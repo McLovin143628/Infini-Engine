@@ -47,6 +47,38 @@ pub enum PageFormat {
     /// BC6H encoder (see `docs/memos/wave-t-textures-disposition.md`), so the
     /// honest choice is 4× the bytes of BC1 with the data intact rather than
     /// 8 bits with the data gone.
+    ///
+    /// # BC6H, priced (wave IASSET2) — and DECLINED, with the price written down
+    ///
+    /// The wave that built [`Bc7`](PageFormat::Bc7) was asked to price BC6H
+    /// beside it, because the two are the same shape of work and BC6H is the
+    /// larger arithmetic win: 16 bytes a block against this format's **128** per
+    /// 4×4, an **8×** saving — the biggest single-format reduction the enum has
+    /// left.
+    ///
+    /// It is buildable at this wave's bar. BC6H's decode is integer: endpoints
+    /// unquantise to a 17-bit signed value, interpolate through the same weight
+    /// tables `Bc7` uses, then scale by `31/64` and reinterpret as a half. A
+    /// one-subset mode (10-bit endpoints, 4-bit indices) is the exact analogue
+    /// of the mode 6 this wave shipped, so the cost is roughly what BC7 cost:
+    /// the encoder, a decoder, an `.inf_tex` **v5** window for the format code,
+    /// and the plumbing.
+    ///
+    /// **It is declined because nothing would encode a byte through it.**
+    /// Measured, not assumed: this repository holds **zero** `.hdr` or `.exr`
+    /// sources, **zero** `.inf_tex` stamped with format code 4, and **zero**
+    /// sidecars with `hdr = true`. The only consumer surface is
+    /// `TextureImportSettings::hdr`, which wave IASSET2 gave its first
+    /// production caller (the import door's per-slot policy routes a float
+    /// displacement or cavity map through it) — and no such map exists to route.
+    ///
+    /// There is a second price the sampled-texture budget names:
+    /// `inf_render::vt::VT_MAX_POOLS` is **3**, and adding BC6H does not retire
+    /// this format (existing float content would keep it), so an HDR level would
+    /// want a fourth arm the GPU does not grant.
+    ///
+    /// So: **carried, with its price.** The day a float texture is committed,
+    /// this is the paragraph to re-open, and the number to beat is 8×.
     Rgba16F,
     /// **BC7** — full RGBA at 16 bytes a block, the same page cost as BC3 and
     /// BC5 and twice BC1's (wave IASSET2).

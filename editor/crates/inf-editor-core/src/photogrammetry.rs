@@ -1559,14 +1559,24 @@ pub fn finish_reconstruction_with_progress(
         channel: "base colour",
         message: e.to_string(),
     })?;
-    // Normals and ORM are DATA, not colour: linear, and uncompressed. BC1 on a
-    // normal map is the artifact `TextureImportSettings::data` was written to
-    // avoid, and the workspace has no BC5.
+    // Normals and ORM are DATA, not colour: linear. BC1 on a normal map is the
+    // artifact `TextureImportSettings::data` was written to avoid.
+    //
+    // **The normal is BC5 since wave IASSET2**, and the comment that stood here
+    // — "the workspace has no BC5" — had stopped being true at Wave T and had
+    // never stopped being *effectively* true: a BC5 map beside a BC1 albedo
+    // demoted the whole level's atlas to RGBA8, so nothing could use it. The
+    // arms fixed that, and this is the second production caller (the ground
+    // library is the first). It is a straight saving here: an uncompressed
+    // normal map is **73 984 B a page** against BC5's 18 496, four times, for
+    // the ~1.7-of-255 mean error the ground library's own measurement puts on
+    // BC5. The ORM keeps all eight bits of its three independent channels, for
+    // the reason that library measured too.
     let normal = texture_from_rgba8(
         normal_filled.to_rgba8(),
         size,
         size,
-        TextureImportSettings::data(),
+        TextureImportSettings::normal_map(),
     )
     .map_err(|e| FinishError::Texture {
         channel: "normal",
