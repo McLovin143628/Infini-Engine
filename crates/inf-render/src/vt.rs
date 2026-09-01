@@ -340,6 +340,16 @@ impl VtPools {
         residency: &VtResidency,
         srgb: bool,
     ) -> Self {
+        // A pool with no arm has no atlas, so `atlas()` and `geometry()` would
+        // index an empty vector — a confusing panic in a public accessor rather
+        // than a stated precondition. `VtResidency::new_multi(&[])` is the only
+        // way to reach one and no caller in this tree does; a caller that starts
+        // to gets a sentence.
+        assert!(
+            residency.arm_count() > 0,
+            "a VT pool needs at least one page-pool arm; this residency has none, \
+             so it can hold nothing and every registration would be refused"
+        );
         let arms: Vec<PoolArm> = (0..residency.arm_count())
             .map(|arm| {
                 let geometry = residency.geometry_of(arm).expect("arm in range");

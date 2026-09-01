@@ -490,8 +490,8 @@ fn encode_bc7_block(block: &[[u8; 4]; 16], out: &mut Vec<u8>) {
     put(best_p.0 as u32, 1);
     put(best_p.1 as u32, 1);
     put(best_idx[0] as u32, 3);
-    for i in 1..16 {
-        put(best_idx[i] as u32, 4);
+    for idx in best_idx.iter().skip(1) {
+        put(*idx as u32, 4);
     }
     debug_assert_eq!(pos, 128, "a BC7 block is 128 bits");
     out.extend_from_slice(&bits.to_le_bytes());
@@ -777,7 +777,7 @@ mod tests {
         let mut src = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                let t = (x + y) as u32;
+                let t = x + y;
                 src.extend_from_slice(&[
                     (t * 8) as u8,
                     (240 - t * 8) as u8,
@@ -1057,7 +1057,7 @@ mod tests {
         let mut src = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                let t = (x + y) as u32;
+                let t = x + y;
                 let a = if (x / 2 + y / 2) % 2 == 0 { 255 } else { 0 };
                 src.extend_from_slice(&[(t * 8) as u8, (200 - t * 6) as u8, (t * 4) as u8, a]);
             }

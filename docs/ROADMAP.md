@@ -29621,3 +29621,140 @@ clean tree afterwards — **none blessed by the run**; clippy **0 warnings, 0 er
 with typecheck + eslint clean; `cargo deny` **bans/licenses/sources/advisories all ok** — which
 needed `rtrb 0.3.4 → 0.3.5` (RUSTSEC-2026-0274, lock-only), an upstream advisory that landed
 against kira's ring buffer mid-wave. Ledger: `docs/memos/iasset1-block-compression.md`.
+
+## Wave IASSET2 — per-format page pools, BC7, and the formats the measurement kept (2026-09-01)
+
+**THE HEADLINE: a level that mixes page formats stopped losing 9.2× of its refinement, and
+the first thing that freedom bought was normal maps that point the right way.** A BC1 + BC5
+level at the shipped 24 MiB budget holds **2 040 pages** where the demotion it replaces held
+**340**; the committed ground normal maps went from a worst per-channel error of **122 of
+255** to **17**. Goldens stay **60**, one re-blessed with its deltas published.
+
+**THE BLOCKER, AND WHY IT WENT FIRST.** `build_vt_level` picked ONE atlas format for a whole
+level by format equality, so a level whose textures disagreed fell back to `Rgba8` — 73 984 B
+a page against BC1's 9 248. `inf_material::ground` paid that rather than take it: all
+seventeen committed ground maps were BC1, normal maps included, and the module wrote down why
+("the first content to use [BC5] alongside a BC1 albedo demotes the whole atlas … the fix is
+a second pool … and it is a wave, not a clause"). Adding BC7 before fixing that would have
+shipped a format that made every level using it worse.
+
+**THE ARMS.** `VtResidency` holds `Vec<Arm>`: one atlas, one format, one slot size, one share
+of the budget each; a texture records its arm at registration from its container's own header
+and never leaves it. The indirection **table stays one buffer with one directory**, so a handle
+is still a handle and the per-instance word is byte-identical — `slots_x` and `pool` moved into
+the texture's own block (`TABLE_TEXTURE_HEADER_WORDS` 4 → 6, word 2 is now `pool_count`), and
+reading the pool-wide `slots_x` would have been right for arm 0 and silently wrong for every
+other arm at the right page size. `admit_by_lane` runs **once per arm**, which is not a filter:
+the walk gives up on the first failed acquisition, true over one array of interchangeable slots
+and false across two, so one walk would let a full BC1 atlas defer every BC5 want with slots
+free. `split_pool_budget` divides ONE total by tile weight — `DEFAULT_VT_BUDGET_BYTES` (24 MiB)
+and `DEFAULT_VT_UPLOAD_BUDGET_BYTES` (1 MiB/frame) did not move, and a single-format level takes
+one arm, the whole budget and the geometry it had before.
+
+**RULING — `view_formats` cannot express this at all.** WebGPU's view-compatibility rule admits
+only a format's sRGB counterpart; BC1 and BC5 are neither the same format nor an sRGB pair. It
+covers **0** of the mixed cases against per-format pools' all of them. The P26.3 sRGB ruling
+(decode in the shader, atlas always linear) is untouched and now says so in the shader header.
+
+**RULING — `VT_MAX_POOLS = 3`, and the GPU chose it.** Each arm past the first is a
+sampled-texture binding. `Limits::default().max_sampled_textures_per_shader_stage` is **16** and
+the terrain pipeline's fragment stage already spends **14** (11 environment + 5 per-tile).
+Measured by walking into it: *"Too many bindings of type SampledTextures … limit is 16, count
+was 18"* at `create_pipeline_layout, label = 'terrain'`. So the budget grants two further
+atlases and the lit path sits at **exactly 16** with no headroom;
+`the_lit_pipelines_fit_the_default_sampled_texture_limit` counts off the two entry lists the
+layouts are built from and pins that, so the seventeenth is a failing test naming the ceiling
+rather than a driver-shaped refusal on a user's machine. A level with a fourth format folds its
+lightest **transcodable** formats into the RGBA8 arm and `VtLevelReport::demoted` names them —
+the whole-level demotion reduced to the maps that caused it. A float format is never folded.
+
+**THE IMPORT DOOR GOT A POLICY.** `inf_material::mapset` wrote the PBR suffix table at Wave T
+and nothing called it: every loose image took `TextureImportSettings::default()`, so
+`rock_2K_Normal.png` became an sRGB BC1 texture with its X on five bits. Now a loose image
+routes through `classify_map` → `MapKind::settings`, the glTF path routes by **slot** (a
+`normal_texture` takes BC5, not uncompressed RGBA8), and `TextureImportSettings::hdr` has its
+first production caller. **FINDING: the import cache key ignored the settings** —
+`ImportKey::new(source, settings)` was handed the EXTENSION for its second half, so
+`Rock_2K_Normal.png` and `Rock_2K_Roughness.png` with identical pixels hashed to one key and a
+roughness map came back as a BC5 normal, with nothing erroring.
+
+**THE BC7 ENCODER — mode 6 only, stated.** Pure Rust, integer-only, and inside `bc.rs` because
+the no-float gate scopes on that file's own `#[cfg(test)]` marker. Two CPU decoders owed and
+both paid by `inf_vt::decode_bc7` (the transcode tier and the thumbnailer). **FINDING: the
+bounding box was on the wrong diagonal** — a naive box takes `(max R, max G, …)`, which misses
+every texel when two channels are anti-correlated; measured **27** off per channel on content
+mode 6 fits exactly. The corner is now chosen per channel by covariance sign, in exact
+integers. It took a red-against-cyan fixture from 2 660 to **0**, which is why that arm now
+uses three primaries: *a fixture a fix makes free measures the fix, not the limit.*
+`encode_color_block` (BC1/BC3) has the same defect and is **carried** — fixing it moves every
+committed `.inf_tex` byte.
+
+**THE TABLES** (per channel out of 255, on `inf_material::ground`'s own bytes):
+
+| ground albedo, 5 × 1024² | BC1 | BC3 | BC7 |
+|---|---:|---:|---:|
+| MAE ×1000 | 1 551 | 1 551 | **236** |
+| worst | **11** | 11 | **5** |
+| encode ms/Mtexel (release) | 6 | 10 | 95 |
+
+| ground ORM, 5 × 512² | BC1 | BC3 | BC7 |
+|---|---:|---:|---:|
+| MAE ×1000 | 1 465 | 1 465 | **481** |
+| worst | **45** | 45 | **33** |
+
+| ground normal + detail, 7 × 512², X/Y only | BC1 | BC5 |
+|---|---:|---:|
+| MAE ×1000 | 10 383 | **1 710** |
+| worst | **122** | **17** |
+
+**THE CONTENT RULINGS.** Normals and detail maps → **BC5** (changed; the deciding column is the
+worst case, and a normal 122 out does not shade approximately wrong, it faces somewhere else).
+Albedo and ORM → **BC1** (kept, and measured: BC7 buys 11 → 5 and 45 → 33 for twice the page
+bytes — half of what an arm holds — and on the ORM mode 6 fits one line through three
+independent signals). `Auto`'s alpha branch → **BC3** (kept: on a cutout mask BC3's dedicated
+alpha block scores **0** against BC7 mode 6's **1 024**, because mode 6 shares one index set
+between colour and alpha). **"BC1 stays" is the honest outcome the brief allowed and the one the
+numbers gave**; BC7 therefore ships measured and author-selectable with nothing defaulting to
+it, which is a different state from BC5's before this wave — BC5 was *impossible* to use, BC7 is
+merely not the best choice for the content that exists.
+
+**`.inf_tex` v3 → v4, ONE window**: format code 5 and not one byte else. Every pre-BC7 texture
+still stamps its own lowest version, so no committed content moved. IASSET1's carried per-tile
+compression was weighed for the same window and **declined with its number**: a tile is already
+the compression unit and a page is a fixed-size atlas slot, so a variable-length tile costs a
+decompress into that slot on **every** adapter to save the ~2 % a general-purpose codec finds in
+block-compressed data.
+
+**BC6H PRICED AND DECLINED**, with the price in `PageFormat::Rgba16F`'s own doc. It is the
+larger win than BC7 was — 16 bytes a block against RGBA16F's 128 per 4×4, **8×** — and
+buildable at this bar. It is declined because nothing would encode a byte through it, measured:
+**zero** `.hdr`/`.exr` sources, **zero** `.inf_tex` at format code 4, **zero** sidecars with
+`hdr = true`. Second price: `VT_MAX_POOLS` is 3 and BC6H would not retire RGBA16F, so an HDR
+level would want a fourth arm the GPU does not grant.
+
+**CONTENT + GOLDEN.** `samples/ground` 7 394 656 B → **9 207 264 B** (+24.51 %); GUIDs are frozen
+constants rather than content-derived, so the blast radius was exactly seven `.inf_tex`, seven
+sidecars and the README — no `.inf_mat`, no island level, no `.inf_pcg`. `ground_close.png`
+re-blessed at **mean 0.001212 / max 0.024941** (inside tolerance, and re-blessed anyway on the
+phase26 precedent quoted in the gate), its fixture moved off a hard-coded `Bc1` onto the
+library's own per-slot settings; `GOLDEN_SET_DIGEST` `e4ef4624…` → `9460b53a…` in all three
+gates that carry it, each with the reason beside it.
+
+**THREE FINDINGS THE BATTERY PRODUCED, one against this wave's own prescription.**
+(1) **BC5 is a TANGENT-space preset.** Routing the photogrammetry finish's normal map to it for
+the four-times page saving cost **93.00 degrees** of median angular error against the analytic
+truth (the mesh's own normals are 34.65 out): that map is object-space, and BC5's reader
+rebuilds `z = sqrt(1 − x² − y²)`, positive by definition — a tangent-space law, false where the
+sign of Z is data. Reverted, with the ruling in `normal_map()`'s doc, at the call site and in
+the gate. The two callers that do take the preset are tangent-space by convention (`_Normal` /
+`_NormalGL` / `_NormalDX`) and by specification (glTF `normalTexture`).
+(2) **A CPU reader had nowhere to ask whether Z is stored** — the rebuild lived in
+`vt_sample.wgsl` and nowhere else; first measurement of its absence was **45.59 degrees**.
+`inf_material::normal_from_rgba8` is the door and `TextureFormat::is_two_channel` the question.
+(3) **A gate's size proxy, broken by legitimate content growth**:
+`a_scene_payload_carries_no_partition` asserted the PIE frame is smaller than the terrain file
+it names, and the BC5 normals pushed a payload that legitimately carries textures past it
+(7 737 553 B against 7 043 328) while printing `0 inline terrain(s)`. It now searches the frame
+for a 64-byte window from the middle of the terrain file, with an anti-vacuity arm.
+
+Ledger: `docs/memos/iasset2-textures-bc7.md`.

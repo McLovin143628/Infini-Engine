@@ -67,7 +67,7 @@
 //! rebuilt from the residency on every run and is never persisted, so the wire
 //! is free to change — what it is *not* free to do is disagree with
 //! `vt_sample.wgsl`, which is why both sides move in one commit and
-//! [`tests::the_block_header_is_pinned_word_by_word`] pins the words by value.
+//! `tests::the_block_header_is_pinned_word_by_word` pins the words by value.
 //!
 //! An entry's index inside its texture is
 //! [`VtTextureDesc::entry_index`](crate::VtTextureDesc::entry_index) — the same

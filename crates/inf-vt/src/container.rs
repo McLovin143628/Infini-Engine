@@ -822,7 +822,7 @@ fn decode_bc7_mode6(bits: u128) -> [[u8; 4]; 16] {
     }
     // Index 0 is three bits (the anchor's high bit is implicitly zero); the
     // fifteen after it are four each.
-    for n in 0..16usize {
+    for (n, texel) in out.iter_mut().enumerate() {
         let idx = if n == 0 {
             field(65, 3)
         } else {
@@ -830,7 +830,7 @@ fn decode_bc7_mode6(bits: u128) -> [[u8; 4]; 16] {
         } as usize;
         let w = BC7_WEIGHT4[idx];
         for c in 0..4 {
-            out[n][c] = (((e0[c] as u32) * (64 - w) + (e1[c] as u32) * w + 32) >> 6) as u8;
+            texel[c] = (((e0[c] as u32) * (64 - w) + (e1[c] as u32) * w + 32) >> 6) as u8;
         }
     }
     out

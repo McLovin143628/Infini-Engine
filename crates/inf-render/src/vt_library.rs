@@ -668,7 +668,7 @@ pub struct VtLevelReport {
 /// It was the honest answer to the question as it was then asked, and it had a
 /// price nobody could pay: `inf_material::ground` authored all seventeen ground
 /// maps — normal maps included — as **BC1**, because *"the first content to use
-/// [BC5] alongside a BC1 albedo demotes the whole atlas"*, and measured the
+/// BC5 alongside a BC1 albedo demotes the whole atlas"*, and measured the
 /// demotion at **2 670 pages of camera-driven refinement against 289, a 9.2×
 /// cut**. That is why every BC5 normal map in this engine had no consumer.
 ///
@@ -719,15 +719,21 @@ pub fn build_vt_level(
     let mut plan: Vec<(PageFormat, u64)> = Vec::new();
     for (_, bytes) in &resolved {
         let Some(b) = bytes else { continue };
-        let Some(stored) = inf_vt::stored_page_format(b.payload()) else {
+        // ONE parse per payload for both facts. `stored_page_format` answers the
+        // format and throws the directories away, which was the right shape when
+        // the format was all this needed; the weight below is the payload's own
+        // tile count, and asking for it separately would parse every bound
+        // texture's directories twice at every level load.
+        let Ok(reader) = inf_vt::TiledTextureReader::new(b.payload()) else {
+            // Not a readable container. It contributes nothing here and is
+            // refused BY NAME a moment later, at the registration.
             continue;
         };
-        let format = crate::vt::pool_format(settings, stored);
-        // The weight is the payload's own tile count — what the arm would page
-        // if the camera asked for all of it. A texture that will not parse a
-        // second time contributes nothing and is refused below.
-        let tiles = inf_vt::TiledTextureReader::new(b.payload())
-            .map_or(0, |r| u64::from(r.header().tile_count));
+        let format = crate::vt::pool_format(settings, reader.header().format);
+        // The weight is what the arm would page if the camera asked for all of
+        // this texture — tiles rather than textures, because a 4 096² albedo and
+        // a 128² mask are not the same claim on refinement.
+        let tiles = u64::from(reader.header().tile_count);
         match plan.iter_mut().find(|(f, _)| *f == format) {
             Some(slot) => slot.1 += tiles,
             None => plan.push((format, tiles)),

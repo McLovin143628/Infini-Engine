@@ -284,6 +284,53 @@ is *possible* and simply not the best choice for the content that exists.
 three arms, and the day a high-contrast photogrammetric albedo lands the table
 above is the one to re-read.
 
+### RULING: BC5 IS A TANGENT-SPACE PRESET, and the wave found that out the hard way
+
+`TextureImportSettings::normal_map()` was routed at the photogrammetry finish's
+normal map for the four-times page saving — an uncompressed normal map is
+**73 984 B a page** against BC5's 18 496 — and the gate refused it in the same
+run.
+
+BC5 stores X and Y; its reader rebuilds `z = sqrt(1 - x² - y²)`, which is
+**positive by definition**. That definition is a *tangent-space* law: a tangent
+normal pointing into the surface is not a normal map, it is damage. It is simply
+**false in object or world space**, where the sign of Z is real data held by
+every texel on the far side of the asset — and the photogrammetry map is
+object-space (`FinishedAsset::normal`, *"Object-space normals, linear"*).
+
+Measured: **93.00 degrees** of median angular error against the analytic truth,
+on a mesh whose own normals are 34.65 out. Reverted; the ruling is written into
+`normal_map()`'s doc, at the call site and in the gate's own assertion.
+
+The two callers that *do* take the preset are safe by convention and by
+specification respectively: `MapKind::Normal` reads the `_Normal` / `_NormalGL` /
+`_NormalDX` suffixes, all of which ship tangent space, and a glTF `normalTexture`
+is tangent space per the glTF specification.
+
+### FINDING: a CPU reader of a normal map had nowhere to ask whether Z is stored
+
+`vt_sample.wgsl` has had the rebuild since Wave T, off the indirection table's
+`reconstruct_z` flag; the **CPU had no twin**, which was harmless while nothing
+shipped as BC5. First measurement of its absence, on the same gate: a reader
+taking `xyz * 2 - 1` off a two-channel decode was **45.59 degrees** out at the
+median. `inf_material::normal_from_rgba8` is now the door and
+`TextureFormat::is_two_channel` is the question, mirroring `PageFormat`'s.
+
+### FINDING: a gate's size proxy, broken by legitimate content growth
+
+`island_gate::a_scene_payload_carries_no_partition` asserted *"the frame is
+smaller than the terrain file it names"*, on the argument that this is false for
+any payload carrying the terrain bytes. True — and also false for a payload that
+carries nothing of the kind and simply got bigger. The BC5 ground normals added
+1 812 608 B of texture to a payload that legitimately carries textures, and the
+frame crossed a terrain file it has nothing to do with (**7 737 553 B against
+7 043 328**) while printing `0 inline terrain(s)` two lines above.
+
+It now searches the frame for a 64-byte window from the middle of the terrain
+file — the thing the proxy stood in for — with an anti-vacuity arm proving the
+window is findable in the file it came from. *A gate must aim at the thing it
+names* (P23), applied to a gate that had been aiming next to it since GTA1.
+
 ### Ship-size delta
 
 `samples/ground`: **7 394 656 B → 9 207 264 B**, +1 812 608 B (**+24.51 %**) —
@@ -379,12 +426,46 @@ declining it.
 ## VERIFICATION
 
 * `cargo fmt --all --check` — clean.
-* `cargo test --workspace -j 3 --no-fail-fast` with `INF_GOLDEN_STRICT=1` — green.
-* `cargo doc --workspace --no-deps` — warnings under the 450 ceiling.
-* `cargo clippy --workspace --all-targets -D warnings` — clean, run last.
-* `cargo deny check` — clean. **No new dependency**: the BC7 encoder and decoder
-  are this repository's own integer code, like every encoder beside them.
+* `cargo test --workspace -j 3 --no-fail-fast` with `INF_GOLDEN_STRICT=1` —
+  **358 targets, 6 659 passed, 0 failed, 20 ignored**, exit 0. Goldens **60**,
+  and the tree is clean afterwards: **none blessed by the run**.
+* `cargo doc --workspace --no-deps` after `cargo clean --doc` — **409 warnings
+  over 48 documented crates**, ceiling 450, and **exactly IASSET1's count**: the
+  four this wave's links added were resolved (`crate::container::format_code`) or
+  de-linked (`tests::…` items rustdoc cannot see) rather than carried.
+* `cargo clippy --workspace --all-targets` with `-D warnings` — **0**, run LAST.
+  Three it caught in this wave's own code: two `needless_range_loop` in the BC7
+  bit packer and decoder, one `unnecessary_cast`.
+* `cargo deny check` — **advisories / bans / licenses / sources all ok**.
+  **No new dependency**: the BC7 encoder and decoder are this repository's own
+  integer code, like every encoder beside them, and `Cargo.lock` did not move.
 * Frontend untouched (no TypeScript moved).
+
+Two batteries were run — one before the hardening pass and one after — and both
+report the same 358 / 6 659 / 0 / 20. The first produced the three findings above;
+the second confirmed the fixes moved nothing else.
+
+---
+
+## THE LAWS THIS WAVE PAID FOR
+
+1. **A gate scopes on the file it is in.** The no-float gate reads `bc.rs`'s own
+   source up to its `#[cfg(test)]` marker, so a BC7 encoder in a new file would
+   have inherited only the weaker crate-wide gate. It went in `bc.rs`.
+2. **A fixture a fix makes free measures the fix, not the limit.** The
+   two-cluster block went from 2 660 to 0 the moment the corner rule landed; the
+   arm now uses three primaries.
+3. **Measure the prescription before landing it** — twice, in opposite
+   directions. BC7 "should" replace BC3 under `Auto` at the same 16 bytes: it
+   loses 1 024 to 0 on a cutout mask because mode 6 shares one index set between
+   colour and alpha. BC5 "should" replace an uncompressed normal map at a quarter
+   of the page: it loses 93 degrees on an **object-space** one, because the Z it
+   rebuilds is positive by definition.
+4. **A rule the GPU has and the CPU does not is a rule written once and needed
+   twice.** The Z rebuild existed in `vt_sample.wgsl` and nowhere on the CPU.
+5. **A size proxy is a hostage to content.** A gate that stands in for a
+   structural property with an inequality between two unrelated numbers fails the
+   day either number moves for its own reasons.
 
 ---
 

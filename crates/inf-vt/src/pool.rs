@@ -98,7 +98,7 @@ impl PageFormat {
     /// enumeration a sweep walks, so a format added to this enum cannot be added
     /// to some sweeps and forgotten by others.
     ///
-    /// The order is [`crate::format_code`]'s and the two are pinned against each
+    /// The order is [`crate::container::format_code`]'s and the two are pinned against each
     /// other (`the_format_code_is_freeze_pinned_both_ways`), so this array is
     /// also the wire-code enumeration and a sweep over it visits every code.
     pub const ALL: [PageFormat; 6] = [
@@ -258,7 +258,7 @@ pub const DEFAULT_MAX_TEXTURE_DIM: u32 = 8192;
 /// three-format level by three while every constant in the tree still read
 /// "24 MiB". So `base.budget_bytes` is the **total** and this hands out shares
 /// of it; the sum is `<=` the total, always, and
-/// [`tests::an_arm_split_never_spends_more_than_the_whole_budget`] is the arm.
+/// `tests::an_arm_split_never_spends_more_than_the_whole_budget` is the arm.
 ///
 /// # The weight
 ///
