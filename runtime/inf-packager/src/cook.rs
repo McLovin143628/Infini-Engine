@@ -127,12 +127,20 @@ pub struct BlockCompressionOptions {
     /// `Lz4`: `Zstd` decodes through the pure-Rust `ruzstd` in a browser, 7.3×
     /// slower than the C `zstd` this host links.
     pub terrain: Option<inf_asset::BlockCodec>,
+    /// Codec for `.inf_voxel` chunks. [`None`] leaves the container untouched.
+    ///
+    /// The same codec terrain uses, deliberately: one decode profile per build
+    /// rather than three. SDF chunks are the most compressible thing this engine
+    /// ships — the phase-21 cavern's eight chunks go 131 104 B → 11 619 B,
+    /// **ratio 0.089**.
+    pub voxel: Option<inf_asset::BlockCodec>,
 }
 
 impl Default for BlockCompressionOptions {
     fn default() -> Self {
         Self {
             terrain: Some(inf_terrain::COOK_TILE_CODEC),
+            voxel: Some(inf_voxel::COOK_CHUNK_CODEC),
         }
     }
 }
@@ -619,7 +627,22 @@ fn cook_one(
                     message: e.to_string(),
                 }
             })?;
-            raw
+            // IASSET1, the terrain arm's twin: per-chunk compression through a
+            // transcode that moves chunk blobs as opaque bytes and never decodes
+            // one, so it is lossless by construction.
+            match opts.compression.voxel {
+                None => raw,
+                Some(codec) => {
+                    let (packed, _) =
+                        inf_voxel::recompress_voxel_asset(&raw, codec).map_err(|e| {
+                            CookError::VoxelVolume {
+                                guid,
+                                message: format!("recompress: {e}"),
+                            }
+                        })?;
+                    packed
+                }
+            }
         }
         // A `.inf_biomes` rides through verbatim too, but is **decoded** first
         // (P19.2). Unlike a terrain this is cheap — a short list of names — and

@@ -200,14 +200,18 @@ fn make_project(root: &Path, level: &inf_scene::RuntimeLevel, voxel: Option<(Ass
 }
 
 /// **(b) THE CLOSURE EDGE.** A level that references a real `.inf_voxel` cooks it
-/// into the pack — uncompressed, byte-identical, and reachable by its own GUID.
+/// into the pack — as an **uncompressed pack entry** holding a container whose
+/// chunks decode bit-identically, reachable by its own GUID.
 ///
-/// The byte-identity claim is the load-bearing one: a `.inf_voxel` rides through
-/// the cook *verbatim* precisely so a runtime can sub-slice a chunk out of the
-/// mapping, and an entry that were re-encoded (or compressed) would break every
-/// offset in its directory while still "containing the asset".
+/// The load-bearing claim used to be spelled "byte-identical", and IASSET1 made
+/// that spelling wrong without making the claim wrong. The cook now transcodes
+/// the container to per-chunk compression, so the *bytes* differ; what must not
+/// differ is (a) the pack entry's own policy — a compressed ENTRY would put every
+/// chunk offset out of reach of the mapping, which is the anti-clause — and (b)
+/// what each chunk decodes to. Both are asserted below, and the second is the one
+/// a shipped cave depends on.
 #[test]
-fn a_referenced_voxel_asset_cooks_into_the_pack_verbatim() {
+fn a_referenced_voxel_asset_cooks_into_a_raw_entry_with_identical_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let proj = dir.path().join("proj");
     let out = dir.path().join("out");
@@ -237,14 +241,37 @@ fn a_referenced_voxel_asset_cooks_into_the_pack_verbatim() {
         "a streaming-class kind must cook uncompressed or its chunk offsets are \
          unreachable from the mapping"
     );
-    assert_eq!(
-        reader.read(VOXEL_ID).unwrap(),
-        payload,
-        "the payload must ride through the cook verbatim"
+    // The container is transcoded, and it is SMALLER — an SDF volume is the most
+    // compressible thing this engine ships.
+    let cooked_bytes = reader.read(VOXEL_ID).unwrap();
+    assert!(
+        cooked_bytes.len() < payload.len(),
+        "the cooked volume ({} B) is not smaller than the authored ({} B); no transcode",
+        cooked_bytes.len(),
+        payload.len()
     );
-    // …and it is still a valid, sub-sliceable container on the far side.
-    let cooked = inf_voxel::VoxelAssetReader::new(reader.read(VOXEL_ID).unwrap()).unwrap();
+
+    // …and it is still a valid, sub-sliceable container on the far side, whose
+    // chunks decode to exactly the authored ones. This is the claim that matters.
+    let cooked = inf_voxel::VoxelAssetReader::new(cooked_bytes.as_slice()).unwrap();
+    let authored = inf_voxel::VoxelAssetReader::new(payload.as_slice()).unwrap();
     assert_eq!(cooked.chunk_count(), 8);
+    assert_eq!(cooked.chunk_count(), authored.chunk_count());
+    assert!(
+        cooked
+            .directory()
+            .iter()
+            .any(|e| e.codec != inf_asset::BlockCodec::Raw),
+        "no chunk compressed; the size assertion above would be the only honest arm"
+    );
+    for e in authored.directory() {
+        assert_eq!(
+            cooked.chunk_bytes(e.key).unwrap(),
+            authored.chunk_bytes(e.key).unwrap(),
+            "chunk {:?} does not decode to what was authored",
+            e.key
+        );
+    }
     assert!(cooked.chunk_bytes(ChunkKey::new(0, 0, 0)).is_some());
 }
 

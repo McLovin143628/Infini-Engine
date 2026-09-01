@@ -42,7 +42,12 @@ use crate::data::VoxelData;
 /// asset-backed store can serve straight out of an mmap'd pack.
 pub trait ChunkStore {
     /// The chunk's blob bytes, or `None` when the store has no such chunk.
-    fn chunk_bytes(&self, key: ChunkKey) -> Option<&[u8]>;
+    ///
+    /// **A `Cow` since IASSET1**, exactly as `inf_terrain::TileStore` is: raw
+    /// borrows out of the payload (a pack mapping included), a v2 compressed
+    /// chunk decompresses into an owned buffer. Every caller hands the bytes to
+    /// `bincode` next -- a chunk has never been cast.
+    fn chunk_bytes(&self, key: ChunkKey) -> Option<std::borrow::Cow<'_, [u8]>>;
 
     /// Every key the store can serve, in ascending [`ChunkKey`] order.
     fn chunk_keys(&self) -> Vec<ChunkKey>;
@@ -67,7 +72,7 @@ pub trait ChunkStore {
     fn load_chunk(&self, key: ChunkKey) -> Result<Option<VoxelChunk>, String> {
         match self.chunk_bytes(key) {
             None => Ok(None),
-            Some(bytes) => decode_chunk_at(bytes, self.chunk_schema_version()).map(Some),
+            Some(bytes) => decode_chunk_at(&bytes, self.chunk_schema_version()).map(Some),
         }
     }
 }
@@ -119,8 +124,10 @@ impl MemoryChunkStore {
 }
 
 impl ChunkStore for MemoryChunkStore {
-    fn chunk_bytes(&self, key: ChunkKey) -> Option<&[u8]> {
-        self.chunks.get(&key).map(|v| v.as_slice())
+    fn chunk_bytes(&self, key: ChunkKey) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.chunks
+            .get(&key)
+            .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
     }
 
     fn chunk_keys(&self) -> Vec<ChunkKey> {
@@ -134,7 +141,7 @@ impl ChunkStore for MemoryChunkStore {
 /// payload is itself a borrowed `PackReader::read_ref` slice of an mmap, a chunk
 /// reaches the caller with **zero copies and zero decodes**.
 impl<B: AsRef<[u8]>> ChunkStore for VoxelAssetReader<B> {
-    fn chunk_bytes(&self, key: ChunkKey) -> Option<&[u8]> {
+    fn chunk_bytes(&self, key: ChunkKey) -> Option<std::borrow::Cow<'_, [u8]>> {
         VoxelAssetReader::chunk_bytes(self, key)
     }
 

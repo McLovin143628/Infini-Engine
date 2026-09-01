@@ -69,9 +69,11 @@ pub mod wants;
 pub mod writeback;
 
 pub use asset::{
-    build_voxel_asset, read_voxel_asset, write_voxel_asset, ChunkDirEntry, VoxelAsset,
-    VoxelAssetBuilder, VoxelAssetError, VoxelAssetHeader, VoxelAssetReader, VoxelAssetView,
-    CHUNK_ALIGN, DIR_ENTRY_LEN, HEADER_LEN, VOXEL_ASSET_MAGIC, VOXEL_ASSET_SCHEMA_VERSION,
+    build_voxel_asset, chunk_raw_ceiling, read_voxel_asset, recompress_voxel_asset,
+    write_voxel_asset, ChunkDirEntry, RecompressReport, VoxelAsset, VoxelAssetBuilder,
+    VoxelAssetError, VoxelAssetHeader, VoxelAssetReader, VoxelAssetView, CHUNK_ALIGN,
+    COOK_CHUNK_CODEC, DIR_ENTRY_LEN, FIRST_CODEC_SCHEMA_VERSION, HEADER_LEN, HEADER_LEN_V2,
+    VOXEL_ASSET_MAGIC, VOXEL_ASSET_SCHEMA_VERSION,
 };
 pub use chunk::{
     ChunkKey, VoxelChunk, CHUNK_DIM, CHUNK_VOXELS, DEFAULT_MATERIAL, EMPTY_SDF, MATERIAL_COUNT,

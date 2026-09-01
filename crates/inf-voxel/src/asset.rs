@@ -12,11 +12,35 @@
 //! │  reserved      u32       zero (room for v2 without a re-length)   │
 //! │  blob_base     u64       absolute offset of the blob section      │
 //! ├ chunk directory (chunk_count × 32 B, sorted by ChunkKey) ─────────┤
-//! │  cx i32 · cy i32 · cz i32 · reserved u32 · offset u64 · len u64   │
-//! ├ blob section (each chunk's bincode bytes, 16-byte-aligned) ───────┤
+//! │  cx i32 · cy i32 · cz i32 · codec u8 + rsv[3] · offset u64 ·      │
+//! │  stored_len u64                                                   │
+//! ├ blob section (each chunk's stored bytes, 16-byte-aligned) ────────┤
 //! │  … chunk blobs, zero-padded up to each 16-byte boundary …         │
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Schema v2: per-chunk compression (IASSET1)
+//!
+//! v2 spends the directory entry's reserved word on a
+//! [`BlockCodec`](inf_asset::BlockCodec) byte, exactly as `.inf_terrain` v6 does
+//! and for the same reason: a chunk blob has always been `bincode`-decoded on
+//! page-in, never cast, so a decompress in front of that decode is an addition to
+//! an existing cost rather than the destruction of a zero-copy path.
+//!
+//! **The measurement that justified the bump.** SDF chunks are the most
+//! compressible thing in this engine — a distance field over mostly-empty or
+//! mostly-solid space. `samples/phase21-cavern/Cavern.inf_voxel`'s eight chunks:
+//! **131 104 B → 11 619 B, ratio 0.089**, all eight compressed. (Terrain's is
+//! 0.35; the island's `.inf_part` is 0.198 but only 60 kB in absolute terms,
+//! which is why *it* did not get this treatment — see the IASSET1 memo.)
+//!
+//! **The downgrade story.** A v2 payload whose chunks are all
+//! [`Raw`](inf_asset::BlockCodec::Raw) differs from the v1 image of the same
+//! chunks in exactly the four bytes of `schema_version`, because the codec byte
+//! lands where v1 already wrote a reserved zero. v1 payloads load for ever, and
+//! `parse` keeps the *strict* reserved-word check on the v1 branch — which is
+//! precisely the "claimed by a version bump" discipline the section below
+//! promised, being exercised for the first time.
 //!
 //! # Why this shape
 //!
@@ -93,9 +117,11 @@
 //! still owes the database live as inherent consts ([`VoxelAsset::KIND`],
 //! [`VoxelAsset::SCHEMA_VERSION`]).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use glam::DVec3;
+use inf_asset::block::{decode_block, encode_block, BlockCodec};
 use inf_asset::AssetKind;
 
 use crate::chunk::{ChunkKey, VoxelChunk, CHUNK_DIM};
@@ -104,8 +130,16 @@ use crate::data::VoxelData;
 /// Magic at the head of every `.inf_voxel` payload.
 pub const VOXEL_ASSET_MAGIC: [u8; 8] = *b"INFVOXEL";
 
-/// Current `.inf_voxel` payload schema version.
-pub const VOXEL_ASSET_SCHEMA_VERSION: u32 = 1;
+/// Current `.inf_voxel` payload schema version (**2** since IASSET1 — the chunk
+/// directory carries a per-chunk [`BlockCodec`]).
+pub const VOXEL_ASSET_SCHEMA_VERSION: u32 = 2;
+
+/// The first schema version whose directory entries carry a codec byte.
+///
+/// Below it, entry byte 12 is v1's reserved word and **must be zero** (the module
+/// docs' claimed-by-a-version-bump rule) — which is what makes "a v1 asset has no
+/// codec" a checked fact rather than an assumption.
+pub const FIRST_CODEC_SCHEMA_VERSION: u32 = 2;
 
 /// Chunk blobs start on multiples of this many bytes (see the module docs).
 pub const CHUNK_ALIGN: u64 = 16;
@@ -114,8 +148,12 @@ pub const CHUNK_ALIGN: u64 = 16;
 /// directory and every blob stay aligned without padding.
 pub const HEADER_LEN_V1: u64 = 64;
 
+/// Bytes of the **v2** fixed header. IASSET1's per-chunk codec lives in the
+/// *directory entry*, in a byte v1 already reserved, so the header does not move.
+pub const HEADER_LEN_V2: u64 = HEADER_LEN_V1;
+
 /// Bytes of the fixed header **this build writes**.
-pub const HEADER_LEN: u64 = HEADER_LEN_V1;
+pub const HEADER_LEN: u64 = HEADER_LEN_V2;
 
 /// Bytes of the fixed header of a payload at `schema_version`.
 ///
@@ -126,12 +164,35 @@ pub const HEADER_LEN: u64 = HEADER_LEN_V1;
 pub const fn header_len(schema_version: u32) -> u64 {
     match schema_version {
         1 => HEADER_LEN_V1,
+        2 => HEADER_LEN_V2,
         // Unreachable in practice: `parse` rejects an unknown version before this
         // is ever asked. Written as a table row rather than a bare constant so the
-        // v2 row has an obvious, single home.
-        _ => HEADER_LEN_V1,
+        // v3 row has an obvious, single home.
+        _ => HEADER_LEN_V2,
     }
 }
+
+/// A ceiling on how many bytes one chunk blob can decompress to.
+///
+/// A compressed block's declared length is written by whoever made the file, so
+/// it is bounded before it becomes an allocation. A [`VoxelChunk`] is a fixed
+/// `CHUNK_DIM³` grid — the one thing this container knows exactly — so the bound
+/// is arithmetic rather than a guess: 64 bytes per sample is better than 3×
+/// headroom over the widest sample a chunk can hold, plus slack for `bincode`'s
+/// framing.
+#[inline]
+pub const fn chunk_raw_ceiling() -> usize {
+    const BYTES_PER_SAMPLE: usize = 64;
+    const SLACK: usize = 64 * 1024;
+    (CHUNK_DIM as usize).pow(3) * BYTES_PER_SAMPLE + SLACK
+}
+
+/// **The codec the cook transcodes `.inf_voxel` chunks to** (IASSET1).
+///
+/// The same `Zstd` `.inf_terrain` chose, for the same measured reasons — see
+/// [`inf_terrain::COOK_TILE_CODEC`]'s table. One codec across the streaming
+/// containers so a build has one decode profile, not three.
+pub const COOK_CHUNK_CODEC: BlockCodec = BlockCodec::Zstd;
 
 /// Bytes of one chunk-directory entry.
 pub const DIR_ENTRY_LEN: u64 = 32;
@@ -243,8 +304,11 @@ pub struct ChunkDirEntry {
     /// Absolute offset of the blob **within the payload** (a multiple of
     /// [`CHUNK_ALIGN`]) — usable directly as a `seek` target on a loose file.
     pub offset: u64,
-    /// Blob length in bytes (unpadded).
+    /// **Stored** blob length in bytes (unpadded) — the bytes on disk, which for
+    /// a compressed chunk is smaller than what it decodes to.
     pub len: u64,
+    /// How the blob is stored (schema v2+; always [`BlockCodec::Raw`] below it).
+    pub codec: BlockCodec,
 }
 
 // ── builder ─────────────────────────────────────────────────────────────────
@@ -257,6 +321,7 @@ pub struct ChunkDirEntry {
 pub struct VoxelAssetBuilder {
     voxel_size_m: f64,
     origin: DVec3,
+    codec: BlockCodec,
     chunks: BTreeMap<ChunkKey, Vec<u8>>,
 }
 
@@ -271,8 +336,23 @@ impl VoxelAssetBuilder {
                 0.5
             },
             origin: DVec3::ZERO,
+            // RAW by default: this builder writes the LOOSE asset an author
+            // carves, whose chunks are rewritten on every write-back.
+            // Compression belongs to the cook (`recompress_voxel_asset`).
+            codec: BlockCodec::Raw,
             chunks: BTreeMap::new(),
         }
+    }
+
+    /// Compress every staged chunk under `codec` (IASSET1, schema v2).
+    ///
+    /// Per-chunk and independent: a chunk that would inflate is stored
+    /// [`Raw`](BlockCodec::Raw) and its directory entry says so, so the payload
+    /// can never be larger than the uncompressed one. The default is
+    /// [`Raw`](BlockCodec::Raw) — see [`new`](Self::new).
+    pub fn with_codec(mut self, codec: BlockCodec) -> Self {
+        self.codec = codec;
+        self
     }
 
     /// Anchor the chunk grid at an explicit world position.
@@ -315,6 +395,18 @@ impl VoxelAssetBuilder {
         let count = u32::try_from(self.chunks.len())
             .map_err(|_| VoxelAssetError::Malformed("more than u32::MAX chunks".into()))?;
 
+        // Compress each chunk independently (IASSET1). `encode_block` reports
+        // the codec it actually used, which is `Raw` for a chunk compression
+        // would inflate — so the directory always states what happened.
+        let stored: Vec<(BlockCodec, Vec<u8>)> = self
+            .chunks
+            .values()
+            .map(|blob| encode_block(self.codec, blob))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e: inf_asset::AssetError| {
+                VoxelAssetError::Malformed(format!("chunk compression: {e}"))
+            })?;
+
         // Offsets first: the blob section starts after the header + full directory
         // (both already multiples of CHUNK_ALIGN, so no padding is ever needed
         // there — `align_up` states the invariant rather than relying on it), and
@@ -322,7 +414,7 @@ impl VoxelAssetBuilder {
         let blob_base = align_up(HEADER_LEN + DIR_ENTRY_LEN * count as u64);
         let mut offsets = Vec::with_capacity(self.chunks.len());
         let mut offset = blob_base;
-        for blob in self.chunks.values() {
+        for (_, blob) in &stored {
             offsets.push(offset);
             offset = align_up(offset + blob.len() as u64);
         }
@@ -341,11 +433,15 @@ impl VoxelAssetBuilder {
         out.extend_from_slice(&blob_base.to_le_bytes());
         debug_assert_eq!(out.len() as u64, HEADER_LEN);
 
-        for ((key, blob), &off) in self.chunks.iter().zip(&offsets) {
+        for ((key, (codec, blob)), &off) in self.chunks.keys().zip(&stored).zip(&offsets) {
             out.extend_from_slice(&key.x.to_le_bytes());
             out.extend_from_slice(&key.y.to_le_bytes());
             out.extend_from_slice(&key.z.to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes()); // reserved, always zero
+            // v2: the codec byte, then three bytes v1 reserved. A raw chunk
+            // writes 0 here, which is what makes an all-raw v2 image
+            // byte-identical to the v1 one.
+            out.push(codec.code());
+            out.extend_from_slice(&[0u8; 3]);
             out.extend_from_slice(&off.to_le_bytes());
             out.extend_from_slice(&(blob.len() as u64).to_le_bytes());
         }
@@ -353,7 +449,7 @@ impl VoxelAssetBuilder {
 
         // Blob section, zero-padded up to each offset (and to the end, so the
         // payload length is itself a multiple of CHUNK_ALIGN).
-        for (blob, &off) in self.chunks.values().zip(&offsets) {
+        for ((_, blob), &off) in stored.iter().zip(&offsets) {
             out.resize(off as usize, 0);
             out.extend_from_slice(blob);
         }
@@ -466,6 +562,73 @@ pub fn write_voxel_asset<'a>(
     Ok(bytes)
 }
 
+/// What one [`recompress_voxel_asset`] pass did — the cook's per-asset row in
+/// the before/after table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecompressReport {
+    /// Chunks in the payload.
+    pub chunks: usize,
+    /// Chunks that actually ended up compressed.
+    pub chunks_compressed: usize,
+    /// Payload bytes before.
+    pub bytes_before: u64,
+    /// Payload bytes after.
+    pub bytes_after: u64,
+}
+
+impl RecompressReport {
+    /// `after / before` — 1.0 when nothing was won.
+    pub fn ratio(&self) -> f64 {
+        if self.bytes_before == 0 {
+            1.0
+        } else {
+            self.bytes_after as f64 / self.bytes_before as f64
+        }
+    }
+}
+
+/// **Transcode a `.inf_voxel` payload to per-chunk `codec`** — the cook's
+/// compile step for a streaming volume (IASSET1).
+///
+/// The `.inf_terrain` door's twin ([`inf_terrain::recompress_terrain_asset`]),
+/// and lossless for the same construction: chunk blobs are carried through as
+/// **opaque bytes**, never decoded and re-encoded, so this cannot change an SDF
+/// sample even if [`VoxelChunk`]'s wire form were wrong. A v1 payload is lifted
+/// to v2, which is legal precisely because the *chunk blob* layout is untouched.
+pub fn recompress_voxel_asset(
+    payload: &[u8],
+    codec: BlockCodec,
+) -> Result<(Vec<u8>, RecompressReport)> {
+    let reader = VoxelAssetReader::new(payload)?;
+    let mut b = VoxelAssetBuilder::new(reader.voxel_size_m())
+        .with_origin(reader.origin())
+        .with_codec(codec);
+    for e in reader.directory() {
+        let blob = reader
+            .chunk_bytes(e.key)
+            .ok_or_else(|| VoxelAssetError::ChunkDecode {
+                x: e.key.x,
+                y: e.key.y,
+                z: e.key.z,
+                message: "stored block did not decode".into(),
+            })?;
+        b.insert_bytes(e.key, blob.into_owned())?;
+    }
+    let asset = b.build()?;
+    let after = VoxelAssetReader::new(asset.as_bytes())?;
+    let report = RecompressReport {
+        chunks: after.chunk_count(),
+        chunks_compressed: after
+            .directory()
+            .iter()
+            .filter(|e| e.codec != BlockCodec::Raw)
+            .count(),
+        bytes_before: payload.len() as u64,
+        bytes_after: asset.as_bytes().len() as u64,
+    };
+    Ok((asset.into_bytes(), report))
+}
+
 /// Read a `.inf_voxel` payload from `path`, validating it.
 pub fn read_voxel_asset(path: &std::path::Path) -> std::io::Result<VoxelAsset> {
     let bytes = std::fs::read(path)?;
@@ -558,19 +721,46 @@ impl<B: AsRef<[u8]>> VoxelAssetReader<B> {
             .map(|i| &self.dir[i])
     }
 
-    /// A chunk's blob, **borrowed from the payload** — 16-byte aligned within it.
-    pub fn chunk_bytes(&self, key: ChunkKey) -> Option<&[u8]> {
+    /// A chunk's **stored** bytes, exactly as they sit in the payload — borrowed,
+    /// 16-byte aligned within it, and still compressed if the directory says so.
+    ///
+    /// The re-pack seam ([`recompress_voxel_asset`], a write-back carrying a
+    /// chunk through untouched) and the seam a size report measures. A consumer
+    /// that wants the *chunk* wants [`chunk_bytes`](Self::chunk_bytes).
+    pub fn stored_bytes(&self, key: ChunkKey) -> Option<&[u8]> {
         let e = self.entry(key)?;
         // Bounds + alignment were validated in `new`.
         Some(&self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize])
     }
 
+    /// A chunk's **canonical bincode blob** — borrowed straight out of the
+    /// payload for a [`Raw`](BlockCodec::Raw) chunk, decompressed into an owned
+    /// buffer for a compressed one (schema v2, IASSET1).
+    ///
+    /// `None` for an absent chunk, and `None` for a corrupt block: a directory
+    /// that lies is an absent chunk, never silent geometry. The caller that wants
+    /// the reason uses [`chunk`](Self::chunk).
+    pub fn chunk_bytes(&self, key: ChunkKey) -> Option<Cow<'_, [u8]>> {
+        let e = self.entry(key)?;
+        let stored = &self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize];
+        decode_block(e.codec, stored, chunk_raw_ceiling()).ok()
+    }
+
     /// Decode a chunk, through **this payload's own** schema version.
     pub fn chunk(&self, key: ChunkKey) -> Result<Option<VoxelChunk>> {
-        let Some(bytes) = self.chunk_bytes(key) else {
+        let Some(e) = self.entry(key) else {
             return Ok(None);
         };
-        decode_chunk_at(bytes, self.header.schema_version)
+        let stored = &self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize];
+        let bytes = decode_block(e.codec, stored, chunk_raw_ceiling()).map_err(|message| {
+            VoxelAssetError::ChunkDecode {
+                x: key.x,
+                y: key.y,
+                z: key.z,
+                message: message.to_string(),
+            }
+        })?;
+        decode_chunk_at(&bytes, self.header.schema_version)
             .map(Some)
             .map_err(|message| VoxelAssetError::ChunkDecode {
                 x: key.x,
@@ -671,13 +861,31 @@ fn parse(data: &[u8]) -> Result<(VoxelAssetHeader, Vec<ChunkDirEntry>)> {
             y: i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap()),
             z: i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap()),
         };
-        // Reserved, on the same rule as the header's — see the module docs.
-        if u32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap()) != 0 {
-            return Err(VoxelAssetError::Malformed(format!(
-                "chunk directory entry {i} has a non-zero reserved word; a v1 \
-                 payload may not use it"
-            )));
-        }
+        // Bytes 12..16: v1's reserved word, half of which v2 spends on a codec
+        // byte. Below v2 the WHOLE word must still be zero — the module docs'
+        // claimed-by-a-version-bump rule, and what makes "a v1 asset has no
+        // codec" a checked fact rather than an assumption.
+        let codec = if schema_version >= FIRST_CODEC_SCHEMA_VERSION {
+            if data[base + 13..base + 16] != [0, 0, 0] {
+                return Err(VoxelAssetError::Malformed(format!(
+                    "chunk directory entry {i} has a non-zero reserved tail"
+                )));
+            }
+            BlockCodec::from_code(data[base + 12]).ok_or_else(|| {
+                VoxelAssetError::Malformed(format!(
+                    "chunk block codec {} is not one this build knows",
+                    data[base + 12]
+                ))
+            })?
+        } else {
+            if u32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap()) != 0 {
+                return Err(VoxelAssetError::Malformed(format!(
+                    "chunk directory entry {i} has a non-zero reserved word; a v1 \
+                     payload may not use it"
+                )));
+            }
+            BlockCodec::Raw
+        };
         let offset = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
         let len = u64::from_le_bytes(data[base + 24..base + 32].try_into().unwrap());
         if let Some(p) = prev {
@@ -707,7 +915,12 @@ fn parse(data: &[u8]) -> Result<(VoxelAssetHeader, Vec<ChunkDirEntry>)> {
             )));
         }
         prev_end = end;
-        dir.push(ChunkDirEntry { key, offset, len });
+        dir.push(ChunkDirEntry {
+            key,
+            offset,
+            len,
+            codec,
+        });
     }
 
     Ok((
@@ -751,6 +964,116 @@ mod tests {
             .set_material(3, 3, 3, 2);
         v.clear_dirty();
         v
+    }
+
+    // ── schema v2: per-chunk block compression (IASSET1) ────────────────────
+
+    /// **The downgrade story, as bytes.** A v2 payload with every chunk
+    /// [`BlockCodec::Raw`] differs from the v1 image of the same chunks in
+    /// exactly the four bytes of `schema_version` — the codec byte lands where v1
+    /// already wrote a reserved zero — and the restamped image parses as v1
+    /// through the strict branch.
+    #[test]
+    fn v2_all_raw_is_v1_plus_four_bytes() {
+        let asset = build_voxel_asset(&sample_volume()).unwrap();
+        let image = asset.as_bytes();
+        assert_eq!(image[8..12], 2u32.to_le_bytes(), "this build writes v2");
+        for e in asset.reader().directory() {
+            assert_eq!(e.codec, BlockCodec::Raw, "the loose writer stays raw");
+        }
+        let mut as_v1 = image.to_vec();
+        as_v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(image[..8], as_v1[..8]);
+        assert_eq!(image[12..], as_v1[12..]);
+        let v1 = VoxelAssetReader::new(as_v1.as_slice()).unwrap();
+        assert_eq!(v1.header().schema_version, 1);
+        for e in asset.reader().directory() {
+            assert_eq!(
+                v1.chunk_bytes(e.key).unwrap(),
+                asset.reader().chunk_bytes(e.key).unwrap()
+            );
+        }
+    }
+
+    /// **The lossless claim, per codec**, and the ratio SDF chunks actually give.
+    #[test]
+    fn recompress_round_trips_every_codec_byte_for_byte() {
+        let asset = build_voxel_asset(&sample_volume()).unwrap();
+        let raw_image = asset.as_bytes().to_vec();
+        for codec in BlockCodec::ALL {
+            let (packed, report) = recompress_voxel_asset(&raw_image, codec).unwrap();
+            assert_eq!(report.chunks, asset.reader().chunk_count());
+            assert!(
+                report.bytes_after <= report.bytes_before,
+                "{codec:?} inflated"
+            );
+            let r = VoxelAssetReader::new(packed.as_slice()).unwrap();
+            assert_eq!(r.header().schema_version, VOXEL_ASSET_SCHEMA_VERSION);
+            for e in asset.reader().directory() {
+                assert_eq!(
+                    r.chunk(e.key).unwrap(),
+                    asset.reader().chunk(e.key).unwrap(),
+                    "{codec:?} changed chunk {:?}",
+                    e.key
+                );
+                assert_eq!(
+                    r.chunk_bytes(e.key).unwrap(),
+                    asset.reader().chunk_bytes(e.key).unwrap()
+                );
+            }
+            // …and back. The inverse transcode is the byte-level arm.
+            let (back, _) = recompress_voxel_asset(&packed, BlockCodec::Raw).unwrap();
+            assert_eq!(back, raw_image, "{codec:?} did not round-trip to raw");
+            // Deterministic: same input, same codec, same bytes.
+            let (again, _) = recompress_voxel_asset(&raw_image, codec).unwrap();
+            assert_eq!(again, packed, "{codec:?} is not byte-deterministic");
+        }
+    }
+
+    /// An SDF chunk is the most compressible thing this engine ships, and the
+    /// **cook's chosen codec** must actually take that win here — an assertion
+    /// that would pass vacuously if `chunks_compressed` were zero.
+    #[test]
+    fn the_cook_codec_compresses_sdf_chunks_hard() {
+        let asset = build_voxel_asset(&sample_volume()).unwrap();
+        let (_, report) = recompress_voxel_asset(asset.as_bytes(), COOK_CHUNK_CODEC).unwrap();
+        assert_eq!(
+            report.chunks_compressed, report.chunks,
+            "every SDF chunk should compress"
+        );
+        assert!(
+            report.ratio() < 0.5,
+            "an SDF volume compressed to {:.3} — the corpus or the codec changed",
+            report.ratio()
+        );
+    }
+
+    /// The store seam borrows a raw chunk and owns a compressed one.
+    #[test]
+    fn the_chunk_store_seam_borrows_raw_and_owns_compressed() {
+        use crate::residency::ChunkStore;
+        let asset = build_voxel_asset(&sample_volume()).unwrap();
+        let key = asset.reader().directory()[0].key;
+        assert!(matches!(
+            ChunkStore::chunk_bytes(&asset.reader(), key).unwrap(),
+            Cow::Borrowed(_)
+        ));
+
+        let (packed, _) = recompress_voxel_asset(asset.as_bytes(), COOK_CHUNK_CODEC).unwrap();
+        let r = VoxelAssetReader::new(packed).unwrap();
+        let compressed = r
+            .directory()
+            .iter()
+            .find(|e| e.codec != BlockCodec::Raw)
+            .expect("the sample volume has a compressible chunk");
+        assert!(matches!(
+            ChunkStore::chunk_bytes(&r, compressed.key).unwrap(),
+            Cow::Owned(_)
+        ));
+        assert_eq!(
+            r.load_chunk(compressed.key).unwrap().unwrap(),
+            asset.reader().chunk(compressed.key).unwrap().unwrap()
+        );
     }
 
     #[test]
@@ -892,12 +1215,35 @@ mod tests {
             .to_string();
         assert!(err.contains("reserved header word"), "{err}");
 
-        let mut dir_reserved = good.clone();
+        // IASSET1 (v2) SPLIT the directory entry's reserved word: byte 12 is the
+        // block codec now, bytes 13..16 are still reserved. So the strict check
+        // is in three parts, and each one is asserted where it lives.
+        //
+        // (a) At v2, an unknown codec byte is refused **by name** — never read as
+        //     raw, which would hand a compressed frame to `bincode` and blame it.
         let r = HEADER_LEN as usize + 12;
-        dir_reserved[r..r + 4].copy_from_slice(&7u32.to_le_bytes());
+        let mut bad_codec = good.clone();
+        bad_codec[r] = 200;
+        let err = VoxelAsset::from_bytes(bad_codec).unwrap_err().to_string();
+        assert!(err.contains("codec 200"), "{err}");
+
+        // (b) At v2, the remaining three reserved bytes are still claimable only
+        //     by a version bump.
+        let mut dir_reserved = good.clone();
+        dir_reserved[r + 1] = 7;
         let err = VoxelAsset::from_bytes(dir_reserved)
             .unwrap_err()
             .to_string();
+        assert!(err.contains("reserved tail"), "{err}");
+
+        // (c) Below v2 the WHOLE word must be zero — the original rule, kept for
+        //     the v1 branch. This is what makes "a v1 asset has no codec" checked
+        //     rather than assumed: a v1 image with a byte in that word does not
+        //     load as a compressed one, it does not load at all.
+        let mut v1_reserved = good.clone();
+        v1_reserved[8..12].copy_from_slice(&1u32.to_le_bytes());
+        v1_reserved[r..r + 4].copy_from_slice(&7u32.to_le_bytes());
+        let err = VoxelAsset::from_bytes(v1_reserved).unwrap_err().to_string();
         assert!(err.contains("reserved word"), "{err}");
 
         // … and the good payload really does have zeros there, so the two checks

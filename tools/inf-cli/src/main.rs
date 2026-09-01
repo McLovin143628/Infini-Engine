@@ -138,6 +138,13 @@ fn cmd_cook(args: &[String]) -> ExitCode {
     let mut out: Option<PathBuf> = None;
     let mut roots: Option<Vec<AssetId>> = None;
     let mut mods: Option<PathBuf> = None;
+    // IASSET1: the per-block codec for the streaming containers. `None` keeps
+    // the default (`inf_terrain::COOK_TILE_CODEC`); `raw` turns the transcode
+    // off, which is how a before/after ship-size table is produced from one
+    // binary and how a bisect isolates it. A WEB-targeted cook wants `lz4`:
+    // `zstd` decodes through the pure-Rust `ruzstd` in a browser, 7.3x slower
+    // than the C zstd a desktop links.
+    let mut terrain_codec: Option<inf_asset::BlockCodec> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -194,6 +201,19 @@ fn cmd_cook(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            "--block-codec" | "--terrain-codec" => {
+                i += 1;
+                terrain_codec = match args.get(i).map(String::as_str) {
+                    Some("raw") => Some(inf_asset::BlockCodec::Raw),
+                    Some("lz4") => Some(inf_asset::BlockCodec::Lz4),
+                    Some("deflate") => Some(inf_asset::BlockCodec::Deflate),
+                    Some("zstd") => Some(inf_asset::BlockCodec::Zstd),
+                    _ => {
+                        eprintln!("--block-codec needs one of raw|lz4|deflate|zstd");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            }
             other => {
                 eprintln!("unexpected argument: {other}");
                 return ExitCode::FAILURE;
@@ -217,10 +237,18 @@ fn cmd_cook(args: &[String]) -> ExitCode {
     // Default output: `<project>/Build`.
     let out = out.unwrap_or_else(|| project.join("Build"));
 
-    let opts = CookOptions {
+    let mut opts = CookOptions {
         roots,
         ..Default::default()
     };
+    if let Some(codec) = terrain_codec {
+        // `raw` means "do not transcode at all" rather than "transcode to raw":
+        // the two differ on an asset that arrived compressed, and only the first
+        // reproduces the pre-IASSET1 pack byte for byte.
+        let c = (codec != inf_asset::BlockCodec::Raw).then_some(codec);
+        opts.compression.terrain = c;
+        opts.compression.voxel = c;
+    }
     match cook(&project, &out, &opts) {
         Ok(report) => {
             print!("{}", report.render());
@@ -1161,7 +1189,10 @@ fn cmd_gis_plan(args: &[String]) -> ExitCode {
 fn cmd_pack(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("ls") => {
-            let Some(path) = args.get(1) else {
+            // The path is the first NON-FLAG argument, not `args[1]` — which is
+            // what `--totals` would otherwise be read as, producing an ENOENT
+            // naming a flag.
+            let Some(path) = args[1..].iter().find(|a| !a.starts_with("--")) else {
                 eprintln!("usage: inf pack ls [--totals] <pack.inf_pack>");
                 return ExitCode::FAILURE;
             };
