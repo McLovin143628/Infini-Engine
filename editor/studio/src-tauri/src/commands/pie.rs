@@ -222,6 +222,12 @@ pub async fn pie_start(
     };
 
     let bin = find_player_bin();
+    // Wave GTA1: the OS's "cannot find the file specified" beside a path is not
+    // something an author can act on. The overwhelmingly common cause in a dev
+    // checkout has a one-line remedy, so say it.
+    if let Some(advice) = inf_editor_core::pie::missing_player_advice(&bin) {
+        return Err(advice);
+    }
     let session = PieSession::spawn_scene(&bin, &payload)
         .map_err(|e| format!("could not start the player ({}): {e}", bin.display()))?;
 

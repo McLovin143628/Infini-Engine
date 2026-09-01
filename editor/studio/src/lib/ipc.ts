@@ -909,6 +909,13 @@ export const project = {
   newProject: (parent: string, name: string, template: string): Promise<ProjectInfoDto> =>
     invoke<ProjectInfoDto>("project_new", { parent, name, template }),
   open: (root: string): Promise<ProjectInfoDto> => invoke<ProjectInfoDto>("project_open", { root }),
+  /**
+   * The `.inf_lvl` path a cooked build of this project would boot into, or null
+   * (wave GTA1). The cook's own rule -- the lowest-GUID level -- read off the
+   * same asset database, so "the level the editor opens" and "the level the
+   * build starts in" are the same sentence.
+   */
+  bootLevel: (): Promise<string | null> => invoke<string | null>("project_boot_level"),
   close: (): Promise<void> => invoke("project_close"),
 };
 
@@ -1569,6 +1576,15 @@ export const character = {
       addToScene: opts.addToScene ?? false,
       at: opts.at ?? null,
     }),
+
+  /**
+   * Place the COMMITTED starter character (wave GTA1). Writes no assets -- it
+   * spawns an actor wearing the seventeen files every 3D project ships with,
+   * which is what `create` above does not do (it mints six new ones every call).
+   * Resolves to the new actor's guid; one undo step, and it is selected.
+   */
+  placeStarter: (at?: [number, number, number]): Promise<string> =>
+    invoke<string>("character_place_starter", { at: at ?? null }),
 
   /** The content sub-folder generated characters land in. */
   folder: (): Promise<string> => invoke<string>("character_folder"),

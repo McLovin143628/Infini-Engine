@@ -88,6 +88,18 @@ interface SceneState {
   cutSelected: () => void;
   paste: () => void;
   saveLevelAs: () => Promise<void>;
+  /**
+   * File > Open Level... -- a real file dialog (wave GTA1). Before it, the menu
+   * row called `scene_open` with no path, and no path means the QUICKSAVE
+   * fallback: choosing "Open Level" silently replaced the document with
+   * `quicksave.inf_lvl`, whatever that happened to be.
+   */
+  openLevelViaDialog: () => Promise<void>;
+  /**
+   * Open a level by path, replacing the document. Resolves to true when the
+   * level opened.
+   */
+  openLevel: (path: string) => Promise<boolean>;
   rename: (guid: string, name: string) => void;
   reparent: (guid: string, parent: string | null) => void;
   toggleVisible: (guid: string) => void;
@@ -322,6 +334,42 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     }
   },
 
+  openLevelViaDialog: async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    // Seeded exactly like Save As: the current level's own directory, else the
+    // project's Levels dir (which is under the CONTENT root -- the IB-7 ruling).
+    let defaultPath: string | undefined;
+    try {
+      defaultPath = (await sceneIpc.currentPath()) ?? undefined;
+    } catch {
+      // No current path -- fall through to the project dir.
+    }
+    if (!defaultPath) {
+      const proj = useProjectStore.getState().current;
+      if (proj) defaultPath = `${proj.root}/${proj.content_dir}/${proj.levels_dir}`;
+    }
+    const picked = await open({
+      title: "Open Level",
+      defaultPath,
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Infini Level", extensions: ["inf_lvl"] }],
+    });
+    const path = typeof picked === "string" ? picked : null;
+    if (!path) return; // cancelled
+    await get().openLevel(path);
+  },
+
+  openLevel: async (path) => {
+    try {
+      get().applySnapshot(await sceneIpc.open(path));
+      return true;
+    } catch (e) {
+      useShellStore.getState().pushStatus(`Open Level failed: ${errText(e)}`, 12000);
+      return false;
+    }
+  },
+
   rename: (guid, name) => void sceneIpc.rename(guid, name),
   reparent: (guid, parent) => void sceneIpc.reparent(guid, parent),
 
@@ -513,7 +561,7 @@ export function registerSceneCommands(): void {
   wire("file.saveLevelAs", () => s().saveLevelAs());
   wire("file.saveAll", async () => reportSaveResult(await sceneIpc.save(), "All"));
   wire("file.newLevel", async () => s().applySnapshot(await sceneIpc.newScene()));
-  wire("file.openLevel", async () => s().applySnapshot(await sceneIpc.open()));
+  wire("file.openLevel", () => s().openLevelViaDialog());
 }
 
 /**

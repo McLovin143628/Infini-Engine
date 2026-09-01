@@ -180,6 +180,52 @@ pub async fn character_preview(
     })
 }
 
+/// **Place the committed starter character** (wave GTA1) — `Place Actor ▸
+/// Starter Character`, and the button on the no-pawn Play dialog.
+///
+/// The distinction from [`character_create`] is the whole point of having two
+/// commands: that one is a *wizard* and mints six new assets every time it runs,
+/// which is the wrong verb for "give this level a player". This one writes
+/// nothing at all. It spawns an actor wearing
+/// [`starter_character_ids`](inf_editor_core::samples::starter_character_ids) —
+/// the guids of the seventeen files every 3D project scaffolds and the editor's
+/// own content root is seeded with — through the same
+/// `SceneDoc::edit_create_character` door the wizard's spawn half takes, so the
+/// character is a character by the same definition.
+///
+/// One undo step, and the placed actor is selected, exactly like a wizard spawn.
+#[tauri::command]
+pub async fn character_place_starter(
+    app: AppHandle,
+    at: Option<[f64; 3]>,
+    scene: State<'_, SceneState>,
+) -> Result<String, String> {
+    let ids = inf_editor_core::samples::starter_character_ids();
+    let asset = |id: Option<AssetId>| -> Result<uuid::Uuid, String> {
+        id.map(|a| a.0)
+            .ok_or_else(|| "the starter character's ids are not all fixed".to_string())
+    };
+    let at = at.unwrap_or([0.0, 0.0, 0.0]);
+    let guid = {
+        let mut doc = super::scene::lock(&scene.doc)?;
+        let guid = doc.edit_create_character(
+            inf_editor_core::samples::STARTER_CHARACTER_NAME,
+            asset(ids.skeleton)?,
+            asset(ids.mesh)?,
+            asset(ids.machine)?,
+            glam::DVec3::new(at[0], at[1], at[2]),
+            Some(asset(ids.actor)?),
+            inf_editor_core::samples::starter_character_spec()
+                .params
+                .height_m,
+        );
+        doc.select(&[guid], false);
+        guid
+    };
+    emit_world_delta(&app, &scene);
+    Ok(guid.to_string())
+}
+
 /// Generate the character's assets under `Content/Characters`, and optionally
 /// add a ready actor to the open level.
 ///

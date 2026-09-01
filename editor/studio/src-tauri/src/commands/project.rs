@@ -160,6 +160,37 @@ pub async fn project_current(
     Ok(cur.as_ref().map(info))
 }
 
+/// **The level this project boots** (wave GTA1): the path of the `.inf_lvl` a
+/// cooked build would start in, or `null` when the project has none.
+///
+/// # One rule, and it is the cook's
+///
+/// `inf_packager::cook` picks the root level by sorting the level assets it
+/// found and taking the first (`levels.sort(); levels.first()`), so a build
+/// starts in the LOWEST-GUID level. This reads the same asset database and
+/// applies the same rule, which is the only way "the level the editor opens" and
+/// "the level the build boots" can be the same sentence. Sorting by filename
+/// instead would agree by luck on a one-level project and disagree the day a
+/// second one arrives.
+///
+/// Opening it is the frontend's decision, not this command's: a command that
+/// replaced the open document would throw away an author's unsaved work on a
+/// menu click.
+#[tauri::command]
+pub async fn project_boot_level(assets: State<'_, AssetState>) -> Result<Option<String>, String> {
+    assets.with_project(|proj| {
+        let mut levels: Vec<_> = proj
+            .db()
+            .by_kind(inf_asset::AssetKind::Level)
+            .map(|e| (e.id(), e.path.clone()))
+            .collect();
+        levels.sort_by_key(|(id, _)| *id);
+        Ok(levels
+            .first()
+            .map(|(_, p)| p.to_string_lossy().replace('\\', "/")))
+    })
+}
+
 /// Scaffold a new project under `parent` from `template` and open it.
 #[tauri::command]
 pub async fn project_new(

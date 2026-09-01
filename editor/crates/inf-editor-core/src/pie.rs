@@ -1199,6 +1199,27 @@ pub fn find_player_bin() -> std::path::PathBuf {
     }
 }
 
+/// **What to do when the player executable is not there** (wave GTA1).
+///
+/// [`find_player_bin`] returns a path whether or not anything is at it, so the
+/// failure surfaced as the operating system's own words — "The system cannot
+/// find the file specified. (os error 2)" — beside a path, which tells an author
+/// nothing they can act on. In a dev checkout the answer is nearly always that
+/// the editor was built and the player was not.
+///
+/// `None` when the file is there; the caller then spawns and reports whatever
+/// really goes wrong.
+pub fn missing_player_advice(bin: &std::path::Path) -> Option<String> {
+    if bin.exists() {
+        return None;
+    }
+    Some(format!(
+        "the player executable is not built — nothing at {}. Build it with \
+         `cargo build -p inf-player`, or point INF_PLAYER_BIN at one that exists.",
+        bin.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

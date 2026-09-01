@@ -210,6 +210,11 @@ export const MENU_BAR: TopMenu[] = [
         act("actor.place.pointLight", "Point Light"),
         act("actor.place.directionalLight", "Directional Light"),
         act("actor.place.camera", "Camera"),
+        sep,
+        // Wave GTA1. A Place Actor row and NOT the wizard below: this places the
+        // committed starter character every 3D project already ships, writing no
+        // assets at all, where `actor.newCharacter` mints six every time it runs.
+        act("actor.place.starterCharacter", "Starter Character"),
       ]),
       // The P24.5 wizard. Its own entry rather than a Place Actor row, for the
       // Terrain Import wizard's reason: it does not place a primitive, it

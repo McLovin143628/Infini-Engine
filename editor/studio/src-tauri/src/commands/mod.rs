@@ -163,6 +163,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_evaluate_biomes,
         character::character_preview,
         character::character_create,
+        character::character_place_starter,
         character::character_folder,
         // P25.4 the capture wizard: photographs -> reconstruct with progress ->
         // preview through the offscreen path -> import.
@@ -325,6 +326,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         settings::game_binding_apply,
         project::project_templates,
         project::project_recent,
+        project::project_boot_level,
         project::project_current,
         project::project_new,
         project::project_open,

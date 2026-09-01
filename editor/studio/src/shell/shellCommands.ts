@@ -8,7 +8,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import { setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
-import { app } from "../lib/ipc";
+import { app, character as characterIpc } from "../lib/ipc";
 import { DISCIPLINE_LABEL } from "../lib/disciplines";
 import { registerMenuCommands } from "../lib/menus";
 import { applyDisciplineLayout, useDockLayout } from "../panels/dock/dockLayoutStore";
@@ -153,6 +153,26 @@ export function bootstrapShellCommands(): void {
   for (const [id, kind] of Object.entries(ACTOR_PLACE_KINDS)) {
     setCommandHandler(id, () => void sceneState().createEntity(kind, null));
   }
+  // Actor ▸ Place Actor ▸ Starter Character (wave GTA1) — its own handler
+  // rather than a `SpawnKind`, because it is not a primitive: it is the
+  // committed character, placed through the character door so it arrives with a
+  // capsule, a movement component and a controller. `character.placeStarter`
+  // writes nothing; `actor.newCharacter` (the wizard) is the one that generates
+  // assets, and confusing the two is how a project ends up with six sets of
+  // near-identical rigs.
+  setCommandHandler("actor.place.starterCharacter", () => {
+    void characterIpc
+      .placeStarter()
+      .then(() =>
+        useShellStore.getState().pushStatus("Placed the starter character."),
+      )
+      .catch((e) =>
+        useShellStore
+          .getState()
+          .pushStatus(`Could not place the starter character: ${String(e)}`, 12000),
+      );
+  });
+
   // Actor ▸ Delete mirrors Edit ▸ Delete (both drop the current selection).
   setCommandHandler("actor.delete", () => sceneState().deleteSelected());
 

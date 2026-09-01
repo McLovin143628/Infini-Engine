@@ -16,6 +16,8 @@ import { listenTo, refCountedInit } from "../lib/events";
 import { project as projectIpc } from "../lib/ipc";
 import { RECENT_PROJECTS_MAX } from "../lib/menus";
 import { useAssetStore } from "./assetStore";
+import { useSceneStore } from "./sceneStore";
+import { useShellStore } from "./shellStore";
 
 export type { ProjectInfoDto, RecentProjectDto, ProjectTemplateDto };
 
@@ -81,6 +83,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       .catch((e) => console.error("project.recent failed", e));
     // The asset DB re-rooted to the new project; re-sync the Content Drawer.
     void useAssetStore.getState().refresh();
+    // ...and OPEN THE PROJECT'S BOOT LEVEL (wave GTA1).
+    //
+    // Opening a project used to leave the document alone, so a fresh `inf new`
+    // put an author in a project whose level they had to go and find -- and the
+    // scratch document they were left looking at is not in the project at all,
+    // so a Ctrl+S would write it to `Levels/quicksave.inf_lvl`.
+    //
+    // The level is the cook's own root level (lowest guid), so what opens is
+    // what a build would start in. UNSAVED WORK IS NEVER REPLACED: a dirty
+    // document keeps the viewport and the offer becomes a status line, because
+    // "open a project" is not consent to discard an edit.
+    void openBootLevel();
   },
 
   setShowStartScreen: (v) => set({ showStartScreen: v, error: null }),
@@ -130,6 +144,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 }));
+
+/**
+ * Open the newly-opened project's boot level, unless the current document has
+ * unsaved changes (in which case the author is TOLD rather than overruled).
+ *
+ * Separate from the store action so the "which level" question has exactly one
+ * answer -- `project_boot_level`, which applies the cook's own rule to the same
+ * asset database -- and so the dirty-document branch is readable.
+ */
+async function openBootLevel(): Promise<void> {
+  let path: string | null;
+  try {
+    path = await projectIpc.bootLevel();
+  } catch (e) {
+    console.error("project.bootLevel failed", e);
+    return;
+  }
+  if (!path) return; // A project with no level: the cook refuses it too.
+  const scene = useSceneStore.getState();
+  const name = path.split("/").pop() ?? path;
+  if (scene.dirty) {
+    useShellStore
+      .getState()
+      .pushStatus(
+        `Project opened. ${name} was not opened because this level has unsaved changes — save, then File ▸ Open Level….`,
+        12000,
+      );
+    return;
+  }
+  if (await scene.openLevel(path)) {
+    useShellStore.getState().pushStatus(`Opened ${name}.`);
+  }
+}
 
 /** Attach project handlers to the enumerated File-menu commands. */
 export function registerProjectCommands(): void {
