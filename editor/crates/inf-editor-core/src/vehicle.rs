@@ -339,6 +339,12 @@ redline_torque_frac = 0.74
 final_drive = 3.9
 shift_up_rpm = 6000.0
 shift_down_rpm = 2300.0
+lateral_grip = 1.25
+longitudinal_grip = 1.3
+front_torque_split = 1.0
+brake_bias = 0.63
+cog_height_m = -0.34
+stability_control = 0.4
 
 [truck]
 label = \"Pickup\"
@@ -377,6 +383,216 @@ final_drive = 4.3
 shift_up_rpm = 3700.0
 shift_down_rpm = 1400.0
 wheel_inertia_kgm2 = 2.4
+lateral_grip = 1.12
+longitudinal_grip = 1.22
+diff_lock_rear = 0.4
+cog_height_m = -0.42
+drag_lateral_n_per_mps2 = 2.4
+stability_control = 0.6
+
+# ── the VEH2a fleet ─────────────────────────────────────────────────────────
+#
+# Three more silhouettes and three more DRIVES. The point of a catalogue is that
+# the rows differ in ways a driver can feel, so each of these turns knobs the
+# other two do not: the sports car is rear-drive with a revvy engine, a locked
+# rear diff, real downforce and its aids turned down; the SUV is all-wheel-drive,
+# tall, soft and heavily assisted; the van is a rear-drive diesel with a huge
+# flank, a high centre of gravity and the strongest stability control of the
+# five.
+
+[sports]
+label = \"Coupe\"
+
+[sports.vehicle]
+body = \"sports\"
+drivetrain = \"rwd\"
+half_width_m = 0.94
+half_height_m = 0.58
+half_length_m = 2.25
+density_kg_m3 = 140.0
+wheel_radius_m = 0.33
+half_track_m = 0.82
+half_wheelbase_m = 1.35
+wheel_drop_m = -0.52
+# A revvy engine: `torque_curve_bias` below 0.5 means it is soft low down and
+# holds its torque to the limiter, which is the opposite end of the one knob the
+# pickup's diesel turns the other way.
+peak_torque_nm = 420.0
+peak_torque_rpm = 5200.0
+redline_rpm = 7600.0
+idle_rpm = 900.0
+idle_torque_frac = 0.45
+redline_torque_frac = 0.86
+torque_curve_bias = 0.28
+engine_brake_nm = 55.0
+final_drive = 3.55
+gear_count = 7.0
+gear_1_ratio = 3.9
+gear_2_ratio = 2.6
+gear_3_ratio = 1.9
+gear_4_ratio = 1.45
+gear_5_ratio = 1.15
+gear_6_ratio = 0.95
+gear_7_ratio = 0.8
+reverse_ratio = 3.4
+shift_time_s = 0.12
+shift_up_rpm = 7200.0
+shift_down_rpm = 3000.0
+max_speed_mps = 62.0
+max_engine_force_n = 16000.0
+brake_force_n = 20000.0
+handbrake_force_n = 9000.0
+brake_bias = 0.66
+diff_lock_rear = 0.6
+lateral_grip = 1.45
+longitudinal_grip = 1.5
+tyre_long_peak_slip = 0.11
+tyre_lat_peak_slip = 0.13
+tyre_long_rise_bias = 0.8
+tyre_lat_rise_bias = 0.78
+tyre_slide_frac = 0.68
+tyre_load_sensitivity = 0.18
+wheel_inertia_kgm2 = 1.0
+rest_length_m = 0.42
+travel_m = 0.16
+stiffness_n_per_m = 32000.0
+damping_ns_per_m = 4200.0
+rolling_resistance = 0.012
+cog_height_m = -0.43
+anti_roll_front_n_per_m = 22000.0
+anti_roll_rear_n_per_m = 24000.0
+downforce_n_per_mps2 = 0.45
+downforce_centre_z = -0.5
+drag_n_per_mps2 = 0.33
+drag_lateral_n_per_mps2 = 1.1
+max_steer_deg = 34.0
+min_steer_deg = 7.0
+steer_rate_deg_per_s = 320.0
+steer_return_deg_per_s = 420.0
+ackermann = 0.9
+# A driver's car: the aids are present and they are turned DOWN.
+abs_slip = 0.13
+traction_control_slip = 0.1
+stability_control = 0.25
+
+[suv]
+label = \"Wagon\"
+
+[suv.vehicle]
+body = \"suv\"
+drivetrain = \"awd\"
+half_width_m = 1.02
+half_height_m = 0.86
+half_length_m = 2.45
+density_kg_m3 = 122.0
+wheel_radius_m = 0.4
+half_track_m = 0.9
+half_wheelbase_m = 1.48
+wheel_drop_m = -0.72
+peak_torque_nm = 480.0
+peak_torque_rpm = 3000.0
+redline_rpm = 5600.0
+idle_rpm = 750.0
+idle_torque_frac = 0.62
+redline_torque_frac = 0.62
+torque_curve_bias = 0.62
+engine_brake_nm = 48.0
+final_drive = 4.0
+shift_up_rpm = 5200.0
+shift_down_rpm = 2000.0
+max_speed_mps = 46.0
+max_engine_force_n = 15000.0
+brake_force_n = 19000.0
+handbrake_force_n = 11000.0
+brake_bias = 0.62
+diff_lock_front = 0.25
+diff_lock_rear = 0.45
+lateral_grip = 1.05
+longitudinal_grip = 1.15
+tyre_long_peak_slip = 0.13
+tyre_lat_peak_slip = 0.18
+tyre_long_rise_bias = 0.7
+tyre_lat_rise_bias = 0.68
+tyre_slide_frac = 0.74
+tyre_load_sensitivity = 0.26
+wheel_inertia_kgm2 = 2.0
+rest_length_m = 0.55
+travel_m = 0.28
+stiffness_n_per_m = 34000.0
+damping_ns_per_m = 5200.0
+rolling_resistance = 0.016
+cog_height_m = -0.4
+anti_roll_front_n_per_m = 16000.0
+anti_roll_rear_n_per_m = 12000.0
+downforce_n_per_mps2 = 0.05
+drag_n_per_mps2 = 0.62
+drag_lateral_n_per_mps2 = 1.9
+max_steer_deg = 33.0
+min_steer_deg = 8.0
+steer_rate_deg_per_s = 190.0
+steer_return_deg_per_s = 280.0
+abs_slip = 0.16
+traction_control_slip = 0.2
+stability_control = 0.55
+
+[van]
+label = \"Box Van\"
+
+[van.vehicle]
+body = \"van\"
+drivetrain = \"rwd\"
+half_width_m = 1.05
+half_height_m = 1.2
+half_length_m = 3.0
+density_kg_m3 = 109.0
+wheel_radius_m = 0.42
+half_track_m = 0.92
+half_wheelbase_m = 1.9
+wheel_drop_m = -1.02
+peak_torque_nm = 620.0
+peak_torque_rpm = 1900.0
+redline_rpm = 3800.0
+idle_rpm = 650.0
+idle_torque_frac = 0.78
+redline_torque_frac = 0.48
+torque_curve_bias = 0.82
+engine_brake_nm = 70.0
+final_drive = 4.6
+shift_up_rpm = 3300.0
+shift_down_rpm = 1250.0
+max_speed_mps = 32.0
+max_engine_force_n = 18000.0
+brake_force_n = 22000.0
+handbrake_force_n = 13000.0
+brake_bias = 0.66
+diff_lock_rear = 0.35
+lateral_grip = 0.95
+longitudinal_grip = 1.0
+tyre_long_peak_slip = 0.14
+tyre_lat_peak_slip = 0.2
+tyre_long_rise_bias = 0.66
+tyre_lat_rise_bias = 0.64
+tyre_slide_frac = 0.78
+tyre_load_sensitivity = 0.3
+wheel_inertia_kgm2 = 3.2
+rest_length_m = 0.6
+travel_m = 0.3
+stiffness_n_per_m = 42000.0
+damping_ns_per_m = 6800.0
+rolling_resistance = 0.02
+cog_height_m = -0.49
+anti_roll_front_n_per_m = 14000.0
+anti_roll_rear_n_per_m = 10000.0
+downforce_n_per_mps2 = 0.0
+drag_n_per_mps2 = 0.95
+drag_lateral_n_per_mps2 = 3.2
+max_steer_deg = 30.0
+min_steer_deg = 6.0
+steer_rate_deg_per_s = 150.0
+steer_return_deg_per_s = 230.0
+abs_slip = 0.18
+traction_control_slip = 0.22
+stability_control = 0.7
 ";
 
 /// The island's catalogue, parsed.
@@ -394,15 +610,32 @@ pub fn island_vehicles() -> inf_ecs::vehicle::VehicleDefs {
 mod tests {
     use super::*;
 
-    /// **The catalogue is two rows and both of them are cars.**
+    /// **The catalogue is five rows and all of them are cars** — and no two of
+    /// them are the same car with two names.
+    ///
+    /// The last clause is the one worth having. A fleet whose rows differ only in
+    /// colour is a fleet of one, so this walks the *tuning* and requires the five
+    /// to differ in the things a driver feels: how fast, how heavy, which axle
+    /// drives, how the engine makes its torque, how much grip, and how hard the
+    /// aids intervene.
     #[test]
-    fn the_island_catalogue_declares_a_sedan_and_a_truck() {
+    fn the_island_catalogue_declares_a_fleet_and_no_two_rows_are_one_car() {
         let defs = island_vehicles();
-        assert_eq!(defs.0.len(), 2);
+        assert_eq!(defs.0.len(), 5);
+        for (id, body) in [
+            ("sedan", inf_ecs::vehicle::VehicleBody::Sedan),
+            ("truck", inf_ecs::vehicle::VehicleBody::Truck),
+            ("sports", inf_ecs::vehicle::VehicleBody::Sports),
+            ("suv", inf_ecs::vehicle::VehicleBody::Suv),
+            ("van", inf_ecs::vehicle::VehicleBody::Van),
+        ] {
+            assert_eq!(
+                defs.get(id).unwrap_or_else(|| panic!("no `{id}` row")).body,
+                body
+            );
+        }
         let sedan = defs.get("sedan").expect("the sedan row");
         let truck = defs.get("truck").expect("the truck row");
-        assert_eq!(sedan.body, inf_ecs::vehicle::VehicleBody::Sedan);
-        assert_eq!(truck.body, inf_ecs::vehicle::VehicleBody::Truck);
         for (id, def) in &defs.0 {
             let volume = 8.0 * def.half_extents.x * def.half_extents.y * def.half_extents.z;
             let kg = volume * def.density_kg_m3;
@@ -436,10 +669,51 @@ mod tests {
             }
         }
         // The truck is the heavier, slower, longer one — or the catalogue's two
-        // rows are the same car with two names.
+        // original rows are the same car with two names.
         assert!(truck.half_extents.z > sedan.half_extents.z);
         assert!(truck.class.max_speed_mps < sedan.class.max_speed_mps);
         assert!(truck.wheel_radius_m > sedan.wheel_radius_m);
+
+        // **No two rows agree about how they drive.** Six axes, each of which a
+        // driver feels: a row set that collided on any of them would be a fleet
+        // wearing five names.
+        let axis: [(&str, fn(&inf_ecs::vehicle::VehicleDef) -> f64); 6] = [
+            ("max_speed_mps", |d| d.class.max_speed_mps),
+            ("peak_torque_nm", |d| d.class.peak_torque_nm),
+            ("torque_curve_bias", |d| d.class.torque_curve_bias),
+            ("lateral_grip", |d| d.class.lateral_grip),
+            ("stability_control", |d| d.class.stability_control),
+            ("mass", |d| {
+                8.0 * d.half_extents.x * d.half_extents.y * d.half_extents.z * d.density_kg_m3
+            }),
+        ];
+        for (name, read) in axis {
+            let mut seen: Vec<(String, f64)> =
+                defs.0.iter().map(|(k, d)| (k.clone(), read(d))).collect();
+            seen.sort_by(|a, b| a.1.total_cmp(&b.1));
+            for pair in seen.windows(2) {
+                assert!(
+                    pair[1].1 > pair[0].1,
+                    "`{name}`: {} and {} both read {} — two rows that agree on \
+                     every axis are one car with two names",
+                    pair[0].0,
+                    pair[1].0,
+                    pair[0].1
+                );
+            }
+        }
+        // …and the three drivetrains are all represented, which is the axis that
+        // is deliberately NOT all-different.
+        let splits: std::collections::BTreeSet<u64> = defs
+            .0
+            .values()
+            .map(|d| d.class.front_torque_split.to_bits())
+            .collect();
+        assert!(
+            splits.len() >= 3,
+            "the fleet has only {} distinct drivetrains",
+            splits.len()
+        );
     }
 
     /// **A spawned car is a rig the recogniser finds, with a body the right size

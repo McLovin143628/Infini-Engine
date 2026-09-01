@@ -322,18 +322,33 @@ fn the_catalogue_truck_climbs_it_too_and_it_is_a_different_car() {
             "{id} covered {along} m up the island's worst planned grade"
         );
     }
-    // The two rows really are two cars: the truck is heavier and geared to a
-    // lower top speed, so it must not out-run the saloon on a hill.
+    // The two rows really are two cars.
     assert!(
         ran[1].1 > ran[0].1,
         "the truck ({} kg) is not heavier than the sedan ({} kg)",
         ran[1].1,
         ran[0].1
     );
+    // **AND THE PICKUP OUT-CLIMBS THE SALOON**, which is a claim VEH2a inverted
+    // and is worth pinning precisely because it is surprising.
+    //
+    // Under P29.7's flat drive curve the answer was the other way round: a heavy
+    // truck geared to a lower top speed simply had less force, and the arm here
+    // asserted so. VEH2a changed two things about these rows and both point the
+    // same way. The pickup got a **diesel** — 520 N·m at 2 200 with the torque
+    // arriving early (`torque_curve_bias` 0.75) — where the saloon has a 245 N·m
+    // petrol that wants revs. And the saloon is **front-wheel drive**, which is
+    // what a saloon is, so an uphill launch transfers load onto the axle it does
+    // not drive while the pickup's rear-drive transfers load ONTO its driven one.
+    //
+    // Measured on the audited 0.108 grade over ten seconds: pickup 124.4 m,
+    // saloon 105.1 m. The gap is the claim; a renamed row would produce two
+    // identical numbers.
     assert!(
-        ran[1].2 < ran[0].2,
-        "the truck ran {} m and the sedan {} m — the catalogue's two rows drive \
-         identically, so its second silhouette is a rename",
+        ran[1].2 > ran[0].2 + 5.0,
+        "the pickup ran {} m and the saloon {} m — a rear-drive diesel that \
+         cannot out-climb a front-drive petrol on an eleven per cent grade is a \
+         drivetrain and a torque curve that reach nothing",
         ran[1].2,
         ran[0].2
     );

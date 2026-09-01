@@ -1,8 +1,8 @@
 schema_version = 27
 guid = "0bb4ea2d-2c7a-3945-7b91-80a72ad78143"
 title = "Vancouver Island"
-entity_count = 290
-content_hash = "848dc3c787389077"
+entity_count = 282
+content_hash = "15d9fdd1d8b45ba9"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a2",

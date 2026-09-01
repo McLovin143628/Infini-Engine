@@ -648,15 +648,19 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // settlement block does, so a level with seven of them holds however many
     // are near the simulation and no more.
     let fleet = crate::vehicle::island_vehicles();
-    for plan in &plans {
-        // A city gets the saloon and a town the pickup — the two rows the
-        // catalogue declares, chosen by the site's own kind rather than by an
-        // index into a list.
-        let id = match plan.kind {
-            inf_island::SiteKind::City => "sedan",
-            _ => "truck",
+    for (n, plan) in plans.iter().enumerate() {
+        // **The whole fleet reaches the island** (island wave VEH2a). A city
+        // parks the two road cars, a town the working vehicles and the wagon,
+        // and everything else the pickup — chosen by the site's own kind and its
+        // position in the settlement order rather than by a hash, so a recipe
+        // that adds a town changes exactly one car.
+        //
+        // Five rows and seven settlements, and no row is left in the catalogue:
+        // a fleet nothing drives is a table, and this wave's whole argument is
+        // that the five rows drive differently.
+        let Some(def) = fleet.get(island_vehicle_id(plan.kind, n)) else {
+            continue;
         };
-        let Some(def) = fleet.get(id) else { continue };
         let Some((v, dir)) = inf_island::nearest_route_vertex(&design.routes, plan.centre) else {
             continue;
         };
@@ -804,6 +808,27 @@ pub fn repo_root() -> std::path::PathBuf {
 /// had never once returned a non-zero step on the shipped island: the sun could
 /// not get below the horizon. Turning it on is the whole of clause 3.
 pub const ISLAND_CLOCK_RATE: f64 = 18.0;
+
+/// **Which catalogue row parks at one settlement** (island wave VEH2a).
+///
+/// A city takes the two road cars, a town the working vehicles and the wagon,
+/// and everything else the pickup — by the site's own kind and its place in the
+/// settlement order, so a recipe that adds a town changes exactly one car.
+///
+/// A function and not a `match` inline in the generator, because the arm that
+/// checks where a car sits has to know which car it is, and a rule restated in
+/// a test is the P29.6 A14 defect: the first version of this WAS restated, and
+/// the restatement went stale on the very commit that grew the fleet.
+pub fn island_vehicle_id(kind: inf_island::SiteKind, index: usize) -> &'static str {
+    match (kind, index % 3) {
+        (inf_island::SiteKind::City, 0) => "sedan",
+        (inf_island::SiteKind::City, _) => "sports",
+        (inf_island::SiteKind::Town, 0) => "van",
+        (inf_island::SiteKind::Town, 1) => "suv",
+        (inf_island::SiteKind::Town, _) => "sedan",
+        _ => "truck",
+    }
+}
 
 /// Every committed island recipe, as repo-relative paths.
 ///
@@ -1220,7 +1245,7 @@ mod tests {
             let fleet = crate::vehicle::island_vehicles();
 
             let mut drawn_parts = 0usize;
-            for plan in &plans {
+            for (n, plan) in plans.iter().enumerate() {
                 let guid = derived(name, &format!("island.car.{}", plan.site));
                 let rig = inf_ecs::vehicle::rig_of(doc.world(), guid).unwrap_or_else(|| {
                     panic!("{recipe}: {} has no car the recogniser finds", plan.name)
@@ -1243,10 +1268,7 @@ mod tests {
                     .get::<inf_ecs::components::Transform>(e)
                     .expect("its transform");
                 let def = fleet
-                    .get(match plan.kind {
-                        inf_island::SiteKind::City => "sedan",
-                        _ => "truck",
-                    })
+                    .get(island_vehicle_id(plan.kind, n))
                     .expect("the catalogue row");
                 assert!(
                     (t.translation.x - v.x).abs() < 1e-9 && (t.translation.z - v.z).abs() < 1e-9,

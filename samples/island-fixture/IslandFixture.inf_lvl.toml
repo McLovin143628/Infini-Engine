@@ -1,8 +1,8 @@
 schema_version = 27
 guid = "ccfc3211-3792-6471-9e48-b3e960b261e0"
 title = "Island Fixture"
-entity_count = 51
-content_hash = "7a02ccda2a8fcb76"
+entity_count = 50
+content_hash = "174633afaafb8e6d"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a2",

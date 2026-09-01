@@ -833,6 +833,14 @@ pub enum VehicleBody {
     Sedan,
     /// Two-volume pickup: a tall forward cab and an open rear bed with sides.
     Truck,
+    /// Low two-seater: a long bonnet, a cabin set well back, and a spoiler
+    /// (island wave VEH2a).
+    Sports,
+    /// Tall five-door with a full-length greenhouse and roof rails.
+    Suv,
+    /// Box body over a low chassis with a stepped cab in front — the delivery
+    /// van of `docs/reference_videos/frames/driving/0014`.
+    Van,
 }
 
 /// The sedan's parts. `+Z` is forward, `+Y` is up.
@@ -913,15 +921,127 @@ const TRUCK_PARTS: &[BodyPart] = &[
     },
 ];
 
+/// The sports car's parts: a long bonnet, a cabin set well back, a spoiler.
+const SPORTS_PARTS: &[BodyPart] = &[
+    BodyPart {
+        name: "lower",
+        centre: Vec3d::new(0.0, -0.5, 0.0),
+        half: Vec3d::new(1.0, 0.5, 1.0),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // Small, narrow, and a long way back — which is most of what reads as
+    // "sports car" from any angle at all.
+    BodyPart {
+        name: "cabin",
+        centre: Vec3d::new(0.0, 0.5, -0.20),
+        half: Vec3d::new(0.80, 0.5, 0.34),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "bonnet",
+        centre: Vec3d::new(0.0, 0.05, 0.62),
+        half: Vec3d::new(0.96, 0.15, 0.36),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "boot",
+        centre: Vec3d::new(0.0, 0.05, -0.72),
+        half: Vec3d::new(0.94, 0.13, 0.26),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "spoiler",
+        centre: Vec3d::new(0.0, 0.34, -0.92),
+        half: Vec3d::new(0.86, 0.05, 0.07),
+        primitive: crate::components::Primitive::Cube,
+    },
+];
+
+/// The SUV's parts: a tall greenhouse over the whole cabin, plus roof rails.
+const SUV_PARTS: &[BodyPart] = &[
+    BodyPart {
+        name: "lower",
+        centre: Vec3d::new(0.0, -0.55, 0.0),
+        half: Vec3d::new(1.0, 0.45, 1.0),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "cabin",
+        centre: Vec3d::new(0.0, 0.42, -0.14),
+        half: Vec3d::new(0.92, 0.52, 0.55),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "bonnet",
+        centre: Vec3d::new(0.0, 0.12, 0.66),
+        half: Vec3d::new(0.94, 0.22, 0.32),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // The rails are what reach the top of the hull, so the topmost part of an
+    // SUV is a 16 cm rail rather than its whole roof — which is what keeps the
+    // silhouette test's anti-brick clause meaningful on a tall car.
+    BodyPart {
+        name: "rail_left",
+        centre: Vec3d::new(-0.78, 0.95, -0.10),
+        half: Vec3d::new(0.08, 0.05, 0.50),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "rail_right",
+        centre: Vec3d::new(0.78, 0.95, -0.10),
+        half: Vec3d::new(0.08, 0.05, 0.50),
+        primitive: crate::components::Primitive::Cube,
+    },
+];
+
+/// The van's parts: a low chassis, a stepped cab, a box body and an inset roof.
+const VAN_PARTS: &[BodyPart] = &[
+    BodyPart {
+        name: "chassis",
+        centre: Vec3d::new(0.0, -0.80, 0.0),
+        half: Vec3d::new(1.0, 0.20, 1.0),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "cab",
+        centre: Vec3d::new(0.0, 0.05, 0.72),
+        half: Vec3d::new(0.92, 0.55, 0.26),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "box",
+        centre: Vec3d::new(0.0, 0.06, -0.30),
+        half: Vec3d::new(0.96, 0.62, 0.68),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // Inset on every axis, which is both what a van's roof actually looks like
+    // and what keeps the topmost part from being the whole vehicle.
+    BodyPart {
+        name: "roof",
+        centre: Vec3d::new(0.0, 0.84, -0.30),
+        half: Vec3d::new(0.88, 0.16, 0.58),
+        primitive: crate::components::Primitive::Cube,
+    },
+];
+
 impl VehicleBody {
     /// Every family, in the canonical order.
-    pub const ALL: [VehicleBody; 2] = [VehicleBody::Sedan, VehicleBody::Truck];
+    pub const ALL: [VehicleBody; 5] = [
+        VehicleBody::Sedan,
+        VehicleBody::Truck,
+        VehicleBody::Sports,
+        VehicleBody::Suv,
+        VehicleBody::Van,
+    ];
 
     /// The stable name a catalogue row names this family by.
     pub fn name(self) -> &'static str {
         match self {
             VehicleBody::Sedan => "sedan",
             VehicleBody::Truck => "truck",
+            VehicleBody::Sports => "sports",
+            VehicleBody::Suv => "suv",
+            VehicleBody::Van => "van",
         }
     }
 
@@ -938,6 +1058,9 @@ impl VehicleBody {
         match self {
             VehicleBody::Sedan => SEDAN_PARTS,
             VehicleBody::Truck => TRUCK_PARTS,
+            VehicleBody::Sports => SPORTS_PARTS,
+            VehicleBody::Suv => SUV_PARTS,
+            VehicleBody::Van => VAN_PARTS,
         }
     }
 }
