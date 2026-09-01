@@ -165,6 +165,12 @@ impl TileStore for PackTileStore {
     fn tile_keys(&self) -> Vec<TileKey> {
         self.dir.iter().map(|e| e.key).collect()
     }
+
+    /// The directory answers this, so **membership never decompresses** — see
+    /// the same override on [`TerrainAssetReader`](crate::TerrainAssetReader).
+    fn contains_tile(&self, key: TileKey) -> bool {
+        self.dir.binary_search_by(|e| e.key.cmp(&key)).is_ok()
+    }
 }
 
 /// A [`TileStore`] over a **loose** `.inf_terrain` file — the editor's cold side.

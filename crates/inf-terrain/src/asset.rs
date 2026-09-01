@@ -270,6 +270,29 @@ pub const fn header_len(schema_version: u32) -> u64 {
     }
 }
 
+/// The largest `tile_resolution` a `.inf_terrain` may declare (IASSET1 audit).
+///
+/// **This exists because the block ceiling is derived from a header field.**
+/// [`tile_raw_ceiling`] turns `tile_resolution` into the bound
+/// [`decode_block`] refuses a length claim against — and `tile_resolution` is
+/// read out of the same doctored file the claim came from. With only the old
+/// `>= 2` check, a header declaring `u32::MAX` samples per side mints a ceiling
+/// of `usize::MAX`, and "bound the claim before it becomes an allocation" bounds
+/// nothing: a forty-byte block asks for a terabyte and gets it.
+///
+/// 2049 is `2^11 + 1` — the shape a terrain tile takes — and **8× the largest
+/// resolution this engine has ever authored** (the island's 257; the tree's
+/// fixtures top out there). One tile at 2049² is 16.8 MB of `f32` heights before
+/// any other layer, which is already far past what a 4 ms streaming step can
+/// page; the bound refuses files nothing here can produce and nothing sane would
+/// want, and in exchange the worst-case decompression allocation is a knowable
+/// ~256 MiB instead of unbounded.
+///
+/// Enforced in **both** directions, on the P23.6 rule that a writer must not
+/// manufacture a file its own reader rejects: [`parse`] refuses a payload above
+/// it and [`TerrainAssetBuilder::build`] refuses to write one.
+pub const MAX_TILE_RESOLUTION: u32 = 2049;
+
 /// A ceiling on how many bytes one tile blob can decompress to, at
 /// `tile_resolution` samples per side.
 ///
@@ -281,14 +304,24 @@ pub const fn header_len(schema_version: u32) -> u64 {
 /// sample — ~21.2 bytes — so 64 gives better than 3× headroom for `bincode`'s
 /// framing and any layer a future schema appends, while still refusing the
 /// gigabyte claim a doctored asset makes.
+///
+/// **The resolution is clamped to [`MAX_TILE_RESOLUTION`] first**, so this
+/// function is safe to call with a number that has not been validated — a
+/// ceiling derived from an attacker's header is the one way a ceiling stops
+/// being one. A payload past the cap never reaches here anyway ([`parse`]
+/// refuses it); the clamp is the belt to that braces.
 #[inline]
 pub const fn tile_raw_ceiling(tile_resolution: u32) -> usize {
     /// Generous per-sample bound; see the doc comment for the real ~21.2.
     const BYTES_PER_SAMPLE: usize = 64;
     /// Slack for the origin, the five length prefixes and alignment.
     const SLACK: usize = 64 * 1024;
-    (tile_resolution as usize)
-        .saturating_mul(tile_resolution as usize)
+    let res = if tile_resolution > MAX_TILE_RESOLUTION {
+        MAX_TILE_RESOLUTION
+    } else {
+        tile_resolution
+    } as usize;
+    res.saturating_mul(res)
         .saturating_mul(BYTES_PER_SAMPLE)
         .saturating_add(SLACK)
 }
@@ -524,6 +557,17 @@ impl TerrainAssetBuilder {
 
     /// Serialize the payload image.
     pub fn build(self) -> Result<TerrainAsset> {
+        // The P23.6 rule: a writer must not manufacture a file its own reader
+        // rejects. `parse` refuses a resolution past the cap because the block
+        // ceiling is derived from it (see `MAX_TILE_RESOLUTION`), so this refuses
+        // it here rather than writing a payload nothing can open.
+        if self.tile_resolution > MAX_TILE_RESOLUTION {
+            return Err(TerrainAssetError::Malformed(format!(
+                "tile_resolution {} is past the {MAX_TILE_RESOLUTION} maximum a \
+                 `.inf_terrain` may declare",
+                self.tile_resolution
+            )));
+        }
         let count = u32::try_from(self.tiles.len())
             .map_err(|_| TerrainAssetError::Malformed("more than u32::MAX tiles".into()))?;
         let lod_levels = self
@@ -1049,6 +1093,16 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
             "tile_resolution {tile_resolution} < 2"
         )));
     }
+    // The upper bound is not cosmetic: `tile_raw_ceiling` derives the bound a
+    // compressed block's length CLAIM is refused against from this very field, so
+    // an unbounded resolution mints an unbounded ceiling and the claim is not
+    // bounded at all. See `MAX_TILE_RESOLUTION`.
+    if tile_resolution > MAX_TILE_RESOLUTION {
+        return Err(TerrainAssetError::Malformed(format!(
+            "tile_resolution {tile_resolution} is past the {MAX_TILE_RESOLUTION} \
+             maximum — a header that names its own block ceiling is not a ceiling"
+        )));
+    }
     let meters_per_sample = f64_at(16);
     if !(meters_per_sample.is_finite() && meters_per_sample > 0.0) {
         return Err(TerrainAssetError::Malformed(format!(
@@ -1555,6 +1609,63 @@ mod tests {
         );
     }
 
+    /// **Membership does not decompress** (IASSET1 audit).
+    ///
+    /// `TileStore::contains_tile`'s default is `tile_bytes(key).is_some()`, which
+    /// was free while `tile_bytes` was a sub-slice and is a whole tile's
+    /// decompress now that it is a `Cow`. `TerrainAssetReader` overrides it with
+    /// the directory's own binary search, and the only way to *observe* the
+    /// difference — the only shape where the two answers differ — is a block the
+    /// directory holds and the decoder refuses. So that is what this builds: a
+    /// compressed tile whose length prefix is over-written with a small, in-range
+    /// lie. `contains_tile` still says yes (the directory does hold it) while the
+    /// bytes are gone, which is exactly the proof that the fetch never ran.
+    ///
+    /// A false answer here means the override was deleted and the fetch is back.
+    #[test]
+    fn membership_asks_the_directory_and_never_the_decoder() {
+        use crate::residency::TileStore;
+        let mut t = TerrainData::new(33, 1.0);
+        for tz in 0..2 {
+            for tx in 0..2 {
+                t.author_tile((tx, tz), height_fn);
+            }
+        }
+        let opts = PyramidOptions::default();
+        let asset = build_terrain_asset(&t, &build_pyramid(&t, opts), opts).unwrap();
+        let (mut packed, _) =
+            recompress_terrain_asset(asset.as_bytes(), BlockCodec::Deflate).unwrap();
+
+        let victim = {
+            let r = TerrainAssetReader::new(packed.as_slice()).unwrap();
+            *r.directory()
+                .iter()
+                .find(|e| e.codec != BlockCodec::Raw)
+                .expect("at least one tile compressed")
+        };
+        // A length claim that is under the ceiling and wrong — the strict half of
+        // `decode_block`, and a corruption the *parser* cannot see.
+        let at = victim.offset as usize;
+        packed[at..at + 8].copy_from_slice(&7u64.to_le_bytes());
+
+        let r = TerrainAssetReader::new(packed.as_slice()).expect("the directory still parses");
+        assert!(
+            TileStore::contains_tile(&r, victim.key),
+            "membership went through the decoder"
+        );
+        assert!(
+            TileStore::tile_bytes(&r, victim.key).is_none(),
+            "the fixture is vacuous — the doctored block still decoded"
+        );
+        // The reader's own door still reports the reason rather than an absence.
+        assert!(r.tile(victim.key).is_err(), "a corrupt tile is an Err");
+        // …and an absent key is still absent.
+        assert!(!TileStore::contains_tile(
+            &r,
+            TileKey::new(0, (9_999, 9_999))
+        ));
+    }
+
     /// The decompression ceiling is a **container** property, and it refuses the
     /// gigabyte claim a doctored asset makes.
     #[test]
@@ -1565,6 +1676,53 @@ mod tests {
         assert!(c > 257 * 257 * 22, "the ceiling must clear a real tile");
         assert!(c < 8 << 20, "…and must still be a ceiling: {c}");
         assert_eq!(tile_raw_ceiling(0), 64 * 1024, "no overflow at the edges");
+    }
+
+    /// **A header may not mint its own ceiling** (IASSET1 audit).
+    ///
+    /// [`tile_raw_ceiling`] derives the bound a compressed block's length claim
+    /// is refused against *from a header field*, and the header came out of the
+    /// same file as the claim. Unbounded, `tile_resolution = u32::MAX` gives a
+    /// ceiling of `usize::MAX` and the bound bounds nothing — a forty-byte block
+    /// asks for a terabyte and `decode_block` hands the allocator the number.
+    ///
+    /// So: the parser refuses the header, the builder refuses to write one (a
+    /// writer must not manufacture a file its own reader rejects), and the
+    /// ceiling function clamps even when called with a number nobody validated.
+    #[test]
+    fn a_doctored_tile_resolution_cannot_mint_its_own_block_ceiling() {
+        // The clamp, first — this is what makes the function safe standalone.
+        assert_eq!(
+            tile_raw_ceiling(u32::MAX),
+            tile_raw_ceiling(MAX_TILE_RESOLUTION)
+        );
+        assert!(
+            tile_raw_ceiling(u32::MAX) < 300 << 20,
+            "the worst-case allocation must be a knowable number: {}",
+            tile_raw_ceiling(u32::MAX)
+        );
+
+        // The parser. A real image with the resolution word over-written is the
+        // fixture, so nothing but that field differs from a payload that loads.
+        let asset = sample_asset();
+        let mut image = asset.as_bytes().to_vec();
+        image[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = TerrainAssetReader::new(image.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, TerrainAssetError::Malformed(m) if m.contains("past the")),
+            "{err}"
+        );
+        // …and one byte under the cap still parses, so the arm is not vacuous
+        // for the wrong reason.
+        image[12..16].copy_from_slice(&MAX_TILE_RESOLUTION.to_le_bytes());
+        assert!(TerrainAssetReader::new(image.as_slice()).is_ok());
+
+        // The writer, on the same number.
+        let over = TerrainAssetBuilder::new(MAX_TILE_RESOLUTION + 1, 1.0).build();
+        assert!(
+            matches!(&over, Err(TerrainAssetError::Malformed(m)) if m.contains("past the")),
+            "{over:?}"
+        );
     }
 
     // ── schema v3 / v4: the tile blob grows layers (P19.1, P19.2) ───────────

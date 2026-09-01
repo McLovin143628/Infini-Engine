@@ -52,7 +52,15 @@ pub trait ChunkStore {
     /// Every key the store can serve, in ascending [`ChunkKey`] order.
     fn chunk_keys(&self) -> Vec<ChunkKey>;
 
-    /// Whether the store can serve `key`.
+    /// Whether the store **holds** `key` — a directory question, not a decode.
+    ///
+    /// The default answers it by fetching the bytes, which is right for a store
+    /// with no directory to ask ([`MemoryChunkStore`]) and wrong for one that has
+    /// it: since IASSET1 made [`chunk_bytes`](Self::chunk_bytes) a `Cow`, a fetch
+    /// of a schema-v2 compressed chunk *decompresses it*. The asset-backed store
+    /// overrides this with its own binary search; see
+    /// `inf_terrain::TileStore::contains_tile` for the corrupt-block case the two
+    /// answers can disagree on.
     fn contains_chunk(&self, key: ChunkKey) -> bool {
         self.chunk_bytes(key).is_some()
     }
@@ -137,9 +145,11 @@ impl ChunkStore for MemoryChunkStore {
 
 /// The asset-backed store: a `.inf_voxel` payload served in place.
 ///
-/// `chunk_bytes` is a binary search plus a sub-slice of the payload — so when the
-/// payload is itself a borrowed `PackReader::read_ref` slice of an mmap, a chunk
-/// reaches the caller with **zero copies and zero decodes**.
+/// `chunk_bytes` is a binary search plus a sub-slice of the payload — so for a
+/// [`BlockCodec::Raw`](inf_asset::BlockCodec::Raw) chunk, and the payload itself a
+/// borrowed `PackReader::read_ref` slice of an mmap, a chunk reaches the caller
+/// with **zero copies and zero decodes**. A schema-v2 *compressed* chunk costs one
+/// allocation and one decompress for that chunk and no other (IASSET1).
 impl<B: AsRef<[u8]>> ChunkStore for VoxelAssetReader<B> {
     fn chunk_bytes(&self, key: ChunkKey) -> Option<std::borrow::Cow<'_, [u8]>> {
         VoxelAssetReader::chunk_bytes(self, key)
@@ -147,6 +157,14 @@ impl<B: AsRef<[u8]>> ChunkStore for VoxelAssetReader<B> {
 
     fn chunk_keys(&self) -> Vec<ChunkKey> {
         self.keys().collect()
+    }
+
+    /// The directory answers this, so **membership never decompresses**.
+    ///
+    /// The trait's default is `chunk_bytes(key).is_some()`, free while that was a
+    /// sub-slice and a whole chunk's decompress since IASSET1 made it a `Cow`.
+    fn contains_chunk(&self, key: ChunkKey) -> bool {
+        self.entry(key).is_some()
     }
 
     /// The payload's own stamp — an older asset's blobs hold the older chunk

@@ -64,7 +64,19 @@ pub trait TileStore {
     /// Every key the store can serve, in ascending [`TileKey`] order.
     fn tile_keys(&self) -> Vec<TileKey>;
 
-    /// Whether the store can serve `key`.
+    /// Whether the store **holds** `key` — a directory question, not a decode.
+    ///
+    /// The default answers it by fetching the bytes, which is right for a store
+    /// that has no directory to ask (a [`MemoryTileStore`]) and wrong for one
+    /// that does: since IASSET1 made [`tile_bytes`](Self::tile_bytes) a `Cow`, a
+    /// fetch of a schema-v6 compressed tile *decompresses it*, and asking "is it
+    /// there" must not cost what asking for it costs. Every asset-backed store
+    /// overrides this with its own binary search.
+    ///
+    /// The two answers can only disagree on a **corrupt** block, where the
+    /// directory holds the key and the bytes will not decode. That is the right
+    /// disagreement: a corrupt tile is a load failure with a reason
+    /// ([`load_tile`](Self::load_tile)), not an absent one.
     fn contains_tile(&self, key: TileKey) -> bool {
         self.tile_bytes(key).is_some()
     }
@@ -154,9 +166,11 @@ impl TileStore for MemoryTileStore {
 
 /// The asset-backed store: a `.inf_terrain` payload served in place.
 ///
-/// `tile_bytes` is a binary search plus a sub-slice of the payload — so when the
-/// payload is itself a borrowed `PackReader::read_ref` slice of an mmap, a tile
-/// reaches the caller with **zero copies and zero decodes**.
+/// `tile_bytes` is a binary search plus a sub-slice of the payload — so for a
+/// [`BlockCodec::Raw`](inf_asset::BlockCodec::Raw) tile, and the payload itself a
+/// borrowed `PackReader::read_ref` slice of an mmap, a tile reaches the caller
+/// with **zero copies and zero decodes**. A schema-v6 *compressed* tile costs one
+/// allocation and one decompress for that tile and no other (IASSET1).
 impl<B: AsRef<[u8]>> TileStore for TerrainAssetReader<B> {
     fn tile_bytes(&self, key: TileKey) -> Option<std::borrow::Cow<'_, [u8]>> {
         TerrainAssetReader::tile_bytes(self, key)
@@ -164,6 +178,16 @@ impl<B: AsRef<[u8]>> TileStore for TerrainAssetReader<B> {
 
     fn tile_keys(&self) -> Vec<TileKey> {
         self.keys().collect()
+    }
+
+    /// The directory answers this, so **membership never decompresses**.
+    ///
+    /// The trait's default is `tile_bytes(key).is_some()`, which was free when
+    /// `tile_bytes` was a sub-slice and is a whole 581 KiB tile's decompress
+    /// since IASSET1 made it a `Cow`. Asking "is it there" must not cost what
+    /// asking for it costs.
+    fn contains_tile(&self, key: TileKey) -> bool {
+        self.entry(key).is_some()
     }
 
     /// The payload's own stamp — an older asset's blobs hold the older tile
