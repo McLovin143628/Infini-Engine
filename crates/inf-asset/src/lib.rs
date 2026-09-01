@@ -19,6 +19,7 @@
 //! crate for identity, the sidecar, and [`AssetPayload`].
 
 pub mod atomic;
+pub mod block;
 pub mod data;
 pub mod db;
 pub mod derived_material;
@@ -36,6 +37,7 @@ pub mod sidecar;
 pub mod watch;
 
 pub use atomic::{temp_sibling, write_atomically};
+pub use block::{decode_block, encode_block, BlockCodec};
 pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
 pub use db::{AssetDb, AssetEntry, IdCollision};
 pub use derived_material::{

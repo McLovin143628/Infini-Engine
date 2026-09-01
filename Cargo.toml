@@ -235,6 +235,31 @@ zstd = "0.13"
 # cook determinism is untouched; wasm reads packs (decode-only) with ruzstd. MIT
 # (on the deny allow-list). Decode-only ⇒ the browser never cooks/writes packs.
 ruzstd = "0.8"
+# ── per-BLOCK compression for the streaming containers (IASSET1) ────────────
+# The pack compresses an authored entry WHOLE; a `.inf_terrain` / `.inf_voxel` /
+# `.inf_part` is paged one tile/chunk/cell at a time and therefore shipped raw,
+# at 100% of its bytes. `inf_asset::block` is the third option: compress each
+# block independently, record the codec in the container's own directory, and
+# decompress only the block a page-in asked for. Two candidates were measured
+# against the already-shipped `zstd` on the real island's tiles (the bake-off
+# table lives in `docs/memos/iasset1-block-compression.md`); both are PURE RUST,
+# so unlike zstd (C natively, `ruzstd` in the browser) one implementation serves
+# every target this engine ships to.
+#
+#   lz4_flex     — LZ4 block format. The fastest decode by a wide margin and the
+#                  weakest ratio. MIT. The one NEW crate this wave pins.
+#   miniz_oxide  — raw DEFLATE. **Already in the tree** (`png` → `flate2` →
+#                  miniz_oxide 0.8.9, and `image` behind it), so this pin is a
+#                  RECORD of a resolved version rather than a new supply-chain
+#                  edge — the same reasoning `parry3d-f64` is pinned under.
+#                  MIT OR Apache-2.0 OR Zlib.
+#
+# default-features off on both: `lz4_flex`'s defaults pull its frame format and a
+# checksum crate we do not use (the container has an xxh3-128 per entry already),
+# and `miniz_oxide`'s pull `simd` + `with-alloc` variants — we want the plain
+# `std`/alloc raw-DEFLATE path so the bytes are identical on every target.
+lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 # ── streaming: zero-copy pack reads (Phase 16.1) ────────────────────────────
 # memmap2 maps a shipped `.inf_pack` into the address space so the runtime reads
 # an uncompressed blob as a borrowed `&[u8]` slice (`PackReader::read_ref`) with

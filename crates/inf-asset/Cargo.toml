@@ -18,6 +18,13 @@ xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# IASSET1 per-block codecs (`crate::block`). Pure Rust, so they build for every
+# target this engine ships to — including wasm32, where the streaming containers
+# have to decode their blocks with no C toolchain behind them. Unlike `zstd`
+# below they are therefore NOT host-only.
+lz4_flex = { workspace = true }
+miniz_oxide = { workspace = true }
+
 # Native/desktop: the `notify` file watcher (asset DB live rescans), the C
 # `zstd` codec (pack encode + decode), and `memmap2` (zero-copy pack reads, P16.1).
 # None targets `wasm32-unknown-unknown` (notify has no browser backend; zstd-sys's
