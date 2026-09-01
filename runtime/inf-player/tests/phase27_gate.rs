@@ -1280,7 +1280,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// committed image changed** — the instanced path draws a one-mesh scene in
     /// the order it drew it before, which is what the stable sort in
     /// `plan_skinned_batches` is for.
-
+    ///
     /// **Wave GTA1 moves it a seventh time, and this move is BOTH branches of the
     /// rule at once** (from `1db3dd0bf5961ddbfb53aeb2b40a1697`), which is why the
     /// commits are separate and each says which it is:
