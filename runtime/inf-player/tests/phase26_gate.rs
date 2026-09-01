@@ -2517,7 +2517,30 @@ fn the_golden_set_is_pinned_and_additive() {
     /// **Day is untouched and it is measured**: `sky_noon`, `sky_dawn` and
     /// `sky_dusk` compare at mean 0.000000 / max 0.000000, because the new
     /// visibility factor is exactly 1.0 while the sun is up.
-    const GOLDEN_SET_DIGEST: &str = "e4ef462477c82c533c31d92fba74cf71";
+    ///
+    /// # Wave IASSET2: `ground_close.png`, re-blessed on the same precedent
+    ///
+    /// The ground library's normal and detail maps moved from **BC1 to BC5**,
+    /// which is the wave's content clause and is measured on those exact bytes:
+    /// BC1's worst per-channel error on the two channels a tangent-space normal
+    /// lives in is **122 of 255** against BC5's **17** (mean 10.4 -> 1.7). A
+    /// normal that wrong does not shade approximately wrong, it faces somewhere
+    /// else.
+    ///
+    /// `ground_close.png` is the one committed frame that depicts those maps.
+    /// Its fixture called `TextureCompression::Bc1` for all four slots by hand;
+    /// it now calls `inf_material::ground`'s own per-slot settings, so "the real
+    /// committed content" stays true rather than remembered. The frame moved by
+    /// **mean 0.001212 / max 0.024941** — inside the harness's tolerance, and
+    /// re-blessed anyway, for the reason the paragraph above gives verbatim: a
+    /// frame that quietly depicts an engine that no longer exists is one nobody
+    /// can read a regression off.
+    ///
+    /// **The albedo and ORM maps did NOT move**, and that is measured too: BC7
+    /// would take the albedo's worst error from 11 of 255 to 5 and the ORM's
+    /// from 45 to 33, for twice the page bytes — half of what a 24 MiB atlas arm
+    /// holds. `GOLDENS` does not move; the set is still 60 files.
+    const GOLDEN_SET_DIGEST: &str = "9460b53af708ab4f1b633e188014c3d9";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

@@ -29,7 +29,7 @@
 use std::path::Path;
 
 use inf_asset::{AssetId, AssetKind, AssetSidecar, ContentHash};
-use inf_material::ground::{albedo_settings, data_settings, GroundKind};
+use inf_material::ground::{albedo_settings, data_settings, normal_settings, GroundKind};
 use inf_material::material::{MatBlend, MaterialAsset};
 use uuid::Uuid;
 
@@ -139,12 +139,16 @@ pub fn ground_library() -> Result<Vec<GroundFile>, String> {
             inf_material::ground::GROUND_ALBEDO_EXTENT,
             albedo_settings(),
         )?;
+        // **BC5 since wave IASSET2** — the one slot whose format moved, and the
+        // only reason it could is that a residency now holds one arm per stored
+        // format. See `inf_material::ground`'s module table: BC1's worst error
+        // on a normal's two channels is 122 of 255 on this content.
         tex(
             "Normal",
             ids.normal,
             maps.normal,
             inf_material::ground::GROUND_MAP_EXTENT,
-            data_settings(),
+            normal_settings(),
         )?;
         tex(
             "ORM",
@@ -154,12 +158,14 @@ pub fn ground_library() -> Result<Vec<GroundFile>, String> {
             data_settings(),
         )?;
         if let (Some(guid), Some(rgba)) = (ids.detail, maps.detail) {
+            // A detail map is a high-frequency NORMAL (plus a roughness lane),
+            // so it takes the normal route for the same measured reason.
             tex(
                 "Detail",
                 guid,
                 rgba,
                 inf_material::ground::GROUND_MAP_EXTENT,
-                data_settings(),
+                normal_settings(),
             )?;
         }
 
@@ -232,12 +238,22 @@ const README: &str = concat!(
     "| `Ground_Sand` | 1.5 m | 1.46 mm | — |\n",
     "| `Ground_Soil` | 2.2 m | 2.15 mm | — |\n",
     "\n",
-    "**Every map is BC1**, including the normals. That is a measurement, not a\n",
-    "preference: `inf_render::build_vt_level` picks the atlas format from the\n",
-    "stored formats of the textures a level binds, and a MIXED set demotes the\n",
-    "whole pool to RGBA8 at eight times the page bytes. Wave T's `PageFormat::Bc5`\n",
-    "is the right normal-map format and cannot be used beside a BC1 albedo until\n",
-    "the atlas can hold two formats.\n",
+    "**Albedo and ORM are BC1; normals and detail maps are BC5** (wave\n",
+    "IASSET2). Every map used to be BC1, including the normals, and that was a\n",
+    "limitation rather than a choice: one atlas held one format, so a MIXED set\n",
+    "demoted the whole pool to RGBA8 at eight times the page bytes. A residency\n",
+    "now holds one arm per stored format, and the three slots were then measured\n",
+    "on these exact bytes (worst error per channel, out of 255):\n",
+    "\n",
+    "| slot | format | BC1 | the alternative |\n",
+    "|---|---|---|---|\n",
+    "| normal, detail | **BC5** | worst **122** | BC5 worst **17** — taken |\n",
+    "| albedo | BC1 | worst 11 | BC7 worst 5, at twice the page — declined |\n",
+    "| ORM | BC1 | worst 45 | BC7 worst 33, at twice the page — declined |\n",
+    "\n",
+    "A BC1 normal map on this content has texels whose X or Y is off by 122 of\n",
+    "255: the surface normal points somewhere else. The albedo's four per cent is\n",
+    "not worth halving what the atlas holds, which is what a 16-byte block costs.\n",
     "\n",
     "## And the three things that stand on it\n",
     "\n",
@@ -316,15 +332,30 @@ mod tests {
         }
     }
 
-    /// **Every `.inf_tex` is a readable v2 container, and every one of them is
-    /// BC1.** The second half is the one that matters: a single map in another
-    /// format demotes the whole level's atlas to RGBA8 (8× the page bytes), so
-    /// this is a property of the library rather than of each file.
+    /// **Every `.inf_tex` is a readable v2 container, and each slot is in the
+    /// format its measurement chose** (wave IASSET2).
+    ///
+    /// This arm used to assert *"every one of them is BC1"*, and the reason it
+    /// could was a limitation rather than a property: a single map in another
+    /// format demoted the whole level's atlas to RGBA8 at 8× the page bytes.
+    /// Wave IASSET2 gave a residency one arm per stored format, so the library
+    /// may now be mixed — and it is, in exactly one slot:
+    ///
+    /// * **normal and detail → BC5.** BC1's worst per-channel error on this
+    ///   content's two normal channels is 122 of 255; BC5's is 17.
+    /// * **albedo and ORM → BC1**, unchanged and measured: BC7 would halve the
+    ///   pages a 24 MiB arm holds to take the albedo's worst from 11 to 5 and
+    ///   the ORM's from 45 to 33.
+    ///
+    /// So the assertion is per SLOT, and the count of formats present is
+    /// asserted too — the library must be two arms and not three, because a
+    /// third would take a third of the atlas budget for one map kind.
     #[test]
-    fn every_texture_is_a_readable_bc1_v2_container() {
+    fn every_texture_is_a_readable_v2_container_in_its_measured_format() {
         let files = ground_library().expect("the ground library builds");
         let mut textures = 0;
         let mut bytes = 0usize;
+        let mut formats: Vec<inf_render::PageFormat> = Vec::new();
         for f in &files {
             if !f.name.ends_with(".inf_tex") {
                 continue;
@@ -334,12 +365,19 @@ mod tests {
             let reader = inf_material::tiles::TiledTextureReader::new(f.payload.as_slice())
                 .unwrap_or_else(|e| panic!("{} is not a v2 container: {e}", f.name));
             let format = reader.header().format;
+            let want = if f.name.contains("_Normal") || f.name.contains("_Detail") {
+                inf_render::PageFormat::Bc5
+            } else {
+                inf_render::PageFormat::Bc1
+            };
             assert_eq!(
-                format,
-                inf_render::PageFormat::Bc1,
-                "{} is {format:?}; a mixed-format level demotes its atlas to RGBA8",
+                format, want,
+                "{} is {format:?} and its slot's measurement chose {want:?}",
                 f.name
             );
+            if !formats.contains(&format) {
+                formats.push(format);
+            }
             reader
                 .vt_desc()
                 .validate()
@@ -348,8 +386,16 @@ mod tests {
             assert_eq!(f.sidecar.content_hash, ContentHash::of(&f.payload));
         }
         assert_eq!(textures, 17, "the library's texture count moved");
+        assert_eq!(
+            formats.len(),
+            2,
+            "the library binds {formats:?}; each distinct format is an atlas arm \
+             and there are only {} of them",
+            inf_render::vt::VT_MAX_POOLS
+        );
         println!(
-            "GROUND LIBRARY: {textures} textures, {} materials, {:.2} MB committed",
+            "GROUND LIBRARY: {textures} textures in {:?}, {} materials, {:.2} MB committed",
+            formats,
             files.len() - textures,
             bytes as f64 / 1.0e6
         );

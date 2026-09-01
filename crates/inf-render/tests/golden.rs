@@ -10836,11 +10836,14 @@ const GROUND_ORDER: [inf_material::ground::GroundKind; 4] = [
 ///
 /// # Two deliberate departures from the shipped configuration, both stated
 ///
-/// * **The pool is `Rgba8`.** The shipped atlas is BC1 and the containers here
-///   are BC1, but a headless CI adapter need not expose
+/// * **The pool is `Rgba8`.** The shipped atlas is BC1 + BC5 and the containers
+///   here are BC1 + BC5, but a headless CI adapter need not expose
 ///   `TEXTURE_COMPRESSION_BC`; the residency door transcodes on the way in
 ///   (`TiledTextureReader::tile_rgba8`), which is the same path a mobile tier
 ///   takes and is adapter-robust. What reaches the frame is the same texels.
+///   One arm, therefore, and not two — the transcode tier collapses every block
+///   format onto RGBA8, which is exactly what `build_vt_level` does on such an
+///   adapter.
 /// * **Mip 0 is not requested.** The wants below start at mip 1, so a 1 024²
 ///   albedo contributes 27 pages rather than 92 and the four sets fit inside a
 ///   320-page pool. At 320×180 with a one-metre eye a screen pixel covers
@@ -10865,21 +10868,20 @@ fn ground_vt_library(
         upload_budget_bytes: 0,
     })
     .0;
-    let tile = |rgba: Vec<u8>, n: u32, srgb: bool| {
-        inf_material::build_tiled_texture(
-            rgba,
-            n,
-            n,
-            inf_material::TextureImportSettings {
-                srgb,
-                generate_mips: true,
-                compression: inf_material::TextureCompression::Bc1,
-                hdr: false,
-            },
-        )
-        .expect("the ground set tiles")
-        .into_bytes()
+    // **The library's own settings, per slot** (wave IASSET2). This used to
+    // hard-code `TextureCompression::Bc1` for all four maps, which was right
+    // while `inf_material::ground` authored all four that way and became a
+    // fixture that depicts a surface the engine no longer ships the moment the
+    // normal maps moved to BC5. Calling the library's own functions is what
+    // keeps "the real committed content" true rather than remembered.
+    let tile = |rgba: Vec<u8>, n: u32, settings| {
+        inf_material::build_tiled_texture(rgba, n, n, settings)
+            .expect("the ground set tiles")
+            .into_bytes()
     };
+    let albedo_s = inf_material::ground::albedo_settings();
+    let normal_s = inf_material::ground::normal_settings();
+    let data_s = inf_material::ground::data_settings();
     let albedo_n = inf_material::ground::GROUND_ALBEDO_EXTENT;
     let map_n = inf_material::ground::GROUND_MAP_EXTENT;
     let mut guid: u128 = 0x9E20_0000;
@@ -10887,14 +10889,14 @@ fn ground_vt_library(
     for kind in GROUND_ORDER {
         let g = inf_material::ground::synthesize(kind);
         let (a, n, o, d) = (guid + 1, guid + 2, guid + 3, guid + 4);
-        lib.register_or_record(a, Arc::new(tile(g.albedo, albedo_n, true)))
+        lib.register_or_record(a, Arc::new(tile(g.albedo, albedo_n, albedo_s)))
             .expect("albedo registers");
-        lib.register_or_record(n, Arc::new(tile(g.normal, map_n, false)))
+        lib.register_or_record(n, Arc::new(tile(g.normal, map_n, normal_s)))
             .expect("normal registers");
-        lib.register_or_record(o, Arc::new(tile(g.orm, map_n, false)))
+        lib.register_or_record(o, Arc::new(tile(g.orm, map_n, data_s)))
             .expect("orm registers");
         let detail = g.detail.map(|rgba| {
-            lib.register_or_record(d, Arc::new(tile(rgba, map_n, false)))
+            lib.register_or_record(d, Arc::new(tile(rgba, map_n, normal_s)))
                 .expect("detail registers");
             d
         });

@@ -38,27 +38,53 @@
 //! platforms produce the same bytes, and
 //! `inf_editor_core::samples`'s lock compares them on every CI leg.
 //!
-//! # One pool format, and what that costs
+//! # The formats, and the three measurements that chose them (wave IASSET2)
 //!
-//! **Every map here is BC1**, including the normal maps, and that is a
-//! measurement rather than a preference. `inf_render::build_vt_level` picks the
-//! atlas format from the *stored* formats of the textures a level binds, and a
-//! level whose textures are **mixed** falls back to `Rgba8` — 73 984 B a page
-//! against BC1's 9 248, so a 24 MiB pool holds **2 721** pages instead of 340.
+//! Until wave IASSET2 **every map here was BC1**, including the normal maps, and
+//! that was a measurement rather than a preference: `inf_render::build_vt_level`
+//! picked ONE atlas format for a whole level, and a level whose textures were
+//! **mixed** fell back to `Rgba8` — 73 984 B a page against BC1's 9 248, so a
+//! 24 MiB pool held **340** pages instead of 2 721. The seventeen textures here
+//! need 51 pages of deterministic floor between them, which either pool fits;
+//! what the demotion cost was everything *after* the floor — 2 670 pages of
+//! camera-driven refinement against **289**, a 9.2× cut.
 //!
-//! The seventeen textures here need 51 pages of deterministic floor between
-//! them, which either pool fits. What the demotion costs is everything *after*
-//! the floor: 2 670 pages of camera-driven refinement against **289**, a 9.2×
-//! cut in what can be resident at once — which at 1080p over ground authored at
-//! two millimetres a texel is the difference between ground you can read and
-//! ground that is permanently three mips coarse.
+//! > Wave T shipped `PageFormat::Bc5` precisely for normal maps and it has no
+//! > consumer, which is exactly why: **the first content to use it alongside a
+//! > BC1 albedo demotes the whole atlas.** … The fix is a second pool … and it
+//! > is a wave, not a clause.
 //!
-//! Wave T shipped `PageFormat::Bc5` precisely for normal maps and it has no
-//! consumer, which is exactly why: **the first content to use it alongside a BC1
-//! albedo demotes the whole atlas.** The honest bound is that a BC1 normal map
-//! quantises X and Y on 5:6:5 endpoints, which is worse than BC5 would be. The
-//! fix is a second pool or a `view_formats` reinterpretation — named in
-//! `vt_sample.wgsl`'s own module comment — and it is a wave, not a clause.
+//! Wave IASSET2 is that wave: a residency now holds one arm per stored format,
+//! so a mixed level pages at BC rates. What follows is what the freedom was
+//! spent on, measured on **these bytes** rather than on a synthetic fixture
+//! (`inf_material::bc`'s tests print all three tables):
+//!
+//! | slot | format | measured, per channel out of 255 |
+//! |---|---|---|
+//! | normal, detail | **BC5** (changed) | BC1 worst **122**, MAE 10.4 → BC5 worst **17**, MAE 1.7 |
+//! | albedo | **BC1** (unchanged) | BC1 worst 11, MAE 1.55 → BC7 worst 5, MAE 0.24 |
+//! | ORM | **BC1** (unchanged) | BC1 worst 45, MAE 1.47 → BC7 worst 33, MAE 0.48 |
+//!
+//! **The normal maps moved and the other two did not, and the deciding column is
+//! the worst case rather than the mean.** A BC1 normal map on this content has
+//! texels whose X or Y is off by 122 of 255 — the surface normal is not
+//! approximately wrong, it points somewhere else — because a normal map's two
+//! channels sweep the whole range inside one block and 5:6:5 endpoints with four
+//! levels cannot follow them. BC5 gives each channel its own 8-bit endpoints and
+//! eight levels, at 16 bytes a block against BC1's 8.
+//!
+//! The albedo's worst BC1 error is **11 of 255**, four per cent, on
+//! low-contrast noisy ground — small, and bought back at twice the page bytes,
+//! i.e. half the pages resident. Against a wave whose own headline number says
+//! pages are what buy refinement, that is a bad trade, so **BC1 stays**. The ORM
+//! triple is worse off (45) and BC7 barely helps (33) for the same doubling,
+//! because mode 6 fits ONE line and occlusion, roughness and metallic are three
+//! independent signals — the subset is the wrong tool rather than an
+//! insufficiently tuned one.
+//!
+//! The consequence for a level binding this library is **two arms**, BC1 and
+//! BC5, sharing one 24 MiB budget: the albedo and ORM stay at 9 248 B a page and
+//! the normals cost 18 496.
 //!
 //! # `detail_scale_m` is not metres
 //!
@@ -245,12 +271,12 @@ pub struct GroundMaps {
     pub detail: Option<Vec<u8>>,
 }
 
-/// Import settings for each of the four map slots.
+/// Import settings for the albedo: **sRGB, BC1** — see the module table for the
+/// measurement that kept it BC1 when BC7 arrived.
 ///
-/// **BC1 for all four** — see the module note on the one-pool-format
-/// measurement. `srgb` is true only for the albedo; a normal or an ORM triple is
-/// data, and encoding it in sRGB would bend every value through a transfer
-/// function nothing undoes.
+/// `srgb` is true here and nowhere else in this module: a normal or an ORM
+/// triple is data, and encoding it in sRGB would bend every value through a
+/// transfer function nothing undoes.
 pub fn albedo_settings() -> TextureImportSettings {
     TextureImportSettings {
         srgb: true,
@@ -260,13 +286,35 @@ pub fn albedo_settings() -> TextureImportSettings {
     }
 }
 
-/// Import settings for a normal, ORM or detail map. See [`albedo_settings`].
+/// Import settings for the **ORM** triple: linear, BC1.
+///
+/// Unchanged by wave IASSET2 and measured rather than left alone: BC7 takes its
+/// worst per-channel error from 45 of 255 to 33 for twice the page bytes,
+/// because mode 6 fits one line through a block and occlusion, roughness and
+/// metallic are three independent signals. See the module table.
 pub fn data_settings() -> TextureImportSettings {
     TextureImportSettings {
         srgb: false,
         generate_mips: true,
         compression: TextureCompression::Bc1,
         hdr: false,
+    }
+}
+
+/// Import settings for a **normal or detail** map: linear, **BC5** (wave
+/// IASSET2).
+///
+/// The one slot in this library whose format changed, and the wave's own
+/// content clause. Measured on these bytes: BC1's worst per-channel error on the
+/// two channels a tangent-space normal lives in is **122 of 255** — a normal
+/// that points somewhere else — against BC5's 17. It costs 16 bytes a block
+/// instead of 8, and it was impossible until a residency could hold two formats
+/// at once (see the module table, and `inf_material::bc`'s
+/// `bc5_against_bc1_on_the_committed_ground_normal_maps`).
+pub fn normal_settings() -> TextureImportSettings {
+    TextureImportSettings {
+        compression: TextureCompression::Bc5,
+        ..data_settings()
     }
 }
 

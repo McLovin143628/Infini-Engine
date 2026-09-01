@@ -17,12 +17,22 @@ for grass and rock — a 512² high-frequency detail normal.
 | `Ground_Sand` | 1.5 m | 1.46 mm | — |
 | `Ground_Soil` | 2.2 m | 2.15 mm | — |
 
-**Every map is BC1**, including the normals. That is a measurement, not a
-preference: `inf_render::build_vt_level` picks the atlas format from the
-stored formats of the textures a level binds, and a MIXED set demotes the
-whole pool to RGBA8 at eight times the page bytes. Wave T's `PageFormat::Bc5`
-is the right normal-map format and cannot be used beside a BC1 albedo until
-the atlas can hold two formats.
+**Albedo and ORM are BC1; normals and detail maps are BC5** (wave
+IASSET2). Every map used to be BC1, including the normals, and that was a
+limitation rather than a choice: one atlas held one format, so a MIXED set
+demoted the whole pool to RGBA8 at eight times the page bytes. A residency
+now holds one arm per stored format, and the three slots were then measured
+on these exact bytes (worst error per channel, out of 255):
+
+| slot | format | BC1 | the alternative |
+|---|---|---|---|
+| normal, detail | **BC5** | worst **122** | BC5 worst **17** — taken |
+| albedo | BC1 | worst 11 | BC7 worst 5, at twice the page — declined |
+| ORM | BC1 | worst 45 | BC7 worst 33, at twice the page — declined |
+
+A BC1 normal map on this content has texels whose X or Y is off by 122 of
+255: the surface normal points somewhere else. The albedo's four per cent is
+not worth halving what the atlas holds, which is what a 16-byte block costs.
 
 ## And the three things that stand on it
 

@@ -854,13 +854,37 @@ mod tests {
     /// fails on a machine with a different allocator.
     #[test]
     fn bc7_against_bc1_on_the_committed_ground_library() {
-        use crate::ground::{GroundKind, GROUND_ALBEDO_EXTENT as N};
+        use crate::ground::GroundKind;
+        for (slot, extent) in [
+            ("albedo", crate::ground::GROUND_ALBEDO_EXTENT),
+            // The ORM triple too, because `image_import_policy` deliberately
+            // left its format to be decided by this measurement rather than
+            // guessed: roughness banding shows as specular banding, which is a
+            // different visibility from albedo banding.
+            ("ORM", crate::ground::GROUND_MAP_EXTENT),
+        ] {
+            bc7_ground_slot(slot, extent);
+        }
+    }
+
+    /// One slot of the ground library, measured three ways. Factored out of the
+    /// arm above so the albedo and the ORM triple are the same measurement and
+    /// not two that happen to agree.
+    fn bc7_ground_slot(slot: &str, n: u32) {
+        use crate::ground::GroundKind;
+        let (n_, N) = (n, n);
+        let _ = n_;
         let mut total = [0u64; 3];
+        let mut worst = [0u32; 3];
         let mut texels = 0u64;
         let mut encode_ms = [0u128; 3];
         for kind in GroundKind::ALL {
             let maps = crate::ground::synthesize(kind);
-            let src = &maps.albedo;
+            let src = if slot == "albedo" {
+                &maps.albedo
+            } else {
+                &maps.orm
+            };
             let mut enc = [Vec::new(), Vec::new(), Vec::new()];
             for (i, f) in [0usize, 1, 2].into_iter().enumerate() {
                 let t = std::time::Instant::now();
@@ -883,7 +907,9 @@ mod tests {
                     if n % 4 == 3 {
                         continue;
                     }
-                    total[i] += (*s as i32 - d[n] as i32).unsigned_abs() as u64;
+                    let e = (*s as i32 - d[n] as i32).unsigned_abs();
+                    total[i] += e as u64;
+                    worst[i] = worst[i].max(e);
                 }
             }
             texels += u64::from(N) * u64::from(N) * 3;
@@ -891,8 +917,9 @@ mod tests {
         let mae = |t: u64| (t * 1000) / texels;
         let mtexels = (texels / 3) as u128 / 1_000_000;
         println!(
-            "IASSET2 BC7 vs BC1/BC3 on {} ground albedos ({N}^2 each):\n  \
+            "IASSET2 BC7 vs BC1/BC3 on {} ground {slot} maps ({N}^2 each):\n  \
              MAE x1000/channel  BC1 {}  BC3 {}  BC7 {}\n  \
+             WORST /channel     BC1 {}  BC3 {}  BC7 {}\n  \
              bytes/block        BC1 8  BC3 16  BC7 16\n  \
              encode ms/Mtexel   BC1 {}  BC3 {}  BC7 {}  (THIS PROFILE — a debug \
              run is not a cook-time number, see the wave ledger for the release \
@@ -901,13 +928,16 @@ mod tests {
             mae(total[0]),
             mae(total[1]),
             mae(total[2]),
+            worst[0],
+            worst[1],
+            worst[2],
             encode_ms[0] / mtexels.max(1),
             encode_ms[1] / mtexels.max(1),
             encode_ms[2] / mtexels.max(1),
         );
         assert!(
             total[2] * 2 < total[0],
-            "BC7 must beat BC1 by a wide margin on real ground albedo, or its \
+            "BC7 must beat BC1 by a wide margin on real ground {slot}, or its \
              doubled page is not worth taking: BC7 {} against BC1 {}",
             mae(total[2]),
             mae(total[0])
@@ -920,6 +950,127 @@ mod tests {
             "BC7 does not beat BC3 at the same page size: BC7 {} against BC3 {}",
             mae(total[2]),
             mae(total[1])
+        );
+    }
+
+    /// **BC5 against BC1 on the committed ground NORMAL maps** (wave IASSET2) —
+    /// the other half of the content ruling, and the half the arm split was
+    /// built for.
+    ///
+    /// `bc5_costs_a_quarter_of_rgba8_and_beats_bc1_on_a_normal_map` measures a
+    /// **synthetic** swept normal field, which is the right fixture for "is this
+    /// format right for this signal" and the wrong one for "should this
+    /// repository's content change". `inf_material::ground` chose BC1 for all
+    /// seventeen maps and wrote its reason down — a BC5 map beside a BC1 albedo
+    /// demoted the whole atlas — so the question this arm answers is whether the
+    /// arms make that choice wrong on the actual bytes.
+    ///
+    /// Both formats are compared at their real page cost: BC1 is 8 bytes a
+    /// block and BC5 is 16, so BC5 halves what a 24 MiB arm holds. The numbers
+    /// are printed for the ledger and the assertion is the one that decides.
+    #[test]
+    fn bc5_against_bc1_on_the_committed_ground_normal_maps() {
+        use crate::ground::{GroundKind, GROUND_MAP_EXTENT as N};
+        let (mut mae1, mut mae5) = (0u64, 0u64);
+        let (mut worst1, mut worst5) = (0u32, 0u32);
+        let mut samples = 0u64;
+        for kind in GroundKind::ALL {
+            let maps = crate::ground::synthesize(kind);
+            for src in [Some(&maps.normal), maps.detail.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let d1 = decode_bc1(&compress_bc1(src, N, N), N, N);
+                let d5 = decode_bc5(&compress_bc5(src, N, N), N, N);
+                for (n, s) in src.iter().enumerate() {
+                    // X and Y only: they are the whole signal, Z is rebuilt from
+                    // them and alpha is unused. Scoring the blue channel would
+                    // credit BC1 for carrying a redundancy and penalise BC5 for
+                    // discarding one, which is backwards.
+                    if n % 4 > 1 {
+                        continue;
+                    }
+                    let (e1, e5) = (
+                        (*s as i32 - d1[n] as i32).unsigned_abs(),
+                        (*s as i32 - d5[n] as i32).unsigned_abs(),
+                    );
+                    mae1 += e1 as u64;
+                    mae5 += e5 as u64;
+                    worst1 = worst1.max(e1);
+                    worst5 = worst5.max(e5);
+                    samples += 1;
+                }
+            }
+        }
+        let per = |t: u64| (t * 1000) / samples.max(1);
+        println!(
+            "IASSET2 BC5 vs BC1 on the committed ground normal + detail maps \
+             ({N}^2 each, X/Y only):\n  \
+             MAE x1000/channel  BC1 {}  BC5 {}\n  \
+             WORST /channel     BC1 {worst1}  BC5 {worst5}\n  \
+             bytes/block        BC1 8  BC5 16",
+            per(mae1),
+            per(mae5),
+        );
+        assert!(
+            mae5 * 2 < mae1,
+            "BC5 must beat BC1 by a wide margin on the two channels a normal map \
+             lives in, or its doubled page is not worth taking: BC5 {} against \
+             BC1 {}",
+            per(mae5),
+            per(mae1)
+        );
+    }
+
+    /// **Does BC7 replace BC3 under `TextureCompression::Auto`?** Measured, and
+    /// the answer is **no** — mode 6 shares one index set between colour and
+    /// alpha (wave IASSET2).
+    ///
+    /// The prescription is obvious and wrong, which is why it is measured before
+    /// it is landed (the P23 law). BC7 and BC3 are both 16 bytes a block, and on
+    /// the ground albedo BC7's mean error is 6.6× lower — so `Auto`'s alpha
+    /// branch "should" become BC7 for free.
+    ///
+    /// It should not, and the reason is structural rather than a tuning
+    /// accident: **BC3 gives alpha its own block** — its own endpoints, its own
+    /// 3-bit indices — while mode 6 has ONE 4-bit index per texel shared by all
+    /// four channels. A cutout mask is the case that breaks it: alpha is 0 or
+    /// 255 while the colour varies independently, so one index cannot serve
+    /// both, and that is precisely the content `Auto` routes to BC3.
+    ///
+    /// The fix is BC7's modes 4 and 5, which carry a **second** index set for
+    /// alpha. They are the honest next step and they are not this wave's, so
+    /// `Auto` is unchanged and this arm is the number that says why.
+    #[test]
+    fn bc7_mode_six_does_not_replace_bc3_on_a_cutout_mask() {
+        // A foliage cutout: colour ramps across the block, alpha is binary.
+        let (w, h) = (16u32, 16u32);
+        let mut src = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = (x + y) as u32;
+                let a = if (x / 2 + y / 2) % 2 == 0 { 255 } else { 0 };
+                src.extend_from_slice(&[(t * 8) as u8, (200 - t * 6) as u8, (t * 4) as u8, a]);
+            }
+        }
+        let alpha_err = |d: &[u8]| -> u64 {
+            src.iter()
+                .zip(d)
+                .enumerate()
+                .filter(|(n, _)| n % 4 == 3)
+                .map(|(_, (a, b))| (*a as i32 - *b as i32).unsigned_abs() as u64)
+                .sum()
+        };
+        let d3 = decode_bc3(&compress_bc3(&src, w, h), w, h);
+        let d7 = decode_bc7(&compress_bc7(&src, w, h), w, h);
+        let (e3, e7) = (alpha_err(&d3), alpha_err(&d7));
+        println!("IASSET2 BC7 mode 6 vs BC3 on a cutout mask (alpha only): BC3 {e3}, BC7 {e7}");
+        assert!(
+            e3 < e7,
+            "BC7 mode 6 now carries a binary alpha better than BC3's dedicated \
+             block ({e7} against {e3}) — if that is real, `Auto`'s alpha branch \
+             should move to BC7 and this arm should be rewritten as the \
+             measurement that says so"
         );
     }
 

@@ -1,7 +1,7 @@
 schema_version = 1
 guid = "00000000-0000-0000-0000-00009e20000e"
 kind = "texture"
-content_hash = "b6af61449c37547f5682662bb12e5b73"
+content_hash = "5693893f003e7a4825f3b40af629f582"
 dependencies = []
 tags = [
     "forest-floor",

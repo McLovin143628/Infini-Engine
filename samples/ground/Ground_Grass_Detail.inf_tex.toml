@@ -1,7 +1,7 @@
 schema_version = 1
 guid = "00000000-0000-0000-0000-00009e200004"
 kind = "texture"
-content_hash = "c52cd0e71564340da54166a6c3e7929a"
+content_hash = "8955cd1df6bb8674c8be1938eb7f3c97"
 dependencies = []
 tags = [
     "grass",
