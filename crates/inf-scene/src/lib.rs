@@ -6846,7 +6846,19 @@ mod tests {
         let level = RuntimeLevel::decode(&read_committed("templates/hybrid-2.5d/Hybrid.inf_lvl"))
             .expect("hybrid decodes");
         assert_eq!(level.title, "Hybrid 2.5D");
-        assert_eq!(level.len(), 5);
+        // SIX since wave GTA1: the ground, the sun, the 2D light, the two
+        // billboards — and the starter character, which is the entity that makes
+        // Play mean anything (`camera_subject` answered `None` on all four
+        // starter levels before it). The runtime reader is the right place to
+        // notice a template growing an entity, so the count moves with it.
+        assert_eq!(level.len(), 6);
+        assert!(
+            level
+                .entities
+                .iter()
+                .any(|e| e.skeletal_mesh.is_some() && e.character_movement.is_some()),
+            "the hybrid template lost its pawn"
+        );
     }
 
     #[test]

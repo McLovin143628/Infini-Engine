@@ -2409,7 +2409,7 @@ fn the_golden_set_is_pinned_and_additive() {
     /// it by nothing, because virtual shadows were inert until a receiver
     /// existed. Wave VIS1a's **audit** added the fifty-fifth — `water_ssr.png`,
     /// the one frame the wave's own reflection feature can be pinned by.
-    const GOLDENS: usize = 59;
+    const GOLDENS: usize = 60;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2493,7 +2493,31 @@ fn the_golden_set_is_pinned_and_additive() {
     /// committed image changed** — the instanced path draws a one-mesh scene in
     /// the order it drew it before, which is what the stable sort in
     /// `plan_skinned_batches` is for.
-    const GOLDEN_SET_DIGEST: &str = "1db3dd0bf5961ddbfb53aeb2b40a1697";
+
+    /// **Wave GTA1 moves it a seventh time, and this move is BOTH branches of the
+    /// rule at once** (from `1db3dd0bf5961ddbfb53aeb2b40a1697`), which is why the
+    /// commits are separate and each says which it is:
+    ///
+    ///  * **additive** — `sky_night_horizon.png`, the frame the night sky's own
+    ///    defect lived in. `golden_sky_night` pitches 35 deg up and looks AWAY
+    ///    from the sun and bounds only blue, so the horizon band facing a
+    ///    below-horizon sun was outside every committed frame in this set.
+    ///    `GOLDENS` moves 59 -> 60 beside it.
+    ///  * **the look** — `clouds_night.png` and `sky_night.png`, re-blessed with
+    ///    the stated purpose that the committed frames depicted the defect: the
+    ///    transmittance LUT's horizon-tangent texel leaking under the ground made
+    ///    a midnight cloud deck glow at R/G **20.88** (top-half mean
+    ///    `[0.27609, 0.01323, 0.01039]` -> `[0.00656, 0.00656, 0.00656]`, diff
+    ///    mean 0.0835 / max 0.5064) and the night sky red-biased (`[0.00975,
+    ///    0.00802, 0.00941]` -> `[0.00672, ...]`, diff mean 0.0057 / max 0.0500 —
+    ///    inside tolerance, and re-blessed anyway, because a frame that quietly
+    ///    depicts an engine that no longer exists is one nobody can read a
+    ///    regression off).
+    ///
+    /// **Day is untouched and it is measured**: `sky_noon`, `sky_dawn` and
+    /// `sky_dusk` compare at mean 0.000000 / max 0.000000, because the new
+    /// visibility factor is exactly 1.0 while the sun is up.
+    const GOLDEN_SET_DIGEST: &str = "e4ef462477c82c533c31d92fba74cf71";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

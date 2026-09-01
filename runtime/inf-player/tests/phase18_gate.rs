@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 59] = [
+const GOLDENS: [&str; 60] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1528,6 +1528,11 @@ const GOLDENS: [&str; 59] = [
     "sky_dawn.png",
     "sky_dusk.png",
     "sky_night.png",
+    // Wave GTA1: the arm `sky_night` could not have. That frame pitches 35 deg
+    // up and looks AWAY from the sun, so the one place a below-horizon sun
+    // could still be seen -- the horizon band facing it -- was outside its
+    // frame; this one stands there and bounds RED.
+    "sky_night_horizon.png",
     "sky_noon.png",
     "spot_lights.png",
     "sprites_2d.png",
@@ -1572,7 +1577,7 @@ const GOLDENS: [&str; 59] = [
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 57 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 60 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.

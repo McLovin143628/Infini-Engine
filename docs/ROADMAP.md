@@ -29271,3 +29271,101 @@ it guards, not by grepping for its message**. **House gates at head:** battery
 76), clippy **0** with `-D warnings` run LAST, fmt clean, schemas / `Cargo.lock` / committed
 content / goldens / step phases **unmoved** — every fix is a test clause or a doc comment. Audit
 ledger in `docs/memos/island-progress.md` under *"Wave VEH1a — the adversarial audit"*.
+
+## Wave GTA1 — the Play button plays, and the night sky is night (2026-08-31)
+
+**COMPLETE.** Base `bf1954e6`; six commits, one per clause plus one follow-up. Full ledger in
+`docs/memos/wave-gta1-play-and-night.md`. **The scene schema does not move (v26).**
+`ScenePayload` **v11 → v12** — the wave's one version rung, and the first this envelope has
+taken to make a payload *smaller*. **Goldens 59 → 60** (one new, two re-blessed with stated
+purpose). **Content re-bless:** three committed template `.inf_lvl`s + sidecars.
+
+(1) **THE RED HORIZON WAS THE LAST TEXEL OF THE `u` AXIS.** The transmittance LUT's `u` ends at
+the horizon-tangent ray — the longest path that misses the planet — so `ClampToEdge` (which is
+load-bearing and stays) answered every below-horizon sun cosine with the reddest entry in the
+table, ~9.7 % red surviving against ~0.004 % blue. Four passes read it as *the sun's light at
+this sample*: the sky-view march, the cloud march, the precipitation highlight, and the sun disc
+whose own comment promised it vanishes when the ray to it passes through the planet.
+`atmos_horizon_visibility` — Bruneton's `GetTransmittanceToSun` in one function — applies the
+planet's own shadow, smoothed across the body's angular diameter, and every sun/moon-cosine
+sampler goes through it (`atmos_sample_transmittance` stays the raw read for view-ray
+extinction). **THE PRESCRIPTION WAS MEASURED BEFORE IT WAS LANDED AND REPLACED**: the brief's
+`sun.y ∈ [+0.02, −0.02]` fade would have passed every red-band assertion and **deleted civil
+twilight** (±0.02 in sine is ±1.15°, so the sky snaps black nine minutes after sunset), because
+the gate belongs on each SAMPLE's own local horizon — air 60 km up sees the sun until it is 7.8°
+below the ground's, and that difference *is* twilight. Measured facing the sun at 23:30, the band
+below the horizon line: `[0.1174, 0.0281, 0.0318]` R/G **4.18**, 10.7× the zenith's red →
+`[0.0068, 0.0068, 0.0068]` R/G **1.00**; the same band at civil twilight reads `[0.398, 0.223,
+0.079]`, which is the arm that falsifies the global fade. **Day is untouched and it is measured:**
+`sky_noon`, `sky_dawn`, `sky_dusk` at **mean 0.000000 / max 0.000000** against their committed
+frames (the factor is exactly 1.0 while the sun is up and `x*1.0` is bit-exact); 118 of 119 arms
+unchanged. New golden `sky_night_horizon` stands where the defect lived — `golden_sky_night`
+pitches 35° up, looks *away* from the sun and bounds only blue, so it could never have seen it.
+Re-blessed for the stated purpose that the committed frame depicted the defect: **`clouds_night`**
+`[0.27609, 0.01323, 0.01039]` **R/G 20.88** → `[0.00656, …]` R/G 1.00 (diff mean 0.0835, max
+0.5064; stars still survive the gaps at peak 0.365 against a starless 0.027, clouds still occlude
+42 px), and **`sky_night`** `[0.00975, 0.00802, 0.00941]` → `[0.00672, …]` (diff mean 0.0057, max
+0.0500 — **inside tolerance and re-blessed anyway**). Cause-2 ruling: a Rust-side `sun_color` fade
+is **not** needed and would be the global gate wearing another hat — all four `atmos.sun_color`
+consumers are now horizon-gated, and `gi_probes`' `gi.sun_color` is a different uniform that
+`ResolvedSky::key_light` already swaps to the moon. The brief's *"verify the GI night tint"* is
+answered with an arm rather than an argument: `gi_sky_radiance_comes_from_the_atmosphere` now
+reads the midnight bounce at **blue/red 1.000** against a floor of 0.6, and the pre-wave LUT's
+midnight band was 0.27.
+
+(2) **THE ISLAND'S GROUND RIDES AS A PATH.** `build_scene_payload` embedded the whole
+`.inf_terrain`; the island's is **342 742 272 B** against `MAX_FRAME_LEN` **268 435 456**, so
+`write_msg` refused the frame and Play on 50 km² died in a one-line status message. **The cap did
+not move** — an unbounded frame length is what stands between a desynced pipe and a 4 GiB
+allocation. `ScenePayload` v12 appends `terrain_paths` at the tail; `TerrainRef::{Path,Bytes}`
+makes the choice the resolver's, because only the caller knows whether the asset has a file (the
+editor always does; the in-memory fixtures keep the byte route). A terrain rides exactly ONE
+route and both consumers — the world builder's PCG resolver and `TerrainContent::Payload` — take
+the path first, so the two cannot page different ground. **PIE == shipping is not weakened**: the
+player opens it through `terrain_source_from_file`, the `--level` boot's door and the same shape
+the shipped build takes, since a cooked pack is read from disk and never streamed. Measured on the
+CI-scale island: `1 terrain path(s), 0 inline`, frame **6 183 889 B** against the cap, and the
+terrain it names is **7 043 328 B** — the arm is that the frame is smaller than the file it names,
+which the cap alone would not have caught on a fixture.
+
+(3) **EVERY 3D STARTER LEVEL SHIPS THE PAWN ITS TEMPLATE ALREADY SCAFFOLDED.** `camera_subject`
+returned `None` on every level the editor boots, so Play showed an author their furniture from an
+overhead orthographic camera with nothing that answered a key — while the templates had been
+scaffolding the seventeen files of `samples/starter-character` since SK1c and nothing spawned
+them. blank-3d, hybrid-2.5d and the boot document now place it through
+`edit_create_character_with_guid`; the editor's own content root is seeded with the same files
+**whenever they are absent**, not only on a fresh root, because an editor run before this wave has
+three materials and no character. **first-person got the smallest TRUE fix instead**: its Player
+had the `CharacterController3D` (the physics half) and not the `CharacterMovement` that
+`movement_targets` and `camera_subject` key on, so the template that says *here is your player*
+shipped a level with no player in it. Content re-bless: `Blank.inf_lvl` 768 → 1 557 B (3 → 4
+entities), `Hybrid.inf_lvl` 1 267 → 2 056, `FirstPerson.inf_lvl` 1 072 → 1 501, plus two sidecars
+that now declare the rig, body and machine. **A doc table was re-measured rather than trusted:** a
+scaffolded blank-3d project's cooked `content.inf_pack` goes **6 480 → 33 625 B**, because the
+closure now reaches the body and its material through an entity.
+
+(4) **PLAY WITH NO PAWN ASKS A QUESTION.** *"This level has no player-controlled character"*, with
+**[Place Starter Character & Play]** — which performs the real level edit through the clause-3
+door and then plays — and **[Play Overhead]**. **No PIE-only auto-spawn**: a preview that spawns a
+player the build does not is the exact divergence PIE == shipping forbids, so the level that comes
+back is the level that ships. Asked through `scene_player_pawn`, which *is* `camera_subject`, so
+it predicts what the player process is about to decide rather than guessing from components; a
+check that cannot be made does not block Play, and that is asserted.
+
+(5) **FOUR DOORS THAT NAMED THINGS THEY DID NOT DO.** `File ▸ Open Level…` called `scene_open`
+with no path, and no path is the **quicksave fallback** — the row silently replaced the document
+with `quicksave.inf_lvl`; it gets a real dialog, and the arm asserts the ARGUMENT because *"it
+called open"* was true before. `Place Actor ▸ Starter Character` places the committed character
+and writes nothing, where `actor.newCharacter` mints six assets a click. Opening a project opens
+its boot level, chosen by **the cook's own rule** (lowest-GUID level) off the same asset database
+— and never over a dirty document, because opening a project is not consent to discard an edit.
+A missing `inf-player.exe` now names `cargo build -p inf-player` instead of quoting the OS.
+
+**Findings recorded, not fixed:** the cook's vgeom advisory claims a placeholder cube for a
+sub-2 048-triangle mesh, which is **false for a `SkeletalMesh` on every native target**
+(`SkinnedRegistry::from_pack` loads the `.inf_mesh` directly) and true only on wasm32;
+`level_dependencies` does not enumerate `ActorClass`, so the new starter levels declare their rig,
+body and machine but not their controller — the same silence the 2D platformer's sidecar has
+carried since I1, and fixing it re-blesses every committed level sidecar; night clouds are now
+**unlit rather than merely un-red**, because the cloud march's only light is the sun and moonlight
+scattering is not modelled anywhere in this engine.
