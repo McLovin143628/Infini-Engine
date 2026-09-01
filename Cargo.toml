@@ -254,11 +254,33 @@ ruzstd = "0.8"
 #                  edge — the same reasoning `parry3d-f64` is pinned under.
 #                  MIT OR Apache-2.0 OR Zlib.
 #
-# default-features off on both: `lz4_flex`'s defaults pull its frame format and a
-# checksum crate we do not use (the container has an xxh3-128 per entry already),
-# and `miniz_oxide`'s pull `simd` + `with-alloc` variants — we want the plain
-# `std`/alloc raw-DEFLATE path so the bytes are identical on every target.
-lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
+# default-features off on both, and then the ones we DO want named back — because
+# `default-features = false` is a blunt instrument and the thing it was reached for
+# here is one feature of five.
+#
+# `lz4_flex`'s default set is `std + safe-encode + safe-decode + frame +
+# checked-decode`. The only member this workspace does not want is **`frame`**,
+# which pulls the LZ4 frame format and `twox-hash` for its checksum — the
+# container already carries an xxh3-128 per entry. `safe-encode`/`safe-decode` are
+# NOT optional here and turning them off was an accident of the blunt instrument:
+# without `safe-decode` the crate compiles `block/decompress.rs`, which writes the
+# output through a raw pointer (`PtrSink`), instead of `block/decompress_safe.rs`,
+# which is `forbid(unsafe_code)`. `inf_asset::block::decode_block` runs **in the
+# shipped player over a container the user downloaded**, and its `raw_len` bound is
+# a bound on the CLAIM — the frame itself is still attacker-controlled. The safe
+# decoder is the whole reason a pure-Rust codec was preferred to a C one, and the
+# codec that actually ships (`COOK_TILE_CODEC` is `Zstd`) is not this one, so
+# there is no measured cost being paid for it either. (`checked-decode` is inert
+# in 0.14: no source file reads the cfg.)
+#
+# `miniz_oxide`'s default set is `with-alloc` and nothing else — `simd` is opt-in
+# and was never on. The pin is spelled out rather than left implicit so the day
+# its defaults grow, this workspace's DEFLATE bytes do not move with them.
+lz4_flex = { version = "0.14", default-features = false, features = [
+    "std",
+    "safe-encode",
+    "safe-decode",
+] }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 # ── streaming: zero-copy pack reads (Phase 16.1) ────────────────────────────
 # memmap2 maps a shipped `.ipack` into the address space so the runtime reads

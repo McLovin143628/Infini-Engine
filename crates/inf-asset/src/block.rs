@@ -391,6 +391,47 @@ mod tests {
         }
     }
 
+    /// **The LZ4 decoder this workspace compiles is the SAFE one** — pinned in
+    /// the manifest, because nothing about the bytes can tell you which.
+    ///
+    /// `lz4_flex`'s `safe-decode` feature selects `block/decompress_safe.rs`
+    /// (`forbid(unsafe_code)`) over `block/decompress.rs`, which writes its
+    /// output through a raw pointer. Both decode a valid frame identically, so a
+    /// round-trip test cannot see the difference and no assertion over
+    /// [`decode_block`]'s behaviour ever will. What decides it is one line of
+    /// `Cargo.toml`, and `default-features = false` — reached for to drop the
+    /// `frame` format and its checksum crate — turns it off as a side effect.
+    ///
+    /// This reader parses a container the user downloaded, in the shipped
+    /// player, and the `raw_len` ceiling bounds the *claim* and not the frame.
+    /// The safe decoder is the reason a pure-Rust codec was preferred at all, so
+    /// the pin is asserted where the decoder is, not left to a reviewer's memory
+    /// of what a feature list used to say.
+    #[test]
+    fn the_lz4_decoder_is_pinned_to_the_safe_implementation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("inf-asset lives two levels under the workspace root");
+        let manifest =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest reads");
+        // The pin spans lines, so normalize whitespace before looking for it.
+        let flat: String = manifest.split_whitespace().collect::<Vec<_>>().join(" ");
+        let start = flat
+            .find("lz4_flex = {")
+            .expect("lz4_flex is pinned in [workspace.dependencies]");
+        let decl = &flat[start..start + flat[start..].find('}').expect("the pin closes") + 1];
+        for feature in ["\"safe-decode\"", "\"safe-encode\""] {
+            assert!(
+                decl.contains(feature),
+                "the workspace pin dropped {feature}: `{decl}`. Without `safe-decode` \
+                 lz4_flex decodes an attacker-controlled frame through a raw pointer, \
+                 in the shipped player, behind a ceiling that bounds the length CLAIM \
+                 and not the frame."
+            );
+        }
+    }
+
     #[test]
     fn declared_length_reads_without_decompressing() {
         let raw = corpus(20_000);
