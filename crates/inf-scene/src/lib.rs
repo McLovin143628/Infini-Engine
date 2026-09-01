@@ -13289,6 +13289,61 @@ mod tests {
         }
     }
 
+    /// **What the v27 tail COSTS, in bytes, measured** — 376 per entity that
+    /// carries a class and zero for every other.
+    ///
+    /// The ladder's own claim, checked rather than derived. `47 × 8` is the
+    /// arithmetic; what this arm adds is that the forty-seven really are eight
+    /// bytes each on the wire (bincode's varints reach integers, not floats) and
+    /// that an entity with **no** class pays nothing at all for their existence —
+    /// which is every entity in twenty-two of the twenty-four committed levels.
+    #[test]
+    fn the_v27_tail_costs_376_bytes_a_class_and_nothing_at_all_without_one() {
+        let bare = v9_rec(Uuid::from_u128(0xFD35), "Marker", None).into_runtime();
+        let carrying = RuntimeEntity {
+            vehicle_class: Some(fixture_vehicle_class()),
+            ..bare.clone()
+        };
+        let size = |r: &RuntimeEntity, n: usize| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![r.clone(); n],
+                settings: RuntimeSettings::default(),
+                geo: Default::default(),
+            })
+            .unwrap()
+            .len()
+        };
+        let frozen = |r: &RuntimeEntity, n: usize| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV26 {
+                    schema_version: 26,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV26::from_current(r.clone()); n],
+                    settings: RuntimeSettings::default(),
+                    geo: Default::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+            .len()
+        };
+        for n in [1usize, 4, 16] {
+            assert_eq!(
+                size(&carrying, n),
+                frozen(&carrying, n) + 376 * n,
+                "the v27 tail cost {} bytes over {n} entities WITH a class",
+                size(&carrying, n) - frozen(&carrying, n)
+            );
+            assert_eq!(
+                size(&bare, n),
+                frozen(&bare, n),
+                "an entity with NO class paid {} bytes for the v27 tail",
+                size(&bare, n) - frozen(&bare, n)
+            );
+        }
+    }
+
     /// **The component IS the tuning door** — the drift gate.
     ///
     /// `VehicleClass` exists to be applied through `Vehicle::tune`, and its
