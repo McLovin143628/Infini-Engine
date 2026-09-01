@@ -18,15 +18,28 @@ cook, and is proven byte-identical to it — so previewing never diverges from s
 
 **Cooking** turns your project into a shippable, content-addressed pack (`.ipack`): it resolves
 the dependency closure of your levels, validates and compiles Blueprints, and bundles everything
-into a deterministic archive with a GUID-sorted index. Most payloads are zstd-compressed;
-streaming-class assets (virtualized meshes today, terrain tiles next) are stored uncompressed and
-16-byte aligned so the runtime can read them straight out of a memory-mapped pack with no copy.
+into a deterministic archive with a GUID-sorted index. Most payloads are zstd-compressed **whole**;
+streaming-class assets — virtualized meshes, terrain, voxel volumes, world partitions and virtual
+textures — are stored uncompressed *as entries* and 16-byte aligned, so the runtime can read one
+page straight out of a memory-mapped pack with no copy and no whole-asset decode.
+
+Those containers compress **per block** instead: a `.inf_terrain` tile and a `.inf_voxel` chunk each
+carry their own codec in the container's directory, so paging one tile decompresses that tile and
+nothing else. The saving is real — the 50 km² Vancouver Island pack is 604 631 836 B stored raw and
+247 497 020 B with per-tile zstd, a 59 % reduction, and it boots *faster* because a load is
+page-fault bound. Compression is lossless, so both packs simulate the same world byte for byte.
+
 Every blob carries an xxh3-128 hash, checked the first time that entry is read. Rebuilds are
 byte-identical. Cook from the CLI or from the editor:
 
 ```sh
 inf cook --project MyGame --out MyGame/Build
 ```
+
+Pass `--block-codec` to choose the per-block codec: `zstd` (the default, and the fastest decode of
+the three that compress), `lz4` (weaker ratio, much faster decode — **the right choice for a web
+build**, because zstd decodes through the pure-Rust `ruzstd` in a browser at 7.3× the cost), or
+`raw` to skip the transcode entirely and ship the uncompressed containers.
 
 In the editor, use **Build ▸ Package Project…** to open the cook dialog. The runtime reads the same
 `.inf_lvl` codec the editor writes (proven byte-lockstep), so a cooked level and an editor level

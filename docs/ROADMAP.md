@@ -29490,8 +29490,8 @@ have moved them: compression is lossless and the cook's transcode carries block 
 **opaque bytes**, never decoding one, so it cannot change a height even if `TerrainTile`'s wire
 form were wrong. **The loose asset an author edits stays raw**; the cook is what compresses.
 
-**`.inf_part` — MEASURED AND DECLINED.** Ratio **0.198**, and **60 509 B — 0.024 % of the
-shipped pack**; its directory entry has no reserved word, so it would need a 32 → 40 B
+**`.inf_part` — MEASURED AND DECLINED.** Ratio **0.198** (75 424 B → 14 915 B), so the whole
+prize is a **saving of 60 509 B — 0.024 % of the shipped pack**; its directory entry has no reserved word, so it would need a 32 → 40 B
 widening. A container bump for 60 kB is not a trade. Recorded, with `EntryPolicy` already
 naming it, so the day a world ships cells by the thousand the arithmetic is one measurement
 away. **`.inf_vmesh` is the largest remaining win** — 29 686 000 → 19 294 141 B under

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use inf_asset::{AssetId, PackReader};
+use inf_asset::{AssetId, EntryPolicy, PackReader, PackWriter};
 use inf_blueprint::BlueprintClass;
 use inf_packager::{
     build_mod_wasm, cook, export, export_android, export_web, generate_mod_crate,
@@ -48,10 +48,11 @@ fn print_help() {
         "inf {} — Infini Engine CLI\n\n\
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
-             inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
+             inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>] \
+             [--block-codec raw|lz4|deflate|zstd]\n  \
              inf cook --mods <class.inf_act> [--out <dir>]\n  \
              inf export --project <dir> [--out <dir>] [--target current|web|android] [--player-bin <path>]\n  \
-             inf pack ls <pack.ipack>\n  \
+             inf pack ls [--totals] <pack.ipack>\n  \
              inf gis info <file.shp|.geojson> [--crs <spec>]\n  \
              inf gis plan <file> [--kind <kind>] [--crs <spec>] [--max <n>] \
              [--min-length <m>] [--project <dir> | --level <file.inf_lvl> | \
@@ -65,7 +66,12 @@ fn print_help() {
          TEMPLATES:\n  \
              blank-3d (default), 2d-platformer, first-person, hybrid-2.5d\n\n\
          GIS LAYER KINDS:\n  \
-             generic (default), roads, streams, lakes, biomes, buildings, parcels\n",
+             generic (default), roads, streams, lakes, biomes, buildings, parcels\n\n\
+         BLOCK CODEC (per-tile / per-chunk, inside the streaming containers):\n  \
+             zstd (default) — best ratio and the fastest decode of the three\n  \
+             lz4            — weaker ratio, far faster decode; the WEB choice\n  \
+             deflate        — no reason to pick it; kept for the bake-off\n  \
+             raw            — do not transcode at all (the pre-IASSET1 pack)\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -229,7 +235,13 @@ fn cmd_cook(args: &[String]) -> ExitCode {
 
     let Some(project) = project else {
         eprintln!(
-            "usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n   \
+            // `--block-codec` is named here because it is the wave's only
+            // web-targeting escape hatch: `zstd` decodes through the pure-Rust
+            // `ruzstd` in a browser, 7.3× slower than the C `zstd` a desktop
+            // links, and a knob nobody can find is a knob nobody uses.
+            "usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n              \
+                    [--block-codec raw|lz4|deflate|zstd]  (default zstd; `raw` = do not\n              \
+                    transcode, reproducing the pre-IASSET1 pack; `lz4` for a web target)\n   \
                     or: inf cook --mods <class.inf_act> [--out <dir>]"
         );
         return ExitCode::FAILURE;
@@ -1242,6 +1254,25 @@ fn cmd_pack(args: &[String]) -> ExitCode {
                                 "file {} B; index + padding {} B",
                                 meta.len(),
                                 meta.len().saturating_sub(ts)
+                            );
+                        }
+                        // **A 1.000 in this table does not mean "not compressed"**
+                        // for a streaming kind, and a reader who takes it that way
+                        // reaches the wrong conclusion about where the download
+                        // went. `raw` is the pack ENTRY's `uncompressed_len`, and
+                        // a `BlockCompressed` kind ships its entry raw on purpose
+                        // — its saving already happened per block, inside the
+                        // payload, before this file existed. Said by the tool that
+                        // prints the table rather than only in the memo that
+                        // quotes it.
+                        if reader.index().any(|e| {
+                            PackWriter::entry_policy(e.kind) == EntryPolicy::BlockCompressed
+                        }) {
+                            println!(
+                                "note: a streaming kind (terrain, voxel, partition) ships its \
+                                 ENTRY raw, so its ratio here is 1.000 by design — the \
+                                 per-block saving is inside the payload and is only visible \
+                                 by comparing two packs."
                             );
                         }
                         return ExitCode::SUCCESS;

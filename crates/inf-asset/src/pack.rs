@@ -247,8 +247,9 @@ pub enum EntryPolicy {
     /// **Which containers actually do, today**: `.inf_terrain` (schema v6) and
     /// `.inf_voxel` (schema v2). `.inf_part` is on this arm because it has the
     /// same shape and the same freedom, and it is **not compressed** — measured
-    /// at ratio 0.198 on the island and **60 509 B, 0.024 % of the shipped
-    /// pack**, against a directory entry with no spare byte to put a codec in.
+    /// at ratio 0.198 on the island (75 424 B → 14 915 B, a **saving** of 60 509 B
+    /// — 0.024 % of the shipped pack), against a directory entry with no spare byte
+    /// to put a codec in.
     /// The arm is about what a kind *may* do; the container decides whether it is
     /// worth doing, and that one wrote its answer down.
     ///

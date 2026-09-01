@@ -131,6 +131,18 @@ impl HeightmapImport {
                 self.tile_resolution
             )));
         }
+        // The upper bound is the container's, reported HERE so a wizard says it
+        // before decoding a gigabyte rather than after: a `.inf_terrain` derives
+        // its per-block decompression ceiling from `tile_resolution`, so the
+        // format caps it (`inf_terrain::MAX_TILE_RESOLUTION`) and an import past
+        // the cap would build an asset `TerrainAssetReader` refuses.
+        if self.tile_resolution > crate::MAX_TILE_RESOLUTION {
+            return Err(TerrainError::Settings(format!(
+                "tile_resolution {} is past the {} a `.inf_terrain` may declare",
+                self.tile_resolution,
+                crate::MAX_TILE_RESOLUTION
+            )));
+        }
         if !(self.meters_per_sample.is_finite() && self.meters_per_sample > 0.0) {
             return Err(TerrainError::Settings(format!(
                 "meters_per_sample {} is not a positive finite length",

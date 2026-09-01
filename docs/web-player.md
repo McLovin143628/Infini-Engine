@@ -105,6 +105,16 @@ seam lands and a human has verified a frame in Chrome.
 
 - **Pack streaming**: v1 fetches the whole pack; HTTP range-request streaming
   (index first, blobs on demand) is a follow-up.
+- **Per-block codec** (IASSET1): a cooked `.inf_terrain`/`.inf_voxel` compresses
+  each tile/chunk independently, and the default codec is `zstd` — which on this
+  target decodes through the pure-Rust `ruzstd` in the table above, **7.3× slower**
+  than the C `zstd` a desktop links, on a lane the browser runs with no job pool.
+  `inf cook --block-codec lz4` produces a pack whose blocks decode with one
+  implementation on every target. It is **not** the automatic choice for
+  `--target web`, and deliberately so: this player fetches the *whole* pack, and
+  LZ4's weaker ratio costs about 51 MB more over the wire on a 50 km² world to
+  save ~15 ms per worst-case page-in sync. Which the user would rather pay is
+  unmeasured; see the IASSET1 memo's carried list.
 - **Asset-mesh geometry**: like PIE, web v1 renders `MeshRef.asset` entities as
   placeholder cubes (it streams no `.inf_vmesh`); wiring the pack's vmeshes into
   the web render host mirrors the desktop follow-up.

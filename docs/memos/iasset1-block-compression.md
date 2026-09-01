@@ -434,13 +434,30 @@ against kira's ring buffer while this wave was in flight, and reds
   The largest remaining win. Needs the parse-time cast sites separated from the
   `stage_page` copy seam first; `EntryPolicy::MappedInPlace` is what stops it
   being taken carelessly in the meantime.
-* **A web-targeted cook should pass `--block-codec lz4`.** `ruzstd` is 7.3× slower
-  than the C `zstd` on the same tile, and the browser player has no job pool. The
-  knob exists; nothing selects it automatically, because the cook has no target
-  concept and giving it one is not this wave's window.
-* **`.inf_part` per-cell compression** — measured at ratio 0.198 / 60 509 B and
-  declined; needs a 32→40 B directory entry. Revisit when a world ships cells by
-  the thousand.
+* **The web target, and why it is a QUESTION rather than a fix** (sharpened by the
+  IASSET1 audit). `ruzstd` is 7.3× slower than the C `zstd` on the same tile and
+  the browser player has no job pool, so a web build's worst-case sync is 19.59 ms
+  against a 4.0 ms step budget — a regression this wave introduced, because those
+  tiles used to ship raw and cost 0 ms to "decompress".
+
+  Two corrections to the first write-up of this item. First, **one door does know
+  its target**: `inf_packager::targets::export_web` cooks with
+  `CookOptions::default()`, and it is called *because* the user asked for the web.
+  "The cook has no target concept" is true of `inf cook` and false of
+  `inf export --target web`, which is where a fix would land.
+
+  Second, and the reason it did not land here: **the browser fetches the whole
+  pack over HTTP** (`web-player.md`, "Pack streaming: v1 fetches the whole pack"),
+  so the codec choice trades decode time against *download* size on a target where
+  download is the first cost the user pays. LZ4's ratio is 0.4442 to zstd's 0.3505
+  — on the island, **+51.5 MB over the wire** to save ~15 ms per worst-case sync.
+  Which of those a web player would rather pay has not been measured, and this
+  repo's standing law is that an unmeasured prescription can be backwards. So the
+  item is carried with **both** axes named rather than closed with a one-line
+  default flip. IASSET2 should measure fetch-to-first-frame, not decode alone.
+* **`.inf_part` per-cell compression** — measured at ratio 0.198 (75 424 B →
+  14 915 B, so a **saving** of 60 509 B, 0.024 % of the pack) and declined; needs a
+  32→40 B directory entry. Revisit when a world ships cells by the thousand.
 * **BC7** (IASSET2) + the second-pool/`view_formats` blocker (R9′).
 * **BC6H for HDR** — D-18's "largest single win left" for textures.
 * **vgeom position quantization** with the T1–T3 traps.
