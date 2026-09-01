@@ -597,6 +597,21 @@ pub async fn scene_set_visible(
     Ok(())
 }
 
+/// **Who Play would follow in this level, if anybody** (wave GTA1): the guid of
+/// the level's player-controlled character, or `null`.
+///
+/// Asked through `inf_ecs::movement::camera_subject` — the runtime's own door,
+/// the function both hosts call every step to decide what the camera watches —
+/// rather than by counting components here. A second rule would be a second
+/// answer, and this one exists to predict what the player process is about to
+/// do: with no subject it keeps its own overhead view and nothing in the level
+/// responds to input, which is what pressing Play used to do silently.
+#[tauri::command]
+pub async fn scene_player_pawn(state: State<'_, SceneState>) -> Result<Option<String>, String> {
+    let doc = lock(&state.doc)?;
+    Ok(inf_ecs::movement::camera_subject(doc.world()).map(|g| g.to_string()))
+}
+
 #[tauri::command]
 pub async fn scene_select(
     app: AppHandle,

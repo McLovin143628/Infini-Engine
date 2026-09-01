@@ -11,9 +11,14 @@ vi.mock("../../lib/ipc", () => ({
     stop: vi.fn(() => Promise.resolve()),
     isRunning: vi.fn(() => Promise.resolve(false)),
   },
+  // Wave GTA1: `play` asks the runtime's own `camera_subject` whether the level
+  // has a pawn before it starts anything.
+  scene: {
+    playerPawn: vi.fn(() => Promise.resolve<string | null>("00000000-0000-0000-0000-00000000beef")),
+  },
 }));
 
-import { pie } from "../../lib/ipc";
+import { pie, scene } from "../../lib/ipc";
 import { useShellStore } from "../shellStore";
 import { __resetPieForTest, usePieStore } from "../pieStore";
 import type { PieStateEvent } from "../../lib/events";
@@ -26,6 +31,8 @@ beforeEach(() => {
   vi.mocked(pie.eject).mockResolvedValue(undefined);
   vi.mocked(pie.stop).mockResolvedValue(undefined);
   vi.mocked(pie.isRunning).mockResolvedValue(false);
+  vi.mocked(scene.playerPawn).mockResolvedValue("00000000-0000-0000-0000-00000000beef");
+  useShellStore.getState().setNoPawnPlay(null);
 });
 
 afterEach(() => {
@@ -45,6 +52,32 @@ describe("pieStore", () => {
     expect(usePieStore.getState().running).toBe(true);
     expect(usePieStore.getState().mode).toBe("embedded");
     expect(usePieStore.getState().paused).toBe(false);
+  });
+
+  it("a level with NO pawn opens the dialog instead of starting", async () => {
+    // The whole of wave GTA1's clause 4: Play on a pawnless level used to start
+    // a player that kept its overhead camera while nothing responded to input,
+    // and said so nowhere.
+    vi.mocked(scene.playerPawn).mockResolvedValueOnce(null);
+    await usePieStore.getState().play("embedded");
+    expect(vi.mocked(pie.start)).not.toHaveBeenCalled();
+    expect(usePieStore.getState().running).toBe(false);
+    expect(useShellStore.getState().noPawnPlay).toBe("embedded");
+
+    // ...and the dialog's "Play Overhead" answer starts the mode it was asked
+    // for, without re-asking.
+    await usePieStore.getState().startAnyway("embedded");
+    expect(vi.mocked(pie.start)).toHaveBeenCalledWith("embedded");
+    expect(usePieStore.getState().running).toBe(true);
+  });
+
+  it("a check that cannot be made does not block Play", async () => {
+    // A diagnostic that fails gets out of the way rather than becoming a second
+    // reason the button does nothing.
+    vi.mocked(scene.playerPawn).mockRejectedValueOnce(new Error("scene lock poisoned"));
+    await usePieStore.getState().play("window");
+    expect(vi.mocked(pie.start)).toHaveBeenCalledWith("window");
+    expect(useShellStore.getState().noPawnPlay).toBe(null);
   });
 
   it("play('window') passes the window mode through", async () => {

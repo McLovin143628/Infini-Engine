@@ -15,7 +15,7 @@
 import { create } from "zustand";
 
 import { listenTo, refCountedInit, type PieStateEvent } from "../lib/events";
-import { pie as pieIpc } from "../lib/ipc";
+import { pie as pieIpc, scene as sceneIpc } from "../lib/ipc";
 import { bindKey } from "../lib/keybindings";
 import { registerCommands } from "../lib/commands";
 import { useShellStore } from "./shellStore";
@@ -37,8 +37,20 @@ interface PieState {
   /** The player's current fixed-step frame count (telemetry). */
   frame: number;
 
-  /** Start PIE in `mode` (or Resume when already paused). */
+  /**
+   * Start PIE in `mode` (or Resume when already paused).
+   *
+   * Asks the backend whether the level HAS a player-controlled character first
+   * and, when it has none, opens the no-pawn dialog instead of starting -- see
+   * `startAnyway` for the other half.
+   */
   play: (mode: PieMode) => Promise<void>;
+  /**
+   * Start PIE without the pawn check (wave GTA1) -- what the no-pawn dialog's
+   * two buttons call once the author has answered. Never bypasses the check on
+   * its own: the dialog is the only caller.
+   */
+  startAnyway: (mode: PieMode) => Promise<void>;
   /** Pause the running player. */
   pause: () => Promise<void>;
   /** Resume a paused player. */
@@ -66,10 +78,34 @@ export const usePieStore = create<PieState>((set, get) => ({
       if (get().paused) await get().resume();
       return;
     }
+    // **The pawn check** (wave GTA1). `camera_subject` is the runtime's own
+    // door, so this asks exactly what the player process is about to decide:
+    // with no player-controlled character it keeps its overhead orthographic
+    // view and nothing in the level answers a key. That is a real outcome an
+    // author may want (a cinematic, a level being blocked out), so it is a
+    // question rather than a refusal -- and never a silent one.
+    //
+    // A failure to ASK is not a reason not to play: the check falls through to
+    // starting, because the honest failure mode of a diagnostic is to get out of
+    // the way.
+    try {
+      const pawn = await sceneIpc.playerPawn();
+      if (!pawn) {
+        useShellStore.getState().setNoPawnPlay(mode);
+        return;
+      }
+    } catch (e) {
+      console.error("scene.playerPawn failed", e);
+    }
+    await get().startAnyway(mode);
+  },
+
+  startAnyway: async (mode) => {
+    if (get().running) return;
     try {
       await pieIpc.start(mode);
     } catch (e) {
-      useShellStore.getState().pushStatus(`Play could not start: ${errText(e)}`);
+      useShellStore.getState().pushStatus(`Play could not start: ${errText(e)}`, 12000);
       return;
     }
     // Optimistic; the pie://state event confirms idempotently.

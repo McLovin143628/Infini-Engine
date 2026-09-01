@@ -648,6 +648,13 @@ export const scene = {
   paste: (): Promise<string[]> => invoke<string[]>("scene_paste"),
   /** The path the current level last opened from / saved to (null = untitled). */
   currentPath: (): Promise<string | null> => invoke<string | null>("scene_current_path"),
+  /**
+   * The guid of the level's player-controlled character, or null when it has
+   * none (wave GTA1). Answered by the runtime's own `camera_subject`, so it
+   * predicts exactly what Play is about to do: with no pawn the player process
+   * keeps its overhead view and nothing responds to input.
+   */
+  playerPawn: (): Promise<string | null> => invoke<string | null>("scene_player_pawn"),
   rename: (guid: string, name: string): Promise<void> => invoke("scene_rename", { guid, name }),
   reparent: (guid: string, parent: string | null): Promise<boolean> =>
     invoke<boolean>("scene_reparent", { guid, parent }),

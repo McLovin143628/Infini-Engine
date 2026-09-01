@@ -36,6 +36,18 @@ interface ShellState {
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
   paletteOpen: boolean;
+  /**
+   * The **no-pawn Play** dialog (wave GTA1), holding the mode Play was asked
+   * for so the choice can start it. `null` = closed.
+   *
+   * A whole dialog rather than a status line because the two answers are
+   * genuinely different acts: one EDITS THE LEVEL (places the starter
+   * character, an undoable document change that the shipped build will also
+   * see) and the other plays a level with no player in it on purpose. A toast
+   * cannot ask that, and pressing Play and getting a camera looking at nothing
+   * answered it silently and wrongly.
+   */
+  noPawnPlay: "embedded" | "window" | null;
   pushStatus: (message: string, ttlMs?: number) => void;
   clearStatus: () => void;
   openLayoutDialog: (kind: Exclude<LayoutDialogKind, null>) => void;
@@ -52,6 +64,7 @@ interface ShellState {
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
+  setNoPawnPlay: (mode: "embedded" | "window" | null) => void;
 }
 
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -70,6 +83,7 @@ export const useShellStore = create<ShellState>((set) => ({
   projectSettingsOpen: false,
   drawerOpen: false,
   paletteOpen: false,
+  noPawnPlay: null,
   pushStatus: (message, ttlMs = 4000) => {
     set({ statusMessage: message });
     if (statusTimer !== undefined) clearTimeout(statusTimer);
@@ -93,6 +107,7 @@ export const useShellStore = create<ShellState>((set) => ({
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  setNoPawnPlay: (noPawnPlay) => set({ noPawnPlay }),
 }));
 
 registerBridgedStore("shell", useShellStore);

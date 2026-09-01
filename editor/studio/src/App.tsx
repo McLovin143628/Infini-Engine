@@ -14,6 +14,7 @@ import ProjectSettingsDialog from "./shell/ProjectSettingsDialog";
 import SortingLayersDialog from "./shell/SortingLayersDialog";
 import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
+import NoPawnPlayDialog from "./shell/NoPawnPlayDialog";
 import CaptureWizardDialog from "./shell/CaptureWizardDialog";
 import CharacterWizardDialog from "./shell/CharacterWizardDialog";
 import GisImportDialog from "./shell/GisImportDialog";
@@ -326,6 +327,7 @@ export default function App() {
       <GisImportDialog />
       <CharacterWizardDialog />
       <CaptureWizardDialog />
+      <NoPawnPlayDialog />
       <CommandPalette />
       <StartScreen />
       <FirstRunTour />
