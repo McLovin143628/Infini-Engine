@@ -859,9 +859,9 @@ fn the_workings_survive_a_round_trip_and_the_room_is_reachable() {
     let tmp = tempfile::tempdir().unwrap();
     let (content, pack) = cook_cavern(tmp.path());
 
-    // Byte-identical, asserted on the bytes: the cook re-emits the `.inf_voxel`
-    // and the `.inf_terrain` (both streaming-class kinds, stored uncompressed),
-    // and the generator's own build reproduces them.
+    // Byte-identical **through the content directory**: the generator's own
+    // build reproduces the committed `.inf_voxel`, so the sample on disk is the
+    // sample the code makes.
     let want_voxel = std::fs::read(phase21_cavern_dir().join("Cavern.inf_voxel")).unwrap();
     assert_eq!(
         std::fs::read(content.join("Cavern.inf_voxel")).unwrap(),
@@ -873,10 +873,50 @@ fn the_workings_survive_a_round_trip_and_the_room_is_reachable() {
             inf_editor_core::samples::PHASE21_VOXEL_ASSET_GUID,
         ))
         .expect("the pack carries the volume");
-    assert_eq!(
-        cooked_voxel, want_voxel,
-        "the cook changed the cave — a streaming-class kind must ride verbatim"
+
+    // **IASSET1 moved what "verbatim" means here, and not what it protects.**
+    // This assertion used to compare the cooked bytes to the authored ones. The
+    // cook now transcodes the container to per-chunk compression, so the bytes
+    // differ; what must not differ is (a) the pack ENTRY's policy — a compressed
+    // entry puts every chunk offset out of reach of the mapping, which is the
+    // anti-clause — and (b) what each chunk decodes to, which is what a shipped
+    // cave actually depends on. Both are checked, and the cooked volume is
+    // smaller, because an SDF is the most compressible thing this engine ships.
+    let entry = reader
+        .entry(inf_asset::AssetId(
+            inf_editor_core::samples::PHASE21_VOXEL_ASSET_GUID,
+        ))
+        .expect("the volume is indexed");
+    assert!(
+        !entry.compressed,
+        "THE ANTI-CLAUSE: a streaming-class ENTRY must stay raw"
     );
+    assert!(
+        cooked_voxel.len() < want_voxel.len(),
+        "the cooked volume ({} B) is not smaller than the authored ({} B)",
+        cooked_voxel.len(),
+        want_voxel.len()
+    );
+    {
+        let cooked = inf_voxel::VoxelAssetReader::new(cooked_voxel.as_slice()).unwrap();
+        let authored = inf_voxel::VoxelAssetReader::new(want_voxel.as_slice()).unwrap();
+        assert_eq!(cooked.chunk_count(), authored.chunk_count());
+        assert!(
+            cooked
+                .directory()
+                .iter()
+                .any(|e| e.codec != inf_asset::BlockCodec::Raw),
+            "no chunk compressed; the size arm above would be the only honest one"
+        );
+        for e in authored.directory() {
+            assert_eq!(
+                cooked.chunk_bytes(e.key).unwrap(),
+                authored.chunk_bytes(e.key).unwrap(),
+                "the cook changed the cave at chunk {:?}",
+                e.key
+            );
+        }
+    }
 
     // The workings really are in there, read back out of the SHIPPED bytes rather
     // than out of the generator: the pit's floor, the room's floor, and a heap
