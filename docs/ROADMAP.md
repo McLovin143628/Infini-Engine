@@ -29537,5 +29537,32 @@ nothing the index does not already give. The cook's compile step is real
 `png`/`flate2`, so the pin is a record of a resolved version). Both pure Rust and therefore
 identical on every target — the property `zstd` lacks. Both were measured and **lost**, and
 both stay: `BlockCodec::Lz4`/`Deflate` are live wire values a container may hold, so a reader
-must decode them whatever the cook's default says. Ledger:
-`docs/memos/iasset1-block-compression.md`.
+must decode them whatever the cook's default says.
+
+**THE RE-BLESS, AND WHAT IT MEASURED.** The two container bumps move the generator's
+output, so `samples/phase21-cavern`'s `.inf_voxel` and both sample `.inf_terrain`s are
+regenerated — and the re-bless is itself the strongest form of the downgrade claim, taken on
+real committed content rather than on a fixture: **each of the three files changed in exactly
+ONE BYTE**, the schema word at offset 8 (1→2, 5→6, 5→6). Nothing else moved in 131 520 +
+17 984 + 35 264 bytes. `phase21_gate`'s headline arm said "a streaming-class kind must ride
+verbatim" and compared cooked bytes to authored ones; IASSET1 moved what *verbatim* means
+there and not what it protects, so it now asserts the ENTRY's policy, that every chunk decodes
+to what was authored, that the cooked volume is smaller, and — the non-vacuity arm — that at
+least one chunk really compressed.
+
+**A DISK LAW, MET FOR THE THIRD TIME AND WEARING ITS USUAL DISGUISE.** The first full battery
+died on `LNK1140: limit exceeded for program database` and `LNK1318`, which read as an MSVC
+PDB ceiling and were the volume filling: `target/` had reached **308 GB** with 20 MB free. The
+CLAUDE.md law says to read a link error against `df` before believing it, and it was right
+again. The fix that made the battery affordable is the one **CI has used all along** and this
+machine had not: `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, which took the same battery's
+artifacts from 300 GB to 27 GB with no change to what is tested.
+
+**House gates on the closing tree:** battery **358 / 6 639 / 0 / 20** exit 0 (+2 targets, +31
+tests over GTA1's 356 / 6 608), goldens **60 files** green under `INF_GOLDEN_STRICT=1` with a
+clean tree afterwards — **none blessed by the run**; clippy **0 warnings, 0 errors** with
+`-D warnings` run LAST; rustdoc **376 over 30 crates** (ceiling 450), the three links the new
+`block` module added resolved rather than carried; fmt clean; frontend **85 files / 776 tests**
+with typecheck + eslint clean; `cargo deny` **bans/licenses/sources/advisories all ok** — which
+needed `rtrb 0.3.4 → 0.3.5` (RUSTSEC-2026-0274, lock-only), an upstream advisory that landed
+against kira's ring buffer mid-wave. Ledger: `docs/memos/iasset1-block-compression.md`.

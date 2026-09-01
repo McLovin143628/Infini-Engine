@@ -391,6 +391,43 @@ island's real ones: a margin rather than a fantasy.)
 
 ---
 
+## VERIFICATION
+
+| gate | result |
+|---|---|
+| `cargo test --workspace -j 3`, `INF_GOLDEN_STRICT=1` | **358 targets / 6 639 passed / 0 failed / 20 ignored**, exit 0 |
+| goldens | **60 files**, none blessed by the run (clean tree afterwards) |
+| `cargo clippy --workspace --all-targets`, `-D warnings`, LAST | **0 warnings, 0 errors** |
+| `cargo doc --workspace --no-deps` | **376** over 30 crates (ceiling 450) |
+| `cargo fmt --all --check` | clean |
+| frontend | typecheck + eslint clean, **85 files / 776 tests** |
+| `cargo deny check` | bans / licenses / sources / advisories **all ok** |
+
+**Two things the battery taught, recorded because both cost time:**
+
+*The re-bless is the downgrade claim, measured on real content.* The two container
+bumps move the generator's output, so `samples/phase21-cavern`'s `.inf_voxel` and
+both sample `.inf_terrain`s were regenerated — and **each changed in exactly ONE
+BYTE**, the schema word at offset 8. Nothing else moved in 131 520 + 17 984 +
+35 264 bytes. A unit test asserting "four bytes" is one thing; three committed
+sample files agreeing is another.
+
+*The disk law, third time, same disguise.* The first full battery died on
+`LNK1140: limit exceeded for program database` — which reads as an MSVC PDB
+ceiling and was the volume filling, `target/` at **308 GB** with 20 MB free.
+CLAUDE.md says to read a link error against `df` before believing it. The fix
+that made the battery affordable is the one **CI has used all along and this
+machine had not**: `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, which took the
+same battery's artifacts from 300 GB to 27 GB and changes nothing about what is
+tested. It belongs in the local workflow, not only in `ci.yml`.
+
+*One advisory, unrelated and unavoidable.* `RUSTSEC-2026-0274` (double free in
+`rtrb`'s `ReadChunk::commit` when an element's `Drop` panics) landed upstream
+against kira's ring buffer while this wave was in flight, and reds
+`cargo deny check advisories`. Fixed lock-only: `rtrb 0.3.4 → 0.3.5`.
+
+---
+
 ## CARRIED
 
 * **`.inf_vmesh` page-section compression — 10.4 MB, 4.2 % of the island pack.**
