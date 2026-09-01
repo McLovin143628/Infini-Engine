@@ -194,7 +194,7 @@ pub async fn pie_start(
             // session over an asset-backed terrain previews no ground at all.
             //
             // **By PATH** (wave GTA1): the editor always has a file for a terrain
-            // in its database, and the island's is 327 MiB — bigger than a PIE
+            // in its database, and the island's is 549.9 MB — bigger than a PIE
             // frame may be, which is how Play died on the island with a one-line
             // status message. `TerrainRef::Bytes` is left for callers that have no
             // file; this one always does.

@@ -404,7 +404,7 @@ impl AssetState {
     /// a byte-reading twin nothing calls is a second way to do the thing that
     /// broke.
     ///
-    /// This is what lets the island play: its terrain is 342 742 272 B, and a PIE
+    /// This is what lets the island play: its terrain is 549.9 MB, and a PIE
     /// frame is capped at 268 435 456, so the bytes route refuses the frame
     /// outright. The player is a child of this process on this machine and opens
     /// the same file through the same door a `--level` boot uses.

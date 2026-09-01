@@ -146,7 +146,7 @@ pub enum TerrainContent {
     ///
     /// The path route is not a weaker version of the byte one — it is the same
     /// door the `--level` boot and the cooked pack take, and it exists because a
-    /// 50 km² `.inf_terrain` is 327 MiB and a PIE frame is capped at 256 MiB. The
+    /// 50 km² `.inf_terrain` is 549.9 MB and a PIE frame is capped at 256 MiB. The
     /// PIE player runs on the editor's machine, so the file it is pointed at is
     /// the file the editor would otherwise have read into the pipe. See
     /// [`ScenePayload::terrain_paths`](inf_runtime::pie::ScenePayload::terrain_paths).

@@ -421,7 +421,7 @@ impl Drop for PieSession {
 /// `ScenePayload` v12).
 ///
 /// A streamed terrain is the largest thing a level references by an order of
-/// magnitude — the island's is 342 742 272 B, which does not fit in a PIE frame
+/// magnitude — the island's is 549.9 MB, which does not fit in a PIE frame
 /// and never will — and it is the one asset kind the PIE player can open for
 /// itself, because it runs on the editor's own machine. So the resolver says
 /// which it has rather than being forced to read a third of a gigabyte into a
@@ -487,7 +487,7 @@ pub enum TerrainRef {
 /// Every other resolver here returns bytes, because a shipped player has no
 /// filesystem handle to the author's project and the wire is the only way in.
 /// A PIE player *is* a child process of the editor, sharing its disk, and a
-/// 50 km² `.inf_terrain` is 327 MiB — bigger than a PIE frame is allowed to be
+/// 50 km² `.inf_terrain` is 549.9 MB — bigger than a PIE frame is allowed to be
 /// ([`inf_runtime::pie::MAX_FRAME_LEN`]), which is how the island lost its Play
 /// button. So this one resolver returns a [`TerrainRef`]: a **path** when the
 /// caller has a file (the editor always does), **bytes** when it does not (the
@@ -753,7 +753,7 @@ where
     // a level whose caves have mouths could not be previewed without it.
     //
     // **By PATH where there is one** (wave GTA1, `ScenePayload` v12). The island's
-    // `.inf_terrain` is 342 742 272 B against a `MAX_FRAME_LEN` of 268 435 456, so
+    // `.inf_terrain` is 549.9 MB against a `MAX_FRAME_LEN` of 268 435 456 B, so
     // carrying it inline did not make Play slow — it made `write_msg` refuse the
     // frame, and the island's Play button died in a one-line status message. The
     // player is a child process of this one on this machine, so the honest thing
@@ -1401,7 +1401,7 @@ mod tests {
     /// **A terrain with a file rides as a PATH, and that is what makes the island
     /// playable** (wave GTA1, `ScenePayload` v12).
     ///
-    /// The island's `.inf_terrain` is 342 742 272 B and `MAX_FRAME_LEN` is
+    /// The island's `.inf_terrain` is 549.9 MB and `MAX_FRAME_LEN` is
     /// 268 435 456, so `write_msg` refused the frame outright: pressing Play on
     /// the island produced one line in the status bar and no player. The cap is
     /// not the defect — an unbounded frame length is how a desynced pipe becomes a

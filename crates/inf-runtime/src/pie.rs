@@ -194,7 +194,7 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   the player is a **child process of the editor on the same machine**, and the
 ///   file it would read is the same file the editor just read. Carrying the bytes
 ///   instead cost the island its Play button — a 50 km² `.inf_terrain` is
-///   342 742 272 B against a [`MAX_FRAME_LEN`] of 268 435 456, so `write_msg`
+///   549.9 MB against a [`MAX_FRAME_LEN`] of 268 435 456 B, so `write_msg`
 ///   refused the frame and Play died in a one-line status message.
 ///
 ///   The cap is NOT what moved: an in-memory bound on a stream frame is the
@@ -430,7 +430,7 @@ pub struct ScenePayload {
     /// promise about a file that is read *later*, so a terrain edited between the
     /// payload being built and the player opening it previews the newer bytes.
     /// That window is the same one the `--level` boot has always had, it is
-    /// bounded by process startup, and the alternative — 327 MiB copied through a
+    /// bounded by process startup, and the alternative — half a gigabyte copied through a
     /// pipe on every press of Play — is what this field exists to stop.
     ///
     /// A terrain appears in **exactly one** of the two vectors: the editor emits

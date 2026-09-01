@@ -57,9 +57,10 @@ pub fn build(doc: &mut SceneDoc) {
     //
     // Through the same door the New Character wizard and the island's hero take,
     // naming the committed starter character's asset guids. The editor's own
-    // content root is seeded with those seventeen files on first run
-    // (`commands::assets::seed_starter_content`), so the references resolve to
-    // real bytes rather than to a placeholder cube.
+    // content root is seeded with those seventeen files whenever they are ABSENT
+    // (`commands::assets::seed_starter_content`) rather than only on a fresh
+    // root, so the references resolve to real bytes rather than to a placeholder
+    // cube — on an editor that has been run before this wave too.
     let ids = crate::samples::starter_character_ids();
     let asset = |id: Option<inf_asset::AssetId>| id.expect("every starter id is fixed").0;
     doc.edit_create_character_with_guid(
