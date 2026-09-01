@@ -16,7 +16,7 @@
 //! `cook` API exposes no progress callback, so we emit start/finish only and do
 //! not fake intermediate progress. Full per-platform *bundling* (`inf export`,
 //! P9.5) is not yet available in `inf-packager` (no `bundle` module at time of
-//! writing); this wires the cook only, so the dialog produces a `.inf_pack` +
+//! writing); this wires the cook only, so the dialog produces a `.ipack` +
 //! manifest. Wiring the dialog to full export lands when that module exists.
 
 use std::path::PathBuf;
@@ -266,7 +266,7 @@ mod tests {
             project_name: "Demo".into(),
             engine_version: "0.1.0".into(),
             out_dir: PathBuf::from("C:/proj/Build"),
-            pack_path: PathBuf::from("C:/proj/Build/demo.inf_pack"),
+            pack_path: PathBuf::from("C:/proj/Build/demo.ipack"),
             manifest_path: PathBuf::from("C:/proj/Build/manifest.toml"),
             asset_count: 12,
             kinds: Default::default(),

@@ -1,7 +1,7 @@
 //! Cook orchestration (P9.2, deliverable 2).
 //!
 //! [`cook`] turns a project's loose Content directory into a shippable build:
-//! one content-addressed `.inf_pack` plus a `manifest.toml`. The stages:
+//! one content-addressed `.ipack` plus a `manifest.toml`. The stages:
 //!
 //! 1. **Open** the project + **scan** its asset database.
 //! 2. **Resolve roots.** Explicit `--roots`, else the default set: every level
@@ -66,7 +66,7 @@
 //!    chunk sets nothing can ever load. `Destructible` is exactly the declaration
 //!    that makes one useful, so it is the trigger. See [`plan_fractures`] for why
 //!    that plan is built *before* the parallel stage.
-//! 8. **Pack + manifest** — write `content.inf_pack` (sorted, zstd, deterministic)
+//! 8. **Pack + manifest** — write `content.ipack` (sorted, zstd, deterministic)
 //!    and a deterministic `manifest.toml`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -82,7 +82,7 @@ use crate::error::{CookError, Result};
 use crate::manifest::{CookManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION};
 
 /// The default pack file name written into the output directory.
-pub const DEFAULT_PACK_NAME: &str = "content.inf_pack";
+pub const DEFAULT_PACK_NAME: &str = "content.ipack";
 
 /// Options controlling a cook.
 #[derive(Debug, Clone, Default)]
@@ -3723,6 +3723,92 @@ mod advisory_source_gate {
         assert!(
             offences.is_empty(),
             "eaten `\\`-continuations survive in the workspace:\n{}",
+            offences.join("\n")
+        );
+    }
+
+    /// **THE RENAME GATE** (IASSET1). No Rust source in this workspace may still
+    /// spell the shipped container `.inf_pack`.
+    ///
+    /// A rename across 44 files and 89 sites is exactly the change that leaves
+    /// one behind — and the ones that hurt are not the doc comments, they are the
+    /// **constructed paths**: a `join("content.inf_pack")` compiles, cooks, and
+    /// produces a build whose player reports "no pack" with both spellings
+    /// correct in their own file. The pack-name drift gate in `city_scale`
+    /// catches the two constants disagreeing; this catches a third literal that
+    /// agrees with neither.
+    ///
+    /// Rust only. The `.gitattributes` rules are pinned by
+    /// `cook_script::committed_scripts_are_pinned_against_line_ending_conversion`;
+    /// **`docs/memos/` deliberately keeps the old spelling**, because a memo is a
+    /// dated record of what was true when it was written and rewriting one is
+    /// falsifying a source, not fixing a reference.
+    ///
+    /// # What is banned, and what is not
+    ///
+    /// **Code**, not prose. A comment may name the old spelling — the
+    /// compatibility story ("a `.inf_pack` from before the rename still opens; the
+    /// FourCC is the identity") has to be written down somewhere, and a gate that
+    /// forbade writing it down would push the explanation out of the codebase to
+    /// buy nothing. What may not survive is a **string literal or a path**, which
+    /// is the only form that can silently produce a build nothing can find.
+    ///
+    /// The needle is **assembled** rather than written, for the reason the
+    /// continuation gate's fixtures are: a source gate that contains its own
+    /// forbidden spelling fails on itself, and the obvious repair — exempting the
+    /// file — is the hole this whole module exists to avoid. The gate's own
+    /// falsifiers are assembled the same way, so it can prove it sees the shape
+    /// it bans before it reports a clean sweep.
+    #[test]
+    fn no_rust_source_still_names_the_old_pack_extension() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("this crate lives two levels under the workspace root")
+            .to_path_buf();
+        let needle = format!(".{}_{}", "inf", "pack");
+        // A CODE line naming the old extension. Prose may (see the doc above);
+        // a literal may not.
+        let offends = |line: &str| {
+            let t = line.trim_start();
+            !t.starts_with("//") && !t.starts_with('*') && line.contains(&needle)
+        };
+
+        // The gate proves it sees the shape it bans before it reports a clean
+        // sweep — this campaign's vacuous-gate catches are all one wave old.
+        assert!(offends(&format!(
+            "    let p = dir.join(\"content{needle}\");"
+        )));
+        assert!(!offends(&format!(
+            "    /// a {needle} from before the rename"
+        )));
+        assert!(!offends("    let p = dir.join(\"content.ipack\");"));
+
+        let mut offences = Vec::new();
+        let mut swept = 0usize;
+        for (dir, floor) in ROOTS {
+            let files = sources_under(&root.join(dir));
+            assert!(files.len() >= *floor, "the sweep is not reaching `{dir}`");
+            swept += files.len();
+            for path in &files {
+                let text = std::fs::read_to_string(path).expect("source is utf-8");
+                for (i, line) in text.lines().enumerate() {
+                    if offends(line) {
+                        offences.push(format!(
+                            "{}:{} — {}",
+                            path.strip_prefix(&root).unwrap_or(path).display(),
+                            i + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(swept >= 500, "only {swept} source files were swept");
+        assert!(
+            offences.is_empty(),
+            "the shipped container is `.ipack` since IASSET1; these still say the \
+             old name:\n{}",
             offences.join("\n")
         );
     }

@@ -115,7 +115,7 @@
 //!
 //! # There is exactly one writer: [`VgeomAssetImage::as_bytes`]
 //!
-//! Like `.inf_terrain`, the bytes on disk and in a `.inf_pack` are the **raw
+//! Like `.inf_terrain`, the bytes on disk and in a `.ipack` are the **raw
 //! image**, never `inf_asset::encode` output — a bincode length prefix would shift
 //! every section off its 16-byte boundary and defeat the whole layout, silently.
 //! So [`VgeomAssetImage`] deliberately implements neither `AssetPayload` nor

@@ -866,7 +866,7 @@ where
     // **Only a GUID-spelled name resolves, and that is the verb's contract rather
     // than a shortcut here.** `inf_ecs::prefab::spawn_prefab` binds
     // `MeshRef::asset` when the prefab parses as a `Uuid` and spawns a named
-    // placeholder cube when it does not, because an `.inf_pack` entry carries a
+    // placeholder cube when it does not, because an `.ipack` entry carries a
     // GUID, a kind and a content hash and **no name** — a shipped player has
     // nothing to resolve a file stem against. The cook resolves a stem because it
     // has the asset database; the runtime does not have one, on either host, and

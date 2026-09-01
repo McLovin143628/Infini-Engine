@@ -42,7 +42,7 @@
 //!
 //! # There is exactly one writer: [`TiledTextureImage::as_bytes`]
 //!
-//! Like `.inf_vmesh` and `.inf_terrain`, the bytes on disk and in a `.inf_pack`
+//! Like `.inf_vmesh` and `.inf_terrain`, the bytes on disk and in a `.ipack`
 //! are the **raw image**, never `inf_asset::encode` output — a bincode length
 //! prefix would shift every tile off its 16-byte boundary and defeat the whole
 //! layout, silently. So [`TiledTextureImage`] deliberately implements neither
@@ -309,7 +309,7 @@ fn tile_levels(
     // **The LOWEST version that can express this format, not the newest this
     // build knows** (Wave T). A BC1 albedo therefore still stamps v2 and is
     // byte-identical to what it was before Wave T — no content hash moves, no
-    // import cache is invalidated, no `.inf_pack` stops reproducing — while a
+    // import cache is invalidated, no `.ipack` stops reproducing — while a
     // BC5 or RGBA16F payload stamps v3 and is refused by name by a build that
     // cannot read its format code. See `inf_vt::container::min_schema_version`.
     out.extend_from_slice(&min_schema_version(format.into()).to_le_bytes());
@@ -730,7 +730,7 @@ mod tests {
     ///
     /// The one claim that makes a container version cheap: a texture in a
     /// pre-Wave-T format is the same file it was, version word included, so no
-    /// content hash moves, no import cache is invalidated and no `.inf_pack`
+    /// content hash moves, no import cache is invalidated and no `.ipack`
     /// stops reproducing. Asserted on the header word rather than on a memory of
     /// the decision — and on both axes, because "the version is 2" and "a v3
     /// format actually stamps 3" are two different mistakes.

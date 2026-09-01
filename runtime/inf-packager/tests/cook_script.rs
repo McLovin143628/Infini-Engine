@@ -245,6 +245,30 @@ fn committed_scripts_are_pinned_against_line_ending_conversion() {
         "a committed .infini whose bytes git may rewrite gets a different asset \
          GUID on Windows than on Linux"
     );
+
+    // **The fifth CRLF catch, prevented rather than survived** (IASSET1). Four
+    // waves of this repo have been bitten by git rewriting the bytes of a
+    // committed BINARY artifact on a Windows checkout, and every time the fix was
+    // a `.gitattributes` line nothing asserted. These two are the ones a
+    // byte-pinned gate reads:
+    //
+    //   *.ipack     — the frozen v1 pack fixture the back-compat gate parses
+    //                 byte for byte. The extension MOVED this wave, and a
+    //                 `.gitattributes` rule that still said `*.inf_pack` would
+    //                 have silently stopped covering the file it was written for.
+    //   *.inf_tex   — the 17 `samples/ground` texture containers whose bytes are
+    //                 pinned by the material gates.
+    //
+    // Asserted here, beside the `.infini` rule, because this is where the reason
+    // is written down; the rules themselves have no other guard.
+    for rule in ["*.ipack -text", "*.inf_tex -text"] {
+        assert!(
+            attrs.lines().any(|l| l.trim() == rule),
+            "`.gitattributes` is missing `{rule}` — a committed binary artifact \
+             git is free to rewrite on a Windows checkout is the CRLF finding \
+             this repo has now paid for four times"
+        );
+    }
 }
 
 /// A script that does not parse **fails the build with its line and column**,

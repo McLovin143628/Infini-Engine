@@ -1,4 +1,4 @@
-//! The `.inf_pack` archive: a single-file, content-addressed asset pack (P9.2).
+//! The `.ipack` archive: a single-file, content-addressed asset pack (P9.2).
 //!
 //! A pack is what a **shipped game loads** instead of a loose Content directory:
 //! one file holding every cooked asset's payload, keyed by [`AssetId`], with a
@@ -83,7 +83,22 @@ use crate::hash::ContentHash;
 use crate::id::AssetId;
 use crate::kind::AssetKind;
 
-/// Magic bytes at the start of every `.inf_pack`.
+/// Magic bytes at the start of every `.ipack`.
+///
+/// **`INFPACK\0` and not `IPACK\0\0\0`, deliberately** (IASSET1). The extension
+/// moved with the product's name; the *format* did not, and the FourCC is what
+/// identifies the format. Changing it would have made every pack ever cooked
+/// unreadable to buy nothing but a tidier hex dump — and would have broken the
+/// frozen `pack_v1` fixture the back-compat gate exists to hold.
+///
+/// # Reading a `.inf_pack` written before the rename
+///
+/// It opens. Nothing in this engine validates a pack's *extension*: the player
+/// resolves a pack by path (`inf_player::level`, `main.rs`), [`PackReader::open`]
+/// reads whatever it is handed, and identity comes from these eight bytes plus
+/// `format_ver`. So an existing build directory keeps booting under its old name,
+/// and the rename is a change to what the cook *writes*, not to what the runtime
+/// *accepts*.
 pub const PACK_MAGIC: [u8; 8] = *b"INFPACK\0";
 
 /// The current container format version (bump on a breaking layout change).
@@ -310,7 +325,7 @@ pub struct PackEntry {
     pub compressed: bool,
 }
 
-/// Accumulates assets and writes a deterministic `.inf_pack`.
+/// Accumulates assets and writes a deterministic `.ipack`.
 ///
 /// Add payloads with [`add_bytes`](Self::add_bytes) or straight from an
 /// [`AssetEntry`](crate::AssetEntry) with [`add_entry`](Self::add_entry); the
@@ -832,7 +847,7 @@ impl PackBacking {
     }
 }
 
-/// A read-only view over a `.inf_pack`.
+/// A read-only view over a `.ipack`.
 ///
 /// `open` memory-maps the file (native) and `from_bytes` takes ownership of a
 /// buffer; either way the header + index are parsed once up front.
@@ -886,7 +901,7 @@ impl PackReader {
         // which never writes a pack in place: it writes a sibling temp file and
         // `rename`s over the target, so a re-cook unlinks the old name while the
         // inode an existing mapping refers to stays alive and unchanged. A
-        // `.inf_pack` is otherwise an immutable ship artifact. (The verify-once
+        // `.ipack` is otherwise an immutable ship artifact. (The verify-once
         // hash catches corrupt *content*; it cannot catch a file another program
         // truncates under a live mapping — that is a SIGBUS on Unix, and no
         // mmap-based asset runtime defends against it.)
@@ -940,7 +955,7 @@ impl PackReader {
             return Err(AssetError::Pack("pack shorter than header".into()));
         }
         if data[0..8] != PACK_MAGIC {
-            return Err(AssetError::Pack("bad magic (not an .inf_pack)".into()));
+            return Err(AssetError::Pack("bad magic (not an .ipack)".into()));
         }
         let format_version = u32::from_le_bytes(data[8..12].try_into().unwrap());
         if format_version > PACK_FORMAT_VERSION {
@@ -1634,7 +1649,7 @@ mod tests {
     #[test]
     fn open_memory_maps_the_pack() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested/ship.inf_pack");
+        let path = dir.path().join("nested/ship.ipack");
         let mut w = PackWriter::new();
         w.add_bytes(guid(1), AssetKind::Blueprint, &big(7)).unwrap();
         w.add_bytes(guid(2), AssetKind::MeshletMesh, &big(9))
@@ -1657,7 +1672,7 @@ mod tests {
     #[test]
     fn an_empty_pack_file_is_a_parse_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.inf_pack");
+        let path = dir.path().join("empty.ipack");
         std::fs::write(&path, []).unwrap();
         let err = PackReader::open(&path).unwrap_err();
         assert!(
@@ -1673,7 +1688,7 @@ mod tests {
     #[test]
     fn open_falls_back_to_a_whole_file_read_when_mapping_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ship.inf_pack");
+        let path = dir.path().join("ship.ipack");
         let mut w = PackWriter::new();
         w.add_bytes(guid(1), AssetKind::Blueprint, &big(7)).unwrap();
         w.add_bytes(guid(2), AssetKind::MeshletMesh, &big(9))
@@ -1744,7 +1759,7 @@ mod tests {
     #[test]
     fn rewriting_a_pack_under_a_live_reader_is_safe() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ship.inf_pack");
+        let path = dir.path().join("ship.ipack");
 
         let mut first = PackWriter::new();
         first
@@ -1821,7 +1836,7 @@ mod tests {
     /// be re-blessed from the current writer, which emits v2.
     #[test]
     fn loads_the_frozen_v1_pack_fixture() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pack_v1.inf_pack");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pack_v1.ipack");
         let bytes = std::fs::read(&path).expect("committed v1 fixture present");
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),

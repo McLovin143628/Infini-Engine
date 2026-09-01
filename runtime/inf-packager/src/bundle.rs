@@ -3,14 +3,14 @@
 //!
 //! [`export`] layers on top of [`cook`](crate::cook): it cooks the project, then
 //! places the release `inf-player` executable (renamed to the project) beside the
-//! `content.inf_pack` + `manifest.toml` the cook produced, and drops a
+//! `content.ipack` + `manifest.toml` the cook produced, and drops a
 //! `player.toml` launch config the player reads on boot (see
 //! `inf_player::config`). The result is a self-contained bundle:
 //!
 //! ```text
 //! <out>/<ProjectName>/
 //!   ├── <ProjectName>[.exe]     # the renamed release player
-//!   ├── content.inf_pack        # cooked assets
+//!   ├── content.ipack        # cooked assets
 //!   ├── manifest.toml           # cook manifest (root level, pack list, …)
 //!   ├── player.toml             # launch config (pack, window title/size)
 //!   └── docs/PACKAGING.txt       # honest per-OS packaging status
@@ -146,7 +146,7 @@ pub fn export(project_root: &Path, opts: &ExportOptions) -> Result<ExportReport>
     let bundle_dir = out.join(&name);
     std::fs::create_dir_all(&bundle_dir)?;
 
-    // 1. cook straight into the bundle (writes content.inf_pack + manifest.toml).
+    // 1. cook straight into the bundle (writes content.ipack + manifest.toml).
     let cook = cook(project_root, &bundle_dir, &CookOptions::default())?;
 
     // 2. resolve + copy the player binary, renamed to the project.
@@ -297,8 +297,8 @@ fn packaging_note(name: &str) -> String {
          ================================================\n\n\
          This folder is a self-contained, runnable build:\n\n\
          * {name}{exe}  — the game executable (the Infini Engine player,\n\
-           renamed). It reads player.toml beside it and boots content.inf_pack.\n\
-         * content.inf_pack       — the cooked, content-addressed asset pack.\n\
+           renamed). It reads player.toml beside it and boots content.ipack.\n\
+         * content.ipack       — the cooked, content-addressed asset pack.\n\
          * manifest.toml          — the cook manifest (root level, pack list).\n\
          * player.toml            — launch config (pack path, window title/size).\n\n\
          Running\n\
@@ -336,7 +336,7 @@ mod tests {
             height: Some(600),
         };
         let t = toml::to_string_pretty(&c).unwrap();
-        assert!(t.contains("pack = \"content.inf_pack\""));
+        assert!(t.contains("pack = \"content.ipack\""));
         assert!(t.contains("title = \"Game\""));
         assert!(t.contains("width = 800"));
     }

@@ -3,7 +3,7 @@
 //! Export the platformer into a runnable bundle (passing the **debug** player as
 //! `--player-bin` so the test never pays a release build), assert the folder
 //! layout, then **run the exported executable** headlessly from inside the bundle
-//! — it must load its own `player.toml` + `content.inf_pack` and exit 0.
+//! — it must load its own `player.toml` + `content.ipack` and exit 0.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +54,7 @@ fn export_bundle_layout_and_runs_headless() {
         "Platformer Sample",
         "exe renamed to the project"
     );
-    assert!(bundle.join("content.inf_pack").is_file(), "pack bundled");
+    assert!(bundle.join("content.ipack").is_file(), "pack bundled");
     assert!(bundle.join("manifest.toml").is_file(), "manifest bundled");
     assert!(
         bundle.join("player.toml").is_file(),
@@ -67,7 +67,7 @@ fn export_bundle_layout_and_runs_headless() {
 
     // player.toml points at the bundled pack + carries the window title.
     let cfg = std::fs::read_to_string(bundle.join("player.toml")).unwrap();
-    assert!(cfg.contains("pack = \"content.inf_pack\""), "config: {cfg}");
+    assert!(cfg.contains("pack = \"content.ipack\""), "config: {cfg}");
     assert!(cfg.contains("Platformer Sample"), "config: {cfg}");
 
     // ── run the exported exe headless (loads its own player.toml + pack) ──────

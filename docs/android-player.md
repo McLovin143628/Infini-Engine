@@ -61,7 +61,7 @@ repo). The minimal shape:
 
 1. **`AndroidManifest.xml`** — a `NativeActivity` (or `GameActivity`) pointing at
    `android.app.NativeActivity` with `meta-data android.app.lib_name` = `inf_player`.
-2. **`assets/content.inf_pack`** — the cooked pack (from `inf export --target
+2. **`assets/content.ipack`** — the cooked pack (from `inf export --target
    android`, or `inf cook`). Loading it from the APK's asset manager (via
    `AndroidApp::asset_manager()`) is the documented follow-up; v1's `android_main`
    runs the bundled `--demo` world.

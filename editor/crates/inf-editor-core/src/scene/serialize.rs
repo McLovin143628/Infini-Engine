@@ -7348,7 +7348,7 @@ pub fn encode_scene(doc: &SceneDoc, guid: Option<Uuid>) -> Result<EncodedScene, 
 ///
 /// **Both halves go down [`inf_asset::write_atomically`]** (C4-2). This is the
 /// most valuable file the product writes and it was the one document with no
-/// atomic story: `.inf_pack`, `.inf_terrain`, `.inf_voxel` and `.inf_vmesh` all
+/// atomic story: `.ipack`, `.inf_terrain`, `.inf_voxel` and `.inf_vmesh` all
 /// had temp+rename, while Ctrl+S truncated the level in place. A power loss, an
 /// OOM kill or a full disk mid-write left the level destroyed with no backup —
 /// and the sidecar half was worse, because `AssetDb` falls back on an

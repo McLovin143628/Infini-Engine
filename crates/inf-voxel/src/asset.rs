@@ -103,7 +103,7 @@
 //!
 //! # There is exactly one writer: [`write_voxel_asset`]
 //!
-//! The bytes on disk — and in a `.inf_pack` — are the **raw image**
+//! The bytes on disk — and in a `.ipack` — are the **raw image**
 //! ([`VoxelAsset::as_bytes`]). They are *not* `inf_asset::encode` output: a
 //! bincode length prefix would shift every chunk off its 16-byte boundary and
 //! defeat the entire point of the layout, silently, in a way only a GPU upload on

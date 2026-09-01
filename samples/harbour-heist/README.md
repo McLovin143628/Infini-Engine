@@ -26,7 +26,7 @@ a whole mission authored as one `.infini` file, with no Rust behind it.
 
 The gate over it is `runtime/inf-player/tests/harbour_heist_gate.rs`, which
 runs the whole mission twice on each of two routes - off a cooked
-`.inf_pack` the way a shipped build boots, and off the `ScenePayload` the
+`.ipack` the way a shipped build boots, and off the `ScenePayload` the
 editor really builds for PIE - and requires the traces byte-identical step
 for step. The two routes take the two exits from the vault and reach the
 two endings: loot the shelf and you are CLEAR; linger in the open, where

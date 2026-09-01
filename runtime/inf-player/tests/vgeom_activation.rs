@@ -48,7 +48,7 @@ fn vgeom_path_activates_from_pack() {
         .expect("add vmesh");
 
     let dir = tempfile::tempdir().unwrap();
-    let pack_path = dir.path().join("content.inf_pack");
+    let pack_path = dir.path().join("content.ipack");
     writer.write_to_file(&pack_path).expect("write pack");
 
     // 2. Load the runtime registry from the pack + the pick rule.

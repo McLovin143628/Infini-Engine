@@ -4,7 +4,7 @@
 //! `inf cook --project <dir>` (build a shippable asset pack + manifest),
 //! `inf export --project <dir>` (assemble a runnable desktop bundle: renamed
 //! player exe + pack + manifest + launch config), `inf pack ls <pack>` (inspect a
-//! `.inf_pack`), `inf --version`. `inf bindings` lands with its tooling phase.
+//! `.ipack`), `inf --version`. `inf bindings` lands with its tooling phase.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -51,7 +51,7 @@ fn print_help() {
              inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
              inf cook --mods <class.inf_act> [--out <dir>]\n  \
              inf export --project <dir> [--out <dir>] [--target current|web|android] [--player-bin <path>]\n  \
-             inf pack ls <pack.inf_pack>\n  \
+             inf pack ls <pack.ipack>\n  \
              inf gis info <file.shp|.geojson> [--crs <spec>]\n  \
              inf gis plan <file> [--kind <kind>] [--crs <spec>] [--max <n>] \
              [--min-length <m>] [--project <dir> | --level <file.inf_lvl> | \
@@ -1193,7 +1193,7 @@ fn cmd_pack(args: &[String]) -> ExitCode {
             // what `--totals` would otherwise be read as, producing an ENOENT
             // naming a flag.
             let Some(path) = args[1..].iter().find(|a| !a.starts_with("--")) else {
-                eprintln!("usage: inf pack ls [--totals] <pack.inf_pack>");
+                eprintln!("usage: inf pack ls [--totals] <pack.ipack>");
                 return ExitCode::FAILURE;
             };
             // `--totals` aggregates by kind instead of listing entries: the
@@ -1269,7 +1269,7 @@ fn cmd_pack(args: &[String]) -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: inf pack ls [--totals] <pack.inf_pack>");
+            eprintln!("usage: inf pack ls [--totals] <pack.ipack>");
             ExitCode::FAILURE
         }
     }

@@ -76,7 +76,7 @@ fn cook_in_a_subprocess(proj: &Path) -> (Vec<u8>, Vec<u8>) {
     );
     let build = proj.join("Build");
     (
-        std::fs::read(build.join("content.inf_pack")).expect("the pack was written"),
+        std::fs::read(build.join("content.ipack")).expect("the pack was written"),
         std::fs::read(build.join("manifest.toml")).expect("the manifest was written"),
     )
 }

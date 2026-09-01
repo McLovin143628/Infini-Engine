@@ -4,7 +4,7 @@
 //! This crate is the **cook**: it resolves a project's asset dependency closure,
 //! validates its blueprints, rewrites its levels to the runtime schema, and
 //! writes a single content-addressed [`inf_asset::PackWriter`]-built
-//! `content.inf_pack` plus a deterministic [`CookManifest`]. The standalone
+//! `content.ipack` plus a deterministic [`CookManifest`]. The standalone
 //! player ([`inf-player`](../inf_player/index.html)) is the pack consumer.
 //!
 //! Per-platform *bundling* — [`export`] assembling a runnable desktop folder

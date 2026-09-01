@@ -37,7 +37,7 @@ use wasm_bindgen_futures::JsFuture;
 /// ```js
 /// import init, { start_player } from "./inf_player.js";
 /// await init();
-/// start_player("game", "./content.inf_pack");
+/// start_player("game", "./content.ipack");
 /// ```
 #[wasm_bindgen]
 pub fn start_player(canvas_id: String, pack_url: String) {

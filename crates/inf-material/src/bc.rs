@@ -280,7 +280,7 @@ mod tests {
     ///
     /// What one `as f32` in an endpoint fit would cost: a texture's content hash
     /// becomes machine-dependent, so two developers importing one PNG write
-    /// different bytes, the import cache disagrees with itself, `.inf_pack` stops
+    /// different bytes, the import cache disagrees with itself, `.ipack` stops
     /// being reproducible, and every "re-import is byte-identical" arm in this
     /// repository passes on each machine separately while being false between
     /// them. Nothing here would fail; the CI is one machine per job.

@@ -19,7 +19,7 @@
 //! Terrain also lives outside the level as a [`TerrainAsset`] (`.inf_terrain`): a
 //! header + tile directory + 16-byte-aligned per-tile blobs across an LOD
 //! [`pyramid`], cooked **uncompressed** so a runtime pages one tile straight out
-//! of an mmap'd `.inf_pack` with no decode and no copy. [`TerrainData`] is then
+//! of an mmap'd `.ipack` with no decode and no copy. [`TerrainData`] is then
 //! the *resident* working set — grown and shrunk against a [`TileStore`] by an
 //! explicit set of wanted `(coord, lod)` keys, with per-tile versions and a dirty
 //! set for write-back.

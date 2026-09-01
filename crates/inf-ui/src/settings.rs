@@ -24,7 +24,7 @@
 //! # Why the file is name-keyed TOML and not a wire schema
 //!
 //! Every value here is a *preference*, not sim state: nothing in a `.inf_lvl`,
-//! a `.inf_pack` or a replay depends on it, and two players with different
+//! a `.ipack` or a replay depends on it, and two players with different
 //! settings must produce the same simulation from the same inputs. That is what
 //! lets the file be a named table with no positional decode and no version
 //! ladder past the one guard above — the `blend_mode` precedent, and the reason

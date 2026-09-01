@@ -363,7 +363,7 @@ mod tests {
     ///
     /// [`AssetKind`] is `Serialize`/`Deserialize` and rides **two** persisted
     /// surfaces: the TOML sidecar every asset carries next to it
-    /// ([`crate::AssetSidecar`]) and the `.inf_pack` index a shipped build reads
+    /// ([`crate::AssetSidecar`]) and the `.ipack` index a shipped build reads
     /// ([`crate::PackReader`]). So a variant renamed — or reordered under a codec
     /// that is positional — is a content-compatibility break in files that are
     /// already on users' disks, and nothing else in the tree would notice.

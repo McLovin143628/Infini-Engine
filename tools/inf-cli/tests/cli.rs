@@ -44,7 +44,7 @@ fn cook_then_pack_ls_succeeds() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("2 assets"), "report: {stdout}");
 
-    let pack = proj.join("Build").join("content.inf_pack");
+    let pack = proj.join("Build").join("content.ipack");
     assert!(pack.exists(), "pack written");
 
     let ls = Command::new(inf())
@@ -84,7 +84,7 @@ fn export_bundles_with_an_explicit_player_bin() {
     assert!(res.status.success(), "export exit: {:?}", res.status);
 
     let bundle = out.join("CliTest");
-    assert!(bundle.join("content.inf_pack").exists(), "pack in bundle");
+    assert!(bundle.join("content.ipack").exists(), "pack in bundle");
     assert!(
         bundle.join("player.toml").exists(),
         "launch config in bundle"

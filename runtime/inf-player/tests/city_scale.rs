@@ -1007,7 +1007,27 @@ fn the_city_cooks_without_an_advisory() {
         "the city cooked with advisories: {:?}",
         report.warnings
     );
-    let _ = level::PACK_FILE;
+    // **THE PACK-NAME DRIFT GATE** (IASSET1). The cook writes
+    // `inf_packager::DEFAULT_PACK_NAME` and the player looks for
+    // `inf_player::level::PACK_FILE`, and the two are independently-declared
+    // string literals in two crates. Their only witness used to be the `let _`
+    // this replaced — a binding that named the constant and asserted nothing, so
+    // renaming one and not the other would have compiled, cooked, and produced a
+    // build the player reports as "no pack" with both spellings correct in their
+    // own file.
+    //
+    // A rename is exactly what IASSET1 did, which is why the assertion is here
+    // now rather than the day the drift is discovered.
+    assert_eq!(
+        inf_packager::DEFAULT_PACK_NAME,
+        level::PACK_FILE,
+        "the cook writes one pack name and the player looks for another"
+    );
+    assert!(
+        level::PACK_FILE.ends_with(".ipack"),
+        "the shipped container's extension is .ipack since IASSET1: {}",
+        level::PACK_FILE
+    );
 }
 
 /// **WHAT A CITY'S DOORS COST** (island wave I6) — measured on the shipped

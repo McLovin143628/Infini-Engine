@@ -242,7 +242,7 @@ pub const SCRIPTS_DIR: &str = "Scripts";
 /// | | |
 /// |---|---|
 /// | a new 3D project's `Content/Characters/` | **152 408 B on disk** |
-/// | its cooked `content.inf_pack` | **33 641 B** (wave GTA1's audit, re-measured; against 1 606 for the 2D platformer). It was 6 480 while the boot level spawned no character and the closure reached only the rig, the three clips and the machine through the controller; the level spawns one now, so the **body and its material** are in the closure too — which is the point, and 27 KB is what a player being in the build costs. The last 16 B are the audit's ground `Collider3D`, without which the pawn falls through the plane it stands on (`samples::ground_slab`) |
+/// | its cooked `content.ipack` | **33 641 B** (wave GTA1's audit, re-measured; against 1 606 for the 2D platformer). It was 6 480 while the boot level spawned no character and the closure reached only the rig, the three clips and the machine through the controller; the level spawns one now, so the **body and its material** are in the closure too — which is the point, and 27 KB is what a player being in the build costs. The last 16 B are the audit's ground `Collider3D`, without which the pawn falls through the plane it stands on (`samples::ground_slab`) |
 /// | `inf.exe` (the CLI, which scaffolds) | carries all 95 932 body bytes — searched for and found |
 /// | `inf-player.exe` (**the shipped player**) | **does not carry them.** Searched for the same 64-byte probe: absent. The player links this crate and never reaches `starter_content`, so the constant is never materialised |
 ///

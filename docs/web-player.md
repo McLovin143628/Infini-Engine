@@ -50,7 +50,7 @@ wasm-bindgen:
 ```js
 import init, { start_player } from "./inf_player.js";
 await init();
-start_player("game", "./content.inf_pack");
+start_player("game", "./content.ipack");
 ```
 
 It fetches the pack over HTTP (whole-file `fetch` v1), parses it with

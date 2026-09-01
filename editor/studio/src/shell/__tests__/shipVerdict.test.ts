@@ -20,7 +20,7 @@ function report(warnings: string[], blocking: string[]): PackageResultDto {
     project_name: "Demo",
     engine_version: "0.1.0",
     out_dir: "C:/proj/Build",
-    pack_path: "C:/proj/Build/demo.inf_pack",
+    pack_path: "C:/proj/Build/demo.ipack",
     manifest_path: "C:/proj/Build/manifest.toml",
     asset_count: 12,
     kinds: [],

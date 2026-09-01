@@ -3111,7 +3111,7 @@ fn default_macro_variation() -> f64 {
 ///
 /// [`asset`](Self::asset) optionally points at a `.inf_terrain` asset — the
 /// out-of-level container that holds the tiles plus their LOD pyramid, cooked
-/// uncompressed so a runtime pages tiles straight out of an mmap'd `.inf_pack`
+/// uncompressed so a runtime pages tiles straight out of an mmap'd `.ipack`
 /// ([`inf_terrain::TerrainAsset`]). **Both paths are legal and the rule is
 /// simple: the inline [`data`](Self::data) is authoritative while `asset` is
 /// `None`.** When `asset` is set, the tile data streams from it and the inline

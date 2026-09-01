@@ -41,7 +41,7 @@ pub enum WorldChoice {
     /// [`LevelSource`]: crate::level::LevelSource
     /// [`WorldBuilder`]: crate::level::WorldBuilder
     Level(PathBuf),
-    /// A cooked pack — either the directory holding `content.inf_pack` +
+    /// A cooked pack — either the directory holding `content.ipack` +
     /// `manifest.toml`, or the pack file itself (the `--pack` / exported-game
     /// path). The root level GUID comes from the manifest.
     Pack(PathBuf),

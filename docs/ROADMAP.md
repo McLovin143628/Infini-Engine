@@ -643,7 +643,7 @@ panic loses no editor state.
 > facade mirroring d2 (incl. trimesh) + ECS wiring + 3D debug outlines; kira audio (device
 > backend feature-gated so CI never links ALSA/dbus; headless-consistent fallback tested);
 > inf-input action/axis maps (pure edge/deadzone core; gilrs behind a feature). **P9.2**:
-> deterministic `.inf_pack` (GUID-sorted index, xxh3-verified reads, zstd, byte-identical
+> deterministic `.ipack` (GUID-sorted index, xxh3-verified reads, zstd, byte-identical
 > rebuilds); dependency-closure cook with handler-anchored blueprint IR validation; the
 > runtime `.inf_lvl` reader lives in `inf-scene` (byte-lockstep with the editor codec,
 > proven on committed bytes — rings intact); `inf cook`/`inf pack ls`; Build ▸ Package
@@ -12867,7 +12867,7 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 >    content stamp is untouched" argument holding one batch later.
 > 5. ***the page-allocation trace is deterministic and PIE == shipping*** —
 >    **CERTIFIED, and the two hosts genuinely differ in construction**
->    (`build_world_from_pack` over a cooked `.inf_pack` against
+>    (`build_world_from_pack` over a cooked `.ipack` against
 >    `sim_from_payload` over an editor `ScenePayload`; they share `project_scene`
 >    and nothing else). **Mutation (M12):** halving every material's roughness
 >    inside `sim_from_payload` only — a change that moves **no page** — fails at
@@ -20098,7 +20098,7 @@ quicker.
   live in, and one hero whose `ActorClass` names a `.infini` exactly as it would name a
   `.inf_act`. Everything else it makes for itself on `BeginPlay` — the item catalogue, the
   vault door, the bullion on the shelf, the hero's own body. `harbour_heist_gate` runs it
-  twice on each of two routes, off a cooked `.inf_pack` and off the `ScenePayload` the editor
+  twice on each of two routes, off a cooked `.ipack` and off the `ScenePayload` the editor
   really builds, and requires the traces **byte-identical step for step**: *clean* — in at
   step 21, six bars, out at 103 on the LOOT with 3.27 s left, clear at 201, condition 0.672,
   256 distinct world states; *interrupted* — in at 21, two bars, back out where the staff can
@@ -20549,7 +20549,7 @@ still loads.
   mid-list renumbers everything after it and every committed level's `Spot`
   lights decode as `Point`s. One table, 18 enums, 59 variants, with a count
   assertion so an enum joining the wire cannot be silently uncovered.
-* **L5.F12** `.inf_pack`'s `uncompressed_len` was parsed, published as a `pub`
+* **L5.F12** `.ipack`'s `uncompressed_len` was parsed, published as a `pub`
   field, and never verified. One comparison inside the branch already hashing.
 
 ### The arithmetic — silent because the release profile has no `overflow-checks`
@@ -29346,7 +29346,7 @@ had the `CharacterController3D` (the physics half) and not the `CharacterMovemen
 shipped a level with no player in it. Content re-bless: `Blank.inf_lvl` 768 → 1 557 B (3 → 4
 entities), `Hybrid.inf_lvl` 1 267 → 2 056, `FirstPerson.inf_lvl` 1 072 → 1 501, plus two sidecars
 that now declare the rig, body and machine. **A doc table was re-measured rather than trusted:** a
-scaffolded blank-3d project's cooked `content.inf_pack` goes **6 480 → 33 625 B**, because the
+scaffolded blank-3d project's cooked `content.ipack` goes **6 480 → 33 625 B**, because the
 closure now reaches the body and its material through an entity.
 
 (4) **PLAY WITH NO PAWN ASKS A QUESTION.** *"This level has no player-controlled character"*, with

@@ -14,7 +14,7 @@
 //!   (the runnable-gameplay proof, since physics/actor-binding aren't yet
 //!   persisted in `.inf_lvl` — see [`level`]).
 //! * `--level <path>` — a loose `.inf_lvl` decoded by the `inf-scene` reader.
-//! * `--pack <dir-or-pack>` — a cooked `content.inf_pack` (+ `manifest.toml`).
+//! * `--pack <dir-or-pack>` — a cooked `content.ipack` (+ `manifest.toml`).
 //! * *no flag* — the pack named by a `player.toml` beside the executable, so a
 //!   double-clicked **exported** game boots its own content ([`config`]).
 //!

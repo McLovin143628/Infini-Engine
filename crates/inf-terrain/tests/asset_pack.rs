@@ -2,7 +2,7 @@
 //!
 //! The unit tests in `asset.rs` prove the payload layout in isolation. This is the
 //! end-to-end claim the layout exists for: build a terrain asset, cook it into a
-//! `.inf_pack` on disk, `mmap` that pack, take the **borrowed** `read_ref` slice,
+//! `.ipack` on disk, `mmap` that pack, take the **borrowed** `read_ref` slice,
 //! and page individual tiles out of the mapping — no decode of the pack entry, no
 //! decode of the other tiles, and every tile blob 16-byte aligned *by address*.
 
@@ -43,7 +43,7 @@ fn terrain_asset_pages_out_of_a_cooked_pack_without_decoding_it() {
     // Cook: the payload bytes go into the pack verbatim (streaming-class kinds are
     // stored uncompressed, which is what makes the borrowed read possible).
     let dir = tempfile::tempdir().unwrap();
-    let pack_path = dir.path().join("content.inf_pack");
+    let pack_path = dir.path().join("content.ipack");
     let mut w = PackWriter::new();
     w.add_bytes(guid, AssetKind::Terrain, asset.as_bytes())
         .unwrap();
@@ -99,7 +99,7 @@ fn residency_streams_a_window_from_the_packed_asset() {
     let guid = AssetId(uuid::Uuid::from_u128(0x1603_0002));
 
     let dir = tempfile::tempdir().unwrap();
-    let pack_path = dir.path().join("content.inf_pack");
+    let pack_path = dir.path().join("content.ipack");
     let mut w = PackWriter::new();
     w.add_bytes(guid, AssetKind::Terrain, asset.as_bytes())
         .unwrap();

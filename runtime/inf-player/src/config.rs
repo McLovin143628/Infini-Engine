@@ -2,7 +2,7 @@
 //! desktop export).
 //!
 //! `inf export` renames the release `inf-player` to the project name and drops a
-//! `player.toml` next to it that points at the bundled `content.inf_pack`. When
+//! `player.toml` next to it that points at the bundled `content.ipack`. When
 //! the player starts with **no** explicit world flag (`--demo`/`--level`/`--pack`)
 //! it looks for this file beside its own executable and boots that pack — so a
 //! double-clicked exported game runs its own content with no arguments.
@@ -11,7 +11,7 @@
 //!
 //! ```toml
 //! schema_version = 1
-//! pack   = "content.inf_pack"   # relative to this file
+//! pack   = "content.ipack"   # relative to this file
 //! title  = "My Game"            # window title (windowed mode)
 //! width  = 1280
 //! height = 720
@@ -182,7 +182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = PlayerConfigFile {
             schema_version: CONFIG_SCHEMA_VERSION,
-            pack: "content.inf_pack".into(),
+            pack: "content.ipack".into(),
             title: Some("My Game".into()),
             width: Some(1024),
             height: Some(768),
@@ -192,7 +192,7 @@ mod tests {
         let cfg = load_from_dir(dir.path())
             .expect("config loads")
             .expect("config present");
-        assert_eq!(cfg.pack, dir.path().join("content.inf_pack"));
+        assert_eq!(cfg.pack, dir.path().join("content.ipack"));
         assert_eq!(cfg.title.as_deref(), Some("My Game"));
         assert_eq!(cfg.width, Some(1024));
     }
@@ -214,7 +214,7 @@ mod tests {
         let path = dir.path().join(PLAYER_CONFIG_FILE);
 
         // Malformed TOML — the hand-edited-title case.
-        std::fs::write(&path, "title = \"My Game\npack = \"content.inf_pack\"\n").unwrap();
+        std::fs::write(&path, "title = \"My Game\npack = \"content.ipack\"\n").unwrap();
         assert!(matches!(
             load_from_dir(dir.path()),
             Err(ConfigError::Parse(_))
@@ -229,21 +229,21 @@ mod tests {
 
         // A zero-filled / torn file: `schema_version = 0` is only reachable from
         // a file that says zero, because absence defaults to the current version.
-        std::fs::write(&path, "schema_version = 0\npack = \"content.inf_pack\"\n").unwrap();
+        std::fs::write(&path, "schema_version = 0\npack = \"content.ipack\"\n").unwrap();
         assert!(matches!(
             load_from_dir(dir.path()),
             Err(ConfigError::UnknownSchema { found: 0, .. })
         ));
 
         // Newer than this build.
-        std::fs::write(&path, "schema_version = 99\npack = \"content.inf_pack\"\n").unwrap();
+        std::fs::write(&path, "schema_version = 99\npack = \"content.ipack\"\n").unwrap();
         assert!(matches!(
             load_from_dir(dir.path()),
             Err(ConfigError::UnknownSchema { found: 99, .. })
         ));
 
         // A wrong-typed field is a schema mismatch, not a silent default.
-        std::fs::write(&path, "pack = \"content.inf_pack\"\nwidth = \"wide\"\n").unwrap();
+        std::fs::write(&path, "pack = \"content.ipack\"\nwidth = \"wide\"\n").unwrap();
         assert!(matches!(
             load_from_dir(dir.path()),
             Err(ConfigError::Parse(_))

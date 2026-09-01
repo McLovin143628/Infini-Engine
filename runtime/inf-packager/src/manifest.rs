@@ -82,7 +82,11 @@ mod tests {
             schema_version: MANIFEST_SCHEMA_VERSION,
             engine_version: "0.1.0".into(),
             project_name: "Game".into(),
-            packs: vec!["content.inf_pack".into()],
+            // The CONST, not the literal (IASSET1). This fixture is what the
+            // round-trip is measured against, and a hard-coded name here would
+            // have kept passing through the `.inf_pack` → `.ipack` rename while
+            // describing a manifest no cook writes.
+            packs: vec![crate::DEFAULT_PACK_NAME.into()],
             root_level: Some(Uuid::from_u128(0x84_0100)),
             levels: vec![Uuid::from_u128(0x84_0100)],
             asset_count: 3,

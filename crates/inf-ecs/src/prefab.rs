@@ -66,7 +66,7 @@
 //! * a **GUID** string binds — the spawned entity gets `MeshRef { asset:
 //!   Some(guid) }`, so it draws whatever the pack (or the content directory)
 //!   holds under that id;
-//! * a **name** does not — an `.inf_pack` entry carries a GUID, a kind and a
+//! * a **name** does not — an `.ipack` entry carries a GUID, a kind and a
 //!   content hash and **no name** (`inf_asset::PackEntry`), so a shipped player
 //!   has nothing to resolve a stem against. Binding by name would need a name
 //!   index in the pack, which is a pack-format move; it is priced here rather

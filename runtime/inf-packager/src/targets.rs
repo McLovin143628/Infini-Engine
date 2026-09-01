@@ -1,7 +1,7 @@
 //! Mobile + web export targets (P14.1 / P14.2).
 //!
 //! [`export_web`] assembles a **browser-runnable bundle skeleton**: it cooks the
-//! project's `content.inf_pack`, writes an `index.html` + JS glue that calls the
+//! project's `content.ipack`, writes an `index.html` + JS glue that calls the
 //! wasm player's `start_player(canvas_id, pack_url)` entry, and — honestly — runs
 //! the **two-step wasm build** (`cargo build --target wasm32-unknown-unknown` then
 //! `wasm-bindgen`) *when the tools are present*, otherwise leaving exact
@@ -375,7 +375,7 @@ fn web_build_note(name: &str) -> String {
          ================================================\n\n\
          This folder is a browser bundle SKELETON. It already contains:\n\
          * index.html          — a full-viewport <canvas id=\"game\"> that boots the game\n\
-         * content.inf_pack     — the cooked asset pack (fetched at runtime)\n\
+         * content.ipack     — the cooked asset pack (fetched at runtime)\n\
          * manifest.toml        — the cook manifest\n\n\
          To produce the runnable player you need the wasm module + JS glue. If\n\
          `inf export --target web` did not already emit inf_player.js + inf_player_bg.wasm\n\
@@ -407,7 +407,7 @@ fn android_build_note(name: &str) -> String {
     format!(
         "Infini Engine — Android export: {name}\n\
          ================================================\n\n\
-         This folder contains the cooked assets (content.inf_pack + manifest.toml).\n\
+         This folder contains the cooked assets (content.ipack + manifest.toml).\n\
          Building the APK requires the Android SDK + NDK, which are NOT in this repo.\n\n\
          Build the player shared object with cargo-ndk (once tools are installed):\n\n\
          1. Install:\n\
@@ -418,7 +418,7 @@ fn android_build_note(name: &str) -> String {
          2. Build the player .so (per ABI):\n\
               cargo ndk -t arm64-v8a -o app/src/main/jniLibs \\\n\
                 build --release -p inf-player\n\n\
-         3. Package the APK: drop content.inf_pack into the app's assets/, point a\n\
+         3. Package the APK: drop content.ipack into the app's assets/, point a\n\
             minimal NativeActivity manifest at the built libinf_player.so, and\n\
             assemble with Gradle. See docs/android-player.md for the full walkthrough.\n\n\
          Honest status: the player has the cfg(target_os = \"android\") entry\n\
@@ -437,7 +437,7 @@ mod tests {
     fn index_html_wires_canvas_and_pack() {
         let html = index_html_contents("My Game");
         assert!(html.contains("<canvas id=\"game\">"));
-        assert!(html.contains("start_player('game', './content.inf_pack')"));
+        assert!(html.contains("start_player('game', './content.ipack')"));
         assert!(html.contains("<title>My Game</title>"));
     }
 

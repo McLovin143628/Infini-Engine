@@ -220,7 +220,7 @@ regex = "1"
 rayon = "1"
 flume = { version = "0.11", default-features = false }
 # ── cook pipeline: asset-pack compression (Phase 9.2) ──
-# zstd compresses the content-addressed `.inf_pack` payload blobs. The C core is
+# zstd compresses the content-addressed `.ipack` payload blobs. The C core is
 # built through zstd-sys/`cc` — the same cc toolchain `meshopt` already requires,
 # and far more CI-portable than the ISPC path we declined for BC7. With a FIXED
 # compression level and no timestamps/dictionary the output is deterministic, so
@@ -261,7 +261,7 @@ ruzstd = "0.8"
 lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 # ── streaming: zero-copy pack reads (Phase 16.1) ────────────────────────────
-# memmap2 maps a shipped `.inf_pack` into the address space so the runtime reads
+# memmap2 maps a shipped `.ipack` into the address space so the runtime reads
 # an uncompressed blob as a borrowed `&[u8]` slice (`PackReader::read_ref`) with
 # no whole-file read and no copy — the substrate P16.3 terrain-tile streaming and
 # P18.2 meshlet streaming page against. inf-asset uses it NATIVE-ONLY; wasm32 has

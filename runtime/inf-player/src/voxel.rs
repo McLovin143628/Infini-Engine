@@ -254,7 +254,7 @@ mod tests {
         let mut w = inf_asset::PackWriter::new();
         w.add_bytes(guid, AssetKind::VoxelVolume, &bytes).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("game.inf_pack");
+        let path = dir.path().join("game.ipack");
         w.write_to_file(&path).unwrap();
 
         let reader = Arc::new(PackReader::open(&path).unwrap());

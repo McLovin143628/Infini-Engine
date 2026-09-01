@@ -323,7 +323,7 @@ const HEIST_README: &str = concat!(
     "\n",
     "The gate over it is `runtime/inf-player/tests/harbour_heist_gate.rs`, which\n",
     "runs the whole mission twice on each of two routes - off a cooked\n",
-    "`.inf_pack` the way a shipped build boots, and off the `ScenePayload` the\n",
+    "`.ipack` the way a shipped build boots, and off the `ScenePayload` the\n",
     "editor really builds for PIE - and requires the traces byte-identical step\n",
     "for step. The two routes take the two exits from the vault and reach the\n",
     "two endings: loot the shelf and you are CLEAR; linger in the open, where\n",

@@ -4,7 +4,7 @@
 //!
 //! # Why this exists beside the pack's own compression
 //!
-//! A `.inf_pack`/`.ipack` entry is compressed **whole** (P9.2). That is right for
+//! A `.ipack` entry is compressed **whole** (P9.2). That is right for
 //! an authored payload read once at level load, and wrong for a container a
 //! runtime pages *one unit at a time*: reaching one 581 KiB terrain tile out of a
 //! 550 MB `.inf_terrain` would decode all 550 MB. So the streaming kinds opted out

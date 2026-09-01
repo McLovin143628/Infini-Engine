@@ -57,14 +57,14 @@ fn export_writes_bundle_with_renamed_exe_pack_manifest_and_config() {
         b"#!not-a-real-binary"
     );
 
-    assert!(bundle.join("content.inf_pack").is_file());
+    assert!(bundle.join("content.ipack").is_file());
     assert!(bundle.join("manifest.toml").is_file());
     assert!(bundle.join("docs").join("PACKAGING.txt").is_file());
 
     // player.toml is valid TOML pointing at the pack + carrying window defaults.
     let cfg = std::fs::read_to_string(&report.config_path).unwrap();
     let parsed: toml::Value = toml::from_str(&cfg).unwrap();
-    assert_eq!(parsed["pack"].as_str(), Some("content.inf_pack"));
+    assert_eq!(parsed["pack"].as_str(), Some("content.ipack"));
     assert_eq!(parsed["title"].as_str(), Some("My Game"));
     assert_eq!(parsed["width"].as_integer(), Some(1280));
 

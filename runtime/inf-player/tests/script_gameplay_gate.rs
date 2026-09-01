@@ -2,7 +2,7 @@
 //!
 //! Real gameplay — an item catalogue defined on `BeginPlay` and a pickup handed
 //! out on a timer — authored as **text**, cooked, and run twice: once off a
-//! `.inf_pack` the way a shipped build boots, and once off the `ScenePayload`
+//! `.ipack` the way a shipped build boots, and once off the `ScenePayload`
 //! the editor really builds for PIE. The two traces must be identical step for
 //! step.
 //!

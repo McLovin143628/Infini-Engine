@@ -16,7 +16,7 @@ cook, and is proven byte-identical to it — so previewing never diverges from s
 
 ## Cook a content pack
 
-**Cooking** turns your project into a shippable, content-addressed pack (`.inf_pack`): it resolves
+**Cooking** turns your project into a shippable, content-addressed pack (`.ipack`): it resolves
 the dependency closure of your levels, validates and compiles Blueprints, and bundles everything
 into a deterministic archive with a GUID-sorted index. Most payloads are zstd-compressed;
 streaming-class assets (virtualized meshes today, terrain tiles next) are stored uncompressed and

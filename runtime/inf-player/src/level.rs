@@ -6,7 +6,7 @@
 //! * [`LevelSource`] — produces the **raw serialized level bytes**.
 //!   [`DevDirLevelSource`] reads an `.inf_lvl` file straight off disk (the
 //!   `--level` dev-dir path); [`PackLevelSource`] opens a cooked
-//!   `content.inf_pack` (+ `manifest.toml`) and returns the root level's bytes
+//!   `content.ipack` (+ `manifest.toml`) and returns the root level's bytes
 //!   (the `--pack` / exported-game path).
 //! * [`WorldBuilder`] — **decodes those bytes into a populated [`BuiltWorld`]**
 //!   (an ECS world + the blueprint actors to tick + gravity/rate).
@@ -64,7 +64,7 @@ use crate::terrain_stream::TerrainSource;
 /// The cook's default pack file name (kept in sync with
 /// `inf_packager::DEFAULT_PACK_NAME`; duplicated here so the shipped player does
 /// not depend on the cook pipeline).
-pub const PACK_FILE: &str = "content.inf_pack";
+pub const PACK_FILE: &str = "content.ipack";
 
 /// The cook's manifest file name (kept in sync with `inf_packager::MANIFEST_FILE`).
 pub const MANIFEST_FILE: &str = "manifest.toml";
@@ -2063,7 +2063,7 @@ struct BootManifest {
     anim_blend: String,
 }
 
-/// A [`LevelSource`] backed by a cooked `content.inf_pack` (+ optional
+/// A [`LevelSource`] backed by a cooked `content.ipack` (+ optional
 /// `manifest.toml`). Opens the pack, resolves the root level GUID, and reads its
 /// bytes; `.inf_act` classes are read straight out of the pack too.
 ///
@@ -2099,7 +2099,7 @@ fn anim_blend_wire(name: &str) -> u8 {
 }
 
 impl PackLevelSource {
-    /// Open a pack given either the **directory** holding `content.inf_pack` +
+    /// Open a pack given either the **directory** holding `content.ipack` +
     /// `manifest.toml`, or the **pack file** itself (its sibling `manifest.toml`
     /// is used when present).
     pub fn open(path: &Path) -> Result<Self, String> {

@@ -119,7 +119,7 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.audioMixer", panelToggle("audioMixer"));
 
   // Cook / Package dialog (P9.2). Both Build entries open the same dialog — the
-  // backend command IS the cook (a `.inf_pack` + manifest); per-platform bundling
+  // backend command IS the cook (a `.ipack` + manifest); per-platform bundling
   // layers on later (P9.5).
   const openPackageDialog = () => useShellStore.getState().setPackageDialogOpen(true);
   setCommandHandler("build.package", openPackageDialog);

@@ -28,7 +28,7 @@
 //! # Host-only, by rule
 //!
 //! Everything here runs at **import and cook time**, never at play time. The
-//! shipped player loads `.inf_terrain`, `.inf_pack` and `.inf_lvl`; it never
+//! shipped player loads `.inf_terrain`, `.ipack` and `.inf_lvl`; it never
 //! parses a GeoTIFF, a Shapefile or a GeoJSON, exactly as `inf-mesh` gates
 //! `meshopt`/`gltf`/`image` out of the runtime. That is the doc's own G13
 //! prescription and it was already this engine's cook doctrine.

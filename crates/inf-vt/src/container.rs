@@ -102,7 +102,7 @@ pub const TEX_ASSET_MAGIC: [u8; 8] = *b"INFVTEX\0";
 /// Which is why the writer emits [`min_schema_version`] rather than this
 /// constant. A BC1 albedo cooked after Wave T is **byte-identical** to the same
 /// albedo cooked before it, version word included, so no content hash moves, no
-/// import cache is invalidated, and no `.inf_pack` stops reproducing. Only a
+/// import cache is invalidated, and no `.ipack` stops reproducing. Only a
 /// texture that actually uses a v3 format is stamped v3, and only that texture is
 /// refused by an older build — by name, at the door, instead of being mis-read.
 pub const TEX_ASSET_SCHEMA_VERSION: u32 = 3;

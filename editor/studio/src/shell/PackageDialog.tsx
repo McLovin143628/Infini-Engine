@@ -211,7 +211,7 @@ export default function PackageDialog() {
                 </button>
               </div>
               <p className="mb-3 text-[11px] text-(--ink-text-faint)">
-                Cooks the project into a content-addressed <code>content.inf_pack</code> plus a
+                Cooks the project into a content-addressed <code>content.ipack</code> plus a
                 deterministic <code>manifest.toml</code>. All levels and gameplay scripts are packed
                 by default, pulling in their referenced assets.
               </p>
