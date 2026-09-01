@@ -329,6 +329,16 @@ max_engine_force_n = 9000.0
 brake_force_n = 13000.0
 stiffness_n_per_m = 21000.0
 damping_ns_per_m = 3200.0
+# A 2.0-litre petrol, geared to reach its limiter in top (island wave VEH2a).
+peak_torque_nm = 245.0
+peak_torque_rpm = 4000.0
+redline_rpm = 6400.0
+idle_rpm = 800.0
+idle_torque_frac = 0.52
+redline_torque_frac = 0.74
+final_drive = 3.9
+shift_up_rpm = 6000.0
+shift_down_rpm = 2300.0
 
 [truck]
 label = \"Pickup\"
@@ -344,12 +354,29 @@ half_track_m = 0.92
 half_wheelbase_m = 1.7
 wheel_drop_m = -0.78
 max_speed_mps = 27.0
-max_engine_force_n = 12000.0
+max_engine_force_n = 14000.0
 brake_force_n = 15000.0
 stiffness_n_per_m = 26000.0
 damping_ns_per_m = 3800.0
 max_steer_deg = 32.0
 min_steer_deg = 6.0
+# A DIESEL, and the reason the row needs one at all (island wave VEH2a): the
+# torque curve is what moves a car now, and a 2 341 kg pickup on the engine
+# every default rig shares was still at IDLE at four metres a second — it
+# climbed the audited grade at 0.55 m/s^2 and covered 17.9 m in ten seconds
+# where the sedan covered 157.8. So: torque low and early (`bias` above 0.5),
+# a short final drive, and a limiter it reaches at 27 m/s.
+peak_torque_nm = 520.0
+peak_torque_rpm = 2200.0
+redline_rpm = 4200.0
+idle_rpm = 700.0
+idle_torque_frac = 0.72
+redline_torque_frac = 0.55
+torque_curve_bias = 0.75
+final_drive = 4.3
+shift_up_rpm = 3700.0
+shift_down_rpm = 1400.0
+wheel_inertia_kgm2 = 2.4
 ";
 
 /// The island's catalogue, parsed.

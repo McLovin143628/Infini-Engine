@@ -1301,9 +1301,37 @@ pub struct WheelState {
     pub load_n: f64,
     /// Steer angle, degrees, after the speed-sensitive limit.
     pub steer_deg: f64,
-    /// Rolling angle, degrees, integrated from the forward speed and the radius
-    /// so a wheel visibly turns at the right rate. Wrapped to `[0, 360)`.
+    /// Rolling angle, degrees, wrapped to `[0, 360)`.
+    ///
+    /// **Derived from [`omega_rad_s`](Self::omega_rad_s) since wave VEH2a.** It
+    /// used to be integrated from the chassis's forward speed over the radius,
+    /// which is a wheel that can never be seen to spin up under power or lock
+    /// under braking — the visual said "this car is rolling" no matter what the
+    /// contact patch was doing.
     pub spin_deg: f64,
+    /// **Angular velocity about the axle, rad/s** (island wave VEH2a) — positive
+    /// is rolling forward.
+    ///
+    /// The state P29.7 did not have, and the reason everything else in this model
+    /// could be a force: with no `ω` there is no slip, with no slip there is no
+    /// tyre curve, and without a tyre curve the only available longitudinal law
+    /// is "cancel the slip, clamped", which is a tyre that is infinitely stiff
+    /// right up to the moment it gives up completely.
+    pub omega_rad_s: f64,
+    /// **Longitudinal slip ratio** this step: `(ω·r − v_forward)` over
+    /// `max(|v_forward|, `[`SLIP_REF_MPS`]`)`.
+    ///
+    /// Positive is the wheel turning faster than the road (wheelspin), negative
+    /// is slower (lockup). Published because it is what a tuner, the ABS, the
+    /// traction control and a tyre-smoke effect all read.
+    pub slip_ratio: f64,
+    /// **Lateral slip** this step, as the *tangent* of the slip angle:
+    /// `v_right / max(|v_forward|, `[`SLIP_REF_MPS`]`)`.
+    ///
+    /// A tangent rather than an angle because that is the form the curve wants
+    /// and computing it needs no `atan` — see
+    /// [`VehicleTuning::tyre_lat_peak_slip`].
+    pub slip_lat: f64,
 }
 
 /// A force to apply at a world point — what a [`Vehicle`] answers with, so the
@@ -1536,30 +1564,42 @@ pub fn engine_cue(revs: f64, load: f64, base_pitch: f64, base_volume: f64) -> En
 
 // ── the implementation this phase ships ─────────────────────────────────────
 
-/// The raycast vehicle: a spring, a damper and a friction circle per wheel.
+/// The raycast vehicle: a spring, a damper, a powertrain and a tyre per wheel.
 #[derive(Clone, Debug)]
 pub struct RaycastVehicle {
     rig: VehicleRig,
     tuning: VehicleTuning,
     controls: VehicleControls,
     wheels: Vec<WheelState>,
+    /// The gear the box is in: `-1` reverse, `0` neutral, `1..=gears()`.
+    gear: i32,
+    /// Seconds left of the shift in progress. **No drive torque crosses the box
+    /// while this is positive**, which is the whole of why a shift is felt.
+    shift_left_s: f64,
+    /// Engine speed, rpm — a *derived* value, held so the audio and the shift
+    /// model read the same number the torque came from.
+    rpm: f64,
 }
 
 impl RaycastVehicle {
     /// Build one over a derived rig, with the default tuning.
     pub fn new(rig: VehicleRig) -> Self {
+        let tuning = VehicleTuning::default();
         let wheels = vec![
             WheelState {
-                length_m: VehicleTuning::default().rest_length_m,
+                length_m: tuning.rest_length_m,
                 ..Default::default()
             };
             rig.wheels.len()
         ];
         Self {
             rig,
-            tuning: VehicleTuning::default(),
             controls: VehicleControls::default(),
             wheels,
+            gear: 1,
+            shift_left_s: 0.0,
+            rpm: tuning.idle_rpm,
+            tuning,
         }
     }
 
@@ -1571,6 +1611,35 @@ impl RaycastVehicle {
     /// The controls in force this step.
     pub fn controls(&self) -> VehicleControls {
         self.controls
+    }
+
+    /// Engine speed, rpm (island wave VEH2a) — the real number the torque curve
+    /// was read at, not a speed rescaled to look like revs.
+    pub fn rpm(&self) -> f64 {
+        self.rpm
+    }
+
+    /// The gear the box is in: `-1` reverse, `0` neutral, `1..=`.
+    pub fn gear(&self) -> i32 {
+        self.gear
+    }
+
+    /// Whether a shift is in progress — the window with no drive torque in it.
+    pub fn shifting(&self) -> bool {
+        self.shift_left_s > 0.0
+    }
+
+    /// The static vertical load one wheel carries, newtons — the reference
+    /// [`load_sensitive_mu`] measures against.
+    ///
+    /// Derived from the chassis mass rather than authored, because it is not a
+    /// tuning choice: it is what the car weighs divided by how many wheels it
+    /// stands on, and a class that authored it could disagree with its own body.
+    fn static_load_n(&self, mass_kg: f64) -> f64 {
+        if self.rig.wheels.is_empty() || !(mass_kg > 0.0) {
+            return 0.0;
+        }
+        mass_kg * 9.81 / self.rig.wheels.len() as f64
     }
 }
 
@@ -1613,24 +1682,279 @@ pub fn curve_bias(t: f64, k: f64) -> f64 {
     (t / denom).clamp(0.0, 1.0)
 }
 
-/// **The engine curve**: drive force as a function of throttle and forward speed.
+/// The speed the slip ratio's denominator is floored at, m/s.
 ///
-/// Linear falloff to zero at [`VehicleTuning::max_speed_mps`], which is what
-/// makes that field the top speed on the flat rather than a number that has to
-/// be balanced against the drag. Reverse gets a third of the force, which is
-/// every road car.
-pub fn engine_force_n(tuning: &VehicleTuning, throttle: f64, forward_mps: f64) -> f64 {
-    let throttle = throttle.clamp(-1.0, 1.0);
-    if throttle == 0.0 || tuning.max_speed_mps <= 0.0 {
-        return 0.0;
+/// Slip ratio is `(ω·r − v) / |v|` and `v` is zero at every traffic light, so
+/// the denominator needs a floor or a stationary car reports infinite slip and
+/// launches itself. Two metres per second is the standard choice and it is a
+/// statement about the model's validity rather than a fudge: below a walking
+/// pace a tyre is inside its linear region whatever the ratio says, and the
+/// floor is what keeps the curve's argument finite there.
+pub const SLIP_REF_MPS: f64 = 2.0;
+
+/// The least of its nominal µ a tyre keeps under load sensitivity, and the most.
+///
+/// Load sensitivity is a linear fit to a curve that is not linear, so it is
+/// bracketed: an unloaded inside wheel does not get 300 % grip and a wheel
+/// carrying four times its share does not get none.
+pub const MU_MIN_FRAC: f64 = 0.35;
+/// The most of its nominal µ a tyre keeps under load sensitivity.
+pub const MU_MAX_FRAC: f64 = 1.60;
+
+/// **The torque curve**: crankshaft torque, newton-metres, at `rpm`.
+///
+/// Three knots — `idle_torque_frac` at [`VehicleTuning::idle_rpm`], `1.0` at
+/// `peak_torque_rpm`, `redline_torque_frac` at `redline_rpm` — with
+/// [`curve_bias`] bending both halves by the one shape knob. Below idle and above
+/// the redline the argument is clamped, which is the limiter.
+///
+/// This replaces P29.7's `engine_force_n`, whose whole curve was "a peak force
+/// falling linearly to zero at the top speed". That function could not be revvy
+/// or torquey, could not be geared, and — because it answered a *force* — never
+/// read the wheel's radius at all, so a truck's 0.42 m wheels and a hatchback's
+/// 0.30 m ones pushed exactly as hard.
+pub fn engine_torque_nm(tuning: &VehicleTuning, rpm: f64) -> f64 {
+    let idle = if tuning.idle_rpm.is_finite() {
+        tuning.idle_rpm.max(0.0)
+    } else {
+        0.0
+    };
+    let peak = if tuning.peak_torque_rpm.is_finite() {
+        tuning.peak_torque_rpm.max(idle + 1.0)
+    } else {
+        idle + 1.0
+    };
+    let red = if tuning.redline_rpm.is_finite() {
+        tuning.redline_rpm.max(peak + 1.0)
+    } else {
+        peak + 1.0
+    };
+    let rpm = if rpm.is_finite() {
+        rpm.clamp(idle, red)
+    } else {
+        idle
+    };
+    let frac = if rpm <= peak {
+        let lo = tuning.idle_torque_frac.clamp(0.0, 1.0);
+        lo + (1.0 - lo) * curve_bias((rpm - idle) / (peak - idle), tuning.torque_curve_bias)
+    } else {
+        let hi = tuning.redline_torque_frac.clamp(0.0, 1.0);
+        1.0 - (1.0 - hi) * curve_bias((rpm - peak) / (red - peak), tuning.torque_curve_bias)
+    };
+    let peak_nm = if tuning.peak_torque_nm.is_finite() {
+        tuning.peak_torque_nm.max(0.0)
+    } else {
+        0.0
+    };
+    peak_nm * frac
+}
+
+/// The share of [`VehicleTuning::max_speed_mps`] the speed limiter tapers over.
+///
+/// Six per cent: full torque below 94 % of the limiter, nothing at it. A taper
+/// rather than a cut, because a limiter that switches off is a wall a car bounces
+/// against and hunts around, and every driver has felt the difference.
+pub const GOVERNOR_BAND: f64 = 0.06;
+
+/// **The speed limiter**, `[0, 1]` on the drive torque.
+///
+/// `max_speed_mps` was the point where P29.7's flat drive curve reached zero, so
+/// it *was* the top speed by construction. With a real torque curve the top speed
+/// is an emergent balance against the drag — and for this engine's default rig
+/// that balance is **52.7 m/s**, which is a correct answer to a question nobody
+/// asked: the committed content, its gates and its camera were all built around a
+/// car that tops out at 25.
+///
+/// So the field keeps its meaning and gets an honest mechanism. Nearly every road
+/// car built this century is electronically limited, and this is that limiter: a
+/// taper across the last [`GOVERNOR_BAND`] of the authored speed. It is also what
+/// makes "top speed" a number a per-class spec row can *bound* rather than a
+/// number that falls out of four other numbers.
+pub fn governor(tuning: &VehicleTuning, forward_mps: f64) -> f64 {
+    let top = tuning.max_speed_mps;
+    if !(top > 0.0) || !forward_mps.is_finite() {
+        return 1.0;
     }
-    let reverse_scale = if throttle < 0.0 { 1.0 / 3.0 } else { 1.0 };
-    // The falloff is against speed IN THE DIRECTION OF THE REQUEST, so full
-    // force is available when reversing at 20 m/s forward — which is a brake,
-    // and is exactly the case `VehicleControls::from_intent` routes elsewhere.
-    let along = forward_mps * throttle.signum();
-    let headroom = (1.0 - along / tuning.max_speed_mps).clamp(0.0, 1.0);
-    tuning.max_engine_force_n * throttle * headroom * reverse_scale
+    let over = forward_mps.abs() / top - (1.0 - GOVERNOR_BAND);
+    if over <= 0.0 {
+        1.0
+    } else {
+        (1.0 - over / GOVERNOR_BAND).clamp(0.0, 1.0)
+    }
+}
+
+/// **Engine speed from wheel speed** — a rigid driveline with an idle floor.
+///
+/// No clutch state machine: below the speed the gearing implies, a real clutch is
+/// slipping and the engine is at idle, and `max(idle, …)` is that in one
+/// comparison. Neutral (and a gear the box does not have) answers idle.
+pub fn engine_rpm(tuning: &VehicleTuning, wheel_omega: f64, gear: i32) -> f64 {
+    let idle = if tuning.idle_rpm.is_finite() {
+        tuning.idle_rpm.max(0.0)
+    } else {
+        0.0
+    };
+    let red = if tuning.redline_rpm.is_finite() {
+        tuning.redline_rpm.max(idle + 1.0)
+    } else {
+        idle + 1.0
+    };
+    let ratio = tuning.drive_ratio(gear);
+    if !wheel_omega.is_finite() || ratio == 0.0 {
+        return idle;
+    }
+    (wheel_omega.abs() * ratio.abs() * 60.0 / std::f64::consts::TAU).clamp(idle, red)
+}
+
+/// **The automatic gearbox's decision**: which gear to be in.
+///
+/// Reverse is a **gear**, not a scalar on a force — P29.7 reversed at "a third of
+/// the drive force", which is a reverse that gets stronger as the engine does and
+/// never runs out of revs. It is selected the way a real automatic selects it: by
+/// the driver asking for backwards while the car is not already going forwards.
+///
+/// A refusal is a value here as everywhere: the answer is always a gear the box
+/// has.
+pub fn shift_target(
+    tuning: &VehicleTuning,
+    gear: i32,
+    rpm: f64,
+    throttle: f64,
+    forward_mps: f64,
+) -> i32 {
+    let top = tuning.gears() as i32;
+    // `VehicleControls::from_intent` only produces a negative throttle once the
+    // car is nearly stopped, so this is the whole of the reverse rule.
+    if throttle < 0.0 && forward_mps < 0.5 {
+        return -1;
+    }
+    if gear <= 0 {
+        return 1;
+    }
+    if gear == -1 {
+        return 1;
+    }
+    if rpm >= tuning.shift_up_rpm && gear < top {
+        return gear + 1;
+    }
+    if rpm <= tuning.shift_down_rpm && gear > 1 {
+        return gear - 1;
+    }
+    gear.clamp(1, top)
+}
+
+/// **The tyre's normalized force curve**, `[0, 1]` of `µ × load`.
+///
+/// `slip_norm` is the slip in units of *that axis's own peak slip*, so the peak
+/// is always at 1. Below it the rise is [`curve_bias`]-shaped by `rise_bias`
+/// (which is therefore the tyre's stiffness, independently of where the peak is);
+/// above it the force falls linearly to `slide_frac` at
+/// [`TYRE_SLIDE_SLIP_MULT`] and holds there.
+///
+/// The falling branch is the whole point and is what P29.7's model could not
+/// have: past the peak a tyre grips **less**, so a slide is something a driver
+/// has to correct rather than a state the car settles into comfortably.
+pub fn tyre_curve(slip_norm: f64, rise_bias: f64, slide_frac: f64) -> f64 {
+    let s = if slip_norm.is_finite() {
+        slip_norm.abs()
+    } else {
+        0.0
+    };
+    let slide = if slide_frac.is_finite() {
+        slide_frac.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    if s <= 1.0 {
+        curve_bias(s, rise_bias)
+    } else if s >= TYRE_SLIDE_SLIP_MULT {
+        slide
+    } else {
+        1.0 + (slide - 1.0) * (s - 1.0) / (TYRE_SLIDE_SLIP_MULT - 1.0)
+    }
+}
+
+/// **Load sensitivity**: the µ a tyre actually has at `load_n`, given the µ it
+/// has at its static share.
+///
+/// `µ(Fz) = µ · (1 − k·(Fz/Fz₀ − 1))`, bracketed by [`MU_MIN_FRAC`] and
+/// [`MU_MAX_FRAC`]. `k = 0` is the schoolbook tyre whose grip is exactly `µ·Fz`;
+/// every real one loses grip as it is pressed harder.
+///
+/// **This is the function that makes weight transfer cost something.** Without
+/// it, load moved from the inside wheel to the outside one is grip moved with it
+/// and an axle's total is unchanged — so a centre of gravity height, an anti-roll
+/// bar and a soft spring would all be free.
+pub fn load_sensitive_mu(mu: f64, load_n: f64, static_load_n: f64, sensitivity: f64) -> f64 {
+    if !(load_n.is_finite() && sensitivity.is_finite()) || !(static_load_n > 0.0) {
+        return mu;
+    }
+    let k = (1.0 - sensitivity * (load_n / static_load_n - 1.0)).clamp(MU_MIN_FRAC, MU_MAX_FRAC);
+    mu * k
+}
+
+/// **The friction circle** — one contact's ground force, newtons, in the wheel's
+/// own `(forward, right)` frame.
+///
+/// The two slips are normalized by their own peaks and then **combined into one
+/// magnitude**; the curve is evaluated at that magnitude and the result is split
+/// back along the slip direction. Pure longitudinal slip therefore reproduces the
+/// longitudinal curve exactly, pure lateral the lateral one, and everything
+/// between lies on the ellipse the two µ's describe.
+///
+/// # What this replaces, and why it is the headline of the wave
+///
+/// P29.7 clamped the two axes **independently**: `lateral.clamp(-µ·N, µ·N)` on
+/// one line and `longitudinal.clamp(-µ·N, µ·N)` on another. A tyre under that
+/// rule can hold its whole grip sideways *and* its whole grip forwards at the
+/// same instant — √2 ≈ 1.41 times what it has — so the car could brake at full
+/// force out of a corner it was already sliding through, and no amount of
+/// throttle could ever cost it steering. That is not a friction circle; it is two
+/// boxes. This is the circle.
+pub fn tyre_force_n(
+    tuning: &VehicleTuning,
+    load_n: f64,
+    static_load_n: f64,
+    slip_ratio: f64,
+    slip_lat: f64,
+) -> (f64, f64) {
+    if !(load_n.is_finite() && load_n > 0.0) || !slip_ratio.is_finite() || !slip_lat.is_finite() {
+        return (0.0, 0.0);
+    }
+    let px = if tuning.tyre_long_peak_slip.is_finite() {
+        tuning.tyre_long_peak_slip.max(1e-4)
+    } else {
+        1e-4
+    };
+    let py = if tuning.tyre_lat_peak_slip.is_finite() {
+        tuning.tyre_lat_peak_slip.max(1e-4)
+    } else {
+        1e-4
+    };
+    let (sx, sy) = (slip_ratio / px, slip_lat / py);
+    let s = (sx * sx + sy * sy).sqrt();
+    if s < 1e-12 {
+        return (0.0, 0.0);
+    }
+    let mu_x = load_sensitive_mu(
+        tuning.longitudinal_grip,
+        load_n,
+        static_load_n,
+        tuning.tyre_load_sensitivity,
+    );
+    let mu_y = load_sensitive_mu(
+        tuning.lateral_grip,
+        load_n,
+        static_load_n,
+        tuning.tyre_load_sensitivity,
+    );
+    let fx_mag = mu_x * load_n * tyre_curve(s, tuning.tyre_long_rise_bias, tuning.tyre_slide_frac);
+    let fy_mag = mu_y * load_n * tyre_curve(s, tuning.tyre_lat_rise_bias, tuning.tyre_slide_frac);
+    // A positive slip RATIO is the wheel outrunning the road, which pushes the
+    // car FORWARD; a positive lateral slip is the patch sliding right, which the
+    // tyre resists to the LEFT. The two conventions differ by a sign and it is
+    // spent here, once, rather than at three call sites.
+    (fx_mag * (sx / s), -fy_mag * (sy / s))
 }
 
 /// **The steering limit**: full lock at a standstill, tightening with speed.
@@ -1715,18 +2039,27 @@ impl Vehicle for RaycastVehicle {
         self.tuning.rest_length_m
     }
 
-    /// Revs are speed against this class's own top speed; load is the throttle,
-    /// unsigned, because reversing is not quieter.
+    /// **Revs are the engine's own rpm** between idle and the redline (island
+    /// wave VEH2a); load is the throttle, unsigned, because reversing is not
+    /// quieter.
+    ///
+    /// VEH1a computed this from road speed against the class's top speed, which
+    /// is a car with one infinitely long gear: it rose smoothly to the top and
+    /// never once fell as a shift went through. It now comes from
+    /// [`engine_rpm`] through the gear actually engaged, so the loop **drops at
+    /// every upshift and flares on every downshift** — which is the single thing
+    /// that makes an engine sound like a car rather than a hair dryer. The
+    /// `forward_mps` the door hands in is no longer read, and it stays in the
+    /// signature because the trait is what an island class implements and a class
+    /// whose revs really are its road speed is a legitimate class.
     ///
     /// The brake is deliberately not in it: a car braking hard from its top
     /// speed still has an engine turning over, and folding the brake in would
     /// make the loudest moment of a drive the one where the pedal comes off.
     fn engine_state(&self, forward_mps: f64) -> (f64, f64) {
-        let revs = if self.tuning.max_speed_mps > 0.0 {
-            (forward_mps.abs() / self.tuning.max_speed_mps).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let _ = forward_mps;
+        let span = (self.tuning.redline_rpm - self.tuning.idle_rpm).max(1.0);
+        let revs = ((self.rpm - self.tuning.idle_rpm) / span).clamp(0.0, 1.0);
         (revs, self.controls.throttle.abs().clamp(0.0, 1.0))
     }
 
@@ -1739,24 +2072,91 @@ impl Vehicle for RaycastVehicle {
         let speed = chassis.linvel.length();
         let limit = steer_limit_deg(&self.tuning, forward_mps);
         let steer_deg = self.controls.steer.clamp(-1.0, 1.0) * limit;
-        let grounded = self.wheels.iter().filter(|w| w.contact.is_some()).count();
-        // The drive and brake budgets are shared over the wheels that can use
-        // them: a car with one wheel on the ground does not get four wheels of
-        // push, which is how a raycast vehicle climbs walls.
-        let drive_total = engine_force_n(&self.tuning, self.controls.throttle, forward_mps);
-        let brake_total = self.tuning.brake_force_n * self.controls.brake.clamp(0.0, 1.0);
-        let per_wheel = if grounded == 0 {
+        let static_load = self.static_load_n(chassis.mass_kg);
+        let inertia = if self.tuning.wheel_inertia_kgm2.is_finite() {
+            self.tuning.wheel_inertia_kgm2.max(1e-3)
+        } else {
+            1e-3
+        };
+        let wheels = self.rig.wheels.len();
+
+        // ── the gearbox ──────────────────────────────────────────────────────
+        //
+        // Revs come from the wheels the engine is connected to, through the gear
+        // it is in. The mean rather than any one wheel, so a car with one wheel
+        // in the air does not scream.
+        let mean_omega = if wheels == 0 {
             0.0
         } else {
-            1.0 / grounded as f64
+            self.wheels.iter().map(|w| w.omega_rad_s).sum::<f64>() / wheels as f64
         };
-        // The quarter-mass the lateral cancel is sized against. Wheel count, not
-        // grounded count: a wheel in the air carries no mass to cancel.
-        let share = if self.rig.wheels.is_empty() {
+        self.shift_left_s = (self.shift_left_s - dt).max(0.0);
+        self.rpm = engine_rpm(&self.tuning, mean_omega, self.gear);
+        if self.shift_left_s <= 0.0 {
+            let want = shift_target(
+                &self.tuning,
+                self.gear,
+                self.rpm,
+                self.controls.throttle,
+                forward_mps,
+            );
+            if want != self.gear {
+                self.gear = want;
+                self.shift_left_s = self.tuning.shift_time_s.max(0.0);
+                self.rpm = engine_rpm(&self.tuning, mean_omega, self.gear);
+            }
+        }
+        let ratio = self.tuning.drive_ratio(self.gear);
+        let throttle = self.controls.throttle.clamp(-1.0, 1.0).abs();
+        // **No torque crosses the box during a shift** — the whole of why a shift
+        // is something a driver feels rather than a number that changes.
+        let crank = if self.shifting() {
             0.0
         } else {
-            chassis.mass_kg / self.rig.wheels.len() as f64
+            engine_torque_nm(&self.tuning, self.rpm)
+                * throttle
+                * governor(&self.tuning, forward_mps)
         };
+        // Reverse is a gear, so its ratio is positive and the DIRECTION is the
+        // gear's sign. One sign, spent here.
+        let direction = if self.gear < 0 { -1.0 } else { 1.0 };
+        let mut wheel_torque = if wheels == 0 {
+            0.0
+        } else {
+            crank * ratio * direction / wheels as f64
+        };
+        // **The driveline ceiling.** `max_engine_force_n` used to be the whole
+        // engine curve; since VEH2a it is the bound on what the wheels may be
+        // handed in total, which is the half-shaft and the clutch a car actually
+        // has. Scaled rather than clipped per wheel, so the split stays the split.
+        let force_sum: f64 = self
+            .rig
+            .wheels
+            .iter()
+            .map(|w| wheel_torque.abs() / w.radius_m.max(1e-3))
+            .sum();
+        let ceiling = self.tuning.max_engine_force_n.max(0.0);
+        if force_sum > ceiling && force_sum > 0.0 {
+            wheel_torque *= ceiling / force_sum;
+        }
+        // Engine braking: the crank's own drag with the throttle shut, rising
+        // with the revs, reaching the wheels through the same gear.
+        let rev_span = (self.tuning.redline_rpm - self.tuning.idle_rpm).max(1.0);
+        let rev_frac = ((self.rpm - self.tuning.idle_rpm) / rev_span).clamp(0.0, 1.0);
+        let engine_brake = if throttle > 0.0 || self.shifting() || wheels == 0 {
+            0.0
+        } else {
+            self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs() / wheels as f64
+        };
+        // The rev limiter, expressed where it belongs: as the fastest the wheels
+        // can turn in this gear. Without it an airborne driven wheel spins up for
+        // ever, because nothing on the ground is there to stop it.
+        let omega_ceiling = if ratio.abs() > 1e-9 {
+            self.tuning.redline_rpm.max(0.0) * std::f64::consts::TAU / 60.0 / ratio.abs()
+        } else {
+            f64::INFINITY
+        };
+        let brake_force = self.tuning.brake_force_n.max(0.0) * self.controls.brake.clamp(0.0, 1.0);
 
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
@@ -1774,15 +2174,59 @@ impl Vehicle for RaycastVehicle {
             } else {
                 steer_direction(right, -fwd, steer)
             };
+            let radius = mount.radius_m.max(1e-3);
+
+            // ── the wheel's own equation of motion ───────────────────────────
+            //
+            // **Drive, then the GROUND, then everything that resists.** The order
+            // is not cosmetic and it was measured wrong first: with the brake
+            // applied before the ground, a fully locked wheel is pulled to zero,
+            // pushed back to 9 rad/s by the contact patch inside the same step,
+            // and pulled to zero again — a wheel that chatters between locked and
+            // rolling at 30 Hz for as long as the pedal is down. Resolving the
+            // brake LAST, against the post-contact speed, is what makes a locked
+            // wheel stay locked: the no-reverse clamp then has exactly the
+            // ground's contribution to remove.
+            let mut omega = state.omega_rad_s + wheel_torque * dt / inertia;
+            omega = omega.clamp(-omega_ceiling, omega_ceiling);
+
+            // Everything that RESISTS is one budget and it may not reverse the
+            // wheel — P29.7's law, moved to where it now belongs. It used to be
+            // stated against the chassis's own motion, where a resistive force
+            // that overshot crept a braked car 5.8 cm backwards per second; on a
+            // wheel the same rule is exact, because a brake that stopped the
+            // wheel and kept pulling is a brake that drives it in reverse.
+            let hand = if self.controls.handbrake && !mount.steered() {
+                self.tuning.handbrake_force_n.max(0.0) * radius
+            } else {
+                0.0
+            };
+            let rolling = state.load_n.max(0.0) * self.tuning.rolling_resistance.max(0.0) * radius;
+            let resist =
+                brake_force * radius / wheels.max(1) as f64 + hand + rolling + engine_brake;
+            let shed = |w: f64| {
+                if resist > 0.0 && w != 0.0 {
+                    w - w.signum() * (resist * dt / inertia).min(w.abs())
+                } else {
+                    w
+                }
+            };
 
             let Some(contact) = state.contact else {
-                // In the air the suspension extends and the wheel free-wheels.
+                // In the air the suspension extends and the wheel turns on its
+                // own torques alone — which is how a wheel that left the ground
+                // under power is SEEN to be spinning when it lands.
                 state.length_m = self.tuning.rest_length_m;
                 state.load_n = 0.0;
+                state.slip_ratio = 0.0;
+                state.slip_lat = 0.0;
+                state.omega_rad_s = shed(omega);
+                state.spin_deg = (state.spin_deg
+                    + state.omega_rad_s * dt * 180.0 / std::f64::consts::PI)
+                    .rem_euclid(360.0);
                 continue;
             };
 
-            let previous = state.length_m;
             let length = (contact.distance_m - mount.radius_m).clamp(
                 self.tuning.rest_length_m - self.tuning.travel_m,
                 self.tuning.rest_length_m,
@@ -1792,8 +2236,7 @@ impl Vehicle for RaycastVehicle {
             // Closing speed from the CONTACT POINT's velocity rather than from
             // the length difference: a finite difference over one step is a step
             // behind and rings at exactly the frequency the damper exists to
-            // kill. `previous` is kept for the visual only.
-            let _ = previous;
+            // kill.
             let point_vel = chassis.point_velocity(contact.point);
             let closing = -point_vel.dot(up);
             let load = suspension_force_n(&self.tuning, compression, closing);
@@ -1807,55 +2250,112 @@ impl Vehicle for RaycastVehicle {
                 force: up * load,
             });
 
-            // ── the friction circle ──────────────────────────────────────────
+            // ── the contact patch ────────────────────────────────────────────
             //
             // On the TYRE's velocity, not the suspension's — see
             // `ChassisState::contact_velocity` for the pitch pump this closes.
             let tyre_vel = chassis.contact_velocity(contact.point, up);
-            let mu_lat = load * self.tuning.lateral_grip;
-            let mu_long = load * self.tuning.longitudinal_grip;
-            let side_v = tyre_vel.dot(wheel_right);
-            // The force that would cancel the slip exactly in one step, clamped
-            // by what the tyre can hold. The clamp is what makes this stable at
-            // any timestep: an uncancellable slip becomes a slide, not a spike.
-            let lateral = (-share * side_v / dt).clamp(-mu_lat, mu_lat);
-            out.push(WheelForce {
-                point: contact.point,
-                force: wheel_right * lateral,
-            });
-
             let along_v = tyre_vel.dot(wheel_fwd);
-            let mut longitudinal = drive_total * per_wheel;
-            // **Everything that resists motion is one budget, and it may not
-            // reverse the motion.** The most any of it can do in one step is
-            // bring this wheel to a stop; a resistive force that overshot would
-            // push the car backwards, and then forwards, for ever. Measured
-            // before the clamp covered the rolling term too: a braked car crept
-            // **5.8 cm backwards per second**, which is what a constant
-            // opposing force does at a velocity smaller than one step of it.
-            let hand = if self.controls.handbrake && !mount.steered() {
-                self.tuning.handbrake_force_n
+            let side_v = tyre_vel.dot(wheel_right);
+            let reference = along_v.abs().max(SLIP_REF_MPS);
+            let slip_lat = side_v / reference;
+            let free = along_v / radius;
+
+            // ── STICK OR SLIDE ───────────────────────────────────────────────
+            //
+            // The wheel and the tyre are a **stiff** pair: a 1.2 kg·m² wheel on a
+            // tyre whose force changes by ~2.5 kN per rad/s has a time constant
+            // of about 1.4 ms, and the fixed step is 16.7. Integrating that
+            // explicitly does not merely lose accuracy, it makes the longitudinal
+            // force a function of the timestep — measured before this branch
+            // existed: a free-rolling wheel carrying nothing but engine braking
+            // reported **1 084 N** of drag where its own equilibrium is 159.
+            //
+            // So the sticking case is solved **exactly** instead of integrated.
+            // If the force needed to end the step rolling with the road fits
+            // inside what the tyre has left after the lateral demand, the wheel
+            // sticks and takes precisely that force; otherwise it breaks away and
+            // the sliding branch integrates — which is safe, because past the
+            // peak the curve is flat or falling and the stiffness is gone. This
+            // is the standard stick/slip split and it is the reason the model is
+            // stable at 60 Hz without a sub-step.
+            let (_, fy_stick) = tyre_force_n(&self.tuning, load, static_load, 0.0, slip_lat);
+            let mu_x = load_sensitive_mu(
+                self.tuning.longitudinal_grip,
+                load,
+                static_load,
+                self.tuning.tyre_load_sensitivity,
+            );
+            let mu_y = load_sensitive_mu(
+                self.tuning.lateral_grip,
+                load,
+                static_load,
+                self.tuning.tyre_load_sensitivity,
+            );
+            // The ellipse, read the honest way round: how much of the LATERAL
+            // capacity is already spent decides how much LONGITUDINAL is left.
+            let cap_y = (mu_y * load).max(0.0);
+            let spent = if cap_y > 0.0 {
+                (fy_stick / cap_y).clamp(-1.0, 1.0)
             } else {
                 0.0
             };
-            if along_v.abs() > 1e-9 {
-                let resist = brake_total * per_wheel + hand + load * self.tuning.rolling_resistance;
-                if resist > 0.0 {
-                    let stop = (share * along_v / dt).abs();
-                    longitudinal -= along_v.signum() * resist.min(stop);
-                }
-            }
-            let longitudinal = longitudinal.clamp(-mu_long, mu_long);
+            let spare = (mu_x * load).max(0.0) * (1.0 - spent * spent).max(0.0).sqrt();
+            // The force the ground must supply to hold this wheel at rolling
+            // speed **against every other torque on it** — the drive already
+            // folded into `omega`, and the resist budget, which is the term the
+            // first cut of this branch forgot. Without it a handbraked wheel on a
+            // slope tested as "sticking" (the ground only had to spin it up by
+            // 1.4 rad/s), took 294 N instead of locking, and let a parked car
+            // creep **0.99 m in two seconds** down the audited 0.108 grade.
+            //
+            // Its resistive half carries P29.7's law forward unchanged: **a
+            // resistive force may not reverse the motion it resists.** The most
+            // it may do in one step is bring this wheel's share of the car to a
+            // stop. Without that cap the branch reads `(0.0f64).signum() == 1.0`
+            // — Rust's answer for a positive zero — and applies a full 12 kN of
+            // brake to a car that is already stationary, which drove one
+            // backwards at **7.3 cm/s**: the exact defect the law was written
+            // for, met again in a new place.
+            let inertial = inertia * (omega - free) / (dt * radius);
+            let cap = chassis.mass_kg.max(0.0) / wheels.max(1) as f64 * along_v.abs() / dt;
+            let braking = (-free.signum() * resist / radius).clamp(-cap, cap);
+            let stick_fx = inertial + braking;
+
+            let (fx, fy) = if stick_fx.abs() <= spare {
+                // Sticking: the ground holds the wheel at rolling speed and the
+                // resist is already paid for inside `stick_fx`, so it is NOT shed
+                // again below.
+                omega = free;
+                state.slip_ratio = 0.0;
+                (stick_fx, fy_stick)
+            } else {
+                let slip_ratio = (omega * radius - along_v) / reference;
+                state.slip_ratio = slip_ratio;
+                let f = tyre_force_n(&self.tuning, load, static_load, slip_ratio, slip_lat);
+                // The ground's reaction may still not push the wheel PAST free
+                // rolling in one step; that is the sliding branch's own safety
+                // net and it is what a breakaway settles onto.
+                let next = omega - f.0 * radius * dt / inertia;
+                omega = if (omega - free) * (next - free) < 0.0 {
+                    free
+                } else {
+                    next
+                };
+                // …and only now the brake, against the speed the ground left
+                // behind. See the ordering note above.
+                omega = shed(omega);
+                f
+            };
+            state.slip_lat = slip_lat;
             out.push(WheelForce {
                 point: contact.point,
-                force: wheel_fwd * longitudinal,
+                force: wheel_fwd * fx + wheel_right * fy,
             });
-
-            // The visual roll: the wheel turns at the speed it is travelling.
-            if mount.radius_m > 0.0 {
-                let deg = along_v / mount.radius_m * dt * 180.0 / std::f64::consts::PI;
-                state.spin_deg = (state.spin_deg + deg).rem_euclid(360.0);
-            }
+            state.omega_rad_s = omega.clamp(-omega_ceiling, omega_ceiling);
+            state.spin_deg = (state.spin_deg
+                + state.omega_rad_s * dt * 180.0 / std::f64::consts::PI)
+                .rem_euclid(360.0);
         }
 
         // Aerodynamic drag, once, at the centre of mass — not per wheel, because
@@ -1982,23 +2482,270 @@ mod tests {
         );
     }
 
-    /// The engine curve reaches zero at the top speed and never pushes backwards
-    /// past it — a curve that went negative would make the top speed a wall the
-    /// car bounces off.
+    /// **The torque curve passes through its three knots**, peaks where it says
+    /// it peaks, and the one shape knob moves both halves the way its doc claims.
     #[test]
-    fn the_engine_curve_falls_to_zero_at_the_top_speed() {
+    fn the_torque_curve_hits_its_three_knots_and_the_bias_moves_both_halves() {
         let t = VehicleTuning::default();
-        assert_eq!(engine_force_n(&t, 1.0, 0.0), t.max_engine_force_n);
-        assert!(engine_force_n(&t, 1.0, t.max_speed_mps * 0.5) > 0.0);
-        assert_eq!(engine_force_n(&t, 1.0, t.max_speed_mps), 0.0);
-        assert_eq!(
-            engine_force_n(&t, 1.0, t.max_speed_mps * 2.0),
-            0.0,
-            "past the top speed the engine stops pushing; it does not pull"
+        let at = |rpm| engine_torque_nm(&t, rpm);
+        assert!((at(t.idle_rpm) - t.peak_torque_nm * t.idle_torque_frac).abs() < 1e-9);
+        assert!((at(t.peak_torque_rpm) - t.peak_torque_nm).abs() < 1e-9);
+        assert!((at(t.redline_rpm) - t.peak_torque_nm * t.redline_torque_frac).abs() < 1e-9);
+        // The peak really is the peak, swept.
+        let mut best = (0.0f64, 0.0f64);
+        for i in 0..=200 {
+            let rpm = t.idle_rpm + (t.redline_rpm - t.idle_rpm) * i as f64 / 200.0;
+            if at(rpm) > best.1 {
+                best = (rpm, at(rpm));
+            }
+        }
+        assert!(
+            (best.0 - t.peak_torque_rpm).abs() < 60.0,
+            "the curve peaks at {} rpm, not at the authored {}",
+            best.0,
+            t.peak_torque_rpm
         );
-        assert_eq!(engine_force_n(&t, 0.0, 0.0), 0.0);
-        // Reverse is a third of the force and full at a standstill.
-        assert!((engine_force_n(&t, -1.0, 0.0) + t.max_engine_force_n / 3.0).abs() < 1e-9);
+        // Below idle and above the redline the argument is clamped — that IS the
+        // limiter, and a curve that kept rising past it would make the redline a
+        // suggestion.
+        assert_eq!(at(0.0), at(t.idle_rpm));
+        assert_eq!(at(t.redline_rpm * 3.0), at(t.redline_rpm));
+        assert!(at(-1.0).is_finite() && at(f64::NAN).is_finite());
+
+        // A TRUCK engine (bias high) makes more torque low down and less at the
+        // top; a SPORTS engine (bias low) does the reverse. Both against the same
+        // three knots, so the claim is about the shape and not about the numbers.
+        let low = t.idle_rpm + (t.peak_torque_rpm - t.idle_rpm) * 0.35;
+        let high = t.peak_torque_rpm + (t.redline_rpm - t.peak_torque_rpm) * 0.6;
+        let truck = VehicleTuning {
+            torque_curve_bias: 0.8,
+            ..t
+        };
+        let sports = VehicleTuning {
+            torque_curve_bias: 0.25,
+            ..t
+        };
+        assert!(engine_torque_nm(&truck, low) > at(low));
+        assert!(engine_torque_nm(&truck, high) < at(high));
+        assert!(engine_torque_nm(&sports, low) < at(low));
+        assert!(engine_torque_nm(&sports, high) > at(high));
+    }
+
+    /// **Revs come from the wheels through the gear**, floored at idle and capped
+    /// at the redline — and a taller gear means fewer revs for the same speed,
+    /// which is the whole reason a gearbox exists.
+    #[test]
+    fn the_revs_are_the_wheels_through_the_gear() {
+        let t = VehicleTuning::default();
+        assert_eq!(engine_rpm(&t, 0.0, 1), t.idle_rpm, "a stopped car idles");
+        assert_eq!(
+            engine_rpm(&t, 40.0, 0),
+            t.idle_rpm,
+            "neutral turns the engine at idle whatever the wheels do"
+        );
+        // 30 rad/s on a 0.35 m wheel is 10.5 m/s.
+        let first = engine_rpm(&t, 30.0, 1);
+        let top = engine_rpm(&t, 30.0, 6);
+        assert!(
+            top < first,
+            "sixth ({top} rpm) is not taller than first ({first} rpm)"
+        );
+        assert!(first > t.idle_rpm && first <= t.redline_rpm);
+        assert_eq!(
+            engine_rpm(&t, 500.0, 1),
+            t.redline_rpm,
+            "the limiter is a clamp, not a suggestion"
+        );
+        // Reverse turns the engine forwards: a car reversing at 3 m/s is not at
+        // minus two thousand rpm.
+        assert!(engine_rpm(&t, -9.0, -1) > t.idle_rpm);
+    }
+
+    /// **The box shifts up at the top, down at the bottom, and does not hunt.**
+    #[test]
+    fn the_gearbox_shifts_up_and_down_and_holds_between() {
+        let t = VehicleTuning::default();
+        let at = |gear, rpm| shift_target(&t, gear, rpm, 1.0, 10.0);
+        assert_eq!(at(1, t.shift_up_rpm + 1.0), 2);
+        assert_eq!(at(2, t.shift_down_rpm - 1.0), 1);
+        assert_eq!(at(3, (t.shift_up_rpm + t.shift_down_rpm) / 2.0), 3);
+        assert_eq!(
+            at(6, t.shift_up_rpm + 1.0),
+            6,
+            "a six-speed box does not shift into a seventh"
+        );
+        assert_eq!(at(1, t.shift_down_rpm - 1.0), 1, "…nor below first");
+        // Reverse: asked for backwards while not going forwards.
+        assert_eq!(shift_target(&t, 1, 2_000.0, -1.0, 0.0), -1);
+        assert_eq!(
+            shift_target(&t, 1, 2_000.0, -1.0, 20.0),
+            1,
+            "asking for reverse at 20 m/s is a BRAKE, and the box stays in gear"
+        );
+        assert_eq!(shift_target(&t, -1, 2_000.0, 1.0, 0.0), 1);
+        // …and the shift band is wide enough that one gear's up point is not the
+        // next gear's down point, or the box hunts for ever.
+        let step = t.gear_1_ratio / t.gear_2_ratio;
+        assert!(
+            t.shift_up_rpm / step > t.shift_down_rpm,
+            "shifting up at {} lands at {} rpm, at or below the {} downshift point",
+            t.shift_up_rpm,
+            t.shift_up_rpm / step,
+            t.shift_down_rpm
+        );
+    }
+
+    /// **THE TYRE CURVE**: it rises to exactly 1 at its own peak slip, falls
+    /// past it, and settles on the sliding plateau — and the rise stiffness is a
+    /// knob that does not move the peak.
+    #[test]
+    fn the_tyre_peaks_at_one_and_falls_to_its_sliding_plateau() {
+        let slide = 0.72;
+        for bias in [0.3, 0.5, 0.74, 0.9] {
+            assert_eq!(tyre_curve(0.0, bias, slide), 0.0);
+            assert!((tyre_curve(1.0, bias, slide) - 1.0).abs() < 1e-12, "{bias}");
+            // The peak is at 1 for EVERY stiffness — that is what makes the two
+            // knobs independent.
+            let mut best = (0.0f64, 0.0f64);
+            for i in 0..=400 {
+                let s = i as f64 * 0.02;
+                let v = tyre_curve(s, bias, slide);
+                if v > best.1 {
+                    best = (s, v);
+                }
+            }
+            assert!(
+                (best.0 - 1.0).abs() < 1e-9,
+                "bias {bias} peaks at {} rather than at its own peak slip",
+                best.0
+            );
+            // Past the peak it FALLS, and reaches the plateau exactly at the
+            // engine-wide multiple.
+            assert!(tyre_curve(2.0, bias, slide) < 1.0);
+            assert!(
+                (tyre_curve(TYRE_SLIDE_SLIP_MULT, bias, slide) - slide).abs() < 1e-12,
+                "{bias}"
+            );
+            assert!((tyre_curve(50.0, bias, slide) - slide).abs() < 1e-12);
+            // Symmetric in the sign of the slip: a tyre does not grip better
+            // going backwards.
+            assert_eq!(tyre_curve(-0.4, bias, slide), tyre_curve(0.4, bias, slide));
+        }
+        // A stiffer tyre is above a softer one everywhere below the peak, and
+        // they meet AT it — which is the claim `tyre_long_rise_bias`'s doc makes.
+        for i in 1..20 {
+            let s = i as f64 / 20.0;
+            assert!(tyre_curve(s, 0.85, slide) > tyre_curve(s, 0.4, slide));
+        }
+    }
+
+    /// **µ falls as load rises**, bracketed at both ends — the function that
+    /// makes weight transfer cost something.
+    #[test]
+    fn grip_falls_under_load_and_is_bracketed_at_both_ends() {
+        let (mu, stat) = (1.2, 3_000.0);
+        assert_eq!(load_sensitive_mu(mu, stat, stat, 0.22), mu);
+        assert!(load_sensitive_mu(mu, stat * 2.0, stat, 0.22) < mu);
+        assert!(load_sensitive_mu(mu, stat * 0.5, stat, 0.22) > mu);
+        assert_eq!(
+            load_sensitive_mu(mu, stat * 4.0, stat, 0.0),
+            mu,
+            "sensitivity 0 is the schoolbook tyre, exactly"
+        );
+        // The bracket, both ways.
+        assert!((load_sensitive_mu(mu, stat * 40.0, stat, 0.5) - mu * MU_MIN_FRAC).abs() < 1e-12);
+        assert!((load_sensitive_mu(mu, 0.0, stat, 4.0) - mu * MU_MAX_FRAC).abs() < 1e-12);
+        // A refusal is a value: no reference load means no correction.
+        assert_eq!(load_sensitive_mu(mu, stat, 0.0, 0.22), mu);
+        assert_eq!(load_sensitive_mu(mu, f64::NAN, stat, 0.22), mu);
+
+        // **The consequence, stated in newtons**: transferring load across an
+        // axle LOSES that axle grip, which is what an anti-roll bar trades and
+        // what a low centre of gravity buys. Zero sensitivity keeps it exactly.
+        let total = |sens: f64, transfer: f64| {
+            load_sensitive_mu(mu, stat + transfer, stat, sens) * (stat + transfer)
+                + load_sensitive_mu(mu, stat - transfer, stat, sens) * (stat - transfer)
+        };
+        assert!((total(0.0, 1_500.0) - total(0.0, 0.0)).abs() < 1e-9);
+        assert!(
+            total(0.22, 1_500.0) < total(0.22, 0.0) * 0.95,
+            "a 1 500 N transfer cost the axle only {:.1} N of {:.1}",
+            total(0.22, 0.0) - total(0.22, 1_500.0),
+            total(0.22, 0.0)
+        );
+    }
+
+    /// **THE FRICTION CIRCLE, and the two boxes that died for it.**
+    ///
+    /// The headline arm of the wave. P29.7 clamped each axis independently, so a
+    /// tyre could hold `µ·N` sideways *and* `µ·N` forwards at once — 1.41 × its
+    /// own grip. Here the combined magnitude never exceeds the peak, pure slip on
+    /// either axis reproduces that axis's own curve exactly, and asking for more
+    /// of one costs the other.
+    #[test]
+    fn the_two_axis_clamps_are_dead_and_this_is_a_circle() {
+        let t = VehicleTuning {
+            // One µ and one shape on both axes, so the ellipse is a circle and
+            // the claim is about the COUPLING rather than about two numbers.
+            lateral_grip: 1.2,
+            longitudinal_grip: 1.2,
+            tyre_lat_peak_slip: 0.12,
+            tyre_long_peak_slip: 0.12,
+            tyre_lat_rise_bias: 0.74,
+            tyre_long_rise_bias: 0.74,
+            tyre_load_sensitivity: 0.0,
+            ..VehicleTuning::default()
+        };
+        let (load, stat) = (3_000.0, 3_000.0);
+        let peak = 1.2 * load;
+        let mag = |sr, sl| {
+            let (x, y) = tyre_force_n(&t, load, stat, sr, sl);
+            (x * x + y * y).sqrt()
+        };
+
+        // Pure longitudinal at the peak slip is the peak, and pure lateral is the
+        // same peak — the two axes agree because they were given one µ.
+        assert!((mag(0.12, 0.0) - peak).abs() < 1e-9);
+        assert!((mag(0.0, 0.12) - peak).abs() < 1e-9);
+        // The two boxes would have delivered √2 × peak here. The circle does not.
+        let both = mag(0.12, 0.12);
+        assert!(
+            both <= peak + 1e-9,
+            "combined slip produced {both} N against a peak of {peak} N — that is \
+             {:.3} times the grip this tyre has, and it is the two-box defect",
+            both / peak
+        );
+        // …and it is not achieved by simply going to zero: the force is still
+        // most of the peak, pointing between the axes.
+        assert!(both > peak * 0.6, "{both} N is not a tyre, it is a hole");
+        let (fx, fy) = tyre_force_n(&t, load, stat, 0.12, 0.12);
+        assert!(
+            (fx.abs() - fy.abs()).abs() < 1e-9,
+            "equal slip on both axes did not split the force equally"
+        );
+
+        // **Asking for more of one costs the other.** At a fixed lateral slip,
+        // adding drive slip must REDUCE the sideways force — the property a
+        // per-axis clamp cannot have and the reason a car can be steered on the
+        // throttle.
+        let side_alone = tyre_force_n(&t, load, stat, 0.0, 0.08).1.abs();
+        let side_under_power = tyre_force_n(&t, load, stat, 0.30, 0.08).1.abs();
+        assert!(
+            side_under_power < side_alone * 0.8,
+            "wheelspin cost the tyre only {side_alone} → {side_under_power} N of \
+             grip; under the old two-box clamp it would have cost none"
+        );
+
+        // The signs: a wheel outrunning the road pushes the car forward, and a
+        // patch sliding right is resisted to the left.
+        assert!(tyre_force_n(&t, load, stat, 0.1, 0.0).0 > 0.0);
+        assert!(tyre_force_n(&t, load, stat, -0.1, 0.0).0 < 0.0);
+        assert!(tyre_force_n(&t, load, stat, 0.0, 0.1).1 < 0.0);
+        // No slip, no force; no load, no force; and no NaN reaches a solver.
+        assert_eq!(tyre_force_n(&t, load, stat, 0.0, 0.0), (0.0, 0.0));
+        assert_eq!(tyre_force_n(&t, 0.0, stat, 0.5, 0.5), (0.0, 0.0));
+        let (x, y) = tyre_force_n(&t, load, stat, f64::NAN, 0.1);
+        assert!(x.is_finite() && y.is_finite());
     }
 
     /// Steering tightens with speed, monotonically, between the two authored
@@ -2601,23 +3348,76 @@ mod tests {
     }
 
     /// **The class decides what revs mean**, and the default is silence.
+    ///
+    /// Since VEH2a the road car's revs are its own **rpm** between idle and the
+    /// redline, so this drives one rather than asserting an algebraic identity on
+    /// the road speed — and it asserts the thing that identity could never say:
+    /// that the revs **fall when the box shifts up** while the car keeps
+    /// accelerating.
     #[test]
     fn the_engine_state_is_the_classs_own_and_defaults_to_silent() {
         let mut v = RaycastVehicle::new(rig(4));
-        let top = v.tuning().max_speed_mps;
+        // A car at rest with no throttle is at idle, which is revs of zero.
         assert_eq!(v.engine_state(0.0), (0.0, 0.0));
         v.control(VehicleControls {
             throttle: -1.0,
             ..Default::default()
         });
-        let (revs, load) = v.engine_state(-top / 2.0);
-        assert!(
-            (revs - 0.5).abs() < 1e-12,
-            "reversing at half speed is {revs}"
+        assert_eq!(
+            v.engine_state(0.0).1,
+            1.0,
+            "reversing is not quieter than driving"
         );
-        assert_eq!(load, 1.0, "reversing is not quieter");
-        // Past the top speed it saturates rather than screaming.
-        assert_eq!(v.engine_state(top * 3.0).0, 1.0);
+
+        // Now drive it, on the ground, and watch the revs saw.
+        let mut v = RaycastVehicle::new(rig(4));
+        let t = *v.tuning();
+        for w in v.wheels_mut() {
+            w.contact = Some(WheelContact {
+                point: DVec3::new(0.0, -1.0, 0.0),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.12 + 0.35,
+            });
+        }
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut chassis = resting(1_200.0);
+        let mut out = Vec::new();
+        let (mut revs, mut gears, mut drops) = (Vec::new(), Vec::new(), 0usize);
+        for _ in 0..600 {
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+            // Integrate the chassis crudely: this arm is about the ENGINE, and a
+            // rigid body would only add rapier to a claim about revs.
+            let fz: f64 = out.iter().map(|f| f.force.z).sum();
+            chassis.linvel.z += fz / 1_200.0 / 60.0;
+            let r = v.engine_state(chassis.linvel.z).0;
+            if revs.last().is_some_and(|p: &f64| r < *p - 0.05) {
+                drops += 1;
+            }
+            revs.push(r);
+            gears.push(v.gear());
+        }
+        assert!(
+            chassis.linvel.z > 8.0,
+            "the rig only reached {} m/s, so there was nothing to shift",
+            chassis.linvel.z
+        );
+        assert!(
+            *gears.last().unwrap() > 1,
+            "the box never left first: {:?}",
+            &gears[..8]
+        );
+        assert!(
+            drops >= 1,
+            "the revs never fell across {} gears — a rev needle that only ever \
+             rises is road speed wearing a tachometer, which is exactly what \
+             VEH1a shipped",
+            gears.last().unwrap()
+        );
+        assert!(revs.iter().all(|r| (0.0..=1.0).contains(r)));
 
         // The trait's default is silence: a class that has not thought about
         // sound makes none, rather than inheriting a road car's curve.
@@ -2653,11 +3453,19 @@ mod tests {
     /// **The handbrake is the rear wheels and only those** — which is what makes
     /// a handbrake turn a turn rather than a stop.
     ///
-    /// Asserted at the model, where a wheel's identity is visible: `solve`
-    /// pushes three forces per grounded wheel in rig order (suspension, lateral,
-    /// longitudinal), so wheel `i`'s longitudinal is `out[3i + 2]`, and the
-    /// fixture's first two wheels are the front pair (`+Z`, therefore steered).
-    /// Applied to all four, this arm would find the front pair braking too.
+    /// Asserted at the model, where a wheel's identity is visible: `solve` pushes
+    /// **two** forces per grounded wheel in rig order — the suspension and the
+    /// tyre — so wheel `i`'s ground force is `out[2i + 1]`, and the fixture's
+    /// first two wheels are the front pair (`+Z`, therefore steered). Applied to
+    /// all four, this arm would find the front pair braking too.
+    ///
+    /// Three became two at VEH2a: the lateral and longitudinal forces used to be
+    /// pushed separately because they were computed separately, which is the
+    /// two-box defect stated in the output vector. One contact patch makes one
+    /// force.
+    ///
+    /// And the handbrake is now a **lock**, not a force: the rear wheels' `ω` is
+    /// what it stops, so this arm reads the wheel state as well as the newtons.
     #[test]
     fn the_handbrake_is_the_rear_wheels_and_only_those() {
         let mut v = RaycastVehicle::new(rig(4));
@@ -2668,6 +3476,8 @@ mod tests {
                 normal: DVec3::Y,
                 distance_m: t.rest_length_m - 0.1 + 0.35,
             });
+            // Rolling with the road, so the handbrake has something to stop.
+            w.omega_rad_s = 8.0 / 0.35;
         }
         v.control(VehicleControls {
             handbrake: true,
@@ -2677,10 +3487,17 @@ mod tests {
         // Rolling forward, so there is something for a brake to resist.
         chassis.linvel = DVec3::new(0.0, 0.0, 8.0);
         let mut out = Vec::new();
-        v.solve(chassis, 1.0 / 60.0, &mut out);
+        // Half a second, because a handbrake LOCKS a wheel rather than pushing
+        // the car: on the first step the wheel is still rolling with the road and
+        // the honest ground force is zero. A one-step arm would have measured the
+        // model's transient and called it the handbrake.
+        for _ in 0..30 {
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+        }
 
-        let long = |i: usize| out[i * 3 + 2].force.z;
-        let (front, rear) = ((long(0) + long(1)) * 0.5, (long(2) + long(3)) * 0.5);
+        let ground = |i: usize| out[i * 2 + 1].force.z;
+        let (front, rear) = ((ground(0) + ground(1)) * 0.5, (ground(2) + ground(3)) * 0.5);
         assert!(
             rear < -100.0,
             "a locked rear wheel must resist the motion; it pushed {rear} N"
@@ -2690,13 +3507,152 @@ mod tests {
             "the front wheels braked {front} N against the rear's {rear} N — the \
              handbrake reached a steered wheel"
         );
-        // …and the front pair is only rolling resistance, which is a small
-        // fraction of the load rather than a brake.
+        // …and the front pair is only rolling resistance, which barely slows a
+        // free-rolling wheel at all.
         let load = v.wheels()[0].load_n;
         assert!(
-            front.abs() < load * t.rolling_resistance * 1.5,
-            "the front wheels carried {front} N, which is more than rolling \
+            front.abs() < load * t.rolling_resistance * 4.0,
+            "the front wheels carried {front} N, which is far more than rolling \
              resistance on a {load} N load"
         );
+        // THE LOCK, read off the wheels: the rears are turning far slower than
+        // the road and the fronts are still rolling with it.
+        let w = v.wheels();
+        assert!(
+            w[2].omega_rad_s < w[0].omega_rad_s * 0.6,
+            "the rear wheels are turning at {} rad/s against the front's {} — the \
+             handbrake did not lock anything",
+            w[2].omega_rad_s,
+            w[0].omega_rad_s
+        );
+        assert!(
+            w[2].slip_ratio < -0.05 && w[0].slip_ratio > -0.05,
+            "the rears are not slipping ({}) or the fronts are ({})",
+            w[2].slip_ratio,
+            w[0].slip_ratio
+        );
+    }
+
+    /// **A wheel is a wheel now**: `ω` is a state, the slip ratio is defined
+    /// against it, and the drawn spin is DERIVED from it rather than from how
+    /// fast the car is going.
+    ///
+    /// The clause-1 arm, written against the mutation that matters: a `spin_deg`
+    /// still integrated from `along_v / r` would pass any check that only asks
+    /// "does the wheel turn", and would show a locked wheel rolling.
+    #[test]
+    fn the_wheel_has_its_own_speed_and_the_drawn_spin_follows_it() {
+        let mut v = RaycastVehicle::new(rig(4));
+        let t = *v.tuning();
+        for w in v.wheels_mut() {
+            w.contact = Some(WheelContact {
+                point: DVec3::new(0.0, -1.0, 0.0),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.1 + 0.35,
+            });
+        }
+        let mut chassis = resting(1_200.0);
+        chassis.linvel = DVec3::new(0.0, 0.0, 10.0);
+        let mut out = Vec::new();
+
+        // Free rolling: ω converges on v/r and the slip goes to nothing.
+        for _ in 0..120 {
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+        }
+        let free = 10.0 / 0.35;
+        // EXACTLY rolling, not nearly: a sticking wheel's resist budget is paid
+        // inside the stick force the ground supplies, so the wheel really is held
+        // at the road's speed rather than dragged a brake-step below it.
+        assert!(
+            (v.wheels()[0].omega_rad_s - free).abs() < 1e-9,
+            "a free-rolling wheel settled at {} rad/s against {free}",
+            v.wheels()[0].omega_rad_s
+        );
+        assert_eq!(
+            v.wheels()[0].slip_ratio,
+            0.0,
+            "a wheel the ground is holding at rolling speed is not slipping"
+        );
+        // …and the force it takes is exactly the engine braking and the rolling
+        // resistance divided by the radius — the equilibrium, not a transient.
+        let drag = out
+            .iter()
+            .map(|f| f.force.z)
+            .filter(|z| z.abs() > 1e-9)
+            .sum::<f64>();
+        assert!(
+            drag < 0.0 && drag > -1_200.0,
+            "a coasting car's total drag is {drag} N, which is a brake"
+        );
+        let before = v.wheels()[0].spin_deg;
+        out.clear();
+        v.solve(chassis, 1.0 / 60.0, &mut out);
+        assert_ne!(v.wheels()[0].spin_deg, before, "the drawn wheel is frozen");
+
+        // **LOCKUP**: full brake, and the wheel stops turning while the car does
+        // not — which is the state P29.7 could not represent at all.
+        v.control(VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        });
+        for _ in 0..30 {
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+        }
+        let w = v.wheels()[0];
+        assert!(
+            w.omega_rad_s < free * 0.5,
+            "the braked wheel is still turning at {} of a free {free}",
+            w.omega_rad_s
+        );
+        assert!(
+            w.slip_ratio < -0.1,
+            "a locked wheel under a moving car has slip {}",
+            w.slip_ratio
+        );
+        let locked = v.wheels()[0].spin_deg;
+        out.clear();
+        v.solve(chassis, 1.0 / 60.0, &mut out);
+        assert!(
+            (v.wheels()[0].spin_deg - locked).abs() < 3.0,
+            "a locked wheel turned {:.2}° in one step — the drawn spin is still \
+             coming from the road speed",
+            v.wheels()[0].spin_deg - locked
+        );
+
+        // **WHEELSPIN**: full throttle from a standstill on a LOW-GRIP surface,
+        // and ω outruns the road.
+        //
+        // Low grip on purpose, and the reason is itself a claim worth recording:
+        // the default rig on dry tarmac does **not** spin its wheels off the
+        // line — 1 852 N·m of wheel torque is 5.3 kN of thrust against 10.3 kN of
+        // grip, so the tyres simply hold and the car goes. A model in which every
+        // standing start is a burnout is a model whose grip is decorative.
+        let mut v = RaycastVehicle::new(rig(4));
+        v.tune("longitudinal_grip", 0.3);
+        v.tune("lateral_grip", 0.3);
+        for w in v.wheels_mut() {
+            w.contact = Some(WheelContact {
+                point: DVec3::new(0.0, -1.0, 0.0),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.1 + 0.35,
+            });
+        }
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let still = resting(1_200.0);
+        for _ in 0..5 {
+            out.clear();
+            v.solve(still, 1.0 / 60.0, &mut out);
+        }
+        assert!(
+            v.wheels()[0].slip_ratio > 0.2,
+            "a standing start produced slip of only {}",
+            v.wheels()[0].slip_ratio
+        );
+        assert!(v.wheels()[0].omega_rad_s > 0.0);
     }
 }

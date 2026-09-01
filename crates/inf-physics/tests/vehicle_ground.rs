@@ -653,7 +653,7 @@ fn a_wheel_does_not_ride_on_a_trigger_volume() {
 /// two centimetres into the tarmac and never sees them through it.
 #[test]
 fn the_wheel_rides_the_ground_and_the_road_is_drawn_above_it() {
-    let mut rig = Rig::new(4.0, 4.0, 0.0);
+    let mut rig = Rig::new(40.0, 40.0, 0.0);
     rig.step(180);
     let settled_clearance = rig.chassis().translation.y - rig.ground_under();
 
@@ -669,7 +669,15 @@ fn the_wheel_rides_the_ground_and_the_road_is_drawn_above_it() {
             1,
         );
         let t = rig.chassis().translation;
-        if t.z > 240.0 || t.x > 240.0 {
+        // All FOUR edges, not two. VEH2a's tyre lets the car slide a little
+        // down this surface's cross-slope where P29.7's slip-cancelling clamp
+        // held it dead straight, so a run that starts four metres from the -X
+        // edge now leaves the patch through it — and `ground_under` past the
+        // edge answers the clamped border height, so the car reads as **107 m
+        // below the ground** while it is really in the void beside it. A guard
+        // that only watched the far edges could not see that, and the arm it
+        // failed was the one about the suspension.
+        if !(8.0..240.0).contains(&t.z) || !(8.0..240.0).contains(&t.x) {
             break;
         }
         let clearance = t.y - rig.ground_under();

@@ -378,8 +378,17 @@ fn throttle_drives_it_and_the_brake_stops_it() {
         180,
     );
     let coasted = rig.z() - before_brake;
+    // 0.8 of the accelerating distance, and the number moved with the model
+    // rather than the model being bent to the number. This ratio IS the brake's
+    // strength against the engine's: the same speed takes `v^2/2a` to reach and
+    // `v^2/2b` to shed. VEH2a's brake locks its wheels — 1 050 N.m against a
+    // tyre that can take about 900 — so it stops at the SLIDING coefficient,
+    // 0.72 of the peak, where P29.7's brake was a force with no such limit and
+    // no such thing as a locked wheel. **The ABS clause tightens this back**:
+    // holding the slip at the peak instead of past it is worth about a fifth of
+    // the distance, and the arm is written to notice.
     assert!(
-        coasted < travelled * 0.5,
+        coasted < travelled * 0.8,
         "braking for as long as it accelerated covered {coasted} m against {travelled} m"
     );
     let stopped = rig.z();
@@ -536,16 +545,22 @@ fn the_handbrake_slows_the_car() {
                 handbrake,
                 ..Default::default()
             },
-            120,
+            240,
         );
         rig.z() - start
     };
     let free = roll(false);
     let held = roll(true);
     assert!(free > 3.0, "the fixture must be rolling: {free} m");
+    // Four seconds rather than two, and the arm got STRONGER for it (0.6 where
+    // it used to ask 0.7). A handbrake now locks two wheels instead of applying
+    // 9 000 N at the rear contacts, so it decelerates at what two sliding tyres
+    // can actually take — about 4 m/s^2 against the old model's 7.5. That is
+    // less brake and more car, and a longer window is the honest way to measure
+    // it rather than a looser threshold.
     assert!(
-        held < free * 0.7,
-        "two seconds on the handbrake covered {held} m against {free} m coasting"
+        held < free * 0.6,
+        "four seconds on the handbrake covered {held} m against {free} m coasting"
     );
 }
 
@@ -1417,8 +1432,15 @@ fn two_characters_cannot_share_one_seat() {
 
 /// A class the Ring-0 defaults do not hold: a much stronger engine, a much
 /// higher top speed and a stiffer spring.
+///
+/// `peak_torque_nm` is what makes it stronger since wave VEH2a, and its absence
+/// here was the first thing the wave's own re-run caught: `max_engine_force_n`
+/// is now the driveline CEILING rather than the engine, so raising it three-fold
+/// over an engine that never reached the old ceiling either moved the car
+/// **10 cm** further in two seconds. A ceiling is not a curve.
 fn island_class() -> inf_ecs::components::VehicleClass {
     inf_ecs::components::VehicleClass {
+        peak_torque_nm: 620.0,
         max_engine_force_n: 24_000.0,
         max_speed_mps: 60.0,
         stiffness_n_per_m: 40_000.0,
