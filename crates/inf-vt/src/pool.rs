@@ -336,7 +336,11 @@ pub fn split_pool_budget(base: VtPoolConfig, weights: &[(PageFormat, u64)]) -> V
             let donor_page = arms[d].0.page_bytes(stored).max(1);
             // `want > slack` here, so the shortfall is positive.
             let needed = (want - slack).div_ceil(donor_page);
-            if needed <= pages[d] - 1 {
+            // `needed < pages[d]`, i.e. the donor keeps a page of its own —
+            // spelled as the strict inequality clippy wants rather than as
+            // `<= pages[d] - 1`, which is the same number and one subtraction
+            // a reader has to check for underflow.
+            if needed < pages[d] {
                 pages[d] -= needed;
                 pages[i] = 1;
             }
