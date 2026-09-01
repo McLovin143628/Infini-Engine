@@ -854,7 +854,6 @@ mod tests {
     /// fails on a machine with a different allocator.
     #[test]
     fn bc7_against_bc1_on_the_committed_ground_library() {
-        use crate::ground::GroundKind;
         for (slot, extent) in [
             ("albedo", crate::ground::GROUND_ALBEDO_EXTENT),
             // The ORM triple too, because `image_import_policy` deliberately
@@ -870,10 +869,8 @@ mod tests {
     /// One slot of the ground library, measured three ways. Factored out of the
     /// arm above so the albedo and the ORM triple are the same measurement and
     /// not two that happen to agree.
-    fn bc7_ground_slot(slot: &str, n: u32) {
+    fn bc7_ground_slot(slot: &str, side: u32) {
         use crate::ground::GroundKind;
-        let (n_, N) = (n, n);
-        let _ = n_;
         let mut total = [0u64; 3];
         let mut worst = [0u32; 3];
         let mut texels = 0u64;
@@ -889,16 +886,16 @@ mod tests {
             for (i, f) in [0usize, 1, 2].into_iter().enumerate() {
                 let t = std::time::Instant::now();
                 enc[i] = match f {
-                    0 => compress_bc1(src, N, N),
-                    1 => compress_bc3(src, N, N),
-                    _ => compress_bc7(src, N, N),
+                    0 => compress_bc1(src, side, side),
+                    1 => compress_bc3(src, side, side),
+                    _ => compress_bc7(src, side, side),
                 };
                 encode_ms[i] += t.elapsed().as_millis();
             }
             let dec = [
-                decode_bc1(&enc[0], N, N),
-                decode_bc3(&enc[1], N, N),
-                decode_bc7(&enc[2], N, N),
+                decode_bc1(&enc[0], side, side),
+                decode_bc3(&enc[1], side, side),
+                decode_bc7(&enc[2], side, side),
             ];
             for (i, d) in dec.iter().enumerate() {
                 for (n, s) in src.iter().enumerate() {
@@ -912,12 +909,12 @@ mod tests {
                     worst[i] = worst[i].max(e);
                 }
             }
-            texels += u64::from(N) * u64::from(N) * 3;
+            texels += u64::from(side) * u64::from(side) * 3;
         }
         let mae = |t: u64| (t * 1000) / texels;
         let mtexels = (texels / 3) as u128 / 1_000_000;
         println!(
-            "IASSET2 BC7 vs BC1/BC3 on {} ground {slot} maps ({N}^2 each):\n  \
+            "IASSET2 BC7 vs BC1/BC3 on {} ground {slot} maps ({side}^2 each):\n  \
              MAE x1000/channel  BC1 {}  BC3 {}  BC7 {}\n  \
              WORST /channel     BC1 {}  BC3 {}  BC7 {}\n  \
              bytes/block        BC1 8  BC3 16  BC7 16\n  \
