@@ -140,13 +140,25 @@ const ZSTD_BLOCK_LEVEL: i32 = 12;
 
 /// Compress `raw` under `codec`, returning the block's **wire bytes**.
 ///
-/// [`Raw`](BlockCodec::Raw) returns the input unchanged. Every other codec
-/// returns the `raw_len` prefix plus its frame — **and falls back to
-/// [`Raw`](BlockCodec::Raw)** (reported in the returned codec) whenever the
-/// result would not be strictly smaller than the input, or the input is below
-/// [`MIN_COMPRESSIBLE`]. A block therefore never grows, and a container's
+/// [`Raw`](BlockCodec::Raw) **borrows the input unchanged**. Every other codec
+/// returns an owned `raw_len` prefix plus its frame — **and falls back to
+/// [`Raw`](BlockCodec::Raw)** (reported in the returned codec, and borrowing)
+/// whenever the result would not be strictly smaller than the input, or the input
+/// is below [`MIN_COMPRESSIBLE`]. A block therefore never grows, and a container's
 /// directory always states what actually happened rather than what was asked
 /// for.
+///
+/// # Why this returns a `Cow` and not a `Vec`
+///
+/// The symmetric half of [`decode_block`]'s promise, and it was missed once: a
+/// container that compresses **nothing** must not pay for the feature. Every
+/// caller is a container builder walking its whole tile/chunk map, so a `Vec`
+/// return made the loose (all-[`Raw`](BlockCodec::Raw)) writer materialize a
+/// second full copy of the payload — a 550 MB `.inf_terrain` write-back went from
+/// a ~2× transient to ~3×, for a copy whose only content was the bytes the
+/// builder was already holding. Borrowing costs nothing on the compressed path
+/// (that arm allocates its frame regardless) and removes the copy entirely on the
+/// raw one.
 ///
 /// # Alignment
 ///
@@ -155,9 +167,9 @@ const ZSTD_BLOCK_LEVEL: i32 = 12;
 /// the mmap doctrine's cast-in-place kinds may not take this path at all. Nothing
 /// casts a compressed block; the decompressed output is a fresh allocation whose
 /// alignment the caller controls.
-pub fn encode_block(codec: BlockCodec, raw: &[u8]) -> Result<(BlockCodec, Vec<u8>)> {
+pub fn encode_block(codec: BlockCodec, raw: &[u8]) -> Result<(BlockCodec, Cow<'_, [u8]>)> {
     if codec == BlockCodec::Raw || raw.len() < MIN_COMPRESSIBLE {
-        return Ok((BlockCodec::Raw, raw.to_vec()));
+        return Ok((BlockCodec::Raw, Cow::Borrowed(raw)));
     }
     let frame = match codec {
         BlockCodec::Raw => unreachable!("handled above"),
@@ -167,12 +179,12 @@ pub fn encode_block(codec: BlockCodec, raw: &[u8]) -> Result<(BlockCodec, Vec<u8
     };
     if frame.len() + LEN_PREFIX >= raw.len() {
         // Incompressible under this codec: never inflate.
-        return Ok((BlockCodec::Raw, raw.to_vec()));
+        return Ok((BlockCodec::Raw, Cow::Borrowed(raw)));
     }
     let mut out = Vec::with_capacity(LEN_PREFIX + frame.len());
     out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
     out.extend_from_slice(&frame);
-    Ok((codec, out))
+    Ok((codec, Cow::Owned(out)))
 }
 
 /// Decode a block stored under `codec`, whose decompressed length the container
@@ -317,9 +329,63 @@ mod tests {
         let raw = corpus(4096);
         let (used, stored) = encode_block(BlockCodec::Raw, &raw).unwrap();
         assert_eq!(used, BlockCodec::Raw);
-        assert_eq!(stored, raw, "a raw block is literally the input bytes");
+        assert_eq!(
+            stored.as_ref(),
+            raw,
+            "a raw block is literally the input bytes"
+        );
+        // **Both directions** (IASSET1 audit). The decode half was always
+        // asserted; the encode half was not, and a `Vec` return made every
+        // all-raw container build a second full copy of its own payload.
+        assert!(
+            matches!(stored, Cow::Borrowed(_)),
+            "a raw ENCODE must not allocate either"
+        );
         let back = decode_block(used, &stored, raw.len()).unwrap();
         assert!(matches!(back, Cow::Borrowed(_)), "raw must not allocate");
+    }
+
+    /// **The invariant is on the codec that was USED, not on the one asked for**:
+    /// whenever `encode_block` reports [`Raw`](BlockCodec::Raw) it must be
+    /// borrowing, whichever of the three fallback doors it came through.
+    ///
+    /// Written as a conditional rather than as "this corpus is incompressible for
+    /// everyone", because that assumption is false and the first draft of this
+    /// test proved it: `lz4_flex` finds something in a multiplicative-hash byte
+    /// stream that DEFLATE and zstd also find, and the assertion that fired said
+    /// `left: Lz4, right: Raw`. A test that has to be right about a codec's
+    /// appetite is testing the codec; this one tests the return type.
+    #[test]
+    fn every_raw_result_is_a_borrow_whichever_door_it_came_through() {
+        let noise: Vec<u8> = (0..8192u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+            .collect();
+        let tiny = corpus(MIN_COMPRESSIBLE - 1);
+        let mut raws = 0usize;
+        let mut owned = 0usize;
+        for codec in BlockCodec::ALL {
+            for input in [noise.as_slice(), tiny.as_slice()] {
+                let (used, stored) = encode_block(codec, input).unwrap();
+                match used {
+                    BlockCodec::Raw => {
+                        raws += 1;
+                        assert!(
+                            matches!(stored, Cow::Borrowed(_)),
+                            "{codec:?} reported Raw and still allocated"
+                        );
+                        assert_eq!(stored.as_ref(), input);
+                    }
+                    _ => {
+                        owned += 1;
+                        assert!(matches!(stored, Cow::Owned(_)), "{codec:?}");
+                    }
+                }
+            }
+        }
+        // Non-vacuity from both sides: the sub-threshold input forces a Raw for
+        // every codec, and the noise compresses for at least one of them.
+        assert!(raws >= BlockCodec::ALL.len(), "no Raw result was exercised");
+        assert!(owned > 0, "no compressed result was exercised");
     }
 
     #[test]
@@ -347,7 +413,7 @@ mod tests {
         for codec in BlockCodec::ALL {
             let (used, stored) = encode_block(codec, &tiny).unwrap();
             assert_eq!(used, BlockCodec::Raw, "{codec:?} on a sub-threshold block");
-            assert_eq!(stored, tiny);
+            assert_eq!(stored.as_ref(), tiny);
         }
     }
 
@@ -355,9 +421,10 @@ mod tests {
     fn a_lying_length_prefix_is_refused_before_it_allocates() {
         let raw = corpus(32 * 1024);
         for codec in [BlockCodec::Lz4, BlockCodec::Deflate, BlockCodec::Zstd] {
-            let (used, mut stored) = encode_block(codec, &raw).unwrap();
+            let (used, stored) = encode_block(codec, &raw).unwrap();
             assert_eq!(used, codec);
             // Claim 4 GiB out of a few kilobytes.
+            let mut stored = stored.into_owned();
             stored[..LEN_PREFIX].copy_from_slice(&(4u64 << 30).to_le_bytes());
             let err = decode_block(used, &stored, raw.len()).unwrap_err();
             assert!(
@@ -374,7 +441,8 @@ mod tests {
         // decode, not by the bound.
         let raw = corpus(32 * 1024);
         for codec in [BlockCodec::Lz4, BlockCodec::Deflate, BlockCodec::Zstd] {
-            let (used, mut stored) = encode_block(codec, &raw).unwrap();
+            let (used, stored) = encode_block(codec, &raw).unwrap();
+            let mut stored = stored.into_owned();
             stored[..LEN_PREFIX].copy_from_slice(&((raw.len() / 2) as u64).to_le_bytes());
             assert!(
                 decode_block(used, &stored, raw.len()).is_err(),

@@ -582,7 +582,7 @@ impl TerrainAssetBuilder {
         // codec it actually used, which is `Raw` for a tile compression would
         // inflate — so the directory always states what happened, and the payload
         // can never be larger than the uncompressed one would have been.
-        let stored: Vec<(BlockCodec, Vec<u8>)> = self
+        let stored: Vec<(BlockCodec, std::borrow::Cow<'_, [u8]>)> = self
             .tiles
             .values()
             .map(|blob| encode_block(self.codec, blob))

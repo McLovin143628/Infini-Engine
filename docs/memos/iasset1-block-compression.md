@@ -424,7 +424,72 @@ tested. It belongs in the local workflow, not only in `ci.yml`.
 *One advisory, unrelated and unavoidable.* `RUSTSEC-2026-0274` (double free in
 `rtrb`'s `ReadChunk::commit` when an element's `Drop` panics) landed upstream
 against kira's ring buffer while this wave was in flight, and reds
-`cargo deny check advisories`. Fixed lock-only: `rtrb 0.3.4 → 0.3.5`.
+`cargo deny check advisories`. Fixed lock-only: `rtrb 0.3.4 → 0.3.5`. The
+advisory's own `patched = ["^0.3.5", ">= 0.4.0"]` names 0.3.5, and recommends it
+over 0.4.0 for 0.3.x users because 0.4.0 changes `is_abandoned()`'s behaviour —
+so the lock-only bump is the right one and not merely the smallest.
+
+---
+
+## THE ADVERSARIAL AUDIT (2026-09-01)
+
+Every headline number above was **independently reproduced** on the audit tree —
+the island re-cooked from a release binary rebuilt with the audit's own fixes in
+it. Both packs came out at 604 631 836 B (`--block-codec raw`) and 247 497 020 B
+(default), the compressed one **byte-identical** to the pack this wave committed;
+the `pack ls --totals` table reproduced row for row; and the 300-frame final-state
+hash is `6a34aa77b6095aeb0af1fe954cb5d166` on **both**, which is the lossless
+claim's strongest arm holding on a second machine-run rather than on a recollection
+of one. The three re-blessed samples were byte-compared: exactly one differing
+byte each, at offset 8, `1→2` / `5→6` / `5→6`, sizes unchanged. Both gates named
+in the wave's own text — the anti-clause and the pack-name drift gate — were
+mutation-verified and fail with the sentence they promise.
+
+### Two hostile-input findings, both in the wave's own ceiling story
+
+**1. The LZ4 decoder this workspace compiled was the unsafe one.**
+`default-features = false` was reached for to drop `lz4_flex`'s `frame` format,
+and silently dropped `safe-decode` and `safe-encode` with it — so the crate
+compiled `block/decompress.rs` (raw-pointer output through `PtrSink`) instead of
+`block/decompress_safe.rs` (`forbid(unsafe_code)`). `decode_block` parses a
+container the user downloaded, in the shipped player. Nothing about the bytes can
+tell you which decoder ran, so the fix carries a manifest pin in `block.rs`
+rather than a behavioural test. Cargo.lock did not move.
+
+**2. A doctored header could mint its own block ceiling.**
+`tile_raw_ceiling(header.tile_resolution)` is the bound a length claim is refused
+against, and `tile_resolution` was checked only for `>= 2`. `u32::MAX` saturates
+the ceiling to `usize::MAX`, at which point a forty-byte block declares a
+terabyte and gets it. `MAX_TILE_RESOLUTION = 2049` (8× the island's 257) is now
+enforced by the parser, by the builder (a writer must not manufacture a file its
+own reader rejects), by the import validator, and by a clamp inside the ceiling
+function itself. Worst case goes from unbounded to ~256 MiB. `.inf_voxel` was
+never exposed — `chunk_raw_ceiling()` is a constant.
+
+A third, smaller one: `TileStore::contains_tile`'s default is
+`tile_bytes(key).is_some()`, which was free while that returned a sub-slice and
+is a whole 581 KiB tile's *decompress* now that it returns a `Cow`. No shipping
+caller reaches it today, which is precisely how it would have been found by a
+profile of the wave *after* the one that added a caller. The asset-backed stores
+answer from their directory now.
+
+The rest of the audit's changes were ledger and discoverability, and are listed in
+`git log 52e1fbda..` — the `--block-codec` knob missing from both help texts, the
+`ratio 1.000` a `--totals` reader takes as "nothing was won", `.inf_part`'s
+60 509 B restated three times as a size when it is a saving, and
+`docs/book/src/packaging.md` still telling users the streaming kinds ship
+uncompressed.
+
+**What the audit did NOT change, and why.** The two new timing arms (the bake-off's
+step-budget check and the GUID probe's frame-share check) assert on wall-clock
+milliseconds. That is *not* against this repo's practice — `budget.rs` documents a
+whole taxonomy of budget classes and some thirty test files measure against them —
+and both arms were re-measured with the margins to say so: the bake-off's absolute
+arm lands at 0.73 ms against a 4.0 ms budget (5.5×), its discriminating arm at
+0.045 vs 0.167 ms/tile (3.7×), and the probe's verdict at 0.077 % of a frame
+against a 1.0 % line (13×). They stay, with the implementer's own flake caveat
+standing. The `.inf_part` decision, the `.inf_vmesh` block, and the atom table all
+re-checked out as recorded.
 
 ---
 

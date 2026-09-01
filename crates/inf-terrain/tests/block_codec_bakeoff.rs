@@ -82,7 +82,7 @@ fn measure(view: &TerrainAssetView<'_>, keys: &[TileKey], codec: BlockCodec) -> 
         .collect();
 
     let t = Instant::now();
-    let stored: Vec<(BlockCodec, Vec<u8>)> = raws
+    let stored: Vec<(BlockCodec, std::borrow::Cow<'_, [u8]>)> = raws
         .iter()
         .map(|r| inf_asset::block::encode_block(codec, r).expect("encode"))
         .collect();

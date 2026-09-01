@@ -398,7 +398,7 @@ impl VoxelAssetBuilder {
         // Compress each chunk independently (IASSET1). `encode_block` reports
         // the codec it actually used, which is `Raw` for a chunk compression
         // would inflate — so the directory always states what happened.
-        let stored: Vec<(BlockCodec, Vec<u8>)> = self
+        let stored: Vec<(BlockCodec, std::borrow::Cow<'_, [u8]>)> = self
             .chunks
             .values()
             .map(|blob| encode_block(self.codec, blob))
