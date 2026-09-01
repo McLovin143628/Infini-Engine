@@ -82,7 +82,11 @@ fn sun_disc(dir: vec3<f32>, r: f32) -> vec3<f32> {
     // 1 at the centre, 0 at the rim.
     let centre = clamp((cos_a - edge) / max(1.0 - edge, 1e-9), 0.0, 1.0);
     let limb = pow(centre, SUN_LIMB);
-    let t = atmos_sample_transmittance(r, dir.y);
+    // The body door, not the raw table read: below the horizon the raw read
+    // clamps onto the tangent texel and the disc survives its own setting as a
+    // red blob hanging under the ground — the exact opposite of the comment
+    // above it (wave GTA1).
+    let t = atmos_sample_body_transmittance(r, dir.y, edge);
     return atmos.sun_color.rgb * t * (atmos.params.y * SUN_DISC_GAIN * limb);
 }
 
@@ -118,7 +122,9 @@ fn moon_disc(dir: vec3<f32>, r: f32) -> vec3<f32> {
     let lit = smoothstep(boundary - 0.12, boundary + 0.12, sx);
     // Gentle rim darkening so it reads as a sphere rather than a sticker.
     let rim = sqrt(max(1.0 - (sx * sx + sy * sy), 0.0));
-    let t = atmos_sample_transmittance(r, dir.y);
+    // Same body door as the sun disc: a moon below the horizon is behind the
+    // planet, and the raw table read would keep it visible (wave GTA1).
+    let t = atmos_sample_body_transmittance(r, dir.y, edge);
     return atmos.moon_color.rgb * t
         * (atmos.params.y * MOON_DISC_GAIN * lit * (0.35 + 0.65 * rim));
 }

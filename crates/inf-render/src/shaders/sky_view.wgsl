@@ -24,9 +24,20 @@
 // follow-up; this constant is the honest stand-in for it.
 const ATMOS_MULTI_SCATTER: f32 = 0.022;
 
+// Sunlight reaching a sample at radius `r` where the sun stands at cosine `mu`
+// from the sample's local up.
+//
+// The `atmos_horizon_visibility` factor is what makes this "the sun's light"
+// rather than "the last texel of the u axis" — see its comment in
+// `atmosphere.wgsl`. Without it every below-horizon `mu` clamps onto the
+// horizon-tangent texel and the march multiplies sunset red into a midnight sky.
+// This pass keeps its own sampler bindings (it BAKES the sky-view LUT and cannot
+// bind the LUT it is writing), so it cannot call
+// `atmos_sample_body_transmittance`; the factor is the same one.
 fn transmittance_to_sun(r: f32, mu: f32) -> vec3<f32> {
     let uv = atmos_transmittance_params_to_uv(r, mu);
-    return textureSampleLevel(atmos_t_lut, atmos_t_smp, uv, 0.0).rgb;
+    let t = textureSampleLevel(atmos_t_lut, atmos_t_smp, uv, 0.0).rgb;
+    return t * atmos_horizon_visibility(r, mu, atmos.sun_dir.w);
 }
 
 @compute @workgroup_size(8, 8, 1)

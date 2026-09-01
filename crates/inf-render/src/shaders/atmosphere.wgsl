@@ -219,6 +219,44 @@ fn atmos_transmittance_params_to_uv(r_in: f32, mu_in: f32) -> vec2<f32> {
     return vec2<f32>(u, v);
 }
 
+// ── the planet's own shadow (wave GTA1) ────────────────────────────────────
+//
+// The parameterization above maps `u` over `d ∈ [d_min, d_max]`, where `d_max`
+// is the HORIZON-TANGENT ray — the longest path that still misses the ground.
+// Every direction below that tangent is off the end of the axis, so a
+// clamp-to-edge sampler (which is itself load-bearing, see `passes::sky_lut`)
+// hands back the tangent texel: the reddest entry in the whole table, ~9.7 % of
+// the red channel surviving against ~0.004 % of the blue. Read as "the sun's
+// light at this sample" that is a lie of the worst kind — it says a sun eight
+// degrees underground still delivers sunset red, which is exactly the band that
+// used to sit on the midnight horizon.
+//
+// So every sampler whose `mu` is a cosine toward a BODY (rather than along a
+// view ray) multiplies by this: 1 while the body is clear of the sample's own
+// local horizon, 0 once it is fully below it, smoothed across the body's angular
+// diameter because a disc sets over a finite time rather than instantly.
+//
+// The local horizon is per-SAMPLE, which is the whole reason this is not a
+// global "is the sun up" flag: a parcel of air 60 km up sees the sun until it is
+// 7.8° below the ground's horizon, and that difference IS civil twilight. A flag
+// on the sun's elevation would snap the whole sky to black at sunset; this keeps
+// the glow exactly as high as the lit air actually is.
+//
+// `disc_cos` is the body's `cos(angular radius)` — `atmos.sun_dir.w` or
+// `atmos.moon_dir.w`. Bruneton's `GetTransmittanceToSun` in one function.
+fn atmos_horizon_visibility(r: f32, mu: f32, disc_cos: f32) -> f32 {
+    let bottom = atmos.planet.x;
+    let rr = max(r, bottom + 1e-4);
+    let sin_h = min(bottom / rr, 1.0);
+    let cos_h = -sqrt(max(1.0 - sin_h * sin_h, 0.0));
+    // Half-width in cosine space: the body's angular radius projected onto the
+    // `mu` axis, where `d(mu)/d(theta) = -sin_h`. Floored so a degenerate disc
+    // still fades over something rather than snapping.
+    let ang = sqrt(max(1.0 - disc_cos * disc_cos, 0.0));
+    let w = max(sin_h * ang, 1e-4);
+    return smoothstep(-w, w, mu - cos_h);
+}
+
 // Ray-marched transmittance from radius `r` at zenith cosine `mu` to the top of
 // the atmosphere. CPU mirror: `crate::atmosphere::transmittance_to_top`.
 fn atmos_transmittance_integral(r: f32, mu: f32, steps: u32) -> vec3<f32> {

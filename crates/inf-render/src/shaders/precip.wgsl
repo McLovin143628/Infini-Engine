@@ -214,7 +214,9 @@ fn fs(in: PrecipVsOut) -> @location(0) vec4<f32> {
     // computed is scattered sky-like radiance, not a surface response.
     let sky = atmos_sample_skyview(atmos.planet.z, in.view_dir);
     let sun = normalize(atmos.sun_dir.xyz);
-    let sun_t = atmos_sample_transmittance(atmos.planet.z, sun.y);
+    // The body door (wave GTA1): rain at midnight has no sun highlight, and the
+    // raw table read would give it the horizon-tangent texel's sunset red.
+    let sun_t = atmos_sample_body_transmittance(atmos.planet.z, sun.y, atmos.sun_dir.w);
     let forward = pow(clamp(dot(in.view_dir, -sun), 0.0, 1.0), PRECIP_SUN_LOBE);
     let sun_l = atmos.sun_color.rgb * sun_t * atmos.params.y * forward * PRECIP_SUN_GAIN;
     let color = (sky * PRECIP_SKY_GAIN + sun_l) * atmos.precip_color.rgb;

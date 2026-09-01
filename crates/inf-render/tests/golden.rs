@@ -5559,10 +5559,22 @@ fn golden_sky_dusk() {
     );
 }
 
-/// Night: the sky collapses to the multiple-scattering floor and the procedural
-/// starfield appears. The star assertion is a *local-contrast* one (a bright
-/// isolated texel against a dark field) rather than a mean, because a mean would
-/// also pass for a uniformly-raised black level.
+/// Night: the sky collapses and the procedural starfield appears. The star
+/// assertion is a *local-contrast* one (a bright isolated texel against a dark
+/// field) rather than a mean, because a mean would also pass for a uniformly-
+/// raised black level.
+///
+/// **What it collapses TO moved in wave GTA1**, and the frame was re-blessed for
+/// it: this used to be "the multiple-scattering floor", which sounds like a
+/// physical quantity and was in fact the horizon-tangent transmittance texel
+/// leaking under the ground (`atmos_horizon_visibility`). With the planet's own
+/// shadow applied there is no sun term at midnight at all, so the sky here is
+/// black plus stars — the mean went from `[0.0098, 0.0080, 0.0094]` (a red-biased
+/// black) to `[0.0067, 0.0067, 0.0067]` (a colourless one). Every scattering
+/// model this engine has is sun-driven; moonlight scattering is not modelled, and
+/// a black night sky is the honest depiction of that rather than a red one.
+/// [`golden_sky_night_horizon`] is the arm that measures the band this frame
+/// cannot see.
 #[test]
 fn golden_sky_night() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -5580,6 +5592,100 @@ fn golden_sky_night() {
     assert!(
         peak > field + 0.12,
         "no starfield contrast (brightest {peak:.3} vs field {field:.3})"
+    );
+}
+
+/// **The night horizon, facing the sun** (wave GTA1) — the arm
+/// [`golden_sky_night`] could not have: it pitches 35° up and looks *away* from
+/// the sun, so the one place a below-horizon sun can still be seen is outside its
+/// frame entirely, and it bounds only blue.
+///
+/// This one stands where the defect lived. The transmittance LUT's `u` axis ends
+/// at the horizon-tangent ray, so before the fix every below-horizon sun cosine
+/// clamped onto that last texel — the reddest one in the table (the longest air
+/// path that still misses the planet) — and the sky-view march multiplied it into
+/// a band of sunset red sitting on the midnight horizon. Measured on this exact
+/// frame at 23:30 UTC, before the fix and after it:
+///
+/// | | band | R/G | band red ÷ zenith red |
+/// |---|---|---|---|
+/// | before | `[0.1174, 0.0281, 0.0318]` | **4.18** | **10.7×** |
+/// | after  | `[0.0068, 0.0068, 0.0068]` | 1.00 | 1.01× |
+///
+/// The second half of the test is the one that says which fix this is: at civil
+/// twilight the same band measures `[0.398, 0.223, 0.079]` — 59× the midnight
+/// red, and warm — because the gate is on each sample's own horizon rather than
+/// on the sun's elevation. A global fade would zero both.
+///
+/// So the assertions are on RED, not blue: an absolute ceiling (a night horizon
+/// is dark) and a ratio ceiling (whatever light is left must not be sunset
+/// coloured). Both are what the reference footage shows — a deep blue-black
+/// horizon with no warm band anywhere on it.
+#[test]
+fn golden_sky_night_horizon() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(84_600.0); // 23:30 UTC
+    assert!(bodies.sun.y < -0.2, "23:30 should be deep night");
+    // Facing the sun's azimuth with the horizon low in frame — the worst case,
+    // and the one a player standing on the island at midnight actually looks at.
+    let view = horizon_view(bodies.sun, 6.0);
+    let img = check_golden(&gpu, "sky_night_horizon", &scene, &view);
+
+    let top = mean_rgb(&img, 0, 0, W, H / 6);
+    let band = mean_rgb(&img, 0, H * 50 / 100, W, H * 58 / 100);
+    eprintln!("sky_night_horizon top {top:?} band {band:?}");
+    assert!(
+        band[0] < 0.05,
+        "the midnight horizon is glowing red: {band:?}"
+    );
+    assert!(
+        band[0] / band[1].max(1e-4) < 1.6,
+        "the midnight horizon is sunset-coloured: {band:?}"
+    );
+    assert!(
+        band[0] < top[0] + 0.02,
+        "the midnight horizon out-reds the sky above it: band {band:?} vs top {top:?}"
+    );
+
+    // ── and the arm that says WHICH fix this is ──
+    //
+    // The cheap way to kill the red band is a gate on the sun's own elevation:
+    // fade the whole sun term out as `sun.y` crosses zero. It would pass every
+    // assertion above and it would also delete **civil twilight**, because the
+    // sky after sunset is lit by air the sun has not set on yet — a parcel 60 km
+    // up sees it until it is 7.8° under the ground's horizon.
+    //
+    // So the gate is per-SAMPLE (each sample's own local horizon,
+    // `atmos_horizon_visibility`), and this is the arm that proves it: with the
+    // sun a few degrees down the same band must still be lit and still be warm.
+    // A global elevation fade renders it black and fails here.
+    let mut seconds = 71_100.0;
+    let twilight = loop {
+        let (s, b) = tod_scene(seconds);
+        // −1.7° .. −5.2°: after sunset, before the end of civil twilight.
+        if b.sun.y < -0.03 && b.sun.y > -0.09 {
+            break (s, b);
+        }
+        seconds += 60.0;
+        assert!(
+            seconds < 86_400.0,
+            "no civil twilight found on this date/latitude"
+        );
+    };
+    let twi = render(&gpu, &twilight.0, &horizon_view(twilight.1.sun, 6.0));
+    let twi_band = mean_rgb(&twi, 0, H * 50 / 100, W, H * 58 / 100);
+    eprintln!(
+        "sky_night_horizon twilight (sun.y {:.3}) band {twi_band:?}",
+        twilight.1.sun.y
+    );
+    assert!(
+        twi_band[0] > band[0] * 4.0,
+        "civil twilight is as dark as midnight — the horizon gate is on the sun's \
+         elevation rather than each sample's own horizon: {twi_band:?} vs {band:?}"
+    );
+    assert!(
+        twi_band[0] / twi_band[1].max(1e-4) > 1.15,
+        "civil twilight lost its warmth: {twi_band:?}"
     );
 }
 

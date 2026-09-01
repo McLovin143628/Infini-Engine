@@ -341,8 +341,13 @@ fn fs(in: VsOut) -> CloudOut {
     // the brightest thing in the sky. The layer is thin enough (a couple of km
     // against a hundred) that its mid-altitude serves for the whole slab.
     let layer_r = atmos.planet.x + (bottom + top) * 0.5 * 1e-3;
+    // The body door (wave GTA1): the layer's own horizon is *lower* than the
+    // ground's — which is why a cloud deck stays lit after sunset, and it comes
+    // out of `atmos_horizon_visibility`'s per-radius local horizon for free —
+    // but once the sun is properly down the raw table read would keep feeding
+    // this deck tangent-texel red all night.
     let sun_radiance = atmos.sun_color.rgb
-        * atmos_sample_transmittance(layer_r, sun.y)
+        * atmos_sample_body_transmittance(layer_r, sun.y, atmos.sun_dir.w)
         * atmos.params.y
         * CLOUD_PI;
     // Ambient. A cloud's TOP sees the upper hemisphere, which the zenith stands in
