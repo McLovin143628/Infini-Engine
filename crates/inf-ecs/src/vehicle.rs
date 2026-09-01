@@ -175,6 +175,24 @@ pub fn rig_of(world: &EcsWorld, chassis: Uuid) -> Option<VehicleRig> {
 /// on why a car body is far lighter than its material) on four 0.35 m wheels.
 /// Every number below is derived from that mass rather than dialled in, and the
 /// derivation is in the field's doc so a different vehicle can redo it.
+///
+/// # The VEH2a window — sixty-two numbers, landed once
+///
+/// P29.7 shipped fifteen, and island wave VEH1a serialized exactly those fifteen
+/// as [`VehicleClass`](crate::components::VehicleClass). Wave **VEH2a** grows the
+/// set to the whole Forza-grade surface **in one bump** — a torque curve, a
+/// gearbox, a drivetrain, a tyre model, an aero package, a steering rack, three
+/// driver aids and the seat warp — because the house law is one scene-schema
+/// window per phase and a tunable that arrives a wave late is a tunable that
+/// costs a second rung of the ladder.
+///
+/// Every one of the sixty-two is an `f64` and is reachable through
+/// [`set`](Self::set) by the name [`names`](Self::names) advertises, so the
+/// component, the live tuner, the catalogue row and the Details grid all read one
+/// list. **There is no second door**: an enum-shaped concept (the drivetrain) is
+/// spelled as the scalar the physics actually reads
+/// ([`front_torque_split`](Self::front_torque_split)) rather than as a parallel
+/// typed field with its own setter — see that field's own note.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VehicleTuning {
     /// Suspension length at full extension, metres — how far below its mount a
@@ -225,16 +243,243 @@ pub struct VehicleTuning {
     pub drag_n_per_mps2: f64,
     /// How long the enter/exit choreography takes, seconds.
     pub enter_time_s: f64,
-    /// **The window of that choreography the root motion is warped over**
-    /// (`inf_anim::WarpWindow`): before it the character is still walking, after
-    /// it the character is seated and the last of the clip plays out.
+    /// Clip time the seat warp **opens**, seconds — the first half of what used
+    /// to be an `inf_anim::WarpWindow` field.
     ///
-    /// A window rather than the whole clip is the point — see
-    /// `inf_physics::d3::vehicle`'s enter/exit section, and the P29.4/P29.5/P29.6
-    /// ledgers, where this type is named three times as the one warp shape with
-    /// no consumer.
-    pub enter_window: inf_anim::WarpWindow,
+    /// # Why two `f64`s and not the `WarpWindow`
+    ///
+    /// P29.7 carried the window as its own type, and VEH1a's ledger recorded the
+    /// consequence as a named bound: *"`VehicleTuning::enter_window` is **not**
+    /// [in `VehicleClass`], because it is not nameable through `set`"*. A tunable
+    /// that no door can reach is a tunable no author has. The window is the same
+    /// window — [`enter_window`](Self::enter_window) rebuilds it — and it is now
+    /// two names on the one door, which is what closes that carried item.
+    ///
+    /// Before it the character is still walking; after it the character is seated
+    /// and the last of the clip plays out. See `inf_physics::d3::vehicle`'s
+    /// enter/exit section for why a window and not the whole clip.
+    pub enter_warp_start: f64,
+    /// Clip time the seat warp **closes**, seconds.
+    pub enter_warp_end: f64,
+
+    // ── the engine (VEH2a) ──────────────────────────────────────────────────
+    //
+    // A torque curve through three knots — idle, peak, redline — with ONE shape
+    // parameter between them. Torque, not force: `max_engine_force_n` above is
+    // now the driveline's CEILING and no longer the curve, because a curve that
+    // is a single number cannot be revvy or torquey and those are the two things
+    // a driver feels first.
+    /// Idle speed, rpm. The engine never turns slower than this: below it a real
+    /// clutch is slipping, and modelling the clutch is a state machine this
+    /// engine does not need to be a car.
+    pub idle_rpm: f64,
+    /// Where the torque curve peaks, rpm.
+    pub peak_torque_rpm: f64,
+    /// Where the limiter cuts, rpm — the top of the curve.
+    pub redline_rpm: f64,
+    /// Peak crankshaft torque, newton-metres. Multiplied by the gear, the final
+    /// drive and divided by the wheel's own radius, which is what makes wheel
+    /// size finally matter (P29.7's model never read the radius on the drive
+    /// path at all).
+    pub peak_torque_nm: f64,
+    /// Torque at [`idle_rpm`](Self::idle_rpm), as a fraction of the peak.
+    pub idle_torque_frac: f64,
+    /// Torque at [`redline_rpm`](Self::redline_rpm), as a fraction of the peak.
+    pub redline_torque_frac: f64,
+    /// **The one shape knob**, `(0, 1)`, applied to both sides of the peak
+    /// through [`curve_bias`].
+    ///
+    /// `0.5` is straight lines between the three knots. Above it the torque
+    /// arrives *early* and dies *hard* — a diesel or a truck. Below it the engine
+    /// is soft low down and holds its torque to the limiter — a sports engine.
+    /// One number rather than two exponents because the two halves of "where does
+    /// this engine make its torque" are the same question asked twice.
+    pub torque_curve_bias: f64,
+    /// Engine braking at the crank with the throttle shut, newton-metres at the
+    /// redline (scaled by the rev fraction below it). What makes lifting off
+    /// slow the car without touching the brake.
+    pub engine_brake_nm: f64,
+
+    // ── the gearbox (VEH2a) ─────────────────────────────────────────────────
+    /// How many forward gears are in use, `1..=`[`MAX_GEARS`]. A count rather
+    /// than "the first zero ratio", because a sentinel is a value that means two
+    /// things.
+    pub gear_count: f64,
+    /// First gear's ratio.
+    pub gear_1_ratio: f64,
+    /// Second gear's ratio.
+    pub gear_2_ratio: f64,
+    /// Third gear's ratio.
+    pub gear_3_ratio: f64,
+    /// Fourth gear's ratio.
+    pub gear_4_ratio: f64,
+    /// Fifth gear's ratio.
+    pub gear_5_ratio: f64,
+    /// Sixth gear's ratio.
+    pub gear_6_ratio: f64,
+    /// Seventh gear's ratio — `0` when [`gear_count`](Self::gear_count) is below
+    /// seven.
+    pub gear_7_ratio: f64,
+    /// Eighth gear's ratio.
+    pub gear_8_ratio: f64,
+    /// Reverse's ratio. **Reverse is a gear**, not a scalar on the drive force:
+    /// P29.7 reversed at "a third of the force", which is a car whose reverse
+    /// gets *stronger* as its engine gets stronger and never runs out of revs.
+    pub reverse_ratio: f64,
+    /// The final drive — the differential's own reduction, multiplying every
+    /// gear.
+    pub final_drive: f64,
+    /// How long a shift takes, seconds. **No drive torque crosses the gearbox
+    /// during it**, which is the whole of why a shift is felt.
+    pub shift_time_s: f64,
+    /// Upshift above this, rpm.
+    pub shift_up_rpm: f64,
+    /// Downshift below this, rpm. Must be enough under
+    /// [`shift_up_rpm`](Self::shift_up_rpm) divided by the ratio step, or the box
+    /// hunts.
+    pub shift_down_rpm: f64,
+
+    // ── the drivetrain (VEH2a) ──────────────────────────────────────────────
+    /// The share of drive torque the **front** axle takes, `[0, 1]`.
+    ///
+    /// # This scalar IS the drivetrain, and that is a ruling
+    ///
+    /// `0.0` is rear-wheel drive, `1.0` is front, and anything between is
+    /// all-wheel drive at that split. A `Drivetrain { Fwd, Rwd, Awd }` enum was
+    /// considered and **refused**: the physics reads a split and nothing else, so
+    /// an enum beside it would be a second source of truth for one fact, and it
+    /// could not travel the `set(name, f64)` door every other tunable travels —
+    /// which would mean a second setter on the `Vehicle` trait, i.e. the P29.6
+    /// A14 defect (two lists of one thing) bought for no behaviour.
+    ///
+    /// A catalogue row may still *say* `drivetrain = "awd"`: that is a string key
+    /// [`VehicleDef::from_toml_table`] resolves to this number before it reads
+    /// any numeric key, so an explicit `front_torque_split` always wins.
+    pub front_torque_split: f64,
+    /// Front differential lock, `[0, 1]` — `0` open, `1` a spool. A locked diff
+    /// pulls its two wheels' speeds together, which is what sends torque to the
+    /// wheel that still has grip.
+    pub diff_lock_front: f64,
+    /// Rear differential lock, `[0, 1]`.
+    pub diff_lock_rear: f64,
+    /// The share of the brake budget the **front** axle takes, `[0, 1]`. Road
+    /// cars run 0.6–0.7 forward, because braking transfers load forward and grip
+    /// follows load.
+    pub brake_bias: f64,
+
+    // ── the tyres (VEH2a) ───────────────────────────────────────────────────
+    //
+    // A simplified Pacejka: a rising branch to a peak and a falling branch to a
+    // sliding plateau, per axis, coupled through ONE combined-slip magnitude —
+    // a true friction circle. P29.7's two independent per-axis clamps could hold
+    // µ×load sideways *and* µ×load forwards at the same time, which is 1.41 × µ
+    // of grip and is why it could brake out of any corner.
+    /// Slip **ratio** at which longitudinal grip peaks — 0.10–0.15 for a road
+    /// tyre.
+    pub tyre_long_peak_slip: f64,
+    /// How stiff the longitudinal rise is, `(0, 1)`, through [`curve_bias`].
+    /// `0.5` is a straight line to the peak; above it the tyre bites early (a
+    /// stiff sidewall), below it the rise is lazy.
+    pub tyre_long_rise_bias: f64,
+    /// **Tangent** of the slip angle at which lateral grip peaks — 0.16 is about
+    /// 9°. A tangent and not an angle because the model computes
+    /// `v_lateral / |v_forward|` directly and an `atan` on the tyre path would be
+    /// a transcendental in the sim loop for a number that is immediately undone.
+    pub tyre_lat_peak_slip: f64,
+    /// How stiff the lateral rise is, `(0, 1)`.
+    pub tyre_lat_rise_bias: f64,
+    /// Grip once the tyre is fully sliding, as a fraction of the peak. Below 1 by
+    /// construction: a sliding tyre grips less than a gripping one, and the gap
+    /// is what makes a slide something a driver must correct.
+    pub tyre_slide_frac: f64,
+    /// **Load sensitivity** — how fast µ falls as vertical load rises, per unit
+    /// of load over the static share.
+    ///
+    /// `0` is the schoolbook tyre whose grip is exactly `µ × Fz`; a real one at
+    /// `0.22` loses 22 % of its µ when it carries twice its static load. This is
+    /// the number that makes **weight transfer cost grip**, and therefore the
+    /// number that makes a soft roll bar and a low centre of gravity worth
+    /// having.
+    pub tyre_load_sensitivity: f64,
+    /// A wheel's rotational inertia, kg·m². A disc of mass `m` and radius `r` is
+    /// `½ m r²`, so a 20 kg wheel on a 0.35 m tyre is 1.2.
+    pub wheel_inertia_kgm2: f64,
+
+    // ── the chassis (VEH2a) ─────────────────────────────────────────────────
+    /// Height of the centre of gravity **above the chassis origin**, metres —
+    /// negative for a car whose mass is in its floor, which is every car.
+    ///
+    /// The solver's centre of mass is the chassis collider's centre and this
+    /// engine has no door to move it. So the model moves the *forces* instead:
+    /// a horizontal tyre force applied at `contact - up × cog_height_m` produces
+    /// exactly the moment the true centre of gravity would have felt, and the
+    /// **suspension force is untouched by construction** because it is parallel
+    /// to `up` and `up × up` is zero.
+    pub cog_height_m: f64,
+    /// Front anti-roll bar rate, newtons per metre of **compression difference**
+    /// across the axle. It transfers load from the inside wheel to the outside
+    /// one without adding any, which — with
+    /// [`tyre_load_sensitivity`](Self::tyre_load_sensitivity) above zero — costs
+    /// that axle grip. Stiffening the front is how a car is made to understeer.
+    pub anti_roll_front_n_per_m: f64,
+    /// Rear anti-roll bar rate, same units.
+    pub anti_roll_rear_n_per_m: f64,
+    /// Downforce, newtons per (m/s)² — pressed **into** the chassis up, so it
+    /// adds load (and therefore grip) rather than mass.
+    pub downforce_n_per_mps2: f64,
+    /// Where that downforce acts along the wheelbase, in fractions of the half
+    /// wheelbase. `0` is the centre of gravity and makes no moment; `-1` is over
+    /// the rear axle, which is a wing.
+    pub downforce_centre_z: f64,
+    /// Aerodynamic drag **sideways**, newtons per (m/s)². A car's side area is
+    /// two to three times its frontal area, and the difference is what stops a
+    /// slide feeling like ice.
+    pub drag_lateral_n_per_mps2: f64,
+
+    // ── the steering rack (VEH2a) ───────────────────────────────────────────
+    /// How fast the road wheels turn toward the driver's demand, degrees per
+    /// second. P29.7's steering was instant, which is a car that changes
+    /// direction in one frame.
+    pub steer_rate_deg_per_s: f64,
+    /// How fast they return to centre with no input, degrees per second. Faster
+    /// than the rate above, because a real rack is self-centring.
+    pub steer_return_deg_per_s: f64,
+    /// Ackermann, `[0, 1]` — how much more the **inside** wheel turns than the
+    /// outside one. `0` is parallel steering, `1` is the geometry that puts both
+    /// front wheels on the same turn centre.
+    pub ackermann: f64,
+
+    // ── the driver aids (VEH2a) ─────────────────────────────────────────────
+    //
+    // Each is one number that carries both the toggle and the threshold: zero is
+    // OFF. A separate `bool` beside a threshold is two fields that can disagree.
+    /// ABS: the slip ratio above which brake torque is bled off. `0` disables it.
+    pub abs_slip: f64,
+    /// Traction control: the drive slip ratio above which engine torque is bled
+    /// off. `0` disables it.
+    pub traction_control_slip: f64,
+    /// Stability control strength, `[0, 1]` — how hard a single wheel is braked
+    /// to pull the yaw rate back to what the steering asked for. `0` disables it.
+    pub stability_control: f64,
 }
+
+/// The most forward gears a gearbox may declare.
+///
+/// Eight, because eight is what a modern automatic has and a fixed arity is what
+/// keeps [`VehicleTuning`] `Copy`, keeps every gear reachable through the one
+/// by-name door, and keeps the serialized class a flat run of `f64`s that a
+/// bincode wire pin can account for field by field. A `Vec` would cost all three.
+pub const MAX_GEARS: usize = 8;
+
+/// How many multiples of the peak slip a tyre takes to reach its sliding
+/// plateau.
+///
+/// One number for the whole engine rather than a per-class knob, on
+/// [`TYRE_WIDTH_FRAC`]'s argument: *where* a tyre gives up is
+/// [`VehicleTuning::tyre_long_peak_slip`] and *how much* it keeps is
+/// [`VehicleTuning::tyre_slide_frac`]; how quickly it gets from one to the other
+/// is a property of rubber, not of a car.
+pub const TYRE_SLIDE_SLIP_MULT: f64 = 3.0;
 
 impl Default for VehicleTuning {
     fn default() -> Self {
@@ -243,8 +488,17 @@ impl Default for VehicleTuning {
             travel_m: 0.25,
             stiffness_n_per_m: 20_000.0,
             damping_ns_per_m: 3_000.0,
+            // The DRIVELINE CEILING since VEH2a, not the curve: whatever the
+            // torque curve and the gearbox ask for, the wheels are never handed
+            // more than this in total. 8 000 N on 1 200 kg is 6.7 m/s², which is
+            // a launch a road car's clutch and half-shafts would survive.
             max_engine_force_n: 8_000.0,
-            max_speed_mps: 25.0,
+            // The class's REFERENCE top speed, m/s — what the speed-sensitive
+            // steering limit and the drive camera scale against. Since VEH2a the
+            // *achieved* top speed is an emergent balance of the torque curve
+            // against the drag, so this number is a claim about the car that
+            // `the_default_rig_reaches_the_speed_its_own_class_claims` checks.
+            max_speed_mps: 55.0,
             brake_force_n: 12_000.0,
             handbrake_force_n: 9_000.0,
             max_steer_deg: 35.0,
@@ -256,7 +510,77 @@ impl Default for VehicleTuning {
             enter_time_s: 0.55,
             // 18 % in and 82 % through: the approach and the settle are the
             // clip's, the warp is the middle.
-            enter_window: inf_anim::WarpWindow::new(0.1, 0.45),
+            enter_warp_start: 0.1,
+            enter_warp_end: 0.45,
+
+            // A 2.0-litre naturally-aspirated petrol: 260 N·m at 3 800, pulling
+            // to 6 500. Straight lines between the knots (`bias` 0.5) is the
+            // shape an author can predict, and the two extremes are what the
+            // truck and the sports row reach for.
+            idle_rpm: 800.0,
+            peak_torque_rpm: 3_800.0,
+            redline_rpm: 6_500.0,
+            peak_torque_nm: 260.0,
+            idle_torque_frac: 0.55,
+            redline_torque_frac: 0.72,
+            torque_curve_bias: 0.5,
+            engine_brake_nm: 35.0,
+
+            // Six speeds and a 3.7 final — the ratios step by about 1.45, which
+            // is what keeps the engine inside its band across a shift.
+            gear_count: 6.0,
+            gear_1_ratio: 3.50,
+            gear_2_ratio: 2.10,
+            gear_3_ratio: 1.45,
+            gear_4_ratio: 1.10,
+            gear_5_ratio: 0.88,
+            gear_6_ratio: 0.72,
+            gear_7_ratio: 0.0,
+            gear_8_ratio: 0.0,
+            reverse_ratio: 3.20,
+            final_drive: 3.70,
+            shift_time_s: 0.28,
+            shift_up_rpm: 6_000.0,
+            shift_down_rpm: 2_200.0,
+
+            // An even split is the closest thing to P29.7's "share the drive over
+            // the grounded wheels", so the default rig's character survives the
+            // wave; a catalogue row says fwd/rwd/awd for itself.
+            front_torque_split: 0.5,
+            diff_lock_front: 0.0,
+            diff_lock_rear: 0.25,
+            brake_bias: 0.62,
+
+            tyre_long_peak_slip: 0.12,
+            tyre_long_rise_bias: 0.74,
+            tyre_lat_peak_slip: 0.16,
+            tyre_lat_rise_bias: 0.72,
+            tyre_slide_frac: 0.72,
+            tyre_load_sensitivity: 0.22,
+            // ½ × 20 kg × 0.35 m² — a wheel and a tyre.
+            wheel_inertia_kgm2: 1.2,
+
+            // A car's mass is in its floor: a quarter-metre below the middle of a
+            // 1.24 m tall body puts the centre of gravity about half a metre off
+            // the road, which is a saloon's.
+            cog_height_m: -0.25,
+            anti_roll_front_n_per_m: 12_000.0,
+            anti_roll_rear_n_per_m: 9_000.0,
+            downforce_n_per_mps2: 0.15,
+            downforce_centre_z: -0.3,
+            // Three times the forward drag: a car's flank is about that much
+            // bigger than its nose.
+            drag_lateral_n_per_mps2: 1.2,
+
+            steer_rate_deg_per_s: 220.0,
+            steer_return_deg_per_s: 320.0,
+            ackermann: 1.0,
+
+            // The Ring-0 default is a MODERN road car, and a modern road car has
+            // its aids on. A row that wants a driver's car turns them down.
+            abs_slip: 0.15,
+            traction_control_slip: 0.18,
+            stability_control: 0.35,
         }
     }
 }
@@ -274,21 +598,68 @@ impl VehicleTuning {
             return false;
         }
         let slot: &mut f64 = match name {
-            "rest_length_m" => &mut self.rest_length_m,
-            "travel_m" => &mut self.travel_m,
-            "stiffness_n_per_m" => &mut self.stiffness_n_per_m,
-            "damping_ns_per_m" => &mut self.damping_ns_per_m,
-            "max_engine_force_n" => &mut self.max_engine_force_n,
-            "max_speed_mps" => &mut self.max_speed_mps,
+            "abs_slip" => &mut self.abs_slip,
+            "ackermann" => &mut self.ackermann,
+            "anti_roll_front_n_per_m" => &mut self.anti_roll_front_n_per_m,
+            "anti_roll_rear_n_per_m" => &mut self.anti_roll_rear_n_per_m,
+            "brake_bias" => &mut self.brake_bias,
             "brake_force_n" => &mut self.brake_force_n,
+            "cog_height_m" => &mut self.cog_height_m,
+            "damping_ns_per_m" => &mut self.damping_ns_per_m,
+            "diff_lock_front" => &mut self.diff_lock_front,
+            "diff_lock_rear" => &mut self.diff_lock_rear,
+            "downforce_centre_z" => &mut self.downforce_centre_z,
+            "downforce_n_per_mps2" => &mut self.downforce_n_per_mps2,
+            "drag_lateral_n_per_mps2" => &mut self.drag_lateral_n_per_mps2,
+            "drag_n_per_mps2" => &mut self.drag_n_per_mps2,
+            "engine_brake_nm" => &mut self.engine_brake_nm,
+            "enter_time_s" => &mut self.enter_time_s,
+            "enter_warp_end" => &mut self.enter_warp_end,
+            "enter_warp_start" => &mut self.enter_warp_start,
+            "final_drive" => &mut self.final_drive,
+            "front_torque_split" => &mut self.front_torque_split,
+            "gear_1_ratio" => &mut self.gear_1_ratio,
+            "gear_2_ratio" => &mut self.gear_2_ratio,
+            "gear_3_ratio" => &mut self.gear_3_ratio,
+            "gear_4_ratio" => &mut self.gear_4_ratio,
+            "gear_5_ratio" => &mut self.gear_5_ratio,
+            "gear_6_ratio" => &mut self.gear_6_ratio,
+            "gear_7_ratio" => &mut self.gear_7_ratio,
+            "gear_8_ratio" => &mut self.gear_8_ratio,
+            "gear_count" => &mut self.gear_count,
             "handbrake_force_n" => &mut self.handbrake_force_n,
-            "max_steer_deg" => &mut self.max_steer_deg,
-            "min_steer_deg" => &mut self.min_steer_deg,
+            "idle_rpm" => &mut self.idle_rpm,
+            "idle_torque_frac" => &mut self.idle_torque_frac,
             "lateral_grip" => &mut self.lateral_grip,
             "longitudinal_grip" => &mut self.longitudinal_grip,
+            "max_engine_force_n" => &mut self.max_engine_force_n,
+            "max_speed_mps" => &mut self.max_speed_mps,
+            "max_steer_deg" => &mut self.max_steer_deg,
+            "min_steer_deg" => &mut self.min_steer_deg,
+            "peak_torque_nm" => &mut self.peak_torque_nm,
+            "peak_torque_rpm" => &mut self.peak_torque_rpm,
+            "redline_rpm" => &mut self.redline_rpm,
+            "redline_torque_frac" => &mut self.redline_torque_frac,
+            "rest_length_m" => &mut self.rest_length_m,
+            "reverse_ratio" => &mut self.reverse_ratio,
             "rolling_resistance" => &mut self.rolling_resistance,
-            "drag_n_per_mps2" => &mut self.drag_n_per_mps2,
-            "enter_time_s" => &mut self.enter_time_s,
+            "shift_down_rpm" => &mut self.shift_down_rpm,
+            "shift_time_s" => &mut self.shift_time_s,
+            "shift_up_rpm" => &mut self.shift_up_rpm,
+            "stability_control" => &mut self.stability_control,
+            "steer_rate_deg_per_s" => &mut self.steer_rate_deg_per_s,
+            "steer_return_deg_per_s" => &mut self.steer_return_deg_per_s,
+            "stiffness_n_per_m" => &mut self.stiffness_n_per_m,
+            "torque_curve_bias" => &mut self.torque_curve_bias,
+            "traction_control_slip" => &mut self.traction_control_slip,
+            "travel_m" => &mut self.travel_m,
+            "tyre_lat_peak_slip" => &mut self.tyre_lat_peak_slip,
+            "tyre_lat_rise_bias" => &mut self.tyre_lat_rise_bias,
+            "tyre_load_sensitivity" => &mut self.tyre_load_sensitivity,
+            "tyre_long_peak_slip" => &mut self.tyre_long_peak_slip,
+            "tyre_long_rise_bias" => &mut self.tyre_long_rise_bias,
+            "tyre_slide_frac" => &mut self.tyre_slide_frac,
+            "wheel_inertia_kgm2" => &mut self.wheel_inertia_kgm2,
             _ => return false,
         };
         *slot = value;
@@ -300,22 +671,115 @@ impl VehicleTuning {
     /// A14, met at this exact shape.)
     pub fn names() -> &'static [&'static str] {
         &[
+            "abs_slip",
+            "ackermann",
+            "anti_roll_front_n_per_m",
+            "anti_roll_rear_n_per_m",
+            "brake_bias",
             "brake_force_n",
+            "cog_height_m",
             "damping_ns_per_m",
+            "diff_lock_front",
+            "diff_lock_rear",
+            "downforce_centre_z",
+            "downforce_n_per_mps2",
+            "drag_lateral_n_per_mps2",
             "drag_n_per_mps2",
+            "engine_brake_nm",
             "enter_time_s",
+            "enter_warp_end",
+            "enter_warp_start",
+            "final_drive",
+            "front_torque_split",
+            "gear_1_ratio",
+            "gear_2_ratio",
+            "gear_3_ratio",
+            "gear_4_ratio",
+            "gear_5_ratio",
+            "gear_6_ratio",
+            "gear_7_ratio",
+            "gear_8_ratio",
+            "gear_count",
             "handbrake_force_n",
+            "idle_rpm",
+            "idle_torque_frac",
             "lateral_grip",
             "longitudinal_grip",
             "max_engine_force_n",
             "max_speed_mps",
             "max_steer_deg",
             "min_steer_deg",
+            "peak_torque_nm",
+            "peak_torque_rpm",
+            "redline_rpm",
+            "redline_torque_frac",
             "rest_length_m",
+            "reverse_ratio",
             "rolling_resistance",
+            "shift_down_rpm",
+            "shift_time_s",
+            "shift_up_rpm",
+            "stability_control",
+            "steer_rate_deg_per_s",
+            "steer_return_deg_per_s",
             "stiffness_n_per_m",
+            "torque_curve_bias",
+            "traction_control_slip",
             "travel_m",
+            "tyre_lat_peak_slip",
+            "tyre_lat_rise_bias",
+            "tyre_load_sensitivity",
+            "tyre_long_peak_slip",
+            "tyre_long_rise_bias",
+            "tyre_slide_frac",
+            "wheel_inertia_kgm2",
         ]
+    }
+
+    /// The seat warp window these two clip times describe.
+    ///
+    /// The one place `enter_warp_start`/`enter_warp_end` become an
+    /// `inf_anim::WarpWindow`, so the pair can never be read in the wrong order
+    /// and the `f32` narrowing happens once.
+    pub fn enter_window(&self) -> inf_anim::WarpWindow {
+        inf_anim::WarpWindow::new(self.enter_warp_start as f32, self.enter_warp_end as f32)
+    }
+
+    /// How many forward gears this box actually has, `1..=`[`MAX_GEARS`].
+    ///
+    /// A refusal is a value here too: a `gear_count` an author typed as `0`, as
+    /// `12` or as a fraction becomes a usable box rather than a division by zero
+    /// three call sites down.
+    pub fn gears(&self) -> usize {
+        if !self.gear_count.is_finite() {
+            return 1;
+        }
+        (self.gear_count.round() as i64).clamp(1, MAX_GEARS as i64) as usize
+    }
+
+    /// The **total** reduction from crank to wheel in `gear`, including the final
+    /// drive: `-1` is reverse, `0` is neutral, `1..=gears()` are the forward
+    /// gears. Zero for neutral and for a gear the box does not have.
+    ///
+    /// One function, so the torque path, the rev calculation and the shift model
+    /// cannot disagree about what gear a car is in.
+    pub fn drive_ratio(&self, gear: i32) -> f64 {
+        let raw = match gear {
+            -1 => self.reverse_ratio,
+            1 => self.gear_1_ratio,
+            2 => self.gear_2_ratio,
+            3 => self.gear_3_ratio,
+            4 => self.gear_4_ratio,
+            5 => self.gear_5_ratio,
+            6 => self.gear_6_ratio,
+            7 => self.gear_7_ratio,
+            8 => self.gear_8_ratio,
+            _ => 0.0,
+        };
+        if gear > self.gears() as i32 {
+            return 0.0;
+        }
+        raw * self.final_drive
     }
 }
 
@@ -1111,6 +1575,37 @@ impl RaycastVehicle {
     }
 }
 
+/// **The one shape function** this model bends every curve with (VEH2a) —
+/// Schlick's bias, `[0, 1] → [0, 1]`, monotone, with `k = 0.5` the identity.
+///
+/// `b(t, k) = t / ((1/k − 2)(1 − t) + 1)`. Its slope at the origin is
+/// `k / (1 − k)`, so `k` is *exactly* "how much sooner than linear does this
+/// arrive": 0.8 rises four times as fast out of zero, 0.2 a quarter as fast, and
+/// both still land on 1 at `t = 1`.
+///
+/// # Why this and not an exponent
+///
+/// A `powf` would do the same job and is the obvious spelling. It is refused for
+/// the reason P14's law exists: `powf` routes through the `libm` crate on
+/// `wasm32` and through the platform's own on everything else, and a vehicle's
+/// pose is compared **byte for byte between two hosts** by the island drive gate
+/// and rides into committed `.inf_lvl` bytes through nothing at all — but the day
+/// it does, a shape function built out of a transcendental is a divergence with
+/// no gate. This is four arithmetic operations and is bit-identical everywhere.
+///
+/// `k` is clamped into `[0.05, 0.95]` and a non-finite `k` is the identity, on
+/// the standing rule that a refusal is a value.
+pub fn curve_bias(t: f64, k: f64) -> f64 {
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    let k = if k.is_finite() { k.clamp(0.05, 0.95) } else { 0.5 };
+    let a = 1.0 / k - 2.0;
+    let denom = a * (1.0 - t) + 1.0;
+    if denom.abs() < 1e-12 {
+        return t;
+    }
+    (t / denom).clamp(0.0, 1.0)
+}
+
 /// **The engine curve**: drive force as a function of throttle and forward speed.
 ///
 /// Linear falloff to zero at [`VehicleTuning::max_speed_mps`], which is what
@@ -1206,7 +1701,7 @@ impl Vehicle for RaycastVehicle {
     }
 
     fn seat_warp(&self) -> (f64, inf_anim::WarpWindow) {
-        (self.tuning.enter_time_s, self.tuning.enter_window)
+        (self.tuning.enter_time_s, self.tuning.enter_window())
     }
 
     fn suspension_rest_m(&self) -> f64 {
@@ -1622,12 +2117,155 @@ mod tests {
         }
         assert_eq!(
             VehicleTuning::names().len(),
-            15,
+            62,
             "a name added to the door and not to the list is invisible to a UI"
         );
+        // …and the list has no duplicate, which a sorted check alone allows.
+        let mut unique = VehicleTuning::names().to_vec();
+        unique.dedup();
+        assert_eq!(unique.len(), VehicleTuning::names().len());
         let mut sorted = VehicleTuning::names().to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted, VehicleTuning::names());
+    }
+
+    /// **The projection onto [`VehicleClass`] is TOTAL, and it is checked by
+    /// moving every one of the sixty-two** (island wave VEH2a).
+    ///
+    /// `VehicleClass::from_tuning` is sixty-two hand-written lines and
+    /// `settings()` is sixty-two more. Two restatements of one list is the P29.6
+    /// A14 shape, and the answer is not to write them once (the component must be
+    /// `Reflect` + `Serialize` and the tunable must not) but to make the
+    /// restatement **falsifiable**: a field that `from_tuning` forgot, or that
+    /// `settings()` does not name, is a field whose distinct value does not
+    /// survive the round trip.
+    ///
+    /// Distinct values, so a copy-paste that reads the *neighbouring* field —
+    /// the way a sixty-two-line projection actually goes wrong — is caught too.
+    ///
+    /// [`VehicleClass`]: crate::components::VehicleClass
+    #[test]
+    fn the_class_and_the_tuning_are_the_same_sixty_two_numbers() {
+        let names = VehicleTuning::names();
+        let mut t = VehicleTuning::default();
+        for (i, name) in names.iter().enumerate() {
+            // 0.5 + i/1000 keeps every value finite, positive, distinct and
+            // inside the ranges the shape functions clamp to.
+            assert!(t.set(name, 0.5 + i as f64 / 1000.0), "{name} is not settable");
+        }
+        let class = crate::components::VehicleClass::from_tuning(&t);
+        assert_eq!(
+            class.to_tuning(),
+            t,
+            "a tunable did not survive the round trip through the serialized class"
+        );
+        let seen: Vec<&str> = class.settings().iter().map(|(n, _)| *n).collect();
+        assert_eq!(seen, names, "`settings()` is not `names()`, in order");
+        for (i, (name, value)) in class.settings().into_iter().enumerate() {
+            assert_eq!(
+                value,
+                0.5 + i as f64 / 1000.0,
+                "`{name}` reports the value of a different field"
+            );
+        }
+        // …and the class's own by-name door is the tuning's, which is what lets a
+        // catalogue row say `torque_curve_bias = 0.3` beside `wheel_radius_m`.
+        let mut c = crate::components::VehicleClass::default();
+        assert!(c.set("peak_torque_nm", 410.0));
+        assert_eq!(c.peak_torque_nm, 410.0);
+        assert!(!c.set("peak_torque", 1.0));
+        assert!(!c.set("peak_torque_nm", f64::NAN));
+        assert_eq!(c.peak_torque_nm, 410.0);
+    }
+
+    /// **The shape function is monotone, lands on both ends, and `k = 0.5` is the
+    /// identity** — the one curve the torque and the tyre both bend with.
+    #[test]
+    fn the_bias_curve_is_monotone_and_its_slope_is_the_knob() {
+        for k in [0.05, 0.2, 0.5, 0.74, 0.95] {
+            assert_eq!(curve_bias(0.0, k), 0.0, "k = {k}");
+            assert!((curve_bias(1.0, k) - 1.0).abs() < 1e-12, "k = {k}");
+            let mut last = -1.0;
+            for i in 0..=100 {
+                let v = curve_bias(i as f64 / 100.0, k);
+                assert!(v >= last - 1e-12, "k = {k} is not monotone at {i}");
+                assert!((0.0..=1.0).contains(&v));
+                last = v;
+            }
+        }
+        // k = 0.5 is the identity, exactly.
+        for i in 0..=20 {
+            let t = i as f64 / 20.0;
+            assert!((curve_bias(t, 0.5) - t).abs() < 1e-12);
+        }
+        // The slope at the origin is k/(1-k): 0.8 arrives four times as fast,
+        // 0.2 a quarter as fast. Measured over a small step, which is what an
+        // author is actually promised.
+        let h = 1e-6;
+        assert!((curve_bias(h, 0.8) / h - 4.0).abs() < 1e-4);
+        assert!((curve_bias(h, 0.2) / h - 0.25).abs() < 1e-4);
+        // A high bias is ABOVE the line everywhere in between, a low one below —
+        // which is the whole claim ("torque arrives early" / "arrives late").
+        assert!(curve_bias(0.3, 0.8) > 0.3 && curve_bias(0.3, 0.2) < 0.3);
+        // Refusals are values.
+        assert_eq!(curve_bias(f64::NAN, 0.5), 0.0);
+        assert_eq!(curve_bias(0.4, f64::NAN), 0.4);
+        assert_eq!(curve_bias(4.0, 0.5), 1.0);
+        assert_eq!(curve_bias(-4.0, 0.5), 0.0);
+    }
+
+    /// **The gearbox answers one ratio per gear, refuses the ones it does not
+    /// have, and reverse is one of them.**
+    #[test]
+    fn the_gearbox_is_a_count_and_a_ratio_per_gear() {
+        let t = VehicleTuning::default();
+        assert_eq!(t.gears(), 6);
+        assert_eq!(t.drive_ratio(1), t.gear_1_ratio * t.final_drive);
+        assert_eq!(t.drive_ratio(6), t.gear_6_ratio * t.final_drive);
+        assert_eq!(t.drive_ratio(-1), t.reverse_ratio * t.final_drive);
+        assert_eq!(t.drive_ratio(0), 0.0, "neutral drives nothing");
+        assert_eq!(
+            t.drive_ratio(7),
+            0.0,
+            "a six-speed box does not have a seventh gear even though the field \
+             exists"
+        );
+        // The ratios shorten monotonically, or the box is not a box.
+        for g in 1..t.gears() as i32 {
+            assert!(
+                t.drive_ratio(g) > t.drive_ratio(g + 1),
+                "gear {g} is not taller than gear {}",
+                g + 1
+            );
+        }
+        // Reverse is between first and second — a real car's is.
+        assert!(t.drive_ratio(-1) < t.drive_ratio(1) && t.drive_ratio(-1) > t.drive_ratio(2));
+        // A count an author typed wrong is clamped, not a panic and not a
+        // division by zero.
+        let mut wrong = t;
+        assert!(wrong.set("gear_count", 0.0));
+        assert_eq!(wrong.gears(), 1);
+        assert!(wrong.set("gear_count", 99.0));
+        assert_eq!(wrong.gears(), MAX_GEARS);
+        assert!(wrong.set("gear_count", 3.4));
+        assert_eq!(wrong.gears(), 3);
+    }
+
+    /// **The seat warp is two authored numbers again**, and they are the window
+    /// v25 could not carry.
+    #[test]
+    fn the_enter_window_is_authored_and_not_taken_from_the_default() {
+        let mut t = VehicleTuning::default();
+        assert_eq!(t.enter_window(), inf_anim::WarpWindow::new(0.1, 0.45));
+        assert!(t.set("enter_warp_start", 0.2));
+        assert!(t.set("enter_warp_end", 0.8));
+        assert_eq!(t.enter_window(), inf_anim::WarpWindow::new(0.2, 0.8));
+        // …and it survives the serialized class, which is the carried item this
+        // closes (VEH1a ledger, "enter_window is still absent from VehicleClass").
+        let class = crate::components::VehicleClass::from_tuning(&t);
+        assert_eq!(class.to_tuning().enter_window(), t.enter_window());
+        assert!(VehicleTuning::names().contains(&"enter_warp_start"));
+        assert!(VehicleTuning::names().contains(&"enter_warp_end"));
     }
 
     /// Back at speed is a **brake**; back at a standstill is reverse.

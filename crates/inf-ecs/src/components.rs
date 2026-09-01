@@ -2568,7 +2568,7 @@ impl CharacterMovement {
 ///
 /// # It is exactly [`VehicleTuning::names`](crate::vehicle::VehicleTuning::names)
 ///
-/// Fifteen `f64`s, in that function's own sorted order, and they reach a running
+/// **Sixty-two** `f64`s since wave VEH2a (fifteen at v25), reaching a running
 /// vehicle through [`Vehicle::tune`](crate::vehicle::Vehicle::tune) — the door
 /// the live tuner already uses. Two consequences, both deliberate:
 ///
@@ -2581,13 +2581,23 @@ impl CharacterMovement {
 ///   a field added here without a name there fails
 ///   `the_vehicle_class_is_exactly_the_tuning_door`.
 ///
-/// # The bound, stated
+/// # The bound v25 stated, and how VEH2a closed it
 ///
-/// `VehicleTuning::enter_window` is **not** here, because it is not nameable
-/// through `set` and the `Vehicle` trait exposes it read-only
-/// (`seat_warp`). A class that wants its own seat-warp window needs a trait
-/// setter first, which is a behaviour change with its own arms. Every other
-/// tunable is authored.
+/// v25's own note read: *"`VehicleTuning::enter_window` is **not** here, because
+/// it is not nameable through `set`… A class that wants its own seat-warp window
+/// needs a trait setter first."* It needed no such thing — it needed the window
+/// to stop being a type and start being its two numbers. Wave VEH2a's schema
+/// window carries `enter_warp_start` and `enter_warp_end` on the one door, and
+/// `VehicleTuning::enter_window()` rebuilds the `WarpWindow` from them. **There
+/// is no longer any tunable this component cannot author.**
+///
+/// # The wire order is APPEND-ONLY, and that is the whole of the bump discipline
+///
+/// bincode is positional. The fifteen v25 fields keep their v25 order and their
+/// v25 offsets; the forty-seven VEH2a fields are a run at the **tail**, sorted
+/// among themselves. A field inserted in the middle would decode a torque curve
+/// out of a spring rate, which is the third time this repository has paid for
+/// that lesson (the P16 `skip_serializing_if` law and the v5 mid-struct insert).
 ///
 /// # Absent means the Ring-0 defaults
 ///
@@ -2628,6 +2638,104 @@ pub struct VehicleClass {
     pub stiffness_n_per_m: f64,
     /// How far the suspension may compress from rest, metres.
     pub travel_m: f64,
+
+    // ── the VEH2a tail (schema v27) — forty-seven, appended, never reordered ──
+    /// ABS: the slip ratio above which brake torque is bled off; `0` is off.
+    pub abs_slip: f64,
+    /// Ackermann, `[0, 1]` — how much more the inside front wheel turns.
+    pub ackermann: f64,
+    /// Front anti-roll bar rate, newtons per metre of compression difference.
+    pub anti_roll_front_n_per_m: f64,
+    /// Rear anti-roll bar rate, same units.
+    pub anti_roll_rear_n_per_m: f64,
+    /// The share of the brake budget the front axle takes, `[0, 1]`.
+    pub brake_bias: f64,
+    /// Centre-of-gravity height above the chassis origin, metres (negative for a
+    /// car whose mass is in its floor).
+    pub cog_height_m: f64,
+    /// Front differential lock, `[0, 1]` — `0` open, `1` a spool.
+    pub diff_lock_front: f64,
+    /// Rear differential lock, `[0, 1]`.
+    pub diff_lock_rear: f64,
+    /// Where downforce acts along the wheelbase, in fractions of half of it.
+    pub downforce_centre_z: f64,
+    /// Downforce, newtons per (m/s)².
+    pub downforce_n_per_mps2: f64,
+    /// Sideways aerodynamic drag, newtons per (m/s)².
+    pub drag_lateral_n_per_mps2: f64,
+    /// Engine braking at the crank with the throttle shut, N·m at the redline.
+    pub engine_brake_nm: f64,
+    /// Clip time the seat warp closes, seconds.
+    pub enter_warp_end: f64,
+    /// Clip time the seat warp opens, seconds.
+    pub enter_warp_start: f64,
+    /// The final drive, multiplying every gear.
+    pub final_drive: f64,
+    /// The share of drive torque the front axle takes, `[0, 1]` — the drivetrain.
+    pub front_torque_split: f64,
+    /// First gear's ratio.
+    pub gear_1_ratio: f64,
+    /// Second gear's ratio.
+    pub gear_2_ratio: f64,
+    /// Third gear's ratio.
+    pub gear_3_ratio: f64,
+    /// Fourth gear's ratio.
+    pub gear_4_ratio: f64,
+    /// Fifth gear's ratio.
+    pub gear_5_ratio: f64,
+    /// Sixth gear's ratio.
+    pub gear_6_ratio: f64,
+    /// Seventh gear's ratio.
+    pub gear_7_ratio: f64,
+    /// Eighth gear's ratio.
+    pub gear_8_ratio: f64,
+    /// How many forward gears are in use.
+    pub gear_count: f64,
+    /// Idle speed, rpm.
+    pub idle_rpm: f64,
+    /// Torque at idle, as a fraction of the peak.
+    pub idle_torque_frac: f64,
+    /// Peak crankshaft torque, newton-metres.
+    pub peak_torque_nm: f64,
+    /// Where the torque curve peaks, rpm.
+    pub peak_torque_rpm: f64,
+    /// Where the limiter cuts, rpm.
+    pub redline_rpm: f64,
+    /// Torque at the redline, as a fraction of the peak.
+    pub redline_torque_frac: f64,
+    /// Reverse's ratio — reverse is a gear.
+    pub reverse_ratio: f64,
+    /// Downshift below this, rpm.
+    pub shift_down_rpm: f64,
+    /// How long a shift takes, seconds — no drive torque crosses it.
+    pub shift_time_s: f64,
+    /// Upshift above this, rpm.
+    pub shift_up_rpm: f64,
+    /// Stability-control strength, `[0, 1]`; `0` is off.
+    pub stability_control: f64,
+    /// How fast the road wheels turn toward the demand, degrees per second.
+    pub steer_rate_deg_per_s: f64,
+    /// How fast they return to centre, degrees per second.
+    pub steer_return_deg_per_s: f64,
+    /// The torque curve's one shape knob, `(0, 1)`; `0.5` is straight lines.
+    pub torque_curve_bias: f64,
+    /// Traction control: the drive slip ratio above which torque is bled off;
+    /// `0` is off.
+    pub traction_control_slip: f64,
+    /// Tangent of the slip angle at which lateral grip peaks.
+    pub tyre_lat_peak_slip: f64,
+    /// How stiff the lateral rise is, `(0, 1)`.
+    pub tyre_lat_rise_bias: f64,
+    /// How fast µ falls as vertical load rises over the static share.
+    pub tyre_load_sensitivity: f64,
+    /// Slip ratio at which longitudinal grip peaks.
+    pub tyre_long_peak_slip: f64,
+    /// How stiff the longitudinal rise is, `(0, 1)`.
+    pub tyre_long_rise_bias: f64,
+    /// Grip once fully sliding, as a fraction of the peak.
+    pub tyre_slide_frac: f64,
+    /// A wheel's rotational inertia, kg·m².
+    pub wheel_inertia_kgm2: f64,
 }
 
 impl Default for VehicleClass {
@@ -2658,22 +2766,67 @@ impl VehicleClass {
             rolling_resistance: t.rolling_resistance,
             stiffness_n_per_m: t.stiffness_n_per_m,
             travel_m: t.travel_m,
+            abs_slip: t.abs_slip,
+            ackermann: t.ackermann,
+            anti_roll_front_n_per_m: t.anti_roll_front_n_per_m,
+            anti_roll_rear_n_per_m: t.anti_roll_rear_n_per_m,
+            brake_bias: t.brake_bias,
+            cog_height_m: t.cog_height_m,
+            diff_lock_front: t.diff_lock_front,
+            diff_lock_rear: t.diff_lock_rear,
+            downforce_centre_z: t.downforce_centre_z,
+            downforce_n_per_mps2: t.downforce_n_per_mps2,
+            drag_lateral_n_per_mps2: t.drag_lateral_n_per_mps2,
+            engine_brake_nm: t.engine_brake_nm,
+            enter_warp_end: t.enter_warp_end,
+            enter_warp_start: t.enter_warp_start,
+            final_drive: t.final_drive,
+            front_torque_split: t.front_torque_split,
+            gear_1_ratio: t.gear_1_ratio,
+            gear_2_ratio: t.gear_2_ratio,
+            gear_3_ratio: t.gear_3_ratio,
+            gear_4_ratio: t.gear_4_ratio,
+            gear_5_ratio: t.gear_5_ratio,
+            gear_6_ratio: t.gear_6_ratio,
+            gear_7_ratio: t.gear_7_ratio,
+            gear_8_ratio: t.gear_8_ratio,
+            gear_count: t.gear_count,
+            idle_rpm: t.idle_rpm,
+            idle_torque_frac: t.idle_torque_frac,
+            peak_torque_nm: t.peak_torque_nm,
+            peak_torque_rpm: t.peak_torque_rpm,
+            redline_rpm: t.redline_rpm,
+            redline_torque_frac: t.redline_torque_frac,
+            reverse_ratio: t.reverse_ratio,
+            shift_down_rpm: t.shift_down_rpm,
+            shift_time_s: t.shift_time_s,
+            shift_up_rpm: t.shift_up_rpm,
+            stability_control: t.stability_control,
+            steer_rate_deg_per_s: t.steer_rate_deg_per_s,
+            steer_return_deg_per_s: t.steer_return_deg_per_s,
+            torque_curve_bias: t.torque_curve_bias,
+            traction_control_slip: t.traction_control_slip,
+            tyre_lat_peak_slip: t.tyre_lat_peak_slip,
+            tyre_lat_rise_bias: t.tyre_lat_rise_bias,
+            tyre_load_sensitivity: t.tyre_load_sensitivity,
+            tyre_long_peak_slip: t.tyre_long_peak_slip,
+            tyre_long_rise_bias: t.tyre_long_rise_bias,
+            tyre_slide_frac: t.tyre_slide_frac,
+            wheel_inertia_kgm2: t.wheel_inertia_kgm2,
         }
     }
 
     /// Lift this class back into a full
-    /// [`VehicleTuning`](crate::vehicle::VehicleTuning), taking the one field
-    /// the class deliberately does not carry — `enter_window` — from the
-    /// default.
+    /// [`VehicleTuning`](crate::vehicle::VehicleTuning).
     ///
-    /// The inverse of [`from_tuning`](Self::from_tuning) on the fifteen fields
-    /// that exist, which is what makes [`set`](Self::set) able to reuse the
-    /// tuning door's own name list instead of restating it.
+    /// The exact inverse of [`from_tuning`](Self::from_tuning) since wave VEH2a —
+    /// every tunable the door knows is now authored, so nothing is taken from the
+    /// default any more (v25 took `enter_window`, which the window closed). That
+    /// is what makes [`set`](Self::set) able to reuse the tuning door's own name
+    /// list instead of restating it, and it is asserted both ways by
+    /// `the_class_and_the_tuning_are_the_same_sixty_two_numbers`.
     pub fn to_tuning(&self) -> crate::vehicle::VehicleTuning {
-        let mut t = crate::vehicle::VehicleTuning {
-            enter_window: crate::vehicle::VehicleTuning::default().enter_window,
-            ..crate::vehicle::VehicleTuning::default()
-        };
+        let mut t = crate::vehicle::VehicleTuning::default();
         for (name, value) in self.settings() {
             t.set(name, value);
         }
@@ -2705,23 +2858,70 @@ impl VehicleClass {
     /// Ordered, because two tunables can interact (a `max_speed_mps` below the
     /// current speed changes what `max_engine_force_n` does) and an unordered
     /// application would make the installed class depend on a map's iteration.
-    pub fn settings(&self) -> [(&'static str, f64); 15] {
+    pub fn settings(&self) -> [(&'static str, f64); 62] {
         [
+            ("abs_slip", self.abs_slip),
+            ("ackermann", self.ackermann),
+            ("anti_roll_front_n_per_m", self.anti_roll_front_n_per_m),
+            ("anti_roll_rear_n_per_m", self.anti_roll_rear_n_per_m),
+            ("brake_bias", self.brake_bias),
             ("brake_force_n", self.brake_force_n),
+            ("cog_height_m", self.cog_height_m),
             ("damping_ns_per_m", self.damping_ns_per_m),
+            ("diff_lock_front", self.diff_lock_front),
+            ("diff_lock_rear", self.diff_lock_rear),
+            ("downforce_centre_z", self.downforce_centre_z),
+            ("downforce_n_per_mps2", self.downforce_n_per_mps2),
+            ("drag_lateral_n_per_mps2", self.drag_lateral_n_per_mps2),
             ("drag_n_per_mps2", self.drag_n_per_mps2),
+            ("engine_brake_nm", self.engine_brake_nm),
             ("enter_time_s", self.enter_time_s),
+            ("enter_warp_end", self.enter_warp_end),
+            ("enter_warp_start", self.enter_warp_start),
+            ("final_drive", self.final_drive),
+            ("front_torque_split", self.front_torque_split),
+            ("gear_1_ratio", self.gear_1_ratio),
+            ("gear_2_ratio", self.gear_2_ratio),
+            ("gear_3_ratio", self.gear_3_ratio),
+            ("gear_4_ratio", self.gear_4_ratio),
+            ("gear_5_ratio", self.gear_5_ratio),
+            ("gear_6_ratio", self.gear_6_ratio),
+            ("gear_7_ratio", self.gear_7_ratio),
+            ("gear_8_ratio", self.gear_8_ratio),
+            ("gear_count", self.gear_count),
             ("handbrake_force_n", self.handbrake_force_n),
+            ("idle_rpm", self.idle_rpm),
+            ("idle_torque_frac", self.idle_torque_frac),
             ("lateral_grip", self.lateral_grip),
             ("longitudinal_grip", self.longitudinal_grip),
             ("max_engine_force_n", self.max_engine_force_n),
             ("max_speed_mps", self.max_speed_mps),
             ("max_steer_deg", self.max_steer_deg),
             ("min_steer_deg", self.min_steer_deg),
+            ("peak_torque_nm", self.peak_torque_nm),
+            ("peak_torque_rpm", self.peak_torque_rpm),
+            ("redline_rpm", self.redline_rpm),
+            ("redline_torque_frac", self.redline_torque_frac),
             ("rest_length_m", self.rest_length_m),
+            ("reverse_ratio", self.reverse_ratio),
             ("rolling_resistance", self.rolling_resistance),
+            ("shift_down_rpm", self.shift_down_rpm),
+            ("shift_time_s", self.shift_time_s),
+            ("shift_up_rpm", self.shift_up_rpm),
+            ("stability_control", self.stability_control),
+            ("steer_rate_deg_per_s", self.steer_rate_deg_per_s),
+            ("steer_return_deg_per_s", self.steer_return_deg_per_s),
             ("stiffness_n_per_m", self.stiffness_n_per_m),
+            ("torque_curve_bias", self.torque_curve_bias),
+            ("traction_control_slip", self.traction_control_slip),
             ("travel_m", self.travel_m),
+            ("tyre_lat_peak_slip", self.tyre_lat_peak_slip),
+            ("tyre_lat_rise_bias", self.tyre_lat_rise_bias),
+            ("tyre_load_sensitivity", self.tyre_load_sensitivity),
+            ("tyre_long_peak_slip", self.tyre_long_peak_slip),
+            ("tyre_long_rise_bias", self.tyre_long_rise_bias),
+            ("tyre_slide_frac", self.tyre_slide_frac),
+            ("wheel_inertia_kgm2", self.wheel_inertia_kgm2),
         ]
     }
 

@@ -987,9 +987,10 @@ impl PhysicsBridge3D {
                     // tuner owns it from there.
                     if let Some(class) = class {
                         let took = class.install(v.as_mut());
+                        let of = class.settings().len();
                         tracing::debug!(
                             "inf-physics: vehicle {chassis} installed its class \
-                             ({took} of 15 tunables taken)"
+                             ({took} of {of} tunables taken)"
                         );
                     }
                     self.vehicles.insert(chassis, v);
