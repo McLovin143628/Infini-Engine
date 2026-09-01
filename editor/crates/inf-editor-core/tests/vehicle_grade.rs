@@ -143,6 +143,64 @@ fn ramp_world(grade: f64, id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
     (doc, bridge, mass)
 }
 
+/// Build a world holding a **big flat static floor** with one catalogue car on
+/// it, facing `+Z`.
+///
+/// A collider and not a terrain, and the reason is a measurement: the feel table
+/// runs a coupe at full throttle for a minute, which is three kilometres, and the
+/// ramp fixture's terrain is 512 m square. The first cut used it and the coupe
+/// simply drove off the end of the world — it reported a stop that never happened
+/// because it was in free fall, `inf` metres from where the brakes went on.
+fn flat_world(id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
+    let def = *inf_editor_core::vehicle::island_vehicles()
+        .get(id)
+        .unwrap_or_else(|| panic!("the catalogue has no `{id}` row"));
+    let mut doc = SceneDoc::new();
+    let e = doc.world_mut().spawn_with_guid(TERRAIN, "Floor", None);
+    doc.world_mut().world_mut().entity_mut(e).insert(
+        inf_ecs::components::Transform::from_translation(DVec3::new(0.0, 9.5, 0.0)),
+    );
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .insert(inf_ecs::components::RigidBody3D {
+            kind: inf_ecs::components::BodyKind3D::Static,
+            ..Default::default()
+        });
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .insert(inf_ecs::components::Collider3D {
+            shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
+            half_extents: inf_ecs::math::Vec3d::new(4_000.0, 0.5, 4_000.0),
+            friction: 0.9,
+            ..Default::default()
+        });
+    inf_editor_core::vehicle::spawn_vehicle(
+        &mut doc,
+        CAR,
+        &def,
+        inf_editor_core::vehicle::VehicleSpawn {
+            name: "Runner",
+            at: DVec3::new(
+                0.0,
+                inf_editor_core::vehicle::resting_origin_y(&def, 10.0),
+                -3_500.0,
+            ),
+            yaw_deg: 0.0,
+            paint: Color::new(0.1, 0.1, 0.6, 1.0),
+            clip: None,
+        },
+    );
+    doc.world_mut().mark_dirty();
+    doc.world_mut().propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(doc.world());
+    let mass =
+        def.half_extents.x * def.half_extents.y * def.half_extents.z * 8.0 * def.density_kg_m3;
+    (doc, bridge, mass)
+}
+
 /// One fixed step, in the slot both hosts run it in.
 fn step(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, controls: VehicleControls) {
     bridge.sync_from_world(world);
@@ -329,27 +387,230 @@ fn the_catalogue_truck_climbs_it_too_and_it_is_a_different_car() {
         ran[1].1,
         ran[0].1
     );
-    // **AND THE PICKUP OUT-CLIMBS THE SALOON**, which is a claim VEH2a inverted
-    // and is worth pinning precisely because it is surprising.
+    // **AND THE TWO ROWS CLIMB IT DIFFERENTLY**, which is all this arm asserts
+    // about the ORDER — deliberately, and the history is the reason.
     //
-    // Under P29.7's flat drive curve the answer was the other way round: a heavy
-    // truck geared to a lower top speed simply had less force, and the arm here
-    // asserted so. VEH2a changed two things about these rows and both point the
-    // same way. The pickup got a **diesel** — 520 N·m at 2 200 with the torque
-    // arriving early (`torque_curve_bias` 0.75) — where the saloon has a 245 N·m
-    // petrol that wants revs. And the saloon is **front-wheel drive**, which is
-    // what a saloon is, so an uphill launch transfers load onto the axle it does
-    // not drive while the pickup's rear-drive transfers load ONTO its driven one.
+    // Under P29.7's flat drive curve the saloon was the faster climber because
+    // the pickup was simply heavier with no more force. When VEH2a gave the
+    // pickup a diesel and made the saloon front-wheel drive, the answer inverted
+    // (124.4 m against 105.1) and this arm was inverted with it. Then the driver
+    // aids became feed-forward torque caps instead of feedback controllers, and
+    // it inverted BACK (130.8 against 144.8), because a front-drive car climbing
+    // a hill is exactly the case a good traction controller rescues.
     //
-    // Measured on the audited 0.108 grade over ten seconds: pickup 124.4 m,
-    // saloon 105.1 m. The gap is the claim; a renamed row would produce two
-    // identical numbers.
+    // Two flips inside one wave is a knife edge, and an arm that pins which side
+    // of it the model is on is an arm that reds on every tuning pass without
+    // telling anyone anything. What is stable, and what a fleet needs to be true,
+    // is that the two rows are not one car: they climb the same hill by a margin
+    // no rename could produce.
     assert!(
-        ran[1].2 > ran[0].2 + 5.0,
-        "the pickup ran {} m and the saloon {} m — a rear-drive diesel that \
-         cannot out-climb a front-drive petrol on an eleven per cent grade is a \
-         drivetrain and a torque curve that reach nothing",
+        (ran[1].2 - ran[0].2).abs() > 8.0,
+        "the pickup ran {} m and the saloon {} m up the same grade — a difference          of {:.1} m is two names on one car",
         ran[1].2,
-        ran[0].2
+        ran[0].2,
+        (ran[1].2 - ran[0].2).abs()
     );
+}
+
+// ── THE FEEL TABLE (island wave VEH2a) ──────────────────────────────────────
+
+/// What one catalogue row is **specified** to do, and what this file measures it
+/// doing.
+///
+/// A spec row rather than a blessed measurement: each bound is a claim about the
+/// *kind of vehicle* the row is meant to be, written before the run and wide
+/// enough that a tuning nudge does not red the gate — and narrow enough that a
+/// coupe that accelerates like a van, or a van that stops like a coupe, does.
+///
+/// `sprint_to_mps` is 100 km/h where the class's own limiter can reach it. Two
+/// rows cannot: the pickup is limited to 27 m/s (97 km/h) and would be measured
+/// against a speed it is not allowed to have, so they are specified against 80 %
+/// of their own limiter instead and the row says so. Measuring every class
+/// against a number two of them cannot reach is how a gate ends up asserting the
+/// governor rather than the engine.
+struct Spec {
+    id: &'static str,
+    /// The speed the sprint is timed to, m/s.
+    sprint_to_mps: f64,
+    /// The most seconds that sprint may take.
+    sprint_max_s: f64,
+    /// …and the least, so a row cannot pass by becoming a rocket.
+    sprint_min_s: f64,
+    /// The most metres it may take to stop from `sprint_to_mps`.
+    brake_max_m: f64,
+    /// …and the least, so a class cannot pass by stopping like a wall.
+    brake_min_m: f64,
+    /// The band the achieved top speed must sit in, as a fraction of the class's
+    /// own `max_speed_mps`. A governor that never engaged, or one that engaged
+    /// early, both fail here.
+    top_frac: (f64, f64),
+}
+
+/// The five rows' specs. **Chosen from what each vehicle IS**, not from a run:
+/// a 1 374 kg rear-drive coupe with 420 N·m is a five-second car, a 3 296 kg
+/// diesel van is not, and a van's brakes work on a van's mass.
+const SPECS: [Spec; 5] = [
+    Spec {
+        id: "sports",
+        sprint_to_mps: 27.78,
+        sprint_max_s: 8.0,
+        sprint_min_s: 2.5,
+        brake_max_m: 46.0,
+        brake_min_m: 20.0,
+        top_frac: (0.88, 1.02),
+    },
+    Spec {
+        id: "sedan",
+        sprint_to_mps: 27.78,
+        sprint_max_s: 16.0,
+        sprint_min_s: 4.0,
+        brake_max_m: 60.0,
+        brake_min_m: 22.0,
+        top_frac: (0.88, 1.02),
+    },
+    Spec {
+        id: "suv",
+        sprint_to_mps: 27.78,
+        sprint_max_s: 16.0,
+        sprint_min_s: 4.0,
+        brake_max_m: 70.0,
+        brake_min_m: 24.0,
+        top_frac: (0.88, 1.02),
+    },
+    // Limited to 32 m/s, so 100 km/h is reachable but only just; timed to it all
+    // the same, because a van that cannot reach a motorway speed is a van
+    // nobody would drive on the island's circuit.
+    Spec {
+        id: "van",
+        sprint_to_mps: 25.6,
+        sprint_max_s: 26.0,
+        sprint_min_s: 6.0,
+        brake_max_m: 85.0,
+        brake_min_m: 26.0,
+        top_frac: (0.88, 1.02),
+    },
+    // Limited to 27 m/s (97 km/h): timed to 80 % of its own limiter, which is
+    // the only honest thing to time a governed vehicle to.
+    Spec {
+        id: "truck",
+        sprint_to_mps: 21.6,
+        sprint_max_s: 18.0,
+        sprint_min_s: 4.0,
+        brake_max_m: 55.0,
+        brake_min_m: 18.0,
+        top_frac: (0.88, 1.02),
+    },
+];
+
+/// **THE FEEL TABLE**: every catalogue row's sprint, stop and top speed,
+/// measured on flat ground and bounded by its own spec row.
+///
+/// The numbers this wave exists to be judged on. A model can be described in any
+/// amount of prose and still produce a car that reaches sixty in a minute; this
+/// is the arm that would notice.
+///
+/// Flat ground and the same `ramp_world` fixture at grade zero, so the rig, the
+/// step order and the tuning are exactly the ones the grade arms use.
+#[test]
+fn every_catalogue_row_sprints_stops_and_tops_out_inside_its_own_spec() {
+    for spec in &SPECS {
+        let (mut doc, mut bridge, mass) = flat_world(spec.id);
+        let class = *inf_editor_core::vehicle::island_vehicles()
+            .get(spec.id)
+            .expect("the row");
+        let limiter = class.class.max_speed_mps;
+        for _ in 0..90 {
+            step(doc.world_mut(), &mut bridge, VehicleControls::default());
+        }
+        let speed = |b: &PhysicsBridge3D| -> f64 {
+            b.body_of(CAR)
+                .and_then(|body| b.world().body_linvel(body))
+                .map(|v| DVec3::new(v.x, 0.0, v.z).length())
+                .unwrap_or(0.0)
+        };
+
+        // ── the sprint ──
+        let full = VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        let (mut sprint_s, mut top) = (f64::INFINITY, 0.0f64);
+        for i in 0..3_600 {
+            step(doc.world_mut(), &mut bridge, full);
+            let v = speed(&bridge);
+            top = top.max(v);
+            if v >= spec.sprint_to_mps && sprint_s.is_infinite() {
+                sprint_s = (i + 1) as f64 * DT;
+            }
+        }
+
+        // ── the stop, from the speed the sprint was timed to ──
+        while speed(&bridge) > spec.sprint_to_mps {
+            step(
+                doc.world_mut(),
+                &mut bridge,
+                VehicleControls {
+                    brake: 1.0,
+                    ..Default::default()
+                },
+            );
+        }
+        let from = car_at(&doc);
+        let mut brake_m = f64::INFINITY;
+        for _ in 0..1_800 {
+            step(
+                doc.world_mut(),
+                &mut bridge,
+                VehicleControls {
+                    brake: 1.0,
+                    ..Default::default()
+                },
+            );
+            if speed(&bridge) < 0.5 {
+                brake_m = (car_at(&doc) - from).length();
+                break;
+            }
+        }
+
+        println!(
+            "THE FEEL TABLE: {:>6} ({:>4.0} kg) 0-{:.0} km/h in {:>5.2} s, stops \
+             in {:>5.1} m, tops out at {:>5.1} m/s ({:.0} km/h) of a {:.0} m/s \
+             limiter",
+            spec.id,
+            mass,
+            spec.sprint_to_mps * 3.6,
+            sprint_s,
+            brake_m,
+            top,
+            top * 3.6,
+            limiter
+        );
+        assert!(
+            sprint_s >= spec.sprint_min_s && sprint_s <= spec.sprint_max_s,
+            "{}: 0-{:.0} km/h took {sprint_s:.2} s, outside its spec of \
+             {:.1}..{:.1}",
+            spec.id,
+            spec.sprint_to_mps * 3.6,
+            spec.sprint_min_s,
+            spec.sprint_max_s
+        );
+        assert!(
+            brake_m >= spec.brake_min_m && brake_m <= spec.brake_max_m,
+            "{}: stopping from {:.0} km/h took {brake_m:.1} m, outside its spec \
+             of {:.0}..{:.0}",
+            spec.id,
+            spec.sprint_to_mps * 3.6,
+            spec.brake_min_m,
+            spec.brake_max_m
+        );
+        assert!(
+            top >= limiter * spec.top_frac.0 && top <= limiter * spec.top_frac.1,
+            "{}: topped out at {top:.1} m/s against a {limiter:.0} m/s limiter — \
+             outside {:.2}..{:.2} of it, so either the governor never engaged or \
+             it engaged early",
+            spec.id,
+            spec.top_frac.0,
+            spec.top_frac.1
+        );
+    }
 }

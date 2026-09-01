@@ -417,18 +417,18 @@ wheel_drop_m = -0.52
 # A revvy engine: `torque_curve_bias` below 0.5 means it is soft low down and
 # holds its torque to the limiter, which is the opposite end of the one knob the
 # pickup's diesel turns the other way.
-peak_torque_nm = 420.0
-peak_torque_rpm = 5200.0
+peak_torque_nm = 460.0
+peak_torque_rpm = 4800.0
 redline_rpm = 7600.0
 idle_rpm = 900.0
-idle_torque_frac = 0.45
+idle_torque_frac = 0.6
 redline_torque_frac = 0.86
-torque_curve_bias = 0.28
+torque_curve_bias = 0.4
 engine_brake_nm = 55.0
-final_drive = 3.55
+final_drive = 3.95
 gear_count = 7.0
-gear_1_ratio = 3.9
-gear_2_ratio = 2.6
+gear_1_ratio = 4.4
+gear_2_ratio = 2.9
 gear_3_ratio = 1.9
 gear_4_ratio = 1.45
 gear_5_ratio = 1.15
@@ -439,11 +439,11 @@ shift_time_s = 0.12
 shift_up_rpm = 7200.0
 shift_down_rpm = 3000.0
 max_speed_mps = 62.0
-max_engine_force_n = 16000.0
+max_engine_force_n = 24000.0
 brake_force_n = 20000.0
 handbrake_force_n = 9000.0
 brake_bias = 0.66
-diff_lock_rear = 0.6
+diff_lock_rear = 0.75
 lateral_grip = 1.45
 longitudinal_grip = 1.5
 tyre_long_peak_slip = 0.11
@@ -472,7 +472,7 @@ steer_return_deg_per_s = 420.0
 ackermann = 0.9
 # A driver's car: the aids are present and they are turned DOWN.
 abs_slip = 0.13
-traction_control_slip = 0.1
+traction_control_slip = 0.16
 stability_control = 0.25
 
 [suv]

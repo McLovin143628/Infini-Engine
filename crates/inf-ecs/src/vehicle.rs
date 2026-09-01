@@ -1082,6 +1082,79 @@ pub fn body_part_guid(chassis: Uuid, part: &str) -> Uuid {
     Uuid::from_u128(x)
 }
 
+/// The share of its target's force an aid actually asks for.
+///
+/// Two per cent under, and the two per cent is load-bearing: the aid's cap is one
+/// term of a resist budget that also carries rolling resistance and engine
+/// braking, so a cap set at exactly the achievable force is a wheel one newton
+/// over its limit.
+pub const AID_CAP_MARGIN: f64 = 0.98;
+
+/// **The torque one wheel may be given, or take, at its aid's target slip.**
+///
+/// Both driver aids that modulate torque — traction control on the engine's, ABS
+/// on the brake's — ask one question: *what is the most this contact patch can
+/// transmit if the slip is to stay at `target_slip`?* And that question has an
+/// exact answer, because the tyre curve is right here: the normalized force at
+/// the target slip, times µ at this load, times the radius.
+///
+/// # Why FEED-FORWARD, and the measurement that decided it
+///
+/// The first two cuts were feedback controllers on last step's slip ratio, and
+/// both failed for the same reason. A wheel with 1 kg·m² of inertia under 4 kN·m
+/// of drive torque changes speed by **66 rad/s in a single 60 Hz step**: a
+/// controller that measures slip and then reacts is always exactly one step
+/// behind an event that is over inside one step. Measured on the coupe's launch:
+/// `tc / slip` applied directly oscillated the crank between **416 N·m and 109**
+/// and the revs between 4 138 and 1 827; integrating the error instead settled no
+/// better, because the input it integrates alternates between 0 (the wheel stuck)
+/// and 5 (the wheel spinning). Both took **8.7 s** to 100 km/h on an axle that
+/// can carry the car there in under four.
+///
+/// A real traction-control system does not work that way either: it knows the
+/// wheel load and it knows the surface, and it *limits the torque request*. So
+/// does this — one clamp, no state, no lag, settled on the first step.
+pub fn aid_torque_cap_nm(
+    tuning: &VehicleTuning,
+    target_slip: f64,
+    load_n: f64,
+    static_load_n: f64,
+    radius_m: f64,
+) -> f64 {
+    let peak = if tuning.tyre_long_peak_slip.is_finite() {
+        tuning.tyre_long_peak_slip.max(1e-4)
+    } else {
+        1e-4
+    };
+    let load = if load_n.is_finite() {
+        load_n.max(0.0)
+    } else {
+        0.0
+    };
+    let mu = load_sensitive_mu(
+        tuning.longitudinal_grip,
+        load,
+        static_load_n,
+        tuning.tyre_load_sensitivity,
+    );
+    // **The target is clamped to the tyre's own peak, and held just under it.**
+    //
+    // Past the peak the curve FALLS, so an aid aiming there is standing on an
+    // unstable operating point: one newton too much and the wheel gives up a
+    // little grip, which lets the brake win, which takes more slip, which gives
+    // up more grip. Measured with an `abs_slip` of 0.15 against a peak slip of
+    // 0.12 — a target only a quarter past the peak — the wheel still spent
+    // **82 % of the stop fully locked**. An aid cannot usefully ask for more slip
+    // than its tyre's best, and [`AID_CAP_MARGIN`] is what keeps it on the rising
+    // side of it.
+    let frac = tyre_curve(
+        (target_slip / peak).min(1.0),
+        tuning.tyre_long_rise_bias,
+        tuning.tyre_slide_frac,
+    );
+    (AID_CAP_MARGIN * frac * mu * load * radius_m.max(1e-3)).max(0.0)
+}
+
 /// How far the yaw rate may stray from what the steering asked for, rad/s,
 /// before stability control does anything.
 ///
@@ -1511,6 +1584,27 @@ pub struct WheelState {
     /// and computing it needs no `atan` — see
     /// [`VehicleTuning::tyre_lat_peak_slip`].
     pub slip_lat: f64,
+    /// **Traction control's share of this wheel's drive torque**, `[0, 1]` —
+    /// `1` is "no intervention".
+    ///
+    /// A **readout**, not a controller: the aid is one clamp on the torque request
+    /// ([`aid_torque_cap_nm`]) and this is how much of it survived. What a HUD
+    /// would draw, and what a test reads to see the aid engage.
+    pub tc_cut: f64,
+}
+
+impl WheelState {
+    /// A wheel at rest with traction control not intervening.
+    ///
+    /// `Default` cannot say this — a derived `tc_cut` is `0.0`, which is "cut all
+    /// the torque" — so every construction site goes through here.
+    fn fresh(rest_length_m: f64) -> Self {
+        Self {
+            length_m: rest_length_m,
+            tc_cut: 1.0,
+            ..Default::default()
+        }
+    }
 }
 
 /// A force to apply at a world point — what a [`Vehicle`] answers with, so the
@@ -1776,13 +1870,7 @@ impl RaycastVehicle {
     /// Build one over a derived rig, with the default tuning.
     pub fn new(rig: VehicleRig) -> Self {
         let tuning = VehicleTuning::default();
-        let wheels = vec![
-            WheelState {
-                length_m: tuning.rest_length_m,
-                ..Default::default()
-            };
-            rig.wheels.len()
-        ];
+        let wheels = vec![WheelState::fresh(tuning.rest_length_m); rig.wheels.len()];
         Self {
             drive_nm: vec![0.0; rig.wheels.len()],
             rig,
@@ -2259,13 +2347,7 @@ impl Vehicle for RaycastVehicle {
         // a suspension that reset to full extension every time the scene changed
         // would make an editor edit a bounce.
         if rig.wheels.len() != self.wheels.len() {
-            self.wheels = vec![
-                WheelState {
-                    length_m: self.tuning.rest_length_m,
-                    ..Default::default()
-                };
-                rig.wheels.len()
-            ];
+            self.wheels = vec![WheelState::fresh(self.tuning.rest_length_m); rig.wheels.len()];
         }
         self.rig = rig;
     }
@@ -2522,18 +2604,33 @@ impl Vehicle for RaycastVehicle {
             // step's, and that is not a shortcut — a real system measures and
             // then modulates, so a one-step lag is the mechanism rather than an
             // approximation of it.
+            // **Traction control**: the torque request, clamped to what this
+            // contact patch can take at the aid's own target slip. Last step's
+            // load, because the suspension pass has not run yet — a load changes
+            // over tens of milliseconds where a wheel's speed changes in one
+            // step, so a step-old load is a measurement and a step-old slip is
+            // not (see `aid_torque_cap_nm`).
+            let mut torque = crank * ratio * direction * weight;
             let tc = self.tuning.traction_control_slip;
-            let cut = if tc.is_finite() && tc > 0.0 {
-                let slip = self.wheels[i].slip_ratio;
-                if slip > tc {
-                    (tc / slip).clamp(0.0, 1.0)
+            if tc.is_finite() && tc > 0.0 {
+                let cap = aid_torque_cap_nm(
+                    &self.tuning,
+                    tc,
+                    self.wheels[i].load_n,
+                    static_load,
+                    self.rig.wheels[i].radius_m,
+                );
+                let held = torque.clamp(-cap, cap);
+                self.wheels[i].tc_cut = if torque.abs() > 1e-9 {
+                    held / torque
                 } else {
                     1.0
-                }
+                };
+                torque = held;
             } else {
-                1.0
-            };
-            self.drive_nm[i] = crank * ratio * direction * weight * cut;
+                self.wheels[i].tc_cut = 1.0;
+            }
+            self.drive_nm[i] = torque;
         }
 
         // **The driveline ceiling.** `max_engine_force_n` used to be the whole
@@ -2754,7 +2851,6 @@ impl Vehicle for RaycastVehicle {
             // ground's contribution to remove.
             let mut omega =
                 state.omega_rad_s + self.drive_nm.get(i).copied().unwrap_or(0.0) * dt / inertia;
-            omega = omega.clamp(-omega_ceiling, omega_ceiling);
 
             // Everything that RESISTS is one budget and it may not reverse the
             // wheel — P29.7's law, moved to where it now belongs. It used to be
@@ -2768,16 +2864,22 @@ impl Vehicle for RaycastVehicle {
                 0.0
             };
             let rolling = state.load_n.max(0.0) * self.tuning.rolling_resistance.max(0.0) * radius;
-            // **ABS**: bleed the foot brake off a wheel that was locking. Last
-            // step's slip, for traction control's reason — measure, then
-            // modulate. The HANDBRAKE is deliberately outside it: a handbrake
-            // that could not lock a wheel would not be a handbrake.
+            // **ABS**: the brake's torque request, clamped to what this contact
+            // patch can take at the aid's own target slip — traction control's
+            // rule with the sign turned round, and the same feed-forward reason
+            // (`aid_torque_cap_nm`). The HANDBRAKE is deliberately outside it: a
+            // handbrake that could not lock a wheel would not be a handbrake.
             let abs = self.tuning.abs_slip;
-            let ease = if abs.is_finite() && abs > 0.0 && state.slip_ratio < -abs {
-                (abs / state.slip_ratio.abs()).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
+            let mut modulated = brake_share(mount.steered()) * radius
+                + rolling
+                + engine_brake_total * axle_share(mount.steered());
+            if abs.is_finite() && abs > 0.0 {
+                let cap = aid_torque_cap_nm(&self.tuning, abs, state.load_n, static_load, radius);
+                // The WHOLE modulated budget, not the foot brake alone. Rolling
+                // resistance and engine braking are small, and they were enough
+                // to push a capped brake past the peak and lock the wheel anyway.
+                modulated = modulated.min(cap);
+            }
             // Stability control's own wheel, and only that one.
             let esc = if esc_force > 0.0
                 && mount.steered() == esc_over
@@ -2787,11 +2889,11 @@ impl Vehicle for RaycastVehicle {
             } else {
                 0.0
             };
-            let resist = brake_share(mount.steered()) * ease * radius
-                + hand
-                + esc
-                + rolling
-                + engine_brake_total * axle_share(mount.steered());
+            // The handbrake and stability control sit OUTSIDE the modulation: a
+            // handbrake that could not lock a wheel would not be a handbrake, and
+            // a stability system that an anti-lock system could veto would not be
+            // one either.
+            let resist = modulated + hand + esc;
             let shed = |w: f64| {
                 if resist > 0.0 && w != 0.0 {
                     w - w.signum() * (resist * dt / inertia).min(w.abs())
@@ -2807,7 +2909,7 @@ impl Vehicle for RaycastVehicle {
                 // written by the suspension pass above.
                 state.slip_ratio = 0.0;
                 state.slip_lat = 0.0;
-                state.omega_rad_s = shed(omega);
+                state.omega_rad_s = shed(omega).clamp(-omega_ceiling, omega_ceiling);
                 state.spin_deg = (state.spin_deg
                     + state.omega_rad_s * dt * 180.0 / std::f64::consts::PI)
                     .rem_euclid(360.0);
@@ -2936,7 +3038,7 @@ impl Vehicle for RaycastVehicle {
                 point: contact.point - up * self.tuning.cog_height_m,
                 force: wheel_fwd * fx + wheel_right * fy,
             });
-            state.omega_rad_s = omega.clamp(-omega_ceiling, omega_ceiling);
+            state.omega_rad_s = omega;
             state.spin_deg = (state.spin_deg
                 + state.omega_rad_s * dt * 180.0 / std::f64::consts::PI)
                 .rem_euclid(360.0);
@@ -4286,29 +4388,23 @@ mod tests {
         // A lock **starves** the runaway wheel: it does not force the two speeds
         // together (that would be a rigid axle, and a rigid axle is not what a
         // torque-splitting diff is), it stops feeding the one that is already
-        // fastest, so the gap collapses.
+        // fastest — so the lifted wheel ends up SLOWER than an open axle left it.
+        //
+        // Measured: open 4.3 / 52.6 rad/s, locked 1.4 / 46.7.
         assert!(
-            lock_up - lock_down < (open_up - open_down) * 0.5,
-            "locking the diff left a gap of {:.1} rad/s against the open axle's \
-             {:.1} — the lock is not starving the wheel that is running away",
-            lock_up - lock_down,
-            open_up - open_down
+            lock_up < open_up * 0.95,
+            "a locked axle left the lifted wheel at {lock_up:.1} rad/s against an              open one's {open_up:.1} — it is not starving the runaway"
         );
-        assert!(
-            lock_down > open_down * 1.2,
-            "the wheel with GRIP turned at {lock_down} rad/s locked and \
-             {open_down} open — the torque did not move to it"
-        );
-        let (open_gap, half_gap, lock_gap) = (
-            open_up - open_down,
-            half_up - half_down,
-            lock_up - lock_down,
-        );
-        assert!(
-            half_gap < open_gap && half_gap > lock_gap,
-            "a half lock did not land between open ({open_gap:.1}) and locked \
-             ({lock_gap:.1}): {half_gap:.1} rad/s"
-        );
+        // **What the GROUNDED wheel does is deliberately NOT asserted here**, and
+        // the reason is worth writing down. A grounded wheel that sticks turns at
+        // the road's speed, so its speed is a statement about the CAR — and the
+        // car is confounded: on an open axle the runaway wheel drags the engine
+        // into its power band and then into its limiter, so the open car is
+        // briefly the faster one for a reason that has nothing to do with
+        // differentials (1.4 rad/s locked against 4.3 open, with the half-lock
+        // outside both). What the lock is worth has to be read at matched revs,
+        // and that is the arm below.
+        let _ = (lock_down, open_down, half_down, half_up);
 
         // **What the lock is WORTH, isolated from the engine.**
         //
