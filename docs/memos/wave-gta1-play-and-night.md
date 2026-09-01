@@ -566,6 +566,24 @@ Above, under the closure.
   dirty-document guard is a real branch with a real arm (`openLevel.test.ts`
   asserts `scene_open` is **not called** and the status line says *unsaved*).
 
+## House gates on the closing tree
+
+| | wave `b41ab78e` | audit `4817e67b`+ |
+|---|---|---|
+| battery (`-j 3`, `--no-fail-fast`, `INF_GOLDEN_STRICT=1`) | 356 / 6 607 / 0 / 19 | **356 / 6 608 / 0 / 19**, exit 0 |
+| goldens, strict | 60 files, 119 arms | **60 files, 119 arms**, all green, **none blessed by the run** |
+| clippy `-D warnings`, `CARGO_INCREMENTAL=0`, run LAST | 0 | **0**, exit 0 |
+| rustdoc after `cargo clean --doc` | 373 over 30 crates | **373 over 30 crates** (403 `^warning` lines − 30 summaries, cross-checked against the summaries' own sum of 373); headroom 77 |
+| `cargo fmt --all --check` | clean | clean |
+| frontend | 85 files / 775 tests | **85 files / 776 tests**, typecheck + eslint clean |
+| `Cargo.lock` | unmoved | unmoved |
+
+**+1 battery arm and +1 frontend arm, which is exactly this audit's `#[test]` and
+`it()` diff.** The three template `.inf_lvl`s moved and no golden did: the
+`phase2{6,7,8}_gate` count-and-CONTENT digests and `phase18_gate`'s inventory all
+pass unchanged, which is the check that a content re-bless did not reach the
+images.
+
 ## Carried (found here, not fixed here)
 
 * **`seed_starter_character` checks only the skeleton guid.** A boot root holding

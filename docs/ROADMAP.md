@@ -29423,4 +29423,11 @@ the island was rebuilt (43.3 s; the command is `cargo run -p inf-cli --release -
 is no `inf` package) and its terrain is **549 879 456 B — 2.05× `MAX_FRAME_LEN`**, settling the
 figure the READMEs still carried at 342.7 MB; the real payload the editor builds for it, through the
 real `write_msg`, is **6 250 534 B — 2.3 % of the cap and 1.1 % of the ground it names**, with one
-terrain path and zero inline. Audit ledger in `docs/memos/wave-gta1-play-and-night.md`.
+terrain path and zero inline. **House gates on the closing tree:** battery **356 / 6 608 / 0 / 19**
+exit 0 (+1 arm, exactly the audit's own `#[test]`), goldens **60 files / 119 arms** green under
+`INF_GOLDEN_STRICT=1` with **none blessed by the run** and every count-and-CONTENT digest pin
+unchanged — which is the check that a content re-bless did not reach the images — clippy **0** with
+`-D warnings` run LAST, rustdoc **373 over 30 crates** cold (403 `^warning` lines − 30 summaries,
+cross-checked against the summaries' own sum), fmt clean, frontend **85 files / 776 tests** with
+typecheck + eslint clean, `Cargo.lock` unmoved, **scene schema still v26**. Audit ledger in
+`docs/memos/wave-gta1-play-and-night.md`.
