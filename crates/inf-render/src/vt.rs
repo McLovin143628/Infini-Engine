@@ -59,11 +59,56 @@ use inf_vt::{PageFormat, VtAdmit, VtResidency, VtTransaction};
 
 use crate::settings::RenderSettings;
 
-/// Bindings the VT surface needs. P26.3 folds exactly this many into the shared
-/// environment group, which is why the indirection is one storage buffer holding
-/// every texture's table rather than a texture per texture — see
+/// Bindings the VT surface needs **contiguously at its base**: the first arm's
+/// atlas, the sampler and the table. P26.3 folds exactly this many into the
+/// shared environment group, which is why the indirection is one storage buffer
+/// holding every texture's table rather than a texture per texture — see
 /// [`inf_vt::table`].
 pub const VT_BINDING_COUNT: u32 = 3;
+
+/// **The most page-pool arms a level may have** (wave IASSET2), and it is a
+/// number the GPU chose rather than a preference.
+///
+/// A pool has one arm per stored page format, and the arms are separate `wgpu`
+/// textures because a BC1 page and a BC5 page are different sizes and one
+/// texture holds one format. They cannot be a texture *array* for the same
+/// reason, and they cannot be a binding array without a feature this project
+/// does not request. So each arm past the first is a **sampled-texture
+/// binding**, and that is the scarce resource here — not the bind group
+/// `passes::ENV_VT_ATLAS`'s folding argument was about.
+///
+/// # The measurement
+///
+/// `Limits::default().max_sampled_textures_per_shader_stage` is **16**, and the
+/// fattest lit pipeline — terrain, whose fragment stage carries the shared
+/// environment group plus its own tile and material textures — already spends
+/// **14**. Measured, by asking for four extra atlases and reading what `wgpu`
+/// said: *"Too many bindings of type SampledTextures in Stage
+/// ShaderStages(FRAGMENT), limit is 16, count was 18"* at
+/// `Device::create_pipeline_layout, label = 'terrain'`.
+///
+/// So the budget grants **two** further atlases and no more, which is three
+/// arms. That covers every format combination this engine's content can
+/// currently produce (a BC1/BC7 albedo, a BC5 normal and one data format); a
+/// level with a fourth folds its lightest transcodable formats into the RGBA8
+/// arm and [`crate::VtLevelReport::demoted`] names them, which is the old
+/// whole-level demotion reduced to the maps that actually caused it.
+///
+/// **Raising it is a device-limit decision, not an edit here.** Requesting a
+/// higher `max_sampled_textures_per_shader_stage` excludes adapters that do not
+/// grant it, and this project ships a wasm player. The other direction — freeing
+/// a sampled texture in the lit path — is what
+/// `tests::the_lit_pipelines_fit_the_default_sampled_texture_limit` guards, so
+/// the next binding added to a lit pass fails with a sentence rather than with a
+/// driver-shaped error at pipeline creation.
+pub const VT_MAX_POOLS: usize = 3;
+
+/// The atlas bindings past the first — `VT_MAX_POOLS - 1` of them.
+///
+/// The table stays **one** buffer with one directory, so a handle is still a
+/// handle and the per-instance word is byte-identical to what it always was;
+/// which atlas a texture is in is a word in its own block (`inf_vt::table`).
+pub const VT_EXTRA_ATLAS_COUNT: u32 = VT_MAX_POOLS as u32 - 1;
 
 /// The `wgpu` format a page uploads as.
 ///
@@ -142,16 +187,31 @@ pub struct VtApplyReport {
     pub missing: Vec<VtAdmit>,
 }
 
-/// The physical page atlas and the indirection buffer for one
-/// [`inf_vt::VtResidency`].
-pub struct VtPools {
+/// **One arm's atlas** (wave IASSET2) — the GPU half of an
+/// `inf_vt::VtResidency` arm: one texture, one format, one slot size.
+struct PoolArm {
     atlas: wgpu::Texture,
-    atlas_view: wgpu::TextureView,
-    sampler: wgpu::Sampler,
-    table: wgpu::Buffer,
+    view: wgpu::TextureView,
     format: wgpu::TextureFormat,
     geometry: inf_vt::VtPoolGeometry,
     page_bytes: u64,
+    /// One zero page of THIS arm's size, allocated once, for the missing-fetch
+    /// path. Per arm because a zero page has to be the length the atlas expects.
+    zero_page: Vec<u8>,
+}
+
+/// The physical page atlases and the indirection buffer for one
+/// [`inf_vt::VtResidency`].
+pub struct VtPools {
+    /// One per residency arm, in the residency's arm order — which is the `pool`
+    /// index the table hands the shader.
+    arms: Vec<PoolArm>,
+    /// A 1×1 view for every atlas binding this pool has no arm for. Bound rather
+    /// than left unsatisfied because a layout entry must be satisfied, and
+    /// nothing samples it: no texture's block names an arm that does not exist.
+    absent: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    table: wgpu::Buffer,
     /// The residency layout generation this buffer was built for. **A stamp, not
     /// a measurement** — the only legal operation on it is `!=`.
     layout_generation: u64,
@@ -164,8 +224,6 @@ pub struct VtPools {
     /// This is the component of `passes::ResourceKey` that makes it visible.
     /// **A stamp, not a measurement.**
     table_generation: u64,
-    /// One zero page, allocated once, for the missing-fetch path.
-    zero_page: Vec<u8>,
 }
 
 /// The **empty** VT surface: what the environment bind group names on a frame
@@ -186,9 +244,16 @@ pub struct VtEmptyPool {
     table: wgpu::Buffer,
 }
 
-impl VtEmptyPool {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+/// A 1×1 filterable-float view — what an atlas binding with no arm behind it is
+/// satisfied by, in [`VtEmptyPool`] and in a [`VtPools`] with fewer arms than
+/// [`VT_EXTRA_ATLAS_COUNT`] + 1.
+///
+/// Nothing samples it: a texture's block names the arm it is in, and no block
+/// names an arm that does not exist. It is here because a layout entry must be
+/// satisfied, which is the same argument `VtEmptyPool` itself rests on.
+fn absent_atlas_view(device: &wgpu::Device) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
             label: Some("vt-atlas-absent"),
             size: wgpu::Extent3d {
                 width: 1,
@@ -202,9 +267,14 @@ impl VtEmptyPool {
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
-        });
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+impl VtEmptyPool {
+    pub fn new(device: &wgpu::Device) -> Self {
         Self {
-            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            view: absent_atlas_view(device),
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("vt-sampler-absent"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -261,31 +331,45 @@ impl VtPools {
         residency: &VtResidency,
         srgb: bool,
     ) -> Self {
-        let geometry = residency.geometry();
-        let format = page_format(residency.config().format, srgb);
-        // A pool whose budget bought no slots still has to produce a legal
-        // texture; it can hold nothing, so one empty slot costs nothing and keeps
-        // the type total.
-        let extent = wgpu::Extent3d {
-            width: geometry.atlas_width().max(geometry.stored_tile_size),
-            height: geometry.atlas_height().max(geometry.stored_tile_size),
-            depth_or_array_layers: 1,
-        };
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("vt-page-atlas"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            // COPY_SRC so the residency heat-map and the readback arms can look
-            // at a page; the shipping path only ever writes and samples.
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let arms: Vec<PoolArm> = (0..residency.arm_count())
+            .map(|arm| {
+                let geometry = residency.geometry_of(arm).expect("arm in range");
+                let page = residency.arm_format(arm).expect("arm in range");
+                let format = page_format(page, srgb);
+                // A pool whose budget bought no slots still has to produce a
+                // legal texture; it can hold nothing, so one empty slot costs
+                // nothing and keeps the type total.
+                let extent = wgpu::Extent3d {
+                    width: geometry.atlas_width().max(geometry.stored_tile_size),
+                    height: geometry.atlas_height().max(geometry.stored_tile_size),
+                    depth_or_array_layers: 1,
+                };
+                let atlas = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("vt-page-atlas"),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    // COPY_SRC so the residency heat-map and the readback arms
+                    // can look at a page; the shipping path only ever writes and
+                    // samples.
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let page_bytes = residency.page_bytes_of(arm).expect("arm in range");
+                PoolArm {
+                    view: atlas.create_view(&wgpu::TextureViewDescriptor::default()),
+                    atlas,
+                    format,
+                    geometry,
+                    page_bytes,
+                    zero_page: vec![0u8; page_bytes as usize],
+                }
+            })
+            .collect();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vt-page-sampler"),
             // CLAMP, and the border ring is what makes that correct: a texel at a
@@ -304,16 +388,12 @@ impl VtPools {
         });
         let (table, _) = upload_whole_table(device, queue, residency);
         Self {
-            atlas,
-            atlas_view,
+            arms,
+            absent: absent_atlas_view(device),
             sampler,
             table,
-            format,
-            geometry,
-            page_bytes: residency.page_bytes(),
             layout_generation: residency.layout_generation(),
             table_generation: residency.layout_generation(),
-            zero_page: vec![0u8; residency.page_bytes() as usize],
         }
     }
 
@@ -325,14 +405,32 @@ impl VtPools {
         self.table_generation
     }
 
-    /// The atlas texture (for a debug view or a readback).
+    /// How many atlas arms this pool has — one per stored page format in the
+    /// level.
+    #[inline]
+    pub fn arm_count(&self) -> usize {
+        self.arms.len()
+    }
+
+    /// The **first** arm's atlas texture (for a debug view or a readback).
     #[inline]
     pub fn atlas(&self) -> &wgpu::Texture {
-        &self.atlas
+        &self.arms[0].atlas
+    }
+    /// Arm `arm`'s atlas texture.
+    #[inline]
+    pub fn atlas_of(&self, arm: usize) -> Option<&wgpu::Texture> {
+        self.arms.get(arm).map(|a| &a.atlas)
     }
     #[inline]
     pub fn atlas_view(&self) -> &wgpu::TextureView {
-        &self.atlas_view
+        &self.arms[0].view
+    }
+    /// Arm `arm`'s view, or the 1×1 **absent** view for an arm this pool does
+    /// not have — so every atlas binding is always satisfiable.
+    #[inline]
+    pub fn atlas_view_of(&self, arm: usize) -> &wgpu::TextureView {
+        self.arms.get(arm).map_or(&self.absent, |a| &a.view)
     }
     #[inline]
     pub fn sampler(&self) -> &wgpu::Sampler {
@@ -344,29 +442,55 @@ impl VtPools {
     pub fn table(&self) -> &wgpu::Buffer {
         &self.table
     }
+    /// The **first** arm's `wgpu` format.
     #[inline]
     pub fn format(&self) -> wgpu::TextureFormat {
-        self.format
+        self.arms[0].format
     }
+    /// Arm `arm`'s `wgpu` format.
+    #[inline]
+    pub fn format_of(&self, arm: usize) -> Option<wgpu::TextureFormat> {
+        self.arms.get(arm).map(|a| a.format)
+    }
+    /// The **first** arm's atlas rectangle.
     #[inline]
     pub fn geometry(&self) -> inf_vt::VtPoolGeometry {
-        self.geometry
+        self.arms[0].geometry
+    }
+    /// Arm `arm`'s atlas rectangle.
+    #[inline]
+    pub fn geometry_of(&self, arm: usize) -> Option<inf_vt::VtPoolGeometry> {
+        self.arms.get(arm).map(|a| a.geometry)
     }
 
-    /// The three bind-group layout entries P26.3 folds into the environment
-    /// group, starting at `base`.
-    pub fn bind_group_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 3] {
-        [
-            wgpu::BindGroupLayoutEntry {
-                binding: base,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
+    /// The bind-group layout entries P26.3 folds into the environment group:
+    /// atlas 0, the sampler and the table at `base`, and (wave IASSET2) the
+    /// further arms' atlases at `extra_base`.
+    ///
+    /// Two bases rather than one run because the three at `base` shipped at
+    /// 14/15/16 and four bindings past them are already spoken for; renumbering
+    /// them to make the atlases contiguous would move VSM and SSR for cosmetics.
+    pub fn bind_group_layout_entries(
+        base: u32,
+        extra_base: u32,
+    ) -> Vec<wgpu::BindGroupLayoutEntry> {
+        let atlas = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                // Every page format this pool can take is a filterable float
+                // sample type — RGBA8, the BC formats, and RGBA16F (only 32-bit
+                // floats need `FLOAT32_FILTERABLE`). One layout entry therefore
+                // serves every arm, which is what lets the arms be plain
+                // bindings rather than a per-format layout.
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
             },
+            count: None,
+        };
+        let mut out = vec![
+            atlas(base),
             wgpu::BindGroupLayoutEntry {
                 binding: base + 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -383,15 +507,17 @@ impl VtPools {
                 },
                 count: None,
             },
-        ]
+        ];
+        out.extend((0..VT_EXTRA_ATLAS_COUNT).map(|i| atlas(extra_base + i)));
+        out
     }
 
     /// The matching bind-group entries.
-    pub fn bind_group_entries(&self, base: u32) -> [wgpu::BindGroupEntry<'_>; 3] {
-        [
+    pub fn bind_group_entries(&self, base: u32, extra_base: u32) -> Vec<wgpu::BindGroupEntry<'_>> {
+        let mut out = vec![
             wgpu::BindGroupEntry {
                 binding: base,
-                resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                resource: wgpu::BindingResource::TextureView(self.atlas_view_of(0)),
             },
             wgpu::BindGroupEntry {
                 binding: base + 1,
@@ -401,7 +527,12 @@ impl VtPools {
                 binding: base + 2,
                 resource: self.table.as_entire_binding(),
             },
-        ]
+        ];
+        out.extend((0..VT_EXTRA_ATLAS_COUNT).map(|i| wgpu::BindGroupEntry {
+            binding: extra_base + i,
+            resource: wgpu::BindingResource::TextureView(self.atlas_view_of(i as usize + 1)),
+        }));
+        out
     }
 
     /// **Apply a transaction, whole.**
@@ -426,47 +557,65 @@ impl VtPools {
         let mut report = VtApplyReport::default();
 
         // ── 1. pages ──
-        let (bw, bh) = self.format.block_dimensions();
-        let block = self
-            .format
-            .block_copy_size(None)
-            .expect("a colour format has a block size");
-        let side = self.geometry.stored_tile_size;
-        let blocks_x = side.div_ceil(bw);
-        let blocks_y = side.div_ceil(bh);
-        let tight = blocks_x * block;
+        //
+        // **Into the admitted texture's own arm** (wave IASSET2): the residency
+        // says which, and it is the same number the table hands the shader as
+        // that texture's `pool`, so the atlas a page is written into and the
+        // atlas it is sampled from are one fact rather than two that agree.
         for admit in &txn.admits {
-            let Some((ox, oy)) = self.geometry.slot_origin(admit.slot) else {
-                // A slot the residency handed out is inside the geometry the
-                // residency was built from; a mismatch means the two are out of
-                // step, which is a caller bug rather than a page fault.
+            let Some(arm) = residency
+                .arm_of(admit.texture)
+                .and_then(|i| self.arms.get(i).map(|a| (i, a)))
+            else {
                 tracing::error!(
-                    "inf-render: VT admit names slot {} outside a {}×{} atlas",
-                    admit.slot,
-                    self.geometry.slots_x,
-                    self.geometry.slots_y
+                    "inf-render: VT admit names texture {} with no arm in a {}-arm pool",
+                    admit.texture.0,
+                    self.arms.len()
                 );
                 report.missing.push(*admit);
                 continue;
             };
+            let (arm_index, arm) = arm;
+            let Some((ox, oy)) = arm.geometry.slot_origin(admit.slot) else {
+                // A slot the residency handed out is inside the geometry the
+                // residency was built from; a mismatch means the two are out of
+                // step, which is a caller bug rather than a page fault.
+                tracing::error!(
+                    "inf-render: VT admit names slot {} outside arm {arm_index}'s {}×{} atlas",
+                    admit.slot,
+                    arm.geometry.slots_x,
+                    arm.geometry.slots_y
+                );
+                report.missing.push(*admit);
+                continue;
+            };
+            let (bw, bh) = arm.format.block_dimensions();
+            let block = arm
+                .format
+                .block_copy_size(None)
+                .expect("a colour format has a block size");
+            let side = arm.geometry.stored_tile_size;
+            let tight = side.div_ceil(bw) * block;
+            let blocks_y = side.div_ceil(bh);
             let bytes = match fetch(admit) {
-                Some(b) if b.len() as u64 == self.page_bytes => b,
+                Some(b) if b.len() as u64 == arm.page_bytes => b,
                 other => {
                     if let Some(b) = other {
                         tracing::warn!(
-                            "inf-render: VT page for slot {} is {} B, not the pool's {} B",
+                            "inf-render: VT page for arm {arm_index} slot {} is {} B, not the \
+                             arm's {} B",
                             admit.slot,
                             b.len(),
-                            self.page_bytes
+                            arm.page_bytes
                         );
                     }
                     report.missing.push(*admit);
-                    Cow::Borrowed(self.zero_page.as_slice())
+                    Cow::Borrowed(arm.zero_page.as_slice())
                 }
             };
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas,
+                    texture: &arm.atlas,
                     mip_level: 0,
                     origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
                     aspect: wgpu::TextureAspect::All,
@@ -486,7 +635,7 @@ impl VtPools {
                 },
             );
             report.pages += 1;
-            report.page_bytes += self.page_bytes;
+            report.page_bytes += arm.page_bytes;
         }
 
         // ── 2. indirection ──
@@ -498,8 +647,6 @@ impl VtPools {
             // has to be told. The residency's layout stamp is a global monotone
             // counter, so this never repeats a value a stale cache may hold.
             self.table_generation = residency.layout_generation();
-            self.zero_page = vec![0u8; residency.page_bytes() as usize];
-            self.page_bytes = residency.page_bytes();
             report.table_bytes = bytes;
             report.table_recreated = true;
         } else {

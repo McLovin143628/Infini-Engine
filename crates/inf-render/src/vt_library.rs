@@ -199,9 +199,10 @@ pub struct VtTextures {
     by_guid: BTreeMap<u128, VtTextureHandle>,
     /// Parsed readers, indexed by handle. Parallel to the residency's textures.
     readers: Vec<TiledTextureReader<VtBytes>>,
-    /// The pool's page format — `Bc1`/`Bc3` when the adapter has BC, else
-    /// `Rgba8` and every fetch transcodes through the same door.
-    pool_format: PageFormat,
+    /// **The arms' page formats**, in arm order (wave IASSET2) — `Bc1`/`Bc3`/
+    /// `Bc5` when the adapter has BC, else a single `Rgba8` arm and every fetch
+    /// transcodes through the same door.
+    arm_formats: Vec<PageFormat>,
     refusals: Vec<(u128, VtRefusal)>,
     /// `.inf_mat` GUID → its three maps, for [`VtTextures::set_for_material`].
     /// A `BTreeMap` because [`registration_order`] walks it and the walk order is
@@ -216,18 +217,48 @@ impl VtTextures {
     /// container's format and the adapter's clamp through
     /// [`crate::vt::pool_format`] — the same door, one decision earlier.
     pub fn new(cfg: VtPoolConfig) -> (Self, Vec<VtAdvisory>) {
-        let (residency, advisories) = VtResidency::new(cfg);
+        Self::new_multi(std::slice::from_ref(&cfg))
+    }
+
+    /// A registry over a pool with **one arm per stored page format** (wave
+    /// IASSET2).
+    ///
+    /// The arms' formats are the *pool* formats — what
+    /// [`crate::vt::pool_format`] returned for each stored format, so an adapter
+    /// without `TEXTURE_COMPRESSION_BC` collapses every block format onto one
+    /// `Rgba8` arm and the transcode tier is unchanged.
+    pub fn new_multi(arms: &[VtPoolConfig]) -> (Self, Vec<VtAdvisory>) {
+        let (residency, advisories) = VtResidency::new_multi(arms);
         (
             Self {
                 residency,
                 by_guid: BTreeMap::new(),
                 readers: Vec::new(),
-                pool_format: cfg.format,
+                arm_formats: arms.iter().map(|c| c.format).collect(),
                 refusals: Vec::new(),
                 materials: BTreeMap::new(),
             },
             advisories,
         )
+    }
+
+    /// **Which arm a payload stored in `stored` belongs in** — the one rule, so
+    /// registration and the page fetch cannot disagree about it.
+    ///
+    /// Its own format's arm when the pool has one; otherwise the `Rgba8` arm,
+    /// which is the transcode tier and the one format every container decodes
+    /// into. `None` when neither exists, which is a pool planned from different
+    /// content than it is being handed — refused by name at registration rather
+    /// than folded into arm 0.
+    fn arm_for(&self, stored: PageFormat) -> Option<usize> {
+        self.arm_formats
+            .iter()
+            .position(|f| *f == stored)
+            .or_else(|| {
+                self.arm_formats
+                    .iter()
+                    .position(|f| *f == PageFormat::Rgba8)
+            })
     }
 
     /// **Register a `.inf_tex` v2 payload, idempotently by GUID.**
@@ -262,9 +293,16 @@ impl VtTextures {
         }
         let reader = TiledTextureReader::new(VtBytes(bytes))
             .map_err(|e| VtRefusal::Container(e.to_string()))?;
+        let stored = reader.header().format;
+        let arm = self.arm_for(stored).ok_or_else(|| {
+            VtRefusal::Container(format!(
+                "no {stored:?} arm and no transcode arm in a pool of {:?}",
+                self.arm_formats
+            ))
+        })?;
         let handle = self
             .residency
-            .register_texture(reader.vt_desc())
+            .register_texture_in(reader.vt_desc(), arm)
             .map_err(VtRefusal::Residency)?;
         debug_assert_eq!(handle.index(), self.readers.len());
         self.readers.push(reader);
@@ -483,10 +521,17 @@ impl VtTextures {
         let txn = self.residency.apply_wants(wants);
         // The mutable borrow above has ended; the fetch below needs only `&`.
         let readers = &self.readers;
-        let format = self.pool_format;
+        let arm_formats = &self.arm_formats;
+        let residency = &self.residency;
         let fetch = |admit: &inf_vt::VtAdmit| -> Option<Cow<'_, [u8]>> {
             let r = readers.get(admit.texture.index())?;
             let at = admit.tile;
+            // **The arm this texture is in decides**, not the pool (wave
+            // IASSET2): a level with a BC1 arm and an Rgba8 arm transcodes the
+            // second's payloads and hands the first's straight out of the mmap.
+            let format = residency
+                .arm_of(admit.texture)
+                .and_then(|a| arm_formats.get(a).copied())?;
             if format == PageFormat::Rgba8 && r.header().format != PageFormat::Rgba8 {
                 // The transcode tier: the SAME tile, one format decision later.
                 r.tile_rgba8(at.mip, at.x, at.y).map(Cow::Owned)
@@ -575,8 +620,26 @@ pub struct VtLevelReport {
     pub textures: usize,
     /// GUIDs a bound material named that did not become a virtual texture.
     pub refused: usize,
-    /// The page format the pool took.
+    /// The page format the **first** arm took. Kept because every reader of it
+    /// asks about a single-format level, which is still the common case.
     pub pool_format: Option<PageFormat>,
+    /// **Every arm's page format**, in arm order (wave IASSET2) — one per
+    /// distinct stored format the level binds, and the index a texture's table
+    /// block carries.
+    pub pool_formats: Vec<PageFormat>,
+    /// Each arm's share of the level's VT budget, in bytes and in arm order.
+    /// They sum to at most `budget_bytes`; how a level's texture budget is
+    /// divided is a fact a project can act on, so it is reported rather than
+    /// inferred.
+    pub pool_budgets: Vec<u64>,
+    /// **Formats this level had to page through the RGBA8 arm** because it binds
+    /// more distinct page formats than [`crate::vt::VT_MAX_POOLS`] atlases.
+    ///
+    /// Empty for every level this engine's content can currently produce. It is
+    /// the whole-level demotion, reduced to the maps that caused it — reported
+    /// rather than only inferred, because it is a real cost an author can avoid
+    /// by importing those maps in a format the level already uses.
+    pub demoted: Vec<PageFormat>,
     /// Advisories the pool planner raised (`inf-vt` returns rather than logs).
     pub advisories: Vec<VtAdvisory>,
 }
@@ -590,27 +653,41 @@ pub struct VtLevelReport {
 /// lit shader, and the command stream is the one all 50 goldens recorded. The
 /// textureless path stays *structural*.
 ///
-/// # One pool holds one page size
+/// # One pool ARM holds one page size (wave IASSET2)
 ///
-/// A slot is one fixed size for every tile of every texture (P26.1's uniform
-/// page), so a pool that is BC1 cannot hold a BC3 tile — the fetch would be the
-/// wrong length, `VtPools::apply` would report it missing and write a black
-/// page, and the surface would be silently wrong. So the format is decided here,
-/// once, from what the level actually stores:
+/// A slot is one fixed size for every tile of every texture in an arm (P26.1's
+/// uniform page), so an arm that is BC1 cannot hold a BC3 tile — the fetch would
+/// be the wrong length, `VtPools::apply` would report it missing and write a
+/// black page, and the surface would be silently wrong. Until wave IASSET2 there
+/// was exactly one arm, so the format was decided here from what the level
+/// stores and a level that **mixed** formats was demoted whole to RGBA8:
 ///
-/// * the adapter has no BC (`vt.bc_tiles` clamped off) → **RGBA8**, every tile
-///   transcoded through `tile_rgba8` — the P26.1 fallback tier, unchanged;
-/// * every bound texture stores the same BC format → **that** format, and a tile
-///   uploads exactly as it lies in the mmap;
-/// * the level **mixes** formats (a BC1 albedo and a BC3 mask, which an importer
-///   writes routinely — BC3 is chosen per texture by whether it has alpha) →
-///   **RGBA8**, because that is the one format every container can transcode
-///   into. It costs 8×/4× the page bytes and it is the honest answer: the
-///   alternative is refusing half a level's textures at registration.
+/// > It costs 8×/4× the page bytes and it is the honest answer: the alternative
+/// > is refusing half a level's textures at registration.
 ///
-/// The mixed case is reported through [`VtLevelReport::pool_format`] rather than
-/// only inferred, because it is a real cost a project can avoid by importing its
-/// masks the same way.
+/// It was the honest answer to the question as it was then asked, and it had a
+/// price nobody could pay: `inf_material::ground` authored all seventeen ground
+/// maps — normal maps included — as **BC1**, because *"the first content to use
+/// [BC5] alongside a BC1 albedo demotes the whole atlas"*, and measured the
+/// demotion at **2 670 pages of camera-driven refinement against 289, a 9.2×
+/// cut**. That is why every BC5 normal map in this engine had no consumer.
+///
+/// So the decision here is now: **one arm per distinct stored format**, in
+/// registration order, sharing one budget through
+/// [`inf_vt::split_pool_budget`]. The arms are separate atlases and a texture
+/// lives in the one its format names; the indirection table stays a single
+/// buffer with a single directory, and which arm a texture is in is a word in
+/// its own block. What survives unchanged:
+///
+/// * the adapter has no BC (`vt.bc_tiles` clamped off) → every block format
+///   clamps to **RGBA8**, so the distinct *pool* formats collapse to one arm and
+///   every tile is transcoded through `tile_rgba8` — the P26.1 fallback tier,
+///   byte for byte;
+/// * a level whose textures all store one format gets **one** arm, the whole
+///   budget, and a pool geometry identical to the one it had before this wave.
+///
+/// [`VtLevelReport::pool_formats`] reports the arms, because how a level's
+/// texture budget is divided is a real fact a project can act on.
 pub fn build_vt_level(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -630,42 +707,69 @@ pub fn build_vt_level(
         return None;
     }
 
-    // The stored formats present, in registration order. A payload that does not
-    // parse contributes nothing here and is refused by name a moment later.
-    let mut stored: Option<PageFormat> = None;
-    let mut mixed = false;
+    // **The arm plan** (wave IASSET2): the distinct POOL formats present, in
+    // registration order, weighted by how many virtual tiles each one's content
+    // has. A payload that does not parse contributes nothing here and is refused
+    // by name a moment later.
+    //
+    // Registration order rather than a `BTreeSet` walk, because the arm index
+    // reaches the shader and the mirror: it has to be a function of the level's
+    // content, and `registration_order` is the one order both hosts agree on
+    // (the P16.6 mirror law, already the residency's own foundation).
+    let mut plan: Vec<(PageFormat, u64)> = Vec::new();
     for (_, bytes) in &resolved {
         let Some(b) = bytes else { continue };
-        let Some(f) = inf_vt::stored_page_format(b.payload()) else {
+        let Some(stored) = inf_vt::stored_page_format(b.payload()) else {
             continue;
         };
-        match stored {
-            None => stored = Some(f),
-            Some(s) if s != f => mixed = true,
-            Some(_) => {}
+        let format = crate::vt::pool_format(settings, stored);
+        // The weight is the payload's own tile count — what the arm would page
+        // if the camera asked for all of it. A texture that will not parse a
+        // second time contributes nothing and is refused below.
+        let tiles = inf_vt::TiledTextureReader::new(b.payload())
+            .map_or(0, |r| u64::from(r.header().tile_count));
+        match plan.iter_mut().find(|(f, _)| *f == format) {
+            Some(slot) => slot.1 += tiles,
+            None => plan.push((format, tiles)),
         }
     }
-    let pool_format = match stored {
-        Some(f) if !mixed => crate::vt::pool_format(settings, f),
-        // Mixed, or nothing parsed: RGBA8 is the format every container
-        // transcodes into, so it is the total answer.
-        _ => PageFormat::Rgba8,
-    };
-
-    let (mut lib, advisories) = VtTextures::new(VtPoolConfig {
-        format: pool_format,
-        stored_tile_size: inf_vt::STORED_TILE_SIZE,
-        budget_bytes,
-        max_texture_dim: device.limits().max_texture_dimension_2d,
-        // Wave T (T47). One door, so the editor viewport and the shipped player
-        // cannot filter a virtual texture differently — the P16.6 mirror law.
-        trilinear: settings.vt.trilinear,
-        // IB-16, through the same one door and for the same reason: a host that
-        // throttled uploads differently from the other would page a burst in at
-        // two different rates and "preview == shipping" would stop being true of
-        // texture residency under motion.
-        upload_budget_bytes: settings.vt.upload_budget_bytes,
-    });
+    if plan.is_empty() {
+        // Nothing parsed. One RGBA8 arm, which is what every container
+        // transcodes into — the registrations below then fail by name and the
+        // level reports a textureless surface, exactly as before.
+        plan.push((PageFormat::Rgba8, 1));
+    }
+    let demoted = cap_arm_plan(&mut plan, crate::vt::VT_MAX_POOLS);
+    if !demoted.is_empty() {
+        tracing::warn!(
+            "inf-render: this level binds {} distinct page formats and the atlas budget \
+             holds {}; {:?} are paged through the RGBA8 arm instead, at 8×/4× their page \
+             bytes. Import those maps in one of {:?} to get them their own atlas",
+            plan.len() + demoted.len(),
+            crate::vt::VT_MAX_POOLS,
+            demoted,
+            plan.iter().map(|(f, _)| *f).collect::<Vec<_>>()
+        );
+    }
+    let arms = inf_vt::split_pool_budget(
+        VtPoolConfig {
+            format: PageFormat::Rgba8,
+            stored_tile_size: inf_vt::STORED_TILE_SIZE,
+            budget_bytes,
+            max_texture_dim: device.limits().max_texture_dimension_2d,
+            // Wave T (T47). One door, so the editor viewport and the shipped
+            // player cannot filter a virtual texture differently — the P16.6
+            // mirror law.
+            trilinear: settings.vt.trilinear,
+            // IB-16, through the same one door and for the same reason: a host
+            // that throttled uploads differently from the other would page a
+            // burst in at two different rates and "preview == shipping" would
+            // stop being true of texture residency under motion.
+            upload_budget_bytes: settings.vt.upload_budget_bytes,
+        },
+        &plan,
+    );
+    let (mut lib, advisories) = VtTextures::new_multi(&arms);
     let mut by_guid: BTreeMap<u128, Arc<dyn VtTileSource>> = BTreeMap::new();
     for (g, bytes) in resolved {
         if let Some(b) = bytes {
@@ -689,10 +793,97 @@ pub fn build_vt_level(
     let report = VtLevelReport {
         textures,
         refused: lib.refusals().len(),
-        pool_format: Some(pool_format),
+        pool_format: arms.first().map(|a| a.format),
+        pool_formats: arms.iter().map(|a| a.format).collect(),
+        pool_budgets: arms.iter().map(|a| a.budget_bytes).collect(),
+        demoted,
         advisories,
     };
     Some((lib, pools, report))
+}
+
+/// **Fit an arm plan into the atlas binding budget** (wave IASSET2), returning
+/// the formats that had to be paged through the RGBA8 arm instead.
+///
+/// `plan` is `(pool format, virtual tiles)` in registration order. Under the cap
+/// it is returned untouched and nothing is demoted, which is every level this
+/// engine's content can currently produce.
+///
+/// Over it, the rule is:
+///
+/// 1. **A float format is never demoted.** `TiledTextureReader::tile_rgba8`
+///    refuses an `Rgba16F` page by name — flattening it is precisely the silent
+///    loss the format was added to end — so demoting one would page black.
+/// 2. Then the **heaviest** formats by tile count, because that is the content a
+///    coarser atlas costs the most.
+/// 3. Whatever is left folds into the **RGBA8** arm, whose weight absorbs
+///    theirs. If the survivors include no RGBA8 arm, the lightest of them gives
+///    up its place to one — the fold has to have somewhere to land.
+///
+/// The surviving arms keep **registration order**, because the arm index is a
+/// word in the shipped table and both hosts must number them alike.
+fn cap_arm_plan(plan: &mut Vec<(PageFormat, u64)>, cap: usize) -> Vec<PageFormat> {
+    if plan.len() <= cap || cap == 0 {
+        return Vec::new();
+    }
+    let mut rank: Vec<usize> = (0..plan.len()).collect();
+    rank.sort_by_key(|&i| {
+        (
+            // A float format first — it cannot transcode, so it cannot fold.
+            !plan[i].0.is_float(),
+            std::cmp::Reverse(plan[i].1),
+            i,
+        )
+    });
+    // The fold has to land in an RGBA8 arm. If the level HAS one, it survives
+    // whatever its weight — dropping it would leave the fold nowhere to go and
+    // cost a second arm for nothing.
+    if let Some(pos) = rank.iter().position(|&i| plan[i].0 == PageFormat::Rgba8) {
+        if pos >= cap {
+            rank.swap(cap - 1, pos);
+        }
+    }
+    let mut keep: Vec<usize> = rank[..cap].to_vec();
+    let overflow: Vec<usize> = rank[cap..].to_vec();
+    let mut demoted = Vec::new();
+    let fold = match keep
+        .iter()
+        .copied()
+        .find(|&i| plan[i].0 == PageFormat::Rgba8)
+    {
+        Some(i) => i,
+        None => {
+            // No RGBA8 arm anywhere in the level: the weakest survivor gives up
+            // its format to be one, and IT is the demotion — the overflow lands
+            // on it rather than the other way round.
+            let i = *keep.last().expect("cap > 0");
+            demoted.push(plan[i].0);
+            plan[i].0 = PageFormat::Rgba8;
+            i
+        }
+    };
+    for &i in &overflow {
+        plan[fold].1 += plan[i].1;
+        // An RGBA8 payload folded into the RGBA8 arm is in its own format and
+        // pays nothing; only a block format demoted out of one is a cost.
+        if plan[i].0 != PageFormat::Rgba8 {
+            demoted.push(plan[i].0);
+        }
+    }
+    keep.sort_unstable();
+    *plan = keep.iter().map(|&i| plan[i]).collect();
+    // Deduplicated by value, in the order the formats were met — `PageFormat`
+    // is deliberately not `Ord` (a page format has no natural order) so this is
+    // a retain rather than a sort.
+    let mut seen: Vec<PageFormat> = Vec::new();
+    demoted.retain(|f| {
+        let fresh = !seen.contains(f);
+        if fresh {
+            seen.push(*f);
+        }
+        fresh
+    });
+    demoted
 }
 
 #[cfg(test)]

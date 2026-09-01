@@ -51,6 +51,22 @@ pub enum PageFormat {
 }
 
 impl PageFormat {
+    /// **Every page format, in freeze-pinned wire-code order** — the one
+    /// enumeration a sweep walks, so a format added to this enum cannot be added
+    /// to some sweeps and forgotten by others.
+    ///
+    /// The order is [`crate::format_code`]'s and the two are pinned against each
+    /// other (`the_format_code_is_freeze_pinned_both_ways`), which is what lets
+    /// [`VT_MAX_POOLS`] be "one arm per variant" rather than a number somebody
+    /// maintains.
+    pub const ALL: [PageFormat; 5] = [
+        PageFormat::Rgba8,
+        PageFormat::Bc1,
+        PageFormat::Bc3,
+        PageFormat::Bc5,
+        PageFormat::Rgba16F,
+    ];
+
     /// Bytes one page occupies at `stored_tile_size` texels per side.
     ///
     /// The stored side is a multiple of 4 by construction (136 = 34 blocks), so
@@ -183,6 +199,110 @@ pub struct VtPoolConfig {
 /// renderer requests and therefore the one a pool is planned against unless a
 /// caller probes something else.
 pub const DEFAULT_MAX_TEXTURE_DIM: u32 = 8192;
+
+/// **Divide one VT budget across per-format arms** (wave IASSET2) — pure integer
+/// arithmetic, so both hosts split identically and the mirror law holds.
+///
+/// # Why a split and not a budget each
+///
+/// The ratchet law: [`DEFAULT_VT_BUDGET_BYTES`] and
+/// [`DEFAULT_VT_UPLOAD_BUDGET_BYTES`] are ceilings that only ever go down, and
+/// giving every arm the whole 24 MiB would multiply the atlas VRAM of a
+/// three-format level by three while every constant in the tree still read
+/// "24 MiB". So `base.budget_bytes` is the **total** and this hands out shares
+/// of it; the sum is `<=` the total, always, and
+/// [`tests::an_arm_split_never_spends_more_than_the_whole_budget`] is the arm.
+///
+/// # The weight
+///
+/// `weights` is `(format, virtual tiles)` — how many tiles of that format the
+/// level's content *has*. Tiles rather than textures because a 4 096² albedo and
+/// a 128² mask are not the same claim on refinement, and rather than bytes
+/// because a byte weight would give the arm with the fattest pages the biggest
+/// share and then spend it on the fewest pages, which is backwards.
+///
+/// Each arm is floored to whole pages of its own format (a fractional page buys
+/// nothing) and then, if that rounded it to zero, raised to one page at the
+/// expense of the largest arm — because an arm with no slots refuses every
+/// texture in it by [`crate::VtError::MandatoryFloorExceedsBudget`], and a
+/// 128² mask beside a 4 096² albedo is exactly the shape that rounds to zero.
+///
+/// Formats must be distinct; a repeat is ignored (its weight folds into the
+/// first). The order of `weights` is the order of the returned arms, so a caller
+/// that walks a `BTreeSet` gets a deterministic arm numbering.
+pub fn split_pool_budget(base: VtPoolConfig, weights: &[(PageFormat, u64)]) -> Vec<VtPoolConfig> {
+    // Distinct formats, first sight wins, weights folded.
+    let mut arms: Vec<(PageFormat, u64)> = Vec::with_capacity(weights.len());
+    for (f, w) in weights {
+        match arms.iter_mut().find(|(g, _)| g == f) {
+            Some(slot) => slot.1 = slot.1.saturating_add(*w),
+            None => arms.push((*f, *w)),
+        }
+    }
+    if arms.is_empty() {
+        return Vec::new();
+    }
+    let stored = base.stored_tile_size.max(4);
+    let total_weight: u64 = arms.iter().map(|(_, w)| *w).sum::<u64>().max(1);
+    // Pass 1: proportional, floored to whole pages of the arm's own format.
+    let mut pages: Vec<u64> = arms
+        .iter()
+        .map(|(f, w)| {
+            let share = base
+                .budget_bytes
+                .saturating_mul(*w)
+                .checked_div(total_weight)
+                .unwrap_or(0);
+            share / f.page_bytes(stored).max(1)
+        })
+        .collect();
+    // Pass 2: nobody gets zero while somebody has two. An arm with no slots
+    // refuses every texture in it, which is a worse answer than a coarser
+    // neighbour.
+    let bytes_of = |i: usize, n: u64| n * arms[i].0.page_bytes(stored);
+    for i in 0..arms.len() {
+        if pages[i] > 0 {
+            continue;
+        }
+        let want = arms[i].0.page_bytes(stored);
+        let spent: u64 = (0..arms.len()).map(|k| bytes_of(k, pages[k])).sum();
+        if base.budget_bytes.saturating_sub(spent) >= want {
+            pages[i] = 1;
+            continue;
+        }
+        // Take it from the arm holding the most bytes, lowest index on a tie,
+        // and only while that arm keeps a page of its own.
+        let donor = (0..arms.len())
+            .filter(|&k| k != i && pages[k] > 1)
+            .max_by_key(|&k| (bytes_of(k, pages[k]), std::cmp::Reverse(k)));
+        if let Some(d) = donor {
+            let mut freed = 0u64;
+            while pages[d] > 1 && freed < want {
+                pages[d] -= 1;
+                freed += arms[d].0.page_bytes(stored);
+            }
+            if freed >= want {
+                pages[i] = 1;
+            }
+        }
+    }
+    arms.iter()
+        .enumerate()
+        .map(|(i, (format, w))| VtPoolConfig {
+            format: *format,
+            budget_bytes: bytes_of(i, pages[i]),
+            // The same proportion, and **never zero while the total is not**: a
+            // zero upload budget means UNLIMITED (`AdmitBudget::from_bytes`), so
+            // an arm rounded to nothing would be the one arm with no throttle at
+            // all — the opposite of what a share of a budget means.
+            upload_budget_bytes: match base.upload_budget_bytes {
+                0 => 0,
+                total => (total.saturating_mul(*w) / total_weight).max(1),
+            },
+            ..base
+        })
+        .collect()
+}
 
 impl Default for VtPoolConfig {
     fn default() -> Self {
@@ -577,6 +697,134 @@ mod tests {
             assert!(o.1 + g.stored_tile_size <= g.atlas_height());
         }
         assert_eq!(g.slot_origin(g.slot_count()), None);
+    }
+
+    /// **The split never spends more than the whole budget** (wave IASSET2) —
+    /// the ratchet law, asserted as arithmetic over a sweep rather than
+    /// inspected on the default.
+    ///
+    /// Two arms of a 24 MiB budget must cost 24 MiB between them, not 24 MiB
+    /// each; the whole reason the arms exist is that a mixed level used to be
+    /// demoted to RGBA8 rather than given two atlases, and buying the fix with a
+    /// silent doubling of VRAM would be a worse answer than the demotion.
+    #[test]
+    fn an_arm_split_never_spends_more_than_the_whole_budget() {
+        let base = VtPoolConfig::default();
+        for weights in [
+            vec![(PageFormat::Bc1, 1_000u64)],
+            vec![(PageFormat::Bc1, 1_000), (PageFormat::Bc5, 250)],
+            vec![
+                (PageFormat::Bc1, 1_000),
+                (PageFormat::Bc5, 250),
+                (PageFormat::Rgba8, 40),
+            ],
+            // The degenerate shapes: one arm asking for everything, and an arm
+            // asking for a rounding error beside it.
+            vec![(PageFormat::Bc1, 100_000), (PageFormat::Rgba16F, 1)],
+            vec![(PageFormat::Rgba8, 0), (PageFormat::Bc3, 0)],
+        ] {
+            let arms = split_pool_budget(base, &weights);
+            assert_eq!(arms.len(), weights.len(), "{weights:?}");
+            let spent: u64 = arms.iter().map(|a| a.budget_bytes).sum();
+            assert!(
+                spent <= base.budget_bytes,
+                "{weights:?} spent {spent} of {}",
+                base.budget_bytes
+            );
+            let upload: u64 = arms.iter().map(|a| a.upload_budget_bytes).sum();
+            assert!(
+                upload <= base.upload_budget_bytes + arms.len() as u64,
+                "{weights:?} uploads {upload}/frame of {}",
+                base.upload_budget_bytes
+            );
+            for (a, (f, _)) in arms.iter().zip(&weights) {
+                assert_eq!(a.format, *f);
+                assert!(
+                    a.budget_bytes.is_multiple_of(f.page_bytes(136)),
+                    "{f:?} got {} B, not a whole number of pages",
+                    a.budget_bytes
+                );
+                // Nobody is left with an unlimited upload budget by rounding: 0
+                // means UNLIMITED, which is the opposite of a share.
+                assert!(a.upload_budget_bytes > 0, "{f:?} got no upload share");
+            }
+        }
+    }
+
+    /// **A single arm gets the whole budget, to the byte** — the split is a
+    /// no-op on the shape every pool had before wave IASSET2, which is why no
+    /// existing pool geometry moved.
+    #[test]
+    fn one_arm_is_the_whole_budget_and_the_pre_iasset2_pool() {
+        let base = VtPoolConfig::default();
+        let arms = split_pool_budget(base, &[(PageFormat::Bc1, 7)]);
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].upload_budget_bytes, base.upload_budget_bytes);
+        // The whole budget, floored to whole pages — which is what `plan_pool`
+        // does with it anyway, so the geometry is bit-for-bit the old one.
+        let page = PageFormat::Bc1.page_bytes(136);
+        assert_eq!(arms[0].budget_bytes, (base.budget_bytes / page) * page);
+        assert_eq!(plan_pool(arms[0]).0, plan_pool(base).0);
+        assert_eq!(plan_pool(arms[0]).0.slot_count(), 2_714);
+    }
+
+    /// **An arm never rounds to zero slots while another has two** — a 128²
+    /// mask beside a 4 096² albedo is a weight ratio of ~1 : 1 000, and an arm
+    /// with no slots refuses every texture in it by the mandatory-floor rule.
+    #[test]
+    fn a_tiny_arm_still_gets_a_page() {
+        let base = VtPoolConfig::default();
+        let arms = split_pool_budget(base, &[(PageFormat::Bc1, 1_000_000), (PageFormat::Bc5, 1)]);
+        assert!(
+            arms[1].budget_bytes >= PageFormat::Bc5.page_bytes(136),
+            "the small arm got {} B, which holds no page at all",
+            arms[1].budget_bytes
+        );
+        assert!(plan_pool(arms[1]).0.slot_count() >= 1);
+        // …and it is still inside the total.
+        assert!(arms.iter().map(|a| a.budget_bytes).sum::<u64>() <= base.budget_bytes);
+
+        // The pathological case the loop above cannot reach: a budget that holds
+        // exactly one page, asked to serve two arms. One of them gets it and the
+        // other is named by `plan_pool`'s own advisory rather than silently
+        // holding a page it did not pay for.
+        let tight = VtPoolConfig {
+            budget_bytes: PageFormat::Bc1.page_bytes(136),
+            ..base
+        };
+        let arms = split_pool_budget(tight, &[(PageFormat::Bc1, 1), (PageFormat::Bc3, 1)]);
+        assert!(arms.iter().map(|a| a.budget_bytes).sum::<u64>() <= tight.budget_bytes);
+    }
+
+    /// **The split is a function of the SET of formats, in the caller's order**
+    /// — an arm index reaches the shader, so it may not depend on a hash walk,
+    /// and a format named twice is one arm rather than two.
+    ///
+    /// How many arms a *level* may have is not decided here: it is a GPU
+    /// binding budget and it lives with the bindings
+    /// (`inf_render::vt::VT_MAX_POOLS`). This crate names no `wgpu` and plans
+    /// exactly the arms it is given.
+    #[test]
+    fn the_split_is_a_function_of_the_format_set_in_the_callers_order() {
+        let all: Vec<(PageFormat, u64)> = PageFormat::ALL.iter().map(|f| (*f, 1)).collect();
+        let arms = split_pool_budget(VtPoolConfig::default(), &all);
+        assert_eq!(arms.len(), PageFormat::ALL.len());
+        // Every variant appears exactly once, in the enumeration's order.
+        assert_eq!(
+            arms.iter().map(|a| a.format).collect::<Vec<_>>(),
+            PageFormat::ALL.to_vec()
+        );
+        // A repeat folds rather than minting a sixth arm — two textures of one
+        // format share one atlas by definition.
+        let folded = split_pool_budget(
+            VtPoolConfig::default(),
+            &[(PageFormat::Bc1, 3), (PageFormat::Bc1, 5)],
+        );
+        assert_eq!(folded.len(), 1);
+        assert_eq!(
+            folded[0].budget_bytes,
+            split_pool_budget(VtPoolConfig::default(), &[(PageFormat::Bc1, 8)])[0].budget_bytes
+        );
     }
 
     /// The rectangle scan beats the obvious closed form, which is why it exists.

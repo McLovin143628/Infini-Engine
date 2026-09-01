@@ -177,7 +177,7 @@ impl Streamer {
                 .assets()
                 .map(|(_, r)| r.pages().first().map_or(0, |p| p.resident_bytes()))
                 .sum(),
-            u64::from(self.texture.stats().roots) * self.texture.page_bytes(),
+            self.texture.floor_bytes(),
             0,
         ]
     }

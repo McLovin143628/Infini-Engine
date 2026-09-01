@@ -66,8 +66,15 @@
 //   VIEW, so the shader must read the per-texture srgb flag to pick a view
 //   anyway. It pays a binding for a `select`.
 // * **decoding in the shader**, from the `srgb` flag already sitting in the
-//   table's texture header, keeps the atlas linear, keeps `VT_BINDING_COUNT` at
-//   the three P26.2 promised, and is exact per texture.
+//   table's texture header, keeps the atlas linear, and is exact per texture.
+//
+// **Wave IASSET2 did not reopen this.** It gives the pool one arm per stored
+// *format* — which `view_formats` cannot express at all, since WebGPU's view
+// compatibility rule admits only the sRGB counterpart of a format and BC1 and
+// BC5 are neither the same format nor an sRGB pair of one. The arms are about
+// page SIZE, the srgb flag is about a transfer curve, and the ruling above still
+// holds: every arm's atlas is created in the LINEAR variant and the decode
+// happens here.
 //
 // The cost is honest and bounded: the transfer function is applied to the
 // FILTERED result rather than per texel before filtering, so a bilinear tap
@@ -77,9 +84,28 @@
 // discovered. The day it matters, the fix is `view_formats` and one more
 // binding.
 
-// The physical page atlas — ONE texture, always in the LINEAR variant of the
-// pool's format (see above).
+// ── the atlases: one per stored page format (wave IASSET2) ───────────────────
+//
+// There used to be ONE, and a level whose textures mixed formats was demoted
+// whole to RGBA8 — 73 984 B a page against BC1's 9 248, which
+// `inf_material::ground` measured as a 9.2× cut in camera-driven refinement and
+// then paid for by authoring every ground normal map as BC1. A `wgpu` texture
+// holds one format and BC1/BC5 pages are different sizes, so several formats
+// mean several textures; they cannot be a texture array (same reason) nor a
+// binding array (a feature this project does not request). So they are bindings,
+// and the shader picks one by the `pool` word in the sampled texture's own table
+// block.
+//
+// The **table** is still one buffer with one directory, so a handle is still a
+// handle, the per-instance word is byte-identical, and a single-format level
+// binds exactly what it always did with arms 1.. left on the 1×1 absent view.
+// There are THREE, and the number is `Limits::default()`'s rather than a
+// preference: `max_sampled_textures_per_shader_stage` is 16 and the terrain
+// pipeline's fragment stage already spends 14. See `inf_render::vt::VT_MAX_POOLS`
+// for the measurement and for what a fourth format costs.
 @group(GROUP_ENV) @binding(14) var vt_atlas: texture_2d<f32>;
+@group(GROUP_ENV) @binding(22) var vt_atlas1: texture_2d<f32>;
+@group(GROUP_ENV) @binding(23) var vt_atlas2: texture_2d<f32>;
 // Linear + clamp. The border ring is what makes clamping correct: a texel at a
 // tile's payload edge filters against real neighbours baked into the page, so
 // the clamp at the SLOT edge is never reached by a legal sample.
@@ -91,7 +117,11 @@
 // never written reads zero here, which is what makes `vt_active()` total.
 const VT_MAGIC: u32 = 0x31425456u;
 const VT_HEADER_WORDS: u32 = 4u;
-const VT_TEX_HEADER_WORDS: u32 = 4u;
+// SIX since wave IASSET2: mip_count · tile_size · border · flags · slots_x ·
+// pool. `inf_vt::TABLE_TEXTURE_HEADER_WORDS` is the other half of this number
+// and `inf_vt::table::tests::the_block_header_is_pinned_word_by_word` pins the
+// words by value.
+const VT_TEX_HEADER_WORDS: u32 = 6u;
 const VT_MIP_REC_WORDS: u32 = 4u;
 
 /// Whether this frame has a virtual-texture pool at all.
@@ -316,12 +346,43 @@ fn vt_tap(b: u32, w_uv: vec2<f32>, m: u32) -> vec4<f32> {
     // In [-1, tile_size) — the border ring covers the slack four times over.
     let local = gp - vec2<f32>(f32(r.gtx), f32(r.gty)) * tile_sz;
 
-    let slots_x = vt_table[2];
+    // `slots_x` is this TEXTURE's arm's, not the pool's (wave IASSET2): arms are
+    // separate atlases with their own rectangles, so reading a pool-wide number
+    // here would address every page of every arm but the first at the wrong
+    // coordinate — right size, wrong texels, no error anywhere.
+    let slots_x = vt_table[b + 4u];
     let stored = f32(vt_table[3]);
     let origin = vec2<f32>(f32(r.page % slots_x), f32(r.page / slots_x)) * stored;
-    let dims = vec2<f32>(textureDimensions(vt_atlas, 0));
-    let atlas_uv = (origin + vec2<f32>(border) + local) / dims;
-    return textureSampleLevel(vt_atlas, vt_smp, atlas_uv, 0.0);
+    return vt_atlas_tap(vt_table[b + 5u], origin + vec2<f32>(border) + local);
+}
+
+/// **Read one texel out of arm `pool`'s atlas**, at `px` texels from its origin.
+///
+/// A `switch` and not an index because WGSL cannot index a texture binding, and
+/// a binding array needs a feature this project does not request. It is one
+/// switch per tap rather than one per table word — the table is a single buffer
+/// — and `textureSampleLevel` takes an explicit LOD, so it is legal in
+/// non-uniform control flow (which `textureSample` would not be).
+///
+/// The `default` arm is arm 0, so a table word that somehow named an arm this
+/// build has no binding for samples the first atlas rather than nothing. It is
+/// unreachable: `VtPools` binds `VT_MAX_POOLS` atlases and a residency can have
+/// no more arms than there are page formats.
+fn vt_atlas_tap(pool: u32, px: vec2<f32>) -> vec4<f32> {
+    switch pool {
+        case 1u: {
+            let uv1 = px / vec2<f32>(textureDimensions(vt_atlas1, 0));
+            return textureSampleLevel(vt_atlas1, vt_smp, uv1, 0.0);
+        }
+        case 2u: {
+            let uv2 = px / vec2<f32>(textureDimensions(vt_atlas2, 0));
+            return textureSampleLevel(vt_atlas2, vt_smp, uv2, 0.0);
+        }
+        default: {
+            let uv0 = px / vec2<f32>(textureDimensions(vt_atlas, 0));
+            return textureSampleLevel(vt_atlas, vt_smp, uv0, 0.0);
+        }
+    }
 }
 
 /// [`vt_sample`] with the texture's own sRGB flag applied — the base-colour face.

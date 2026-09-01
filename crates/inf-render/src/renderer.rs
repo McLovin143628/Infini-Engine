@@ -486,8 +486,15 @@ impl FrameData<'_> {
     /// The atlas the env bind group names this frame.
     #[inline]
     pub(crate) fn vt_atlas(&self) -> &wgpu::TextureView {
+        self.vt_atlas_of(0)
+    }
+    /// The atlas of **arm `arm`** the env bind group names this frame (wave
+    /// IASSET2), or the 1×1 absent view when the frame has no pool or the pool
+    /// has fewer arms than that.
+    #[inline]
+    pub(crate) fn vt_atlas_of(&self, arm: usize) -> &wgpu::TextureView {
         self.vt
-            .map_or_else(|| self.vt_absent.view(), |p| p.atlas_view())
+            .map_or_else(|| self.vt_absent.view(), |p| p.atlas_view_of(arm))
     }
     /// The page sampler the env bind group names this frame.
     #[inline]
@@ -1662,7 +1669,12 @@ impl EngineRenderer {
         let vt = self.vt_textures.as_ref().map(|l| l.residency());
         let vsm = self.vsm.as_ref();
 
-        let texture_floor = vt.map_or(0, |r| u64::from(r.stats().roots) * r.page_bytes());
+        // `floor_bytes`, not `roots × page_bytes()`: since wave IASSET2 a
+        // residency has one arm per stored format and the arms' pages are
+        // different sizes, so multiplying every root by the first arm's page
+        // would misprice a mixed level's floor — the quantity a budget refusal
+        // is then made of.
+        let texture_floor = vt.map_or(0, |r| r.floor_bytes());
         let resident = [
             vgeom.stats.resident_bytes,
             vt.map_or(0, |r| r.resident_bytes()),

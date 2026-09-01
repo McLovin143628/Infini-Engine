@@ -28,8 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::address::{DescError, TileCoord, VtTextureDesc};
-use crate::pool::{plan_pool, VtAdvisory, VtPoolConfig, VtPoolGeometry};
-use crate::table::{pack_entry, unpack_entry, TableImage, MAX_SLOT_INDEX};
+use crate::pool::{plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry};
+use crate::table::{pack_entry, unpack_entry, TableImage, TableTexture, MAX_SLOT_INDEX};
 
 /// Source of residency stamps: **`inf_stream::next_stamp`**, the one domain
 /// (P28.3, clause 1).
@@ -384,6 +384,13 @@ pub enum VtError {
         budget_bytes: u64,
         slots: u32,
     },
+    #[error(
+        "this residency has {arms} page-pool arm(s) and the registration named arm {arm}; a \
+         texture is registered into the arm whose format its container stores, so an arm that \
+         does not exist means the caller planned its arms from different content than it is \
+         registering"
+    )]
+    NoSuchArm { arm: usize, arms: usize },
 }
 
 /// One physical slot.
@@ -403,21 +410,52 @@ struct Slot {
 struct Texture {
     desc: VtTextureDesc,
     /// Exact-resident slot per virtual tile, indexed by `desc.entry_index`.
+    /// The slot is an index into [`Arm::slots`] of [`Texture::arm`].
     resident: Vec<Option<u32>>,
     generation: u64,
     /// Whether this texture's root pages have been emitted in a transaction (and
     /// therefore actually exist in the atlas, not merely in the table).
     warm: bool,
+    /// **Which arm holds this texture's pages** (wave IASSET2). Decided at
+    /// registration from the stored format and never changed: a `.inf_tex`'s
+    /// format is a property of the file.
+    arm: u32,
 }
 
-/// The residency of one physical page pool.
+/// **One physical page pool** — one atlas, one format, one slot size (wave
+/// IASSET2).
+///
+/// A residency used to *be* this. It now holds one per stored page format, so a
+/// level whose textures mix BC1 and BC5 pages both of them at their own size
+/// instead of demoting the whole atlas to RGBA8. The rule that made the old
+/// arrangement simple is untouched **inside** an arm: every slot is one fixed
+/// size, so allocation is "take the lowest free index" and fragmentation cannot
+/// exist. What changed is that there are several such arrays, and a texture is
+/// in exactly one of them for its whole life.
 #[derive(Debug, Clone)]
-pub struct VtResidency {
+struct Arm {
     cfg: VtPoolConfig,
     geometry: VtPoolGeometry,
     page_bytes: u64,
     slots: Vec<Slot>,
     free: BTreeSet<u32>,
+    /// Slots this arm has pinned as roots — the mandatory floor, per arm,
+    /// because a floor that fits in total and not in its own arm is a floor that
+    /// does not fit.
+    roots: u32,
+}
+
+/// The residency of one virtual-texture pool — since wave IASSET2, of its
+/// **arms**: one physical page pool per stored page format.
+#[derive(Debug, Clone)]
+pub struct VtResidency {
+    arms: Vec<Arm>,
+    /// Texels per side of a slot. Shared by every arm by construction — the
+    /// container writes one [`crate::STORED_TILE_SIZE`] — so a texture is
+    /// refused for the wrong tile geometry against one number rather than per
+    /// arm.
+    stored_tile_size: u32,
+    trilinear: bool,
     textures: Vec<Texture>,
     table: TableImage,
     pending_roots: Vec<(VtTextureHandle, TileCoord)>,
@@ -432,73 +470,177 @@ pub struct VtResidency {
 }
 
 impl VtResidency {
-    /// A pool sized from `cfg`, with the advisories planning it raised.
+    /// A **single-arm** pool sized from `cfg`, with the advisories planning it
+    /// raised.
     ///
     /// The advisories are returned rather than logged, so a host decides whether
     /// they are a warning, a fatal, or a line in an import report — the
     /// `texture_import_advisories` shape.
+    ///
+    /// This is what every caller that has one stored format wants, and it is
+    /// exactly the pre-IASSET2 residency: one arm, arm 0, and every existing
+    /// transaction trace unchanged to the byte.
     pub fn new(cfg: VtPoolConfig) -> (Self, Vec<VtAdvisory>) {
-        let (geometry, advisories) = plan_pool(cfg);
-        let page_bytes = cfg.format.page_bytes(geometry.stored_tile_size);
-        let n = geometry.slot_count();
-        debug_assert!(n <= MAX_SLOT_INDEX + 1, "a slot index must fit 16 bits");
-        let table = TableImage::layout(
-            &[],
-            geometry.slots_x,
-            geometry.stored_tile_size,
-            cfg.trilinear,
-        );
+        Self::new_multi(std::slice::from_ref(&cfg))
+    }
+
+    /// **A pool with one arm per stored page format** (wave IASSET2).
+    ///
+    /// `arms` is one config per format, in the order the arms are numbered — and
+    /// that number reaches the shader (the table block's `pool` word) and the
+    /// mirror (which atlas a page is written into), so it must be a function of
+    /// the level's content rather than of a hash walk. `inf_render::build_vt_level`
+    /// derives it from the registration order.
+    ///
+    /// Every arm shares `stored_tile_size`, `max_texture_dim` and `trilinear` —
+    /// the first because the container writes one tile geometry, the second
+    /// because there is one device, the third because it is a filtering rule and
+    /// filtering a normal map differently from the albedo beside it is not a
+    /// feature. The first arm's values win and the rest are ignored, which is
+    /// safe because the one constructor that builds several
+    /// ([`crate::split_pool_budget`]) copies them from a single base.
+    ///
+    /// An empty `arms` is an empty pool: legal, holds nothing, refuses every
+    /// registration by the mandatory-floor rule. It is what a caller with no
+    /// content at all would build and it is not a special case anywhere.
+    pub fn new_multi(arms: &[VtPoolConfig]) -> (Self, Vec<VtAdvisory>) {
+        let mut advisories = Vec::new();
+        let base = arms.first().copied().unwrap_or_default();
+        let mut built = Vec::with_capacity(arms.len());
+        for cfg in arms {
+            let cfg = VtPoolConfig {
+                stored_tile_size: base.stored_tile_size,
+                max_texture_dim: base.max_texture_dim,
+                trilinear: base.trilinear,
+                ..*cfg
+            };
+            let (geometry, mut a) = plan_pool(cfg);
+            advisories.append(&mut a);
+            let n = geometry.slot_count();
+            debug_assert!(n <= MAX_SLOT_INDEX + 1, "a slot index must fit 16 bits");
+            built.push(Arm {
+                page_bytes: cfg.format.page_bytes(geometry.stored_tile_size),
+                cfg,
+                geometry,
+                slots: vec![
+                    Slot {
+                        occupant: None,
+                        stamp: 0,
+                        pinned: false,
+                    };
+                    n as usize
+                ],
+                free: (0..n).collect(),
+                roots: 0,
+            });
+        }
+        let slots = built.iter().map(|a| a.geometry.slot_count()).sum();
+        let stored_tile_size = built.first().map_or(base.stored_tile_size.max(4), |a| {
+            a.geometry.stored_tile_size
+        });
         let this = Self {
-            cfg,
-            geometry,
-            page_bytes,
+            table: TableImage::layout(&[], built.len() as u32, stored_tile_size, base.trilinear),
+            arms: built,
+            stored_tile_size,
+            trilinear: base.trilinear,
             throttled_run: 0,
-            slots: vec![
-                Slot {
-                    occupant: None,
-                    stamp: 0,
-                    pinned: false,
-                };
-                n as usize
-            ],
-            free: (0..n).collect(),
             textures: Vec::new(),
-            table,
             pending_roots: Vec::new(),
             pending_evicts: Vec::new(),
             layout_generation: next_stamp(),
             layout_dirty: false,
             stats: VtStats {
-                slots: n,
+                slots,
                 ..Default::default()
             },
         };
         (this, advisories)
     }
 
+    /// How many arms this residency has — atlases the mirror binds.
+    #[inline]
+    pub fn arm_count(&self) -> usize {
+        self.arms.len()
+    }
+
+    /// Which arm holds `tex`'s pages, or `None` for an unknown handle.
+    #[inline]
+    pub fn arm_of(&self, tex: VtTextureHandle) -> Option<usize> {
+        self.textures.get(tex.index()).map(|t| t.arm as usize)
+    }
+
+    /// The **first** arm's config — what a single-arm pool's caller means by
+    /// "the config", and the arm every pre-IASSET2 constructor built.
+    ///
+    /// A multi-arm residency has one of these per arm; ask
+    /// [`config_of`](Self::config_of).
     #[inline]
     pub fn config(&self) -> VtPoolConfig {
-        self.cfg
+        self.config_of(0).unwrap_or_default()
     }
+    /// Arm `arm`'s config.
+    #[inline]
+    pub fn config_of(&self, arm: usize) -> Option<VtPoolConfig> {
+        self.arms.get(arm).map(|a| a.cfg)
+    }
+    /// The page format arm `arm` stores — what the mirror creates its atlas in.
+    #[inline]
+    pub fn arm_format(&self, arm: usize) -> Option<PageFormat> {
+        self.arms.get(arm).map(|a| a.cfg.format)
+    }
+    /// The **first** arm's atlas rectangle. See [`config`](Self::config).
     #[inline]
     pub fn geometry(&self) -> VtPoolGeometry {
-        self.geometry
+        self.geometry_of(0).unwrap_or(VtPoolGeometry {
+            slots_x: 0,
+            slots_y: 0,
+            stored_tile_size: self.stored_tile_size,
+        })
     }
-    /// Bytes one page occupies.
+    /// Arm `arm`'s atlas rectangle.
+    #[inline]
+    pub fn geometry_of(&self, arm: usize) -> Option<VtPoolGeometry> {
+        self.arms.get(arm).map(|a| a.geometry)
+    }
+    /// Bytes one page of the **first** arm occupies. See [`config`](Self::config).
     #[inline]
     pub fn page_bytes(&self) -> u64 {
-        self.page_bytes
+        self.page_bytes_of(0).unwrap_or(0)
     }
-    /// The VRAM the atlas costs — `slots × page_bytes`, and **never** more than
-    /// [`VtPoolConfig::budget_bytes`].
+    /// Bytes one page of arm `arm` occupies.
+    #[inline]
+    pub fn page_bytes_of(&self, arm: usize) -> Option<u64> {
+        self.arms.get(arm).map(|a| a.page_bytes)
+    }
+    /// The VRAM every atlas costs together — `Σ slots × page_bytes`, and
+    /// **never** more than the budget the arms were split from.
     #[inline]
     pub fn capacity_bytes(&self) -> u64 {
-        u64::from(self.geometry.slot_count()) * self.page_bytes
+        self.arms
+            .iter()
+            .map(|a| u64::from(a.geometry.slot_count()) * a.page_bytes)
+            .sum()
     }
-    /// Bytes currently holding a page.
+    /// Bytes currently holding a page, across every arm.
     #[inline]
     pub fn resident_bytes(&self) -> u64 {
-        u64::from(self.stats.resident) * self.page_bytes
+        self.arms
+            .iter()
+            .map(|a| a.slots.iter().filter(|s| s.occupant.is_some()).count() as u64 * a.page_bytes)
+            .sum()
+    }
+    /// **Bytes the mandatory floor holds** — the always-resident root pages,
+    /// priced in each arm's own page size.
+    ///
+    /// A residency-level answer rather than `roots × page_bytes()` at the call
+    /// site, which is what the budget reporters did and which prices every arm's
+    /// roots at the first arm's page size the moment there are two.
+    #[inline]
+    pub fn floor_bytes(&self) -> u64 {
+        self.arms
+            .iter()
+            .map(|a| u64::from(a.roots) * a.page_bytes)
+            .sum()
     }
     #[inline]
     /// **The sustained-demand advisory** (IB-16), or `None` while the budget is
@@ -513,7 +655,9 @@ impl VtResidency {
     pub fn upload_advisory(&self) -> Option<crate::VtAdvisory> {
         (self.throttled_run >= crate::VT_SUSTAINED_THROTTLE_FRAMES).then_some(
             crate::VtAdvisory::UploadBudgetSustained {
-                budget_bytes: self.cfg.upload_budget_bytes,
+                // The arms' budgets summed — the number a host would raise, and
+                // the one `split_pool_budget` divided in the first place.
+                budget_bytes: self.arms.iter().map(|a| a.cfg.upload_budget_bytes).sum(),
                 frames: self.throttled_run,
                 pages: self.stats.throttled,
             },
@@ -572,21 +716,45 @@ impl VtResidency {
     /// Seating roots may evict cached non-root pages — roots outrank cache — and
     /// those evictions ride along in the next transaction.
     pub fn register_texture(&mut self, desc: VtTextureDesc) -> Result<VtTextureHandle, VtError> {
+        self.register_texture_in(desc, 0)
+    }
+
+    /// [`register_texture`](Self::register_texture) into a named **arm** (wave
+    /// IASSET2) — the door a caller with several stored formats uses.
+    ///
+    /// The arm is the caller's decision because the caller is the one holding
+    /// the `.inf_tex` header: `inf_render::build_vt_level` reads
+    /// [`crate::stored_page_format`] off every payload it resolved, plans one
+    /// arm per distinct format, and registers each texture into its own. An arm
+    /// index this residency does not have is refused by name rather than
+    /// silently folded into arm 0, which would put a BC5 page in a BC1 atlas —
+    /// the right length, the wrong texels, and no error anywhere.
+    pub fn register_texture_in(
+        &mut self,
+        desc: VtTextureDesc,
+        arm: usize,
+    ) -> Result<VtTextureHandle, VtError> {
         desc.validate()?;
-        if desc.stored_tile_size() != self.geometry.stored_tile_size {
+        if desc.stored_tile_size() != self.stored_tile_size {
             return Err(VtError::PoolGeometryMismatch {
                 desc: desc.stored_tile_size(),
-                pool: self.geometry.stored_tile_size,
+                pool: self.stored_tile_size,
             });
         }
+        let Some(a) = self.arms.get(arm) else {
+            return Err(VtError::NoSuchArm {
+                arm,
+                arms: self.arms.len(),
+            });
+        };
         let roots = desc.root_tiles();
-        let floor = self.stats.roots + roots.len() as u32;
-        if floor > self.geometry.slot_count() {
+        let floor = a.roots + roots.len() as u32;
+        if floor > a.geometry.slot_count() {
             return Err(VtError::MandatoryFloorExceedsBudget {
                 roots: floor,
-                floor_bytes: u64::from(floor) * self.page_bytes,
-                budget_bytes: self.cfg.budget_bytes,
-                slots: self.geometry.slot_count(),
+                floor_bytes: u64::from(floor) * a.page_bytes,
+                budget_bytes: a.cfg.budget_bytes,
+                slots: a.geometry.slot_count(),
             });
         }
 
@@ -597,6 +765,7 @@ impl VtResidency {
             resident: vec![None; tiles],
             generation: next_stamp(),
             warm: false,
+            arm: arm as u32,
         });
         // The directory sits before the blocks, so a new texture moves every
         // block after it: the image is laid out again and refilled from the live
@@ -610,7 +779,7 @@ impl VtResidency {
         let mut protected = BTreeSet::new();
         for tile in roots {
             let (slot, evicted) = self
-                .acquire_slot(&protected)
+                .acquire_slot(arm, &protected)
                 .expect("the mandatory-floor check guarantees a slot for every root");
             if let Some(e) = evicted {
                 self.pending_evicts.push(e);
@@ -624,7 +793,7 @@ impl VtResidency {
         // recomputes this too, and leaving it to the frame would leave a stats
         // read between a registration and the first frame under-counting a pool
         // that is already partly full.
-        self.stats.resident = self.slots.iter().filter(|s| s.occupant.is_some()).count() as u32;
+        self.stats.resident = self.count_resident();
         Ok(handle)
     }
 
@@ -652,23 +821,29 @@ impl VtResidency {
         // exactly once, before anything else can take a slot. A protected set,
         // even though roots are pinned and pinning already forbids it — a safety
         // property should not rest on a second mechanism agreeing with it.
-        let mut protected: BTreeSet<u32> = BTreeSet::new();
+        //
+        // **Per arm** since wave IASSET2: a slot index is arm-local, so one set
+        // would have arm 1's slot 3 protecting arm 0's slot 3.
+        let mut protected: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); self.arms.len()];
+        let mut upload_bytes = 0u64;
         for (handle, tile) in std::mem::take(&mut self.pending_roots) {
             let t = &self.textures[handle.index()];
+            let arm = t.arm as usize;
             let Some(idx) = t.desc.entry_index(tile) else {
                 continue;
             };
             let Some(slot) = t.resident[idx as usize] else {
                 continue;
             };
-            protected.insert(slot);
-            self.touch(slot);
+            protected[arm].insert(slot);
+            self.touch(arm, slot);
             txn.admits.push(VtAdmit {
                 slot,
                 texture: handle,
                 tile,
             });
             self.stats.admits += 1;
+            upload_bytes += self.arms[arm].page_bytes;
         }
         for t in &mut self.textures {
             t.warm = true;
@@ -706,14 +881,23 @@ impl VtResidency {
         // Before the walk rather than inside it, because an out-of-range tile is
         // a *want set computed against the wrong extent* and the arbiter's job
         // starts at addresses that exist. `retain` keeps the lane-major order.
-        let mut lanes: Vec<(VtPriority, (u32, TileCoord))> = Vec::with_capacity(sorted.len());
+        //
+        // **Split by arm** since wave IASSET2, keeping the lane-major order
+        // inside each: a BC5 page cannot go in a BC1 atlas, so the arbiter runs
+        // once per arm over that arm's own wants. It is not merely a filter —
+        // `admit_by_lane` stops offering slots the moment one acquisition fails
+        // ("once acquisition fails nothing in this transaction frees a slot"),
+        // and that reasoning is true *within* a pool of interchangeable slots
+        // and false across two. One walk over both arms would let a full BC1
+        // atlas defer every BC5 want in the same frame, with slots free.
+        let mut lanes: Vec<Vec<(VtPriority, (u32, TileCoord))>> = vec![Vec::new(); self.arms.len()];
         for w in &sorted {
             let t = &self.textures[w.texture.index()];
             if t.desc.entry_index(w.tile).is_none() {
                 txn.out_of_range += 1;
                 continue;
             }
-            lanes.push((w.priority, (w.texture.0, w.tile)));
+            lanes[t.arm as usize].push((w.priority, (w.texture.0, w.tile)));
         }
 
         // ── 4. THE ADMISSION WALK (P28.3) ──
@@ -733,46 +917,64 @@ impl VtResidency {
         // A want past it is deferred and re-offered next frame: late, never
         // never. `0` is unlimited, which is what every gate written before IB-16
         // configures and why none of their transactions move.
-        let budget =
-            inf_stream::AdmitBudget::from_bytes(self.cfg.upload_budget_bytes, self.page_bytes);
-        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected, budget);
-        for (slot, (t, tile)) in log.evicts {
-            let texture = VtTextureHandle(t);
-            dirty.insert(texture);
-            txn.evicts.push(VtEvict {
-                slot,
-                texture,
-                tile,
-            });
-            self.stats.evicts += 1;
-        }
-        for (slot, (t, tile)) in log.admits {
-            let texture = VtTextureHandle(t);
-            dirty.insert(texture);
-            txn.admits.push(VtAdmit {
-                slot,
-                texture,
-                tile,
-            });
-            self.stats.admits += 1;
+        //
+        // **Arms are walked in index order** — the order the level's formats
+        // were planned in — so a transaction is a pure function of the want set
+        // and the arm plan, exactly as it was of the want set alone.
+        let (mut deferred, mut throttled) = (0u32, 0u32);
+        for (arm, arm_lanes) in lanes.iter().enumerate() {
+            let a = &self.arms[arm];
+            let budget =
+                inf_stream::AdmitBudget::from_bytes(a.cfg.upload_budget_bytes, a.page_bytes);
+            let page_bytes = a.page_bytes;
+            let log = inf_stream::admit_by_lane(
+                &mut ArmView(self, arm),
+                arm_lanes,
+                &mut protected[arm],
+                budget,
+            );
+            for (slot, (t, tile)) in log.evicts {
+                let texture = VtTextureHandle(t);
+                dirty.insert(texture);
+                txn.evicts.push(VtEvict {
+                    slot,
+                    texture,
+                    tile,
+                });
+                self.stats.evicts += 1;
+            }
+            for (slot, (t, tile)) in log.admits {
+                let texture = VtTextureHandle(t);
+                dirty.insert(texture);
+                txn.admits.push(VtAdmit {
+                    slot,
+                    texture,
+                    tile,
+                });
+                self.stats.admits += 1;
+                upload_bytes += page_bytes;
+            }
+            deferred += log.deferred;
+            throttled += log.throttled;
         }
 
-        let deferred = log.deferred;
         txn.deferred = deferred;
-        txn.throttled = log.throttled;
+        txn.throttled = throttled;
         txn.tables = dirty.into_iter().collect();
         self.stats.deferred = deferred;
         self.stats.budget_clamped = deferred > 0;
-        self.stats.throttled = log.throttled;
-        self.stats.upload_bytes = txn.admits.len() as u64 * self.page_bytes;
+        self.stats.throttled = throttled;
+        // Bytes, not `admits × page_bytes`: two arms' pages are two sizes, and
+        // the number this reports is what the frame actually uploaded.
+        self.stats.upload_bytes = upload_bytes;
         // A RUN, not a total: a burst that drains resets it, and only demand that
         // never drains crosses the advisory's threshold.
-        self.throttled_run = match log.throttled {
+        self.throttled_run = match throttled {
             0 => 0,
             _ => self.throttled_run.saturating_add(1),
         };
         self.stats.throttled_frames = self.throttled_run;
-        self.stats.resident = self.slots.iter().filter(|s| s.occupant.is_some()).count() as u32;
+        self.stats.resident = self.count_resident();
         txn
     }
 
@@ -803,17 +1005,32 @@ impl VtResidency {
         })
     }
 
-    /// What a slot holds, if anything.
+    /// What a slot of the **first** arm holds, if anything.
     pub fn slot_occupant(&self, slot: u32) -> Option<(VtTextureHandle, TileCoord)> {
-        self.slots
+        self.slot_occupant_in(0, slot)
+    }
+
+    /// What a slot of arm `arm` holds, if anything.
+    pub fn slot_occupant_in(&self, arm: usize, slot: u32) -> Option<(VtTextureHandle, TileCoord)> {
+        self.arms
+            .get(arm)?
+            .slots
             .get(slot as usize)?
             .occupant
             .map(|(t, c)| (VtTextureHandle(t), c))
     }
 
-    /// Whether a slot holds a pinned root.
+    /// Whether a slot of the **first** arm holds a pinned root.
     pub fn slot_is_root(&self, slot: u32) -> bool {
-        self.slots.get(slot as usize).is_some_and(|s| s.pinned)
+        self.slot_is_root_in(0, slot)
+    }
+
+    /// Whether a slot of arm `arm` holds a pinned root.
+    pub fn slot_is_root_in(&self, arm: usize, slot: u32) -> bool {
+        self.arms
+            .get(arm)
+            .and_then(|a| a.slots.get(slot as usize))
+            .is_some_and(|s| s.pinned)
     }
 
     /// Whether this texture's root pages have been emitted in an applied
@@ -867,13 +1084,33 @@ impl VtResidency {
 
     // ── internals ───────────────────────────────────────────────────────────
 
+    /// Slots holding a page, across every arm.
+    fn count_resident(&self) -> u32 {
+        self.arms
+            .iter()
+            .map(|a| a.slots.iter().filter(|s| s.occupant.is_some()).count() as u32)
+            .sum()
+    }
+
     fn relayout(&mut self) {
         let descs: Vec<VtTextureDesc> = self.textures.iter().map(|t| t.desc.clone()).collect();
+        // Each texture's block carries the geometry of ITS arm — see
+        // `crate::table`'s module docs for why that moved out of the pool header.
+        let rows: Vec<TableTexture<'_>> = self
+            .textures
+            .iter()
+            .zip(&descs)
+            .map(|(t, desc)| TableTexture {
+                desc,
+                slots_x: self.arms[t.arm as usize].geometry.slots_x,
+                pool: t.arm,
+            })
+            .collect();
         self.table = TableImage::layout(
-            &descs,
-            self.geometry.slots_x,
-            self.geometry.stored_tile_size,
-            self.cfg.trilinear,
+            &rows,
+            self.arms.len() as u32,
+            self.stored_tile_size,
+            self.trilinear,
         );
         for t in 0..self.textures.len() {
             self.recompute_entries(t);
@@ -939,20 +1176,26 @@ impl VtResidency {
         }
     }
 
-    fn touch(&mut self, slot: u32) {
-        if let Some(s) = self.slots.get_mut(slot as usize) {
+    fn touch(&mut self, arm: usize, slot: u32) {
+        if let Some(s) = self
+            .arms
+            .get_mut(arm)
+            .and_then(|a| a.slots.get_mut(slot as usize))
+        {
             s.stamp = next_stamp();
         }
     }
 
-    /// Put `tile` of texture `t` in `slot` and re-point the fallbacks beneath it.
+    /// Put `tile` of texture `t` in `slot` **of `t`'s own arm** and re-point the
+    /// fallbacks beneath it.
     fn seat(&mut self, slot: u32, t: u32, tile: TileCoord, pinned: bool) {
-        self.slots[slot as usize] = Slot {
+        let ti = t as usize;
+        let arm = self.textures[ti].arm as usize;
+        self.arms[arm].slots[slot as usize] = Slot {
             occupant: Some((t, tile)),
             stamp: next_stamp(),
             pinned,
         };
-        let ti = t as usize;
         let idx = self.textures[ti]
             .desc
             .entry_index(tile)
@@ -961,39 +1204,48 @@ impl VtResidency {
         self.propagate(ti, tile, pack_entry(slot, tile.mip));
         self.textures[ti].generation = next_stamp();
         if pinned {
+            self.arms[arm].roots += 1;
             self.stats.roots += 1;
         }
     }
 
-    /// The lowest free slot, or the least-recently-stamped evictable one.
+    /// The lowest free slot **of arm `arm`**, or its least-recently-stamped
+    /// evictable one.
     ///
     /// Never returns a pinned root and never returns a `protected` slot (one this
     /// transaction has already admitted or touched), so **a transaction can never
-    /// evict what it just brought in**.
-    fn acquire_slot(&mut self, protected: &BTreeSet<u32>) -> Option<(u32, Option<VtEvict>)> {
-        if let Some(&slot) = self.free.iter().next() {
-            self.free.remove(&slot);
+    /// evict what it just brought in**. The search never leaves the arm: a slot
+    /// of another arm is a page of another *size*, and handing one back would put
+    /// a BC5 tile in a BC1 atlas.
+    fn acquire_slot(
+        &mut self,
+        arm: usize,
+        protected: &BTreeSet<u32>,
+    ) -> Option<(u32, Option<VtEvict>)> {
+        let a = self.arms.get_mut(arm)?;
+        if let Some(&slot) = a.free.iter().next() {
+            a.free.remove(&slot);
             return Some((slot, None));
         }
-        let victim = lru_victim(self.slots.iter().enumerate().filter_map(|(i, s)| {
+        let victim = lru_victim(a.slots.iter().enumerate().filter_map(|(i, s)| {
             let slot = i as u32;
             (s.occupant.is_some() && !s.pinned && !protected.contains(&slot))
                 .then_some((s.stamp, slot))
         }))?;
-        let evict = self.unseat(victim);
-        self.free.remove(&victim);
+        let evict = self.unseat(arm, victim);
+        self.arms[arm].free.remove(&victim);
         Some((victim, Some(evict)))
     }
 
-    /// Empty `slot`, re-pointing its tile (and the subtree that fell back through
-    /// it) at its parent's entry.
-    fn unseat(&mut self, slot: u32) -> VtEvict {
-        let (t, tile) = self.slots[slot as usize]
+    /// Empty `slot` of arm `arm`, re-pointing its tile (and the subtree that fell
+    /// back through it) at its parent's entry.
+    fn unseat(&mut self, arm: usize, slot: u32) -> VtEvict {
+        let (t, tile) = self.arms[arm].slots[slot as usize]
             .occupant
             .take()
             .expect("a victim is occupied");
         debug_assert!(
-            !self.slots[slot as usize].pinned,
+            !self.arms[arm].slots[slot as usize].pinned,
             "a pinned root must never be unseated"
         );
         let ti = t as usize;
@@ -1005,7 +1257,7 @@ impl VtResidency {
         let word = self.table.words[self.table.entry_word(ti, &desc, parent).expect("in grid")];
         self.propagate(ti, tile, word);
         self.textures[ti].generation = next_stamp();
-        self.free.insert(slot);
+        self.arms[arm].free.insert(slot);
         VtEvict {
             slot,
             texture: VtTextureHandle(t),
@@ -1024,9 +1276,12 @@ impl VtResidency {
 /// field and the private `PageUpload` constructor exist to keep in `inf-vgeom`.
 /// A private wrapper gives the walk everything it needs and gives an external
 /// caller nothing.
-struct PoolView<'a>(&'a mut VtResidency);
+/// One **arm** of it (wave IASSET2): the walk runs once per arm, over that arm's
+/// own wants and that arm's own slot indices, so a full BC1 atlas cannot defer a
+/// BC5 want.
+struct ArmView<'a>(&'a mut VtResidency, usize);
 
-impl inf_stream::SlotPool for PoolView<'_> {
+impl inf_stream::SlotPool for ArmView<'_> {
     /// `(texture index, tile)` — the residency's own address, unpacked from
     /// [`VtWant`] before the walk so the arbiter never sees a handle it would
     /// have to validate.
@@ -1034,15 +1289,23 @@ impl inf_stream::SlotPool for PoolView<'_> {
 
     fn resident_slot(&self, key: &Self::Key) -> Option<u32> {
         let t = self.0.textures.get(key.0 as usize)?;
+        // A key from another arm is not resident *here*, whatever slot it holds
+        // there — the walk is only ever handed this arm's own wants, and this is
+        // the arithmetic that says so rather than a comment claiming it.
+        if t.arm as usize != self.1 {
+            return None;
+        }
         t.resident[t.desc.entry_index(key.1)? as usize]
     }
 
     fn touch(&mut self, slot: u32) {
-        self.0.touch(slot);
+        let arm = self.1;
+        self.0.touch(arm, slot);
     }
 
     fn acquire(&mut self, protected: &BTreeSet<u32>) -> Option<inf_stream::Acquired<Self::Key>> {
-        let (slot, evicted) = self.0.acquire_slot(protected)?;
+        let arm = self.1;
+        let (slot, evicted) = self.0.acquire_slot(arm, protected)?;
         Some(inf_stream::Acquired {
             slot,
             evicted: evicted.map(|e| (e.texture.0, e.tile)),
@@ -1114,6 +1377,158 @@ mod tests {
             upload_budget_bytes: 0,
         });
         r
+    }
+
+    /// **The measurement that made wave IASSET2 the shape it is**, run as an
+    /// arm: a level of BC1 albedos and BC5 normals pages at BC rates in two
+    /// atlases, where one atlas would have had to be RGBA8 and hold 8× fewer.
+    ///
+    /// `inf_material::ground`'s module doc wrote the number down when it chose
+    /// to author every ground map — normals included — as BC1 rather than take
+    /// the demotion: *"2 670 pages of camera-driven refinement against 289, a
+    /// 9.2× cut in what can be resident at once"*. The arithmetic here is that
+    /// sentence, held against the arms it now gets instead.
+    #[test]
+    fn a_mixed_level_pages_at_bc_rates_instead_of_demoting_to_rgba8() {
+        const BUDGET: u64 = crate::DEFAULT_VT_BUDGET_BYTES;
+        // What the level's content weighs: four BC1 albedos to one BC5 normal
+        // set, the ground library's own ratio of tiles.
+        let weights = [(PageFormat::Bc1, 4_000u64), (PageFormat::Bc5, 1_000)];
+        let arms = crate::split_pool_budget(
+            VtPoolConfig {
+                budget_bytes: BUDGET,
+                ..Default::default()
+            },
+            &weights,
+        );
+        let (r, advisories) = VtResidency::new_multi(&arms);
+        assert!(advisories.is_empty(), "{advisories:?}");
+        assert_eq!(r.arm_count(), 2);
+
+        let split_slots =
+            r.geometry_of(0).unwrap().slot_count() + r.geometry_of(1).unwrap().slot_count();
+        // The one-pool answer this replaces: mixed formats fell back to RGBA8.
+        let demoted = (BUDGET / PageFormat::Rgba8.page_bytes(136)) as u32;
+        assert_eq!(demoted, 340, "the RGBA8 page count the demotion bought");
+        assert!(
+            split_slots >= demoted * 5,
+            "two arms hold {split_slots} pages against the demotion's {demoted}"
+        );
+        // …and the VRAM is the SAME budget, not two of them. This is the half a
+        // page-count comparison cannot see.
+        assert!(
+            r.capacity_bytes() <= BUDGET,
+            "{} B of atlas for a {BUDGET} B budget",
+            r.capacity_bytes()
+        );
+    }
+
+    /// **An arm is a pool, and a full one does not defer another's wants.**
+    ///
+    /// `admit_by_lane` gives up on the first failed acquisition — correct over a
+    /// flat array of interchangeable slots, and false across two arrays. So the
+    /// walk runs once per arm; this is the arm that fails if it is ever folded
+    /// back into one.
+    #[test]
+    fn a_full_arm_does_not_defer_another_arms_wants() {
+        let page = PageFormat::Bc1.page_bytes(136);
+        let base = VtPoolConfig {
+            stored_tile_size: 136,
+            max_texture_dim: 8192,
+            trilinear: false,
+            upload_budget_bytes: 0,
+            ..Default::default()
+        };
+        // Arm 0: two slots (one root + one cache). Arm 1: eight.
+        let (mut r, _) = VtResidency::new_multi(&[
+            VtPoolConfig {
+                format: PageFormat::Bc1,
+                budget_bytes: page * 2,
+                ..base
+            },
+            VtPoolConfig {
+                format: PageFormat::Bc5,
+                budget_bytes: PageFormat::Bc5.page_bytes(136) * 8,
+                ..base
+            },
+        ]);
+        let tight = r
+            .register_texture_in(full_pyramid(1024, 1024, 128, 4, true), 0)
+            .expect("one root fits two slots");
+        let roomy = r
+            .register_texture_in(full_pyramid(512, 512, 128, 4, false), 1)
+            .expect("one root fits eight slots");
+        assert_eq!(r.apply_wants(&[]).admits.len(), 2, "one root per arm");
+
+        // Three tiles from each. Arm 0 can seat exactly one; arm 1 all three.
+        let mut wants = Vec::new();
+        for x in 0..3u32 {
+            wants.push(VtWant::new(tight, TileCoord::new(0, x, 0)));
+            wants.push(VtWant::new(roomy, TileCoord::new(0, x, 0)));
+        }
+        let txn = r.apply_wants(&wants);
+        assert_eq!(txn.out_of_range, 0, "the fixture asks for real tiles");
+        for x in 0..3u32 {
+            assert!(
+                r.is_resident(roomy, TileCoord::new(0, x, 0)),
+                "arm 1 tile {x} was deferred by arm 0 running out: {}",
+                txn.trace()
+            );
+        }
+        assert_eq!(txn.deferred, 2, "arm 0's two extra tiles: {}", txn.trace());
+        // ANTI-VACUITY: arm 0 really is out of slots, so the deferral above is a
+        // measurement of the arms and not of a pool that fitted everything.
+        assert_eq!(r.geometry_of(0).unwrap().slot_count(), 2);
+    }
+
+    /// A registration naming an arm this residency does not have is refused **by
+    /// name** — never folded into arm 0, which would put a page of one format in
+    /// an atlas of another: the right length, the wrong texels, no error.
+    #[test]
+    fn a_registration_into_an_absent_arm_is_refused_by_name() {
+        let mut r = pool(16);
+        assert_eq!(r.arm_count(), 1);
+        let err = r
+            .register_texture_in(full_pyramid(320, 192, 128, 4, true), 1)
+            .expect_err("there is no arm 1");
+        assert_eq!(err, VtError::NoSuchArm { arm: 1, arms: 1 });
+        assert!(err.to_string().contains("arm 1"), "{err}");
+        assert_eq!(r.texture_count(), 0, "the refusal is total");
+    }
+
+    /// `floor_bytes` prices every arm's roots in **its own** page size — the
+    /// quantity a budget reporter wants, and the one `roots × page_bytes()` gets
+    /// wrong the moment there are two arms.
+    #[test]
+    fn the_floor_is_priced_in_each_arms_own_pages() {
+        let base = VtPoolConfig {
+            upload_budget_bytes: 0,
+            ..Default::default()
+        };
+        let (mut r, _) = VtResidency::new_multi(&[
+            VtPoolConfig {
+                format: PageFormat::Bc1,
+                budget_bytes: PageFormat::Bc1.page_bytes(136) * 8,
+                ..base
+            },
+            VtPoolConfig {
+                format: PageFormat::Rgba8,
+                budget_bytes: PageFormat::Rgba8.page_bytes(136) * 8,
+                ..base
+            },
+        ]);
+        r.register_texture_in(full_pyramid(512, 512, 128, 4, true), 0)
+            .unwrap();
+        r.register_texture_in(full_pyramid(512, 512, 128, 4, false), 1)
+            .unwrap();
+        assert_eq!(r.stats().roots, 2);
+        assert_eq!(
+            r.floor_bytes(),
+            PageFormat::Bc1.page_bytes(136) + PageFormat::Rgba8.page_bytes(136)
+        );
+        // …and NOT the number the old expression gives, which is what makes this
+        // an assertion about the arms rather than about two ways to spell one sum.
+        assert_ne!(r.floor_bytes(), 2 * r.page_bytes());
     }
 
     #[test]

@@ -691,16 +691,19 @@ fn the_bind_group_layout_and_its_entries_are_the_same_three_bindings() {
     };
     let image = container(320, 192);
     let h = harness(&gpu, &image, 4);
-    let entries = VtPools::bind_group_layout_entries(9);
+    let entries = VtPools::bind_group_layout_entries(9, 20);
     assert_eq!(
         entries.len() as u32,
-        inf_render::vt::VT_BINDING_COUNT,
-        "the constant P26.3 budgets against is not the number of entries"
+        inf_render::vt::VT_BINDING_COUNT + inf_render::vt::VT_EXTRA_ATLAS_COUNT,
+        "the constants P26.3 and wave IASSET2 budget against are not the number \
+         of entries"
     );
     assert_eq!(
         entries.iter().map(|e| e.binding).collect::<Vec<_>>(),
-        vec![9, 10, 11],
-        "the entries must be consecutive from `base`"
+        // The three consecutive from `base`, then one further atlas per page
+        // format past the first from `extra_base` (wave IASSET2).
+        vec![9, 10, 11, 20, 21],
+        "the entries must be consecutive from `base` and then from `extra_base`"
     );
     let layout = gpu
         .device
@@ -711,7 +714,7 @@ fn the_bind_group_layout_and_its_entries_are_the_same_three_bindings() {
     let _ = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vt-test-group"),
         layout: &layout,
-        entries: &h.pools.bind_group_entries(9),
+        entries: &h.pools.bind_group_entries(9, 20),
     });
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
 }

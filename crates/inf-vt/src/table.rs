@@ -32,21 +32,42 @@
 //! ┌ pool header ([`TABLE_HEADER_WORDS`] = 4) ─────────────────────────┐
 //! │ [0] magic = [`TABLE_MAGIC`]                                       │
 //! │ [1] texture_count                                                 │
-//! │ [2] slots_x            (atlas slots per row)                      │
+//! │ [2] pool_count         (atlas ARMS this table describes)          │
 //! │ [3] stored_tile_size   (texels per side of a slot)                │
 //! ├ texture directory (texture_count words) ──────────────────────────┤
 //! │ [4 + t] = word offset of texture t's block                        │
-//! ├ texture block, at `b` ([`TABLE_TEXTURE_HEADER_WORDS`] = 4) ───────┤
+//! ├ texture block, at `b` ([`TABLE_TEXTURE_HEADER_WORDS`] = 6) ───────┤
 //! │ [b+0] mip_count                                                   │
 //! │ [b+1] tile_size        (PAYLOAD texels per tile side)             │
 //! │ [b+2] border                                                      │
 //! │ [b+3] flags     bit 0 srgb · bit 1 reconstruct_z · bit 2 trilinear│
+//! │ [b+4] slots_x          (THIS texture's arm — slots per atlas row) │
+//! │ [b+5] pool             (which atlas arm holds this texture)       │
 //! ├ mip records (mip_count × [`TABLE_MIP_REC_WORDS`] = 4) ────────────┤
 //! │ width · height · tiles_x · first_entry (ABSOLUTE word offset)     │
 //! ├ entries (one per tile of the pyramid, in (mip, y, x) order) ──────┤
 //! │ [`pack_entry`]: slot in bits 0..16, resolved mip in bits 16..24   │
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # `slots_x` and `pool` are per TEXTURE (wave IASSET2)
+//!
+//! They used to be one pool-wide word each, because there was one atlas. Wave
+//! IASSET2 gives a residency **one arm per stored page format** — the fix for
+//! the mixed-format demotion `inf_material::ground` measured at 9.2× of
+//! camera-driven refinement — and an arm has its own atlas, its own rectangle
+//! and therefore its own `slots_x`. A texture lives in exactly one arm for its
+//! whole life (its stored format does not change), so the arm and its geometry
+//! are properties of the texture's block, read once per sample beside the
+//! `tile_size` and `border` that were already there.
+//!
+//! Word `[2]` is `pool_count` rather than `slots_x` for the same reason: the
+//! pool-wide answer no longer exists, and leaving the old name holding one arm's
+//! number would be a value that reads as total and is not. The table buffer is
+//! rebuilt from the residency on every run and is never persisted, so the wire
+//! is free to change — what it is *not* free to do is disagree with
+//! `vt_sample.wgsl`, which is why both sides move in one commit and
+//! [`tests::the_block_header_is_pinned_word_by_word`] pins the words by value.
 //!
 //! An entry's index inside its texture is
 //! [`VtTextureDesc::entry_index`](crate::VtTextureDesc::entry_index) — the same
@@ -131,7 +152,11 @@ pub const TABLE_MAGIC: u32 = u32::from_le_bytes(*b"VTB1");
 pub const TABLE_HEADER_WORDS: usize = 4;
 
 /// Words of a texture block's own header, before its mip records.
-pub const TABLE_TEXTURE_HEADER_WORDS: usize = 4;
+///
+/// **Six since wave IASSET2** — `slots_x` and `pool` joined `mip_count`,
+/// `tile_size`, `border` and `flags` when a residency gained one arm per stored
+/// format. See the module docs.
+pub const TABLE_TEXTURE_HEADER_WORDS: usize = 6;
 
 /// Words of one mip record.
 pub const TABLE_MIP_REC_WORDS: usize = 4;
@@ -200,8 +225,19 @@ pub(crate) struct TableImage {
     pub blocks: Vec<BlockSpan>,
 }
 
+/// One texture's row in a [`TableImage::layout`] — the descriptor plus the two
+/// facts about **where it lives** that the block header carries (wave IASSET2).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableTexture<'a> {
+    pub desc: &'a VtTextureDesc,
+    /// Slots per row of the atlas of the arm this texture is in.
+    pub slots_x: u32,
+    /// Which arm — the index the mirror binds an atlas at.
+    pub pool: u32,
+}
+
 impl TableImage {
-    /// Lay the image out for `descs`, leaving every entry zero. Callers fill the
+    /// Lay the image out for `texs`, leaving every entry zero. Callers fill the
     /// entries with a coarse-to-fine sweep afterwards.
     ///
     /// The layout is rebuilt whole on registration — never incrementally — because
@@ -210,20 +246,21 @@ impl TableImage {
     /// and a `layout_rebuilt` transaction tells the mirror to re-create and
     /// re-upload the buffer rather than patch it.
     pub fn layout(
-        descs: &[VtTextureDesc],
-        slots_x: u32,
+        texs: &[TableTexture<'_>],
+        pool_count: u32,
         stored_tile_size: u32,
         trilinear: bool,
     ) -> Self {
-        let n = descs.len();
+        let n = texs.len();
         let mut words = vec![0u32; TABLE_HEADER_WORDS + n];
         words[0] = TABLE_MAGIC;
         words[1] = n as u32;
-        words[2] = slots_x;
+        words[2] = pool_count;
         words[3] = stored_tile_size;
 
         let mut blocks = Vec::with_capacity(n);
-        for (t, desc) in descs.iter().enumerate() {
+        for (t, tex) in texs.iter().enumerate() {
+            let desc = tex.desc;
             let base = words.len();
             words[TABLE_HEADER_WORDS + t] = base as u32;
             words.push(desc.mip_count());
@@ -239,6 +276,9 @@ impl TableImage {
                     | (u32::from(desc.reconstruct_z) << 1)
                     | (u32::from(trilinear) << 2),
             );
+            // Wave IASSET2's two: the arm's atlas rectangle and the arm itself.
+            words.push(tex.slots_x);
+            words.push(tex.pool);
             let entries = base + TABLE_TEXTURE_HEADER_WORDS + TABLE_MIP_REC_WORDS * desc.mips.len();
             for (m, mip) in desc.mips.iter().enumerate() {
                 words.push(mip.width);
@@ -279,16 +319,29 @@ mod tests {
         }
     }
 
+    /// Every descriptor in one arm 0 of `slots_x` slots a row — the shape every
+    /// pre-IASSET2 caller had.
+    fn one_arm<'a>(descs: &'a [VtTextureDesc], slots_x: u32) -> Vec<TableTexture<'a>> {
+        descs
+            .iter()
+            .map(|desc| TableTexture {
+                desc,
+                slots_x,
+                pool: 0,
+            })
+            .collect()
+    }
+
     #[test]
     fn the_layout_addresses_every_tile_exactly_once() {
         let descs = vec![
             full_pyramid(320, 192, 128, 4, true),
             full_pyramid(129, 129, 128, 4, false),
         ];
-        let img = TableImage::layout(&descs, 46, 136, false);
+        let img = TableImage::layout(&one_arm(&descs, 46), 1, 136, false);
         assert_eq!(img.words[0], TABLE_MAGIC);
         assert_eq!(img.words[1], 2);
-        assert_eq!(img.words[2], 46);
+        assert_eq!(img.words[2], 1, "one arm");
         assert_eq!(img.words[3], 136);
 
         let mut seen = std::collections::BTreeSet::new();
@@ -337,7 +390,7 @@ mod tests {
         normal.reconstruct_z = true;
 
         let flags = |descs: &[VtTextureDesc], trilinear: bool| -> Vec<u32> {
-            let img = TableImage::layout(descs, 46, 136, trilinear);
+            let img = TableImage::layout(&one_arm(descs, 46), 1, 136, trilinear);
             img.blocks.iter().map(|b| img.words[b.base + 3]).collect()
         };
 
@@ -352,6 +405,53 @@ mod tests {
         assert_eq!(flags(&[all], true), vec![7]);
         // Per texture, not per pool, for the two that are per texture.
         assert_eq!(flags(&[plain, srgb, normal], true), vec![4, 5, 6]);
+    }
+
+    /// **The block header is six words and `vt_sample.wgsl` reads all six** —
+    /// pinned by value and by position, because the shader indexes them with
+    /// literal offsets off `b` and nothing else compares the two files.
+    ///
+    /// Wave IASSET2 appended `slots_x` and `pool`, which is what lets two
+    /// textures of two stored formats live in two atlases and still be addressed
+    /// through one table and one directory. A texture in arm 1 whose arm is 12
+    /// slots a row must read 12 — not the first arm's 46 — or every one of its
+    /// pages is fetched from the wrong atlas coordinate, at the right size, with
+    /// no error anywhere.
+    #[test]
+    fn the_block_header_is_pinned_word_by_word() {
+        let a = full_pyramid(320, 192, 128, 4, true);
+        let b = full_pyramid(256, 256, 128, 4, false);
+        let img = TableImage::layout(
+            &[
+                TableTexture {
+                    desc: &a,
+                    slots_x: 46,
+                    pool: 0,
+                },
+                TableTexture {
+                    desc: &b,
+                    slots_x: 12,
+                    pool: 1,
+                },
+            ],
+            2,
+            136,
+            false,
+        );
+        assert_eq!(img.words[2], 2, "two arms");
+        let block = |t: usize| -> Vec<u32> {
+            let base = img.blocks[t].base;
+            img.words[base..base + TABLE_TEXTURE_HEADER_WORDS].to_vec()
+        };
+        // mip_count · tile_size · border · flags · slots_x · pool
+        assert_eq!(block(0), vec![a.mip_count(), 128, 4, 1, 46, 0]);
+        assert_eq!(block(1), vec![b.mip_count(), 128, 4, 0, 12, 1]);
+        // …and the mip records still start immediately after the six.
+        for (t, desc) in [&a, &b].into_iter().enumerate() {
+            let rec = img.blocks[t].base + TABLE_TEXTURE_HEADER_WORDS;
+            assert_eq!(img.words[rec], desc.mips[0].width);
+            assert_eq!(img.words[rec + 1], desc.mips[0].height);
+        }
     }
 
     /// **The UV-precision tripwire** (Wave T, the texture document's T44).

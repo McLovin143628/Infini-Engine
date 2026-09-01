@@ -65,7 +65,7 @@ struct FeedbackRequest {
 @group(0) @binding(2) var<storage, read> vt_table: array<u32>;
 @group(0) @binding(3) var<storage, read_write> mask: array<atomic<u32>>;
 
-const VT_TEX_HEADER_WORDS: u32 = 4u;
+const VT_TEX_HEADER_WORDS: u32 = 6u;  // wave IASSET2 appended slots_x + pool
 const VT_MIP_REC_WORDS: u32 = 4u;
 
 fn tiles_down(height: u32, tile_size: u32) -> u32 {

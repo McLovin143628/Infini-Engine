@@ -317,9 +317,25 @@ fn the_wgsl_implements_the_twin_above() {
         "the border offset is gone from vt_sample.wgsl's atlas address — a \
          sample whose `local` is negative now reads the previous slot"
     );
+    // **The arm dispatch** (wave IASSET2): the atlas a tap reads and the slot
+    // rectangle it addresses within it both come from the sampled TEXTURE's own
+    // block — `pool` at `b + 5` and `slots_x` at `b + 4`. Reading either from
+    // the pool header would be right for arm 0 and silently wrong for every
+    // other arm, at the right page size, with no error anywhere.
+    assert!(
+        code.contains("vt_atlas_tap(vt_table[b + 5u]") && code.contains("vt_table[b + 4u]"),
+        "vt_sample.wgsl no longer picks its atlas and its slot rectangle from the \
+         texture's own block — every page of every arm but the first is then \
+         addressed in the wrong atlas"
+    );
+    assert!(
+        !code.contains("let slots_x = vt_table[2]"),
+        "the pool-wide `slots_x` is back: word 2 is `pool_count` since wave \
+         IASSET2 and reading it as a rectangle addresses every page wrongly"
+    );
     // Anti-vacuity: the stripper left the code, not only the comments.
     assert!(
-        code.contains("fn vt_sample(") && code.contains("textureSampleLevel(vt_atlas"),
+        code.contains("fn vt_sample(") && code.contains("textureSampleLevel(vt_atlas,"),
         "the comment stripper ate the shader"
     );
 }
@@ -1219,7 +1235,7 @@ fn cs_probe(@builtin(global_invocation_id) gid: vec3<u32>) {{
     ];
     // The atlas / sampler / table at 14/15/16 — the same three bindings the env
     // group carries, visible to COMPUTE here.
-    for mut e in VtPools::bind_group_layout_entries(14) {
+    for mut e in VtPools::bind_group_layout_entries(14, 22) {
         e.visibility = wgpu::ShaderStages::COMPUTE;
         entries.push(e);
     }
@@ -1239,7 +1255,7 @@ fn cs_probe(@builtin(global_invocation_id) gid: vec3<u32>) {{
             resource: out_buf.as_entire_binding(),
         },
     ];
-    bg_entries.extend(pools.bind_group_entries(14));
+    bg_entries.extend(pools.bind_group_entries(14, 22));
     let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vt-walk-probe"),
         layout: &bgl,
@@ -1339,15 +1355,32 @@ fn cs_probe(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// with one caller and no arm at all.
 ///
 /// The ruling matters because one pool slot is one size for every tile of every
-/// texture in it: a BC1 pool cannot hold a BC3 tile, the fetch is the wrong
+/// texture in it: a BC1 arm cannot hold a BC3 tile, the fetch is the wrong
 /// length, `VtPools::apply` writes its deterministic zero page and the surface is
 /// silently wrong. So the third assertion here is not about the reported format
 /// at all — it is that every page of a mixed level's floor actually LANDS.
 ///
 /// Both adapter tiers, on the P25.2 doctrine: a runner without
-/// `TEXTURE_COMPRESSION_BC` collapses branches 1 and 2 onto RGBA8, which is
-/// exactly the transcode tier this ruling exists to serve, so the discriminating
-/// assertion is guarded and says so rather than being skipped.
+/// `TEXTURE_COMPRESSION_BC` collapses every block format onto one RGBA8 arm,
+/// which is exactly the transcode tier this ruling exists to serve, so the
+/// discriminating assertions are guarded and say so rather than being skipped.
+///
+/// # Re-aimed by wave IASSET2, and this is the purpose
+///
+/// Branch 2 used to assert that a level mixing BC1 and BC3 takes an **RGBA8**
+/// pool — the whole-level demotion, which was the honest answer while there was
+/// one atlas. It had a price the ledger recorded rather than paid:
+/// `inf_material::ground` authored all seventeen committed ground maps as BC1,
+/// normal maps included, because *"the first content to use [BC5] alongside a
+/// BC1 albedo demotes the whole atlas"* — 2 670 pages of camera-driven
+/// refinement against 289, **9.2×**.
+///
+/// A mixed level now takes **one arm per stored format**, so the assertion
+/// inverts: the reported arms are the level's own formats, the atlases together
+/// cost no more than the one budget, and every page still lands. Branch 4 is the
+/// case the wave exists for (BC1 albedo beside a BC5 normal) and branch 5 is the
+/// bound — more distinct formats than there are atlas bindings, which demotes
+/// the *lightest* maps and names them instead of demoting the level.
 #[test]
 fn the_registration_door_decides_the_pool_format_from_the_level() {
     let Some(gpu) = gpu_or_skip("the VT registration door") else {
@@ -1423,8 +1456,25 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
         Some(pool_format(&settings, PageFormat::Bc1)),
         "a uniformly-BC1 level did not take the BC1 pool the adapter allows"
     );
+    assert_eq!(
+        uniform.pool_formats.len(),
+        1,
+        "a level of one stored format must take ONE arm, and therefore the whole \
+         budget and the pool geometry it had before wave IASSET2"
+    );
+    assert!(uniform.demoted.is_empty());
+    assert_eq!(
+        uniform.pool_budgets.iter().sum::<u64>() % PageFormat::Bc1.page_bytes(136),
+        if has_bc {
+            0
+        } else {
+            uniform.pool_budgets[0] % PageFormat::Bc1.page_bytes(136)
+        },
+        "one arm's budget is not a whole number of its own pages"
+    );
 
-    // 2. A level that MIXES BC1 and BC3 → RGBA8, on EVERY adapter.
+    // 2. A level that MIXES BC1 and BC3 gets ONE ARM EACH (wave IASSET2) — and
+    //    the two atlases together still cost one budget.
     let (mut mixed_lib, mut mixed_pools, mixed) = level(vec![
         (
             1,
@@ -1436,11 +1486,29 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
         ),
     ])
     .expect("a mixed level builds");
-    assert_eq!(
-        mixed.pool_format,
-        Some(PageFormat::Rgba8),
-        "a level mixing BC1 and BC3 took a BC pool: one slot is one size, so the \
-         other format's fetch is the wrong length and the mirror writes a zero page"
+    if has_bc {
+        assert_eq!(
+            mixed.pool_formats,
+            vec![PageFormat::Bc1, PageFormat::Bc3],
+            "a mixed level did not get one arm per stored format — it is being \
+             demoted to a single pool, which is the 9.2× refinement cut wave \
+             IASSET2 exists to end"
+        );
+    } else {
+        assert_eq!(
+            mixed.pool_formats,
+            vec![PageFormat::Rgba8],
+            "an adapter without BC must collapse every block format onto ONE \
+             transcode arm, not one arm per format it cannot upload"
+        );
+    }
+    assert!(mixed.demoted.is_empty(), "{:?}", mixed.demoted);
+    assert!(
+        mixed.pool_budgets.iter().sum::<u64>() <= inf_vt::DEFAULT_VT_BUDGET_BYTES,
+        "{} arms spent {} B of a {} B budget",
+        mixed.pool_budgets.len(),
+        mixed.pool_budgets.iter().sum::<u64>(),
+        inf_vt::DEFAULT_VT_BUDGET_BYTES
     );
     assert_eq!(mixed.textures, 2);
     assert_eq!(
@@ -1465,7 +1533,7 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
     // the mixed ruling is not branch 1 wearing another name.
     if has_bc {
         assert_ne!(
-            uniform.pool_format, mixed.pool_format,
+            uniform.pool_formats, mixed.pool_formats,
             "the two branches agree, so the mixed ruling asserts nothing here"
         );
     } else {
@@ -1481,6 +1549,94 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
     // …and a level that binds nothing at all is `None` too, which is the
     // textureless command stream all 50 committed goldens recorded.
     assert!(level(vec![]).is_none());
+
+    // 4. **THE WAVE'S OWN CASE**: a BC1 albedo beside a BC5 normal map — the
+    //    combination `inf_material::ground` refused to author because it demoted
+    //    the atlas. Both arms are BC, so the level pages at BC rates.
+    let (mut two_lib, mut two_pools, two) = level(vec![
+        (
+            1,
+            container(256, 256, true, inf_material::TextureCompression::Bc1),
+        ),
+        (
+            2,
+            container(256, 256, false, inf_material::TextureCompression::Bc5),
+        ),
+    ])
+    .expect("a BC1 + BC5 level builds");
+    if has_bc {
+        assert_eq!(two.pool_formats, vec![PageFormat::Bc1, PageFormat::Bc5]);
+        // The measurement, as a rate rather than as prose: the slots the two
+        // arms hold together, against the 340 an RGBA8 demotion of the same
+        // budget would have bought.
+        let slots: u32 = (0..two_pools.arm_count())
+            .map(|a| two_pools.geometry_of(a).expect("arm").slot_count())
+            .sum();
+        let demoted_slots =
+            (inf_vt::DEFAULT_VT_BUDGET_BYTES / PageFormat::Rgba8.page_bytes(136)) as u32;
+        assert_eq!(demoted_slots, 340, "the pre-IASSET2 demotion's page count");
+        assert!(
+            slots >= demoted_slots * 5,
+            "a BC1 + BC5 level holds {slots} pages; the demotion it replaces held \
+             {demoted_slots}, and the whole wave is that ratio"
+        );
+        eprintln!(
+            "IASSET2 arm split: BC1+BC5 level holds {slots} pages vs {demoted_slots} demoted"
+        );
+    }
+    // …and every page still LANDS, in whichever atlas its texture's arm names.
+    let floor = two_lib.want_floor();
+    let (txn, report) = two_lib.sync(&gpu.device, &gpu.queue, &mut two_pools, &floor);
+    assert_eq!(txn.deferred, 0, "the floor did not fit: {}", txn.trace());
+    assert!(
+        report.missing.is_empty(),
+        "{} page(s) of a two-arm level did not reach their atlas",
+        report.missing.len()
+    );
+
+    // 5. **The bound**, and it names what it cost. More distinct formats than
+    //    there are atlas bindings demotes the LIGHTEST transcodable ones into
+    //    the RGBA8 arm rather than demoting the level.
+    if has_bc {
+        let (_lib, _pools, over) = level(vec![
+            (
+                1,
+                container(512, 512, true, inf_material::TextureCompression::Bc1),
+            ),
+            (
+                2,
+                container(512, 512, false, inf_material::TextureCompression::Bc5),
+            ),
+            (
+                3,
+                container(256, 256, true, inf_material::TextureCompression::Bc3),
+            ),
+            (
+                4,
+                container(128, 128, false, inf_material::TextureCompression::None),
+            ),
+        ])
+        .expect("a four-format level builds");
+        assert_eq!(
+            over.pool_formats.len(),
+            inf_render::vt::VT_MAX_POOLS,
+            "a level with four formats must fill the atlas budget, not exceed it"
+        );
+        assert_eq!(
+            over.demoted,
+            vec![PageFormat::Bc3],
+            "the lightest transcodable format is the one that folds, and it is \
+             named rather than silently paged coarse: {:?} kept, {:?} demoted",
+            over.pool_formats,
+            over.demoted
+        );
+        assert!(
+            over.pool_formats.contains(&PageFormat::Rgba8),
+            "the fold needs an RGBA8 arm to land in: {:?}",
+            over.pool_formats
+        );
+        assert_eq!(over.refused, 0, "a demoted texture must still register");
+    }
 }
 
 // -- (e) the residency heat-map + the tier budget (P26.5) -------------------
@@ -2265,7 +2421,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {{
             count: None,
         },
     ];
-    for mut e in VtPools::bind_group_layout_entries(14) {
+    for mut e in VtPools::bind_group_layout_entries(14, 22) {
         e.visibility = wgpu::ShaderStages::COMPUTE;
         entries.push(e);
     }
@@ -2285,7 +2441,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {{
             resource: out_buf.as_entire_binding(),
         },
     ];
-    bg_entries.extend(pools.bind_group_entries(14));
+    bg_entries.extend(pools.bind_group_entries(14, 22));
     let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vt-surface-probe"),
         layout: &bgl,

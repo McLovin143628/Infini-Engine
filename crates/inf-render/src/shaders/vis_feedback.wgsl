@@ -160,7 +160,7 @@ const VIS_INSTANCE_SHIFT: u32 = 0u;
 // `vt_feedback.wgsl` carry.
 const VT_MAGIC: u32 = 0x31425456u;
 const VT_HEADER_WORDS: u32 = 4u;
-const VT_TEX_HEADER_WORDS: u32 = 4u;
+const VT_TEX_HEADER_WORDS: u32 = 6u;  // wave IASSET2 appended slots_x + pool
 const VT_MIP_REC_WORDS: u32 = 4u;
 
 fn read_tri_byte(byte_addr: u32) -> u32 {

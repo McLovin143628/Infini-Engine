@@ -208,6 +208,20 @@ const ENV_VSM_PARAMS: u32 = 20;
 /// exactly what a reprojected fetch wants — so it costs one binding index and no
 /// sampler, the arrangement [`ENV_CLOUD_SHADOW`] already uses.
 const ENV_SCENE_COLOR: u32 = 21;
+/// **The further virtual-texture atlases** (wave IASSET2) — one per stored page
+/// format past the first, at 22 and up.
+///
+/// A pool has one arm per format because a BC1 page and a BC5 page are different
+/// sizes and one `wgpu` texture holds one format; the mixed-format demotion this
+/// replaced cost 8× the page bytes and 9.2× the camera-driven refinement
+/// (`inf_material::ground`'s measurement). They sit past SSR rather than beside
+/// [`ENV_VT_ATLAS`] because 15 through 21 shipped and renumbering VSM and SSR to
+/// make one run contiguous would move four bindings for cosmetics.
+///
+/// The **table** is still one buffer with one directory, so a handle is a handle
+/// and the per-instance word did not move; which atlas a texture is in is a word
+/// in its own block (`inf_vt::table`).
+const ENV_VT_ATLAS_EXTRA: u32 = 22;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -1017,7 +1031,10 @@ pub(crate) fn env_bgl_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     // pair that drifts into a validation error at pipeline creation — or, worse,
     // into a bind group that is legal and wrong.
     .into_iter()
-    .chain(crate::vt::VtPools::bind_group_layout_entries(ENV_VT_ATLAS))
+    .chain(crate::vt::VtPools::bind_group_layout_entries(
+        ENV_VT_ATLAS,
+        ENV_VT_ATLAS_EXTRA,
+    ))
     // ── P27.4 virtual shadow maps (17, 18, 19, 20) ──
     //
     // Appended from the receiver's own module for `VtPools`'s reason: the layout
@@ -1240,7 +1257,24 @@ impl EnvBinding {
                         binding: ENV_SCENE_COLOR,
                         resource: wgpu::BindingResource::TextureView(&frame.targets.scene_hdr),
                     },
-                ],
+                ]
+                .into_iter()
+                // ── wave IASSET2: the further VT atlases ──
+                //
+                // Arm `i + 1`'s atlas when the frame's pool has one, else the
+                // same 1×1 absent view the first binding falls back to. A
+                // texture's block names the arm it is in and no block names an
+                // arm that does not exist, so these are satisfied and never
+                // sampled.
+                .chain(
+                    (0..crate::vt::VT_EXTRA_ATLAS_COUNT).map(|i| wgpu::BindGroupEntry {
+                        binding: ENV_VT_ATLAS_EXTRA + i,
+                        resource: wgpu::BindingResource::TextureView(
+                            frame.vt_atlas_of(i as usize + 1),
+                        ),
+                    }),
+                )
+                .collect::<Vec<_>>(),
             })
         })
     }

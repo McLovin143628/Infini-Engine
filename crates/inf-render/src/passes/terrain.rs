@@ -876,6 +876,67 @@ pub fn macro_modulate(albedo: Vec3, fbm: f32, amp: f32) -> Vec3 {
     albedo * (1.0 + amp * fbm)
 }
 
+/// **The per-tile bind group's layout entries** (`@group(1)`), hoisted out of
+/// [`TerrainNode::new`] so a test can COUNT them — the P28.1 precedent
+/// [`super::env_bgl_entries`] set, for the same reason and against a different
+/// limit.
+///
+/// The terrain pipeline's fragment stage is the fattest in the renderer, and
+/// wave IASSET2 found the ceiling it sits under by walking into it: adding four
+/// virtual-texture atlases took it to 18 sampled textures against
+/// `Limits::default().max_sampled_textures_per_shader_stage` = 16. These five
+/// are a third of the budget, so they have to be visible to the arm that guards
+/// it rather than spelled inside a constructor that needs a device.
+///
+/// The R32Float height texture (binding 0) and the Rgba8Unorm splat-weight
+/// texture (binding 1) are unfilterable-float and sampled via `textureLoad` (no
+/// sampler, no `FLOAT32_FILTERABLE`).
+///
+/// Binding 2 is the R8Uint biome-id texture (P19.2) — a separate entry because
+/// an id is an INTEGER sample type, not an unfilterable float: the shader
+/// declares `texture_2d<u32>` and reads it with `textureLoad`, which is exactly
+/// what keeps a categorical id from ever being blended. Fragment-only — a biome
+/// tints, it never displaces geometry.
+///
+/// Binding 3 is the P21.2 hole mask: R32Uint, row-packed, integer again because
+/// a bitfield read through a filtering sample type would be a float somebody has
+/// to guess an integer back out of.
+///
+/// Binding 4 is the P22.1 deformation window — the ONE entry in this group that
+/// is not per-tile. It rides here because it is read at the same rate the height
+/// texture is (`ground_height` calls both, in both stages) and because the group
+/// is already VERTEX|FRAGMENT; giving a single global texture its own fifth bind
+/// group would have cost a group for one view.
+pub(crate) fn tile_bgl_entries() -> [wgpu::BindGroupLayoutEntry; 5] {
+    let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let uint_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Uint,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    [
+        tex_entry(0),
+        tex_entry(1),
+        uint_entry(2),
+        uint_entry(3),
+        tex_entry(4),
+    ]
+}
+
 impl TerrainNode {
     pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
         let shader = gpu
@@ -885,58 +946,11 @@ impl TerrainNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("terrain").into()),
             });
 
-        // Per-tile bind group (@group(1)): the R32Float height texture (binding 0)
-        // + the Rgba8Unorm splat-weight texture (binding 1), both unfilterable-
-        // float and sampled via textureLoad (no sampler, no FLOAT32_FILTERABLE).
-        let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        // …plus the R8Uint biome-id texture (binding 2, P19.2). A separate entry
-        // because an id is an INTEGER sample type, not an unfilterable float: the
-        // shader declares `texture_2d<u32>` and reads it with textureLoad, which is
-        // exactly what keeps a categorical id from ever being blended. Fragment-only
-        // — a biome tints, it never displaces geometry.
-        let uint_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Uint,
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
         let tile_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-tile"),
-                // Binding 3 is the P21.2 hole mask: R32Uint, row-packed, and
-                // `uint_entry` again because a bitfield read through a filtering
-                // sample type would be a float somebody has to guess an integer
-                // back out of — the same reason the biome ids at binding 2 are Uint.
-                //
-                // Binding 4 is the P22.1 deformation window — the ONE entry in
-                // this group that is not per-tile. It rides here because it is
-                // read at the same rate the height texture is (`ground_height`
-                // calls both, in both stages) and because the group is already
-                // VERTEX|FRAGMENT; giving a single global texture its own fifth
-                // bind group would have cost a group for one view. `tex_entry`
-                // again: R32Float sampled with `textureLoad`, no sampler, no
-                // FLOAT32_FILTERABLE.
-                entries: &[
-                    tex_entry(0),
-                    tex_entry(1),
-                    uint_entry(2),
-                    uint_entry(3),
-                    tex_entry(4),
-                ],
+                entries: &tile_bgl_entries(),
             });
 
         // Splat material uniform bind group (@group(2)): the layer material at
@@ -1816,6 +1830,73 @@ mod tests {
     const MPS: f64 = 1.0;
     /// Level-0 tile span for the fixtures below.
     const SPAN0: f64 = (RES - 1) as f64 * MPS;
+
+    /// **The lit path spends every sampled-texture binding the default limit
+    /// grants, and the terrain pipeline is the one that spends them** (wave
+    /// IASSET2).
+    ///
+    /// The arm exists so the seventeenth is a failing test here rather than a
+    /// `create_pipeline_layout` refusal on a user's machine — which is exactly
+    /// how this ceiling was found. Measured, by asking for four virtual-texture
+    /// atlases instead of two: *"Too many bindings of type SampledTextures in
+    /// Stage ShaderStages(FRAGMENT), limit is 16, count was 18"*, at
+    /// `Device::create_pipeline_layout, label = 'terrain'`.
+    ///
+    /// It COUNTS off the two entry lists the two layouts are actually built
+    /// from, on `the_resolve_spends_every_fragment_storage_binding_the_default_
+    /// limit_grants`'s pattern and for its recorded reason: that arm's first
+    /// draft asserted `4 + 4 == 8` with both numbers written by hand, and
+    /// growing the list left it green.
+    ///
+    /// `inf_render::vt::VT_MAX_POOLS` is the knob this bounds. If a later wave
+    /// needs a fourth page-format arm it must first free a sampled texture in
+    /// the lit path — or raise `max_sampled_textures_per_shader_stage`, which is
+    /// a device-limit decision with a wasm player behind it.
+    #[test]
+    fn the_lit_pipelines_fit_the_default_sampled_texture_limit() {
+        let sampled = |e: &wgpu::BindGroupLayoutEntry| {
+            e.visibility.contains(wgpu::ShaderStages::FRAGMENT)
+                && matches!(e.ty, wgpu::BindingType::Texture { .. })
+        };
+        let env = super::super::env_bgl_entries()
+            .iter()
+            .filter(|e| sampled(e))
+            .count();
+        let tile = tile_bgl_entries().iter().filter(|e| sampled(e)).count();
+        // `terrain-material` is uniforms only and the view group carries no
+        // texture, so these two lists are the whole fragment sampled set.
+        let limit = wgpu::Limits::default().max_sampled_textures_per_shader_stage as usize;
+        assert_eq!(limit, 16, "the pinned wgpu's default moved; re-measure");
+        assert!(
+            env + tile <= limit,
+            "the terrain pipeline's fragment stage wants {} sampled textures \
+             ({env} environment + {tile} per-tile) and the default limit grants \
+             {limit}. Either free one, or lower inf_render::vt::VT_MAX_POOLS \
+             (currently {}) — each virtual-texture arm past the first is one of \
+             these",
+            env + tile,
+            crate::vt::VT_MAX_POOLS
+        );
+        // **There is no headroom, and that is the finding rather than an
+        // accident**: the lit path sits exactly at 16, so the next sampled
+        // texture anywhere in it does not build. Pinned by value so a saving is
+        // as visible as a growth — if this drops below the limit, a fourth VT
+        // arm is affordable and `VT_MAX_POOLS` can rise.
+        assert_eq!(
+            env + tile,
+            limit,
+            "the lit path no longer sits exactly at the sampled-texture limit \
+             ({env} environment + {tile} per-tile against {limit})"
+        );
+        assert_eq!(
+            (env, tile),
+            (11, 5),
+            "the environment group holds AO, the shadow array, two atmosphere \
+             LUTs, the cloud shadow, the scene depth, {} VT atlases, the VSM \
+             atlas and the scene colour; the tile group holds five",
+            crate::vt::VT_MAX_POOLS
+        );
+    }
 
     /// One flat page at `key`, placed at its level's grid pitch (`SPAN0 · 2^lod`).
     fn tile_at(key: TerrainTileKey, version: u64) -> RenderTerrainTile {
