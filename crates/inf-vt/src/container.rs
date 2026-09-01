@@ -42,13 +42,14 @@
 //! │  schema_ver   u32      the LOWEST version this payload needs      │
 //! │  width · height  u32   the VIRTUAL extent (mip 0)                 │
 //! │  format       u32      0 Rgba8·1 Bc1·2 Bc3·3 Bc5·4 RGBA16F (v3)  │
+//! │                        ·5 Bc7 (v4)                                │
 //! │  flags        u32      bit 0 = srgb                               │
 //! │  tile_size    u32      PAYLOAD texels per tile side (128)         │
 //! │  border       u32      border texels per side (4)                 │
 //! │  mip_count · tile_count  u32                                      │
 //! │  tile_bytes   u32      bytes of ONE stored tile (uniform)         │
 //! │  mip_dir_off · tile_dir_off · tile_base · total_len  (u64 each)   │
-//! │  reserved     [u8; 48] zeros (room for v4 without a re-length)    │
+//! │  reserved     [u8; 48] zeros (still unspent at v4)                │
 //! ├ mip directory (mip_count × 32 B, FINEST FIRST) ───────────────────┤
 //! │  width u32 · height u32 · tiles_x u32 · tiles_y u32 ·             │
 //! │  first_tile u32 · tile_count u32 · pad[8]                         │
@@ -105,7 +106,26 @@ pub const TEX_ASSET_MAGIC: [u8; 8] = *b"INFVTEX\0";
 /// import cache is invalidated, and no `.ipack` stops reproducing. Only a
 /// texture that actually uses a v3 format is stamped v3, and only that texture is
 /// refused by an older build — by name, at the door, instead of being mis-read.
-pub const TEX_ASSET_SCHEMA_VERSION: u32 = 3;
+///
+/// # v4 (wave IASSET2): one format code, and not one byte else
+///
+/// v4 appends [`PageFormat::Bc7`] (code 5). **The layout does not move** — same
+/// 128-byte header, same two directories, same uniform stride — so v4 is doing
+/// the same single job v3 did: telling a build that predates this wave that it
+/// cannot read the format code it is about to find.
+///
+/// The window was opened **once** and it carries exactly this. The per-tile
+/// compression IASSET1 carried was weighed for the same window and declined with
+/// a number: `inf_asset::block` frames a compressed section with a per-block
+/// directory, and a `.inf_tex` tile is *already* the compression unit — a page
+/// is a fixed-size slot in an atlas, so a variable-length tile would have to be
+/// decompressed into that slot on the way in, which is the transcode tier's cost
+/// on **every** adapter rather than on the ones without BC. What it would save
+/// is the ~2 % a general-purpose codec finds in already block-compressed data
+/// (`.ipack`'s own measurement on `.inf_tex` entries: BC content is entropy the
+/// codec cannot see), against a per-page decompress in the paging hot path. It
+/// stays declined, with the number written down here rather than re-derived.
+pub const TEX_ASSET_SCHEMA_VERSION: u32 = 4;
 
 /// The **lowest** container version that can express `format` — what the writer
 /// stamps.
@@ -118,6 +138,7 @@ pub const fn min_schema_version(format: PageFormat) -> u32 {
     match format {
         PageFormat::Rgba8 | PageFormat::Bc1 | PageFormat::Bc3 => 2,
         PageFormat::Bc5 | PageFormat::Rgba16F => 3,
+        PageFormat::Bc7 => 4,
     }
 }
 
@@ -186,6 +207,7 @@ pub fn format_code(f: PageFormat) -> u32 {
         PageFormat::Bc3 => 2,
         PageFormat::Bc5 => 3,
         PageFormat::Rgba16F => 4,
+        PageFormat::Bc7 => 5,
     }
 }
 
@@ -197,6 +219,7 @@ pub fn format_from_code(c: u32) -> Option<PageFormat> {
         2 => Some(PageFormat::Bc3),
         3 => Some(PageFormat::Bc5),
         4 => Some(PageFormat::Rgba16F),
+        5 => Some(PageFormat::Bc7),
         _ => None,
     }
 }
@@ -396,6 +419,7 @@ impl<B: AsRef<[u8]>> TiledTextureReader<B> {
             PageFormat::Bc1 => decode_bc1(blob, n, n),
             PageFormat::Bc3 => decode_bc3(blob, n, n),
             PageFormat::Bc5 => decode_bc5(blob, n, n),
+            PageFormat::Bc7 => decode_bc7(blob, n, n),
             PageFormat::Rgba16F => return None,
         })
     }
@@ -718,6 +742,100 @@ pub fn decode_bc5(data: &[u8], width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// Decode a **BC7** image to RGBA8 (wave IASSET2).
+///
+/// # It decodes MODE 6, which is every block this project writes
+///
+/// `inf_material::bc::compress_bc7` emits mode 6 only, and the `.inf_tex`
+/// container has exactly one writer — the property [`parse`] already leans on to
+/// pin the layout arithmetic. So this decoder is complete for every payload that
+/// can exist in this project, and its scope is the encoder's scope rather than a
+/// shortcut taken against it.
+///
+/// A block in any other mode decodes to **zeros**, which is what hardware does
+/// with a block whose mode field is invalid — and it is a divergence rather than
+/// a match for a block whose mode is merely one this decoder does not implement:
+/// a BC7 payload from another tool would render correctly on the BC tier and
+/// black on the transcode tier. Nothing in this project can produce one; the day
+/// something can, this function grows the other modes or the importer refuses
+/// them at the door.
+///
+/// Integer-only, like everything else in this file and for the same recorded
+/// reason: a transcoded page must be the same bytes on a phone as on a desktop.
+pub fn decode_bc7(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; rgba8_len(width, height)];
+    let mut p = 0;
+    for by in 0..height.div_ceil(4) {
+        for bx in 0..width.div_ceil(4) {
+            if p + 16 > data.len() {
+                return out;
+            }
+            let bits = u128::from_le_bytes(data[p..p + 16].try_into().unwrap());
+            p += 16;
+            let texels = decode_bc7_mode6(bits);
+            for j in 0..4u32 {
+                for i in 0..4u32 {
+                    let (x, y) = (bx * 4 + i, by * 4 + j);
+                    if x >= width || y >= height {
+                        continue;
+                    }
+                    let px = texels[(j * 4 + i) as usize];
+                    let o = (y as usize * width as usize + x as usize) * 4;
+                    let Some(dst) = out.get_mut(o..o + 4) else {
+                        continue;
+                    };
+                    dst.copy_from_slice(&px);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The BC7 4-bit interpolation weights, out of 64 — the spec's `aWeight4`, and
+/// the encoder's `BC7_WEIGHT4` seen from the other side.
+///
+/// Not `i * 64 / 15`: the table is what silicon uses, and a decoder that
+/// interpolated with a formula would disagree with the BC tier on twelve of the
+/// sixteen levels while looking right.
+const BC7_WEIGHT4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+
+/// One mode-6 block's sixteen RGBA texels, or zeros for any other mode.
+fn decode_bc7_mode6(bits: u128) -> [[u8; 4]; 16] {
+    let mut out = [[0u8; 4]; 16];
+    // The mode is unary: mode 6 is six zeros then a one, i.e. exactly bit 6 set
+    // in the low seven. Any other pattern is a mode this decoder does not
+    // implement — see the function docs.
+    if (bits & 0x7F) != (1 << 6) {
+        return out;
+    }
+    let field = |at: u32, n: u32| -> u32 { ((bits >> at) & ((1u128 << n) - 1)) as u32 };
+    let p0 = field(63, 1) as u8;
+    let p1 = field(64, 1) as u8;
+    let mut e0 = [0u8; 4];
+    let mut e1 = [0u8; 4];
+    for c in 0..4u32 {
+        let q0 = field(7 + c * 14, 7) as u8;
+        let q1 = field(7 + c * 14 + 7, 7) as u8;
+        e0[c as usize] = (q0 << 1) | p0;
+        e1[c as usize] = (q1 << 1) | p1;
+    }
+    // Index 0 is three bits (the anchor's high bit is implicitly zero); the
+    // fifteen after it are four each.
+    for n in 0..16usize {
+        let idx = if n == 0 {
+            field(65, 3)
+        } else {
+            field(65 + 3 + (n as u32 - 1) * 4, 4)
+        } as usize;
+        let w = BC7_WEIGHT4[idx];
+        for c in 0..4 {
+            out[n][c] = (((e0[c] as u32) * (64 - w) + (e1[c] as u32) * w + 32) >> 6) as u8;
+        }
+    }
+    out
+}
+
 fn from_565(c: u16) -> [u8; 3] {
     let r = ((c >> 11) & 0x1F) as u8;
     let g = ((c >> 5) & 0x3F) as u8;
@@ -886,15 +1004,29 @@ mod tests {
             // the whole content of the pin.
             (PageFormat::Bc5, 3),
             (PageFormat::Rgba16F, 4),
+            // …and wave IASSET2 appended this one, on the same terms.
+            (PageFormat::Bc7, 5),
         ] {
             assert_eq!(format_code(f), c, "{f:?}");
             assert_eq!(format_from_code(c), Some(f));
             // …and each code names the container version it needs, so an older
             // build refuses a newer format by version rather than by luck.
-            assert_eq!(min_schema_version(f), if c < 3 { 2 } else { 3 }, "{f:?}");
+            let want = match c {
+                0..=2 => 2,
+                3..=4 => 3,
+                _ => 4,
+            };
+            assert_eq!(min_schema_version(f), want, "{f:?}");
         }
-        assert_eq!(format_from_code(5), None);
-        const { assert!(TEX_ASSET_SCHEMA_VERSION >= 3) };
+        assert_eq!(format_from_code(6), None);
+        const { assert!(TEX_ASSET_SCHEMA_VERSION >= 4) };
+        // **The enumeration is the code space.** `PageFormat::ALL` is what every
+        // sweep in this workspace walks, so a variant added to the enum and left
+        // out of the array would be invisible to all of them at once.
+        assert_eq!(PageFormat::ALL.len(), 6);
+        for (i, f) in PageFormat::ALL.iter().enumerate() {
+            assert_eq!(format_code(*f), i as u32, "{f:?} is out of code order");
+        }
     }
 
     /// The page-byte arithmetic of the two formats Wave T added, and the two

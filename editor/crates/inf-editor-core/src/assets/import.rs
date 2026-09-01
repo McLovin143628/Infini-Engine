@@ -127,6 +127,7 @@ fn importer_tag(ext: &str, source: &Path, bytes: &[u8]) -> Vec<u8> {
                     inf_material::TextureCompression::Bc1 => 1,
                     inf_material::TextureCompression::Bc3 => 2,
                     inf_material::TextureCompression::Bc5 => 3,
+                    inf_material::TextureCompression::Bc7 => 5,
                     inf_material::TextureCompression::Auto => 4,
                 }
             )

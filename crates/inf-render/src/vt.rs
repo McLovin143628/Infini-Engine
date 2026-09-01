@@ -126,6 +126,15 @@ pub fn page_format(format: PageFormat, srgb: bool) -> wgpu::TextureFormat {
         (PageFormat::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
         (PageFormat::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
         (PageFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
+        // BC7 **does** have an sRGB variant, unlike Wave T's two — it carries a
+        // base colour, which is exactly what a transfer curve is for. The atlas
+        // is still created LINEAR and the decode still happens per texture in
+        // `vt_sample.wgsl` (the P26.3 ruling, one atlas per FORMAT and not per
+        // colour space), so the sRGB arm is here for the same reason BC1's and
+        // BC3's are: the mapping is total, and a debug view that wants the
+        // hardware decode has somewhere to ask for it.
+        (PageFormat::Bc7, true) => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        (PageFormat::Bc7, false) => wgpu::TextureFormat::Bc7RgbaUnorm,
         // **Neither of Wave T's formats has an sRGB variant, and neither wants
         // one.** BC5 stores a normal's X and Y — a transfer curve on a direction
         // is meaningless — and RGBA16F is linear by construction. The `srgb`

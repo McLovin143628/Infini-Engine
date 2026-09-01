@@ -48,6 +48,17 @@ pub enum PageFormat {
     /// honest choice is 4× the bytes of BC1 with the data intact rather than
     /// 8 bits with the data gone.
     Rgba16F,
+    /// **BC7** — full RGBA at 16 bytes a block, the same page cost as BC3 and
+    /// BC5 and twice BC1's (wave IASSET2).
+    ///
+    /// The quality format. `inf_material::bc::compress_bc7` writes **mode 6**
+    /// only: one subset, effectively 8-bit RGBA endpoints and sixteen
+    /// interpolated levels, against BC1's 5:6:5 endpoints and four. What it buys
+    /// is measured on this project's own committed ground content rather than
+    /// argued — see `inf_material::bc`'s tests and the wave ledger — and it is
+    /// bought at **two BC1 pages a page**, so it is a per-map decision and not a
+    /// default.
+    Bc7,
 }
 
 impl PageFormat {
@@ -56,15 +67,15 @@ impl PageFormat {
     /// to some sweeps and forgotten by others.
     ///
     /// The order is [`crate::format_code`]'s and the two are pinned against each
-    /// other (`the_format_code_is_freeze_pinned_both_ways`), which is what lets
-    /// [`VT_MAX_POOLS`] be "one arm per variant" rather than a number somebody
-    /// maintains.
-    pub const ALL: [PageFormat; 5] = [
+    /// other (`the_format_code_is_freeze_pinned_both_ways`), so this array is
+    /// also the wire-code enumeration and a sweep over it visits every code.
+    pub const ALL: [PageFormat; 6] = [
         PageFormat::Rgba8,
         PageFormat::Bc1,
         PageFormat::Bc3,
         PageFormat::Bc5,
         PageFormat::Rgba16F,
+        PageFormat::Bc7,
     ];
 
     /// Bytes one page occupies at `stored_tile_size` texels per side.
@@ -80,6 +91,7 @@ impl PageFormat {
             PageFormat::Bc3 => (s / 4) * (s / 4) * 16,
             PageFormat::Bc5 => (s / 4) * (s / 4) * 16,
             PageFormat::Rgba16F => s * s * 8,
+            PageFormat::Bc7 => (s / 4) * (s / 4) * 16,
         }
     }
 
@@ -91,7 +103,10 @@ impl PageFormat {
     /// rescue a *block* format from an adapter without BC, and there is nothing
     /// to rescue a float format from.
     pub fn needs_bc(&self) -> bool {
-        matches!(self, PageFormat::Bc1 | PageFormat::Bc3 | PageFormat::Bc5)
+        matches!(
+            self,
+            PageFormat::Bc1 | PageFormat::Bc3 | PageFormat::Bc5 | PageFormat::Bc7
+        )
     }
 
     /// Whether this format stores only two channels, so the third has to be

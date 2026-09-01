@@ -374,6 +374,7 @@ fn tile_levels(
                     TextureFormat::Bc1 => bc::compress_bc1(&gathered, stored, stored),
                     TextureFormat::Bc3 => bc::compress_bc3(&gathered, stored, stored),
                     TextureFormat::Bc5 => bc::compress_bc5(&gathered, stored, stored),
+                    TextureFormat::Bc7 => bc::compress_bc7(&gathered, stored, stored),
                 };
                 debug_assert_eq!(blob.len(), tile_bytes);
                 out.extend_from_slice(&blob);
@@ -586,6 +587,7 @@ impl From<TextureFormat> for inf_vt::PageFormat {
             TextureFormat::Bc3 => inf_vt::PageFormat::Bc3,
             TextureFormat::Bc5 => inf_vt::PageFormat::Bc5,
             TextureFormat::Rgba16F => inf_vt::PageFormat::Rgba16F,
+            TextureFormat::Bc7 => inf_vt::PageFormat::Bc7,
         }
     }
 }
@@ -608,6 +610,7 @@ impl From<inf_vt::PageFormat> for TextureFormat {
             inf_vt::PageFormat::Bc3 => TextureFormat::Bc3,
             inf_vt::PageFormat::Bc5 => TextureFormat::Bc5,
             inf_vt::PageFormat::Rgba16F => TextureFormat::Rgba16F,
+            inf_vt::PageFormat::Bc7 => TextureFormat::Bc7,
         }
     }
 }
@@ -615,12 +618,13 @@ impl From<inf_vt::PageFormat> for TextureFormat {
 /// Every storage format, for a sweep to iterate — one list, so a format added to
 /// the enum and forgotten here fails the bijection gate rather than being missed
 /// by every test at once.
-pub const ALL_TEXTURE_FORMATS: [TextureFormat; 5] = [
+pub const ALL_TEXTURE_FORMATS: [TextureFormat; 6] = [
     TextureFormat::Rgba8,
     TextureFormat::Bc1,
     TextureFormat::Bc3,
     TextureFormat::Bc5,
     TextureFormat::Rgba16F,
+    TextureFormat::Bc7,
 ];
 
 /// Decode a `.inf_tex` payload of **either** version into the v1 record.
@@ -710,20 +714,24 @@ mod tests {
         // the whole content of "freeze-pinned".
         assert_eq!(format_code(TextureFormat::Bc5.into()), 3);
         assert_eq!(format_code(TextureFormat::Rgba16F.into()), 4);
+        // …and wave IASSET2 APPENDED 5, leaving the five above where they were.
+        assert_eq!(format_code(TextureFormat::Bc7.into()), 5);
         for f in ALL_TEXTURE_FORMATS {
             assert_eq!(format_from_code(format_code(f.into())), Some(f.into()));
         }
-        assert_eq!(format_from_code(5), None);
+        assert_eq!(format_from_code(6), None);
         // …and the version a format demands is the version the writer stamps.
         // A build that predates Wave T refuses codes 3 and 4 by *version*, not
         // by guessing at the code — and every older format still stamps v2, so
-        // no existing texture's bytes moved.
+        // no existing texture's bytes moved. Wave IASSET2's v4 window says the
+        // same thing about code 5.
         for f in [TextureFormat::Rgba8, TextureFormat::Bc1, TextureFormat::Bc3] {
             assert_eq!(min_schema_version(f.into()), 2, "{f:?}");
         }
         for f in [TextureFormat::Bc5, TextureFormat::Rgba16F] {
             assert_eq!(min_schema_version(f.into()), 3, "{f:?}");
         }
+        assert_eq!(min_schema_version(TextureFormat::Bc7.into()), 4);
     }
 
     /// **The v3 bump moved no existing byte** (Wave T).

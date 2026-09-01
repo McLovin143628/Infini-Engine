@@ -36,6 +36,14 @@ pub enum TextureFormat {
     /// The trade is written down in `docs/memos/wave-t-textures-disposition.md`
     /// and surfaced to the importing author as an advisory.
     Rgba16F,
+    /// **BC7** — full RGBA at 16 bytes a block, twice BC1's page (wave IASSET2).
+    ///
+    /// The quality format: effectively 8-bit RGBA endpoints and sixteen
+    /// interpolated levels, against BC1's 5:6:5 endpoints and four. This
+    /// project's encoder writes **mode 6** only and says so
+    /// ([`crate::bc::compress_bc7`]). It costs twice BC1's bytes on disk and in
+    /// the atlas, so it is a measured per-map choice rather than a default.
+    Bc7,
 }
 
 impl TextureFormat {
@@ -45,7 +53,9 @@ impl TextureFormat {
         match self {
             TextureFormat::Rgba8 => Some(4),
             TextureFormat::Rgba16F => Some(8),
-            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5 => None,
+            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5 | TextureFormat::Bc7 => {
+                None
+            }
         }
     }
 
@@ -62,12 +72,13 @@ impl TextureFormat {
             TextureFormat::Bc1 => bc::compressed_size(w, h, false),
             TextureFormat::Bc3 => bc::compressed_size(w, h, true),
             TextureFormat::Bc5 => bc::compressed_size_bc5(w, h),
+            TextureFormat::Bc7 => bc::compressed_size_bc7(w, h),
         }
     }
     pub fn is_compressed(self) -> bool {
         matches!(
             self,
-            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5
+            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5 | TextureFormat::Bc7
         )
     }
     /// Whether a texel can hold a value outside `[0, 1]`.
@@ -127,6 +138,7 @@ impl TextureAsset {
             TextureFormat::Bc1 => bc::decode_bc1(&mip.data, mip.width, mip.height),
             TextureFormat::Bc3 => bc::decode_bc3(&mip.data, mip.width, mip.height),
             TextureFormat::Bc5 => bc::decode_bc5(&mip.data, mip.width, mip.height),
+            TextureFormat::Bc7 => bc::decode_bc7(&mip.data, mip.width, mip.height),
             // **This one loses data, and it is the only door that may** (Wave T).
             // A thumbnail is 8 bits per channel because a PNG is; asking a float
             // texture for RGBA8 is asking for a preview, and a preview that
@@ -290,6 +302,10 @@ pub enum TextureCompression {
     /// Force **BC5** — two channels (R, G), the normal-map format (Wave T).
     /// Blue and alpha are discarded and the sampler rebuilds Z.
     Bc5,
+    /// Force **BC7** — full RGBA at twice BC1's bytes, mode 6 (wave IASSET2).
+    /// The quality choice for a base colour or an ORM triple whose banding
+    /// shows; see [`crate::bc::compress_bc7`] for what the subset covers.
+    Bc7,
     /// BC1 if fully opaque, else BC3.
     #[default]
     Auto,
@@ -700,6 +716,7 @@ pub fn texture_from_rgba8(
                 TextureFormat::Bc1 => bc::compress_bc1(&data, w, h),
                 TextureFormat::Bc3 => bc::compress_bc3(&data, w, h),
                 TextureFormat::Bc5 => bc::compress_bc5(&data, w, h),
+                TextureFormat::Bc7 => bc::compress_bc7(&data, w, h),
                 // Unreachable: `choose_format` never answers a float format for
                 // an 8-bit source (promoting one invents precision). Answering
                 // the bytes unchanged rather than panicking, because a wrong
@@ -851,6 +868,7 @@ pub(crate) fn choose_format(compression: TextureCompression, level0: &[u8]) -> T
         TextureCompression::Bc1 => TextureFormat::Bc1,
         TextureCompression::Bc3 => TextureFormat::Bc3,
         TextureCompression::Bc5 => TextureFormat::Bc5,
+        TextureCompression::Bc7 => TextureFormat::Bc7,
         TextureCompression::Auto => {
             if is_fully_opaque(level0) {
                 TextureFormat::Bc1

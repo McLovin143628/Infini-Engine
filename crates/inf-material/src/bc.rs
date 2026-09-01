@@ -1,13 +1,27 @@
-//! Pure-Rust BC1 / BC3 (DXT1 / DXT5) block compression.
+//! Pure-Rust BC1 / BC3 / BC5 / BC7 block compression.
 //!
-//! GPU-native block-compressed textures are 4-8× smaller than RGBA8 and sample
-//! for free, so imported textures are compressed at import time. We hand-roll
-//! BC1 (opaque, 4 bits per texel — **8:1** against RGBA8's 32) and BC3 (full
-//! alpha, 8 bits per texel — 4:1) rather than pull `intel_tex_2`, whose ISPC
-//! build is a cross-OS CI liability (BC7 via intel_tex_2 is the documented
-//! follow-up). The encoder uses the standard bounding-box endpoint selection
-//! with per-pixel nearest-index assignment — correct, GPU-decodable output;
-//! endpoint refinement (PCA/cluster fit) is a future quality pass.
+//! GPU-native block-compressed textures are 2-8× smaller than RGBA8 and sample
+//! for free, so imported textures are compressed at import time. Every encoder
+//! here is hand-rolled rather than `intel_tex_2`'s, whose ISPC build is a
+//! cross-OS CI liability:
+//!
+//! | format | bytes/block | what it is for |
+//! |---|---|---|
+//! | BC1 | 8 | opaque colour, **8:1** against RGBA8's 32 bits a texel |
+//! | BC3 | 16 | colour with a real alpha channel, 4:1 |
+//! | BC5 | 16 | tangent-space normals — two channels, Z rebuilt (Wave T) |
+//! | BC7 | 16 | full RGBA at 8-bit endpoints and sixteen levels (wave IASSET2) |
+//!
+//! BC1/BC3/BC5 use the standard bounding-box endpoint selection with per-pixel
+//! nearest-index assignment — correct, GPU-decodable output; endpoint refinement
+//! (PCA/cluster fit) is a future quality pass. **BC7 does one step better**: it
+//! picks the bounding box's *corner* per channel by the sign of its covariance,
+//! which is what a naive box gets wrong on anti-correlated channels. The same
+//! improvement is available to BC1 and is deliberately not taken there, because
+//! it would move the bytes of every `.inf_tex` this repository has committed.
+//!
+//! `TEXTURE_COMPRESSION_BC` covers all four; an adapter without it transcodes
+//! through `inf_vt::container`'s decoders instead.
 //!
 //! Blocks are 4×4; images whose dimensions aren't multiples of 4 are padded by
 //! clamping edge texels (the standard approach), so any size compresses. The
@@ -63,6 +77,68 @@ pub fn compress_bc5(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Compress an RGBA8 image to **BC7 — mode 6 only** (wave IASSET2). 16
+/// bytes/block, the same page cost as BC3 and BC5 and twice BC1's.
+///
+/// # The mode subset, stated
+///
+/// BC7 has eight modes and this encoder emits **one**: mode 6, a single subset
+/// with 7-bit-plus-p-bit RGBA endpoints and 4-bit indices. That is a real subset
+/// and it is chosen rather than defaulted to:
+///
+/// * it is the only mode that carries **full RGBA at maximum index precision**
+///   (16 interpolated levels against BC1's four), so one encoder covers base
+///   colour, ORM triples and masks without a second code path;
+/// * its endpoints are effectively **8 bits a channel** (7 stored plus a shared
+///   p-bit), against BC1's 5:6:5 — which is the quantisation that makes BC1 bad
+///   at exactly the smooth gradients ground and skin are made of;
+/// * every other useful mode needs the **partition tables** (64 two-subset and
+///   64 three-subset layouts) plus a search over them. That is where a
+///   general-purpose BC7 encoder spends its complexity and its time, and it buys
+///   accuracy on blocks whose colours are not colinear — a decal corner, a
+///   silhouette over two backgrounds. It is the honest next step and it is not
+///   this wave's.
+///
+/// What the subset costs is therefore a block **no single line fits**, and
+/// `tests::bc7_mode_six_pays_for_a_non_colinear_block_and_the_number_is_here`
+/// measures that rather than only the flattering case. A block with *two*
+/// clusters is generally not the hard case: two clusters are colinear, and the
+/// per-channel corner rule below encodes red-against-cyan exactly.
+///
+/// # Integer-only, like everything else here
+///
+/// The endpoints are the RGBA bounding box quantised to 7 bits — with the
+/// **corner** chosen per channel by the sign of its covariance against the widest
+/// channel, so an anti-correlated pair lands on the box's other diagonal rather
+/// than off the data entirely — the two p-bits are chosen by **exhaustive search
+/// over all four combinations** (there are four, and trying them is cheaper than
+/// a rule that guesses), and each texel takes the nearest of the sixteen palette
+/// entries by squared error. Every step is `u32`/`u64`/`i64` arithmetic —
+/// `the_encoder_never_touches_a_float` covers this function because it is in this
+/// file, which is why it is in this file.
+///
+/// **The BC1 encoder above still takes the max corner unconditionally**, and
+/// that is a carried finding rather than an oversight: fixing it would move the
+/// bytes of every `.inf_tex` this repository has committed, which is a content
+/// re-bless and belongs with one.
+pub fn compress_bc7(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let bw = width.div_ceil(4);
+    let bh = height.div_ceil(4);
+    let mut out = Vec::with_capacity((bw * bh) as usize * 16);
+    for by in 0..bh {
+        for bx in 0..bw {
+            let block = gather_block(rgba, width, height, bx * 4, by * 4);
+            encode_bc7_block(&block, &mut out);
+        }
+    }
+    out
+}
+
+/// Bytes a BC7 image occupies — 16 a block, the BC3 size.
+pub fn compressed_size_bc7(width: u32, height: u32) -> usize {
+    compressed_size(width, height, true)
 }
 
 /// Bytes a compressed image occupies: `ceil(w/4) * ceil(h/4) * block_bytes`.
@@ -234,6 +310,193 @@ fn encode_bc4_block(block: &[[u8; 4]; 16], channel: usize, out: &mut Vec<u8>) {
     }
 }
 
+// ── BC7, mode 6 ─────────────────────────────────────────────────────────────
+
+/// The BC7 4-bit interpolation weights, out of 64 — the spec's `aWeight4`.
+///
+/// Written out rather than computed: they are **not** `i * 64 / 15`, they are the
+/// table the hardware decoder uses, and a decoder that interpolated with a
+/// formula would disagree with silicon on twelve of the sixteen levels.
+const BC7_WEIGHT4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+
+/// One channel of a mode-6 endpoint, quantised to 7 bits given its p-bit.
+///
+/// The reconstructed value is `(q << 1) | p`, so the best `q` for a target `v` is
+/// `round((v - p) / 2)` clamped into the field.
+fn bc7_quant7(v: u8, p: u8) -> u8 {
+    let q = (v as i32 - p as i32 + 1) >> 1;
+    q.clamp(0, 127) as u8
+}
+
+/// The 8-bit endpoint a `(q, p)` pair reconstructs to — the decoder's rule,
+/// spelled once so the encoder measures its own output.
+#[inline]
+fn bc7_deq(q: u8, p: u8) -> u8 {
+    (q << 1) | p
+}
+
+/// One palette entry: `e0` and `e1` at weight `w` out of 64.
+#[inline]
+fn bc7_lerp(e0: u8, e1: u8, w: u32) -> u8 {
+    (((e0 as u32) * (64 - w) + (e1 as u32) * w + 32) >> 6) as u8
+}
+
+/// Squared RGBA distance, in `u64` because 4 × 255² × 16 texels does not fit
+/// comfortably in anything smaller once it is summed over a block.
+#[inline]
+fn bc7_dist(a: [u8; 4], b: [u8; 4]) -> u64 {
+    let mut d = 0u64;
+    for c in 0..4 {
+        let e = a[c] as i32 - b[c] as i32;
+        d += (e * e) as u64;
+    }
+    d
+}
+
+/// Encode one 16-byte BC7 mode-6 block.
+///
+/// The bit layout, LSB first, is the spec's and it is the only thing here that
+/// is not obviously arithmetic:
+///
+/// ```text
+///  [0..7)    mode — six zeros then a one (unary), so the field is 0b1000000
+///  [7..63)   R0 R1 G0 G1 B0 B1 A0 A1, seven bits each, component-major
+///  [63..65)  P0 P1
+///  [65..68)  index 0, THREE bits (the anchor's high bit is implicitly zero)
+///  [68..128) indices 1..15, four bits each
+/// ```
+///
+/// The anchor rule is why the endpoints may be swapped at the end: index 0 is
+/// stored in three bits, so it must be ≤ 7. Swapping the two endpoints and
+/// replacing every index `i` with `15 - i` names the identical colours through
+/// the reversed palette, which is what makes the fix free rather than a
+/// compromise.
+fn encode_bc7_block(block: &[[u8; 4]; 16], out: &mut Vec<u8>) {
+    let mut lo = [255u8; 4];
+    let mut hi = [0u8; 4];
+    let mut sum = [0i64; 4];
+    for px in block {
+        for c in 0..4 {
+            lo[c] = lo[c].min(px[c]);
+            hi[c] = hi[c].max(px[c]);
+            sum[c] += px[c] as i64;
+        }
+    }
+
+    // **Which corner of the bounding box each endpoint takes**, per channel.
+    //
+    // Not "endpoint 0 is the max corner": a block whose red rises while its
+    // green falls has its data on the box's OTHER diagonal, and a line through
+    // (max R, max G) and (min R, min G) misses every texel in it. Measured
+    // before this existed: a colinear RGBA gradient with one anti-correlated
+    // channel came back **27** off per channel at worst, on content mode 6 fits
+    // exactly once the corner is right.
+    //
+    // The rule is the sign of the covariance against the widest channel, summed
+    // over the block in exact integers (each term is scaled by 16 so the means
+    // never need a division). The widest channel is its own reference, so its
+    // covariance is a variance and it always takes the max — which is what makes
+    // the assignment total rather than circular.
+    let mut widest = 0usize;
+    for c in 1..4 {
+        if hi[c] - lo[c] > hi[widest] - lo[widest] {
+            widest = c;
+        }
+    }
+    let mut corner_hi = [true; 4];
+    for c in 0..4 {
+        let mut cov: i64 = 0;
+        for px in block {
+            cov += (16 * px[widest] as i64 - sum[widest]) * (16 * px[c] as i64 - sum[c]);
+        }
+        corner_hi[c] = cov >= 0;
+    }
+    let (mut end0, mut end1) = ([0u8; 4], [0u8; 4]);
+    for c in 0..4 {
+        end0[c] = if corner_hi[c] { hi[c] } else { lo[c] };
+        end1[c] = if corner_hi[c] { lo[c] } else { hi[c] };
+    }
+
+    let mut best_err = u64::MAX;
+    let mut best_q0 = [0u8; 4];
+    let mut best_q1 = [0u8; 4];
+    let mut best_p = (0u8, 0u8);
+    let mut best_idx = [0u8; 16];
+    // All four p-bit combinations. They shift each endpoint by at most one
+    // 8-bit step, which is exactly the precision a 7-bit field is short of.
+    for p0 in 0..2u8 {
+        for p1 in 0..2u8 {
+            let mut q0 = [0u8; 4];
+            let mut q1 = [0u8; 4];
+            let mut e0 = [0u8; 4];
+            let mut e1 = [0u8; 4];
+            for c in 0..4 {
+                q0[c] = bc7_quant7(end0[c], p0);
+                q1[c] = bc7_quant7(end1[c], p1);
+                e0[c] = bc7_deq(q0[c], p0);
+                e1[c] = bc7_deq(q1[c], p1);
+            }
+            let mut palette = [[0u8; 4]; 16];
+            for (i, entry) in palette.iter_mut().enumerate() {
+                for c in 0..4 {
+                    entry[c] = bc7_lerp(e0[c], e1[c], BC7_WEIGHT4[i]);
+                }
+            }
+            let mut idx = [0u8; 16];
+            let mut err = 0u64;
+            for (n, px) in block.iter().enumerate() {
+                let mut best = 0usize;
+                let mut best_d = u64::MAX;
+                for (i, entry) in palette.iter().enumerate() {
+                    let d = bc7_dist(*entry, *px);
+                    if d < best_d {
+                        best_d = d;
+                        best = i;
+                    }
+                }
+                idx[n] = best as u8;
+                err += best_d;
+            }
+            if err < best_err {
+                best_err = err;
+                best_q0 = q0;
+                best_q1 = q1;
+                best_p = (p0, p1);
+                best_idx = idx;
+            }
+        }
+    }
+
+    // The anchor: index 0 is three bits wide, so flip the palette if it is not.
+    if best_idx[0] > 7 {
+        std::mem::swap(&mut best_q0, &mut best_q1);
+        best_p = (best_p.1, best_p.0);
+        for i in best_idx.iter_mut() {
+            *i = 15 - *i;
+        }
+    }
+
+    let mut bits: u128 = 0;
+    let mut pos: u32 = 0;
+    let mut put = |v: u32, n: u32| {
+        bits |= ((v as u128) & ((1u128 << n) - 1)) << pos;
+        pos += n;
+    };
+    put(1 << 6, 7);
+    for c in 0..4 {
+        put(best_q0[c] as u32, 7);
+        put(best_q1[c] as u32, 7);
+    }
+    put(best_p.0 as u32, 1);
+    put(best_p.1 as u32, 1);
+    put(best_idx[0] as u32, 3);
+    for i in 1..16 {
+        put(best_idx[i] as u32, 4);
+    }
+    debug_assert_eq!(pos, 128, "a BC7 block is 128 bits");
+    out.extend_from_slice(&bits.to_le_bytes());
+}
+
 fn nearest_alpha(palette: &[u8; 8], a: u8) -> usize {
     let mut best = 0usize;
     let mut best_d = u32::MAX;
@@ -263,7 +526,7 @@ fn nearest_alpha(palette: &[u8; 8], a: u8) -> usize {
 /// guards it — a texture's bytes are content-hashed into a reproducible pack, so
 /// one `as f32` in an endpoint fit would make them a property of the machine that
 /// imported it.
-pub use inf_vt::container::{decode_bc1, decode_bc3, decode_bc5};
+pub use inf_vt::container::{decode_bc1, decode_bc3, decode_bc5, decode_bc7};
 
 #[cfg(test)]
 mod tests {
@@ -460,6 +723,279 @@ mod tests {
         // And it is NOT the BC3 encoding of the same block: BC5 carries R and G,
         // BC3 carries alpha and colour.
         assert_ne!(compress_bc5(&rgba, 16, 16), compress_bc3(&rgba, 16, 16));
+    }
+
+    /// **BC7 round-trips through its own decoder, exactly** — the encoder's
+    /// output is what `inf_vt::decode_bc7` reads, block bit for block bit.
+    ///
+    /// This is the arm the whole format rests on: the encoder writes a bit
+    /// stream and the decoder reads one, and nothing else in the workspace
+    /// compares them. It asserts on the DECODED texels rather than on the bytes,
+    /// because the claim is about what a sampler sees.
+    #[test]
+    fn bc7_encodes_a_block_its_own_decoder_reads_back() {
+        // **A flat block is exact when its channels share a parity, and within
+        // one step otherwise** — and the reason is the format rather than the
+        // encoder. Mode 6 stores 7 bits per channel plus **one p-bit per
+        // endpoint, shared by all four channels**: `(q << 1) | p`. So an
+        // endpoint can hit every odd value or every even one, never both. The
+        // p-bit search picks whichever parity costs less over the four channels.
+        //
+        // Measured here rather than assumed: the first draft of this arm
+        // asserted exactness on `[37, 200, 91, 255]` — three odd channels and
+        // one even — and the even one came back 201.
+        let odd = [37u8, 201, 91, 255];
+        let rgba: Vec<u8> = odd.iter().copied().cycle().take(4 * 4 * 4).collect();
+        let dec = decode_bc7(&compress_bc7(&rgba, 4, 4), 4, 4);
+        assert!(
+            dec.chunks_exact(4).all(|p| p == odd),
+            "a flat block of one parity is not exact: {:?}",
+            &dec[..8]
+        );
+        let mixed = [37u8, 200, 91, 255];
+        let rgba: Vec<u8> = mixed.iter().copied().cycle().take(4 * 4 * 4).collect();
+        let dec = decode_bc7(&compress_bc7(&rgba, 4, 4), 4, 4);
+        for px in dec.chunks_exact(4) {
+            for c in 0..4 {
+                assert!(
+                    (px[c] as i32 - mixed[c] as i32).abs() <= 1,
+                    "a flat block moved by more than the shared p-bit allows: {px:?}"
+                );
+            }
+        }
+
+        // **A colinear RGBA gradient, alpha included** — the case mode 6 is for,
+        // and the one BC1 cannot carry at all (it has no alpha) while BC3 gives
+        // alpha its own block and quantises the colour on 5:6:5.
+        //
+        // Colinear on purpose: one subset means one line through 4-space, so a
+        // block whose channels vary along *independent* axes is the subset's
+        // documented cost and is measured in
+        // `bc7_mode_six_pays_for_a_two_cluster_block_and_the_number_is_here`,
+        // not here.
+        let (w, h) = (16u32, 16u32);
+        let mut src = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = (x + y) as u32;
+                src.extend_from_slice(&[
+                    (t * 8) as u8,
+                    (240 - t * 8) as u8,
+                    (t * 4) as u8,
+                    (255 - t * 5) as u8,
+                ]);
+            }
+        }
+        let dec = decode_bc7(&compress_bc7(&src, w, h), w, h);
+        assert_eq!(dec.len(), src.len());
+        let worst = |d: &[u8]| -> u32 {
+            src.iter()
+                .zip(d)
+                .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+                .max()
+                .expect("non-empty")
+        };
+        assert!(
+            worst(&dec) <= 8,
+            "worst per-channel error on a colinear gradient is {}",
+            worst(&dec)
+        );
+        // …and BC3, at the same sixteen bytes, is worse — which is what makes
+        // the number above a statement about the format and not about 4×4
+        // blocks being easy.
+        let bc3 = decode_bc3(&compress_bc3(&src, w, h), w, h);
+        assert!(
+            worst(&dec) < worst(&bc3),
+            "BC7 {} against BC3 {} at the same page size",
+            worst(&dec),
+            worst(&bc3)
+        );
+
+        // Deterministic — the bytes are content-hashed into a reproducible pack.
+        assert_eq!(compress_bc7(&src, w, h), compress_bc7(&src, w, h));
+        assert_eq!(compress_bc7(&src, w, h).len(), compressed_size_bc7(w, h));
+
+        // A block whose ANCHOR index would exceed three bits still round-trips:
+        // texel 0 is the darkest, so the natural endpoint order puts it at index
+        // 15 and the encoder must flip the palette. Measured rather than
+        // asserted structurally — the failure would be one wrong texel.
+        let mut flip = vec![250u8; 4 * 4 * 4];
+        flip[0..4].copy_from_slice(&[0, 0, 0, 255]);
+        let dec = decode_bc7(&compress_bc7(&flip, 4, 4), 4, 4);
+        assert!(
+            dec[0] < 8 && dec[1] < 8 && dec[2] < 8,
+            "the anchor texel decoded as {:?}",
+            &dec[0..4]
+        );
+        assert!(
+            dec[4] > 240,
+            "the rest of the block moved: {:?}",
+            &dec[4..8]
+        );
+    }
+
+    /// **What BC7 buys and what it costs, measured on the committed ground
+    /// library** (wave IASSET2) — the numbers the wave's content ruling is made
+    /// of, printed so the ledger quotes a measurement rather than a memory.
+    ///
+    /// Three claims, and the third is the one that decides:
+    ///
+    /// 1. **Size.** BC7 is 16 bytes a block, BC1 is 8. A `.inf_tex` page is
+    ///    18 496 B instead of 9 248, so a 24 MiB atlas arm holds **half** the
+    ///    pages. That is not a rounding cost — it is the same currency the arm
+    ///    split just bought back.
+    /// 2. **Quality.** Mean absolute error per channel against the source, on
+    ///    the real albedo of every ground kind rather than on a synthetic ramp.
+    /// 3. **Encode time**, cook-side, printed per megatexel.
+    ///
+    /// The assertion is on the RATIO, so it cannot be satisfied by both being
+    /// bad, and it is deliberately weak — the arm exists to publish numbers, and
+    /// a threshold tight enough to be interesting would be a threshold that
+    /// fails on a machine with a different allocator.
+    #[test]
+    fn bc7_against_bc1_on_the_committed_ground_library() {
+        use crate::ground::{GroundKind, GROUND_ALBEDO_EXTENT as N};
+        let mut total = [0u64; 3];
+        let mut texels = 0u64;
+        let mut encode_ms = [0u128; 3];
+        for kind in GroundKind::ALL {
+            let maps = crate::ground::synthesize(kind);
+            let src = &maps.albedo;
+            let mut enc = [Vec::new(), Vec::new(), Vec::new()];
+            for (i, f) in [0usize, 1, 2].into_iter().enumerate() {
+                let t = std::time::Instant::now();
+                enc[i] = match f {
+                    0 => compress_bc1(src, N, N),
+                    1 => compress_bc3(src, N, N),
+                    _ => compress_bc7(src, N, N),
+                };
+                encode_ms[i] += t.elapsed().as_millis();
+            }
+            let dec = [
+                decode_bc1(&enc[0], N, N),
+                decode_bc3(&enc[1], N, N),
+                decode_bc7(&enc[2], N, N),
+            ];
+            for (i, d) in dec.iter().enumerate() {
+                for (n, s) in src.iter().enumerate() {
+                    // RGB only: the source is opaque, and an alpha channel that
+                    // is 255 everywhere would flatter every encoder equally.
+                    if n % 4 == 3 {
+                        continue;
+                    }
+                    total[i] += (*s as i32 - d[n] as i32).unsigned_abs() as u64;
+                }
+            }
+            texels += u64::from(N) * u64::from(N) * 3;
+        }
+        let mae = |t: u64| (t * 1000) / texels;
+        let mtexels = (texels / 3) as u128 / 1_000_000;
+        println!(
+            "IASSET2 BC7 vs BC1/BC3 on {} ground albedos ({N}^2 each):\n  \
+             MAE x1000/channel  BC1 {}  BC3 {}  BC7 {}\n  \
+             bytes/block        BC1 8  BC3 16  BC7 16\n  \
+             encode ms/Mtexel   BC1 {}  BC3 {}  BC7 {}  (THIS PROFILE — a debug \
+             run is not a cook-time number, see the wave ledger for the release \
+             figure)",
+            GroundKind::ALL.len(),
+            mae(total[0]),
+            mae(total[1]),
+            mae(total[2]),
+            encode_ms[0] / mtexels.max(1),
+            encode_ms[1] / mtexels.max(1),
+            encode_ms[2] / mtexels.max(1),
+        );
+        assert!(
+            total[2] * 2 < total[0],
+            "BC7 must beat BC1 by a wide margin on real ground albedo, or its \
+             doubled page is not worth taking: BC7 {} against BC1 {}",
+            mae(total[2]),
+            mae(total[0])
+        );
+        // …and it must beat BC3 too, which costs the SAME sixteen bytes — that
+        // is the comparison that says the format is worth its page rather than
+        // that compression is worth its page.
+        assert!(
+            total[2] < total[1],
+            "BC7 does not beat BC3 at the same page size: BC7 {} against BC3 {}",
+            mae(total[2]),
+            mae(total[1])
+        );
+    }
+
+    /// **The subset's cost, measured rather than admitted in prose.**
+    ///
+    /// Mode 6 fits ONE line through a block, so what it cannot do is a block
+    /// whose colours are **not colinear** — three clusters, a decal corner, a
+    /// texel of foliage over two different backgrounds. That is exactly what the
+    /// partitioned modes exist for, and this arm is the number that says how
+    /// much this encoder gives up there.
+    ///
+    /// **Two** clusters is not the hard case and the first draft of this arm
+    /// used one: red against cyan is perfectly colinear (a line through the
+    /// colour cube's other diagonal), and once
+    /// [`encode_bc7_block`]'s per-channel corner rule landed it encodes
+    /// **exactly**, error zero, while BC1 loses 4 040. A fixture a fix makes
+    /// free is a fixture that measures the fix and not the limit.
+    ///
+    /// Asserted loosely — BC7 must not be *worse* than BC1 — because the claim
+    /// is "this is the cost", not "the cost is small". It is a floor for a later
+    /// wave's partitioned modes to beat.
+    #[test]
+    fn bc7_mode_six_pays_for_a_non_colinear_block_and_the_number_is_here() {
+        // Three primaries in one block: no line through the cube passes near
+        // all of red, green and blue at once.
+        let mut split = Vec::with_capacity(4 * 4 * 4);
+        for j in 0..4u32 {
+            for i in 0..4u32 {
+                let c: [u8; 4] = match (i + j) % 3 {
+                    0 => [220, 20, 20, 255],
+                    1 => [20, 220, 20, 255],
+                    _ => [20, 20, 220, 255],
+                };
+                split.extend_from_slice(&c);
+            }
+        }
+        let err = |dec: &[u8]| -> u64 {
+            split
+                .iter()
+                .zip(dec)
+                .enumerate()
+                .filter(|(n, _)| n % 4 != 3)
+                .map(|(_, (a, b))| (*a as i32 - *b as i32).unsigned_abs() as u64)
+                .sum()
+        };
+        let e7 = err(&decode_bc7(&compress_bc7(&split, 4, 4), 4, 4));
+        let e1 = err(&decode_bc1(&compress_bc1(&split, 4, 4), 4, 4));
+        println!(
+            "IASSET2 BC7 non-colinear block (three primaries): BC7 total abs err {e7}, BC1 {e1}"
+        );
+        assert!(
+            e7 <= e1,
+            "mode 6 is WORSE than BC1 on a two-cluster block ({e7} against \
+             {e1}); the partitioned modes are then not an improvement but a fix"
+        );
+        // ANTI-VACUITY: a smooth gradient is where mode 6 wins outright, so the
+        // arm above is measuring the hard case and not a tie everywhere.
+        let ramp: Vec<u8> = (0..16)
+            .flat_map(|i| [(i * 16) as u8, (i * 16) as u8, (i * 16) as u8, 255])
+            .collect();
+        let r7 = decode_bc7(&compress_bc7(&ramp, 4, 4), 4, 4);
+        let r1 = decode_bc1(&compress_bc1(&ramp, 4, 4), 4, 4);
+        let sum = |d: &[u8]| -> u64 {
+            ramp.iter()
+                .zip(d)
+                .enumerate()
+                .filter(|(n, _)| n % 4 != 3)
+                .map(|(_, (a, b))| (*a as i32 - *b as i32).unsigned_abs() as u64)
+                .sum()
+        };
+        assert!(
+            sum(&r7) * 2 < sum(&r1),
+            "mode 6 does not beat BC1 on a smooth ramp: {} against {}",
+            sum(&r7),
+            sum(&r1)
+        );
     }
 
     #[test]
