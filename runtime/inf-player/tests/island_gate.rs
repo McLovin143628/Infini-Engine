@@ -342,9 +342,26 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     // 268 435 456-byte cap.
     //
     // The assertion is not "under the cap" alone, which this small fixture would
-    // pass either way. It is that the whole frame is **smaller than the terrain
-    // file it names**: that is false for any payload carrying the bytes, at any
-    // island size, and it is what makes the arm non-vacuous on a fixture.
+    // pass either way.
+    //
+    // # It was a size proxy, and wave IASSET2 broke it by growing the CONTENT
+    //
+    // It used to be "the whole frame is smaller than the terrain file it names",
+    // on the argument that this "is false for any payload carrying the bytes, at
+    // any island size". True — and it is also false for a payload that carries
+    // nothing of the kind and simply got bigger for its own reasons. IASSET2
+    // moved the ground library's normal maps from BC1 to BC5 (worst per-channel
+    // error 122 of 255 down to 17), which added 1 812 608 B of texture to a
+    // payload that legitimately carries textures, and the frame crossed a
+    // terrain file it had nothing to do with: **7 737 553 B against 7 043 328**,
+    // with `0 inline terrain(s)` printed two lines above.
+    //
+    // So the proxy is replaced by the thing it was standing in for: **the
+    // terrain file's own bytes must not appear in the frame.** A window from the
+    // middle of the file (past the header, where the content is) is searched for
+    // directly. That is non-vacuous on a fixture, independent of how large the
+    // payload's legitimate content grows, and it is what "the ground is riding
+    // inline" actually means.
     let mut frame = Vec::new();
     inf_runtime::pie::write_msg(
         &mut frame,
@@ -365,11 +382,38 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         "the PIE frame is over the cap at {} B",
         frame.len()
     );
+    // THE DIRECT CHECK: a 64-byte window from the middle of the terrain file
+    // must not occur anywhere in the frame. Scanned by first-byte prefilter so
+    // it is linear rather than quadratic over a multi-megabyte frame.
+    let terrain_bytes = std::fs::read(&terrain_file).expect("terrain bytes");
     assert!(
-        (frame.len() as u64) < terrain_len,
-        "the frame ({} B) is bigger than the terrain file it names ({terrain_len} B) — \
-         the ground is riding inline again and the shipped island cannot be played",
+        terrain_bytes.len() > 4096,
+        "the fixture's terrain is {} B — too small for the window below to be a \
+         fingerprint rather than a coincidence",
+        terrain_bytes.len()
+    );
+    let needle = &terrain_bytes[terrain_bytes.len() / 2..terrain_bytes.len() / 2 + 64];
+    let carried = frame
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| **b == needle[0] && *i + needle.len() <= frame.len())
+        .any(|(i, _)| &frame[i..i + needle.len()] == needle);
+    assert!(
+        !carried,
+        "the terrain file's own bytes are inside the {} B PIE frame — the ground \
+         is riding inline again and the shipped island cannot be played",
         frame.len()
+    );
+    // ANTI-VACUITY: the window really is findable when it IS carried, so the
+    // assertion above is about the frame and not about a needle that never
+    // matches anything.
+    assert!(
+        terrain_bytes
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| **b == needle[0] && *i + needle.len() <= terrain_bytes.len())
+            .any(|(i, _)| &terrain_bytes[i..i + needle.len()] == needle),
+        "the search cannot find the needle in the file it came from"
     );
     assert_eq!(
         payload.biome_sets.len(),

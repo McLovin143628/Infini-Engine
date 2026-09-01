@@ -913,25 +913,28 @@ mod tests {
         }
         let mae = |t: u64| (t * 1000) / texels;
         let mtexels = (texels / 3) as u128 / 1_000_000;
+        // One `println!` a row rather than one continued literal with padded
+        // columns in it: `no_string_literal_in_the_workspace_carries_an_eaten_
+        // continuation` reads a run of spaces inside a `\`-continued literal as
+        // the chr(92) defect, and an aligned table is exactly that shape.
         println!(
-            "IASSET2 BC7 vs BC1/BC3 on {} ground {slot} maps ({side}^2 each):\n  \
-             MAE x1000/channel  BC1 {}  BC3 {}  BC7 {}\n  \
-             WORST /channel     BC1 {}  BC3 {}  BC7 {}\n  \
-             bytes/block        BC1 8  BC3 16  BC7 16\n  \
-             encode ms/Mtexel   BC1 {}  BC3 {}  BC7 {}  (THIS PROFILE — a debug \
-             run is not a cook-time number, see the wave ledger for the release \
-             figure)",
-            GroundKind::ALL.len(),
-            mae(total[0]),
-            mae(total[1]),
-            mae(total[2]),
-            worst[0],
-            worst[1],
-            worst[2],
-            encode_ms[0] / mtexels.max(1),
-            encode_ms[1] / mtexels.max(1),
-            encode_ms[2] / mtexels.max(1),
+            "IASSET2 BC7 vs BC1/BC3 on {} ground {slot} maps ({side}^2 each):",
+            GroundKind::ALL.len()
         );
+        let row = |name: &str, v: [String; 3]| {
+            println!("  {name:<18} BC1 {}  BC3 {}  BC7 {}", v[0], v[1], v[2]);
+        };
+        row(
+            "MAE x1000/channel",
+            [0, 1, 2].map(|i| mae(total[i]).to_string()),
+        );
+        row("WORST /channel", [0, 1, 2].map(|i| worst[i].to_string()));
+        row("bytes/block", ["8", "16", "16"].map(String::from));
+        row(
+            "encode ms/Mtexel",
+            [0, 1, 2].map(|i| (encode_ms[i] / mtexels.max(1)).to_string()),
+        );
+        println!("  (THIS PROFILE: a debug run is not a cook-time number)");
         assert!(
             total[2] * 2 < total[0],
             "BC7 must beat BC1 by a wide margin on real ground {slot}, or its \
@@ -1000,15 +1003,24 @@ mod tests {
             }
         }
         let per = |t: u64| (t * 1000) / samples.max(1);
+        // A row a `println!`, and the column padding through a WIDTH SPECIFIER
+        // rather than through literal spaces — see the note in
+        // `bc7_ground_slot`; the same gate reads a run of spaces inside any
+        // literal, continued or not.
         println!(
             "IASSET2 BC5 vs BC1 on the committed ground normal + detail maps \
-             ({N}^2 each, X/Y only):\n  \
-             MAE x1000/channel  BC1 {}  BC5 {}\n  \
-             WORST /channel     BC1 {worst1}  BC5 {worst5}\n  \
-             bytes/block        BC1 8  BC5 16",
-            per(mae1),
-            per(mae5),
+             ({N}^2 each, X/Y only):"
         );
+        let row = |name: &str, a: String, b: String| {
+            println!("  {name:<18} BC1 {a}  BC5 {b}");
+        };
+        row(
+            "MAE x1000/channel",
+            per(mae1).to_string(),
+            per(mae5).to_string(),
+        );
+        row("WORST /channel", worst1.to_string(), worst5.to_string());
+        row("bytes/block", "8".into(), "16".into());
         assert!(
             mae5 * 2 < mae1,
             "BC5 must beat BC1 by a wide margin on the two channels a normal map \

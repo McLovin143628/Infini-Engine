@@ -35,9 +35,9 @@ pub use mapset::{classify_map, pack_orm, plan_map_set, MapKind, MapSetPlan, Plan
 pub use material::{MatBlend, MaterialAsset};
 pub use texture::{
     decode_image_rgba16f, decode_image_rgba8, hdr_import_advisory, import_texture_bytes,
-    source_is_float, texture_from_rgba16f, texture_from_rgba8, texture_import_advisories,
-    tiled_size_factor_pct, TextureAsset, TextureCompression, TextureFormat, TextureImportSettings,
-    TextureMip,
+    normal_from_rgba8, source_is_float, texture_from_rgba16f, texture_from_rgba8,
+    texture_import_advisories, tiled_size_factor_pct, TextureAsset, TextureCompression,
+    TextureFormat, TextureImportSettings, TextureMip,
 };
 pub use tiles::{
     build_tiled_texture, build_tiled_texture_from_bytes, build_tiled_texture_rgba16f,

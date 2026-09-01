@@ -916,12 +916,16 @@ fn the_baked_normals_land_near_the_analytic_truth() {
         if truth.dot(atlas.normal[i]) < 0.0 {
             truth = -truth;
         }
-        let got = DVec3::new(
-            level[i * 4] as f64 / 255.0 * 2.0 - 1.0,
-            level[i * 4 + 1] as f64 / 255.0 * 2.0 - 1.0,
-            level[i * 4 + 2] as f64 / 255.0 * 2.0 - 1.0,
-        )
-        .normalize_or(DVec3::Y);
+        // **Through the one door, not by hand** (wave IASSET2). The finish
+        // writes this map as BC5 now, whose decode leaves B at zero on purpose
+        // and owes the reader `z = sqrt(1 - x^2 - y^2)` -- the rule
+        // `vt_sample.wgsl` has had since Wave T and the CPU had nowhere.
+        // Measured with the rebuild missing: 45.59 degrees out at the median.
+        let n = inf_material::normal_from_rgba8(
+            &level[i * 4..i * 4 + 4],
+            f.normal.format.is_two_channel(),
+        );
+        let got = DVec3::new(n[0], n[1], n[2]).normalize_or(DVec3::Y);
         errors.push(got.dot(truth).clamp(-1.0, 1.0).acos().to_degrees());
     }
     errors.sort_by(f64::total_cmp);
@@ -992,12 +996,16 @@ fn the_baked_normals_beat_the_mesh_they_are_written_onto() {
         if truth.dot(atlas.normal[i]) < 0.0 {
             truth = -truth;
         }
-        let got = DVec3::new(
-            level[i * 4] as f64 / 255.0 * 2.0 - 1.0,
-            level[i * 4 + 1] as f64 / 255.0 * 2.0 - 1.0,
-            level[i * 4 + 2] as f64 / 255.0 * 2.0 - 1.0,
-        )
-        .normalize_or(DVec3::Y);
+        // **Through the one door, not by hand** (wave IASSET2). The finish
+        // writes this map as BC5 now, whose decode leaves B at zero on purpose
+        // and owes the reader `z = sqrt(1 - x^2 - y^2)` -- the rule
+        // `vt_sample.wgsl` has had since Wave T and the CPU had nowhere.
+        // Measured with the rebuild missing: 45.59 degrees out at the median.
+        let n = inf_material::normal_from_rgba8(
+            &level[i * 4..i * 4 + 4],
+            f.normal.format.is_two_channel(),
+        );
+        let got = DVec3::new(n[0], n[1], n[2]).normalize_or(DVec3::Y);
         baked.push(got.dot(truth).clamp(-1.0, 1.0).acos().to_degrees());
         own.push(
             atlas.normal[i]
@@ -1603,10 +1611,22 @@ fn the_written_assets_reopen_through_the_standard_loaders_and_their_refs_resolve
     assert!(albedo.srgb, "the base colour was written as linear");
     assert!(!normal.srgb, "the normal map was written as sRGB");
     assert!(!orm.srgb, "the ORM map was written as sRGB");
+    // **Uncompressed, and BC5 is refused BY SPACE** (wave IASSET2). The reason
+    // that stood here was "the workspace has no BC5", which stopped being true
+    // at Wave T; the reason now is the map itself. This one is OBJECT-space, and
+    // BC5's reader rebuilds `z = sqrt(1 - x^2 - y^2)` — positive by definition,
+    // which is a tangent-space law. Measured when the route was tried: 93.00
+    // degrees of median error against the analytic truth, on a mesh whose own
+    // normals are 34.65 out.
     assert_eq!(
         normal.format,
         TextureFormat::Rgba8,
-        "the normal map was block-compressed; the workspace has no BC5"
+        "the object-space normal map was block-compressed into two channels; the \
+         half of the surface whose Z is negative cannot survive that"
+    );
+    assert!(
+        !normal.format.is_two_channel(),
+        "…and it must keep all three, because in object space the sign of Z is data"
     );
 
     // And the dependency edges are real: deleting a texture without force must

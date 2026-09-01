@@ -1559,24 +1559,36 @@ pub fn finish_reconstruction_with_progress(
         channel: "base colour",
         message: e.to_string(),
     })?;
-    // Normals and ORM are DATA, not colour: linear. BC1 on a normal map is the
-    // artifact `TextureImportSettings::data` was written to avoid.
+    // Normals and ORM are DATA, not colour: linear, and uncompressed. BC1 on a
+    // normal map is the artifact `TextureImportSettings::data` was written to
+    // avoid.
     //
-    // **The normal is BC5 since wave IASSET2**, and the comment that stood here
-    // — "the workspace has no BC5" — had stopped being true at Wave T and had
-    // never stopped being *effectively* true: a BC5 map beside a BC1 albedo
-    // demoted the whole level's atlas to RGBA8, so nothing could use it. The
-    // arms fixed that, and this is the second production caller (the ground
-    // library is the first). It is a straight saving here: an uncompressed
-    // normal map is **73 984 B a page** against BC5's 18 496, four times, for
-    // the ~1.7-of-255 mean error the ground library's own measurement puts on
-    // BC5. The ORM keeps all eight bits of its three independent channels, for
-    // the reason that library measured too.
+    // **BC5 IS REFUSED HERE, and the reason is the map's SPACE** (wave IASSET2,
+    // measured). The comment that stood here said "the workspace has no BC5",
+    // which stopped being true at Wave T and stopped being *effectively* true
+    // when wave IASSET2 gave a residency one arm per stored format — so this
+    // wave routed it to `TextureImportSettings::normal_map()` for the four-times
+    // page saving the ground library measured, and the gate caught it in the
+    // same run.
+    //
+    // This map is **object-space** (`FinishedAsset::normal`, "Object-space
+    // normals, linear"), and BC5 stores only X and Y: its reader rebuilds
+    // `z = sqrt(1 - x^2 - y^2)`, which is **positive by definition**. That
+    // definition is a *tangent-space* law — a tangent normal pointing into the
+    // surface is not a normal map, it is damage — and in object space the sign
+    // of Z is real data, held by every texel on the far side of the asset.
+    // Measured: the transferred normals went from 45.59 degrees out at the
+    // median (three channels read off a two-channel decode) to **93.00** once
+    // the rebuild was correct, against the mesh's own 34.65 — i.e. exactly the
+    // half of the surface whose Z is negative, lost.
+    //
+    // So it stays uncompressed, at 73 984 B a page, and `normal_map()`'s own doc
+    // now says which space it is for.
     let normal = texture_from_rgba8(
         normal_filled.to_rgba8(),
         size,
         size,
-        TextureImportSettings::normal_map(),
+        TextureImportSettings::data(),
     )
     .map_err(|e| FinishError::Texture {
         channel: "normal",

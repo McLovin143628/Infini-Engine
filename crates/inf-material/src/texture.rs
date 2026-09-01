@@ -81,6 +81,16 @@ impl TextureFormat {
             TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5 | TextureFormat::Bc7
         )
     }
+    /// Whether this format stores only **two** channels, so a third has to be
+    /// rebuilt by whoever reads it.
+    ///
+    /// The mirror of [`inf_vt::PageFormat::is_two_channel`], pinned equal to it
+    /// by `tiles::tests::the_two_format_enums_are_one_bijection`. It exists here
+    /// because a **CPU** reader needs the same answer the shader gets out of the
+    /// indirection table's `reconstruct_z` flag — see [`normal_from_rgba8`].
+    pub fn is_two_channel(self) -> bool {
+        matches!(self, TextureFormat::Bc5)
+    }
     /// Whether a texel can hold a value outside `[0, 1]`.
     pub fn is_float(self) -> bool {
         matches!(self, TextureFormat::Rgba16F)
@@ -289,6 +299,45 @@ impl AssetPayload for TextureAsset {
     }
 }
 
+/// **One texel of a normal map as a unit vector, whichever way the texture
+/// stores it** — the CPU twin of `vt_sample.wgsl`'s `vt_normal_ts` (wave
+/// IASSET2).
+///
+/// The shader has had this rule since Wave T and the CPU had none, which stopped
+/// being harmless the moment real content shipped as BC5. `decode_bc5` writes
+/// **B = 0 on purpose** — a BC5 page stores X and Y and the Z that belongs there
+/// is `sqrt(1 - x^2 - y^2)`, which the file may not contain and this file's
+/// decoder may not compute (it is integer-only, so a transcoded page is the same
+/// bytes on a phone as on a desktop). Every reader therefore owes the rebuild,
+/// and until this function existed each one owed it privately.
+///
+/// Measured when the ground and photogrammetry normal maps moved to BC5: a
+/// reader that took `xyz * 2 - 1` off a two-channel decode was **45.59 degrees**
+/// out at the median.
+///
+/// * three-channel storage (RGBA8/BC1/BC3/BC7) — `xyz * 2 - 1`, exactly what
+///   shipped;
+/// * **two**-channel storage (BC5) — `xy * 2 - 1`, with
+///   `z = sqrt(max(0, 1 - x^2 - y^2))`.
+///
+/// The `max(0, ...)` is the only slack, and it exists because a filtered pair of
+/// quantised channels can land a hair outside the unit disc; there the honest
+/// answer is the flattest normal consistent with the data.
+pub fn normal_from_rgba8(px: &[u8], two_channel: bool) -> [f64; 3] {
+    let dec = |v: u8| v as f64 / 255.0 * 2.0 - 1.0;
+    let (x, y) = (dec(px[0]), dec(px[1]));
+    let z = if two_channel {
+        (1.0 - x * x - y * y).max(0.0).sqrt()
+    } else {
+        dec(px[2])
+    };
+    let len = (x * x + y * y + z * z).sqrt();
+    if len <= f64::EPSILON {
+        return [0.0, 0.0, 1.0];
+    }
+    [x / len, y / len, z / len]
+}
+
 /// Which block compression to apply on import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -365,13 +414,32 @@ impl TextureImportSettings {
         }
     }
 
-    /// Preset for a **tangent-space normal map** (Wave T): linear, BC5.
+    /// Preset for a **TANGENT-space normal map** (Wave T): linear, BC5.
     ///
     /// The preset [`data`](Self::data) could not be, because it is the preset for
     /// every data map and BC5 keeps only two channels. Opting in per map is what
     /// makes that safe: an ORM triple through `data()` still stores three
     /// channels, and a normal map through this one stores the two it needs at a
     /// quarter of the page bytes.
+    ///
+    /// # Tangent space, and not the other kind (wave IASSET2, measured)
+    ///
+    /// BC5 stores X and Y; its reader rebuilds `z = sqrt(1 - x^2 - y^2)`, which
+    /// is **positive by definition**. That definition is a tangent-space law — a
+    /// tangent normal pointing into the surface is not a normal map, it is
+    /// damage — and it is **false in object or world space**, where the sign of
+    /// Z is real data held by every texel on the far side of the asset.
+    ///
+    /// Measured when this preset was tried on the photogrammetry finish's
+    /// object-space normal map: **93.00 degrees** of median angular error
+    /// against the analytic truth, on a mesh whose own normals are 34.65 out —
+    /// exactly the half of the surface whose Z is negative, gone. That map is
+    /// back on [`data`](Self::data) and this paragraph is why.
+    ///
+    /// The two callers that take this preset are tangent-space by convention or
+    /// by specification: `MapKind::Normal` reads the Megascans/Substance `_Normal`
+    /// / `_NormalGL` / `_NormalDX` suffixes, all of which ship tangent space, and
+    /// a glTF `normalTexture` is tangent space per the glTF specification.
     pub fn normal_map() -> Self {
         Self {
             srgb: false,
