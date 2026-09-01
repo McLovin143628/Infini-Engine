@@ -515,7 +515,11 @@ impl AssetState {
     /// is dropped; the shared background tick picks up the new one. Emits
     /// `assets://changed` so the Content Drawer re-syncs.
     pub fn reroot(&self, app: &AppHandle, content_root: PathBuf) {
-        match build_inner(app, &content_root) {
+        // `boot: false` — this root is somebody's PROJECT. `seed_starter_content`
+        // writes files, and a project is not a place for the editor to put
+        // seventeen of them uninvited (wave GTA1 audit); `inf new` scaffolds the
+        // starter character into every 3D project already.
+        match build_inner(app, &content_root, false) {
             Some(inner) => {
                 // Swap the new inner in and take the OLD one OUT within one short
                 // critical section, then drop the old inner *after* releasing the
@@ -541,7 +545,11 @@ impl AssetState {
 /// Build a fresh [`AssetInner`] rooted at `content_root`: open the project (seed
 /// starter content if empty), spawn the import worker + file watcher, and open
 /// the (content-hash-keyed, shared) thumbnail cache. `None` on failure.
-fn build_inner(app: &AppHandle, content_root: &std::path::Path) -> Option<AssetInner> {
+///
+/// `boot` is true **only** for the editor's own `<app_data>/Content` root — see
+/// [`seed_starter_content`], which writes files and must therefore never do it
+/// inside somebody's project (wave GTA1 audit).
+fn build_inner(app: &AppHandle, content_root: &std::path::Path, boot: bool) -> Option<AssetInner> {
     let project = match AssetProject::open(content_root) {
         Ok(p) => Arc::new(Mutex::new(p)),
         Err(e) => {
@@ -549,7 +557,7 @@ fn build_inner(app: &AppHandle, content_root: &std::path::Path) -> Option<AssetI
             return None;
         }
     };
-    seed_starter_content(&project, content_root);
+    seed_starter_content(&project, content_root, boot);
 
     let mut queue = ImportQueue::spawn(project.clone());
     // P18.3: derive a `.inf_vmesh` for every mesh that lacks a current one, so a
@@ -597,7 +605,7 @@ pub fn init_assets_on_boot(app: &AppHandle) {
         return;
     };
     let root = base.join("Content");
-    if let Some(inner) = build_inner(app, &root) {
+    if let Some(inner) = build_inner(app, &root, true) {
         if let Some(state) = app.try_state::<AssetState>() {
             *state.inner.lock().expect("asset state") = Some(inner);
         }
@@ -621,7 +629,18 @@ pub fn init_assets_on_boot(app: &AppHandle) {
 /// The **same** constant, copied verbatim with its sidecars (each names the
 /// committed guid, so the scan adopts them with their identity intact) rather
 /// than re-derived through `write_asset`, which would mint new ids.
-fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Path) {
+///
+/// # `boot`, and why it is not optional (wave GTA1 audit)
+///
+/// This function *writes files into `root`*, and `build_inner` runs it on every
+/// re-root as well as on boot — so as first landed it copied seventeen files
+/// into **every project the editor opened** whose database lacked the starter
+/// skeleton. That is every 2D project (`ProjectTemplate::Platformer2d` does not
+/// scaffold a character) and every project whose author deleted theirs, which
+/// would then come back on each open. `<app_data>/Content` is the one root the
+/// editor owns; a project belongs to its author, and `inf new` has scaffolded
+/// the character into every 3D one since SK1c.
+fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Path, boot: bool) {
     let Ok(mut proj) = project.lock() else { return };
     // Read BEFORE anything is written, or seeding the character would make the
     // root look non-fresh and the materials would never land.
@@ -633,7 +652,7 @@ fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Pa
     let has_character = inf_editor_core::samples::starter_character_ids()
         .skeleton
         .is_some_and(|id| proj.db().get(id).is_some());
-    if !has_character {
+    if boot && !has_character {
         seed_starter_character(&mut proj, root);
     }
     if !fresh {
