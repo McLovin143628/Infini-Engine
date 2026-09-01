@@ -620,8 +620,15 @@ pub struct VtLevelReport {
     pub textures: usize,
     /// GUIDs a bound material named that did not become a virtual texture.
     pub refused: usize,
-    /// The page format the **first** arm took. Kept because every reader of it
-    /// asks about a single-format level, which is still the common case.
+    /// The page format the **first** arm took — the whole answer for a
+    /// single-format level, which is still the common case, and the shape every
+    /// pre-IASSET2 caller reads.
+    ///
+    /// **Both hosts log [`pool_formats`](Self::pool_formats) instead** (IASSET2
+    /// audit): this one is the first arm's and reads as the whole answer, so a
+    /// BC1 + BC5 level reported "Bc1" with half its content in another atlas.
+    /// It stays because it is the honest single-format question and
+    /// `vt_sampling`'s registration-door arm asks it.
     pub pool_format: Option<PageFormat>,
     /// **Every arm's page format**, in arm order (wave IASSET2) — one per
     /// distinct stored format the level binds, and the index a texture's table

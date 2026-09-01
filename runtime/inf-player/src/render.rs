@@ -263,12 +263,19 @@ impl PlayerRenderHost {
                 for a in &report.advisories {
                     tracing::warn!("inf-player: virtual textures: {a}");
                 }
+                // **Every arm, not the first one's format** (wave IASSET2
+                // audit) — the editor viewport's line says the same, for the
+                // same reason: `pool_format` is the FIRST arm's and reads as the
+                // whole answer, so a BC1 + BC5 level logged "Bc1 pages" with
+                // half its content in another atlas. `demoted` is a cost an
+                // author can avoid and nothing else surfaces it per level.
                 tracing::info!(
                     "inf-player: {} virtual texture(s) registered for {} bound material(s) \
-                     ({:?} pages, {} refused)",
+                     ({:?} page arm(s), {:?} demoted, {} refused)",
                     report.textures,
                     mats.len(),
-                    report.pool_format,
+                    report.pool_formats,
+                    report.demoted,
                     report.refused
                 );
                 self.renderer.set_vt_level(Some((textures, pools)));

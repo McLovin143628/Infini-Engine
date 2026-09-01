@@ -4853,12 +4853,20 @@ impl EngineHost {
                 for a in &report.advisories {
                     tracing::warn!("inf-viewport: virtual textures: {a}");
                 }
+                // **Every arm, not the first one's format** (wave IASSET2
+                // audit). This said `pool_format` — the FIRST arm's — which was
+                // the whole answer while a pool had one atlas and reads as the
+                // whole answer still: a BC1 + BC5 level logged "Bc1 pages" with
+                // half its content in another atlas. `demoted` is here for the
+                // same reason it exists at all: it is a cost an author can
+                // avoid, and one nothing else surfaces per level.
                 tracing::info!(
                     "inf-viewport: {} virtual texture(s) registered for {} bound material(s) \
-                     ({:?} pages, {} refused)",
+                     ({:?} page arm(s), {:?} demoted, {} refused)",
                     report.textures,
                     content.materials.len(),
-                    report.pool_format,
+                    report.pool_formats,
+                    report.demoted,
                     report.refused
                 );
                 self.renderer.set_vt_level(Some((textures, pools)));
