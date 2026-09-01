@@ -263,3 +263,31 @@ z = 0.12
 x = 30.0
 y = 30.0
 z = 30.0
+
+[driving]
+arm_per_length_m = 0.55
+arm_per_speed_s = 0.045
+fov_per_speed_deg_s = 0.42
+fov_gain_max_deg = 14.0
+look_ahead_s = 0.35
+align_speed_mps = 9.0
+
+[driving.base]
+arm_length_m = 5.0
+rotation_lag = 4.0
+fov_deg = 72.0
+
+[driving.base.pivot_offset]
+x = 0.0
+y = 0.55
+z = 0.0
+
+[driving.base.camera_offset]
+x = 0.0
+y = 0.0
+z = 0.0
+
+[driving.base.lag_speeds]
+x = 6.0
+y = 5.0
+z = 3.5

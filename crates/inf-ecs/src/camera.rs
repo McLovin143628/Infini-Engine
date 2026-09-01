@@ -159,6 +159,101 @@ impl GaitCameraSettings {
     }
 }
 
+/// **The drive camera's block** (island wave VEH2a) — one settings block plus
+/// the handful of numbers that make a car's camera a car's camera.
+///
+/// # Why a car needed a branch at all
+///
+/// P29.7 gave the engine a vehicle and never gave it a camera. `settings_for`
+/// dispatches on `RotationMode` and `Gait`, `step_driving` writes neither — it
+/// returns before `actual_gait` is ever computed — so a driving character got
+/// **whichever on-foot gait block was latched at the instant it pressed the
+/// interact key, frozen for the whole drive**. Since a player is usually
+/// stationary beside the door when they press it, that block is `walk`: arm
+/// 3.0 m, FOV 70, shoulder offset 0.45 m. Literally the walking camera, and it
+/// could not react to the car accelerating from nothing to thirty metres a
+/// second because nothing it reads changes while driving.
+///
+/// Everything here is per-*camera*, not per-vehicle-class, and the one number a
+/// class would want — how far back to sit for a bus against a hatchback — is
+/// [`arm_per_length_m`](Self::arm_per_length_m) against the chassis's own
+/// half-length. Geometry the rig already carries, so the fleet grows without the
+/// camera table growing with it.
+///
+/// Reference: `docs/reference_videos/frames/driving/0032` and `steal-car/0040` —
+/// the camera sits a little above roof height, five to six metres back, pitched
+/// down about ten degrees, with the car in the lower third and the horizon near
+/// the top of the frame.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DrivingCameraSettings {
+    /// The block at a standstill: arm, offsets, lag, FOV.
+    pub base: CameraSettings,
+    /// Extra arm length per metre of the vehicle's **half-length**, so a van
+    /// sits further back than a hatchback without a per-class table.
+    pub arm_per_length_m: f64,
+    /// Extra arm length per m/s of speed — the camera easing back as the car
+    /// gets going.
+    pub arm_per_speed_s: f64,
+    /// Extra vertical FOV per m/s, degrees. The single cheapest speed cue there
+    /// is, and the reason a car at 40 m/s feels different from one at 10 in a
+    /// still frame.
+    pub fov_per_speed_deg_s: f64,
+    /// The most FOV the speed term may add, degrees — a ceiling, because a field
+    /// of view that keeps widening ends as a fisheye.
+    pub fov_gain_max_deg: f64,
+    /// How many seconds of velocity the pivot is pushed along, metres per (m/s).
+    /// This is the look-ahead: at 30 m/s and 0.35 s the camera is aimed ten
+    /// metres up the road rather than at the roof.
+    pub look_ahead_s: f64,
+    /// The speed, m/s, at which the camera is fully aligned with the vehicle's
+    /// heading rather than the driver's aim. Below it the two are blended, so a
+    /// driver parking can still look around and a driver at speed gets a camera
+    /// that follows the car.
+    pub align_speed_mps: f64,
+}
+
+impl Default for DrivingCameraSettings {
+    fn default() -> Self {
+        Self {
+            base: CameraSettings {
+                // Roof height and a little more, five metres back, and a boom
+                // that lags: a car is heavier than a person and its camera
+                // should feel it.
+                arm_length_m: 5.0,
+                pivot_offset: Vec3d::new(0.0, 0.55, 0.0),
+                camera_offset: Vec3d::new(0.0, 0.0, 0.0),
+                lag_speeds: Vec3d::new(6.0, 5.0, 3.5),
+                rotation_lag: 4.0,
+                fov_deg: 72.0,
+            },
+            arm_per_length_m: 0.55,
+            arm_per_speed_s: 0.045,
+            fov_per_speed_deg_s: 0.42,
+            fov_gain_max_deg: 14.0,
+            look_ahead_s: 0.35,
+            align_speed_mps: 9.0,
+        }
+    }
+}
+
+/// What the camera needs to know about the car its subject is driving.
+///
+/// Everything in it is already written by `inf_physics::d3::movement::
+/// step_driving` onto the character (the chassis heading as `body_yaw_deg`, the
+/// chassis velocity as `velocity`) except the half-length, which the camera door
+/// reads off the chassis collider. Nothing here is new simulation state, which
+/// is why the drive camera costs no schema and no trace bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DrivingView {
+    /// The chassis's heading, degrees about `+Y`.
+    pub chassis_yaw_deg: f64,
+    /// The chassis's velocity, m/s, world space.
+    pub velocity: Vec3d,
+    /// Half the chassis's length along its forward axis, metres.
+    pub half_length_m: f64,
+}
+
 /// **The whole tunable set**, and the thing P29.5's live-tuning door edits.
 ///
 /// The table is ALS's `FALSCameraStateSettings` — `RotationMode` × (gait +
@@ -173,6 +268,10 @@ pub struct CameraTuning {
     /// The first-person **seat**: the arm length is ignored (the camera is at the
     /// pivot), and the offsets place the eye.
     pub first_person: CameraSettings,
+    /// **The drive camera** (island wave VEH2a) — the block a character in
+    /// [`MovementMode::Driving`] gets, whatever gait it happened to enter the
+    /// car at.
+    pub driving: DrivingCameraSettings,
     /// Where the pivot sits on the character, as a fraction of its standing
     /// height. ALS uses the midpoint of the `head` and `root` sockets, which is
     /// this number with the rig's own proportions behind it; deriving it from the
@@ -244,6 +343,7 @@ impl Default for CameraTuning {
                 rotation_lag: 30.0,
                 fov_deg: 90.0,
             },
+            driving: DrivingCameraSettings::default(),
             pivot_height_ratio: 0.80,
             collision_radius_m: 0.15,
             state_blend_speed: 6.0,
@@ -262,6 +362,14 @@ impl CameraTuning {
         gait: Gait,
         mode: MovementMode,
     ) -> CameraSettings {
+        // **Driving is answered before the gait is even looked at**, and that is
+        // the point rather than a shortcut: `step_driving` returns before
+        // `actual_gait` is computed, so the value in it during a drive is
+        // whatever was latched at the moment the character got in. Reading it
+        // would be reading a stale field, so this branch does not.
+        if mode == MovementMode::Driving {
+            return self.driving.base;
+        }
         let low = matches!(
             mode,
             MovementMode::Crouch
@@ -324,6 +432,33 @@ impl CameraTuning {
                 self.min_arm_fraction = value;
                 return true;
             }
+            // The drive camera's own scalars (island wave VEH2a). Under the
+            // `drive.` prefix so `drive.arm_length_m` — the block's base — still
+            // goes through the shared field table below.
+            "drive.arm_per_length_m" => {
+                self.driving.arm_per_length_m = value;
+                return true;
+            }
+            "drive.arm_per_speed_s" => {
+                self.driving.arm_per_speed_s = value;
+                return true;
+            }
+            "drive.fov_per_speed_deg_s" => {
+                self.driving.fov_per_speed_deg_s = value;
+                return true;
+            }
+            "drive.fov_gain_max_deg" => {
+                self.driving.fov_gain_max_deg = value;
+                return true;
+            }
+            "drive.look_ahead_s" => {
+                self.driving.look_ahead_s = value;
+                return true;
+            }
+            "drive.align_speed_mps" => {
+                self.driving.align_speed_mps = value;
+                return true;
+            }
             _ => {}
         }
         let Some((block, field)) = name.split_once('.') else {
@@ -357,6 +492,7 @@ impl CameraTuning {
                 &mut self.aiming.crouch,
             ]),
             "first_person" => targets.push(&mut self.first_person),
+            "drive" => targets.push(&mut self.driving.base),
             _ => return false,
         }
         let mut known = false;
@@ -483,6 +619,9 @@ pub struct CameraInput {
     pub rotation_mode: RotationMode,
     pub gait: Gait,
     pub mode: MovementMode,
+    /// The car this character is driving, or `None` (island wave VEH2a). Read
+    /// only when [`mode`](Self::mode) is [`MovementMode::Driving`].
+    pub driving: Option<DrivingView>,
 }
 
 /// Where the camera ended up this step. The whole of what a renderer needs.
@@ -551,7 +690,7 @@ impl LocomotionCamera {
     /// resolves the collision, because a swept sphere needs a physics world and
     /// nothing else here does.
     pub fn advance(&mut self, input: &CameraInput, dt: f64) {
-        let target = if self.view_mode == ViewMode::FirstPerson {
+        let mut target = if self.view_mode == ViewMode::FirstPerson {
             self.tuning.first_person
         } else {
             self.tuning
@@ -561,6 +700,53 @@ impl LocomotionCamera {
             1.0
         } else {
             0.0
+        };
+
+        // ── the drive camera's speed terms (island wave VEH2a) ───────────────
+        //
+        // Folded into the TARGET rather than applied after the blend, so they
+        // arrive through `state_blend_speed` like everything else and a car
+        // accelerating hard does not snap its field of view. The pivot's
+        // look-ahead is separate — it is a place, not a setting.
+        let drive = match (input.mode, input.driving) {
+            (MovementMode::Driving, Some(v)) if self.view_mode != ViewMode::FirstPerson => {
+                let d = &self.tuning.driving;
+                let speed = v.velocity.to_dvec3().length();
+                target.arm_length_m +=
+                    d.arm_per_length_m * v.half_length_m.max(0.0) + d.arm_per_speed_s * speed;
+                target.fov_deg +=
+                    (d.fov_per_speed_deg_s * speed).clamp(0.0, d.fov_gain_max_deg.max(0.0));
+                Some((v, speed))
+            }
+            _ => None,
+        };
+        // **The camera's yaw target.** On foot it is the driver's aim and nothing
+        // else. In a car it blends toward the chassis's own heading as the car
+        // gets going, which is a *recentring* rather than an override: the stick
+        // still moves `aim_yaw_deg`, so holding it looks around and releasing it
+        // lets the camera swing back behind the car. That is the behaviour the
+        // reference frames show and it costs no character state at all.
+        let aim_yaw = match drive {
+            Some((v, speed)) if self.tuning.driving.align_speed_mps > 0.0 => {
+                let w = (speed / self.tuning.driving.align_speed_mps).clamp(0.0, 1.0);
+                crate::movement::wrap_deg(
+                    input.aim_yaw_deg
+                        + w * crate::movement::angle_delta_deg(
+                            v.chassis_yaw_deg,
+                            input.aim_yaw_deg,
+                        ),
+                )
+            }
+            _ => input.aim_yaw_deg,
+        };
+        // …and the pivot is pushed along the car's velocity, so the camera is
+        // aimed up the road rather than at the roof.
+        let pivot_target = match drive {
+            Some((v, _)) => Vec3d::from_dvec3(
+                input.pivot_target.to_dvec3()
+                    + v.velocity.to_dvec3() * self.tuning.driving.look_ahead_s,
+            ),
+            None => input.pivot_target,
         };
 
         if !self.seeded {
@@ -573,8 +759,8 @@ impl LocomotionCamera {
             self.seeded = true;
             self.settings = target;
             self.fp_weight = fp_target;
-            self.pivot = input.pivot_target;
-            self.yaw_deg = input.aim_yaw_deg;
+            self.pivot = pivot_target;
+            self.yaw_deg = aim_yaw;
             self.pitch_deg = input.aim_pitch_deg;
         } else {
             self.settings = self
@@ -595,7 +781,7 @@ impl LocomotionCamera {
             // step); this is the same rule on the same quantity.
             self.yaw_deg = crate::movement::wrap_deg(interp_angle_deg(
                 self.yaw_deg,
-                input.aim_yaw_deg,
+                aim_yaw,
                 self.settings.rotation_lag,
                 dt,
             ));
@@ -614,7 +800,7 @@ impl LocomotionCamera {
             // against its own numbers.)
             self.pivot = axis_independent_lag(
                 self.pivot,
-                input.pivot_target,
+                pivot_target,
                 self.yaw_deg,
                 self.settings.lag_speeds,
                 dt,
@@ -1013,6 +1199,212 @@ mod tests {
         }
     }
 
+    /// **THE DRIVE CAMERA IS ITS OWN BLOCK**, and it does not read the gait.
+    ///
+    /// The arm the whole clause turns on. Before VEH2a a driving character got
+    /// whichever on-foot block was latched when it pressed the interact key, so
+    /// the *same drive* produced three different cameras depending on whether
+    /// the player had been walking, running or sprinting when they got in — and
+    /// `actual_gait` cannot change while `step_driving` owns the character, so it
+    /// stayed wrong for the whole segment.
+    #[test]
+    fn the_drive_camera_is_its_own_block_and_ignores_the_stale_gait() {
+        let t = CameraTuning::default();
+        let drive = t.settings_for(
+            RotationMode::LookingDirection,
+            Gait::Walk,
+            MovementMode::Driving,
+        );
+        assert_eq!(drive, t.driving.base);
+        for gait in [Gait::Walk, Gait::Run, Gait::Sprint] {
+            for mode in [
+                RotationMode::VelocityDirection,
+                RotationMode::LookingDirection,
+                RotationMode::Aiming,
+            ] {
+                assert_eq!(
+                    t.settings_for(mode, gait, MovementMode::Driving),
+                    drive,
+                    "a drive with a latched {gait:?}/{mode:?} got a different camera"
+                );
+            }
+        }
+        // …and it really is a different camera from every on-foot one, or the
+        // arm above is satisfied by a table that has not changed.
+        for gait in [Gait::Walk, Gait::Run, Gait::Sprint] {
+            assert_ne!(
+                t.settings_for(RotationMode::LookingDirection, gait, MovementMode::Grounded),
+                drive
+            );
+        }
+        // A car sits further back than a sprint and rolls its boom slower than a
+        // walk — the two things a chase camera is.
+        let sprint = t.settings_for(
+            RotationMode::LookingDirection,
+            Gait::Sprint,
+            MovementMode::Grounded,
+        );
+        assert!(drive.arm_length_m > sprint.arm_length_m);
+        assert!(drive.rotation_lag < sprint.rotation_lag);
+        // …and no shoulder offset: a car is not looked over.
+        assert_eq!(drive.camera_offset.x, 0.0);
+    }
+
+    /// **The drive camera reaches back and widens with speed, and with the car.**
+    #[test]
+    fn the_drive_camera_grows_with_the_speed_and_the_size_of_the_car() {
+        let t = CameraTuning::default();
+        let settled = |speed: f64, half_length: f64| -> CameraPose {
+            let mut cam = LocomotionCamera::default();
+            let input = CameraInput {
+                pivot_target: v(0.0, 1.5, 0.0),
+                aim_yaw_deg: 0.0,
+                aim_pitch_deg: 0.0,
+                rotation_mode: RotationMode::LookingDirection,
+                gait: Gait::Walk,
+                mode: MovementMode::Driving,
+                driving: Some(DrivingView {
+                    chassis_yaw_deg: 0.0,
+                    velocity: v(0.0, 0.0, speed),
+                    half_length_m: half_length,
+                }),
+            };
+            // Long enough for `state_blend_speed` to arrive.
+            for _ in 0..300 {
+                cam.advance(&input, 1.0 / 60.0);
+            }
+            cam.pose
+        };
+        let parked = settled(0.0, 2.2);
+        let fast = settled(35.0, 2.2);
+        let bus = settled(0.0, 6.0);
+        assert!(
+            fast.fov_deg > parked.fov_deg + 5.0,
+            "a car at 35 m/s got {:.1}° of field against {:.1}° parked — the \
+             cheapest speed cue there is, and it is not firing",
+            fast.fov_deg,
+            parked.fov_deg
+        );
+        assert!(
+            fast.fov_deg <= parked.fov_deg + t.driving.fov_gain_max_deg + 1e-6,
+            "the FOV gain broke its own ceiling at {:.1}°",
+            fast.fov_deg
+        );
+        // The arm shows up as distance from the pivot, and the pivot itself has
+        // moved (the look-ahead), so measure the arm through the settings.
+        let arm = |speed: f64, half_length: f64| -> f64 {
+            let mut cam = LocomotionCamera::default();
+            let input = CameraInput {
+                pivot_target: v(0.0, 1.5, 0.0),
+                aim_yaw_deg: 0.0,
+                aim_pitch_deg: 0.0,
+                rotation_mode: RotationMode::LookingDirection,
+                gait: Gait::Walk,
+                mode: MovementMode::Driving,
+                driving: Some(DrivingView {
+                    chassis_yaw_deg: 0.0,
+                    velocity: v(0.0, 0.0, speed),
+                    half_length_m: half_length,
+                }),
+            };
+            for _ in 0..300 {
+                cam.advance(&input, 1.0 / 60.0);
+            }
+            cam.settings.arm_length_m
+        };
+        assert!(
+            arm(35.0, 2.2) > arm(0.0, 2.2) + 1.0,
+            "the boom did not extend with speed"
+        );
+        assert!(
+            arm(0.0, 6.0) > arm(0.0, 2.2) + 1.5,
+            "a six-metre bus sat as close as a two-metre car: {:.2} against {:.2}",
+            arm(0.0, 6.0),
+            arm(0.0, 2.2)
+        );
+        let _ = bus;
+        // A character NOT driving is untouched by any of it.
+        let mut walking = LocomotionCamera::default();
+        let on_foot = CameraInput {
+            pivot_target: v(0.0, 1.5, 0.0),
+            aim_yaw_deg: 0.0,
+            aim_pitch_deg: 0.0,
+            rotation_mode: RotationMode::LookingDirection,
+            gait: Gait::Run,
+            mode: MovementMode::Grounded,
+            driving: Some(DrivingView {
+                chassis_yaw_deg: 90.0,
+                velocity: v(0.0, 0.0, 35.0),
+                half_length_m: 6.0,
+            }),
+        };
+        for _ in 0..300 {
+            walking.advance(&on_foot, 1.0 / 60.0);
+        }
+        assert_eq!(
+            walking.settings.fov_deg,
+            t.settings_for(
+                RotationMode::LookingDirection,
+                Gait::Run,
+                MovementMode::Grounded
+            )
+            .fov_deg,
+            "a walking character read the drive camera's speed terms"
+        );
+    }
+
+    /// **The camera swings behind the car as it gets going, and looks up the
+    /// road** — and a parked car leaves the driver's aim alone.
+    #[test]
+    fn the_drive_camera_aligns_with_the_car_and_looks_ahead() {
+        let run = |speed: f64| -> (f64, Vec3d) {
+            let mut cam = LocomotionCamera::default();
+            let input = CameraInput {
+                // The driver is looking 90° off the car's heading.
+                pivot_target: v(0.0, 1.5, 0.0),
+                aim_yaw_deg: 90.0,
+                aim_pitch_deg: 0.0,
+                rotation_mode: RotationMode::LookingDirection,
+                gait: Gait::Walk,
+                mode: MovementMode::Driving,
+                driving: Some(DrivingView {
+                    chassis_yaw_deg: 0.0,
+                    velocity: v(0.0, 0.0, speed),
+                    half_length_m: 2.2,
+                }),
+            };
+            for _ in 0..300 {
+                cam.advance(&input, 1.0 / 60.0);
+            }
+            (cam.yaw_deg, cam.pivot)
+        };
+        let (parked_yaw, parked_pivot) = run(0.0);
+        let (moving_yaw, moving_pivot) = run(30.0);
+        assert!(
+            (parked_yaw - 90.0).abs() < 1e-6,
+            "a PARKED car dragged the camera off the driver's aim to {parked_yaw}° \
+             — a driver reversing into a space must still be able to look"
+        );
+        assert!(
+            moving_yaw.abs() < 1.0,
+            "at 30 m/s the camera sat at {moving_yaw}° instead of behind a car \
+             heading 0°"
+        );
+        // The look-ahead: the pivot is pushed up the road by the authored number
+        // of seconds of velocity, and a parked car's is not pushed at all.
+        assert!(
+            (parked_pivot.z - 0.0).abs() < 1e-6,
+            "a parked car's pivot drifted to {}",
+            parked_pivot.z
+        );
+        let want = 30.0 * CameraTuning::default().driving.look_ahead_s;
+        assert!(
+            (moving_pivot.z - want).abs() < 0.05,
+            "the look-ahead put the pivot {:.2} m up the road against {want:.2}",
+            moving_pivot.z
+        );
+    }
+
     /// The first frame **snaps**. A camera that lerped from the origin would fly
     /// across the level on every load.
     #[test]
@@ -1025,6 +1417,7 @@ mod tests {
             rotation_mode: RotationMode::LookingDirection,
             gait: Gait::Run,
             mode: MovementMode::Grounded,
+            driving: None,
         };
         cam.advance(&input, 1.0 / 60.0);
         assert_eq!(cam.pivot, input.pivot_target, "the first frame must snap");
@@ -1074,6 +1467,37 @@ mod tests {
         assert_eq!(t.pivot_height_ratio, 0.9);
         assert!(t.set("first_person.offset_y", 0.2));
         assert_eq!(t.first_person.camera_offset.y, 0.2);
+        // The drive block (island wave VEH2a): its base goes through the shared
+        // field table like every other block, and its own six scalars are
+        // table-wide names under a `drive.` prefix.
+        assert!(t.set("drive.arm_length_m", 6.25));
+        assert_eq!(
+            t.settings_for(
+                RotationMode::LookingDirection,
+                Gait::Walk,
+                MovementMode::Driving
+            )
+            .arm_length_m,
+            6.25
+        );
+        assert!(t.set("drive.lag_z", 2.0));
+        assert_eq!(t.driving.base.lag_speeds.z, 2.0);
+        for (name, want) in [
+            ("drive.arm_per_length_m", 0.9),
+            ("drive.arm_per_speed_s", 0.02),
+            ("drive.fov_per_speed_deg_s", 0.6),
+            ("drive.fov_gain_max_deg", 20.0),
+            ("drive.look_ahead_s", 0.5),
+            ("drive.align_speed_mps", 12.0),
+        ] {
+            assert!(t.set(name, want), "the door refuses `{name}`");
+        }
+        assert_eq!(t.driving.arm_per_length_m, 0.9);
+        assert_eq!(t.driving.align_speed_mps, 12.0);
+        assert!(
+            !t.set("drive.arm_per_length", 1.0),
+            "a near-miss is refused"
+        );
         // Refusals, all values.
         assert!(!t.set("run.arm_length", 1.0), "a misspelled field");
         assert!(!t.set("gallop.arm_length_m", 1.0), "a misspelled block");
@@ -1137,6 +1561,7 @@ mod tests {
             rotation_mode: RotationMode::LookingDirection,
             gait: Gait::Run,
             mode: MovementMode::Grounded,
+            driving: None,
         };
         cam.advance(&input, 1.0 / 60.0);
         let a = cam.trace_bytes();
@@ -1205,6 +1630,7 @@ mod tests {
             rotation_mode: RotationMode::LookingDirection,
             gait: Gait::Run,
             mode: MovementMode::Grounded,
+            driving: None,
         };
         cam.advance(&base, 1.0 / 60.0);
         // Six full revolutions at four degrees a step, the aim wrapped at its

@@ -107,6 +107,30 @@ pub fn step_locomotion_camera(
     let standing = cm.stand_half_height_m + collider.map(|c| c.radius).unwrap_or(0.0);
     let pivot_target = feet + DVec3::Y * (2.0 * standing * cam.tuning.pivot_height_ratio);
 
+    // **The drive camera's view of the car** (island wave VEH2a). Two of its
+    // three numbers are already on the movement runtime, written by
+    // `step_driving` itself: `body_yaw_deg` IS the chassis's heading while
+    // seated, and `velocity` IS the chassis's own linear velocity. Only the
+    // half-length has to be looked up, and it comes off the chassis collider
+    // rather than out of a new field — the same "derive it from what the level
+    // already carries" rule the whole vehicle rig is built on. Nothing here is
+    // new simulation state, which is why the drive camera costs no schema, no
+    // trace bytes and no mirror.
+    let driving = (cm.mode == inf_ecs::components::MovementMode::Driving
+        && cm.runtime.seat.is_seated())
+    .then(|| {
+        let half_length_m = world
+            .entity_of(cm.runtime.seat.vehicle)
+            .and_then(|e| world.world().get::<Collider3D>(e))
+            .map(|c| c.half_extents.z.abs())
+            .unwrap_or(0.0);
+        inf_ecs::camera::DrivingView {
+            chassis_yaw_deg: cm.runtime.body_yaw_deg,
+            velocity: cm.runtime.velocity,
+            half_length_m,
+        }
+    });
+
     cam.advance(
         &CameraInput {
             pivot_target: Vec3d::from_dvec3(pivot_target),
@@ -115,6 +139,7 @@ pub fn step_locomotion_camera(
             rotation_mode: cm.rotation_mode,
             gait: cm.runtime.actual_gait,
             mode: cm.mode,
+            driving,
         },
         dt,
     );

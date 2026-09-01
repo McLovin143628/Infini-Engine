@@ -156,6 +156,7 @@ fn a_rebase_mid_lag_moves_the_camera_by_exactly_the_origin_and_no_more() {
                 rotation_mode: RotationMode::default(),
                 gait: Gait::default(),
                 mode: MovementMode::default(),
+                driving: None,
             },
             DT,
         );
@@ -297,6 +298,7 @@ fn a_partition_handoff_at_speed_is_absorbed_by_the_lag() {
         rotation_mode: RotationMode::default(),
         gait: Gait::default(),
         mode: MovementMode::default(),
+        driving: None,
     };
 
     // Settle first, so the seeding snap is not what is measured.
