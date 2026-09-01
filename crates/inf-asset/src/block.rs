@@ -8,8 +8,8 @@
 //! an authored payload read once at level load, and wrong for a container a
 //! runtime pages *one unit at a time*: reaching one 581 KiB terrain tile out of a
 //! 550 MB `.inf_terrain` would decode all 550 MB. So the streaming kinds opted out
-//! of pack compression entirely ([`EntryPolicy::BlockCompressed`] /
-//! [`EntryPolicy::MappedInPlace`]) and shipped **raw** — which bought the streaming
+//! of pack compression entirely ([`BlockCompressed`] / [`MappedInPlace`]) and
+//! shipped **raw** — which bought the streaming
 //! latency and paid for it in ship size, at 100% of the raw bytes.
 //!
 //! This module is the third option the two-way choice was hiding: compress each
@@ -20,7 +20,7 @@
 //! # What may and may not use it
 //!
 //! * **May**: a block the loader *already copies or decodes* on its way to being
-//!   used. A `.inf_terrain` tile is `bincode`-decoded into a [`TerrainTile`] on
+//!   used. A `.inf_terrain` tile is `bincode`-decoded into a `TerrainTile` on
 //!   every page-in — the borrowed slice is an input to a decoder, never a cast —
 //!   so a decompress in front of that decode is an addition to an existing cost,
 //!   not the destruction of a zero-copy path.
@@ -53,6 +53,9 @@
 //! decoder learned the weaker version of this lesson at round-2 finding B12; this
 //! one is the strict form, because a block ceiling is a property of the container
 //! and is therefore actually knowable.)
+//!
+//! [`BlockCompressed`]: crate::EntryPolicy::BlockCompressed
+//! [`MappedInPlace`]: crate::EntryPolicy::MappedInPlace
 
 use std::borrow::Cow;
 
