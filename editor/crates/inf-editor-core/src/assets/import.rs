@@ -49,10 +49,10 @@ pub fn import_file(
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    // Content-cache check: same source bytes + same importer → reuse if the
-    // produced asset still exists.
+    // Content-cache check: same source bytes + same importer **and the same
+    // settings** → reuse if the produced asset still exists.
     let bytes = std::fs::read(source)?;
-    let key = ImportKey::new(&bytes, ext.as_bytes());
+    let key = ImportKey::new(&bytes, &importer_tag(&ext, source, &bytes));
     if let Some(existing) = project.cache_mut().get(key) {
         if project.db().contains(existing) {
             return Ok(ImportOutcome {
@@ -93,6 +93,47 @@ pub fn import_file(
         }
     }
     Ok(outcome)
+}
+
+/// **The second half of the import key**: the importer, and the settings it will
+/// run with.
+///
+/// `ImportKey::new(source_bytes, settings_bytes)` has always taken two halves,
+/// and this call site had always passed the extension for the second — which was
+/// harmless while every image import ran the same default settings, and stops
+/// being harmless the moment the settings depend on anything but the bytes.
+///
+/// Wave IASSET2 made them depend on the **filename**, and the defect was
+/// measured immediately: `Rock_2K_Normal.png` and `Rock_2K_Roughness.png` with
+/// identical pixels hashed to one key, so the second import returned the first's
+/// asset and a roughness map came back as a BC5 normal. Neither file is wrong,
+/// nothing errors, and the cache is doing exactly what it was told.
+///
+/// So the tag carries the chosen settings, spelled field by field rather than
+/// through `Debug` — a derived format is not a wire contract, and this one is
+/// hashed into a manifest that outlives the process.
+fn importer_tag(ext: &str, source: &Path, bytes: &[u8]) -> Vec<u8> {
+    let mut tag = ext.as_bytes().to_vec();
+    if matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr") {
+        let (s, _) = image_import_policy(source, bytes);
+        tag.extend_from_slice(
+            format!(
+                "|srgb={} mips={} hdr={} comp={}",
+                u8::from(s.srgb),
+                u8::from(s.generate_mips),
+                u8::from(s.hdr),
+                match s.compression {
+                    inf_material::TextureCompression::None => 0,
+                    inf_material::TextureCompression::Bc1 => 1,
+                    inf_material::TextureCompression::Bc3 => 2,
+                    inf_material::TextureCompression::Bc5 => 3,
+                    inf_material::TextureCompression::Auto => 4,
+                }
+            )
+            .as_bytes(),
+        );
+    }
+    tag
 }
 
 /// A single audio file (WAV/OGG/FLAC/MP3) → one `.inf_audio` asset (P12.3).
@@ -155,24 +196,86 @@ fn audio_settings_table(settings: &AudioImportSettings) -> Option<toml::Table> {
     }
 }
 
-/// A single image → one **v2 tiled** texture asset (sRGB base-color defaults).
+/// **The format policy for a loose image** (wave IASSET2): the filename's PBR
+/// suffix decides the colour space and the compression, and the choice is said
+/// out loud.
+///
+/// `inf_material::mapset` has written the table down since Wave T and *nothing
+/// called it from here*: every loose import took `TextureImportSettings::default()`
+/// — sRGB, `Auto` — so `rock_2K_Normal.png` became an **sRGB BC1** texture with
+/// its X quantised onto 5 bits, and `rock_2K_Displacement.exr` arrived with
+/// everything above 1.0 clipped. That module's own opening paragraph names the
+/// artifact: *"Every one of those is a silent wrong answer."*
+///
+/// Returns the settings and, when the policy chose something **other than the
+/// default**, the sentence saying so.
+///
+/// A name with no recognised suffix keeps the old default exactly — a bare
+/// `logo.png` is a base colour, and guessing otherwise would be a worse silence
+/// — and raises nothing, because an advisory on every icon is the noise that
+/// makes the real ones unreadable (`tail_cost_advisory`'s own ruling, applied
+/// here). A recognised slot that *agrees* with the default (an albedo) is
+/// likewise silent: nothing happened the author cannot see.
+///
+/// What is announced is the case where the import departed from what it has
+/// always done: a normal map at BC5, a data map kept linear and uncompressed, a
+/// float source keeping its range. That is the "shows the chosen format
+/// honestly" half, and it costs one line per data map rather than one per file.
+fn image_import_policy(source: &Path, bytes: &[u8]) -> (TextureImportSettings, Option<String>) {
+    let name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let Some((_, kind)) = inf_material::classify_map(name) else {
+        return (TextureImportSettings::default(), None);
+    };
+    let settings = kind.settings(inf_material::source_is_float(bytes));
+    if settings == TextureImportSettings::default() {
+        return (settings, None);
+    }
+    let note = format!(
+        "{name} reads as a {kind:?} map, so it is imported {} at {:?}{}",
+        if settings.srgb { "sRGB" } else { "linear" },
+        settings.compression,
+        if settings.hdr {
+            " with its float range kept"
+        } else {
+            ""
+        }
+    );
+    (settings, Some(note))
+}
+
+/// A single image → one **v2 tiled** texture asset.
 ///
 /// P26.1: the payload written here is the tiled container, not the bincode
 /// record — every texture imported from now on is byte-addressable by tile. v1
 /// payloads already on disk keep loading through `TextureAsset::from_payload`.
+///
+/// Wave IASSET2: the format is [`image_import_policy`]'s rather than the
+/// default, so a normal map is BC5 and a float source keeps its range.
 fn import_image(
     project: &mut AssetProject,
     source: &Path,
     bytes: &[u8],
     dest_dir: &Path,
 ) -> Result<ImportOutcome> {
-    let settings = TextureImportSettings::default();
-    let (rgba, w, h) =
-        inf_material::decode_image_rgba8(bytes).map_err(|e| AssetError::Import(e.to_string()))?;
-    let mut advisories = raise(source, inf_material::texture_import_advisories(w, h));
-    advisories.extend(outside_root_advisories(project, source));
-    let image = inf_material::build_tiled_texture(rgba, w, h, settings)
+    let (settings, note) = image_import_policy(source, bytes);
+    let mut advisories = raise(source, note.into_iter().collect());
+    // **The one door** `inf_material::tiles` already provides: it is where
+    // `source_is_float` and `hdr` meet, so this call site cannot check one and
+    // forget the other — and it hands back the HDR advisory as a value rather
+    // than logging it. It is also the **HDR door's first production caller**;
+    // Wave T shipped `TextureImportSettings::hdr` with none.
+    let (image, hdr_note) = inf_material::build_tiled_texture_from_bytes(bytes, settings)
         .map_err(|e| AssetError::Import(e.to_string()))?;
+    let header = *image.reader().header();
+    advisories.extend(raise(
+        source,
+        inf_material::texture_import_advisories(header.width, header.height),
+    ));
+    advisories.extend(raise(source, hdr_note.into_iter().collect()));
+    advisories.extend(outside_root_advisories(project, source));
     let name = file_stem(source);
     let import_tbl = settings_table(&settings);
     let id = project.write_tiled_texture(
@@ -229,12 +332,25 @@ fn import_mesh_container(
     let source_rel = super::sidecar_source(project, source);
     let mut produced = Vec::new();
 
-    // 1. Decide each image's usage (sRGB base color vs linear data) from the
-    //    materials that reference it, then import.
+    // 1. Decide each image's usage from the materials that reference it, then
+    //    import.
+    //
+    // **The slot, not just the colour space** (wave IASSET2). A glTF names which
+    // slot every image fills, which is the information `inf_material::mapset`
+    // has to recover from a filename for a loose import — and until this wave it
+    // was thrown away past the sRGB bit: a normal map took
+    // `TextureImportSettings::data()`, i.e. **uncompressed RGBA8**, at four
+    // times a BC5 page for a signal BC5 carries better. That was the right
+    // answer while one atlas held one format (a BC5 map beside a BC1 albedo
+    // demoted the level); the arms above are what make it wrong now.
     let mut srgb = vec![false; g.images.len()];
+    let mut normal = vec![false; g.images.len()];
     for m in &g.materials {
         if let Some(i) = m.base_color_image {
             srgb[i] = true;
+        }
+        if let Some(i) = m.normal_image {
+            normal[i] = true;
         }
     }
     let mut image_ids: Vec<Option<AssetId>> = vec![None; g.images.len()];
@@ -244,8 +360,14 @@ fn import_mesh_container(
     // pool size). This is the P7.0 job system's first real consumer (§2.5).
     let settings: Vec<TextureImportSettings> = (0..g.images.len())
         .map(|i| {
+            // sRGB wins over the normal flag: an image a glTF binds as BOTH a
+            // base colour and a normal map is malformed, and storing two of its
+            // channels would destroy the colour. The albedo reading is the one
+            // that keeps the asset usable.
             if srgb[i] {
                 TextureImportSettings::default()
+            } else if normal[i] {
+                TextureImportSettings::normal_map()
             } else {
                 TextureImportSettings::data()
             }
@@ -538,6 +660,97 @@ mod tests {
         let r = inf_material::TiledTextureReader::new(bytes.as_slice()).unwrap();
         assert_eq!((r.mips()[0].tiles_x, r.mips()[0].tiles_y), (3, 2));
         assert!(r.tile(0, 2, 1).is_some());
+    }
+
+    /// **The import door has a per-slot format policy** (wave IASSET2), and the
+    /// slot comes from the filename.
+    ///
+    /// `inf_material::mapset` wrote the table down at Wave T and nothing called
+    /// it from here: every loose import took `TextureImportSettings::default()`,
+    /// so a file named `..._Normal.png` became an **sRGB BC1** texture with its
+    /// X axis quantised onto five bits — the artifact that module's opening
+    /// paragraph calls "a silent wrong answer".
+    ///
+    /// Asserted on what reaches DISK, not on the helper: the container's own
+    /// header says which format and which colour space the payload is in, which
+    /// is the thing a renderer reads and the thing a wrong policy would get
+    /// wrong.
+    #[test]
+    fn the_import_door_routes_a_map_by_its_slot() {
+        let proj_dir = tempfile::tempdir().unwrap();
+        let src = proj_dir.path().join("Source");
+        std::fs::create_dir_all(&src).unwrap();
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+
+        let header = |proj: &AssetProject, id: inf_asset::AssetId| {
+            let bytes = std::fs::read(&proj.db().get(id).unwrap().path).unwrap();
+            *inf_material::TiledTextureReader::new(bytes.as_slice())
+                .unwrap()
+                .header()
+        };
+
+        // A normal map: LINEAR and BC5 — two channels at a quarter of the page
+        // bytes an RGBA8 normal cost, and the first production caller BC5 has
+        // had since Wave T shipped it.
+        let png = write_corner_png(&src, "Rock_2K_Normal", 260, 132);
+        let out = proj.import_file(&png, &dest).unwrap();
+        let h = header(&proj, out.primary.unwrap());
+        assert_eq!(h.format, inf_render::PageFormat::Bc5, "a normal map is BC5");
+        assert!(!h.srgb, "a normal map is linear");
+        assert!(
+            out.advisories.iter().any(|a| a.contains("Normal")),
+            "the chosen route is not reported: {:?}",
+            out.advisories
+        );
+
+        // An ORM input: linear and uncompressed — the `data()` preset, whose
+        // channels are the data.
+        //
+        // **The same pixels as the normal map above, on purpose.** The import
+        // key is `(source bytes, settings)`, and the settings used to be the
+        // extension: these two hashed to one key, the second import returned the
+        // first's asset, and a roughness map came back as a BC5 normal with
+        // nothing anywhere reporting it. See `importer_tag`.
+        let png = write_corner_png(&src, "Rock_2K_Roughness", 260, 132);
+        let out = proj.import_file(&png, &dest).unwrap();
+        assert!(
+            !out.cached,
+            "two slots of one image collapsed into one asset"
+        );
+        let h = header(&proj, out.primary.unwrap());
+        assert_eq!(h.format, inf_render::PageFormat::Rgba8);
+        assert!(!h.srgb);
+
+        // An albedo: the old default exactly, and SILENT — nothing happened the
+        // author cannot see, so nothing is said.
+        let png = write_corner_png(&src, "Rock_2K_Albedo", 260, 132);
+        let out = proj.import_file(&png, &dest).unwrap();
+        let h = header(&proj, out.primary.unwrap());
+        assert!(h.srgb, "a base colour is sRGB");
+        assert_eq!(
+            h.format,
+            inf_render::PageFormat::Bc1,
+            "opaque → BC1 under Auto"
+        );
+        assert!(
+            !out.advisories.iter().any(|a| a.contains("reads as")),
+            "an albedo took the default and must say nothing: {:?}",
+            out.advisories
+        );
+
+        // ANTI-VACUITY: a name with no slot in it is the pre-IASSET2 behaviour,
+        // byte for byte — so the assertions above measure the POLICY and not the
+        // importer's defaults under another name.
+        //
+        // A different extent on purpose: identical pixels AND identical settings
+        // are one import key, so this would otherwise be the albedo above coming
+        // back out of the cache with no advisories at all.
+        let png = write_corner_png(&src, "Corners", 264, 132);
+        let out = proj.import_file(&png, &dest).unwrap();
+        let h = header(&proj, out.primary.unwrap());
+        assert!(h.srgb && h.format == inf_render::PageFormat::Bc1);
+        assert_eq!(out.advisories.len(), 1, "{:?}", out.advisories);
     }
 
     /// **L7.H7 — a source outside the project records no path.**
