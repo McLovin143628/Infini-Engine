@@ -483,6 +483,38 @@ pub fn character_actors(doc: &SceneDoc) -> Vec<(Uuid, BlueprintClass)> {
     out
 }
 
+/// **The collider under a starter template's ground plane** (wave GTA1 audit),
+/// `half_xz` metres from the origin in X and Z.
+///
+/// # The defect this closes
+///
+/// Every 3D starter template's ground was a `MeshRef` and a `Material` and
+/// nothing else. `inf_physics::d3::ecs`'s sync walks the entities that carry a
+/// body **or** a collider and `continue`s on the rest, so those planes reached
+/// the solver as nothing at all — which cost nothing while the levels held only
+/// furniture, and became the whole story the moment wave GTA1 put a
+/// *gravity-driven pawn* on them: `CharacterMovement::gravity_mps2` is 9.81, and
+/// a character the controller does not report grounded integrates it to a 53 m/s
+/// terminal velocity. Measured, one second of Simulate at 60 Hz, with no
+/// collider under the plane: **4.9868 m of fall on all four documents, still
+/// accelerating**; with this slab under it, **−0.0201 m** (the controller's own
+/// ground snap, upward). The template README this wave wrote — *"press Play and
+/// WASD moves the Player"* — described a body in free fall.
+///
+/// A collider with **no** `RigidBody3D`, which is the documented way to say
+/// "static world" ([`Collider3D`](inf_ecs::components::Collider3D) attaches to an
+/// implicit static body), and the offset puts the slab's **top face exactly on
+/// the visual plane**: `inf_render::primitives::plane_geometry` is a unit quad
+/// spanning ±0.5, so a ground scaled by 20 is ±10 m at `y = 0`.
+pub(crate) fn ground_slab(half_xz: f64) -> inf_ecs::components::Collider3D {
+    inf_ecs::components::Collider3D {
+        shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
+        half_extents: inf_ecs::math::Vec3d::new(half_xz, 0.5, half_xz),
+        offset: inf_ecs::math::Vec3d::new(0.0, -0.5, 0.0),
+        ..Default::default()
+    }
+}
+
 // ── Hybrid 2.5D template scene (P8.4b) ───────────────────────────────────────
 pub const HYBRID_GROUND_GUID: Uuid = Uuid::from_u128(0x8402_0001);
 pub const HYBRID_SUN_GUID: Uuid = Uuid::from_u128(0x8402_0002);
@@ -537,6 +569,7 @@ pub fn hybrid_scene() -> SceneDoc {
             ..Default::default()
         }
     );
+    insert!(doc, HYBRID_GROUND_GUID, ground_slab(10.0));
 
     // A directional sun (3D lighting).
     doc.create_with_guid(HYBRID_SUN_GUID, SpawnKind::Empty, "Sun", None);
@@ -705,6 +738,7 @@ pub fn firstperson_scene() -> SceneDoc {
             ..Default::default()
         }
     );
+    insert!(doc, FP_GROUND_GUID, ground_slab(20.0));
 
     // A directional sun.
     doc.create_with_guid(FP_SUN_GUID, SpawnKind::Empty, "Sun", None);
@@ -729,11 +763,20 @@ pub fn firstperson_scene() -> SceneDoc {
     );
 
     // The player: a kinematic capsule with a 3D character controller.
+    //
+    // **y = 1.2, not 1.0** (wave GTA1 audit). A character's transform is its
+    // capsule CENTRE and its feet are `inf_ecs::movement::feet_offset_m` below —
+    // `half_extents.y + radius`, so 0.9 + 0.3 = 1.2 for this capsule. Authored
+    // at 1.0 the feet sat at −0.2 m, which cost nothing while the capsule was
+    // furniture and is 20 cm inside the ground the moment it became a pawn with
+    // a collider under it. `edit_create_character_with_guid` applies exactly this
+    // offset for the other three templates; this one is hand-authored, so it says
+    // so here.
     doc.create_with_guid(FP_PLAYER_GUID, SpawnKind::Empty, "Player", None);
     insert!(
         doc,
         FP_PLAYER_GUID,
-        Transform::from_translation(DVec3::new(0.0, 1.0, 0.0))
+        Transform::from_translation(DVec3::new(0.0, 1.2, 0.0))
     );
     insert!(
         doc,
@@ -903,6 +946,7 @@ pub fn blank3d_scene() -> SceneDoc {
             ..Default::default()
         }
     );
+    insert!(doc, BLANK3D_GROUND_GUID, ground_slab(10.0));
 
     // A directional sun, tilted so the plane is shaded rather than flat-lit.
     doc.create_with_guid(BLANK3D_SUN_GUID, SpawnKind::Empty, "Sun", None);
@@ -11004,6 +11048,112 @@ mod tests {
             assert_eq!(machine, Some(want(ids.machine)), "{name}: wrong machine");
             let class = world.world().get::<ActorClass>(e).map(|c| c.0);
             assert_eq!(class, Some(want(ids.actor)), "{name}: wrong controller");
+        }
+    }
+
+    /// **AND THE GROUND HOLDS IT UP** (wave GTA1 audit).
+    ///
+    /// The arm above asks `camera_subject` and stops there, which is exactly
+    /// what a pawn with nothing under it passes. All four of these ground planes
+    /// were a `MeshRef` and a `Material` and nothing else, and
+    /// `inf_physics::d3::ecs`'s sync walks the entities carrying a body **or** a
+    /// collider and `continue`s on the rest — so the ground reached the solver as
+    /// nothing, while the character the wave placed on it is gravity-driven. The
+    /// first-person template's own README, written in the same wave, says *"press
+    /// Play and WASD moves the Player"*; what it moved was a body in free fall.
+    ///
+    /// Measured on this arm, one second of Simulate at 60 Hz: **4.9868 m of
+    /// fall on every one of the four** with no collider under the plane, still
+    /// accelerating toward `terminal_velocity_mps` (53), against **−0.0201 m**
+    /// with the slab under it — a 2 cm *rise*, which is the kinematic
+    /// controller's own ground snap and the reason the standing bound is 5 cm
+    /// rather than zero.
+    ///
+    /// The **control is the half that makes this an assertion about the ground**
+    /// rather than about gravity: the same document with every non-pawn collider
+    /// taken back off must drop the pawn, measured in the same run. Without it a
+    /// level with no gravity at all would pass, and so would one whose physics
+    /// bridge never ran.
+    #[test]
+    fn every_starter_level_gives_its_pawn_something_to_stand_on() {
+        use inf_ecs::components::Collider3D;
+
+        /// The fixed step the templates author, and one second of it.
+        const HZ: f64 = 60.0;
+        const STEPS: u32 = 60;
+
+        fn pawn_y(doc: &SceneDoc, guid: Uuid) -> f64 {
+            let e = doc.entity_of(guid).expect("the pawn exists");
+            doc.world()
+                .world()
+                .get::<Transform>(e)
+                .expect("the pawn has a transform")
+                .translation
+                .y
+        }
+
+        /// How far the level's pawn falls in one second, in metres (positive =
+        /// down). `strip_ground` removes every collider that is not the pawn's,
+        /// which is the control.
+        fn fall_of(doc: &mut SceneDoc, strip_ground: bool) -> f64 {
+            let subject =
+                inf_ecs::movement::camera_subject(doc.world()).expect("the level has a pawn");
+            if strip_ground {
+                for guid in doc.order().to_vec() {
+                    if guid == subject {
+                        continue;
+                    }
+                    if let Some(e) = doc.entity_of(guid) {
+                        doc.world_mut()
+                            .world_mut()
+                            .entity_mut(e)
+                            .remove::<Collider3D>();
+                    }
+                }
+            }
+            let gravity = crate::simulate::SimSession::gravity_of(doc);
+            // ANTI-VACUITY: a document with no gravity would pass the standing
+            // assertion for the wrong reason, and the control would then measure
+            // nothing at all.
+            assert!(
+                gravity.d3.y < -1.0,
+                "the document authors no 3D gravity ({}), so neither half of this \
+                 arm is measuring anything",
+                gravity.d3.y
+            );
+            let before = pawn_y(doc, subject);
+            let mut sim =
+                crate::simulate::SimSession::enter_with_gravity(doc, Vec::new(), gravity, HZ);
+            for _ in 0..STEPS {
+                sim.step_once(doc, crate::simulate::SimInput::default());
+            }
+            before - pawn_y(doc, subject)
+        }
+
+        let boot = || {
+            let mut d = SceneDoc::new();
+            crate::scene::demo::build(&mut d);
+            d
+        };
+        for (name, make) in [
+            ("the editor's boot document", &boot as &dyn Fn() -> SceneDoc),
+            ("blank-3d", &blank3d_scene),
+            ("hybrid-2.5d", &hybrid_scene),
+            ("first-person", &firstperson_scene),
+        ] {
+            let stood = fall_of(&mut make(), false);
+            let control = fall_of(&mut make(), true);
+            eprintln!("{name}: falls {stood:.4} m on its ground, {control:.4} m without it");
+            assert!(
+                stood.abs() < 0.05,
+                "{name}: its pawn fell {stood:.4} m in one second — the ground under \
+                 it has no collider, so Play drops the player through the world"
+            );
+            assert!(
+                control > 1.0,
+                "{name}: the control fell only {control:.4} m with every collider \
+                 removed, so the standing assertion above is not measuring the ground"
+            );
         }
     }
 

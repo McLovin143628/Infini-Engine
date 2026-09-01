@@ -26,6 +26,14 @@ pub fn build(doc: &mut SceneDoc) {
         },
     );
     set_color(doc, floor, Color::new(0.30, 0.32, 0.35, 1.0));
+    // **And the collider under it** (wave GTA1 audit). `SpawnKind::Plane` inserts
+    // a `MeshRef` and nothing physical, and `inf_physics::d3::ecs`'s sync skips
+    // an entity with neither a body nor a collider — so this floor reached the
+    // solver as nothing, which cost nothing until the pawn below arrived and
+    // began falling through it at 9.81 m/s². Measured, one second of Simulate:
+    // **4.9868 m of fall** without it. See `samples::ground_slab` for the shape and why
+    // the offset is what it is; the plane is a unit quad scaled by 20, so ±10 m.
+    set_ground_collider(doc, floor, 10.0);
 
     // A little cluster of primitives under a "Props" folder.
     let props = doc.create(SpawnKind::Empty, "Props", None);
@@ -161,6 +169,17 @@ fn add_sky(doc: &mut SceneDoc, parent: uuid::Uuid) {
 
 fn translate(x: f64, y: f64, z: f64) -> Transform {
     Transform::from_translation(DVec3::new(x, y, z))
+}
+
+/// Put [`crate::samples::ground_slab`] under an already-created ground plane.
+fn set_ground_collider(doc: &mut SceneDoc, guid: uuid::Uuid, half_xz: f64) {
+    if let Some(e) = doc.entity_of(guid) {
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::samples::ground_slab(half_xz));
+        doc.world_mut().mark_dirty();
+    }
 }
 
 fn set_transform(doc: &mut SceneDoc, guid: uuid::Uuid, t: Transform) {

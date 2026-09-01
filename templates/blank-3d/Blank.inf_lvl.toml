@@ -2,7 +2,7 @@ schema_version = 26
 guid = "00000000-0000-0000-0000-000084070000"
 title = "Blank 3D"
 entity_count = 4
-content_hash = "9d9791b547ded279"
+content_hash = "901a21525907c131"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a2",
