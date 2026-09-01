@@ -68,10 +68,10 @@ fn print_help() {
          GIS LAYER KINDS:\n  \
              generic (default), roads, streams, lakes, biomes, buildings, parcels\n\n\
          BLOCK CODEC (per-tile / per-chunk, inside the streaming containers):\n  \
-             zstd (default) — best ratio and the fastest decode of the three\n  \
-             lz4            — weaker ratio, far faster decode; the WEB choice\n  \
-             deflate        — no reason to pick it; kept for the bake-off\n  \
-             raw            — do not transcode at all (the pre-IASSET1 pack)\n",
+             zstd    — the default; best ratio and the fastest decode\n  \
+             lz4     — weaker ratio, far faster decode; the WEB choice\n  \
+             deflate — no reason to pick it; kept for the bake-off\n  \
+             raw     — do not transcode at all (the pre-IASSET1 pack)\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -239,9 +239,9 @@ fn cmd_cook(args: &[String]) -> ExitCode {
             // web-targeting escape hatch: `zstd` decodes through the pure-Rust
             // `ruzstd` in a browser, 7.3× slower than the C `zstd` a desktop
             // links, and a knob nobody can find is a knob nobody uses.
-            "usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n              \
-                    [--block-codec raw|lz4|deflate|zstd]  (default zstd; `raw` = do not\n              \
-                    transcode, reproducing the pre-IASSET1 pack; `lz4` for a web target)\n   \
+            "usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n   \
+                    [--block-codec raw|lz4|deflate|zstd] (default zstd; `raw` = do\n   \
+                    not transcode, the pre-IASSET1 pack; `lz4` for a web target)\n   \
                     or: inf cook --mods <class.inf_act> [--out <dir>]"
         );
         return ExitCode::FAILURE;

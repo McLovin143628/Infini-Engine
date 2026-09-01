@@ -29558,6 +29558,48 @@ again. The fix that made the battery affordable is the one **CI has used all alo
 machine had not: `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, which took the same battery's
 artifacts from 300 GB to 27 GB with no change to what is tested.
 
+**THE ADVERSARIAL AUDIT (2026-09-01).** Every headline number was **independently reproduced**
+on the audit tree — the island re-cooked from a release binary rebuilt with the audit's own
+fixes in it. Both packs came out at **604 631 836 B** (`--block-codec raw`) and **247 497 020 B**
+(default), the compressed one **byte-identical** to the pack this wave committed; `pack ls
+--totals` reproduced row for row; the 300-frame final-state hash is
+`6a34aa77b6095aeb0af1fe954cb5d166` on **both**. Cook 42.1 s vs 41.4 s; boot 1 467 ms vs
+1 562 ms (best of three, 120 frames) — same direction and magnitude as the wave's 1 437 / 1 540.
+The three re-blessed samples were byte-compared: **exactly one differing byte each**, at offset
+8. The anti-clause and the pack-name drift gate were mutation-verified and fail with the
+sentence they promise, as did the `.gitattributes` pin.
+
+**Four defects, all fixed.** (1) `default-features = false` on `lz4_flex` was reached for to
+drop the `frame` format and dropped **`safe-decode`** with it, so the workspace compiled the
+raw-pointer decoder (`PtrSink`) instead of the `forbid(unsafe_code)` one — for a reader that
+parses a container the user downloaded, in the shipped player, behind a ceiling that bounds the
+length *claim* and not the frame. Named back, and pinned by a manifest test because nothing
+about the bytes can tell you which decoder ran. (2) **A doctored header could mint its own
+ceiling**: `tile_raw_ceiling(header.tile_resolution)` was fed a field checked only for `>= 2`,
+so `u32::MAX` saturated the bound to `usize::MAX` and "bound the claim before it becomes an
+allocation" bounded nothing. `MAX_TILE_RESOLUTION = 2049` is enforced by the parser, the builder
+(a writer must not manufacture a file its own reader rejects), the import validator, and a clamp
+inside the ceiling itself; worst case goes from unbounded to ~256 MiB. `.inf_voxel` was never
+exposed — its ceiling is a constant. (3) **The `Cow` conversion was done on the decode side
+only**: `encode_block` returned a `Vec`, so every all-raw container build materialized a second
+full copy of its own payload — a 550 MB `.inf_terrain` write-back went from a ~2× transient to
+~3×, on the editor's save path. (4) `contains_tile`'s default fetches the bytes to answer a
+bool, which is a whole 581 KiB tile's *decompress* since the `Cow`; the asset-backed stores
+answer from their directory now. Plus four ledger corrections — `--block-codec` named in neither
+help text, the `ratio 1.000` a `--totals` reader takes as "nothing was won", `.inf_part`'s
+60 509 B restated three times as a size when it is a *saving*, and `packaging.md` still telling
+users the streaming kinds ship uncompressed — and one carried item **sharpened**: the web
+target's codec is a *question* (decode time against a 51.5 MB larger download, on a player that
+fetches the whole pack), not a default flip, so it stays carried under the
+unmeasured-prescription law rather than being closed with a one-line change.
+
+**What the audit did NOT change.** The two new timing arms assert on wall-clock milliseconds,
+which is this repo's practice rather than a violation of it (`budget.rs` documents the budget
+classes; ~30 test files measure against them). Re-measured margins: the bake-off's absolute arm
+0.73 ms against 4.0 (5.5×), its discriminating arm 0.045 vs 0.167 ms/tile (3.7×), the GUID
+probe's verdict 0.077 % of a frame against a 1.0 % line (13×). They stay, with the implementer's
+own flake caveat standing.
+
 **House gates on the closing tree:** battery **358 / 6 639 / 0 / 20** exit 0 (+2 targets, +31
 tests over GTA1's 356 / 6 608), goldens **60 files** green under `INF_GOLDEN_STRICT=1` with a
 clean tree afterwards — **none blessed by the run**; clippy **0 warnings, 0 errors** with
