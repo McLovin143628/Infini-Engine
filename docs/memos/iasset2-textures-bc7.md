@@ -467,6 +467,64 @@ the second confirmed the fixes moved nothing else.
 
 ---
 
+## THE ADVERSARIAL AUDIT (2026-09-01, `fbd2aa34..a696a1cc`)
+
+Seven findings. One is a correctness defect in this wave's own new code; the rest
+are gates and numbers that did not aim at what they named. All fixed in
+`audit(IASSET2)` commits; the closing tree is **358 / 6 660 / 0 / 20** (one arm
+added), goldens **60** with a clean tree, rustdoc **409 / 48 crates**, clippy
+**0**, `cargo deny` four-ok, `Cargo.lock` unmoved.
+
+1. **`split_pool_budget` donated pages it could not pay for.** Pass 2 decremented
+   the donor in a loop and asked afterwards whether enough had come free, so a
+   donor that ran out mid-loop kept nothing it had given up and the recipient
+   still got nothing. Measured: on a budget of eight BC1 pages asked to seat one
+   RGBA8 arm beside them, the split handed out **9 248 B of 73 984 (12.5 %)** and
+   the RGBA8 arm was empty anyway. Now one priced subtraction against the
+   flooring slack, taken only when it covers the page.
+2. **The headline page count was not the number the arm computes.** 2 040 is the
+   **equal-weight** split; the fixture weighs the ground library's **4 : 1** and
+   measures **2 445** (2 173 + 272), i.e. **7.2×** rather than 6.0×. The `>= 5×`
+   assertion could not tell them apart. Pinned by value; every row in this memo
+   now names its weighting.
+3. **The wgpu page-format sweep never saw BC7** — it walked a hand-written list.
+   It walks `PageFormat::ALL` now.
+4. **The no-float gate's anti-vacuity list did not name a BC7 function**, so the
+   gate's own argument ("it is in this file") was not an assertion. It is now.
+5. **The image-extension table was two lists** — `import_file`'s router and
+   `importer_tag`'s key. One `is_image_ext`, because a divergence re-opens
+   finding 1 of the import-door section silently.
+6. **Both hosts logged the first arm's format as the level's**, and `demoted`
+   surfaced nowhere per level. Both lines print the arms now.
+7. **The v4 window's own format had no writer-side version pin** — forward-looking
+   (today the `None` row already falsifies the mutation), load-bearing at v5.
+
+Independently re-verified rather than taken on the ledger's word: the BC7 mode-6
+bit stream against a **separately written spec decoder** (unary mode, R0 R1 G0 G1
+B0 B1 A0 A1 at seven bits, P0/P1 at 63/64, three-bit anchor) — 0 of 4 096 bytes
+differ over 64 random blocks; the encoder tables above, re-measured; the seventeen
+committed `.inf_tex` headers read byte-by-byte (five v2 BC1 albedos, five v2 BC1
+ORM, seven v3 BC5 normals/details, **no v4**, sizes summing to exactly 9 207 264);
+the BC6H no-content claim (zero `.hdr`/`.exr`, zero code-4 payloads, zero
+`hdr = true` sidecars); the per-instance word (`scene.rs`, `passes/mesh.rs`,
+`passes/vgeom.rs` are byte-untouched across the whole wave). Mutation-verified:
+`VT_MAX_POOLS` 3→4 and a sixth `tile_bgl_entries` entry each fail the counting
+gate with its sentence; an `as f32` inside `encode_bc7_block` fails the no-float
+gate; the IB-16 floor lane still lands in arm 1 while arm 0's refinement is
+throttled to one page.
+
+Carried by the audit: `cap_arm_plan` could demote a **float** format if `cap`
+were 1 (the RGBA8 swap can displace `rank[0]`) — unreachable at `VT_MAX_POOLS` 3
+with one float format in the enum; the counting gate is **terrain-scoped**
+(`env + tile`), so a fragment sampled texture added to another env-binding
+pipeline's own group is unguarded — visbuffer-resolve sits at 13 and every other
+lit pipeline at 11, so there is headroom, but the gate's sentence says "the lit
+path"; `TextureImportSettings` cannot **say** which space a normal map is in, so
+the BC5 tangent-space rule is a doc plus one gate rather than a refusal; and BC7
+has no committed content and therefore no GPU-decode arm anywhere in the tree.
+
+---
+
 ## THE LAWS THIS WAVE PAID FOR
 
 1. **A gate scopes on the file it is in.** The no-float gate reads `bc.rs`'s own
