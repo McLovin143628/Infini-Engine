@@ -959,6 +959,23 @@ pub fn body_part_guid(chassis: Uuid, part: &str) -> Uuid {
     Uuid::from_u128(x)
 }
 
+/// How far the yaw rate may stray from what the steering asked for, rad/s,
+/// before stability control does anything.
+///
+/// A dead band, and not an optional one: a car is always a little off its own
+/// bicycle-model reference, and an aid with no tolerance would be braking a
+/// wheel on a motorway.
+pub const ESC_YAW_TOLERANCE_RAD_S: f64 = 0.12;
+
+/// How hard stability control brakes, newtons per rad/s of yaw error past the
+/// tolerance, at full [`VehicleTuning::stability_control`].
+///
+/// Sized against a road car's brake: 9 000 N per rad/s means half a radian a
+/// second of error spends about a third of a 12 kN brake budget on one wheel,
+/// which is a correction a driver feels as the car tightening rather than as a
+/// hand on the wheel.
+pub const ESC_GAIN_N_PER_RAD_S: f64 = 9_000.0;
+
 /// The speed difference, rad/s, a differential's lock ramps in over.
 ///
 /// Two radians a second — about 0.7 m/s of wheel speed on a road tyre. A lock
@@ -2377,7 +2394,23 @@ impl Vehicle for RaycastVehicle {
                 let axle = base * n as f64;
                 base * (1.0 - lock * ramp) + axle * lock * ramp * mine
             };
-            self.drive_nm[i] = crank * ratio * direction * weight;
+            // **Traction control**, which is one line once a wheel has a slip
+            // ratio: if this wheel was spinning last step, hand it less. Last
+            // step's, and that is not a shortcut — a real system measures and
+            // then modulates, so a one-step lag is the mechanism rather than an
+            // approximation of it.
+            let tc = self.tuning.traction_control_slip;
+            let cut = if tc.is_finite() && tc > 0.0 {
+                let slip = self.wheels[i].slip_ratio;
+                if slip > tc {
+                    (tc / slip).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+            self.drive_nm[i] = crank * ratio * direction * weight * cut;
         }
 
         // **The driveline ceiling.** `max_engine_force_n` used to be the whole
@@ -2438,6 +2471,42 @@ impl Vehicle for RaycastVehicle {
         } else {
             self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs()
         };
+        // ── stability control ────────────────────────────────────────────────
+        //
+        // The yaw rate the steering asked for, from the bicycle model:
+        // `psi = v · delta / L`, negative for a right turn because a positive
+        // steer points the wheels at `+X` and yawing toward `+X` is a rotation
+        // about `-Y`. Compared against the yaw rate the car actually has, and the
+        // difference decides WHICH wheel to brake:
+        //
+        // * **oversteer** — the car is rotating faster than it was asked to, so
+        //   brake the OUTSIDE FRONT wheel, whose drag yaws the car back out of
+        //   the turn;
+        // * **understeer** — it is rotating slower, so brake the INSIDE REAR,
+        //   whose drag yaws it into the turn.
+        //
+        // Which is the whole of what a stability system is: one wheel, chosen by
+        // the sign of an error.
+        let esc_strength = if self.tuning.stability_control.is_finite() {
+            self.tuning.stability_control.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let yaw_rate = chassis.angvel.dot(up);
+        let yaw_ref = if wheelbase > 0.0 {
+            -forward_mps * steer_deg.to_radians() / wheelbase
+        } else {
+            0.0
+        };
+        let esc_over = yaw_rate.abs() > yaw_ref.abs();
+        let esc_force = if esc_strength > 0.0 && steer_deg != 0.0 {
+            let error = (yaw_rate - yaw_ref).abs() - ESC_YAW_TOLERANCE_RAD_S;
+            (esc_strength * ESC_GAIN_N_PER_RAD_S * error.max(0.0))
+                .min(self.tuning.brake_force_n.max(0.0))
+        } else {
+            0.0
+        };
+
         // The rev limiter, expressed where it belongs: as the fastest the wheels
         // can turn in this gear. Without it an airborne driven wheel spins up for
         // ever, because nothing on the ground is there to stop it.
@@ -2576,8 +2645,28 @@ impl Vehicle for RaycastVehicle {
                 0.0
             };
             let rolling = state.load_n.max(0.0) * self.tuning.rolling_resistance.max(0.0) * radius;
-            let resist = brake_share(mount.steered()) * radius
+            // **ABS**: bleed the foot brake off a wheel that was locking. Last
+            // step's slip, for traction control's reason — measure, then
+            // modulate. The HANDBRAKE is deliberately outside it: a handbrake
+            // that could not lock a wheel would not be a handbrake.
+            let abs = self.tuning.abs_slip;
+            let ease = if abs.is_finite() && abs > 0.0 && state.slip_ratio < -abs {
+                (abs / state.slip_ratio.abs()).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            // Stability control's own wheel, and only that one.
+            let esc = if esc_force > 0.0
+                && mount.steered() == esc_over
+                && (mount.mount_local.x * steer_deg < 0.0) == esc_over
+            {
+                esc_force * radius
+            } else {
+                0.0
+            };
+            let resist = brake_share(mount.steered()) * ease * radius
                 + hand
+                + esc
                 + rolling
                 + engine_brake_total * axle_share(mount.steered());
             let shed = |w: f64| {
@@ -3941,9 +4030,22 @@ mod tests {
         );
     }
 
-    /// Park a four-wheel rig on flat ground with every wheel in contact.
+    /// Park a four-wheel rig on flat ground with every wheel in contact, **with
+    /// the three driver aids switched off**.
+    ///
+    /// Off by default because an aid's whole job is to hide the mechanism under
+    /// it: a lockup arm with ABS on measures ABS, and a differential arm with
+    /// traction control on measures traction control. The aids get their own
+    /// fixtures, which turn them back on one at a time.
     fn grounded(tuning: &[(&str, f64)]) -> RaycastVehicle {
         let mut v = RaycastVehicle::new(rig(4));
+        for (name, value) in [
+            ("abs_slip", 0.0),
+            ("traction_control_slip", 0.0),
+            ("stability_control", 0.0),
+        ] {
+            assert!(v.tune(name, value));
+        }
         for (name, value) in tuning {
             assert!(v.tune(name, *value), "the fixture set an unknown `{name}`");
         }
@@ -4453,6 +4555,222 @@ mod tests {
             .is_err());
     }
 
+    /// **ABS keeps a braked wheel turning, and it stops the car sooner for it.**
+    ///
+    /// Both halves matter. An ABS that merely stopped the wheel locking while
+    /// lengthening the stop would be a worse brake with a better graph, and that
+    /// is exactly what a naive one does.
+    #[test]
+    fn abs_keeps_the_wheel_out_of_lockup_and_stops_shorter_for_it() {
+        let stop = |abs: f64| -> (f64, f64, f64) {
+            let mut v = grounded(&[("abs_slip", abs)]);
+            let mut chassis = resting(1_200.0);
+            chassis.linvel = DVec3::new(0.0, 0.0, 25.0);
+            for w in v.wheels_mut() {
+                w.omega_rad_s = 25.0 / 0.35;
+            }
+            v.control(VehicleControls {
+                brake: 1.0,
+                ..Default::default()
+            });
+            let mut out = Vec::new();
+            let (mut travelled, mut locked) = (0.0, 0usize);
+            // Sampled MID-STOP, not at the end: by step 180 both cars are
+            // stationary and both wheels read zero, so a comparison there says
+            // nothing at all.
+            let mut mid = 0.0;
+            for step in 0..180 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+                let fz: f64 = out.iter().map(|f| f.force.z).sum();
+                chassis.linvel.z = (chassis.linvel.z + fz / 1_200.0 / 60.0).max(0.0);
+                travelled += chassis.linvel.z / 60.0;
+                if step == 30 {
+                    mid = v.wheels()[0].omega_rad_s;
+                }
+                // "Locked" as a COUNT of steps rather than a worst case: a real
+                // anti-lock system PULSES, so its worst single step is a locked
+                // wheel too, and only the share of the stop it spends there says
+                // anything at all.
+                if v.wheels()[0].slip_ratio < -0.8 {
+                    locked += 1;
+                }
+            }
+            (travelled, locked as f64 / 180.0, mid)
+        };
+        let (locked_far, locked_share, locked_omega) = stop(0.0);
+        let (abs_far, abs_share, abs_omega) = stop(0.15);
+        assert!(
+            locked_share > 0.5 && locked_omega < 1.0,
+            "with ABS off the wheel spent {locked_share:.2} of the stop locked \
+             and ended at {locked_omega} rad/s"
+        );
+        assert!(
+            abs_share < locked_share * 0.5,
+            "ABS spent {abs_share:.2} of the stop locked against {locked_share:.2} \
+             unaided"
+        );
+        assert!(
+            abs_omega > locked_omega + 5.0,
+            "ABS left the wheel at {abs_omega} rad/s against a locked {locked_omega}"
+        );
+        assert!(
+            abs_far < locked_far * 0.95,
+            "ABS stopped in {abs_far:.2} m against a locked {locked_far:.2} — an \
+             anti-lock that lengthens the stop is a worse brake with a better graph"
+        );
+    }
+
+    /// **Traction control takes torque off a spinning wheel**, and a slippery
+    /// standing start goes further with it than without.
+    #[test]
+    fn traction_control_cuts_the_torque_a_spinning_wheel_is_given() {
+        let launch = |tc: f64| -> (f64, f64) {
+            let mut v = grounded(&[
+                ("traction_control_slip", tc),
+                ("longitudinal_grip", 0.35),
+                ("lateral_grip", 0.35),
+            ]);
+            v.control(VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            });
+            let mut chassis = resting(1_200.0);
+            let mut out = Vec::new();
+            let (mut travelled, mut worst) = (0.0, 0.0f64);
+            for _ in 0..120 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+                let fz: f64 = out.iter().map(|f| f.force.z).sum();
+                chassis.linvel.z += fz / 1_200.0 / 60.0;
+                travelled += chassis.linvel.z / 60.0;
+                worst = worst.max(v.wheels()[0].slip_ratio);
+            }
+            (travelled, worst)
+        };
+        let (free_far, free_slip) = launch(0.0);
+        let (tc_far, tc_slip) = launch(0.12);
+        assert!(
+            free_slip > 0.5,
+            "the fixture never span its wheels: {free_slip}"
+        );
+        assert!(
+            tc_slip < free_slip * 0.5,
+            "traction control let the slip reach {tc_slip} against {free_slip} \
+             unaided"
+        );
+        assert!(
+            tc_far > free_far,
+            "traction control carried the car {tc_far:.2} m against {free_far:.2} \
+             — an aid that costs distance on a slippery launch is not one"
+        );
+        // …and it costs nothing at all when the tyres are gripping: an aid that
+        // is always taking torque away is a smaller engine.
+        let dry = |tc: f64| -> f64 {
+            let mut v = grounded(&[("traction_control_slip", tc)]);
+            v.control(VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            });
+            let mut chassis = resting(1_200.0);
+            let mut out = Vec::new();
+            let mut travelled = 0.0;
+            for _ in 0..120 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+                let fz: f64 = out.iter().map(|f| f.force.z).sum();
+                chassis.linvel.z += fz / 1_200.0 / 60.0;
+                travelled += chassis.linvel.z / 60.0;
+            }
+            travelled
+        };
+        assert!(
+            (dry(0.12) - dry(0.0)).abs() < dry(0.0) * 0.02,
+            "traction control cost a GRIPPING car {:.3} m of {:.3}",
+            dry(0.0) - dry(0.12),
+            dry(0.0)
+        );
+    }
+
+    /// **Stability control brakes ONE wheel, and it is the right one.**
+    ///
+    /// Oversteer takes the outside front; understeer takes the inside rear. Read
+    /// as the difference in ground force between the two candidates, which is
+    /// what a claim about "which wheel" has to be.
+    #[test]
+    fn stability_control_brakes_the_outside_front_when_the_car_is_loose() {
+        // Steering RIGHT (positive), so the outside is the left pair (x < 0) and
+        // the inside is the right pair (x > 0). The fixture's wheels are
+        // (-x, +z), (+x, +z), (-x, -z), (+x, -z).
+        let run = |yaw: f64, strength: f64| -> [f64; 4] {
+            let mut v = grounded(&[
+                ("stability_control", strength),
+                ("steer_rate_deg_per_s", 1e9),
+            ]);
+            let mut chassis = resting(1_200.0);
+            chassis.linvel = DVec3::new(0.0, 0.0, 20.0);
+            chassis.angvel = DVec3::new(0.0, yaw, 0.0);
+            for w in v.wheels_mut() {
+                w.omega_rad_s = 20.0 / 0.35;
+            }
+            v.control(VehicleControls {
+                steer: 1.0,
+                ..Default::default()
+            });
+            let mut out = Vec::new();
+            for _ in 0..3 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+            }
+            let mut omega = [0.0; 4];
+            for (i, w) in v.wheels().iter().enumerate() {
+                omega[i] = w.omega_rad_s;
+            }
+            omega
+        };
+        // A right turn's reference yaw rate is NEGATIVE. Spinning faster than
+        // that (more negative) is oversteer.
+        // The reference yaw rate this fixture's own steering asks for, so the two
+        // cases below are genuinely oversteer and understeer rather than two
+        // numbers that happened to work.
+        let reference =
+            -20.0 * steer_limit_deg(&VehicleTuning::default(), 20.0).to_radians() / (2.0 * 1.4);
+        let loose = run(reference * 1.8, 1.0);
+        let off = run(reference * 1.8, 0.0);
+        assert!(
+            loose[0] < off[0] - 1.0,
+            "the outside FRONT wheel was not braked: {} against {}",
+            loose[0],
+            off[0]
+        );
+        for i in [1, 2, 3] {
+            assert!(
+                (loose[i] - off[i]).abs() < 1e-9,
+                "stability control also braked wheel {i} ({} vs {})",
+                loose[i],
+                off[i]
+            );
+        }
+        // Understeer — barely rotating into a turn the steering asked for — takes
+        // the INSIDE REAR instead.
+        let push = run(0.0, 1.0);
+        let push_off = run(0.0, 0.0);
+        assert!(
+            push[3] < push_off[3] - 1.0,
+            "the inside REAR wheel was not braked: {} against {}",
+            push[3],
+            push_off[3]
+        );
+        assert!((push[0] - push_off[0]).abs() < 1e-9);
+        // …and inside the tolerance it does nothing at all.
+        let calm = run(reference, 1.0);
+        let calm_off = run(reference, 0.0);
+        assert_eq!(
+            calm, calm_off,
+            "stability control fired inside its dead band"
+        );
+    }
+
     /// **A wheel is a wheel now**: `ω` is a state, the slip ratio is defined
     /// against it, and the drawn spin is DERIVED from it rather than from how
     /// fast the car is going.
@@ -4462,7 +4780,7 @@ mod tests {
     /// "does the wheel turn", and would show a locked wheel rolling.
     #[test]
     fn the_wheel_has_its_own_speed_and_the_drawn_spin_follows_it() {
-        let mut v = RaycastVehicle::new(rig(4));
+        let mut v = grounded(&[]);
         let t = *v.tuning();
         for w in v.wheels_mut() {
             w.contact = Some(WheelContact {
@@ -4511,7 +4829,9 @@ mod tests {
         assert_ne!(v.wheels()[0].spin_deg, before, "the drawn wheel is frozen");
 
         // **LOCKUP**: full brake, and the wheel stops turning while the car does
-        // not — which is the state P29.7 could not represent at all.
+        // not — which is the state P29.7 could not represent at all. ABS off,
+        // because an ABS that let a wheel lock would not be an ABS.
+        v.tune("abs_slip", 0.0);
         v.control(VehicleControls {
             brake: 1.0,
             ..Default::default()
@@ -4552,6 +4872,7 @@ mod tests {
         let mut v = RaycastVehicle::new(rig(4));
         v.tune("longitudinal_grip", 0.3);
         v.tune("lateral_grip", 0.3);
+        v.tune("traction_control_slip", 0.0);
         for w in v.wheels_mut() {
             w.contact = Some(WheelContact {
                 point: DVec3::new(0.0, -1.0, 0.0),

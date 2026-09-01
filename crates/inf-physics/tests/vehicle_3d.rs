@@ -378,17 +378,21 @@ fn throttle_drives_it_and_the_brake_stops_it() {
         180,
     );
     let coasted = rig.z() - before_brake;
-    // 0.8 of the accelerating distance, and the number moved with the model
+    // 0.7 of the accelerating distance, and the number moved with the model
     // rather than the model being bent to the number. This ratio IS the brake's
     // strength against the engine's: the same speed takes `v^2/2a` to reach and
-    // `v^2/2b` to shed. VEH2a's brake locks its wheels — 1 050 N.m against a
-    // tyre that can take about 900 — so it stops at the SLIDING coefficient,
-    // 0.72 of the peak, where P29.7's brake was a force with no such limit and
-    // no such thing as a locked wheel. **The ABS clause tightens this back**:
-    // holding the slip at the peak instead of past it is worth about a fifth of
-    // the distance, and the arm is written to notice.
+    // `v^2/2b` to shed.
+    //
+    // It was 0.5 under P29.7, whose brake was a force with no limit and no such
+    // thing as a locked wheel. VEH2a's brake locks — 1 050 N.m against a tyre
+    // that can take about 900 — so it stops at the SLIDING coefficient, and the
+    // arm went to 0.8 for one commit at a measured 16.09 m of 21.25. **ABS took
+    // it back**: holding the slip near the peak instead of past it is worth 17 %
+    // of the stop, measured at 13.29 m of 21.69, so the arm is tighter than the
+    // model it now guards and looser than the fiction it replaced.
+    println!("THE BRAKE: {travelled:.2} m accelerating, {coasted:.2} m stopping");
     assert!(
-        coasted < travelled * 0.8,
+        coasted < travelled * 0.7,
         "braking for as long as it accelerated covered {coasted} m against {travelled} m"
     );
     let stopped = rig.z();
