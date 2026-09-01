@@ -1848,11 +1848,15 @@ mod tests {
     fn frozen_tile_generations_are_pinned_to_both_ladders() {
         assert_eq!(
             crate::asset::TERRAIN_ASSET_SCHEMA_VERSION,
-            5,
+            6,
             "the .inf_terrain header moved. Generation-1 frozen tiles cover header \
              versions 1..=2, generation-2 covers 3, generation-3 covers 4, and the \
-             current TerrainTile covers 5. If the tile layout changed again, add \
-             TerrainTileFrozenV4 and extend `decode_tile_at`; if only the header \
+             current TerrainTile covers 5 AND 6 — IASSET1's v6 changed the \
+             CONTAINER's directory (a per-tile codec byte), not the tile blob, \
+             which is the one kind of bump that needs no new frozen generation \
+             and is exactly the distinction this pin exists to make someone \
+             check. If the tile LAYOUT changed again, add TerrainTileFrozenV4 \
+             and extend `decode_tile_at`; if only the header or the directory \
              changed, update this pin and TerrainTileFrozenV1's generation table."
         );
         // The version→wire-type mapping the pin is really about. Each generation

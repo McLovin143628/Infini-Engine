@@ -238,7 +238,10 @@ pub fn rewrite_terrain_asset<B: AsRef<[u8]>>(
 /// next load.
 fn passthrough<B: AsRef<[u8]>>(source: &TerrainAssetReader<B>, key: TileKey) -> Result<Vec<u8>> {
     if source.header().schema_version == TERRAIN_ASSET_SCHEMA_VERSION {
-        return source.tile_bytes(key).map(<[u8]>::to_vec).ok_or_else(|| {
+        return source
+            .tile_bytes(key)
+            .map(std::borrow::Cow::into_owned)
+            .ok_or_else(|| {
             TerrainAssetError::Malformed(format!(
                 "write-back tried to pass through tile {key:?}, which the source asset does not hold"
             ))

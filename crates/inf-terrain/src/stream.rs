@@ -146,12 +146,20 @@ impl std::fmt::Debug for PackTileStore {
 }
 
 impl TileStore for PackTileStore {
-    fn tile_bytes(&self, key: TileKey) -> Option<&[u8]> {
+    fn tile_bytes(&self, key: TileKey) -> Option<std::borrow::Cow<'_, [u8]>> {
         let i = self.dir.binary_search_by(|e| e.key.cmp(&key)).ok()?;
         let e = &self.dir[i];
         let bytes = self.payload()?;
         // Bounds were validated when the directory was parsed.
-        bytes.get(e.offset as usize..(e.offset + e.len) as usize)
+        let stored = bytes.get(e.offset as usize..(e.offset + e.len) as usize)?;
+        // Raw borrows straight out of the mapping (the P16.3 promise, intact);
+        // a v6 compressed tile decompresses this one block and nothing else.
+        inf_asset::block::decode_block(
+            e.codec,
+            stored,
+            crate::asset::tile_raw_ceiling(self.header.tile_resolution),
+        )
+        .ok()
     }
 
     fn tile_keys(&self) -> Vec<TileKey> {

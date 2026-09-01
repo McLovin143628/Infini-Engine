@@ -51,7 +51,15 @@ use crate::tile::{TerrainTile, TileKey};
 /// store — so an asset-backed store can serve straight out of an mmap'd pack.
 pub trait TileStore {
     /// The tile's blob bytes, or `None` when the store has no such tile.
-    fn tile_bytes(&self, key: TileKey) -> Option<&[u8]>;
+    ///
+    /// **A `Cow` since IASSET1.** A store whose tile is stored raw still borrows
+    /// straight out of its payload (a pack mapping included) — the P16.3
+    /// zero-copy read, unchanged. A store whose tile is *block-compressed*
+    /// (`.inf_terrain` schema v6) decompresses exactly that one tile into an
+    /// owned buffer. The seam is a `Cow` rather than two methods because every
+    /// caller does the same thing next — hand the bytes to `bincode` — and a
+    /// terrain tile has always been decoded rather than cast.
+    fn tile_bytes(&self, key: TileKey) -> Option<std::borrow::Cow<'_, [u8]>>;
 
     /// Every key the store can serve, in ascending [`TileKey`] order.
     fn tile_keys(&self) -> Vec<TileKey>;
@@ -77,7 +85,7 @@ pub trait TileStore {
     fn load_tile(&self, key: TileKey) -> Result<Option<TerrainTile>, String> {
         match self.tile_bytes(key) {
             None => Ok(None),
-            Some(bytes) => decode_tile_at(bytes, self.tile_schema_version()).map(Some),
+            Some(bytes) => decode_tile_at(&bytes, self.tile_schema_version()).map(Some),
         }
     }
 }
@@ -133,8 +141,10 @@ impl MemoryTileStore {
 }
 
 impl TileStore for MemoryTileStore {
-    fn tile_bytes(&self, key: TileKey) -> Option<&[u8]> {
-        self.tiles.get(&key).map(|v| v.as_slice())
+    fn tile_bytes(&self, key: TileKey) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.tiles
+            .get(&key)
+            .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
     }
 
     fn tile_keys(&self) -> Vec<TileKey> {
@@ -148,7 +158,7 @@ impl TileStore for MemoryTileStore {
 /// payload is itself a borrowed `PackReader::read_ref` slice of an mmap, a tile
 /// reaches the caller with **zero copies and zero decodes**.
 impl<B: AsRef<[u8]>> TileStore for TerrainAssetReader<B> {
-    fn tile_bytes(&self, key: TileKey) -> Option<&[u8]> {
+    fn tile_bytes(&self, key: TileKey) -> Option<std::borrow::Cow<'_, [u8]>> {
         TerrainAssetReader::tile_bytes(self, key)
     }
 
@@ -448,7 +458,10 @@ mod tests {
         assert_eq!(live.height_at(probe), Some(before));
         assert_eq!(
             crate::asset::encode_tile(live.get_tile((0, 0)).unwrap()).unwrap(),
-            store.tile_bytes(TileKey::lod0((0, 0))).unwrap(),
+            store
+                .tile_bytes(TileKey::lod0((0, 0)))
+                .unwrap()
+                .into_owned(),
         );
     }
 

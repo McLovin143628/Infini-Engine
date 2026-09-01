@@ -75,10 +75,11 @@ pub mod writeback;
 use glam::DVec3;
 
 pub use asset::{
-    build_terrain_asset, header_len, read_terrain_asset, write_terrain_asset, TerrainAsset,
-    TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
-    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3, HEADER_LEN_V4,
-    HEADER_LEN_V5, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
+    build_terrain_asset, header_len, read_terrain_asset, recompress_terrain_asset,
+    tile_raw_ceiling, write_terrain_asset, RecompressReport, TerrainAsset, TerrainAssetBuilder,
+    TerrainAssetError, TerrainAssetHeader, TerrainAssetReader, TerrainAssetView, TileDirEntry,
+    FIRST_CODEC_SCHEMA_VERSION, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3, HEADER_LEN_V4,
+    HEADER_LEN_V5, HEADER_LEN_V6, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
 };
 pub use biome::{
     BiomeDef, BiomeSet, BiomeSetError, BIOME_SET_SCHEMA_VERSION, UNASSIGNED_BIOME_COLOR,

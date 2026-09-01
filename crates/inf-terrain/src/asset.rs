@@ -16,11 +16,49 @@
 //! │  pyr_min_tiles u32       PyramidOptions::min_tiles                │
 //! │  reserved      [u8; 56]  zeros (room for v6 without a re-length)  │
 //! ├ tile directory (tile_count × 32 B, sorted by TileKey) ────────────┤
-//! │  lod u32 · tx i32 · tz i32 · reserved u32 · offset u64 · len u64  │
-//! ├ blob section (each tile's bincode bytes, 16-byte-aligned) ────────┤
+//! │  lod u32 · tx i32 · tz i32 · codec u8 + rsv[3] · offset u64 ·     │
+//! │  stored_len u64                                                   │
+//! ├ blob section (each tile's stored bytes, 16-byte-aligned) ─────────┤
 //! │  … tile blobs, zero-padded up to each 16-byte boundary …          │
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Schema v6: per-tile compression (IASSET1)
+//!
+//! v6 changes the **container**, not the tile blob — the mirror image of v3/v4/v5,
+//! which changed the blob and not the container. The directory entry's
+//! always-zero `reserved u32` becomes a [`BlockCodec`] byte plus three zero bytes,
+//! `len` keeps meaning *stored* bytes, and a tile whose codec is not
+//! [`BlockCodec::Raw`] holds an
+//! [`inf_asset::block`](inf_asset::block)-framed blob instead of bare bincode.
+//! Reading is unchanged in shape: binary-search the directory, take the blob,
+//! [`decode_block`] it (a borrow when raw), `bincode`-decode the result.
+//!
+//! **Terrain tiles were never cast in place**, which is the fact that makes this
+//! legal where it is not legal for `.inf_vmesh` or `.inf_tex`. Every page-in has
+//! always run the blob through `bincode` into a [`TerrainTile`], so the borrowed
+//! slice was an input to a decoder, never a `bytemuck` cast — a decompress in
+//! front of that decode is an addition to an existing cost, and the "zero-copy
+//! streaming" the raw layout bought was zero-*copy*, not zero-*work*.
+//!
+//! **The downgrade story.** A v6 payload written with [`BlockCodec::Raw`] on every
+//! tile is byte-identical to the v5 image of the same tiles **except for the four
+//! bytes of `schema_version`** (the codec byte lands where v5's reserved zero
+//! already was) — `v6_all_raw_is_v5_plus_four_bytes` asserts exactly that. A v1–v5
+//! payload keeps loading for ever, because the parser refuses a non-zero
+//! `reserved` on those versions rather than reading it as a codec: an old asset
+//! has no codec byte, and no old asset can be mistaken for one that does. There is
+//! no reverse migration and none is needed — the loose editor asset is what an
+//! author edits, and the cook rebuilds the compressed one from it every time.
+//!
+//! **Where compression is applied.** The editor's writer keeps emitting
+//! [`BlockCodec::Raw`]: a loose `.inf_terrain` is being authored, its tiles are
+//! rewritten on every sculpt write-back, and compressing them would tax the
+//! editor to shrink a file nobody ships. The **cook** transcodes with
+//! [`recompress_terrain_asset`] on the way into the pack. So the editor and the
+//! shipped game hold two different images of one terrain that decode to
+//! bit-identical tiles — which is what keeps PIE (reading the loose asset by path)
+//! and shipping (reading the cooked one) simulating the same world.
 //!
 //! # Schema v3 / v4 / v5: tile blobs grow layers (P19.1, P19.2, P21.2)
 //!
@@ -119,9 +157,11 @@
 //! image atomically (temp + rename, like `PackWriter::write_to_file`) and stamps
 //! the sidecar's content hash over the same bytes the cook will pack.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use glam::DVec3;
+use inf_asset::block::{decode_block, encode_block, BlockCodec};
 use inf_asset::AssetKind;
 
 use crate::data::TerrainData;
@@ -133,11 +173,19 @@ use crate::tile::{
 /// Magic at the head of every `.inf_terrain` payload.
 pub const TERRAIN_ASSET_MAGIC: [u8; 8] = *b"INFTERRN";
 
-/// Current `.inf_terrain` payload schema version (**4** since P19.2 — tile blobs
+/// Current `.inf_terrain` payload schema version (**6** since IASSET1 — the
+/// directory carries a per-tile [`BlockCodec`]; **5** since P21.2 — tile blobs
 /// carry the packed per-sample hole mask; **4** since P19.2 — the biome ids;
 /// **3** since P19.1 — the erosion data maps; **2** since P16.6 — the header
 /// records the pyramid options; see the module docs).
-pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 5;
+pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 6;
+
+/// The first schema version whose directory entries carry a codec byte.
+///
+/// Below it byte 12 of an entry is v1's `reserved u32` and **must be zero** —
+/// which is what makes "a v5 asset has no codec" a checked fact rather than an
+/// assumption (see [`parse`]).
+pub const FIRST_CODEC_SCHEMA_VERSION: u32 = 6;
 
 /// Tile blobs start on multiples of this many bytes (see the module docs).
 pub const TILE_ALIGN: u64 = 16;
@@ -166,8 +214,13 @@ pub const HEADER_LEN_V4: u64 = HEADER_LEN_V2;
 /// here before it was written — the P21.2 audit wrote it).
 pub const HEADER_LEN_V5: u64 = HEADER_LEN_V2;
 
+/// Bytes of the **v6** fixed header. IASSET1's per-tile codec lives in the
+/// *directory entry*, in bytes v1 already reserved, so once again the header does
+/// not move — same reasoning as [`HEADER_LEN_V3`].
+pub const HEADER_LEN_V6: u64 = HEADER_LEN_V2;
+
 /// Bytes of the fixed header **this build writes** (the current schema's).
-pub const HEADER_LEN: u64 = HEADER_LEN_V5;
+pub const HEADER_LEN: u64 = HEADER_LEN_V6;
 
 /// Bytes of the fixed header of a payload at `schema_version`.
 ///
@@ -181,8 +234,32 @@ pub const fn header_len(schema_version: u32) -> u64 {
         2 => HEADER_LEN_V2,
         3 => HEADER_LEN_V3,
         4 => HEADER_LEN_V4,
-        _ => HEADER_LEN_V5,
+        5 => HEADER_LEN_V5,
+        _ => HEADER_LEN_V6,
     }
+}
+
+/// A ceiling on how many bytes one tile blob can decompress to, at
+/// `tile_resolution` samples per side.
+///
+/// A compressed block's declared length is written by whoever made the file, so
+/// it is a claim that has to be bounded **before** it becomes an allocation
+/// ([`decode_block`]). This is the bound, and it is a property of the container
+/// rather than a guess: a [`TerrainTile`] carries at most one `f32` height, one
+/// RGBA weight, three `f32` data-map channels, one biome id and one hole bit per
+/// sample — ~21.2 bytes — so 64 gives better than 3× headroom for `bincode`'s
+/// framing and any layer a future schema appends, while still refusing the
+/// gigabyte claim a doctored asset makes.
+#[inline]
+pub const fn tile_raw_ceiling(tile_resolution: u32) -> usize {
+    /// Generous per-sample bound; see the doc comment for the real ~21.2.
+    const BYTES_PER_SAMPLE: usize = 64;
+    /// Slack for the origin, the five length prefixes and alignment.
+    const SLACK: usize = 64 * 1024;
+    (tile_resolution as usize)
+        .saturating_mul(tile_resolution as usize)
+        .saturating_mul(BYTES_PER_SAMPLE)
+        .saturating_add(SLACK)
 }
 
 /// Bytes of one tile-directory entry.
@@ -312,8 +389,11 @@ pub struct TileDirEntry {
     /// Absolute offset of the blob **within the payload** (a multiple of
     /// [`TILE_ALIGN`]) — usable directly as a `seek` target on a loose file.
     pub offset: u64,
-    /// Blob length in bytes (unpadded).
+    /// **Stored** blob length in bytes (unpadded) — the bytes on disk, which for
+    /// a compressed tile is smaller than what it decodes to.
     pub len: u64,
+    /// How the blob is stored (schema v6+; always [`BlockCodec::Raw`] below it).
+    pub codec: BlockCodec,
 }
 
 // ── builder ─────────────────────────────────────────────────────────────────
@@ -328,6 +408,7 @@ pub struct TerrainAssetBuilder {
     meters_per_sample: f64,
     origin: DVec3,
     pyramid: PyramidOptions,
+    codec: BlockCodec,
     tiles: BTreeMap<TileKey, Vec<u8>>,
 }
 
@@ -344,8 +425,24 @@ impl TerrainAssetBuilder {
             },
             origin: DVec3::ZERO,
             pyramid: PyramidOptions::default(),
+            // RAW by default, deliberately: this builder writes the LOOSE asset
+            // an author edits, whose tiles are rewritten on every sculpt
+            // write-back. Compression belongs to the cook
+            // ([`recompress_terrain_asset`]), which runs once per ship.
+            codec: BlockCodec::Raw,
             tiles: BTreeMap::new(),
         }
+    }
+
+    /// Compress every staged tile under `codec` (IASSET1).
+    ///
+    /// Per-tile and independent: a tile that would inflate is stored
+    /// [`Raw`](BlockCodec::Raw) and its directory entry says so, so the payload
+    /// can never be larger than the uncompressed one. The default is
+    /// [`Raw`](BlockCodec::Raw) — see [`new`](Self::new).
+    pub fn with_codec(mut self, codec: BlockCodec) -> Self {
+        self.codec = codec;
+        self
     }
 
     /// Anchor the tile grid at an explicit world origin (reserved for world
@@ -406,6 +503,19 @@ impl TerrainAssetBuilder {
             .unwrap_or(1)
             .max(1);
 
+        // Compress each tile independently (IASSET1). `encode_block` reports the
+        // codec it actually used, which is `Raw` for a tile compression would
+        // inflate — so the directory always states what happened, and the payload
+        // can never be larger than the uncompressed one would have been.
+        let stored: Vec<(BlockCodec, Vec<u8>)> = self
+            .tiles
+            .values()
+            .map(|blob| encode_block(self.codec, blob))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e: inf_asset::AssetError| {
+                TerrainAssetError::Malformed(format!("tile compression: {e}"))
+            })?;
+
         // Offsets first: the blob section starts after the header + full directory
         // (both already multiples of TILE_ALIGN, so no padding is ever needed
         // there — `align_up` states the invariant rather than relying on it), and
@@ -418,7 +528,7 @@ impl TerrainAssetBuilder {
         let pyr_min_tiles = u32::try_from(self.pyramid.min_tiles).unwrap_or(u32::MAX);
         let mut offsets = Vec::with_capacity(self.tiles.len());
         let mut offset = blob_base;
-        for blob in self.tiles.values() {
+        for (_, blob) in &stored {
             offsets.push(offset);
             offset = align_up(offset + blob.len() as u64);
         }
@@ -442,11 +552,15 @@ impl TerrainAssetBuilder {
         out.resize(HEADER_LEN as usize, 0);
         debug_assert_eq!(out.len() as u64, HEADER_LEN);
 
-        for ((key, blob), &off) in self.tiles.iter().zip(&offsets) {
+        for ((key, (codec, blob)), &off) in self.tiles.keys().zip(&stored).zip(&offsets) {
             out.extend_from_slice(&key.lod.to_le_bytes());
             out.extend_from_slice(&key.coord.0.to_le_bytes());
             out.extend_from_slice(&key.coord.1.to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes()); // reserved, always zero
+            // v6: the codec byte, then three bytes v1 reserved and every version
+            // since has written as zero. A raw tile writes 0 here, which is what
+            // makes an all-raw v6 image byte-identical to the v5 one.
+            out.push(codec.code());
+            out.extend_from_slice(&[0u8; 3]);
             out.extend_from_slice(&off.to_le_bytes());
             out.extend_from_slice(&(blob.len() as u64).to_le_bytes());
         }
@@ -454,7 +568,7 @@ impl TerrainAssetBuilder {
 
         // Blob section, zero-padded up to each offset (and to the end, so the
         // payload length is itself a multiple of TILE_ALIGN).
-        for (blob, &off) in self.tiles.values().zip(&offsets) {
+        for ((_, blob), &off) in stored.iter().zip(&offsets) {
             out.resize(off as usize, 0);
             out.extend_from_slice(blob);
         }
@@ -590,6 +704,87 @@ pub fn write_terrain_asset<'a>(
     Ok(bytes)
 }
 
+/// What one [`recompress_terrain_asset`] pass did to a payload — the cook's
+/// per-asset row in the before/after table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecompressReport {
+    /// Tiles in the payload.
+    pub tiles: usize,
+    /// Tiles that actually ended up compressed (the rest inflated and stayed
+    /// [`Raw`](BlockCodec::Raw)).
+    pub tiles_compressed: usize,
+    /// Payload bytes before.
+    pub bytes_before: u64,
+    /// Payload bytes after.
+    pub bytes_after: u64,
+}
+
+impl RecompressReport {
+    /// `after / before` — 1.0 when nothing was won.
+    pub fn ratio(&self) -> f64 {
+        if self.bytes_before == 0 {
+            1.0
+        } else {
+            self.bytes_after as f64 / self.bytes_before as f64
+        }
+    }
+}
+
+/// **Transcode a `.inf_terrain` payload to per-tile `codec`** — the cook's
+/// compile step for a streaming terrain (IASSET1).
+///
+/// Rebuilds the container at the current schema with every tile's *stored* bytes
+/// re-framed under `codec`. Losslessness is by construction rather than by
+/// assertion: the tile blobs are carried through as **opaque bytes**, never
+/// decoded and re-encoded, so this cannot change a height, a weight or a hole
+/// even if `TerrainTile`'s wire form were wrong. What it may change is the
+/// schema stamp — a v1–v5 payload is lifted to v6, which is legal precisely
+/// because the *tile blob* layout is untouched and the version is what selects
+/// the blob's wire type ([`decode_tile_at`]).
+///
+/// Passing [`BlockCodec::Raw`] is the inverse transcode, and it is not a no-op
+/// worth removing: it is how a test proves the round trip, and how a build that
+/// wants the old ship size gets it back with one option.
+pub fn recompress_terrain_asset(
+    payload: &[u8],
+    codec: BlockCodec,
+) -> Result<(Vec<u8>, RecompressReport)> {
+    let reader = TerrainAssetReader::new(payload)?;
+    let mut b = TerrainAssetBuilder::new(reader.tile_resolution(), reader.meters_per_sample())
+        .with_origin(reader.origin())
+        .with_codec(codec);
+    if let Some(p) = reader.pyramid_options() {
+        b = b.with_pyramid(p);
+    }
+    for e in reader.directory() {
+        // The blob, decompressed if it already was compressed and borrowed if it
+        // was not — so a re-cook of an already-compressed pack transcodes rather
+        // than double-framing.
+        let blob = reader
+            .tile_bytes(e.key)
+            .ok_or_else(|| TerrainAssetError::TileDecode {
+                lod: e.key.lod,
+                tx: e.key.coord.0,
+                tz: e.key.coord.1,
+                message: "stored block did not decode".into(),
+            })?;
+        b.insert_bytes(e.key, blob.into_owned())?;
+    }
+    let asset = b.build()?;
+    let after = TerrainAssetReader::new(asset.as_bytes())?;
+    let report = RecompressReport {
+        tiles: after.tile_count(),
+        tiles_compressed: after
+            .directory()
+            .iter()
+            .filter(|e| e.codec != BlockCodec::Raw)
+            .count(),
+        bytes_before: payload.len() as u64,
+        bytes_after: asset.as_bytes().len() as u64,
+    };
+    Ok((asset.into_bytes(), report))
+}
+
 /// Read a `.inf_terrain` payload from `path`, validating it.
 pub fn read_terrain_asset(path: &std::path::Path) -> std::io::Result<TerrainAsset> {
     let bytes = std::fs::read(path)?;
@@ -706,20 +901,58 @@ impl<B: AsRef<[u8]>> TerrainAssetReader<B> {
             .map(|i| &self.dir[i])
     }
 
-    /// A tile's blob, **borrowed from the payload** — 16-byte aligned within it.
-    pub fn tile_bytes(&self, key: TileKey) -> Option<&[u8]> {
+    /// A tile's **stored** bytes, exactly as they sit in the payload — borrowed,
+    /// 16-byte aligned within it, and still compressed if the directory says so.
+    ///
+    /// This is the re-pack seam ([`recompress_terrain_asset`], a write-back that
+    /// carries a tile through untouched) and the seam a size report measures. A
+    /// consumer that wants the *tile* wants [`tile_bytes`](Self::tile_bytes).
+    pub fn stored_bytes(&self, key: TileKey) -> Option<&[u8]> {
         let e = self.entry(key)?;
         // Bounds + alignment were validated in `new`.
         Some(&self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize])
     }
 
+    /// A tile's **canonical bincode blob** — borrowed straight out of the payload
+    /// for a [`Raw`](BlockCodec::Raw) tile, decompressed into an owned buffer for
+    /// a compressed one (schema v6, IASSET1).
+    ///
+    /// The `Cow` is the whole IASSET1 seam in one return type: a raw container
+    /// keeps the zero-copy read it has had since P16.3, and a compressed one pays
+    /// exactly one allocation + one decompress for the one tile that was asked
+    /// for. `None` for an absent tile; `None` for a corrupt block too — a
+    /// directory that lies is an absent tile, never silent geometry (the caller
+    /// that wants the reason uses [`tile`](Self::tile)).
+    pub fn tile_bytes(&self, key: TileKey) -> Option<Cow<'_, [u8]>> {
+        let e = self.entry(key)?;
+        let stored = &self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize];
+        decode_block(
+            e.codec,
+            stored,
+            tile_raw_ceiling(self.header.tile_resolution),
+        )
+        .ok()
+    }
+
     /// Decode a tile, through **this payload's own** schema version — so a v1/v2
     /// asset's tiles come back with empty data maps rather than a decode error.
     pub fn tile(&self, key: TileKey) -> Result<Option<TerrainTile>> {
-        let Some(bytes) = self.tile_bytes(key) else {
+        let Some(e) = self.entry(key) else {
             return Ok(None);
         };
-        decode_tile_at(bytes, self.header.schema_version)
+        let stored = &self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize];
+        let bytes = decode_block(
+            e.codec,
+            stored,
+            tile_raw_ceiling(self.header.tile_resolution),
+        )
+        .map_err(|message| TerrainAssetError::TileDecode {
+            lod: key.lod,
+            tx: key.coord.0,
+            tz: key.coord.1,
+            message: message.to_string(),
+        })?;
+        decode_tile_at(&bytes, self.header.schema_version)
             .map(Some)
             .map_err(|message| TerrainAssetError::TileDecode {
                 lod: key.lod,
@@ -821,6 +1054,32 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
                 i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap()),
             ),
         };
+        // Bytes 12..16: v1's `reserved u32`, reinterpreted at v6 as a codec byte
+        // plus three still-reserved zeros. Below v6 the WHOLE word must be zero —
+        // an old asset has no codec, so this refuses to *read* one out of bytes
+        // that never meant anything, which is what makes "v1–v5 load for ever"
+        // a checked fact instead of a hope.
+        let codec = if schema_version >= FIRST_CODEC_SCHEMA_VERSION {
+            if data[base + 13..base + 16] != [0, 0, 0] {
+                return Err(TerrainAssetError::Malformed(
+                    "tile directory entry has a non-zero reserved tail".into(),
+                ));
+            }
+            BlockCodec::from_code(data[base + 12]).ok_or_else(|| {
+                TerrainAssetError::Malformed(format!(
+                    "tile block codec {} is not one this build knows",
+                    data[base + 12]
+                ))
+            })?
+        } else {
+            if data[base + 12..base + 16] != [0, 0, 0, 0] {
+                return Err(TerrainAssetError::Malformed(format!(
+                    "a schema v{schema_version} tile directory entry has a non-zero \
+                     reserved word (v{FIRST_CODEC_SCHEMA_VERSION} is the first with a codec)"
+                )));
+            }
+            BlockCodec::Raw
+        };
         let offset = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
         let len = u64::from_le_bytes(data[base + 24..base + 32].try_into().unwrap());
         if let Some(p) = prev {
@@ -856,7 +1115,12 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
             )));
         }
         prev_end = end;
-        dir.push(TileDirEntry { key, offset, len });
+        dir.push(TileDirEntry {
+            key,
+            offset,
+            len,
+            codec,
+        });
     }
 
     Ok((
@@ -948,7 +1212,7 @@ mod tests {
         }
         for (e, &off) in r.directory().iter().zip(&offsets) {
             out.resize(off as usize, 0);
-            out.extend_from_slice(r.tile_bytes(e.key).unwrap());
+            out.extend_from_slice(&r.tile_bytes(e.key).unwrap());
         }
         out.resize(total as usize, 0);
         out
@@ -986,38 +1250,43 @@ mod tests {
         );
     }
 
-    /// **The v5 header claim, actually checked** (P21.2 audit). [`HEADER_LEN_V5`]
-    /// says P21.2's hole mask cost no header re-length and cited this test by
-    /// name; the test did not exist, and a cited gate that does not exist is worse
-    /// than no claim.
+    /// **The v5 and v6 header claims, actually checked** (P21.2 audit; extended
+    /// at IASSET1). [`HEADER_LEN_V5`] says P21.2's hole mask cost no header
+    /// re-length and cited this test by name; the test did not exist, and a cited
+    /// gate that does not exist is worse than no claim. [`HEADER_LEN_V6`] makes
+    /// the same claim for a *directory* change, and it is checked here for the
+    /// same reason.
     ///
-    /// What it pins is what the claim actually rests on: `header_len(5)` resolves
-    /// to the v2 length, this build writes v5 and writes that length, and the
-    /// reserved tail is **still all zeros** — the 56 bytes v2 set aside are
-    /// unclaimed, so the next version that genuinely needs a header field can take
-    /// them and be told apart from every version that did not.
+    /// What it pins is what the claims actually rest on: `header_len(5)` and
+    /// `header_len(6)` both resolve to the v2 length, this build writes v6 and
+    /// writes that length, and the reserved tail is **still all zeros** — the 56
+    /// bytes v2 set aside are unclaimed, so the next version that genuinely needs
+    /// a header field can take them and be told apart from every version that did
+    /// not.
     #[test]
-    fn v5_needed_no_header_re_length() {
-        assert_eq!(TERRAIN_ASSET_SCHEMA_VERSION, 5, "this test is about v5");
+    fn neither_v5_nor_v6_needed_a_header_re_length() {
+        assert_eq!(TERRAIN_ASSET_SCHEMA_VERSION, 6, "this test is about v5/v6");
         assert_eq!(header_len(5), HEADER_LEN_V2);
+        assert_eq!(header_len(6), HEADER_LEN_V2);
         assert_eq!(HEADER_LEN_V5, HEADER_LEN_V2);
-        assert_eq!(HEADER_LEN, HEADER_LEN_V5);
+        assert_eq!(HEADER_LEN_V6, HEADER_LEN_V2);
+        assert_eq!(HEADER_LEN, HEADER_LEN_V6);
         // The catch-all arm answers with the current length. Not a forward-compat
         // promise — an unknown version is rejected before `header_len` is asked —
-        // just the statement that v5 is the arm every future number lands in until
+        // just the statement that v6 is the arm every future number lands in until
         // one of them claims the reserved tail and adds its own.
-        assert_eq!(header_len(6), HEADER_LEN_V5);
+        assert_eq!(header_len(7), HEADER_LEN_V6);
 
         let t = sample_terrain();
         let opts = PyramidOptions::default();
         let asset = build_terrain_asset(&t, &build_pyramid(&t, opts), opts).unwrap();
-        assert_eq!(asset.reader().header().schema_version, 5);
+        assert_eq!(asset.reader().header().schema_version, 6);
         assert!(
-            asset.as_bytes()[72..HEADER_LEN_V5 as usize]
+            asset.as_bytes()[72..HEADER_LEN_V6 as usize]
                 .iter()
                 .all(|&b| b == 0),
-            "v5 spent part of the reserved tail — then it is not a tile-blob-only \
-             change, and HEADER_LEN_V5's doc is wrong"
+            "v6 spent part of the reserved tail — then it is not a tile-blob-only \
+             change, and HEADER_LEN_V6's doc is wrong"
         );
         assert_eq!(
             asset.reader().header().blob_base,
@@ -1025,6 +1294,222 @@ mod tests {
                 .next_multiple_of(TILE_ALIGN),
             "the directory does not start where a 128-byte header would put it"
         );
+    }
+
+    // ── schema v6: per-tile block compression (IASSET1) ─────────────────────
+
+    /// Re-stamp a v6 image's `schema_version` as `5`, leaving every other byte
+    /// alone — the "what would v5 have written?" fixture for an ALL-RAW asset.
+    fn restamp(image: &[u8], version: u32) -> Vec<u8> {
+        let mut out = image.to_vec();
+        out[8..12].copy_from_slice(&version.to_le_bytes());
+        out
+    }
+
+    /// **The downgrade story, as bytes.** A v6 payload with every tile
+    /// [`BlockCodec::Raw`] differs from the v5 image of the same tiles in exactly
+    /// the four bytes of `schema_version` — because the codec byte lands where v5
+    /// already wrote a reserved zero.
+    ///
+    /// That is what makes "the editor keeps writing what it wrote" a fact rather
+    /// than a hope, and it is also the cheapest possible arm of the lossless
+    /// claim: for the raw case there is nothing to be lossy *with*.
+    #[test]
+    fn v6_all_raw_is_v5_plus_four_bytes() {
+        let asset = sample_asset(); // built with the default Raw codec
+        let image = asset.as_bytes();
+        assert_eq!(image[8..12], 6u32.to_le_bytes(), "this build writes v6");
+        for e in asset.reader().directory() {
+            assert_eq!(e.codec, BlockCodec::Raw, "the loose writer stays raw");
+        }
+        let as_v5 = restamp(image, 5);
+        // Byte-identical apart from the version word, and it still parses as v5.
+        assert_eq!(image[..8], as_v5[..8]);
+        assert_eq!(image[12..], as_v5[12..]);
+        let v5 = TerrainAssetReader::new(as_v5.as_slice()).unwrap();
+        assert_eq!(v5.header().schema_version, 5);
+        for e in asset.reader().directory() {
+            assert_eq!(
+                v5.tile_bytes(e.key).unwrap(),
+                asset.reader().tile_bytes(e.key).unwrap()
+            );
+        }
+    }
+
+    /// A pre-v6 payload whose reserved word is **not** zero is refused, rather
+    /// than having a codec read out of bytes that never meant one.
+    ///
+    /// This is what turns "v1–v5 load for ever" into a checked property: the only
+    /// way an old asset could be misread as a compressed one is if the parser
+    /// guessed, and it does not.
+    #[test]
+    fn a_pre_v6_reserved_word_must_be_zero() {
+        let asset = sample_asset();
+        let mut image = restamp(asset.as_bytes(), 5);
+        let dir0 = HEADER_LEN_V2 as usize;
+        image[dir0 + 12] = 1; // would be `Lz4` at v6
+        let err = TerrainAssetReader::new(image.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, TerrainAssetError::Malformed(m) if m.contains("reserved word")),
+            "{err}"
+        );
+    }
+
+    /// A v6 payload naming a codec this build does not know is refused with the
+    /// code in the message — never silently read as raw, which would hand the
+    /// tile decoder a compressed frame and blame `bincode`.
+    #[test]
+    fn an_unknown_codec_is_refused_by_name() {
+        let asset = sample_asset();
+        let mut image = asset.as_bytes().to_vec();
+        image[HEADER_LEN_V2 as usize + 12] = 200;
+        let err = TerrainAssetReader::new(image.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, TerrainAssetError::Malformed(m) if m.contains("codec 200")),
+            "{err}"
+        );
+    }
+
+    /// **The lossless claim, per codec**: a transcode to any codec and back to
+    /// raw reproduces the original image byte for byte, and every tile decodes to
+    /// the same `TerrainTile` in between.
+    #[test]
+    fn recompress_round_trips_every_codec_byte_for_byte() {
+        let asset = sample_asset();
+        let raw_image = asset.as_bytes().to_vec();
+        for codec in BlockCodec::ALL {
+            let (packed, report) = recompress_terrain_asset(&raw_image, codec).unwrap();
+            assert_eq!(report.tiles, asset.reader().tile_count());
+            let r = TerrainAssetReader::new(packed.as_slice()).unwrap();
+            assert_eq!(r.header().schema_version, TERRAIN_ASSET_SCHEMA_VERSION);
+            assert_eq!(r.tile_count(), asset.reader().tile_count());
+            for e in asset.reader().directory() {
+                assert_eq!(
+                    r.tile(e.key).unwrap(),
+                    asset.reader().tile(e.key).unwrap(),
+                    "{codec:?} changed tile {:?}",
+                    e.key
+                );
+                assert_eq!(
+                    r.tile_bytes(e.key).unwrap(),
+                    asset.reader().tile_bytes(e.key).unwrap(),
+                    "{codec:?} changed tile {:?}'s blob",
+                    e.key
+                );
+            }
+            // …and back. The inverse transcode is the byte-level arm.
+            let (back, _) = recompress_terrain_asset(&packed, BlockCodec::Raw).unwrap();
+            assert_eq!(back, raw_image, "{codec:?} did not round-trip to raw");
+        }
+    }
+
+    /// A transcode is **deterministic**: same input, same codec, same bytes. The
+    /// cook's byte-identical-rebuild gate reaches through this.
+    #[test]
+    fn recompress_is_byte_deterministic() {
+        let asset = sample_asset();
+        for codec in BlockCodec::ALL {
+            let (a, _) = recompress_terrain_asset(asset.as_bytes(), codec).unwrap();
+            let (b, _) = recompress_terrain_asset(asset.as_bytes(), codec).unwrap();
+            assert_eq!(a, b, "{codec:?}");
+        }
+    }
+
+    /// A **v1** payload transcodes forward: the container is lifted to v6 while
+    /// the tile blobs are carried through untouched, so the tiles that come back
+    /// out are the ones a v1 reader would have produced — empty maps, biomes and
+    /// holes included.
+    ///
+    /// This is the arm that says the cook may compress an asset from any vintage
+    /// without decoding it, which is the whole reason `recompress_terrain_asset`
+    /// moves bytes rather than tiles.
+    #[test]
+    fn a_v1_payload_transcodes_forward_without_decoding_its_tiles() {
+        let asset = sample_asset();
+        let v1 = v1_image(&asset);
+        let (packed, report) = recompress_terrain_asset(&v1, BlockCodec::Deflate).unwrap();
+        assert_eq!(report.tiles, asset.reader().tile_count());
+        let r = TerrainAssetReader::new(packed.as_slice()).unwrap();
+        assert_eq!(r.header().schema_version, TERRAIN_ASSET_SCHEMA_VERSION);
+        let v1r = TerrainAssetReader::new(v1.as_slice()).unwrap();
+        for e in v1r.directory() {
+            assert_eq!(v1r.tile_bytes(e.key).unwrap(), r.tile_bytes(e.key).unwrap());
+        }
+    }
+
+    /// Compression is per-tile and independent: a tile that would inflate keeps
+    /// [`BlockCodec::Raw`] and says so, so a payload can never grow.
+    #[test]
+    fn an_incompressible_tile_stays_raw_and_the_payload_never_grows() {
+        let asset = sample_asset();
+        for codec in BlockCodec::ALL {
+            let (packed, report) = recompress_terrain_asset(asset.as_bytes(), codec).unwrap();
+            assert!(
+                report.bytes_after <= report.bytes_before,
+                "{codec:?}: {} -> {}",
+                report.bytes_before,
+                report.bytes_after
+            );
+            assert!(packed.len() <= asset.as_bytes().len(), "{codec:?}");
+            let r = TerrainAssetReader::new(packed.as_slice()).unwrap();
+            for e in r.directory() {
+                assert!(e.codec == BlockCodec::Raw || e.codec == codec, "{codec:?}");
+            }
+        }
+    }
+
+    /// A compressed tile decompresses through the **store** seam too — the path
+    /// `sync_sim`/`sync_render` actually take — and the raw one still borrows.
+    #[test]
+    fn the_tile_store_seam_borrows_raw_and_owns_compressed() {
+        use crate::residency::TileStore;
+        // `sample_terrain`'s 5² tiles are below `block::MIN_COMPRESSIBLE`, so a
+        // 33² one — still tiny, but past the threshold — is what makes the
+        // "owned" half of this test non-vacuous.
+        let mut t = TerrainData::new(33, 1.0);
+        for tz in 0..2 {
+            for tx in 0..2 {
+                t.author_tile((tx, tz), height_fn);
+            }
+        }
+        let opts = PyramidOptions::default();
+        let asset = build_terrain_asset(&t, &build_pyramid(&t, opts), opts).unwrap();
+        let key = asset.reader().directory()[0].key;
+        assert!(matches!(
+            TileStore::tile_bytes(&asset.reader(), key).unwrap(),
+            Cow::Borrowed(_)
+        ));
+
+        let (packed, _) = recompress_terrain_asset(asset.as_bytes(), BlockCodec::Deflate).unwrap();
+        let r = TerrainAssetReader::new(packed).unwrap();
+        // The sample terrain's tiles are large enough to compress, so at least
+        // one of them must have actually taken the owned path — otherwise this
+        // test would pass vacuously on a corpus where nothing compressed.
+        let compressed = r
+            .directory()
+            .iter()
+            .find(|e| e.codec != BlockCodec::Raw)
+            .expect("the sample terrain has at least one compressible tile");
+        assert!(matches!(
+            TileStore::tile_bytes(&r, compressed.key).unwrap(),
+            Cow::Owned(_)
+        ));
+        assert_eq!(
+            r.load_tile(compressed.key).unwrap().unwrap(),
+            asset.reader().tile(compressed.key).unwrap().unwrap()
+        );
+    }
+
+    /// The decompression ceiling is a **container** property, and it refuses the
+    /// gigabyte claim a doctored asset makes.
+    #[test]
+    fn the_block_ceiling_is_derived_from_the_tile_resolution() {
+        // 257² samples × 64 B + slack — comfortably above the ~21.2 B/sample a
+        // fully-materialized tile actually needs, and nowhere near a gigabyte.
+        let c = tile_raw_ceiling(257);
+        assert!(c > 257 * 257 * 22, "the ceiling must clear a real tile");
+        assert!(c < 8 << 20, "…and must still be a ceiling: {c}");
+        assert_eq!(tile_raw_ceiling(0), 64 * 1024, "no overflow at the edges");
     }
 
     // ── schema v3 / v4: the tile blob grows layers (P19.1, P19.2) ───────────
@@ -1328,7 +1813,7 @@ mod tests {
         assert_eq!(r.header().schema_version, TERRAIN_ASSET_SCHEMA_VERSION);
         for key in r.keys() {
             // A passed-through v3 blob would fail here with an unexpected end.
-            let tile = decode_tile(r.tile_bytes(key).unwrap())
+            let tile = decode_tile(&r.tile_bytes(key).unwrap())
                 .unwrap_or_else(|e| panic!("{key:?} did not transcode: {e}"));
             if key == TileKey::lod0((0, 0)) {
                 assert_eq!(tile.biome_sample(5, 0, 0), 3);
@@ -1386,7 +1871,7 @@ mod tests {
         for key in r.keys() {
             // Decoding at the *current* schema must succeed for every tile — a
             // passed-through v2 blob would fail here with an unexpected end.
-            let tile = decode_tile(r.tile_bytes(key).unwrap())
+            let tile = decode_tile(&r.tile_bytes(key).unwrap())
                 .unwrap_or_else(|e| panic!("{key:?} did not transcode: {e}"));
             if key == TileKey::lod0((0, 0)) {
                 assert_eq!(tile.map_texel(5, 0, 0), [9.0, 0.0, 0.0]);
