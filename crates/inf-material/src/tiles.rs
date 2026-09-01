@@ -775,6 +775,30 @@ mod tests {
             u32::from_le_bytes(hdr.as_bytes()[8..12].try_into().unwrap()),
             3
         );
+        // **…and wave IASSET2's own format stamps FOUR** (IASSET2 audit), which
+        // is the row that goes on being load-bearing after v5.
+        //
+        // The five stamps above already falsify a writer that emits
+        // `TEX_ASSET_SCHEMA_VERSION` instead of `min_schema_version`
+        // (mutation-measured: `None` comes back v4 against 2). What they cannot
+        // do is keep falsifying it for the CURRENT format, which is the one
+        // whose minimum and the container's current version happen to be the
+        // same number in every window that has just opened. This row is the one
+        // that separates them the day a v5 arrives — a BC7 texture stamped v5
+        // would be refused by v4 builds for a format no v4 build lacks — so it
+        // is written now, while the reason is in front of somebody.
+        let bc7 = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc7),
+        )
+        .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(bc7.as_bytes()[8..12].try_into().unwrap()),
+            4
+        );
+        assert_eq!(bc7.reader().header().format, inf_vt::PageFormat::Bc7);
     }
 
     /// **A v2 stamp over a v3 format code is refused** — the version and the
