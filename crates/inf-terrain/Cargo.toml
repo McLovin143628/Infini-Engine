@@ -67,3 +67,9 @@ xxhash-rust = { workspace = true }
 # The `.inf_terrain` round trip through a real cooked pack (P16.3): build a pack
 # on disk, `PackReader::open` it, and slice tiles out of the mapping.
 tempfile = { workspace = true }
+# IASSET1's codec bake-off measures the WASM arm of `BlockCodec::Zstd` — the
+# browser player decodes with `ruzstd`, not with the C `zstd` this host links,
+# and "the same format" is not "the same speed". A dev-dependency because only
+# the bake-off names it; the shipped native crate keeps decoding through
+# `inf_asset::block`, which picks the backend per target.
+ruzstd = { workspace = true }

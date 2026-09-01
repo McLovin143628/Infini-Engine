@@ -190,6 +190,37 @@ pub const FIRST_CODEC_SCHEMA_VERSION: u32 = 6;
 /// Tile blobs start on multiples of this many bytes (see the module docs).
 pub const TILE_ALIGN: u64 = 16;
 
+/// **The codec the cook transcodes `.inf_terrain` tiles to** (IASSET1), chosen
+/// by measurement over the real island's 1 064 DEM tiles at 257².
+///
+/// The bake-off is `tests/block_codec_bakeoff.rs`; the full table is in
+/// `docs/memos/iasset1-block-compression.md`. Measured (Windows, test profile
+/// with optimizations), whole 549 879 456 B asset:
+///
+/// | codec | ship ratio | lod-0 decode | 16 serialized | encode (whole) |
+/// |---|---|---|---|---|
+/// | lz4 | 0.4442 | 0.099 ms | 1.59 ms | 0.4 s |
+/// | deflate | 0.3567 | 0.749 ms | **11.99 ms** | 8.8 s |
+/// | **zstd** | **0.3505** | **0.168 ms** | **2.69 ms** | 3.3 s |
+///
+/// **zstd wins on every axis at once**, which is not the answer the arc brief
+/// expected and is why it was measured: it has the best ratio *and* is 4.5×
+/// faster to decode than DEFLATE *and* 2.7× faster to encode, *and* it is the
+/// codec already in the tree. DEFLATE is the one that fails — 16 level-0 tiles
+/// decompressed serially is 11.99 ms against
+/// `inf_player::budget::STREAMED_STEP_BUDGET_MS`'s 4.0.
+///
+/// **The one cost, measured rather than assumed**: `Zstd` is the C `zstd`
+/// natively and the pure-Rust `ruzstd` in a browser, and ruzstd decodes the same
+/// tile in **1.224 ms — 7.3× slower**. `lz4_flex` and `miniz_oxide` are one
+/// implementation on every target and have no such split. A web-targeted cook
+/// should therefore pass `BlockCodec::Lz4`, which is why this is a *default* and
+/// `CookOptions::terrain_codec` exists.
+///
+/// **Every codec in [`BlockCodec`] must stay decodable** whatever this constant
+/// says: a pack cooked with the knob turned is opened by the same reader.
+pub const COOK_TILE_CODEC: BlockCodec = BlockCodec::Zstd;
+
 /// Bytes of the **v1** fixed header (no pyramid options).
 pub const HEADER_LEN_V1: u64 = 64;
 

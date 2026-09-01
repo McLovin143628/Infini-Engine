@@ -3724,6 +3724,7 @@ dependencies = [
  "inf-core",
  "inf-math",
  "png 0.18.1",
+ "ruzstd",
  "serde",
  "serde_json",
  "tempfile",
