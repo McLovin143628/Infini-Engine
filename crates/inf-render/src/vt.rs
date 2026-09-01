@@ -720,16 +720,32 @@ mod tests {
     /// Every page format maps to a `wgpu` format whose block copy size is the
     /// page's own arithmetic — the mapping and `inf_vt::PageFormat::page_bytes`
     /// cannot disagree without this failing.
+    ///
+    /// **It sweeps `PageFormat::ALL`, not a hand-written list** (wave IASSET2
+    /// audit). The list it used to sweep was written out by hand and BC7 was
+    /// added to `page_format` without being added to it, so the wave's newest
+    /// format was the one format the sweep did not check. The enumeration is
+    /// the code space (`inf_vt::container`'s freeze pin says so), so walking it
+    /// is what makes "a format added to the enum cannot be missed" true here
+    /// too; the sRGB partition below is the only thing that still needs naming
+    /// by hand, and it is asserted to be exactly the formats that have no sRGB
+    /// counterpart.
     #[test]
     fn the_page_format_mapping_agrees_with_the_page_size() {
-        for (fmt, srgb) in [
-            (PageFormat::Rgba8, false),
-            (PageFormat::Rgba8, true),
-            (PageFormat::Bc1, false),
-            (PageFormat::Bc1, true),
-            (PageFormat::Bc3, false),
-            (PageFormat::Bc3, true),
-        ] {
+        // The formats with no sRGB counterpart, named once and checked against
+        // the mapping below rather than trusted.
+        let linear_only = [PageFormat::Bc5, PageFormat::Rgba16F];
+        let pairs: Vec<(PageFormat, bool)> = PageFormat::ALL
+            .into_iter()
+            .filter(|f| !linear_only.contains(f))
+            .flat_map(|f| [(f, false), (f, true)])
+            .collect();
+        assert_eq!(
+            pairs.len(),
+            2 * (PageFormat::ALL.len() - linear_only.len()),
+            "the sweep lost a format"
+        );
+        for (fmt, srgb) in pairs {
             let wgpu_fmt = page_format(fmt, srgb);
             let (bw, bh) = wgpu_fmt.block_dimensions();
             let block = wgpu_fmt.block_copy_size(None).expect("colour format");
@@ -747,7 +763,7 @@ mod tests {
         // asserted here: neither has an sRGB variant, and neither wants one — a
         // transfer curve on a normal's X and Y is meaningless, and RGBA16F is
         // linear by construction.
-        for fmt in [PageFormat::Bc5, PageFormat::Rgba16F] {
+        for fmt in linear_only {
             for srgb in [false, true] {
                 let wgpu_fmt = page_format(fmt, srgb);
                 let (bw, bh) = wgpu_fmt.block_dimensions();

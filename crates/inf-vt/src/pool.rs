@@ -313,22 +313,31 @@ pub fn split_pool_budget(base: VtPoolConfig, weights: &[(PageFormat, u64)]) -> V
         }
         let want = arms[i].0.page_bytes(stored);
         let spent: u64 = (0..arms.len()).map(|k| bytes_of(k, pages[k])).sum();
-        if base.budget_bytes.saturating_sub(spent) >= want {
+        let slack = base.budget_bytes.saturating_sub(spent);
+        if slack >= want {
             pages[i] = 1;
             continue;
         }
-        // Take it from the arm holding the most bytes, lowest index on a tie,
-        // and only while that arm keeps a page of its own.
+        // Take the rest from the arm holding the most bytes, lowest index on a
+        // tie, and only while that arm keeps a page of its own.
+        //
+        // **Priced before it is taken** (wave IASSET2 audit). The first draft
+        // decremented the donor in a loop and only then asked whether enough had
+        // come free — so a donor that ran out mid-loop kept the pages it had
+        // already given up and the recipient still got nothing. Measured on a
+        // budget of eight BC1 pages asked to seat one RGBA8 arm beside them: the
+        // split spent **9 248 B of 73 984** (12.5 %) and left the RGBA8 arm
+        // empty anyway. The donation is now one subtraction, taken only when the
+        // arithmetic says it covers the page.
         let donor = (0..arms.len())
             .filter(|&k| k != i && pages[k] > 1)
             .max_by_key(|&k| (bytes_of(k, pages[k]), std::cmp::Reverse(k)));
         if let Some(d) = donor {
-            let mut freed = 0u64;
-            while pages[d] > 1 && freed < want {
-                pages[d] -= 1;
-                freed += arms[d].0.page_bytes(stored);
-            }
-            if freed >= want {
+            let donor_page = arms[d].0.page_bytes(stored).max(1);
+            // `want > slack` here, so the shortfall is positive.
+            let needed = (want - slack).div_ceil(donor_page);
+            if needed <= pages[d] - 1 {
+                pages[d] -= needed;
                 pages[i] = 1;
             }
         }
@@ -841,6 +850,61 @@ mod tests {
         };
         let arms = split_pool_budget(tight, &[(PageFormat::Bc1, 1), (PageFormat::Bc3, 1)]);
         assert!(arms.iter().map(|a| a.budget_bytes).sum::<u64>() <= tight.budget_bytes);
+    }
+
+    /// **A donation that cannot cover the page is never taken** (wave IASSET2
+    /// audit) — the ratchet's other direction, and the one the "sum ≤ total"
+    /// arm above cannot see.
+    ///
+    /// Pass 2 raises a zero-page arm to one page at the largest arm's expense.
+    /// Its first draft decremented the donor in a loop and asked afterwards
+    /// whether enough had come free, so a donor that ran out of spare pages
+    /// mid-loop **kept the pages it had already given up** and the recipient
+    /// still got nothing: the split spent less of the budget than it was handed
+    /// and nobody was better for it. Measured on the fixture below before the
+    /// fix: **9 248 B of a 73 984 B budget, 12.5 %**, with the RGBA8 arm still
+    /// empty.
+    ///
+    /// The assertion is that the split never LOSES: whatever it decides about
+    /// the small arm, the bytes it hands out are at least what pass 1 had
+    /// already floored, minus at most the one page a granted donation costs.
+    #[test]
+    fn a_donation_the_donor_cannot_afford_is_not_taken() {
+        let page = PageFormat::Bc1.page_bytes(136);
+        // Eight BC1 pages in total; an RGBA8 page is eight BC1 pages, so the
+        // second arm can only be seated by emptying the first — which is not
+        // allowed, so it must not be started either.
+        let base = VtPoolConfig {
+            budget_bytes: page * 8,
+            ..VtPoolConfig::default()
+        };
+        let arms = split_pool_budget(base, &[(PageFormat::Bc1, 1_000), (PageFormat::Rgba8, 1)]);
+        let spent: u64 = arms.iter().map(|a| a.budget_bytes).sum();
+        assert!(spent <= base.budget_bytes, "the ratchet still holds");
+        assert!(
+            spent >= 7 * page,
+            "the split threw {} B of a {} B budget away and seated nobody with it",
+            base.budget_bytes - spent,
+            base.budget_bytes
+        );
+        assert_eq!(arms[0].budget_bytes, 7 * page, "the donor kept its pages");
+        assert_eq!(arms[1].budget_bytes, 0, "and the page it could not buy");
+
+        // …and when the donor CAN afford it, the donation still happens: one
+        // more BC1 page of budget is exactly the shortfall, and the RGBA8 arm
+        // gets its page out of the donor's.
+        let base = VtPoolConfig {
+            budget_bytes: page * 16,
+            ..VtPoolConfig::default()
+        };
+        let arms = split_pool_budget(base, &[(PageFormat::Bc1, 1_000), (PageFormat::Rgba8, 1)]);
+        assert_eq!(
+            arms[1].budget_bytes,
+            PageFormat::Rgba8.page_bytes(136),
+            "the small arm got no page from a donor that could afford one"
+        );
+        assert!(arms[0].budget_bytes >= page, "the donor kept at least one");
+        assert!(arms.iter().map(|a| a.budget_bytes).sum::<u64>() <= base.budget_bytes);
     }
 
     /// **The split is a function of the SET of formats, in the caller's order**

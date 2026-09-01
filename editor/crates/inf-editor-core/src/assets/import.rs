@@ -69,9 +69,7 @@ pub fn import_file(
     let outcome = match ext.as_str() {
         "gltf" | "glb" => import_gltf(project, source, dest_dir)?,
         "obj" => import_obj(project, source, dest_dir)?,
-        "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr" => {
-            import_image(project, source, &bytes, dest_dir)?
-        }
+        e if is_image_ext(e) => import_image(project, source, &bytes, dest_dir)?,
         "wav" | "ogg" | "mp3" | "flac" => import_audio(project, source, &bytes, &ext, dest_dir)?,
         other => {
             return Err(AssetError::Import(format!(
@@ -95,6 +93,16 @@ pub fn import_file(
     Ok(outcome)
 }
 
+/// **The extensions [`import_image`] answers for** — ONE list, because the
+/// router and [`importer_tag`] both ask the question and a routing table that
+/// disagreed with the key would re-open the very defect the tag exists to close
+/// (wave IASSET2 audit): an extension added to the router alone would route
+/// through the per-slot policy while still keying on the extension, so two slots
+/// of one image collapse into one asset again, silently.
+fn is_image_ext(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr")
+}
+
 /// **The second half of the import key**: the importer, and the settings it will
 /// run with.
 ///
@@ -114,7 +122,7 @@ pub fn import_file(
 /// hashed into a manifest that outlives the process.
 fn importer_tag(ext: &str, source: &Path, bytes: &[u8]) -> Vec<u8> {
     let mut tag = ext.as_bytes().to_vec();
-    if matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr") {
+    if is_image_ext(ext) {
         let (s, _) = image_import_policy(source, bytes);
         tag.extend_from_slice(
             format!(

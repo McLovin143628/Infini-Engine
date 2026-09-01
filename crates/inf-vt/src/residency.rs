@@ -1414,6 +1414,24 @@ mod tests {
             split_slots >= demoted * 5,
             "two arms hold {split_slots} pages against the demotion's {demoted}"
         );
+        // **PINNED BY VALUE** (wave IASSET2 audit), because a `>= 5×` arm is
+        // satisfied by any number from 1 700 up and the wave's ledger quotes a
+        // number: the two arms hold **2 445** pages on this weighting — 2 173
+        // BC1 (41 × 53) plus 272 BC5 (16 × 17) — which is **7.2×** the
+        // demotion's 340. The ledger's other figure, 2 040, is the EQUAL-weight
+        // split (1 360 + 680) and is a different question; both are stated
+        // there, each beside the weighting that produces it. Pinning it here is
+        // what keeps the two from drifting apart again, and makes a saving as
+        // visible as a loss.
+        assert_eq!(
+            (
+                r.geometry_of(0).unwrap().slot_count(),
+                r.geometry_of(1).unwrap().slot_count()
+            ),
+            (2_173, 272),
+            "the 4:1 ground-ratio split moved; the ledger's page counts are stale"
+        );
+        assert_eq!(split_slots, 2_445);
         // …and the VRAM is the SAME budget, not two of them. This is the half a
         // page-count comparison cannot see.
         assert!(

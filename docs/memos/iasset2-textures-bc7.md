@@ -13,10 +13,10 @@ first thing that freedom bought was normal maps that point the right way.**
 
 | | before | after |
 |---|---:|---:|
-| a BC1 + BC5 level, pages resident at 24 MiB | **340** (demoted to RGBA8) | **2 040** |
+| a BC1 + BC5 level at the ground library's 4 : 1 tile ratio, pages resident at 24 MiB | **340** (demoted to RGBA8) | **2 445** (7.2×) |
 | ground normal map, worst error per channel | **122** / 255 (BC1) | **17** / 255 (BC5) |
 | ground normal map, mean error per channel | 10.4 / 255 | **1.7** / 255 |
-| `samples/ground` on disk | 7 394 656 B | 9 207 264 B (+24.51 %) |
+| `samples/ground` on disk — **the wave's one cost** | 7 394 656 B | 9 207 264 B (**+24.51 %**) |
 | `.inf_tex` container version | v3 | **v4** (BC7's format code, nothing else) |
 | goldens | 60 | 60 (one re-blessed, digest moved) |
 
@@ -247,8 +247,17 @@ blue would credit BC1 for carrying a redundancy.
 | a level of… | pages resident at 24 MiB |
 |---|---:|
 | one BC1 format (unchanged by this wave) | 2 714 |
-| **BC1 + BC5, two arms** | **2 040** |
+| **BC1 + BC5, two arms, at the ground library's 4 : 1 tile ratio** | **2 445** (2 173 + 272) |
+| BC1 + BC5, two arms, at **equal** tile weight | 2 040 (1 360 + 680) |
 | the same level before this wave (demoted to RGBA8) | 340 |
+
+**The split depends on the weighting, so the weighting is named on every row**
+(IASSET2 audit). The first draft of this memo carried 2 040 — the equal-weight
+figure — under a headline that pointed at the ground library's 4 : 1 case, whose
+arm measures 2 445; the `>= 5×` assertion in
+`a_mixed_level_pages_at_bc_rates_instead_of_demoting_to_rgba8` was satisfied by
+both, so nothing caught the mismatch. That arm now pins **2 173 + 272 = 2 445**
+by value.
 
 ### The re-priced budgets
 
@@ -331,10 +340,21 @@ file — the thing the proxy stood in for — with an anti-vacuity arm proving t
 window is findable in the file it came from. *A gate must aim at the thing it
 names* (P23), applied to a gate that had been aiming next to it since GTA1.
 
-### Ship-size delta
+### Ship-size delta — this wave made the content BIGGER, and that is the cost
+
+The `.iasset` arc's own mandate is **supercompression**, and IASSET1 delivered
+it: `.ipack` is 59.07 % smaller on the island. This wave spends part of that
+back. It is a trade, not a saving, and it is stated as a trade: **quality for
+normals, paid in bytes on disk.**
 
 `samples/ground`: **7 394 656 B → 9 207 264 B**, +1 812 608 B (**+24.51 %**) —
-seven maps at 16 bytes a block instead of 8. GUIDs are frozen constants rather
+seven maps at 16 bytes a block instead of 8. What buys it is a normal map whose
+worst per-channel error falls from 122 of 255 to 17, i.e. texels that were
+pointing somewhere else. The same reasoning is what **declined** BC7 for the
+albedo and the ORM, where the quality win did not justify the same doubling —
+so the increase is confined to the one slot that could show it.
+
+GUIDs are frozen constants rather
 than content-derived, so the blast radius was exactly seven `.inf_tex`, seven
 sidecars and the README: no `.inf_mat`, no island level, no `.inf_pcg`.
 

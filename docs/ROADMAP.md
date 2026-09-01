@@ -29626,9 +29626,11 @@ against kira's ring buffer mid-wave. Ledger: `docs/memos/iasset1-block-compressi
 
 **THE HEADLINE: a level that mixes page formats stopped losing 9.2× of its refinement, and
 the first thing that freedom bought was normal maps that point the right way.** A BC1 + BC5
-level at the shipped 24 MiB budget holds **2 040 pages** where the demotion it replaces held
-**340**; the committed ground normal maps went from a worst per-channel error of **122 of
-255** to **17**. Goldens stay **60**, one re-blessed with its deltas published.
+level at the shipped 24 MiB budget holds **2 445 pages** at the ground library's 4 : 1 tile
+ratio (2 040 at equal weight) where the demotion it replaces held **340**; the committed
+ground normal maps went from a worst per-channel error of **122 of 255** to **17**. Goldens
+stay **60**, one re-blessed with its deltas published. It is bought with the wave's one cost:
+`samples/ground` grows **+24.51 %** on disk, seven maps at 16 bytes a block instead of 8.
 
 **THE BLOCKER, AND WHY IT WENT FIRST.** `build_vt_level` picked ONE atlas format for a whole
 level by format equality, so a level whose textures disagreed fell back to `Rgba8` — 73 984 B

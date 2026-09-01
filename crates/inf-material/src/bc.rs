@@ -587,11 +587,18 @@ mod tests {
         // (`fn encode_alpha_block` stood here until Wave T made it a one-line
         // forwarder onto `encode_bc4_block`; naming the forwarder would have
         // asserted the gate onto a signature and not onto the block fit.)
+        // (`fn encode_bc7_block` joined them in the IASSET2 audit: this gate's
+        // whole argument for covering BC7 is *"it is in this file, which is why
+        // it is in this file"*, and nothing failed if it left. Naming it makes
+        // the argument the assertion.)
         assert!(
             code.contains("fn compress_bc1")
                 && code.contains("fn compress_bc5")
+                && code.contains("fn compress_bc7")
+                && code.contains("fn encode_bc7_block")
                 && code.contains("fn encode_bc4_block"),
-            "the source filter ate the encoder"
+            "the source filter ate the encoder, or an encoder left this file and \
+             took itself out of this gate's scope with it"
         );
     }
     use super::*;
