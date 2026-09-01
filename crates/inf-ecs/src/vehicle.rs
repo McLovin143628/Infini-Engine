@@ -493,12 +493,11 @@ impl Default for VehicleTuning {
             // more than this in total. 8 000 N on 1 200 kg is 6.7 m/s², which is
             // a launch a road car's clutch and half-shafts would survive.
             max_engine_force_n: 8_000.0,
-            // The class's REFERENCE top speed, m/s — what the speed-sensitive
-            // steering limit and the drive camera scale against. Since VEH2a the
-            // *achieved* top speed is an emergent balance of the torque curve
-            // against the drag, so this number is a claim about the car that
-            // `the_default_rig_reaches_the_speed_its_own_class_claims` checks.
-            max_speed_mps: 55.0,
+            // Still the flat curve's own falloff speed until the powertrain
+            // clause replaces that curve; it becomes the class's REFERENCE top
+            // speed (the steering limit's and the drive camera's) there, and
+            // moves with it.
+            max_speed_mps: 25.0,
             brake_force_n: 12_000.0,
             handbrake_force_n: 9_000.0,
             max_steer_deg: 35.0,
@@ -1596,8 +1595,16 @@ impl RaycastVehicle {
 /// `k` is clamped into `[0.05, 0.95]` and a non-finite `k` is the identity, on
 /// the standing rule that a refusal is a value.
 pub fn curve_bias(t: f64, k: f64) -> f64 {
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
-    let k = if k.is_finite() { k.clamp(0.05, 0.95) } else { 0.5 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let k = if k.is_finite() {
+        k.clamp(0.05, 0.95)
+    } else {
+        0.5
+    };
     let a = 1.0 / k - 2.0;
     let denom = a * (1.0 - t) + 1.0;
     if denom.abs() < 1e-12 {
@@ -2151,7 +2158,10 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             // 0.5 + i/1000 keeps every value finite, positive, distinct and
             // inside the ranges the shape functions clamp to.
-            assert!(t.set(name, 0.5 + i as f64 / 1000.0), "{name} is not settable");
+            assert!(
+                t.set(name, 0.5 + i as f64 / 1000.0),
+                "{name} is not settable"
+            );
         }
         let class = crate::components::VehicleClass::from_tuning(&t);
         assert_eq!(

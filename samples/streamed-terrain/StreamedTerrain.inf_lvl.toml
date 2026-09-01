@@ -1,6 +1,6 @@
-schema_version = 26
+schema_version = 27
 guid = "00000000-0000-0000-0000-000084160000"
 title = "Streamed Terrain"
 entity_count = 4
-content_hash = "ea6ae20f37da4e6b"
+content_hash = "b9d7dd16b961df24"
 dependencies = ["00000000-0000-0000-0000-0000841600aa"]

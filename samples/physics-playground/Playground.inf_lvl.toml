@@ -1,8 +1,8 @@
-schema_version = 26
+schema_version = 27
 guid = "00000000-0000-0000-0000-000084050000"
 title = "Physics Playground"
 entity_count = 28
-content_hash = "5cfe22f370eecab5"
+content_hash = "ffeb9379b56e8626"
 dependencies = [
     "00000000-0000-0000-0000-0000840500a0",
     "00000000-0000-0000-0000-0000840500a1",

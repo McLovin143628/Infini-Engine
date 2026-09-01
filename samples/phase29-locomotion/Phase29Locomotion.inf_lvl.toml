@@ -1,8 +1,8 @@
-schema_version = 26
+schema_version = 27
 guid = "00000000-0000-0000-0000-000084090000"
 title = "Phase 29 Locomotion Course"
 entity_count = 32
-content_hash = "022cd51d5a456ffe"
+content_hash = "a3bae92a4bea2bf9"
 dependencies = [
     "00000000-0000-0000-0000-0000840900a0",
     "00000000-0000-0000-0000-0000840900a1",

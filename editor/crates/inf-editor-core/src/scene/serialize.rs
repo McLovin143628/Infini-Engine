@@ -428,7 +428,37 @@ use crate::scene::SceneDoc;
 ///   The wire cost is **70 bytes per file** and **4 bytes per materialed
 ///   entity** — measured, not derived, because `flare_ghost_count` is a `u32`
 ///   whose default of 4 encodes in one byte under bincode's varints.
-pub const SCHEMA_VERSION: u32 = 26;
+/// * **v27** — island wave VEH2a, the driving arc's **one** schema window:
+///   [`VehicleClass`] grows from **fifteen** `f64`s to **sixty-two**.
+///
+///   The component's byte layout moves, so this is the [`MaterialV25`] *shape* of
+///   bump: the pre-v27 component freezes as [`VehicleClassV26`] and every frozen
+///   record that reaches a class through `EntityRecordGen`'s `V` parameter is
+///   re-pointed at it. **No fourth generic was needed** — `V` already exists for
+///   exactly this, which is what the v25 rung meant by "the tail is generic", and
+///   v24-and-below carry `()` and are untouched.
+///
+///   What the forty-seven buy: a three-knot torque curve with one shape knob, an
+///   eight-slot gearbox with a shift model and reverse as a *gear*, a drivetrain
+///   split with per-axle diff locks, brake bias, a simplified-Pacejka tyre (per
+///   axis: peak slip, rise stiffness; shared: a sliding plateau and load
+///   sensitivity), wheel inertia, centre-of-gravity height, anti-roll bars,
+///   downforce with a centre of pressure, sideways drag, a steering rack (rate,
+///   return, Ackermann), three driver aids, and the two seat-warp clip times.
+///
+///   **Why all forty-seven at once.** The house law is one scene bump per phase,
+///   and the tuning surface was *known in full* before the first line was
+///   written — a field that arrives a wave late costs a whole rung of this
+///   ladder for one number. The v26 rung's own note ("some of these fields have
+///   no consumer until VIS1b") applies here too and is met the same way: every
+///   one of the forty-seven is applied by both hosts and asserted by a store/load
+///   arm from the day it lands.
+///
+///   The wire cost is **376 bytes per entity that carries a class** (47 × 8; f64
+///   is fixed-width under bincode, varints reach integers only) and **zero** for
+///   every other entity, which is every entity in twenty-two of the twenty-four
+///   committed levels.
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -985,9 +1015,14 @@ pub struct EntityRecordGen<T = Terrain, V = Option<VehicleClass>, M = Material> 
 /// One entity's persisted state — **the live record**.
 pub type EntityRecord = EntityRecordGen<Terrain, Option<VehicleClass>, Material>;
 
+/// **The frozen v26 entity record**: the live shape *before* [`VehicleClass`]
+/// grew from fifteen tunables to sixty-two (island wave VEH2a). The material is
+/// the live one — v26 is where it arrived. MIRROR: `inf_scene::EntityRecordV26`.
+pub type EntityRecordV26 = EntityRecordGen<Terrain, Option<VehicleClassV26>, Material>;
+
 /// **The frozen v25 entity record**: the live shape *before* `Material` gained
 /// its `emissive_intensity` (wave VIS1a). MIRROR: `inf_scene::EntityRecordV25`.
-pub type EntityRecordV25 = EntityRecordGen<Terrain, Option<VehicleClass>, MaterialV25>;
+pub type EntityRecordV25 = EntityRecordGen<Terrain, Option<VehicleClassV26>, MaterialV25>;
 
 /// **The frozen v24 entity record**: the live shape *before* the vehicle class,
 /// with the live terrain (v25 changed no component).
@@ -1133,17 +1168,32 @@ impl<T, V, M> EntityRecordGen<T, V, M> {
     }
 }
 
+impl EntityRecordV26 {
+    /// Lift to the live record: the forty-seven VEH2a tunables arrive at the
+    /// Ring-0 defaults, which is what every pre-v27 level meant.
+    pub fn into_current(self) -> EntityRecord {
+        self.map_tail(|v| v.map(VehicleClassV26::into_current))
+    }
+
+    /// Project a live record onto the frozen v26 shape (the **downgrade-bless**
+    /// path). The forty-seven are what is lost.
+    pub fn from_current(r: EntityRecord) -> Self {
+        r.map_tail(|v| v.map(VehicleClassV26::from_current))
+    }
+}
+
 impl EntityRecordV25 {
     /// Lift to the live record: the emissive intensity arrives at **1.0**, which
-    /// is what every pre-v26 level meant -- the authored colour, unscaled.
+    /// is what every pre-v26 level meant -- the authored colour, unscaled; and
+    /// the VEH2a tunables arrive at their defaults through the v26 rung.
     pub fn into_current(self) -> EntityRecord {
-        self.map_material(MaterialV25::into_current)
+        self.map_material(MaterialV25::into_current).into_current()
     }
 
     /// Project a live record onto the frozen v25 shape (the **downgrade-bless**
-    /// path). Only the intensity is lost.
+    /// path). The intensity and the forty-seven VEH2a tunables are lost.
     pub fn from_current(r: EntityRecord) -> Self {
-        r.map_material(MaterialV25::from_current)
+        EntityRecordV26::from_current(r).map_material(MaterialV25::from_current)
     }
 }
 
@@ -1457,6 +1507,100 @@ impl MaterialV25 {
 impl Default for MaterialV25 {
     fn default() -> Self {
         Self::from_current(Material::default())
+    }
+}
+
+/// The **pre-v27** [`VehicleClass`] byte layout — the fifteen `f64`s v25
+/// appended, before island wave VEH2a's window grew the set to sixty-two.
+/// MIRROR: `inf_scene::VehicleClassV26`, which carries the argument in full.
+///
+/// Declared field-by-field rather than derived, because a frozen record's whole
+/// job is to keep saying what it said when the bytes were written.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VehicleClassV26 {
+    pub brake_force_n: f64,
+    pub damping_ns_per_m: f64,
+    pub drag_n_per_mps2: f64,
+    pub enter_time_s: f64,
+    pub handbrake_force_n: f64,
+    pub lateral_grip: f64,
+    pub longitudinal_grip: f64,
+    pub max_engine_force_n: f64,
+    pub max_speed_mps: f64,
+    pub max_steer_deg: f64,
+    pub min_steer_deg: f64,
+    pub rest_length_m: f64,
+    pub rolling_resistance: f64,
+    pub stiffness_n_per_m: f64,
+    pub travel_m: f64,
+}
+
+impl VehicleClassV26 {
+    /// Lift to the live [`VehicleClass`]: the fifteen authored numbers are kept
+    /// exactly and the forty-seven VEH2a tunables arrive at the **Ring-0
+    /// defaults**, which is what a pre-v27 level meant by not carrying them.
+    ///
+    /// Two of the fifteen changed what they *mean* without changing their units
+    /// or their magnitude, and the lift is honest about both:
+    ///
+    /// * `max_engine_force_n` was the peak of a flat drive curve and is now the
+    ///   driveline **ceiling** — still newtons, still a bound on what the wheels
+    ///   are handed, so a v26 car keeps the launch its author gave it;
+    /// * `max_speed_mps` was where that curve fell to zero and is now the class's
+    ///   **reference** top speed (the steering limit's and the drive camera's),
+    ///   with the achieved top speed emerging from the torque curve against the
+    ///   drag. A v26 car therefore accelerates past its old ceiling; there is no
+    ///   number that could have preserved a wall that no longer exists, and
+    ///   pretending otherwise by inventing a torque curve from one force would be
+    ///   the codec deciding a tuning question.
+    pub fn into_current(self) -> VehicleClass {
+        VehicleClass {
+            brake_force_n: self.brake_force_n,
+            damping_ns_per_m: self.damping_ns_per_m,
+            drag_n_per_mps2: self.drag_n_per_mps2,
+            enter_time_s: self.enter_time_s,
+            handbrake_force_n: self.handbrake_force_n,
+            lateral_grip: self.lateral_grip,
+            longitudinal_grip: self.longitudinal_grip,
+            max_engine_force_n: self.max_engine_force_n,
+            max_speed_mps: self.max_speed_mps,
+            max_steer_deg: self.max_steer_deg,
+            min_steer_deg: self.min_steer_deg,
+            rest_length_m: self.rest_length_m,
+            rolling_resistance: self.rolling_resistance,
+            stiffness_n_per_m: self.stiffness_n_per_m,
+            travel_m: self.travel_m,
+            ..VehicleClass::default()
+        }
+    }
+
+    /// Downgrade a live [`VehicleClass`] to the pre-v27 layout (the
+    /// **downgrade-bless** path). The forty-seven VEH2a tunables are what is lost.
+    pub fn from_current(c: VehicleClass) -> Self {
+        Self {
+            brake_force_n: c.brake_force_n,
+            damping_ns_per_m: c.damping_ns_per_m,
+            drag_n_per_mps2: c.drag_n_per_mps2,
+            enter_time_s: c.enter_time_s,
+            handbrake_force_n: c.handbrake_force_n,
+            lateral_grip: c.lateral_grip,
+            longitudinal_grip: c.longitudinal_grip,
+            max_engine_force_n: c.max_engine_force_n,
+            max_speed_mps: c.max_speed_mps,
+            max_steer_deg: c.max_steer_deg,
+            min_steer_deg: c.min_steer_deg,
+            rest_length_m: c.rest_length_m,
+            rolling_resistance: c.rolling_resistance,
+            stiffness_n_per_m: c.stiffness_n_per_m,
+            travel_m: c.travel_m,
+        }
+    }
+}
+
+impl Default for VehicleClassV26 {
+    fn default() -> Self {
+        Self::from_current(VehicleClass::default())
     }
 }
 
@@ -6449,6 +6593,38 @@ pub struct SceneFile {
     pub geo: inf_math::geo::GeoAnchor,
 }
 
+/// A frozen schema-v26 file layout — the shape before v27 grew [`VehicleClass`]
+/// (island wave VEH2a). Only `entities` is repointed: the file record itself and
+/// its settings are untouched by a component growth.
+/// MIRROR: `inf_scene::SceneFileV26`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV26 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV26>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+    #[serde(default)]
+    pub geo: inf_math::geo::GeoAnchor,
+}
+
+impl SceneFileV26 {
+    /// Lift every record to the current shape and stamp the current version.
+    fn into_current(self) -> SceneFile {
+        SceneFile {
+            schema_version: SCHEMA_VERSION,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV26::into_current)
+                .collect(),
+            settings: self.settings,
+            geo: self.geo,
+        }
+    }
+}
+
 /// A frozen schema-v25 file layout — the shape before v26 grew `Material` (the
 /// emissive intensity) and the render block (the photoreal arc's authorable
 /// surface). BOTH payload-bearing fields are repointed at frozen shapes.
@@ -7048,6 +7224,12 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             migrate(v25.into_current())
         }
         26 => {
+            let (v26, _): (SceneFileV26, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v26: {e}"))?;
+            migrate(v26.into_current())
+        }
+        27 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -12884,7 +13066,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 26,
+            SCHEMA_VERSION, 27,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -14614,7 +14796,7 @@ mod tests {
     /// and P29.3's movement slot **re-declared field-for-field**. A `type`
     /// because clippy counts the tuple's nesting, and because naming it says
     /// what it is.
-    type V26EntityWire = (
+    type V27EntityWire = (
         EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
@@ -14680,6 +14862,55 @@ mod tests {
         rolling_resistance: f64,
         stiffness_n_per_m: f64,
         travel_m: f64,
+        // ── the VEH2a tail (v27): forty-seven more, re-declared here so a class
+        //    grown WITHOUT a bump leaves bytes this shape cannot account for.
+        abs_slip: f64,
+        ackermann: f64,
+        anti_roll_front_n_per_m: f64,
+        anti_roll_rear_n_per_m: f64,
+        brake_bias: f64,
+        cog_height_m: f64,
+        diff_lock_front: f64,
+        diff_lock_rear: f64,
+        downforce_centre_z: f64,
+        downforce_n_per_mps2: f64,
+        drag_lateral_n_per_mps2: f64,
+        engine_brake_nm: f64,
+        enter_warp_end: f64,
+        enter_warp_start: f64,
+        final_drive: f64,
+        front_torque_split: f64,
+        gear_1_ratio: f64,
+        gear_2_ratio: f64,
+        gear_3_ratio: f64,
+        gear_4_ratio: f64,
+        gear_5_ratio: f64,
+        gear_6_ratio: f64,
+        gear_7_ratio: f64,
+        gear_8_ratio: f64,
+        gear_count: f64,
+        idle_rpm: f64,
+        idle_torque_frac: f64,
+        peak_torque_nm: f64,
+        peak_torque_rpm: f64,
+        redline_rpm: f64,
+        redline_torque_frac: f64,
+        reverse_ratio: f64,
+        shift_down_rpm: f64,
+        shift_time_s: f64,
+        shift_up_rpm: f64,
+        stability_control: f64,
+        steer_rate_deg_per_s: f64,
+        steer_return_deg_per_s: f64,
+        torque_curve_bias: f64,
+        traction_control_slip: f64,
+        tyre_lat_peak_slip: f64,
+        tyre_lat_rise_bias: f64,
+        tyre_load_sensitivity: f64,
+        tyre_long_peak_slip: f64,
+        tyre_long_rise_bias: f64,
+        tyre_slide_frac: f64,
+        wheel_inertia_kgm2: f64,
     }
 
     /// The **v24 geo-anchor**, re-declared independently — the file's new tail.
@@ -14705,7 +14936,7 @@ mod tests {
     /// Serialized from the **live** record rather than reassembled from frozen
     /// parts, because the shadow's only job is to produce bytes that carry one
     /// slot more than the current wire.
-    type V26EntityShadow<'a> = (&'a EntityRecord, Option<u8>);
+    type V27EntityShadow<'a> = (&'a EntityRecord, Option<u8>);
 
     /// **The v23 wire shape, pinned against an INDEPENDENT declaration.**
     ///
@@ -14732,10 +14963,10 @@ mod tests {
     /// `Material` without a bump shifts every byte after it, which is the case
     /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV26Wire {
+    struct SceneFileV27Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V26EntityWire>,
+        entities: Vec<V27EntityWire>,
         settings: LevelSettings,
         /// The v24 tail — declared so a payload whose anchor is short or long by
         /// a field cannot pass.
@@ -14745,16 +14976,16 @@ mod tests {
     /// A **shadow v23** — the live wire plus one appended tail slot, exactly
     /// what an author adding a component would write.
     #[derive(serde::Serialize)]
-    struct SceneFileV26Shadow<'a> {
+    struct SceneFileV27Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<V26EntityShadow<'a>>,
+        entities: Vec<V27EntityShadow<'a>>,
         settings: LevelSettings,
         geo: &'a inf_math::geo::GeoAnchor,
     }
 
     #[test]
-    fn the_v26_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v27_wire_shape_is_pinned_against_an_independent_declaration() {
         let bound = uuid::Uuid::from_u128(0xFA7E_0026);
         let level = SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -14769,6 +15000,7 @@ mod tests {
                     cloth_sim: Some(v21_fixture_cloth()),
                     hair_guides: Some(v21_fixture_hair()),
                     character_movement: Some(v23_fixture_movement()),
+                    vehicle_class: Some(fixture_vehicle_class()),
                     ..v9_base(uuid::Uuid::from_u128(0xFD10), "Hero", None)
                         .into_v10()
                         .into_v11()
@@ -14788,9 +15020,9 @@ mod tests {
         };
         let bytes = bincode::serde::encode_to_vec(&level, bincode_config()).unwrap();
 
-        let (wire, consumed): (SceneFileV26Wire, usize) =
+        let (wire, consumed): (SceneFileV27Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v22 shape decodes the v22 wire");
+                .expect("the pinned v27 shape decodes the v27 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -14824,6 +15056,37 @@ mod tests {
             "the HairGuides is not in slot 47"
         );
         assert!(wire.entities[1].1.is_none() && wire.entities[1].3.is_none());
+        assert!(
+            wire.entities[0].4.is_some(),
+            "the CharacterMovement is not in slot 48"
+        );
+        // The v25 tail landed in slot 49, and the pin read it through its OWN
+        // SIXTY-TWO-field declaration — so a class short or long by a field, or
+        // reordered, is a decode failure rather than a silently shifted read.
+        //
+        // Ring 1 did not seed a class here until wave VEH2a, so this half of the
+        // mirror was pinning `None` and could not have failed. It is seeded now,
+        // which is what makes the Ring-1 pin the equal of `inf_scene`'s twin.
+        let class = wire.entities[0]
+            .5
+            .as_ref()
+            .expect("the VehicleClass is not in slot 49");
+        assert_eq!(
+            class.wheel_inertia_kgm2,
+            fixture_vehicle_class().wheel_inertia_kgm2,
+            "the LAST field of the class — if this is wrong the slot is short"
+        );
+        assert_eq!(class.brake_force_n, fixture_vehicle_class().brake_force_n);
+        // The SEAM between the v25 fifteen and the VEH2a forty-seven, read from
+        // both sides: `travel_m` was the last field at v25 and `abs_slip` is the
+        // first of the tail, so a v27 tail spliced in one slot early or late
+        // still consumes every byte and fails right here.
+        assert_eq!(class.travel_m, fixture_vehicle_class().travel_m);
+        assert_eq!(class.abs_slip, fixture_vehicle_class().abs_slip);
+        assert!(
+            wire.entities[1].5.is_none(),
+            "and an entity with no vehicle class really has none"
+        );
         // The v24 tail landed in ITS OWN slot, field for field — the anchor is
         // the file's growth, and nothing else in this shape would notice if it
         // were short, long, or reordered.
@@ -14884,7 +15147,7 @@ mod tests {
         };
         let v23 = bincode::serde::encode_to_vec(&level, bincode_config()).unwrap();
         let v24 = bincode::serde::encode_to_vec(
-            &SceneFileV26Shadow {
+            &SceneFileV27Shadow {
                 schema_version: SCHEMA_VERSION,
                 title: &level.title,
                 entities: vec![(&level.entities[0], Some(7u8))],
@@ -14919,7 +15182,7 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV26Wire, _>(&v24, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV27Wire, _>(&v24, bincode_config()).err();
         assert!(
             err.is_some(),
             "the pinned v23 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
@@ -14927,7 +15190,7 @@ mod tests {
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV26Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV27Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
@@ -15345,9 +15608,9 @@ mod tests {
     }
 
     /// A vehicle class with numbers no default holds — the Ring-1 mirror of
-    /// `inf_scene`'s `v25_fixture_class`, and byte-identical to it, because the
+    /// `inf_scene`'s `fixture_vehicle_class`, and byte-identical to it, because the
     /// two crates' v24 fixtures are compared for equality.
-    fn v25_fixture_class() -> VehicleClass {
+    fn fixture_vehicle_class() -> VehicleClass {
         VehicleClass {
             max_engine_force_n: 21_500.0,
             max_speed_mps: 41.5,
@@ -15364,6 +15627,54 @@ mod tests {
             stiffness_n_per_m: 46_000.0,
             damping_ns_per_m: 5_400.0,
             enter_time_s: 0.83,
+            // ── the forty-seven VEH2a numbers (v27) ──
+            abs_slip: 0.205,
+            ackermann: 0.65,
+            anti_roll_front_n_per_m: 17_500.0,
+            anti_roll_rear_n_per_m: 6_250.0,
+            brake_bias: 0.545,
+            cog_height_m: -0.415,
+            diff_lock_front: 0.35,
+            diff_lock_rear: 0.85,
+            downforce_centre_z: -0.72,
+            downforce_n_per_mps2: 0.94,
+            drag_lateral_n_per_mps2: 2.35,
+            engine_brake_nm: 62.5,
+            enter_warp_end: 0.61,
+            enter_warp_start: 0.17,
+            final_drive: 4.11,
+            front_torque_split: 0.28,
+            gear_1_ratio: 4.15,
+            gear_2_ratio: 2.63,
+            gear_3_ratio: 1.87,
+            gear_4_ratio: 1.41,
+            gear_5_ratio: 1.09,
+            gear_6_ratio: 0.86,
+            gear_7_ratio: 0.71,
+            gear_8_ratio: 0.62,
+            gear_count: 8.0,
+            idle_rpm: 950.0,
+            idle_torque_frac: 0.41,
+            peak_torque_nm: 512.0,
+            peak_torque_rpm: 4_450.0,
+            redline_rpm: 7_800.0,
+            redline_torque_frac: 0.83,
+            reverse_ratio: 3.71,
+            shift_down_rpm: 2_650.0,
+            shift_time_s: 0.135,
+            shift_up_rpm: 7_150.0,
+            stability_control: 0.72,
+            steer_rate_deg_per_s: 315.0,
+            steer_return_deg_per_s: 455.0,
+            torque_curve_bias: 0.31,
+            traction_control_slip: 0.095,
+            tyre_lat_peak_slip: 0.205,
+            tyre_lat_rise_bias: 0.83,
+            tyre_load_sensitivity: 0.315,
+            tyre_long_peak_slip: 0.145,
+            tyre_long_rise_bias: 0.79,
+            tyre_slide_frac: 0.655,
+            wheel_inertia_kgm2: 2.35,
         }
     }
 
@@ -15482,7 +15793,7 @@ mod tests {
         doc.world_mut()
             .world_mut()
             .entity_mut(car_e)
-            .insert(v25_fixture_class());
+            .insert(fixture_vehicle_class());
         // A second entity with NO class, so a codec that wrote one value into
         // every slot would fail here.
         let cone = doc.create(crate::ipc::SpawnKind::Empty, "Cone", None);
@@ -15499,7 +15810,7 @@ mod tests {
             .and_then(|e| back.world().world().get::<VehicleClass>(e).copied());
         assert_eq!(
             got,
-            Some(v25_fixture_class()),
+            Some(fixture_vehicle_class()),
             "the vehicle class did not survive the document round trip"
         );
         assert!(
@@ -15636,6 +15947,69 @@ mod tests {
         assert_eq!(d.chromatic_aberration, 0.0);
         assert_eq!(d.grain_intensity, 0.0);
         assert_eq!(d.grain_size, 0.0);
+    }
+
+    /// **The downgrade direction for v27** — the frozen [`VehicleClassV26`]
+    /// loses exactly the forty-seven VEH2a tunables, brings them back at the
+    /// **Ring-0 defaults**, and touches none of the fifteen v25 numbers.
+    ///
+    /// Counted rather than listed, so the arm keeps meaning something the day a
+    /// forty-eighth field lands. MIRROR: `inf_scene`'s
+    /// `v26_downgrade_is_lossless_except_for_what_v27_added`, which makes the
+    /// same claim through the whole entity record.
+    #[test]
+    fn v26_downgrade_is_lossless_except_for_what_v27_added() {
+        let authored = fixture_vehicle_class();
+        let back = VehicleClassV26::from_current(authored).into_current();
+        assert_ne!(
+            back, authored,
+            "the forty-seven must really be what is lost"
+        );
+
+        let default = VehicleClass::default();
+        let mut lost = 0usize;
+        for ((name, g), ((_, w), (_, d))) in back
+            .settings()
+            .into_iter()
+            .zip(authored.settings().into_iter().zip(default.settings()))
+        {
+            if g == w {
+                continue;
+            }
+            lost += 1;
+            assert_eq!(
+                g, d,
+                "`{name}` came back as neither the authored value nor the Ring-0 default"
+            );
+        }
+        assert_eq!(
+            lost, 47,
+            "the v27 rung appended forty-seven tunables; {lost} of them survived a \
+             round trip through the frozen v26 shape"
+        );
+
+        // …and the frozen ENTITY record loses the same thing and nothing more.
+        // Built through `record_of` rather than by literal, so this arm also
+        // fails if the projection out of the world stops carrying the slot.
+        let mut doc = crate::scene::SceneDoc::new();
+        let car = doc.create(crate::ipc::SpawnKind::Empty, "Car", None);
+        let car_e = doc.entity_of(car).unwrap();
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(car_e)
+            .insert(authored);
+        let live = record_of(&doc, car).expect("the car has a record");
+        assert_eq!(live.vehicle_class, Some(authored));
+        let rung = EntityRecordV26::from_current(live.clone()).into_current();
+        assert_eq!(rung.vehicle_class, Some(back));
+        assert_eq!(
+            EntityRecord {
+                vehicle_class: live.vehicle_class,
+                ..rung
+            },
+            live,
+            "the v26 record downgrade touched something that is not the class"
+        );
     }
 
     /// **The downgrade direction for v26** — the frozen v25 shapes lose exactly
@@ -16062,7 +16436,7 @@ mod tests {
     /// from v1 up is migrated by the ladder, which is what makes this codec's
     /// contract one-sided where `SessionSave`'s is two-sided.
     #[test]
-    fn a_v27_payload_is_refused_by_name_in_both_doors() {
+    fn a_v28_payload_is_refused_by_name_in_both_doors() {
         let file = SceneFile {
             schema_version: SCHEMA_VERSION,
             title: "Future".into(),
@@ -16073,14 +16447,14 @@ mod tests {
         let mut bytes = bincode::serde::encode_to_vec(&file, bincode_config()).unwrap();
         bytes[0] = SCHEMA_VERSION as u8 + 1;
         let err = decode(&bytes).expect_err("a newer payload must be refused");
-        assert!(err.contains("v27") && err.contains("v26"), "{err}");
+        assert!(err.contains("v28") && err.contains("v27"), "{err}");
 
         let err = migrate(SceneFile {
             schema_version: SCHEMA_VERSION + 1,
             ..file
         })
         .expect_err("migrate must refuse it too");
-        assert!(err.contains("v27") && err.contains("v26"), "{err}");
+        assert!(err.contains("v28") && err.contains("v27"), "{err}");
     }
 
     /// **L5.F4, the editor mirror.** The same three zero bytes, the same
