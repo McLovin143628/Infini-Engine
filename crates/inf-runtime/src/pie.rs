@@ -420,8 +420,10 @@ pub struct ScenePayload {
     /// process of the editor, on the same machine, with the same view of the disk,
     /// and the file named here is the one the editor would otherwise have read
     /// into the frame. Nothing about the world changes — the player decodes the
-    /// same bytes through the same [`inf_player::level::terrain_source_from_file`]
-    /// door the `--level` boot uses, which is also the door the SHIPPED build
+    /// same bytes through the same `inf_player::level::terrain_source_from_file`
+    /// door the `--level` boot uses (named rather than linked: this crate is
+    /// BELOW the player and must not depend on it), which is also the door the
+    /// SHIPPED build
     /// takes (a cooked pack is read from disk, never streamed), so PIE == shipping
     /// is not weakened by this: it is the one asset kind where the wire was the
     /// odd path out.
