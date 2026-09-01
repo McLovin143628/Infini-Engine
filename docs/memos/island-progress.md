@@ -23568,3 +23568,360 @@ difference from the heading.
 | frontend | not run | **not run — `editor/studio/src/` is untouched by the audit as well as by the wave** |
 | `chr(92)` | 2 caught pre-commit | **zero eaten continuations** in the wave's range and in the audit's own diff, by an independent stream lexer |
 | disk | 89 GB free | **63 GB free at the end**, and the wave's own law paid for a fourth time: the audit's rebuilds took the volume from 94 GB to **39 GB**, and deleting `target/debug/incremental` alone (**29.8 GB**) returned **+24 GB with no cold rebuild** before the verification legs ran. No `cargo clean` beyond `--doc`, and no `.pdb` reclaim needed |
+## Wave VEH2a — driving feel v2, the Forza-grade model (2026-09-01)
+
+Base `efb7baec`. The 2026-08-31 mandate's second wave: *driving on par with
+GTA 6 / Forza — ultra-realistic.* P29.7 shipped a raycast vehicle and island
+wave VEH1a gave it a body, a catalogue and a place on the circuit. What neither
+gave it was a **car**: no wheel could turn, no engine had a curve, no gearbox
+existed, the tyre was two independent clamps, the steering was instant, and a
+driving character inherited whichever walking camera it had been latched to.
+
+Ten clauses. The one that governed the wave was **THE SCHEMA WINDOW**: the house
+law is one scene bump per phase, so the whole tuning surface had to be enumerated
+before a line of it was written and landed in a single rung.
+
+### Clause 0 — THE SCHEMA WINDOW, as landed
+
+`VehicleClass` grows from **fifteen `f64`s to sixty-two**, scene schema **v27**,
+in both codec mirrors, once. The forty-seven append at the component's **tail**,
+sorted among themselves, so every v25 field keeps its v25 offset; bincode is
+positional and this repository has paid for that three times.
+
+| block | tunables |
+|---|---|
+| engine | `idle_rpm`, `peak_torque_rpm`, `redline_rpm`, `peak_torque_nm`, `idle_torque_frac`, `redline_torque_frac`, `torque_curve_bias`, `engine_brake_nm` |
+| gearbox | `gear_count`, `gear_1_ratio`…`gear_8_ratio`, `reverse_ratio`, `final_drive`, `shift_time_s`, `shift_up_rpm`, `shift_down_rpm` |
+| drivetrain | `front_torque_split`, `diff_lock_front`, `diff_lock_rear` |
+| brakes | `brake_bias` |
+| tyres | `tyre_long_peak_slip`, `tyre_long_rise_bias`, `tyre_lat_peak_slip`, `tyre_lat_rise_bias`, `tyre_slide_frac`, `tyre_load_sensitivity`, `wheel_inertia_kgm2` |
+| chassis | `cog_height_m`, `anti_roll_front_n_per_m`, `anti_roll_rear_n_per_m`, `downforce_n_per_mps2`, `downforce_centre_z`, `drag_lateral_n_per_mps2` |
+| steering | `steer_rate_deg_per_s`, `steer_return_deg_per_s`, `ackermann` |
+| aids | `abs_slip`, `traction_control_slip`, `stability_control` |
+| seat | `enter_warp_start`, `enter_warp_end` |
+
+The last row closes VEH1a's carried item *"`enter_window` is still absent from
+`VehicleClass`"*, and it closes it the way the bound was wrong rather than the
+way it was stated: the window did not need a trait setter, it needed to stop
+being a type and start being its two numbers. **There is no longer any tunable a
+level cannot author.**
+
+Three rulings inside the window:
+
+* **`front_torque_split` IS the drivetrain.** A `Drivetrain{Fwd,Rwd,Awd}` enum was
+  refused: the physics reads a split and nothing else, so an enum beside it is a
+  second source of truth for one fact AND cannot travel the `set(name, f64)` door
+  every other tunable travels — which would mean a second setter on the `Vehicle`
+  trait, i.e. the P29.6 A14 defect bought for no behaviour. A catalogue row may
+  still write `drivetrain = "awd"`; that is a spelling, resolved before any
+  numeric key so an explicit split always wins whatever order the TOML map
+  iterated in, and an unknown word is a refusal by name.
+* **Eight gear slots, not a `Vec`.** A fixed arity keeps `VehicleTuning` `Copy`,
+  keeps every gear reachable through the one by-name door, and keeps the
+  serialized class a flat run of `f64`s a bincode wire pin can account for field
+  by field. A `Vec` costs all three.
+* **Each aid is ONE number** carrying both the toggle and the threshold. A `bool`
+  beside a threshold is two fields that can disagree.
+
+The rung is the `MaterialV25` *shape* of bump: `VehicleClassV26` freezes the
+pre-v27 layout in both mirrors and every pre-v27 alias turns its `V` parameter
+back to `Option<VehicleClassV26>`. **No new generic parameter and no re-declared
+forty-eight-field record was needed** — the v25 rung's own promise, *"the tail is
+generic … so the day a class needs a sixteenth number, the frozen record does not
+need re-declaring"*, held exactly. Wire cost: **376 bytes per entity that carries
+a class**, zero for every other.
+
+Honest about the two fields that changed MEANING without changing units, in the
+lift's own doc: `max_engine_force_n` was a flat curve's peak and is now the
+driveline **ceiling**; `max_speed_mps` was where that curve died and is now the
+class's reference speed and its **limiter**. Inventing a torque curve out of one
+force would be the codec deciding a tuning question, so it does not.
+
+### Clauses 1–3 — the wheel, the engine and the tyre
+
+One commit, because they are one mechanism: without angular state there is no
+slip, without slip there is no tyre curve, and without a curve the only available
+longitudinal law is "cancel the slip, clamped".
+
+* **`WheelState` gains `omega_rad_s`, `slip_ratio`, `slip_lat`**, and `spin_deg`
+  becomes derived from `ω`. The visual used to say "rolling" whatever the contact
+  patch did.
+* **A three-knot torque curve** with one shape knob (`curve_bias`, Schlick's bias
+  — four arithmetic operations rather than a `powf`, because P14's law reaches a
+  curve whose output is compared byte for byte between two hosts), times a gear,
+  times a final drive, **divided by the wheel's radius**, which the drive path had
+  never once read. Engine braking, an automatic box with a real shift window,
+  reverse as a *gear*, and revs that are the engine's own rpm — so the audio loop
+  drops on every upshift, which is the single thing that makes an engine sound
+  like a car.
+* **A simplified Pacejka tyre**: a bias-shaped rise to a peak at the axis's own
+  peak slip, a fall to a sliding plateau, load sensitivity so weight transfer
+  COSTS grip, and the two axes coupled through ONE combined-slip magnitude.
+  P29.7 clamped each axis independently, so a tyre could hold its whole grip
+  sideways *and* its whole grip forwards at once — 1.41 × what it has, which is
+  why it could brake at full force out of a corner it was already sliding through.
+
+**A speed LIMITER, and why.** With a torque curve the default rig's emergent top
+speed is 52.7 m/s where every piece of committed content was built around 25, so
+`max_speed_mps` keeps its meaning and gets an honest mechanism: a taper across
+the last 6 % of the authored speed. Nearly every road car this century is
+electronically limited, and it is what lets a spec row *bound* a top speed.
+
+### Clause 4 — the drivetrain, the differentials and the brakes
+
+`front_torque_split` decides which axle pushes and it decides the drive torque,
+the engine braking AND the revs alike, because reading revs off wheels the engine
+cannot turn is how a rear-drive car ends up shifting on its front axle.
+
+**A differential divides an axle's TORQUE**, and the lock decides how much of it
+the SLOWER wheel takes. A *speed* average was tried first and refused, with the
+measurement in the code: pulling a grounded wheel's `ω` up toward a spinning
+partner's puts momentum into it that the ground must then absorb, so the wheel
+that had grip breaks away and the spool delivered **less** force than the open
+diff — 3 083 N against 3 853 at matched revs.
+
+### Clause 5 — the chassis
+
+* **Centre of gravity.** No door exists to move the solver's centre of mass, so
+  the model moves the *forces*: a tyre force applied at `contact − up·cog_height_m`
+  produces exactly the moment the true centre of gravity would have felt, and the
+  suspension is untouched by construction because it is parallel to `up`.
+* **Anti-roll bars**, which cost the suspension pass its single-pass shape: a bar
+  resists the compression difference across an axle, so every load on that axle
+  has to exist before any of them is final. It moves load and adds none, and with
+  a load-sensitive tyre under it, moving load is what costs grip.
+* **A per-axle load readout**, **downforce at its own centre of pressure**, and
+  **anisotropic drag** — a car's flank is two to three times its nose, and one
+  isotropic coefficient meant a car sliding at 20 m/s met exactly as much air as
+  one driving at 20.
+* **A steering rack** with a rate and a return-to-centre, plus Ackermann. P29.7's
+  steering was instant. The Ackermann is the small-angle geometry rather than the
+  cotangent identity, because that needs a tangent and an arctangent and this
+  repository has no portable one.
+
+### Clause 6 — the aids, and the two defects they found
+
+The aids are **feed-forward torque caps**: the tyre curve evaluated at the aid's
+own target slip, times µ at this load, times the radius (`aid_torque_cap_nm`).
+One clamp, no state, no lag, settled on the first step. ABS caps the whole
+modulated budget, traction control the drive request, and stability control brakes
+exactly one wheel — the outside front when the car rotates faster than it was
+asked to, the inside rear when it rotates slower.
+
+Getting there cost two findings, both recorded at the code:
+
+* **THE REV LIMITER WAS CLAMPING THE CONTACT PATCH.** It was a clamp on wheel
+  angular speed applied BEFORE the contact solve, and the stick force is
+  proportional to how far the drive torque moved the wheel — so as a wheel neared
+  the ceiling the force **collapsed**. The coupe reached 14.2 m/s in first gear
+  over four and a third seconds with 21 kN of engine and 11 kN of grip available,
+  delivering **982 N**. Every class tailed off the same way at the top of every
+  gear and nothing was watching. A limiter cuts fuel; it does not reach into the
+  friction model.
+* **A FEEDBACK AID CANNOT WIN A ONE-STEP RACE.** A wheel with 1 kg·m² of inertia
+  under 4 kN·m of drive changes speed by **66 rad/s in a single 60 Hz step**, so
+  measuring slip and then reacting is always exactly one step behind something
+  that is over inside one step. `tc / slip` applied directly oscillated the crank
+  between **416 N·m and 109** and the revs between **4 138 and 1 827**;
+  integrating the error settled no better, because its input alternates between 0
+  (stuck) and 5 (spinning). Both took **8.7 s** to 100 km/h on an axle that
+  carries the car there in **4.17**.
+  Two corollaries: the aid's target is clamped to the tyre's own **peak**, because
+  past it the curve falls and an aid aiming there stands on an unstable point (an
+  `abs_slip` of 0.15 against a peak of 0.12 still spent **82 %** of the stop
+  locked); and ABS caps the whole modulated budget rather than the foot brake
+  alone, because rolling resistance and engine braking were enough to push a
+  capped brake over the edge by themselves.
+
+### Clause 7 — THE DRIVE CAMERA, and it costs no schema
+
+P29.7 gave the engine a vehicle and never gave it a camera. `settings_for`
+dispatches on `RotationMode` and `Gait`; `step_driving` writes neither, because it
+returns before `actual_gait` is computed. So a driving character got **whichever
+on-foot gait block was latched at the instant it pressed the interact key, frozen
+for the whole drive** — and since a player is normally stationary beside the door
+when they press it, that block is `walk`: arm 3.0 m, FOV 70, shoulder offset
+0.45 m. Literally the walking camera, on a car.
+
+`CameraTuning` gains a `driving` block answered **before the gait is looked at**,
+and on top of the base block: arm length per metre of the vehicle's own
+half-length (so a bus sits further back than a hatchback with no per-class table —
+geometry the rig already carries), arm and FOV per m/s with a ceiling on the FOV
+gain, a velocity look-ahead that aims the camera up the road instead of at the
+roof, and a yaw that blends toward the chassis heading as the car gets going.
+
+The alignment is a **recentring, not an override**: the stick still moves
+`aim_yaw_deg`, so holding it looks around and releasing it lets the camera swing
+back behind the car — which is what `docs/reference_videos/frames/driving/0032`
+and `steal-car/0040` show. Two of the drive view's three numbers are already
+written by `step_driving` onto the runtime; only the half-length is looked up. So
+the drive camera adds **no simulation state, no schema, no trace bytes and no
+mirror**.
+
+### Clause 8 — the fleet
+
+Three more silhouettes and three more drives, and the two originals finally given
+engines and drivetrains of their own. The coupe is rear-drive with a revvy engine,
+a locked rear diff, real downforce and its aids turned down; the wagon is
+all-wheel-drive, tall, soft and heavily assisted; the van is a rear-drive diesel
+with a huge flank, a high centre of gravity and the strongest stability control of
+the five. The saloon becomes front-wheel drive, which is what a saloon is.
+
+`the_island_catalogue_declares_a_fleet_and_no_two_rows_are_one_car` walks six axes
+a driver actually feels — top speed, peak torque, where the torque arrives, grip,
+how hard the aids intervene, and mass — and requires all five rows to differ on
+every one. **And the fleet reaches the island**: a city parks the two road cars, a
+town the working vehicles and the wagon. A row left in the catalogue is a table,
+not a fleet.
+
+**No bus.** A bus is not one more parts table: its axles are not a sign test on
+`mount_local.z`, and pretending three axles are two is the kind of shortcut this
+wave spent its budget removing. Carried.
+
+### Clause 9 — THE TABLES
+
+**THE FEEL TABLE**, measured on flat ground, bounded by per-row spec bands
+written before the run:
+
+| row | mass | sprint | stop | top speed | limiter |
+|---|---|---|---|---|---|
+| sports | 1 374 kg | 0–100 km/h in **4.17 s** | **31.4 m** | 60.9 m/s (219 km/h) | 62 |
+| sedan | 1 185 kg | 0–100 km/h in **7.48 s** | **42.6 m** | 33.6 m/s (121 km/h) | 34 |
+| suv | 2 098 kg | 0–100 km/h in **7.40 s** | **40.8 m** | 44.8 m/s (161 km/h) | 46 |
+| van | 3 296 kg | 0–92 km/h in **14.68 s** | **42.8 m** | 31.1 m/s (112 km/h) | 32 |
+| truck | 2 341 kg | 0–78 km/h in **6.75 s** | **32.7 m** | 26.8 m/s (96 km/h) | 27 |
+
+Two rows are governed below 100 km/h and are specified against 80 % of their own
+limiter instead: measuring every class against a speed two of them are not allowed
+to have is how a gate ends up asserting the governor rather than the engine.
+
+**THE SLIP CURVES.** The tyre is `tyre_curve(slip / peak_slip, rise_bias,
+slide_frac)`: `curve_bias` up to 1 at the peak, linear down to `slide_frac` at
+`TYRE_SLIDE_SLIP_MULT = 3`, flat after. The peak is at 1 for **every** stiffness,
+which is what makes "where it peaks" and "how stiff the rise is" two independent
+knobs. Per class:
+
+| row | long peak slip | long rise bias | lat peak slip (tan) | lat rise bias | slide frac | load sensitivity |
+|---|---|---|---|---|---|---|
+| sports | 0.11 | 0.80 | 0.13 | 0.78 | 0.68 | 0.18 |
+| sedan / truck (defaults) | 0.12 | 0.74 | 0.16 | 0.72 | 0.72 | 0.22 |
+| suv | 0.13 | 0.70 | 0.18 | 0.68 | 0.74 | 0.26 |
+| van | 0.14 | 0.66 | 0.20 | 0.64 | 0.78 | 0.30 |
+
+**THE STEP COST**, `inf_physics::d3::step_vehicles` over N cars on the island's
+own grid, MIN of three rounds of forty steps:
+
+| cars | dev (VEH1a) | dev (VEH2a) | per car | world queries |
+|---|---|---|---|---|
+| 1 | 0.0015 ms | **0.0018 ms** | 1.81 µs | 4 |
+| 4 | 0.0053 | **0.0063** | 1.57 | 16 |
+| 16 | 0.0227 | **0.0271** | 1.70 | 64 |
+| **64** | **0.1101** | **0.1277 ms** | **2.00 µs** | 256 |
+
+**+16 % for all of it**, because the expensive work in this phase was always the
+four ray casts and none of the new work casts anything. `VEHICLE_STEP_BUDGET_MS`
+**stays at 0.5**: re-minting at VEH1a's own ~4.5× rule would give 0.575 and §8
+forbids raising a budget, so the headroom tightens to **~3.9×** instead. That is
+the ratchet doing exactly what it is for.
+
+**THE DRIVE TRACE, re-blessed.** Purpose unchanged — it is still the one place
+that says the editor's Simulate and the shipped player step a vehicle to the same
+bytes — so the deltas are published:
+
+| | VEH1a | VEH2a | why |
+|---|---|---|---|
+| distance in 300 steps | 34.1 m | **27.0 m** | the settlement now parks a row from the grown fleet |
+| top speed | 16.81 m/s | **7.65 m/s** | same, plus a torque curve that must rev through a gearbox |
+| wheel contacts | 1 018 of 1 200 | **1 200 of 1 200** | the suspension keeps every wheel down for the whole drive |
+| peak revs | 0.4944 | **0.9269** | revs are rpm between idle and the redline, not road speed |
+
+The contact count is the one worth reading twice: 182 wheel-steps that used to be
+spent in the air.
+
+**THE GRADE.** The sedan still climbs I7's audited 0.108 worst grade, **driven**:
+144.8 m and 15.68 m of height in ten seconds; the pickup 130.8 m and 13.5 m; the
+control at 0.60 goes backwards. The arm's *order* claim is retired — it flipped
+twice inside this wave (saloon, then pickup when the diesel and the front drive
+landed, then saloon again when the aids became feed-forward, because a front-drive
+car climbing a hill is exactly what a good traction controller rescues) — and what
+is asserted instead is the margin, because an arm pinned to one side of a knife
+edge reds on every tuning pass and says nothing.
+
+**THE LIBM HOLE, closed.** Neither vehicle module was covered by any portability
+gate in the tree, and the only thing keeping `f64::sin` out of the driving model
+was a comment. Every gate was checked when the hole was found —
+`portable_character`'s four `d3` files, `portable_pose`'s thirty-five
+`include_str!`s, `inf-editor-core`'s crate-wide walk — and **not one covered
+either file**. A cross-target divergence in a car would have shipped: the two arms
+that compare a drive both run two hosts on ONE machine, which is exactly the
+comparison a libm difference is invisible to. Both files join
+`portable_character`, which grows the `#[cfg(test)]` strip its own comment had
+been asking for since it was written. Mutation-verified: a `.sin()` in
+`curve_bias` reds it by name and line.
+
+### THE LAWS THIS WAVE PAID FOR
+
+**A limiter limits the ENGINE, not the contact patch.** Clamping a wheel's speed
+clamps the force it can transmit, because a stick solve's force is proportional to
+how far the drive torque moved the wheel. The symptom is not "the car will not
+rev" — it is "the car will not accelerate", at the top of every gear, with the
+engine and the grip both sitting there unused.
+
+**A one-step event cannot be governed by a one-step-old measurement.** Any aid,
+filter or controller reading last step's state is a step behind, and a wheel's
+whole story happens inside one step. Feed forward from what does not change that
+fast — the load — and clamp the request.
+
+**An aid must aim at the RISING side of its curve.** Past the peak, more slip is
+less force, so a target beyond it is an unstable operating point that finds the
+locked/spinning end every time. The clamp to the peak is not a convenience.
+
+**Order the wheel's torques: drive, then the ground, then everything that
+resists.** With the brake before the ground, a locked wheel is pulled to zero,
+pushed back to 9 rad/s by the contact patch inside the same step, and pulled to
+zero again — a wheel that chatters between locked and rolling at 30 Hz for as long
+as the pedal is down.
+
+**`(0.0f64).signum()` is 1.0.** The stick force applied a full 12 kN of brake to a
+stationary car and drove it backwards at 7.3 cm/s — P29.7's "a resistive force may
+not reverse the motion" law, met again in a new place.
+
+**A surprising true fact is worth pinning; a knife edge is not.** The pickup
+out-climbing the saloon was true, interesting and worth an assertion — until the
+aids changed and it stopped being true. An arm that flips twice inside one wave is
+measuring the tuning, not the model.
+
+**A selection rule restated in a test goes stale on the commit that changes it.**
+The island's car-per-settlement rule was written twice and the second copy went
+wrong on the very commit that grew the fleet. One door, `island_vehicle_id`.
+
+**A fixture measures the world it is given.** The feel table's first cut ran a
+coupe at full throttle for a minute — three kilometres — on a 512 m terrain, and
+reported a stop that never happened because the car was in free fall.
+
+### CARRIED
+
+1. **No bus, and the reason is structural** (above): a third axle is not a sign
+   test on `mount_local.z`.
+2. **The tyre is isotropic in the surface.** One µ per vehicle, so wet tarmac,
+   gravel and grass are the same road. A per-surface µ needs a material lookup at
+   the contact, which is the terrain layer weights the ray already crosses.
+3. **`WheelContact::normal` still reaches no force**, and the VEH1a tripwire still
+   holds. The Pacejka model was priced against it and does not need it: the
+   friction basis is the steered wheel's own axes and the suspension pushes along
+   the chassis up, so a camber term is what would change that, not the curve.
+4. **No tyre smoke, no skid marks, no engine audio beyond the one loop.** The slip
+   ratio a particle system would key off is published on every wheel and read by
+   nobody. `docs/reference_videos/frames/driving/0006` is the reference.
+5. **The engine's emitter still does not MOVE** (VEH1a's carried item, unmoved):
+   no `AudioCommand::SetPosition`, so a driving car's engine is spatialized where
+   its `Play` was issued.
+6. **The gearbox is automatic only.** No clutch, no manual shift input, no
+   sequential paddle — `shift_target` is the whole policy and nothing routes a
+   driver's request into it.
+7. **The phase-29 course's car is still built sideways**, and its tripwire still
+   holds. VEH2a changed the model under it, not its half-extents.
+8. **No vehicle HUD**: rpm, gear and the aids' intervention are all published
+   (`RaycastVehicle::rpm`, `gear`, `WheelState::tc_cut`, `axle_load_n`) and
+   nothing draws them.
+9. **Traffic is still VEH1b's.** The fleet parks; nothing drives itself.

@@ -2727,9 +2727,11 @@ impl Vehicle for RaycastVehicle {
             0.0
         };
 
-        // The rev limiter, expressed where it belongs: as the fastest the wheels
-        // can turn in this gear. Without it an airborne driven wheel spins up for
-        // ever, because nothing on the ground is there to stop it.
+        // The fastest a wheel may turn in this gear — applied **only to a wheel in
+        // the air**, where nothing on the ground is there to stop it. A grounded
+        // one is limited by the fuel cut above and by the contact patch; clamping
+        // its speed clamps the force it can transmit, which is the defect the
+        // limiter's own note records.
         let omega_ceiling = if ratio.abs() > 1e-9 {
             self.tuning.redline_rpm.max(0.0) * std::f64::consts::TAU / 60.0 / ratio.abs()
         } else {
@@ -4393,7 +4395,8 @@ mod tests {
         // Measured: open 4.3 / 52.6 rad/s, locked 1.4 / 46.7.
         assert!(
             lock_up < open_up * 0.95,
-            "a locked axle left the lifted wheel at {lock_up:.1} rad/s against an              open one's {open_up:.1} — it is not starving the runaway"
+            "a locked axle left the lifted wheel at {lock_up:.1} rad/s against an \
+             open one's {open_up:.1} — it is not starving the runaway"
         );
         // **What the GROUNDED wheel does is deliberately NOT asserted here**, and
         // the reason is worth writing down. A grounded wheel that sticks turns at

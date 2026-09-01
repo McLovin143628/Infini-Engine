@@ -382,7 +382,8 @@ use uuid::Uuid;
 ///   no cheaper placement that puts the field where it belongs — on the layer.
 /// * **v25** — the island phase, and **the phase's only scene bump**. The entity
 ///   record appends the **vehicle class** slot — `vehicle_class`
-///   ([`VehicleClass`]: a vehicle's fifteen authored tunables, exactly
+///   ([`VehicleClass`]: a vehicle's authored tunables — fifteen at v25, and
+///   sixty-two since v27 grew them — exactly
 ///   `inf_ecs::vehicle::VehicleTuning::names()`). A new slot at the record's
 ///   tail, i.e. the cheap `EntityRecordV10` rung rather than the
 ///   `EntityRecordV14` one, so every frozen record above is byte-unchanged.

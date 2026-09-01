@@ -405,7 +405,8 @@ fn the_catalogue_truck_climbs_it_too_and_it_is_a_different_car() {
     // no rename could produce.
     assert!(
         (ran[1].2 - ran[0].2).abs() > 8.0,
-        "the pickup ran {} m and the saloon {} m up the same grade — a difference          of {:.1} m is two names on one car",
+        "the pickup ran {} m and the saloon {} m up the same grade — a difference \
+         of {:.1} m is two names on one car",
         ran[1].2,
         ran[0].2,
         (ran[1].2 - ran[0].2).abs()

@@ -2740,7 +2740,7 @@ pub struct VehicleClass {
 
 impl Default for VehicleClass {
     /// The Ring-0 defaults, read from the ONE definition of them rather than
-    /// restated — a second copy of fifteen numbers is a second thing to update.
+    /// restated — a second copy of sixty-two numbers is a second thing to update.
     fn default() -> Self {
         Self::from_tuning(&crate::vehicle::VehicleTuning::default())
     }

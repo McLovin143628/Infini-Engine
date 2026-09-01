@@ -29760,3 +29760,77 @@ it names, and the BC5 normals pushed a payload that legitimately carries texture
 for a 64-byte window from the middle of the terrain file, with an anti-vacuity arm.
 
 Ledger: `docs/memos/iasset2-textures-bc7.md`.
+
+**ISLAND WAVE VEH2a — driving feel v2, the Forza-grade model (2026-09-01, base `efb7baec`).**
+Ten clauses, all ten taken, and the wave's governing discipline was **THE SCHEMA WINDOW**: one
+scene bump per phase, so the whole tuning surface was enumerated before a line of it was written.
+`VehicleClass` grows from **fifteen `f64`s to sixty-two** in one rung — **scene schema v27** —
+with the forty-seven appended at the component's *tail*, sorted among themselves, so every v25
+field keeps its v25 offset. `VehicleClassV26` freezes the pre-v27 layout in both mirrors and every
+pre-v27 alias turns its `V` parameter back to it; **no new generic parameter and no re-declared
+forty-eight-field record was needed**, which is the v25 rung's own promise ("the tail is generic")
+held exactly. Wire cost **376 bytes per entity that carries a class**, zero for every other. The
+window closes VEH1a's carried *"`enter_window` is still absent from `VehicleClass`"* — the bound
+was wrong rather than merely unmet: the window did not need a trait setter, it needed to stop
+being a type and start being its two numbers. Three rulings inside it: **`front_torque_split` IS
+the drivetrain** (an enum beside it is a second source of truth for one fact and cannot travel the
+one `set(name, f64)` door — `drivetrain = "awd"` is a catalogue *spelling*, resolved before any
+numeric key, and an unknown word is a refusal by name); **eight gear slots, not a `Vec`** (a fixed
+arity keeps the tunable `Copy`, keeps every gear on the one door, and keeps the serialized class a
+flat run of `f64`s a wire pin can account for field by field); **each aid is ONE number** carrying
+both its toggle and its threshold, because a `bool` beside a threshold is two fields that can
+disagree. *The model:* per-wheel angular state (`ω`, slip ratio, lateral slip) with `spin_deg`
+**derived** from it, so a locked wheel is visibly locked; a three-knot torque curve with one shape
+knob (`curve_bias`, Schlick's bias — four arithmetic operations rather than a `powf`, because
+P14's law reaches a curve whose output two hosts compare byte for byte) times a gear times a final
+drive **divided by the wheel's radius**, which the drive path had never once read; engine braking,
+an automatic box with a real shift window, **reverse as a gear**, and revs that are the engine's
+own rpm so the audio loop drops on every upshift; a simplified-Pacejka tyre with per-axis peak slip
+and rise stiffness, a sliding plateau, load sensitivity, and the two axes coupled through **one**
+combined-slip magnitude — P29.7 clamped each axis independently, so a tyre could hold its whole
+grip sideways *and* forwards at once, 1.41× what it has. `max_engine_force_n` becomes the driveline
+**ceiling** and `max_speed_mps` a real speed **limiter** (`governor`), because with a torque curve
+the default rig's emergent top speed is 52.7 m/s where every piece of committed content was built
+around 25. *The rest:* a torque-splitting differential (a **speed** average was tried and refused
+with its measurement — pulling a grounded wheel's `ω` toward a spinning partner's puts momentum
+into it that the ground must absorb, so the spool delivered **3 083 N against the open diff's
+3 853** at matched revs); brake bias; a centre of gravity applied as a moment-arm correction on the
+tyre force alone, since the suspension is parallel to `up` and `up × up` is zero; anti-roll bars
+(which cost the suspension its single-pass shape); downforce at its own centre of pressure;
+anisotropic drag; a steering rack with a rate, a return-to-centre and Ackermann. **THE DRIVE
+CAMERA** costs no schema: before this wave a driving character got whichever on-foot gait block
+was latched when it pressed the interact key — `step_driving` returns before `actual_gait` is
+computed — and since a player is normally stationary beside the door, that block is `walk`. A
+`driving` block in `camera.toml` is answered *before the gait is looked at*, with arm length per
+metre of the vehicle's own half-length (geometry the rig already carries, so no per-class table),
+speed-scaled arm and FOV under a ceiling, a velocity look-ahead, and a yaw that **recentres**
+toward the chassis heading rather than overriding the stick. It adds no simulation state, no trace
+bytes and no mirror. **The fleet grows to five** — coupe, wagon, box van beside the saloon and the
+pickup — and *reaches the island*, with an arm requiring all five rows to differ on six axes a
+driver feels. **THE TABLES.** Feel, on flat ground, bounded by per-row spec bands written before
+the run: sports **0–100 in 4.17 s / 31.4 m / 219 km/h**, sedan **7.48 s / 42.6 m / 121 km/h**, suv
+**7.40 s / 40.8 m / 161 km/h**, van **0–92 in 14.68 s / 42.8 m / 112 km/h**, truck **0–78 in
+6.75 s / 32.7 m / 96 km/h** (two rows are governed below 100 km/h and are specified against 80 % of
+their own limiter — measuring every class against a speed two of them may not have is how a gate
+ends up asserting the governor). Step cost **0.1101 → 0.1277 ms at 64 cars**, +16 %, and
+`VEHICLE_STEP_BUDGET_MS` **stays at 0.5** because §8 forbids raising a budget — the headroom
+tightens to ~3.9×. The drive trace is **re-blessed with its deltas published**: 34.1 → 27.0 m,
+16.81 → 7.65 m/s, **1 018 → 1 200 wheel contacts of 1 200**, peak revs 0.4944 → 0.9269. The sedan
+still climbs I7's audited **0.108** grade driven (144.8 m, +15.68 m in ten seconds; the 0.60
+control goes backwards). **THE LIBM HOLE IS CLOSED**: neither vehicle module was covered by any
+portability gate in the tree — not `portable_character`'s four `d3` files, not `portable_pose`'s
+thirty-five `include_str!`s, not `inf-editor-core`'s crate walk — so the only thing keeping
+`f64::sin` out of the driving model was a comment, and the two arms that compare a drive both run
+two hosts on **one machine**, which is exactly the comparison a libm difference is invisible to.
+Both files join `portable_character`, which grows the `#[cfg(test)]` strip its own comment had been
+asking for; mutation-verified by name and line. **Three defects the wave found in itself**: the rev
+limiter was a clamp on wheel angular speed applied *before* the contact solve, so the stick force
+collapsed as a wheel neared the ceiling — the coupe delivered **982 N** in first gear with 21 kN of
+engine and 11 kN of grip available, and every class tailed off the same way at the top of every
+gear; the driver aids were **feedback controllers on a one-step event** (a 1 kg·m² wheel under
+4 kN·m changes speed by 66 rad/s in one 60 Hz step), which oscillated the crank between 416 N·m and
+109 and cost **8.7 s to 100 km/h on an axle that does it in 4.17** — they are feed-forward torque
+caps now, the tyre curve evaluated at the aid's own target slip; and `(0.0f64).signum()` is 1.0, so
+the stick force applied a full 12 kN of brake to a stationary car and drove it **backwards at
+7.3 cm/s**. Ledger, laws and the carried list in `docs/memos/island-progress.md` under
+*"Wave VEH2a"*.

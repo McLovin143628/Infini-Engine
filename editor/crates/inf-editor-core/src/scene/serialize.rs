@@ -6815,7 +6815,8 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         // this is the second non-`Copy` character component. The live runtime
         // rides along in memory and is `#[serde(skip)]` on the way to the file.
         character_movement: w.get::<CharacterMovement>(e).cloned(),
-        // v25 (island phase). `Copy` — fifteen `f64`s and nothing else.
+        // v25 (island phase), grown to sixty-two at v27. `Copy` — `f64`s and
+        // nothing else, which is what keeps this line one word long.
         vehicle_class: w.get::<VehicleClass>(e).copied(),
     })
 }
