@@ -677,7 +677,8 @@ mod tests {
         // **No two rows agree about how they drive.** Six axes, each of which a
         // driver feels: a row set that collided on any of them would be a fleet
         // wearing five names.
-        let axis: [(&str, fn(&inf_ecs::vehicle::VehicleDef) -> f64); 6] = [
+        type Axis = (&'static str, fn(&inf_ecs::vehicle::VehicleDef) -> f64);
+        let axis: [Axis; 6] = [
             ("max_speed_mps", |d| d.class.max_speed_mps),
             ("peak_torque_nm", |d| d.class.peak_torque_nm),
             ("torque_curve_bias", |d| d.class.torque_curve_bias),
