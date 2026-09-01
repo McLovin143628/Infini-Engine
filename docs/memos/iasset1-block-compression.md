@@ -491,6 +491,33 @@ against a 1.0 % line (13×). They stay, with the implementer's own flake caveat
 standing. The `.inf_part` decision, the `.inf_vmesh` block, and the atom table all
 re-checked out as recorded.
 
+### The audit's closing numbers
+
+| gate | result |
+|---|---|
+| battery, `INF_GOLDEN_STRICT=1`, `-j 3 --no-fail-fast` | **6 641 run / 6 641 passed / 0 failed / 17 skipped** across 313 binaries, exit 0 |
+| goldens | **60**, none blessed (clean tree after the strict run) |
+| clippy `--workspace --all-targets`, `-D warnings`, LAST | **0** over 48 crates |
+| rustdoc after `cargo clean --doc` | **409** over **48** documented crates (ceiling 450) |
+| `cargo fmt --all --check` | clean |
+| frontend | typecheck + eslint clean, **85 files / 776 tests** |
+| `cargo deny check` | advisories / bans / licenses / sources **all ok** |
+| Cargo.lock | **unmoved by the audit** (both lz4 features are pure cfg) |
+| island re-cook | 604 631 836 B raw / 247 497 020 B default, the latter **byte-identical** to the committed pack; 300-frame hash equal on both |
+
+The rustdoc count is 409 against the wave's 376 because this run documented **48** crates and
+that one documented 30 — a stricter measurement under the same ceiling. None of the 409 is in a
+file this audit touched.
+
+**And one thing the battery caught, which is the entry worth keeping.** The
+`advisory_source_gate` eaten-continuation sweep **reddened on the audit's own new help text**:
+column-aligning a codec table inside a string literal is precisely the run of eight-or-more
+spaces that a swallowed `\`-continuation leaves behind. The fix was to retire the reason
+(columns down to 1–5, where the tree's intentional alignment lives) rather than to add
+`print_help` to `ALIGNED_ON_PURPOSE` — that list's own doc says an allowlist entry is a blind
+spot with a name on it. A gate written after the fifth catch of a defect nobody could see by
+reading caught an auditor sixth, which is a better argument for it than any of its comments.
+
 ---
 
 ## CARRIED

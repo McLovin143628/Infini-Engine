@@ -29600,6 +29600,19 @@ classes; ~30 test files measure against them). Re-measured margins: the bake-off
 probe's verdict 0.077 % of a frame against a 1.0 % line (13×). They stay, with the implementer's
 own flake caveat standing.
 
+**The audit's own closing tree:** battery **6 641 / 6 641 passed / 0 failed / 17 skipped** across
+313 binaries, `INF_GOLDEN_STRICT=1`, exit 0; goldens **60**, none blessed (clean tree after);
+clippy **0** with `-D warnings` over 48 crates, run LAST; rustdoc **409** over **48** documented
+crates after `cargo clean --doc` (ceiling 450, and 48 crates against the wave's 30 — a stricter
+count under the same ceiling, with none of the warnings in a file this audit touched); fmt clean;
+frontend **85 files / 776 tests**, typecheck + eslint clean; `cargo deny` all four checks ok;
+Cargo.lock unmoved by the audit. One thing the battery caught, and it is worth the sentence: the
+`advisory_source_gate` eaten-continuation sweep **reddened on the audit's own help text** —
+column-aligning a codec table inside a string literal is exactly the eight-space run it bans. The
+reason was retired (columns down to 1–5) rather than the function allowlisted, per that list's own
+doc. A gate written after the fifth catch of a defect nobody could see by reading caught an
+auditor sixth.
+
 **House gates on the closing tree:** battery **358 / 6 639 / 0 / 20** exit 0 (+2 targets, +31
 tests over GTA1's 356 / 6 608), goldens **60 files** green under `INF_GOLDEN_STRICT=1` with a
 clean tree afterwards — **none blessed by the run**; clippy **0 warnings, 0 errors** with
