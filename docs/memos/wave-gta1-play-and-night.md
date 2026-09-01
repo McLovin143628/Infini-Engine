@@ -376,13 +376,209 @@ pointing *up* at `inf-player`, fixed in `544e2711`.
 
 ## What this wave did NOT verify
 
-* **The real island's Play button was not pressed.** No `.inf_terrain` for the
-  shipped island exists on this machine (it is not committed), so neither the
-  549.9 MB nor the 342.7 MB figure was measured here — see the correction under
-  clause 2. What is measured here is stronger than one more file size would be: the
-  payload no longer contains terrain bytes **at any size**, which the unit arm
-  shows by building the same document both ways (the byte route grows by the
+* **The real island's Play button was not pressed.** No *fresh* `.inf_terrain`
+  for the shipped island was built here (it is not committed), so neither the
+  549.9 MB nor the 342.7 MB figure was measured by this wave — see the correction
+  under clause 2. What is measured here is stronger than one more file size would
+  be: the payload no longer contains terrain bytes **at any size**, which the unit
+  arm shows by building the same document both ways (the byte route grows by the
   whole file, the path route by a filename) and `island_gate` shows by the frame
   being smaller than the terrain it names.
+  **Closed by the audit below**, which rebuilt the island and measured both.
 * **Every GPU claim in this memo is a headless-render measurement**, like every
   golden in this repository. Nobody looked at the sky in the editor.
+
+---
+
+# The adversarial audit (2026-08-31, over `bf1954e6..b41ab78e`)
+
+Clause 1, clause 2's envelope and clause 5's rulings stand as written and are
+re-derived below. Clause 3 **shipped a pawn with no ground under it**, which is
+the finding this audit exists to have caught, and clause 3's seeding wrote files
+into projects it does not own.
+
+## THE ISLAND CLOSURE — both numbers, measured
+
+The wave could not press the island's Play button because it had no island. This
+audit built one: `inf island build --recipe samples/island/island.toml`, **43.3 s**
+on a warm cache, all four standing advisories and nothing blocking. (The invocation
+is `cargo run -p inf-cli --release --bin inf -- island build …` — there is no `inf`
+*package*; the brief's `-p inf` fails with *"package(s) `inf` not found"*.)
+
+| | |
+|---|---|
+| `VancouverIsland.inf_terrain` | **549 879 456 B** |
+| `MAX_FRAME_LEN` | 268 435 456 B |
+| ratio | **2.05×** — the frame refusal was real |
+| the whole built project | 595 333 570 B |
+
+**549.9 MB is right and 342.7 MB was wave I7's**, settled by measurement rather
+than by a fourth restatement. `samples/island/README.md` (twice) and
+`samples/island-fixture/README.md` still carried I7's figure after `a8060ca4`
+corrected the nine source comments; they carry the measured one now, which is the
+place a reader actually quotes it from.
+
+And the payload the editor really builds for it — the real `build_scene_payload`
+over the built project's own asset sidecars, the real `TerrainRef::Path`, the
+real `write_msg`:
+
+```
+TERRAIN ASSETS: 1
+  bbb9b175-… -> …/island-build/project/Content/VancouverIsland.inf_terrain (549 879 456 B)
+PAYLOAD: 1 terrain path(s), 0 inline terrain(s)
+REAL ISLAND PAYLOAD FRAME: 6 250 534 B against a 268 435 456 B cap;
+                           the terrain it names is 549 879 456 B
+```
+
+**6 250 534 B is 2.3 % of the cap and 1.1 % of the ground it names.** Carried
+inline the same frame is ~556 MB, which is what `write_msg` refused. The
+measurement ran through a throwaway `inf-player` integration test and is not
+committed: an arm that needs an uncommitted 550 MB artifact skips in CI, and a
+skipping arm is a vacuous one.
+
+## Findings
+
+### 1 — THE PAWN HAD NO GROUND (fixed)
+
+`blank3d_scene`, `hybrid_scene`, `firstperson_scene` and the editor's boot
+document all put their character on a ground plane carrying a `MeshRef`, a
+`Material` and **nothing physical**. `inf_physics::d3::ecs`'s sync walks the
+entities that carry a body **or** a collider and `continue`s on the rest
+(`ecs.rs:800`), so those planes reached the solver as nothing at all — which cost
+nothing while the levels held only furniture, and became the whole story the
+moment this wave put a *gravity-driven* pawn on them.
+
+Measured, one second of Simulate at 60 Hz, through `SimSession` — the editor's own
+door — on all four documents:
+
+| | falls in 1 s |
+|---|---|
+| the plane as the wave shipped it | **4.9868 m**, still accelerating toward the 53 m/s terminal velocity |
+| with `samples::ground_slab` under it | **−0.0201 m** (a 2 cm *rise*: the kinematic controller's ground snap) |
+
+`templates/first-person/README.md`, written by this wave, says *"Press Play and
+WASD moves the Player"*. What it moved was a body in free fall, and the wave's own
+gate could not see it: `every_starter_level_has_a_player_controlled_character`
+asks `camera_subject` and stops, which is exactly what a pawn with nothing under
+it passes.
+
+The fix is one component per ground entity — a box `Collider3D` with **no**
+`RigidBody3D`, which is this engine's documented way to say *static world*, and an
+offset that puts the slab's top face **exactly on the visual plane** (a unit
+`Primitive::Plane` spans ±0.5, so a ground scaled by 20 is ±10 m at `y = 0`).
+Second half of the same finding: **first-person's Player was authored at
+`y = 1.0`** while a character's transform is its capsule centre and
+`feet_offset_m` is `half_extents.y + radius` = 1.2 — so its feet sat 20 cm under
+the floor the moment there was a floor. Now 1.2, which is what
+`edit_create_character_with_guid` computes for the other three.
+
+The new arm is `every_starter_level_gives_its_pawn_something_to_stand_on`, and its
+**control** is what makes it an assertion about the ground rather than about
+gravity: the same document with every non-pawn collider removed must drop the
+pawn, measured in the same run, plus an anti-vacuity assertion that the document
+authors gravity at all.
+
+**Content re-bless, stated purpose: the committed levels had no ground under
+their new pawn.** No schema move (scene stays v26), no entity added, no dependency
+added — 94 B of `Collider3D` per level:
+
+| | |
+|---|---|
+| `templates/blank-3d/Blank.inf_lvl` | 1 557 → **1 651 B** (4 entities, unchanged) |
+| `templates/hybrid-2.5d/Hybrid.inf_lvl` | 2 056 → **2 150 B** (6, unchanged) |
+| `templates/first-person/FirstPerson.inf_lvl` | 1 501 → **1 595 B** (4, unchanged; includes the 1.0 → 1.2 spawn) |
+
+and `template.rs`'s doc table re-measured a second time by the same door the wave
+used (`inf new` → `inf cook`): **33 625 → 33 641 B**. The 16 B is the collider.
+
+### 2 — THE SEEDER WROTE INTO OTHER PEOPLE'S PROJECTS (fixed)
+
+`seed_starter_content`'s doc says it seeds *"the editor's own boot content root —
+`<app_data>/Content`"*. `build_inner` runs it on **every re-root as well**, and
+`AssetState::reroot` is what opening a project calls. Before this wave the
+`if !proj.db().is_empty() { return; }` guard made that harmless; the wave moved
+the character branch *above* the guard and keyed it on absence, so opening any
+project without the starter skeleton copied seventeen files into its
+`Content/Characters/`. That is every 2D project (`Platformer2d` scaffolds no
+character) and every project whose author deleted theirs — which would then come
+back on each open.
+
+`build_inner` takes a `boot: bool` now: true from `init_assets_on_boot`, false
+from `reroot`. The materials branch is untouched (it was already fresh-root only).
+
+### 3 — THE HYBRID DECODER'S "PAWN" WAS NOT A PAWN (fixed)
+
+`158ca5d4` says the arm *"gained the assertion the count cannot make — that one of
+those entities is a pawn"*. What it asserted was `skeletal_mesh.is_some() &&
+character_movement.is_some()`. `camera_subject` filters on
+`CharacterMovement::player_controlled`, so a character with the flag **false**
+passes that arm while the level goes straight back to the overhead camera — the
+whole defect the count moved for. The arm reads the flag now.
+
+### 4 — THE PLACE ACTOR ROW'S THREE ARMS COULD NOT SEE IT UNWIRED (fixed)
+
+`shellCommands.test.ts`'s new arms check that the row is in `MENU_BAR`, that it is
+*not* in `ACTOR_PLACE_KINDS`, and that `stubHint` has nothing for it. Deleting the
+`setCommandHandler` call passes all three, and the row then dispatches into the
+unhandled hook and toasts *"is not implemented yet"* — which that file's own header
+says is the failure it exists to catch. **Mutation-verified**: renaming the handler
+id leaves all three green and fails only the arm this audit added to
+`objectCommands.test.ts`, which is the suite that actually calls
+`bootstrapShellCommands`.
+
+### 5 — THE ISLAND READMEs (fixed)
+
+Above, under the closure.
+
+## What was re-derived and stands
+
+* **The horizon gate is Bruneton's, and it is right.** `sin_h = bottom/r`,
+  `cos_h = -sqrt(1 - sin_h²)`, `smoothstep(-w, w, mu - cos_h)` with
+  `w = sin_h·sin(angular radius)` — `GetTransmittanceToSun` with `sin(θ)` where the
+  reference has `θ`, which is the same number to five decimals at 0.27°. Per-sample
+  `r`, so twilight survives; **no double-gate** with the ground-bounce block
+  (`n_dot_l` and the visibility reach zero at the same `mu`, and their product is
+  zero either way) and none with the cloud paths (`cloud_shadow_factor` and
+  `cloud_sun_transmittance` return **1.0** below the horizon — they are occlusion
+  terms, not light terms, and 1.0 × 0 is 0). Every call site passes a radius in km
+  and `atmos.{sun,moon}_dir.w` really is `p.{sun,moon}_disc_cos()` at the only
+  place the uniform is filled (`sky_lut.rs:302`); the other two `sun_dir` sites are
+  cache keys. `atmosphere_apply.wgsl` samples the sky-view LUT, so the fix reaches
+  aerial perspective one table upstream, as claimed.
+* **The twilight arm falsifies the brief's prescription.** Its window is
+  `sun.y ∈ (−0.09, −0.03)`, entirely past the ±0.02 fade, and it demands the band
+  be 4× the midnight red and warm. A global fade renders it black and fails.
+* **`ScenePayload` v12 is append-only and honest in both hosts.** One field at the
+  tail, the wire-order pin extended to 21 fields with a string length unique among
+  the tail (bincode encodes `String` exactly as `Vec<u8>`, so that uniqueness is
+  the pin), `check_version` exact equality in `build_world_from_payload`,
+  `Cargo.lock` unmoved, and the **scene schema did not move** — v26 in all three
+  sidecars, and `crates/inf-scene`'s only diff is inside `mod tests`.
+* **`TerrainRef::Path` cannot carry a relative path.** It is `AssetEntry::path`,
+  documented absolute and canonicalized by `AssetDb::normalize`, kind-checked to
+  `AssetKind::Terrain`, and the player opens it with `terrain_source_from_file` —
+  byte-for-byte the door `TerrainContent::Dir` (the `--level` boot) uses, with no
+  editor-only decode anywhere. Both consumers prefer the path, so the IB-1 shape
+  cannot recur.
+* **The boot-level rule is the cook's.** `cook.rs:1283` declares
+  `levels: Vec<AssetId>` and `cook.rs:1448` does `levels.sort(); levels.first()`;
+  `project_boot_level` sorts the same `AssetId`s off `by_kind(Level)`. The
+  dirty-document guard is a real branch with a real arm (`openLevel.test.ts`
+  asserts `scene_open` is **not called** and the status line says *unsaved*).
+
+## Carried (found here, not fixed here)
+
+* **`seed_starter_character` checks only the skeleton guid.** A boot root holding
+  the rig but missing one of the other sixteen files is not re-seeded. Checking all
+  seventeen would also mean overwriting sixteen files an author may have edited, so
+  the narrow check is defensible and the gap is recorded rather than closed.
+* **The cook's `levels` set is post-`Skipped`.** A level that fails to cook is not
+  in it, so a project whose lowest-GUID level does not cook would have the editor
+  open one level and the build boot another. Pathological, and no gate names it.
+* **`inf-ecs/src/item.rs:25`** prices a hypothetical inventory field at
+  `SCENE_PAYLOAD_VERSION` **12**, which this wave has now spent on terrain paths
+  (and at scene **v26**, which is already the current one). Prose drift on a
+  feature nobody is building; it would mislead the person who does.
+* The wave's own three: the cook's vgeom advisory over-claiming a placeholder cube
+  for a skeletal mesh, `level_dependencies` not enumerating `ActorClass`, and night
+  clouds now being unlit rather than merely un-red.

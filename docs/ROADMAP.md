@@ -29391,3 +29391,36 @@ body and machine but not their controller — the same silence the 2D platformer
 carried since I1, and fixing it re-blesses every committed level sidecar; night clouds are now
 **unlit rather than merely un-red**, because the cloud march's only light is the sun and moonlight
 scattering is not modelled anywhere in this engine.
+
+**The adversarial audit.** Clause 1's per-sample horizon gate, `ScenePayload` v12's append-only
+tail, `TerrainRef::Path`'s absolute-and-canonical resolve door, and the boot level's lowest-GUID
+rule were all re-derived against their cited sites and **stand**. Two defects did not.
+**(i) THE WAVE GAVE EVERY STARTER LEVEL A PAWN AND NO GROUND TO STAND ON.** All four documents put
+their character on a `MeshRef` plane with nothing physical on it, and `inf_physics::d3::ecs`'s sync
+skips an entity carrying neither a body nor a collider — so the plane reached the solver as nothing
+while the character on it is gravity-driven. Measured through `SimSession`, one second at 60 Hz:
+**4.9868 m of fall on all four, still accelerating**, against **−0.0201 m** with a collider under
+it. The first-person README this wave wrote — *"press Play and WASD moves the Player"* — described
+a body in free fall, and the wave's own gate could not see it because `camera_subject` answering is
+exactly what a pawn with no ground passes. Fixed with one static box `Collider3D` per ground
+(offset so its top face is the visual plane) plus first-person's spawn moved 1.0 → **1.2** (a
+character's transform is its capsule centre and `feet_offset_m` is 1.2, so its feet were 20 cm under
+the floor), and armed by `every_starter_level_gives_its_pawn_something_to_stand_on`, whose
+**control** — the same document with every non-pawn collider removed — is what makes it an
+assertion about the ground rather than about gravity. Content re-bless, stated purpose, 94 B per
+level, no entity and no dependency added and **scene still v26**: Blank 1 557 → 1 651, Hybrid
+2 056 → 2 150, FirstPerson 1 501 → 1 595; `template.rs`'s pack table re-measured 33 625 → **33 641 B**.
+**(ii) THE STARTER-CHARACTER SEEDER RAN ON EVERY PROJECT OPEN**, not only on the editor's own
+`<app_data>/Content` as its doc claimed — `build_inner` is what `AssetState::reroot` calls, and the
+wave moved the character branch above the `db().is_empty()` guard, so opening any project without
+the starter skeleton (every 2D one, and any whose author deleted theirs) copied seventeen files into
+it. `build_inner` takes `boot: bool` now. Two gates were also strengthened where they could not
+falsify what they named: `decodes_the_committed_hybrid_template`'s "pawn" assertion never read
+`player_controlled` (a character with it false passed), and the Place Actor row's three arms all
+survive deleting its `setCommandHandler` — mutation-verified, and the handler-presence arm now lives
+in the suite that bootstraps the commands. **THE ISLAND CLOSURE, measured rather than restated:**
+the island was rebuilt (43.3 s; the command is `cargo run -p inf-cli --release --bin inf --`, there
+is no `inf` package) and its terrain is **549 879 456 B — 2.05× `MAX_FRAME_LEN`**, settling the
+figure the READMEs still carried at 342.7 MB; the real payload the editor builds for it, through the
+real `write_msg`, is **6 250 534 B — 2.3 % of the cap and 1.1 % of the ground it names**, with one
+terrain path and zero inline. Audit ledger in `docs/memos/wave-gta1-play-and-night.md`.
