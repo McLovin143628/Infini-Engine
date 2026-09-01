@@ -393,20 +393,16 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
-    /// Raw payload bytes of a `.inf_terrain` asset (P21.4), for the PIE payload's
-    /// streamed-terrain source. Kind-checked exactly like
-    /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason: a
-    /// mistyped reference must miss rather than feed arbitrary bytes to the tile
-    /// reader.
-    pub fn load_terrain_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
-        self.terrain_path(id).and_then(|p| std::fs::read(p).ok())
-    }
-
     /// The on-disk **path** of a `.inf_terrain` asset (wave GTA1), for the PIE
     /// payload's `terrain_paths` route. Kind-checked exactly like
-    /// [`load_terrain_bytes`](Self::load_terrain_bytes), which now reads through
-    /// it — one resolution rule, so a path and the bytes behind it cannot come
-    /// from two different files.
+    /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason: a
+    /// mistyped reference must miss rather than hand the tile reader a path to
+    /// arbitrary bytes.
+    ///
+    /// It replaces `load_terrain_bytes` outright rather than sitting beside it:
+    /// its one caller is the PIE payload builder, which now names the file, and
+    /// a byte-reading twin nothing calls is a second way to do the thing that
+    /// broke.
     ///
     /// This is what lets the island play: its terrain is 342 742 272 B, and a PIE
     /// frame is capped at 268 435 456, so the bytes route refuses the frame
