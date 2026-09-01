@@ -6852,11 +6852,17 @@ mod tests {
         // starter levels before it). The runtime reader is the right place to
         // notice a template growing an entity, so the count moves with it.
         assert_eq!(level.len(), 6);
+        // A **PAWN**, which is `player_controlled` and not merely a body that can
+        // move (wave GTA1 audit): `inf_ecs::movement::camera_subject` filters on
+        // exactly that field, so a `CharacterMovement` with it false is a level
+        // Play still runs from an overhead camera — the whole defect this count
+        // moved for. Asserting the components without the flag is an arm that
+        // cannot fail for the reason it names.
         assert!(
-            level
-                .entities
-                .iter()
-                .any(|e| e.skeletal_mesh.is_some() && e.character_movement.is_some()),
+            level.entities.iter().any(|e| e.skeletal_mesh.is_some()
+                && e.character_movement
+                    .as_ref()
+                    .is_some_and(|m| m.player_controlled)),
             "the hybrid template lost its pawn"
         );
     }

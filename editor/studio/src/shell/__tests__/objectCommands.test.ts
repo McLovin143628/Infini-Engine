@@ -55,6 +55,23 @@ describe("object editor command wiring", () => {
     }
   });
 
+  /**
+   * **Place Actor ▸ Starter Character has a HANDLER** (wave GTA1 audit).
+   *
+   * Its own three arms in `shellCommands.test.ts` check that the row is in the
+   * menu, that it is not in the `SpawnKind` table and that it has no stub hint —
+   * and a row whose `setCommandHandler` call was deleted passes all three, then
+   * dispatches into the unhandled hook and toasts "is not implemented yet",
+   * which is the exact failure that file's own header says it exists to catch.
+   * This is the assertion those three cannot make, and it belongs here because
+   * this is the suite that calls `bootstrapShellCommands`.
+   */
+  it("actor.place.starterCharacter is wired, not just enumerated", () => {
+    const cmd = getCommand("actor.place.starterCharacter");
+    expect(cmd, "the Place Actor row is not registered").toBeDefined();
+    expect(typeof cmd!.run, "the Place Actor row is enumerated with no handler").toBe("function");
+  });
+
   it("actor.rename — advertised with F2 since Phase 1 — is finally wired", () => {
     const rename = getCommand("actor.rename");
     expect(rename).toBeDefined();
