@@ -184,7 +184,24 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   Recorded as **one** rung rather than two because this envelope had not been
 ///   pushed when the `.inf_sm` ruling arrived: extending an unpushed bump is not
 ///   a second bump, and a v10.5 would be a version no build ever spoke.
-pub const SCENE_PAYLOAD_VERSION: u32 = 11;
+///
+/// * **v12** — wave GTA1, and the first rung this envelope has taken to make a
+///   payload *smaller* rather than richer:
+///   [`terrain_paths`](ScenePayload::terrain_paths).
+///
+///   Every asset above rides as BYTES because a shipped player has no filesystem
+///   handle to the author's project. A terrain does not have that excuse in PIE:
+///   the player is a **child process of the editor on the same machine**, and the
+///   file it would read is the same file the editor just read. Carrying the bytes
+///   instead cost the island its Play button — a 50 km² `.inf_terrain` is
+///   342 742 272 B against a [`MAX_FRAME_LEN`] of 268 435 456, so `write_msg`
+///   refused the frame and Play died in a one-line status message.
+///
+///   The cap is NOT what moved: an in-memory bound on a stream frame is the
+///   thing standing between a desynced pipe and a 4 GiB allocation, and a
+///   protocol whose limits follow the author's content is not a protocol. What
+///   moved is what the frame has to hold.
+pub const SCENE_PAYLOAD_VERSION: u32 = 12;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -393,6 +410,35 @@ pub struct ScenePayload {
     /// discriminants are frozen and pinned on the `inf-anim` side.
     #[serde(default)]
     pub blend_mode: u8,
+    /// Referenced streamed terrains **by path** (v12): `(asset guid, absolute
+    /// `.inf_terrain` path)` — the [`terrains`](Self::terrains) twin, and the
+    /// route the editor takes for every asset-backed terrain it can name a file
+    /// for.
+    ///
+    /// **Why a path is legal here and nowhere else in this envelope.** PIE is not
+    /// a network protocol: `PieSession::spawn_scene` starts the player as a child
+    /// process of the editor, on the same machine, with the same view of the disk,
+    /// and the file named here is the one the editor would otherwise have read
+    /// into the frame. Nothing about the world changes — the player decodes the
+    /// same bytes through the same [`inf_player::level::terrain_source_from_file`]
+    /// door the `--level` boot uses, which is also the door the SHIPPED build
+    /// takes (a cooked pack is read from disk, never streamed), so PIE == shipping
+    /// is not weakened by this: it is the one asset kind where the wire was the
+    /// odd path out.
+    ///
+    /// **What it costs, stated rather than discovered later.** A path is a
+    /// promise about a file that is read *later*, so a terrain edited between the
+    /// payload being built and the player opening it previews the newer bytes.
+    /// That window is the same one the `--level` boot has always had, it is
+    /// bounded by process startup, and the alternative — 327 MiB copied through a
+    /// pipe on every press of Play — is what this field exists to stop.
+    ///
+    /// A terrain appears in **exactly one** of the two vectors: the editor emits
+    /// a path when it has one and bytes when it does not (a caller with no file
+    /// on disk — the in-memory fixtures — still ships bytes). The player prefers
+    /// the path, and `attach_terrain_streaming` sees one merged source either way.
+    #[serde(default)]
+    pub terrain_paths: Vec<(Uuid, String)>,
 }
 
 impl ScenePayload {
@@ -427,6 +473,7 @@ impl ScenePayload {
             // v11: inertialize, which is `SmBlendMode::default()` and what every
             // session means until something calls `set_blend_mode`.
             blend_mode: 0,
+            terrain_paths: Vec::new(),
         }
     }
 
@@ -493,6 +540,22 @@ impl ScenePayload {
     pub fn with_terrains(mut self, terrains: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.terrains = terrains;
         self
+    }
+
+    /// Attach the referenced `.inf_terrain` **paths** (`(asset guid, absolute
+    /// path)`) — the v12 route, and the one the editor takes whenever it can name
+    /// a file. See [`terrain_paths`](Self::terrain_paths) for why a path is legal
+    /// in this envelope and only for this kind.
+    pub fn with_terrain_paths(mut self, paths: Vec<(Uuid, String)>) -> Self {
+        self.terrain_paths = paths;
+        self
+    }
+
+    /// Whether the payload names any streamed terrain at all, by either route.
+    /// The one question every consumer actually asks; asking it of
+    /// [`terrains`](Self::terrains) alone is the v12 mistake waiting to be made.
+    pub fn has_terrain_sources(&self) -> bool {
+        !self.terrains.is_empty() || !self.terrain_paths.is_empty()
     }
 
     /// Attach the referenced `.inf_mesh` payloads (`(asset guid, bytes)`) a
@@ -861,6 +924,14 @@ mod tests {
         // non-empty: a pin whose fixture carries the default value cannot tell
         // "field 20 decoded" from "a zero was read from somewhere else".
         .with_blend_mode(1)
+        // v12 — non-empty, and its string a length no byte payload above uses.
+        // bincode encodes a `String` exactly as a `Vec<u8>` (length + bytes), so
+        // this field can be swapped with any of them and still decode; only the
+        // length tells them apart.
+        .with_terrain_paths(vec![(
+            Uuid::from_u128(0x6A_11_01),
+            "/x".repeat(43), // 86 bytes: unique among the tail
+        )])
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -896,7 +967,8 @@ mod tests {
         assert_eq!(got.meshes[0].1.len(), 96);
     }
 
-    /// **The WHOLE wire order is pinned, all fifteen fields** (P24.1 audit M5).
+    /// **The WHOLE wire order is pinned, every field of it** (P24.1 audit M5;
+    /// twenty-one of them since v12).
     ///
     /// The stale-reader test below models a *pre-v5* build and therefore stops at
     /// `windowed` — correctly, that is its whole point. But it left the four tail
@@ -942,6 +1014,10 @@ mod tests {
             // mis-ordering would not change the encoding's LENGTH — which is
             // exactly why the value assertion below is not optional.
             blend_mode: u8,
+            // v12: the terrain PATHS. `String` and `Vec<u8>` are the same shape on
+            // this wire, so this one is pinned by the length of its content like
+            // every byte field above it.
+            terrain_paths: Vec<(Uuid, String)>,
         }
 
         let want = payload_with_assets();
@@ -960,6 +1036,13 @@ mod tests {
         .iter()
         .map(|v| v[0].1.len())
         .collect();
+        // v12's `String` field belongs in the same uniqueness check: bincode
+        // encodes it exactly like a `Vec<u8>`, so it is swappable with any of
+        // them.
+        let tail_lens: Vec<usize> = tail_lens
+            .into_iter()
+            .chain(std::iter::once(want.terrain_paths[0].1.len()))
+            .collect();
         let mut uniq = tail_lens.clone();
         uniq.sort_unstable();
         uniq.dedup();
@@ -973,11 +1056,11 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 20-field order decodes the wire");
+                .expect("the canonical 21-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned 19-field order does not account \
+            "the encoding carries bytes the pinned 21-field order does not account \
              for — a field was added to `ScenePayload` without extending this pin"
         );
 
@@ -1015,6 +1098,10 @@ mod tests {
         assert_eq!(
             wire.blend_mode, want.blend_mode,
             "`blend_mode` is not wire field 20"
+        );
+        assert_eq!(
+            wire.terrain_paths, want.terrain_paths,
+            "`terrain_paths` is not wire field 21"
         );
         // ANTI-VACUITY for the one-byte field: the fixture must not carry the
         // DEFAULT, or a pin that read a stray zero from anywhere would pass.

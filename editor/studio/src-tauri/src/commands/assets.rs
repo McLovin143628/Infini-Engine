@@ -399,6 +399,20 @@ impl AssetState {
     /// mistyped reference must miss rather than feed arbitrary bytes to the tile
     /// reader.
     pub fn load_terrain_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        self.terrain_path(id).and_then(|p| std::fs::read(p).ok())
+    }
+
+    /// The on-disk **path** of a `.inf_terrain` asset (wave GTA1), for the PIE
+    /// payload's `terrain_paths` route. Kind-checked exactly like
+    /// [`load_terrain_bytes`](Self::load_terrain_bytes), which now reads through
+    /// it - one resolution rule, so a path and the bytes behind it cannot come
+    /// from two different files.
+    ///
+    /// This is what lets the island play: its terrain is 342 742 272 B, and a PIE
+    /// frame is capped at 268 435 456, so the bytes route refuses the frame
+    /// outright. The player is a child of this process on this machine and opens
+    /// the same file through the same door a `--level` boot uses.
+    pub fn terrain_path(&self, id: AssetId) -> Option<std::path::PathBuf> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;
         let proj = inner.project.lock().ok()?;
@@ -406,7 +420,7 @@ impl AssetState {
         if entry.kind() != inf_asset::AssetKind::Terrain {
             return None;
         }
-        std::fs::read(&entry.path).ok()
+        Some(entry.path.clone())
     }
 
     /// Create a new material instance of `parent` (P7.4). Returns the new id.

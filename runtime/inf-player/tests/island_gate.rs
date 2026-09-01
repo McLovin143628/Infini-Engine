@@ -245,8 +245,12 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     let doc = inf_editor_core::scene::serialize::load(&content.join(format!("{slug}.inf_lvl")))
         .expect("the island level loads");
 
-    let terrain = std::fs::read(content.join(format!("{slug}.inf_terrain")))
-        .expect("the built terrain is on disk");
+    // **The terrain is named, not read** (wave GTA1, `ScenePayload` v12). The
+    // editor hands the PIE player a path for exactly this asset kind, so this
+    // gate builds its payload the way the editor does; see the frame-size arm
+    // below for what carrying it inline cost.
+    let terrain_file = content.join(format!("{slug}.inf_terrain"));
+    assert!(terrain_file.is_file(), "the built terrain is on disk");
     let biomes = std::fs::read(content.join(format!("{slug}.inf_biomes")))
         .expect("the built biome set is on disk");
     let pcg = std::fs::read(content.join(format!("{slug}Cover.inf_pcg")))
@@ -293,7 +297,7 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         read_asset,
         |g| (g == b_guid).then(|| biomes.clone()),
         |_| None,
-        |g| (g == t_guid).then(|| terrain.clone()),
+        |g| (g == t_guid).then(|| inf_editor_core::pie::TerrainRef::Path(terrain_file.clone())),
         |g| {
             if g == m_guid {
                 Some(mesh.clone())
@@ -310,13 +314,63 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     // **Non-vacuity at the payload.** A payload carrying no terrain would boot a
     // world with no ground, and two hosts with no ground agree perfectly.
     println!(
-        "PAYLOAD: {} terrain(s), {} biome set(s), {} pcg(s), {} mesh(es)",
+        "PAYLOAD: {} terrain path(s), {} inline terrain(s), {} biome set(s), {} pcg(s), {} mesh(es)",
+        payload.terrain_paths.len(),
         payload.terrains.len(),
         payload.biome_sets.len(),
         payload.pcgs.len(),
         payload.meshes.len()
     );
-    assert_eq!(payload.terrains.len(), 1, "the terrain must ride the wire");
+    assert_eq!(
+        payload.terrain_paths.len(),
+        1,
+        "the terrain must ride the wire — as a path (v12)"
+    );
+    assert!(
+        payload.terrains.is_empty(),
+        "the terrain rode inline as well as by path: it must ride exactly one of \
+         the two routes, or the player has two sources for one guid"
+    );
+
+    // **THE FRAME FITS, AND IT IS THE FRAME THAT REFUSED** (wave GTA1).
+    //
+    // `write_msg` is the door that killed Play on the island: a `.inf_terrain`
+    // carried inline made the payload larger than `MAX_FRAME_LEN` and the writer
+    // refused the frame, so pressing Play produced one line in the status bar and
+    // no player at all. Measured on the SHIPPED island — the one this fixture
+    // stands in for, whose terrain is not committed — that was 549.9 MB against a
+    // 268 435 456-byte cap.
+    //
+    // The assertion is not "under the cap" alone, which this small fixture would
+    // pass either way. It is that the whole frame is **smaller than the terrain
+    // file it names**: that is false for any payload carrying the bytes, at any
+    // island size, and it is what makes the arm non-vacuous on a fixture.
+    let mut frame = Vec::new();
+    inf_runtime::pie::write_msg(
+        &mut frame,
+        &inf_runtime::pie::EditorToPlayer::LoadScene(Box::new(payload.clone())),
+    )
+    .expect("the PIE frame writes — this is the call that refused before v12");
+    let terrain_len = std::fs::metadata(&terrain_file)
+        .expect("terrain metadata")
+        .len();
+    println!(
+        "PAYLOAD FRAME: {} B against a {} B cap; the terrain it names is {} B",
+        frame.len(),
+        inf_runtime::pie::MAX_FRAME_LEN,
+        terrain_len
+    );
+    assert!(
+        frame.len() < inf_runtime::pie::MAX_FRAME_LEN,
+        "the PIE frame is over the cap at {} B",
+        frame.len()
+    );
+    assert!(
+        (frame.len() as u64) < terrain_len,
+        "the frame ({} B) is bigger than the terrain file it names ({terrain_len} B) — \
+         the ground is riding inline again and the shipped island cannot be played",
+        frame.len()
+    );
     assert_eq!(
         payload.biome_sets.len(),
         1,

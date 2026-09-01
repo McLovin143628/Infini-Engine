@@ -417,6 +417,27 @@ impl Drop for PieSession {
     }
 }
 
+/// How a caller of [`build_scene_payload`] serves one `.inf_terrain` (wave GTA1,
+/// `ScenePayload` v12).
+///
+/// A streamed terrain is the largest thing a level references by an order of
+/// magnitude — the island's is 342 742 272 B, which does not fit in a PIE frame
+/// and never will — and it is the one asset kind the PIE player can open for
+/// itself, because it runs on the editor's own machine. So the resolver says
+/// which it has rather than being forced to read a third of a gigabyte into a
+/// pipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerrainRef {
+    /// The asset's file, for the player to open through the same
+    /// `terrain_source_from_file` door a `--level` boot uses. What the editor
+    /// returns for every terrain in its asset database.
+    Path(std::path::PathBuf),
+    /// The asset's bytes, for a caller with no file to name — an in-memory
+    /// fixture, or a terrain that exists only in a test's `SceneDoc`. Rides the
+    /// wire as it always has, under the same frame cap.
+    Bytes(Vec<u8>),
+}
+
 /// Build the [`ScenePayload`] handed to the player from the **live** document:
 /// the v3 `.inf_lvl` bytes of the current (unsaved-included) doc, plus the bound
 /// blueprint classes. Bindings resolve like [`crate::samples::bound_actors`]:
@@ -460,6 +481,19 @@ impl Drop for PieSession {
 /// mis-order rather than harder. The positions are named in the `where` clause and
 /// pinned by `a_payload_carries_every_referenced_asset_kind_in_its_own_field`
 /// below.)
+///
+/// # `resolve_terrain`, and why it alone answers with a choice
+///
+/// Every other resolver here returns bytes, because a shipped player has no
+/// filesystem handle to the author's project and the wire is the only way in.
+/// A PIE player *is* a child process of the editor, sharing its disk, and a
+/// 50 km² `.inf_terrain` is 327 MiB — bigger than a PIE frame is allowed to be
+/// ([`inf_runtime::pie::MAX_FRAME_LEN`]), which is how the island lost its Play
+/// button. So this one resolver returns a [`TerrainRef`]: a **path** when the
+/// caller has a file (the editor always does), **bytes** when it does not (the
+/// in-memory fixtures). The choice is the caller's because only the caller knows
+/// which it has, and the two land in separate payload vectors so nothing has to
+/// guess later.
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene_payload<F, G, H, B, V, T, M, A>(
     doc: &SceneDoc,
@@ -490,7 +524,7 @@ where
     H: FnMut(Uuid) -> Option<Vec<u8>>,
     B: FnMut(Uuid) -> Option<Vec<u8>>,
     V: FnMut(Uuid) -> Option<Vec<u8>>,
-    T: FnMut(Uuid) -> Option<Vec<u8>>,
+    T: FnMut(Uuid) -> Option<TerrainRef>,
     M: FnMut(Uuid) -> Option<Vec<u8>>,
     A: FnMut(Uuid) -> Option<Vec<u8>>,
 {
@@ -717,7 +751,16 @@ where
     // asset-backed terrain at all — tolerable while the only casualty was
     // detail, and not tolerable since P21.2 put the **hole mask** in the asset:
     // a level whose caves have mouths could not be previewed without it.
+    //
+    // **By PATH where there is one** (wave GTA1, `ScenePayload` v12). The island's
+    // `.inf_terrain` is 342 742 272 B against a `MAX_FRAME_LEN` of 268 435 456, so
+    // carrying it inline did not make Play slow — it made `write_msg` refuse the
+    // frame, and the island's Play button died in a one-line status message. The
+    // player is a child process of this one on this machine, so the honest thing
+    // to hand it is the filename; `TerrainRef` is the resolver's choice, not this
+    // walk's, because only the caller knows whether the asset has a file at all.
     let mut terrains: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut terrain_paths: Vec<(Uuid, String)> = Vec::new();
     let mut seen_terrain: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     for &guid in doc.order() {
         let Some(e) = world.entity_of(guid) else {
@@ -733,8 +776,28 @@ where
         if !seen_terrain.insert(asset) {
             continue;
         }
-        if let Some(bytes) = resolve_terrain(asset) {
-            terrains.push((asset, bytes));
+        match resolve_terrain(asset) {
+            Some(TerrainRef::Path(path)) => {
+                // Lossy is a refusal in disguise, so it is not used: a path this
+                // process cannot spell is a path the player cannot open, and
+                // shipping a mangled one would preview as "no ground" with no
+                // message anywhere. Falling back to the bytes keeps such a level
+                // playable up to the frame cap.
+                match path.to_str() {
+                    Some(s) => terrain_paths.push((asset, s.to_string())),
+                    None => {
+                        tracing::warn!(
+                            "pie: terrain {asset} has a non-UTF-8 path, so its bytes ride \
+                             the wire instead"
+                        );
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            terrains.push((asset, bytes));
+                        }
+                    }
+                }
+            }
+            Some(TerrainRef::Bytes(bytes)) => terrains.push((asset, bytes)),
+            None => {}
         }
     }
 
@@ -1030,6 +1093,7 @@ where
             .with_anim_assets(skeletons, clips, machines)
             .with_voxels(voxels)
             .with_terrains(terrains)
+            .with_terrain_paths(terrain_paths)
             .with_fractures(fractures)
             .with_meshes(meshes)
             .with_garments(cloths, hairs)
@@ -1240,7 +1304,7 @@ mod tests {
             },
             |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
             |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
-            |g| (g == TERRAIN).then(|| b"TERRAIN".to_vec()),
+            |g| (g == TERRAIN).then(|| TerrainRef::Bytes(b"TERRAIN".to_vec())),
             |g| {
                 if g == MESH {
                     Some(inf_asset::encode(&fracture_cube()).expect("encodes"))
@@ -1310,6 +1374,99 @@ mod tests {
         assert_eq!(
             payload.schema_version,
             inf_runtime::pie::SCENE_PAYLOAD_VERSION
+        );
+    }
+
+    /// **A terrain with a file rides as a PATH, and that is what makes the island
+    /// playable** (wave GTA1, `ScenePayload` v12).
+    ///
+    /// The island's `.inf_terrain` is 342 742 272 B and `MAX_FRAME_LEN` is
+    /// 268 435 456, so `write_msg` refused the frame outright: pressing Play on
+    /// the island produced one line in the status bar and no player. The cap is
+    /// not the defect — an unbounded frame length is how a desynced pipe becomes a
+    /// 4 GiB allocation — so what moved is what the frame has to hold.
+    ///
+    /// Both halves are asserted because either alone would pass a fake: a payload
+    /// that named the path *and* carried the bytes fails the second, and one that
+    /// carried neither fails the first. The frame size is measured through
+    /// `write_msg` itself — the door that refused — over a terrain deliberately
+    /// larger than the whole rest of the payload.
+    #[test]
+    fn a_terrain_with_a_file_rides_as_a_path_and_the_frame_stays_small() {
+        const TERRAIN: Uuid = Uuid::from_u128(0x6A11_7E44);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("Island.inf_terrain");
+        // 4 MiB stands in for 327: big enough that carrying it inline is
+        // unmistakable in the frame length, small enough for a unit test.
+        let big = vec![0xA5u8; 4 * 1024 * 1024];
+        std::fs::write(&file, &big).expect("the terrain writes");
+
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Ground", None);
+        {
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world.world_mut().entity_mut(id).insert(Terrain {
+                asset: Some(TERRAIN),
+                ..Terrain::default()
+            });
+        }
+
+        let build = |terrain: TerrainRef| {
+            build_scene_payload(
+                &doc,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |g| (g == TERRAIN).then(|| terrain.clone()),
+                |_| None,
+                |_| None,
+                60,
+                false,
+            )
+            .expect("payload builds")
+        };
+        let frame_len = |p: &ScenePayload| {
+            let mut out = Vec::new();
+            inf_runtime::pie::write_msg(
+                &mut out,
+                &inf_runtime::pie::EditorToPlayer::LoadScene(Box::new(p.clone())),
+            )
+            .expect("the frame writes");
+            out.len()
+        };
+
+        let by_path = build(TerrainRef::Path(file.clone()));
+        assert_eq!(
+            by_path.terrain_paths,
+            vec![(TERRAIN, file.to_string_lossy().to_string())],
+            "the terrain did not ride as a path"
+        );
+        assert!(
+            by_path.terrains.is_empty(),
+            "the terrain rode BOTH routes; the player would then have two sources \
+             for one guid"
+        );
+
+        let by_bytes = build(TerrainRef::Bytes(big.clone()));
+        assert_eq!(by_bytes.terrains.len(), 1, "the bytes route is broken");
+        assert!(by_bytes.terrain_paths.is_empty());
+
+        let (small, large) = (frame_len(&by_path), frame_len(&by_bytes));
+        assert!(
+            large > small + big.len() - 4096,
+            "the inline route ({large} B) is not carrying the terrain ({} B) that \
+             the path route ({small} B) omits — this comparison is measuring \
+             nothing",
+            big.len()
+        );
+        assert!(
+            small < 64 * 1024,
+            "the path route's frame is {small} B; it should be a level and a \
+             filename"
         );
     }
 

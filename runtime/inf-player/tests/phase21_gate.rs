@@ -216,7 +216,15 @@ fn cavern_payload() -> inf_runtime::pie::ScenePayload {
         |_| None,
         |_| None,
         |_| Some(voxel_bytes.clone()),
-        |_| Some(terrain_bytes.clone()),
+        // The BYTES route (`ScenePayload` v12 kept both): this cavern's terrain
+        // is small, and a gate that only ever exercised the path route would
+        // leave the inline one — which every in-memory caller still takes —
+        // uncovered. `island_gate` drives the path route.
+        |_| {
+            Some(inf_editor_core::pie::TerrainRef::Bytes(
+                terrain_bytes.clone(),
+            ))
+        },
         // P22.3: no destructible meshes in this fixture.
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.

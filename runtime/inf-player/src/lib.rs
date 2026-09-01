@@ -140,11 +140,23 @@ pub enum TerrainContent {
     Dir(std::collections::HashMap<uuid::Uuid, PathBuf>),
     /// The opened cooked pack (`--pack` / the exported game).
     Pack(PackLevelSource),
-    /// `.inf_terrain` payloads that arrived over the **PIE wire** (P21.4), keyed
-    /// by asset GUID. The PIE player has no filesystem handle to the project and
-    /// no pack, so the payload *is* the source — see
-    /// [`ScenePayload::terrains`](inf_runtime::pie::ScenePayload::terrains).
-    Memory(std::collections::HashMap<uuid::Uuid, Vec<u8>>),
+    /// What a **PIE payload** names (P21.4, both routes since `ScenePayload` v12):
+    /// `bytes` for the terrains it carried inline, `files` for the ones it named
+    /// by path.
+    ///
+    /// The path route is not a weaker version of the byte one — it is the same
+    /// door the `--level` boot and the cooked pack take, and it exists because a
+    /// 50 km² `.inf_terrain` is 327 MiB and a PIE frame is capped at 256 MiB. The
+    /// PIE player runs on the editor's machine, so the file it is pointed at is
+    /// the file the editor would otherwise have read into the pipe. See
+    /// [`ScenePayload::terrain_paths`](inf_runtime::pie::ScenePayload::terrain_paths).
+    ///
+    /// A guid appears in exactly one of the two maps; `files` is consulted first,
+    /// which is also what the world builder's PCG resolver does.
+    Payload {
+        bytes: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
+        files: std::collections::HashMap<uuid::Uuid, PathBuf>,
+    },
 }
 
 impl TerrainContent {
@@ -169,8 +181,17 @@ impl TerrainContent {
                     None
                 }
             },
-            TerrainContent::Memory(map) => {
-                match level::terrain_source_from_bytes(map.get(&guid)?.clone()) {
+            TerrainContent::Payload { bytes, files } => {
+                if let Some(path) = files.get(&guid) {
+                    return match level::terrain_source_from_file(path) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            tracing::error!("inf-player: terrain asset {guid} at {path:?}: {e}");
+                            None
+                        }
+                    };
+                }
+                match level::terrain_source_from_bytes(bytes.get(&guid)?.clone()) {
                     Ok(s) => Some(s),
                     Err(e) => {
                         tracing::error!("inf-player: terrain asset {guid}: {e}");
@@ -916,7 +937,18 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
     // terrain scattered at sea level while the cooked build scattered on the
     // hill — a preview that differs from the build, which is the whole point of
     // the envelope carrying these bytes at all.
+    //
+    // Both routes (`ScenePayload` v12): the bytes the payload carries, and the
+    // **paths** it names for terrains too large to carry. Resolved through the
+    // same two doors `TerrainContent` uses below, so PCG pages its ground off the
+    // same source the streamer pages the world off — the IB-1 defect was exactly
+    // those two disagreeing.
     let terrains: HashMap<uuid::Uuid, Vec<u8>> = payload.terrains.iter().cloned().collect();
+    let terrain_files: HashMap<uuid::Uuid, PathBuf> = payload
+        .terrain_paths
+        .iter()
+        .map(|(g, p)| (*g, PathBuf::from(p)))
+        .collect();
     let builder = InfSceneWorldBuilder::with_defaults(fallback)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
@@ -925,6 +957,19 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
         .with_cloth_assets(cloths)
         .with_hair_assets(hairs)
         .with_terrain_resolver(std::sync::Arc::new(move |g| {
+            // The path first: a terrain that rode as a path has no bytes here, and
+            // a terrain that rode as bytes has no path. Both, for one guid, would
+            // be an editor bug rather than a choice — the payload builder emits
+            // exactly one — and the path is the one the streamer will also take.
+            if let Some(path) = terrain_files.get(&g) {
+                return match level::terrain_source_from_file(path) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("inf-player: terrain path {g} (for PCG): {e}");
+                        None
+                    }
+                };
+            }
             let bytes = terrains.get(&g)?;
             match level::terrain_source_from_bytes(bytes.clone()) {
                 Ok(s) => Some(s),
@@ -1263,14 +1308,19 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     // through the same `TerrainStreaming` the pack path attaches. The level bytes
     // carry a blanked working set for these terrains, so without this the PIE
     // world has no ground — and, since P21.2, none of the hole mask either.
-    if !payload.terrains.is_empty() {
-        let content = crate::TerrainContent::Memory(
-            payload
-                .terrains
+    //
+    // **Both routes** (`ScenePayload` v12): a terrain rides as bytes or as a path,
+    // never as both, and `TerrainContent::Payload` holds the pair so there is one
+    // source rather than two attachments racing each other.
+    if payload.has_terrain_sources() {
+        let content = crate::TerrainContent::Payload {
+            bytes: payload.terrains.iter().cloned().collect(),
+            files: payload
+                .terrain_paths
                 .iter()
-                .cloned()
-                .collect::<std::collections::HashMap<_, _>>(),
-        );
+                .map(|(g, p)| (*g, PathBuf::from(p)))
+                .collect(),
+        };
         attach_terrain_streaming(&mut sim, &content);
     }
     Ok(PayloadSim {

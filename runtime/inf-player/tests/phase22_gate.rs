@@ -266,7 +266,12 @@ fn playground_payload() -> inf_runtime::pie::ScenePayload {
         |guid| (guid == PHASE22_CLIP_GUID).then(|| audio.clone()),
         |_| None,
         |_| None,
-        |_| Some(terrain_bytes.clone()),
+        // The BYTES route (`ScenePayload` v12 kept both) — see `phase21_gate`.
+        |_| {
+            Some(inf_editor_core::pie::TerrainRef::Bytes(
+                terrain_bytes.clone(),
+            ))
+        },
         |guid| match guid {
             g if g == PHASE22_BLOCK_MESH_GUID => Some(block.clone()),
             g if g == PHASE22_CHASSIS_MESH_GUID => Some(chassis.clone()),

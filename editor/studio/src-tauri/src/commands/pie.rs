@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use inf_editor_core::pie::{build_scene_payload, find_player_bin, PieSession, SessionHealth};
+use inf_editor_core::pie::{
+    build_scene_payload, find_player_bin, PieSession, SessionHealth, TerrainRef,
+};
 use inf_runtime::pie::PlayerToEditor;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -190,7 +192,17 @@ pub async fn pie_start(
             // P21.4 (the P16.3b2 deferral): the `.inf_terrain` a streamed
             // terrain's working set was stripped in favour of. Without it a PIE
             // session over an asset-backed terrain previews no ground at all.
-            |guid| assets.load_terrain_bytes(inf_asset::AssetId(guid)),
+            //
+            // **By PATH** (wave GTA1): the editor always has a file for a terrain
+            // in its database, and the island's is 327 MiB — bigger than a PIE
+            // frame may be, which is how Play died on the island with a one-line
+            // status message. `TerrainRef::Bytes` is left for callers that have no
+            // file; this one always does.
+            |guid| {
+                assets
+                    .terrain_path(inf_asset::AssetId(guid))
+                    .map(TerrainRef::Path)
+            },
             // P22.3: the `.inf_mesh` bytes a `Destructible` actor's fracture is
             // DERIVED from — the one payload entry that is computed rather than
             // resolved. Without it a PIE session over a destructible level would
