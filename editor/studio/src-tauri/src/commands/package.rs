@@ -270,6 +270,7 @@ mod tests {
             manifest_path: PathBuf::from("C:/proj/Build/manifest.toml"),
             asset_count: 12,
             kinds: Default::default(),
+            kind_bytes: Default::default(),
             pack_bytes: 4096,
             levels: Vec::new(),
             root_level: None,

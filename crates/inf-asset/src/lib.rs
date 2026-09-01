@@ -49,8 +49,8 @@ pub use id::AssetId;
 pub use import_cache::{ImportCache, ImportKey};
 pub use kind::{importable_source_kind, AssetKind};
 pub use pack::{
-    AlignedBytes, EntryPolicy, PackEntry, PackReader, PackWriter, BLOB_ALIGN, PACK_FORMAT_VERSION,
-    PACK_MAGIC, PACK_MIN_READ_VERSION,
+    AlignedBytes, EntryPolicy, KindBytes, PackEntry, PackReader, PackWriter, BLOB_ALIGN,
+    PACK_FORMAT_VERSION, PACK_MAGIC, PACK_MIN_READ_VERSION,
 };
 // `bincode_config` is exported so a container format that carries a bincode
 // *section* beside its raw pages (`.inf_terrain`'s tile blobs, `.inf_vmesh`'s DAG

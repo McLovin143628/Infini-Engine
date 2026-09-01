@@ -455,6 +455,16 @@ const BIOME_SET_ID: AssetId = AssetId(uuid::Uuid::from_u128(0x1902_0100));
 const MISSING_BIOME_SET_ID: AssetId = AssetId(uuid::Uuid::from_u128(0x1902_0DEA));
 
 fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> AssetId {
+    make_streaming_terrain_project_from(root, biomes, &streaming_terrain())
+}
+
+/// The same scaffold over an explicit terrain — IASSET1 needs one whose tiles
+/// clear `inf_asset::block::MIN_COMPRESSIBLE`, and the 9² default does not.
+fn make_streaming_terrain_project_from(
+    root: &Path,
+    biomes: BiomeSetFixture,
+    src: &inf_terrain::TerrainData,
+) -> AssetId {
     ProjectManifest::new("Terrain Streaming", "blank-3d")
         .save(root)
         .unwrap();
@@ -463,10 +473,11 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
 
     // The `.inf_terrain` asset: tiles + LOD pyramid, written as the RAW payload
     // image (never `inf_asset::encode` — a length prefix would misalign tiles).
-    let src = streaming_terrain();
-    let pyramid = inf_terrain::build_pyramid(&src, inf_terrain::PyramidOptions::default());
+    let tile_res = src.tile_resolution();
+    let mps = src.meters_per_sample();
+    let pyramid = inf_terrain::build_pyramid(src, inf_terrain::PyramidOptions::default());
     let asset =
-        inf_terrain::build_terrain_asset(&src, &pyramid, inf_terrain::PyramidOptions::default())
+        inf_terrain::build_terrain_asset(src, &pyramid, inf_terrain::PyramidOptions::default())
             .unwrap();
     let terrain_id = AssetId(uuid::Uuid::from_u128(0x1603_0100));
     let terrain_path = content.join("World.inf_terrain");
@@ -515,7 +526,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
                     }
                     BiomeSetFixture::Dangling => Some(MISSING_BIOME_SET_ID.uuid()),
                 },
-                ..inf_ecs::components::Terrain::configured(9, 2.0)
+                ..inf_ecs::components::Terrain::configured(tile_res, mps)
             }),
             pcg_volume: None,
             skeletal_mesh: None,
@@ -622,12 +633,86 @@ fn cook_follows_the_terrain_asset_edge_and_stores_it_uncompressed() {
     for (&coord, tile) in src.tiles() {
         let key = inf_terrain::TileKey::lod0(coord);
         assert_eq!(&view.tile(key).unwrap().unwrap(), tile);
+        // **Alignment is a property of the container layout, and IASSET1 did not
+        // move it.** What `stored_bytes` hands back is the blob exactly as it
+        // sits in the payload, and every blob still starts on a 16-byte
+        // boundary. It is asserted through THAT door rather than through
+        // `tile_bytes`, because `tile_bytes` now decompresses — and an alignment
+        // check on a freshly-allocated `Vec` would pass for a reason that has
+        // nothing to do with the format.
         assert_eq!(
-            view.tile_bytes(key).unwrap().as_ptr() as usize % 16,
+            view.stored_bytes(key).unwrap().as_ptr() as usize % 16,
             0,
             "tile {coord:?} is not 16-byte aligned in the mapping"
         );
     }
+}
+
+/// **IASSET1: the cook's compile step, end to end.** A terrain whose tiles are
+/// big enough to compress ships block-compressed inside a pack entry that is
+/// still *raw* — and pages back bit-identical.
+///
+/// The two halves are the whole wave in one test. The entry must stay
+/// uncompressed (the anti-clause: whole-entry zstd on a streaming kind decodes
+/// the container per page-in), while the tiles inside it must be smaller than
+/// what the author's loose asset holds.
+#[test]
+fn cook_block_compresses_a_streaming_terrain_and_pages_it_back_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    // 65² tiles: past `MIN_COMPRESSIBLE`, still fast to build.
+    let mut src = inf_terrain::TerrainData::new(65, 1.0);
+    for tz in 0..3 {
+        for tx in 0..3 {
+            src.author_tile((tx, tz), |x, z| x * 0.05 - z * 0.02 + x * z * 1e-4 + 12.0);
+        }
+    }
+    let terrain_id = make_streaming_terrain_project_from(&proj, BiomeSetFixture::None, &src);
+    let out = dir.path().join("out");
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook succeeds");
+
+    let loose = std::fs::read(proj.join("Content/World.inf_terrain")).unwrap();
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let entry = reader.entry(terrain_id).expect("terrain packed");
+    assert!(
+        !entry.compressed,
+        "THE ANTI-CLAUSE: the pack ENTRY must stay raw — whole-entry zstd on a \
+         streaming kind decodes the whole container on every read_ref"
+    );
+    assert!(
+        entry.stored_len < loose.len() as u64,
+        "the cooked terrain ({} B) is not smaller than the authored one ({} B) — \
+         the transcode did not run",
+        entry.stored_len,
+        loose.len()
+    );
+
+    // Bit-identical tiles on both sides. This is the arm that lets PIE keep
+    // reading the loose asset by path while shipping reads the cooked one.
+    let payload = reader.read_ref(terrain_id).unwrap();
+    let cooked = inf_terrain::TerrainAssetReader::new(&*payload).unwrap();
+    let authored = inf_terrain::TerrainAssetReader::new(loose.as_slice()).unwrap();
+    assert!(
+        cooked
+            .directory()
+            .iter()
+            .any(|e| e.codec != inf_asset::BlockCodec::Raw),
+        "no tile actually compressed — the assertion above would pass vacuously"
+    );
+    assert_eq!(cooked.tile_count(), authored.tile_count());
+    for e in authored.directory() {
+        assert_eq!(
+            cooked.tile_bytes(e.key).unwrap(),
+            authored.tile_bytes(e.key).unwrap(),
+            "the cooked and authored images disagree on tile {:?}",
+            e.key
+        );
+    }
+
+    // And the report's per-kind byte roll-up sees it, keyed by slug.
+    let terrain_bytes = report.kind_bytes.get("terrain").expect("a terrain row");
+    assert_eq!(terrain_bytes.count, 1);
+    assert_eq!(terrain_bytes.stored_bytes, entry.stored_len);
 }
 
 #[test]

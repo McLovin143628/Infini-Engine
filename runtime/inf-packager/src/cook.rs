@@ -96,6 +96,45 @@ pub struct CookOptions {
     pub vgeom: VgeomCookOptions,
     /// Fracture (`.inf_fracture`) derivation controls (P22.2).
     pub fracture: FractureCookOptions,
+    /// Per-block compression of the streaming containers (IASSET1).
+    pub compression: BlockCompressionOptions,
+}
+
+/// **The cook's compile step for the streaming containers** (IASSET1).
+///
+/// A `.inf_terrain` ships raw at pack level — it is
+/// [`EntryPolicy::BlockCompressed`](inf_asset::EntryPolicy), paged one tile at a
+/// time — so before this wave the cooked pack carried 100% of the authored bytes
+/// and the only ship-size lever was one the anti-clause forbids. The cook now
+/// **transcodes** the container on the way in: each tile is compressed
+/// independently and the codec lands in the container's own directory, so a
+/// page-in still decompresses exactly one tile.
+///
+/// # Why the cook and not the writer
+///
+/// The loose asset an author edits stays raw. Its tiles are rewritten on every
+/// sculpt write-back, and compressing them would tax the editor to shrink a file
+/// nobody ships. The two images decode to bit-identical tiles, which is what keeps
+/// PIE (which reads the loose asset by path) and shipping (which reads the cooked
+/// one) simulating the same world — and is only safe because this is *lossless*.
+/// The moment a cook step is lossy, that sentence stops being true; see IASSET2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockCompressionOptions {
+    /// Codec for `.inf_terrain` tiles. [`None`] leaves the container untouched.
+    ///
+    /// Defaults to [`inf_terrain::COOK_TILE_CODEC`], which is `Zstd` on the
+    /// measurement in that constant's docs. A **web**-targeted cook should pass
+    /// `Lz4`: `Zstd` decodes through the pure-Rust `ruzstd` in a browser, 7.3×
+    /// slower than the C `zstd` this host links.
+    pub terrain: Option<inf_asset::BlockCodec>,
+}
+
+impl Default for BlockCompressionOptions {
+    fn default() -> Self {
+        Self {
+            terrain: Some(inf_terrain::COOK_TILE_CODEC),
+        }
+    }
 }
 
 /// Controls the cook's fracture derivation (P22.2).
@@ -210,6 +249,15 @@ pub struct CookReport {
     pub asset_count: usize,
     /// Per-kind counts (keyed by kind slug, sorted).
     pub kinds: BTreeMap<String, usize>,
+    /// **Per-kind BYTES** in the written pack, keyed by kind slug (IASSET1).
+    ///
+    /// Counts answer "what is in the build"; only bytes answer "where did the
+    /// download go", and a ship-size table assembled from counts is a table
+    /// about the wrong quantity. Read back out of the pack that was just
+    /// written — the same [`PackReader::kind_totals`](inf_asset::PackReader::kind_totals)
+    /// `inf pack ls --totals` prints — so the report describes the file rather
+    /// than the writer's intent, and the two producers cannot disagree.
+    pub kind_bytes: BTreeMap<String, inf_asset::KindBytes>,
     /// Size of the written pack in bytes.
     pub pack_bytes: u64,
     /// Level GUIDs in the pack (sorted).
@@ -536,7 +584,26 @@ fn cook_one(
                     message: e.to_string(),
                 }
             })?;
-            raw
+            // IASSET1: the cook's compile step for this container — every tile
+            // recompressed independently, the codec recorded per entry in the
+            // container's own directory. LOSSLESS by construction: the transcode
+            // moves tile blobs as opaque bytes and never decodes one, so it
+            // cannot change a height even if `TerrainTile`'s wire form were
+            // wrong. That is what lets PIE keep reading the loose (raw) asset by
+            // path while shipping reads this one.
+            match opts.compression.terrain {
+                None => raw,
+                Some(codec) => {
+                    let (packed, _) =
+                        inf_terrain::recompress_terrain_asset(&raw, codec).map_err(|e| {
+                            CookError::Terrain {
+                                guid,
+                                message: format!("recompress: {e}"),
+                            }
+                        })?;
+                    packed
+                }
+            }
         }
         // A `.inf_voxel` rides through verbatim as well (P21.1) — same reasoning
         // as the terrain above, one dimension up. **Structurally validated**
@@ -1444,6 +1511,20 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let pack_path = out_dir.join(&pack_name);
     writer.write_to_file(&pack_path)?;
     let pack_bytes = std::fs::metadata(&pack_path)?.len();
+    // IASSET1's per-kind byte roll-up, read back out of the pack that was just
+    // written rather than accumulated as it was built. Same producer as
+    // `inf pack ls --totals`, over the same bytes, so the ship-size table
+    // describes the file and not the intent — and an entry the writer stored
+    // differently from how it was handed in shows up here as it shipped.
+    let kind_bytes: BTreeMap<String, inf_asset::KindBytes> =
+        inf_asset::PackReader::open(&pack_path)
+            .map(|r| {
+                r.kind_totals()
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect()
+            })
+            .unwrap_or_default();
 
     levels.sort();
     let root_level = levels.first().copied();
@@ -1489,6 +1570,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         manifest_path,
         asset_count: writer.len(),
         kinds,
+        kind_bytes,
         pack_bytes,
         levels,
         root_level,

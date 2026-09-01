@@ -266,6 +266,30 @@ impl EntryPolicy {
     }
 }
 
+/// One kind's share of a pack, in bytes — a row of
+/// [`PackReader::kind_totals`]'s table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KindBytes {
+    /// Entries of this kind.
+    pub count: usize,
+    /// Bytes those entries occupy **on disk**.
+    pub stored_bytes: u64,
+    /// Bytes they decompress to at pack level (equal to `stored_bytes` for a
+    /// kind that ships raw — see [`PackReader::kind_totals`]).
+    pub uncompressed_bytes: u64,
+}
+
+impl KindBytes {
+    /// `stored / uncompressed` — 1.0 for a kind the pack does not compress.
+    pub fn ratio(&self) -> f64 {
+        if self.uncompressed_bytes == 0 {
+            1.0
+        } else {
+            self.stored_bytes as f64 / self.uncompressed_bytes as f64
+        }
+    }
+}
+
 /// One entry in a pack index (metadata only; the payload lives in the blob
 /// section and is fetched by [`PackReader::read`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1022,6 +1046,39 @@ impl PackReader {
     /// Iterate the index in GUID order.
     pub fn index(&self) -> impl Iterator<Item = &PackEntry> {
         self.by_guid.values().map(|&slot| &self.entries[slot])
+    }
+
+    /// **Where the ship size goes, by kind** — the one producer of the before/
+    /// after table (IASSET1).
+    ///
+    /// A cook report and `inf pack ls --totals` both read this, over a pack that
+    /// has already been written, so the table describes the **file that ships**
+    /// rather than an accounting of what the writer intended. Two numbers that
+    /// looked like one quantity is how a size table ends up disagreeing with
+    /// `dir`.
+    ///
+    /// Note what `uncompressed_bytes` does and does not include. It is the pack
+    /// entry's `uncompressed_len` — what whole-entry zstd would have to expand to
+    /// — so for a [`EntryPolicy::BlockCompressed`] kind it equals `stored_bytes`
+    /// (the entry ships raw either way) and the per-block saving is invisible
+    /// here. That is not a defect in the roll-up: the block saving already
+    /// happened, inside the payload, before this file existed. The before/after
+    /// comparison for those kinds is between two *packs*, which is exactly how
+    /// the memo's table is built.
+    ///
+    /// Keyed by [`AssetKind::slug`] rather than by the kind: `AssetKind` is a
+    /// wire enum and giving it an `Ord` would mint an ordering with no meaning
+    /// that a future reorder could silently change. Both consumers display the
+    /// slug anyway.
+    pub fn kind_totals(&self) -> BTreeMap<&'static str, KindBytes> {
+        let mut out: BTreeMap<&'static str, KindBytes> = BTreeMap::new();
+        for e in self.index() {
+            let k = out.entry(e.kind.slug()).or_default();
+            k.count += 1;
+            k.stored_bytes += e.stored_len;
+            k.uncompressed_bytes += e.uncompressed_len;
+        }
+        out
     }
 
     /// How many integrity hashes this reader has computed since it was opened.

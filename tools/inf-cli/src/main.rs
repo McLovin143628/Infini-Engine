@@ -1162,9 +1162,15 @@ fn cmd_pack(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("ls") => {
             let Some(path) = args.get(1) else {
-                eprintln!("usage: inf pack ls <pack.inf_pack>");
+                eprintln!("usage: inf pack ls [--totals] <pack.inf_pack>");
                 return ExitCode::FAILURE;
             };
+            // `--totals` aggregates by kind instead of listing entries: the
+            // ship-size table, from the ONE producer a `CookReport`'s
+            // `kind_bytes` also reads (IASSET1). An entry list of 1 100 assets
+            // cannot be read as a size table, and a size table assembled by eye
+            // from one is how two numbers for one quantity get into a memo.
+            let totals = args.iter().any(|a| a == "--totals");
             match PackReader::open(&PathBuf::from(path)) {
                 Ok(reader) => {
                     println!(
@@ -1173,6 +1179,42 @@ fn cmd_pack(args: &[String]) -> ExitCode {
                         reader.format_version(),
                         reader.len()
                     );
+                    if totals {
+                        println!(
+                            "{:<18} {:>7} {:>16} {:>16} {:>8}",
+                            "kind", "n", "stored", "raw", "ratio"
+                        );
+                        let (mut ts, mut tr, mut tn) = (0u64, 0u64, 0usize);
+                        let mut rows: Vec<_> = reader.kind_totals().into_iter().collect();
+                        rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.stored_bytes));
+                        for (kind, v) in rows {
+                            println!(
+                                "{:<18} {:>7} {:>16} {:>16} {:>8.3}",
+                                kind,
+                                v.count,
+                                v.stored_bytes,
+                                v.uncompressed_bytes,
+                                v.ratio()
+                            );
+                            ts += v.stored_bytes;
+                            tr += v.uncompressed_bytes;
+                            tn += v.count;
+                        }
+                        let ratio = if tr == 0 { 1.0 } else { ts as f64 / tr as f64 };
+                        println!("{:<18} {tn:>7} {ts:>16} {tr:>16} {ratio:>8.3}", "TOTAL");
+                        // The file is bigger than the blobs: header, index and
+                        // 16-byte alignment padding. Stating the gap is what
+                        // stops "the kinds add up to less than the pack" being
+                        // read as a missing kind.
+                        if let Ok(meta) = std::fs::metadata(path) {
+                            println!(
+                                "file {} B; index + padding {} B",
+                                meta.len(),
+                                meta.len().saturating_sub(ts)
+                            );
+                        }
+                        return ExitCode::SUCCESS;
+                    }
                     println!(
                         "{:<38} {:<18} {:>10} {:>10}  z",
                         "guid", "kind", "stored", "raw"
@@ -1196,7 +1238,7 @@ fn cmd_pack(args: &[String]) -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: inf pack ls <pack.inf_pack>");
+            eprintln!("usage: inf pack ls [--totals] <pack.inf_pack>");
             ExitCode::FAILURE
         }
     }
