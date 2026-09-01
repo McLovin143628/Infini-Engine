@@ -1618,6 +1618,9 @@ pub struct RaycastVehicle {
     /// Engine speed, rpm — a *derived* value, held so the audio and the shift
     /// model read the same number the torque came from.
     rpm: f64,
+    /// The road wheels' actual steer angle, degrees — the RACK's own state,
+    /// which is what makes a steering rate and a return-to-centre possible.
+    steer_deg: f64,
     /// Per-wheel drive torque this step, N·m — scratch, in
     /// [`VehicleRig::wheels`] order.
     ///
@@ -1647,6 +1650,7 @@ impl RaycastVehicle {
             wheels,
             gear: 1,
             shift_left_s: 0.0,
+            steer_deg: 0.0,
             rpm: tuning.idle_rpm,
             tuning,
         }
@@ -1671,6 +1675,28 @@ impl RaycastVehicle {
     /// The gear the box is in: `-1` reverse, `0` neutral, `1..=`.
     pub fn gear(&self) -> i32 {
         self.gear
+    }
+
+    /// The rack's angle, degrees — where the road wheels actually are, which
+    /// since VEH2a is not where the driver's stick is.
+    pub fn steer_deg(&self) -> f64 {
+        self.steer_deg
+    }
+
+    /// **The load one axle carries**, newtons — the readout a tuner watches and
+    /// the number every weight-transfer claim in this model is made of.
+    ///
+    /// `front` selects the steered axle. On a rig at rest the two sum to the
+    /// car's weight; under braking the front's rises and the rear's falls, and
+    /// with `tyre_load_sensitivity` above zero that swap is not free.
+    pub fn axle_load_n(&self, front: bool) -> f64 {
+        self.rig
+            .wheels
+            .iter()
+            .zip(self.wheels.iter())
+            .filter(|(m, _)| m.steered() == front)
+            .map(|(_, w)| w.load_n)
+            .sum()
     }
 
     /// Whether a shift is in progress — the window with no drive torque in it.
@@ -2019,6 +2045,46 @@ pub fn steer_limit_deg(tuning: &VehicleTuning, speed_mps: f64) -> f64 {
     tuning.max_steer_deg + (tuning.min_steer_deg - tuning.max_steer_deg) * t
 }
 
+/// **Ackermann steering**: the angle one front wheel takes, given the rack's.
+///
+/// Both front wheels turn about one centre, so the inside wheel — the one on a
+/// tighter radius — must turn **more**. `amount` blends between parallel steering
+/// (`0`, both wheels at the rack angle) and the full geometry (`1`).
+///
+/// # A first-order geometry, and why it is not the textbook one
+///
+/// The exact relation is `cot δ_outer − cot δ_inner = track / wheelbase`, which
+/// needs a tangent and an arctangent. P14's law says std trigonometry is not
+/// bit-portable, and this repository has no portable `tan`, so the small-angle
+/// form — `R = L/δ`, `δ_inner = δ / (1 − δ·w/L)` — is used instead. It is exact
+/// to first order, it has the right sign and the right magnitude everywhere a
+/// road car steers, and it is four arithmetic operations. The denominator is
+/// floored so a rack angle large enough to put the turn centre inside the track
+/// answers a big number rather than a singular one.
+pub fn ackermann_deg(
+    rack_deg: f64,
+    inner: bool,
+    half_track_m: f64,
+    wheelbase_m: f64,
+    amount: f64,
+) -> f64 {
+    let a = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if a <= 0.0 || !(wheelbase_m > 0.0) || !rack_deg.is_finite() || !(half_track_m > 0.0) {
+        return rack_deg;
+    }
+    let k = rack_deg.to_radians().abs() * half_track_m / wheelbase_m;
+    let factor = if inner {
+        1.0 / (1.0 - k).max(0.25)
+    } else {
+        1.0 / (1.0 + k)
+    };
+    rack_deg * (1.0 + a * (factor - 1.0))
+}
+
 /// **The suspension**: spring plus damper, in newtons, never negative.
 ///
 /// `compression_m` is how far the suspension is from full extension and
@@ -2119,8 +2185,47 @@ impl Vehicle for RaycastVehicle {
         let (fwd, right, up) = chassis.basis();
         let forward_mps = chassis.linvel.dot(fwd);
         let speed = chassis.linvel.length();
+        // ── the steering rack ────────────────────────────────────────────────
+        //
+        // P29.7's steering was INSTANT: the road wheels were at the driver's
+        // demand on the frame it arrived, which is a car that changes direction
+        // in a sixtieth of a second and cannot be caught once it is sideways. The
+        // rack now moves at a rate, and returns to centre faster than it turns
+        // away from it, which is what a real one's castor does.
         let limit = steer_limit_deg(&self.tuning, forward_mps);
-        let steer_deg = self.controls.steer.clamp(-1.0, 1.0) * limit;
+        let demand = self.controls.steer.clamp(-1.0, 1.0) * limit;
+        let returning = demand.abs() < self.steer_deg.abs() || demand * self.steer_deg < 0.0;
+        let rate = if returning {
+            self.tuning.steer_return_deg_per_s
+        } else {
+            self.tuning.steer_rate_deg_per_s
+        };
+        let step = if rate.is_finite() {
+            rate.max(0.0) * dt
+        } else {
+            f64::INFINITY
+        };
+        self.steer_deg += (demand - self.steer_deg).clamp(-step, step);
+        // The speed-sensitive limit binds the RESULT too: slowing into a corner
+        // must not leave the wheels at an angle the rack could no longer reach.
+        self.steer_deg = self.steer_deg.clamp(-limit, limit);
+        let steer_deg = self.steer_deg;
+        // The rig's own geometry, for the Ackermann. Derived rather than
+        // authored: a track and a wheelbase are facts about where the wheels
+        // are, and a class that authored them could disagree with its own rig.
+        let half_track = self
+            .rig
+            .wheels
+            .iter()
+            .map(|w| w.mount_local.x.abs())
+            .fold(0.0f64, f64::max);
+        let wheelbase = 2.0
+            * self
+                .rig
+                .wheels
+                .iter()
+                .map(|w| w.mount_local.z.abs())
+                .fold(0.0f64, f64::max);
         let static_load = self.static_load_n(chassis.mass_kg);
         let inertia = if self.tuning.wheel_inertia_kgm2.is_finite() {
             self.tuning.wheel_inertia_kgm2.max(1e-3)
@@ -2342,11 +2447,95 @@ impl Vehicle for RaycastVehicle {
             f64::INFINITY
         };
 
+        // ── the suspension, and the bars that tie its two sides together ─────
+        //
+        // Two passes over the wheels, and the reason is the anti-roll bar: it
+        // transfers load ACROSS an axle, so every load on that axle has to exist
+        // before any of them is final. One pass would have to look at a
+        // neighbour's state before that neighbour had been visited, which is the
+        // shape of bug that reads as "the bar only works on one side".
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
                 break;
             };
-            let steer = if mount.steered() { steer_deg } else { 0.0 };
+            let Some(contact) = state.contact else {
+                state.length_m = self.tuning.rest_length_m;
+                state.load_n = 0.0;
+                continue;
+            };
+            let length = (contact.distance_m - mount.radius_m).clamp(
+                self.tuning.rest_length_m - self.tuning.travel_m,
+                self.tuning.rest_length_m,
+            );
+            state.length_m = length;
+            // Closing speed from the CONTACT POINT's velocity rather than from
+            // the length difference: a finite difference over one step is a step
+            // behind and rings at exactly the frequency the damper exists to
+            // kill.
+            let closing = -chassis.point_velocity(contact.point).dot(up);
+            state.load_n =
+                suspension_force_n(&self.tuning, self.tuning.rest_length_m - length, closing);
+        }
+
+        // **The anti-roll bars.** A bar resists the DIFFERENCE in compression
+        // across its axle, so it moves load from the inside wheel to the outside
+        // one and adds none: the adjustment sums to zero over the axle by
+        // construction. With `tyre_load_sensitivity` above zero that transfer
+        // COSTS the axle grip, which is why stiffening the front is how a car is
+        // made to understeer — and why a bar would be free without a load-
+        // sensitive tyre under it.
+        for front_axle in [true, false] {
+            let rate = if front_axle {
+                self.tuning.anti_roll_front_n_per_m
+            } else {
+                self.tuning.anti_roll_rear_n_per_m
+            };
+            if !rate.is_finite() || rate <= 0.0 {
+                continue;
+            }
+            let (mut sum, mut n) = (0.0f64, 0usize);
+            for (i, mount) in self.rig.wheels.iter().enumerate() {
+                if mount.steered() == front_axle {
+                    if let Some(w) = self.wheels.get(i) {
+                        sum += self.tuning.rest_length_m - w.length_m;
+                        n += 1;
+                    }
+                }
+            }
+            if n < 2 {
+                continue;
+            }
+            let mean = sum / n as f64;
+            for (i, mount) in self.rig.wheels.iter().enumerate() {
+                if mount.steered() != front_axle {
+                    continue;
+                }
+                let Some(w) = self.wheels.get_mut(i) else {
+                    continue;
+                };
+                if w.contact.is_none() {
+                    continue;
+                }
+                let compression = self.tuning.rest_length_m - w.length_m;
+                w.load_n = (w.load_n + rate * (compression - mean)).max(0.0);
+            }
+        }
+
+        for (i, mount) in self.rig.wheels.iter().enumerate() {
+            let Some(state) = self.wheels.get_mut(i) else {
+                break;
+            };
+            let steer = if mount.steered() {
+                ackermann_deg(
+                    steer_deg,
+                    mount.mount_local.x * steer_deg > 0.0,
+                    half_track,
+                    wheelbase,
+                    self.tuning.ackermann,
+                )
+            } else {
+                0.0
+            };
             state.steer_deg = steer;
             let wheel_fwd = if steer == 0.0 {
                 fwd
@@ -2400,11 +2589,10 @@ impl Vehicle for RaycastVehicle {
             };
 
             let Some(contact) = state.contact else {
-                // In the air the suspension extends and the wheel turns on its
-                // own torques alone — which is how a wheel that left the ground
-                // under power is SEEN to be spinning when it lands.
-                state.length_m = self.tuning.rest_length_m;
-                state.load_n = 0.0;
+                // In the air the wheel turns on its own torques alone — which is
+                // how a wheel that left the ground under power is SEEN to be
+                // spinning when it lands. Its length and load were already
+                // written by the suspension pass above.
                 state.slip_ratio = 0.0;
                 state.slip_lat = 0.0;
                 state.omega_rad_s = shed(omega);
@@ -2414,20 +2602,7 @@ impl Vehicle for RaycastVehicle {
                 continue;
             };
 
-            let length = (contact.distance_m - mount.radius_m).clamp(
-                self.tuning.rest_length_m - self.tuning.travel_m,
-                self.tuning.rest_length_m,
-            );
-            state.length_m = length;
-            let compression = self.tuning.rest_length_m - length;
-            // Closing speed from the CONTACT POINT's velocity rather than from
-            // the length difference: a finite difference over one step is a step
-            // behind and rings at exactly the frequency the damper exists to
-            // kill.
-            let point_vel = chassis.point_velocity(contact.point);
-            let closing = -point_vel.dot(up);
-            let load = suspension_force_n(&self.tuning, compression, closing);
-            state.load_n = load;
+            let load = state.load_n;
             // The spring pushes along the SUSPENSION axis (the chassis up), not
             // along the contact normal: a raycast wheel on a slope is still held
             // up by its own strut, and projecting onto the normal is how a car
@@ -2535,8 +2710,18 @@ impl Vehicle for RaycastVehicle {
                 f
             };
             state.slip_lat = slip_lat;
+            // **The centre of gravity, applied where it costs nothing.**
+            //
+            // The solver's centre of mass is the chassis collider's centre and
+            // this engine has no door to move it. But a force applied at
+            // `contact − up·cog_height_m` produces exactly the moment the true
+            // centre of gravity would have felt about the real one, and the
+            // linear force is unchanged — so the whole of "a low car rolls less"
+            // is one subtraction. The SUSPENSION force is untouched by
+            // construction, because it is parallel to `up` and `up × up` is zero;
+            // only the tyre's horizontal force needs the correction.
             out.push(WheelForce {
-                point: contact.point,
+                point: contact.point - up * self.tuning.cog_height_m,
                 force: wheel_fwd * fx + wheel_right * fy,
             });
             state.omega_rad_s = omega.clamp(-omega_ceiling, omega_ceiling);
@@ -2545,15 +2730,51 @@ impl Vehicle for RaycastVehicle {
                 .rem_euclid(360.0);
         }
 
-        // Aerodynamic drag, once, at the centre of mass — not per wheel, because
-        // a car in the air has no wheels on the ground and still has air on it.
-        if speed > 1e-6 && self.tuning.drag_n_per_mps2 > 0.0 {
-            let drag =
-                -chassis.linvel.normalize_or_zero() * self.tuning.drag_n_per_mps2 * speed * speed;
-            out.push(WheelForce {
-                point: chassis.position,
-                force: drag,
-            });
+        // ── the air ──────────────────────────────────────────────────────────
+        //
+        // Once, at the centre of gravity — not per wheel, because a car in the
+        // air has no wheels on the ground and still has air on it.
+        let cog = chassis.position + up * self.tuning.cog_height_m;
+        if speed > 1e-6 {
+            // **Anisotropic.** A car's flank is two to three times its nose, and
+            // the difference is the whole reason a slide feels like a slide
+            // rather than like ice: sideways motion is what the air resists most.
+            // P29.7 had one isotropic coefficient, so a car sliding at 20 m/s met
+            // exactly as much air as one driving at 20.
+            let along = chassis.linvel.dot(fwd);
+            let across = chassis.linvel - fwd * along;
+            let mut drag = -fwd * along.abs() * along * self.tuning.drag_n_per_mps2.max(0.0);
+            let sideways = across.length();
+            if sideways > 1e-9 {
+                drag -= across / sideways
+                    * sideways
+                    * sideways
+                    * self.tuning.drag_lateral_n_per_mps2.max(0.0);
+            }
+            if drag != DVec3::ZERO {
+                out.push(WheelForce {
+                    point: cog,
+                    force: drag,
+                });
+            }
+            // **Downforce**, pressed into the chassis up at its own centre of
+            // pressure — so a rear wing is a rear wing rather than extra mass.
+            // It adds LOAD and not weight, which is why it buys grip a heavier
+            // car does not have.
+            let df = self.tuning.downforce_n_per_mps2.max(0.0) * speed * speed;
+            if df > 0.0 {
+                let cp = chassis.position
+                    + chassis.rotation
+                        * DVec3::new(
+                            0.0,
+                            self.tuning.cog_height_m,
+                            self.tuning.downforce_centre_z * wheelbase * 0.5,
+                        );
+                out.push(WheelForce {
+                    point: cp,
+                    force: -up * df,
+                });
+            }
         }
     }
 }
@@ -3938,6 +4159,264 @@ mod tests {
         assert!(
             (f - r).abs() < f.abs() * 0.05,
             "an even bias braked {f} N at the front and {r} N at the rear"
+        );
+    }
+
+    /// **The steering rack has a rate, and it returns to centre faster than it
+    /// leaves it.**
+    #[test]
+    fn the_rack_takes_time_to_turn_and_less_time_to_come_back() {
+        let mut v = grounded(&[]);
+        let t = *v.tuning();
+        let limit = steer_limit_deg(&t, 0.0);
+        v.control(VehicleControls {
+            steer: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        assert_eq!(v.steer_deg(), 0.0);
+        v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+        let after_one = v.steer_deg();
+        assert!(
+            after_one > 0.0 && after_one < limit,
+            "the rack reached {after_one}° of {limit}° in ONE step — that is the \
+             instant steering VEH2a exists to retire"
+        );
+        assert!(
+            (after_one - t.steer_rate_deg_per_s / 60.0).abs() < 1e-9,
+            "one step of a {}°/s rack moved {after_one}°",
+            t.steer_rate_deg_per_s
+        );
+        // Held, it arrives at full lock and stops there.
+        for _ in 0..120 {
+            out.clear();
+            v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+        }
+        assert!((v.steer_deg() - limit).abs() < 1e-9);
+        // Released, it comes back at the OTHER rate — faster, because a real
+        // rack's castor is what centres it.
+        v.control(VehicleControls::default());
+        let before = v.steer_deg();
+        out.clear();
+        v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+        let back = before - v.steer_deg();
+        assert!(
+            (back - t.steer_return_deg_per_s / 60.0).abs() < 1e-9,
+            "the rack returned {back}° in a step against a {}°/s return rate",
+            t.steer_return_deg_per_s
+        );
+        assert!(back > t.steer_rate_deg_per_s / 60.0);
+        // …and the speed-sensitive limit binds the RESULT, not just the demand:
+        // a car that sped up with the wheel held must give the angle back.
+        let mut fast = resting(1_200.0);
+        fast.linvel = DVec3::new(0.0, 0.0, t.max_speed_mps);
+        v.control(VehicleControls {
+            steer: 1.0,
+            ..Default::default()
+        });
+        for _ in 0..240 {
+            out.clear();
+            v.solve(fast, 1.0 / 60.0, &mut out);
+        }
+        assert!(
+            (v.steer_deg() - t.min_steer_deg).abs() < 1e-9,
+            "at the top speed the rack sits at {}° against a {}° limit",
+            v.steer_deg(),
+            t.min_steer_deg
+        );
+    }
+
+    /// **Ackermann turns the inside wheel more**, blends to parallel at zero, and
+    /// never inverts.
+    #[test]
+    fn the_inside_front_wheel_turns_more_than_the_outside_one() {
+        let (w, l) = (0.84, 2.84);
+        for rack in [5.0, 20.0, 35.0, -35.0] {
+            let inner = ackermann_deg(rack, true, w, l, 1.0);
+            let outer = ackermann_deg(rack, false, w, l, 1.0);
+            assert!(
+                inner.abs() > rack.abs() && outer.abs() < rack.abs(),
+                "at {rack}° the inside wheel took {inner}° and the outside {outer}°"
+            );
+            assert_eq!(
+                inner.signum(),
+                rack.signum(),
+                "a wheel steered the wrong way"
+            );
+            assert_eq!(outer.signum(), rack.signum());
+            // Zero Ackermann is parallel steering, exactly.
+            assert_eq!(ackermann_deg(rack, true, w, l, 0.0), rack);
+            assert_eq!(ackermann_deg(rack, false, w, l, 0.0), rack);
+            // Half is half way there.
+            let half = ackermann_deg(rack, true, w, l, 0.5);
+            assert!((half - (rack + inner) / 2.0).abs() < 1e-9);
+        }
+        // It grows with lock — at a standstill's full lock the difference is
+        // worth degrees, and on a motorway it is worth nothing.
+        let small = ackermann_deg(2.0, true, w, l, 1.0) - 2.0;
+        let large = ackermann_deg(35.0, true, w, l, 1.0) - 35.0;
+        assert!(large > small * 10.0, "{small} vs {large}");
+        // Degenerate geometry is a refusal, not a division.
+        assert_eq!(ackermann_deg(10.0, true, w, 0.0, 1.0), 10.0);
+        assert!(ackermann_deg(179.0, true, 4.0, 1.0, 1.0).is_finite());
+        // …and the rig reads it: the two front wheels take different angles.
+        let mut v = grounded(&[]);
+        v.control(VehicleControls {
+            steer: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        for _ in 0..60 {
+            out.clear();
+            v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+        }
+        let s = v.wheels();
+        assert!(
+            (s[0].steer_deg - s[1].steer_deg).abs() > 0.5,
+            "the two front wheels took {}° and {}° — the rig is steering parallel",
+            s[0].steer_deg,
+            s[1].steer_deg
+        );
+        assert_eq!(s[2].steer_deg, 0.0, "a rear wheel steered");
+    }
+
+    /// **The anti-roll bar moves load across an axle and adds none** — and with a
+    /// load-sensitive tyre, moving it costs that axle grip.
+    #[test]
+    fn an_anti_roll_bar_transfers_load_without_adding_any() {
+        let loads = |rate: f64| -> (f64, f64, f64) {
+            let mut v = grounded(&[("anti_roll_front_n_per_m", rate)]);
+            // Roll the rig: the left front is compressed further than the right.
+            let t = *v.tuning();
+            v.wheels_mut()[0].contact = Some(WheelContact {
+                point: DVec3::new(-0.9, -1.0, 1.4),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.18 + 0.35,
+            });
+            v.wheels_mut()[1].contact = Some(WheelContact {
+                point: DVec3::new(0.9, -1.0, 1.4),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.04 + 0.35,
+            });
+            let mut out = Vec::new();
+            v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+            let w = v.wheels();
+            (w[0].load_n, w[1].load_n, v.axle_load_n(true))
+        };
+        let (bare_l, bare_r, bare_axle) = loads(0.0);
+        let (bar_l, bar_r, bar_axle) = loads(8_000.0);
+        assert!(
+            bar_l > bare_l && bar_r < bare_r + 1e-9 && bar_r < bare_r,
+            "the bar did not transfer: {bare_l}/{bare_r} became {bar_l}/{bar_r}"
+        );
+        assert!(
+            (bar_axle - bare_axle).abs() < 1e-9,
+            "the bar ADDED {:.1} N to the axle — a bar transfers load, it does \
+             not make any",
+            bar_axle - bare_axle
+        );
+        // …and the transfer costs grip, which is the only reason the knob is
+        // worth turning. Read through the µ the two loads actually get.
+        let stat = 1_200.0 * 9.81 / 4.0;
+        let grip = |a: f64, b: f64| {
+            load_sensitive_mu(1.2, a, stat, 0.22) * a + load_sensitive_mu(1.2, b, stat, 0.22) * b
+        };
+        assert!(
+            grip(bar_l, bar_r) < grip(bare_l, bare_r),
+            "stiffening the bar cost the axle no grip at all"
+        );
+        // …and a bar stiff enough to lift the inside wheel does NOT pull it
+        // down. That IS load the axle gains, and it is gained by the suspension's
+        // own rule — a strut that pulled the chassis toward the road would suck
+        // the car onto it — rather than by the bar being wrong.
+        let (heavy_l, heavy_r, _) = loads(40_000.0);
+        assert_eq!(heavy_r, 0.0, "the unloaded wheel took {heavy_r} N");
+        assert!(heavy_l > bar_l);
+    }
+
+    /// **A high centre of gravity rolls the car harder** — the same tyre force,
+    /// a longer moment arm, and nothing else changed.
+    #[test]
+    fn the_centre_of_gravity_is_where_the_tyre_force_pulls_from() {
+        let moment = |cog: f64| -> f64 {
+            let mut v = grounded(&[("cog_height_m", cog)]);
+            let mut chassis = resting(1_200.0);
+            // Sliding sideways, so there is a lateral force to take a moment of.
+            chassis.linvel = DVec3::new(4.0, 0.0, 10.0);
+            let mut out = Vec::new();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+            // Roll moment about the body's own centre of mass, from the forces
+            // the model asked for.
+            out.iter()
+                .map(|f| {
+                    let r = f.point - chassis.position;
+                    r.cross(f.force).z
+                })
+                .sum()
+        };
+        let (low, high) = (moment(-0.45), moment(0.35));
+        assert!(
+            high.abs() > low.abs() * 1.2,
+            "a centre of gravity 0.8 m higher produced a roll moment of {high:.0} \
+             N·m against {low:.0} — the height reaches no force"
+        );
+        assert_eq!(
+            high.signum(),
+            low.signum(),
+            "raising the centre of gravity reversed the roll"
+        );
+    }
+
+    /// **Downforce presses, drag is anisotropic, and a slide meets more air than
+    /// a drive.**
+    #[test]
+    fn the_air_pushes_down_and_resists_sideways_harder_than_forwards() {
+        let aero = |vel: DVec3, df: f64| -> (DVec3, f64) {
+            let mut v = grounded(&[
+                ("downforce_n_per_mps2", df),
+                // No engine, no brake: the only forces are the springs, the
+                // tyres and the air, and the springs are vertical.
+                ("peak_torque_nm", 0.0),
+            ]);
+            let mut chassis = resting(1_200.0);
+            chassis.linvel = vel;
+            let mut out = Vec::new();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+            // The aero forces are the ones NOT at a contact point.
+            let mut f = DVec3::ZERO;
+            let mut down = 0.0;
+            for w in out.iter().filter(|w| w.point.y > -0.5) {
+                f += w.force;
+                down += -w.force.y;
+            }
+            (f, down)
+        };
+        let fast = 30.0;
+        let (fwd_drag, _) = aero(DVec3::new(0.0, 0.0, fast), 0.0);
+        let (side_drag, _) = aero(DVec3::new(fast, 0.0, 0.0), 0.0);
+        assert!(
+            side_drag.length() > fwd_drag.length() * 2.0,
+            "sideways at {fast} m/s met {:.0} N of air and forwards met {:.0} — \
+             one isotropic coefficient is exactly the model VEH2a replaced",
+            side_drag.length(),
+            fwd_drag.length()
+        );
+        assert!(
+            fwd_drag.z < 0.0 && side_drag.x < 0.0,
+            "the air pushed ALONG"
+        );
+        // Downforce is quadratic and it presses DOWN.
+        let (_, none) = aero(DVec3::new(0.0, 0.0, fast), 0.0);
+        let (_, some) = aero(DVec3::new(0.0, 0.0, fast), 0.5);
+        let (_, half) = aero(DVec3::new(0.0, 0.0, fast / 2.0), 0.5);
+        assert!(
+            none.abs() < 1e-9,
+            "there is downforce with the wing switched off"
+        );
+        assert!((some - 0.5 * fast * fast).abs() < 1e-6, "{some}");
+        assert!(
+            (some / half - 4.0).abs() < 1e-6,
+            "downforce is not quadratic"
         );
     }
 
