@@ -959,6 +959,21 @@ pub fn body_part_guid(chassis: Uuid, part: &str) -> Uuid {
     Uuid::from_u128(x)
 }
 
+/// The speed difference, rad/s, a differential's lock ramps in over.
+///
+/// Two radians a second — about 0.7 m/s of wheel speed on a road tyre. A lock
+/// that engaged on any difference at all would be thrown between two torque
+/// splits by the last bit of a float; a lock that needed a big one would never
+/// engage on the surface it exists for.
+pub const DIFF_SPEED_BAND: f64 = 2.0;
+
+/// The front share a catalogue row's `drivetrain = "awd"` means.
+///
+/// Forty per cent, which is the rear-biased split nearly every road-going
+/// all-wheel-drive system runs, and a row that wants a different one says
+/// `front_torque_split` and gets exactly what it asks for.
+pub const AWD_FRONT_SPLIT: f64 = 0.4;
+
 /// A tyre's width as a fraction of its own radius.
 ///
 /// One number for the whole engine rather than a per-class knob, on
@@ -1128,8 +1143,32 @@ impl VehicleDef {
             def.body = VehicleBody::from_name(name)
                 .ok_or_else(|| format!("unknown vehicle body `{name}`"))?;
         }
+        // **`drivetrain` is a spelling, not a field** (island wave VEH2a). The
+        // physics reads one number — `front_torque_split` — and an enum beside it
+        // would be a second source of truth for one fact; see that tunable's own
+        // note. An author still gets to write `drivetrain = "awd"`, and it is
+        // resolved HERE, before any numeric key, so an explicit
+        // `front_torque_split` in the same table always wins whatever order the
+        // TOML map happens to iterate in.
+        if let Some(d) = table.get("drivetrain") {
+            let name = d
+                .as_str()
+                .ok_or_else(|| "`drivetrain` must be a string".to_string())?;
+            let split = match name {
+                "fwd" => 1.0,
+                "rwd" => 0.0,
+                "awd" => AWD_FRONT_SPLIT,
+                _ => {
+                    return Err(format!(
+                        "unknown drivetrain `{name}` (fwd, rwd or awd; for any \
+                         other split say `front_torque_split` directly)"
+                    ))
+                }
+            };
+            def.class.front_torque_split = split;
+        }
         for (k, v) in table {
-            if k == "body" {
+            if k == "body" || k == "drivetrain" {
                 continue;
             }
             let n = v
@@ -1579,6 +1618,15 @@ pub struct RaycastVehicle {
     /// Engine speed, rpm — a *derived* value, held so the audio and the shift
     /// model read the same number the torque came from.
     rpm: f64,
+    /// Per-wheel drive torque this step, N·m — scratch, in
+    /// [`VehicleRig::wheels`] order.
+    ///
+    /// A field rather than a local because the differential's share depends on
+    /// **every** wheel on an axle, so the torques must all be known before the
+    /// per-wheel loop takes a mutable borrow of the wheel states — and a `Vec`
+    /// allocated inside a fixed step, once per vehicle per step, is exactly the
+    /// kind of cost the vehicle phase was given its own budget row to notice.
+    drive_nm: Vec<f64>,
 }
 
 impl RaycastVehicle {
@@ -1593,6 +1641,7 @@ impl RaycastVehicle {
             rig.wheels.len()
         ];
         Self {
+            drive_nm: vec![0.0; rig.wheels.len()],
             rig,
             controls: VehicleControls::default(),
             wheels,
@@ -2080,16 +2129,52 @@ impl Vehicle for RaycastVehicle {
         };
         let wheels = self.rig.wheels.len();
 
+        // ── the drivetrain ───────────────────────────────────────────────────
+        //
+        // `front_torque_split` IS the drivetrain: 0 is rear drive, 1 is front,
+        // between is all-wheel at that split. An axle with no wheels hands its
+        // share to the other one rather than losing it, so a three-wheeler and a
+        // rig whose recogniser found only rear wheels are both still driven.
+        //
+        // This block comes BEFORE the gearbox because `axle_share` is what the
+        // engine is connected THROUGH: it decides the drive torque, the engine
+        // braking and the revs alike, and reading the revs off wheels the engine
+        // cannot turn is how a rear-drive car ends up shifting on its front axle.
+        let front_wheels = self.rig.wheels.iter().filter(|w| w.steered()).count();
+        let rear_wheels = wheels - front_wheels;
+        let split = if front_wheels == 0 {
+            0.0
+        } else if rear_wheels == 0 {
+            1.0
+        } else {
+            self.tuning.front_torque_split.clamp(0.0, 1.0)
+        };
+        let axle_share = |front: bool| -> f64 {
+            let (share, n) = if front {
+                (split, front_wheels)
+            } else {
+                (1.0 - split, rear_wheels)
+            };
+            if n == 0 {
+                0.0
+            } else {
+                share / n as f64
+            }
+        };
+
         // ── the gearbox ──────────────────────────────────────────────────────
         //
         // Revs come from the wheels the engine is connected to, through the gear
-        // it is in. The mean rather than any one wheel, so a car with one wheel
-        // in the air does not scream.
-        let mean_omega = if wheels == 0 {
-            0.0
-        } else {
-            self.wheels.iter().map(|w| w.omega_rad_s).sum::<f64>() / wheels as f64
-        };
+        // it is in — the DRIVEN wheels, weighted by exactly the share of the
+        // driveline each of them is on, so a car with one wheel in the air does
+        // not scream and a front-drive car does not read its revs off its rears.
+        let mean_omega: f64 = self
+            .rig
+            .wheels
+            .iter()
+            .zip(self.wheels.iter())
+            .map(|(m, w)| axle_share(m.steered()) * w.omega_rad_s)
+            .sum();
         self.shift_left_s = (self.shift_left_s - dt).max(0.0);
         self.rpm = engine_rpm(&self.tuning, mean_omega, self.gear);
         if self.shift_left_s <= 0.0 {
@@ -2120,33 +2205,133 @@ impl Vehicle for RaycastVehicle {
         // Reverse is a gear, so its ratio is positive and the DIRECTION is the
         // gear's sign. One sign, spent here.
         let direction = if self.gear < 0 { -1.0 } else { 1.0 };
-        let mut wheel_torque = if wheels == 0 {
-            0.0
-        } else {
-            crank * ratio * direction / wheels as f64
+
+        // ── the differentials ────────────────────────────────────────────────
+        //
+        // **A diff shares an axle's TORQUE, and the lock decides how much of it
+        // the slower wheel takes.** Open (`0`) is an even split whatever the two
+        // wheels are doing, which is why an open axle with one wheel in the air
+        // delivers only half its torque and wastes the rest spinning. Spooled
+        // (`1`) hands the whole axle to the wheel that is turning slowest — the
+        // one that still has grip — which is what a locked diff is FOR.
+        //
+        // A **speed** average was tried first and refused: pulling a grounded
+        // wheel's `ω` up toward a spinning partner's puts momentum into it that
+        // the ground then has to absorb, so the wheel that had grip breaks away
+        // and the spool delivered LESS force than the open diff (3 083 N against
+        // 3 853 at matched revs). Torque is what a differential divides.
+        //
+        // The transfer ramps in over [`DIFF_SPEED_BAND`] of speed difference so
+        // an axle whose wheels are simply rolling together is not thrown between
+        // two states by numerical noise, and ties are split evenly, so the answer
+        // never depends on which wheel a `Guid` sort happened to put first.
+        let axle_lock = |front: bool| -> f64 {
+            let v = if front {
+                self.tuning.diff_lock_front
+            } else {
+                self.tuning.diff_lock_rear
+            };
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
         };
+        self.drive_nm.clear();
+        self.drive_nm.resize(wheels, 0.0);
+        for i in 0..wheels {
+            let front = self.rig.wheels[i].steered();
+            let n = if front { front_wheels } else { rear_wheels };
+            let base = axle_share(front);
+            let lock = axle_lock(front);
+            let weight = if lock <= 0.0 || n < 2 {
+                base
+            } else {
+                let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+                for (j, m) in self.rig.wheels.iter().enumerate() {
+                    if m.steered() == front {
+                        let w = self.wheels[j].omega_rad_s;
+                        lo = lo.min(w);
+                        hi = hi.max(w);
+                    }
+                }
+                let ramp = ((hi - lo) / DIFF_SPEED_BAND).clamp(0.0, 1.0);
+                let slowest = self
+                    .rig
+                    .wheels
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, m)| m.steered() == front && self.wheels[*j].omega_rad_s <= lo)
+                    .count()
+                    .max(1);
+                let mine = if self.wheels[i].omega_rad_s <= lo {
+                    1.0 / slowest as f64
+                } else {
+                    0.0
+                };
+                let axle = base * n as f64;
+                base * (1.0 - lock * ramp) + axle * lock * ramp * mine
+            };
+            self.drive_nm[i] = crank * ratio * direction * weight;
+        }
+
         // **The driveline ceiling.** `max_engine_force_n` used to be the whole
         // engine curve; since VEH2a it is the bound on what the wheels may be
         // handed in total, which is the half-shaft and the clutch a car actually
-        // has. Scaled rather than clipped per wheel, so the split stays the split.
+        // has. Scaled rather than clipped per wheel, so the SPLIT stays the split.
         let force_sum: f64 = self
             .rig
             .wheels
             .iter()
-            .map(|w| wheel_torque.abs() / w.radius_m.max(1e-3))
+            .zip(self.drive_nm.iter())
+            .map(|(w, t)| t.abs() / w.radius_m.max(1e-3))
             .sum();
         let ceiling = self.tuning.max_engine_force_n.max(0.0);
         if force_sum > ceiling && force_sum > 0.0 {
-            wheel_torque *= ceiling / force_sum;
+            let derate = ceiling / force_sum;
+            for t in self.drive_nm.iter_mut() {
+                *t *= derate;
+            }
         }
+
+        // ── the brakes ───────────────────────────────────────────────────────
+        let brake_force = self.tuning.brake_force_n.max(0.0) * self.controls.brake.clamp(0.0, 1.0);
+        //
+        // Brake bias is the share of the budget the FRONT axle takes. Road cars
+        // run it forward because braking transfers load forward and grip follows
+        // load — and with `tyre_load_sensitivity` above zero, biasing it the
+        // wrong way is now something a driver can feel rather than a number with
+        // no consequence.
+        let bias = if front_wheels == 0 {
+            0.0
+        } else if rear_wheels == 0 {
+            1.0
+        } else {
+            self.tuning.brake_bias.clamp(0.0, 1.0)
+        };
+        let brake_share = |front: bool| -> f64 {
+            let (share, n) = if front {
+                (bias, front_wheels)
+            } else {
+                (1.0 - bias, rear_wheels)
+            };
+            if n == 0 {
+                0.0
+            } else {
+                brake_force * share / n as f64
+            }
+        };
         // Engine braking: the crank's own drag with the throttle shut, rising
         // with the revs, reaching the wheels through the same gear.
         let rev_span = (self.tuning.redline_rpm - self.tuning.idle_rpm).max(1.0);
         let rev_frac = ((self.rpm - self.tuning.idle_rpm) / rev_span).clamp(0.0, 1.0);
-        let engine_brake = if throttle > 0.0 || self.shifting() || wheels == 0 {
+        // Distributed through `axle_share`, exactly like drive torque: an axle
+        // the engine cannot turn is an axle the engine cannot slow, so on a
+        // rear-drive car the front wheels genuinely coast.
+        let engine_brake_total = if throttle > 0.0 || self.shifting() {
             0.0
         } else {
-            self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs() / wheels as f64
+            self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs()
         };
         // The rev limiter, expressed where it belongs: as the fastest the wheels
         // can turn in this gear. Without it an airborne driven wheel spins up for
@@ -2156,7 +2341,6 @@ impl Vehicle for RaycastVehicle {
         } else {
             f64::INFINITY
         };
-        let brake_force = self.tuning.brake_force_n.max(0.0) * self.controls.brake.clamp(0.0, 1.0);
 
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
@@ -2187,7 +2371,8 @@ impl Vehicle for RaycastVehicle {
             // brake LAST, against the post-contact speed, is what makes a locked
             // wheel stay locked: the no-reverse clamp then has exactly the
             // ground's contribution to remove.
-            let mut omega = state.omega_rad_s + wheel_torque * dt / inertia;
+            let mut omega =
+                state.omega_rad_s + self.drive_nm.get(i).copied().unwrap_or(0.0) * dt / inertia;
             omega = omega.clamp(-omega_ceiling, omega_ceiling);
 
             // Everything that RESISTS is one budget and it may not reverse the
@@ -2202,8 +2387,10 @@ impl Vehicle for RaycastVehicle {
                 0.0
             };
             let rolling = state.load_n.max(0.0) * self.tuning.rolling_resistance.max(0.0) * radius;
-            let resist =
-                brake_force * radius / wheels.max(1) as f64 + hand + rolling + engine_brake;
+            let resist = brake_share(mount.steered()) * radius
+                + hand
+                + rolling
+                + engine_brake_total * axle_share(mount.steered());
             let shed = |w: f64| {
                 if resist > 0.0 && w != 0.0 {
                     w - w.signum() * (resist * dt / inertia).min(w.abs())
@@ -3531,6 +3718,260 @@ mod tests {
             w[2].slip_ratio,
             w[0].slip_ratio
         );
+    }
+
+    /// Park a four-wheel rig on flat ground with every wheel in contact.
+    fn grounded(tuning: &[(&str, f64)]) -> RaycastVehicle {
+        let mut v = RaycastVehicle::new(rig(4));
+        for (name, value) in tuning {
+            assert!(v.tune(name, *value), "the fixture set an unknown `{name}`");
+        }
+        let rest = v.tuning().rest_length_m;
+        for w in v.wheels_mut() {
+            w.contact = Some(WheelContact {
+                point: DVec3::new(0.0, -1.0, 0.0),
+                normal: DVec3::Y,
+                distance_m: rest - 0.1 + 0.35,
+            });
+        }
+        v
+    }
+
+    /// **The drivetrain is the split, and the split is which axle pushes.**
+    ///
+    /// Read off the wheels' own speeds on a LOW-GRIP surface, where the driven
+    /// axle spins and the undriven one cannot: a check on the chassis's motion
+    /// alone would pass for any split at all, because all three drivetrains move
+    /// a car forwards.
+    #[test]
+    fn the_drivetrain_split_decides_which_axle_pushes() {
+        let low = [("longitudinal_grip", 0.25), ("lateral_grip", 0.25)];
+        let spun = |split: f64| -> (f64, f64) {
+            let mut v = grounded(&[low[0], low[1], ("front_torque_split", split)]);
+            v.control(VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            });
+            let mut out = Vec::new();
+            for _ in 0..20 {
+                out.clear();
+                v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+            }
+            let w = v.wheels();
+            (
+                (w[0].omega_rad_s + w[1].omega_rad_s) / 2.0,
+                (w[2].omega_rad_s + w[3].omega_rad_s) / 2.0,
+            )
+        };
+        // The fixture's first two wheels are `+Z` and therefore the front pair.
+        let (ff, fr) = spun(1.0);
+        assert!(
+            ff > 1.0 && fr.abs() < 1e-9,
+            "front-wheel drive turned the rears at {fr} rad/s"
+        );
+        let (rf, rr) = spun(0.0);
+        assert!(
+            rr > 1.0 && rf.abs() < 1e-9,
+            "rear-wheel drive turned the fronts at {rf} rad/s"
+        );
+        let (af, ar) = spun(AWD_FRONT_SPLIT);
+        assert!(af > 0.0 && ar > 0.0, "all-wheel drive turned one axle only");
+        assert!(
+            ar > af,
+            "a {AWD_FRONT_SPLIT} front split must put MORE torque on the rear \
+             axle, but the front spun to {af} against the rear's {ar}"
+        );
+        // …and the whole engine is spent either way: an axle that gets nothing
+        // does not shrink the car's total drive.
+        assert!(
+            (ff - rr).abs() < ff * 0.05,
+            "front drive spun to {ff} and rear drive to {rr} — the split is \
+             losing torque instead of moving it"
+        );
+    }
+
+    /// **A locked differential drags a spinning wheel back; an open one does
+    /// not** — and it moves speed rather than making it.
+    ///
+    /// One rear wheel lifted, which is the case a diff exists for: on an open
+    /// axle the airborne wheel takes all the speed and the grounded one is left
+    /// with nothing.
+    #[test]
+    fn a_locked_diff_pulls_a_lifted_wheel_back_to_its_partner() {
+        // (grounded ω, lifted ω, metres the car covered in half a second)
+        let run = |lock: f64| -> (f64, f64, f64) {
+            let mut v = grounded(&[
+                ("front_torque_split", 0.0),
+                ("diff_lock_rear", lock),
+                // Enough grip that the grounded wheel really can hold, or both
+                // wheels spin and there is no asymmetry to measure.
+                ("longitudinal_grip", 2.0),
+            ]);
+            // Wheel 3 is a rear one, and it is in the air.
+            v.wheels_mut()[3].contact = None;
+            v.control(VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            });
+            let mut chassis = resting(1_200.0);
+            let mut out = Vec::new();
+            let mut travelled = 0.0;
+            for _ in 0..30 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+                let fz: f64 = out.iter().map(|f| f.force.z).sum();
+                chassis.linvel.z += fz / 1_200.0 / 60.0;
+                travelled += chassis.linvel.z / 60.0;
+            }
+            (
+                v.wheels()[2].omega_rad_s,
+                v.wheels()[3].omega_rad_s,
+                travelled,
+            )
+        };
+        let (open_down, open_up, open_far) = run(0.0);
+        let (lock_down, lock_up, lock_far) = run(1.0);
+        let (half_down, half_up, half_far) = run(0.5);
+        assert!(
+            open_up > open_down * 3.0,
+            "an OPEN diff left the lifted wheel at {open_up} rad/s against the \
+             grounded one's {open_down} — it is behaving like a locked one"
+        );
+        // A lock **starves** the runaway wheel: it does not force the two speeds
+        // together (that would be a rigid axle, and a rigid axle is not what a
+        // torque-splitting diff is), it stops feeding the one that is already
+        // fastest, so the gap collapses.
+        assert!(
+            lock_up - lock_down < (open_up - open_down) * 0.5,
+            "locking the diff left a gap of {:.1} rad/s against the open axle's \
+             {:.1} — the lock is not starving the wheel that is running away",
+            lock_up - lock_down,
+            open_up - open_down
+        );
+        assert!(
+            lock_down > open_down * 1.2,
+            "the wheel with GRIP turned at {lock_down} rad/s locked and \
+             {open_down} open — the torque did not move to it"
+        );
+        let (open_gap, half_gap, lock_gap) = (
+            open_up - open_down,
+            half_up - half_down,
+            lock_up - lock_down,
+        );
+        assert!(
+            half_gap < open_gap && half_gap > lock_gap,
+            "a half lock did not land between open ({open_gap:.1}) and locked \
+             ({lock_gap:.1}): {half_gap:.1} rad/s"
+        );
+
+        // **What the lock is WORTH, isolated from the engine.**
+        //
+        // A distance comparison over the runs above is NOT the arm, and the
+        // reason is worth recording: at full throttle the open diff's runaway
+        // wheel drags the engine to 3 200 rpm and most of its peak torque while
+        // the locked axle is still at 1 400 in first, so the open car goes
+        // further (0.39 m against 0.32) for a reason that has nothing to do with
+        // differentials. The lock's own contribution is read at MATCHED revs and
+        // at a throttle the single grounded wheel can still hold.
+        let force = |lock: f64| -> f64 {
+            let mut v = grounded(&[
+                ("front_torque_split", 0.0),
+                ("longitudinal_grip", 2.0),
+                ("diff_lock_rear", lock),
+            ]);
+            v.wheels_mut()[3].contact = None;
+            v.wheels_mut()[2].omega_rad_s = 0.0;
+            v.wheels_mut()[3].omega_rad_s = 40.0;
+            v.control(VehicleControls {
+                throttle: 0.3,
+                ..Default::default()
+            });
+            let mut out = Vec::new();
+            v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
+            out.iter().map(|f| f.force.z).sum()
+        };
+        let (open_step, lock_step) = (force(0.0), force(1.0));
+        assert!(
+            lock_step > open_step * 1.8,
+            "a locked axle put {lock_step:.0} N down against an open one's \
+             {open_step:.0} N from the same state at the same revs — the whole \
+             axle's torque did not reach the wheel that has grip"
+        );
+        let _ = (open_far, lock_far, half_far);
+    }
+
+    /// **Brake bias sends the budget to the axle it names.**
+    #[test]
+    fn the_brake_bias_is_the_share_the_front_axle_takes() {
+        let axles = |bias: f64| -> (f64, f64) {
+            let mut v = grounded(&[("brake_bias", bias), ("abs_slip", 0.0)]);
+            for w in v.wheels_mut() {
+                w.omega_rad_s = 12.0 / 0.35;
+            }
+            v.control(VehicleControls {
+                brake: 1.0,
+                ..Default::default()
+            });
+            let mut chassis = resting(1_200.0);
+            chassis.linvel = DVec3::new(0.0, 0.0, 12.0);
+            let mut out = Vec::new();
+            for _ in 0..4 {
+                out.clear();
+                v.solve(chassis, 1.0 / 60.0, &mut out);
+            }
+            let g = |i: usize| out[i * 2 + 1].force.z;
+            ((g(0) + g(1)) * 0.5, (g(2) + g(3)) * 0.5)
+        };
+        let (f, r) = axles(0.9);
+        assert!(
+            f < r * 1.5,
+            "a 0.9 front bias braked {f} N at the front against {r} N at the rear"
+        );
+        let (f, r) = axles(0.1);
+        assert!(
+            r < f * 1.5,
+            "a 0.1 front bias braked {r} N at the rear against {f} N at the front"
+        );
+        // A bias of 0.5 is even, which is the control that says the arm above is
+        // reading the bias and not the fixture's geometry.
+        let (f, r) = axles(0.5);
+        assert!(
+            (f - r).abs() < f.abs() * 0.05,
+            "an even bias braked {f} N at the front and {r} N at the rear"
+        );
+    }
+
+    /// **`drivetrain = "awd"` is a spelling of one number**, and the number wins.
+    #[test]
+    fn a_catalogue_row_may_spell_its_drivetrain() {
+        let mut defs = VehicleDefs::default();
+        defs.merge_toml(
+            "[a.vehicle]\ndrivetrain = \"fwd\"\n\
+             [b.vehicle]\ndrivetrain = \"rwd\"\n\
+             [c.vehicle]\ndrivetrain = \"awd\"\n\
+             [d.vehicle]\ndrivetrain = \"awd\"\nfront_torque_split = 0.15\n",
+        )
+        .expect("the rows parse");
+        assert_eq!(defs.get("a").unwrap().class.front_torque_split, 1.0);
+        assert_eq!(defs.get("b").unwrap().class.front_torque_split, 0.0);
+        assert_eq!(
+            defs.get("c").unwrap().class.front_torque_split,
+            AWD_FRONT_SPLIT
+        );
+        assert_eq!(
+            defs.get("d").unwrap().class.front_torque_split,
+            0.15,
+            "an explicit split must win over the word, whatever order the TOML \
+             map iterated in"
+        );
+        // …and an unknown word is a refusal BY NAME, not a silent rear-drive.
+        let err = VehicleDefs::default()
+            .merge_toml("[x.vehicle]\ndrivetrain = \"tracks\"\n")
+            .expect_err("an unknown drivetrain is refused");
+        assert!(err.contains("tracks"), "{err}");
+        assert!(VehicleDefs::default()
+            .merge_toml("[x.vehicle]\ndrivetrain = 3\n")
+            .is_err());
     }
 
     /// **A wheel is a wheel now**: `ω` is a state, the slip ratio is defined
