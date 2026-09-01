@@ -25146,9 +25146,11 @@ tree** and should not be quoted.
 
 **Two kinds of constant, because one could not be both.** `SHIPPING_FRAME_BUDGET_MS = 16.6`
 is what "≥ 60 fps" MEANS and is **never asserted** — a constant asserted where it fails is a
-red build somebody raises. `SHIPPING_FRAME_CEILING_MS = 58.0` (and `_P99_ = 64.0`) is the
+red build somebody raises. `SHIPPING_FRAME_CEILING_MS` (and its `_P99_` twin) is the
 ratcheting tripwire that walks down toward it, and the instrument prints the distance every
-run.
+run. *(This paragraph quoted 58.0 / 64.0, the values the wave that wrote it minted. Both have
+since ratcheted — **40.0 / 48.0** as of IASSET1 — which is the rule working, and is why the
+prose no longer names a number the constants are free to move: read `budget.rs`.)*
 
 **Three exemptions, each by name**: software/paravirtual adapters report; every CI runner
 reports; and the **dev profile** reports — `[profile.dev]` is `opt-level = 1` with debug
@@ -29431,3 +29433,109 @@ unchanged — which is the check that a content re-bless did not reach the image
 cross-checked against the summaries' own sum), fmt clean, frontend **85 files / 776 tests** with
 typecheck + eslint clean, `Cargo.lock` unmoved, **scene schema still v26**. Audit ledger in
 `docs/memos/wave-gta1-play-and-night.md`.
+
+## Wave IASSET1 — sub-entry compression, the `.ipack` rename, and the tables (2026-09-01)
+
+**THE HEADLINE: the cooked Vancouver Island pack went from 604 631 836 B to
+247 497 020 B — a 59.07 % reduction — and boots 6.5 % faster** (1 437 ms against 1 540 ms,
+best of three headless 120-frame runs), with a **byte-identical 300-frame final-state hash**
+(`6a34aa77b6095aeb0af1fe954cb5d166`) across the two packs. That last number is the lossless
+claim in its strongest available form: not "the bytes round-trip in a unit test" but "the
+whole simulated world is the same world". Cook time did not move (42.673 s against 42.640 s):
+the 3.3 s of zstd is paid for by writing 357 MB fewer bytes.
+
+**THE PREMISE, RE-PRICED.** The pack has compressed *whole entries* since P9.2, and the
+streaming kinds opted out because a pack entry decompresses whole on every `read_ref` and
+`read_ref` is a per-frame path. So they shipped raw, at 100 % of their bytes, and the only
+remaining ship-size lever was one that must never be pulled. IASSET1 is the third option that
+two-way choice was hiding: compress each **block** — tile, chunk, cell — independently, record
+the codec in the container's own directory, decompress exactly the block a page-in asked for.
+
+**THE POLICY DOOR.** `PackWriter::compresses_kind` was a `bool`, and a bool has room for one
+reason: it could say "not zstd-compressed" and could not say *why*. It is now
+`entry_policy -> EntryPolicy` — `WholeEntry` / `BlockCompressed` (terrain, voxel, partition:
+the loader already **decodes** these blocks) / `MappedInPlace` (meshlet mesh, texture: a
+consumer **casts** them off the mapping). `compresses_kind` survives as a one-line reader.
+**THE ANTI-CLAUSE IS A TEST**: `no_streaming_kind_compresses_whole` fails with the reason
+attached — flipping `MeshletMesh` to `WholeEntry` decodes the entire `.inf_vmesh` *every frame
+it is drawn*, because `read_ref` has no cache — and names the door that already took the
+ship-size win it would be reaching for.
+
+**THE CODEC, CHOSEN BY MEASUREMENT AND NOT THE ONE EXPECTED.** Over 1 064 real DEM tiles at
+257²: whole-asset ratio **lz4 0.4442 / deflate 0.3567 / zstd 0.3505**; level-0 decode **0.099 /
+0.749 / 0.168 ms per tile**; encode of the whole 550 MB **0.4 / 8.8 / 3.3 s**. **zstd wins on
+every axis at once** — best ratio, 4.5× faster to decode than DEFLATE, 2.7× faster to encode,
+and already in the tree. The arc brief had *refused* zstd on a "zstd-sys is C" reading, which
+is exactly why its own law said to measure. **DEFLATE is the codec that fails**: sixteen
+level-0 tiles decompressed serially is **11.99 ms** against `STREAMED_STEP_BUDGET_MS`'s 4.0.
+
+**TWO FINDINGS A RATIO COLUMN WOULD HAVE HIDDEN.** *(i) The honest denominator.* A worst-case
+sync **already** costs **9.66 ms serially at raw**, because `bincode` has decoded these tiles
+since P16.3 and that cost is not new — the serial path is over budget with or without this
+wave, and what keeps the streamer inside it is the job pool `sync_render` already uses (raw
+1.77 ms, zstd **2.41 ms**, both under 4.0). Reporting a decompress against zero would have
+overstated the wave's cost several-fold; zstd adds **0.47 ms to a 9.66 ms baseline**.
+*(ii) The wasm arm, measured rather than assumed.* `ruzstd` decodes the same tile in **1.224 ms
+— 7.3× slower** than the C `zstd`, and the browser player has no job pool, so a web-targeted
+cook should pass `--block-codec lz4`. The codec is a `CookOptions` default, not a law.
+
+**SCHEMA: two container windows, each moved once.** `.inf_terrain` **v5 → v6** and `.inf_voxel`
+**v1 → v2**, both spending an always-zero directory `reserved u32` on a codec byte plus three
+zeros. **The downgrade story is four bytes**: an all-raw image differs from the previous
+version's image of the same blocks only in `schema_version`, and the parser **refuses** a
+non-zero reserved word below the codec version rather than reading a codec out of bytes that
+never meant one — which is what makes "old assets keep loading" checked rather than hoped.
+`inf_scene` **v26** and `ScenePayload` **v12** did not move, and nothing in this wave could
+have moved them: compression is lossless and the cook's transcode carries block blobs as
+**opaque bytes**, never decoding one, so it cannot change a height even if `TerrainTile`'s wire
+form were wrong. **The loose asset an author edits stays raw**; the cook is what compresses.
+
+**`.inf_part` — MEASURED AND DECLINED.** Ratio **0.198**, and **60 509 B — 0.024 % of the
+shipped pack**; its directory entry has no reserved word, so it would need a 32 → 40 B
+widening. A container bump for 60 kB is not a trade. Recorded, with `EntryPolicy` already
+naming it, so the day a world ships cells by the thousand the arithmetic is one measurement
+away. **`.inf_vmesh` is the largest remaining win** — 29 686 000 → 19 294 141 B under
+DEFLATE-9, **10.4 MB, 4.2 % of the pack** — and it is blocked by the mmap doctrine rather than
+by effort: the container `bytemuck`-casts its sections straight off the mapping. Carried.
+
+**THE RENAME.** `.inf_pack` → `.ipack`: 89 sites across 44 files, `.gitattributes`, the frozen
+`pack_v1` fixture, the editor's UI strings and the living docs (`docs/memos/` deliberately keep
+the old spelling — a memo is a dated record). **The FourCC stays `INFPACK\0`**: the extension
+moved with the product's name, the *format* did not, and the FourCC is what identifies a
+format. **A pre-rename pack still opens** — nothing validates a pack's extension, so this
+changes what the cook writes, not what the runtime accepts. Three gates make it stick:
+`city_scale` asserts `DEFAULT_PACK_NAME == level::PACK_FILE` (whose only witness was a `let _`
+that named the constant and asserted nothing, so renaming one and not the other would have
+produced a build reporting "no pack" with both spellings correct in their own file);
+`cook_script` extends the `.gitattributes` pin to `*.ipack -text` **and** `*.inf_tex -text`
+(the rule covering the frozen fixture named an extension that no longer exists — the fifth
+CRLF catch, prevented); and a source gate sweeps every `.rs` for the old spelling **in code**
+(prose may keep it), with an assembled needle and assembled falsifiers so it neither trips on
+itself nor reports a sweep it never took. `manifest.rs`'s round-trip fixture reads the const.
+
+**ONE PRODUCER FOR THE TABLES.** `CookReport::kind_bytes` and `inf pack ls --totals` both read
+`PackReader::kind_totals()` over the pack that was **written**, so the ship-size table
+describes the file rather than the writer's intent. Counts answer "what is in the build"; only
+bytes answer "where did the download go", and `CookReport` had counts only.
+
+**THE ATOM TABLE STAYS UNBUILT, WITH THE NUMBER BESIDE IT.** The GUID probe costs 12.5 ns at
+48 pack entries, 40.6 at 1 000, 49.5 at 10 000, 59.1 at 100 000 — tree growth, pinned by its
+own arm because a linear scan would pass a budget check at 48 entries. The figure that decides
+is the **inversion**: at the slowest measured probe it takes **2 810 probes per frame** to
+reach 1 % of a 16.6 ms frame, and the cooked island holds **48 entries in total, one of them a
+`.inf_vmesh`**. (The first draft of that test charged 4 096 probes against a 100 000-entry
+index and *failed* at 1.457 %, which would have justified the table by budgeting for a scene
+this engine has never produced.)
+
+**THE `.iasset` NAMING RULING:** the cooked-entry FORM lives **inside** `.ipack` — kind codes
+in the index, per-block policy in each container's directory — **not as loose `.iasset` files**.
+A loose cooked file is a second thing to name, hash, dedupe, watch and ship in exchange for
+nothing the index does not already give. The cook's compile step is real
+(`recompress_terrain_asset`, `recompress_voxel_asset`); its *output* is an entry, not a file.
+
+**Deps:** `lz4_flex` (the one new crate, MIT) and `miniz_oxide` (already in the tree behind
+`png`/`flate2`, so the pin is a record of a resolved version). Both pure Rust and therefore
+identical on every target — the property `zstd` lacks. Both were measured and **lost**, and
+both stay: `BlockCodec::Lz4`/`Deflate` are live wire values a container may hold, so a reader
+must decode them whatever the cook's default says. Ledger:
+`docs/memos/iasset1-block-compression.md`.

@@ -464,8 +464,10 @@ the tree and one was wrong:
   (`gpu.rs`, masked by `adapter.features()`), which is why BC5 needed no feature
   negotiation, no new capability tier and no caps work.
 * *"`VT_ADMITS_PER_FRAME_CEILING` is cited by name and defined nowhere"* —
-  **false**. It is defined at `runtime/inf-player/src/budget.rs:368` and asserted
-  by `phase26_gate`. No fix was needed.
+  **false**. It is defined in `runtime/inf-player/src/budget.rs` and asserted by
+  `phase26_gate`. No fix was needed. *(The line number this bullet carried — 368
+  — has drifted with the file, which is what line numbers in prose do; the
+  constant is now at 593. Named rather than numbered from IASSET1 on.)*
 * *"`inf-vt`'s `fill.rs` ships with no hot-path caller"* — **confirmed**; its only
   callers are its own tests and `inf-material/tests/vt_fill_quality.rs`. It
   remains the measured fallback the P26 direction memo promised, awaiting a

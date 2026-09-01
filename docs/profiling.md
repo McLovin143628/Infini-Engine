@@ -87,6 +87,12 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | **Shipping frame, p95** (city + streamed terrain + a character, 1080p and 1440p) | `SHIPPING_FRAME_CEILING_MS` | 40.0 ms | `inf-player` · `tests/fps_instrument.rs` |
 | …and its hitch twin, p99 | `SHIPPING_FRAME_P99_CEILING_MS` | 48.0 ms | `inf-player` · `tests/fps_instrument.rs` |
 | **What "≥ 60 fps" MEANS** — a target, printed as a distance, never asserted | `SHIPPING_FRAME_BUDGET_MS` | 16.6 ms | `inf-player` · `tests/fps_instrument.rs` |
+| Per-frame ECS→render projection (carried-forward terrain/voxel/props) | `PROJECTION_BUDGET_MS` | 1.5 ms | `inf-player` · `tests/projection_budget.rs` |
+| **Virtual-texture stream step** (the SVT admit lane) | `VT_STREAM_STEP_BUDGET_MS` | 8.0 ms | `inf-player` · `tests/phase26_gate.rs` |
+| VT tiles admitted per frame (peak) | `VT_ADMITS_PER_FRAME_CEILING` | 16 | `inf-player` · `tests/phase26_gate.rs` |
+| VT tiles *wanted* per frame (peak) | `VT_WANTS_PER_FRAME_CEILING` | 48 | `inf-player` · `tests/phase26_gate.rs` |
+| Agents the NPC budget is measured over | `NPC_BUDGET_AGENTS` | 1 000 | `inf-player` · `tests/crowd_sweep.rs` |
+| Cars the vehicle budget is measured over | `VEHICLE_BUDGET_CARS` | 64 | `inf-player` · `tests/island_gate.rs` |
 
 Notes:
 
