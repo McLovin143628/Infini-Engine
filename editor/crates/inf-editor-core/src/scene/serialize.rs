@@ -16013,6 +16013,167 @@ mod tests {
         );
     }
 
+    /// The fifteen names `VehicleClass` carried at v25, restated here rather
+    /// than derived (`audit:` VEH2a). MIRROR: `inf_scene`'s `V25_CLASS_NAMES`.
+    const V25_CLASS_NAMES: [&str; 15] = [
+        "brake_force_n",
+        "damping_ns_per_m",
+        "drag_n_per_mps2",
+        "enter_time_s",
+        "handbrake_force_n",
+        "lateral_grip",
+        "longitudinal_grip",
+        "max_engine_force_n",
+        "max_speed_mps",
+        "max_steer_deg",
+        "min_steer_deg",
+        "rest_length_m",
+        "rolling_resistance",
+        "stiffness_n_per_m",
+        "travel_m",
+    ];
+
+    /// The v25 class **as a writer**, declared independently of
+    /// [`VehicleClassV26`] so the fixture below encodes in the v25 order rather
+    /// than in whatever order the frozen reader currently holds.
+    /// MIRROR: `inf_scene`'s `V25ClassWriter`.
+    #[derive(Serialize)]
+    struct V25ClassWriter {
+        brake_force_n: f64,
+        damping_ns_per_m: f64,
+        drag_n_per_mps2: f64,
+        enter_time_s: f64,
+        handbrake_force_n: f64,
+        lateral_grip: f64,
+        longitudinal_grip: f64,
+        max_engine_force_n: f64,
+        max_speed_mps: f64,
+        max_steer_deg: f64,
+        min_steer_deg: f64,
+        rest_length_m: f64,
+        rolling_resistance: f64,
+        stiffness_n_per_m: f64,
+        travel_m: f64,
+    }
+
+    /// The v26 file, written independently of the record that reads it.
+    #[derive(Serialize)]
+    struct SceneFileV26Writer {
+        schema_version: u32,
+        title: String,
+        entities: Vec<EntityRecordGen<Terrain, Option<V25ClassWriter>, Material>>,
+        settings: LevelSettings,
+        geo: inf_math::geo::GeoAnchor,
+    }
+
+    /// **A REAL v26 PAYLOAD DECODES AT v27, AND EVERY v25 FIELD IS WHERE IT WAS**
+    /// (`audit:` VEH2a). MIRROR: `inf_scene`'s twin, which carries the argument.
+    ///
+    /// The rung's other arms are in memory and never touch a byte, and the
+    /// highest committed byte fixture in this tree is **v24** — so before this
+    /// arm, the ladder's `26 =>` branch (rewritten by this wave from an identity
+    /// into a per-record lift) was executed by nothing.
+    #[test]
+    fn a_v26_payload_decodes_at_v27_with_every_v25_field_at_its_own_offset() {
+        let authored = fixture_vehicle_class();
+        let mut doc = crate::scene::SceneDoc::new();
+        let car = doc.create(crate::ipc::SpawnKind::Empty, "Car", None);
+        let car_e = doc.entity_of(car).unwrap();
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(car_e)
+            .insert(authored);
+        // A second entity with NO class, so a ladder that wrote one value into
+        // every slot cannot pass.
+        let cone = doc.create(crate::ipc::SpawnKind::Empty, "Cone", None);
+        let live = record_of(&doc, car).expect("the car has a record");
+        let bare = record_of(&doc, cone).expect("the cone has a record");
+
+        let writer = |r: &EntityRecord| {
+            EntityRecordV26::from_current(r.clone()).map_tail(|v| {
+                v.map(|_| {
+                    let c = r.vehicle_class.expect("the tail is Some");
+                    V25ClassWriter {
+                        brake_force_n: c.brake_force_n,
+                        damping_ns_per_m: c.damping_ns_per_m,
+                        drag_n_per_mps2: c.drag_n_per_mps2,
+                        enter_time_s: c.enter_time_s,
+                        handbrake_force_n: c.handbrake_force_n,
+                        lateral_grip: c.lateral_grip,
+                        longitudinal_grip: c.longitudinal_grip,
+                        max_engine_force_n: c.max_engine_force_n,
+                        max_speed_mps: c.max_speed_mps,
+                        max_steer_deg: c.max_steer_deg,
+                        min_steer_deg: c.min_steer_deg,
+                        rest_length_m: c.rest_length_m,
+                        rolling_resistance: c.rolling_resistance,
+                        stiffness_n_per_m: c.stiffness_n_per_m,
+                        travel_m: c.travel_m,
+                    }
+                })
+            })
+        };
+        let bytes = bincode::serde::encode_to_vec(
+            &SceneFileV26Writer {
+                schema_version: 26,
+                title: "V26 On The Wire".into(),
+                entities: vec![writer(&live), writer(&bare)],
+                settings: LevelSettings::default(),
+                geo: Default::default(),
+            },
+            bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(bytes[0], 26, "the fixture must be a genuine v26 payload");
+
+        let back = decode(&bytes).expect("a v26 payload decodes at v27");
+        assert_eq!(back.schema_version, SCHEMA_VERSION);
+        assert_eq!(back.entities.len(), 2);
+        assert_eq!(
+            back.entities[1].vehicle_class, None,
+            "an entity with no class arrived with one out of a v26 file"
+        );
+        let got = back.entities[0]
+            .vehicle_class
+            .expect("the class survived the v26 rung");
+
+        let want: std::collections::BTreeMap<&str, f64> = authored.settings().into_iter().collect();
+        let default: std::collections::BTreeMap<&str, f64> =
+            VehicleClass::default().settings().into_iter().collect();
+        let mut kept = 0usize;
+        for (name, value) in got.settings() {
+            if V25_CLASS_NAMES.contains(&name) {
+                kept += 1;
+                assert_eq!(
+                    value, want[name],
+                    "`{name}` was authored at v25 and came back as {value} rather \
+                     than {} — the fifteen no longer occupy their v25 offsets",
+                    want[name]
+                );
+            } else {
+                assert_eq!(
+                    value, default[name],
+                    "`{name}` is a VEH2a tunable a v26 file cannot have carried, \
+                     and it arrived as {value} rather than the Ring-0 default {}",
+                    default[name]
+                );
+            }
+        }
+        assert_eq!(
+            kept, 15,
+            "{kept} of the sixty-two settings are v25 names; the frozen list and \
+             the live door no longer agree about which fifteen v26 wrote"
+        );
+        assert_eq!(
+            EntityRecord {
+                vehicle_class: live.vehicle_class,
+                ..back.entities[0].clone()
+            },
+            live,
+            "the v26 rung changed something that is not the vehicle class"
+        );
+    }
+
     /// **The downgrade direction for v26** — the frozen v25 shapes lose exactly
     /// what v26 added and nothing else, asserted as a property rather than as a
     /// field list. MIRROR: `inf_scene`'s twin.

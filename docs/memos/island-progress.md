@@ -23725,7 +23725,8 @@ Getting there cost two findings, both recorded at the code:
   between **416 N·m and 109** and the revs between **4 138 and 1 827**;
   integrating the error settled no better, because its input alternates between 0
   (stuck) and 5 (spinning). Both took **8.7 s** to 100 km/h on an axle that
-  carries the car there in **4.17**.
+  carries the car there in **under four** (`audit:` VEH2a — the wave wrote 4.17
+  here; the re-measured figure is 3.98, see the feel table below).
   Two corollaries: the aid's target is clamped to the tyre's own **peak**, because
   past it the curve falls and an aid aiming there stands on an unstable point (an
   `abs_slip` of 0.15 against a peak of 0.12 still spent **82 %** of the stop
@@ -23785,15 +23786,29 @@ written before the run:
 
 | row | mass | sprint | stop | top speed | limiter |
 |---|---|---|---|---|---|
-| sports | 1 374 kg | 0–100 km/h in **4.17 s** | **31.4 m** | 60.9 m/s (219 km/h) | 62 |
-| sedan | 1 185 kg | 0–100 km/h in **7.48 s** | **42.6 m** | 33.6 m/s (121 km/h) | 34 |
-| suv | 2 098 kg | 0–100 km/h in **7.40 s** | **40.8 m** | 44.8 m/s (161 km/h) | 46 |
-| van | 3 296 kg | 0–92 km/h in **14.68 s** | **42.8 m** | 31.1 m/s (112 km/h) | 32 |
+| sports | 1 374 kg | 0–100 km/h in **3.98 s** | **31.1 m** | 60.9 m/s (219 km/h) | 62 |
+| sedan | 1 185 kg | 0–100 km/h in **7.37 s** | **36.4 m** | 33.6 m/s (121 km/h) | 34 |
+| suv | 2 098 kg | 0–100 km/h in **7.40 s** | **40.7 m** | 44.8 m/s (161 km/h) | 46 |
+| van | 3 296 kg | 0–100 km/h in **17.43 s** | **50.4 m** | 31.1 m/s (112 km/h) | 32 |
 | truck | 2 341 kg | 0–78 km/h in **6.75 s** | **32.7 m** | 26.8 m/s (96 km/h) | 27 |
 
-Two rows are governed below 100 km/h and are specified against 80 % of their own
-limiter instead: measuring every class against a speed two of them are not allowed
-to have is how a gate ends up asserting the governor rather than the engine.
+**One row** is governed below 100 km/h — the pickup, at 27 m/s (97 km/h) — and it
+is specified against 80 % of its own limiter instead: measuring a class against a
+speed it is not allowed to have is how a gate ends up asserting the governor
+rather than the engine.
+
+> **`audit:` VEH2a.** This table is the AUDIT's re-measurement, and it replaces
+> the wave's own in two places. First, three of the five rows did not reproduce:
+> the numbers published at commit `0515274b` (sports 4.17 s / 31.4 m, sedan
+> 7.48 s / 42.6 m, van 14.68 s) do not come out of that commit's own code, which
+> is deterministic and was re-run at its tip and at `HEAD` with identical
+> results — they were taken from an iteration inside its development and never
+> re-measured. Second, the **van** was timed to 25.6 m/s, exactly 80 % of its
+> limiter, while the rule beside it said 80 % was for rows that *cannot reach
+> 100 km/h*. A 32 m/s limiter is 115 km/h; the van reaches 100 and does it in
+> 17.43 s, so it is now timed to 100 like every other row that can, and only the
+> pickup is the governed case the rule describes. `SPECS`' van band moved with
+> it (9.0…32.0 s, 30…85 m).
 
 **THE SLIP CURVES.** The tyre is `tyre_curve(slip / peak_slip, rise_bias,
 slide_frac)`: `curve_bias` up to 1 at the peak, linear down to `slide_frac` at
@@ -23839,7 +23854,8 @@ The contact count is the one worth reading twice: 182 wheel-steps that used to b
 spent in the air.
 
 **THE GRADE.** The sedan still climbs I7's audited 0.108 worst grade, **driven**:
-144.8 m and 15.68 m of height in ten seconds; the pickup 130.8 m and 13.5 m; the
+144.8 m and 15.68 m of height in ten seconds; the pickup 130.8 m and **14.15** m
+(`audit:` VEH2a — the wave wrote 13.5); the
 control at 0.60 goes backwards. The arm's *order* claim is retired — it flipped
 twice inside this wave (saloon, then pickup when the diesel and the front drive
 landed, then saloon again when the aids became feed-forward, because a front-drive
@@ -23939,3 +23955,139 @@ reported a stop that never happened because the car was in free fall.
 | committed content | 24 levels | **24 levels regenerated** (the version byte), of which the two islands also carry the class tail and the grown fleet: `VancouverIsland` 73 633 → **74 556 B**, `IslandFixture` 16 671 → **17 216 B**. Plus **two `camera.toml`s** for the drive block. `EXPECTED_LEVELS` still **24** |
 | frontend | not run | **not run — `editor/studio/src/` is untouched by this wave** |
 | disk | — | **139 GB free** at the end; no `cargo clean` was needed |
+
+### THE ADVERSARIAL AUDIT (2026-09-01, range `efb7baec..31969ab4`)
+
+Everything below is measured on the authoring machine, in this repository, at the
+wave's own `HEAD` unless a commit is named.
+
+**What reproduced exactly.** The battery — **358 / 6 689 / 0 / 20**, exit 0,
+`INF_GOLDEN_STRICT=1`, `-j 3 --no-fail-fast` — and a **clean tree afterwards**,
+which is what makes "24 levels regenerated" a byte claim rather than a
+description: the samples arm regenerates every committed level from its generator
+and compares, so an empty `git status` is the regeneration. Goldens 60, none
+blessed. The drive trace reproduces to the digit: **27.0 m, top 7.65 m/s, 1 200
+wheel contacts of 1 200, peak revs 0.9269**, `(1, 334, 334)` engine commands over
+34 + 300 steps, PIE == shipping on all 300 states. The 376-byte wire cost, the
+sixty-two arity, the friction circle and the load-sensitivity brackets all hold.
+
+**What did not.** Three of the five feel rows. The table published at `0515274b`
+does not come out of `0515274b`: the model is deterministic (two runs, bit-equal)
+and the only changes between that commit and `HEAD` are four NaN guards that
+differ solely on infinite inputs, a `type` alias and two comment rewraps — the
+audit re-ran the arm with that commit's own `vehicle.rs` **and** its own
+`vehicle_grade.rs` restored and got `HEAD`'s numbers. The rows were taken from an
+iteration inside the commit's development and never re-measured. **Corrected in
+place** (the table above, the ROADMAP block, and the pickup's 13.5 to 14.15 m).
+
+**Four findings, all fixed.**
+
+1. **The van was being timed to 80 % of a limiter that clears 100 km/h.** `SPECS`
+   timed it to 25.6 m/s while its own comment said it was timed to 100 km/h and
+   the rule above it said 80 % was for rows that *cannot* reach 100. A 32 m/s
+   limiter is 115 km/h. The van now sprints to 100 like every other row that can
+   (17.43 s, 50.4 m), the band moved with it, and only the pickup is the governed
+   case the rule describes.
+2. **The ladder's `26 =>` branch was executed by nothing.** This wave rewrote it
+   from an identity (`entities: v26.entities`) into a per-record lift, and the
+   rung's arms are all in memory — `from_current` then `into_current`, which never
+   touches a byte. The highest committed byte fixture in this tree is **v24**, so
+   v25 and v26 never had one either.
+   `a_v26_payload_decodes_at_v27_with_every_v25_field_at_its_own_offset` is added
+   to **both mirrors**: a genuine v26 payload written through an *independently
+   declared* fifteen-field class writer, decoded by the public `decode`, and each
+   of the fifteen checked **by name** against the value it was written with while
+   the forty-seven are checked against the Ring-0 defaults. Mutation-verified —
+   swapping two fields in `VehicleClassV26` reds it and **nothing else in 135
+   inf-scene arms**.
+3. **The feed-forward aid ruling had no arm.** `aid_torque_cap_nm`'s doc records
+   that `tc / slip` oscillated the crank between 416 N·m and 109; nothing asserted
+   it. The three existing aid arms measure what the aid is *worth*, and the
+   refused controller satisfies all three.
+   `the_traction_control_cut_settles_instead_of_alternating` reads
+   `WheelState::tc_cut` over a pinned-throttle launch: measured **0.4592…0.5552
+   with a worst step-to-step change of 0.0020**, against the reinstated feedback
+   controller's **1.0000…0.1079, 35 of 110 steps uncut, worst jump 0.8921**.
+   Mutation-verified, and it is the only one of 42 vehicle arms that sees it.
+4. **The drive camera's own lookup had no arm.** Every VEH2a camera arm hands
+   `advance` a `DrivingView` by literal; the line that builds one —
+   `step_locomotion_camera`'s `c.half_extents.z.abs()` — was covered by nothing,
+   and `.x` is a plausible typo that yields a plausible number.
+   `a_driven_car_gets_the_drive_camera_and_sits_back_by_its_own_length` enters a
+   car through the interact edge and measures two chassis lengths: a 3 m car gets
+   a **5.825 m** arm at **72°** and a 12 m one **8.300 m**, against the walking
+   camera's 3.000 m / 70°, and the difference is the per-half-length rule to
+   0.05 m. Mutation-verified on `.z` becoming `.x`.
+
+**Two prose corrections at the code.** `engine_torque_nm` said clamping its
+argument "is the limiter" and the `omega_ceiling` note said a grounded wheel is
+"limited by the fuel cut above". **There is no fuel cut**: past the redline the
+curve plateaus at `redline_torque_frac` rather than falling, and `engine_rpm`
+clamps to the same ceiling, so an over-revving top gear is invisible rather than
+punished. It costs nothing in the gears the box shifts through, and it means the
+ceiling that actually stops the car in top gear is `governor`. Both docs now say
+so; the behaviour is unchanged and the missing half is carried.
+
+**The rulings, mutation-verified.** Reinstating the pre-fix omega clamp *before*
+the contact solve reds the sports 0–100 arm at **8.30 s** against its 8.0
+ceiling — so the rev-limiter ruling is guarded, by 0.30 s. Removing the
+no-reverse cap on `braking` reds `throttle_drives_it_and_the_brake_stops_it`. A
+`.sin()` in `curve_bias` reds `portable_character` **by file and line**.
+
+**The feel bands, sized.** They are ~2× the measurement on every row, which is
+the wave's stated intent and is worth stating as a number: the sports 0–100 arm
+tolerates a **63 %** torque cut (460 to 170 N·m gives 7.83 s of an 8.0 ceiling)
+before it reds, and the sports and sedan bands overlap, so the arm does not
+enforce that the coupe is quicker than the saloon. The van's band does bind its
+engine: 620 to 260 N·m reds it at 50.12 s.
+
+**The step cost, reproduced on a second fixture.** The island's 64-car row has no
+arm at all — `VEHICLE_BUDGET_CARS` is named once, in a `println!` — so the audit
+built one: N cars on a flat box ground, MIN of three rounds of forty steps, run
+at `HEAD` and again in a worktree at `efb7baec`.
+
+| | 1 | 4 | 16 | **64** |
+|---|---|---|---|---|
+| dev, VEH1a (`efb7baec`) | 0.0011 ms | 0.0036 | 0.0139 | **0.0629 ms** (0.98 µs) |
+| dev, VEH2a (`HEAD`) | 0.0014 | 0.0048 | 0.0184 | **0.0830 ms** (1.30 µs) |
+| release, VEH1a | 0.0007 | 0.0023 | 0.0096 | **0.0440 ms** (0.69 µs) |
+| release, VEH2a | 0.0011 | 0.0037 | 0.0138 | **0.0633 ms** (0.99 µs) |
+
+Linear in the car count, as claimed. The **+16 %** in the ladder is a fact about
+the island's fixture and not about the model: on ground whose rays are cheap the
+same change is **+32 % (dev) / +44 % (release)**. The two agree where it matters —
+the absolute 64-car delta is **0.0201 ms** here against the island's **0.0176 ms**
+— and `VEHICLE_STEP_BUDGET_MS` stays 0.5 with ~8× headroom on this fixture in
+release. No ratchet anywhere in the range moved: the only `pub const`s the diff
+adds are the model's own.
+
+**VERIFICATION AFTER THE FIXES.** `cargo fmt --all --check` clean. Battery
+**358 / 6 693 / 0 / 20**, exit 0, `INF_GOLDEN_STRICT=1`, `-j 3 --no-fail-fast`
+(+4 arms, all four added here). Goldens **60**, none blessed and none touched.
+**`INF_BLESS_SAMPLES=1` was run and changed nothing** — every committed level,
+template and `camera.toml` is the generator's current output byte for byte,
+which is the form the "24 levels regenerated" claim needed. rustdoc **409** of a
+450 ceiling over **48** documented crates after `cargo clean --doc`, exit 0, and
+none of the 409 is on a line this wave or this audit wrote (the inf-scene ones
+are the schema ladder's long-standing "links to private item"). `clippy
+--workspace --all-targets` at `RUSTFLAGS=-D warnings`: **0**, exit 0, run
+**last** per the rmeta law — and checked for vacuity, because an incremental
+clippy that skipped the new arms would also report zero: a `clone()` on a `u32`
+inside the new camera arm reds it by name. `Cargo.lock` and every manifest
+byte-identical.
+
+**CARRIED by the audit**, on top of the wave's nine:
+
+10. **No committed byte fixture above v24.** The new arm builds its v26 payload in
+    process; the ladder's v25/v26/v27 rungs still have no *committed* bytes, so a
+    change that moved the frozen records **and** the writer together would pass.
+    `scene_v26.inf_lvl` under `INF_BLESS_FIXTURES` is the shape of the fix.
+11. **No fuel cut at the redline** (above): the top gear over-revs silently
+    against the road-speed governor.
+12. **The island's own N-car step cost has no arm**, only a doc table and a
+    `println!`. The 64-car figure is a manual measurement in a doc comment, which
+    is the one number in this wave's tables that cannot go stale loudly.
+13. **The drive camera's speed terms are covered only at the Ring-0 door.** The
+    new integration arm measures a *parked* car, because `camera_3d`'s fixture
+    does not run `step_vehicles`; a real accelerating drive would also pin the
+    FOV and look-ahead terms end to end.

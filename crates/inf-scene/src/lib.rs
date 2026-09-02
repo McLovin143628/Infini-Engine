@@ -13164,6 +13164,191 @@ mod tests {
         );
     }
 
+    /// The fifteen names `VehicleClass` carried at v25, restated **here** rather
+    /// than derived from anything (`audit:` VEH2a).
+    ///
+    /// A frozen record's whole job is to keep saying what it said when the bytes
+    /// were written, and a list computed from the live type would agree with a
+    /// live type that had drifted. This is the list a v26 file's fifteen `f64`s
+    /// are, in the order it wrote them.
+    const V25_CLASS_NAMES: [&str; 15] = [
+        "brake_force_n",
+        "damping_ns_per_m",
+        "drag_n_per_mps2",
+        "enter_time_s",
+        "handbrake_force_n",
+        "lateral_grip",
+        "longitudinal_grip",
+        "max_engine_force_n",
+        "max_speed_mps",
+        "max_steer_deg",
+        "min_steer_deg",
+        "rest_length_m",
+        "rolling_resistance",
+        "stiffness_n_per_m",
+        "travel_m",
+    ];
+
+    /// The v25 class **as a writer**, declared independently of
+    /// [`VehicleClassV26`] (`audit:` VEH2a).
+    ///
+    /// A fixture that encodes with the same record it decodes with cannot see a
+    /// reordering: both sides move together. The values cross into this by NAME
+    /// and the bytes come out in THIS declaration's order, so the payload below
+    /// is a statement about the v25 layout rather than about whatever the frozen
+    /// record currently says. The wire pin's own discipline, one rung down.
+    #[derive(serde::Serialize)]
+    struct V25ClassWriter {
+        brake_force_n: f64,
+        damping_ns_per_m: f64,
+        drag_n_per_mps2: f64,
+        enter_time_s: f64,
+        handbrake_force_n: f64,
+        lateral_grip: f64,
+        longitudinal_grip: f64,
+        max_engine_force_n: f64,
+        max_speed_mps: f64,
+        max_steer_deg: f64,
+        min_steer_deg: f64,
+        rest_length_m: f64,
+        rolling_resistance: f64,
+        stiffness_n_per_m: f64,
+        travel_m: f64,
+    }
+
+    /// The v26 entity record with the class written by [`V25ClassWriter`] — the
+    /// v25 tail slot has been generic since v25 for exactly this kind of reuse.
+    type V26EntityWriter = RuntimeEntityGen<Terrain, Option<V25ClassWriter>, Material>;
+
+    /// The v26 file, written independently of the record that reads it.
+    #[derive(serde::Serialize)]
+    struct SceneFileV26Writer {
+        schema_version: u32,
+        title: String,
+        entities: Vec<V26EntityWriter>,
+        settings: RuntimeSettings,
+        geo: inf_math::geo::GeoAnchor,
+    }
+
+    /// **A REAL v26 PAYLOAD DECODES AT v27, AND EVERY v25 FIELD IS WHERE IT WAS**
+    /// (`audit:` VEH2a).
+    ///
+    /// The rung's own arms are in memory: `from_current` then `into_runtime`,
+    /// which never touches a byte. The **ladder's** `26 =>` branch — the code a
+    /// shipped build runs on every pre-v27 level that already exists — was
+    /// rewritten by this wave (it was `entities: v26.entities`, an identity, and
+    /// is now a per-record lift), and no test executed it. The highest committed
+    /// byte fixture in this tree is **v24**, so v25 and v26 have never had one
+    /// either.
+    ///
+    /// This is that arm, at the level the claim is made at: bytes written by the
+    /// frozen v26 writer, fed to the public [`decode`], and each of the fifteen
+    /// checked **by name** against the value it was written with. A tail spliced
+    /// one slot early or late, a frozen record whose fields drifted out of the
+    /// live prefix's order, or a `26 =>` branch that forgot to lift, all land
+    /// here as a named field carrying the wrong number.
+    #[test]
+    fn a_v26_payload_decodes_at_v27_with_every_v25_field_at_its_own_offset() {
+        let authored = fixture_vehicle_class();
+        let live = RuntimeEntity {
+            vehicle_class: Some(authored),
+            character_movement: Some(v23_fixture_movement()),
+            terrain: Some(fixture_terrain()),
+            ..v9_rec(Uuid::from_u128(0xFE24), "Car", None).into_runtime()
+        };
+        // A second entity with NO class, so a ladder that wrote one value into
+        // every slot cannot pass.
+        let bare = v9_rec(Uuid::from_u128(0xFE25), "Marker", None).into_runtime();
+        // Written through the INDEPENDENT declarations, so the payload says what
+        // v25 said rather than what the frozen record currently says.
+        let writer = |r: &RuntimeEntity| -> V26EntityWriter {
+            EntityRecordV26::from_current(r.clone()).map_tail(|v| {
+                v.map(|_| {
+                    let c = r.vehicle_class.expect("the tail is Some");
+                    V25ClassWriter {
+                        brake_force_n: c.brake_force_n,
+                        damping_ns_per_m: c.damping_ns_per_m,
+                        drag_n_per_mps2: c.drag_n_per_mps2,
+                        enter_time_s: c.enter_time_s,
+                        handbrake_force_n: c.handbrake_force_n,
+                        lateral_grip: c.lateral_grip,
+                        longitudinal_grip: c.longitudinal_grip,
+                        max_engine_force_n: c.max_engine_force_n,
+                        max_speed_mps: c.max_speed_mps,
+                        max_steer_deg: c.max_steer_deg,
+                        min_steer_deg: c.min_steer_deg,
+                        rest_length_m: c.rest_length_m,
+                        rolling_resistance: c.rolling_resistance,
+                        stiffness_n_per_m: c.stiffness_n_per_m,
+                        travel_m: c.travel_m,
+                    }
+                })
+            })
+        };
+        let bytes = bincode::serde::encode_to_vec(
+            &SceneFileV26Writer {
+                schema_version: 26,
+                title: "V26 On The Wire".into(),
+                entities: vec![writer(&live), writer(&bare)],
+                settings: RuntimeSettings::default(),
+                geo: Default::default(),
+            },
+            bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(bytes[0], 26, "the fixture must be a genuine v26 payload");
+
+        let back = decode(&bytes).expect("a v26 payload decodes at v27");
+        assert_eq!(back.entities.len(), 2);
+        assert_eq!(
+            back.entities[1].vehicle_class, None,
+            "an entity with no class arrived with one out of a v26 file"
+        );
+        let got = back.entities[0]
+            .vehicle_class
+            .expect("the class survived the v26 rung");
+
+        let want: std::collections::BTreeMap<&str, f64> = authored.settings().into_iter().collect();
+        let default: std::collections::BTreeMap<&str, f64> =
+            VehicleClass::default().settings().into_iter().collect();
+        let mut kept = 0usize;
+        for (name, value) in got.settings() {
+            if V25_CLASS_NAMES.contains(&name) {
+                kept += 1;
+                assert_eq!(
+                    value, want[name],
+                    "`{name}` was authored at v25 and came back as {value} rather \
+                     than {} — the fifteen no longer occupy their v25 offsets",
+                    want[name]
+                );
+            } else {
+                assert_eq!(
+                    value, default[name],
+                    "`{name}` is a VEH2a tunable a v26 file cannot have carried, \
+                     and it arrived as {value} rather than the Ring-0 default {}",
+                    default[name]
+                );
+            }
+        }
+        assert_eq!(
+            kept, 15,
+            "{kept} of the sixty-two settings are v25 names; the frozen list and \
+             the live door no longer agree about which fifteen v26 wrote"
+        );
+
+        // Everything that is NOT the class survived the rung as well, and
+        // re-encoding stamps the current version.
+        assert_eq!(
+            RuntimeEntity {
+                vehicle_class: live.vehicle_class,
+                ..back.entities[0].clone()
+            },
+            live,
+            "the v26 rung changed something that is not the vehicle class"
+        );
+        assert_eq!(encode(&back).unwrap()[0], SCHEMA_VERSION as u8);
+    }
+
     /// **The downgrade direction for v26**, both halves: the frozen v25 entity
     /// record loses the intensity and nothing else, and the frozen v25 settings
     /// lose the render tail and nothing else.

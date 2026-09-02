@@ -2013,7 +2013,23 @@ pub const MU_MAX_FRAC: f64 = 1.60;
 /// Three knots — `idle_torque_frac` at [`VehicleTuning::idle_rpm`], `1.0` at
 /// `peak_torque_rpm`, `redline_torque_frac` at `redline_rpm` — with
 /// [`curve_bias`] bending both halves by the one shape knob. Below idle and above
-/// the redline the argument is clamped, which is the limiter.
+/// the redline the **argument** is clamped, so the curve is flat outside its own
+/// knots.
+///
+/// # What clamping the argument is, and is NOT (`audit:` VEH2a)
+///
+/// It is a **plateau**, not a fuel cut: past the redline this answers
+/// `redline_torque_frac × peak_torque_nm` for ever rather than falling to zero,
+/// and [`engine_rpm`] clamps to the same ceiling, so an over-revving engine is
+/// invisible rather than punished. Nothing in this model cuts fuel.
+///
+/// It costs nothing in the gears the box shifts through, because `shift_up_rpm`
+/// is below the redline and [`shift_target`] leaves before the ceiling is
+/// reached. In **top** gear it means the ceiling that actually stops the car is
+/// [`governor`] — the road-speed limiter — and not the redline. That is the
+/// honest reading of the wave's own "a limiter cuts fuel" law: the law is about
+/// where a limiter may NOT reach (the contact patch, see the note beside
+/// `omega_ceiling`), and the fuel half of it is not built.
 ///
 /// This replaces P29.7's `engine_force_n`, whose whole curve was "a peak force
 /// falling linearly to zero at the top speed". That function could not be revvy
@@ -2739,9 +2755,14 @@ impl Vehicle for RaycastVehicle {
 
         // The fastest a wheel may turn in this gear — applied **only to a wheel in
         // the air**, where nothing on the ground is there to stop it. A grounded
-        // one is limited by the fuel cut above and by the contact patch; clamping
-        // its speed clamps the force it can transmit, which is the defect the
-        // limiter's own note records.
+        // one is held by the contact patch and, at road speed, by `governor`;
+        // clamping its speed clamps the force it can transmit, which is the
+        // defect the limiter's own note records.
+        //
+        // `audit:` VEH2a — the first spelling of this said a grounded wheel was
+        // "limited by the fuel cut above", and there is no fuel cut: above the
+        // redline `engine_torque_nm` plateaus at `redline_torque_frac` rather
+        // than falling to zero. See its own doc for what that costs and where.
         let omega_ceiling = if ratio.abs() > 1e-9 {
             self.tuning.redline_rpm.max(0.0) * std::f64::consts::TAU / 60.0 / ratio.abs()
         } else {
@@ -4921,6 +4942,95 @@ mod tests {
             "traction control cost a GRIPPING car {:.3} m of {:.3}",
             dry(0.0) - dry(0.12),
             dry(0.0)
+        );
+    }
+
+    /// **THE AID DOES NOT CHATTER** (`audit:` VEH2a) — the arm the
+    /// feed-forward ruling did not have.
+    ///
+    /// [`aid_torque_cap_nm`]'s own doc records why the first two cuts were
+    /// refused: a wheel under 4 kN·m changes speed by 66 rad/s in a single 60 Hz
+    /// step, so a controller reading last step's slip is always a step behind an
+    /// event that is over inside one step, and `tc / slip` applied directly
+    /// oscillated the crank between 416 N·m and 109. That is a measurement in a
+    /// comment; **nothing in the tree asserted it**. The arms above measure what
+    /// the aid is WORTH (less slip, more distance, nothing lost when dry), and
+    /// an oscillating controller can satisfy all three — the refused one did,
+    /// and paid for it in 8.7 s to 100 km/h, which only the feel table would
+    /// have caught, by 0.3 s.
+    ///
+    /// So the claim is the shape of the cut itself. `WheelState::tc_cut` is the
+    /// share of the requested torque the wheel was actually handed, and under a
+    /// feed-forward cap it is a function of the LOAD, which moves over tens of
+    /// milliseconds. Under a controller fed by the slip it alternates between
+    /// "no cut at all" (the wheel stuck, so the error is zero) and "almost
+    /// everything" (the wheel spinning) on consecutive steps. Both states in one
+    /// pinned-throttle launch is the signature, and it is what this refuses.
+    #[test]
+    fn the_traction_control_cut_settles_instead_of_alternating() {
+        let mut v = grounded(&[
+            ("traction_control_slip", 0.12),
+            ("longitudinal_grip", 0.35),
+            ("lateral_grip", 0.35),
+        ]);
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut chassis = resting(1_200.0);
+        let mut out = Vec::new();
+        let mut cuts: Vec<f64> = Vec::new();
+        for _ in 0..120 {
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+            let fz: f64 = out.iter().map(|f| f.force.z).sum();
+            chassis.linvel.z += fz / 1_200.0 / 60.0;
+            cuts.push(v.wheels()[0].tc_cut);
+        }
+        // Past the first ten steps the suspension has settled and the throttle
+        // has been pinned throughout, so every remaining step is the same
+        // question asked again.
+        let settled = &cuts[10..];
+        let uncut = settled.iter().filter(|c| **c > 0.95).count();
+        let cutting = settled.iter().filter(|c| **c < 0.9).count();
+        let (lo, hi) = settled
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, h), c| (l.min(*c), h.max(*c)));
+        let worst_jump = settled
+            .windows(2)
+            .fold(0.0f64, |m, w| m.max((w[1] - w[0]).abs()));
+        println!(
+            "THE AID'S CUT: {cutting} of {} settled steps cut, {uncut} uncut \
+             (>0.95), range {lo:.4}..{hi:.4}, worst step-to-step change \
+             {worst_jump:.4}",
+            settled.len()
+        );
+        // It really is cutting, or the arm is about a controller that never ran.
+        assert!(
+            cutting > settled.len() / 2,
+            "traction control cut on only {cutting} of {} steps — the fixture is \
+             not spinning its wheels and this arm measures nothing",
+            settled.len()
+        );
+        // …and it never lets go: a step at full torque in the middle of a run
+        // that is otherwise cutting is the alternation a feed-forward cap does
+        // not have.
+        assert!(
+            uncut < 3,
+            "the cut was released entirely on {uncut} of {} settled steps while \
+             cutting on {cutting} — that is a controller alternating between a \
+             stuck wheel and a spinning one, which is exactly the one-step race \
+             `aid_torque_cap_nm` refuses to enter",
+            settled.len()
+        );
+        // **The shape claim.** A cap computed from the LOAD moves at the speed a
+        // load moves; a cap computed from last step's slip moves at the speed a
+        // wheel spins up, which is 66 rad/s in one step. Measured at **0.0020**
+        // per step here, so a fiftyfold margin is still a claim.
+        assert!(
+            worst_jump < 0.1,
+            "the cut moved by {worst_jump:.3} in one step; a cap on the LOAD \
+             cannot move that fast, so this is a cap on last step's slip"
         );
     }
 

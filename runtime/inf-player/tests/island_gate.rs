@@ -5733,7 +5733,9 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
 /// **streaming** claim"*, on the argument that a tile arriving on one host and
 /// not the other would separate the traces within a step. The argument is true
 /// about the mechanism and false about this window: 300 steps at 60 Hz is five
-/// seconds and **34 metres**, and the counters say the drive pages **nothing**
+/// seconds and **27 metres** (34 before VEH2a re-blessed the trace; `audit:`
+/// VEH2a — the re-bless published its deltas and left three stale `34`s in this
+/// arm's own prose), and the counters say the drive pages **nothing**
 /// — `(activations, deactivations, cells, sim tiles, terrain loads)` is
 /// `(1, 0, 1, 16, 15)` before it and `(1, 0, 1, 16, 15)` after, on both hosts.
 /// The paging half of the streaming claim therefore stays exactly where wave I7
@@ -5927,7 +5929,7 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
     //    (VEH1a audit). This arm's own header called itself *"a far sharper
     //    instrument for the streaming claim"* on the argument that four wheel
     //    rays read whatever ground has paged in — which is true of the
-    //    MECHANISM and says nothing about whether this 34-metre, five-second
+    //    MECHANISM and says nothing about whether this 27-metre, five-second
     //    window pages anything at all. The scripted arm it joins covers 360 m
     //    and asserts its counters; this one has to print its own or the
     //    sentence is prose ahead of the arm.
@@ -5953,13 +5955,13 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
         ship0, pie0,
         "the two hosts had paged differently before anybody moved"
     );
-    // …and the honest reading of the deltas. A five-second drive over 34 m is
+    // …and the honest reading of the deltas. A five-second drive over 27 m is
     // NOT the scripted arm's 360 m out-and-back, and this says which of the two
     // claims it can carry: the residency it inherited, or a page that arrived
     // under a moving car.
     let paged = ship1.0 > ship0.0 || ship1.1 > ship0.1 || ship1.4 > ship0.4;
     println!(
-        "THE DRIVE'S STREAMING: the car {} over its 34-metre window — the \
+        "THE DRIVE'S STREAMING: the car {} over its {travelled:.0}-metre window — the \
          PAGING half of the streaming claim is the scripted 360 m arm's \
          (`pie_equals_shipping_on_an_island_drive`), and what THIS arm adds is \
          that the two hosts' streamers agree exactly while a simulated body \

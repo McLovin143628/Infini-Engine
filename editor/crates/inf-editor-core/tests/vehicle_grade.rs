@@ -423,12 +423,20 @@ fn the_catalogue_truck_climbs_it_too_and_it_is_a_different_car() {
 /// enough that a tuning nudge does not red the gate — and narrow enough that a
 /// coupe that accelerates like a van, or a van that stops like a coupe, does.
 ///
-/// `sprint_to_mps` is 100 km/h where the class's own limiter can reach it. Two
-/// rows cannot: the pickup is limited to 27 m/s (97 km/h) and would be measured
-/// against a speed it is not allowed to have, so they are specified against 80 %
-/// of their own limiter instead and the row says so. Measuring every class
-/// against a number two of them cannot reach is how a gate ends up asserting the
-/// governor rather than the engine.
+/// `sprint_to_mps` is 100 km/h where the class's own limiter can reach it. **One
+/// row cannot**: the pickup is limited to 27 m/s (97 km/h) and would be measured
+/// against a speed it is not allowed to have, so it is specified against 80 % of
+/// its own limiter instead and its row says so. Measuring a class against a
+/// number it cannot reach is how a gate ends up asserting the governor rather
+/// than the engine.
+///
+/// **`audit:` VEH2a — the van was the second such row and it should never have
+/// been one.** It was timed to 25.6 m/s, exactly 80 % of its 32 m/s limiter,
+/// while its own comment said it was timed to 100 km/h and the rule above said
+/// two rows *cannot* reach that speed. A 32 m/s limiter is 115 km/h: the van can
+/// reach 100 and does, in 17.43 s, stopping from it in 50.4 m. It is timed to
+/// 100 km/h like every other row that can, which is what makes the rule stated
+/// here a rule rather than a description of four of five rows.
 struct Spec {
     id: &'static str,
     /// The speed the sprint is timed to, m/s.
@@ -448,8 +456,10 @@ struct Spec {
 }
 
 /// The five rows' specs. **Chosen from what each vehicle IS**, not from a run:
-/// a 1 374 kg rear-drive coupe with 420 N·m is a five-second car, a 3 296 kg
+/// a 1 374 kg rear-drive coupe with 460 N·m is a four-second car, a 3 296 kg
 /// diesel van is not, and a van's brakes work on a van's mass.
+/// (`audit:` VEH2a — the wave wrote "420 N·m" and "five-second"; the catalogue
+/// row says 460 and the arm measures 3.98 s.)
 const SPECS: [Spec; 5] = [
     Spec {
         id: "sports",
@@ -478,16 +488,17 @@ const SPECS: [Spec; 5] = [
         brake_min_m: 24.0,
         top_frac: (0.88, 1.02),
     },
-    // Limited to 32 m/s, so 100 km/h is reachable but only just; timed to it all
-    // the same, because a van that cannot reach a motorway speed is a van
-    // nobody would drive on the island's circuit.
+    // Limited to 32 m/s (115 km/h), so 100 km/h is reachable but only just —
+    // and it is timed to it, because a van that cannot reach a motorway speed is
+    // a van nobody would drive on the island's circuit. (`audit:` VEH2a: this
+    // comment was already true and the constant beside it was not.)
     Spec {
         id: "van",
-        sprint_to_mps: 25.6,
-        sprint_max_s: 26.0,
-        sprint_min_s: 6.0,
+        sprint_to_mps: 27.78,
+        sprint_max_s: 32.0,
+        sprint_min_s: 9.0,
         brake_max_m: 85.0,
-        brake_min_m: 26.0,
+        brake_min_m: 30.0,
         top_frac: (0.88, 1.02),
     },
     // Limited to 27 m/s (97 km/h): timed to 80 % of its own limiter, which is

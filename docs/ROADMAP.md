@@ -29808,11 +29808,13 @@ toward the chassis heading rather than overriding the stick. It adds no simulati
 bytes and no mirror. **The fleet grows to five** — coupe, wagon, box van beside the saloon and the
 pickup — and *reaches the island*, with an arm requiring all five rows to differ on six axes a
 driver feels. **THE TABLES.** Feel, on flat ground, bounded by per-row spec bands written before
-the run: sports **0–100 in 4.17 s / 31.4 m / 219 km/h**, sedan **7.48 s / 42.6 m / 121 km/h**, suv
-**7.40 s / 40.8 m / 161 km/h**, van **0–92 in 14.68 s / 42.8 m / 112 km/h**, truck **0–78 in
-6.75 s / 32.7 m / 96 km/h** (two rows are governed below 100 km/h and are specified against 80 % of
-their own limiter — measuring every class against a speed two of them may not have is how a gate
-ends up asserting the governor). Step cost **0.1101 → 0.1277 ms at 64 cars**, +16 %, and
+the run: sports **0–100 in 3.98 s / 31.1 m / 219 km/h**, sedan **7.37 s / 36.4 m / 121 km/h**, suv
+**7.40 s / 40.7 m / 161 km/h**, van **17.43 s / 50.4 m / 112 km/h**, truck **0–78 in
+6.75 s / 32.7 m / 96 km/h** (ONE row — the pickup, governed at 97 km/h — is specified against 80 % of
+its own limiter; measuring a class against a speed it may not have is how a gate ends up asserting
+the governor). **`audit:` VEH2a re-measured this table**: the wave's published sports/sedan/van rows
+did not reproduce out of the commit that published them, and the van was being timed to 80 % of a
+limiter that clears 100 km/h — it is timed to 100 like every other row that can reach it. Step cost **0.1101 → 0.1277 ms at 64 cars**, +16 %, and
 `VEHICLE_STEP_BUDGET_MS` **stays at 0.5** because §8 forbids raising a budget — the headroom
 tightens to ~3.9×. The drive trace is **re-blessed with its deltas published**: 34.1 → 27.0 m,
 16.81 → 7.65 m/s, **1 018 → 1 200 wheel contacts of 1 200**, peak revs 0.4944 → 0.9269. The sedan
@@ -29829,7 +29831,7 @@ collapsed as a wheel neared the ceiling — the coupe delivered **982 N** in fir
 engine and 11 kN of grip available, and every class tailed off the same way at the top of every
 gear; the driver aids were **feedback controllers on a one-step event** (a 1 kg·m² wheel under
 4 kN·m changes speed by 66 rad/s in one 60 Hz step), which oscillated the crank between 416 N·m and
-109 and cost **8.7 s to 100 km/h on an axle that does it in 4.17** — they are feed-forward torque
+109 and cost **8.7 s to 100 km/h on an axle that does it in under four** — they are feed-forward torque
 caps now, the tyre curve evaluated at the aid's own target slip; and `(0.0f64).signum()` is 1.0, so
 the stick force applied a full 12 kN of brake to a stationary car and drove it **backwards at
 7.3 cm/s**. Ledger, laws and the carried list in `docs/memos/island-progress.md` under

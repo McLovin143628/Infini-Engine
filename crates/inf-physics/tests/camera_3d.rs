@@ -477,3 +477,110 @@ fn the_camera_excludes_the_vehicle_its_subject_is_driving() {
          the car it is riding"
     );
 }
+
+/// **THE DRIVE CAMERA REALLY ENGAGES IN A DRIVE** (`audit:` VEH2a) — and the
+/// arm it sits on is the CHASSIS'S OWN LENGTH.
+///
+/// VEH2a's drive-camera arms are all on the Ring-0 door: they hand
+/// `LocomotionCamera::advance` a `DrivingView` by literal and assert what it
+/// does with one. None of them runs the path a player takes, and that path has
+/// a piece of code with no arm at all —
+/// `inf_physics::d3::camera::step_locomotion_camera` looking the half-length up
+/// off the seated character's vehicle:
+///
+/// ```ignore
+/// .map(|c| c.half_extents.z.abs())
+/// ```
+///
+/// `half_extents` is `(half_width, half_height, half_length)`, so `.x` is a
+/// plausible typo that produces a plausible number and would have made every
+/// car in the fleet sit at the same distance. Two cars of different LENGTHS and
+/// the same width is what tells the two apart, and it is what this fixture is.
+///
+/// It also closes the reachability question the block's own doc raises: the
+/// branch is answered off `CharacterMovement::mode`, which `step_driving`
+/// writes, and this is the arm that says a hero who pressed the interact key
+/// arrives in it.
+#[test]
+fn a_driven_car_gets_the_drive_camera_and_sits_back_by_its_own_length() {
+    let settled = |half_z: f64| -> (inf_ecs::camera::CameraSettings, f64) {
+        let mut sim = Sim::new(None);
+        park_a_car(&mut sim.world, half_z);
+        let idle = MovementIntent::default();
+        for _ in 0..60 {
+            sim.step(&idle);
+        }
+        sim.step(&MovementIntent {
+            interact: true,
+            ..Default::default()
+        });
+        for _ in 0..120 {
+            sim.step(&idle);
+        }
+        let mode = {
+            let e = sim.world.entity_of(HERO).unwrap();
+            sim.world.world().get::<CharacterMovement>(e).unwrap().mode
+        };
+        assert_eq!(
+            mode,
+            MovementMode::Driving,
+            "the fixture must be driving before it can measure a drive camera"
+        );
+        (sim.cam.settings, sim.cam.tuning.driving.arm_per_length_m)
+    };
+
+    // The on-foot camera the same hero would have had — the block a drive used
+    // to inherit, latched at the gait it happened to be in beside the door.
+    let walking = {
+        let mut sim = Sim::new(None);
+        park_a_car(&mut sim.world, 1.5);
+        for _ in 0..90 {
+            sim.step(&MovementIntent::default());
+        }
+        sim.cam.settings
+    };
+
+    let (short, per_m) = settled(1.5);
+    let (long, _) = settled(6.0);
+    println!(
+        "THE DRIVE CAMERA IN A DRIVE: a 3 m car got a {:.3} m arm / {:.1}° FOV, a \
+         12 m one {:.3} m / {:.1}°, against the walking camera's {:.3} m / {:.1}° \
+         and a {per_m} m-per-half-metre rule",
+        short.arm_length_m,
+        short.fov_deg,
+        long.arm_length_m,
+        long.fov_deg,
+        walking.arm_length_m,
+        walking.fov_deg
+    );
+
+    // It is the DRIVE block and not the gait one.
+    assert!(
+        short.fov_deg > walking.fov_deg && short.arm_length_m > walking.arm_length_m,
+        "a driving hero got a {:.1}° / {:.2} m camera against a walking {:.1}° / \
+         {:.2} m — the Driving branch was never reached",
+        short.fov_deg,
+        short.arm_length_m,
+        walking.fov_deg,
+        walking.arm_length_m
+    );
+    // The shoulder offset is BLENDED away rather than switched, so this is a
+    // tolerance and not an equality — `state_blend_speed` is exponential and
+    // never reaches its target exactly.
+    assert!(
+        short.camera_offset.x.abs() < 1e-3,
+        "the drive camera kept a {:.4} m shoulder offset — a car is not looked over",
+        short.camera_offset.x
+    );
+    // …and the arm grew by the vehicle's own half-length, through the collider
+    // lookup. Read as a DIFFERENCE so the base block cancels out and only the
+    // per-length term is under test.
+    let grew = long.arm_length_m - short.arm_length_m;
+    let want = per_m * (6.0 - 1.5);
+    assert!(
+        (grew - want).abs() < 0.05,
+        "a 12 m car sat {grew:.3} m further back than a 3 m one where its own \
+         half-length asks for {want:.3} — the camera is reading the wrong axis \
+         of the chassis collider, or not reading it at all"
+    );
+}
