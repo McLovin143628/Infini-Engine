@@ -26013,3 +26013,423 @@ audit's alike.
 the detours 0.22 / 1.99 m), and `a_nightclubs_dance_floor_fills_with_dancers`
 (226 agents, 31 night jobs all taken, 246 leisure places → 63 revellers; at 22:30
 **47 seated, 16 on the dance floor, 4 performing, 27 tending**).
+
+## Wave WPN1 — the weapons array COMPLETED, not built (2026-09-02)
+
+Base `fe5e257b`. Reference: `docs/reference_videos/frames/police-bike/0030,
+0033, 0036` (the encampment brawl, a downed body with a `PICK UP / LOOT` prompt,
+and a weapon-name readout) and `steal-car/0022` ("Crime reported" on a night
+street) — outside the repo, never committed. Seven clauses, **no schema move**
+(scene stays v27, `ScenePayload` v12), **no new dependency**, goldens **62 with
+none added or blessed**.
+
+The scout's finding governs the whole wave: about 85 % of what looked like
+clause 1 already shipped. `WeaponDef` is a thirteen-field TOML door, `WeaponState`
+is an ammunition clock in the trace, `resolve_shot` casts a real ray, the
+equipped weapon is an entity on a `hand_r` socket, `Health` is joules with a
+`Downed` latch and a ragdoll handoff, and two gates already ran PIE == shipping
+over all of it. So this wave is a **completion**: the noise a shot makes, the two
+things a player looks at, the recoil, the reaction to being hit, the fist, what
+the street does about it, who saw it, and the door an NPC pulls a trigger
+through.
+
+### Clause 1a — the gunshot report, and why it is not occluded
+
+A round leaving a barrel made no noise. The *impact* did — `fire_weapon_audio`
+has played the target's own emitter since I6 — so a shot that missed was silent
+and a shot that hit was heard only where it landed.
+
+`inf_ecs::weapon::report_source()` is the single Ring-0 description (clip, bus,
+volume, reach), on `venue_music_source`'s precedent and for its reason: the
+alternative is four constants in two host-side loops that have to be compared
+character for character to stay in step. The clip is a committed `.inf_audio`
+with a fixed GUID (`WEAPON_REPORT_CLIP`, `samples/phase30-gameplay/
+Report.inf_audio`, 800 samples at 8 kHz = a tenth of a second — a tenth of the
+venue loop, because a report that outlasted its own weapon's 600 rpm cycle would
+overlap itself for ever).
+
+Queued **first**, because a queue is ordered and a gunshot is heard before its
+impact; keyed on the **shooter**, so a barrel has one voice and a 600 rpm burst
+is not ten live voices a second.
+
+**THE OCCLUSION RULING.** The report is unoccluded, and the flag is not what
+decides that. Each host's one-shot occlusion pass walks the queued `Play`s, looks
+each one's source key up in the **Blueprint entity map** and then asks the world
+for that entity's own `AudioSource::occlusion`. A gunshot's source key is its
+shooter's, a shooter is not an audio emitter, and the lookup answers `None` — so
+a report is unoccluded whatever `report_source` says. `false` is set because that
+is what is true, not because `true` would have done anything. **Honest bound**: a
+shot fired indoors is heard at full spatial gain outside; closing it means giving
+one-shots the doorway model at `Play` time, which is a change to `portal_gain`'s
+call site in both hosts. Carried.
+
+The whole block is `MIRROR-BEGIN weapon_report` in both hosts, character for
+character, with a `fixed_step_mirror` arm that also pins the **order** (report
+before impact) — a claim a stream comparison cannot make for itself.
+
+**THE RING, PRICED.** `BoundedLog`'s cap is 8192 and VEN1b's arm demands
+`dropped == 0`:
+
+| shooters at 600 rpm | reports a second | seconds to the first eviction |
+|---|---|---|
+| 1 | 10 | 819 |
+| 4 | 40 | 205 |
+| 8 | 80 | 102 |
+
+No clamp is taken. The arm that reads `dropped == 0` runs on courses whose
+longest is under two thousand steps, and weapons content lives in
+`phase30-gameplay` and `harbour-heist` only; the island is not armed. The number
+is stated so the first wave that writes a three-minute firefight course knows its
+own ceiling. Measured on the extended `phase30_gameplay_gate`: **23 commands over
+the whole course, 23 of them the report, 0 dropped.**
+
+### Clause 1b — the reticle and the ammunition
+
+`inf_ecs::weapon::ammo_readout(magazine, reserve)` is `"12 / 120"`, in Ring 0 for
+`drive_readout`'s reason verbatim: the player's window cannot be tested and this
+can. It shares the bottom-centre slot with the driver's speed and gear behind an
+`else` — a character cannot be at a wheel and pointing a rifle at the same time
+in this engine (`step_driving` parks the collider, `clear_edges` eats the attack
+edge), and two readouts stacked in one place would be a HUD that draws over
+itself on the one frame both are true. **A reloading weapon reads the magazine it
+HAS**: the number that decides whether the next trigger pull does anything is the
+one on screen.
+
+`inf_ui::view::reticle` is four arms and a **hole**, at the rounded centre, in
+the module's own integral `text_scale`. The hole is the point — a crosshair whose
+arms met would cover the one pixel the element exists to point at — and the arm
+measures that the centre is inside no quad. Drawn **only while aiming**, which is
+a claim about this engine and not a taste: `aim_hold_point` answers `None`
+outside `RotationMode::Aiming`, so a carried rifle hangs where the animation puts
+it and is not on the line the shot leaves along.
+
+### Clause 1c — recoil, split honestly
+
+`weapon::recoil_fraction(def, state)` is `cooldown_s / fire_interval_s` — `1.0`
+on the step the round leaves, falling to `0.0` as the action closes. **Derived,
+not stored**: a field on `WeaponState` would be a second copy of a number the
+state already answers, cost eight bytes an armed character in every trace in the
+tree, and be the copy that drifts (`CrowdRecord::speed_of`'s argument).
+
+It reaches the pose through `aim_hold_point`, which lifts its point by
+`RECOIL_RISE_DEG` (4°) and pulls it back by `RECOIL_PULL_M` (0.06 m against the
+0.42 m reach) — so it lands in `HandIk::reach`, then `apply_hand_ik`, then
+`pose_state_bytes`, which is what two hosts are compared on byte for byte.
+**Measured**: `weapon_hands_gate`'s course posed **18** distinct poses and now
+poses **24**, and the six are exactly a 600 rpm weapon's six-step cycle at 60 Hz.
+
+**It does not move the aim.** `cm.runtime.aim_*` is what the bullet leaves along;
+this reads it and writes neither half.
+
+**RULING — THERE IS NO CAMERA RECOIL**, and the refusal has two halves that meet.
+A camera kick that does **not** move the aim makes the reticle **lie**: the shot
+leaves along `aim_pitch_deg`, the reticle is drawn at screen centre, and the
+camera's pitch is the entire mapping between them — kick one and not the other
+and the crosshair stops being where the rounds go, permanently under sustained
+fire. A camera kick that **does** move the aim is a camera → sim write, which
+`d3::camera`'s Ruling 4 forbids outright ("`ViewMode` never crosses the sim wire,
+and there is no camera → sim path at all") and which `phase29_gate` pins by
+running one course under two cameras and comparing the sim trace. The honest form
+is an **aim** recoil in the movement step's own look integrator — the aim really
+moves, the camera follows it because it always did, and the reticle stays true.
+It moves every committed aim in the tree. **Carried by name.**
+
+The gate arms the RETURN and not just the change: `t[30] != t[31]` (the shot
+moved the hands), `t[31] != t[33]` (it decays rather than latching) and
+`t[30] == t[37]` (it is back on the aim line by the time the weapon may fire
+again). The middle one is what a recoil written as a latch nobody clears fails.
+
+### Clause 2 — the silent shot, closed
+
+`on_flesh` asked whether the target carried a `Health` component, and I6 gave one
+to the hero and to **nothing else**. So a round into any other character answered
+`false`, went to the destructible branch, and was owed to an entity with no
+`Destructible` — where the host logs a `NoDestructible` refusal, once per round,
+**ten times a second on a held trigger**. The person was unhurt, the log was
+full, and the flood was the only symptom anybody could see.
+
+`is_flesh` now asks *is it a **character***: `CharacterMovement` is the one
+component in this engine that means a person. And `apply_hit` gives a character a
+body on the first hit that lands on it.
+
+**LAZY, and the two alternatives are both worse.**
+
+| where the body comes from | trace cost at N=1000 | what it breaks |
+|---|---|---|
+| every character at spawn | **33 kB a step** (33 B × 1000) | moves every committed trace for levels with a crowd and no combat — all of them |
+| every *materialized* agent | 33 B × the band | the trace becomes a function of the crowd BAND — the tier-dependent-state trap `crowd_state_bytes` exists to keep out |
+| **first hit (taken)** | **0** until something is shot | nothing; and once a body is in the section the band cannot take it out |
+
+**The other half of the flood**: a round only owes the P22 door anything if what
+it hit HAS a `Destructible`. The ground is the case a level cannot avoid, and
+every missed round used to end there with a refusal in the log. Owing energy to
+something with no door is not owing.
+
+**STAGGER** (greenfield). Every non-fatal blow on a body arms
+`weapon::STAGGER_TRIGGER` through the same one-shot seam the fire and the reload
+use — armed whether or not anything is listening, which is the reload's own rule.
+A blow worth `STAGGER_FRACTION` (a third) of what the body **had left** also puts
+it into `FallControlled`, asked of `transition_is_legal` rather than assigned:
+the carjack's eject verbatim, and the row P29.3's table has been describing since
+it was written. The denominator is what was left and not the capacity, so the
+third punch of a fight lands differently from the first — measured: 500 J on a
+5 000 J body does not stagger, the same 500 J on a body with 1 200 J left does.
+
+Two counters, not one: `staggers` says the reaction seam is wired, `knockdowns`
+says the mode table let go. A 1 700 J rifle round on a 2 000 J body is 0.85 and
+does both; a 500 J pistol round on a 5 000 J body is a tenth and does only the
+first.
+
+**RULING (I6 item 7) — a respawn is a RE-SEAT, not a reload.** End the ragdoll
+through its own door (the table already permits `(Ragdoll, Grounded)`), restore
+the capacity, place the body at the level's own start, clear the edges the way
+`clear_edges` does at a seat. **The world keeps everything that happened** — the
+doors stay kicked, the bag keeps what it held, the debris stays on the floor, the
+crowd stays scattered. That is deliberate: rolling the world back needs a
+runtime-owned save container with its own schema, migration and gate, because
+this engine's one snapshot format is the author's `.inf_lvl` and P21 forbids the
+runtime to write it. Four calls into existing doors against a wave. Named in
+`step_deaths`, carried.
+
+### Clause 3 — melee, the third consumer of the attack edge
+
+A `ShotKind::Melee` rather than a system beside the weapons, because everything a
+punch needs a rifle already has: a rate, a damage in joules, an automatic/semi
+flag, an ammunition clock that paces the swings, and an attack-button arbitration
+that already chooses between a kick and the weapon. A parallel melee system would
+have re-derived every one and given the button two arbitrations to agree about.
+
+What melee does not have is a ray. `range_m` is a **reach** (bounded by
+`MAX_MELEE_REACH_M` = 2.5 m, four orders below `MAX_RANGE_M`; `reach_m()` is one
+door so no call site can let a 20 km punch through) and `melee_arc_deg` is the
+cone. The resolution goes through `inf_ecs::interact::resolve` — the E prompt's,
+the door press's and `try_kick`'s own door — which is `try_kick`'s named defect
+one verb along: *a punch that could land on somebody the prompt calls unreachable
+is a punch through a wall*. It also buys the portable `patan2_64` cone test and
+its boundary epsilon free.
+
+**The fists.** `engine:fists` is deliberately **not** in `ItemDefs` — a pair of
+hands is not an item and putting one in the catalogue makes it a thing a level
+can take away — but it **is** a `WeaponState::item_id`, which is the field that
+decides staleness, so punching and then equipping a rifle gets a fresh magazine.
+150 J (`0.5 × 4 kg × (8 m/s)²` ≈ 130, the "name the real quantities" arithmetic
+`DEFAULT_VITALITY_J` is arrived at by), 1.2 m, 100°, 90 rpm, **semi**-automatic so
+a held button throws one punch.
+
+**Installed lazily**, on the first press: an unarmed character that has never
+punched carries no `WeaponState` at all, so every pre-WPN1 trace is
+byte-identical; once installed it stays, because that clock is what paces the
+swings.
+
+**Arbitration order: kick, then punch, then fire.** A player at a locked gate
+pressing attack wants the gate open, not a bruised hand; `try_kick` refuses every
+door that is not locked and in reach, so the punch is what the press means
+everywhere else.
+
+`MELEE_TRIGGER` is its own anim one-shot, and a swing does **not** count against
+`muzzles_without_a_socket` — which it would have: a fist has no weapon entity to
+hang off a socket, so a rigged character throwing one takes the capsule rule
+*correctly* and would have tripped the tripwire on every swing.
+
+**The reference reading** (police-bike 0030/0033/0036): a brawl draws
+**watchers** — bystanders stand a metre away and observe — while gunfire is what
+scatters a street. So the panic radius belongs to the report and not to the
+swing, which is what clause 4 builds. The downed body stays on the ground and is
+lootable, which is the picture this engine's no-cleanup ragdoll already produces.
+
+**Carried**: a swing has no line-of-sight test (a body behind a shut leaf inside
+1.2 m is hit) and no cleave (the nearest body in the arc takes it).
+
+### Clause 4 — one flee door, and a gunshot that scatters the street
+
+`carjack::flee` becomes `inf_ecs::crowd::flee_from(world, guid, from, away_from,
+dt, distance_m)` and the carjack becomes its **first caller**. What is left there
+is the one thing genuinely about a carjack: which point they run away from.
+
+**THE RE-PHASE CAME WITH IT, and it is now measured rather than asserted.**
+`progress_at` is `speed × t_s + phase` over the crowd's elapsed **session** time,
+so a fresh 60 m `Once` route handed to a population 3 600 steps in reads as
+**60.0 m of a 60.0 m route** — finished before the agent has taken a step. With
+the re-phase the same clock answers **0.000 m**. The un-rephased control is in
+the arm, so the trap cannot quietly stop being a trap. (The scout's HIGH trap,
+held.)
+
+Two things the hoist had to change. A `Dormant` agent has **no entity**, and it
+is exactly the agent a shot at the edge of a panic radius reaches — so the body
+is optional and the record is not. And an agent the population already holds
+takes a **new route** rather than being refused (`adopt` refuses, rightly, for
+its own caller): interrupting somebody who was already doing something is the
+whole point of a panic. A scheduled agent's day is **cleared**, which releases
+the `SlotArrival` claim holding it at its desk or its bar stool.
+
+`step_panic` runs in the gameplay phase, after the weapons and before the deaths.
+
+| | |
+|---|---|
+| `PANIC_RADIUS_M` | 45 m — against the report's own 250 m audible reach, because hearing a shot and running from one are different distances |
+| `PANIC_FLEE_M` | 60 m — half again as far as a carjacked driver goes |
+| `MAX_PANIC_SOURCES` | 8 — what makes the inner loop a constant rather than the firefight's shooter count |
+
+**COST, MEASURED** at the population `NPC_STEP_BUDGET_MS` (1.0 ms) was minted at:
+
+| N = 1000 agents | sources | considered | fled | gameplay step (debug) |
+|---|---|---|---|---|
+| no gunfire | 0 | **0** (inert) | 0 | **0.035 ms** |
+| one round | 1 | **1000** (one walk) | 336 | **0.502 ms** |
+
+and the source bound is armed structurally rather than with a stopwatch:
+**16 shooters 45 m apart coalesce to 8**; 16 rounds from one place coalesce to
+**1**, which is what makes a held trigger cost the same as a single round.
+
+**THE ONE-STEP LATENCY, STATED**: the crowd steers in phase 5 and this runs in
+phase 14, so an agent frightened here moves on the **next** fixed step — 16.7 ms
+at 60 Hz, the same lag in both hosts, invisible to every trace. `muzzle_of`'s own
+sentence one system along.
+
+**A punch frightens nobody.** `WeaponHit::loud` is new and has two consumers: the
+report's `Play` (a fist that fired a rifle's clip would be the funniest defect in
+the engine) and the panic's sources.
+
+`PanickedRes` is the latch, and it is a **resource and not a component for the
+tier**: a component would have been silently absent on every dormant agent, which
+is the tier-dependent-state trap `crowd_state_bytes` names. Cleared with the
+crowd at both ends of a Simulate session. **Carried**: a person panics **once** —
+the latch never clears, so somebody who ran and stopped is not frightened again,
+which is the carjack's own "they do not resume their day".
+
+### Clause 4b — who saw what (the EMS seed)
+
+`inf_ecs::witness` records `{kind, actor, at, step, observers, actor_look,
+actor_vehicle}` into a bounded ring. **Nothing reads it yet**, and that is the
+point: a gunshot's position, who fired it and who could see it are facts the
+gameplay step holds for one step and then throws away, so the record is written
+now and read by EMS3.
+
+A **resource**, `ItemDefs`' shape — derived, unsaveable, **no schema moves**.
+
+**RULING — it is NOT folded into `state_bytes`.** Folding would be legal (after
+the traffic section; the order is frozen and append-only) but would make every
+gate in the tree compare a record nothing consumes, and the first wave to change
+what an observer *is* would move every committed trace hash for a reason
+unrelated to the simulation. A two-host gate compares the log directly instead —
+which is what `weapon_hands_gate` already does with the engagement counters. The
+day a dispatcher reads it, folding becomes right; the position is named so nobody
+decides it twice.
+
+**The line of sight is what makes it a witness record and not a distance list**:
+one `cast_ray_excluding` per candidate, the same query the audio occlusion and
+`resolve_shot` already make. Measured — a bystander 8 m away in the open is an
+observer, one 12 m away **behind a wall** is not, and both are inside the 120 m
+radius so a distance-only rule names both.
+
+Bounded three ways because a firefight is the case: `MAX_ACTS_PER_STEP` (4),
+`MAX_OBSERVERS` (8) — so at most 32 rays a step and **zero** on a quiet street —
+and `MAX_WITNESSED_ACTS` (256), a ring that says how many it dropped. Observers
+are gathered at **every tier**, dormant included, kept nearest-first (the cost
+bound) and recorded in `Guid` order (a set written in an order that depends on
+where somebody stood is a set two readers can compare wrongly).
+
+### Clause 5 — an armed NPC can pull a trigger
+
+`apply_intent` writes `want_attack` and the aim **only onto `player_controlled`
+characters**. The consequence nobody had noticed: an armed NPC had no way to pull
+a trigger at all — nothing in the tree could write that field onto one.
+
+`npc_aim_at(world, shooter, target, hold_trigger)` is the complement, and
+deliberately VEH2b's `drive_intent` shape: **one function, refusing the other
+half of the world.** Between them every character's intent has exactly one
+author, which is the property that makes a divergence findable — and the arm
+asserts the **refusal** as well as the write.
+
+It aims from the shooter's own muzzle at the same `strike_point` a swing lands
+on, so a rifle and a fist agree about where a person is, and the two angles go
+through `planar_yaw_deg` and `pacos64` rather than `atan2`/`asin` (the P14 law:
+they reach `shot_direction`, whose output reaches the ray cast, whose hit reaches
+the damage door, which reaches the trace).
+
+It writes the trigger's **level** and not the edge. The level is what `try_fire`
+already reads for both automatic and semi weapons; and `press_attack` is the
+**door-kick's** edge, so an NPC that wrote it would kick every locked door it
+happened to face. The spread is free and already deterministic.
+
+**No cover, no squad, no target selection, no reaction time, no leading a moving
+target, no decision to stop.** Each is a *policy*, and a policy here is a policy
+two hosts have to agree about written where nobody would look for it — they are
+EMS3's. The arm measures the mechanical question as the **world**: the round
+lands on the hero and takes its joules, which is the only thing that says the two
+numbers are an aim rather than a pair of plausible floats.
+
+### Clause 6 — the gates, extended and not replaced
+
+`phase30_gameplay_gate`'s no-wildcard `Verb → Duty` match is what makes four new
+verbs a deliberate compile-time edit; the list length is asserted (17) so a row
+cannot be deleted silently. The **cast** arrives in the shared course at a fixed
+step through the engine's own doors — `weapon_hands_gate::unequip_at`'s
+precedent — placed *relative* to where the hero is standing, so the station does
+not own a metre the earlier stations decide while still being identical on both
+hosts. **The committed `.inf_lvl` does not move.**
+
+**ENGAGEMENT COUNTERS — their first reader outside `gameplay.rs`.**
+`GameplayReport::hits`, `kills` and `shots` have existed since I6 and no gate had
+ever looked at one, which is precisely the condition under which a counter
+quietly stops counting. Eight are compared between hosts **and** asserted
+non-zero, because a trace comparison is satisfied by two hosts doing nothing
+identically.
+
+| counter | over the whole course |
+|---|---|
+| shots (rounds **and** swings, one trigger, one clock) | **27** |
+| of which swings | **4** |
+| blows that landed on flesh | **18** |
+| staggers / knockdowns | **5** / **1** |
+| kills (handed to the ragdoll) | **1** |
+| agents that fled | **5** of 5 near, **0** of 3 far |
+| acts witnessed | **24** (23 shots + 1 death) |
+| rounds fired by somebody who is not the player | **1** |
+| `muzzles_without_a_socket` | **0** |
+| audio commands / of them the report / dropped | **23** / **23** / **0** |
+
+The 23 reports against 27 attacks is the `loud` guard proving itself: 27 − 4
+swings.
+
+**THE AUDIO STREAM is compared command for command**, which `state_bytes` cannot
+see: the queue is what a player *hears*, and P12's doctrine is that the stream is
+the observable contract, so a report queued by one host and not the other is a
+divergence no trace comparison in this repository can find. `dropped == 0` is
+asserted **first** on both sides, or the comparison is between two windows and
+not two streams (VEN1b's own finding, applied where it belongs).
+
+`muzzles_without_a_socket == 0` is armed where it can **fail**: the rigged
+course. `weapon_hands_gate` gains a punch at step 140 — after the release arm's
+step 139, which still holds to the bit — so the one case that could have sprung
+the tripwire on a rigged character is exercised. The capsule course asserts it
+too, as a tripwire for the day that fixture gains a rig.
+
+`shots` counts rounds **and** swings through one trigger and one clock, so the
+rigged course's "exactly one shot" arm became "exactly one **round**" by
+subtracting the swings rather than by inventing a second counter.
+
+### The carried list
+
+* **Camera/aim recoil** — the honest form is an aim recoil in the movement step's
+  look integrator; it moves every committed aim in the tree. (Clause 1c's
+  ruling.)
+* **A one-shot is never occluded** — a shot fired indoors is heard at full
+  spatial gain outside; the fix is the doorway model at `Play` time.
+* **Hip-fire recoil** — the recoil is visible on the *aimed* hold only, because a
+  carried weapon hangs where the animation puts it and there is no rest point to
+  displace.
+* **A punch moves no bone** — a fist asks the hand pass for nothing, so a swing
+  is damage plus an animation trigger and no pose. Asserted, so the day it
+  changes the arm fails.
+* **A swing has no line of sight and no cleave.**
+* **A person panics once** — `PanickedRes` never clears.
+* **A fled agent does not resume its day** — the carjack's bound, inherited by
+  the hoist.
+* **No respawn** — named in `step_deaths`, not built.
+* **No cover, no squad, no target selection** — EMS3's.
+* Inherited from I6/SK1b/SK1c and unchanged: `GripAffordance::palm` unread; a
+  weapon and a pickup are placeholder cubes (`ItemDef` names no mesh); the
+  one-step muzzle latency (**do not fix** — it moves committed traces); no
+  projectile ballistics; no particle system (a flash is a debug line, blood is
+  nothing); the between-frames inventory verb.

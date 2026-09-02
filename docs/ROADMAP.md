@@ -30411,3 +30411,121 @@ census*; *a ring buys a bound and sells a claim*. Carried in the memo: the
 portal's neighbour-door ranking, the door-state step in an otherwise continuous
 swell, the residual O(doors) audio walk, a blocked agent that sits down in the
 street, and a stray tracked `0` at the repo root.
+
+**ISLAND WAVE WPN1 — the weapons array COMPLETED, not built (2026-09-02).**
+Base `fe5e257b`. Reference `frames/police-bike/0030,0033,0036` (the encampment
+brawl, a downed lootable body, a weapon-name readout) and `steal-car/0022`
+("Crime reported") — outside the repo, never committed. **No schema move**
+(scene v27, `ScenePayload` v12), **no new dependency**, goldens **62 with none
+added or blessed**.
+
+The scout's finding governs the wave: ~85 % of what read as clause 1 already
+shipped at I6/SK1b/SK1c — the thirteen-field `WeaponDef` TOML door, the
+ammunition clock in the trace, a real ray, the weapon as an entity on a `hand_r`
+socket, health in joules with a `Downed` latch and a ragdoll handoff, and two
+gates already running PIE == shipping over all of it. So this is a **completion**
+in eight commits.
+
+**THE REPORT.** A round leaving a barrel made no noise; only the *impact* did, so
+a miss was silent. `weapon::report_source()` is one Ring-0 description
+(`venue_music_source`'s precedent) with a committed `.inf_audio` at a fixed GUID,
+queued **before** the impact and keyed on the **shooter** so a barrel has one
+voice. **RULING — it is not occluded, and the flag is not what decides that**:
+each host's one-shot occlusion pass looks a `Play`'s source key up in the
+**Blueprint entity map** and asks that entity for its own `AudioSource`; a
+shooter is not an emitter, so the lookup answers `None` whatever the flag says.
+The whole block is `MIRROR-BEGIN weapon_report`, character-identical, with an arm
+that pins the **order** too. The ring is priced rather than clamped: 8192 / 10
+reports a second a shooter = **819 s for one shooter, 205 for four, 102 for
+eight**, against courses under two thousand steps.
+
+**RETICLE + AMMO.** `ammo_readout` is `"12 / 120"` in Ring 0 (`drive_readout`'s
+split verbatim — the window cannot be tested and this can), sharing the
+bottom-centre slot behind an `else` because a driver cannot point a rifle.
+`view::reticle` is four arms and a **hole**, drawn only while aiming, because
+`aim_hold_point` answers `None` otherwise and a carried rifle is not on the line
+the shot leaves along.
+
+**RECOIL, SPLIT HONESTLY.** `recoil_fraction` is `cooldown_s / fire_interval_s` —
+**derived**, so no field, no eight bytes an armed character, no copy to drift. It
+reaches `HandIk::reach` → `apply_hand_ik` → `pose_state_bytes`: measured, the
+rigged course went from **18 to 24 distinct poses**, and the six are a 600 rpm
+weapon's six-step cycle at 60 Hz. It does **not** move the aim. **RULING — there
+is no camera recoil**: one that does not move the aim makes the reticle *lie*
+(the camera's pitch is the whole mapping between the crosshair and where rounds
+go), and one that does is a camera → sim write, which Ruling 4 forbids and
+`phase29_gate` pins. The honest form is an **aim** recoil in the look integrator;
+it moves every committed aim in the tree. Carried.
+
+**THE SILENT SHOT, CLOSED.** `on_flesh` asked for a `Health` component and I6
+gave one to the hero alone — so a round into any other character went to the
+destructible branch and was owed to an entity with no `Destructible`, logging a
+`NoDestructible` refusal **ten times a second on a held trigger**. `is_flesh` now
+asks *is it a character*, and `apply_hit` gives one a body on the **first hit**:
+lazily, because at spawn it is **33 kB a step** at N=1000 and moves every
+committed trace, and per-materialized-agent it makes the trace a function of the
+crowd **band**. The other half: a round owes the P22 door nothing unless what it
+hit *has* a `Destructible` — the ground is the case a level cannot avoid.
+**STAGGER** is greenfield: every non-fatal blow arms a one-shot reaction, and one
+worth a third of what the body **had left** takes `FallControlled` through
+`transition_is_legal` (the carjack's eject verbatim). **RULING — a respawn is a
+re-seat, not a reload**: end the ragdoll, restore the capacity, place the body at
+the start, clear the edges; the world keeps everything that happened, because
+rolling it back needs a runtime-owned save container and this engine's one
+snapshot format is the author's `.inf_lvl`.
+
+**MELEE** is a `ShotKind`, not a system beside the weapons: a punch needs a rate,
+a damage in joules, a semi/auto flag and a clock, and a rifle has all four. What
+it lacks is a ray — `range_m` becomes a reach bounded by `MAX_MELEE_REACH_M`
+(2.5 m, four orders below a rifle's) and the arc resolves through
+`interact::resolve`, `try_kick`'s named defect one verb along. `engine:fists` is
+150 J / 1.2 m / 100° / 90 rpm, semi-automatic, installed **on the first press**
+so a character that never punches is byte-identical. Arbitration is kick → punch
+→ fire. A swing does **not** count against `muzzles_without_a_socket`, which it
+would have.
+
+**THE FLEE DOOR, HOISTED.** `carjack::flee` becomes `crowd::flee_from` with the
+carjack as its first caller — and **the re-phase came with it and is now
+measured**: a fresh 60 m `Once` route handed to a population 3 600 steps in reads
+as **60.0 m of a 60.0 m route** (finished before a step is taken); with the
+re-phase, **0.000 m**, and the un-rephased control is in the arm. Gunfire scatters
+the street at `PANIC_RADIUS_M` = 45 m against the report's 250 m audible reach,
+through one `O(agents)` walk whose sources are coalesced to at most **8**:
+measured at N=1000, **0.035 ms quiet → 0.502 ms with one round** (debug, against
+`NPC_STEP_BUDGET_MS` 1.0), 1000 considered, 336 fled, and 16 shooters 45 m apart
+coalescing to 8 while 16 rounds from one place coalesce to 1. **A punch frightens
+nobody** (`WeaponHit::loud`) — the reference's own reading: a brawl draws watchers,
+gunfire empties a street. The **one-step latency** (crowd is phase 5, gameplay
+phase 14) is stated. `PanickedRes` is a **resource and not a component**, because
+a dormant agent has no entity to carry one.
+
+**WHO SAW WHAT.** `inf_ecs::witness` is the EMS seed — a bounded ring of
+`{kind, actor, at, step, observers, look digest, vehicle}`, a resource, **not**
+folded into `state_bytes` (a ruling: folding makes every gate compare a record
+nothing consumes). The **line of sight** is what makes it a witness record and not
+a distance list — measured, a bystander 8 m away in the open sees and one 12 m
+away behind a wall does not, both inside the 120 m radius. Bounded at 4 acts and
+8 observers a step (≤ 32 rays, **0** on a quiet street) and 256 acts in the ring.
+
+**AN ARMED NPC CAN FIRE.** `apply_intent` writes the aim and `want_attack` only
+onto `player_controlled` characters, so nothing in the tree could write them onto
+an NPC. `npc_aim_at` is the complement — VEH2b's `drive_intent` shape, one
+function refusing the other half of the world, so every character's intent has
+exactly one author. Portable trig, the trigger's **level** and not the
+door-kick's edge, and no cover / squad / target selection (EMS3's).
+
+**THE GATES, EXTENDED.** `phase30_gameplay_gate` grows from 13 to **17** verbs
+through its no-wildcard `Verb → Duty` match; the cast arrives in the shared
+course at a fixed step through engine doors, so **the committed `.inf_lvl` does
+not move**. The **audio command stream** is compared command for command (with
+`dropped == 0` asserted first, VEN1b's own finding applied where it belongs) —
+the queue is what a player hears and `state_bytes` cannot see it. The
+**engagement counters get their first reader outside `gameplay.rs`**: 27 shots /
+4 swings / 18 on flesh / 5 staggers / 1 knockdown / 1 kill / 5 of 5 near agents
+fled and 0 of 3 far / 24 acts witnessed / 1 NPC round / 23 audio commands all of
+them the report / 0 dropped / `muzzles_without_a_socket` 0. That last is armed
+where it can *fail* — `weapon_hands_gate` gains a punch at step 140, after the
+release arm's step 139 which still holds to the bit.
+
+Ledger, tables, rulings and the carried list in `docs/memos/island-progress.md`
+under *"Wave WPN1"*.
