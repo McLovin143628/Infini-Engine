@@ -160,6 +160,12 @@ pub struct GameplayReport {
     /// **What this step's gunfire did to the crowd** (wave WPN1) — an
     /// engagement counter, on [`crowd_doors`](Self::crowd_doors)' own terms.
     pub panic: PanicReport,
+    /// **Acts recorded into the witness log** this step (wave WPN1) — an
+    /// engagement counter for a seed nothing reads yet, which is exactly the
+    /// case where one is worth most: without it "the witness pass runs" and
+    /// "somebody saw something" are indistinguishable, and a seed that silently
+    /// recorded nothing would look identical to a seed that worked.
+    pub witnessed: u32,
     /// **Melee swings thrown** this step (wave WPN1) — the subset of
     /// [`shots`](Self::shots) that were an arc rather than a ray.
     ///
@@ -270,7 +276,17 @@ pub fn step_gameplay(
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
-    step_deaths(world, bridge, &mut report);
+    let killed = step_deaths(world, bridge, &mut report);
+    // 5. **Who saw it** (wave WPN1) — the witnessed-act seed. LAST, because a
+    //    death outranks a shot in the record and the deaths are only known
+    //    once the pass above has run. Inert on every step nothing happened on.
+    report.witnessed = step_witness(
+        world,
+        bridge,
+        &report.hits,
+        &killed,
+        inf_ecs::traffic::steps(world),
+    );
     report
 }
 
@@ -1056,6 +1072,25 @@ fn resolve_shot(
     }
 }
 
+/// **How far away an act can be seen**, metres.
+///
+/// A hundred and twenty — wider than the panic radius, because seeing something
+/// and running from it are different distances in the other direction too: the
+/// person across the square who did not run is still the person who can describe
+/// you. It is the [`weapon::REPORT_MAX_M`] / [`PANIC_RADIUS_M`] pair's third
+/// number and it sits between them on purpose.
+pub const WITNESS_RADIUS_M: f64 = 120.0;
+
+/// **How many acts one step may record.**
+///
+/// Four, and it is a cost bound: each act is one `O(agents)` walk plus at most
+/// [`inf_ecs::witness::MAX_OBSERVERS`] rays, so this is what keeps a firefight's
+/// bookkeeping a constant multiple of a walk rather than a function of how many
+/// people are shooting. A step that produced more records the first four; the
+/// rest are simply not written, which for a seed nothing reads yet is the honest
+/// trade and is stated rather than hidden.
+pub const MAX_ACTS_PER_STEP: usize = 4;
+
 /// **How far a gunshot scatters a crowd**, metres.
 ///
 /// Forty-five. Deliberately much smaller than a gunshot's own audible reach
@@ -1182,6 +1217,107 @@ fn step_panic(world: &mut EcsWorld, hits: &[WeaponHit], dt: f64) -> PanicReport 
         }
     }
     report
+}
+
+/// **WHO SAW IT** (wave WPN1) — the witnessed-act seed for the EMS arc.
+///
+/// One record per act, at most [`MAX_ACTS_PER_STEP`] a step, each carrying the
+/// nearest few crowd agents that have a clear line to it. Nothing reads it yet;
+/// see [`inf_ecs::witness`] for why it is written now anyway.
+///
+/// # The line of sight, and what it costs
+///
+/// One `cast_ray_excluding` per candidate observer, from the observer's own eye
+/// to the act — which is the same query the audio occlusion path makes and the
+/// same one `resolve_shot` makes, so it is the engine's existing answer to "is
+/// there something between these two points" rather than a fourth. Bounded at
+/// `MAX_ACTS_PER_STEP × MAX_OBSERVERS` = 32 rays a step in the worst case, and
+/// **zero** on every step nothing happened on.
+///
+/// A `Dormant` observer has no collider to exclude and the ray simply runs
+/// without one, which is right: an agent with no body cannot be in its own way.
+///
+/// Returns how many acts were recorded — an engagement counter, because "the
+/// pass ran" and "somebody saw something" are different facts.
+fn step_witness(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    hits: &[WeaponHit],
+    killed: &[Uuid],
+    step: u64,
+) -> u32 {
+    use inf_ecs::witness::{ActKind, WitnessedAct};
+    // The acts, in the order they happened: a death outranks a shot, because a
+    // dispatcher asked to name one thing about a street should name the body.
+    let mut acts: Vec<(ActKind, Uuid, DVec3)> = Vec::new();
+    for guid in killed {
+        if acts.len() >= MAX_ACTS_PER_STEP {
+            break;
+        }
+        let Some(at) = strike_point(world, *guid) else {
+            continue;
+        };
+        acts.push((ActKind::Killed, *guid, at));
+    }
+    for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
+        if acts.len() >= MAX_ACTS_PER_STEP {
+            break;
+        }
+        acts.push((ActKind::Shot, hit.shooter, hit.from));
+    }
+    if acts.is_empty() {
+        return 0;
+    }
+    let mut recorded = 0u32;
+    for (kind, actor, at) in acts {
+        let candidates = inf_ecs::witness::candidates_near(world, at, WITNESS_RADIUS_M);
+        let mut observers: Vec<Uuid> = Vec::new();
+        for (guid, feet) in candidates {
+            if guid == actor {
+                continue;
+            }
+            let eye = feet + DVec3::Y * MUZZLE_HEIGHT_M;
+            let to = at - eye;
+            let d = to.length();
+            if !d.is_finite() {
+                continue;
+            }
+            if d > 1.0e-6 {
+                let mut exclude = BTreeSet::new();
+                if let Some(c) = bridge.collider_of(guid) {
+                    exclude.insert(c);
+                }
+                if let Some(c) = bridge.collider_of(actor) {
+                    exclude.insert(c);
+                }
+                // Anything in the way at all: the ray is stopped short of the
+                // act, so the observer cannot see it. The tolerance is a
+                // centimetre, which is the wall a shot leaves through.
+                if bridge
+                    .world_mut()
+                    .cast_ray_excluding(eye, to / d, d, &exclude)
+                    .is_some_and(|h| h.toi < d - 0.01)
+                {
+                    continue;
+                }
+            }
+            observers.push(guid);
+        }
+        inf_ecs::witness::record_act(
+            world,
+            WitnessedAct {
+                kind,
+                actor,
+                at,
+                step,
+                observers,
+                actor_look: inf_ecs::witness::look_digest(actor),
+                actor_vehicle: inf_ecs::witness::actor_vehicle(world, actor),
+            },
+        );
+        recorded += 1;
+    }
+    recorded
 }
 
 /// **Where a swing lands on a body**, world metres — the point a punch is aimed
@@ -1550,8 +1686,18 @@ fn step_kicks(world: &mut EcsWorld, dt: f64, report: &mut GameplayReport) {
 /// It is not written here because *where* it goes is a decision this function
 /// cannot make: reviving the camera subject belongs to whoever owns the camera
 /// subject, and today that is each host. Carried by name.
-fn step_deaths(world: &mut EcsWorld, _bridge: &mut PhysicsBridge3D, report: &mut GameplayReport) {
-    for guid in weapon::newly_dead(world) {
+///
+/// Answers **who stopped working on this step**, in `Guid` order — the list the
+/// witness pass records a death from, and the reason this returns anything at
+/// all: `report.kills` counts the ones the ragdoll *took*, and a body the
+/// ragdoll refused is still a body somebody saw fall.
+fn step_deaths(
+    world: &mut EcsWorld,
+    _bridge: &mut PhysicsBridge3D,
+    report: &mut GameplayReport,
+) -> Vec<Uuid> {
+    let dead = weapon::newly_dead(world);
+    for guid in dead.iter().copied() {
         // **The latch goes down FIRST**, whether or not the ragdoll takes it.
         // A body whose ragdoll is refused — no `CharacterMovement`, a mode the
         // table will not leave — must not be offered again on the next step; see
@@ -1564,6 +1710,7 @@ fn step_deaths(world: &mut EcsWorld, _bridge: &mut PhysicsBridge3D, report: &mut
             report.kills += 1;
         }
     }
+    dead
 }
 
 /// Which side of `door` a character standing at `feet` is on — re-exported for

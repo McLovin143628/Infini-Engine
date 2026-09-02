@@ -1742,3 +1742,89 @@ fn gunfire_scatters_the_crowd_and_a_brawl_does_not() {
         );
     }
 }
+
+/// **WHO SAW IT** (wave WPN1) — the witnessed-act seed, and the line of sight
+/// that makes it a *witness* record rather than a distance one.
+///
+/// Three claims:
+///
+/// 1. a shot is recorded, with the shooter, the muzzle, the step and a
+///    description digest;
+/// 2. a bystander standing in the open **is** an observer and one behind a wall
+///    is **not** — which is the whole difference between "was near" and "saw";
+/// 3. a level where nothing happens records **nothing**, so the seed costs a
+///    quiet street no allocation.
+#[test]
+fn a_gunshot_is_recorded_with_the_people_who_could_see_it() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+
+    let seen = Uuid::from_u128(0x1601_0301);
+    let blind = Uuid::from_u128(0x1601_0302);
+    let mut rig = Rig::new();
+    // A wall between the hero and `blind`, and nothing between it and `seen`.
+    // The hero fires along `+Z`; the wall stands at z = 6 across that line.
+    spawn_wall(&mut rig.world, 6.0);
+    let a = CrowdArchetype::humanoid(None, None, None);
+    let mut records = std::collections::BTreeMap::new();
+    // In the open, off to the side: nothing between it and the muzzle.
+    records.insert(
+        seen,
+        CrowdRecord::standing(a.clone(), DVec3::new(8.0, 0.0, 0.0)),
+    );
+    // Directly behind the wall.
+    records.insert(
+        blind,
+        CrowdRecord::standing(a.clone(), DVec3::new(0.0, 0.0, 12.0)),
+    );
+    assert_eq!(inf_ecs::crowd::add_agents(&mut rig.world, records), 0);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.arm("rifle");
+    let r = rig.step(&idle());
+    assert_eq!(r.witnessed, 0, "a quiet street recorded something");
+    assert!(
+        inf_ecs::witness::witnessed(&rig.world).is_empty(),
+        "the log is not empty before anything happened"
+    );
+
+    let r = rig.step(&hold_trigger());
+    assert_eq!(r.shots, 1, "the trigger did not fire");
+    assert_eq!(r.witnessed, 1, "the shot was not recorded");
+    let acts = inf_ecs::witness::witnessed(&rig.world);
+    assert_eq!(acts.len(), 1);
+    let act = &acts[0];
+    println!(
+        "act {:?} by {} at {:?} on step {}: observers {:?}, look {:#x}, vehicle {:?}",
+        act.kind,
+        act.actor.as_u128(),
+        act.at,
+        act.step,
+        act.observers
+            .iter()
+            .map(|g| g.as_u128())
+            .collect::<Vec<_>>(),
+        act.actor_look,
+        act.actor_vehicle
+    );
+    assert_eq!(act.kind, inf_ecs::witness::ActKind::Shot);
+    assert_eq!(act.actor, HERO);
+    assert_ne!(act.actor_look, 0, "the actor has no description at all");
+    assert_eq!(act.actor_vehicle, None, "the hero is not in a car");
+    // **THE LINE OF SIGHT.** Both agents are well inside `WITNESS_RADIUS_M`
+    // (8 m and 12 m against 120), so a distance-only rule would name both — and
+    // `candidates_near` really does hand both to the ray.
+    assert_eq!(
+        inf_ecs::witness::candidates_near(&rig.world, act.at, d3::gameplay::WITNESS_RADIUS_M).len(),
+        2,
+        "the candidate walk did not offer both agents, so the ray is untested"
+    );
+    assert!(
+        act.observers.contains(&seen),
+        "the bystander standing in the open did not see a gunshot 8 m away"
+    );
+    assert!(
+        !act.observers.contains(&blind),
+        "the bystander behind a wall saw through it — the line of sight is not \
+         being cast, and the record is a distance list wearing a witness's name"
+    );
+}

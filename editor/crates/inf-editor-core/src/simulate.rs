@@ -560,6 +560,9 @@ impl SimSession {
         // capture it and `apply_to_doc` cannot restore it, and a second run
         // would begin with run 1's bystanders unable to be frightened.
         inf_ecs::crowd::clear_panic(doc.world_mut());
+        // WPN1: and what the street saw, for the same reason — the witness log
+        // is a resource a Simulate session fills and the author never authored.
+        inf_ecs::witness::clear_witness(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the
@@ -963,6 +966,9 @@ impl SimSession {
         // capture it and `apply_to_doc` cannot restore it, and a second run
         // would begin with run 1's bystanders unable to be frightened.
         inf_ecs::crowd::clear_panic(doc.world_mut());
+        // WPN1: and what the street saw, for the same reason — the witness log
+        // is a resource a Simulate session fills and the author never authored.
+        inf_ecs::witness::clear_witness(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the
