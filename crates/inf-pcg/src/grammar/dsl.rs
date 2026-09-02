@@ -275,7 +275,8 @@ pub struct ModuleDef {
     /// ([`ModuleShape::surface`](crate::building::modules::ModuleShape::surface)),
     /// so a chrome pole is chrome in every archetype by one rule.
     ///
-    /// [`PcgSurface::DEFAULT`] for every module of every palette that predates
+    /// [`PcgSurface::DEFAULT`](crate::scatter::PcgSurface::DEFAULT) for every
+    /// module of every palette that predates
     /// the venue families, which is what keeps every building the engine has
     /// ever drawn byte-identical.
     pub surface: crate::scatter::PcgSurface,
