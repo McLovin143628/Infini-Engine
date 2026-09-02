@@ -142,6 +142,21 @@ pub struct GameplayReport {
     pub locks_broken: u32,
     /// Characters that stopped working this step and were handed to the ragdoll.
     pub kills: u32,
+    /// **Non-fatal blows that landed on a body** this step (wave WPN1) — every
+    /// one of them armed a hit reaction.
+    ///
+    /// An engagement counter, on `crowd_doors`' own terms: "a round was fired"
+    /// and "a round hurt somebody" are different facts, and a gate that cannot
+    /// tell them apart certifies a course where every shot missed.
+    pub staggers: u32,
+    /// **Blows heavy enough to put a body on the floor** this step — the subset
+    /// of [`staggers`](Self::staggers) that also took a mode.
+    ///
+    /// Its own number rather than a flag on the one above, because the two
+    /// answer different questions: `staggers` says the reaction seam is wired
+    /// and `knockdowns` says the mode table let go — and a course where they are
+    /// equal is a course where every punch is a rifle round.
+    pub knockdowns: u32,
     /// Every shot that landed, in `Guid` order of the shooter.
     pub hits: Vec<WeaponHit>,
     /// Energy owed to the P22 damage door: `(destructible entity, joules)`.
@@ -935,10 +950,7 @@ fn resolve_shot(
     match landed {
         Some(h) => {
             let target = bridge.guid_of_collider(h.collider);
-            let on_flesh = target
-                .and_then(|g| world.entity_of(g))
-                .map(|e| world.world().get::<Health>(e).is_some())
-                .unwrap_or(false);
+            let on_flesh = target.is_some_and(|g| is_flesh(world, g));
             WeaponHit {
                 shooter,
                 target,
@@ -959,19 +971,98 @@ fn resolve_shot(
     }
 }
 
+/// **Is this thing a body?** — the question a round asks about what it hit
+/// (wave WPN1).
+///
+/// # It used to be "does it have a `Health` component", and that was the silent
+/// shot
+///
+/// I6 gave the hero a body from its own Blueprint and gave **nothing else** one.
+/// So a round into an NPC, a crowd agent or any other character was `on_flesh ==
+/// false`, went to the destructible branch, and was owed to an entity with no
+/// `Destructible` — where the host logged a `NoDestructible` refusal, once per
+/// round, ten times a second on a held trigger. The person was unhurt, the log
+/// was full, and the only visible symptom was the flood.
+///
+/// So the question is now **"is it a character"**, and [`apply_hit`] gives it a
+/// body on the first hit that lands. `CharacterMovement` is the one component in
+/// this engine that means *a person*: the crowd puts it on every materialized
+/// agent, the movement step visits exactly the entities that carry it, and
+/// nothing else in the tree has one.
+///
+/// A body that already has [`Health`] still answers `true` through the first arm,
+/// so a level that authored one — the gameplay fixture's hero, every
+/// `health.set` a Blueprint calls — is byte-identical to what it was.
+fn is_flesh(world: &EcsWorld, guid: Uuid) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let w = world.world();
+    w.get::<Health>(e).is_some() || w.get::<CharacterMovement>(e).is_some()
+}
+
 /// Spend a hit's joules: on a body's health here, on a destructible through the
 /// host's own wrapper.
+///
+/// # Lazy health, and what it buys (wave WPN1)
+///
+/// A character with no [`Health`] is given one **on the first hit that lands on
+/// it**, at [`weapon::DEFAULT_VITALITY_J`]. Two alternatives were available and
+/// both are worse:
+///
+/// * giving every character a body at spawn puts 33 bytes an agent per step into
+///   `health_state_bytes` — **33 kB a step at the thousand agents
+///   `NPC_BUDGET_AGENTS` measures** — and moves every committed trace in the tree
+///   for levels that have a crowd and no combat, which is all of them;
+/// * giving one to every *materialized* agent makes the trace a function of the
+///   crowd BAND, which is the tier-dependent-component trap NPC1a's own
+///   `crowd_state_bytes` exists to keep out: an agent would enter and leave the
+///   health section as the player walked towards and away from it, and two hosts
+///   that tiered it a step apart would diverge for a reason that has nothing to
+///   do with anybody's health.
+///
+/// Lazily, the section is empty until something is shot, which keeps every
+/// pre-WPN1 trace byte-identical, and once a body is in it it stays there
+/// however the band moves.
 fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport) {
     let Some(target) = hit.target else {
         return;
     };
     if hit.on_flesh {
+        // The body, if this is the first thing that has ever hurt it.
+        if weapon::health_of(world, target).is_none() {
+            weapon::give_health(world, target, weapon::DEFAULT_VITALITY_J);
+        }
+        let before = weapon::health_of(world, target)
+            .map(|h| h.joules)
+            .unwrap_or(0.0);
         // One door (`weapon::damage_entity`), shared with the `health.damage`
         // verb, so a bullet and a script spend joules the same way.
-        weapon::damage_entity(world, target, hit.energy_j);
+        let Some(r) = weapon::damage_entity(world, target, hit.energy_j) else {
+            return;
+        };
+        if r.was_dead || r.killed {
+            // A corpse does not stagger and a kill is the ragdoll's business —
+            // `step_deaths` hands it over on this same step, and a hit reaction
+            // armed on the way out would be an animation fighting a ragdoll for
+            // the same skeleton.
+            return;
+        }
+        stagger(world, target, r.absorbed_j, before, report);
         return;
     }
-    // Not flesh: the host spends it at the P22 door. Coalesced by entity so one
+    // Not flesh. **Only a destructible is owed anything** (wave WPN1): a round
+    // into a lamp post, a kerb or the ground reached this list before, and the
+    // host answered every one of them with a `NoDestructible` refusal in the log.
+    // Owing energy to something with no door is not owing.
+    if world
+        .entity_of(target)
+        .and_then(|e| world.world().get::<inf_ecs::components::Destructible>(e))
+        .is_none()
+    {
+        return;
+    }
+    // The host spends it at the P22 door. Coalesced by entity so one
     // burst on one wall is one blow — which matters, because **damage is not
     // banked**: three small blows on one step are not a big one, and pretending
     // otherwise here would make the rate of fire a hidden multiplier on damage.
@@ -980,6 +1071,57 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
     } else {
         report.destruct.push((target, hit.energy_j));
     }
+}
+
+/// **A hit that hurts is a hit that shows** (wave WPN1) — the one-shot reaction,
+/// and the blow that puts a body on the floor.
+///
+/// Two things, and the second one is a mode:
+///
+/// * the animation trigger ([`weapon::STAGGER_TRIGGER`]) is armed on **every**
+///   non-fatal blow, through the same `set_anim_trigger` seam the fire and the
+///   reload use. A character with no state machine plays nothing and still takes
+///   the damage — the reload's rule verbatim;
+/// * a blow that takes [`weapon::STAGGER_FRACTION`] of what the body had left
+///   also **puts it off its feet**, into `MovementMode::FallControlled`. That is
+///   the carjack's own eject verbatim (`carjack.rs`: *"being pulled out of a car
+///   is a fact about your body and not a choice"*) and it is what
+///   `transition_is_legal`'s own doc has been describing since P29.3.
+///
+/// The mode is asked of the table rather than assigned: a swimmer, a ragdoll and
+/// a driver all refuse it, and a refusal is a value.
+fn stagger(
+    world: &mut EcsWorld,
+    target: Uuid,
+    absorbed_j: f64,
+    before_j: f64,
+    report: &mut GameplayReport,
+) {
+    inf_ecs::anim_bridge::set_anim_trigger(world, target, weapon::STAGGER_TRIGGER);
+    report.staggers += 1;
+    if !weapon::is_staggering(absorbed_j, before_j) {
+        return;
+    }
+    let Some(entity) = world.entity_of(target) else {
+        return;
+    };
+    let Some(mut cm) = world
+        .world_mut()
+        .get_mut::<inf_ecs::components::CharacterMovement>(entity)
+    else {
+        return;
+    };
+    if cm.runtime.seat.is_seated()
+        || !inf_ecs::movement::transition_is_legal(
+            cm.mode,
+            inf_ecs::components::MovementMode::FallControlled,
+        )
+    {
+        return;
+    }
+    cm.mode = inf_ecs::components::MovementMode::FallControlled;
+    cm.runtime.time_in_mode_s = 0.0;
+    report.knockdowns += 1;
 }
 
 /// **Arm a kick** at the door in front of `character`, if there is one and the
@@ -1061,6 +1203,38 @@ fn step_kicks(world: &mut EcsWorld, dt: f64, report: &mut GameplayReport) {
     }
 }
 
+/// **Every body that stopped working goes to the ragdoll** — and nothing gets up
+/// again.
+///
+/// # RULING: what a respawn would be, and why it is not here (I6 item 7)
+///
+/// The hero can be killed — `phase30_gameplay_gate` proves a round takes 1 700 J
+/// off a 2 000 J body and `weapon::Downed` latches the handoff — and when it is,
+/// the level has a ragdoll in it and no player. The mandate asks for a respawn.
+/// Named rather than built, because the shape matters more than the code:
+///
+/// **The simplest honest form is a re-seat, not a reload.** On the step a
+/// `player_controlled` body is handed to the ragdoll, a host would: end the
+/// ragdoll through `ragdoll_bridge`'s own door (the table already permits
+/// `(Ragdoll, Grounded)`), restore [`Health`] to its capacity, place the body at
+/// the level's own start — the `StreamingSource`-carrying spawn the scene
+/// already names — and clear the movement runtime's edges the way `clear_edges`
+/// does at a seat. Nothing else. **The world keeps everything that happened**:
+/// the doors stay where they were kicked, the bag keeps what it held, the debris
+/// stays on the floor, the crowd stays scattered.
+///
+/// That is deliberate rather than lazy, and it is the reason there is no save
+/// container. Restoring a *world* means a snapshot of it, and this engine's one
+/// snapshot format is `.inf_lvl` — **the author's document**, which P21's own
+/// ruling forbids the runtime to write ("in the editor the render store IS the
+/// save's staging source"). A respawn that rolled the world back would need a
+/// second, runtime-owned container with its own schema, its own migration and
+/// its own gate; a respawn that does not is four calls into doors that already
+/// exist. The second is a game, and the first is a wave.
+///
+/// It is not written here because *where* it goes is a decision this function
+/// cannot make: reviving the camera subject belongs to whoever owns the camera
+/// subject, and today that is each host. Carried by name.
 fn step_deaths(world: &mut EcsWorld, _bridge: &mut PhysicsBridge3D, report: &mut GameplayReport) {
     for guid in weapon::newly_dead(world) {
         // **The latch goes down FIRST**, whether or not the ragdoll takes it.

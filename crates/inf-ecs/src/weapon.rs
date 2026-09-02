@@ -294,6 +294,45 @@ pub const RELOAD_TRIGGER: &str = "weapon_reload";
 /// through `inf_ecs::anim_bridge::set_anim_trigger` exactly as the ragdoll's is.
 pub const KICK_TRIGGER: &str = "door_kick";
 
+/// **The animation trigger a hit reaction arms** (wave WPN1).
+///
+/// A P29-style one-shot, reached through
+/// [`crate::anim_bridge::set_anim_trigger`] exactly as [`FIRE_TRIGGER`] and the
+/// ragdoll's are — and, exactly as those are, it is armed whether or not
+/// anything is listening: a character with no state machine takes the damage and
+/// plays nothing, which is the "the animation follows the decision rather than
+/// gating it" rule the reload already follows.
+pub const STAGGER_TRIGGER: &str = "hit_react";
+
+/// **The fraction of a body's remaining capacity one blow has to take to put it
+/// off its feet.**
+///
+/// A third. Not a joule count, because a joule count would be a second damage
+/// table — the same defect `DEFAULT_VITALITY_J`'s doc refuses — and because the
+/// interesting quantity is *proportion*: a rifle round is a third of a fresh
+/// 5 100 J body and the whole of a hurt one, and the second is the hit that
+/// should drop somebody.
+///
+/// Measured against the engine's own numbers: a 1 700 J rifle round against the
+/// default 2 000 J body is 0.85 of it and staggers; a 150 J punch against the
+/// same body is 0.075 and does not, which is the whole difference between being
+/// shot and being hit.
+pub const STAGGER_FRACTION: f64 = 1.0 / 3.0;
+
+/// Whether a blow of `absorbed_j` on a body that had `before_j` left is one that
+/// takes it off its feet.
+///
+/// The denominator is what the body **had**, not what it started with: the third
+/// punch of a fight lands on a body with less to give than the first did, and
+/// measuring against the capacity would make a beating feel identical from
+/// beginning to end.
+pub fn is_staggering(absorbed_j: f64, before_j: f64) -> bool {
+    if !absorbed_j.is_finite() || !before_j.is_finite() || before_j <= 0.0 {
+        return false;
+    }
+    absorbed_j >= before_j * STAGGER_FRACTION
+}
+
 /// The animation notify a door kick lands on.
 ///
 /// **The impulse is on the notify, not on the press.** A kick that broke the
@@ -1212,6 +1251,28 @@ automatic = true
             "a gunshot does not carry meaningfully further than a nightclub"
         );
         assert!(s.min_distance < s.max_distance && s.min_distance > 0.0);
+    }
+
+    /// **A stagger is a PROPORTION of what the body had left** (wave WPN1), so
+    /// the same punch that bounces off a fresh body drops a hurt one.
+    #[test]
+    fn a_blow_staggers_by_what_it_takes_of_what_was_left() {
+        let rifle = WeaponDef::default().damage_j;
+        // A rifle round is 0.85 of a fresh default body: it drops it.
+        assert!(is_staggering(rifle, DEFAULT_VITALITY_J));
+        // …and a tenth of a big one does not.
+        assert!(!is_staggering(500.0, 5000.0));
+        // THE POINT: the same 500 J on a body with 1 200 J left is 0.42 and
+        // does. A threshold measured against the CAPACITY could not tell these
+        // two apart, and a beating would feel identical from beginning to end.
+        assert!(is_staggering(500.0, 1200.0));
+        // The boundary is inclusive, so a blow worth exactly a third counts.
+        assert!(is_staggering(1000.0, 3000.0));
+        assert!(!is_staggering(999.0, 3000.0));
+        // Refusals are values: a corpse and a NaN stagger nothing.
+        assert!(!is_staggering(rifle, 0.0));
+        assert!(!is_staggering(f64::NAN, 100.0));
+        assert!(!is_staggering(10.0, f64::INFINITY));
     }
 
     /// **The recoil IS the weapon's own cycle** (wave WPN1) — full on the step

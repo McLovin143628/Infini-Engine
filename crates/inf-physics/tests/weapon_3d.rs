@@ -143,6 +143,35 @@ fn spawn_target(w: &mut EcsWorld, z: f64, capacity_j: f64) {
     ));
 }
 
+/// **A standing body at `z` with no [`Health`] at all** (wave WPN1) — the shape
+/// every character in this engine has until something hurts it.
+///
+/// The one difference from [`spawn_target`] is the component that is missing,
+/// and that is the whole point: before this wave a round into one of these was
+/// `on_flesh == false`, went to the destructible branch, and was owed to an
+/// entity with no `Destructible`.
+fn spawn_bare_body(w: &mut EcsWorld, z: f64) {
+    let cm = CharacterMovement::default();
+    let e = w.spawn_with_guid(TARGET, "Bystander", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, cm.stand_half_height_m + RADIUS, z);
+    w.world_mut().entity_mut(e).insert((
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+            radius: RADIUS,
+            ..Default::default()
+        },
+        CharacterController3D::default(),
+        cm,
+        t,
+    ));
+}
+
 /// A destructible wall at `z` — what a shot that misses flesh hits.
 fn spawn_wall(w: &mut EcsWorld, z: f64) {
     let e = w.spawn_with_guid(WALL, "Wall", None);
@@ -1154,5 +1183,205 @@ fn an_armed_character_grabs_with_its_free_hand() {
         (after[0] - held[0]).abs() < 1.0e-12 && (after[1] - held[1]).abs() < 1.0e-12,
         "the hands did not go back on the weapon after the grab: {after:?} \
          against {held:?}"
+    );
+}
+
+/// **A ROUND INTO A PERSON HURTS THE PERSON** — the silent shot, closed (wave
+/// WPN1).
+///
+/// Until this wave `on_flesh` asked whether the target carried a `Health`
+/// component, and I6 gave one to the hero and to nothing else. So a round into
+/// any other character answered `false`, went to the destructible branch, and
+/// came back in `GameplayReport::destruct` — where the host logs a
+/// `NoDestructible` refusal, once per round, ten times a second on a held
+/// trigger. The person was unhurt, the log was full, and the flood was the only
+/// symptom.
+///
+/// Three claims, and the second is the one a "lazy health" that never fires
+/// would fail:
+///
+/// 1. the body has **no** `Health` before the shot — or this arm is
+///    `a_round_reaches_the_body_it_is_aimed_at` wearing a different name;
+/// 2. it has one **after**, with the round's joules already out of it;
+/// 3. `destruct` is **empty**, so nothing was owed to a door that does not
+///    exist.
+#[test]
+fn a_round_into_a_character_with_no_health_gives_it_one_and_owes_nothing() {
+    let mut rig = Rig::new();
+    spawn_bare_body(&mut rig.world, 8.0);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.arm("rifle");
+    rig.step(&idle());
+    assert!(
+        weapon::health_of(&rig.world, TARGET).is_none(),
+        "the fixture gave the bystander a body, so this arm proves nothing"
+    );
+    let r = rig.step(&hold_trigger());
+    assert_eq!(r.shots, 1, "the trigger did not fire");
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(r.hits[0].target, Some(TARGET));
+    assert!(
+        r.hits[0].on_flesh,
+        "a round into a person was not on flesh, so it went to the P22 door"
+    );
+    let h = weapon::health_of(&rig.world, TARGET).expect("the round gave it a body");
+    println!(
+        "one rifle round on a bystander with no authored health: {} J of {} left; \
+         destruct owes {:?}; {} stagger(s), {} knockdown(s)",
+        h.joules, h.capacity_j, r.destruct, r.staggers, r.knockdowns
+    );
+    assert!(
+        (h.capacity_j - weapon::DEFAULT_VITALITY_J).abs() < 1e-9,
+        "the lazy body is not the default vitality: {}",
+        h.capacity_j
+    );
+    assert!(
+        (h.joules - (weapon::DEFAULT_VITALITY_J - RIFLE_J)).abs() < 1e-9,
+        "the round's joules did not come out of the body it just made: {}",
+        h.joules
+    );
+    assert!(
+        r.destruct.is_empty(),
+        "a round into a person owed {:?} to the P22 damage door — this is the \
+         log flood, and the host answers every one of these with a \
+         `NoDestructible` refusal",
+        r.destruct
+    );
+
+    // …and the DESTRUCTIBLE branch still works, which is what says the guard
+    // above discriminates rather than simply refusing everything.
+    let mut wall = Rig::new();
+    spawn_wall(&mut wall.world, 8.0);
+    wall.world.mark_dirty();
+    wall.world.propagate();
+    wall.arm("rifle");
+    wall.step(&idle());
+    let r = wall.step(&hold_trigger());
+    assert_eq!(
+        r.destruct.len(),
+        1,
+        "a round into a destructible owes it nothing: {:?}",
+        r.destruct
+    );
+    assert!((r.destruct[0].1 - RIFLE_J).abs() < 1e-9);
+}
+
+/// **A ROUND INTO A NON-DESTRUCTIBLE PROP OWES NOTHING AT ALL** — the other half
+/// of the flood (wave WPN1).
+///
+/// The ground is the case a level cannot avoid: it is a static collider, it has
+/// no `Destructible` and it is what most missed rounds end at. Before this wave
+/// every one of those was a `NoDestructible` line in the log.
+#[test]
+fn a_round_into_the_ground_owes_the_p22_door_nothing() {
+    let mut rig = Rig::new();
+    rig.arm("rifle");
+    rig.step(&idle());
+    // Straight down: the ground slab is the only thing under the hero.
+    {
+        let e = rig.world.entity_of(HERO).expect("the hero");
+        let mut cm = rig
+            .world
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("a mover");
+        cm.runtime.aim_pitch_deg = -89.0;
+    }
+    let r = rig.step(&hold_trigger_no_edge());
+    println!(
+        "{} round(s) into the ground: {} hit(s), {:?} owed",
+        r.shots,
+        r.hits.len(),
+        r.destruct
+    );
+    assert_eq!(r.shots, 1, "the trigger did not fire");
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(
+        r.hits[0].target,
+        Some(GROUND),
+        "the shot did not reach the ground: {:?}",
+        r.hits[0].target
+    );
+    assert!(!r.hits[0].on_flesh, "the ground is not flesh");
+    assert!(
+        r.destruct.is_empty(),
+        "a round into the ground owed {:?} to a door the ground does not have",
+        r.destruct
+    );
+}
+
+/// **A HIT SHOWS, AND A HEAVY ONE PUTS A BODY ON THE FLOOR** (wave WPN1).
+///
+/// The two halves are asserted apart, because a `stagger` that always knocked
+/// down and a `knockdown` that never fired both satisfy a single counter:
+///
+/// * a **rifle round** — 1 700 J against a 2 000 J body, 0.85 of what it had —
+///   arms the reaction AND takes the mode;
+/// * a **pistol round** — 500 J against a 5 000 J body, a tenth — arms the
+///   reaction and leaves the body standing.
+#[test]
+fn a_non_fatal_hit_arms_a_reaction_and_a_heavy_one_takes_the_mode() {
+    // The heavy blow.
+    let mut rig = Rig::new();
+    spawn_target(&mut rig.world, 8.0, weapon::DEFAULT_VITALITY_J);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.arm("rifle");
+    rig.step(&idle());
+    let mode_before = rig.target_mode();
+    let r = rig.step(&hold_trigger());
+    println!(
+        "a {RIFLE_J} J round on a {} J body: {} stagger(s), {} knockdown(s), mode {:?} -> {:?}",
+        weapon::DEFAULT_VITALITY_J,
+        r.staggers,
+        r.knockdowns,
+        mode_before,
+        rig.target_mode()
+    );
+    assert_eq!(
+        r.staggers, 1,
+        "a round that hurt somebody armed no reaction"
+    );
+    assert_eq!(
+        r.knockdowns, 1,
+        "a round worth 85 % of a body left it standing"
+    );
+    assert_eq!(
+        rig.target_mode(),
+        inf_ecs::components::MovementMode::FallControlled,
+        "the mode table did not let go"
+    );
+    // The reaction really reached the animation seam, and it is a ONE-SHOT: the
+    // trigger is consumed by whoever asks first, so a second read finds nothing.
+    assert!(
+        inf_ecs::anim_bridge::consume_anim_notify(&mut rig.world, TARGET, weapon::STAGGER_TRIGGER)
+            || inf_ecs::anim_bridge::bridge(&rig.world).is_none(),
+        "the hit reaction never reached the animation bridge"
+    );
+
+    // The light blow, on a body with plenty left.
+    let mut soft = Rig::new();
+    spawn_target(&mut soft.world, 8.0, 5000.0);
+    soft.world.mark_dirty();
+    soft.world.propagate();
+    soft.arm("pistol");
+    soft.step(&idle());
+    let r = soft.step(&hold_trigger());
+    println!(
+        "a pistol round on a 5000 J body: {} stagger(s), {} knockdown(s), mode {:?}",
+        r.staggers,
+        r.knockdowns,
+        soft.target_mode()
+    );
+    assert_eq!(r.staggers, 1, "a pistol round armed no reaction");
+    assert_eq!(
+        r.knockdowns, 0,
+        "a pistol round worth an eighth of a body knocked it down — the \
+         threshold is not discriminating and every hit is a knockdown"
+    );
+    assert_ne!(
+        soft.target_mode(),
+        inf_ecs::components::MovementMode::FallControlled
     );
 }
