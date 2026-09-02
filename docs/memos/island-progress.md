@@ -25750,6 +25750,16 @@ settlement's content.
   degree at a thigh; the f64 pair is what the module's own doc says to use for
   committed geometry.
 * **An ascending sample list is load-bearing when the sampler walks forward.**
+* **A lone `\` before a newline in a non-raw PYTHON string is a *Python*
+  continuation — SEVENTH time.** P22 named it (`write_text` and a `\` in a Rust
+  literal) and this wave met it in a new dress: a `python - <<'PYEOF'` heredoc,
+  whose triple-quoted strings eat the `\` and leave the Rust literal carrying a
+  run of fourteen spaces where a continuation used to be. **Three survived to the
+  battery**, in `pose.rs` twice and `island_gate.rs` once, and
+  `no_string_literal_in_the_workspace_carries_an_eaten_continuation` — P22's own
+  gate, written the last time this happened — caught all three by name and line.
+  The spelling that cannot be broken is one long line; `cargo fmt` leaves a
+  literal alone.
 
 ### CARRIED
 

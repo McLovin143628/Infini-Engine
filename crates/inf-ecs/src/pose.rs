@@ -4209,7 +4209,7 @@ mod tests {
         // A standing crowd agent poses exactly what a hero does.
         assert_eq!(
             standing.pose, hero_pose.pose,
-            "a `Stand` agent poses differently from a body with no verdict at              all, so `Stand` is not the absence of a posture"
+            "a `Stand` agent poses differently from a body with no verdict at all, so `Stand` is not the absence of a posture"
         );
         let at = |p: &EvaluatedPose| joint_at(p, &rig, knee);
         println!(
@@ -4230,7 +4230,7 @@ mod tests {
         // The dance is a clip: two times, two poses.
         assert_ne!(
             dance_a.pose, dance_b.pose,
-            "a dancing body is in the same pose at both ends of its own loop,              so `posture_t` is not reaching the sampler"
+            "a dancing body is in the same pose at both ends of its own loop, so `posture_t` is not reaching the sampler"
         );
     }
 

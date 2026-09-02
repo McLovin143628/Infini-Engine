@@ -5301,7 +5301,7 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         // night`, at the settlement that HAS one.
         assert_eq!(
             r.society.leisure_places, 0,
-            "{label}: this settlement offers {} places to spend an evening, so              the arms below are measuring the wrong thing — they say a town              empties BECAUSE it has nowhere to go",
+            "{label}: this settlement offers {} places to spend an evening, so the arms below are measuring the wrong thing — they say a town empties BECAUSE it has nowhere to go",
             r.society.leisure_places
         );
         assert_eq!(
