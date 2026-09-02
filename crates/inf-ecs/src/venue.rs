@@ -337,7 +337,7 @@ mod tests {
             "a level with no venue spawned something"
         );
 
-        let v = Uuid::from_u128(0x5E_1);
+        let v = Uuid::from_u128(0x5E01);
         volume_with(&mut world, v, DVec3::new(10.0, 3.0, 4.0), 1);
         let a = sync_venue_audio(&mut world);
         assert_eq!((a.wanted, a.spawned, a.despawned, a.live), (1, 1, 0, 1));
@@ -372,14 +372,14 @@ mod tests {
     /// LEVEL's rather than the order's.
     #[test]
     fn an_emitters_id_is_the_levels_own_and_not_the_orders() {
-        let v = Uuid::from_u128(0x5E_2);
+        let v = Uuid::from_u128(0x5E02);
         let mut a = EcsWorld::new();
         volume_with(&mut a, v, DVec3::ZERO, 2);
         sync_venue_audio(&mut a);
         let mut b = EcsWorld::new();
         volume_with(
             &mut b,
-            Uuid::from_u128(0x5E_3),
+            Uuid::from_u128(0x5E03),
             DVec3::new(99.0, 0.0, 0.0),
             1,
         );

@@ -5324,18 +5324,18 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         // never claimed, or walking a leg with no destination.
         let (evening_out, small_hours) = (at(21.0), at(1.0));
         assert!(
-            evening_out.at_home * 2 > total(&evening_out),
+            evening_out.at_home * 2 > total(evening_out),
             "{label}: at {:.2} h only {} of {} are home in a town with no bar",
             evening_out.hour,
             evening_out.at_home,
-            total(&evening_out)
+            total(evening_out)
         );
         assert!(
-            small_hours.at_home * 2 > total(&small_hours),
+            small_hours.at_home * 2 > total(small_hours),
             "{label}: at {:.2} h only {} of {} are home",
             small_hours.hour,
             small_hours.at_home,
-            total(&small_hours)
+            total(small_hours)
         );
         println!(
             "NPC1d {label}: past dusk — {:.2} h {} home / {} walking; {:.2} h {} home / {} walking; the settlement offers {} leisure place(s) and {} night job(s)",
@@ -7662,7 +7662,10 @@ fn club_probe(
     // hangs in.
     let flat = glam::DVec2::new(hinge.x - emitter.x, hinge.z - emitter.z);
     let m = flat.length();
-    if !(m > 1e-3) {
+    // `is_finite` first, then the comparison: a NaN length must refuse rather
+    // than divide, and `!(m > eps)` says that in a spelling clippy reads as a
+    // negated partial order.
+    if !m.is_finite() || m <= 1e-3 {
         return None;
     }
     let out = glam::DVec3::new(flat.x / m, 0.0, flat.y / m);
@@ -8265,17 +8268,17 @@ fn a_nightclubs_dance_floor_fills_with_dancers() {
         ));
     };
     place(
-        uuid::Uuid::from_u128(0x0C_1),
+        uuid::Uuid::from_u128(0x0C01),
         inf_pcg::ArchetypeId::Nightclub,
         glam::DVec3::ZERO,
     );
     place(
-        uuid::Uuid::from_u128(0x0C_2),
+        uuid::Uuid::from_u128(0x0C02),
         inf_pcg::ArchetypeId::Apartment,
         glam::DVec3::new(90.0, 0.0, 0.0),
     );
     place(
-        uuid::Uuid::from_u128(0x0C_3),
+        uuid::Uuid::from_u128(0x0C03),
         inf_pcg::ArchetypeId::Office,
         glam::DVec3::new(0.0, 0.0, 90.0),
     );
