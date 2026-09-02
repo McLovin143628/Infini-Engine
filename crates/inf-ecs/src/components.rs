@@ -3845,6 +3845,34 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub lights: Vec<ScatteredLight>,
+    /// **Whether any instance in [`evaluated`](Self::evaluated) pulses** (wave
+    /// VEN1a audit) — the `O(1)` answer to the question the scatter memo's key
+    /// asks every frame.
+    ///
+    /// # Why it is a field and not a scan
+    ///
+    /// `ScatterSource::pulse_tick` is *zero unless this volume actually
+    /// pulses*, and that condition is evaluated to build the memo **key** — so
+    /// it runs before the lookup, on a hit as well as a miss. Spelled as
+    /// `evaluated.iter().any(…)` it made a carried projection walk every
+    /// instance it was carrying precisely so as not to touch them: measured on
+    /// `projection_budget`'s 20 020-instance fixture, the memo-hit path went
+    /// **0.009 ms → 0.350 ms**, 39× dearer, for a question whose answer is
+    /// `false` in every volume of every level that holds no festoon.
+    ///
+    /// # One writer
+    ///
+    /// [`set_population`](Self::set_population) is the only code in the tree
+    /// that assigns `evaluated`, and it derives this in the same pass — so the
+    /// two cannot disagree. A struct literal that sets `evaluated` directly
+    /// must set this too; `a_volumes_pulse_flag_tracks_its_own_population`
+    /// pins the derivation both ways.
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` like everything else derived
+    /// here: it reaches no bytes and moves no schema.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub pulses: bool,
     /// Bumped every time the derived population is replaced through
     /// [`set_structures`](Self::set_structures) or
     /// [`set_population`](Self::set_population) — the **change stamp** the
@@ -4001,6 +4029,7 @@ impl Default for PcgVolume {
             structures: Vec::new(),
             doorways: Vec::new(),
             lights: Vec::new(),
+            pulses: false,
             structures_gen: 0,
             structure_groups: Vec::new(),
             residents: Vec::new(),
@@ -4090,6 +4119,11 @@ impl PcgVolume {
         self.residents = residents;
         self.interior_nav = interior_nav;
         let (ns, ni) = (solids.len(), instances.len());
+        // **Derived here, in the pass that already owns the list** (wave VEN1a
+        // audit). See `pulses`: the projectors ask this once a frame per volume
+        // to build the scatter memo's key, and asking it by walking `evaluated`
+        // made a memo HIT cost what the memo exists to avoid.
+        self.pulses = instances.iter().any(|i| i.surface.pulse_hz > 0.0);
         self.evaluated = instances;
         self.structures = solids;
         let (mut sc, mut ic) = (0usize, 0usize);
@@ -6783,6 +6817,7 @@ mod tests {
             draw_distance: 600.0,
             doorways: Vec::new(),
             lights: Vec::new(),
+            pulses: false,
             evaluated: vec![ScatteredInstance {
                 position: DVec3::new(1.0, 2.0, 3.0),
                 rotation: DQuat::IDENTITY,
@@ -6848,6 +6883,7 @@ mod tests {
         assert!(!json.contains("structure_groups"));
         assert!(!json.contains("residents"));
         assert!(!json.contains("interior_nav"));
+        assert!(!json.contains("pulses"), "the pulse flag is derived too");
         let back: PcgVolume = serde_json::from_str(&json).unwrap();
         // … and decode empty, while the persisted fields round-trip.
         assert!(back.evaluated.is_empty());
@@ -6986,6 +7022,66 @@ mod tests {
         assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
         assert_eq!(w.structure_groups[0].range(), 0..2);
         assert_eq!(w.structure_groups[1].range(), 2..4);
+    }
+
+    /// **THE PULSE FLAG IS THE POPULATION'S OWN ANSWER** (wave VEN1a audit).
+    ///
+    /// [`PcgVolume::pulses`] exists so the projectors can build the scatter
+    /// memo's key without walking the instances the memo is carrying — which
+    /// makes it a *second* statement of something `evaluated` already says, and
+    /// a second statement is only safe while the two cannot drift.
+    /// [`PcgVolume::set_population`] is the one writer, so this arm pins it
+    /// **both ways**: a population with a festoon in it raises the flag, and
+    /// replacing that population with one that has none lowers it again. Only
+    /// the second half fails a `|=`, which is the shape the mistake would take.
+    #[test]
+    fn a_volumes_pulse_flag_tracks_its_own_population() {
+        let at = |pulse_hz: f32| ScatteredInstance {
+            position: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            scale: 1.0,
+            kind: 0,
+            mesh: None,
+            extent: None,
+            glow: 0.0,
+            surface: ScatteredSurface {
+                pulse_hz,
+                ..ScatteredSurface::DEFAULT
+            },
+        };
+        let set = |v: &mut PcgVolume, insts: Vec<ScatteredInstance>| {
+            v.set_population(
+                insts,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
+                Vec::new(),
+            );
+        };
+        let mut v = PcgVolume::default();
+        assert!(!v.pulses, "an empty volume breathes");
+        // A settlement block of ordinary modules: the default surface is steady,
+        // which is what keeps this `false` for every level that predates VEN1a.
+        set(&mut v, vec![at(0.0); 8]);
+        assert!(!v.pulses, "a volume of steady modules claims to pulse");
+        // …and one festoon among them is enough.
+        let mut with = vec![at(0.0); 8];
+        with[5] = at(0.27);
+        set(&mut v, with);
+        assert!(v.pulses, "a volume holding a festoon does not pulse");
+        // **The half a `|=` would fail**: the flag is re-derived, not accumulated.
+        set(&mut v, vec![at(0.0); 8]);
+        assert!(
+            !v.pulses,
+            "the flag survived the population that raised it — a carried batch \
+             would then re-pack eight times a second for ever"
+        );
+        // A NaN rate is not `> 0.0`, so it is steady rather than a volume that
+        // re-packs on every tick (the island wave I8a spelling).
+        set(&mut v, vec![at(f32::NAN)]);
+        assert!(!v.pulses, "a NaN rate reads as a pulse");
     }
 
     #[test]

@@ -1717,14 +1717,15 @@ fn carry_or_push_pcg_scatter(
         // must be in the key or a carried batch keeps the phase it was packed
         // at and a club's string lights freeze mid-breath -- but a key that
         // always carried it would re-pack all 172 of the island's settlement
-        // volumes eight times a second for a festoon in one of them. The scan
-        // is O(instances) and runs only on a memo MISS, where the pack that
-        // follows is already O(instances).
-        pulse_tick: if vol.evaluated.iter().any(|i| i.surface.pulse_hz > 0.0) {
-            clock.pulse_tick
-        } else {
-            0
-        },
+        // volumes eight times a second for a festoon in one of them.
+        //
+        // **`PcgVolume::pulses` and NOT a scan of `evaluated`** (VEN1a audit).
+        // This expression builds the memo's KEY, so it runs before the lookup
+        // -- on a hit as much as a miss. Spelled as `evaluated.iter().any(..)`
+        // it made a carried projection walk every instance it was carrying
+        // precisely so as not to touch them: measured on `projection_budget`'s
+        // 20 020-instance fixture, the hit path went 0.009 ms -> 0.350 ms.
+        pulse_tick: if vol.pulses { clock.pulse_tick } else { 0 },
         anchor: translation,
     };
     if let Some(batches) = prev.take(source) {
