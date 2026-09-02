@@ -30424,7 +30424,7 @@ shipped at I6/SK1b/SK1c — the thirteen-field `WeaponDef` TOML door, the
 ammunition clock in the trace, a real ray, the weapon as an entity on a `hand_r`
 socket, health in joules with a `Downed` latch and a ragdoll handoff, and two
 gates already running PIE == shipping over all of it. So this is a **completion**
-in eight commits.
+in fourteen commits.
 
 **THE REPORT.** A round leaving a barrel made no noise; only the *impact* did, so
 a miss was silent. `weapon::report_source()` is one Ring-0 description
