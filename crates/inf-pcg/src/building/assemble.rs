@@ -506,27 +506,31 @@ impl Ctx<'_> {
             if !(half.x > 0.0 && half.y > 0.0 && half.z > 0.0) {
                 return;
             }
-            let (h, p) = if along_x {
-                (
-                    half,
-                    DVec2::new(mid.x, mid.y + outward * (half_t + standoff)),
-                )
-            } else {
-                (
-                    DVec3::new(half.z, half.y, half.x),
-                    DVec2::new(mid.x + outward * (half_t + standoff), mid.y),
-                )
-            };
+            // **The half-extents stay LOCAL**, and this is the trap the first
+            // cut fell into. `PcgInstance::extent` is half-extents *in the
+            // instance's own ROTATED frame* -- `wall_furniture` passes the
+            // authored `def.half` beside a `yaw_onto` and lets the rotation do
+            // the mapping. Swapping the axes into world space *as well* applies
+            // the turn twice, and on a wall running along Z that draws a 1.8 m
+            // sign as a 0.14 m one standing edge-on to the street. The
+            // orientation is carried entirely by the yaw; `half` stays what the
+            // palette wrote -- `(along the run, up, out from the wall)`, which
+            // IS `(local +X, +Y, +Z)` once local `+Z` faces outward.
             let normal = if along_x {
                 DVec3::new(0.0, 0.0, outward)
             } else {
                 DVec3::new(outward, 0.0, 0.0)
             };
+            let p = if along_x {
+                DVec2::new(mid.x, mid.y + outward * (half_t + standoff))
+            } else {
+                DVec2::new(mid.x + outward * (half_t + standoff), mid.y)
+            };
             out.decor.push(self.instance_lit(
                 kind,
                 DVec3::new(p.x, cy, p.y),
                 yaw_onto(normal),
-                h,
+                half,
                 Some(sign.colour),
             ));
         };
@@ -1585,6 +1589,121 @@ mod tests {
                 ph.dedup();
                 assert_eq!(ph.len(), n, "{id:?}: two spots share a phase slot");
             }
+        }
+    }
+
+    /// **THE STREET FACE STANDS OUTSIDE, FACES OUT, AND IS THE SIZE IT SAYS**
+    /// (wave VEN1a).
+    ///
+    /// Three claims, and the third is the one the first cut of `street_face`
+    /// failed. `PcgInstance::extent` is half-extents in the instance's **own
+    /// rotated frame**, so a placement that swaps them into world axes *and*
+    /// applies a yaw turns the piece twice: on a wall running along Z a 1.8 m
+    /// sign was drawn as a 0.14 m one standing edge-on to the street. Nothing
+    /// caught it — the decoration-tail arm checks the module and the colour, a
+    /// sign carries no collider, and no sweep in this module had a lot that was
+    /// deeper than it was wide.
+    ///
+    /// # What exercises the branch, and what does not
+    ///
+    /// **Not** the lot frame. `street_face` runs in LOT coordinates, before
+    /// `place_in_frame`, so rotating the lot cannot change which wall is "along
+    /// X" — the first spelling of this arm rotated the frame through four yaws
+    /// and passed with the bug re-introduced. What decides it is
+    /// `choose_entrance`: the longest exterior run on the ground floor. So the
+    /// arm varies the **footprint's aspect** instead, and a deeper-than-wide lot
+    /// is what puts the entrance on a Z-running wall.
+    ///
+    /// Mutation-verified: the swap re-introduced fails this arm on the deep-lot
+    /// half and on nothing else, which is exactly the shape of the defect.
+    #[test]
+    fn the_street_sign_stands_proud_of_the_wall_it_names() {
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            let Some(sign) = arch.entrance_sign else {
+                continue;
+            };
+            let g = arch.grammar().expect("parses");
+            let plate = g.module_index(sign.plate).expect("declared");
+            let want = [
+                sign.half[0] as f32,
+                sign.half[1] as f32,
+                sign.half[2] as f32,
+            ];
+            let mut wide = 0;
+            let mut deep = 0;
+            for (w, d) in [(34.0f64, 23.0f64), (23.0, 34.0)] {
+                for seed in [7u64, 44, 512] {
+                    let out = build(
+                        &BuildingParams {
+                            floors: 1,
+                            ..BuildingParams::new(id, lot(w, d), 4.0, seed)
+                        },
+                        seed,
+                        true,
+                    );
+                    // The palette also mounts `Neon` on interior walls, so the
+                    // street plate is the one drawn at the SIGN's own size.
+                    let plates: Vec<&PcgInstance> = out
+                        .instances
+                        .iter()
+                        .filter(|i| i.kind_index == plate)
+                        .collect();
+                    let street = plates
+                        .iter()
+                        .find(|i| {
+                            i.extent
+                                .map(|e| (0..3).all(|k| (e[k] - want[k]).abs() < 1e-4))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}: lot {w}x{d} seed {seed}: no plate is drawn at its authored                                  {want:?} — the {} plate(s) present are {:?}",
+                                arch.display,
+                                plates.len(),
+                                plates.iter().map(|i| i.extent).collect::<Vec<_>>()
+                            )
+                        });
+                    // It burns the palette's own colour, not the family's.
+                    assert_eq!(street.surface.emissive, sign.colour);
+                    // …and it stands OUTSIDE the wall it names: past the wall's
+                    // own outer face, along that wall's outward normal. Stated
+                    // as "no solid contains its centre" the first time, which is
+                    // a different and much noisier claim — a lintel is as thick
+                    // as its wall, so the two touch, and the arm went red for a
+                    // reason that had nothing to do with the sign.
+                    let wi = out.plan.entrance.expect("an entrance");
+                    let wall = out.plan.walls[wi];
+                    let op = out
+                        .plan
+                        .openings
+                        .iter()
+                        .find(|o| o.wall == wi && o.kind == OpeningKind::Door)
+                        .expect("a door on the entrance wall");
+                    let on_wall = wall.point_at((op.start + op.end) * 0.5);
+                    let inside = out.plan.rooms[wall.inside].rect.center();
+                    let out_dir = (on_wall - inside).normalize_or_zero();
+                    let stand = (DVec2::new(street.pos.x, street.pos.z) - on_wall).dot(out_dir);
+                    assert!(
+                        stand >= arch.wall_thickness * 0.5,
+                        "{}: lot {w}x{d} seed {seed}: the sign stands {stand:.3} m out from                          the wall line, which is inside a {} m wall",
+                        arch.display,
+                        arch.wall_thickness
+                    );
+                    if wall.direction().x.abs() >= wall.direction().y.abs() {
+                        wide += 1;
+                    } else {
+                        deep += 1;
+                    }
+                }
+            }
+            // **The anti-vacuity half**: both branches were actually taken, or
+            // the arm is a statement about one of them.
+            assert!(
+                wide > 0 && deep > 0,
+                "{}: {wide} X-running and {deep} Z-running entrances — this arm                  exercised one branch",
+                arch.display
+            );
         }
     }
 

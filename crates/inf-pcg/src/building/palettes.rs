@@ -1817,13 +1817,13 @@ const BAR: BuildingArchetype = BuildingArchetype {
 # windows that do exist are high and small so nobody sees the stage from the\n\
 # pavement. The signage itself is HUNG by the assembler and not built into the\n\
 # run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
-module Pier     = size 0.4 offset 0,1.8,0.2   collider 0.2,1.8,0.2\n\
-module Clad     = size 1.4 offset 0,1.8,0.7   collider 0.14,1.8,0.7\n\
+module Pier     = size 0.4 offset 0,1.8,0.2   collider 0.09,1.8,0.2\n\
+module Clad     = size 1.4 offset 0,1.8,0.7   collider 0.09,1.8,0.7\n\
 module Glazing  = size 1.1 offset 0,1.8,0.55  collider 0.05,1.8,0.55\n\
 module Partition= size 1.0 offset 0,1.6,0.5   collider 0.06,1.6,0.5\n\
 module Pane     = size 1   offset 0,0,0\n\
-module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
-module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.09,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.09,0.5,0.5\n\
 module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
 module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
 module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
@@ -1936,13 +1936,13 @@ const NIGHTCLUB: BuildingArchetype = BuildingArchetype {
 # windows that do exist are high and small so nobody sees the stage from the\n\
 # pavement. The signage itself is HUNG by the assembler and not built into the\n\
 # run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
-module Pier     = size 0.4 offset 0,2.1,0.2   collider 0.2,2.1,0.2\n\
-module Clad     = size 1.4 offset 0,2.1,0.7   collider 0.14,2.1,0.7\n\
+module Pier     = size 0.4 offset 0,2.1,0.2   collider 0.1,2.1,0.2\n\
+module Clad     = size 1.4 offset 0,2.1,0.7   collider 0.1,2.1,0.7\n\
 module Glazing  = size 1.1 offset 0,2.1,0.55  collider 0.05,2.1,0.55\n\
 module Partition= size 1.0 offset 0,1.9,0.5   collider 0.06,1.9,0.5\n\
 module Pane     = size 1   offset 0,0,0\n\
-module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
-module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.1,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.1,0.5,0.5\n\
 module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
 module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
 module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
@@ -2054,13 +2054,13 @@ const STRIP_CLUB: BuildingArchetype = BuildingArchetype {
 # windows that do exist are high and small so nobody sees the stage from the\n\
 # pavement. The signage itself is HUNG by the assembler and not built into the\n\
 # run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
-module Pier     = size 0.4 offset 0,2.0,0.2   collider 0.2,2.0,0.2\n\
-module Clad     = size 1.4 offset 0,2.0,0.7   collider 0.14,2.0,0.7\n\
+module Pier     = size 0.4 offset 0,2.0,0.2   collider 0.1,2.0,0.2\n\
+module Clad     = size 1.4 offset 0,2.0,0.7   collider 0.1,2.0,0.7\n\
 module Glazing  = size 1.1 offset 0,2.0,0.55  collider 0.05,2.0,0.55\n\
 module Partition= size 1.0 offset 0,1.8,0.5   collider 0.06,1.8,0.5\n\
 module Pane     = size 1   offset 0,0,0\n\
-module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
-module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.1,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.1,0.5,0.5\n\
 module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
 module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
 module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
