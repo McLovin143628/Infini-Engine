@@ -30233,3 +30233,143 @@ clippy `-D warnings` **0**, exit 0, run LAST. Scene schema **v27, unmoved**;
 `Cargo.lock` and every manifest untouched; no new dependency of any kind.
 Twenty commits (fifteen the implementer's, five the audit's), 63 files,
 +6 067 / −174, **24 new `#[test]` arms**.
+
+**ISLAND WAVE VEN1b — the life inside a venue: seats, dances, a night out and a
+door (2026-09-02, base `8820694a`).** The mandate's reference is
+`docs/reference_videos/frames/venues/0012`–`0060` (outside the repo, never
+committed): patrons seated at tables and along a bench at the catwalk edge, a
+dancer on the pole, a bouncer on the door, and a second stage seen **through a
+doorway**. Seven clauses, **no schema move** (scene stays v27) and **no new
+dependency of any kind**. The wave's economy is one sentence: *everything a venue
+needs already existed and nothing was reading it* — the assembler knew where the
+stools were, the door system knew which leaves were open, and every `.inf_skel`
+has carried a bone-role table since v3.
+
+**THE PLACES A VENUE OFFERS A BODY.** `society::slots_of` answers *how many
+people does this building hold* out of the **plan**, which is right for a house
+and wrong for a bar: what a patron does in a bar is *sit on that stool*, and a
+stool is a property of the furniture the **assembler** placed rather than of a
+rectangle. `inf_pcg::building::station` derives six affordances where the
+furniture goes — `Seat` (a stool; one per 0.6 m of bench), `Mingle` (dance-floor
+standing room on a spaced lattice), `Tend` (**behind** the counter, which is the
+whole difference between a bar and a shelf), `Perform` (**on** the deck),
+`Guard` (outside the entrance) and `Music` (nobody stands here) — and carries
+them on `GrammarOutput::stations`, `#[serde(skip)]` all the way down. Measured
+over 4 seeds × 2 storey counts: **Bar 11 seats / 1 counter / 1 door; Nightclub 55
+/ 16 standing / a deck; Strip club 47 / a deck; the other seven ZERO.** The seven
+zeroes are the finding: before the derivation was gated on the ROOM, the
+Factory / warehouse palette offered **111 seats** — it puts a `Bench` in its
+workshop and `shape_of` maps `Desk | Table | Bench` onto one family — which would
+have put the town's night out on an industrial estate and made no level
+predating this wave byte-identical to itself.
+
+**THE FOURTH ROLE.** `SlotRole::Leisure` is **appended** (`Home` 0, `Work` 1,
+`Errand` 2, `Leisure` 3). No wire pin moved and none exists to move: neither
+`SlotRole` derives `Serialize` or `Reflect` and `PcgVolume::residents` is
+`#[serde(skip)]`; what `as_u8` is frozen against is the replay trace, so the
+variant took the next byte. `SlotPosture` and `SlotShift` ride the slot beside
+it, and `shift_of` is one exhaustive match over the new `RoomType::ALL`, so a
+fifteenth room type fails to compile rather than defaulting.
+
+**A BODY THAT SITS, AND A BODY THAT DANCES.** `inf_anim::posture` — two poses as
+**authored clip data addressed by BONE ROLE**, composed onto the machine's own
+result inside `step_pose_evaluation`'s writer chain. **RULING: a role-addressed
+Rust clip, not an `.inf_anim` and two `.inf_sm` states** — a clip cannot be
+authored as data at all (`inf_anim::text` is a `StateMachine` door; the only ways
+in are glTF import and Rust generation), the island's rig is
+`samples/starter-character` whose committed bytes are byte-locked to
+`build_character` (**and the lock is a lock on the New Character wizard**), and a
+clip keyed by joint INDEX is a clip for one rig. The sit is measured in model
+space rather than argued: on the 161-bone mannequin the femur is 0.482 m, the
+hips go **0.928 → 0.445** (one femur, and the drop is *derived* from the rig so a
+child sits at its own height), the knee ends **0.480 m in front of** the hip and
+the ankle **0.077 m** off it in plan. The dance is a 1.2 s loop with a 10 cm
+weight shift, ±6° of hip roll against a counter-twist, and alternating arms —
+armed on all three, with per-agent phase **and tempo**, because a phase spread
+alone leaves two dancers in lockstep for ever a beat apart. `psin64` and never
+`psin`: the f32 pair is documented "demo-grade ~5e-3", a quarter of a degree at
+the sit's own thigh.
+
+**THE TOWN STOPS EMPTYING AT SIX.** `SocietyRes` grows `night_work` and
+`leisure`, each **claimed** — unlike a day desk, because a venue's three jobs are
+three *distinct places* and two bodies claiming one stand inside each other.
+`plan_day` tries the scarce thing first (a night shift, `18:00 → 03:00`), then
+the working day with an evening appended (`20:00` out, `02:00` home).
+`NIGHTLIFE_SHARE` is 0.34 and is deliberately larger than the venues hold: **the
+seat count is the cap**. `leg()` now walks the last few metres to the slot
+itself, which is exactly a no-op for every leg planned before this wave (every
+plan-derived slot stands on its own room node) and is armed as such rather than
+asserted in a comment.
+
+**THE MUSIC, AND THE DOOR IT COMES THROUGH.** `inf_ecs::venue` reconciles one
+entity with an `AudioSource` (a scene-**v6** component) against each venue's
+`Music` station, in the society phase and for the society's reason. Audio
+occlusion has been one unfiltered ray and a flat −12 dB since P12.3, taken
+**once at `Play` time** — so a venue's loop began muffled behind its own door and
+stayed muffled however far in you walked. `inf_physics::d3::audio` reads the
+doorways audio has been walking past since I6: *clear* → unity, *no doorway near*
+→ −12 dB (P12.3 to the digit), *OPEN doorway* → attenuated by the listener's own
+distance from the opening with **no filter**, *SHUT door* → −24 dB **plus a
+500 Hz low-pass**. **A detour is not an attenuation**, and that is a measurement:
+a detour is nearly scale-free (4 m straight out from an opening detours 0.22 m
+and 5 m round the corner detours 1.99 m, while a listener **sixty metres away**
+detours 5.2 m and was accepted as hearing the club through its front door), so
+the detour is a *filter* and the gain is a function of the listener's distance.
+Both hosts' private `occlusion_gain` raycasts — two copies of one rule with a
+−12 dB constant beside each — are gone, and a MIRROR-fenced block re-evaluates
+every looping spatial source that opts in, every step, through the appended
+`AudioCommand::SetOcclusion`. **RULING on the low-pass: the decision is taken and
+rides the command stream; the DEVICE is not** — `backend.rs` has no filter code
+and the mixer's `Effect::Lowpass` has been modelled-not-applied since P12.
+Content: `samples/settlement/Venue_Music.inf_audio`, so the `Play` names a clip
+that resolves.
+
+**THE CROWD ON THE FLOOR. RULING: cap the occupancy to the spacing; do NOT fix
+`steer_agent` avoidance.** The evidence is not a budget, it is the shape of the
+collision: an agent standing at a station has **arrived**, and an arrived agent's
+steering wish is `ZERO`. Avoidance separates bodies that *walk*; it can do
+nothing about two bodies standing on one point. So a dance floor's stations are
+1.4 m apart (2.3 capsule diameters) and each is **claimed**, capped at 16 a room.
+The bound is stated: a crowd is still a wall *while it walks*. Prop-in-hand is
+**named and not taken** — the door exists end to end (`AttachedTo` +
+`WEAPON_SOCKET` + `GRIP_PROP`, which is how a rifle reaches a hand) and what
+stops it is that there is no drink: a spawned prop resolves to `Primitive::Cube`,
+and a cube in every patron's hand reads worse than an empty one.
+
+**THE GATE.** `pie_equals_shipping_at_a_club_on_a_saturday_night`, at half past
+ten on the fixture's own bar, identical on both hosts: **512 agents; 35 night
+jobs → 35 workers; 50 leisure places → 48 revellers (107 turned away); 48 seated,
+35 on shift, 83 of them at the venue, 35 at the counter; 6 speakers, the nearest
+1.6 m off; 750 `SetOcclusion` over 120 steps; society 0.026 ms / crowd 0.176 ms a
+step against ratchets of 0.5 and 1.0; 120 step digests identical AND the audio
+command stream identical** (`state_bytes` folds eleven sections and audio is not
+one of them). The three points, six numbers because a door has two states:
+**inside +0.0 dB `clear` either way; the opening −24.0 dB `shut` at 500 Hz
+shut and +0.0 dB `doorway` unfiltered open; the street four metres out −24.0 dB
+shut and −1.4 dB open.** Beside it,
+`a_nightclubs_dance_floor_fills_with_dancers` runs a real `Nightclub` through the
+production door with a society settled over it — **226 agents, 31 night jobs all
+taken, 246 leisure places → 67 revellers; at 22:30, 52 seated, 15 on the dance
+floor, 4 performing, 27 tending** — because the CI fixture's one venue is a Bar
+and a bar has no dance floor. The day-in-the-life arm gains two hours past dusk
+(21:00 and 01:00, the list **ascending** because the sampler walks it forward)
+and now asserts `leisure_places == 0` beside its emptiness, because "the town
+empties" stopped being a claim about the engine and became one about that
+settlement's content.
+
+**FIVE DEFECTS THE GATE FOUND.** (1) **The island had no ear**: `active_listener`
+finds none and leaves the engine's listener at the **world origin**, so every
+spatial source the island has ever carried was mixed against (0, 0, 0) — the hero
+gains `AudioListener` and both levels are re-blessed. (2) **The hero was 212.8 m
+from the nearest speaker**: every arm in the file places it at `y = 0`, which on
+a levelled pad is under the ground, and none had ever measured a distance.
+(3) **The budget arms were vacuous** — `step_profile` is all zeroes until
+`set_step_profiling` is armed, and zero passes every ratchet. (4) **A leg's hour
+cannot name a shift**: `HOME_H` and `NIGHT_WORK_START_H` are both eighteen
+hundred, so an hour test counted **155 night workers in a town with 31 night
+jobs**; `SlotArrival` carries its destination's `SlotRole` now and no hour is
+load-bearing. (5) **One door of six is not an open club** — `portal_of` takes the
+opening nearest the LISTENER and a venue block is six bars.
+
+Ledger, laws and the carried list in `docs/memos/island-progress.md` under *"Wave
+VEN1b"*.
