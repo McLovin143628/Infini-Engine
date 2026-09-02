@@ -3955,6 +3955,20 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub interior_nav: inf_nav::NavGraph,
+    /// **Where this volume's buildings make a noise** (wave VEN1b) — one
+    /// emitter over the middle of each venue's main room.
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` on exactly the terms
+    /// [`residents`](Self::residents) and [`lights`](Self::lights) are, and for
+    /// the same consequence: **scene v27 does not move**. An emitter is a pure
+    /// function of the plan and the palette, so every host re-derives it.
+    ///
+    /// Written through [`set_population`](Self::set_population) with everything
+    /// else, because an emitter that outlived the volume it names would play a
+    /// room that is not there.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub emitters: Vec<AudioEmitterSlot>,
 }
 
 /// **One place one person can be** (NPC1d): a dependency-light mirror of
@@ -3978,10 +3992,26 @@ pub struct ResidentSlot {
     pub index: u32,
     /// The node of [`PcgVolume::interior_nav`] this slot stands on.
     pub node: inf_nav::NavNodeId,
+    /// **What a body does here** (wave VEN1b) — the mirror of
+    /// `inf_pcg::SlotPosture`. [`Stand`](SlotPosture::Stand) for every slot a
+    /// building plan implies, which is every slot in the palettes that predate
+    /// the venues.
+    pub posture: SlotPosture,
+    /// **When it is filled** (wave VEN1b) — the mirror of `inf_pcg::SlotShift`.
+    pub shift: SlotShift,
+    /// **A unit direction the body faces** (wave VEN1b), in the XZ plane, or
+    /// `DVec3::ZERO` for a slot with no opinion — which is every slot derived
+    /// from a room rectangle.
+    pub face: DVec3,
 }
 
 /// **What a room offers a person** — the mirror of `inf_pcg::SlotRole`, and the
 /// vocabulary `inf_ecs::society`'s schedules are written in.
+///
+/// `Leisure` was appended by wave VEN1b. There is no wire pin to move — nothing
+/// here derives `Serialize` or `Reflect` and `PcgVolume::residents` is
+/// `#[serde(skip)]` — but [`as_u8`](SlotRole::as_u8) is frozen against the
+/// **replay trace**, so it took the next byte rather than a place in the middle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotRole {
     /// Somewhere to sleep.
@@ -3990,6 +4020,9 @@ pub enum SlotRole {
     Work,
     /// Somewhere to go that is neither — a shop.
     Errand,
+    /// Somewhere to spend an evening — a seat at a bar, a place on a dance
+    /// floor (wave VEN1b).
+    Leisure,
 }
 
 impl SlotRole {
@@ -3999,18 +4032,98 @@ impl SlotRole {
             SlotRole::Home => "home",
             SlotRole::Work => "work",
             SlotRole::Errand => "errand",
+            SlotRole::Leisure => "leisure",
         }
     }
 
     /// The byte this role folds into a trace. Frozen: `Home` 0, `Work` 1,
-    /// `Errand` 2.
+    /// `Errand` 2, `Leisure` 3 (appended, wave VEN1b).
     pub fn as_u8(self) -> u8 {
         match self {
             SlotRole::Home => 0,
             SlotRole::Work => 1,
             SlotRole::Errand => 2,
+            SlotRole::Leisure => 3,
         }
     }
+}
+
+/// **What a body DOES at a slot** (wave VEN1b) — the mirror of
+/// `inf_pcg::SlotPosture`, and the half of an affordance the pose pipeline
+/// reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotPosture {
+    /// On both feet. The default, and every pre-venue slot.
+    #[default]
+    Stand,
+    /// Seated — on a stool, on a bench, at the stage edge.
+    Sit,
+    /// Dancing on the spot.
+    Dance,
+}
+
+impl SlotPosture {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            SlotPosture::Stand => "stand",
+            SlotPosture::Sit => "sit",
+            SlotPosture::Dance => "dance",
+        }
+    }
+
+    /// The byte this posture folds into a trace. Frozen on the same terms
+    /// [`SlotRole::as_u8`] is: `Stand` 0, `Sit` 1, `Dance` 2.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            SlotPosture::Stand => 0,
+            SlotPosture::Sit => 1,
+            SlotPosture::Dance => 2,
+        }
+    }
+}
+
+/// **WHEN a slot is filled** (wave VEN1b) — the mirror of
+/// `inf_pcg::SlotShift`, and the bit that stopped the town emptying at
+/// eighteen hundred.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotShift {
+    /// The working day. Every slot in every palette that predates the venues.
+    #[default]
+    Day,
+    /// The evening and the small hours.
+    Night,
+}
+
+impl SlotShift {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            SlotShift::Day => "day",
+            SlotShift::Night => "night",
+        }
+    }
+}
+
+/// **Where a volume's buildings make a noise** (wave VEN1b) — a
+/// dependency-light mirror of the `inf_pcg::StationUse::Music` half of
+/// `PcgStation`, on the [`DoorwaySlot`] / [`ResidentSlot`] terms.
+///
+/// One per venue: the emitter over the middle of its main room. Derived,
+/// `#[serde(skip)]`, never reflected — see [`PcgVolume::emitters`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioEmitterSlot {
+    /// Where the sound comes from, world metres.
+    pub at: DVec3,
+    /// Index into its own building's rooms — a diagnostic, so a reader can say
+    /// *which* room a level's music is coming out of.
+    ///
+    /// There is deliberately no building ordinal beside it: an emitter is
+    /// **located**, and two emitters of one volume are told apart by where they
+    /// are. The ordinal is assigned by `pass.rs` after the assembler has run,
+    /// and carrying it here would mean stamping every station with a number
+    /// only one consumer would read.
+    pub room: u32,
 }
 
 fn default_pcg_extent() -> Vec2d {
@@ -4036,6 +4149,7 @@ impl Default for PcgVolume {
             structure_groups: Vec::new(),
             residents: Vec::new(),
             interior_nav: inf_nav::NavGraph::new(),
+            emitters: Vec::new(),
         }
     }
 }
@@ -4115,11 +4229,13 @@ impl PcgVolume {
         residents: Vec<ResidentSlot>,
         interior_nav: inf_nav::NavGraph,
         lights: Vec<ScatteredLight>,
+        emitters: Vec<AudioEmitterSlot>,
     ) {
         self.doorways = doorways;
         self.lights = lights;
         self.residents = residents;
         self.interior_nav = interior_nav;
+        self.emitters = emitters;
         let (ns, ni) = (solids.len(), instances.len());
         // **Derived here, in the pass that already owns the list** (wave VEN1a
         // audit). See `pulses`: the projectors ask this once a frame per volume
@@ -6819,6 +6935,7 @@ mod tests {
             draw_distance: 600.0,
             doorways: Vec::new(),
             lights: Vec::new(),
+            emitters: Vec::new(),
             pulses: false,
             evaluated: vec![ScatteredInstance {
                 position: DVec3::new(1.0, 2.0, 3.0),
@@ -6866,6 +6983,9 @@ mod tests {
                 floor: 2,
                 index: 0,
                 node: 0x3000_0000_0000_0003,
+                posture: SlotPosture::Stand,
+                shift: SlotShift::Day,
+                face: DVec3::ZERO,
             }],
             interior_nav: {
                 let mut g = inf_nav::NavGraph::new();
@@ -6952,6 +7072,7 @@ mod tests {
             Vec::new(),
             Default::default(),
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
         assert_eq!(v.structure_groups[0].range(), 0..3);
@@ -6973,6 +7094,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
             Vec::new(),
         );
         let second = v.structures_gen;
@@ -7020,6 +7142,7 @@ mod tests {
             Vec::new(),
             Default::default(),
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
         assert_eq!(w.structure_groups[0].range(), 0..2);
@@ -7059,6 +7182,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Default::default(),
+                Vec::new(),
                 Vec::new(),
             );
         };
@@ -8315,9 +8439,35 @@ mod tests {
                 continue;
             };
             let name = rest.trim_end_matches(" {").trim().to_string();
-            // Its derives sit in the few lines above, past the doc comment.
-            let derives = lines[i.saturating_sub(8)..i].join("\n");
-            if derives.contains("Serialize") {
+            // **The ATTRIBUTES, and only the attributes** (wave VEN1b).
+            //
+            // This used to be `lines[i - 8 .. i].join("\n").contains("Serialize")`
+            // — an eight-line window over whatever happened to be above the
+            // enum, **doc comments included**. VEN1b wrote a doc on `SlotRole`
+            // saying, correctly, *"nothing here derives `Serialize`"*, and the
+            // census enrolled it on the strength of the word and demanded a
+            // freeze pin for an enum that reaches no bytes at all.
+            //
+            // A census that reads prose is a census that can be argued with. So
+            // the walk goes UP from the declaration over the attribute-and-doc
+            // block that belongs to it, keeps the `#[…]` lines and discards the
+            // rest — which also removes the eight-line horizon, so an enum with
+            // a long derive list can no longer slip past by being far from its
+            // own attributes.
+            let mut attrs = String::new();
+            for prev in lines[..i].iter().rev() {
+                let t = prev.trim_start();
+                if t.starts_with("#[") {
+                    attrs.push_str(t);
+                    attrs.push('\n');
+                    continue;
+                }
+                if t.starts_with("///") || t.starts_with("//") {
+                    continue;
+                }
+                break;
+            }
+            if attrs.contains("Serialize") {
                 on_the_wire.push(name);
             }
         }

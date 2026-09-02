@@ -80,6 +80,15 @@ pub struct VolumeOutput {
     /// in the world and naming no index, so composition neither shifts nor
     /// re-bases them.
     pub lights: Vec<crate::building::PcgLight>,
+    /// **Where this volume's buildings make a NOISE** (wave VEN1b) — the
+    /// [`Music`](crate::building::StationUse::Music) stations, and nothing else.
+    ///
+    /// The occupied stations became [`slots`](Self::slots) in `pass.rs`, where
+    /// the building's salt was in hand; these are the ones no body stands at,
+    /// and they cross into the ECS as themselves because what reads them is the
+    /// audio step rather than the society. World metres, no index — the terms
+    /// [`doorways`](Self::doorways) and [`lights`](Self::lights) are on.
+    pub emitters: Vec<crate::building::PcgStation>,
 }
 
 /// Join a volume's scatter instances with its grammar/building output.
@@ -107,6 +116,16 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
             l.truncate(VOLUME_LIGHT_CAP);
             l
         },
+        // **The stations nobody stands at** (VEN1b). `pass.rs` has already
+        // taken the occupied ones into `slots`; what is left on the list is the
+        // music, and filtering here — at the one door both hosts pass, beside
+        // the light cap — is what keeps a seat from reaching the audio step and
+        // an emitter from reaching the society.
+        emitters: grammar
+            .stations
+            .into_iter()
+            .filter(|s| !s.use_kind.is_occupied_by_a_person())
+            .collect(),
         groups: grammar
             .groups
             .into_iter()
@@ -165,6 +184,7 @@ mod tests {
             slots: Vec::new(),
             interior: inf_nav::NavGraph::new(),
             lights: Vec::new(),
+            stations: Vec::new(),
         };
         let scatter: Vec<PcgInstance> = (0..7).map(inst).collect();
         let out = compose_volume(scatter, grammar);

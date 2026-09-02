@@ -79,6 +79,9 @@ pub mod pass;
 pub mod plan;
 // NPC1d: who a building HOLDS -- the residents and workers its own rooms imply.
 pub mod society;
+// VEN1b: what a room offers a BODY -- the seats, standing room, counters and
+// decks its own FURNITURE implies, which is the half `society` cannot see.
+pub mod station;
 pub mod subdivide;
 
 use glam::{DVec2, DVec3};
@@ -98,6 +101,7 @@ pub use pass::{
     pass_seed, plans_of, BuildingPass,
 };
 pub use plan::{plan_building, plan_building_in, BuildingParams, MAX_FLOORS};
+pub use station::{PcgStation, StationUse};
 pub use subdivide::{subdivide_block, BlockLot, BlockSubdivision, LotRules, MAX_LOTS_PER_AXIS};
 
 /// **The lot's own frame on the XZ plane** (IB-6): where its origin is and
@@ -446,6 +450,35 @@ pub enum RoomType {
 }
 
 impl RoomType {
+    /// **Every kind of room this generator draws**, in declaration order (wave
+    /// VEN1b).
+    ///
+    /// Written out rather than derived, and that is the point: it is an array
+    /// with a length, so a variant added to the enum and forgotten here fails
+    /// to compile. Two waves have now added a rule that has to answer for
+    /// *every* room type — `is_errand_destination` and
+    /// [`society::shift_of`] — and a sweep over a hand-written `vec!` is the
+    /// exact shape `phase29_gate`'s `ALL_MODES` was minted to retire.
+    pub const ALL: [RoomType; 17] = [
+        RoomType::Corridor,
+        RoomType::Stair,
+        RoomType::Lobby,
+        RoomType::Office,
+        RoomType::Meeting,
+        RoomType::Service,
+        RoomType::Living,
+        RoomType::Bedroom,
+        RoomType::Kitchen,
+        RoomType::Bath,
+        RoomType::Retail,
+        RoomType::Storage,
+        RoomType::Workshop,
+        RoomType::Guest,
+        RoomType::DanceFloor,
+        RoomType::BarRoom,
+        RoomType::Stage,
+    ];
+
     /// A stable short name for diagnostics and gate traces.
     pub fn name(self) -> &'static str {
         match self {

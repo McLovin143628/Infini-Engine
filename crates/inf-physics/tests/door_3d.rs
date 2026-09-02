@@ -891,6 +891,7 @@ fn spawn_house(w: &mut EcsWorld, guid: Uuid, at: DVec3) -> usize {
         Vec::new(),
         Default::default(),
         Vec::new(),
+        Vec::new(),
     );
     w.world_mut().entity_mut(e).insert((t, vol));
     w.mark_dirty();
@@ -1436,6 +1437,7 @@ fn a_citys_doorway_gather_is_paid_once_a_gameplay_step() {
         slots,
         Vec::new(),
         Default::default(),
+        Vec::new(),
         Vec::new(),
     );
     w.world_mut()

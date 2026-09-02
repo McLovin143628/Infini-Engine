@@ -192,6 +192,7 @@ pub type VolumePopulation = (
     Vec<inf_ecs::components::ResidentSlot>,
     inf_nav::NavGraph,
     Vec<inf_ecs::components::ScatteredLight>,
+    Vec<inf_ecs::components::AudioEmitterSlot>,
 );
 
 /// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
@@ -275,6 +276,7 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
                 inf_pcg::SlotRole::Home => inf_ecs::components::SlotRole::Home,
                 inf_pcg::SlotRole::Work => inf_ecs::components::SlotRole::Work,
                 inf_pcg::SlotRole::Errand => inf_ecs::components::SlotRole::Errand,
+                inf_pcg::SlotRole::Leisure => inf_ecs::components::SlotRole::Leisure,
             },
             at: s.at,
             room: s.room,
@@ -282,6 +284,31 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
             floor: s.floor,
             index: s.index,
             node: s.node,
+            // **The VEN1b half** — what a body does at this place, when, and
+            // which way it faces. Three plain values across the mirror, like
+            // every field above them.
+            posture: match s.posture {
+                inf_pcg::SlotPosture::Stand => inf_ecs::components::SlotPosture::Stand,
+                inf_pcg::SlotPosture::Sit => inf_ecs::components::SlotPosture::Sit,
+                inf_pcg::SlotPosture::Dance => inf_ecs::components::SlotPosture::Dance,
+            },
+            shift: match s.shift {
+                inf_pcg::SlotShift::Day => inf_ecs::components::SlotShift::Day,
+                inf_pcg::SlotShift::Night => inf_ecs::components::SlotShift::Night,
+            },
+            face: s.face,
+        })
+        .collect();
+    // **The emitters** (VEN1b) — one per venue, over its main room. A straight
+    // field-for-field mirror like the doorways: what CLIP an emitter plays and
+    // how loud it is at a listener are the audio step's business and are
+    // nowhere in this conversion.
+    let emitters = out
+        .emitters
+        .iter()
+        .map(|s| inf_ecs::components::AudioEmitterSlot {
+            at: s.at,
+            room: s.room,
         })
         .collect();
     // **The rig** (VEN1a) — one `ScatteredLight` per fixture the grammar hung.
@@ -305,7 +332,7 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
         })
         .collect();
     (
-        instances, solids, groups, doorways, residents, interior, lights,
+        instances, solids, groups, doorways, residents, interior, lights, emitters,
     )
     // MIRROR-END population_of
 }
@@ -992,14 +1019,16 @@ pub async fn pcg_evaluate(
         // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
         // load-bearing (a `StructureGroup` carries index ranges into these very
         // lists), so it is stated once in Ring 0 rather than twice here.
-        let (baked, solid, groups, doorways, residents, interior, lights) =
+        let (baked, solid, groups, doorways, residents, interior, lights, emitters) =
             population_of(inf_pcg::compose_volume(instances, generated));
         let placed = baked.len() as u32;
 
         {
             let w = doc.world_mut().world_mut();
             if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
-                vol.set_population(baked, solid, groups, doorways, residents, interior, lights);
+                vol.set_population(
+                    baked, solid, groups, doorways, residents, interior, lights, emitters,
+                );
             }
         }
         doc.bump_version_for_runtime();

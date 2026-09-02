@@ -990,6 +990,51 @@ pub struct ScheduleLeg {
     pub travel_h: f64,
     /// The route walked, in world metres, ground-snapped when it was built.
     pub path: inf_nav::NavPath,
+    /// **What the body does once it gets there** (wave VEN1b).
+    ///
+    /// The leg carries it rather than the record, because a day is a sequence
+    /// of *arrivals*: the same agent stands at a desk at ten, sits on a bar
+    /// stool at eleven at night and lies in bed at three, and a posture stored
+    /// on the record could only ever describe one of them.
+    ///
+    /// [`SlotArrival::STANDING`] for every leg planned before this wave, which
+    /// is what keeps a pre-VEN1b level's trace byte-identical: a `Stand`
+    /// arrival with no facing is exactly the behaviour that had no name.
+    pub arrival: SlotArrival,
+}
+
+/// **What a body does at the far end of a leg** (wave VEN1b) — a posture and,
+/// optionally, a direction to face.
+///
+/// A pair rather than two fields on [`ScheduleLeg`], because they are answered
+/// together by one `SocietyPlace` and a leg that got one without the other
+/// would be a seated body facing wherever it happened to walk in from.
+///
+/// Derived at plan time and never mutated, so it costs the step nothing: the
+/// crowd reads it off the leg the clock already named
+/// ([`CrowdRecord::arrival_on`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlotArrival {
+    /// The posture — see [`crate::components::SlotPosture`].
+    pub posture: crate::components::SlotPosture,
+    /// A unit XZ direction to face, or `DVec3::ZERO` to keep whatever facing
+    /// the walk left the body with.
+    pub face: DVec3,
+}
+
+impl SlotArrival {
+    /// **On both feet, facing wherever you came in from** — the arrival every
+    /// leg had before wave VEN1b, and the one every non-venue leg still has.
+    pub const STANDING: Self = Self {
+        posture: crate::components::SlotPosture::Stand,
+        face: DVec3::ZERO,
+    };
+}
+
+impl Default for SlotArrival {
+    fn default() -> Self {
+        Self::STANDING
+    }
 }
 
 impl ScheduleLeg {
@@ -1357,6 +1402,34 @@ impl CrowdRecord {
         }
     }
 
+    /// **What this agent is DOING right now** (wave VEN1b) — the active leg's
+    /// [`arrival`](ScheduleLeg::arrival), once it has finished walking it.
+    ///
+    /// # A posture is a place you have GOT to
+    ///
+    /// `u >= 1.0` is the same test [`RouteProgress::arrived`] is written from,
+    /// and using it is the whole of the rule: an agent halfway to the club is
+    /// walking, and an agent whose leg's clock window has run out is sitting on
+    /// the stool at the end of it. Nothing is stored — this is a pure function
+    /// of `(schedule, clock)`, so two hosts sit the same people down without
+    /// exchanging a byte, and a `Dormant` agent with no entity at all is still
+    /// *seated at the bar at eleven*.
+    ///
+    /// [`SlotArrival::STANDING`] for an unscheduled record, which is every
+    /// fixture written before this wave.
+    pub fn arrival_on(&self, leg: ActiveLeg) -> SlotArrival {
+        match (&self.schedule, leg) {
+            (Some(s), Some((i, u))) if u >= 1.0 => s.legs()[i].arrival,
+            _ => SlotArrival::STANDING,
+        }
+    }
+
+    /// [`arrival_on`](Self::arrival_on) with the leg resolved from the clock —
+    /// the ad-hoc door, for a reader that holds a record and a question.
+    pub fn arrival_at(&self, guid: Uuid, clock: CrowdClock) -> SlotArrival {
+        self.arrival_on(self.leg_at(guid, clock))
+    }
+
     /// **How far along its route this agent is** at `clock`.
     pub fn progress_at(&self, guid: Uuid, clock: CrowdClock) -> RouteProgress {
         self.progress_on(self.leg_at(guid, clock), guid, clock)
@@ -1523,6 +1596,29 @@ pub struct CrowdAgent {
     /// Always `false` on a tier with no controller: an agent the clock moves
     /// cannot fall behind the clock.
     pub blocked: bool,
+    /// **What this agent is doing right now** (wave VEN1b) — its active leg's
+    /// [`SlotArrival::posture`], once it has arrived.
+    ///
+    /// Published here for [`crate::pose::step_pose_evaluation`]'s benefit, on
+    /// exactly [`feet_offset_m`](Self::feet_offset_m)'s terms: the pose step's
+    /// query already reads this component, so a posture on it costs the pose
+    /// pass **nothing** — no second lookup, no resource, no map. It is a
+    /// re-publication of a pure function rather than sim state, which is why it
+    /// is not folded into `crowd_state_bytes`: both hosts derive it from the
+    /// same schedule and the same clock, and what a divergence would change is
+    /// the *pose*, which the trace already carries joint by joint.
+    ///
+    /// [`Stand`](crate::components::SlotPosture::Stand) for every agent that
+    /// is walking, for every unscheduled record, and for every level that
+    /// predates the venues.
+    pub posture: crate::components::SlotPosture,
+    /// **A unit XZ direction this agent should face**, or `DVec3::ZERO` for one
+    /// with no opinion (wave VEN1b) — its active leg's
+    /// [`SlotArrival::face`].
+    ///
+    /// Published beside the posture because they are answered together and a
+    /// seated body facing the wall it walked in past is not a seated body.
+    pub face: DVec3,
 }
 
 /// What one [`step_crowd`] did — the instrument's read, and the gate's.
@@ -1530,6 +1626,17 @@ pub struct CrowdAgent {
 pub struct CrowdStats {
     /// Records at each tier, indexed by [`CrowdTier::as_u8`].
     pub per_tier: [usize; 4],
+    /// **Agents turned to face something this step** (wave VEN1b) — one per
+    /// materialized agent whose active leg's arrival names a direction.
+    ///
+    /// Counted because [`face_body`] writes through two different doors
+    /// depending on the tier and a write to the wrong one is *invisible*: a
+    /// steered body would simply keep the yaw it walked in with. A gate can
+    /// hold this against the number of agents it knows are sitting down.
+    pub faced: u64,
+    /// **Agents in a posture other than standing this step** (wave VEN1b) —
+    /// the town's seated and dancing population, as one number.
+    pub posed_apart: u64,
     /// Entities materialized this step (`Dormant` → anything else).
     pub spawned: u64,
     /// Entities dematerialized this step (anything else → `Dormant`).
@@ -1998,14 +2105,28 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
                 t.translation = Vec3d::new(at.x, at.y, at.z);
             }
         }
+        // **What the agent is DOING, and which way it is doing it** (VEN1b).
+        // Resolved off the leg the step already named, so this costs one match
+        // on a value in hand; `face_body` is the one door both branches of the
+        // ladder turn a body through.
+        let arrival = rec.arrival_on(leg);
+        if arrival.face != DVec3::ZERO {
+            face_body(world, entity, tier.steers(), arrival.face);
+            stats.faced += 1;
+        }
         if let Some(mut a) = world.world_mut().get_mut::<CrowdAgent>(entity) {
             a.tier = tier;
+            a.posture = arrival.posture;
+            a.face = arrival.face;
             if !tier.steers() {
                 // An agent the clock moves cannot fall behind the clock, and a
                 // stale `true` here would send the door pass looking for a body
                 // that is no longer standing against anything.
                 a.blocked = false;
             }
+        }
+        if arrival.posture != crate::components::SlotPosture::Stand {
+            stats.posed_apart += 1;
         }
     }
 
@@ -2059,6 +2180,39 @@ pub const ARRIVE_M: f64 = 0.5;
 /// beyond that, NPC1d's.
 pub const BLOCKED_LAG_M: f64 = 2.0;
 
+/// **Turn a body to face `face`** (wave VEN1b) — the one door, because the
+/// ladder has two ways to own a rotation and writing to the wrong one is
+/// invisible.
+///
+/// A **steered** agent's rotation belongs to the movement model:
+/// `step_character_movement` writes `runtime.body_yaw_deg` back onto
+/// `Transform::rotation.y` every step, five phases after this one, so a
+/// transform written here would be overwritten before anything drew it. The
+/// model is told instead — both the current yaw and the target, or the model's
+/// own turn-rate would spend the next half second walking it back.
+///
+/// Every other tier has no model, so its transform IS the answer.
+///
+/// The yaw comes from [`inf_math::patan2_64`] and never `f64::atan2`: it lands
+/// on a `Transform` and therefore in the replay trace (P14), and it is the same
+/// spelling `traffic::yaw_deg_of` uses for the same reason.
+fn face_body(world: &mut EcsWorld, entity: Entity, steers: bool, face: DVec3) {
+    let yaw = inf_math::patan2_64(face.x, face.z).to_degrees();
+    if !yaw.is_finite() {
+        return;
+    }
+    if steers {
+        if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+            cm.runtime.body_yaw_deg = yaw;
+            cm.runtime.target_yaw_deg = yaw;
+            return;
+        }
+    }
+    if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
+        t.rotation.y = yaw;
+    }
+}
+
 /// Build the entity a record describes, at `at`.
 ///
 /// The component set is fixed and small: a skeletal mesh, a machine, the
@@ -2090,6 +2244,8 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -
             guid,
             feet_offset_m: a.feet_offset_m(),
             blocked: false,
+            posture: crate::components::SlotPosture::Stand,
+            face: DVec3::ZERO,
         },
     ));
     set_tier_components(world, e, rec.tier, &a);
@@ -2229,6 +2385,8 @@ pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec
             guid,
             feet_offset_m: a.feet_offset_m(),
             blocked: false,
+            posture: crate::components::SlotPosture::Stand,
+            face: DVec3::ZERO,
         },
     ));
     set_tier_components(world, e, CrowdTier::Full, a);
@@ -3136,6 +3294,7 @@ mod tests {
             start_h,
             travel_h,
             path: inf_nav::NavPath::new([from, to]),
+            arrival: crate::crowd::SlotArrival::STANDING,
         }
     }
 

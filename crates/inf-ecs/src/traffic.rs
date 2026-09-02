@@ -1823,11 +1823,13 @@ pub fn plan_commute(
             start_h: crate::society::WORK_START_H,
             travel_h: crate::society::COMMUTE_H,
             path: out,
+            arrival: crate::crowd::SlotArrival::STANDING,
         },
         crate::crowd::ScheduleLeg {
             start_h: crate::society::HOME_H,
             travel_h: crate::society::COMMUTE_H,
             path: back,
+            arrival: crate::crowd::SlotArrival::STANDING,
         },
     ])
 }
@@ -2488,6 +2490,9 @@ mod tests {
                     floor: 0,
                     index: 0,
                     node: 0,
+                    posture: crate::components::SlotPosture::Stand,
+                    shift: crate::components::SlotShift::Day,
+                    face: DVec3::ZERO,
                 }];
                 w.world_mut().entity_mut(e).insert(v);
             }
@@ -2648,6 +2653,9 @@ mod tests {
             floor: 0,
             index: 0,
             node: 0,
+            posture: crate::components::SlotPosture::Stand,
+            shift: crate::components::SlotShift::Day,
+            face: DVec3::ZERO,
         }];
         w.world_mut().entity_mut(e).insert(v);
         w.propagate();

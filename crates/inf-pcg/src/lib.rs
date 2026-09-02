@@ -66,7 +66,8 @@ pub use binding::{
 };
 pub use building::{
     archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of,
-    society::{PcgSlot, SlotRole},
+    society::{PcgSlot, SlotPosture, SlotRole, SlotShift},
+    station::{PcgStation, StationUse},
     subdivide_block, ArchetypeId, BlockLot, BlockSubdivision, BuildingArchetype, BuildingOutput,
     BuildingParams, BuildingPass, BuildingPlan, LotRules, Opening, OpeningKind, Rect2, Room,
     RoomType, Stair, StructureGroup, StructureTier, Wall, DEFAULT_STRUCTURE_LOD_M,

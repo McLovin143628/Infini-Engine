@@ -132,9 +132,23 @@ pub const MAX_SLOTS_PER_ROOM: usize = 64;
 
 /// **What a room offers a person** — the vocabulary a schedule is written in.
 ///
-/// Three roles rather than fourteen room types, because a schedule asks "where
+/// Four roles rather than fourteen room types, because a schedule asks "where
 /// does this agent sleep, work and go" and not "what kind of room is this". The
 /// mapping from the one to the other is the table in this module's docs.
+///
+/// # `Leisure` is APPENDED (wave VEN1b), and here is why that is safe
+///
+/// The P19 wire-enum law freezes an enum's discriminants when they reach
+/// **bytes**. This one does not: it has no `serde` derive, no `Reflect`, is
+/// never bincoded and crosses no IPC — and its ECS mirror
+/// `inf_ecs::components::SlotRole` rides `ResidentSlot`, which lives on a
+/// `#[serde(skip)]` `#[reflect(ignore)]` field of `PcgVolume`. There is no
+/// freeze pin to move and no downgrade to bless. (The same finding VEN1a
+/// recorded for `RoomType`, re-checked at this wave's head.)
+///
+/// What the mirror's `as_u8` *is* frozen against is the **replay trace**, so
+/// the variant is appended rather than inserted: `Home` stays 0, `Work` 1,
+/// `Errand` 2, and `Leisure` takes 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotRole {
     /// Somewhere to sleep. An agent has exactly one, and it is what makes it a
@@ -144,6 +158,15 @@ pub enum SlotRole {
     Work,
     /// Somewhere to go that is neither — a shop.
     Errand,
+    /// **Somewhere to spend an evening** (wave VEN1b) — a seat at a bar, a
+    /// place on a dance floor, a bench at the stage edge.
+    ///
+    /// Distinct from [`Errand`](SlotRole::Errand) and not a flavour of it: an
+    /// errand is a half-hour out of a working day and a leisure slot is *where
+    /// an agent is at eleven at night*, which is a different leg of a different
+    /// schedule. Keeping them apart is also what stops a night out being
+    /// planned into a shop.
+    Leisure,
 }
 
 impl SlotRole {
@@ -153,7 +176,96 @@ impl SlotRole {
             SlotRole::Home => "home",
             SlotRole::Work => "work",
             SlotRole::Errand => "errand",
+            SlotRole::Leisure => "leisure",
         }
+    }
+}
+
+/// **What a body DOES at a slot** (wave VEN1b) — the half of an affordance the
+/// pose pipeline reads.
+///
+/// A slot has always been a *place*; a venue needs it to be a place and a
+/// posture, because "at the bar" and "on the dance floor" are the same three
+/// metres of room and completely different pictures. Derived from the
+/// [`station`](super::station) the slot came from, never authored.
+///
+/// [`Stand`](SlotPosture::Stand) is the answer for every slot in the twelve
+/// palettes that predate the venues, which is what keeps them byte-identical.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotPosture {
+    /// On both feet. The default, and every pre-venue slot.
+    #[default]
+    Stand,
+    /// Seated — on a stool, on a bench, at the stage edge.
+    Sit,
+    /// Dancing on the spot.
+    Dance,
+}
+
+impl SlotPosture {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            SlotPosture::Stand => "stand",
+            SlotPosture::Sit => "sit",
+            SlotPosture::Dance => "dance",
+        }
+    }
+}
+
+/// **WHEN a slot is filled** (wave VEN1b).
+///
+/// The reason the town stopped emptying at eighteen hundred is one bit: a bar's
+/// keeper is not an office worker who happens to work in a bar. A `Night` slot
+/// is worked (or visited) between dusk and the small hours; a `Day` slot is
+/// everything the four-leg commute has always described.
+///
+/// Derived from the ROOM, in [`shift_of`], and not from the role — because a
+/// venue's back office is a day job in a building that opens at nine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotShift {
+    /// The working day. Every slot in every palette that predates the venues.
+    #[default]
+    Day,
+    /// The evening and the small hours.
+    Night,
+}
+
+impl SlotShift {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            SlotShift::Day => "day",
+            SlotShift::Night => "night",
+        }
+    }
+}
+
+/// **When a room of this kind is used** — the one place [`SlotShift`] is
+/// decided.
+///
+/// A statement about the ROOM and not about the role, so a venue's back office
+/// and store room keep the working day the rest of the town keeps while its
+/// three public rooms move to the evening. One door, one exhaustive match: a
+/// fifteenth room type has to answer this question, in the same place it
+/// answers [`occupancy`].
+pub fn shift_of(kind: RoomType) -> SlotShift {
+    match kind {
+        RoomType::BarRoom | RoomType::DanceFloor | RoomType::Stage => SlotShift::Night,
+        RoomType::Bedroom
+        | RoomType::Guest
+        | RoomType::Office
+        | RoomType::Workshop
+        | RoomType::Retail
+        | RoomType::Corridor
+        | RoomType::Stair
+        | RoomType::Lobby
+        | RoomType::Meeting
+        | RoomType::Service
+        | RoomType::Living
+        | RoomType::Kitchen
+        | RoomType::Bath
+        | RoomType::Storage => SlotShift::Day,
     }
 }
 
@@ -187,6 +299,23 @@ pub struct PcgSlot {
     /// Carried rather than re-derived because the salt is the *level's* word and
     /// a consumer holding a slot may not hold the volume it came from.
     pub node: inf_nav::NavNodeId,
+    /// **What a body does here** (wave VEN1b).
+    ///
+    /// [`Stand`](SlotPosture::Stand) for every slot [`slots_of`] derives from a
+    /// plan, which is every slot in the twelve palettes that predate the
+    /// venues; the other two arrive with [`station_slots`].
+    pub posture: SlotPosture,
+    /// **When it is filled** (wave VEN1b) — [`shift_of`] of its own room.
+    pub shift: SlotShift,
+    /// **A unit direction the body faces** (wave VEN1b), in the XZ plane, or
+    /// `DVec3::ZERO` for a slot with no opinion — which is every slot derived
+    /// from a room rectangle, because a room centre faces nowhere in
+    /// particular.
+    ///
+    /// A direction and not an angle for [`PcgStation::face`](super::station::PcgStation::face)'s
+    /// reason: a lot frame is a quaternion, and P14 bans libm on anything that
+    /// reaches a `Transform`.
+    pub face: DVec3,
 }
 
 /// **How many people a room of this kind and area holds**, and in which role.
@@ -254,6 +383,7 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
             continue;
         }
         let node = super::room_node_id_in(salt, i);
+        let shift = shift_of(room.kind);
         for k in 0..n {
             out.push(PcgSlot {
                 role,
@@ -263,6 +393,9 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
                 floor: room.floor,
                 index: k as u32,
                 node,
+                posture: SlotPosture::Stand,
+                shift,
+                face: DVec3::ZERO,
             });
         }
         // **A shop is one errand however many people staff it.** The visit slot
@@ -283,8 +416,89 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
                 floor: room.floor,
                 index: n as u32,
                 node,
+                posture: SlotPosture::Stand,
+                shift,
+                face: DVec3::ZERO,
             });
         }
+    }
+    out
+}
+
+/// **Every place a body can be at this building's FURNITURE** (wave VEN1b) —
+/// the stations the assembler emitted, turned into slots now that the caller
+/// holds the building's own salt.
+///
+/// # Why this is a second function and not a longer [`slots_of`]
+///
+/// [`slots_of`] is a pure function of a `BuildingPlan`, and a plan does not
+/// know where a stool ended up: furniture is placed by
+/// [`assemble`](super::assemble), against blockers, with a hash. The two halves
+/// answer different questions from different inputs and the split is what keeps
+/// `slots_of`'s own arms — *a bedroom holds one person whatever its area* — true
+/// sentences about a plan.
+///
+/// # The mapping, which is the whole of it
+///
+/// | station | role | posture | shift |
+/// |---|---|---|---|
+/// | [`Seat`](super::station::StationUse::Seat) | `Leisure` | `Sit` | the room's |
+/// | [`Mingle`](super::station::StationUse::Mingle) | `Leisure` | `Dance` | the room's |
+/// | [`Tend`](super::station::StationUse::Tend) | `Work` | `Stand` | the room's |
+/// | [`Perform`](super::station::StationUse::Perform) | `Work` | `Dance` | the room's |
+/// | [`Guard`](super::station::StationUse::Guard) | `Work` | `Stand` | **`Night`** |
+/// | [`Music`](super::station::StationUse::Music) | — nobody stands here — |
+///
+/// The guard is the one row that does not read its room's shift, and the reason
+/// is that it does not have one: a bouncer stands on the pavement outside, and
+/// the room its entrance wall belongs to is a lobby the day shift also uses.
+/// A venue's door is watched at night.
+///
+/// **The `index` is the station's position in the list**, which is stable
+/// because the assembler's own emission order is (and is what
+/// `inf_ecs::society::agent_guid` would hash if a station ever became a home).
+/// The node is the room's, like every other slot's, so a leg still routes
+/// room-to-room and the last few metres to the seat are the walk `leg()`
+/// appends.
+pub fn station_slots(
+    plan: &BuildingPlan,
+    stations: &[super::station::PcgStation],
+    building: u32,
+    salt: u64,
+) -> Vec<PcgSlot> {
+    use super::station::StationUse;
+    let mut out = Vec::new();
+    for (i, st) in stations.iter().enumerate() {
+        let (role, posture) = match st.use_kind {
+            StationUse::Seat => (SlotRole::Leisure, SlotPosture::Sit),
+            StationUse::Mingle => (SlotRole::Leisure, SlotPosture::Dance),
+            StationUse::Tend => (SlotRole::Work, SlotPosture::Stand),
+            StationUse::Perform => (SlotRole::Work, SlotPosture::Dance),
+            StationUse::Guard => (SlotRole::Work, SlotPosture::Stand),
+            StationUse::Music => continue,
+        };
+        if !(st.at.is_finite() && st.face.is_finite()) {
+            continue;
+        }
+        let Some(room) = plan.rooms.get(st.room as usize) else {
+            continue;
+        };
+        let shift = match st.use_kind {
+            StationUse::Guard => SlotShift::Night,
+            _ => shift_of(room.kind),
+        };
+        out.push(PcgSlot {
+            role,
+            at: st.at,
+            room: st.room,
+            building,
+            floor: st.floor,
+            index: i as u32,
+            node: super::room_node_id_in(salt, st.room as usize),
+            posture,
+            shift,
+            face: st.face,
+        });
     }
     out
 }

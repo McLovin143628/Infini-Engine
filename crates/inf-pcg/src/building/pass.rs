@@ -379,7 +379,16 @@ pub fn evaluate_buildings_in(
         // `slots_of` both go through the plan's own frame, which is why there is
         // no `place_slots_in_frame` beside the doorway call above.
         let salt = super::society::building_salt(cx.entity, ordinal);
-        let slots = super::society::slots_of(&out.plan, ordinal, salt);
+        let mut slots = super::society::slots_of(&out.plan, ordinal, salt);
+        // VEN1b: …and the places its own FURNITURE offers, which a plan cannot
+        // name. Appended after the plan's own, so a room's slots stay in one
+        // run and the pre-venue slot order is untouched by construction.
+        slots.extend(super::society::station_slots(
+            &out.plan,
+            &out.stations,
+            ordinal,
+            salt,
+        ));
         // A building nobody lives or works in contributes no interior: a
         // route's endpoints are slots, and carrying a warehouse's corridors
         // into a level's network is nodes nothing ever asks for.
@@ -395,6 +404,13 @@ pub fn evaluate_buildings_in(
             doorways,
             slots,
             interior,
+            // The stations, carried whole (VEN1b): the occupied ones are
+            // already slots above, and `compose_volume` keeps the rest as the
+            // volume's emitters. Carried rather than filtered here because a
+            // `GrammarOutput` is what `extend` folds, and a list that meant one
+            // thing before the fold and another after it is the shape of defect
+            // `groups`' own re-basing exists to avoid.
+            stations: out.stations,
             // The rig the assembler hung (VEN1a). `assemble_in` has already
             // moved every fixture into the lot's frame beside the instances
             // and the colliders, so these are world metres like everything

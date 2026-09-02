@@ -63,6 +63,9 @@ fn blocks(world: &mut EcsWorld, cols: i32, rows: i32) {
                 floor: 0,
                 index: 0,
                 node: 0,
+                posture: inf_ecs::components::SlotPosture::Stand,
+                shift: inf_ecs::components::SlotShift::Day,
+                face: glam::DVec3::ZERO,
             }];
             world.world_mut().entity_mut(e).insert(v);
         }

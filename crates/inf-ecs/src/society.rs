@@ -94,7 +94,7 @@ use glam::{DVec2, DVec3};
 use inf_nav::{NavGraph, NavKind, NavNodeId};
 use uuid::Uuid;
 
-use crate::components::{GlobalTransform, Guid, PcgVolume, SlotRole};
+use crate::components::{GlobalTransform, Guid, PcgVolume, SlotRole, SlotShift};
 use crate::crowd::{CrowdArchetype, CrowdRecord, CrowdSchedule, ScheduleLeg};
 use crate::world::EcsWorld;
 
@@ -179,6 +179,83 @@ pub const ERRAND_BACK_H: f64 = 13.0;
 /// The hour the walk home begins.
 pub const HOME_H: f64 = 18.0;
 
+// ── the night (wave VEN1b) ──────────────────────────────────────────────────
+//
+// Before this wave the table above WAS the day, and the day ended: every agent
+// walked home at eighteen hundred and stood there until eight the next morning.
+// A town with a nightclub in it that empties before the nightclub opens is the
+// thing this block exists to stop.
+
+/// The hour a reveller leaves for a venue.
+///
+/// Eight in the evening: an hour after the last commute home lands, so a body
+/// is at its own front door before it turns round, and late enough that the
+/// island's own night-glow ramp is at full by the time it arrives.
+pub const EVENING_OUT_H: f64 = 20.0;
+
+/// How long the walk to a venue takes, in hours of the level clock.
+///
+/// The same hour a commute takes, because it is the same walk across the same
+/// settlement: the venues sit one ring out of a city's office core, which is
+/// exactly the distance a resident already walks to work.
+pub const EVENING_H: f64 = 1.0;
+
+/// The hour a reveller starts walking home.
+///
+/// Two in the morning, which is the other end of the mandate's own
+/// **18:00–02:00** window. It is past midnight on purpose: `CrowdSchedule::at`
+/// picks the leg that started most recently as `(hour - start_h) mod 24`, so a
+/// day is a circle and a leg that begins after midnight is not a special case —
+/// it is the arm `a_night_out_wraps_past_midnight` exists to prove.
+pub const NIGHT_HOME_H: f64 = 2.0;
+
+/// The hour a night-shift worker leaves for the venue they work at.
+///
+/// Six in the evening. A bar's keeper is not an office worker who happens to
+/// work in a bar: they are behind the counter before the first patron arrives
+/// at nine, and asleep while the town commutes.
+pub const NIGHT_WORK_START_H: f64 = 18.0;
+
+/// The hour a night-shift worker starts walking home — an hour after the last
+/// patron leaves.
+pub const NIGHT_WORK_END_H: f64 = 3.0;
+
+/// **What share of a town goes out on a given night.**
+///
+/// A third, drawn per agent from [`SALT_NIGHTLIFE`] at `tick = 0`, on
+/// `CrowdRecord::speed_of`'s own terms: derived and never stored, so it is a
+/// constant of the agent rather than of the step.
+///
+/// The number is deliberately larger than the venues can hold, and that is the
+/// design rather than a slip. **The venue's own seat count is the cap** — a
+/// leisure slot is CLAIMED, so a settlement with one bar seats eleven people
+/// whatever this is, and the share only decides *which* eleven of the willing
+/// get there first. Making the share the cap instead would have put the
+/// occupancy of a club in a constant rather than in the club.
+pub const NIGHTLIFE_SHARE: f64 = 0.34;
+
+/// Salts the per-agent nightlife draw. See [`NIGHTLIFE_SHARE`].
+pub const SALT_NIGHTLIFE: u64 = 0x4e49_4748_5400_0001;
+
+/// How far an agent will walk to a night job, metres in plan.
+///
+/// A night job is scarce — three per venue — and is claimed by the nearest
+/// unclaimed home in `Guid` order, so without a reach the first agent planned
+/// would take a job on the far side of the island. Six hundred metres is about
+/// twice a settlement's own block span, which keeps a bar staffed by people who
+/// live in the same town as the bar.
+pub const NIGHT_JOB_MAX_M: f64 = 600.0;
+
+/// How far an agent will walk for a night out, metres in plan.
+///
+/// Wider than [`NIGHT_JOB_MAX_M`], because going out is a choice and going to
+/// work is a routine: a kilometre is the whole of one of the island's cities,
+/// and a resident who would cross it for a nightclub is a resident who wants a
+/// nightclub. Two settlements are kilometres apart and stay separate towns,
+/// which the network already enforces — an unroutable pair is refused by
+/// [`leg`] whatever this says.
+pub const NIGHT_OUT_MAX_M: f64 = 1_000.0;
+
 /// Salts an agent's derived `Guid`. See [`agent_guid`].
 const SALT_AGENT: u64 = 0x4147_454E_5400_0001;
 
@@ -203,6 +280,13 @@ pub type BlockRing = (DVec3, DVec2, Vec<(NavNodeId, DVec3)>);
 pub struct SocietyPlace {
     /// What it is for.
     pub role: SlotRole,
+    /// **What a body does when it gets here** (wave VEN1b), carried onto the
+    /// leg that ends here so the crowd step and the pose step can read it
+    /// without asking the society a second time.
+    pub posture: crate::components::SlotPosture,
+    /// **Which way the body faces here** (wave VEN1b), a unit XZ direction, or
+    /// `DVec3::ZERO` for a place with no opinion.
+    pub face: DVec3,
     /// Where it is, world metres.
     pub at: DVec3,
     /// The node of its own building's interior it stands on — a node of
@@ -230,6 +314,31 @@ pub struct SocietyStats {
     pub works: usize,
     /// Errands the level has offered.
     pub errands: usize,
+    /// **Night-shift jobs the level has offered** (wave VEN1b) — three per
+    /// venue: a counter, a deck and a door.
+    pub night_jobs: usize,
+    /// **Leisure places the level has offered** — every seat, bench place and
+    /// patch of dance floor its venues hold. The occupancy ceiling of the whole
+    /// town's nightlife, and it is the CONTENT's number rather than a constant.
+    pub leisure_places: usize,
+    /// Agents who took a night job. At most [`night_jobs`](Self::night_jobs),
+    /// and less when a venue stands further than [`NIGHT_JOB_MAX_M`] from
+    /// anybody's home.
+    pub night_workers: usize,
+    /// **Agents whose day ends at a venue rather than at home** — the town's
+    /// nightlife, as a count.
+    ///
+    /// At most [`leisure_places`](Self::leisure_places) by construction (a
+    /// place is claimed), and less when [`NIGHTLIFE_SHARE`] of the town is
+    /// smaller than the venues are, or when a venue is unroutable from a home.
+    pub revellers: usize,
+    /// **Agents who wanted a night out and found nowhere to have one** — the
+    /// share that drew in and then met either a full town or an unroutable one.
+    ///
+    /// Not a defect and deliberately counted: a bar seats eleven and a town
+    /// holds three hundred, so this is *large* and is what says the cap is the
+    /// venue rather than the constant.
+    pub turned_away: usize,
     /// Agents installed into the population.
     pub agents: usize,
     /// Homes still waiting for a day.
@@ -348,10 +457,46 @@ pub struct SocietyRes {
     pub legs: BTreeMap<(NavNodeId, NavNodeId), Option<inf_nav::NavPath>>,
     /// Volumes already folded in, by `Guid`.
     pub folded: BTreeSet<Uuid>,
-    /// Every workplace, in the order the volumes were folded.
+    /// Every **day-shift** workplace, in the order the volumes were folded.
     pub work: Vec<SocietyPlace>,
     /// Every errand.
     pub errand: Vec<SocietyPlace>,
+    /// **Every night-shift job** (wave VEN1b) — a venue's keeper, its act, its
+    /// door — in the order the volumes were folded.
+    ///
+    /// Kept apart from [`work`](Self::work) rather than flagged inside it,
+    /// because the two are searched for by different agents at different hours
+    /// and a `nearest()` over one list would offer a bar's counter to somebody
+    /// looking for a desk at eight in the morning.
+    pub night_work: Vec<SocietyPlace>,
+    /// **Every place the town can spend an evening** (wave VEN1b) — a seat, a
+    /// bench at a stage edge, a patch of dance floor.
+    pub leisure: Vec<SocietyPlace>,
+    /// **Which [`night_work`](Self::night_work) entries are already somebody's
+    /// job**, by index (wave VEN1b).
+    ///
+    /// A night job is CLAIMED and a day job is not, and the difference is
+    /// deliberate: an office slot is one of `area / 12` identical desks in one
+    /// room and every worker stands on the room's own node anyway, while a
+    /// venue's three jobs are three *distinct places* — behind that counter, on
+    /// that deck, at that door — and two bodies claiming one of them stand
+    /// inside each other. See [`SocietyStats::night_workers`].
+    ///
+    /// Indices rather than a `Vec<bool>` beside the list, because the list only
+    /// ever grows (a volume folds, its jobs are appended) and an index is
+    /// therefore stable; a parallel vector would have to be grown in lockstep
+    /// at every append.
+    pub taken_night: BTreeSet<usize>,
+    /// **Which [`leisure`](Self::leisure) places are already somebody's seat**,
+    /// by index (wave VEN1b).
+    ///
+    /// **THIS IS THE OCCUPANCY CAP.** A dance floor is the densest interior
+    /// this engine has and a kinematic `Full` crowd agent does not part for
+    /// another; the stations are laid at least
+    /// `inf_pcg::building::station::MINGLE_PITCH_M` apart, and claiming one
+    /// exclusively is what turns that spacing into a promise about bodies
+    /// rather than about points.
+    pub taken_leisure: BTreeSet<usize>,
     /// Homes with no day yet, by the agent `Guid` that will live there.
     pub pending: BTreeMap<Uuid, SocietyPlace>,
     /// The counters after the last sync.
@@ -603,6 +748,13 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         crossings: soc.stats.crossings,
         salt_collisions: soc.stats.salt_collisions,
         homes_declined: soc.stats.homes_declined,
+        // …and the night's four (VEN1b), on the same terms: they accumulate
+        // over the whole run, and a gate that read them after the town settled
+        // would otherwise see a nightlife of zero over a town that plainly has
+        // one.
+        night_workers: soc.stats.night_workers,
+        revellers: soc.stats.revellers,
+        turned_away: soc.stats.turned_away,
         ..SocietyStats::default()
     };
 
@@ -738,18 +890,26 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
             };
             let place = SocietyPlace {
                 role: s.role,
+                posture: s.posture,
+                face: s.face,
                 at: s.at,
                 node: s.node,
                 volume: f.guid,
                 door,
             };
-            match s.role {
-                SlotRole::Home => {
+            // **The role AND the shift** (wave VEN1b). A venue's counter is a
+            // `Work` slot and so is an office desk; what tells them apart is
+            // *when*, and putting a night job in `work` would have the town's
+            // residents commuting to a shut bar at eight in the morning.
+            match (s.role, s.shift) {
+                (SlotRole::Home, _) => {
                     let g = agent_guid(f.guid, s.building, s.room, s.index);
                     soc.pending.entry(g).or_insert(place);
                 }
-                SlotRole::Work => soc.work.push(place),
-                SlotRole::Errand => soc.errand.push(place),
+                (SlotRole::Work, SlotShift::Day) => soc.work.push(place),
+                (SlotRole::Work, SlotShift::Night) => soc.night_work.push(place),
+                (SlotRole::Errand, _) => soc.errand.push(place),
+                (SlotRole::Leisure, _) => soc.leisure.push(place),
             }
         }
         soc.folded.insert(f.guid);
@@ -771,6 +931,8 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
     stats.volumes = soc.folded.len();
     stats.works = soc.work.len();
     stats.errands = soc.errand.len();
+    stats.night_jobs = soc.night_work.len();
+    stats.leisure_places = soc.leisure.len();
 
     // ── 4. plan days, but never while the town is still arriving ───────────
     // ...and never at all once somebody has installed a population by hand: a
@@ -804,9 +966,9 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         let mut records: BTreeMap<Uuid, CrowdRecord> = BTreeMap::new();
         for g in batch {
             let home = soc.pending.remove(&g).expect("a key we just read");
-            let (rec, kind) = plan_day(&mut soc, archetype, home, &mut stats);
+            let (rec, kind) = plan_day(&mut soc, archetype, g, home, &mut stats);
             match kind {
-                DayKind::Full => {}
+                DayKind::Full | DayKind::NightShift => {}
                 DayKind::Homebound => stats.homebound += 1,
                 DayKind::Housebound => stats.housebound += 1,
             }
@@ -844,6 +1006,10 @@ enum DayKind {
     /// Nowhere reachable at all. The agent stands at home, which is what a
     /// record with no schedule does.
     Housebound,
+    /// **The agent works a night shift** (wave VEN1b) — out at six in the
+    /// evening, behind a counter or on a deck until three in the morning, home
+    /// and asleep while the town commutes.
+    NightShift,
 }
 
 /// The nearest place of a role to `from`, ties broken on the node id.
@@ -865,6 +1031,69 @@ fn nearest(places: &[SocietyPlace], from: DVec3) -> Option<SocietyPlace> {
     best.map(|(_, p)| p)
 }
 
+/// **The nearest UNCLAIMED place to `from` within `reach`**, by index (wave
+/// VEN1b) — the door a scarce place is taken through.
+///
+/// An index and not a place, because the caller has to mark it taken and a
+/// `SocietyPlace` is `Copy` and carries no identity of its own. Ties are broken
+/// on the index, which is the list's own append order, so nothing here depends
+/// on a hash or on a float comparison beyond `<`.
+///
+/// The reach is a *plan* distance and is a filter rather than a verdict: a
+/// place inside it may still be unroutable, and [`leg`] is what says so.
+fn nearest_unclaimed(
+    places: &[SocietyPlace],
+    taken: &BTreeSet<usize>,
+    from: DVec3,
+    reach_m: f64,
+) -> Option<usize> {
+    let mut best: Option<(f64, usize)> = None;
+    for (i, p) in places.iter().enumerate() {
+        if taken.contains(&i) {
+            continue;
+        }
+        let d = DVec2::new(p.at.x - from.x, p.at.z - from.z).length();
+        if !d.is_finite() || d > reach_m {
+            continue;
+        }
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// **Whether this agent goes out tonight** — [`NIGHTLIFE_SHARE`] of the town,
+/// drawn once per agent at `tick = 0`.
+///
+/// `crate::crowd::agent_unit`'s own door, so the draw is the house mixer over
+/// `(guid, tick, salt)` and is a constant of the AGENT rather than of the step
+/// — the property `CrowdRecord::speed_of` and `hour_of` are both written
+/// against, and the reason none of the three is ever stored.
+fn goes_out(guid: Uuid) -> bool {
+    crate::crowd::agent_unit(guid, 0, SALT_NIGHTLIFE) < NIGHTLIFE_SHARE
+}
+
+/// **The arrival a place implies** — its posture and its facing, as the leg
+/// that ends there will carry them.
+fn arrival_of(p: &SocietyPlace) -> crate::crowd::SlotArrival {
+    crate::crowd::SlotArrival {
+        posture: p.posture,
+        face: p.face,
+    }
+}
+
+/// A leg with nothing to do at the far end — every leg planned before wave
+/// VEN1b, spelled once so the four call sites that mean it say so.
+fn plain(start_h: f64, travel_h: f64, path: inf_nav::NavPath) -> ScheduleLeg {
+    ScheduleLeg {
+        start_h,
+        travel_h,
+        path,
+        arrival: crate::crowd::SlotArrival::STANDING,
+    }
+}
+
 /// A route between two nodes of one graph, or `None`. A search whose two ends
 /// are the same node answers an empty contribution rather than a refusal.
 fn hop(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> Option<Vec<DVec3>> {
@@ -884,15 +1113,48 @@ fn hop(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> Option<Vec<DVec3>> {
 /// door, along the street (memoized), and in through the other front door. The
 /// three point lists are joined by `NavPath::new`, which drops the coincident
 /// ends for us.
+///
+/// # THE LAST FEW METRES (wave VEN1b)
+///
+/// The nav graph is room centres and doorways — it "knows nothing about the
+/// furniture the same plan scatters into the room", as `interior_nav_in`'s own
+/// doc says. Every slot a *plan* implies stands exactly on its room's node, so
+/// a route that ended at the node ended at the slot and the two were the same
+/// point. A **station** does not: a stool is against the wall, a counter's
+/// service side is behind the counter, and a body that walked to the room
+/// centre and sat down would be sitting in the middle of the dance floor.
+///
+/// So a leg is extended by the endpoints' own metres — the origin's prepended,
+/// the destination's appended — whenever they differ from the node. That is
+/// **exactly a no-op for every leg planned before this wave**, because
+/// `slots_of` puts every plan-derived slot's `at` on its room node and
+/// `NavPath::new` drops a coincident end. Measured that way rather than
+/// asserted: `a_plan_slots_leg_is_the_route_it_always_was` compares the two
+/// spellings point for point.
+///
+/// The last segment crosses a room and may pass through the furniture the graph
+/// cannot see. That is the same honest limit the graph already carries, one
+/// scale smaller, and it is why the seat is *claimed* — two bodies never walk
+/// to the same one.
 fn leg(
     soc: &mut SocietyRes,
     from: &SocietyPlace,
     to: &SocietyPlace,
     stats: &mut SocietyStats,
 ) -> Option<inf_nav::NavPath> {
+    let finish = |soc: &SocietyRes, mut pts: Vec<DVec3>| -> Vec<DVec3> {
+        if node_offset(soc, from) {
+            pts.insert(0, from.at);
+        }
+        if node_offset(soc, to) {
+            pts.push(to.at);
+        }
+        pts
+    };
     if from.volume == to.volume {
         let g = soc.interiors.get(&from.volume)?;
         let pts = hop(g, from.node, to.node)?;
+        let pts = finish(soc, pts);
         return (pts.len() > 1).then(|| inf_nav::NavPath::new(pts));
     }
     let inside_a = hop(soc.interiors.get(&from.volume)?, from.node, from.door)?;
@@ -916,25 +1178,85 @@ fn leg(
     let mut pts = inside_a;
     pts.extend_from_slice(street.points());
     pts.extend_from_slice(&inside_b);
+    let pts = finish(soc, pts);
     let path = inf_nav::NavPath::new(pts);
     (path.length_m() > 0.0).then_some(path)
 }
 
-/// **Plan one agent's day** — the four legs, and the two honest fall-backs.
+/// **Does this place stand somewhere other than its own room's node?**
+///
+/// The test [`leg`]'s extension is gated on, and it is a comparison against the
+/// graph rather than a flag on the place, because the graph is the authority on
+/// where a node is and a second copy of that answer is the thing that drifts.
+/// `false` when the node is not in the volume's interior at all, which is the
+/// conservative answer: a leg that cannot find its own endpoint's node is a leg
+/// that should not be lengthened by a metre nobody can check.
+fn node_offset(soc: &SocietyRes, p: &SocietyPlace) -> bool {
+    let Some(g) = soc.interiors.get(&p.volume) else {
+        return false;
+    };
+    let Some(n) = g.node(p.node) else {
+        return false;
+    };
+    // Half a centimetre — far below any distance that means anything here, and
+    // far above the arithmetic difference between `frame.to_world(centre)`
+    // computed twice.
+    (n.position - p.at).length() > 5e-3
+}
+
+/// **Plan one agent's day** — the four legs, the night that follows them, and
+/// the three honest fall-backs.
+///
+/// # The order the three kinds of day are tried in, and why
+///
+/// 1. **A night job first.** They are scarce — three per venue, claimed
+///    exclusively — and a bar with nobody behind the counter is a bar that is
+///    shut. Whoever is planned first and lives near enough takes one.
+/// 2. **Then the working day**, unchanged from NPC1d, followed by the evening.
+/// 3. **Then the fall-backs**, unchanged.
+///
+/// That order is a decision about scarcity and not about importance: a day job
+/// is `area / 12` identical desks and there is always another one, while a
+/// venue's deck is one deck.
 fn plan_day(
     soc: &mut SocietyRes,
     archetype: CrowdArchetype,
+    guid: Uuid,
     home: SocietyPlace,
     stats: &mut SocietyStats,
 ) -> (CrowdRecord, DayKind) {
+    // ── the night shift ────────────────────────────────────────────────────
+    if let Some(i) = nearest_unclaimed(&soc.night_work, &soc.taken_night, home.at, NIGHT_JOB_MAX_M)
+    {
+        let job = soc.night_work[i];
+        if let (Some(out), Some(back)) =
+            (leg(soc, &home, &job, stats), leg(soc, &job, &home, stats))
+        {
+            // Claimed only once the walk is known to route BOTH ways: a job
+            // claimed and then refused would be a counter nobody could ever
+            // stand behind again.
+            soc.taken_night.insert(i);
+            stats.night_workers += 1;
+            if let Some(sched) = CrowdSchedule::new(vec![
+                ScheduleLeg {
+                    start_h: NIGHT_WORK_START_H,
+                    travel_h: COMMUTE_H,
+                    path: out,
+                    arrival: arrival_of(&job),
+                },
+                plain(NIGHT_WORK_END_H, COMMUTE_H, back),
+            ]) {
+                return (
+                    CrowdRecord::scheduled(archetype, sched),
+                    DayKind::NightShift,
+                );
+            }
+        }
+    }
     if let Some(w) = nearest(&soc.work, home.at) {
         if let Some(out) = leg(soc, &home, &w, stats) {
             let back = leg(soc, &w, &home, stats);
-            let mut legs = vec![ScheduleLeg {
-                start_h: WORK_START_H,
-                travel_h: COMMUTE_H,
-                path: out,
-            }];
+            let mut legs = vec![plain(WORK_START_H, COMMUTE_H, out)];
             // The errand is nearest the WORKPLACE, because that is where the
             // agent is standing at noon.
             let mut got_errand = false;
@@ -942,16 +1264,8 @@ fn plan_day(
                 if let (Some(to_shop), Some(to_work)) =
                     (leg(soc, &w, &e, stats), leg(soc, &e, &w, stats))
                 {
-                    legs.push(ScheduleLeg {
-                        start_h: ERRAND_OUT_H,
-                        travel_h: ERRAND_H,
-                        path: to_shop,
-                    });
-                    legs.push(ScheduleLeg {
-                        start_h: ERRAND_BACK_H,
-                        travel_h: ERRAND_H,
-                        path: to_work,
-                    });
+                    legs.push(plain(ERRAND_OUT_H, ERRAND_H, to_shop));
+                    legs.push(plain(ERRAND_BACK_H, ERRAND_H, to_work));
                     got_errand = true;
                 }
             }
@@ -961,13 +1275,18 @@ fn plan_day(
             // **A day that only goes one way is counted** (NPC1d audit). Before
             // it was, an agent whose walk home did not route left at eight and
             // stood at its desk for ever, and the report called it a full day.
+            let came_home = back.is_some();
             match back {
-                Some(back) => legs.push(ScheduleLeg {
-                    start_h: HOME_H,
-                    travel_h: COMMUTE_H,
-                    path: back,
-                }),
+                Some(back) => legs.push(plain(HOME_H, COMMUTE_H, back)),
                 None => stats.no_return += 1,
+            }
+            // ── and the evening (wave VEN1b) ────────────────────────────────
+            //
+            // Only for an agent that got home: a body still standing at its
+            // desk at six has no front door to leave from, and giving it a
+            // night out would teleport it across the town at eight.
+            if came_home {
+                plan_evening(soc, guid, &home, &mut legs, stats);
             }
             if let Some(sched) = CrowdSchedule::new(legs) {
                 return (CrowdRecord::scheduled(archetype, sched), DayKind::Full);
@@ -977,18 +1296,11 @@ fn plan_day(
     // No workplace. An errand out and back is still a day.
     if let Some(e) = nearest(&soc.errand, home.at) {
         if let (Some(out), Some(back)) = (leg(soc, &home, &e, stats), leg(soc, &e, &home, stats)) {
-            if let Some(sched) = CrowdSchedule::new(vec![
-                ScheduleLeg {
-                    start_h: 10.0,
-                    travel_h: ERRAND_H,
-                    path: out,
-                },
-                ScheduleLeg {
-                    start_h: 16.0,
-                    travel_h: ERRAND_H,
-                    path: back,
-                },
-            ]) {
+            let mut legs = vec![plain(10.0, ERRAND_H, out), plain(16.0, ERRAND_H, back)];
+            // A homebound agent has an evening too — it is the *day* it has
+            // nowhere to be, and the venues do not care where somebody works.
+            plan_evening(soc, guid, &home, &mut legs, stats);
+            if let Some(sched) = CrowdSchedule::new(legs) {
                 return (CrowdRecord::scheduled(archetype, sched), DayKind::Homebound);
             }
         }
@@ -997,6 +1309,51 @@ fn plan_day(
         CrowdRecord::standing(archetype, home.at),
         DayKind::Housebound,
     )
+}
+
+/// **Append a night out to a day that has one** (wave VEN1b) — out at eight,
+/// back at two.
+///
+/// Nothing is appended when the agent did not draw in
+/// ([`NIGHTLIFE_SHARE`]), when every place in reach is already somebody's, or
+/// when the one it wanted does not route both ways; the last two are counted in
+/// [`SocietyStats::turned_away`], because a town whose venues are full is a
+/// different fact from a town that does not go out.
+///
+/// **The place is CLAIMED**, which is the whole of the crowd-density answer:
+/// the stations are laid at least a body's width apart by
+/// `inf_pcg::building::station::mingle_points`, and claiming makes that a
+/// promise about people rather than about points.
+fn plan_evening(
+    soc: &mut SocietyRes,
+    guid: Uuid,
+    home: &SocietyPlace,
+    legs: &mut Vec<ScheduleLeg>,
+    stats: &mut SocietyStats,
+) {
+    if !goes_out(guid) {
+        return;
+    }
+    let Some(i) = nearest_unclaimed(&soc.leisure, &soc.taken_leisure, home.at, NIGHT_OUT_MAX_M)
+    else {
+        stats.turned_away += 1;
+        return;
+    };
+    let spot = soc.leisure[i];
+    let (Some(out), Some(back)) = (leg(soc, home, &spot, stats), leg(soc, &spot, home, stats))
+    else {
+        stats.turned_away += 1;
+        return;
+    };
+    soc.taken_leisure.insert(i);
+    stats.revellers += 1;
+    legs.push(ScheduleLeg {
+        start_h: EVENING_OUT_H,
+        travel_h: EVENING_H,
+        path: out,
+        arrival: arrival_of(&spot),
+    });
+    legs.push(plain(NIGHT_HOME_H, COMMUTE_H, back));
 }
 
 /// The society's counters, or all zeroes on a level that has none.
@@ -1032,6 +1389,41 @@ mod tests {
         salt: u64,
         roles: &[SlotRole],
     ) {
+        let day: Vec<VenueSlot> = roles
+            .iter()
+            .map(|r| VenueSlot {
+                role: *r,
+                shift: SlotShift::Day,
+                posture: crate::components::SlotPosture::Stand,
+                offset: DVec3::ZERO,
+            })
+            .collect();
+        block_of(world, guid, centre, half, salt, &day)
+    }
+
+    /// One slot a fixture block offers, as the fixture spells it.
+    #[derive(Clone, Copy)]
+    struct VenueSlot {
+        role: SlotRole,
+        shift: SlotShift,
+        posture: crate::components::SlotPosture,
+        /// How far the slot stands from its own room's node — zero for a slot a
+        /// PLAN implies, non-zero for a station.
+        offset: DVec3,
+    }
+
+    /// [`block`], with a shift, a posture and an offset on every slot — the
+    /// shape a venue's own rooms have (wave VEN1b).
+    fn block_of(
+        world: &mut EcsWorld,
+        guid: Uuid,
+        centre: DVec3,
+        half: f64,
+        salt: u64,
+        slots: &[VenueSlot],
+    ) {
+        let roles: Vec<SlotRole> = slots.iter().map(|s| s.role).collect();
+        let roles = &roles[..];
         world.spawn_with_guid(guid, "block", None);
         let e = world.entity_of(guid).expect("the block");
         let room = |i: usize| domain::BUILDING | (i as u64 & 0xF_FFFF) | (salt << 20);
@@ -1049,12 +1441,19 @@ mod tests {
             g.link(door(i + 1), room(i + 1), NavKind::Doorway, Vec::new());
             residents.push(ResidentSlot {
                 role: *role,
-                at,
+                at: at + slots[i].offset,
                 room: (i + 1) as u32,
                 building: 0,
                 floor: 0,
-                index: 0,
+                index: i as u32,
                 node: room(i + 1),
+                posture: slots[i].posture,
+                shift: slots[i].shift,
+                face: if slots[i].offset == DVec3::ZERO {
+                    DVec3::ZERO
+                } else {
+                    DVec3::Z
+                },
             });
         }
         // The exterior door: one edge, at the block's own edge.
@@ -1085,6 +1484,7 @@ mod tests {
             }],
             residents,
             g,
+            Vec::new(),
             Vec::new(),
         );
         world.world_mut().entity_mut(e).insert((
@@ -1211,6 +1611,314 @@ mod tests {
         // The memo did its job: four legs, and the second commute of the day is
         // a different pair, so both searched once and neither twice.
         assert!(b.outer_searches > 0, "no street route was ever searched");
+    }
+
+    /// **THE NIGHT** (wave VEN1b): a town with a venue in it stops emptying at
+    /// six.
+    ///
+    /// Eight homes and one venue offering a night job, two seats and a patch of
+    /// dance floor. Every claim is a count with a floor, because a town with no
+    /// nightlife and a town whose nightlife nobody can reach produce the same
+    /// silence:
+    ///
+    /// * somebody works the night shift, and their day is the *two*-leg one —
+    ///   out at eighteen, home at three — rather than the four-leg commute;
+    /// * somebody goes out, and their day is **six** legs;
+    /// * the evening leg's arrival carries a posture that is not standing;
+    /// * the venue's places are **claimed**, so two agents never take one;
+    /// * and the ones who wanted a night out and found the venue full are
+    ///   counted rather than dropped.
+    #[test]
+    fn a_town_with_a_venue_in_it_has_a_night() {
+        use crate::components::SlotPosture;
+        let home = VenueSlot {
+            role: SlotRole::Home,
+            shift: SlotShift::Day,
+            posture: SlotPosture::Stand,
+            offset: DVec3::ZERO,
+        };
+        let mut world = EcsWorld::new();
+        // Eight homes, a day job and a shop — so the ordinary day really is the
+        // FOUR-leg one and a night shift is the only two-leg day in the town.
+        // (Without the shop every day is two legs, `errandless`, and the arm
+        // below cannot tell a bar's keeper from an office worker.)
+        let mut homes = vec![home; 8];
+        for role in [SlotRole::Work, SlotRole::Errand] {
+            homes.push(VenueSlot {
+                role,
+                shift: SlotShift::Day,
+                posture: SlotPosture::Stand,
+                offset: DVec3::ZERO,
+            });
+        }
+        block_of(
+            &mut world,
+            Uuid::from_u128(1),
+            DVec3::ZERO,
+            10.0,
+            0x11,
+            &homes,
+        );
+        // The venue: a counter to work behind, two seats and a dance spot —
+        // every one of them OFFSET from its own room's node, which is what a
+        // station is and what the plan-derived slots are not.
+        let off = DVec3::new(1.5, 0.0, 0.0);
+        block_of(
+            &mut world,
+            Uuid::from_u128(2),
+            DVec3::new(28.0, 0.0, 0.0),
+            10.0,
+            0x22,
+            &[
+                VenueSlot {
+                    role: SlotRole::Work,
+                    shift: SlotShift::Night,
+                    posture: SlotPosture::Stand,
+                    offset: off,
+                },
+                VenueSlot {
+                    role: SlotRole::Leisure,
+                    shift: SlotShift::Night,
+                    posture: SlotPosture::Sit,
+                    offset: off,
+                },
+                VenueSlot {
+                    role: SlotRole::Leisure,
+                    shift: SlotShift::Night,
+                    posture: SlotPosture::Sit,
+                    offset: off,
+                },
+                VenueSlot {
+                    role: SlotRole::Leisure,
+                    shift: SlotShift::Night,
+                    posture: SlotPosture::Dance,
+                    offset: off,
+                },
+            ],
+        );
+        sync_society(&mut world);
+        let mut last = SocietyStats::default();
+        for _ in 0..8 {
+            last = sync_society(&mut world);
+            if last.pending == 0 && last.planned_now == 0 {
+                break;
+            }
+        }
+        println!(
+            "VEN1b: {} agent(s); {} night job(s) -> {} worker(s); {} leisure \
+             place(s) -> {} reveller(s), {} turned away",
+            last.agents,
+            last.night_jobs,
+            last.night_workers,
+            last.leisure_places,
+            last.revellers,
+            last.turned_away
+        );
+        assert_eq!(last.night_jobs, 1, "the venue offered no night job");
+        assert_eq!(last.leisure_places, 3);
+        assert_eq!(
+            last.night_workers, 1,
+            "the venue's counter has nobody behind it"
+        );
+        assert!(last.revellers > 0, "not one of eight went out");
+        assert!(
+            last.revellers <= last.leisure_places,
+            "{} revellers claimed {} places",
+            last.revellers,
+            last.leisure_places
+        );
+
+        let pop = world
+            .world()
+            .get_resource::<crate::crowd::CrowdPopulationRes>()
+            .expect("a population");
+        let mut nights = 0usize;
+        let mut outs = 0usize;
+        let mut postures: BTreeSet<u8> = BTreeSet::new();
+        let mut spots: Vec<[u64; 3]> = Vec::new();
+        for (g, rec) in &pop.records {
+            let Some(s) = rec.schedule.as_ref() else {
+                continue;
+            };
+            match s.legs().len() {
+                // The night shift: out at eighteen, home at three.
+                2 if s.legs()[0].start_h == NIGHT_WORK_START_H => {
+                    nights += 1;
+                    assert_eq!(s.legs()[1].start_h, NIGHT_WORK_END_H);
+                }
+                6 => {
+                    outs += 1;
+                    let evening = &s.legs()[4];
+                    assert_eq!(evening.start_h, EVENING_OUT_H);
+                    assert_eq!(s.legs()[5].start_h, NIGHT_HOME_H);
+                    postures.insert(evening.arrival.posture.as_u8());
+                    assert_ne!(
+                        evening.arrival.face,
+                        DVec3::ZERO,
+                        "a reveller arrives facing nowhere"
+                    );
+                    // …and the walk really ENDS at the seat, not at the room's
+                    // node in the middle of the floor.
+                    let end = evening.path.points()[evening.path.points().len() - 1];
+                    spots.push(end.to_array().map(f64::to_bits));
+                }
+                // The four-leg commute, unchanged: an agent that did not draw
+                // in stays the agent NPC1d planned.
+                4 => {}
+                n => panic!("agent {g} got a {n}-leg day"),
+            }
+            // Whatever the day, the agent is at HOME at ten in the morning.
+            let (i, u) = s.at(10.0);
+            assert!(
+                u >= 1.0 || i == 0,
+                "agent {g} is mid-walk at ten in the morning"
+            );
+        }
+        assert_eq!(nights, 1);
+        assert_eq!(outs, last.revellers);
+        assert!(
+            postures.contains(&SlotPosture::Sit.as_u8())
+                || postures.contains(&SlotPosture::Dance.as_u8()),
+            "nobody in the club is sitting or dancing: {postures:?}"
+        );
+        // **THE CLAIM.** Two revellers never walk to one seat, which is the
+        // whole of the crowd-density answer expressed as a count.
+        let unique: BTreeSet<[u64; 3]> = spots.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            spots.len(),
+            "{} revellers arrived at {} distinct places",
+            spots.len(),
+            unique.len()
+        );
+    }
+
+    /// **The nightlife draw really is [`NIGHTLIFE_SHARE`] of a town**, over a
+    /// population big enough for the answer to mean something.
+    ///
+    /// Eight agents is a coin toss and the arm above deliberately does not test
+    /// this; a thousand is the size the arc's own sweeps are quoted at. Written
+    /// because a `goes_out` that answered `false` for everybody would make the
+    /// night arm's "somebody went out" pass on one lucky draw and the whole
+    /// clause vacuous on a real settlement.
+    #[test]
+    fn a_third_of_a_town_goes_out() {
+        const N: u128 = 1_000;
+        let out = (0..N)
+            .filter(|i| goes_out(Uuid::from_u128(0x4e50_0000_0000_0000 + i)))
+            .count();
+        let share = out as f64 / N as f64;
+        println!(
+            "VEN1b: {out} of {N} go out — {:.3} against {NIGHTLIFE_SHARE}",
+            share
+        );
+        assert!(
+            (share - NIGHTLIFE_SHARE).abs() < 0.05,
+            "the draw put {share:.3} of a thousand agents in a venue against a \
+             share of {NIGHTLIFE_SHARE}"
+        );
+        // …and it is a constant of the agent, not of the call.
+        let g = Uuid::from_u128(7);
+        assert_eq!(goes_out(g), goes_out(g));
+    }
+
+    /// **A night out wraps past midnight**, and the schedule needs no special
+    /// case for it: `CrowdSchedule::at` is `(hour - start) mod 24`, so a leg
+    /// that begins at two in the morning is the active leg from two until the
+    /// next one starts.
+    #[test]
+    fn a_night_out_wraps_past_midnight() {
+        let path = |a: DVec3, b: DVec3| inf_nav::NavPath::new(vec![a, b]);
+        let p = path(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
+        let sched = CrowdSchedule::new(vec![
+            ScheduleLeg {
+                start_h: EVENING_OUT_H,
+                travel_h: EVENING_H,
+                path: p.clone(),
+                arrival: crate::crowd::SlotArrival {
+                    posture: crate::components::SlotPosture::Dance,
+                    face: DVec3::Z,
+                },
+            },
+            ScheduleLeg {
+                start_h: NIGHT_HOME_H,
+                travel_h: COMMUTE_H,
+                path: p,
+                arrival: crate::crowd::SlotArrival::STANDING,
+            },
+        ])
+        .expect("two walkable legs");
+        // At eleven at night the reveller is at the club, dancing.
+        let (i, u) = sched.at(23.0);
+        assert_eq!(i, 0);
+        assert!(u >= 1.0, "still walking at eleven ({u})");
+        // At half past two it is walking home, and at four it is there.
+        let (i, u) = sched.at(2.5);
+        assert_eq!(i, 1, "the small-hours leg never became active");
+        assert!(u < 1.0, "home already at half past two ({u})");
+        assert!(sched.at(4.0).1 >= 1.0);
+        // Nothing is standing where the club is: the arrival is the leg's.
+        assert_eq!(
+            sched.legs()[0].arrival.posture,
+            crate::components::SlotPosture::Dance
+        );
+    }
+
+    /// **A slot a PLAN implies stands on its own room's node, so the leg it
+    /// ends is the route it always was** — the arm that says wave VEN1b's
+    /// endpoint extension is a no-op for every level that predates it.
+    #[test]
+    fn a_plan_slots_leg_is_the_route_it_always_was() {
+        let mut world = EcsWorld::new();
+        block(
+            &mut world,
+            Uuid::from_u128(1),
+            DVec3::ZERO,
+            10.0,
+            0x11,
+            &[SlotRole::Home],
+        );
+        block(
+            &mut world,
+            Uuid::from_u128(2),
+            DVec3::new(28.0, 0.0, 0.0),
+            10.0,
+            0x22,
+            &[SlotRole::Work],
+        );
+        sync_society(&mut world);
+        sync_society(&mut world);
+        let soc = world
+            .world()
+            .get_resource::<SocietyRes>()
+            .expect("a society");
+        // Not one place in this level stands off its own node…
+        for p in soc.work.iter().chain(soc.pending.values()) {
+            assert!(
+                !super::node_offset(soc, p),
+                "a plan-derived slot at {:?} stands off its room's node",
+                p.at
+            );
+        }
+        // …so the commute's ends are the graph's own points, and the extension
+        // added nothing.
+        let pop = world
+            .world()
+            .get_resource::<crate::crowd::CrowdPopulationRes>()
+            .expect("a population");
+        let rec = pop.records.values().next().expect("one agent");
+        let commute = &rec.schedule.as_ref().expect("a day").legs()[0];
+        let pts = commute.path.points();
+        assert_eq!(
+            pts[0],
+            DVec3::new(0.0, 0.0, 2.0),
+            "the commute grew a metre at its start"
+        );
+        assert_eq!(
+            pts[pts.len() - 1],
+            DVec3::new(28.0, 0.0, 2.0),
+            "the commute grew a metre at its end"
+        );
     }
 
     /// A resident with no reachable workplace still gets a day, and the counter

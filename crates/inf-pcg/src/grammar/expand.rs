@@ -908,6 +908,18 @@ pub struct GrammarOutput {
     /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in), like
     /// [`doorways`](Self::doorways) and [`slots`](Self::slots).
     pub interior: inf_nav::NavGraph,
+    /// **Every place a body can be at a piece of this output's FURNITURE**
+    /// (wave VEN1b) — the seats, the standing room, the counters and the decks.
+    ///
+    /// Unlike [`slots`](Self::slots) these are emitted by the **assembler**,
+    /// which is the one pass that knows where a stool ended up; `slots` is
+    /// derived from the plan alone and could not name one. `pass.rs` turns the
+    /// occupied ones into slots once it holds the building's own salt, and the
+    /// rest — an emitter for the music bus — reach the ECS as themselves.
+    ///
+    /// World metres and no index, like a doorway, so concatenation is the whole
+    /// of it. See [`crate::building::station`].
+    pub stations: Vec<crate::building::station::PcgStation>,
     /// **Every real light this output's buildings hang** (wave VEN1a). Located
     /// in the world and naming no index, so composition neither shifts nor
     /// re-bases them — exactly like `doorways` and `slots`.
@@ -934,6 +946,9 @@ impl GrammarOutput {
         self.slots.extend(other.slots);
         // A fixture is world metres and names no index either (VEN1a).
         self.lights.extend(other.lights);
+        // …and so is a station (VEN1b). Concatenation is associative, so the
+        // floor-major `parallel_map` fold stays pool-size invariant.
+        self.stations.extend(other.stations);
         // The interiors are salted apart building by building, so absorbing is
         // the union it looks like — and `absorb`'s "the first record wins" rule
         // never fires, which is exactly what the salt is for.
@@ -1058,6 +1073,9 @@ pub fn expand_span(
         interior: inf_nav::NavGraph::new(),
         // …and a fence hangs no lights (VEN1a).
         lights: Vec::new(),
+        // …and offers nobody a seat (VEN1b): a station is a property of
+        // FURNITURE in a ROOM, and a 1-D expansion has neither.
+        stations: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

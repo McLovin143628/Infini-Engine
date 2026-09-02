@@ -171,6 +171,12 @@ pub struct BuildingOutput {
     /// archetype that declares no [`StageRig`](super::palettes::StageRig),
     /// which is the seven that predate the venues.
     pub lights: Vec<super::PcgLight>,
+    /// **Every place a body can be at this building's furniture** (wave VEN1b)
+    /// — the stools and benches it seated, the floor it left to stand on, the
+    /// counter it ran and the deck it raised. See
+    /// [`station`](super::station); empty for every archetype whose rooms offer
+    /// none, which is the seven that predate the venues.
+    pub stations: Vec<super::station::PcgStation>,
 }
 
 /// The height seam expansion demands but a building never uses: every module is
@@ -209,6 +215,7 @@ pub fn build_in(
         instances: out.instances,
         colliders: out.colliders,
         lights: out.lights,
+        stations: out.stations,
     }
 }
 
@@ -308,6 +315,16 @@ fn place_in_frame(out: &mut GrammarOutput, frame: crate::building::LotFrame) {
     for l in &mut out.lights {
         l.at = map(l.at);
         l.dir = yaw * l.dir;
+    }
+    // **A station turns with its lot too** (VEN1b), and its FACING turns with
+    // the same quaternion the beam does. That is why the facing is carried as a
+    // direction and not as an angle: rotating a vector by `yaw` is exact on
+    // every target, while a degree would have needed an `atan2` here — on a
+    // value that lands on an NPC's `Transform` and therefore in the replay
+    // trace (P14).
+    for s in &mut out.stations {
+        s.at = map(s.at);
+        s.face = yaw * s.face;
     }
 }
 
@@ -542,6 +559,38 @@ impl Ctx<'_> {
                 FESTOON_HALF_D_M,
             );
         }
+        // **And somebody on the door** (wave VEN1b) — `venues/0060`'s bouncer,
+        // standing OUTSIDE the entrance, facing away from it.
+        //
+        // It rides `street_face` rather than a pass of its own because this is
+        // the one place in the assembler that has resolved *which wall is the
+        // street face and which way is out* — and the guard is a station for
+        // exactly the same reason the sign is decor: it is a property of the
+        // entrance, not of a room. `GUARD_STAND_M` is one pace clear of the
+        // swing, so the bouncer never stands in the leaf's arc.
+        let g = if along_x {
+            DVec2::new(
+                mid.x,
+                mid.y + outward * (half_t + super::station::GUARD_STAND_M),
+            )
+        } else {
+            DVec2::new(
+                mid.x + outward * (half_t + super::station::GUARD_STAND_M),
+                mid.y,
+            )
+        };
+        let out_normal = if along_x {
+            DVec3::new(0.0, 0.0, outward)
+        } else {
+            DVec3::new(outward, 0.0, 0.0)
+        };
+        out.stations.push(super::station::PcgStation {
+            use_kind: super::station::StationUse::Guard,
+            at: DVec3::new(g.x, y, g.y),
+            face: out_normal,
+            room: w.inside as u32,
+            floor: 0,
+        });
     }
 
     /// **The glazed leaf in a window void** (island wave I8b clause 3).
@@ -620,8 +669,56 @@ impl Ctx<'_> {
                 // furniture above just put in the middle of the room.
                 self.rig(&mut out, room, y);
             }
+            self.music(&mut out, floor, y);
         }
         out
+    }
+
+    /// **Where a venue's music comes from** (wave VEN1b) — one emitter, over
+    /// the middle of the room the archetype anchors its ground floor on.
+    ///
+    /// # The MAIN room, and not "a room with a speaker in it"
+    ///
+    /// `ground_anchors` is already the archetype's own statement of what its
+    /// building is *for* — `[BarRoom]` for a bar, `[DanceFloor, BarRoom]` for a
+    /// nightclub, `[Stage, BarRoom]` for a strip club — and `plan` claims those
+    /// rooms by descending area with no hash in it (VEN1a's anchor ruling). So
+    /// the first anchor is the largest room of the kind the building exists for,
+    /// and asking for it here costs one comparison per room rather than a
+    /// second opinion about which room matters.
+    ///
+    /// A building whose archetype declares no anchor — the seven that predate
+    /// the venues — emits nothing, which is why a house is byte-identical to
+    /// its pre-VEN1b self.
+    ///
+    /// It hangs at [`MUSIC_HANG`](super::station::MUSIC_HANG) of the storey:
+    /// above head height, below the rig, and — the reason that matters — high
+    /// enough that the doorway rule's ray from a listener out in the street
+    /// reaches it without grazing the floor slab.
+    fn music(&self, out: &mut GrammarOutput, floor: u32, y: f64) {
+        if floor != 0 {
+            return;
+        }
+        let Some(&anchor) = self.arch.ground_anchors.first() else {
+            return;
+        };
+        let Some((ri, room)) = self.plan.rooms_on(0).find(|(_, r)| r.kind == anchor) else {
+            return;
+        };
+        let c = room.rect.center();
+        out.stations.push(super::station::PcgStation {
+            use_kind: super::station::StationUse::Music,
+            at: DVec3::new(
+                c.x,
+                y + self.arch.floor_height * super::station::MUSIC_HANG,
+                c.y,
+            ),
+            // An emitter has no opinion about which way it points: the spatial
+            // model is a distance and a pan, not a cone.
+            face: DVec3::ZERO,
+            room: ri as u32,
+            floor: 0,
+        });
     }
 
     /// One wall: the solid runs between its openings, expanded by the grammar,
@@ -973,11 +1070,21 @@ impl Ctx<'_> {
             };
             let dh = base.mix_u64(di as u64);
             match def.place {
-                Placement::Wall => {
-                    self.wall_furniture(out, room, y, def, kind, dh, blockers, &mut placed, 0.0)
-                }
+                Placement::Wall => self.wall_furniture(
+                    out,
+                    room_index,
+                    room,
+                    y,
+                    def,
+                    kind,
+                    dh,
+                    blockers,
+                    &mut placed,
+                    0.0,
+                ),
                 Placement::Mounted { height_m } => self.wall_furniture(
                     out,
+                    room_index,
                     room,
                     y,
                     def,
@@ -987,16 +1094,81 @@ impl Ctx<'_> {
                     &mut placed,
                     height_m,
                 ),
-                Placement::Free => {
-                    self.free_furniture(out, room, y, def, kind, dh, blockers, &mut placed)
-                }
-                Placement::Centre => {
-                    self.centre_furniture(out, room, y, def, kind, blockers, &mut placed)
-                }
+                Placement::Free => self.free_furniture(
+                    out,
+                    room_index,
+                    room,
+                    y,
+                    def,
+                    kind,
+                    dh,
+                    blockers,
+                    &mut placed,
+                ),
+                Placement::Centre => self.centre_furniture(
+                    out,
+                    room_index,
+                    room,
+                    y,
+                    def,
+                    kind,
+                    blockers,
+                    &mut placed,
+                ),
                 Placement::Run => {
-                    self.run_furniture(out, room, y, def, kind, blockers, &mut placed)
+                    self.run_furniture(out, room_index, room, y, def, kind, blockers, &mut placed)
                 }
             }
+        }
+        // **The floor that is left** (VEN1b), after every piece has registered
+        // its own reach in `placed` — which is why this is a tail and not a
+        // pass of its own: the lattice has to know where the stage went.
+        self.standing_room(out, room_index, room, y, &placed);
+    }
+
+    /// **The standing room a room offers** (wave VEN1b) — the dance floor, on a
+    /// spaced lattice, around whatever the furniture above put in the middle
+    /// of it.
+    ///
+    /// Inert for every room that is not standing room, which is every room in
+    /// the twelve palettes that predate the venues and every room of a venue
+    /// but its dance floor. See [`station::is_standing_room`](super::station::is_standing_room)
+    /// for why a bar room's floor is deliberately not filled.
+    fn standing_room(
+        &self,
+        out: &mut GrammarOutput,
+        room_index: usize,
+        room: &Room,
+        y: f64,
+        placed: &[(DVec2, f64)],
+    ) {
+        if !super::station::is_standing_room(room.kind) {
+            return;
+        }
+        let inner = room
+            .rect
+            .inset(self.arch.wall_thickness * 0.5 + FURNITURE_WALL_GAP);
+        let centre = inner.center();
+        for p in super::station::mingle_points(&inner, placed) {
+            // A dancer faces the middle of the room, which on a dance floor is
+            // where the stage and the pole are. A body exactly at the centre —
+            // which the lattice's own clearance rule makes impossible while a
+            // stage stands there, and possible in an empty room — keeps its
+            // own facing rather than normalizing a zero vector.
+            let d = centre - p;
+            let m = (d.x * d.x + d.y * d.y).sqrt();
+            let face = if m > 1e-6 {
+                DVec3::new(d.x / m, 0.0, d.y / m)
+            } else {
+                DVec3::Z
+            };
+            out.stations.push(super::station::PcgStation {
+                use_kind: super::station::StationUse::Mingle,
+                at: DVec3::new(p.x, y, p.y),
+                face,
+                room: room_index as u32,
+                floor: room.floor,
+            });
         }
     }
 
@@ -1016,6 +1188,7 @@ impl Ctx<'_> {
     fn centre_furniture(
         &self,
         out: &mut GrammarOutput,
+        room_index: usize,
         room: &Room,
         y: f64,
         def: &FurnitureDef,
@@ -1076,6 +1249,23 @@ impl Ctx<'_> {
         // not an authored number: a 3 m stage that declared 0.6 m of clearance
         // would still get a stool standing on it.
         placed.push((p, half.x.hypot(half.z)));
+        // **The act stands ON the deck** (VEN1b), not beside it. `y + 2·half.y`
+        // is the deck's top surface — the instance's own centre is at
+        // `y + half.y` — so a performer's feet are where a viewer sees the
+        // plank, which is what `venues/0028` and `/0044` are pictures of.
+        //
+        // The facing is ACROSS the deck's long axis, because that is where the
+        // benches are: `run_furniture` puts a bench against a wall facing in,
+        // and a catwalk in a long room has its audience down both long sides.
+        if super::station::performs_of(def.module) && super::station::is_social(room.kind) {
+            out.stations.push(super::station::PcgStation {
+                use_kind: super::station::StationUse::Perform,
+                at: DVec3::new(p.x, y + half.y * 2.0, p.y),
+                face: if half.x >= half.z { DVec3::Z } else { DVec3::X },
+                room: room_index as u32,
+                floor: room.floor,
+            });
+        }
     }
 
     /// **One continuous run along the room's longest inset edge** (wave VEN1a) —
@@ -1090,6 +1280,7 @@ impl Ctx<'_> {
     fn run_furniture(
         &self,
         out: &mut GrammarOutput,
+        room_index: usize,
         room: &Room,
         y: f64,
         def: &FurnitureDef,
@@ -1208,6 +1399,20 @@ impl Ctx<'_> {
             rotation: rot,
         });
         placed.push((p, half.x.hypot(half.z)));
+        // **The keeper stands BEHIND the counter** (VEN1b), which is the whole
+        // difference between a bar and a shelf: `normal` points into the room,
+        // so the service side is `-normal`, half the counter's depth plus a
+        // stride back from its centre. The body faces the run it is serving.
+        if super::station::tends_of(def.module) && super::station::is_social(room.kind) {
+            let back = p - normal * (half.z + super::station::KEEPER_STAND_M);
+            out.stations.push(super::station::PcgStation {
+                use_kind: super::station::StationUse::Tend,
+                at: DVec3::new(back.x, y, back.y),
+                face: DVec3::new(normal.x, 0.0, normal.y),
+                room: room_index as u32,
+                floor: room.floor,
+            });
+        }
     }
 
     /// Station a wall-aligned piece along the room's inset perimeter, facing in.
@@ -1215,6 +1420,7 @@ impl Ctx<'_> {
     fn wall_furniture(
         &self,
         out: &mut GrammarOutput,
+        room_index: usize,
         room: &Room,
         y: f64,
         def: &FurnitureDef,
@@ -1312,7 +1518,72 @@ impl Ctx<'_> {
                     half_extents: half,
                     rotation: rot,
                 });
+                // **A bench against a wall seats a row facing IN** (VEN1b), and
+                // that is why a bench at a stage edge works without anything
+                // knowing there is a stage: the inward normal a wall piece is
+                // already placed on points at the middle of the room, which is
+                // where the catwalk is. A `Placement::Mounted` piece is skipped
+                // by `seats_of` — nobody sits on a neon plate — so the shared
+                // body needs no branch of its own.
+                self.seat_row(out, room_index, room, y, def, p, half, normal);
             }
+        }
+    }
+
+    /// **The seats one placed piece offers**, along its own long axis (wave
+    /// VEN1b).
+    ///
+    /// `along` is the piece's local +X in the plan, which is the axis
+    /// perpendicular to the wall normal it faces off; a stool has no pitch and
+    /// takes one place at its own centre. The seat surface is `rise` of the
+    /// piece's height, so a body's feet are put where a viewer sees the plank
+    /// and not at its middle.
+    #[allow(clippy::too_many_arguments)]
+    fn seat_row(
+        &self,
+        out: &mut GrammarOutput,
+        room_index: usize,
+        room: &Room,
+        y: f64,
+        def: &FurnitureDef,
+        p: DVec2,
+        half: DVec3,
+        normal: DVec2,
+    ) {
+        // **A bench in a workshop is where you put your tools.** The gate is on
+        // the ROOM and not on the archetype — see
+        // [`station::is_social`](super::station::is_social) for the 111 seats
+        // the factory palette offered before it was here.
+        if !super::station::is_social(room.kind) {
+            return;
+        }
+        let Some(spec) = super::station::seats_of(def.module) else {
+            return;
+        };
+        // The long axis of a wall-stationed piece runs ALONG the wall, which is
+        // the normal turned a quarter turn. Exact for the four axis-aligned
+        // normals every wall placement uses, and no trigonometry.
+        let along = DVec2::new(-normal.y, normal.x);
+        let seat_y = y + half.y * 2.0 * spec.rise;
+        let face = DVec3::new(normal.x, 0.0, normal.y);
+        let places: Vec<DVec2> = match spec.pitch_m {
+            None => vec![p],
+            Some(pitch) => {
+                let n = ((half.x * 2.0) / pitch).floor().max(1.0) as usize;
+                let span = (n - 1) as f64 * pitch;
+                (0..n)
+                    .map(|k| p + along * (k as f64 * pitch - span * 0.5))
+                    .collect()
+            }
+        };
+        for q in places {
+            out.stations.push(super::station::PcgStation {
+                use_kind: super::station::StationUse::Seat,
+                at: DVec3::new(q.x, seat_y, q.y),
+                face,
+                room: room_index as u32,
+                floor: room.floor,
+            });
         }
     }
 
@@ -1322,6 +1593,7 @@ impl Ctx<'_> {
     fn free_furniture(
         &self,
         out: &mut GrammarOutput,
+        room_index: usize,
         room: &Room,
         y: f64,
         def: &FurnitureDef,
@@ -1373,6 +1645,29 @@ impl Ctx<'_> {
                     half_extents: half,
                     rotation: glam::DQuat::IDENTITY,
                 });
+                // **A free-standing seat faces the middle of its room**
+                // (VEN1b). A stool has no wall to face off, and the middle is
+                // where a bar's counter run and a club's stage both are; a
+                // stool exactly at the centre keeps `+Z` rather than
+                // normalizing a zero vector. Gated on the room like the wall
+                // row is, and for the same measured reason.
+                if let Some(spec) = super::station::seats_of(def.module)
+                    .filter(|_| super::station::is_social(room.kind))
+                {
+                    let d = room.rect.center() - p;
+                    let m = (d.x * d.x + d.y * d.y).sqrt();
+                    out.stations.push(super::station::PcgStation {
+                        use_kind: super::station::StationUse::Seat,
+                        at: DVec3::new(p.x, y + half.y * 2.0 * spec.rise, p.y),
+                        face: if m > 1e-6 {
+                            DVec3::new(d.x / m, 0.0, d.y / m)
+                        } else {
+                            DVec3::Z
+                        },
+                        room: room_index as u32,
+                        floor: room.floor,
+                    });
+                }
             }
         }
     }
@@ -1527,6 +1822,139 @@ mod tests {
         for id in ArchetypeId::ALL.into_iter().filter(|a| !a.is_venue()) {
             let (name, worst, _) = table[ArchetypeId::ALL.iter().position(|a| *a == id).unwrap()];
             assert_eq!(worst, 0, "{name} grew a lighting rig");
+        }
+    }
+
+    /// **THE OCCUPANCY MEASUREMENT** (wave VEN1b) — what a venue's own
+    /// furniture offers a body, per archetype, printed so the ledger quotes a
+    /// number rather than an intention.
+    ///
+    /// Armed four ways, because a station list that came out empty would make
+    /// every downstream claim about a populated club vacuous:
+    ///
+    /// * each of the three venues offers seats, standing room and a counter to
+    ///   work behind;
+    /// * the two with a raised deck offer somewhere to perform on it;
+    /// * every venue puts somebody on its own door;
+    /// * and **the seven archetypes that predate the venues offer NOTHING** —
+    ///   asserted, because that is what makes a house byte-identical to its
+    ///   pre-VEN1b self rather than merely believed to be.
+    #[test]
+    fn a_venue_offers_a_countable_number_of_places_to_be() {
+        use super::super::station::StationUse;
+        let count = |out: &BuildingOutput, u: StationUse| {
+            out.stations.iter().filter(|s| s.use_kind == u).count()
+        };
+        println!(
+            "{:<12} {:>5} {:>7} {:>5} {:>8} {:>6} {:>6}",
+            "archetype", "seat", "mingle", "tend", "perform", "guard", "music"
+        );
+        let mut best: std::collections::BTreeMap<&str, [usize; 6]> = Default::default();
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            let mut worst = [0usize; 6];
+            for seed in [3u64, 44, 512, 900] {
+                for floors in [1u32, 2] {
+                    let out = build(
+                        &BuildingParams {
+                            floors,
+                            ..BuildingParams::new(id, lot(40.0, 30.0), 4.0, seed)
+                        },
+                        seed,
+                        true,
+                    );
+                    for (k, u) in [
+                        StationUse::Seat,
+                        StationUse::Mingle,
+                        StationUse::Tend,
+                        StationUse::Perform,
+                        StationUse::Guard,
+                        StationUse::Music,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        worst[k] = worst[k].max(count(&out, u));
+                    }
+                }
+            }
+            println!(
+                "{:<12} {:>5} {:>7} {:>5} {:>8} {:>6} {:>6}",
+                arch.display, worst[0], worst[1], worst[2], worst[3], worst[4], worst[5]
+            );
+            best.insert(arch.display, worst);
+        }
+        for id in ArchetypeId::ALL.into_iter().filter(|a| a.is_venue()) {
+            let w = best[archetype(id).display];
+            assert!(w[0] > 0, "{id:?} offers nobody a seat");
+            assert!(w[2] > 0, "{id:?} offers nobody a counter to work behind");
+            assert!(w[4] > 0, "{id:?} leaves its own door unwatched");
+            assert_eq!(w[5], 1, "{id:?} has {} music emitters, not one", w[5]);
+        }
+        // A dance floor is standing room and a stage is a deck; the bar has
+        // neither, and saying which venue offers which is the difference
+        // between three archetypes and one.
+        assert!(
+            best[archetype(ArchetypeId::Nightclub).display][1] > 0,
+            "a nightclub offers no standing room on its dance floor"
+        );
+        for id in [ArchetypeId::Nightclub, ArchetypeId::StripClub] {
+            assert!(
+                best[archetype(id).display][3] > 0,
+                "{id:?} raises a deck nobody performs on"
+            );
+        }
+        // …and the seven that predate the venues offer nothing at all.
+        for id in ArchetypeId::ALL.into_iter().filter(|a| !a.is_venue()) {
+            let w = best[archetype(id).display];
+            assert_eq!(
+                w.iter().sum::<usize>(),
+                0,
+                "{id:?} grew {w:?} stations, so a pre-VEN1b level is not \
+                 byte-identical to itself"
+            );
+        }
+    }
+
+    /// **Every station stands where a body can stand**: on a walking surface or
+    /// on a deck, inside the building's own storey, and — for the ones that
+    /// face something — facing a unit direction (wave VEN1b).
+    #[test]
+    fn a_station_stands_on_something_and_faces_somewhere() {
+        use super::super::station::StationUse;
+        for id in [
+            ArchetypeId::Bar,
+            ArchetypeId::Nightclub,
+            ArchetypeId::StripClub,
+        ] {
+            let arch = archetype(id);
+            for seed in [3u64, 512] {
+                let out = built(id, 1, seed);
+                assert!(!out.stations.is_empty(), "{id:?} at seed {seed}: none");
+                let base = out.plan.floor_y(0);
+                for s in &out.stations {
+                    assert!(s.at.is_finite() && s.face.is_finite());
+                    assert!(
+                        s.at.y >= base - 1e-9 && s.at.y <= base + arch.floor_height,
+                        "{id:?}: a {} station at y {:.3} is outside the storey \
+                         [{base:.3}, {:.3}]",
+                        s.use_kind.name(),
+                        s.at.y,
+                        base + arch.floor_height
+                    );
+                    if s.use_kind == StationUse::Music {
+                        assert_eq!(s.face, DVec3::ZERO, "an emitter faces somewhere");
+                        continue;
+                    }
+                    let m = s.face.length();
+                    assert!(
+                        (m - 1.0).abs() < 1e-9,
+                        "{id:?}: a {} station faces a vector of length {m}",
+                        s.use_kind.name()
+                    );
+                    assert_eq!(s.face.y, 0.0, "a body faces out of the XZ plane");
+                }
+            }
         }
     }
 

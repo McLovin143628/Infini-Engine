@@ -481,6 +481,8 @@ mod tests {
                 guid,
                 feet_offset_m: 0.9,
                 blocked: false,
+                posture: crate::components::SlotPosture::Stand,
+                face: DVec3::ZERO,
             });
             let n = ground_contacts(&world).len();
             assert_eq!(

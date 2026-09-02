@@ -787,6 +787,7 @@ mod tests {
             doorways: vec![],
             decor: vec![],
             slots: vec![],
+            stations: vec![],
             interior: Default::default(),
             lights: vec![],
         };
