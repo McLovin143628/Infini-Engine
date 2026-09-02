@@ -2511,6 +2511,188 @@ pub fn adopt(world: &mut EcsWorld, guid: Uuid, rec: CrowdRecord) -> bool {
     fresh
 }
 
+/// **How fast somebody who wants to be somewhere else walks**, m/s.
+///
+/// `CharacterMovement::run_speed_mps`'s own default. A person who has just been
+/// dragged out of their car — or heard a shot — is not strolling, and they are
+/// not sprinting either: the crowd's `Gait::Walk` is what the body will actually
+/// manage through `move_and_slide`, and the route speed is what the clock's tiers
+/// use.
+///
+/// Hoisted out of `inf_physics::d3::carjack` at wave WPN1, when the flee gained
+/// its second caller.
+pub const FLEE_MPS: f64 = 3.75;
+
+/// **Everybody who is running from something** (wave WPN1) — the latch that
+/// stops [`flee_from`] restarting the same route every step.
+///
+/// [`crate::weapon::Downed`]'s argument verbatim: without it a crowd standing in
+/// a firefight is re-routed on every step the gunfire continues, and a route that
+/// restarts sixty times a second never gets anywhere — the clock's progress is
+/// always about zero, so the body never leaves and the panic reads as a bug in
+/// the steering.
+///
+/// # A resource and not a component, and the reason is the TIER
+///
+/// `Downed` is a component because a body that can be shot is a body that
+/// exists. A crowd agent is not: a [`Dormant`](CrowdTier::Dormant) one has **no
+/// entity at all** and its record is still in the population, still steps, still
+/// has a route — and it is exactly the agent a shot at the far edge of the panic
+/// radius reaches. A component latch would have been silently absent on every one
+/// of them, which is the tier-dependent-state trap this module's own
+/// `crowd_state_bytes` doc names.
+///
+/// Not a field on [`CrowdRecord`] either, because [`AGENT_TRACE_BYTES`] is
+/// pinned and quoted — the crowd's whole trace-reshape claim is a ratio with that
+/// number as its numerator. What the trace *does* see is the effect: the
+/// re-phase, the position and the tier all move when an agent flees, so two hosts
+/// that disagreed about who panicked part company there on the next step.
+///
+/// Derived, never saved and no schema moves — [`crate::item::ItemDefs`]' shape.
+///
+/// **A person panics ONCE.** The latch is never cleared, so somebody who has run
+/// forty metres and stopped is not frightened again by a later shot. That is the
+/// carjack's own bound (*"they arrive, and then they stand; they do not resume
+/// their day"*) rather than a design, and it is on this wave's carried list.
+#[derive(bevy_ecs::prelude::Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct PanickedRes {
+    /// Who is running, in `Guid` order.
+    pub fleeing: BTreeSet<Uuid>,
+}
+
+/// Whether this agent is already running from something.
+pub fn is_panicked(world: &EcsWorld, guid: Uuid) -> bool {
+    world
+        .world()
+        .get_resource::<PanickedRes>()
+        .is_some_and(|p| p.fleeing.contains(&guid))
+}
+
+/// **Forget who was running** — [`clear_crowd`]'s twin, for its reason: an editor
+/// Simulate session must leave nothing behind in the author's document.
+pub fn clear_panic(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<PanickedRes>();
+}
+
+/// **THE ONE FLEE DOOR** (wave WPN1) — give somebody a reason to be somewhere
+/// else, and the route to get there.
+///
+/// # It was `carjack::flee`, and hoisting it is the point
+///
+/// Wave VEH2b wrote this to walk a pulled-out driver away from the car. Wave
+/// WPN1 needs the identical behaviour for a crowd that has heard a gunshot, and
+/// a second copy would have been a second answer to *"what does a frightened
+/// person in this engine do"* — including a second copy of the re-phase below,
+/// which is the half that is easy to leave out and impossible to see.
+///
+/// `away_from` is the place being run from; `distance_m` is how far.
+///
+/// # THE RE-PHASE, and why it is not optional
+///
+/// [`CrowdRoute::progress_at`] is `speed × t_s + phase`, and `t_s` is the
+/// crowd's own elapsed **session** time — so a fresh forty-metre
+/// [`RouteMode::Once`] route handed to a population that has been running for a
+/// minute reads as **finished before the agent has taken a step**. Two things go
+/// wrong when it does: the agent is permanently `blocked` (which the door pass
+/// reads, so it stands at the nearest door turning the handle for ever), and the
+/// moment it drops off the steered tier its transform is written at the route's
+/// END — forty metres away, instantly.
+///
+/// [`CrowdRecord::rephase_m`] exists for exactly this, so it is set once, here,
+/// to the negative of whatever the clock has already run up plus the agent's own
+/// derived phase.
+///
+/// # A scheduled agent's day is RELEASED, not paused
+///
+/// An agent with a [`CrowdSchedule`] is standing at a slot it was planned into —
+/// a bar stool, a desk, a bed — and its [`SlotArrival`] is what holds it in that
+/// posture. Fleeing **clears the schedule**, which releases that claim: the body
+/// stops being at its venue and becomes a person walking. It does not resume its
+/// day afterwards, exactly as a carjacked driver does not, and that is on this
+/// wave's carried list rather than hidden here.
+///
+/// Answers `false` for a guid that is neither a record nor a body — there is
+/// nobody to frighten — and for one that is already running ([`PanickedRes`]).
+///
+/// **A `Dormant` agent has no entity and is still a legitimate subject**: its
+/// record is in the population, it still steps, and it is exactly the agent a
+/// shot at the far edge of a panic radius reaches. So the body is optional here
+/// and the record is not.
+pub fn flee_from(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    from: DVec3,
+    away_from: DVec3,
+    dt: f64,
+    distance_m: f64,
+) -> bool {
+    let known = world
+        .world()
+        .get_resource::<CrowdPopulationRes>()
+        .is_some_and(|p| p.records.contains_key(&guid));
+    if (!known && world.entity_of(guid).is_none()) || is_panicked(world, guid) {
+        return false;
+    }
+    let away = from - away_from;
+    let len = (away.x * away.x + away.z * away.z).sqrt();
+    let dir = if len > 1.0e-6 {
+        DVec3::new(away.x / len, 0.0, away.z / len)
+    } else {
+        // Standing exactly on the thing being run from has no direction; `+Z` is
+        // the engine's own forward and is a value rather than a NaN.
+        DVec3::Z
+    };
+    let distance = if distance_m.is_finite() {
+        distance_m.clamp(1.0, 1000.0)
+    } else {
+        FLEE_M
+    };
+    let route = CrowdRoute::along(
+        inf_nav::NavPath::new([from, from + dir * distance]),
+        FLEE_MPS,
+        RouteMode::Once,
+    );
+    let archetype = crate::society::level_archetype(world);
+    let t_s = population_steps(world) as f64 * dt;
+    let mut pop = world
+        .world_mut()
+        .remove_resource::<CrowdPopulationRes>()
+        .unwrap_or_default();
+    match pop.records.get_mut(&guid) {
+        // **An agent the population already holds keeps its identity and takes a
+        // new route.** `adopt` refuses this case and is right to for its own
+        // caller — adopting twice would restart a walking agent's day — but the
+        // whole point of a panic is that it interrupts somebody who was already
+        // doing something.
+        Some(rec) => {
+            rec.route = route;
+            rec.schedule = None;
+            rec.leg = 0;
+            rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
+        }
+        None => {
+            let mut rec = CrowdRecord::walking(archetype, route);
+            rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
+            pop.records.insert(guid, rec);
+        }
+    }
+    world.world_mut().insert_resource(pop);
+    let mut latch = world
+        .world_mut()
+        .remove_resource::<PanickedRes>()
+        .unwrap_or_default();
+    latch.fleeing.insert(guid);
+    world.world_mut().insert_resource(latch);
+    true
+}
+
+/// How far somebody who wants to be somewhere else walks, metres.
+///
+/// Forty is over a city block: far enough that a player who turns round has
+/// genuinely lost them, and short enough that the route is one straight leg
+/// rather than a plan. Hoisted out of `inf_physics::d3::carjack` at wave WPN1.
+pub const FLEE_M: f64 = 40.0;
+
 /// The movement model a crowd agent walks with.
 ///
 /// Defaults everywhere except the four things a *pedestrian* is:
@@ -4623,6 +4805,119 @@ mod tests {
             distinct.len(),
             trace_a[0].len()
         );
+    }
+
+    /// **THE ONE FLEE DOOR, and the re-phase trap it exists to hold** (wave
+    /// WPN1).
+    ///
+    /// Four claims:
+    ///
+    /// 1. a **dormant** agent — no entity at all — can be frightened, because
+    ///    that is exactly the agent a shot at the edge of a panic radius
+    ///    reaches, and a door that needed a body would have been silently
+    ///    inert on every one of them;
+    /// 2. the route really starts **now**: without the re-phase a fresh `Once`
+    ///    route handed to a population that has already been running reads as
+    ///    finished before the agent has taken a step, which puts its body at the
+    ///    route's far end the moment it drops off the steered tier;
+    /// 3. a **scheduled** agent's day is released, so its slot posture stops
+    ///    holding it;
+    /// 4. the **latch** holds: a second call does nothing.
+    #[test]
+    fn the_flee_door_starts_the_route_now_and_latches() {
+        let dt = 1.0 / 60.0;
+        let a = CrowdArchetype::humanoid(None, None, None);
+        let mut w = EcsWorld::new();
+        let who = guid(0xF1EE);
+        // A record with a schedule, standing at the origin — and NO entity: the
+        // dormant case, which is the one a component latch could not see.
+        let legs = vec![ScheduleLeg {
+            start_h: 8.0,
+            travel_h: 1.0,
+            path: inf_nav::NavPath::new([DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)]),
+            arrival: SlotArrival {
+                role: Some(crate::components::SlotRole::Work),
+                posture: crate::components::SlotPosture::Sit,
+                face: DVec3::Z,
+            },
+        }];
+        let rec = CrowdRecord::scheduled(a.clone(), CrowdSchedule::new(legs).expect("a day"));
+        set_population(&mut w, BTreeMap::from([(who, rec)]));
+        assert!(w.entity_of(who).is_none(), "the fixture materialized it");
+        // Run the population's clock on, so the session time is not zero — which
+        // is the whole reason the re-phase exists.
+        {
+            let mut pop = w
+                .world_mut()
+                .remove_resource::<CrowdPopulationRes>()
+                .expect("a population");
+            pop.steps = 3600;
+            w.world_mut().insert_resource(pop);
+        }
+        let here = DVec3::new(2.0, 0.0, 0.0);
+        assert!(!is_panicked(&w, who));
+        assert!(
+            flee_from(&mut w, who, here, DVec3::ZERO, dt, 60.0),
+            "a dormant agent could not be frightened"
+        );
+        assert!(is_panicked(&w, who));
+
+        let pop = w
+            .world()
+            .get_resource::<CrowdPopulationRes>()
+            .expect("a population");
+        let rec = &pop.records[&who];
+        assert!(
+            rec.schedule.is_none(),
+            "the agent kept its day, so its slot posture still holds it at a \
+             desk it is supposed to be running from"
+        );
+        assert_eq!(rec.route.mode, RouteMode::Once);
+        // It runs AWAY: the destination is further from the source than the
+        // start was.
+        let dest = rec.route.destination();
+        println!(
+            "fleeing from {:?}: {here:?} -> {dest:?} ({:.1} m)",
+            DVec3::ZERO,
+            (dest - here).length()
+        );
+        assert!(dest.length() > here.length() + 50.0, "{dest:?}");
+        // **THE RE-PHASE.** `t_s` is 3600 steps of session time, so an
+        // un-rephased route is finished before it starts. Measured as the
+        // progress the clock answers on the step it was handed the route.
+        let clock = CrowdClock::at(pop.steps as f64 * dt);
+        let p = rec.progress_at(who, clock);
+        println!(
+            "the clock says the agent is {:.3} m along a {:.1} m route ({} steps of session time)",
+            p.s_m,
+            rec.route.length_m(),
+            pop.steps
+        );
+        assert!(
+            p.s_m.abs() < 1.0,
+            "the route is {:.1} m in on the step it was handed over — the \
+             re-phase is missing and the body will be written at the far end",
+            p.s_m
+        );
+        // …and the control: the SAME record without the re-phase really is
+        // finished, so the arm above is measuring something.
+        let mut naive = rec.clone();
+        naive.rephase_m = 0.0;
+        let q = naive.progress_at(who, clock);
+        println!("without the re-phase the same clock says {:.1} m", q.s_m);
+        assert!(
+            q.s_m >= naive.route.length_m(),
+            "the un-rephased control is not finished, so the trap this arm \
+             names cannot happen and the arm proves nothing"
+        );
+
+        // **THE LATCH.**
+        assert!(
+            !flee_from(&mut w, who, here, DVec3::ZERO, dt, 60.0),
+            "a second call re-routed somebody who is already running"
+        );
+        clear_panic(&mut w);
+        assert!(!is_panicked(&w, who));
     }
 
     /// **Clearing the crowd leaves a world that never had one.**

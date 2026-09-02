@@ -49,7 +49,6 @@ use glam::DVec3;
 use uuid::Uuid;
 
 use inf_ecs::components::{CharacterMovement, MovementMode, Transform};
-use inf_ecs::crowd::{CrowdRecord, CrowdRoute, RouteMode};
 use inf_ecs::interact::{InteractCandidate, InteractVerb, NO_VIEW_TEST_DEG};
 use inf_ecs::EcsWorld;
 
@@ -78,18 +77,15 @@ pub const RESIST_CHANCE: f64 = 0.25;
 
 /// How far a pulled-out driver walks away, metres.
 ///
-/// Forty is over a city block: far enough that a player who turns round has
-/// genuinely lost them, and short enough that the route is one straight leg
-/// rather than a plan.
-pub const FLEE_M: f64 = 40.0;
+/// **Hoisted to [`inf_ecs::crowd::FLEE_M`] at wave WPN1**, when the flee gained
+/// a second caller (a crowd that has heard a gunshot). Re-exported here under
+/// its original name because `traffic_3d` measures against it and because "how
+/// far a carjacked driver goes" is a question about this module.
+pub const FLEE_M: f64 = inf_ecs::crowd::FLEE_M;
 
-/// How fast they walk away, m/s.
-///
-/// `CharacterMovement::run_speed_mps`'s own default. A person who has just been
-/// dragged out of their car is not strolling, and they are not sprinting
-/// either — the crowd's `Gait::Walk` is what the body will actually manage
-/// through `move_and_slide`, and the route speed is what the clock's tiers use.
-pub const FLEE_MPS: f64 = 3.75;
+/// How fast they walk away, m/s — [`inf_ecs::crowd::FLEE_MPS`], hoisted at wave
+/// WPN1 with [`FLEE_M`].
+pub const FLEE_MPS: f64 = inf_ecs::crowd::FLEE_MPS;
 
 /// **Who is sitting in this car**, or `None`.
 ///
@@ -373,40 +369,26 @@ pub fn try_carjack(
 ///
 /// `RouteMode::Once`: they arrive, and then they stand. **They do not resume
 /// their day** — see the wave's carried list.
+///
+/// # This is now the FIRST caller of one door, not the only implementation
+///
+/// Wave WPN1 hoisted the body of this into [`inf_ecs::crowd::flee_from`],
+/// because a crowd that has heard a gunshot needs the identical behaviour and a
+/// second copy would have been a second answer to *"what does a frightened
+/// person in this engine do"* — including a second copy of the re-phase, which
+/// is the half that is easy to leave out and impossible to see. What is left
+/// here is the one thing that is genuinely about a carjack: **which point they
+/// run away from**, which is whoever pulled them out.
 fn flee(world: &mut EcsWorld, victim: Uuid, from: DVec3, actor: Uuid, dt: f64) {
-    let away = world
+    let away_from = world
         .entity_of(actor)
         .and_then(|e| world.world().get::<Transform>(e))
-        .map(|t| from - t.translation.to_dvec3())
-        .unwrap_or(DVec3::Z);
-    let len = (away.x * away.x + away.z * away.z).sqrt();
-    let dir = if len > 1.0e-6 {
-        DVec3::new(away.x / len, 0.0, away.z / len)
-    } else {
-        DVec3::Z
-    };
-    let archetype = inf_ecs::society::level_archetype(world);
-    let route = CrowdRoute::along(
-        inf_ecs::traffic::LanePath::new([from, from + dir * FLEE_M]),
-        FLEE_MPS,
-        RouteMode::Once,
-    );
-    let mut rec = CrowdRecord::walking(archetype, route);
-    // **The route has to START now.** `CrowdRoute::progress_at` is
-    // `speed x t_s + phase`, and `t_s` is the crowd's own elapsed SESSION time —
-    // so a fresh forty-metre `Once` route handed to a population that has been
-    // running for a minute reads as finished before the victim has taken a
-    // step. Two things go wrong if it does: the agent is permanently `blocked`
-    // (which the door pass reads), and the moment it drops off the steered tier
-    // its transform is written at the route's END, forty metres away.
-    //
-    // `rephase_m` is the field that exists for exactly this — the metre the
-    // clock is moved by — so it is set once, here, to the negative of whatever
-    // the clock has already run up.
-    let t_s = inf_ecs::crowd::population_steps(world) as f64 * dt;
-    rec.rephase_m = -(rec.speed_of(victim) * t_s
-        + inf_ecs::crowd::agent_unit(victim, 0, inf_ecs::crowd::SALT_PHASE) * 8.0);
-    inf_ecs::crowd::adopt(world, victim, rec);
+        .map(|t| t.translation.to_dvec3())
+        // No actor to run from — the door was opened by a script — so they run
+        // along `-Z` from where they are, which is what `flee_from` answers for
+        // a zero-length direction.
+        .unwrap_or(from - DVec3::Z);
+    inf_ecs::crowd::flee_from(world, victim, from, away_from, dt, FLEE_M);
 }
 
 /// Which chassis a carjack candidate names, for a caller that wants to ask

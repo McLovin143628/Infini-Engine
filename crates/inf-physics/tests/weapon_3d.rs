@@ -1611,3 +1611,134 @@ fn an_authored_melee_weapon_swings_instead_of_casting() {
         "a 2 m bat reached a body 3 m away — the reach is not being applied"
     );
 }
+
+/// **A GUNSHOT SCATTERS THE STREET AND A PUNCH DOES NOT** (wave WPN1).
+///
+/// The four claims, and each kills a different mutation:
+///
+/// 1. a crowd standing near a shot **flees** — through the one door, so the
+///    agents get a route, a re-phase and a `Panicked` latch;
+/// 2. a crowd standing **outside** `PANIC_RADIUS_M` does not, so the radius is
+///    doing work rather than the pass firing at everybody;
+/// 3. the latch holds: firing again does not re-route somebody who is already
+///    running, which is what stops a held trigger restarting a route sixty times
+///    a second and pinning every agent at its own start;
+/// 4. a **punch** frightens nobody. That is the reference frames' own reading —
+///    an encampment brawl draws bystanders who stand and watch — and it is what
+///    `WeaponHit::loud` exists for.
+#[test]
+fn gunfire_scatters_the_crowd_and_a_brawl_does_not() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+
+    let near: Vec<Uuid> = (0..4).map(|i| Uuid::from_u128(0x1601_0100 + i)).collect();
+    let far: Vec<Uuid> = (0..3).map(|i| Uuid::from_u128(0x1601_0200 + i)).collect();
+    let populate = |rig: &mut Rig| {
+        let a = CrowdArchetype::humanoid(None, None, None);
+        let mut records = std::collections::BTreeMap::new();
+        for (i, g) in near.iter().enumerate() {
+            // A few metres either side of the hero, well inside the radius.
+            let at = DVec3::new(4.0 + i as f64, 0.0, 2.0);
+            records.insert(*g, CrowdRecord::standing(a.clone(), at));
+        }
+        for (i, g) in far.iter().enumerate() {
+            // Past `PANIC_RADIUS_M` — the same street, a long way down it.
+            let at = DVec3::new(0.0, 0.0, d3::gameplay::PANIC_RADIUS_M + 20.0 + i as f64);
+            records.insert(*g, CrowdRecord::standing(a.clone(), at));
+        }
+        assert_eq!(
+            inf_ecs::crowd::add_agents(&mut rig.world, records),
+            0,
+            "the fixture's population was refused (the count is the REFUSALS)"
+        );
+        rig.world.mark_dirty();
+        rig.world.propagate();
+    };
+
+    // ── the gunshot ──
+    let mut rig = Rig::new();
+    populate(&mut rig);
+    rig.arm("rifle");
+    rig.step(&idle());
+    for g in near.iter().chain(&far) {
+        assert!(
+            !inf_ecs::crowd::is_panicked(&rig.world, *g),
+            "somebody was already running before anything happened"
+        );
+    }
+    let r = rig.step(&hold_trigger());
+    println!(
+        "one rifle round beside a crowd of {}: {} source(s), {} considered, {} fled",
+        near.len() + far.len(),
+        r.panic.sources,
+        r.panic.considered,
+        r.panic.fled
+    );
+    assert_eq!(r.shots, 1, "the trigger did not fire");
+    assert_eq!(r.panic.sources, 1, "the shot was not a panic source");
+    assert_eq!(
+        r.panic.considered,
+        near.len() + far.len(),
+        "the pass did not look at the whole population"
+    );
+    assert_eq!(
+        r.panic.fled,
+        near.len(),
+        "the gunshot scattered {} of {} agents",
+        r.panic.fled,
+        near.len() + far.len()
+    );
+    for g in &near {
+        assert!(
+            inf_ecs::crowd::is_panicked(&rig.world, *g),
+            "an agent beside the shot is not running"
+        );
+    }
+    for g in &far {
+        assert!(
+            !inf_ecs::crowd::is_panicked(&rig.world, *g),
+            "an agent {} m away ran — the radius is not being applied",
+            d3::gameplay::PANIC_RADIUS_M + 20.0
+        );
+    }
+    // **THE LATCH.** A held trigger fires again and re-routes nobody: without it
+    // a route restarts every step and the agents never leave.
+    let more = rig.steps(&hold_trigger_no_edge(), 30);
+    let refled: usize = more.iter().map(|r| r.panic.fled).sum();
+    let shots: u32 = more.iter().map(|r| r.shots).sum();
+    println!("{shots} more round(s) re-routed {refled} agent(s)");
+    assert!(
+        shots > 1,
+        "the burst did not continue, so the latch is untested"
+    );
+    assert_eq!(
+        refled, 0,
+        "a held trigger re-routed {refled} already-running agents — the route \
+         restarts every step and nobody ever gets anywhere"
+    );
+
+    // ── the brawl ──
+    let mut brawl = Rig::new();
+    populate(&mut brawl);
+    // No `arm()`: an empty hand, which is a swing.
+    brawl.step(&idle());
+    let r = brawl.step(&hold_trigger());
+    println!(
+        "one punch beside the same crowd: {} swing(s), {} panic source(s), {} fled",
+        r.swings, r.panic.sources, r.panic.fled
+    );
+    assert_eq!(
+        r.swings, 1,
+        "the punch did not happen, so this proves nothing"
+    );
+    assert_eq!(
+        r.panic.sources, 0,
+        "a punch was a panic source — a brawl empties the street"
+    );
+    assert_eq!(r.panic.fled, 0);
+    for g in near.iter().chain(&far) {
+        assert!(
+            !inf_ecs::crowd::is_panicked(&brawl.world, *g),
+            "a bystander ran from a fist-fight"
+        );
+    }
+}

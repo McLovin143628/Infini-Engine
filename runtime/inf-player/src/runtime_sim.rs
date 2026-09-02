@@ -2605,13 +2605,19 @@ impl RuntimeSim {
             // The clip is the engine's own (`inf_ecs::weapon::report_source`)
             // rather than a slot on `WeaponDef`, on the impact's own P22 §5
             // reasoning one field along.
-            let report = inf_ecs::weapon::report_source();
-            let cmd = play_command_for(
-                guid_source_key(hit.shooter),
-                &report,
-                report.spatial.then_some(hit.from),
-            );
-            audio_cmds.push(AudioCommand::Play(cmd));
+            //
+            // **Only a LOUD attack**: a punch is an attack that goes through
+            // this same list, and a fist that fired a rifle's clip would be the
+            // funniest defect in the engine.
+            if hit.loud {
+                let report = inf_ecs::weapon::report_source();
+                let cmd = play_command_for(
+                    guid_source_key(hit.shooter),
+                    &report,
+                    report.spatial.then_some(hit.from),
+                );
+                audio_cmds.push(AudioCommand::Play(cmd));
+            }
             // **THE IMPACT** — the target's own emitter, at the hit.
             let Some(target) = hit.target else {
                 continue;

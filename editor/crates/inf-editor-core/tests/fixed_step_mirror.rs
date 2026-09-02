@@ -472,6 +472,12 @@ fn both_hosts_report_a_gunshot_the_same_way() {
              wave — a report that replaced it would have made every wall in \
              every level silent again",
         ),
+        (
+            "ifhit.loud{",
+            "only a LOUD attack reports. A punch goes through this same list, \
+             and a host that dropped the guard would fire a rifle's clip every \
+             time somebody threw one",
+        ),
     ] {
         let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(

@@ -120,6 +120,21 @@ pub struct WeaponHit {
     /// Whether the target absorbed it as **health** (a character) rather than
     /// as structure.
     pub on_flesh: bool,
+    /// **Whether this attack made a noise** (wave WPN1) — `true` for a round
+    /// leaving a barrel, `false` for a swing.
+    ///
+    /// Two consumers, and neither could be written without it. Each host's
+    /// `fire_weapon_audio` queues the gunshot report only for a loud attack, so
+    /// a punch does not fire a rifle's clip; and the crowd's panic takes its
+    /// sources only from loud attacks, which is what the reference frames
+    /// actually show — an encampment **brawl** draws bystanders who stand a metre
+    /// away and watch, while a gunshot is what empties a street.
+    ///
+    /// A field rather than a re-lookup of the shooter's equipped weapon, because
+    /// by the time either consumer runs the shooter may have scrolled: what made
+    /// the noise is a property of the shot and not of whatever is in the hand
+    /// afterwards.
+    pub loud: bool,
 }
 
 /// What one fixed step of gameplay did.
@@ -142,6 +157,9 @@ pub struct GameplayReport {
     pub locks_broken: u32,
     /// Characters that stopped working this step and were handed to the ragdoll.
     pub kills: u32,
+    /// **What this step's gunfire did to the crowd** (wave WPN1) — an
+    /// engagement counter, on [`crowd_doors`](Self::crowd_doors)' own terms.
+    pub panic: PanicReport,
     /// **Melee swings thrown** this step (wave WPN1) — the subset of
     /// [`shots`](Self::shots) that were an arc rather than a ray.
     ///
@@ -242,6 +260,13 @@ pub fn step_gameplay(
     //     before the pose step reads it, which is the ordering the
     //     gameplay < pose < attachments pin already covers.
     report.hands = step_hand_ik(world, dt);
+    // 3d. **The street hears it** (wave WPN1) — the crowd's panic, from this
+    //     step's own gunfire. After the weapons, because it reads their hits;
+    //     before the deaths, so a body that is about to be handed to the ragdoll
+    //     is not also given a route to walk. `O(agents)` with a bounded inner
+    //     loop and inert on a level with no gunfire — see `step_panic` for the
+    //     cost and for the one-step latency the crowd's phase ordering implies.
+    report.panic = step_panic(world, &report.hits, dt);
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
@@ -1016,6 +1041,7 @@ fn resolve_shot(
                 to: from + dir * h.toi,
                 energy_j: def.damage_j,
                 on_flesh,
+                loud: true,
             }
         }
         None => WeaponHit {
@@ -1025,8 +1051,137 @@ fn resolve_shot(
             to: from + dir * range,
             energy_j: def.damage_j,
             on_flesh: false,
+            loud: true,
         },
     }
+}
+
+/// **How far a gunshot scatters a crowd**, metres.
+///
+/// Forty-five. Deliberately much smaller than a gunshot's own audible reach
+/// ([`weapon::REPORT_MAX_M`], 250 m), because hearing a shot and running from one
+/// are different distances: a person three streets away turns their head, and a
+/// person on the same corner leaves. The two numbers are related on purpose —
+/// see [`weapon::REPORT_MAX_M`]'s own doc — so a designer who widens one can see
+/// what it is being compared against.
+pub const PANIC_RADIUS_M: f64 = 45.0;
+
+/// **How far a frightened bystander walks**, metres.
+///
+/// Half again as far as a carjacked driver goes ([`inf_ecs::crowd::FLEE_M`]),
+/// because a gunshot is worth more distance than an argument, and short enough
+/// that the route is still one straight leg rather than a plan.
+pub const PANIC_FLEE_M: f64 = 60.0;
+
+/// **How many distinct places one step may panic a crowd from.**
+///
+/// The pass is `O(agents × sources)` and this is what makes the second factor a
+/// constant rather than a firefight's shooter count: shots inside half a panic
+/// radius of each other are one source, and past this many the rest of the step's
+/// shots are folded into the nearest. Eight is more than a street fight has
+/// distinct corners, and it bounds the walk at 8 × 1 000 agents = 8 000 squared
+/// distances a step against `NPC_STEP_BUDGET_MS`'s own 1 000-agent figure.
+pub const MAX_PANIC_SOURCES: usize = 8;
+
+/// What one [`step_panic`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PanicReport {
+    /// Distinct places this step's gunfire came from, after coalescing.
+    pub sources: usize,
+    /// Agents the pass looked at — the whole population, which is the cost.
+    pub considered: usize,
+    /// Agents that started running on this step. `considered - fled` is mostly
+    /// distance, and it is the number that says the radius is doing work.
+    pub fled: usize,
+}
+
+/// **A GUNSHOT SCATTERS THE STREET** (wave WPN1) — the crowd's panic, through
+/// the one flee door.
+///
+/// # The cost, stated, because it is the whole design
+///
+/// The obvious shape is "for each shot, for each agent, how far apart are they",
+/// which is `O(shots × agents)` — and at 600 rpm with several shooters that is a
+/// per-step cost that grows with how exciting the scene is, measured against a
+/// [`NPC_STEP_BUDGET_MS`] that was set at a thousand *walking* agents.
+///
+/// [`NPC_STEP_BUDGET_MS`]: inf_player::budget::NPC_STEP_BUDGET_MS
+///
+/// So this is **one walk over the population** with a bounded inner loop: the
+/// step's loud shots are coalesced into at most [`MAX_PANIC_SOURCES`] places
+/// first (two shots inside half a radius of each other frighten the same people),
+/// and the agents are read off `CrowdPopulationRes`'s own records — the
+/// `blocked_agents` shape, `O(agents)` and allocation-free on a level with no
+/// crowd, rather than `O(entities)` over a furnished town.
+///
+/// # The one-step latency, stated
+///
+/// The crowd steers in phase 5 (`crowd`) and this runs in phase 14 (`gameplay`),
+/// so an agent frightened here starts moving on the **next** fixed step: 16.7 ms
+/// at 60 Hz. It is the same lag in both hosts — the pass is one Ring-0 rule they
+/// both call from the same slot — so PIE == shipping is unaffected and no trace
+/// can see it. Running the panic before the crowd would fix it and would put the
+/// gunfire pass before the shots that feed it, which is a full step of lag the
+/// other way. The sentence is `muzzle_of`'s own, one system along.
+///
+/// Inert on a level with no gunfire and on a level with no population: two early
+/// returns and no allocation.
+fn step_panic(world: &mut EcsWorld, hits: &[WeaponHit], dt: f64) -> PanicReport {
+    let mut report = PanicReport::default();
+    // 1. The sources, coalesced. A brawl is not a source — see `WeaponHit::loud`
+    //    and the reference frames it cites.
+    let mut sources: Vec<DVec3> = Vec::new();
+    for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
+        if sources
+            .iter()
+            .any(|s| (*s - hit.from).length() < PANIC_RADIUS_M * 0.5)
+        {
+            continue;
+        }
+        if sources.len() >= MAX_PANIC_SOURCES {
+            break;
+        }
+        sources.push(hit.from);
+    }
+    if sources.is_empty() {
+        return report;
+    }
+    report.sources = sources.len();
+    // 2. ONE walk over the population, reading where each agent stood at the end
+    //    of the crowd's own step.
+    let mut want: Vec<(Uuid, DVec3, DVec3)> = Vec::new();
+    {
+        let Some(pop) = world
+            .world()
+            .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        else {
+            return report;
+        };
+        report.considered = pop.records.len();
+        for (guid, rec) in &pop.records {
+            let here = rec.last;
+            let mut best: Option<(f64, DVec3)> = None;
+            for s in &sources {
+                let d = (*s - here).length();
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, *s));
+                }
+            }
+            let Some((d, at)) = best else { continue };
+            if d > PANIC_RADIUS_M {
+                continue;
+            }
+            want.push((*guid, here, at));
+        }
+    }
+    // 3. …and the flee itself, through the one door, in `Guid` order (the
+    //    `BTreeMap` walk above), so two hosts scatter the same people.
+    for (guid, here, away_from) in want {
+        if inf_ecs::crowd::flee_from(world, guid, here, away_from, dt, PANIC_FLEE_M) {
+            report.fled += 1;
+        }
+    }
+    report
 }
 
 /// **Where a swing lands on a body**, world metres — the point a punch is aimed
@@ -1115,6 +1270,7 @@ fn resolve_swing(
             // Every candidate here IS a character, which is what `is_flesh`
             // answers `true` for — so this is a fact rather than an assumption.
             on_flesh: true,
+            loud: false,
         },
         None => WeaponHit {
             shooter,
@@ -1125,6 +1281,7 @@ fn resolve_swing(
             to: from + dir * reach,
             energy_j: def.damage_j,
             on_flesh: false,
+            loud: false,
         },
     }
 }

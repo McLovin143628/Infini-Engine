@@ -555,6 +555,11 @@ impl SimSession {
         //    with real entities in the author's document that no Outliner row
         //    put there.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
+        // WPN1: and who was running from what, for `clear_crowd`'s reason
+        // exactly — the panic latch is a resource, so the snapshot cannot
+        // capture it and `apply_to_doc` cannot restore it, and a second run
+        // would begin with run 1's bystanders unable to be frightened.
+        inf_ecs::crowd::clear_panic(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the
@@ -953,6 +958,11 @@ impl SimSession {
         //    would put an NPC in the author's Outliner and, on the next save,
         //    in the author's level.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
+        // WPN1: and who was running from what, for `clear_crowd`'s reason
+        // exactly — the panic latch is a resource, so the snapshot cannot
+        // capture it and `apply_to_doc` cannot restore it, and a second run
+        // would begin with run 1's bystanders unable to be frightened.
+        inf_ecs::crowd::clear_panic(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the
@@ -2132,13 +2142,19 @@ impl SimSession {
             // The clip is the engine's own (`inf_ecs::weapon::report_source`)
             // rather than a slot on `WeaponDef`, on the impact's own P22 §5
             // reasoning one field along.
-            let report = inf_ecs::weapon::report_source();
-            let cmd = play_command_for(
-                guid_source_key(hit.shooter),
-                &report,
-                report.spatial.then_some(hit.from),
-            );
-            audio_cmds.push(AudioCommand::Play(cmd));
+            //
+            // **Only a LOUD attack**: a punch is an attack that goes through
+            // this same list, and a fist that fired a rifle's clip would be the
+            // funniest defect in the engine.
+            if hit.loud {
+                let report = inf_ecs::weapon::report_source();
+                let cmd = play_command_for(
+                    guid_source_key(hit.shooter),
+                    &report,
+                    report.spatial.then_some(hit.from),
+                );
+                audio_cmds.push(AudioCommand::Play(cmd));
+            }
             // **THE IMPACT** — the target's own emitter, at the hit.
             let Some(target) = hit.target else {
                 continue;
