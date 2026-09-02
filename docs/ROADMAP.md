@@ -29925,17 +29925,27 @@ had ever sat down; the first NPC driver would have made the prompt read "[E] Ent
 occupied car. Occupancy is a fact about the WORLD, so `d3::interact::candidates` reads it itself now.
 
 **THE GATE**: `pie_equals_shipping_at_rush_hour_with_cars_on_the_streets`. The CI fixture's
-settlement at 08:24 — 2 street lines → 8 lanes derived 3 times as the town pages; 16 cars, 6 with a
-day, 4 driving with 4 drivers; 329 residents walking with 44 563 steering intents; the ladder
-`[0,0,0,0]` a kilometre away, `[0,3,0,13]` at the town edge, `[15,0,0,1]` at the crossroads; the
-carjack in 8 presses, driver out, hero seated — **byte-identical on both hosts over 600 steps**.
+settlement at 08:24 — 2 street lines → 8 lanes derived 3 times as the town pages; 11 cars, 7 with a
+day, 6 driving with 6 drivers, the busiest one moving 33.4 m; 329 residents walking with 44 376
+steering intents; the ladder `[0,0,0,0]` a kilometre away, `[0,3,0,8]` at the town edge,
+`[10,0,0,1]` at the crossroads; the carjack in 4 presses, driver out, hero seated, the player's own
+throttle reaching the stolen car at 1.00 — **byte-identical on both hosts over 600 steps**.
 Every claim is a count with a floor, because a rush-hour gate that passes with zero cars certifies
 nothing. `traffic` is `STEP_PHASES` index 6 with `TRAFFIC_STEP_BUDGET_MS` = 1.0 ms minted beside a
-CONTROL: the same settlement with the traffic taken out is **24.5641 ms against 25.8459**, so a street
-costs **1.2818 ms — 5.0 % of the step** — of which the four named rows are only 0.45, the rest being
-`character move` and `animation` paying for NPC drivers who are ordinary characters.
+CONTROL: the same settlement with the traffic taken out is **20.4876 ms against 21.5010** in a
+release build, so a street costs **1.0134 ms — 4.7 % of the step** — of which the four named rows
+are only 0.24, the rest being `character move` and `animation` paying for NPC drivers who are
+ordinary characters.
 
-**Five defects the gate found by being written.** The cars were **falling through the island at
+**Six defects found by writing the arms, and by an adversarial read of the wave's own four new
+modules.** The worst was not the gate's: **every traffic car was driving on its belly.**
+`catalogue_row` gives a Van a 3 402 kg hull and left the P29.7 test rig's 20 kN/m springs and its
+−0.75 m wheel drop, so the struts bottomed out, the chassis collider carried the car, the tyres saw a
+tenth of their load and full throttle produced **3.5 m in ten seconds**. `size_the_suspension` makes
+the mass decide the springs and solves the wheel drop against the hull's own bottom edge **at the
+static sag**; a stolen car now does **87.4 m at 18.14 m/s** on a clear street, and the island's own
+modest number is the CROWD — a `Full` crowd agent is a kinematic capsule, which a car cannot push at
+any torque. The other five: The cars were **falling through the island at
 72 m/s** — a street's derived height is a mean over the blocks that bound it and `volume_sites` falls
 back to a volume's entity `y`, which the island authors as zero, so mixing zeros with a pad at 130 m
 gave 86 and every car was built forty-five metres under the world (measured at −631 m after ten

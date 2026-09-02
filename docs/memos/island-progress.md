@@ -38,7 +38,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **VEH1a** | **the car drives the island** — the audited heightfield ride, a body and a fleet, the `vehicle` step phase, the drive-the-circuit gate | **DONE** — see *Wave VEH1a* at the end of this file. **Both of wave I7's open road items die**: the island parks seven cars (38 drawn body parts, **no new committed file**), the hero enters through the shipped seat door and drives **34.1 m at up to 16.81 m/s byte-identically on both hosts**, and **all 42 of Vancouver Island's ordered site pairs are reachable** over a real `RoadGraph`. The routed wheel-normal smoothing is **refused with a falsifier** — the snap is 15.69° on open ground and reaches **0.000000 m** of force — and the P29.7 sensor-ride bound is **closed** by `CastTargets::AllSolid`. `STEP_PHASES` **26 → 27**, `VEHICLE_STEP_BUDGET_MS` **0.5** minted at 64 cars from a measured 0.1101 ms, engine audio through the P12.3 queue with **zero new API**. The sedan climbs I7's audited **0.108** grade at 94 km/h |
 | **NPC1b** | **the crowd renderer** — instanced skinning over a palette atlas, VSM proxy casters, crowd variation, the headline at N = 1 000 | **DONE** — see *Wave NPC1b* at the end of this file. The renderer reads the tier: draws **2 002 → 2**, palette blocks **1 001 → 292**, palette upload **9.3–9.4×** smaller, shadow groups **1 001 → 32** of a 1 024 ceiling (wall 4 retired), a crowd golden that is not eight clones, and the exact posed caster bound at **67 % of the margin's radius**. **A thousand island-class NPCs do NOT fit the island's headroom** (42.0 → 16.8 fps p50, 74.3 → 34.0 pipelined) **and the wall is not the renderer**: +9.09 ms of fixed step, +3.67 of CPU-side recording, +2.95 of projection, against one draw call and 0.249 ms of skinned GPU. The `Far → Near` pop is measured at **0.95 m in one step** and routed |
 
-| **VEH2b** | **traffic, parked cars, carjacking, living streets** — the lane centreline, the path-steering controller, traffic on the crowd's tier ladder, kerb parking, the carjack, the rush-hour gate | **DONE** — see *Wave VEH2b* at the end of this file. VEH2a's carried item 9 (*"the fleet parks; nothing drives itself"*) dies. A level **re-derives its own street grid from the block rectangles it committed** (there is nowhere in a `.inf_lvl` for a centreline and the schema window is spent), lays a lane each way and a parked row on both kerbs, and puts commuters and day/night circuits on them — **49 cars on a 3×3-block town, 7 rigs and 20 drawn bodies at the crossroads**. Past 64 m a car is built with **no wheels**, so `rig_of` answers `None` and `step_vehicles` **cannot reach it even by accident**: the watched-car sentence as a fact rather than a promise. An NPC drives through the SAME `VehicleControls::from_intent` a player's stick goes through, and the carjack is the P29.7 seat door seen from the outside — the candidate `vehicle_candidates` refuses, a new `InteractVerb::Carjack` so the prompt stops lying, and the victim flees as an ordinary crowd agent. `STEP_PHASES` **27 → 28**, `TRAFFIC_STEP_BUDGET_MS` **1.0** minted beside a **control**: a street costs **1.22 ms of a 22.45 ms release step, 5.4 %**, two thirds of it the NPC drivers being characters. Gate: rush hour at 08:24, 329 residents walking while four cars drive with people in them, the hero pulls one out in eight presses — **byte-identical on both hosts over 600 steps**. Five defects found by writing the arms, the worst of them cars **falling through the island at 72 m/s** |
+| **VEH2b** | **traffic, parked cars, carjacking, living streets** — the lane centreline, the path-steering controller, traffic on the crowd's tier ladder, kerb parking, the carjack, the rush-hour gate | **DONE** — see *Wave VEH2b* at the end of this file. VEH2a's carried item 9 (*"the fleet parks; nothing drives itself"*) dies. A level **re-derives its own street grid from the block rectangles it committed** (there is nowhere in a `.inf_lvl` for a centreline and the schema window is spent), lays a lane each way and a parked row on both kerbs, and puts commuters and day/night circuits on them — **63 cars on a 3×3-block town, 11 rigs and 26 drawn bodies at the crossroads**. Past 64 m a car is built with **no wheels**, so `rig_of` answers `None` and `step_vehicles` **cannot reach it even by accident**: the watched-car sentence as a fact rather than a promise. An NPC drives through the SAME `VehicleControls::from_intent` a player's stick goes through, and the carjack is the P29.7 seat door seen from the outside — the candidate `vehicle_candidates` refuses, a new `InteractVerb::Carjack` so the prompt stops lying, and the victim flees as an ordinary crowd agent. `STEP_PHASES` **27 → 28**, `TRAFFIC_STEP_BUDGET_MS` **1.0** minted beside a **control**: a street costs **1.01 ms of a 21.50 ms release step, 4.7 %**, three quarters of it the NPC drivers being characters. Gate: rush hour at 08:24, 329 residents walking while six cars drive with people in them, the hero pulls one out in four presses — **byte-identical on both hosts over 600 steps**. Six defects found by writing the arms and by an adversarial read, the worst of them cars **falling through the island at 72 m/s** and then **driving on their bellies** |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -24413,10 +24413,12 @@ over six hundred steps.
 | | shipping | PIE |
 |---|---|---|
 | street lines → lanes, derivations | 2 → 8, **3** | 2 → 8, 3 |
-| cars / with a day / driving / with a driver | 16 / 6 / 4 / **4** | 16 / 6 / 4 / 4 |
-| residents, steering intents over the window | 329, **44 563** | 329, 44 563 |
-| tiers a km away / at the town edge / at the crossroads | `[0,0,0,0]` / `[0,3,0,13]` / `[15,0,0,1]` | same |
-| carjack: presses / driver out / hero seated | **8** / yes / yes | 8 / yes / yes |
+| cars / with a day / driving / with a driver | 11 / 7 / 6 / **6** | 11 / 7 / 6 / 6 |
+| the busiest car moved | **33.4 m** | 33.4 m |
+| residents, steering intents over the window | 329, **44 376** | 329, 44 376 |
+| tiers a km away / at the town edge / at the crossroads | `[0,0,0,0]` / `[0,3,0,8]` / `[10,0,0,1]` | same |
+| carjack: presses / driver out / hero seated | **4** / yes / yes | 4 / yes / yes |
+| the player's throttle at the stolen car | **1.00** | 1.00 |
 | distinct states over 600 steps | > 300 | > 300 |
 | **per-step `state_bytes` digests** | — | **equal, all 600** |
 
@@ -24439,33 +24441,33 @@ prices nothing unless the alternative is priced too (the I1 audit law).
 
 | row | dev, street | dev, none | **release, street** | **release, none** |
 |---|---|---|---|---|
-| `character move` (329 residents) | 8.5246 ms | — | 8.9763 ms | — |
-| `solver` | 4.3663 | 4.1811 | 4.0786 | 3.9332 |
-| `animation` | 4.6138 | — | 3.6495 | — |
-| `physics3d sync` | 4.6912 | 4.6324 | 3.1341 | 3.0928 |
-| `gameplay` | 1.9343 | — | 1.2751 | — |
-| `write-back` | 0.4458 | — | 0.4196 | — |
-| `terrain stream` | 0.4255 | — | 0.2819 | — |
-| **`traffic`** | **0.2029** | 0.0558 | **0.1479** | 0.0362 |
-| `crowd` | 0.1688 | — | 0.1313 | — |
-| `deformation` | 0.1219 | — | 0.0931 | — |
-| **`vehicle`** (15 rigs) | **0.0707** (4.72 µs/car) | 0.0107 | **0.0616** (4.11 µs/car) | 0.0094 |
-| `propagate` | 0.0837 | — | 0.0599 | — |
-| `camera` | 0.0692 | — | 0.0587 | — |
-| `society` | 0.0188 | — | 0.0121 | — |
-| **WHOLE STEP** | **25.8459** | **24.5641** | **22.4481** | **21.2298** |
-| **THE COST OF A STREET** | **+1.2818 — 5.0 %** | | **+1.2183 — 5.4 %** | |
+| `character move` (329 residents) | 8.4246 ms | — | 9.0298 ms | — |
+| `physics3d sync` | 4.5108 | 4.4736 | 3.0055 | 2.9916 |
+| `animation` | — | — | 3.6126 | — |
+| `solver` | 3.5472 | 3.3801 | 3.3504 | 3.2641 |
+| `gameplay` | — | — | 1.2528 | — |
+| `write-back` | — | — | 0.3926 | — |
+| `terrain stream` | — | — | 0.2716 | — |
+| **`traffic`** | **0.1784** | 0.0338 | **0.1455** | 0.0231 |
+| `crowd` (329 agents) | 0.1539 | — | 0.1310 | — |
+| `deformation` | — | — | 0.0880 | — |
+| **`vehicle`** (10 rigs) | **0.0455** (4.55 µs/car) | 0.0104 | **0.0415** (4.15 µs/car) | 0.0099 |
+| `camera` | — | — | 0.0534 | — |
+| `propagate` | — | — | 0.0511 | — |
+| `society` | 0.0169 | — | 0.0113 | — |
+| **WHOLE STEP** | **24.4653** | **23.3734** | **21.5010** | **20.4876** |
+| **THE COST OF A STREET** | **+1.0918 — 4.5 %** | | **+1.0134 — 4.7 %** | |
 
 The release row is the one `TRAFFIC_STEP_BUDGET_MS` is **asserted** against, per
-`CITY_STEP_BUDGET_MS`'s conditioning: **0.1479 ms of a 1.0 ms ceiling, 15 %**,
+`CITY_STEP_BUDGET_MS`'s conditioning: **0.1455 ms of a 1.0 ms ceiling, 15 %**,
 with `cargo test --release` off CI.
 
 Two things that table says which the phase row alone does not. **A traffic car
 costs more OUTSIDE its own phase than inside it**: the four named rows account
-for 0.35 ms of the release build's 1.22, and the rest is `character move` and
+for 0.24 ms of the release build's 1.01, and the rest is `character move` and
 `animation` paying for the NPC drivers, who are ordinary characters with ordinary
 capsules and ordinary poses. And **the island's µs-a-car is twice the
-flat-fixture one** — 4.11 release against `VEHICLE_STEP_BUDGET_MS`'s 2.00 —
+flat-fixture one** — 4.15 release against `VEHICLE_STEP_BUDGET_MS`'s 2.00 —
 because these rays cast into a streamed heightfield under a settlement rather
 than into a four-tile box, which is the same dilution the VEH2a audit measured in
 the other direction (its own island row was +16 % where a flat box was +44 %).
@@ -24476,45 +24478,73 @@ bounded by GEOMETRY rather than by a setting: `KERB_SLOT_M` is 14 m,
 
 | world | streets | cars | with a day | Full | Near | Dormant |
 |---|---|---|---|---|---|---|
-| 3×3 city blocks, 100 m pitch, 20 m streets (unit fixture) | 4 | **49** | 26 | **7** | 20 | 22 |
-| the CI island's settlement, hero at the crossroads | 2 | **16** | 6 | **15** | 0 | 1 |
-| …hero at the town's edge (150 m) | 2 | 16 | 6 | 0 | **3** | 13 |
+| 3×3 city blocks, 100 m pitch, 20 m streets (unit fixture) | 4 | **63** | 32 | **11** | 26 | 26 |
+| the CI island's settlement, hero at the crossroads | 2 | **11** | 7 | **10** | 0 | 1 |
+| …hero at the town's edge (150 m) | 2 | 11 | 7 | 0 | **3** | 8 |
 | …hero a kilometre away | — | **0** | — | 0 | 0 | 0 |
 
-**The budget arithmetic.** Ten `Full` rigs at VEH2a's own 2.00 µs is **0.020 ms
-of the 0.5 ms `vehicle` budget — four per cent**; at the island's measured
-4.11 µs (release), fifteen rigs is **0.0616 ms — twelve per cent**. The budget
-alone would allow **121 rigs** at the island's rate and 250 at the flat fixture's;
-the GEOMETRY allows about **twenty**, because a 64 m disc over a 100 m-pitch grid
-covers roughly two street lines' worth of kerb and 45 % of those slots hold a
-car. **The geometry bound is six times tighter than the budget bound**, which is
-the property that makes this population safe without a cap on it — and it is why
-`MAX_TRAFFIC_CARS` (4 096) is a table bound against a malformed recipe rather
-than a performance knob.
+**The budget arithmetic.** Eleven `Full` rigs at VEH2a's own 2.00 µs would be
+**0.022 ms of the 0.5 ms `vehicle` budget — four per cent**; at the island's
+measured **4.15 µs** (release, ten rigs) it is **0.0415 ms — eight per cent**.
+The budget alone would allow **120 rigs** at the island's rate and 250 at the flat
+fixture's; the GEOMETRY allows about **twenty**, because a 64 m disc over a
+100 m-pitch grid covers roughly two street lines' worth of kerb and 45 % of those
+slots hold a car. **The geometry bound is six times tighter than the budget
+bound**, which is the property that makes this population safe without a cap on
+it — and it is why `MAX_TRAFFIC_CARS` (4 096) is a table bound against a
+malformed recipe rather than a performance knob.
 
 `TRAFFIC_STEP_BUDGET_MS` is minted at **1.0 ms** — `NPC_STEP_BUDGET_MS`'s figure,
 because the two phases do the same shape of work over populations of the same
 order, and a sixth of `CITY_STEP_BUDGET_MS`, which is the property that makes it
 able to see anything.
 
-**THE 60-FPS TRAJECTORY, HONESTLY.** The fixed step above is **22.4 ms in a
-release build** and it is dominated by `character move` (8.98) and `solver`
-(4.08) over 329 residents — **neither of which is this wave's**, and both of
-which were there before it. `SHIPPING_FRAME_BUDGET_MS` is 16.6 ms and it is a
-*target printed as a distance, never asserted*; `fps_instrument` owns the
-shipping frame claim over the phase-30 city and this wave did not move it or
-re-measure it.
+**THE 60-FPS TRAJECTORY, HONESTLY.** The fixed step above is **21.5 ms in a
+release build** and it is dominated by `character move` (9.03), `animation`
+(3.61) and `solver` (3.35) over 329 residents — **none of which is this wave's**,
+and all of which were there before it.
+`SHIPPING_FRAME_BUDGET_MS` is 16.6 ms and it is a *target printed as a distance,
+never asserted*; `fps_instrument` owns the shipping frame claim over the phase-30
+city and this wave did not move it or re-measure it.
 
 What this wave can say is the delta it is responsible for, and it is small:
-**a street costs 1.22 ms — 5.4 % — of the step it is on**, of which its own phase
-is 0.11 and the rest is the NPC drivers being ordinary characters. A settlement
+**a street costs 1.01 ms — 4.7 % — of the step it is on**, of which its own phase
+is 0.12 and the rest is the NPC drivers being ordinary characters. A settlement
 of this island's size is therefore **not** what stands between this engine and
-sixty frames; three hundred and twenty-nine `move_and_slide` characters at
+sixty frames; three hundred and twenty-nine `move_and_slide` characters against
 `CITY_STEP_BUDGET_MS`'s own six-millisecond ceiling are, and that is the crowd
 arc's number rather than this one's. **This wave does not claim 60 fps on the
 island, and no arm here asserts one.**
 
 ### THE LAWS THIS WAVE PAID FOR
+
+**A DEFAULT THAT FITS ONE BODY DOES NOT FIT FIVE.** The worst defect of the wave,
+and the one an arm found only after an adversarial read pointed at the module:
+`catalogue_row` gives each silhouette its own hull, and left every one of them the
+P29.7 test rig's suspension — **20 kN/m over 0.25 m of travel, sized for
+1.2 tonnes**, under a Van that at the 150 kg/m³ hollow-shell convention weighs
+**3 402 kg**. Four corners of that carry 5 kN of a 33 kN car. The struts bottomed
+out; the default `wheel_drop_m` of −0.75 under a 1.05 m half-height put the hull
+**6 cm under the road** anyway; the chassis collider carried the car; the tyres
+saw a tenth of their load; `slip_ratio` was **0.0000** and full throttle produced
+**3.5 m in ten seconds**. Every traffic car in the wave was driving on its belly,
+and the gate reported it as a jammed street.
+
+Two rules came out of it. **The geometry decides the mass and the mass decides
+the springs** — `size_the_suspension`, one place, from a stated static sag rather
+than from a table a silhouette can outgrow. And **ride height is measured at the
+SAG, not at full extension**: a hull that clears the road only with its springs
+unloaded lands on it the moment anybody sits in it, so the wheel drop is solved
+against the hull's own bottom edge at 45 % of travel.
+
+**And the wave's own ledger was wrong about it for an hour.** The first write-up
+said the stolen car's 0.98 m/s was the town's crowd. It was the belly. The way
+that was settled is the rule: **when a claim has two candidate causes, build the
+control.** `a_stolen_car_answers_the_throttle_on_an_empty_street` puts one car on
+an empty street and gets **87.4 m at 18.14 m/s** — which retired the first
+explanation, and then re-earned the second one honestly, because the island's car
+STILL only manages a few metres and now it really is the crowd (a `Full` crowd
+agent is a kinematic capsule, and a car cannot push one at any torque).
 
 **A first guess a body is built on has to be a guess a body can survive.** The
 street's derived height is a mean over the blocks that bound it, and
@@ -24594,13 +24624,17 @@ pure function of the space, so "again" is exactly the cars that did not move.
 5. **Traffic is silent.** Deliberate, and it unblocks on VEH2a's carried item 5:
    the moment an engine emitter can follow its car, `RigSpawn::engine_voice`
    becomes `true` for traffic and a street sounds like one.
-6. **A crowd does not part for a car.** Traffic yields to anything in its lane,
-   which is why nothing gets run over — and on a two-street town with 329
-   residents it is also why the hero's stolen car covers **0.6 m at 0.98 m/s**.
-   `a_stolen_car_answers_the_throttle_on_an_empty_street` is the falsifier that
-   says that is the town rather than the car: the same press on an empty street
-   is **194.8 m at 24.86 m/s**. The fix is pedestrian avoidance in the crowd's
-   own steering, not an animation.
+6. **A CROWD IS A WALL.** A `Full` crowd agent carries a **kinematic** capsule
+   (`crowd::set_tier_components`), and a kinematic body cannot be pushed at any
+   torque — so a car parked among the eighty-one of them the fixture's crossroads
+   holds is not slowed, it is *walled in*. Traffic's own yield rule keeps it from
+   trying, which is why nothing gets run over; the player's stolen car has no such
+   rule and simply cannot move. Measured: throttle **1.00** reaching the car,
+   **4.7 m** covered in ten seconds, against **87.4 m at 18.14 m/s** for the same
+   press on an empty street. The fix is pedestrian avoidance in the crowd's own
+   steering — a crowd that PARTS — and it is a change to `steer_agent`, not an
+   animation. The near-miss flinch this wave priced is the cosmetic half of the
+   same item.
 7. **A `Near` car holds one height along its whole route.** `ground_y` is
    measured once, at its own space, and applied to every point of its path. Right
    on a levelled settlement pad, wrong on a route that climbs. A `Full` car is on
@@ -24619,7 +24653,14 @@ pure function of the space, so "again" is exactly the cars that did not move.
     needs the schema window this wave does not have.
 11. **No tyre smoke and no skid marks** (VEH2a's carried item 4, unmoved). The
     slip ratio is still published and still read by nobody.
-12. **No vehicle HUD** (VEH2a's carried item 8, unmoved). Priced and not taken:
-    a speed-and-gear readout is a Ring-2 overlay in `inf-ui` plus a projection
-    seam, and this wave's eight clauses did not leave room for a new panel that
-    nothing else needs.
+12. **Half a vehicle HUD.** VEH2a's carried item 8 said rpm, gear and the aids'
+    intervention are published and nothing draws them. The **gear** is drawn now,
+    beside a speed, in the box the interaction prompt already uses
+    (`inf_ecs::vehicle::drive_readout` formats it in Ring 0 where it can be
+    tested; `Vehicle::gear` puts the number on the trait). The rev counter and
+    `WheelState::tc_cut` are still published and still read by nobody, and there
+    is still no rev bar, no gauge and no minimap.
+13. **The readout is drawn by a path CI cannot run.** `PlayerApp::drive_readout`
+    lives in the windowed player, which no test opens; what is armed is the Ring-0
+    string it calls. That is the same bound every other line of `window.rs`
+    carries and it is stated rather than implied.

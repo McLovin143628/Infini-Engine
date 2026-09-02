@@ -99,27 +99,27 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 
 The `traffic` row was **minted at wave VEH2b**, and it is minted with a control
 beside it. `the_traffic_phase_costs_what_it_costs_on_the_island` measures the CI
-fixture's settlement at half past eight — 16 derived cars, 15 of them rigs, four
-of them driving with a person at the wheel, over 329 walking residents — and
-then measures **the same settlement at the same hour with the traffic taken
-out**, through `RuntimeSim::set_traffic_population(empty)`, which stops the
-derivation as well as taking the bodies down. Dev build, MIN of three rounds of
-sixty settled steps:
+fixture's settlement at 08:24 — 11 derived cars, 10 of them rigs, six of them
+driving with a person at the wheel, over 329 walking residents — and then
+measures **the same settlement at the same hour with the traffic taken out**,
+through `RuntimeSim::set_traffic_population(empty)`, which stops the derivation
+as well as taking the bodies down. Release build, MIN of three rounds of sixty
+settled steps:
 
 | row | with a street | without | delta |
 |---|---|---|---|
-| `traffic` | **0.2029 ms** | 0.0558 | +0.1471 |
-| `vehicle` | 0.0707 (15 rigs, **4.72 µs a car**) | 0.0107 | +0.0600 |
-| `solver` | 4.3663 | 4.1811 | +0.1852 |
-| `physics3d sync` | 4.6912 | 4.6324 | +0.0588 |
-| **whole step** | **25.8459 ms** | **24.5641 ms** | **+1.2818 ms — 5.0 %** |
+| `traffic` | **0.1455 ms** | 0.0231 | +0.1224 |
+| `vehicle` | 0.0415 (10 rigs, **4.15 µs a car**) | 0.0099 | +0.0316 |
+| `solver` | 3.3504 | 3.2641 | +0.0863 |
+| `physics3d sync` | 3.0055 | 2.9916 | +0.0139 |
+| **whole step** | **21.5010 ms** | **20.4876 ms** | **+1.0134 ms — 4.7 %** |
 
 Two things that table says which the phase row alone does not. **A traffic car
 costs more OUTSIDE its own phase than inside it**: the four named rows account
-for 0.45 ms of the 1.28, and the rest is `character move` and `animation` paying
+for 0.24 ms of the 1.01, and the rest is `character move` and `animation` paying
 for the NPC drivers, which are ordinary characters with ordinary capsules and
 ordinary poses. And **the island's µs-a-car is higher than the flat-fixture
-one**: 4.72 against `VEHICLE_STEP_BUDGET_MS`'s 2.00, because these rays cast into
+one**: 4.15 against `VEHICLE_STEP_BUDGET_MS`'s 2.00, because these rays cast into
 a streamed heightfield under a settlement rather than into a four-tile box, which
 is the same dilution the VEH2a audit measured in the other direction.
 
