@@ -463,7 +463,7 @@ fn view_of<'a>(
 }
 
 /// **What one traffic car's driver is asking for right now** — the same view
-/// [`steer_car`] builds, for an instrument that wants the decision rather than
+/// `steer_car` builds, for an instrument that wants the decision rather than
 /// its consequence.
 ///
 /// One door for both: an arm that rebuilt the view itself would be measuring a

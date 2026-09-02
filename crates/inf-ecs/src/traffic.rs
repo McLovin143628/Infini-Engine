@@ -1242,7 +1242,7 @@ pub struct TrafficRecord {
     /// The way the row it is parked in points, degrees.
     pub home_yaw_deg: f64,
     /// Its commute, or `None`. A record has at most one of this and
-    /// [`circuit`](Self::circuit), by construction in [`plan_batch`].
+    /// [`circuit`](Self::circuit), by construction in `plan_batch`.
     pub schedule: Option<crate::crowd::CrowdSchedule>,
     /// Its loop, or `None` — see [`Circuit`].
     pub circuit: Option<Circuit>,

@@ -507,8 +507,8 @@ impl LaneNetwork {
         self.lanes.get(&id)
     }
 
-    /// The lanes this one leads into, in the order [`join`](Self::join)
-    /// documents. Empty for a lane that leads nowhere.
+    /// The lanes this one leads into, in the order `join` documents. Empty for
+    /// a lane that leads nowhere.
     pub fn successors(&self, id: LaneId) -> &[LaneId] {
         self.next.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
     }
