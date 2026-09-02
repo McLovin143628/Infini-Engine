@@ -30268,8 +30268,10 @@ predating this wave byte-identical to itself.
 `SlotRole` derives `Serialize` or `Reflect` and `PcgVolume::residents` is
 `#[serde(skip)]`; what `as_u8` is frozen against is the replay trace, so the
 variant took the next byte. `SlotPosture` and `SlotShift` ride the slot beside
-it, and `shift_of` is one exhaustive match over the new `RoomType::ALL`, so a
-fifteenth room type fails to compile rather than defaulting.
+it, and `shift_of` is one exhaustive match over `RoomType`, so an eighteenth
+room type fails to compile rather than defaulting; the new `RoomType::ALL` is
+the array the sweeps run over, pinned by the audit against a census of the
+module's own source (an array's length is not a census).
 
 **A BODY THAT SITS, AND A BODY THAT DANCES.** `inf_anim::posture` — two poses as
 **authored clip data addressed by BONE ROLE**, composed onto the machine's own
@@ -30373,3 +30375,39 @@ opening nearest the LISTENER and a venue block is six bars.
 
 Ledger, laws and the carried list in `docs/memos/island-progress.md` under *"Wave
 VEN1b"*.
+
+**THE ADVERSARIAL AUDIT of VEN1b.** Full diff read commit by commit, every table
+reproduced, the battery re-run whole at head. Every number the wave states holds
+— the archetype station table, the six attenuation cells, the club's 512 / 35 →
+35 / 50 → 48 (107 turned away) / 48 seated / 35 on shift / 83 at the venue,
+6 speakers at 1.6 m, 750 `SetOcclusion`, 120 identical digests and an identical
+audio command stream — with scene **v27 unmoved**, goldens **62 none blessed**,
+`GOLDEN_SET_DIGEST` unmoved, manifests / `Cargo.lock` / frontend untouched and
+zero CRLF in the diff's 45 text files. **Six findings, all fixed.** (1) **The
+phase the wave grew is the one nobody measured**: the club arm asserts `society`
+and `crowd`, the two phases barely touched, while the wave's per-step work
+landed in **`audio`** — armed, it read **0.549 ms a step, three times the crowd
+phase**, because `portal_gain` rebuilt the unbanded door list (a `String` per
+door, over every doorway in the resident world) *once per source per step*.
+`portal_gain_in` takes the list the step already built, hoisted once inside the
+MIRROR fence with a needle to hold it there: **0.549 → 0.185 ms**, digests and
+audio stream byte-identical, and `AUDIO_STEP_BUDGET_MS` minted at 1.0.
+(2) **The stream equality was not anchored to a whole stream** — `BoundedLog`'s
+own doc demands `dropped == 0` first and no gate in the tree had it, on the wave
+that put the island's first per-step `SetListener` into that ring; asserted, 0.
+(3) **`RoomType::ALL`'s "fails to compile" was false** — an array's length is
+not a census; mutation-verified that dropping a variant leaves
+`the_social_rooms_are_the_night_rooms` green, and pinned now against a source
+census. (4) **The bouncer was gated on the neon sign**, not on the rooms — right
+today for a reason that has nothing to do with venues, and a shop with a
+signboard would have grown a night job; `station::watches_its_door` is the rule
+about the ROOMS, station table unchanged. (5) **`portal_of`'s doc named a
+different rule from its code** (smallest detour vs nearest listener). (6) **A
+carried item was backwards** — foot IK cannot reach a seated body's feet: the
+trace envelope is 0.45 m below the held foot and a seated foot is a femur up.
+Laws: *measure the phase the wave GREW*; *a rule right for a reason it does not
+state will be wrong the day that reason moves*; *an array's length is not a
+census*; *a ring buys a bound and sells a claim*. Carried in the memo: the
+portal's neighbour-door ranking, the door-state step in an otherwise continuous
+swell, the residual O(doors) audio walk, a blocked agent that sits down in the
+street, and a stray tracked `0` at the repo root.

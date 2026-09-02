@@ -25451,9 +25451,13 @@ the middle. (VEN1a's finding about `RoomType`, re-checked at this wave's head fo
 a different enum.)
 
 `SlotPosture` (`Stand`/`Sit`/`Dance`) and `SlotShift` (`Day`/`Night`) ride the
-slot beside it. `shift_of` is one exhaustive match over **`RoomType::ALL`** —
-new, and written out rather than derived, so a fifteenth room type fails to
-compile instead of defaulting. `station::is_social` and `society::shift_of` name
+slot beside it. `shift_of` is one exhaustive `match` over `RoomType` itself, so
+an eighteenth room type fails to **compile** there rather than defaulting, and
+the new **`RoomType::ALL`** is the array the sweeps run over. (This paragraph
+said `ALL` was what failed to compile; the audit corrected it and armed it —
+`[RoomType; 17]` is a length and not a census, so `ALL` is now pinned against a
+census of the module's own source, `the_room_type_sweep_covers_every_variant`.)
+`station::is_social` and `society::shift_of` name
 the same three rooms in two modules, and `the_social_rooms_are_the_night_rooms`
 is the pin that stops them drifting (`slots_of`'s two `== Retail` tests, VEN1a,
 met again).
@@ -25789,10 +25793,17 @@ settlement's content.
   twelfth section is the natural move and it is a frozen-order change.
 * **The autoplay walk still has no distance cull.** The doorway loop culls on
   `max_distance`; the walk above it scans every entity every step.
-* **The seated body's feet are authored, not solved.** The sit is a clip; a
-  chair whose seat is 40 cm rather than the rig's own femur would put the feet
-  through the floor. Foot IK runs *after* the posture and would fix it the day a
-  seat height varies.
+* **The seated body's feet are authored, not solved, and NOTHING solves them.**
+  The sit is a clip; a chair whose seat is 40 cm rather than the rig's own femur
+  puts the feet through the floor. This entry first said foot IK *"runs after
+  the posture and would fix it the day a seat height varies"* — **measured, it
+  cannot**: the P29.4 solve is gated on a shape-cast from the held foot over
+  `TRACE_ABOVE_M` 0.50 / `TRACE_BELOW_M` 0.45, and a seated foot sits about a
+  femur (0.48 m) up, so the trace finds no ground and the pass `continue`s
+  before it has a goal. Even where it does hit, `ground_offset` measures the
+  ground under the foot against the body's own ground plane and answers **zero
+  on a flat floor** — it corrects for a step, not for a seat. Forced by: a seat
+  whose height is not the rig's femur.
 * **The fixture has no nightclub**, so the live two-host dance-floor claim is
   made at *society* scale on a real nightclub rather than at world scale.
   Forced by: a fixture recipe with a settlement big enough for a city's strip.
@@ -25837,3 +25848,132 @@ holds **zero** CRLF blobs (`git ls-files --eol` over every tracked file). The 23
 working-tree CRLF files that remain are the pre-existing frontend `.ts`/`.tsx`
 set from earlier sessions; none is in this diff. The `\`-continuation law, on the
 other hand, **fired** — see the laws above.
+
+### THE ADVERSARIAL AUDIT (2026-09-02, range `8820694a..f609ae5c`)
+
+Full diff read commit by commit, every claim re-derived, the battery re-run whole
+at head. **The wave's own numbers all reproduce**: the archetype station table
+(Bar 11/0/1/0/1/1, Nightclub 55/16/1/1/1/1, Strip club 47/0/1/1/1/1, the other
+seven all zero), the six attenuation cells, and the club's 512 agents /
+35 night jobs -> 35 workers / 50 leisure places -> 48 revellers (107 turned away)
+/ 48 seated / 35 on shift / 83 at the venue / 35 at the counter, 6 speakers at
+1.6 m, 750 `SetOcclusion`, 120 identical digests and an identical audio command
+stream. Scene **v27 unmoved**, `ScenePayload` unmoved, goldens **62, none
+blessed**, `GOLDEN_SET_DIGEST` unmoved, manifests / `Cargo.lock` / frontend
+untouched, and `git ls-files --eol` over all 45 text files of the diff is
+**w/lf** without exception.
+
+**A1 - THE PHASE THE WAVE GREW IS THE ONE NOBODY MEASURED.** The club arm
+asserts `society` (0.028 ms) and `crowd` (0.178 ms) against their ratchets - the
+two phases this wave barely touched. What it added per-step work to is the
+**`audio`** phase, which has had a row in `step_profile` since the profile
+existed and has never had an arm. Armed and measured, on both hosts:
+
+    society 0.028 ms | crowd 0.178 ms | audio 0.549 ms
+
+The audio phase was **three times the crowd phase** and by far the dearest of the
+three. The shape behind the number: `portal_gain` built the door list *inside
+itself*, so `d3::door::placements` - the **unbanded** walk, which allocates a
+label `String` per authored door and per grammar `PcgDoorway` in the resident
+world - ran **once per occluded source per step**, five times over 750 doors.
+`placements_near`'s own doc is the measurement of where that goes: *"the shipped
+city plans 19 790 doorways and the band keeps 234"*, twenty-six times this
+fixture.
+
+`audio::portal_gain_in` takes the list the step already built; both hosts hoist it
+once inside the MIRROR fence, and the fence gained a needle so a host that drops
+the hoist goes red. **0.549 -> 0.185 ms**, with the 120 step digests, every
+verdict and the whole audio command stream byte-identical.
+`AUDIO_STEP_BUDGET_MS` is minted at 1.0 (`NPC_STEP_BUDGET_MS`'s figure) and the
+fixture sits at 19 % of it.
+
+**A2 - THE STREAM EQUALITY WAS NOT ANCHORED TO A WHOLE STREAM.**
+`audio_command_log` is a `BoundedLog` of 8 192 whose own doc says *"a test that
+reasons about the first command must assert this is zero first"*, and no gate in
+the tree ever had. Three of the club arm's claims rest on it - the `Play` and
+`SetOcclusion` counts, the `occlusions_here >= CLUB_STEPS` floor, and the
+host-to-host equality of a field whose doc calls it *the whole* stream. This wave
+is also what put the island's **first per-step `SetListener`** into that ring, by
+giving the hero an ear, so the headroom moved under it. Asserted now, and
+measured at **0 dropped** on both hosts.
+
+**A3 - `RoomType::ALL`'s "fails to compile" was not true.** The array's doc
+claimed that a variant added to the enum and forgotten there fails to compile.
+`[RoomType; 17]` is a length, not a census: a new room type would simply have
+been **absent from every sweep written over `ALL`**, the first of which is
+`the_social_rooms_are_the_night_rooms` - the arm that keeps `station::is_social`
+and `society::shift_of` from drifting apart. **Mutation-verified**: dropping
+`Corridor` from `ALL` leaves that arm GREEN. The guard is now `components.rs`'s
+own shape - a census of the module's source, checked name for name against the
+array - and the same mutation reds it.
+
+**A4 - THE BOUNCER WAS GATED ON THE NEON SIGN.** The `Guard` station rides
+`assemble::street_face`, which is the right pass (it is where the assembler has
+resolved which wall is the street) and therefore inherits that pass's early
+return on `BuildingArchetype::entrance_sign`. So *"a venue's door is watched at
+night"* was really *"a building with a lit sign over its door is watched at
+night"*. It measured correctly - the three venues are exactly the three
+archetypes that declare a sign - for a reason that has nothing to do with venues,
+and a shop given a signboard would have grown a **night job**: a bouncer on a
+bakery, and an agent planned onto a night shift there. `station::watches_its_door`
+is a rule about the ROOMS, which is what this wave's own law says outlives a rule
+about an archetype; the station table is unchanged.
+
+**A5 - `portal_of`'s doc named a different rule from its code.** The header said
+the portal is *"the door with the smallest detour"*; the code has always ranked on
+the **listener's own distance** to the opening, which is also what the gain is a
+function of and what the constants' own measurement argues for. Doc corrected,
+with the bound it leaves written down beside it - see the carried list.
+
+**A6 - A CARRIED ITEM THAT WAS BACKWARDS.** *"Foot IK runs after the posture and
+would fix it the day a seat height varies"* - it cannot. Measured against the
+code: the P29.4 solve shape-casts from the held foot over `TRACE_ABOVE_M` 0.50 /
+`TRACE_BELOW_M` 0.45, and a seated foot is about a femur (0.48 m) up, so the trace
+finds no ground and the pass `continue`s before it has a goal; and where it does
+hit, `ground_offset` answers **zero on a flat floor** because it measures a step,
+not a seat. Rewritten as what it is: nothing solves a seated body's feet.
+
+### THE AUDIT'S LAWS
+
+* **Measure the phase the wave GREW, not the phase the wave is about.** The
+  society and the crowd were asserted; the audio phase - three times the crowd's
+  cost - had no arm at all. A budget is a ratchet only where the work landed.
+* **A rule that is right for a reason it does not state will be wrong the day
+  that reason moves.** The bouncer was correct because venues happen to be the
+  only archetypes with a lit sign.
+* **An array's LENGTH is not a census.** `[T; 17]` compiles perfectly against an
+  eighteen-variant enum. Rust cannot enumerate a variant, so the guard is a source
+  census or nothing - and "or nothing" is a sweep that silently skips.
+* **A ring buys a bound and sells a claim.** Every "the whole stream" assertion
+  over a `BoundedLog` needs `dropped == 0` beside it, and the wave that adds a
+  per-step command is the wave that moved the headroom.
+* **A convenience that builds its own inputs is O(callers x inputs).** One query
+  and a loop want different doors; `portal_gain` was right for the first and five
+  times the price for the second.
+
+### THE AUDIT'S CARRIED
+
+* **`portal_of` ranks on the listener, so a listener in the street can pick a
+  NEIGHBOUR's interior door** as the way the sound arrives - the club gate's fifth
+  defect, worked around there by opening the whole block (`CLUB_OPENS_M` 60 m)
+  rather than one leaf. Ranking on the **detour** would name the opening on the
+  sound's own line; priced and not taken, because it moves every number this wave
+  measured. Forced by: a venue whose neighbours' doors are open.
+* **The swell is continuous in the LISTENER and a step in the DOOR.**
+  `DoorState::is_open` is a half-limit threshold, so a swinging leaf snaps the
+  verdict from `Shut` (-24 dB + 500 Hz) to `Doorway` (up to unity) in one step.
+  The module doc's "continuous by construction" is true of walking and not of
+  opening. Forced by: the first door a player watches swing.
+* **The `audio` phase's remaining cost is still O(doors in the resident world)** -
+  one build a step now instead of one per source, but a city block's 19 790
+  doorways is twenty-six times the fixture's 750. The band exists
+  (`placements_near`) and audio does not use it, because a listener can hear
+  through a door the sim band would not make solid. Forced by:
+  `AUDIO_STEP_BUDGET_MS`.
+* **A blocked steered agent sits down where it is.** `arrival_on` is keyed on the
+  CLOCK's `u >= 1.0`, not on the body's own arrival, so a `Full` agent held up on
+  its way to a stool takes the seated pose in the street when its leg's window
+  runs out. Deterministic and identical on both hosts, which is why no gate sees
+  it. Forced by: the crowd-avoidance work the wave's own ruling defers.
+* **A stray tracked file `0` at the repo root** - empty, committed 2026-08-19,
+  predating this wave (the shape of a `2>0` redirect). Out of scope, named.
