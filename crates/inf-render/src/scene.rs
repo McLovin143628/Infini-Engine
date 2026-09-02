@@ -3118,14 +3118,6 @@ impl RenderScene {
 #[cfg(test)]
 mod tests {
 
-    /// **The night glow is a ramp on the sun's own height, quantized** (island
-    /// wave I8b clause 3).
-    ///
-    /// Four claims, and the first is the one the memo key rests on: a daytime
-    /// step is EXACTLY zero and a daytime emission is exactly `[0, 0, 0]`, so a
-    /// level with no night in it packs the bytes it packed before this feature
-    /// existed.
-
     /// **A steady fixture is untouched, and a sweeping rig shows three colours
     /// at once** (wave VEN1a).
     #[test]
@@ -3254,6 +3246,13 @@ mod tests {
         assert!(pulse_tick(365.0 * 24.0 * 3600.0) < u32::MAX);
     }
 
+    /// **The night glow is a ramp on the sun's own height, quantized** (island
+    /// wave I8b clause 3).
+    ///
+    /// Four claims, and the first is the one the memo key rests on: a daytime
+    /// step is EXACTLY zero and a daytime emission is exactly `[0, 0, 0]`, so a
+    /// level with no night in it packs the bytes it packed before this feature
+    /// existed.
     #[test]
     fn the_night_glow_ramps_on_the_sun_and_quantizes() {
         use glam::Vec3;

@@ -190,10 +190,11 @@ impl ModuleMesh {
         // radial direction of the face's own midpoint. Worked out rather than
         // guessed, because the box table above records what guessing the
         // symmetry cost the first time.
-        for k in 0..8 {
-            let j = (k + 1) % 8;
+        for (k, a) in RING.iter().enumerate() {
+            let j = (k + 1) % RING.len();
+            let b = RING[j];
             let n = {
-                let (x, z) = (RING[k][0] + RING[j][0], RING[k][1] + RING[j][1]);
+                let (x, z) = (a[0] + b[0], a[1] + b[1]);
                 // The midpoint direction, normalized by its own length — which
                 // for two adjacent octagon vertices is a constant, but is
                 // written as the division so a different `RING` stays correct.

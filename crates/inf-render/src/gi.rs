@@ -661,7 +661,11 @@ pub fn scatter_batch_stages(
     voxel_size: f32,
     extent: f32,
 ) -> bool {
-    if !emits && !(widest_radius >= voxel_size * 0.5) {
+    // `!is_finite() || <` and NOT `!(>=)`: the two agree on every value
+    // including a NaN, and only one of them is a spelling clippy will read (the
+    // island wave I8a finding, met here for the third time). A NaN radius is
+    // dust, which is the answer that stages nothing rather than a NaN bound.
+    if !emits && (!widest_radius.is_finite() || widest_radius < voxel_size * 0.5) {
         return false;
     }
     if near_distance > 0.0 && near_distance >= f64::from(volume_reach(extent)) {

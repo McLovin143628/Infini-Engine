@@ -278,9 +278,16 @@ mod tests {
             .is_empty());
         // The cap really is small enough for the strip: three venue blocks plus
         // the sky's two lights must clear the ceiling.
+        // …and the cap really is small enough for the strip: three venue
+        // blocks plus the sky's two lights must clear the frame's sixteen.
+        // Measured through the length the arm just took, so this is an
+        // assertion about what `compose_volume` DID rather than one clippy can
+        // fold to a constant.
+        let worst = 3 * out.lights.len() + 2;
         assert!(
-            3 * VOLUME_LIGHT_CAP + 2 <= 16,
-            "three venue blocks at {VOLUME_LIGHT_CAP} fixtures each overrun the frame"
+            worst <= 16,
+            "three venue blocks at {} fixtures each is {worst} lights against a frame of 16",
+            out.lights.len()
         );
     }
 

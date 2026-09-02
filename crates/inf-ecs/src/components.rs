@@ -4070,6 +4070,11 @@ impl PcgVolume {
     /// pair would make one solid both a part and part of another's shell.
     /// Nothing downstream may assume the groups *cover* the lists; everything
     /// downstream may assume they are ordered.
+    // Eight, and every one of them is a half of the SAME population: writing
+    // them through eight setters is what this door exists to prevent, because a
+    // `StructureGroup` is a pair of index ranges and an index range is only
+    // meaningful against the exact lists it was derived from.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_population(
         &mut self,
         instances: Vec<ScatteredInstance>,
