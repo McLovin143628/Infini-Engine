@@ -30191,6 +30191,19 @@ for `skinned_rejected`'s reason and then read by nothing — the exact state
 `skinned_rejected` exists to escape. Both now ride `fps_instrument`'s `gi audit`
 row beside it.
 
+**THE NEAR-BLACK ARM WAS SET ABOVE THE DEFECT IT NAMES.** The roofless first cut
+measured 40 of 255; the clause written for it reads `corner < 42.0`, so it passed
+on that very frame and the mutation was caught by the *ratio* clause beside it
+instead — an accident that evaporates the day the stage gets brighter.
+Mutation-verified at the audit (roof and three walls deleted: corner **40.06**,
+stage 65.96; closed: **4.20** / 45.30); the ceiling is now **15.0**, 2.7× under
+the defect and 3.6× over the frame that ships. A fourth finding — the venue
+palettes' modules made flush with their walls, with no guard left behind — was
+opened, and **measuring the guard before landing it withdrew it**: fifteen
+modules across all seven older palettes stand proud of their own walls (`Column`
+by 17.5 cm), and `modules.rs`'s own header calls that relief the point. The
+venues are now the only flush façades in the engine; recorded, carried.
+
 **THE CRLF SWEEP WAS `.rs`-SCOPED.** The wave's own note records renormalizing 32
 `.rs` files; the same scripted edits also wrote `samples/island/island.toml` and
 `samples/island-fixture/island.toml`, which were still CRLF **in the working
@@ -30218,5 +30231,5 @@ of 450 over 48 crates, and **zero on a line this wave added** (measured by
 intersecting the warning locations with the diff's own added-line ranges);
 clippy `-D warnings` **0**, exit 0, run LAST. Scene schema **v27, unmoved**;
 `Cargo.lock` and every manifest untouched; no new dependency of any kind.
-Eighteen commits (fifteen the implementer's, three the audit's), 63 files,
-+5 996 / −174, **24 new `#[test]` arms**.
+Twenty commits (fifteen the implementer's, five the audit's), 63 files,
++6 067 / −174, **24 new `#[test]` arms**.

@@ -25217,7 +25217,7 @@ moved.
 | new external dependencies | — | **none** |
 | committed content | — | 20 files: 3 zone documents, 3 phase19 lots, both island levels + recipes, the phase-19 town |
 | frontend (`editor/studio/src/`) | untouched | **untouched** (`src-tauri/commands/pcg.rs` only, the projector mirror) |
-| the wave | — | **18 commits (15 implementer + 3 audit), 63 files, +5 996 / −174, 24 new `#[test]` arms** |
+| the wave | — | **20 commits (15 implementer + 5 audit), 63 files, +6 067 / −174, 24 new `#[test]` arms** |
 
 **The rustdoc figure is stated with its measurement**, because 380 → 410 looks
 like a regression and is not one: the warning locations were intersected with
@@ -25301,6 +25301,52 @@ what says so.
 `scatter_decimated` were added for `skinned_rejected`'s stated reason and then
 read by nothing in the tree, which is the exact condition `skinned_rejected`
 exists to escape. Both now ride `fps_instrument`'s `gi audit` row beside it.
+
+**Finding 4 — the near-black arm was set ABOVE the defect it names.** The wave's
+own first defect is "the golden's room had no roof, and its far corner sat at 40
+of 255". The clause written for it reads `corner < 42.0`. Mutation-verified at
+the audit by deleting the roof and three walls and re-running:
+
+| | far corner | stage | `corner < 42` | `stage > corner·2 + 8` |
+|---|---|---|---|---|
+| roofless (the defect) | **40.06** | 65.96 | **passes** | fails |
+| closed (the frame that ships) | 4.20 | 45.30 | passes | passes |
+
+So the mutation *is* caught — by the **ratio** clause, which is an accident of
+the two lamps being bright and evaporates the day the stage gets brighter. The
+ceiling moves to **15.0**: 2.7× under the defect, 3.6× of headroom over the
+frame that passes, 10.8 of 255 in the absolute units an adapter differs in over
+a near-black region mean. `--test golden` under `INF_GOLDEN_STRICT=1`: 121
+passed, nothing re-blessed.
+
+**Withdrawn: a guard whose prescription pointed backwards.** The wave's third
+self-caught defect — "the venue walls were thinner than their own modules" — was
+fixed by hand in three palettes with nothing left behind to catch the next one,
+so the audit wrote the missing clause into
+`palette_parameters_are_self_consistent` (which already walks exactly the right
+module set for the jamb rule). Measured before it was landed, per the P25 law,
+and the measurement said no:
+
+| palette | modules standing proud of their own wall |
+|---|---|
+| Office block | `Mullion` +0.050 |
+| Apartment block | `Balcony`, `Pier`, `Wall` +0.050 |
+| Factory / warehouse | `Column` **+0.175** |
+| House | `Brick`, `Quoin` +0.025 |
+| Estate house | `Ashlar`, `Pier` +0.060, `Pilaster` +0.100 |
+| Hotel | `Panelled` +0.050, `Pier`, `Wall` +0.035 |
+| Shop | `Solid`, `Stall` +0.030 |
+| **Bar / Nightclub / Strip club** | **none — the only flush façades in the engine** |
+
+Fifteen violators across all seven palettes that predate the venues, `Wall`,
+`Solid`, `Brick` and `Ashlar` among them — and `modules.rs`'s own header says
+"the relief is in the **silhouette**: a window has a frame standing proud of a
+recessed pane". Standing proud is the idiom, not the bug; a universal "a module
+fits inside its wall" rule would red seven palettes for doing what the module
+system is built to do. The guard was withdrawn and the fact recorded: **the
+wave's fix made its three palettes the only flush ones**, which is a
+consistency question about looks and not a correctness one, and it belongs to
+whoever owns the façade vocabulary. Carried.
 
 **The 539 s was inverted in the hand-off, not in the tree.** It belongs to the
 *withdrawn* whole-block-lot approach, as `zone_lots`, the ROADMAP and this memo
