@@ -102,10 +102,21 @@ const JOINT_DOMINANT_WEIGHT: f32 = 0.35;
 /// pure function of the payload's own length, and is reported as
 /// [`GiAudit::scatter_decimated`] rather than being silent.
 ///
-/// It bites only on a batch with more than 16 384 instances **inside the 40 m
-/// GI volume**, where the 64³ grid holds 262 144 voxels and the budget admits
-/// 4 096 primitives: the grid is saturated several times over before the stride
-/// removes anything a probe could have seen.
+/// **It bites on the PAYLOAD's length, not on how much of it is in the volume**
+/// (VEN1a audit — the doc said the second and the code has always said the
+/// first). `stride` is `data.len().div_ceil(…)`, chosen before a single
+/// instance is examined, because examining them is the cost it exists to bound.
+/// The walk is uniform over the authored order, so a batch that overruns is
+/// thinned by the same factor everywhere — including inside the volume, where
+/// only a fraction of it may stand.
+///
+/// What makes that acceptable rather than merely cheap: a batch big enough to
+/// trip it and *mostly inside* the volume is one the grid cannot represent
+/// anyway — 16 384 primitives against a 64³ grid of 262 144 voxels and a budget
+/// of 4 096, so the grid is saturated several times over before the stride
+/// removes anything a probe could have seen. A batch big enough to trip it and
+/// mostly *outside* loses fidelity it would have had; no committed level holds
+/// one, and [`GiAudit::scatter_decimated`] is what says so rather than a hope.
 const SCATTER_WALK_CEILING: usize = 4 * 4096;
 
 /// One cached mesh's joint boxes, **and the `Arc` whose address is its key**.

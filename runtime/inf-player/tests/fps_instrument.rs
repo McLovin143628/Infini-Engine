@@ -416,10 +416,12 @@ struct Measured {
     /// **The GI voxelizer's own counters** (island wave NPC1e), from the last
     /// frame of the measured run.
     ///
-    /// Read for one field: `skinned_rejected`, the engagement counter behind the
+    /// Read for its engagement counters: `skinned_rejected`, behind the
     /// per-instance pre-reject that stopped the fifth skinned consumer walking a
-    /// crowd per joint. A pass whose recording got cheaper and a pass with
-    /// nothing to reject look identical in a millisecond.
+    /// crowd per joint, and (wave VEN1a) `scatter_rejected` / `scatter_decimated`
+    /// behind the scatter staging's two whole-batch rejects and its walk
+    /// ceiling. A pass whose recording got cheaper and a pass with nothing to
+    /// reject look identical in a millisecond.
     gi: inf_render::GiAudit,
 }
 
@@ -2483,9 +2485,23 @@ fn the_island_at_shipping_resolution() {
         // because the number that matters is a *pair*: `candidates` says the
         // volume kept something and `skinned_rejected` says the pre-reject
         // dropped something, and either alone can be read as the other.
+        // **…and what SCATTER did** (wave VEN1a audit). The venue wave gave the
+        // scatter path its first route into the bounce, with two whole-batch
+        // rejects and a walk ceiling in front of it — three numbers that were
+        // counted and then read by nobody, which is the state
+        // `skinned_rejected` was added to escape. `scatter_decimated` above zero
+        // is a reportable loss of fidelity; on the island it is expected to be
+        // zero, and a number nobody prints is a number nobody can notice moving.
         println!(
-            "  gi {:>16}: {} candidates, {} voxelized, {} dropped, {} skinned instances rejected whole",
-            "audit", m.gi.candidates, m.gi.voxelized, m.gi.dropped, m.gi.skinned_rejected
+            "  gi {:>16}: {} candidates, {} voxelized, {} dropped, {} skinned instances rejected whole, \
+             {} scatter batches rejected whole, {} strided",
+            "audit",
+            m.gi.candidates,
+            m.gi.voxelized,
+            m.gi.dropped,
+            m.gi.skinned_rejected,
+            m.gi.scatter_rejected,
+            m.gi.scatter_decimated
         );
         if label == "LIT+VIS+CROWD" || label == "LIT+VIS (rush hour, the island's own society)" {
             let mut scene = RenderScene::default();

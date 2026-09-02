@@ -276,8 +276,6 @@ mod tests {
         assert!(compose_volume(Vec::new(), GrammarOutput::default())
             .lights
             .is_empty());
-        // The cap really is small enough for the strip: three venue blocks plus
-        // the sky's two lights must clear the ceiling.
         // …and the cap really is small enough for the strip: three venue
         // blocks plus the sky's two lights must clear the frame's sixteen.
         // Measured through the length the arm just took, so this is an

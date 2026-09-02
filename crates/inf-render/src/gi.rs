@@ -523,7 +523,9 @@ pub struct GiAudit {
     ///
     /// Non-zero means the staging walk hit its own ceiling, which is a
     /// *reportable* loss of fidelity and not a silent one. It cannot happen
-    /// below 16 384 instances of one batch inside the volume.
+    /// below 16 384 instances in one batch — the **payload's own length**, and
+    /// not the part of it standing inside the volume, because the stride is
+    /// chosen before a single instance is examined.
     pub scatter_decimated: u32,
 }
 
