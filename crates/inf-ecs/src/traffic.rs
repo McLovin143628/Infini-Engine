@@ -52,10 +52,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
-use inf_nav::lane::{right_of, LaneNetwork, LaneSpec, DEFAULT_LANE_WIDTH_M};
+use inf_nav::lane::{right_of, LaneNetwork, LaneSpec};
 use inf_nav::{NavGraph, NavKind, NavNodeId, NavPath};
 
 use crate::math::Vec2d;
+pub use inf_nav::lane::DEFAULT_LANE_WIDTH_M;
 pub use inf_nav::NavPath as LanePath;
 
 use crate::crowd::CrowdTier;
@@ -530,6 +531,13 @@ pub struct DriveView<'a> {
     pub speed_limit_mps: f64,
     /// Metres to the car in front along this path, or `None` for clear road.
     pub gap_m: Option<f64>,
+    /// **Whether the path closes on itself** — a [`Circuit`]'s loop.
+    ///
+    /// Two things turn on it and both are wrong without it: the aim point wraps
+    /// past the end instead of clamping to it (or a car brakes at the seam every
+    /// lap), and the end-of-road stop is skipped (or it brakes to a *halt*
+    /// there, for ever, because the seam never goes away).
+    pub loops: bool,
 }
 
 /// **What the driver asks for** — a stick, and the three numbers that decided
@@ -639,9 +647,14 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
         _ => f64::INFINITY,
     };
     // …and the end of the road. A car that has run out of lane stops at it
-    // rather than driving off the end, on the same stopping-distance rule.
-    let to_end = (view.path.length_m() - view.s_m).max(0.0);
-    let endstop = (2.0 * COMFORT_DECEL_MPS2 * to_end).sqrt();
+    // rather than driving off the end, on the same stopping-distance rule — and
+    // a LOOP has no end, so it is not slowed at its own seam.
+    let endstop = if view.loops {
+        f64::INFINITY
+    } else {
+        let to_end = (view.path.length_m() - view.s_m).max(0.0);
+        (2.0 * COMFORT_DECEL_MPS2 * to_end).sqrt()
+    };
     let target = limit.min(bend).min(ahead_of_us).min(endstop);
 
     // ── 3. the pedal.
@@ -652,7 +665,17 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
     };
 
     // ── 4. the wheel.
-    let aim = view.path.position_at(view.s_m + lookahead);
+    let ahead_s = if view.loops {
+        let len = view.path.length_m();
+        if len > 0.0 {
+            (view.s_m + lookahead).rem_euclid(len)
+        } else {
+            0.0
+        }
+    } else {
+        view.s_m + lookahead
+    };
+    let aim = view.path.position_at(ahead_s);
     let to = aim - view.at;
     let f = {
         let len = (view.forward.x * view.forward.x + view.forward.z * view.forward.z).sqrt();
@@ -924,18 +947,31 @@ pub const TRAFFIC_RADII: (f64, f64, f64) = (TRAFFIC_FULL_M, TRAFFIC_NEAR_M, TRAF
 /// about three cars.
 pub const KERB_OCCUPANCY: f64 = 0.45;
 
-/// The share of parked cars that go somewhere in the morning.
+/// **What kind of day a car has**, as one draw split into four bands.
 ///
-/// A third, so a rush hour empties a visible fraction of the kerb and leaves
-/// the rest of the street parked — which is what a street does, and which makes
-/// the difference between eight o'clock and midnight something a viewer can see
-/// without counting.
-pub const COMMUTER_SHARE: f64 = 0.35;
+/// ONE draw, from [`SALT_DAY`], because the alternative — a draw for "does it
+/// commute" and a second for "is it a circuit instead" — makes the second share
+/// a share *of the first*, and the first cut of this wave did exactly that: a
+/// three-per-cent night shift of a thirty-five-per-cent commuting population is
+/// **one per cent of the street**, which on a forty-nine-car town is zero cars
+/// and an empty three in the morning. The arm caught it
+/// (`the_street_is_busy_at_eight_and_sparse_at_three_and_never_empty`), and the
+/// fix is that the bands are all shares of the same thing.
+///
+/// | draw | day |
+/// |---|---|
+/// | `[0, 0.06)` | a night circuit |
+/// | `[0.06, 0.20)` | a day circuit |
+/// | `[0.20, 0.50)` | a commute |
+/// | `[0.50, 1)` | parked, for ever |
+///
+/// Half the kerb never moves, which is what a kerb is.
+pub const COMMUTER_SHARE: f64 = 0.30;
 
 /// Salts the parked/empty draw.
 pub const SALT_PARK: u64 = 0x5041_524b_0000_0011;
-/// Salts the commuter draw.
-pub const SALT_COMMUTE: u64 = 0x434f_4d4d_0000_0012;
+/// Salts the one draw that decides a car's whole day — see [`COMMUTER_SHARE`].
+pub const SALT_DAY: u64 = 0x434f_4d4d_0000_0012;
 /// Salts which catalogue row a slot's car is.
 pub const SALT_CLASS: u64 = 0x434c_4153_0000_0013;
 /// Salts a car's paint.
@@ -1019,6 +1055,67 @@ impl RigDetail {
     }
 }
 
+/// **A loop, and the hours it runs** — the other kind of day a car has.
+///
+/// A commute is a `CrowdSchedule`: two legs, and the position is a fraction of
+/// each leg's *window*. That is exactly right for a person, and it has a
+/// property a car cannot live with — the implied speed is `length / window`, so
+/// a four-hundred-metre commute over an hour of a level clock running at
+/// eighteen is **two metres a second**. A pedestrian's pace, in a car.
+///
+/// A circuit is a [`crate::crowd::CrowdRoute`] in
+/// [`RouteMode::Loop`](crate::crowd::RouteMode::Loop), whose position is
+/// `speed x t + phase` folded by the loop's length: it has a **stated speed**
+/// and no window at all, so a car on one does town speed whatever rate the
+/// level's day runs at. It is what a delivery van, a taxi and somebody running
+/// errands all are, and it is the only thing that puts cars on a street at three
+/// in the morning.
+///
+/// Outside its hours the car does not exist — see
+/// [`TrafficRecord::alive`]. Not "parked at home": a day-shift van that
+/// teleported back to its space at ten at night would be a teleport somebody
+/// watched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Circuit {
+    /// The loop, at a real speed.
+    pub route: crate::crowd::CrowdRoute,
+    /// The local hour it starts, `[0, 24)`.
+    pub from_h: f64,
+    /// The local hour it stops. May be **before** `from_h`, which is a night
+    /// shift — a day is a circle and the modulo is the circle
+    /// ([`crate::crowd::CrowdSchedule::at`]'s own sentence).
+    pub to_h: f64,
+}
+
+impl Circuit {
+    /// Whether this circuit is running at `hour`.
+    pub fn running(&self, hour: f64) -> bool {
+        if !hour.is_finite() {
+            return false;
+        }
+        let span = (self.to_h - self.from_h).rem_euclid(24.0);
+        let since = (hour - self.from_h).rem_euclid(24.0);
+        span > 0.0 && since < span
+    }
+}
+
+/// The hours a day-shift circuit runs.
+pub const DAY_CIRCUIT_H: (f64, f64) = (6.0, 22.0);
+/// The hours a night-shift one does — `frames/steal-car/0028`'s reference: a
+/// street at night is not empty, it is *sparse*.
+pub const NIGHT_CIRCUIT_H: (f64, f64) = (22.0, 6.0);
+/// The share of parked cars that are out on a day circuit.
+pub const DAY_CIRCUIT_SHARE: f64 = 0.14;
+/// The share that are out at night — a third as many, which is what makes the
+/// small hours read as quiet rather than as broken.
+pub const NIGHT_CIRCUIT_SHARE: f64 = 0.06;
+/// What a circuit car actually holds, as a share of the sign.
+///
+/// Eight tenths, because traffic does not sit on the limit and a clock-tier car
+/// that did would arrive at every junction faster than the steered one beside
+/// it.
+pub const CIRCUIT_SPEED_FRAC: f64 = 0.8;
+
 /// **One traffic car**: a body, a kerb space, and possibly a day.
 ///
 /// The schedule is [`crate::crowd::CrowdSchedule`] — the *same* type a resident
@@ -1045,8 +1142,11 @@ pub struct TrafficRecord {
     pub home: DVec3,
     /// The way the row it is parked in points, degrees.
     pub home_yaw_deg: f64,
-    /// Its day, or `None` for a car that never moves.
+    /// Its commute, or `None`. A record has at most one of this and
+    /// [`circuit`](Self::circuit), by construction in [`plan_batch`].
     pub schedule: Option<crate::crowd::CrowdSchedule>,
+    /// Its loop, or `None` — see [`Circuit`].
+    pub circuit: Option<Circuit>,
     /// The tier it took on the last step.
     pub tier: CrowdTier,
     /// How much of it is built right now.
@@ -1096,6 +1196,7 @@ impl TrafficRecord {
             home,
             home_yaw_deg: yaw,
             schedule: None,
+            circuit: None,
             tier: CrowdTier::Dormant,
             detail: RigDetail::None,
             last: home,
@@ -1108,7 +1209,84 @@ impl TrafficRecord {
 
     /// Whether this car goes anywhere at all.
     pub fn commutes(&self) -> bool {
-        self.schedule.is_some()
+        self.schedule.is_some() || self.circuit.is_some()
+    }
+
+    /// **Whether this car is on the road at all at this hour.**
+    ///
+    /// A parked car and a commuter are always there — a commuter that is not
+    /// driving is standing in a space somebody could steal it out of. A circuit
+    /// car outside its hours is **not there**, which is the honest answer for a
+    /// van that is not working: parking it back at its space would be a teleport
+    /// (see [`Circuit`]).
+    pub fn alive(&self, hour: f64) -> bool {
+        match &self.circuit {
+            Some(c) => c.running(hour),
+            None => true,
+        }
+    }
+
+    /// The metres of head start this car has round its own loop.
+    ///
+    /// [`crate::crowd::CrowdRecord::phase_of`]'s draw, scaled to the loop rather
+    /// than to eight metres: a dozen vans that all started at the same point
+    /// would be a convoy.
+    pub fn phase_of(&self, guid: Uuid) -> f64 {
+        let Some(c) = self.circuit.as_ref() else {
+            return 0.0;
+        };
+        crate::crowd::agent_unit(guid, 0, crate::crowd::SALT_PHASE) * c.route.length_m()
+            + self.rephase_m
+    }
+
+    /// **The path this car is driving right now**, whichever kind of day it has.
+    pub fn active_path(
+        &self,
+        clock: crate::crowd::CrowdClock,
+        leg: crate::crowd::ActiveLeg,
+    ) -> Option<&NavPath> {
+        match &self.circuit {
+            Some(c) => c.running(clock.hour).then(|| &c.route.path),
+            None => self.path_on(leg),
+        }
+    }
+
+    /// **Where the clock says it is and which way it points** — one door over
+    /// both kinds of day, so the tier that draws a car and the tier that steers
+    /// one cannot disagree about either.
+    pub fn place(
+        &self,
+        guid: Uuid,
+        clock: crate::crowd::CrowdClock,
+        leg: crate::crowd::ActiveLeg,
+    ) -> (DVec3, f64) {
+        let Some(c) = self.circuit.as_ref() else {
+            return self.place_on(leg);
+        };
+        if !c.running(clock.hour) {
+            return (self.home, self.home_yaw_deg);
+        }
+        let s = c.route.progress_at(clock.t_s, self.phase_of(guid)).s_m;
+        (
+            c.route.path.position_at(s),
+            yaw_of_dir(c.route.path.direction_at(s)),
+        )
+    }
+
+    /// The phase change that puts the clock on the metre the body reached, over
+    /// both kinds of day.
+    pub fn rephase_delta(
+        &self,
+        guid: Uuid,
+        clock: crate::crowd::CrowdClock,
+        leg: crate::crowd::ActiveLeg,
+        s_m: f64,
+    ) -> f64 {
+        let Some(c) = self.circuit.as_ref() else {
+            return self.rephase_delta_on(leg, s_m);
+        };
+        let travelled = c.route.travelled_at(clock.t_s, self.phase_of(guid));
+        c.route.rephase_delta(travelled, s_m)
     }
 
     /// Which leg it is on and how far through, or `None` for a car with no day.
@@ -1198,8 +1376,15 @@ impl TrafficRecord {
     ///
     /// This is what decides whether it carries a driver, which is what decides
     /// whether it can be carjacked rather than merely stolen.
-    pub fn is_driving(&self, leg: crate::crowd::ActiveLeg) -> bool {
-        matches!(leg, Some((_, u)) if u < 1.0) && self.schedule.is_some()
+    pub fn is_driving(
+        &self,
+        clock: crate::crowd::CrowdClock,
+        leg: crate::crowd::ActiveLeg,
+    ) -> bool {
+        match &self.circuit {
+            Some(c) => c.running(clock.hour),
+            None => matches!(leg, Some((_, u)) if u < 1.0) && self.schedule.is_some(),
+        }
     }
 }
 
@@ -1317,9 +1502,7 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         let def = catalogue_row(guid);
         let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);
         records.insert(guid, TrafficRecord::parked(def, car_paint(guid), at, yaw));
-        if crate::crowd::agent_unit(guid, 0, SALT_COMMUTE) < COMMUTER_SHARE
-            && pending.len() < MAX_COMMUTERS
-        {
+        if day_of(guid) != TrafficDay::Parked && pending.len() < MAX_COMMUTERS {
             pending.insert(guid, at);
         }
     }
@@ -1371,9 +1554,30 @@ fn plan_batch(world: &mut EcsWorld) -> usize {
         };
         pop.pending.remove(&guid);
         planned += 1;
-        if let Some(sched) = plan_commute(&graph, &res.lanes, &slots, guid, home) {
-            if let Some(rec) = pop.records.get_mut(&guid) {
-                rec.schedule = Some(sched);
+        // **Which kind of day**, from the car's own seed and nothing else — so a
+        // level derives the same mix on both hosts, a re-derivation does not
+        // reshuffle the street, and the two fields are exclusive by
+        // construction: this is the only place either is written.
+        match day_of(guid) {
+            TrafficDay::Parked => {}
+            TrafficDay::NightCircuit | TrafficDay::DayCircuit => {
+                let hours = if day_of(guid) == TrafficDay::NightCircuit {
+                    NIGHT_CIRCUIT_H
+                } else {
+                    DAY_CIRCUIT_H
+                };
+                if let Some(c) = plan_circuit(&graph, &res.lanes, &slots, guid, home, hours) {
+                    if let Some(rec) = pop.records.get_mut(&guid) {
+                        rec.circuit = Some(c);
+                    }
+                }
+            }
+            TrafficDay::Commute => {
+                if let Some(sched) = plan_commute(&graph, &res.lanes, &slots, guid, home) {
+                    if let Some(rec) = pop.records.get_mut(&guid) {
+                        rec.schedule = Some(sched);
+                    }
+                }
             }
         }
     }
@@ -1399,25 +1603,9 @@ pub fn plan_commute(
     guid: Uuid,
     home: DVec3,
 ) -> Option<crate::crowd::CrowdSchedule> {
-    if slots.len() < 2 {
-        return None;
-    }
-    // The destination: a slot drawn from this car's own seed, at least a
-    // hundred metres off, walked forward until one qualifies so the draw cannot
-    // fail on a small town.
-    let start = (crate::crowd::agent_unit(guid, 0, SALT_DEST) * slots.len() as f64) as usize;
-    let mut dest: Option<(DVec3, f64)> = None;
-    for k in 0..slots.len() {
-        let (p, yaw) = slots[(start + k) % slots.len()];
-        let d = p - home;
-        if (d.x * d.x + d.z * d.z).sqrt() >= COMMUTE_MIN_M {
-            dest = Some((p, yaw));
-            break;
-        }
-    }
-    let (dest_p, dest_yaw) = dest?;
+    let (dest_p, dest_yaw) = pick_destination(slots, guid, home)?;
     let out = drive_path(graph, lanes, home, dest_p, dest_yaw)?;
-    let back = drive_path(graph, lanes, dest_p, home, 0.0)?;
+    let back = drive_path(graph, lanes, dest_p, home, home_yaw_at(slots, home))?;
     crate::crowd::CrowdSchedule::new(vec![
         crate::crowd::ScheduleLeg {
             start_h: crate::society::WORK_START_H,
@@ -1430,6 +1618,104 @@ pub fn plan_commute(
             path: back,
         },
     ])
+}
+
+/// What kind of day one car has — [`COMMUTER_SHARE`]'s table, as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TrafficDay {
+    /// It never moves.
+    Parked,
+    /// A loop through the small hours.
+    NightCircuit,
+    /// A loop through the working day.
+    DayCircuit,
+    /// Out at eight, home at six.
+    Commute,
+}
+
+/// **The one draw** that decides a car's day. See [`COMMUTER_SHARE`].
+pub fn day_of(guid: Uuid) -> TrafficDay {
+    let d = crate::crowd::agent_unit(guid, 0, SALT_DAY);
+    if d < NIGHT_CIRCUIT_SHARE {
+        TrafficDay::NightCircuit
+    } else if d < NIGHT_CIRCUIT_SHARE + DAY_CIRCUIT_SHARE {
+        TrafficDay::DayCircuit
+    } else if d < NIGHT_CIRCUIT_SHARE + DAY_CIRCUIT_SHARE + COMMUTER_SHARE {
+        TrafficDay::Commute
+    } else {
+        TrafficDay::Parked
+    }
+}
+
+/// **One car's loop**, out along the lanes and back down the other side.
+///
+/// The two halves are two [`drive_path`]s in opposite directions, so a circuit
+/// runs out on one carriageway and home on the other — a real loop rather than a
+/// car reversing down its own lane. Its speed is stated
+/// ([`CIRCUIT_SPEED_FRAC`] of the sign) and not implied by a window, which is
+/// the whole difference between this and a commute.
+///
+/// `None` when the two ends are not connected. A refusal is a value: the car
+/// stays parked.
+pub fn plan_circuit(
+    graph: &NavGraph,
+    lanes: &LaneNetwork,
+    slots: &[(DVec3, f64)],
+    guid: Uuid,
+    home: DVec3,
+    hours: (f64, f64),
+) -> Option<Circuit> {
+    let (dest_p, dest_yaw) = pick_destination(slots, guid, home)?;
+    let out = drive_path(graph, lanes, home, dest_p, dest_yaw)?;
+    let back = drive_path(graph, lanes, dest_p, home, home_yaw_at(slots, home))?;
+    let mut pts: Vec<DVec3> = out.points().to_vec();
+    pts.extend_from_slice(back.points());
+    // The ends coincide, which is what makes `RouteMode::Loop` a loop rather
+    // than a jump: `NavPath::new` drops the duplicate and the fold closes it.
+    let path = NavPath::new(pts);
+    if path.is_stand() {
+        return None;
+    }
+    Some(Circuit {
+        route: crate::crowd::CrowdRoute::along(
+            path,
+            street_speed_mps() * CIRCUIT_SPEED_FRAC,
+            crate::crowd::RouteMode::Loop,
+        ),
+        from_h: hours.0,
+        to_h: hours.1,
+    })
+}
+
+/// The yaw of the slot at `home`, or zero — so a loop pulls back into its own
+/// space facing the way the row faces.
+fn home_yaw_at(slots: &[(DVec3, f64)], home: DVec3) -> f64 {
+    slots
+        .iter()
+        .find(|(p, _)| {
+            let d = *p - home;
+            (d.x * d.x + d.z * d.z).sqrt() < 0.5
+        })
+        .map(|(_, y)| *y)
+        .unwrap_or(0.0)
+}
+
+/// **A destination slot, drawn from this car's own seed** — at least
+/// [`COMMUTE_MIN_M`] away, walked forward until one qualifies so the draw cannot
+/// fail on a small town.
+fn pick_destination(slots: &[(DVec3, f64)], guid: Uuid, home: DVec3) -> Option<(DVec3, f64)> {
+    if slots.len() < 2 {
+        return None;
+    }
+    let start = (crate::crowd::agent_unit(guid, 0, SALT_DEST) * slots.len() as f64) as usize;
+    for k in 0..slots.len() {
+        let (p, yaw) = slots[(start + k) % slots.len()];
+        let d = p - home;
+        if (d.x * d.x + d.z * d.z).sqrt() >= COMMUTE_MIN_M {
+            return Some((p, yaw));
+        }
+    }
+    None
 }
 
 /// How far a commute has to be to be worth driving, metres.
@@ -1661,6 +1947,7 @@ mod tests {
             s_m: s,
             speed_limit_mps: 14.0,
             gap_m: None,
+            loops: false,
         }
     }
 
@@ -1769,6 +2056,7 @@ mod tests {
             s_m: 95.0,
             speed_limit_mps: 25.0,
             gap_m: None,
+            loops: false,
         });
         assert!(i.target_mps < 25.0, "{i:?}");
     }
@@ -1828,6 +2116,7 @@ mod tests {
             s_m: 0.0,
             speed_limit_mps: f64::NAN,
             gap_m: Some(f64::NAN),
+            loops: false,
         });
         assert!(
             i.move_input.x.is_finite() && i.move_input.y.is_finite(),

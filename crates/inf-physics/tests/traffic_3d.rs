@@ -270,16 +270,20 @@ fn every_car_the_hero_can_reach_is_one_the_interact_door_can_enter() {
 #[test]
 fn a_commuter_leaves_its_space_at_eight_oclock_with_somebody_at_the_wheel() {
     let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
-    // Midnight: everything is parked and nothing has a driver.
+    // Midnight: every commuter is parked and only the night shift is out.
     town.set_hour(0.0);
     let night = town.step(60);
-    assert_eq!(night.driving, 0, "somebody is driving at midnight");
-    assert_eq!(night.drivers, 0);
 
-    // Half past eight: the commuters are out.
+    // Half past eight: the commuters are out too.
     town.set_hour(8.5);
     let rush = town.step(90);
     assert!(rush.driving > 0, "nobody drives at half past eight");
+    assert!(
+        rush.driving > night.driving * 3,
+        "the rush ({}) is not visibly busier than midnight ({})",
+        rush.driving,
+        night.driving
+    );
     assert!(
         rush.drivers > 0,
         "{} cars are driving and none of them has a driver",
@@ -642,4 +646,230 @@ fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
     );
     assert!(!inf_physics::d3::carjack::is_ejectable(&town.world, HERO));
     assert!(inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).is_empty());
+}
+
+// ── the living street (clauses 3 and 6) ─────────────────────────────────────
+
+/// **A street at night is sparse, not empty** — `frames/steal-car/0028`.
+///
+/// The commute alone cannot do this: its legs run at eight and at six, so
+/// between them the town is a car park. The circuit can, because it is a loop at
+/// a STATED speed rather than a fraction of a window, and a night shift is a
+/// circuit whose hours run through midnight.
+#[test]
+fn the_street_is_busy_at_eight_and_sparse_at_three_and_never_empty() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    // Let every route plan before the clock is read, so the census is about the
+    // hour and not about how far the batch queue got.
+    town.set_hour(8.5);
+    town.step(240);
+    let rush = town.step(30);
+    assert_eq!(rush.pending, 0, "the plan queue never drained");
+
+    town.set_hour(3.0);
+    let night = town.step(30);
+    town.set_hour(8.5);
+    let morning = town.step(30);
+    town.set_hour(13.0);
+    let noon = town.step(30);
+
+    assert!(
+        night.driving > 0,
+        "nothing at all is on the road at three in the morning"
+    );
+    assert!(
+        morning.driving > night.driving,
+        "rush hour ({}) is no busier than three a.m. ({})",
+        morning.driving,
+        night.driving
+    );
+    assert!(
+        noon.driving > 0 && noon.driving < morning.driving,
+        "midday ({}) is not between the night ({}) and the rush ({})",
+        noon.driving,
+        night.driving,
+        morning.driving
+    );
+    // …and the night-shift cars are the only ones out, so the ones that are not
+    // working are NOT parked back in their spaces pretending to be.
+    let hour_now = 3.0;
+    town.set_hour(hour_now);
+    town.step(2);
+    for (_, rec) in inf_physics::d3::traffic::records(&town.world) {
+        if let Some(c) = rec.circuit.as_ref() {
+            if !c.running(hour_now) {
+                assert_eq!(
+                    rec.tier,
+                    inf_ecs::crowd::CrowdTier::Dormant,
+                    "a car that is not working is standing in the street"
+                );
+            }
+        }
+    }
+    println!(
+        "street: 03:00 {} driving, 08:30 {}, 13:00 {}",
+        night.driving, morning.driving, noon.driving
+    );
+}
+
+/// **A circuit car keeps its speed round the seam.**
+///
+/// A loop's start and end are one point, so a controller that read the path as
+/// finite would brake to a halt there — and it would do it every lap, for ever.
+#[test]
+fn a_loop_does_not_brake_at_its_own_seam() {
+    let ring = inf_ecs::traffic::LanePath::new([
+        DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(200.0, 0.0, 0.0),
+        DVec3::new(200.0, 0.0, 200.0),
+        DVec3::new(0.0, 0.0, 200.0),
+        DVec3::new(0.0, 0.0, 0.0),
+    ]);
+    let len = ring.length_m();
+    let at_seam = |loops: bool| {
+        traffic::drive_intent(&traffic::DriveView {
+            at: DVec3::new(0.0, 0.0, 8.0),
+            forward: DVec3::new(0.0, 0.0, -1.0),
+            forward_mps: 8.0,
+            path: &ring,
+            s_m: len - 8.0,
+            speed_limit_mps: 8.4,
+            gap_m: None,
+            loops,
+        })
+    };
+    // A finite path stops at its end…
+    assert!(at_seam(false).target_mps < 8.0, "{:?}", at_seam(false));
+    // …and a loop does not.
+    let looped = at_seam(true);
+    assert_eq!(looped.target_mps, 8.4, "{looped:?}");
+    assert!(!looped.handbrake);
+    // …and its aim point wraps past the seam rather than clamping to it, so the
+    // wheel is not held hard over for the last eight metres of every lap.
+    assert!(looped.move_input.x.abs() < 1.0, "{looped:?}");
+}
+
+/// **The pavement, the parked row and the carriageway do not overlap.**
+///
+/// Two systems that never met until this wave: `inf_ecs::society` lays a
+/// pedestrian ring `PAVEMENT_M` outside every block, and this wave lays lanes
+/// down the middle of the gap and parked cars between the two. Nothing had ever
+/// checked that a resident's own walking surface is clear of the road, because
+/// until now there was nothing on the road.
+///
+/// This is clause 6's real content: the peds were ALREADY on the pavement (the
+/// society has never routed one down the road centre), and what was missing was
+/// an arm saying the traffic this wave put in the street does not drive over
+/// them.
+#[test]
+fn the_pavement_the_parked_row_and_the_lanes_are_three_separate_places() {
+    use inf_ecs::society::PAVEMENT_M;
+    let streets = {
+        let mut w = EcsWorld::new();
+        blocks(&mut w, 3, 3);
+        w.propagate();
+        inf_ecs::traffic::streets_of(&w)
+    };
+    assert!(!streets.is_empty());
+    let lanes = inf_ecs::traffic::carriageway(&streets);
+    let slots = inf_ecs::traffic::kerb_slots(&streets);
+    assert!(!slots.is_empty());
+
+    // The pavement's own line, measured the way the society lays it: the block
+    // edge plus `PAVEMENT_M`, which on a 20 m street is 8 m from the centre.
+    let pavement_from_centre = STREET * 0.5 - PAVEMENT_M;
+    assert_eq!(pavement_from_centre, 8.0);
+
+    // A lane is inside 3.5 m of its own centreline…
+    for lane in lanes.lanes() {
+        for p in lane.path.points() {
+            let off = perp_to_nearest(&streets, *p);
+            assert!(
+                off < inf_ecs::traffic::DEFAULT_LANE_WIDTH_M,
+                "a lane at {off} m is out of the carriageway"
+            );
+        }
+    }
+    // …a parked car is between the carriageway and the pavement, on both
+    // counts and with its own body allowed for…
+    for (p, _) in &slots {
+        let off = perp_to_nearest(&streets, *p);
+        assert!(
+            off > inf_ecs::traffic::DEFAULT_LANE_WIDTH_M / 2.0 + 1.0,
+            "a parked car at {off} m is in a lane"
+        );
+        assert!(
+            off + 1.0 <= pavement_from_centre,
+            "a parked car at {off} m is on the pavement"
+        );
+    }
+    // …and the pavement is outside both.
+    assert!(pavement_from_centre > inf_ecs::traffic::KERB_PARK_OFFSET_M);
+}
+
+/// The shortest distance from `p` to any street centreline, metres.
+fn perp_to_nearest(streets: &[inf_ecs::traffic::Street], p: DVec3) -> f64 {
+    let mut best = f64::INFINITY;
+    for s in streets {
+        let (ax, az) = (s.a.x, s.a.y);
+        let (dx, dz) = (s.b.x - s.a.x, s.b.y - s.a.y);
+        let len2 = dx * dx + dz * dz;
+        let t = if len2 > 0.0 {
+            (((p.x - ax) * dx + (p.z - az) * dz) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (qx, qz) = (ax + dx * t, az + dz * t);
+        let d = ((p.x - qx).powi(2) + (p.z - qz).powi(2)).sqrt();
+        best = best.min(d);
+    }
+    best
+}
+
+/// **Traffic yields to whatever is standing in its lane** — which is why a town
+/// does not run over its own residents, and why a hero standing in the road
+/// stops the street.
+#[test]
+fn a_body_in_the_lane_is_a_gap_the_car_slows_for() {
+    let lane =
+        inf_ecs::traffic::LanePath::new([DVec3::new(0.0, 0.0, 0.0), DVec3::new(300.0, 0.0, 0.0)]);
+    let clear = traffic::drive_intent(&traffic::DriveView {
+        at: DVec3::new(0.0, 0.0, 0.0),
+        forward: DVec3::X,
+        forward_mps: 8.0,
+        path: &lane,
+        s_m: 0.0,
+        speed_limit_mps: 8.4,
+        gap_m: None,
+        loops: false,
+    });
+    assert_eq!(clear.target_mps, 8.4);
+    // A pedestrian twelve metres up the lane.
+    let blocked = traffic::drive_intent(&traffic::DriveView {
+        gap_m: Some(12.0),
+        ..clear_view(&lane)
+    });
+    assert!(blocked.target_mps < clear.target_mps, "{blocked:?}");
+    assert!(blocked.move_input.y < 0.0, "the car is not braking");
+    // …and standing right in front of it stops it dead rather than nudging it.
+    let touching = traffic::drive_intent(&traffic::DriveView {
+        gap_m: Some(inf_ecs::traffic::STANDING_GAP_M),
+        forward_mps: 0.2,
+        ..clear_view(&lane)
+    });
+    assert_eq!(touching.target_mps, 0.0);
+    assert!(touching.handbrake);
+}
+
+fn clear_view(lane: &inf_ecs::traffic::LanePath) -> traffic::DriveView<'_> {
+    traffic::DriveView {
+        at: DVec3::new(0.0, 0.0, 0.0),
+        forward: DVec3::X,
+        forward_mps: 8.0,
+        path: lane,
+        s_m: 0.0,
+        speed_limit_mps: 8.4,
+        gap_m: None,
+        loops: false,
+    }
 }

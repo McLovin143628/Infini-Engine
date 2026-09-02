@@ -147,10 +147,21 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                 rec.rephase_m = 0.0;
             }
         }
-        let driving = rec.is_driving(leg);
+        let driving = rec.is_driving(clock, leg);
         stats.driving += usize::from(driving);
-        let (mut at, mut yaw) = rec.place_on(leg);
-        let tier = band.tier(here);
+        let (mut at, mut yaw) = rec.place(guid, clock, leg);
+        // **A circuit car outside its hours is not there.** Not parked back at
+        // its space — that would be a teleport somebody watched. The tier is
+        // forced rather than banded, which is the one place in this step that
+        // is not `band.tier`, and it is a fact about the LEVEL CLOCK rather than
+        // about a camera, so the "visibility never filters sim" law is
+        // untouched.
+        let alive = rec.alive(clock.hour);
+        let tier = if alive {
+            band.tier(here)
+        } else {
+            CrowdTier::Dormant
+        };
         let was = rec.tier;
         if tier != was {
             stats.retiered += 1;
@@ -163,13 +174,13 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         //    to — `CrowdRecord`'s own argument, and without it a car that spent
         //    ten seconds behind a queue teleports the moment it drops to `Near`.
         if was == CrowdTier::Full && tier != CrowdTier::Full && driving {
-            if let Some(path) = rec.path_on(leg) {
+            if let Some(path) = rec.active_path(clock, leg) {
                 let s_body = path.project(here).s_m;
-                let delta = rec.rephase_delta_on(leg, s_body);
+                let delta = rec.rephase_delta(guid, clock, leg, s_body);
                 if delta != 0.0 {
                     rec.rephase_m += delta;
                     stats.rephased += 1;
-                    let (a2, y2) = rec.place_on(leg);
+                    let (a2, y2) = rec.place(guid, clock, leg);
                     at = a2;
                     yaw = y2;
                 }
@@ -221,7 +232,7 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                 if driving {
                     let driver = ensure_driver(world, bridge, guid, &archetype, at);
                     stats.drivers += usize::from(driver);
-                    steer_car(world, bridge, guid, rec, leg, &obstacles);
+                    steer_car(world, bridge, guid, rec, clock, leg, &obstacles);
                 } else {
                     despawn_driver(world, bridge, guid);
                     if let Some(v) = bridge.vehicle_mut(guid) {
@@ -363,10 +374,11 @@ fn steer_car(
     bridge: &PhysicsBridge3D,
     chassis: Uuid,
     rec: &TrafficRecord,
+    clock: CrowdClock,
     leg: inf_ecs::crowd::ActiveLeg,
     obstacles: &[(Uuid, DVec3)],
 ) {
-    let Some(path) = rec.path_on(leg) else {
+    let Some(path) = rec.active_path(clock, leg) else {
         return;
     };
     let Some(body) = bridge.body_of(chassis) else {
@@ -388,6 +400,7 @@ fn steer_car(
         s_m,
         speed_limit_mps: traffic::street_speed_mps(),
         gap_m: gap_ahead(path, s_m, chassis, driver, obstacles),
+        loops: rec.circuit.is_some(),
     };
     let intent = traffic::drive_intent(&view);
     let Some(e) = world.entity_of(driver) else {
