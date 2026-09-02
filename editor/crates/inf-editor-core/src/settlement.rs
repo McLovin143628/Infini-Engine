@@ -1130,6 +1130,14 @@ pub fn zone_lots(a: ArchetypeId) -> LotRules {
         // back-of-house; a club is a box, and it has to be one -- a nightclub's
         // `max_room_area` is 260 m2 and a 20 m frontage would never give it a
         // room that big to anchor its dance floor in.
+        //
+        // A WHOLE-BLOCK lot was tried and withdrawn. It made one venue per
+        // venue block, which reads better and holds the light budget by
+        // construction -- and it made the gate arm **11 s -> 539 s**, because a
+        // single 54 x 54 m building is a different shape of problem from six
+        // 20 x 30 ones with the same total floor area. The budget is held at the
+        // source instead, by `inf_pcg::VOLUME_LIGHT_CAP`, which is a rule about
+        // the thing that is scarce rather than about the thing that is not.
         ArchetypeId::Bar => (22.0, 30.0, 0.12, 1.0, 90.0),
         ArchetypeId::Nightclub => (32.0, 36.0, 0.08, 2.0, 200.0),
         ArchetypeId::StripClub => (28.0, 34.0, 0.08, 2.0, 170.0),
@@ -2038,6 +2046,77 @@ mod tests {
             "NPC1c streets TOTAL: {} settlements, {nodes} nodes, {edges} directed \
              edges",
             plans.len()
+        );
+    }
+    /// **THE NIGHTLIFE STRIP, on both committed recipes** (wave VEN1a).
+    ///
+    /// Two claims, and the second is the one that costs something to state:
+    ///
+    /// * the shipped island's every settlement gets a strip, and its cities get
+    ///   all three kinds — so "at least one venue of each kind is placed" is a
+    ///   measurement and not a hope;
+    /// * the **CI fixture** gets exactly one bar, in its camp and not in its
+    ///   town, and that is correct rather than a bug. `Fixture Town` is a
+    ///   four-block reservation wearing a `city` label: a city's strip starts at
+    ///   ring 1 (ring 0 is the office core) and `VENUE_SHARE` refuses to spend
+    ///   more than a third of a settlement on nightlife, so four blocks buy
+    ///   none. A hamlet with a nightclub is stranger than a hamlet without one.
+    ///
+    /// Stated here because a gate that walks into a club has to know which
+    /// recipe has one, and because a later wave that grows the fixture will
+    /// change this number and should be made to say so.
+    #[test]
+    fn the_nightlife_strip_is_one_per_settlement_and_three_kinds_per_city() {
+        let mut kinds: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (which, recipe) in crate::island::ISLAND_RECIPES.iter().enumerate() {
+            let Some(design) = crate::island::committed_design(recipe) else {
+                eprintln!("SKIP: no committed island design for {recipe}");
+                return;
+            };
+            let plans = settlements(&design);
+            assert!(!plans.is_empty(), "{recipe} reserves no urban ground");
+            for plan in &plans {
+                let mut v: Vec<String> = plan
+                    .blocks
+                    .iter()
+                    .filter(|b| b.archetype.is_venue())
+                    .map(|b| b.archetype.name().to_string())
+                    .collect();
+                v.sort();
+                println!(
+                    "VEN1a strip: {recipe} {} ({} blocks) -> {v:?}",
+                    plan.name,
+                    plan.blocks.len()
+                );
+                for n in &v {
+                    kinds.insert(match n.as_str() {
+                        "Bar" => "Bar",
+                        "Nightclub" => "Nightclub",
+                        _ => "StripClub",
+                    });
+                }
+                // A settlement never spends more than a third of itself on
+                // nightlife — the `VENUE_SHARE` guard, asserted rather than
+                // trusted.
+                assert!(
+                    v.len() * VENUE_SHARE <= plan.blocks.len().max(VENUE_SHARE),
+                    "{}: {} venues on {} blocks",
+                    plan.name,
+                    v.len(),
+                    plan.blocks.len()
+                );
+                // Every settlement on the SHIPPED island has somewhere to go
+                // at night; the fixture's four-block town is the documented
+                // exception and is checked by the count below instead.
+                if which == 0 {
+                    assert!(!v.is_empty(), "{} has no nightlife at all", plan.name);
+                }
+            }
+        }
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            vec!["Bar", "Nightclub", "StripClub"],
+            "the committed recipes do not place one venue of each kind"
         );
     }
 }

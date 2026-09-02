@@ -1261,7 +1261,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// Wave VIS1a's **audit** adds the fifty-fifth, `water_ssr.png`: a new frame,
     /// so this pin and the digest below move together on the additive branch and
     /// no committed image changed. `phase26_gate`'s twin carries the reason.
-    const GOLDENS: usize = 61;
+    const GOLDENS: usize = 62;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted.
     /// **RULE: this may change only in a commit that adds a golden, or in one
     /// whose stated purpose is to change what the engine LOOKS like.**
@@ -1327,16 +1327,27 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// would take the albedo's worst error from 11 of 255 to 5 and the ORM's
     /// from 45 to 33, for twice the page bytes — half of what a 24 MiB atlas arm
     /// holds. `GOLDENS` does not move; the set is still 60 files.
-    /// **Wave VEN1a (2026-09-02) — the ADDITIVE branch.** One golden joins the
-    /// set: `gi_scatter_neon.png`, a scatter batch of emissive plates lighting a
+    /// **Wave VEN1a (2026-09-02) — the ADDITIVE branch, twice.** Two goldens
+    /// join the set and **no existing frame was re-blessed**.
+    ///
+    /// `gi_scatter_neon.png`: a scatter batch of emissive plates lighting a
     /// white floor through the GI volume under a zero-radiance sun. It exists
     /// because `passes::gi` staged instances, skinned meshes and vgeom and never
     /// **scatter** — so a grammar-built venue's neon, string lights and lit
-    /// panes were drawn and bounced nothing. `GOLDENS` moves 60 -> 61; **no
-    /// existing frame was re-blessed**, and none could be: the four `gi_*`
-    /// goldens hold no scatter and the two `scatter_*` goldens run with GI off,
-    /// which was measured before the pin moved.
-    const GOLDEN_SET_DIGEST: &str = "84479ea46c55a4b25c42bc70e76a0af7";
+    /// panes were drawn and bounced nothing. Nothing could have moved with it:
+    /// the four `gi_*` goldens hold no scatter and the two `scatter_*` goldens
+    /// run with GI off, measured under `INF_GOLDEN_STRICT=1` before the pin did.
+    ///
+    /// `venue_interior.png`: the wave's visual claim as one frame — a **closed**
+    /// near-black room lit only by practicals, with a red key and a blue rim
+    /// over a plank stage, a chrome pole (`metallic 1.0, roughness 0.12`)
+    /// standing in the wash, a magenta neon plate throwing a halo onto the
+    /// boards, and a festoon chain. Its far corner sits at **4.2 of 255** and
+    /// its stage at 45; with the room's roof and side walls removed the corner
+    /// was 40, which is a frame lit by daylight with some neon in it.
+    ///
+    /// `GOLDENS` moves 60 -> 62.
+    const GOLDEN_SET_DIGEST: &str = "26faf4da53ff1e002cfa469528ff8253";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

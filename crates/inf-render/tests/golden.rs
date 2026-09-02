@@ -4226,6 +4226,281 @@ fn golden_gi_emissive() {
     );
 }
 
+/// **THE VENUE INTERIOR** (wave VEN1a) — `venue_interior`.
+///
+/// The wave's visual claim, made as one frame: a near-black room whose every
+/// photon comes from a practical.
+///
+/// What is in it, and which reference frame each part answers:
+///
+/// * a **wood floor and a raised stage** with the plank tint the module table
+///   gives `ModuleShape::Stage` (`venues/0028`, `0036`);
+/// * a **chrome pole** on the stage — a scatter batch at `metallic 1.0,
+///   roughness 0.12`, which is what turns a red wash into one bright vertical
+///   streak (`0044`);
+/// * a **red stage wash** and a **blue rim**: two real spot lights, cones
+///   crossing over the middle of the stage, the shape a `StageRig` produces;
+/// * a **magenta neon plate** and a run of **festoon bulbs** as *scattered
+///   emission* — carrying no light slot at all, and reaching the bounce through
+///   `passes::gi`'s scatter staging (`0004`, `0060`);
+/// * **near-zero ambient**: the sun is present and BLACK, so the light-loop
+///   path runs and contributes nothing. Everything visible is a practical.
+///
+/// The arms are about *where the light is*, which is the whole content of the
+/// reference's lighting recipe. A frame that drew the same objects under a flat
+/// fill would satisfy "not black" and fail every one of them.
+#[test]
+fn golden_venue_interior() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // The room: a dark plank floor and a dark back wall.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.15, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(18.0, 0.3, 16.0),
+        [0.19, 0.13, 0.08, 1.0],
+        1,
+    ));
+    // **The room is CLOSED**, and that is not scene dressing. A club has a
+    // roof: with the box open the GI volume's sky ray reaches the floor from
+    // every direction and the frame is lit by daylight with some neon in it,
+    // which is the opposite of the thing this golden claims. Measured on the
+    // first cut: the far corner sat at 40 of 255 with the walls off and at a
+    // third of that with them on.
+    for (c, h, id) in [
+        (DVec3::new(0.0, 2.4, -6.0), Vec3::new(18.0, 5.0, 0.4), 2),
+        (DVec3::new(-8.2, 2.4, 0.0), Vec3::new(0.4, 5.0, 16.0), 4),
+        (DVec3::new(8.2, 2.4, 0.0), Vec3::new(0.4, 5.0, 16.0), 5),
+        (DVec3::new(0.0, 4.9, 0.0), Vec3::new(18.0, 0.4, 16.0), 6),
+        (DVec3::new(0.0, 2.4, 8.0), Vec3::new(18.0, 5.0, 0.4), 7),
+    ] {
+        scene.instances.push(MeshInstance::lit(
+            c,
+            Quat::IDENTITY,
+            h,
+            [0.05, 0.045, 0.05, 1.0],
+            id,
+        ));
+    }
+    // The stage: a raised plank platform, `ModuleShape::Stage`'s own tint.
+    scene.instances.push(MeshInstance {
+        roughness: 0.55,
+        ..MeshInstance::lit(
+            DVec3::new(0.0, 0.22, -1.6),
+            Quat::IDENTITY,
+            Vec3::new(6.4, 0.45, 3.4),
+            [0.38, 0.26, 0.16, 1.0],
+            3,
+        )
+    });
+    // **The chrome pole**, as the scatter path draws it: a batch at the
+    // material `ModuleShape::Pole` states. One instance, because a pole is one
+    // pole and the claim is about its SHADING.
+    scene.scatter.push(ScatterBatch {
+        metallic: 1.0,
+        roughness: 0.12,
+        ..ScatterBatch::lit(
+            Arc::new(ScatterData::build(
+                PrimMesh::Cube,
+                DVec3::ZERO,
+                vec![ScatterInstance {
+                    position: DVec3::new(0.0, 1.85, -1.6),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(0.09, 2.8, 0.09),
+                    color: [0.90, 0.91, 0.94, 1.0],
+                }],
+            )),
+            DVec3::ZERO,
+            0.12,
+            10,
+        )
+    });
+    // **The neon plate** — scattered emission, no light slot.
+    scene.scatter.push(ScatterBatch {
+        emissive: [3.4, 0.35, 3.0],
+        ..ScatterBatch::lit(
+            Arc::new(ScatterData::build(
+                PrimMesh::Cube,
+                DVec3::ZERO,
+                vec![ScatterInstance {
+                    position: DVec3::new(-4.6, 2.6, -5.6),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(1.6, 0.8, 0.14),
+                    color: [0.05, 0.05, 0.06, 1.0],
+                }],
+            )),
+            DVec3::ZERO,
+            0.3,
+            11,
+        )
+    });
+    // **The festoon** — a chain of small warm bulbs along the back wall.
+    scene.scatter.push(ScatterBatch {
+        emissive: [1.5, 1.15, 0.75],
+        ..ScatterBatch::lit(
+            Arc::new(ScatterData::build(
+                PrimMesh::Cube,
+                DVec3::ZERO,
+                (0..9)
+                    .map(|i| ScatterInstance {
+                        position: DVec3::new(f64::from(i) * 1.5 - 6.0, 3.5, -5.7),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::splat(0.16),
+                        color: [0.06, 0.06, 0.06, 1.0],
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            DVec3::ZERO,
+            0.4,
+            12,
+        )
+    });
+    // **The sun, and it is BLACK.** Present so the lit passes take the
+    // light-loop path rather than the fallback editor sun; contributing
+    // nothing, so every photon below is a practical.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [0.0, 0.0, 0.0],
+        intensity: 0.0,
+        direction: Vec3::Y,
+        ..RenderLight::default()
+    });
+    // **The rig**: a red key over the stage and a blue rim off to one side,
+    // toed in so the cones cross — `StageRig`'s own shape.
+    for (x, colour, intensity) in [
+        (-1.7_f64, [3.0, 0.12, 0.22_f32], 26.0_f32),
+        (1.7, [0.28, 0.5, 2.8], 22.0),
+    ] {
+        let at = DVec3::new(x, 4.2, -1.6);
+        let aim = Vec3::new(-(x as f32) * 0.35, -1.0, 0.0).normalize();
+        scene.lights.push(RenderLight {
+            kind: LightKind::Spot,
+            color: colour,
+            intensity,
+            // Toward the light: the negated emission direction.
+            direction: -aim,
+            position: at,
+            range: 8.4,
+            inner_cos: 20.0_f32.to_radians().cos(),
+            outer_cos: 36.0_f32.to_radians().cos(),
+            cast_shadows: false,
+        });
+    }
+    scene.mark_dirty();
+
+    let view = look_view(DVec3::new(0.0, 2.6, 7.0), DVec3::new(0.0, 1.0, -2.0));
+    let lit = gi_settings(28.0, 64, 2.0);
+    let img = check_golden_with(&gpu, "venue_interior", &scene, &view, lit);
+
+    // ── (a) NEAR-BLACK AMBIENT. The room's far corners are dark; a flat fill
+    // would light them as brightly as the stage.
+    let stage = region_mean(
+        &img,
+        (W * 40 / 100)..(W * 60 / 100),
+        (H * 58 / 100)..(H * 72 / 100),
+    );
+    let corner = region_mean(
+        &img,
+        (W * 2 / 100)..(W * 14 / 100),
+        (H * 80 / 100)..(H * 98 / 100),
+    );
+    eprintln!("venue_interior: stage {stage:.2}, dark corner {corner:.2}");
+    assert!(
+        stage > corner * 2.0 + 8.0,
+        "the stage ({stage:.2}) is not markedly brighter than the room's corner \
+         ({corner:.2}) — this frame is lit by a fill, not by practicals"
+    );
+    assert!(
+        corner < 42.0,
+        "the room's far corner is at {corner:.2} — a venue interior's ambient is \
+         near black and everything else in this arm rests on it"
+    );
+
+    // ── (b) THE WASH IS COLOURED, AND THE TWO SIDES DIFFER. A red key on one
+    // side of the stage and a blue rim on the other is the reference's whole
+    // lighting signature, and one white spot would fail both halves.
+    let left = region_channel_ratio(
+        &img,
+        (W * 30 / 100)..(W * 46 / 100),
+        (H * 60 / 100)..(H * 72 / 100),
+        0,
+        2,
+    );
+    let right = region_channel_ratio(
+        &img,
+        (W * 54 / 100)..(W * 70 / 100),
+        (H * 60 / 100)..(H * 72 / 100),
+        0,
+        2,
+    );
+    eprintln!("venue_interior: stage red/blue left {left:.3}, right {right:.3}");
+    // Named by MEASUREMENT and not by which side of the screen each lamp lands
+    // on: a view's handedness is the harness's business and this arm's claim is
+    // about the two lamps.
+    let (warm, cool) = (left.max(right), left.min(right));
+    assert!(
+        warm > cool + 0.5,
+        "the two stage lamps are the same colour (r/b {left:.3} and {right:.3})"
+    );
+    assert!(
+        warm > 1.6,
+        "neither lamp lays a RED wash on the planks ({warm:.3})"
+    );
+    assert!(
+        cool < 1.4,
+        "neither lamp lays a cool rim on the planks ({cool:.3}) — one red key and \
+         one blue rim is the reference's whole stage signature"
+    );
+
+    // ── (c) THE POLE IS BRIGHT. A chrome cylinder in a coloured wash is one
+    // vertical specular streak; a dielectric at roughness 0.75 is a grey stick.
+    let pole = region_mean(
+        &img,
+        (W * 48 / 100)..(W * 52 / 100),
+        (H * 34 / 100)..(H * 56 / 100),
+    );
+    let beside = region_mean(
+        &img,
+        (W * 62 / 100)..(W * 68 / 100),
+        (H * 34 / 100)..(H * 56 / 100),
+    );
+    eprintln!("venue_interior: pole {pole:.2}, wall beside it {beside:.2}");
+    assert!(
+        pole > beside + 6.0,
+        "the chrome pole ({pole:.2}) does not stand out from the wall behind it \
+         ({beside:.2})"
+    );
+
+    // ── (d) THE NEON IS THE BRIGHTEST THING IN THE FRAME, and it is magenta.
+    let (nx, ny) = (
+        (W * 29 / 100)..(W * 37 / 100),
+        (H * 31 / 100)..(H * 40 / 100),
+    );
+    let neon = region_mean(&img, nx.clone(), ny.clone());
+    // The HALO the plate throws on the boards around it — the thing the sign's
+    // standoffs exist for, and the half of it that is not simply "a bright
+    // rectangle".
+    let halo = region_channel_ratio(
+        &img,
+        (W * 20 / 100)..(W * 28 / 100),
+        (H * 34 / 100)..(H * 46 / 100),
+        2,
+        1,
+    );
+    eprintln!("venue_interior: neon {neon:.2}, halo blue/green {halo:.3}");
+    assert!(
+        neon > stage + 40.0,
+        "the neon ({neon:.2}) is not the brightest thing in the room          (the stage wash is {stage:.2})"
+    );
+    assert!(
+        halo > 1.25,
+        "the wall beside the neon plate is not magenta (blue/green {halo:.3}) —          a sign bolted flat to a wall has nowhere for its glow to spill, which is          why `ModuleShape::Sign` has standoffs"
+    );
+}
+
 /// **Scattered emission reaches the bounce** (wave VEN1a) —
 /// `golden_gi_scatter_neon`.
 ///

@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 61] = [
+const GOLDENS: [&str; 62] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1552,6 +1552,11 @@ const GOLDENS: [&str; 61] = [
     "tilemap_2d.png",
     "translucency.png",
     "unlit.png",
+    // Wave VEN1a: a closed, near-black venue interior lit only by practicals --
+    // a red key and a blue rim over a plank stage, a chrome pole standing in
+    // the wash, a magenta neon plate throwing a halo, and a festoon chain.
+    // The wave's SECOND new golden.
+    "venue_interior.png",
     "vgeom_dense.png",
     "vgeom_far.png",
     // P21.1: the carved SDF volume — a slab with a bored tunnel and a dome, the

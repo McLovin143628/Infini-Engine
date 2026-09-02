@@ -18,6 +18,43 @@ use crate::building::StructureGroup;
 use crate::grammar::expand::GrammarOutput;
 use crate::scatter::{PcgCollider, PcgInstance};
 
+/// **The most real lights one `PcgVolume` may contribute to a frame** (wave
+/// VEN1a).
+///
+/// # The measurement that forces it
+///
+/// `inf_render::MAX_LIGHTS` is **16 for the whole scene**, and the truncation
+/// is first-N in projection order with **no distance prioritization anywhere**
+/// between the ECS and the uniform — so the seventeenth light is not dimmed,
+/// it is deleted, and which sixteen survive depends on GUID order. A venue
+/// hangs up to four fixtures (three stage spots and a bar glow), and a
+/// settlement block is subdivided into LOTS: a 100 m city block at a
+/// nightclub's 32 m frontage is **nine** nightclubs, which is thirty-six
+/// lights, which is the sun going out.
+///
+/// # Why the cap is here and not in the settlement generator
+///
+/// Because the scarce thing is *lights in a frame*, and a lot rule is a
+/// statement about *frontage*. Making venue lots whole-block does hold the
+/// budget — it was tried — and it also made the wave's gate arm run
+/// **11 s → 539 s**, because one 54 × 54 m building is a different shape of
+/// problem from six 20 × 30 ones with the same floor area. A rule about the
+/// scarce thing is smaller than a rule about a proxy for it.
+///
+/// # What it costs, stated
+///
+/// A block of six bars lights four of them. Which four is the volume's own
+/// building order — deterministic, identical on both hosts, and **not** a
+/// function of the camera, which is what keeps a level's content from
+/// depending on where somebody stood. What it is NOT is a distance-prioritized
+/// selection, which is the right long answer and belongs to the renderer,
+/// where the eye is; see the wave ledger's carried list.
+///
+/// Four, because at most three venue blocks stand in one settlement (the
+/// nightlife strip), so the worst frame is `3 × 4 + 2` sky lights = **14 of
+/// 16**.
+pub const VOLUME_LIGHT_CAP: usize = 4;
+
 /// Everything one `PcgVolume` evaluates to.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VolumeOutput {
@@ -62,7 +99,14 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
         doorways: grammar.doorways,
         slots: grammar.slots,
         interior: grammar.interior,
-        lights: grammar.lights,
+        // **Capped here, at the one door**, so no host can produce a volume
+        // that overruns the frame's light budget and no host can produce a
+        // different four from the other. See `VOLUME_LIGHT_CAP`.
+        lights: {
+            let mut l = grammar.lights;
+            l.truncate(VOLUME_LIGHT_CAP);
+            l
+        },
         groups: grammar
             .groups
             .into_iter()
@@ -184,6 +228,60 @@ mod tests {
         let scatter_kinds: Vec<u32> = out.instances[..4].iter().map(|i| i.kind_index).collect();
         let grammar_kinds: Vec<u32> = out.instances[4..].iter().map(|i| i.kind_index).collect();
         assert_eq!(scatter_kinds, grammar_kinds);
+    }
+
+    /// **THE FRAME BUDGET, HELD AT THE ONE DOOR** (wave VEN1a).
+    ///
+    /// A block of venues is a block of rigs, and the frame has sixteen light
+    /// slots for the whole scene. This is the arm that says the cap is applied
+    /// where both hosts pass and that it keeps the SAME four.
+    #[test]
+    fn a_volume_never_contributes_more_than_its_share_of_the_frame() {
+        let fixture = |n: usize| crate::building::PcgLight {
+            at: DVec3::new(n as f64, 4.0, 0.0),
+            dir: -DVec3::Y,
+            sweep: ([3.0, 0.1, 0.2], [2.4, 0.2, 1.9]),
+            intensity: 26.0,
+            range_m: 8.0,
+            inner_deg: 20.0,
+            outer_deg: 36.0,
+            cycle_hz: 0.11,
+            phase: 0,
+            phases: 3,
+        };
+        // Nine nightclubs' worth -- what a 100 m city block at a 32 m frontage
+        // actually subdivides into.
+        let grammar = GrammarOutput {
+            lights: (0..36).map(fixture).collect(),
+            ..GrammarOutput::default()
+        };
+        let out = compose_volume(Vec::new(), grammar);
+        assert_eq!(
+            out.lights.len(),
+            VOLUME_LIGHT_CAP,
+            "thirty-six fixtures reached the frame; `MAX_LIGHTS` is 16 for the whole scene"
+        );
+        // …and it is the FIRST four, in the volume's own building order, so two
+        // hosts composing the same volume light the same four buildings.
+        for (k, l) in out.lights.iter().enumerate() {
+            assert_eq!(l.at.x, k as f64, "the cap kept a different four");
+        }
+        // A volume under the cap is untouched, so every level that predates the
+        // venues composes byte-identically.
+        let few = GrammarOutput {
+            lights: (0..2).map(fixture).collect(),
+            ..GrammarOutput::default()
+        };
+        assert_eq!(compose_volume(Vec::new(), few).lights.len(), 2);
+        assert!(compose_volume(Vec::new(), GrammarOutput::default())
+            .lights
+            .is_empty());
+        // The cap really is small enough for the strip: three venue blocks plus
+        // the sky's two lights must clear the ceiling.
+        assert!(
+            3 * VOLUME_LIGHT_CAP + 2 <= 16,
+            "three venue blocks at {VOLUME_LIGHT_CAP} fixtures each overrun the frame"
+        );
     }
 
     #[test]

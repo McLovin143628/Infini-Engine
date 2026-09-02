@@ -6840,6 +6840,335 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     run
 }
 
+// ── wave VEN1a: the venue ────────────────────────────────────────────────────
+
+/// How many steps the venue arm runs its traces for, after the town has
+/// settled and the clock has been walked to closing time.
+const VENUE_STEPS: usize = 240;
+
+/// The hour the venue gate reads the town at. Twenty-two hundred is when a
+/// bar is a bar; it is also well past `night_glow_step`'s ramp, so the window
+/// glow is at full and the emissive path is carrying its whole load.
+const VENUE_HOUR: f64 = 22.0;
+
+/// What one host saw inside the venue.
+#[derive(Debug, Default)]
+struct VenueRun {
+    /// Per-step sim digests over `VENUE_STEPS`.
+    digests: Vec<u64>,
+    /// Distinct digests — the anti-vacuity counter.
+    distinct: usize,
+    /// The hour the trace was taken at.
+    hour: f64,
+    /// Resident `PcgVolume`s, and instances in them.
+    volumes: usize,
+    instances: usize,
+    /// Instances carrying an authored, *coloured* emission (neon, screens,
+    /// festoons) — the thing the venue wave added.
+    emitters: usize,
+    /// The most saturated emitter's brightest channel.
+    peak_emissive: f32,
+    /// Instances that pulse.
+    pulsing: usize,
+    /// Instances whose surface is metal — the chrome pole and the brass stool.
+    metal: usize,
+    /// Real lights the rigs hang, and how many of them are spots.
+    fixtures: usize,
+    spots: usize,
+    /// Interior nav nodes reachable in the resident volumes.
+    nav_nodes: usize,
+    /// Errand slots — somewhere the town can be sent at night.
+    errands: usize,
+    /// What the PROJECTOR made of it: lights in the frame, scatter batches, and
+    /// batches carrying emission.
+    frame_lights: usize,
+    frame_batches: usize,
+    frame_emissive_batches: usize,
+}
+
+/// **THE VEN1a GATE.** A settlement at ten at night, with the player standing
+/// in its venue: the neon is lit and coloured, the rig is hung and aimed, the
+/// chrome is metal, the interior is walkable — identically on both hosts, byte
+/// for byte, over 240 fixed steps.
+///
+/// Coverage first, then the comparison (the NPC1d law: a gate staged where a
+/// defect cannot appear certifies the defect). Two empty streets agree
+/// perfectly, and so do two venues with nothing in them, so every claim below
+/// is a count with a floor on it.
+///
+/// **The fixture's venue is a BAR**, and that is measured rather than assumed:
+/// `settlement::tests::the_nightlife_strip_is_one_per_settlement_and_three_kinds
+/// _per_city` prints the strip for both committed recipes, and the four-block
+/// `Fixture Town` correctly gets none while `Fixture Camp` gets a bar. The
+/// shipped island's cities get all three kinds; what CI can afford to build and
+/// cook twenty-odd times is the fixture.
+#[test]
+fn pie_equals_shipping_inside_a_venue_at_night() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+
+    // The venue block, from the same generator the level was built with.
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let venue = plans
+        .iter()
+        .flat_map(|p| p.blocks.iter())
+        .find(|b| b.archetype.is_venue())
+        .copied()
+        .expect("the fixture places at least one venue");
+    println!(
+        "VEN1a: standing in a {} at ({:.0}, {:.0})",
+        venue.archetype.name(),
+        venue.centre.x,
+        venue.centre.y
+    );
+
+    let mut hosts: Vec<(&str, RuntimeSim)> = vec![
+        ("shipping", pack_sim(&pack)),
+        ("PIE", loose_sim(&content, &slug)),
+    ];
+    let mut runs: Vec<(&str, VenueRun)> = Vec::new();
+
+    for (label, sim) in hosts.iter_mut() {
+        let hero = hero_entity(sim).expect("a hero");
+        let centre = glam::DVec3::new(venue.centre.x, 0.0, venue.centre.y);
+        set_hero(sim, hero, centre);
+        sim.world_mut().mark_dirty();
+        let mut tier_peak = [0usize; 4];
+        let mut steered = 0u64;
+        settle_the_society(sim, &mut tier_peak, &mut steered);
+
+        // **Wind the clock to closing time**, on the day-in-the-life arm's own
+        // pattern (`GATE_CLOCK_RATE`) and for its reason: the island authors an
+        // eighty-minute day, so *walking* to 22:00 is hundreds of thousands of
+        // fixed steps a host and this battery has to finish. Measured before it
+        // was wound: 2 400 steps reached 10.72 h.
+        //
+        // `local_hour` is solar time, so the UTC seconds a longitude needs are
+        // `hour × 3600 − longitude × 240` — the same arithmetic the day arm
+        // winds midnight with.
+        {
+            let w = sim.world_mut().world_mut();
+            let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+            let mut wound = 0usize;
+            for mut tod in q.iter_mut(w) {
+                tod.seconds =
+                    (VENUE_HOUR * 3_600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.rate = GATE_CLOCK_RATE;
+                wound += 1;
+            }
+            assert!(wound > 0, "{label}: the island carries no clock to wind");
+        }
+        sim.world_mut().mark_dirty();
+        // One step, so every reader of the clock has seen the new hour.
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let hour = local_hour(sim);
+        assert!(
+            (hour - VENUE_HOUR).abs() < 0.5,
+            "{label}: the clock reads {hour:.2} h after being wound to {VENUE_HOUR:.1} — \
+             this gate is about what a venue looks like at night"
+        );
+        // …and the night-glow ramp is at FULL, or "at night" is a claim about a
+        // number nobody downstream is reading.
+        let (step, sun_y) = glow_now(sim);
+        assert_eq!(
+            step,
+            inf_render::NIGHT_GLOW_STEPS,
+            "{label}: the glow step is {step} at {hour:.2} h (sun y {sun_y:+.3})"
+        );
+
+        let mut r = VenueRun {
+            hour,
+            ..VenueRun::default()
+        };
+        {
+            let w = sim.world().world();
+            for e in w.iter_entities() {
+                let Some(v) = e.get::<inf_ecs::components::PcgVolume>() else {
+                    continue;
+                };
+                if v.evaluated.is_empty() && v.lights.is_empty() {
+                    continue;
+                }
+                r.volumes += 1;
+                r.instances += v.evaluated.len();
+                for i in &v.evaluated {
+                    if i.surface.emits() {
+                        let e = i.surface.emissive;
+                        let hi = e[0].max(e[1]).max(e[2]);
+                        let lo = e[0].min(e[1]).min(e[2]);
+                        // SATURATED, not merely lit: a warm-white window pane
+                        // has glowed since I8b and is not what this wave added.
+                        if hi > 1.0 && hi > lo * 2.0 {
+                            r.emitters += 1;
+                            r.peak_emissive = r.peak_emissive.max(hi);
+                        }
+                    }
+                    if i.surface.pulse_hz > 0.0 {
+                        r.pulsing += 1;
+                    }
+                    if i.surface.metallic > 0.5 {
+                        r.metal += 1;
+                    }
+                }
+                r.fixtures += v.lights.len();
+                r.spots += v.lights.iter().filter(|l| l.outer_deg < 180.0).count();
+                r.nav_nodes += v.interior_nav.len();
+                r.errands += v
+                    .residents
+                    .iter()
+                    .filter(|s| s.role == inf_ecs::components::SlotRole::Errand)
+                    .count();
+            }
+        }
+
+        // …and what the PROJECTOR made of it, through the widest door the
+        // shipped player itself uses.
+        {
+            let mut scene = inf_render::RenderScene::default();
+            let voxels = inf_voxel::VoxelVolumes::default();
+            // The module-mesh table through the SAME Ring-0 door both hosts
+            // use, so this arm's scatter is bucketed against the table a
+            // shipped frame is bucketed against.
+            let mut meshes = inf_render::ScatterMeshes::new();
+            inf_player::scatter_mesh::add_building_modules(&mut meshes);
+            inf_player::render::project_scene_full(
+                &mut scene,
+                sim,
+                1.0,
+                &inf_player::vmesh::VmeshRegistry::default(),
+                &inf_player::skinned::SkinnedRegistry::new(),
+                &voxels,
+                &mut inf_render::DebrisCache::default(),
+                None,
+                &meshes,
+            );
+            r.frame_lights = scene.lights.len();
+            r.frame_batches = scene.scatter.len();
+            r.frame_emissive_batches = scene
+                .scatter
+                .iter()
+                .filter(|b| b.emissive.iter().any(|c| *c > 0.0))
+                .count();
+        }
+
+        for _ in 0..VENUE_STEPS {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            r.digests.push(digest(&sim.state_bytes()));
+        }
+        let mut d = r.digests.clone();
+        d.sort_unstable();
+        d.dedup();
+        r.distinct = d.len();
+
+        println!(
+            "VEN1a {label}: {:.2} h -- {} volume(s), {} instance(s); {} coloured emitter(s) \
+             (peak {:.2}), {} pulsing, {} metal; {} fixture(s) ({} spot(s)); {} nav node(s), \
+             {} errand slot(s); FRAME: {} light(s), {} scatter batch(es), {} of them emissive",
+            r.hour,
+            r.volumes,
+            r.instances,
+            r.emitters,
+            r.peak_emissive,
+            r.pulsing,
+            r.metal,
+            r.fixtures,
+            r.spots,
+            r.nav_nodes,
+            r.errands,
+            r.frame_lights,
+            r.frame_batches,
+            r.frame_emissive_batches
+        );
+        runs.push((label, r));
+    }
+
+    // ── the per-host arms, BEFORE the compare ────────────────────────────────
+    for (label, r) in &runs {
+        assert!(r.volumes > 0, "{label}: no volume streamed in at all");
+        assert!(r.instances > 100, "{label}: {} instances", r.instances);
+        // THE WAVE'S OWN CLAIM: a venue emits colour.
+        assert!(
+            r.emitters > 0,
+            "{label}: not one coloured emitter in the whole town — a venue whose neon \
+             is a warm-white window pane is the thing this wave replaced"
+        );
+        assert!(
+            r.peak_emissive > 1.5,
+            "{label}: the brightest authored emission is {:.2}, which is a lit window",
+            r.peak_emissive
+        );
+        assert!(r.pulsing > 0, "{label}: nothing in this town breathes");
+        assert!(
+            r.metal > 0,
+            "{label}: no metal anywhere — a chrome pole shaded as plaster is what \
+             `pcg_kind_color` and a fixed roughness of 0.75 produced for four waves"
+        );
+        // The rig.
+        assert!(r.fixtures > 0, "{label}: the venue hangs no light");
+        // The interior is walkable, which is what `is_errand_destination`
+        // earns: a venue with no slots gets an EMPTY nav graph from `pass.rs`.
+        assert!(r.nav_nodes > 0, "{label}: the venue's interior is orphaned");
+        assert!(
+            r.errands > 0,
+            "{label}: the venue is nowhere anybody can be sent"
+        );
+        // The frame.
+        assert!(
+            r.frame_emissive_batches > 0,
+            "{label}: the projector produced no emissive scatter batch — the bucket \
+             key is not carrying the surface"
+        );
+        // **THE LIGHT-BUDGET MEASUREMENT, at frame scale.** `MAX_LIGHTS` is 16
+        // for the whole scene and the truncation is first-N in projection order
+        // with no distance priority, so a rig that overran it would silently
+        // drop the sun.
+        assert!(
+            r.frame_lights <= inf_render::passes::mesh::MAX_LIGHTS,
+            "{label}: {} lights in one frame against a ceiling of {} — a venue rig \
+             has pushed the sun out of the uniform",
+            r.frame_lights,
+            inf_render::passes::mesh::MAX_LIGHTS
+        );
+        assert!(
+            r.frame_lights > 1,
+            "{label}: {} light(s) in the frame — the rig did not reach the projector",
+            r.frame_lights
+        );
+        // The trace evolves, or a byte comparison of two frozen worlds proves
+        // nothing.
+        assert!(
+            r.distinct > VENUE_STEPS / 4,
+            "{label}: only {} distinct states across {VENUE_STEPS} steps",
+            r.distinct
+        );
+    }
+
+    // ── the byte compare ─────────────────────────────────────────────────────
+    let (a, b) = (&runs[0].1, &runs[1].1);
+    assert_eq!(
+        a.volumes, b.volumes,
+        "the two hosts streamed different worlds"
+    );
+    assert_eq!(a.emitters, b.emitters, "the two hosts lit different venues");
+    assert_eq!(a.fixtures, b.fixtures, "the two hosts hung different rigs");
+    assert_eq!(
+        a.frame_lights, b.frame_lights,
+        "the two hosts projected different frames"
+    );
+    for (i, (x, y)) in a.digests.iter().zip(b.digests.iter()).enumerate() {
+        assert_eq!(
+            x, y,
+            "PIE and shipping diverged at venue step {i} of {VENUE_STEPS}"
+        );
+    }
+}
+
 /// **THE VEH2b GATE.** A settlement at half past eight: the residents walk to
 /// work, the traffic drives past them, and the player pulls one of the drivers
 /// out and takes their car — identically on both hosts, byte for byte.
