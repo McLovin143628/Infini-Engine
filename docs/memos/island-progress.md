@@ -25710,8 +25710,8 @@ the production door on the committed zone document with a society settled over
 it, no cook and no second island
 (`a_nightclubs_dance_floor_fills_with_dancers`):
 
-    226 agents; 31 night jobs -> 31 workers; 246 leisure places -> 67 revellers
-    at 22:30 — 52 seated, 15 on the dance floor, 4 performing, 27 tending
+    226 agents; 31 night jobs -> 31 workers; 246 leisure places -> 63 revellers
+    at 22:30 — 47 seated, 16 on the dance floor, 4 performing, 27 tending
 
 **THE DAY GATE PAST DUSK.** Two more sample hours (21:00 and 01:00), and the
 list is **ascending** because the sampler walks it forward — `1.0` written last

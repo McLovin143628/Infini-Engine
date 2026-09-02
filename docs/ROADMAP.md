@@ -30349,7 +30349,7 @@ shut and +0.0 dB `doorway` unfiltered open; the street four metres out −24.0 d
 shut and −1.4 dB open.** Beside it,
 `a_nightclubs_dance_floor_fills_with_dancers` runs a real `Nightclub` through the
 production door with a society settled over it — **226 agents, 31 night jobs all
-taken, 246 leisure places → 67 revellers; at 22:30, 52 seated, 15 on the dance
+taken, 246 leisure places → 63 revellers; at 22:30, 47 seated, 16 on the dance
 floor, 4 performing, 27 tending** — because the CI fixture's one venue is a Bar
 and a bar has no dance floor. The day-in-the-life arm gains two hours past dusk
 (21:00 and 01:00, the list **ascending** because the sampler walks it forward)
