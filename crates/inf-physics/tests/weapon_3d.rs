@@ -2055,3 +2055,176 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
         "sixteen rounds from one place were sixteen sources"
     );
 }
+
+/// **BEING HIT MAKES A BYSTANDER LEAVE — OR NOT** (wave WPN1), on the carjack's
+/// own resist draw.
+///
+/// Three claims:
+///
+/// 1. a punch on a crowd agent puts it on the run through the **one** flee
+///    door — measured as the `Panicked` latch, not as a report field;
+/// 2. the draw **discriminates**: over a population of struck agents both
+///    outcomes happen, so the rule is a quarter-chance and not a certainty
+///    wearing one's name;
+/// 3. somebody the crowd does not own — the hero — is refused, so being hit
+///    does not conjure a crowd record for a scripted actor.
+#[test]
+fn a_struck_bystander_either_runs_or_stands_its_ground() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+
+    // One agent, punched: it either runs or it does not, and the world says
+    // which through the latch.
+    let victim = Uuid::from_u128(0x1601_0401);
+    let mut rig = Rig::new();
+    spawn_bare_body(&mut rig.world, 1.0);
+    {
+        // The body the punch lands on IS the crowd agent, so the reaction and
+        // the damage are about one person.
+        let a = CrowdArchetype::humanoid(None, None, None);
+        // **`adopt`, not `add_agents`**, for the body that already exists:
+        // `add_agents` refuses a guid the world already holds as an entity (a
+        // synthetic guid colliding with a level entity would make that entity
+        // unreachable), and `adopt` is the door VEH2b built for exactly this —
+        // a body that IS in the world and needs a record.
+        assert!(inf_ecs::crowd::adopt(
+            &mut rig.world,
+            TARGET,
+            CrowdRecord::standing(a.clone(), DVec3::new(0.0, 0.0, 1.0))
+        ));
+        let records = std::collections::BTreeMap::from([(
+            victim,
+            CrowdRecord::standing(a, DVec3::new(20.0, 0.0, 0.0)),
+        )]);
+        assert_eq!(inf_ecs::crowd::add_agents(&mut rig.world, records), 0);
+    }
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.step(&idle());
+    let r = rig.step(&hold_trigger());
+    assert_eq!(r.swings, 1, "the punch did not happen");
+    assert_eq!(r.hits[0].target, Some(TARGET));
+    let ran = inf_ecs::crowd::is_panicked(&rig.world, TARGET);
+    println!(
+        "one punch on a crowd agent: {} fled, {} stood their ground; the latch \
+         says ran = {ran}",
+        r.panic.fled, r.stood_their_ground
+    );
+    assert_eq!(
+        u32::from(ran) + r.stood_their_ground,
+        1,
+        "the struck agent neither ran nor stood — the reaction never fired"
+    );
+    // **THE COUNTER AGREES WITH THE WORLD**, and this is the arm that found the
+    // wave's own defect: `step_panic` runs several passes after `apply_hit` and
+    // ASSIGNED the whole `PanicReport`, so a struck bystander's flee was
+    // counted and then erased — the latch said an agent was running and the
+    // counter said nobody had. It is merged now.
+    assert_eq!(
+        r.panic.fled,
+        u32::from(ran) as usize,
+        "the latch says ran = {ran} and the counter says {} fled",
+        r.panic.fled
+    );
+    // The agent 20 m away was not touched by any of it.
+    assert!(
+        !inf_ecs::crowd::is_panicked(&rig.world, victim),
+        "a punch frightened somebody 20 m away"
+    );
+
+    // **THE DRAW DISCRIMINATES.** `RESIST_CHANCE` is a quarter, so over a
+    // population of struck agents both outcomes must appear — a rule that
+    // always fled and a rule that never did would each satisfy the arm above.
+    let mut ran = 0u32;
+    let mut stood = 0u32;
+    for n in 0..40u128 {
+        let mut r2 = Rig::new();
+        // A different guid each time is a different draw, which is what the
+        // seed is a function of.
+        let who = Uuid::from_u128(0x1601_0500 + n);
+        {
+            let cm = CharacterMovement::default();
+            let e = r2.world.spawn_with_guid(who, "Bystander", None);
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(0.0, cm.stand_half_height_m + RADIUS, 1.0);
+            r2.world.world_mut().entity_mut(e).insert((
+                RigidBody3D {
+                    kind: BodyKind3D::Kinematic,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+                    radius: RADIUS,
+                    ..Default::default()
+                },
+                CharacterController3D::default(),
+                cm,
+                t,
+            ));
+            let a = CrowdArchetype::humanoid(None, None, None);
+            assert!(inf_ecs::crowd::adopt(
+                &mut r2.world,
+                who,
+                CrowdRecord::standing(a, DVec3::new(0.0, 0.0, 1.0))
+            ));
+        }
+        r2.world.mark_dirty();
+        r2.world.propagate();
+        r2.step(&idle());
+        let rep = r2.step(&hold_trigger());
+        assert_eq!(rep.swings, 1);
+        if inf_ecs::crowd::is_panicked(&r2.world, who) {
+            ran += 1;
+        } else {
+            stood += rep.stood_their_ground;
+        }
+    }
+    println!("40 struck bystanders: {ran} ran, {stood} stood their ground");
+    assert_eq!(ran + stood, 40, "somebody did neither");
+    assert!(
+        ran > 0 && stood > 0,
+        "the draw does not discriminate: {ran} ran and {stood} stood, so the \
+         rule is a certainty wearing a chance's name"
+    );
+
+    // **The hero is refused**: being hit does not conjure a crowd record for
+    // somebody the crowd does not own.
+    let mut solo = Rig::new();
+    spawn_bare_body(&mut solo.world, 8.0);
+    solo.world.mark_dirty();
+    solo.world.propagate();
+    // The bystander shoots the HERO, which is not in any population.
+    assert!(item::give_inventory(&mut solo.world, TARGET, 4));
+    let defs = item::item_defs(&solo.world).cloned().unwrap_or_default();
+    {
+        let e = solo.world.entity_of(TARGET).expect("the bystander");
+        let mut inv = solo
+            .world
+            .world_mut()
+            .get_mut::<item::Inventory>(e)
+            .expect("a bag");
+        assert_eq!(inv.add(&defs, "pistol", 1), 0);
+    }
+    assert!(d3::gameplay::equip_weapon(
+        &mut solo.world,
+        TARGET,
+        "pistol"
+    ));
+    solo.step(&idle());
+    assert!(d3::gameplay::npc_aim_at(
+        &mut solo.world,
+        TARGET,
+        HERO,
+        true
+    ));
+    let r = solo.step(&idle());
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(r.hits[0].target, Some(HERO), "the NPC missed the hero");
+    assert_eq!(r.staggers, 1, "the hero was not hurt");
+    assert!(
+        !inf_ecs::crowd::is_panicked(&solo.world, HERO),
+        "being shot put the HERO in the crowd's population"
+    );
+    assert_eq!(r.panic.fled, 0);
+    assert_eq!(r.stood_their_ground, 0, "the hero took a crowd draw");
+}

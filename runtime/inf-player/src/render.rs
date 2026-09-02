@@ -416,6 +416,16 @@ impl PlayerRenderHost {
             return;
         }
         for hit in hits {
+            // **Only a LOUD attack draws one** (wave WPN1). A swing arrives in
+            // this same list — it goes through the same trigger, the same clock
+            // and the same `hits` vector as a round — and a fist that drew a
+            // tracer and a muzzle flash would be a bullet trail coming out of an
+            // empty hand. `WeaponHit::loud` is the discriminator the audio
+            // queue already uses, which is what keeps the two answers one
+            // answer.
+            if !hit.loud {
+                continue;
+            }
             let from = self.origin.to_render(hit.from);
             let to = self.origin.to_render(hit.to);
             self.scene.debug.line(from, to, TRACER_COLOR);

@@ -2560,6 +2560,19 @@ pub struct PanickedRes {
     pub fleeing: BTreeSet<Uuid>,
 }
 
+/// **Whether the crowd knows about this guid at all** — whether it has a record.
+///
+/// The question a caller asks *before* [`flee_from`], so that "give this person
+/// somewhere to be" is `O(1)` for everybody the crowd does not own: the hero, a
+/// scripted actor, a shopkeeper the level authored by hand. `flee_from` refuses
+/// them anyway; this is what lets a caller not pay for the refusal.
+pub fn is_in_population(world: &EcsWorld, guid: Uuid) -> bool {
+    world
+        .world()
+        .get_resource::<CrowdPopulationRes>()
+        .is_some_and(|p| p.records.contains_key(&guid))
+}
+
 /// Whether this agent is already running from something.
 pub fn is_panicked(world: &EcsWorld, guid: Uuid) -> bool {
     world

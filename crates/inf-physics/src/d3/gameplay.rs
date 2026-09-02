@@ -181,6 +181,13 @@ pub struct GameplayReport {
     /// and "a round hurt somebody" are different facts, and a gate that cannot
     /// tell them apart certifies a course where every shot missed.
     pub staggers: u32,
+    /// **Struck bystanders who did NOT leave** this step (wave WPN1) — the
+    /// resist half of the draw.
+    ///
+    /// Its own counter beside [`PanicReport::fled`], because a course where it
+    /// is zero and a course where it is everything look identical from the flee
+    /// count alone, and the whole point of a draw is that both happen.
+    pub stood_their_ground: u32,
     /// **Blows heavy enough to put a body on the floor** this step — the subset
     /// of [`staggers`](Self::staggers) that also took a mode.
     ///
@@ -272,7 +279,17 @@ pub fn step_gameplay(
     //     is not also given a route to walk. `O(agents)` with a bounded inner
     //     loop and inert on a level with no gunfire — see `step_panic` for the
     //     cost and for the one-step latency the crowd's phase ordering implies.
-    report.panic = step_panic(world, &report.hits, dt);
+    //
+    //     **MERGED, not assigned** — and the arm that found this is
+    //     `a_struck_bystander_either_runs_or_stands_its_ground`. A struck
+    //     bystander's own flee is counted in `apply_hit`, several passes
+    //     earlier; `report.panic = step_panic(…)` erased it, so the latch said
+    //     an agent was running and the counter said nobody had. A counter that
+    //     disagrees with the world is worse than no counter.
+    let panic = step_panic(world, &report.hits, dt);
+    report.panic.sources = panic.sources;
+    report.panic.considered = panic.considered;
+    report.panic.fled += panic.fled;
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
@@ -1018,7 +1035,7 @@ fn step_weapons(
         } else {
             resolve_shot(world, bridge, guid, &def, from, dir)
         };
-        apply_hit(world, &hit, report);
+        apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
     }
 }
@@ -1496,7 +1513,7 @@ fn is_flesh(world: &EcsWorld, guid: Uuid) -> bool {
 /// Lazily, the section is empty until something is shot, which keeps every
 /// pre-WPN1 trace byte-identical, and once a body is in it it stays there
 /// however the band moves.
-fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport) {
+fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, dt: f64, report: &mut GameplayReport) {
     let Some(target) = hit.target else {
         return;
     };
@@ -1520,7 +1537,7 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
             // the same skeleton.
             return;
         }
-        stagger(world, target, r.absorbed_j, before, report);
+        stagger(world, hit, target, r.absorbed_j, before, dt, report);
         return;
     }
     // Not flesh. **Only a destructible is owed anything** (wave WPN1): a round
@@ -1545,6 +1562,69 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
     }
 }
 
+/// **WHAT A PERSON DOES ABOUT BEING HIT** (wave WPN1) — the resist draw, and
+/// the one flee door.
+///
+/// # Why the same draw the carjack uses
+///
+/// `carjack::RESIST_CHANCE` already answers *"does this person fight you off
+/// this time"*, drawn per attempt from the victim's own guid and the sim step —
+/// a function of who they are and when you tried, agreed by both hosts, and
+/// deliberately **not** a stored counter, because a counter of how many times
+/// somebody has resisted is a second copy of what the seed already answers. A
+/// punch is the same question with a different verb, so it takes the same draw
+/// against a salt of its own: a quarter of the time somebody who is hit stands
+/// their ground, and the rest of the time they leave.
+///
+/// It is a draw and not a certainty because the reference frames show both —
+/// the encampment brawl (`frames/police-bike/0033`) has a bystander standing a
+/// metre from a fight watching it, and it also has people who are plainly not
+/// there any more. A rule that always fled would empty a brawl of everybody but
+/// the two people in it.
+///
+/// # What it is NOT
+///
+/// It is not a fight-back: an NPC that resists simply stays, and the day one
+/// swings back is the day `npc_aim_at` grows a policy — which is EMS3's, for
+/// the reason that function's own doc gives. And it reaches [`inf_ecs::crowd::
+/// flee_from`], so a person who is not in the population is not made one:
+/// the hero, a scripted actor and a shopkeeper with no crowd record are all
+/// refused by that door, and the honest answer for them is that being hit does
+/// not give them somewhere to be.
+fn struck_reaction(
+    world: &mut EcsWorld,
+    hit: &WeaponHit,
+    target: Uuid,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    // Only somebody the crowd knows about: `flee_from` refuses the rest, and
+    // asking first is what keeps this `O(1)` on a hit against the hero.
+    if !inf_ecs::crowd::is_in_population(world, target)
+        || inf_ecs::crowd::is_panicked(world, target)
+    {
+        return;
+    }
+    let tick = inf_ecs::traffic::steps(world);
+    if inf_ecs::crowd::agent_unit(target, tick, SALT_STRUCK) < super::carjack::RESIST_CHANCE {
+        report.stood_their_ground += 1;
+        return;
+    }
+    let Some(from) = feet_of(world, target) else {
+        return;
+    };
+    // Away from where the blow came from — the attacker's own muzzle, which is
+    // the one point in a `WeaponHit` that is always the attacker's.
+    if inf_ecs::crowd::flee_from(world, target, from, hit.from, dt, PANIC_FLEE_M) {
+        report.panic.fled += 1;
+    }
+}
+
+/// Salts the "does being hit make you leave" draw — `carjack::SALT_RESIST`'s
+/// shape, with its own constant so a person who resisted a carjack is not
+/// thereby the person who stands their ground when punched.
+const SALT_STRUCK: u64 = 0x5354_5255_434b_0001;
+
 /// **A hit that hurts is a hit that shows** (wave WPN1) — the one-shot reaction,
 /// and the blow that puts a body on the floor.
 ///
@@ -1564,13 +1644,18 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
 /// a driver all refuse it, and a refusal is a value.
 fn stagger(
     world: &mut EcsWorld,
+    hit: &WeaponHit,
     target: Uuid,
     absorbed_j: f64,
     before_j: f64,
+    dt: f64,
     report: &mut GameplayReport,
 ) {
     inf_ecs::anim_bridge::set_anim_trigger(world, target, weapon::STAGGER_TRIGGER);
     report.staggers += 1;
+    // **…and whoever it happened to may decide to leave** (wave WPN1). The
+    // draw, and the flee, are `struck_reaction`'s.
+    struck_reaction(world, hit, target, dt, report);
     if !weapon::is_staggering(absorbed_j, before_j) {
         return;
     }
