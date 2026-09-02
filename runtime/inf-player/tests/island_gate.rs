@@ -4889,7 +4889,19 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
     let settlement = walk_target_settlement(&design);
 
     // The hours the town is read at, and what each is for.
-    let hours: [f64; 6] = [2.0, 7.0, 8.5, 10.0, 19.0, 22.0];
+    // …and two of them are **past dusk** (wave VEN1b). Twenty-one hundred is
+    // the middle of a night out and one in the morning is the small hours, so a
+    // town that goes out and a town that does not are two different pictures
+    // rather than one blank one. Which of the two THIS settlement is, and why,
+    // is asserted below beside the emptiness it explains.
+    //
+    // **Ascending**, and that is load-bearing rather than tidy: the sampler
+    // walks this list forward as the step index passes each threshold, so an
+    // hour out of order fires immediately after its predecessor and the reading
+    // is taken at the wrong time of day. (Measured: `1.0` written last gave a
+    // "22.1 h" sample and `at(1.0)` found nothing.) The day begins at midnight,
+    // so the small hours come first.
+    let hours: [f64; 8] = [1.0, 2.0, 7.0, 8.5, 10.0, 19.0, 21.0, 22.0];
 
     let mut hosts: Vec<(&str, RuntimeSim)> = vec![
         ("shipping", pack_sim(&pack)),
@@ -5270,14 +5282,71 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             commuting.at_home,
             commuting.at_work
         );
-        // **AND IT EMPTIES.** By ten at night every clock-driven agent is home
-        // -- the last leg starts at six and takes an hour, jitter included.
+        // **AND IT EMPTIES — BECAUSE THIS TOWN HAS NOWHERE TO GO** (wave
+        // VEN1b). By ten at night every clock-driven agent is home: the last
+        // leg starts at six and takes an hour, jitter included.
+        //
+        // That was an unconditional claim about the engine until this wave and
+        // is now a claim about this settlement's CONTENT, so the arm carries the
+        // reason with it. `walk_target_settlement` picks the fixture's four-block
+        // `Fixture Town`, which gets **no venue** — a city's nightlife strip
+        // starts at ring 1 and `VENUE_SHARE` refuses to spend more than a third
+        // of a settlement on it (VEN1a's own ruling, and the reason a hamlet
+        // with a nightclub is stranger than a hamlet without one). A town with
+        // no bar in it goes to bed, and `leisure_places == 0` is what says the
+        // emptiness is the content's answer rather than a schedule that never
+        // learned about the evening.
+        //
+        // The populated night is `pie_equals_shipping_at_a_club_on_a_saturday_
+        // night`, at the settlement that HAS one.
+        assert_eq!(
+            r.society.leisure_places, 0,
+            "{label}: this settlement offers {} places to spend an evening, so              the arms below are measuring the wrong thing — they say a town              empties BECAUSE it has nowhere to go",
+            r.society.leisure_places
+        );
+        assert_eq!(
+            r.society.night_jobs, 0,
+            "{label}: …and it offers {} night job(s)",
+            r.society.night_jobs
+        );
+        assert_eq!(r.society.revellers, 0);
         assert!(
             late.at_home * 2 > total(late),
             "{label}: at {:.2} h only {} of {} are home",
             late.hour,
             late.at_home,
             total(late)
+        );
+        // …and past midnight too, which is the half the six-hour sample never
+        // reached: `EVENING_OUT_H` is twenty hundred and `NIGHT_HOME_H` is two
+        // in the morning, so a schedule that had grown an evening it could not
+        // fill would show it HERE — an agent standing at a leisure slot it
+        // never claimed, or walking a leg with no destination.
+        let (evening_out, small_hours) = (at(21.0), at(1.0));
+        assert!(
+            evening_out.at_home * 2 > total(&evening_out),
+            "{label}: at {:.2} h only {} of {} are home in a town with no bar",
+            evening_out.hour,
+            evening_out.at_home,
+            total(&evening_out)
+        );
+        assert!(
+            small_hours.at_home * 2 > total(&small_hours),
+            "{label}: at {:.2} h only {} of {} are home",
+            small_hours.hour,
+            small_hours.at_home,
+            total(&small_hours)
+        );
+        println!(
+            "NPC1d {label}: past dusk — {:.2} h {} home / {} walking; {:.2} h {} home / {} walking; the settlement offers {} leisure place(s) and {} night job(s)",
+            evening_out.hour,
+            evening_out.at_home,
+            evening_out.walking,
+            small_hours.hour,
+            small_hours.at_home,
+            small_hours.walking,
+            r.society.leisure_places,
+            r.society.night_jobs
         );
         // Seven in the evening is the middle of the walk home and is reported
         // rather than asserted: with half an hour of jitter either way, whether
@@ -7431,4 +7500,865 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             a.jack_digests.len()
         );
     }
+}
+
+// ── wave VEN1b: the night ────────────────────────────────────────────────────
+
+/// The hour the club gate reads the town at.
+///
+/// Half past ten: past `EVENING_OUT_H + EVENING_H`, so every reveller has
+/// arrived and nobody has started for home; past `NIGHT_WORK_START_H + 1`, so
+/// the keeper is behind the counter; and past `night_glow_step`'s ramp, so the
+/// venue's own neon is at full while the population is read.
+const CLUB_HOUR: f64 = 22.5;
+
+/// How many steps the club arm compares its traces over, after the clock is
+/// wound.
+///
+/// Half `VENUE_STEPS`, and the difference is the whole reason this arm is dear:
+/// the hero stands INSIDE the club rather than on the street outside it, so the
+/// settlement's agents are on the `Full` rung with controllers under them —
+/// which is the ladder working, and is the 0.25 ms-an-agent
+/// `step_character_movement` NPC1c priced. Measured: 240 steps put this arm at
+/// 569 s, and the trace's own anti-vacuity floor needs a fraction of that.
+const CLUB_STEPS: usize = 120;
+
+/// How near a slot a body has to be to count as AT it, metres in plan.
+///
+/// A metre. `THERE_M` is four, which is right for "did this agent reach the
+/// building it works in" and far too loose for "is this body on the stool it
+/// claimed": the seats of one bench are 0.6 m apart, so a four-metre radius
+/// would count one body at five of them.
+const AT_SLOT_M: f64 = 1.0;
+
+/// How near the venue's own block a body has to be to count as AT the club,
+/// metres in plan.
+///
+/// Forty: a venue lot is 22-32 m of frontage on a 76 m fixture block, so this
+/// is "inside the block the club stands on" rather than "inside the room",
+/// which is the claim a plan-space distance can honestly make.
+const AT_THE_VENUE_M: f64 = 40.0;
+
+/// How much of the venue block opens its doors for the second reading, metres
+/// from the speaker.
+///
+/// Sixty — the block and its pavement. **Every** doorway inside it, interior
+/// ones included, and that is a measurement rather than thoroughness:
+/// `portal_of` takes the opening nearest the LISTENER, the fixture's one venue
+/// block is six bars, and with only the six FRONT doors opened a listener on the
+/// pavement kept reading `shut` off the neighbouring bar's *interior* door. A
+/// club that is open is open.
+const CLUB_OPENS_M: f64 = 60.0;
+
+/// One reading of the doorway model, at one listener position.
+///
+/// `Default` is "nothing heard at all" and is never a measurement: every field
+/// is overwritten by `listen` before anything reads one, and a run that somehow
+/// reached the arms carrying it would fail the first verdict comparison rather
+/// than pass quietly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Heard {
+    db: f64,
+    lowpass_hz: Option<f64>,
+    verdict: &'static str,
+}
+
+impl Default for Heard {
+    fn default() -> Self {
+        Self {
+            db: f64::NEG_INFINITY,
+            lowpass_hz: None,
+            verdict: "unmeasured",
+        }
+    }
+}
+
+/// What one host saw at the club.
+#[derive(Debug, Default)]
+struct ClubRun {
+    /// Per-step sim digests over `CLUB_STEPS`.
+    digests: Vec<u64>,
+    /// Distinct digests — the anti-vacuity counter.
+    distinct: usize,
+    /// The whole audio command stream, as `physics_demo`'s gate (c) compares
+    /// it: a `Debug` rendering of every command both hosts queued.
+    audio: String,
+    /// The hour the reading was taken at.
+    hour: f64,
+    /// The society's counters.
+    society: inf_ecs::society::SocietyStats,
+    /// The venue-audio counters.
+    venue: inf_ecs::venue::VenueAudioStats,
+    /// **The club's own population**, by what the body is DOING — read off the
+    /// records' active arrival rather than off a report.
+    seated: usize,
+    dancing: usize,
+    /// Agents whose active leg ends at a `Work`/night slot — the keeper, the
+    /// act, the door.
+    on_shift: usize,
+    /// Of `seated` + `dancing` + `on_shift`, how many are actually **inside the
+    /// venue's own block** — the anti-vacuity half, because a posture is a
+    /// property of a schedule and a body in the right posture in the wrong town
+    /// is not a club.
+    at_the_venue: usize,
+    /// Bodies within `AT_SLOT_M` of the venue's counter station.
+    at_the_counter: usize,
+    /// Agents the crowd step turned to face something, and how many wore a
+    /// posture other than standing, on the last step of the window.
+    faced: u64,
+    posed_apart: u64,
+    /// The three listening points, door SHUT then door OPEN.
+    shut: [Heard; 3],
+    open: [Heard; 3],
+    /// `Play` commands and per-step `SetOcclusion` commands over the window,
+    /// and the share of the latter that name the speaker the probe listened to.
+    plays: usize,
+    occlusions: usize,
+    occlusions_here: usize,
+    /// How far the hero stood from that speaker, metres.
+    heard_from_m: f64,
+    /// How many exterior doors the block opened for the second reading.
+    opened_doors: usize,
+    /// Whether the venue's own music `Play` named a clip the host resolved.
+    music_resolved: bool,
+    /// The mean society + crowd phase cost over the window, ms.
+    society_ms: f64,
+    crowd_ms: f64,
+}
+
+/// The venue emitter, its block's exterior doorway, and the three points a
+/// listener is put at — all derived from the level rather than authored.
+fn club_probe(
+    sim: &RuntimeSim,
+    listener: glam::DVec3,
+) -> Option<(uuid::Uuid, glam::DVec3, [glam::DVec3; 3])> {
+    // **The NEAREST speaker, not the lowest-guid one.** A venue is placed per
+    // LOT and the fixture's one venue block is six bars (VEN1a's own
+    // measurement), so `venue_emitters()` returns six and the first of them is
+    // whichever hashed lowest — up to a block's diagonal from where the player
+    // is standing, and past `AudioSource::max_distance`. The one a listener
+    // hears is the one nearest the listener.
+    let (emitter_guid, emitter) = inf_ecs::venue::venue_emitters(sim.world())
+        .into_iter()
+        .min_by(|a, b| {
+            (a.1 - listener)
+                .length()
+                .total_cmp(&(b.1 - listener).length())
+        })?;
+    // The nearest EXTERIOR ground-floor doorway to it — the venue's own front
+    // door, found the way `society` finds a front door: by asking the level.
+    let mut best: Option<(f64, glam::DVec3)> = None;
+    for (_, _, d) in inf_ecs::door::volume_doorways(sim.world()) {
+        if !(d.exterior && d.floor == 0 && d.hinge.is_finite()) {
+            continue;
+        }
+        let dist = (d.hinge - emitter).length();
+        if best.is_none_or(|(b, _)| dist < b) {
+            best = Some((dist, d.hinge));
+        }
+    }
+    let (_, hinge) = best?;
+    // Outward, in plan, with no trigonometry: away from the room the emitter
+    // hangs in.
+    let flat = glam::DVec2::new(hinge.x - emitter.x, hinge.z - emitter.z);
+    let m = flat.length();
+    if !(m > 1e-3) {
+        return None;
+    }
+    let out = glam::DVec3::new(flat.x / m, 0.0, flat.y / m);
+    // Ear height, taken off the door's own mid-height rather than off a
+    // constant, so the probe follows the storey the venue actually built.
+    let ear = |p: glam::DVec3| glam::DVec3::new(p.x, hinge.y + 0.6, p.z);
+    Some((
+        emitter_guid,
+        emitter,
+        [
+            ear(emitter - out * 2.0), // inside, two metres off the speaker
+            ear(hinge + out * 0.2),   // in the opening
+            ear(hinge + out * 4.0),   // out in the street
+        ],
+    ))
+}
+
+/// Read the doorway model at the three points.
+fn listen(sim: &mut RuntimeSim, emitter: glam::DVec3, points: [glam::DVec3; 3]) -> [Heard; 3] {
+    points.map(|p| {
+        let g = sim.audio_portal(p, emitter);
+        Heard {
+            db: g.db(),
+            lowpass_hz: g.lowpass_hz,
+            verdict: g.verdict.name(),
+        }
+    })
+}
+
+/// **THE VEN1b GATE.** A night at the club: the town goes out, the keeper is
+/// behind the counter, the patrons are on the stools, and the music comes
+/// through the door — identically on both hosts, byte for byte, on the sim
+/// trace AND on the audio command stream.
+///
+/// # Coverage first, then the comparison
+///
+/// The NPC1d law, applied to a club: two empty bars agree perfectly, and so do
+/// two bars whose patrons are standing in the street. So every claim below is a
+/// count with a floor, and the *posture* counts are held against a count of
+/// bodies actually **inside the venue's block** — because a posture is a
+/// property of a schedule and an agent sitting down in the wrong town is not
+/// nightlife.
+///
+/// # What the CI fixture can and cannot show
+///
+/// The fixture's one venue is a **Bar**: `venue_strip` gives a town `[Bar]` and
+/// `Fixture Town`'s four blocks fall under `VENUE_SHARE`. A bar has a `BarRoom`
+/// and therefore stools, a counter and a door — so *seated*, *the keeper* and
+/// *the bouncer* are live claims here. A **dance floor** and a **stage** belong
+/// to the `Nightclub` and `StripClub` a city gets, and the shipped island's two
+/// cities get all three; what says so at this scale is
+/// `a_venue_offers_a_countable_number_of_places_to_be` (16 standing stations
+/// and a performer's deck, per archetype, over 4 seeds x 2 storeys) and
+/// `a_nightclubs_dance_floor_fills_with_dancers` below, which runs a real
+/// nightclub through the production door and settles a society on it without
+/// cooking a second island. Stated rather than implied, because a gate that
+/// quietly measured a bar and reported a nightclub would be the vacuity this
+/// file's own laws are about.
+#[test]
+fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let venue = plans
+        .iter()
+        .flat_map(|p| p.blocks.iter())
+        .find(|b| b.archetype.is_venue())
+        .copied()
+        .expect("the fixture places at least one venue");
+    println!(
+        "VEN1b: a night at the {} at ({:.0}, {:.0})",
+        venue.archetype.name(),
+        venue.centre.x,
+        venue.centre.y
+    );
+
+    let mut hosts: Vec<(&str, RuntimeSim)> = vec![
+        ("shipping", pack_sim(&pack)),
+        ("PIE", loose_sim(&content, &slug)),
+    ];
+    let mut runs: Vec<(&str, ClubRun)> = Vec::new();
+
+    for (label, sim) in hosts.iter_mut() {
+        let hero = hero_entity(sim).expect("a hero");
+        let centre = glam::DVec3::new(venue.centre.x, 0.0, venue.centre.y);
+        set_hero(sim, hero, centre);
+        sim.world_mut().mark_dirty();
+        let mut tier_peak = [0usize; 4];
+        let mut steered = 0u64;
+        settle_the_society(sim, &mut tier_peak, &mut steered);
+
+        // Wind to closing time on the day arm's own pattern, then let one step
+        // carry the new hour into every reader of the clock.
+        {
+            let w = sim.world_mut().world_mut();
+            let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+            let mut wound = 0usize;
+            for mut tod in q.iter_mut(w) {
+                tod.seconds =
+                    (CLUB_HOUR * 3_600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.rate = GATE_CLOCK_RATE;
+                wound += 1;
+            }
+            assert!(wound > 0, "{label}: the island carries no clock to wind");
+        }
+        sim.world_mut().mark_dirty();
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let hour = local_hour(sim);
+        assert!(
+            (hour - CLUB_HOUR).abs() < 0.5,
+            "{label}: the clock reads {hour:.2} h after being wound to {CLUB_HOUR:.1}"
+        );
+
+        let mut r = ClubRun {
+            hour,
+            society: sim.society_stats(),
+            venue: sim.venue_audio_stats(),
+            ..ClubRun::default()
+        };
+
+        // ── who is at the club, and what are they doing ─────────────────────
+        //
+        // Read off each record's ACTIVE ARRIVAL — the same pure function of
+        // `(schedule, clock)` the crowd step publishes onto `CrowdAgent` — so
+        // this is the world's own answer and not a second derivation of it.
+        // **THE PLAYER WALKS IN.** The settle above put the hero at the venue
+        // block's centre with `y = 0` — which is the pattern every arm in this
+        // file uses and is *under the ground* on an island whose settlements
+        // stand on a levelled pad. Measured here for the first time, because
+        // this is the first arm that asks how far the hero is from anything:
+        // after four thousand steps of being pushed out of a hillside the body
+        // was **212.8 m** from the nearest speaker, well past
+        // `AudioSource::max_distance`, so nothing was ever re-evaluated and the
+        // whole clause would have certified an empty street.
+        //
+        // So the hero is put IN the club, at the speaker's own XZ and a body's
+        // height under it, and given a few steps to stand up. A gate about what
+        // a night at the club sounds like has to have somebody at the club.
+        let anchor = inf_ecs::venue::venue_emitters(sim.world())
+            .into_iter()
+            .min_by(|a, b| (a.1 - centre).length().total_cmp(&(b.1 - centre).length()))
+            .map(|(_, at)| at)
+            .expect("the venue block carries a speaker");
+        set_hero(
+            sim,
+            hero,
+            glam::DVec3::new(anchor.x, anchor.y - 1.5, anchor.z),
+        );
+        sim.world_mut().mark_dirty();
+        for _ in 0..30 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        // **The profiler is OPT-IN**, and this arm's budget claims were vacuous
+        // until it was armed: `RuntimeSim::step_profile` is "all zeroes until
+        // `set_step_profiling` is armed" by its own doc, so `society 0.000 ms /
+        // crowd 0.000 ms` passed a ratchet of 0.5 and 1.0 while measuring
+        // nothing at all.
+        sim.set_step_profiling(true);
+        let hero_at = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::Transform>(hero)
+            .map(|t| t.translation.to_dvec3())
+            .unwrap_or(centre);
+        let probe = club_probe(sim, hero_at);
+        let venue_at = glam::DVec3::new(venue.centre.x, 0.0, venue.centre.y);
+        {
+            let clock = inf_ecs::crowd::CrowdClock::from_world(
+                sim.world(),
+                inf_ecs::crowd::population_steps(sim.world()) as f64 / HZ,
+            );
+            let pop = sim
+                .world()
+                .world()
+                .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+                .expect("the island installed a population");
+            for (guid, rec) in &pop.records {
+                let leg = rec.leg_at(*guid, clock);
+                let arrival = rec.arrival_on(leg);
+                let near = glam::DVec2::new(rec.last.x - venue_at.x, rec.last.z - venue_at.z)
+                    .length()
+                    <= AT_THE_VENUE_M;
+                // **A shift is named by the ARRIVAL, not by the hour.**
+                // `HOME_H` and `NIGHT_WORK_START_H` are both eighteen hundred —
+                // the town comes home at the hour a keeper leaves for work — so
+                // an hour test cannot tell a night shift from a walk home.
+                // Measured on the nightclub arm below when this read the hour:
+                // **155 night workers in a town with 31 night jobs**.
+                let working = arrival.role == Some(inf_ecs::components::SlotRole::Work)
+                    && matches!(leg, Some((_, u)) if u >= 1.0);
+                match arrival.posture {
+                    inf_ecs::components::SlotPosture::Sit => r.seated += 1,
+                    inf_ecs::components::SlotPosture::Dance => r.dancing += 1,
+                    inf_ecs::components::SlotPosture::Stand => {}
+                }
+                if working {
+                    r.on_shift += 1;
+                }
+                if near && (working || arrival.posture != inf_ecs::components::SlotPosture::Stand) {
+                    r.at_the_venue += 1;
+                }
+                // A night worker's leg ENDS at its own station -- the counter,
+                // the deck, the door -- so "is the keeper at the counter" is
+                // "is the body within a metre of where its own leg ends".
+                if working {
+                    let pts = rec.path_on(leg).points();
+                    let end = pts[pts.len() - 1];
+                    if glam::DVec2::new(rec.last.x - end.x, rec.last.z - end.z).length()
+                        <= AT_SLOT_M
+                    {
+                        r.at_the_counter += 1;
+                    }
+                }
+            }
+        }
+        let st = sim.crowd_stats();
+        r.faced = st.faced;
+        r.posed_apart = st.posed_apart;
+
+        // ── the three points, door SHUT then door OPEN ──────────────────────
+        let Some((music_guid, emitter, points)) = probe else {
+            panic!("{label}: the venue has no music emitter, or no front door");
+        };
+        r.heard_from_m = (emitter - hero_at).length();
+        r.shut = listen(sim, emitter, points);
+        // **THE CLUB OPENS — every door on the block, not one.**
+        //
+        // `portal_of` takes the opening nearest the LISTENER, which is right and
+        // is what this measured: a venue block is six bars, so a listener eight
+        // metres out from one bar's door is nearer some OTHER bar's, and with
+        // only the probed door opened the street point kept reading `shut` at
+        // -24 dB. Opening one door of six and reporting "the club is open" is
+        // the vacuity; opening the block is the claim.
+        let opened = {
+            let mut want: Vec<uuid::Uuid> = Vec::new();
+            for (vol, i, d) in inf_ecs::door::volume_doorways(sim.world()) {
+                if (d.hinge - emitter).length() <= CLUB_OPENS_M {
+                    want.push(inf_physics::d3::door::pcg_doorway_guid(vol, i));
+                }
+            }
+            let specs: Vec<(uuid::Uuid, inf_ecs::door::DoorSpec)> = want
+                .into_iter()
+                .filter_map(|g| {
+                    inf_physics::d3::door::placement_of(sim.world(), g).map(|p| (g, p.spec))
+                })
+                .collect();
+            let n = specs.len();
+            let f = inf_ecs::door::door_field_mut(sim.world_mut());
+            for (g, spec) in specs {
+                f.entry(g, &spec).open_deg = spec.open_limit_deg;
+            }
+            n
+        };
+        assert!(
+            opened > 0,
+            "{label}: the venue block offers no exterior door to open"
+        );
+        r.opened_doors = opened;
+        r.open = listen(sim, emitter, points);
+        println!(
+            "VEN1b {label}: {:.2} h — {} agent(s); {} night job(s) -> {} worker(s); \
+             {} leisure place(s) -> {} reveller(s), {} turned away; {} seated, \
+             {} dancing, {} on shift, {} of them at the venue ({} at the \
+             counter); {} homebound, {} housebound, {} with no walk home, {} \
+             errandless",
+            r.hour,
+            r.society.agents,
+            r.society.night_jobs,
+            r.society.night_workers,
+            r.society.leisure_places,
+            r.society.revellers,
+            r.society.turned_away,
+            r.seated,
+            r.dancing,
+            r.on_shift,
+            r.at_the_venue,
+            r.at_the_counter,
+            r.society.homebound,
+            r.society.housebound,
+            r.society.no_return,
+            r.society.errandless
+        );
+        for (state, row) in [("SHUT", &r.shut), ("OPEN", &r.open)] {
+            println!(
+                "VEN1b {label}: the door {state:<4} — inside {:+6.1} dB ({:<7}), \
+                 doorway {:+6.1} dB ({:<7}), street {:+6.1} dB ({:<7}); low-pass \
+                 {:?} / {:?} / {:?}",
+                row[0].db,
+                row[0].verdict,
+                row[1].db,
+                row[1].verdict,
+                row[2].db,
+                row[2].verdict,
+                row[0].lowpass_hz,
+                row[1].lowpass_hz,
+                row[2].lowpass_hz
+            );
+        }
+
+        // ── the traces ──────────────────────────────────────────────────────
+        let mut seen: std::collections::BTreeSet<u64> = Default::default();
+        let (mut soc_ms, mut crowd_ms) = (0.0f64, 0.0f64);
+        for _ in 0..CLUB_STEPS {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            let d = digest(&sim.state_bytes());
+            seen.insert(d);
+            r.digests.push(d);
+            // By NAME rather than by index: `step_profile::phase` is
+            // `pub(crate)`, and `STEP_PHASE_NAMES` is the public face of the
+            // same list -- which is also the spelling that goes red rather than
+            // silently measuring the wrong phase if the order ever moves.
+            for (name, ms) in sim.step_profile().rows() {
+                match name {
+                    "society" => soc_ms += ms,
+                    "crowd" => crowd_ms += ms,
+                    _ => {}
+                }
+            }
+        }
+        r.distinct = seen.len();
+        r.society_ms = soc_ms / CLUB_STEPS as f64;
+        r.crowd_ms = crowd_ms / CLUB_STEPS as f64;
+
+        let log = sim.audio_command_log();
+        // The audio source key is the guid's low bits -- `guid_source_key`'s
+        // own rule, spelled here because it is a private helper of the host.
+        let key = music_guid.as_u128() as u64;
+        for c in log {
+            match c {
+                inf_audio::AudioCommand::Play(p) => {
+                    r.plays += 1;
+                    if p.source == key {
+                        r.music_resolved = true;
+                    }
+                }
+                inf_audio::AudioCommand::SetOcclusion { source, .. } => {
+                    r.occlusions += 1;
+                    if *source == key {
+                        r.occlusions_here += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        r.audio = format!("{log:?}");
+        println!(
+            "VEN1b {label}: {} speaker(s) ({} spawned), the nearest {:.1} m off, \
+             {} door(s) opened; {} Play(s), {} SetOcclusion(s) ({} for that \
+             speaker); society {:.3} ms / crowd {:.3} ms a step over {CLUB_STEPS}",
+            r.venue.live,
+            r.venue.spawned,
+            r.heard_from_m,
+            r.opened_doors,
+            r.plays,
+            r.occlusions,
+            r.occlusions_here,
+            r.society_ms,
+            r.crowd_ms
+        );
+        runs.push((label, r));
+    }
+
+    // ── the per-host arms, BEFORE the compare ────────────────────────────────
+    for (label, r) in &runs {
+        // THE SOCIETY AFTER DARK.
+        assert!(r.society.agents > 0, "{label}: nobody lives here");
+        assert!(
+            r.society.night_jobs > 0,
+            "{label}: the venue offers no night job — a bar with nobody behind \
+             the counter is a bar that is shut"
+        );
+        assert!(
+            r.society.leisure_places > 0,
+            "{label}: the venue offers nowhere to spend an evening"
+        );
+        assert!(
+            r.society.night_workers > 0,
+            "{label}: {} night job(s) and nobody took one",
+            r.society.night_jobs
+        );
+        assert!(
+            r.society.revellers > 0,
+            "{label}: {} agents, {} leisure places, and not one of them went out",
+            r.society.agents,
+            r.society.leisure_places
+        );
+        assert!(
+            r.society.revellers <= r.society.leisure_places,
+            "{label}: {} revellers claimed {} places — the occupancy cap is not \
+             capping",
+            r.society.revellers,
+            r.society.leisure_places
+        );
+        // THE POSTURES, and the anti-vacuity half beside them.
+        assert!(
+            r.seated > 0,
+            "{label}: at half past ten not one body in this town is sitting down"
+        );
+        assert!(
+            r.on_shift > 0,
+            "{label}: nobody is working the night shift at {:.1} h",
+            r.hour
+        );
+        assert!(
+            r.at_the_venue > 0,
+            "{label}: {} seated / {} dancing / {} on shift, and NONE of them is \
+             within {AT_THE_VENUE_M:.0} m of the venue — a posture in the wrong town \
+             is not a club",
+            r.seated,
+            r.dancing,
+            r.on_shift
+        );
+        assert!(
+            r.at_the_counter > 0,
+            "{label}: the keeper's leg ends at the counter and the keeper is not \
+             standing at it"
+        );
+        assert!(
+            r.faced > 0,
+            "{label}: not one body was turned to face anything — `face_body` \
+             wrote through the wrong door for every tier"
+        );
+        assert!(
+            r.posed_apart > 0,
+            "{label}: the crowd step published no posture other than standing"
+        );
+        // THE MUSIC.
+        // A venue is placed per LOT and a block is subdivided into them, so
+        // the fixture's one venue BLOCK is six bars (VEN1a's own measurement) —
+        // six speakers, one apiece. The claim is a floor and an equality
+        // between the hosts, not a number.
+        assert!(
+            r.venue.live > 0,
+            "{label}: the venue block carries no speaker at all"
+        );
+        assert!(
+            r.music_resolved,
+            "{label}: the venue's own emitter never issued a Play"
+        );
+        assert!(
+            r.occlusions_here >= CLUB_STEPS,
+            "{label}: {} SetOcclusion(s) for the speaker the probe listened to \
+             ({:.1} m off) over {CLUB_STEPS} steps, {} for all of them — the \
+             loop's occlusion is not being re-evaluated",
+            r.occlusions_here,
+            r.heard_from_m,
+            r.occlusions
+        );
+        // THE DOORWAY, as three numbers with the order between them asserted.
+        assert_eq!(r.shut[0].verdict, "clear", "{label}: inside is not clear");
+        assert!(
+            r.shut[0].db > -0.001,
+            "{label}: standing inside the club the music is {:.1} dB down",
+            r.shut[0].db
+        );
+        assert_eq!(
+            r.shut[1].verdict, "shut",
+            "{label}: the venue's front door is not shut at the start"
+        );
+        assert_eq!(
+            r.shut[1].lowpass_hz,
+            Some(inf_physics::d3::audio::DOOR_SHUT_LOWPASS_HZ),
+            "{label}: a shut door does not muffle, it only quietens"
+        );
+        assert_eq!(r.open[0].verdict, "clear");
+        assert_eq!(
+            r.open[1].verdict, "doorway",
+            "{label}: the open door still reads as a wall"
+        );
+        assert_eq!(
+            r.open[1].lowpass_hz, None,
+            "{label}: an OPEN door filters the sound"
+        );
+        // …and the swell: opening the door is louder at the opening and in the
+        // street, and the opening is louder than the street.
+        assert!(
+            r.open[1].db > r.shut[1].db + 6.0,
+            "{label}: opening the door changed the doorway by {:.1} dB",
+            r.open[1].db - r.shut[1].db
+        );
+        assert!(
+            r.open[2].db > r.shut[2].db + 6.0,
+            "{label}: opening the door changed the street by {:.1} dB",
+            r.open[2].db - r.shut[2].db
+        );
+        assert!(
+            r.open[1].db > r.open[2].db,
+            "{label}: the opening ({:.1} dB) is no louder than the street \
+             ({:.1} dB)",
+            r.open[1].db,
+            r.open[2].db
+        );
+        // THE BUDGETS, on the phases this wave added work to.
+        assert!(
+            r.society_ms <= inf_player::budget::SOCIETY_STEP_BUDGET_MS,
+            "{label}: the society phase costs {:.3} ms a step against a ratchet \
+             of {}",
+            r.society_ms,
+            inf_player::budget::SOCIETY_STEP_BUDGET_MS
+        );
+        assert!(
+            r.crowd_ms <= inf_player::budget::NPC_STEP_BUDGET_MS,
+            "{label}: the crowd phase costs {:.3} ms a step against a ratchet of \
+             {}",
+            r.crowd_ms,
+            inf_player::budget::NPC_STEP_BUDGET_MS
+        );
+        // Anti-vacuity: a window whose every step hashed the same would compare
+        // equal and mean nothing.
+        assert!(
+            r.distinct > CLUB_STEPS / 4,
+            "{label}: only {} distinct states across {CLUB_STEPS} steps",
+            r.distinct
+        );
+        assert!(!r.audio.is_empty() && r.plays > 0);
+    }
+
+    // ── and the two hosts agree, step for step and command for command ───────
+    let (a, b) = (&runs[0].1, &runs[1].1);
+    assert_eq!(a.society.agents, b.society.agents);
+    assert_eq!(a.society.night_workers, b.society.night_workers);
+    assert_eq!(a.society.revellers, b.society.revellers);
+    assert_eq!(
+        (a.seated, a.dancing, a.on_shift, a.at_the_venue),
+        (b.seated, b.dancing, b.on_shift, b.at_the_venue),
+        "the two hosts put different people in the club"
+    );
+    assert_eq!(a.venue.live, b.venue.live);
+    assert_eq!(a.shut, b.shut, "the two hosts heard different shut doors");
+    assert_eq!(a.open, b.open, "the two hosts heard different open doors");
+    for (i, (x, y)) in a.digests.iter().zip(b.digests.iter()).enumerate() {
+        assert_eq!(x, y, "PIE and shipping diverged at club step {i}");
+    }
+    // **AND THE AUDIO STREAM**, which `state_bytes` does not cover: the sim
+    // snapshot folds eleven sections and audio is not one of them, so a
+    // divergence in what the two hosts PLAYED would be invisible to every arm
+    // above. `physics_demo`'s gate (c) compares the same rendering on the
+    // playground; this is the same claim about a club.
+    assert_eq!(
+        a.audio, b.audio,
+        "PIE and shipping queued different audio for the same night"
+    );
+}
+
+/// **A NIGHTCLUB'S DANCE FLOOR FILLS WITH DANCERS** — the half of the wave the
+/// CI fixture's bar cannot show, run through the production door on a real
+/// `Nightclub`.
+///
+/// The fixture places one venue and it is a `Bar` (see the gate above for why),
+/// so *standing room* and *a performer's deck* have no live subject there. This
+/// builds a nightclub from the **committed zone document** — the same
+/// `BuildingPass` a settlement block lowers to — puts it in a world with two
+/// blocks of homes, settles a society over it, and reads what the schedules put
+/// on the floor at half past ten.
+///
+/// No cook, no second island: it is the *society* that is being measured, and a
+/// society is a function of `PcgVolume::residents`, which this builds honestly.
+#[test]
+fn a_nightclubs_dance_floor_fills_with_dancers() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+
+    let mut world = inf_ecs::EcsWorld::new();
+    let mut place = |guid: uuid::Uuid, a: inf_pcg::ArchetypeId, centre: glam::DVec3| {
+        let passes = zone_passes(&content, a);
+        let extent = glam::DVec2::new(38.0, 38.0);
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(guid),
+            center: centre,
+            extent,
+            seed_offset: 0x5E_1B,
+        };
+        let height = inf_pcg::FnHeight::new(move |_, _| Some(centre.y));
+        let out = inf_pcg::evaluate_buildings(&passes, &inf_pcg::NoSplines, &height, &cx);
+        let (baked, solid, groups, doorways, residents, interior, lights, emitters) =
+            inf_player::level::population_of(inf_pcg::compose_volume(Vec::new(), out));
+        world.spawn_with_guid(guid, a.name(), None);
+        let e = world.entity_of(guid).expect("the block");
+        let mut vol = inf_ecs::components::PcgVolume {
+            extent: inf_ecs::math::Vec2d::new(extent.x, extent.y),
+            ..Default::default()
+        };
+        vol.set_population(
+            baked, solid, groups, doorways, residents, interior, lights, emitters,
+        );
+        world.world_mut().entity_mut(e).insert((
+            inf_ecs::components::Transform {
+                translation: inf_ecs::math::Vec3d::new(centre.x, centre.y, centre.z),
+                ..Default::default()
+            },
+            inf_ecs::components::GlobalTransform(glam::DAffine3::from_translation(centre)),
+            vol,
+        ));
+    };
+    place(
+        uuid::Uuid::from_u128(0x0C_1),
+        inf_pcg::ArchetypeId::Nightclub,
+        glam::DVec3::ZERO,
+    );
+    place(
+        uuid::Uuid::from_u128(0x0C_2),
+        inf_pcg::ArchetypeId::Apartment,
+        glam::DVec3::new(90.0, 0.0, 0.0),
+    );
+    place(
+        uuid::Uuid::from_u128(0x0C_3),
+        inf_pcg::ArchetypeId::Office,
+        glam::DVec3::new(0.0, 0.0, 90.0),
+    );
+
+    // Settle: the first sync folds, and every one after it plans eight days.
+    let mut stats = inf_ecs::society::sync_society(&mut world);
+    for _ in 0..600 {
+        stats = inf_ecs::society::sync_society(&mut world);
+        if stats.pending == 0 && stats.planned_now == 0 {
+            break;
+        }
+    }
+    println!(
+        "VEN1b nightclub: {} agent(s); {} night job(s) -> {} worker(s); {} \
+         leisure place(s) -> {} reveller(s), {} turned away",
+        stats.agents,
+        stats.night_jobs,
+        stats.night_workers,
+        stats.leisure_places,
+        stats.revellers,
+        stats.turned_away
+    );
+
+    // What the schedules put on the floor at half past ten.
+    let clock = inf_ecs::crowd::CrowdClock::new(0.0, CLUB_HOUR);
+    let pop = world
+        .world()
+        .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        .expect("a population");
+    let (mut sitting, mut dancing, mut performing, mut tending) = (0usize, 0usize, 0usize, 0usize);
+    for (guid, rec) in &pop.records {
+        let leg = rec.leg_at(*guid, clock);
+        let arrival = rec.arrival_on(leg);
+        // The ARRIVAL, not the hour — see the club gate above for the 155-of-31
+        // measurement that says why.
+        let night = arrival.role == Some(inf_ecs::components::SlotRole::Work)
+            && matches!(leg, Some((_, u)) if u >= 1.0);
+        match (arrival.posture, night) {
+            (inf_ecs::components::SlotPosture::Sit, _) => sitting += 1,
+            (inf_ecs::components::SlotPosture::Dance, true) => performing += 1,
+            (inf_ecs::components::SlotPosture::Dance, false) => dancing += 1,
+            (inf_ecs::components::SlotPosture::Stand, true) => tending += 1,
+            _ => {}
+        }
+    }
+    println!(
+        "VEN1b nightclub at {CLUB_HOUR:.1} h: {sitting} seated, {dancing} on the \
+         dance floor, {performing} performing, {tending} on the door or behind \
+         the counter"
+    );
+    assert!(
+        stats.leisure_places > 10,
+        "a nightclub offers {} places to spend an evening",
+        stats.leisure_places
+    );
+    assert!(
+        dancing > 0,
+        "{} leisure places, {} revellers, and NOBODY is on the dance floor",
+        stats.leisure_places,
+        stats.revellers
+    );
+    assert!(sitting > 0, "nobody in the club is sitting down");
+    assert!(
+        performing > 0,
+        "the nightclub raised a deck and nobody is performing on it"
+    );
+    assert!(
+        tending > 0,
+        "the nightclub has a counter and a door and nobody is at either"
+    );
+    // …and the whole night population is capped by the CONTENT rather than by a
+    // constant: every reveller claimed a distinct place.
+    assert!(
+        stats.revellers <= stats.leisure_places,
+        "{} revellers claimed {} places",
+        stats.revellers,
+        stats.leisure_places
+    );
+    assert_eq!(
+        stats.night_workers, stats.night_jobs,
+        "a nightclub's three night jobs are not all taken: {} of {}",
+        stats.night_workers, stats.night_jobs
+    );
+    drop(tmp);
+    let _ = proj;
 }

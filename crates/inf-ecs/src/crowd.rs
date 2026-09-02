@@ -1015,6 +1015,23 @@ pub struct ScheduleLeg {
 /// ([`CrowdRecord::arrival_on`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlotArrival {
+    /// **What kind of place this leg ends at**, or `None` for a leg with no
+    /// destination — which is every record with no schedule.
+    ///
+    /// # This is the only thing that can tell a shift from a walk home
+    ///
+    /// `HOME_H` and `NIGHT_WORK_START_H` are **both eighteen hundred**: the
+    /// town comes home at the hour a bar's keeper leaves for work, which is
+    /// exactly right and makes a leg's `start_h` useless as an identity.
+    /// Measured, on a real nightclub: a classifier that read "the active leg
+    /// started at `NIGHT_WORK_START_H`" counted **155 night workers** in a town
+    /// with **31 night jobs** — every ordinary resident standing at its own
+    /// front door.
+    ///
+    /// So an arrival names the kind of place it is. Nothing about a leg's
+    /// *hour* is load-bearing any more, which is the property that lets the
+    /// hour table be re-tuned without silently re-labelling the population.
+    pub role: Option<crate::components::SlotRole>,
     /// The posture — see [`crate::components::SlotPosture`].
     pub posture: crate::components::SlotPosture,
     /// A unit XZ direction to face, or `DVec3::ZERO` to keep whatever facing
@@ -1023,9 +1040,10 @@ pub struct SlotArrival {
 }
 
 impl SlotArrival {
-    /// **On both feet, facing wherever you came in from** — the arrival every
-    /// leg had before wave VEN1b, and the one every non-venue leg still has.
+    /// **On both feet, going nowhere in particular** — the arrival every record
+    /// with no schedule wears, and every fixture written before wave VEN1b.
     pub const STANDING: Self = Self {
+        role: None,
         posture: crate::components::SlotPosture::Stand,
         face: DVec3::ZERO,
     };

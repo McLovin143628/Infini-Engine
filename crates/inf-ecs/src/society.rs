@@ -1074,23 +1074,31 @@ fn goes_out(guid: Uuid) -> bool {
     crate::crowd::agent_unit(guid, 0, SALT_NIGHTLIFE) < NIGHTLIFE_SHARE
 }
 
-/// **The arrival a place implies** — its posture and its facing, as the leg
-/// that ends there will carry them.
+/// **The arrival a place implies** — what kind of place it is, what a body does
+/// there, and which way it faces.
+///
+/// Every leg's arrival is its DESTINATION's, without exception. There is no
+/// "plain" leg helper beside this one and there deliberately is not: a slot a
+/// *plan* implies already carries `Stand` and no facing (`slots_of` writes
+/// exactly that), so the ordinary four-leg day comes out of this door
+/// byte-identical to the day NPC1d planned — and the day it does not, the
+/// reason is a change to the SLOT rather than a second table of arrivals to
+/// keep in step.
 fn arrival_of(p: &SocietyPlace) -> crate::crowd::SlotArrival {
     crate::crowd::SlotArrival {
+        role: Some(p.role),
         posture: p.posture,
         face: p.face,
     }
 }
 
-/// A leg with nothing to do at the far end — every leg planned before wave
-/// VEN1b, spelled once so the four call sites that mean it say so.
-fn plain(start_h: f64, travel_h: f64, path: inf_nav::NavPath) -> ScheduleLeg {
+/// One leg of a day: leave at an hour, walk `path`, and arrive at `to`.
+fn leg_to(to: &SocietyPlace, start_h: f64, travel_h: f64, path: inf_nav::NavPath) -> ScheduleLeg {
     ScheduleLeg {
         start_h,
         travel_h,
         path,
-        arrival: crate::crowd::SlotArrival::STANDING,
+        arrival: arrival_of(to),
     }
 }
 
@@ -1238,13 +1246,8 @@ fn plan_day(
             soc.taken_night.insert(i);
             stats.night_workers += 1;
             if let Some(sched) = CrowdSchedule::new(vec![
-                ScheduleLeg {
-                    start_h: NIGHT_WORK_START_H,
-                    travel_h: COMMUTE_H,
-                    path: out,
-                    arrival: arrival_of(&job),
-                },
-                plain(NIGHT_WORK_END_H, COMMUTE_H, back),
+                leg_to(&job, NIGHT_WORK_START_H, COMMUTE_H, out),
+                leg_to(&home, NIGHT_WORK_END_H, COMMUTE_H, back),
             ]) {
                 return (
                     CrowdRecord::scheduled(archetype, sched),
@@ -1256,7 +1259,7 @@ fn plan_day(
     if let Some(w) = nearest(&soc.work, home.at) {
         if let Some(out) = leg(soc, &home, &w, stats) {
             let back = leg(soc, &w, &home, stats);
-            let mut legs = vec![plain(WORK_START_H, COMMUTE_H, out)];
+            let mut legs = vec![leg_to(&w, WORK_START_H, COMMUTE_H, out)];
             // The errand is nearest the WORKPLACE, because that is where the
             // agent is standing at noon.
             let mut got_errand = false;
@@ -1264,8 +1267,8 @@ fn plan_day(
                 if let (Some(to_shop), Some(to_work)) =
                     (leg(soc, &w, &e, stats), leg(soc, &e, &w, stats))
                 {
-                    legs.push(plain(ERRAND_OUT_H, ERRAND_H, to_shop));
-                    legs.push(plain(ERRAND_BACK_H, ERRAND_H, to_work));
+                    legs.push(leg_to(&e, ERRAND_OUT_H, ERRAND_H, to_shop));
+                    legs.push(leg_to(&w, ERRAND_BACK_H, ERRAND_H, to_work));
                     got_errand = true;
                 }
             }
@@ -1277,7 +1280,7 @@ fn plan_day(
             // stood at its desk for ever, and the report called it a full day.
             let came_home = back.is_some();
             match back {
-                Some(back) => legs.push(plain(HOME_H, COMMUTE_H, back)),
+                Some(back) => legs.push(leg_to(&home, HOME_H, COMMUTE_H, back)),
                 None => stats.no_return += 1,
             }
             // ── and the evening (wave VEN1b) ────────────────────────────────
@@ -1296,7 +1299,10 @@ fn plan_day(
     // No workplace. An errand out and back is still a day.
     if let Some(e) = nearest(&soc.errand, home.at) {
         if let (Some(out), Some(back)) = (leg(soc, &home, &e, stats), leg(soc, &e, &home, stats)) {
-            let mut legs = vec![plain(10.0, ERRAND_H, out), plain(16.0, ERRAND_H, back)];
+            let mut legs = vec![
+                leg_to(&e, 10.0, ERRAND_H, out),
+                leg_to(&home, 16.0, ERRAND_H, back),
+            ];
             // A homebound agent has an evening too — it is the *day* it has
             // nowhere to be, and the venues do not care where somebody works.
             plan_evening(soc, guid, &home, &mut legs, stats);
@@ -1347,13 +1353,8 @@ fn plan_evening(
     };
     soc.taken_leisure.insert(i);
     stats.revellers += 1;
-    legs.push(ScheduleLeg {
-        start_h: EVENING_OUT_H,
-        travel_h: EVENING_H,
-        path: out,
-        arrival: arrival_of(&spot),
-    });
-    legs.push(plain(NIGHT_HOME_H, COMMUTE_H, back));
+    legs.push(leg_to(&spot, EVENING_OUT_H, EVENING_H, out));
+    legs.push(leg_to(home, NIGHT_HOME_H, COMMUTE_H, back));
 }
 
 /// The society's counters, or all zeroes on a level that has none.
@@ -1836,6 +1837,7 @@ mod tests {
                 travel_h: EVENING_H,
                 path: p.clone(),
                 arrival: crate::crowd::SlotArrival {
+                    role: Some(SlotRole::Leisure),
                     posture: crate::components::SlotPosture::Dance,
                     face: DVec3::Z,
                 },

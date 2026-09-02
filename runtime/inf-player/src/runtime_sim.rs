@@ -776,6 +776,23 @@ impl RuntimeSim {
         self.venue_audio
     }
 
+    /// **What a listener at `listener` hears an emitter at `emitter` through**
+    /// (VEN1b) — the sim's own occlusion verdict, exposed.
+    ///
+    /// The audio step takes this every fixed step for every looping occluded
+    /// source; this is the ad-hoc door, for a gate and an instrument that have
+    /// two points and one question. It exists because the two things the rule
+    /// needs are DISJOINT FIELDS of this struct, and a caller holding
+    /// `&mut RuntimeSim` cannot borrow `world()` and `bridge3d_mut()` at once
+    /// through the accessors.
+    pub fn audio_portal(
+        &mut self,
+        listener: DVec3,
+        emitter: DVec3,
+    ) -> inf_physics::d3::audio::PortalGain {
+        portal(&self.world, &mut self.bridge3d, listener, emitter)
+    }
+
     /// **The most recent fixed step's traffic counters** (VEH2b) — cars per
     /// tier, how many are on a leg of their day, how many carry an NPC driver,
     /// how many the traffic has let go of, and how many commuter routes are

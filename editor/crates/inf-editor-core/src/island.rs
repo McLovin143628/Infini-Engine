@@ -365,8 +365,8 @@ fn island_ground_layers() -> [inf_ecs::components::TerrainLayer; 4] {
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
-        AlwaysLoaded, Light, LightKind, MeshRef, PcgVolume, SkyAtmosphere, Spline, SplineInterp,
-        StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
+        AlwaysLoaded, AudioListener, Light, LightKind, MeshRef, PcgVolume, SkyAtmosphere, Spline,
+        SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
     };
     use inf_ecs::math::{Color, Vec2d, Vec3d};
 
@@ -732,6 +732,23 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // wizard's door would put it on every character anybody ever spawns.
     insert!(doc, hero, StreamingSource { radius_m: 256.0 });
     insert!(doc, hero, AlwaysLoaded);
+    // **…and the EAR** (wave VEN1b). A third component outside the wizard's
+    // door, for the two above it's own reason and one of its own.
+    //
+    // `active_listener` takes the first active `AudioListener` in `Guid` order
+    // and, finding none, leaves the engine's listener at its default pose —
+    // **the world origin**. The island had none, so every spatial source it has
+    // ever carried was mixed against (0, 0, 0): a vehicle's engine loop four
+    // hundred metres from the hero was as loud as one under the bonnet, and the
+    // occlusion raycast was a line from the origin to the emitter through
+    // whatever a kilometre of island happened to contain.
+    //
+    // Nothing measured it, because nothing on this island made a spatial noise
+    // that anybody stood next to — the traffic is silent by ruling, and the
+    // footstep cue is a one-shot at the body's own feet. The venue's music is
+    // the first, and this is the attachment its own boot path was missing.
+    // (`AudioListener` is a scene-v6 component: placing one moves no schema.)
+    insert!(doc, hero, AudioListener { active: true });
 
     doc.world_mut().propagate();
     doc.mark_saved();
