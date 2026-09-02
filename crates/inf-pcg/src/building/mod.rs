@@ -382,6 +382,15 @@ pub enum RoomType {
     Storage,
     Workshop,
     Guest,
+    /// **A venue's main floor** (wave VEN1a) — where the crowd stands and
+    /// dances. Nobody works one, so it holds no `Work` slot; it is an *errand
+    /// destination*, which is what a patron walks to.
+    DanceFloor,
+    /// **A venue's bar** (wave VEN1a) — the room the counter runs along.
+    BarRoom,
+    /// **A venue's stage** (wave VEN1a) — a raised platform with a pole, and one
+    /// act on it however big it is.
+    Stage,
 }
 
 impl RoomType {
@@ -402,7 +411,29 @@ impl RoomType {
             RoomType::Storage => "storage",
             RoomType::Workshop => "workshop",
             RoomType::Guest => "guest",
+            RoomType::DanceFloor => "dancefloor",
+            RoomType::BarRoom => "barroom",
+            RoomType::Stage => "stage",
         }
+    }
+
+    /// **Whether a room of this kind is somewhere a person GOES** (wave VEN1a)
+    /// — as opposed to somewhere a person works or sleeps.
+    ///
+    /// One door, because `society::slots_of` asks the question twice — once to
+    /// decide whether an empty room is skipped and once to decide whether it
+    /// gets a visit slot — and a room type added to one arm and not the other
+    /// would produce a destination nobody can be sent to, or a node with
+    /// nothing on it.
+    ///
+    /// A dance floor qualifies **with a `Work` count of zero**, which is the
+    /// case the two arms disagreeing would lose entirely: nobody works a dance
+    /// floor and everybody visits one.
+    pub fn is_errand_destination(self) -> bool {
+        matches!(
+            self,
+            RoomType::Retail | RoomType::BarRoom | RoomType::DanceFloor
+        )
     }
 }
 

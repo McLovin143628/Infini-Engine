@@ -2,7 +2,7 @@ schema_version = 27
 guid = "0bb4ea2d-2c7a-3945-7b91-80a72ad78143"
 title = "Vancouver Island"
 entity_count = 282
-content_hash = "7052116d5b76d36c"
+content_hash = "4e0fe843a1f30930"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a2",
@@ -14,9 +14,12 @@ dependencies = [
     "07b6e426-cc31-13d9-afd1-c5da6250f4b1",
     "0e982054-7c78-d1d3-9340-e6890efb1cca",
     "2f1bed68-23f0-f1cc-eebf-a1df325c922a",
+    "60dfa86c-f956-8450-851f-d3bdce6e629f",
     "642e8e19-b76d-8348-6c7b-c0023cb2b978",
+    "65b8ede7-098b-f9b7-5b8f-089d6b111ef4",
     "72c77ebc-da0f-c90f-367f-fd8bb041c317",
     "826ad69a-6fcf-6332-242b-f8e86883ba4f",
+    "95f16f75-2297-9fa7-642c-83f2d558ec73",
     "9f43cea8-e684-25a3-fb07-15a03738d46e",
     "a2080917-9429-e9a3-b6fc-645173725896",
     "bbb9b175-c841-91e4-9583-26ae7273c6aa",

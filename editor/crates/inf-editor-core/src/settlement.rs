@@ -173,6 +173,50 @@ const NODE_FIELD_MASK: u64 = (1 << 20) - 1;
 /// eligible blocks and four of them would be half the town.
 pub const INDUSTRIAL_SHARE: usize = 4;
 
+/// **A settlement's venues, in the order the strip assigns them** (wave VEN1a).
+///
+/// A city gets all three; a town gets a bar. That ordering is not decorative —
+/// the blocks are handed out nearest-first, so the bar is the one closest to
+/// the centre and the strip club is the one furthest out, which is where they
+/// are in every town that has all three.
+///
+/// The list is per SITE KIND rather than per radius because it is a statement
+/// about what a settlement *is*, not about how much room it has: a hamlet with
+/// a nightclub is stranger than a city without one.
+fn venue_strip(kind: SiteKind) -> &'static [ArchetypeId] {
+    const CITY: &[ArchetypeId] = &[
+        ArchetypeId::Bar,
+        ArchetypeId::Nightclub,
+        ArchetypeId::StripClub,
+    ];
+    const TOWN: &[ArchetypeId] = &[ArchetypeId::Bar];
+    match kind {
+        SiteKind::City => CITY,
+        _ => TOWN,
+    }
+}
+
+/// The innermost ring a venue may take (wave VEN1a).
+///
+/// A city's ring 0 is its office core — the most expensive ground in the
+/// settlement and the one the zone table gives to offices and hotels — so the
+/// strip sits one ring out. A town has no such core: its ring 0 *is* its high
+/// street, which is exactly where its bar belongs.
+fn venue_min_ring(kind: SiteKind) -> u32 {
+    match kind {
+        SiteKind::City => 1,
+        _ => 0,
+    }
+}
+
+/// At most one block in this many becomes a venue (wave VEN1a) — the
+/// industrial cluster's `INDUSTRIAL_SHARE` guard, for its reason.
+///
+/// A settlement of four blocks that spent three of them on nightlife is not a
+/// settlement. The share bites only on the very smallest reservations, where it
+/// costs the strip its club and then its bar in that order.
+const VENUE_SHARE: usize = 3;
+
 /// **Which archetypes are furnished** (island wave I8a, ruling 3).
 ///
 /// The orchestrator's ruling was *measure, then decide, default ON*, and the
@@ -187,10 +231,18 @@ pub const INDUSTRIAL_SHARE: usize = 4;
 /// estate) are the one- to four-storey ones. A ten-storey hotel is 5 × the rooms
 /// of a house for a lobby nobody has walked past yet.
 pub fn furnishes(a: ArchetypeId) -> bool {
-    matches!(
-        a,
-        ArchetypeId::House | ArchetypeId::Shop | ArchetypeId::Estate
-    )
+    // **A venue is always furnished** (wave VEN1a), and it is not an exception
+    // to the rule above -- it is the rule. The measurement's argument is that
+    // furniture costs per room and is worth it for the archetypes a player
+    // walks into on foot. A club's fittings ARE the club: an unfurnished
+    // nightclub is an empty concrete box with a sign on it, which is strictly
+    // worse than not placing one. The venues are also one to two storeys, which
+    // is the other half of the same argument.
+    a.is_venue()
+        || matches!(
+            a,
+            ArchetypeId::House | ArchetypeId::Shop | ArchetypeId::Estate
+        )
 }
 
 /// One street centreline of a settlement's local grid, in world XZ.
@@ -695,6 +747,41 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
             _ => Vec::new(),
         };
 
+    // **THE NIGHTLIFE STRIP** (wave VEN1a): a settlement's venues, on the
+    // industrial cluster's own pattern.
+    //
+    // A weighted zone table cannot say "one of these per settlement" -- it is a
+    // per-block draw, so a table carrying a nightclub at weight 1 would give a
+    // city eleven of them and a town none. `zone_table`'s own arm asserts that
+    // `Industrial` never comes out of the ladder for exactly this reason ("the
+    // cluster is the only door onto it"), and a venue is the same shape of
+    // thing: a fact about the settlement, not a probability per block.
+    //
+    // Where: nearest the centre, one ring OUT of it for a city (a strip is just
+    // off the main street, not on it -- and ring 0 is the office core that pays
+    // for the ground), and ring 0 for a town, whose high street IS its strip.
+    // Sorted by squared distance `to_bits` then `(col, row)`, which is the
+    // industrial cluster's own portable comparison: no float ordering reaches a
+    // committed decision.
+    //
+    // Blocks the industrial cluster has already claimed are skipped rather than
+    // overwritten, so the two rules cannot silently disagree about one block.
+    let venues: Vec<((i32, i32), ArchetypeId)> = {
+        let want = venue_strip(s.kind);
+        let floor = venue_min_ring(s.kind);
+        let mut near: Vec<(u64, i32, i32)> = cells
+            .iter()
+            .filter(|(col, row, ring, _)| *ring >= floor && !industrial.contains(&(*col, *row)))
+            .map(|(col, row, _, c)| ((*c - centre).length_squared().to_bits(), *col, *row))
+            .collect();
+        near.sort();
+        near.truncate(want.len().min(near.len() / VENUE_SHARE));
+        near.into_iter()
+            .zip(want.iter().copied())
+            .map(|((_, col, row), a)| ((col, row), a))
+            .collect()
+    };
+
     let name_seed = Hash64::new(design.recipe.seed)
         .mix_u64(SETTLEMENT_SALT)
         .mix_u64(site as u64);
@@ -704,6 +791,8 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
             let h = name_seed.mix_i64(i64::from(*col)).mix_i64(i64::from(*row));
             let archetype = if industrial.contains(&(*col, *row)) {
                 ArchetypeId::Industrial
+            } else if let Some((_, a)) = venues.iter().find(|(k, _)| *k == (*col, *row)) {
+                *a
             } else {
                 pick(zone_table(s.kind, *ring), h.mix_u64(ZONE_SALT).unit())
             };
@@ -1020,6 +1109,9 @@ pub fn zone_file_name(a: ArchetypeId) -> String {
 /// | House | 18 × 26 | 3.0 | 0.16 | 60 | 6 × 4 = 24 |
 /// | Estate | 40 × 44 | 6.0 | 0.10 | 300 | 3 × 2 = 6 |
 /// | Industrial | 48 × 48 | 4.0 | 0.06 | 400 | 2 × 2 = 4 |
+/// | Bar | 22 × 30 | 1.0 | 0.12 | 90 | 5 × 3 = 15 |
+/// | Nightclub | 32 × 36 | 2.0 | 0.08 | 200 | 3 × 3 = 9 |
+/// | StripClub | 28 × 34 | 2.0 | 0.08 | 170 | 4 × 3 = 12 |
 ///
 /// The counts are `subdivide_block`'s own rounding rule — *round to the nearest
 /// whole number of lots, never below one* — so a 60 m town block takes fewer of
@@ -1034,6 +1126,13 @@ pub fn zone_lots(a: ArchetypeId) -> LotRules {
         ArchetypeId::House => (18.0, 26.0, 0.16, 3.0, 60.0),
         ArchetypeId::Estate => (40.0, 44.0, 0.10, 6.0, 300.0),
         ArchetypeId::Industrial => (48.0, 48.0, 0.06, 4.0, 400.0),
+        // **The venues** (wave VEN1a). A bar is a shopfront with a deeper
+        // back-of-house; a club is a box, and it has to be one -- a nightclub's
+        // `max_room_area` is 260 m2 and a 20 m frontage would never give it a
+        // room that big to anchor its dance floor in.
+        ArchetypeId::Bar => (22.0, 30.0, 0.12, 1.0, 90.0),
+        ArchetypeId::Nightclub => (32.0, 36.0, 0.08, 2.0, 200.0),
+        ArchetypeId::StripClub => (28.0, 34.0, 0.08, 2.0, 170.0),
     };
     LotRules {
         frontage_m,

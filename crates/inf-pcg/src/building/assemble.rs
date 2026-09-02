@@ -45,7 +45,7 @@
 
 use glam::{DVec2, DVec3};
 
-use super::palettes::{archetype, BuildingArchetype, FurnitureDef};
+use super::palettes::{archetype, BuildingArchetype, FurnitureDef, Placement};
 use super::plan::BuildingParams;
 use super::{BuildingPlan, Opening, OpeningKind, Rect2, Room, RoomType, Wall};
 use crate::grammar::dsl::Grammar;
@@ -79,6 +79,46 @@ const MAX_STATIONS: usize = 512;
 /// binary floating point — a one-ulp overshoot would read as a blocked window.
 /// Two centimetres is also what furniture does in the world.
 const FURNITURE_WALL_GAP: f64 = 0.02;
+
+/// **Walking room left on each side of a room-centre piece** (wave VEN1a).
+///
+/// A stage clamped to the room's full inner width is a floor, not a stage: the
+/// patrons in the reference stand *around* the catwalk, and the benches at its
+/// edge need somewhere to be. 1.2 m is a person and a shoulder-turn either side.
+const CENTRE_MARGIN_M: f64 = 1.2;
+
+/// **Wall left clear at each end of a continuous run** (wave VEN1a).
+///
+/// A counter that reaches the corners of the room it is in seals two walls,
+/// which would put the bartender's own side out of reach of the doorway. 0.9 m
+/// is a person's width -- the same number `door_width` hovers around.
+const RUN_END_MARGIN_M: f64 = 0.9;
+
+/// The shortest half-length a continuous run may be, metres (wave VEN1a).
+///
+/// Below this it is not a run any more: a 0.6 m counter is a station, which is
+/// the thing `Placement::Run` exists to stop being. An edge whose longest clear
+/// stretch cannot carry one is refused and the next edge tried.
+const RUN_MIN_HALF_M: f64 = 1.0;
+
+/// How much a room-centre piece shrinks per attempt when it fouls an opening
+/// void or a door swing, and how many attempts it gets (wave VEN1a).
+///
+/// A centred piece cannot be *moved* — being centred is what it is — so the
+/// only honest answers are "smaller" and "not at all", and three attempts at
+/// 70 % take a 5 m catwalk to 1.7 m before giving up.
+const CENTRE_SHRINK: f64 = 0.7;
+const CENTRE_SHRINK_TRIES: u32 = 3;
+
+/// How far a street-face festoon reaches past each jamb of the door it hangs
+/// over, metres (wave VEN1a).
+const FESTOON_OVERHANG_M: f64 = 0.6;
+/// Half-height of a street-face festoon swag, metres.
+const FESTOON_HALF_H_M: f64 = 0.14;
+/// Half-depth of a street-face festoon swag, metres.
+const FESTOON_HALF_D_M: f64 = 0.09;
+/// How far above an entrance's head a festoon hangs, metres.
+const FESTOON_ABOVE_HEAD_M: f64 = 0.35;
 
 /// Where furniture may **not** stand, on one floor.
 ///
@@ -185,6 +225,7 @@ pub fn assemble_in(
     }
     ctx.roof(&mut out);
     ctx.stairs(&mut out);
+    ctx.street_face(&mut out);
     // **The decoration tail, folded in exactly once** (island wave I8b). Every
     // instance up to this point has a collider beside it at the same index;
     // everything appended here has none. Doing it before `place_in_frame` is
@@ -298,7 +339,36 @@ impl Ctx<'_> {
         rotation: glam::DQuat,
         half: DVec3,
     ) -> PcgInstance {
+        self.instance_lit(kind, center, rotation, half, None)
+    }
+
+    /// [`instance`](Self::instance) with the module's family emission
+    /// **overridden** (wave VEN1a).
+    ///
+    /// A family states the brightness a thing of its kind emits at and a
+    /// palette states the hue: `Neon` is a bright plate in every archetype, and
+    /// whether it is magenta or green is the strip club's business and the
+    /// cocktail bar's. `None` keeps the family's own colour, which is what every
+    /// structural placement passes.
+    ///
+    /// An override on a family that does **not** emit is honoured, deliberately:
+    /// `FurnitureDef::emissive` is an author saying "this one glows", and
+    /// refusing it silently would make an authored light invisible with no
+    /// diagnostic. What it cannot do is dim a family to nothing by accident,
+    /// because `None` and `Some([0,0,0])` are different values.
+    fn instance_lit(
+        &self,
+        kind: u32,
+        center: DVec3,
+        rotation: glam::DQuat,
+        half: DVec3,
+        emissive: Option<[f32; 3]>,
+    ) -> PcgInstance {
         let def = self.grammar.modules().get(kind as usize);
+        let mut surface = def.map_or(PcgSurface::DEFAULT, |m| m.surface);
+        if let Some(e) = emissive {
+            surface.emissive = e;
+        }
         PcgInstance {
             pos: center,
             rotation,
@@ -309,7 +379,123 @@ impl Ctx<'_> {
             glow: def.map_or(0.0, |m| m.glow),
             // **Wave VEN1a**: the module's own surface, from the same
             // `ModuleDef` the mesh and the glow come from.
-            surface: def.map_or(PcgSurface::DEFAULT, |m| m.surface),
+            surface,
+        }
+    }
+
+    /// **THE STREET FACE** (wave VEN1a) — the neon over the door and the string
+    /// lights across it, so a venue reads as a venue from the far pavement.
+    ///
+    /// Runs once for the whole building, not once per floor, because a building
+    /// has one entrance. Both pieces go onto [`GrammarOutput::decor`] and
+    /// **neither takes a collider**, for the reason
+    /// [`super::palettes::BuildingArchetype::pane`] gives about the pane: a sign
+    /// you cannot walk through is a wall, and `opening_is_clear` is an assertion
+    /// about *solids*. That also keeps the alignment invariant intact -- the
+    /// first `colliders.len()` instances are the solid ones and everything after
+    /// them is decoration.
+    ///
+    /// # Why this is not a grammar rule
+    ///
+    /// A wall run's grammar places modules *in* the wall: every element of an
+    /// alternative consumes span, so a `Bay -> Clad | Neon` would put a 1 m sign
+    /// in a 4 m wall and leave the rest of that bay a **hole** -- a stretch of
+    /// facade with no full-height solid, which is this engine's definition of a
+    /// doorway. A sign is hung on a wall, not built into one.
+    ///
+    /// The plate stands out from the **outside** face of the entrance wall,
+    /// which is the direction away from the room the door belongs to.
+    /// `Wall::inside` names that room, so the outward normal is derived rather
+    /// than authored -- a palette cannot know which way a lot happened to face.
+    fn street_face(&self, out: &mut GrammarOutput) {
+        let Some(sign) = self.arch.entrance_sign else {
+            return;
+        };
+        let Some(wi) = self.plan.entrance else {
+            return;
+        };
+        let Some(w) = self.plan.walls.get(wi) else {
+            return;
+        };
+        let Some(op) = self
+            .plan
+            .openings
+            .iter()
+            .find(|o| o.wall == wi && o.kind == OpeningKind::Door)
+        else {
+            return;
+        };
+        let mid = w.point_at((op.start + op.end) * 0.5);
+        let dir = w.direction();
+        let along_x = dir.x.abs() >= dir.y.abs();
+        // Outward: away from the room the wall belongs to. A degenerate case
+        // (the room's centre exactly on the wall line) answers `+`, which is a
+        // sign on one face rather than a sign nowhere.
+        let inside_c = self
+            .plan
+            .rooms
+            .get(w.inside)
+            .map_or(mid, |r| r.rect.center());
+        let outward = if along_x {
+            if mid.y >= inside_c.y {
+                1.0
+            } else {
+                -1.0
+            }
+        } else if mid.x >= inside_c.x {
+            1.0
+        } else {
+            -1.0
+        };
+        let half_t = self.arch.wall_thickness * 0.5;
+        let y = self.plan.floor_y(0);
+        let mut place = |module: &str, half: DVec3, cy: f64, standoff: f64| {
+            let Some(kind) = self.grammar.module_index(module) else {
+                return;
+            };
+            if !(half.x > 0.0 && half.y > 0.0 && half.z > 0.0) {
+                return;
+            }
+            let (h, p) = if along_x {
+                (
+                    half,
+                    DVec2::new(mid.x, mid.y + outward * (half_t + standoff)),
+                )
+            } else {
+                (
+                    DVec3::new(half.z, half.y, half.x),
+                    DVec2::new(mid.x + outward * (half_t + standoff), mid.y),
+                )
+            };
+            let normal = if along_x {
+                DVec3::new(0.0, 0.0, outward)
+            } else {
+                DVec3::new(outward, 0.0, 0.0)
+            };
+            out.decor.push(self.instance_lit(
+                kind,
+                DVec3::new(p.x, cy, p.y),
+                yaw_onto(normal),
+                h,
+                Some(sign.colour),
+            ));
+        };
+        place(
+            sign.plate,
+            DVec3::from(sign.half),
+            y + sign.height_m,
+            sign.half[2],
+        );
+        // The string lights hang across the whole doorway, a little above the
+        // head -- the swag over the entrance in venues/0060.
+        if let Some(f) = sign.festoon {
+            let span = (op.width() * 0.5 + FESTOON_OVERHANG_M).min(w.length() * 0.5);
+            place(
+                f,
+                DVec3::new(span, FESTOON_HALF_H_M, FESTOON_HALF_D_M),
+                y + op.head + FESTOON_ABOVE_HEAD_M,
+                FESTOON_HALF_D_M,
+            );
         }
     }
 
@@ -631,12 +817,242 @@ impl Ctx<'_> {
                 continue;
             };
             let dh = base.mix_u64(di as u64);
-            if def.against_wall {
-                self.wall_furniture(out, room, y, def, kind, dh, blockers, &mut placed);
-            } else {
-                self.free_furniture(out, room, y, def, kind, dh, blockers, &mut placed);
+            match def.place {
+                Placement::Wall => {
+                    self.wall_furniture(out, room, y, def, kind, dh, blockers, &mut placed, 0.0)
+                }
+                Placement::Mounted { height_m } => self.wall_furniture(
+                    out,
+                    room,
+                    y,
+                    def,
+                    kind,
+                    dh,
+                    blockers,
+                    &mut placed,
+                    height_m,
+                ),
+                Placement::Free => {
+                    self.free_furniture(out, room, y, def, kind, dh, blockers, &mut placed)
+                }
+                Placement::Centre => {
+                    self.centre_furniture(out, room, y, def, kind, blockers, &mut placed)
+                }
+                Placement::Run => {
+                    self.run_furniture(out, room, y, def, kind, blockers, &mut placed)
+                }
             }
         }
+    }
+
+    /// **One piece at the room's centre** (wave VEN1a) — the stage on a dance
+    /// floor, the catwalk in a strip club.
+    ///
+    /// Not density-driven and not hashed: a room has one stage in the middle of
+    /// it, and "0.4 stages per 10 m², accepted on a hash" is a room that
+    /// sometimes has none. The size is authored in metres and **clamped to the
+    /// room**, so a 6 m catwalk in a 5 m room becomes a 4 m one rather than a
+    /// solid that walls the room off.
+    ///
+    /// It registers its own footprint in `placed`, so the stools and benches
+    /// that follow it in the same set keep out of it — which is how a bench
+    /// ends up at the stage's EDGE rather than on top of it.
+    #[allow(clippy::too_many_arguments)]
+    fn centre_furniture(
+        &self,
+        out: &mut GrammarOutput,
+        room: &Room,
+        y: f64,
+        def: &FurnitureDef,
+        kind: u32,
+        blockers: &Blockers,
+        placed: &mut Vec<(DVec2, f64)>,
+    ) {
+        let inner = room
+            .rect
+            .inset(self.arch.wall_thickness * 0.5 + FURNITURE_WALL_GAP);
+        if !inner.is_positive() {
+            return;
+        }
+        // The clamp leaves a walking margin on each side, or the "stage" is a
+        // floor and the room has no floor left to stand on.
+        let half = DVec3::new(
+            def.half[0].min(inner.size_x() * 0.5 - CENTRE_MARGIN_M),
+            def.half[1],
+            def.half[2].min(inner.size_z() * 0.5 - CENTRE_MARGIN_M),
+        );
+        if !(half.x > 0.0 && half.y > 0.0 && half.z > 0.0) {
+            return;
+        }
+        let p = inner.center();
+        // **A stage must keep out of a doorway too** (the audit this wave's own
+        // gate performed on it). `wall_furniture` and `free_furniture` have
+        // tested the blockers since P19.5 and the first cut of these two did
+        // not, so a 5 m catwalk in a small room stood squarely in the one door
+        // -- the building drew, the collider was solid, and `no_solid_ever_
+        // blocks_a_doorway` went red. A centred piece cannot be *moved* (it is
+        // centred), so the only honest answers are "smaller" and "not at all".
+        let mut half = half;
+        for _ in 0..CENTRE_SHRINK_TRIES {
+            if self.clear_of_blockers(p, DVec2::new(half.x, half.z), blockers) {
+                break;
+            }
+            half.x *= CENTRE_SHRINK;
+            half.z *= CENTRE_SHRINK;
+        }
+        if !self.clear_of_blockers(p, DVec2::new(half.x, half.z), blockers)
+            || !(half.x > 0.0 && half.z > 0.0)
+        {
+            return;
+        }
+        out.instances.push(self.instance_lit(
+            kind,
+            DVec3::new(p.x, y + half.y, p.y),
+            glam::DQuat::IDENTITY,
+            half,
+            def.emissive,
+        ));
+        out.colliders.push(PcgCollider {
+            center: DVec3::new(p.x, y + half.y, p.y),
+            half_extents: half,
+            rotation: glam::DQuat::IDENTITY,
+        });
+        // The clearance a follower must keep is the piece's own diagonal reach,
+        // not an authored number: a 3 m stage that declared 0.6 m of clearance
+        // would still get a stool standing on it.
+        placed.push((p, half.x.hypot(half.z)));
+    }
+
+    /// **One continuous run along the room's longest inset edge** (wave VEN1a) —
+    /// the bar counter.
+    ///
+    /// This is the clause the venue mandate names: a counter placed by
+    /// [`Placement::Wall`] is a row of discrete 1.2 m boxes with hashed gaps
+    /// between them, and a bar is one piece of joinery. The run's length is the
+    /// edge's, clamped by the authored maximum; its back is on the wall and its
+    /// `+Z` faces the room, exactly as a wall-stationed piece's does.
+    #[allow(clippy::too_many_arguments)]
+    fn run_furniture(
+        &self,
+        out: &mut GrammarOutput,
+        room: &Room,
+        y: f64,
+        def: &FurnitureDef,
+        kind: u32,
+        blockers: &Blockers,
+        placed: &mut Vec<(DVec2, f64)>,
+    ) {
+        let inner = room
+            .rect
+            .inset(self.arch.wall_thickness * 0.5 + FURNITURE_WALL_GAP);
+        if !inner.is_positive() {
+            return;
+        }
+        // **The counter takes the longest CLEAR STRETCH of the longest edge.**
+        //
+        // The first cut took the longest edge whole and refused it if anything
+        // fouled it, which is wrong twice: a run spans a wall, and every door
+        // swing reaches a metre out from the wall it is in, so a counter could
+        // never share a wall with a door. On a bar room with doors on three
+        // sides that produced **no counter at all** (measured: `Bar` at seed
+        // 512 built one bar room and nothing to drink at), and a bar beside its
+        // own door is what a bar looks like.
+        //
+        // So each edge is projected to an interval, the blockers that reach into
+        // the counter's own depth band are subtracted from it, and the longest
+        // surviving gap wins. Edges are tried longest first with a fixed index
+        // tie-break; the result is a pure function of the room's geometry and
+        // its openings, with no hash in it.
+        let mid = inner.center();
+        let edges = [
+            // (back-line point, inward normal, the edge's own length)
+            (DVec2::new(mid.x, inner.min.y), DVec2::Y, inner.size_x()),
+            (DVec2::new(mid.x, inner.max.y), DVec2::NEG_Y, inner.size_x()),
+            (DVec2::new(inner.min.x, mid.y), DVec2::X, inner.size_z()),
+            (DVec2::new(inner.max.x, mid.y), DVec2::NEG_X, inner.size_z()),
+        ];
+        let mut order: Vec<usize> = (0..4).collect();
+        order.sort_by(|a, b| edges[*b].2.total_cmp(&edges[*a].2).then(a.cmp(b)));
+        let mut chosen: Option<(DVec2, DVec2, DVec3)> = None;
+        for k in order {
+            let (back, normal, _) = edges[k];
+            let along_x = normal.x == 0.0;
+            let depth = def.half[2] * 2.0;
+            // The band the counter would occupy across the wall, and the span it
+            // could occupy along it.
+            let (lo, hi) = if along_x {
+                (inner.min.x, inner.max.x)
+            } else {
+                (inner.min.y, inner.max.y)
+            };
+            let (b0, b1) = {
+                let base = if along_x { back.y } else { back.x };
+                let far = base + if normal.x == 0.0 { normal.y } else { normal.x } * depth;
+                (base.min(far), base.max(far))
+            };
+            // Every blocker that reaches into that band, as a forbidden
+            // interval along the edge.
+            let mut cuts: Vec<(f64, f64)> = Vec::new();
+            for r in blockers.voids.iter().chain(blockers.swings.iter()) {
+                let (across0, across1, along0, along1) = if along_x {
+                    (r.min.y, r.max.y, r.min.x, r.max.x)
+                } else {
+                    (r.min.x, r.max.x, r.min.y, r.max.y)
+                };
+                if across1 > b0 && across0 < b1 {
+                    cuts.push((along0, along1));
+                }
+            }
+            cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // The longest gap between the cuts, inside the edge's own margins.
+            let (mut cursor, mut best) = (lo + RUN_END_MARGIN_M, (0.0f64, 0.0f64, 0.0f64));
+            let end = hi - RUN_END_MARGIN_M;
+            let consider = |a: f64, b: f64, best: &mut (f64, f64, f64)| {
+                if b - a > best.2 {
+                    *best = (a, b, b - a);
+                }
+            };
+            for (c0, c1) in cuts {
+                if c0 > cursor {
+                    consider(cursor, c0.min(end), &mut best);
+                }
+                cursor = cursor.max(c1);
+            }
+            if end > cursor {
+                consider(cursor, end, &mut best);
+            }
+            let half_len = (best.2 * 0.5).min(def.half[0]);
+            let half = DVec3::new(half_len, def.half[1], def.half[2]);
+            if !(half.x >= RUN_MIN_HALF_M && half.y > 0.0 && half.z > 0.0) {
+                continue;
+            }
+            let centre = (best.0 + best.1) * 0.5;
+            let back_at = if along_x {
+                DVec2::new(centre, back.y)
+            } else {
+                DVec2::new(back.x, centre)
+            };
+            let p = back_at + normal * half.z;
+            chosen = Some((p, normal, half));
+            break;
+        }
+        let Some((p, normal, half)) = chosen else {
+            return;
+        };
+        let rot = yaw_onto(DVec3::new(normal.x, 0.0, normal.y));
+        out.instances.push(self.instance_lit(
+            kind,
+            DVec3::new(p.x, y + half.y, p.y),
+            rot,
+            half,
+            def.emissive,
+        ));
+        out.colliders.push(PcgCollider {
+            center: DVec3::new(p.x, y + half.y, p.y),
+            half_extents: half,
+            rotation: rot,
+        });
+        placed.push((p, half.x.hypot(half.z)));
     }
 
     /// Station a wall-aligned piece along the room's inset perimeter, facing in.
@@ -651,6 +1067,12 @@ impl Ctx<'_> {
         hash: Hash64,
         blockers: &Blockers,
         placed: &mut Vec<(DVec2, f64)>,
+        // **Wave VEN1a**: the centre height above the walking surface, or `0.0`
+        // for a piece that STANDS on it (which is every `Placement::Wall`).
+        // `Placement::Mounted` is otherwise this function exactly -- a neon
+        // plate and a locker are both stationed along the perimeter facing in,
+        // and differ only in whether their feet are on the floor.
+        mount_m: f64,
     ) {
         let half = DVec3::from(def.half);
         let inner = room
@@ -718,14 +1140,20 @@ impl Ctx<'_> {
                 // height above it, so a desk was drawn with its middle at ankle
                 // level — invisible while the drawn thing was a unit cube and
                 // very visible the moment it is the size of the desk.
-                out.instances.push(self.instance(
+                let cy = if mount_m > 0.0 {
+                    y + mount_m
+                } else {
+                    y + half.y
+                };
+                out.instances.push(self.instance_lit(
                     kind,
-                    DVec3::new(p.x, y + half.y, p.y),
+                    DVec3::new(p.x, cy, p.y),
                     rot,
                     half,
+                    def.emissive,
                 ));
                 out.colliders.push(PcgCollider {
-                    center: DVec3::new(p.x, y + half.y, p.y),
+                    center: DVec3::new(p.x, cy, p.y),
                     half_extents: half,
                     rotation: rot,
                 });
@@ -778,11 +1206,12 @@ impl Ctx<'_> {
                     continue;
                 }
                 placed.push((p, def.clearance));
-                out.instances.push(self.instance(
+                out.instances.push(self.instance_lit(
                     kind,
                     DVec3::new(p.x, y + half.y, p.y),
                     glam::DQuat::IDENTITY,
                     half,
+                    def.emissive,
                 ));
                 out.colliders.push(PcgCollider {
                     center: DVec3::new(p.x, y + half.y, p.y),
@@ -791,6 +1220,25 @@ impl Ctx<'_> {
                 });
             }
         }
+    }
+
+    /// **Is this footprint out of every opening void and every door swing?**
+    /// (wave VEN1a) — the half of [`accept_spot`](Self::accept_spot) that the
+    /// two singular placements need and the other half of which they do not.
+    ///
+    /// A centred stage and a counter run are not density placements: they have
+    /// no room inset to be inside of (they derive their own) and no `placed`
+    /// list to be clear of (they go first). What they DO have to respect is the
+    /// enterability invariant, which is about voids and swings — so the test is
+    /// factored here rather than duplicated, which is how the first cut of them
+    /// came to skip it entirely and put a catwalk in a doorway.
+    fn clear_of_blockers(&self, p: DVec2, foot: DVec2, blockers: &Blockers) -> bool {
+        let box_ = Rect2 {
+            min: p - foot,
+            max: p + foot,
+        };
+        !blockers.voids.iter().any(|v| v.overlaps(&box_))
+            && !blockers.swings.iter().any(|s| s.overlaps(&box_))
     }
 
     /// The four placement rules, in one predicate: inside the room, **out of
@@ -849,6 +1297,297 @@ mod tests {
             seed,
             true,
         )
+    }
+
+    /// **THE VENUE ANCHOR ASSERTION** (wave VEN1a): a venue's largest ground
+    /// room is the type its archetype names, not one a hash chose.
+    ///
+    /// The sweep is over lot sizes and seeds *deliberately*: the defect this
+    /// closes is probabilistic. A weighted draw puts a dance floor in the big
+    /// room roughly a third of the time, so an arm that built one nightclub
+    /// would pass on a third of the seeds it could have been written with.
+    #[test]
+    fn a_venues_largest_ground_room_is_the_room_it_is_named_for() {
+        let mut checked = 0;
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            if arch.ground_anchors.is_empty() {
+                continue;
+            }
+            for seed in [1u64, 7, 44, 91, 203, 700] {
+                for (w, h) in [(34.0, 23.0), (26.0, 26.0), (44.0, 18.0)] {
+                    let out = build(
+                        &BuildingParams {
+                            floors: 2,
+                            ..BuildingParams::new(id, lot(w, h), 4.0, seed)
+                        },
+                        seed,
+                        true,
+                    );
+                    let mut ground: Vec<&Room> =
+                        out.plan.rooms.iter().filter(|r| r.floor == 0).collect();
+                    // Structural rooms are not products of the anchor rule, and
+                    // a single-storey plan's stair rectangle IS drawn -- so the
+                    // claim is about the rooms the anchor could have reached.
+                    ground.retain(|r| !matches!(r.kind, RoomType::Stair | RoomType::Corridor));
+                    ground.sort_by(|a, b| {
+                        b.rect
+                            .area()
+                            .total_cmp(&a.rect.area())
+                            .then(a.kind.name().cmp(b.kind.name()))
+                    });
+                    for (k, want) in arch.ground_anchors.iter().enumerate() {
+                        let Some(got) = ground.get(k) else { continue };
+                        assert_eq!(
+                            got.kind,
+                            *want,
+                            "{} seed {seed} lot {w}x{h}: ground room #{k} by area is {} \
+                             and the archetype says {}",
+                            arch.display,
+                            got.kind.name(),
+                            want.name()
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 50,
+            "only {checked} anchored rooms were examined -- the sweep found no venues"
+        );
+    }
+
+    /// **The anchor rule is INERT for the seven that predate it** (wave VEN1a).
+    ///
+    /// The arm above says the venues get what they ask for; this one says
+    /// nothing else moved. Without it, an anchor loop that ran on every
+    /// archetype and happened to pick the same kinds would look identical.
+    #[test]
+    fn an_archetype_with_no_anchors_keeps_its_weighted_draw() {
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            if !arch.ground_anchors.is_empty() {
+                continue;
+            }
+            let out = built(id, 3, 44);
+            for r in out.plan.rooms.iter().filter(|r| r.floor == 0) {
+                if matches!(r.kind, RoomType::Stair | RoomType::Corridor) {
+                    continue;
+                }
+                assert!(
+                    arch.ground_rooms.iter().any(|w| w.kind == r.kind),
+                    "{}: ground room {} is not in its own table",
+                    arch.display,
+                    r.kind.name()
+                );
+            }
+        }
+    }
+
+    /// **THE COUNTER IS ONE PIECE** (wave VEN1a) — the limitation the venue
+    /// mandate names, falling.
+    ///
+    /// A bar room holds exactly one `BarRun` instance, and it is *long*: the
+    /// claim is not "a counter exists" (a `Placement::Wall` counter would
+    /// satisfy that eleven times over) but "the counter is a single solid
+    /// several metres long", which is what a discrete-station placer cannot
+    /// produce at all.
+    #[test]
+    fn a_bar_rooms_counter_is_one_continuous_run() {
+        let mut seen = 0;
+        for id in [
+            ArchetypeId::Bar,
+            ArchetypeId::Nightclub,
+            ArchetypeId::StripClub,
+        ] {
+            let g = archetype(id).grammar().expect("parses");
+            let run_kind = g.module_index("BarRun").expect("declared");
+            for seed in [3u64, 44, 512] {
+                let out = build(
+                    &BuildingParams {
+                        floors: 1,
+                        ..BuildingParams::new(id, lot(34.0, 23.0), 4.0, seed)
+                    },
+                    seed,
+                    true,
+                );
+                let bars: Vec<&PcgInstance> = out
+                    .instances
+                    .iter()
+                    .filter(|i| i.kind_index == run_kind)
+                    .collect();
+                let rooms = out
+                    .plan
+                    .rooms
+                    .iter()
+                    .filter(|r| r.kind == RoomType::BarRoom)
+                    .count();
+                assert_eq!(
+                    bars.len(),
+                    rooms,
+                    "{:?} seed {seed}: {} counters for {rooms} bar room(s)",
+                    id,
+                    bars.len()
+                );
+                for b in &bars {
+                    let e = b.extent.expect("a counter is drawn at its own size");
+                    let long = f64::from(e[0]).max(f64::from(e[2]));
+                    assert!(
+                        long >= 2.0,
+                        "{:?} seed {seed}: a {} m half-length counter is a station, not a run",
+                        id,
+                        long
+                    );
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 0, "no bar room was built at all");
+    }
+
+    /// **A stage carries a pole, and the pole stands ON it** (wave VEN1a).
+    ///
+    /// Two centred pieces in one room is the case `centre_furniture`
+    /// deliberately does not reject: the pole's footprint is inside the stage's,
+    /// and a `placed`-clearance test would have thrown the pole away.
+    #[test]
+    fn a_stage_room_gets_its_platform_and_its_pole() {
+        for id in [ArchetypeId::Nightclub, ArchetypeId::StripClub] {
+            let g = archetype(id).grammar().expect("parses");
+            let pole = g.module_index("Pole").expect("declared");
+            let mut found = 0;
+            for seed in [3u64, 44, 512, 900] {
+                let out = build(
+                    &BuildingParams {
+                        floors: 1,
+                        ..BuildingParams::new(id, lot(34.0, 23.0), 4.0, seed)
+                    },
+                    seed,
+                    true,
+                );
+                let stages = out
+                    .plan
+                    .rooms
+                    .iter()
+                    .filter(|r| matches!(r.kind, RoomType::Stage | RoomType::DanceFloor))
+                    .count();
+                if stages == 0 {
+                    continue;
+                }
+                let poles: Vec<&PcgInstance> = out
+                    .instances
+                    .iter()
+                    .filter(|i| i.kind_index == pole)
+                    .collect();
+                assert_eq!(
+                    poles.len(),
+                    stages,
+                    "{:?} seed {seed}: {} poles for {stages} stage room(s)",
+                    id,
+                    poles.len()
+                );
+                // Chrome, and it says so on the instance rather than in a table
+                // somewhere -- this is the arm that says the surface reached
+                // the placement.
+                for p in &poles {
+                    assert_eq!(p.surface.metallic, 1.0, "{id:?}: a plastic pole");
+                    assert!(p.surface.roughness < 0.2);
+                }
+                found += 1;
+            }
+            assert!(found > 0, "{id:?}: no stage room in any seed");
+        }
+    }
+
+    /// **A venue emits, and the emission is coloured** (wave VEN1a).
+    ///
+    /// The claim the whole wave rests on: after assembly a venue's instance
+    /// list contains real, saturated, *authored* emission — not the warm-white
+    /// window glow every building has had since I8b.
+    #[test]
+    fn a_venue_carries_authored_coloured_emission() {
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            let out = built(id, 2, 44);
+            let emitters: Vec<&PcgInstance> =
+                out.instances.iter().filter(|i| i.surface.emits()).collect();
+            if !id.is_venue() {
+                assert!(
+                    emitters.is_empty(),
+                    "{}: a non-venue emits {} authored colours",
+                    arch.display,
+                    emitters.len()
+                );
+                continue;
+            }
+            assert!(
+                emitters.len() >= 4,
+                "{}: only {} authored emitters",
+                arch.display,
+                emitters.len()
+            );
+            // SATURATED: at least one emitter whose brightest channel is more
+            // than twice its dimmest. A warm white would satisfy "emits".
+            let coloured = emitters.iter().any(|i| {
+                let e = i.surface.emissive;
+                let hi = e[0].max(e[1]).max(e[2]);
+                let lo = e[0].min(e[1]).min(e[2]);
+                hi > 1.0 && hi > lo * 2.0
+            });
+            assert!(
+                coloured,
+                "{}: every emitter is near-white -- that is a lit window, not neon",
+                arch.display
+            );
+            // And exactly one kind of thing breathes.
+            assert!(
+                emitters.iter().any(|i| i.surface.pulse_hz > 0.0),
+                "{}: nothing in this venue pulses",
+                arch.display
+            );
+        }
+    }
+
+    /// **A venue's rooms are reachable and its people have somewhere to be**
+    /// (wave VEN1a).
+    ///
+    /// The interior nav graph is built ONLY for a building with slots
+    /// (`pass.rs`: "a building nobody lives or works in contributes no
+    /// interior"), so a venue whose rooms held no slot would have every room
+    /// orphaned and no route into it — silently, with no failure anywhere. This
+    /// is the arm that says the new room types earned their occupancy.
+    #[test]
+    fn a_venue_has_slots_so_its_interior_is_not_orphaned() {
+        for id in [
+            ArchetypeId::Bar,
+            ArchetypeId::Nightclub,
+            ArchetypeId::StripClub,
+        ] {
+            let out = built(id, 2, 44);
+            let slots = crate::building::society::slots_of(&out.plan, 0, 9);
+            assert!(
+                !slots.is_empty(),
+                "{id:?}: no slots, so `pass.rs` hands this building an EMPTY nav graph"
+            );
+            let nav = out.plan.interior_nav_in(9);
+            assert!(nav.len() > 1, "{id:?}: an interior of {} nodes", nav.len());
+            // Every slot stands on a node the graph actually holds.
+            for s in &slots {
+                assert!(
+                    nav.contains(s.node),
+                    "{id:?}: a slot in room {} stands on no node",
+                    s.room
+                );
+            }
+            // A venue is somewhere the town GOES, not only somewhere it works.
+            assert!(
+                slots
+                    .iter()
+                    .any(|s| s.role == crate::building::society::SlotRole::Errand),
+                "{id:?}: nowhere to visit"
+            );
+        }
     }
 
     /// **THE ENTERABILITY ASSERTION**, at unit scale: for every archetype, no
@@ -1282,21 +2021,52 @@ mod tests {
                 .count();
             assert!(windows > 0, "{}: no windows at all", arch.display);
             let decor = &out.instances[out.colliders.len()..];
+            // **The tail is panes THEN the street face** (wave VEN1a). A venue
+            // hangs a sign and a festoon over its entrance, and both are decor
+            // for the same reason a pane is: a sign you cannot walk through is
+            // a wall. `assemble_in` runs the floors before `street_face`, so
+            // the panes are a prefix and the signage is a suffix -- which is a
+            // stronger claim than the count this arm used to make alone.
+            let signage = arch
+                .entrance_sign
+                .map_or(0, |s| 1 + usize::from(s.festoon.is_some()));
             assert_eq!(
                 decor.len(),
-                windows,
-                "{}: {} panes for {windows} windows",
+                windows + signage,
+                "{}: {} decorations for {windows} windows and {signage} sign piece(s)",
                 arch.display,
                 decor.len()
             );
-            let pane_kind = archetype(arch.id)
-                .grammar()
-                .expect("parses")
+            let g = archetype(arch.id).grammar().expect("parses");
+            let pane_kind = g
                 .module_index(arch.pane)
                 .expect("the palette declares its pane");
-            for p in decor {
+            for p in &decor[..windows] {
                 assert_eq!(p.kind_index, pane_kind, "{}: not a pane", arch.display);
                 assert!(p.glow > 0.0, "{}: a pane that does not glow", arch.display);
+            }
+            if let Some(sign) = arch.entrance_sign {
+                let plate = g
+                    .module_index(sign.plate)
+                    .expect("the palette declares its sign plate");
+                let tail = &decor[windows..];
+                assert_eq!(
+                    tail[0].kind_index, plate,
+                    "{}: the street face's first piece is not the plate",
+                    arch.display
+                );
+                // The plate burns the palette's OWN colour, not the family's --
+                // this is the arm that says `FurnitureDef`-style overriding
+                // reached the street.
+                assert_eq!(
+                    tail[0].surface.emissive, sign.colour,
+                    "{}: the street sign did not take its authored colour",
+                    arch.display
+                );
+                if let Some(f) = sign.festoon {
+                    let fk = g.module_index(f).expect("the palette declares its festoon");
+                    assert_eq!(tail[1].kind_index, fk, "{}: no festoon", arch.display);
+                }
             }
             // …and nothing in the aligned prefix glows, so "the windows light
             // up" is a statement about windows.

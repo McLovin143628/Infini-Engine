@@ -372,6 +372,33 @@ pub fn plan_building_in(params: &BuildingParams, frame: crate::building::LotFram
                     .map(|r| (r, None)),
             );
         }
+        // **THE DETERMINISTIC ANCHORS** (wave VEN1a). On the ground floor, the
+        // archetype's `ground_anchors` claim the largest un-forced rooms in
+        // descending area order *before* the weighted draw runs, so a venue's
+        // main room IS its dance floor rather than whichever room a hash
+        // happened to pick. Ties break on the room's index in the plan's own
+        // fixed spatial order, so the answer holds no hash at all.
+        //
+        // `f64::total_cmp` rather than `partial_cmp`: a degenerate rect's area
+        // can be a NaN, and a sort that panics inside a level load is worse than
+        // one that puts the NaN somewhere definite.
+        //
+        // Empty for the seven archetypes that predate the venues, so this loop
+        // does nothing at all and their plans are byte-identical.
+        if floor == 0 && !arch.ground_anchors.is_empty() {
+            let mut order: Vec<usize> =
+                (0..rects.len()).filter(|k| rects[*k].1.is_none()).collect();
+            order.sort_by(|a, b| {
+                rects[*b]
+                    .0
+                    .area()
+                    .total_cmp(&rects[*a].0.area())
+                    .then(a.cmp(b))
+            });
+            for (anchor, k) in arch.ground_anchors.iter().zip(order) {
+                rects[k].1 = Some(*anchor);
+            }
+        }
         for (i, (rect, forced)) in rects.iter().enumerate() {
             plan.rooms.push(Room {
                 floor,

@@ -18,11 +18,17 @@
 //! | [`RoomType::Workshop`] | [`SlotRole::Work`] | one per [`WORKSHOP_M2_PER_WORKER`] m² | a bench is wider than a desk |
 //! | [`RoomType::Retail`] | [`SlotRole::Work`] | one per [`RETAIL_M2_PER_WORKER`] m² | a shop floor is mostly for its customers |
 //! | [`RoomType::Retail`] | [`SlotRole::Errand`] | **one a room** | somewhere to go that is neither home nor work |
+//! | [`RoomType::BarRoom`] | [`SlotRole::Work`] | one per [`BAR_M2_PER_KEEPER`] m² | a bar room is mostly in front of the counter |
+//! | [`RoomType::Stage`] | [`SlotRole::Work`] | **one a room** | one act on a stage, however big it is |
+//! | [`RoomType::BarRoom`], [`RoomType::DanceFloor`] | [`SlotRole::Errand`] | **one a room** | a venue is somewhere the town goes |
 //!
-//! The other eight room types hold nobody. A corridor, a stair, a lobby, a
-//! service riser, a living room, a kitchen, a bath and a store room are all
-//! places a person passes through rather than places a person *is* at an hour of
-//! the day, and this wave's schedule is about hours.
+//! The other nine room types hold nobody. A corridor, a stair, a lobby, a
+//! service riser, a living room, a kitchen, a bath, a store room and a dance
+//! floor's *work* count are all places a person passes through rather than
+//! places a person *is* at an hour of the day, and this wave's schedule is
+//! about hours. (A dance floor is still an errand destination — nobody works
+//! one and everybody visits one, which is the case the two arms of
+//! [`slots_of`] disagreeing would lose entirely.)
 //!
 //! # What the table means per archetype, and why it is not written per archetype
 //!
@@ -104,6 +110,14 @@ pub const WORKSHOP_M2_PER_WORKER: f64 = 20.0;
 /// room is standing room for the people who do **not** work there. Those arrive
 /// as [`SlotRole::Errand`] visitors instead.
 pub const RETAIL_M2_PER_WORKER: f64 = 30.0;
+
+/// Square metres of bar-room floor a keeper takes (wave VEN1a).
+///
+/// The most generous of the four, and deliberately: the floor area of a bar
+/// room is overwhelmingly *in front of* the counter, and one keeper serves a
+/// long run of it. At `RETAIL_M2_PER_WORKER` a 120 m2 bar would be staffed by
+/// four, which is a shift and not a bar.
+pub const BAR_M2_PER_KEEPER: f64 = 45.0;
 
 /// The most people one room may hold, whatever its area.
 ///
@@ -193,6 +207,19 @@ pub fn occupancy(kind: RoomType, area_m2: f64) -> (SlotRole, usize) {
         RoomType::Office => (SlotRole::Work, per(OFFICE_M2_PER_WORKER)),
         RoomType::Workshop => (SlotRole::Work, per(WORKSHOP_M2_PER_WORKER)),
         RoomType::Retail => (SlotRole::Work, per(RETAIL_M2_PER_WORKER)),
+        // **A bar is staffed like a shop counter, not like a shop** (wave
+        // VEN1a): the floor area behind a bar is small and one keeper serves a
+        // long run of it, so the metres-per-worker is generous.
+        RoomType::BarRoom => (SlotRole::Work, per(BAR_M2_PER_KEEPER)),
+        // **One act on a stage, however big it is** — the same argument that
+        // makes a shop one errand however many people staff it. A 40 m2 stage
+        // and a 12 m2 one both hold a routine, and a per-area count would put
+        // four dancers on one pole.
+        RoomType::Stage => (SlotRole::Work, 1),
+        // A dance floor is nobody's WORKPLACE. It is an errand destination and
+        // gets its visit slot from `slots_of`, which is why it appears in the
+        // zero arm and is still somewhere a person can be sent.
+        RoomType::DanceFloor => (SlotRole::Home, 0),
         RoomType::Corridor
         | RoomType::Stair
         | RoomType::Lobby
@@ -218,7 +245,7 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
     let mut out = Vec::new();
     for (i, room) in plan.rooms.iter().enumerate() {
         let (role, n) = occupancy(room.kind, room.rect.area());
-        if n == 0 && room.kind != RoomType::Retail {
+        if n == 0 && !room.kind.is_errand_destination() {
             continue;
         }
         let c = plan.frame.to_world(room.rect.center());
@@ -241,7 +268,13 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
         // **A shop is one errand however many people staff it.** The visit slot
         // is emitted after the workers so a room's slots stay in role order, and
         // it takes the next `index` so no two slots of one room collide.
-        if room.kind == RoomType::Retail {
+        //
+        // Wave VEN1a widened the test from `== Retail` to the rule
+        // `RoomType::is_errand_destination`, so a bar and a dance floor are
+        // places the town already walks to -- and a venue therefore has slots,
+        // which is what keeps `pass.rs` from handing it an EMPTY interior nav
+        // graph and orphaning every room in it.
+        if room.kind.is_errand_destination() {
             out.push(PcgSlot {
                 role: SlotRole::Errand,
                 at,

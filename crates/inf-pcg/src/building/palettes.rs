@@ -61,12 +61,24 @@ pub enum ArchetypeId {
     Estate,
     Hotel,
     Shop,
+    /// **A corner bar** (wave VEN1a).
+    Bar,
+    /// **A nightclub** (wave VEN1a).
+    Nightclub,
+    /// **A strip club** (wave VEN1a).
+    StripClub,
 }
 
 impl ArchetypeId {
     /// Every archetype, in the canonical order the node's choice param and the
     /// gate both use.
-    pub const ALL: [ArchetypeId; 7] = [
+    /// **Append-only**, and the venues are appended for that reason. The
+    /// wire form of an archetype is its NAME (`graph.rs` writes
+    /// `P::Enum(a.name())` and parses it back), so reordering this array is not
+    /// observable in a committed document -- but the gate, the zone library and
+    /// three ledgers all read it in order, and a diff that moves seven rows to
+    /// insert three is a diff nobody can read.
+    pub const ALL: [ArchetypeId; 10] = [
         ArchetypeId::Office,
         ArchetypeId::Apartment,
         ArchetypeId::Industrial,
@@ -74,6 +86,9 @@ impl ArchetypeId {
         ArchetypeId::Estate,
         ArchetypeId::Hotel,
         ArchetypeId::Shop,
+        ArchetypeId::Bar,
+        ArchetypeId::Nightclub,
+        ArchetypeId::StripClub,
     ];
 
     /// The stable identifier used in the node param, diagnostics and traces.
@@ -86,7 +101,24 @@ impl ArchetypeId {
             ArchetypeId::Estate => "Estate",
             ArchetypeId::Hotel => "Hotel",
             ArchetypeId::Shop => "Shop",
+            ArchetypeId::Bar => "Bar",
+            ArchetypeId::Nightclub => "Nightclub",
+            ArchetypeId::StripClub => "StripClub",
         }
+    }
+
+    /// **Whether this archetype is a VENUE** (wave VEN1a) — a place the town
+    /// goes to at night rather than a place it lives or works.
+    ///
+    /// One door, because four readers ask it: the settlement's own placement
+    /// rule, the furniture table, the gate's arms, and the light rig. A fifth
+    /// spelling of `matches!(a, Bar | Nightclub | StripClub)` is one that
+    /// forgets `StripClub` the day a fourth venue is added.
+    pub fn is_venue(self) -> bool {
+        matches!(
+            self,
+            ArchetypeId::Bar | ArchetypeId::Nightclub | ArchetypeId::StripClub
+        )
     }
 
     /// Parse a [`name`](Self::name). Unknown text answers `None` so the lowerer
@@ -104,23 +136,112 @@ pub struct RoomWeight {
     pub weight: f64,
 }
 
+/// **How a piece of furniture finds its place in a room** (wave VEN1a).
+///
+/// Before this wave the answer was a `bool` — stationed along the perimeter, or
+/// scattered on a grid — and both are *density* placements: they ask "how many
+/// of these per ten square metres" and hash each candidate. That is right for
+/// desks and beds and completely wrong for the three things a venue is made of.
+///
+/// A dance floor has **one** stage in the middle of it, not a hashed 0.4 of one
+/// per 10 m²; a bar has **one** counter that RUNS the length of a wall, not
+/// eleven discrete 1.2 m boxes with gaps between them (the limitation the venue
+/// mandate names); and a neon sign is **on** a wall at head height, not standing
+/// on the floor against it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Placement {
+    /// Stationed along the room's inset perimeter, facing in. Density-driven.
+    Wall,
+    /// On a jittered grid over the room's interior. Density-driven.
+    Free,
+    /// **One** piece at the room's centre, at its authored size clamped to the
+    /// room. `per_10m2` and `clearance` are not read.
+    Centre,
+    /// **One continuous run** along the room's longest inset edge, its back to
+    /// that wall. `half[0]` is the run's authored *maximum* half-length and the
+    /// room clamps it down; `half[1]`/`half[2]` are the section.
+    /// `per_10m2` and `clearance` are not read.
+    Run,
+    /// Stationed along the room's inset perimeter like [`Wall`](Self::Wall), but
+    /// **mounted** with its centre `height_m` above the walking surface instead
+    /// of standing on it. Density-driven.
+    Mounted {
+        /// Centre height above the room's walking surface, metres.
+        height_m: f64,
+    },
+}
+
+/// **A venue's street face** (wave VEN1a) — the signage the assembler hangs
+/// over the building's one exterior door.
+///
+/// # Why this is not a grammar rule
+///
+/// A wall run's grammar places modules *in* the wall: every element of an
+/// alternative consumes span, and two elements in sequence stand side by side
+/// rather than one over the other. So a `Bay -> Clad | Neon` would put a
+/// 1 m-tall sign in a 4 m-tall wall and leave the rest of that bay a **hole** —
+/// a stretch of façade with no full-height solid, which is the definition of a
+/// doorway in this engine. The sign has to be hung on the wall, not built into
+/// it, and that is an assembler placement (exactly like the glazed pane, which
+/// is the other thing that hangs rather than builds).
+///
+/// # Why over the ENTRANCE
+///
+/// `BuildingPlan::entrance` is already the one wall the plan calls the street
+/// face — chosen as the longest exterior run on the ground floor whose room is
+/// not the stair. Putting the sign anywhere else would need a second answer to
+/// "which side does this building face", and two answers to that question is
+/// how a building comes to have its door on one street and its name on another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntranceSign {
+    /// The plate module — declared by the palette, and classified by
+    /// [`shape_of`](crate::building::modules::shape_of) as
+    /// [`ModuleShape::Sign`](crate::building::modules::ModuleShape::Sign).
+    pub plate: &'static str,
+    /// The plate's linear emissive colour. The family states the brightness a
+    /// sign burns at; this states the hue, because a strip club's neon is not a
+    /// cocktail bar's.
+    pub colour: [f32; 3],
+    /// Plate half-extents in metres: `(along the wall run, up, out from the
+    /// wall face)`.
+    pub half: [f64; 3],
+    /// The plate's centre height above the ground-floor walking surface,
+    /// metres.
+    pub height_m: f64,
+    /// A string-light module run along the same wall over the door, or `None`.
+    pub festoon: Option<&'static str>,
+}
+
 /// One piece of furniture a room type may hold.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FurnitureDef {
     /// The palette module placed — must be declared by the archetype's grammar
-    /// text, which a unit test checks for all seven.
+    /// text, which a unit test checks for all ten.
     pub module: &'static str,
     /// Half-extents in metres `(x, y, z)`, in the **piece's own frame**: `+Z` is
     /// the direction it faces (away from the wall, for a wall-aligned piece).
     pub half: [f64; 3],
-    /// Wall-aligned pieces are stationed along the room's inset perimeter;
-    /// free-standing pieces go on a jittered grid in the room's interior.
-    pub against_wall: bool,
+    /// How the piece finds its place — see [`Placement`].
+    pub place: Placement,
     /// Pieces per ten square metres of room floor — the density knob, so a big
     /// room gets proportionally more without a per-room count being authored.
+    /// Read by [`Placement::Wall`], [`Placement::Free`] and
+    /// [`Placement::Mounted`] only.
     pub per_10m2: f64,
-    /// Minimum centre-to-centre distance to any other piece, in metres.
+    /// Minimum centre-to-centre distance to any other piece, in metres. Read by
+    /// the density placements only.
     pub clearance: f64,
+    /// **The emissive colour this piece overrides its family's with** (wave
+    /// VEN1a), linear rgb — or `None` to keep what
+    /// [`ModuleShape::surface`](crate::building::modules::ModuleShape::surface)
+    /// says.
+    ///
+    /// The split is deliberate: a family states the *brightness* a thing of its
+    /// kind emits at, and a palette states the *hue*, because a strip club's
+    /// neon is not a cocktail bar's and both are `Neon`. Overriding a
+    /// non-emitting family's zero would make it emit, which is why this is an
+    /// `Option` and not a default of black.
+    pub emissive: Option<[f32; 3]>,
 }
 
 /// A complete building palette: the grammar, the plan parameters, the room table
@@ -213,6 +334,35 @@ pub struct BuildingArchetype {
     /// Per-room-type furniture sets. A room type absent from this table is
     /// simply unfurnished.
     pub furniture: &'static [(RoomType, &'static [FurnitureDef])],
+    /// **The room types the LARGEST ground-floor rooms are**, in descending
+    /// area order (wave VEN1a). Empty for every archetype that draws its ground
+    /// floor from [`ground_rooms`](Self::ground_rooms) alone.
+    ///
+    /// # Why a venue could not be expressed without this
+    ///
+    /// A room's kind is a **weighted draw** — `partition::room_type` hashes the
+    /// building, the floor and the room index against the archetype's table. For
+    /// a house that is exactly right: which of three upstairs rooms is the bath
+    /// is nobody's business. For a nightclub it is a catastrophe, because a
+    /// nightclub whose dance floor came out in the 8 m² room beside the stair
+    /// and whose bar took the 90 m² hall is not a nightclub. **A venue's main
+    /// room IS the dance floor** — that is a fact about the building, not a
+    /// probability.
+    ///
+    /// So the anchors are assigned by AREA, descending, before the draw runs,
+    /// and the remaining rooms fall to the table as they always did. Ties break
+    /// on the room's index in the plan's own fixed spatial order, so the answer
+    /// is a pure function of the geometry with no hash in it at all.
+    ///
+    /// The list may be shorter than the floor: a Bar names one anchor and lets
+    /// its back rooms draw. It may also be LONGER than the floor has rooms, in
+    /// which case the tail is simply not placed — a lot too small to hold a
+    /// stage does not get one.
+    pub ground_anchors: &'static [RoomType],
+    /// **The signage on this archetype's street face** (wave VEN1a), or `None`
+    /// for a building that does not announce itself — which is the seven that
+    /// predate the venues.
+    pub entrance_sign: Option<EntranceSign>,
 }
 
 impl BuildingArchetype {
@@ -262,11 +412,14 @@ pub fn archetype(id: ArchetypeId) -> &'static BuildingArchetype {
         ArchetypeId::Estate => &ESTATE,
         ArchetypeId::Hotel => &HOTEL,
         ArchetypeId::Shop => &SHOP,
+        ArchetypeId::Bar => &BAR,
+        ArchetypeId::Nightclub => &NIGHTCLUB,
+        ArchetypeId::StripClub => &STRIP_CLUB,
     }
 }
 
-/// All seven archetypes, in [`ArchetypeId::ALL`] order.
-pub fn archetypes() -> [&'static BuildingArchetype; 7] {
+/// All ten archetypes, in [`ArchetypeId::ALL`] order.
+pub fn archetypes() -> [&'static BuildingArchetype; 10] {
     ArchetypeId::ALL.map(archetype)
 }
 
@@ -369,16 +522,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Desk",
                     half: [0.7, 0.37, 0.35],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 1.4,
                     clearance: 1.6,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Cabinet",
                     half: [0.5, 0.9, 0.25],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.6,
                     clearance: 1.2,
+                    emissive: None,
                 },
             ],
         ),
@@ -388,16 +543,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Table",
                     half: [1.2, 0.37, 0.6],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.5,
                     clearance: 2.6,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Cabinet",
                     half: [0.5, 0.9, 0.25],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.4,
                     clearance: 1.4,
+                    emissive: None,
                 },
             ],
         ),
@@ -407,16 +564,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Counter",
                     half: [1.2, 0.55, 0.35],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.3,
                     clearance: 3.0,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Plant",
                     half: [0.3, 0.6, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.5,
                     clearance: 2.0,
+                    emissive: None,
                 },
             ],
         ),
@@ -425,12 +584,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Locker",
                 half: [0.4, 0.9, 0.3],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.2,
                 clearance: 0.9,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const APARTMENT: BuildingArchetype = BuildingArchetype {
@@ -522,16 +684,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bed",
                     half: [0.9, 0.28, 1.0],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 1.0,
                     clearance: 2.4,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Wardrobe",
                     half: [0.6, 1.05, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.7,
                     clearance: 1.6,
+                    emissive: None,
                 },
             ],
         ),
@@ -541,16 +705,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Sofa",
                     half: [0.95, 0.4, 0.45],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.7,
                     clearance: 2.2,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Table",
                     half: [0.7, 0.37, 0.45],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.5,
                     clearance: 1.8,
+                    emissive: None,
                 },
             ],
         ),
@@ -559,9 +725,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Units",
                 half: [0.6, 0.45, 0.3],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.8,
                 clearance: 1.3,
+                emissive: None,
             }],
         ),
         (
@@ -569,9 +736,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Basin",
                 half: [0.3, 0.42, 0.25],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.2,
                 clearance: 1.0,
+                emissive: None,
             }],
         ),
         (
@@ -579,12 +747,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Shelf",
                 half: [0.5, 0.9, 0.25],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.4,
                 clearance: 1.1,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const INDUSTRIAL: BuildingArchetype = BuildingArchetype {
@@ -665,16 +836,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Rack",
                     half: [1.3, 1.8, 0.6],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.35,
                     clearance: 3.4,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Crate",
                     half: [0.6, 0.6, 0.6],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.4,
                     clearance: 1.6,
+                    emissive: None,
                 },
             ],
         ),
@@ -684,16 +857,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bench",
                     half: [1.0, 0.45, 0.4],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.5,
                     clearance: 2.6,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Crate",
                     half: [0.6, 0.6, 0.6],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.25,
                     clearance: 2.2,
+                    emissive: None,
                 },
             ],
         ),
@@ -702,12 +877,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Locker",
                 half: [0.4, 0.9, 0.3],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.0,
                 clearance: 1.0,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const HOUSE: BuildingArchetype = BuildingArchetype {
@@ -793,16 +971,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bed",
                     half: [0.75, 0.28, 1.0],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 1.0,
                     clearance: 2.2,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Wardrobe",
                     half: [0.55, 1.0, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.7,
                     clearance: 1.5,
+                    emissive: None,
                 },
             ],
         ),
@@ -812,16 +992,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Sofa",
                     half: [0.9, 0.4, 0.45],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.8,
                     clearance: 2.0,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Table",
                     half: [0.75, 0.37, 0.5],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.5,
                     clearance: 1.7,
+                    emissive: None,
                 },
             ],
         ),
@@ -830,9 +1012,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Units",
                 half: [0.6, 0.45, 0.3],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.8,
                 clearance: 1.3,
+                emissive: None,
             }],
         ),
         (
@@ -840,9 +1023,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Basin",
                 half: [0.3, 0.42, 0.25],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.2,
                 clearance: 1.0,
+                emissive: None,
             }],
         ),
         (
@@ -850,12 +1034,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Shelf",
                 half: [0.45, 0.9, 0.22],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.2,
                 clearance: 1.0,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const ESTATE: BuildingArchetype = BuildingArchetype {
@@ -944,16 +1131,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bed",
                     half: [0.95, 0.3, 1.05],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.7,
                     clearance: 2.8,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Wardrobe",
                     half: [0.7, 1.1, 0.32],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.5,
                     clearance: 1.9,
+                    emissive: None,
                 },
             ],
         ),
@@ -963,16 +1152,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bed",
                     half: [0.95, 0.3, 1.05],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.6,
                     clearance: 2.8,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Shelf",
                     half: [0.6, 1.1, 0.28],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.5,
                     clearance: 1.7,
+                    emissive: None,
                 },
             ],
         ),
@@ -982,16 +1173,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Sofa",
                     half: [1.1, 0.42, 0.5],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.6,
                     clearance: 2.6,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Table",
                     half: [1.4, 0.38, 0.7],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.35,
                     clearance: 3.0,
+                    emissive: None,
                 },
             ],
         ),
@@ -1000,9 +1193,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Plant",
                 half: [0.35, 0.7, 0.35],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 0.6,
                 clearance: 2.2,
+                emissive: None,
             }],
         ),
         (
@@ -1010,9 +1204,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Units",
                 half: [0.7, 0.45, 0.32],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.6,
                 clearance: 1.5,
+                emissive: None,
             }],
         ),
         (
@@ -1020,12 +1215,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Basin",
                 half: [0.35, 0.42, 0.27],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.0,
                 clearance: 1.2,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const HOTEL: BuildingArchetype = BuildingArchetype {
@@ -1109,23 +1307,26 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Bed",
                     half: [0.85, 0.28, 1.0],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 1.0,
                     clearance: 2.4,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Wardrobe",
                     half: [0.55, 1.0, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.6,
                     clearance: 1.5,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Desk",
                     half: [0.6, 0.37, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.6,
                     clearance: 1.4,
+                    emissive: None,
                 },
             ],
         ),
@@ -1135,23 +1336,26 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Counter",
                     half: [1.4, 0.55, 0.35],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.25,
                     clearance: 3.4,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Sofa",
                     half: [0.9, 0.4, 0.45],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.4,
                     clearance: 2.4,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Plant",
                     half: [0.3, 0.65, 0.3],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.5,
                     clearance: 2.0,
+                    emissive: None,
                 },
             ],
         ),
@@ -1160,12 +1364,15 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Basin",
                 half: [0.3, 0.42, 0.25],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.0,
                 clearance: 1.1,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
 };
 
 const SHOP: BuildingArchetype = BuildingArchetype {
@@ -1246,16 +1453,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Shelf",
                     half: [1.0, 1.0, 0.35],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.6,
                     clearance: 2.6,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Counter",
                     half: [1.1, 0.55, 0.35],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.3,
                     clearance: 3.0,
+                    emissive: None,
                 },
             ],
         ),
@@ -1265,16 +1474,18 @@ Inner  -> Partition+
                 FurnitureDef {
                     module: "Rack",
                     half: [0.9, 1.5, 0.45],
-                    against_wall: true,
+                    place: Placement::Wall,
                     per_10m2: 0.8,
                     clearance: 2.0,
+                    emissive: None,
                 },
                 FurnitureDef {
                     module: "Crate",
                     half: [0.5, 0.5, 0.5],
-                    against_wall: false,
+                    place: Placement::Free,
                     per_10m2: 0.5,
                     clearance: 1.6,
+                    emissive: None,
                 },
             ],
         ),
@@ -1283,9 +1494,10 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Counter",
                 half: [1.1, 0.55, 0.35],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 0.6,
                 clearance: 1.8,
+                emissive: None,
             }],
         ),
         (
@@ -1293,12 +1505,574 @@ Inner  -> Partition+
             &[FurnitureDef {
                 module: "Crate",
                 half: [0.5, 0.5, 0.5],
-                against_wall: true,
+                place: Placement::Wall,
                 per_10m2: 1.0,
                 clearance: 1.2,
+                emissive: None,
             }],
         ),
     ],
+    ground_anchors: &[],
+    entrance_sign: None,
+};
+
+/// **What is in a venue's rooms** (wave VEN1a) — shared by all three, because
+/// what a bar room contains is a fact about bar rooms and not about which kind
+/// of venue owns one.
+///
+/// # The ruling: three archetypes, one furniture table
+///
+/// The wave asked whether the three should be one archetype with a variant
+/// table. They are three, and the furniture table is the reason the answer is
+/// not obvious: *rooms* are what differ, not *fittings*. A dance floor holds a
+/// stage and string lights whether it is in a nightclub or a strip club; what
+/// makes the strip club a strip club is that its LARGEST room is a stage room
+/// (`ground_anchors`), that its stage is a long catwalk rather than a square
+/// riser, and that its sign burns red.
+///
+/// What forced three rather than one:
+///
+/// * `zone_table` picks an `ArchetypeId`, and the zone graph writes
+///   `P::Enum(a.name())` into a committed `.inf_pcg`. A variant would need a
+///   second authored parameter on `building.archetype`, which is a **wire
+///   change in every zone document** in the tree.
+/// * `zone_lots` gives each archetype its own frontage and depth. A bar is a
+///   high-street shopfront at 18 m of frontage; a nightclub is a 30 m box.
+///   One archetype would have to carry three lot rules under one id.
+/// * `floors`, `floor_height`, `max_room_area` and the whole window band differ,
+///   and every one of them is a *plan* input read before any variant could be
+///   consulted.
+///
+/// What three cost: three `&'static` tables of plan numbers. What one would
+/// have cost: a wire field, a lot-rule fan-out and a plan-time variant lookup.
+/// The tables are cheaper and they are readable as one thing each, which is the
+/// argument this module's own header already makes about writing the rule text
+/// out per palette.
+const VENUE_FURNITURE: &[(RoomType, &[FurnitureDef])] = &[
+    (
+        RoomType::BarRoom,
+        &[
+            // **THE COUNTER, AS ONE PIECE.** The limitation the venue mandate
+            // names, falling: `Placement::Wall` would station eleven discrete
+            // 1.2 m boxes along this wall with hashed gaps between them, and a
+            // bar is one piece of joinery.
+            FurnitureDef {
+                module: "BarRun",
+                half: [4.5, 0.55, 0.34],
+                place: Placement::Run,
+                per_10m2: 0.0,
+                clearance: 0.0,
+                emissive: None,
+            },
+            // Stools along the front of it. They keep out of the counter's own
+            // footprint because `run_furniture` registered it in `placed`.
+            FurnitureDef {
+                module: "Stool",
+                half: [0.19, 0.4, 0.19],
+                place: Placement::Free,
+                per_10m2: 0.8,
+                clearance: 0.75,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Table",
+                half: [0.45, 0.37, 0.45],
+                place: Placement::Free,
+                per_10m2: 0.35,
+                clearance: 1.5,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Shelf",
+                half: [0.4, 0.9, 0.24],
+                place: Placement::Wall,
+                per_10m2: 0.3,
+                clearance: 1.0,
+                emissive: None,
+            },
+            // The televisions over the back bar -- `venues/0028`'s wall of
+            // small bright rectangles.
+            FurnitureDef {
+                module: "Screen",
+                half: [0.46, 0.28, 0.05],
+                place: Placement::Mounted { height_m: 2.35 },
+                per_10m2: 0.5,
+                clearance: 1.8,
+                emissive: None,
+            },
+            // A cool blue sign over the bar. The family says how bright; this
+            // says which colour.
+            FurnitureDef {
+                module: "Neon",
+                half: [0.55, 0.3, 0.06],
+                place: Placement::Mounted { height_m: 2.7 },
+                per_10m2: 0.22,
+                clearance: 3.2,
+                emissive: Some([0.5, 1.6, 3.4]),
+            },
+            // The string lights along the skirting -- the constellation of tiny
+            // blue and white dots in every reference frame.
+            FurnitureDef {
+                module: "Festoon",
+                half: [0.9, 0.12, 0.08],
+                place: Placement::Mounted { height_m: 0.55 },
+                per_10m2: 1.1,
+                clearance: 1.9,
+                emissive: None,
+            },
+        ],
+    ),
+    (
+        RoomType::DanceFloor,
+        &[
+            // **ONE stage, in the middle.** Not a density draw: a dance floor
+            // that sometimes has no stage is not a dance floor.
+            FurnitureDef {
+                module: "Stage",
+                half: [2.4, 0.4, 1.8],
+                place: Placement::Centre,
+                per_10m2: 0.0,
+                clearance: 0.0,
+                emissive: None,
+            },
+            // The pole stands ON the stage, so it is placed centre too and its
+            // own footprint is inside the stage's -- which is why
+            // `centre_furniture` does not consult `placed` before it places.
+            FurnitureDef {
+                module: "Pole",
+                half: [0.04, 1.6, 0.04],
+                place: Placement::Centre,
+                per_10m2: 0.0,
+                clearance: 0.0,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Bench",
+                half: [0.9, 0.24, 0.24],
+                place: Placement::Wall,
+                per_10m2: 0.7,
+                clearance: 2.2,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Neon",
+                half: [0.7, 0.36, 0.07],
+                place: Placement::Mounted { height_m: 3.0 },
+                per_10m2: 0.3,
+                clearance: 3.5,
+                emissive: Some([3.2, 0.4, 2.8]),
+            },
+            FurnitureDef {
+                module: "Festoon",
+                half: [1.0, 0.12, 0.08],
+                place: Placement::Mounted { height_m: 3.5 },
+                per_10m2: 1.3,
+                clearance: 1.7,
+                emissive: None,
+            },
+        ],
+    ),
+    (
+        RoomType::Stage,
+        &[
+            // A CATWALK: long and narrow where the dance floor's stage is
+            // square. Same family, same placement rule, different extent --
+            // which is exactly the claim `shape_of` makes by giving `Stage` and
+            // `Catwalk` one family.
+            FurnitureDef {
+                module: "Catwalk",
+                half: [3.2, 0.4, 1.3],
+                place: Placement::Centre,
+                per_10m2: 0.0,
+                clearance: 0.0,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Pole",
+                half: [0.04, 1.7, 0.04],
+                place: Placement::Centre,
+                per_10m2: 0.0,
+                clearance: 0.0,
+                emissive: None,
+            },
+            // The plank benches at the catwalk's edge -- `venues/0036`.
+            FurnitureDef {
+                module: "Bench",
+                half: [1.1, 0.24, 0.26],
+                place: Placement::Wall,
+                per_10m2: 1.0,
+                clearance: 2.4,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Neon",
+                half: [0.65, 0.34, 0.07],
+                place: Placement::Mounted { height_m: 2.9 },
+                per_10m2: 0.32,
+                clearance: 3.4,
+                emissive: Some([3.5, 0.3, 0.55]),
+            },
+            FurnitureDef {
+                module: "Festoon",
+                half: [1.0, 0.12, 0.08],
+                place: Placement::Mounted { height_m: 0.5 },
+                per_10m2: 1.4,
+                clearance: 1.6,
+                emissive: None,
+            },
+        ],
+    ),
+    (
+        RoomType::Storage,
+        &[
+            FurnitureDef {
+                module: "Crate",
+                half: [0.45, 0.4, 0.4],
+                place: Placement::Free,
+                per_10m2: 1.0,
+                clearance: 1.1,
+                emissive: None,
+            },
+            FurnitureDef {
+                module: "Shelf",
+                half: [0.4, 0.9, 0.24],
+                place: Placement::Wall,
+                per_10m2: 1.2,
+                clearance: 1.0,
+                emissive: None,
+            },
+        ],
+    ),
+    (
+        RoomType::Office,
+        &[FurnitureDef {
+            module: "Table",
+            half: [0.6, 0.37, 0.4],
+            place: Placement::Free,
+            per_10m2: 0.4,
+            clearance: 1.5,
+            emissive: None,
+        }],
+    ),
+];
+
+/// **A corner bar** (wave VEN1a) -- one long counter, stools, a screen and a
+/// back room. The `venues/0004` end of the reference: near-black, warm, and lit
+/// entirely by what is on its walls.
+const BAR: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::Bar,
+    display: "Bar",
+    rules: "# Bar -- a neighbourhood counter.\n\
+# The venue vocabulary (wave VEN1a). A club's street wall is mostly SOLID: the\n\
+# reference's facades carry one lit sign and a door, not a shopfront, and the\n\
+# windows that do exist are high and small so nobody sees the stage from the\n\
+# pavement. The signage itself is HUNG by the assembler and not built into the\n\
+# run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
+module Pier     = size 0.4 offset 0,1.8,0.2   collider 0.2,1.8,0.2\n\
+module Clad     = size 1.4 offset 0,1.8,0.7   collider 0.14,1.8,0.7\n\
+module Glazing  = size 1.1 offset 0,1.8,0.55  collider 0.05,1.8,0.55\n\
+module Partition= size 1.0 offset 0,1.6,0.5   collider 0.06,1.6,0.5\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
+module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
+# Fittings. None of these is placed by a wall RULE, so their colliders may be\n\
+# wider than the door jamb -- the furniture placer stations them at plan-derived\n\
+# positions and they never straddle a wall line.\n\
+module BarRun   = size 1   offset 0,0,0        collider 3,0.55,0.34\n\
+module Stool    = size 1   offset 0,0,0        collider 0.19,0.4,0.19\n\
+module Stage    = size 1   offset 0,0,0        collider 2,0.4,1.5\n\
+module Catwalk  = size 1   offset 0,0,0        collider 2.6,0.4,1.1\n\
+module Pole     = size 1   offset 0,0,0        collider 0.04,1.6,0.04\n\
+module Bench    = size 1   offset 0,0,0        collider 0.9,0.24,0.24\n\
+module Table    = size 1   offset 0,0,0        collider 0.45,0.37,0.45\n\
+module Screen   = size 1   offset 0,0,0        collider 0.46,0.28,0.05\n\
+module Neon     = size 1   offset 0,0,0        collider 0.6,0.35,0.06\n\
+module Festoon  = size 1   offset 0,0,0        collider 0.9,0.12,0.08\n\
+module Shelf    = size 1   offset 0,0,0        collider 0.4,0.9,0.24\n\
+module Crate    = size 1   offset 0,0,0        collider 0.45,0.4,0.4\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.30\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (1, 2),
+    floor_height: 3.4,
+    slab_thickness: 0.2,
+    min_room: 3.2,
+    // Wide, because a bar IS its main room: the anchor below takes the largest
+    // room on the ground floor, and a `max_room_area` that split it in three
+    // would give the counter a broom cupboard to run along.
+    max_room_area: 150.0,
+    corridor: false,
+    corridor_width: 1.4,
+    wall_thickness: 0.18,
+    stair_size: (3.4, 2.6),
+    door_width: 1.0,
+    door_height: 2.15,
+    // High and narrow, and far apart: a bar's street wall is mostly solid and
+    // the windows it does have are above head height.
+    window_width: 1.1,
+    window_sill: 1.6,
+    window_head: 2.7,
+    window_pitch: 4.6,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+    ],
+    furniture: VENUE_FURNITURE,
+    // **A bar's main room is its bar room.** One anchor, so the back of house
+    // still draws from the table above.
+    ground_anchors: &[RoomType::BarRoom],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // Warm amber -- a beer sign, not a stage light.
+        colour: [3.0, 1.5, 0.45],
+        half: [0.75, 0.32, 0.07],
+        height_m: 3.0,
+        festoon: Some("Festoon"),
+    }),
+};
+
+/// **A nightclub** (wave VEN1a) -- a dance floor with a stage on it, a bar room
+/// beside it, and nothing on the street but a sign.
+const NIGHTCLUB: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::Nightclub,
+    display: "Nightclub",
+    rules: "# Nightclub -- a tall dark box with a lit door.\n\
+# The venue vocabulary (wave VEN1a). A club's street wall is mostly SOLID: the\n\
+# reference's facades carry one lit sign and a door, not a shopfront, and the\n\
+# windows that do exist are high and small so nobody sees the stage from the\n\
+# pavement. The signage itself is HUNG by the assembler and not built into the\n\
+# run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
+module Pier     = size 0.4 offset 0,2.1,0.2   collider 0.2,2.1,0.2\n\
+module Clad     = size 1.4 offset 0,2.1,0.7   collider 0.14,2.1,0.7\n\
+module Glazing  = size 1.1 offset 0,2.1,0.55  collider 0.05,2.1,0.55\n\
+module Partition= size 1.0 offset 0,1.9,0.5   collider 0.06,1.9,0.5\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
+module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
+# Fittings. None of these is placed by a wall RULE, so their colliders may be\n\
+# wider than the door jamb -- the furniture placer stations them at plan-derived\n\
+# positions and they never straddle a wall line.\n\
+module BarRun   = size 1   offset 0,0,0        collider 3,0.55,0.34\n\
+module Stool    = size 1   offset 0,0,0        collider 0.19,0.4,0.19\n\
+module Stage    = size 1   offset 0,0,0        collider 2,0.4,1.5\n\
+module Catwalk  = size 1   offset 0,0,0        collider 2.6,0.4,1.1\n\
+module Pole     = size 1   offset 0,0,0        collider 0.04,1.6,0.04\n\
+module Bench    = size 1   offset 0,0,0        collider 0.9,0.24,0.24\n\
+module Table    = size 1   offset 0,0,0        collider 0.45,0.37,0.45\n\
+module Screen   = size 1   offset 0,0,0        collider 0.46,0.28,0.05\n\
+module Neon     = size 1   offset 0,0,0        collider 0.6,0.35,0.06\n\
+module Festoon  = size 1   offset 0,0,0        collider 0.9,0.12,0.08\n\
+module Shelf    = size 1   offset 0,0,0        collider 0.4,0.9,0.24\n\
+module Crate    = size 1   offset 0,0,0        collider 0.45,0.4,0.4\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.16\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (1, 2),
+    // Tall: the reference's clubs hang their moving heads well above the crowd,
+    // and a 2.9 m ceiling puts a stage wash on people's foreheads.
+    floor_height: 4.2,
+    slab_thickness: 0.22,
+    min_room: 4.0,
+    max_room_area: 260.0,
+    corridor: false,
+    corridor_width: 1.6,
+    wall_thickness: 0.2,
+    stair_size: (3.8, 3.0),
+    door_width: 1.2,
+    door_height: 2.3,
+    window_width: 1.0,
+    // Higher still, and rarer: a club that let daylight onto its dance floor
+    // would not be one.
+    window_sill: 2.6,
+    window_head: 3.6,
+    window_pitch: 7.5,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+    ],
+    furniture: VENUE_FURNITURE,
+    // **The main room IS the dance floor**, and the second is the bar. Not a
+    // weighted draw: a club whose dance floor came out in the 8 m2 room beside
+    // the stair is not a club.
+    ground_anchors: &[RoomType::DanceFloor, RoomType::BarRoom],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // Hot magenta -- the hue that reads as "club" across a dark street.
+        colour: [3.4, 0.35, 3.0],
+        half: [0.95, 0.4, 0.08],
+        height_m: 3.4,
+        festoon: Some("Festoon"),
+    }),
+};
+
+/// **A strip club** (wave VEN1a) -- `venues/0020`-`0052` exactly: a raised
+/// catwalk with a chrome pole down its middle, plank benches at its edge, a bar
+/// room next door, and near-black everything else.
+const STRIP_CLUB: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::StripClub,
+    display: "Strip club",
+    rules: "# Strip club -- a catwalk, a pole and a bar.\n\
+# The venue vocabulary (wave VEN1a). A club's street wall is mostly SOLID: the\n\
+# reference's facades carry one lit sign and a door, not a shopfront, and the\n\
+# windows that do exist are high and small so nobody sees the stage from the\n\
+# pavement. The signage itself is HUNG by the assembler and not built into the\n\
+# run -- see `BuildingArchetype::entrance_sign` for why a bay cannot hold it.\n\
+module Pier     = size 0.4 offset 0,2.0,0.2   collider 0.2,2.0,0.2\n\
+module Clad     = size 1.4 offset 0,2.0,0.7   collider 0.14,2.0,0.7\n\
+module Glazing  = size 1.1 offset 0,2.0,0.55  collider 0.05,2.0,0.55\n\
+module Partition= size 1.0 offset 0,1.8,0.5   collider 0.06,1.8,0.5\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0        collider 0.14,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0        collider 0.14,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0        collider 1,0.1,1\n\
+module Step     = size 1   offset 0,0,0        collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0        collider 1,0.12,1\n\
+# Fittings. None of these is placed by a wall RULE, so their colliders may be\n\
+# wider than the door jamb -- the furniture placer stations them at plan-derived\n\
+# positions and they never straddle a wall line.\n\
+module BarRun   = size 1   offset 0,0,0        collider 3,0.55,0.34\n\
+module Stool    = size 1   offset 0,0,0        collider 0.19,0.4,0.19\n\
+module Stage    = size 1   offset 0,0,0        collider 2,0.4,1.5\n\
+module Catwalk  = size 1   offset 0,0,0        collider 2.6,0.4,1.1\n\
+module Pole     = size 1   offset 0,0,0        collider 0.04,1.6,0.04\n\
+module Bench    = size 1   offset 0,0,0        collider 0.9,0.24,0.24\n\
+module Table    = size 1   offset 0,0,0        collider 0.45,0.37,0.45\n\
+module Screen   = size 1   offset 0,0,0        collider 0.46,0.28,0.05\n\
+module Neon     = size 1   offset 0,0,0        collider 0.6,0.35,0.06\n\
+module Festoon  = size 1   offset 0,0,0        collider 0.9,0.12,0.08\n\
+module Shelf    = size 1   offset 0,0,0        collider 0.4,0.9,0.24\n\
+module Crate    = size 1   offset 0,0,0        collider 0.45,0.4,0.4\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.12\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (1, 2),
+    floor_height: 4.0,
+    slab_thickness: 0.22,
+    min_room: 3.8,
+    max_room_area: 240.0,
+    corridor: false,
+    corridor_width: 1.5,
+    wall_thickness: 0.2,
+    stair_size: (3.6, 2.8),
+    door_width: 1.1,
+    door_height: 2.25,
+    window_width: 1.0,
+    window_sill: 2.5,
+    window_head: 3.4,
+    window_pitch: 8.5,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 1.0,
+        },
+    ],
+    furniture: VENUE_FURNITURE,
+    // **The main room is the STAGE room**, and the second is the bar. That is
+    // the difference between this and the nightclub in one line: the club's
+    // biggest room is for the crowd, and this one's is for the act.
+    ground_anchors: &[RoomType::Stage, RoomType::BarRoom],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // Deep red, the hue every frame in `venues/` puts on the stage.
+        colour: [3.6, 0.28, 0.5],
+        half: [0.9, 0.38, 0.08],
+        height_m: 3.2,
+        festoon: Some("Festoon"),
+    }),
 };
 
 #[cfg(test)]

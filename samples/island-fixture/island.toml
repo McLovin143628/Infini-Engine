@@ -120,6 +120,8 @@ content = [
   # byte-locked against its generator, referenced by both islands.
   "../settlement/Zone_Apartment.inf_pcg",
   "../settlement/Zone_Apartment.inf_pcg.toml",
+  "../settlement/Zone_Bar.inf_pcg",
+  "../settlement/Zone_Bar.inf_pcg.toml",
   "../settlement/Zone_Estate.inf_pcg",
   "../settlement/Zone_Estate.inf_pcg.toml",
   "../settlement/Zone_Hotel.inf_pcg",
@@ -128,10 +130,14 @@ content = [
   "../settlement/Zone_House.inf_pcg.toml",
   "../settlement/Zone_Industrial.inf_pcg",
   "../settlement/Zone_Industrial.inf_pcg.toml",
+  "../settlement/Zone_Nightclub.inf_pcg",
+  "../settlement/Zone_Nightclub.inf_pcg.toml",
   "../settlement/Zone_Office.inf_pcg",
   "../settlement/Zone_Office.inf_pcg.toml",
   "../settlement/Zone_Shop.inf_pcg",
   "../settlement/Zone_Shop.inf_pcg.toml",
+  "../settlement/Zone_StripClub.inf_pcg",
+  "../settlement/Zone_StripClub.inf_pcg.toml",
 ]
 
 # The same UTM zone and the same ground as the full island, offset to sit over

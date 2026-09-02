@@ -687,7 +687,7 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
         "Pane" | "Glazing" | "Shopfront" => ModuleShape::Glazing,
         // Solid wall leaves.
         "Spandrel" | "Wall" | "Balcony" | "Partition" | "Cladding" | "Brick" | "Ashlar"
-        | "Panelled" | "Solid" => ModuleShape::Panel,
+        | "Panelled" | "Solid" | "Clad" => ModuleShape::Panel,
         // Vertical members.
         "Mullion" | "Pier" | "Column" | "Quoin" | "Pilaster" | "Stall" => ModuleShape::Column,
         // Horizontal decks.
