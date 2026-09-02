@@ -2184,6 +2184,84 @@ fn set_tier_components(world: &mut EcsWorld, entity: Entity, tier: CrowdTier, a:
     }
 }
 
+/// **Build one crowd-archetype body that is NOT in the population** (wave
+/// VEH2b) — the door a traffic car's driver comes through.
+///
+/// A traffic driver is a person made of a level's own archetype, wearing the
+/// same capsule, the same mesh and the same state machine as every resident,
+/// and it must be: a carjack pulls one out onto the pavement and it walks away
+/// as an ordinary NPC. What it is *not* is a [`CrowdRecord`] — it has no route,
+/// no schedule and no tier of its own, because the thing that decides where it
+/// is is the car it is sitting in.
+///
+/// So it goes through this door rather than through [`materialize`]: the same
+/// components, minus the [`CrowdAgent`] verdict that would make
+/// [`step_crowd`] and [`crate::pose::step_pose_evaluation`] answer for an agent
+/// the population has never heard of. It is always a **steered** body
+/// ([`CrowdTier::Full`]'s components), because a driver only exists at a car's
+/// own `Full` tier and a body the movement step does not walk cannot sit in a
+/// seat.
+pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec3) -> Entity {
+    if let Some(e) = world.entity_of(guid) {
+        return e;
+    }
+    let e = world.spawn_with_guid(guid, "Driver", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform {
+            translation: Vec3d::new(at.x, at.y, at.z),
+            ..Transform::IDENTITY
+        },
+        SkeletalMesh {
+            mesh: a.mesh,
+            skeleton: a.skeleton,
+        },
+        AnimStateMachine {
+            sm: a.sm,
+            ..AnimStateMachine::default()
+        },
+        // The verdict goes on even though the population has never heard of
+        // this body, because `step_pose_evaluation` picks its subjects by this
+        // component and a driver with no tier is a driver with no pose. `Full`
+        // is the honest answer and not a convenience: a driver exists only
+        // while its car is Full, which is 64 m.
+        CrowdAgent {
+            tier: CrowdTier::Full,
+            guid,
+            feet_offset_m: a.feet_offset_m(),
+            blocked: false,
+        },
+    ));
+    set_tier_components(world, e, CrowdTier::Full, a);
+    e
+}
+
+/// **Give an existing body a route** (wave VEH2b) — the door a carjacked driver
+/// walks out of.
+///
+/// [`add_agents`] refuses a `Guid` the world already holds, and it is right to:
+/// every caller before this one drew from a namespace of its own, and
+/// `spawn_with_guid` would leave a level's own entity unreachable. This caller
+/// is different in exactly one way — **the body is one this module built**,
+/// through [`spawn_body`], and what it needs is not a body but a *record*: a
+/// person who was driving a car a moment ago and is now standing in the road
+/// with somewhere to be.
+///
+/// Returns `false` if the population already holds the guid, which is the
+/// refusal that matters: adopting twice would replace a walking agent's route
+/// with a fresh one and restart its day.
+pub fn adopt(world: &mut EcsWorld, guid: Uuid, rec: CrowdRecord) -> bool {
+    let mut pop = world
+        .world_mut()
+        .remove_resource::<CrowdPopulationRes>()
+        .unwrap_or_default();
+    let fresh = !pop.records.contains_key(&guid);
+    if fresh {
+        pop.records.insert(guid, rec);
+    }
+    world.world_mut().insert_resource(pop);
+    fresh
+}
+
 /// The movement model a crowd agent walks with.
 ///
 /// Defaults everywhere except the four things a *pedestrian* is:

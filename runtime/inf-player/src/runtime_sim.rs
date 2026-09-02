@@ -435,6 +435,13 @@ pub struct RuntimeSim {
     /// population has been derived, and what its network holds. MIRROR of
     /// `SimSession::society`.
     society: inf_ecs::society::SocietyStats,
+    /// This step's traffic counters (VEH2b) — cars per tier, how many are
+    /// driving, how many carry a driver and how many the traffic has let go of.
+    /// The `crowd` shape one system along, and read for the same reason: a gate
+    /// that wants to know whether the STREET is alive has to ask something
+    /// other than "did the function get called". All zeroes on a level with no
+    /// blocks. MIRROR of `SimSession::traffic`.
+    traffic: inf_ecs::traffic::TrafficStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). Data rather than a
     /// constant `step_crowd` reads for itself, for `debris_budget`'s reason one
     /// system over: a level's own crowd block will set it, and the sweep
@@ -589,6 +596,7 @@ impl RuntimeSim {
             fracture_audit: FractureAudit::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
             society: inf_ecs::society::SocietyStats::default(),
+            traffic: inf_ecs::traffic::TrafficStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
             vehicles: Vec::new(),
@@ -756,6 +764,17 @@ impl RuntimeSim {
     /// gate tells "no society" from "a society that is not being derived".
     pub fn society_stats(&self) -> inf_ecs::society::SocietyStats {
         self.society
+    }
+
+    /// **The most recent fixed step's traffic counters** (VEH2b) — cars per
+    /// tier, how many are on a leg of their day, how many carry an NPC driver,
+    /// how many the traffic has let go of, and how many commuter routes are
+    /// still waiting to be planned.
+    ///
+    /// All zeroes on a level with no blocks in it, which is how a gate tells
+    /// "no streets" from "streets with nothing on them".
+    pub fn traffic_stats(&self) -> inf_ecs::traffic::TrafficStats {
+        self.traffic
     }
 
     /// **Install a crowd population** (NPC1a) — the door the sweep instrument
@@ -1255,6 +1274,22 @@ impl RuntimeSim {
         // concatenation in this order. A level with no population produces an
         // empty vec, so every pre-NPC1a trace is byte-identical.
         out.extend_from_slice(&inf_ecs::crowd::crowd_state_bytes(&self.world));
+        // VEH2b appends the traffic, last, on the crowd's argument verbatim: a
+        // `Near` car is not simulated and a `Dormant` one has no entity, so
+        // **without this section the traffic tier decision would be invisible to
+        // every trace comparison in this repository** — two hosts that tiered
+        // the same car differently would compare equal until one of them
+        // happened to solve a chassis the other did not. 60 bytes a car.
+        //
+        // The `taken` byte is in it for the same reason `rephase_m` is: it is
+        // produced by the simulation (somebody got into a car), it decides
+        // everything the traffic step does with that car afterwards, and two
+        // hosts that disagreed about it have diverged.
+        //
+        // **The position is frozen**, exactly as the eight above it are. A level
+        // with no streets produces an empty vec, so every pre-VEH2b trace is
+        // byte-identical.
+        out.extend_from_slice(&inf_ecs::traffic::traffic_state_bytes(&self.world));
         out
     }
 
@@ -1427,6 +1462,17 @@ impl RuntimeSim {
         clk.mark(phase::SOCIETY);
         self.crowd = inf_ecs::crowd::step_crowd_banded(&mut self.world, dt, self.crowd_radii);
         clk.mark(phase::CROWD);
+        // ── VEH2b traffic ── the level's own carriageway, the tier every car
+        //    takes, and the stick each steered car's driver is handed. HERE for
+        //    the crowd's own two reasons: a car built this step must be mirrored
+        //    by the sync below on this step, and the driver's INTENT must be
+        //    written before `character move` reads it. Inert on a level with no
+        //    blocks. (MIRROR of `SimSession::fixed_step`.)
+        let (tw, tb) = (&mut self.world, &mut self.bridge3d);
+        // MIRROR-BEGIN traffic_step
+        self.traffic = inf_physics::d3::traffic::step_traffic(tw, tb, dt);
+        // MIRROR-END traffic_step
+        clk.mark(phase::TRAFFIC);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         clk.mark(phase::PHYSICS2D_SYNC);

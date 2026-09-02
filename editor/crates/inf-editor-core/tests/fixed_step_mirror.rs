@@ -198,6 +198,67 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
     }
 }
 
+/// **Both hosts step their TRAFFIC the same way** (wave VEH2b).
+///
+/// The `vehicle_step` fence's argument, one system along and with a sharper
+/// edge: the traffic step DERIVES a level's carriageway and its whole car
+/// population. Two hosts that called it with different arguments — or one that
+/// did not call it at all — would not merely diverge on a drive; one of them
+/// would have an empty street.
+#[test]
+fn both_fixed_steps_step_their_traffic_the_same_way() {
+    let editor = fenced(&read(EDITOR), "traffic_step", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "traffic_step", "the shipped RuntimeSim");
+    assert_eq!(
+        editor, player,
+        "the two hosts' traffic steps differ character for character"
+    );
+    assert!(
+        editor.contains("step_traffic("),
+        "the traffic fence does not call the traffic step: {editor}"
+    );
+}
+
+/// **…and they run it in the same PLACE.**
+///
+/// The traffic step writes a driver's INTENT and builds bodies. Run after the
+/// character step it would write an intent nothing reads until the next step;
+/// run after the physics sync it would build a car the bridge does not see
+/// until the next step. Both are one-step lags rather than divergences — which
+/// is exactly why an equality gate cannot see them, and why the order is
+/// asserted as an order.
+#[test]
+fn the_traffic_step_sits_between_the_crowd_and_the_physics_sync_on_both_hosts() {
+    for (who, rel) in [
+        ("the editor SimSession", EDITOR),
+        ("the shipped RuntimeSim", PLAYER),
+    ] {
+        let src = read(rel);
+        let crowd = only(&src, "inf_ecs::crowd::step_crowd_banded(", who);
+        let traffic = only(&src, "// MIRROR-BEGIN traffic_step", who);
+        let mover = only(&src, "inf_physics::d3::step_character_movement(", who);
+        assert!(
+            crowd < traffic,
+            "{who}: the traffic step runs BEFORE the crowd, so a car and a              pedestrian would be tiered against two different bands"
+        );
+        assert!(
+            traffic < mover,
+            "{who}: the traffic step runs AFTER the character step, so every              driver's intent is one step stale — the car would steer where the              lane was last step, for ever"
+        );
+        // …and before the 3D sync, so a car built this step is a body the
+        // solver has this step. The LAST occurrence, because both hosts also
+        // name `sync_from_world_sim` in their one-shot seeding path hundreds of
+        // lines above the fixed step, and the first hit is that one.
+        let sync_at = src
+            .rfind("sync_from_world_sim(")
+            .unwrap_or_else(|| panic!("{who}: no 3D sync"));
+        assert!(
+            traffic < sync_at,
+            "{who}: the traffic step runs after the 3D sync, so a car it builds              is drawn a step before it is solid"
+        );
+    }
+}
+
 /// **…and they run it in the same PLACE.**
 ///
 /// The fence pins the statement; this pins its neighbours. A vehicle step that

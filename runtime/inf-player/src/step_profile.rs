@@ -41,7 +41,7 @@
 use std::time::Instant;
 
 /// How many phases one fixed step is split into.
-pub const STEP_PHASES: usize = 27;
+pub const STEP_PHASES: usize = 28;
 
 /// The phases, in the order [`RuntimeSim::fixed_step`] runs them.
 ///
@@ -67,6 +67,7 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
     "sky",
     "society",
     "crowd",
+    "traffic",
     "physics2d sync",
     "physics3d sync",
     "water forces",
@@ -118,19 +119,36 @@ pub(crate) mod phase {
     /// bodies), the character step and the animation (so both read this step's
     /// tiers). Inert — one `contains_resource` — on a level with no crowd.
     pub const CROWD: usize = 5;
+    /// VEH2b — the level's own carriageway, the traffic tier decision, and the
+    /// stick each steered car's driver is handed.
+    ///
+    /// **HERE, immediately after [`CROWD`]**, and for the crowd's own two
+    /// reasons one system along: a car that materializes this step has to be
+    /// mirrored by the physics sync on the same step (or it is a body that
+    /// exists for the renderer and not for the solver), and the driver's
+    /// **intent** has to be written before [`CHARACTER_MOVE`] reads it six
+    /// phases later — which is the same slot a player's stick is written in,
+    /// through the same `VehicleControls::from_intent`.
+    ///
+    /// Its own row rather than a corner of [`CROWD`]'s, because a settlement's
+    /// whole traffic population is derived in it and a step that cannot say
+    /// where its milliseconds went is the defect wave I4b existed to remove.
+    /// Inert — one `get_resource` and one entity walk that finds nothing — on
+    /// a level with no blocks in it.
+    pub const TRAFFIC: usize = 6;
     /// The 2D bridge's ECS → rapier2d walk.
-    pub const PHYSICS2D_SYNC: usize = 6;
+    pub const PHYSICS2D_SYNC: usize = 7;
     /// The 3D bridge's walk — the I3 collider band's gather lives here, and so
     /// does the P22.3 fracture follow that precedes it.
-    pub const PHYSICS3D_SYNC: usize = 7;
+    pub const PHYSICS3D_SYNC: usize = 8;
     /// P20.2 buoyancy + hydrodynamic drag.
-    pub const WATER: usize = 8;
+    pub const WATER: usize = 9;
     /// Wave 3 input edges and the dispatches they queue.
-    pub const INPUT_EVENTS: usize = 9;
+    pub const INPUT_EVENTS: usize = 10;
     /// The Tick pass over every actor, and the dispatches it queues.
-    pub const BLUEPRINT_TICK: usize = 10;
+    pub const BLUEPRINT_TICK: usize = 11;
     /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
-    pub const CHARACTER_MOVE: usize = 11;
+    pub const CHARACTER_MOVE: usize = 12;
     /// VEH1a — `inf_physics::d3::step_vehicles`: the wheel rays, the model's
     /// forces and the visual wheel write.
     ///
@@ -157,37 +175,37 @@ pub(crate) mod phase {
     /// guard than "it is one statement inside another function", because that
     /// guarded the *call* and nothing guarded the two hosts agreeing about
     /// **when**.
-    pub const VEHICLE: usize = 12;
+    pub const VEHICLE: usize = 13;
     /// I6 — doors, weapons and the health they spend, plus the host's own drain
     /// of the energy they owe the P22 damage door.
-    pub const GAMEPLAY: usize = 13;
+    pub const GAMEPLAY: usize = 14;
     /// rapier2d + rapier3d.
-    pub const SOLVER: usize = 14;
+    pub const SOLVER: usize = 15;
     /// Wave 3 contacts and overlaps, and the dispatches they queue.
-    pub const COLLISION_DRAIN: usize = 15;
+    pub const COLLISION_DRAIN: usize = 16;
     /// rapier → ECS.
-    pub const WRITE_BACK: usize = 16;
+    pub const WRITE_BACK: usize = 17;
     /// The transform + visibility DFS. **Three call sites, gathered.**
-    pub const PROPAGATE: usize = 17;
+    pub const PROPAGATE: usize = 18;
     /// P22.1 — the ground remembers what stood on it.
-    pub const DEFORMATION: usize = 18;
+    pub const DEFORMATION: usize = 19;
     /// Play-heads, state machines and root motion.
-    pub const ANIMATION: usize = 19;
+    pub const ANIMATION: usize = 20;
     /// P11.3 sockets.
-    pub const ATTACHMENTS: usize = 20;
+    pub const ATTACHMENTS: usize = 21;
     /// P24.4 garments and hair.
-    pub const CLOTH_HAIR: usize = 21;
+    pub const CLOTH_HAIR: usize = 22;
     /// P14.5 WASM mods — which propagate internally, so their propagate is here
     /// rather than in [`PROPAGATE`].
-    pub const MODS: usize = 22;
+    pub const MODS: usize = 23;
     /// P22.3 fracture write-back, the structural solve and the debris budget.
-    pub const DESTRUCTION: usize = 23;
+    pub const DESTRUCTION: usize = 24;
     /// P12.3 — the audio command queue.
-    pub const AUDIO: usize = 24;
+    pub const AUDIO: usize = 25;
     /// P29.6 — the locomotion camera.
-    pub const CAMERA: usize = 25;
+    pub const CAMERA: usize = 26;
     /// The interpolation history roll and the rising-edge clear.
-    pub const POSITION_CAPTURE: usize = 26;
+    pub const POSITION_CAPTURE: usize = 27;
 }
 
 /// One fixed step's phase milliseconds — or, after

@@ -404,6 +404,9 @@ pub struct SimSession {
     /// population has been derived, and what its network holds. MIRROR of
     /// `RuntimeSim::society`.
     society: inf_ecs::society::SocietyStats,
+    /// This step's traffic counters (VEH2b) — the MIRROR of
+    /// `RuntimeSim::traffic`, and read for the same reason.
+    traffic: inf_ecs::traffic::TrafficStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). MIRROR of
     /// `RuntimeSim::crowd_radii`, and mirrored *because* it is an argument to
     /// the one Ring-0 door both hosts call: a host that read a constant while
@@ -550,6 +553,12 @@ impl SimSession {
         //    put there.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
+        // VEH2b: and the traffic, for `clear_crowd`'s reason exactly — a
+        // `SceneDoc` snapshot carries entities and `EcsWorld::clear` despawns
+        // them, and neither touches a resource, so without this a stopped
+        // session's parked cars would stay in the author's document.
+        inf_ecs::traffic::clear_traffic(doc.world_mut());
+        inf_ecs::traffic::clear_carriageway(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -617,6 +626,7 @@ impl SimSession {
             vehicles: Vec::new(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
             society: inf_ecs::society::SocietyStats::default(),
+            traffic: inf_ecs::traffic::TrafficStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             voxels: BTreeMap::new(),
         };
@@ -936,6 +946,12 @@ impl SimSession {
         //    in the author's level.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
+        // VEH2b: and the traffic, for `clear_crowd`'s reason exactly — a
+        // `SceneDoc` snapshot carries entities and `EcsWorld::clear` despawns
+        // them, and neither touches a resource, so without this a stopped
+        // session's parked cars would stay in the author's document.
+        inf_ecs::traffic::clear_traffic(doc.world_mut());
+        inf_ecs::traffic::clear_carriageway(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -1111,6 +1127,15 @@ impl SimSession {
     /// gate tells "no society" from "a society that is not being derived".
     pub fn society_stats(&self) -> inf_ecs::society::SocietyStats {
         self.society
+    }
+
+    /// **The most recent fixed step's traffic counters** (VEH2b) — the MIRROR
+    /// of `RuntimeSim::traffic_stats`.
+    ///
+    /// All zeroes on a level with no blocks in it, which is how a gate tells
+    /// "no streets" from "streets with nothing on them".
+    pub fn traffic_stats(&self) -> inf_ecs::traffic::TrafficStats {
+        self.traffic
     }
 
     /// **Install a crowd population** (NPC1d) — the MIRROR of
@@ -1339,6 +1364,16 @@ impl SimSession {
         //    nothing and inserts no resource.
         self.society = inf_ecs::society::sync_society(doc.world_mut());
         self.crowd = inf_ecs::crowd::step_crowd_banded(doc.world_mut(), dt, self.crowd_radii);
+        // ── VEH2b traffic ── the level's own carriageway, the tier every car
+        //    takes, and the stick each steered car's driver is handed. HERE for
+        //    the crowd's own two reasons: a car built this step must be mirrored
+        //    by the sync below on this step, and the driver's INTENT must be
+        //    written before `character move` reads it. Inert on a level with no
+        //    blocks. (MIRROR of `RuntimeSim::fixed_step`.)
+        let (tw, tb) = (doc.world_mut(), &mut self.bridge3d);
+        // MIRROR-BEGIN traffic_step
+        self.traffic = inf_physics::d3::traffic::step_traffic(tw, tb, dt);
+        // MIRROR-END traffic_step
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         // ── P22.3 fracture follow ── an INTACT destructible is a normal

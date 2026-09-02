@@ -32,6 +32,7 @@ mod query;
 // P29.4 the ragdoll bridge: the physics half of the anim<->physics handoff.
 pub mod ragdoll_bridge;
 // P29.4 traversal detectors: the ledge probe and the land-prediction sweep.
+pub mod traffic;
 pub mod traversal;
 // P29.7 vehicles: the wheel rays, the forces and the wheel write-back.
 pub mod vehicle;

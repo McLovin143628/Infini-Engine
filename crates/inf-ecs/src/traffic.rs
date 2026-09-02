@@ -56,6 +56,9 @@ use inf_nav::lane::{right_of, LaneNetwork, LaneSpec, DEFAULT_LANE_WIDTH_M};
 use inf_nav::{NavGraph, NavKind, NavNodeId, NavPath};
 
 use crate::math::Vec2d;
+pub use inf_nav::NavPath as LanePath;
+
+use crate::crowd::CrowdTier;
 use crate::society::{mix64, rect_gap, volume_sites, PAVEMENT_LATTICE_M, PAVEMENT_M};
 use crate::world::EcsWorld;
 
@@ -86,6 +89,18 @@ pub const MIN_STREET_GAP_M: f64 = 6.0;
 /// a place a pedestrian steps into the road. The island's *circuit* is a
 /// different class and carries `inf_gis::default_speed_kmh`'s own numbers.
 pub const STREET_SPEED_KMH: u32 = 30;
+
+/// [`STREET_SPEED_KMH`] as a speed, m/s — the conversion at the point of use.
+///
+/// A function rather than a `const` because the units doctrine's carve-out is
+/// that a *sign* is km/h and a *physical quantity* is SI, and this is the one
+/// place the crossing happens for a settlement street. Every lane the runtime
+/// derivation lays carries the same sign today, which is why the controller can
+/// be handed a constant; the day a level has a fast road in it, this is the
+/// call site that becomes `lane.speed_limit_mps()`.
+pub fn street_speed_mps() -> f64 {
+    inf_nav::lane::kmh_to_mps(f64::from(STREET_SPEED_KMH))
+}
 
 /// How far from a street's centreline a car parks at the kerb, metres.
 ///
@@ -858,6 +873,766 @@ pub fn derived_guids(streets: &[Street]) -> BTreeSet<Uuid> {
         .into_iter()
         .map(|(p, _)| parked_car_guid(p))
         .collect()
+}
+
+// ── the population ──────────────────────────────────────────────────────────
+
+/// Metres inside which a traffic car is [`Full`](CrowdTier::Full) — a real rig,
+/// with physics, a driver if it is moving, and a seat the hero can reach.
+///
+/// **Twice the crowd's 32 m**, chosen against the same thing the crowd chose
+/// against: [`crate::band::DEFAULT_COLLIDER_NEAR_M`] is 64 m, the radius inside
+/// which a building is solid, and a car you can drive into has to be inside a
+/// world you can drive into. It is also 21 times `ENTER_REACH_M`, which is what
+/// makes the promotion rule of clause 4 structural rather than a second check:
+/// **any car the hero can reach the seat of is Full**, because 3 m is deep
+/// inside 64.
+pub const TRAFFIC_FULL_M: f64 = 64.0;
+
+/// Metres inside which a traffic car exists at all — [`Near`](CrowdTier::Near),
+/// drawn and solid but moved by its own clock.
+///
+/// # A CAR HAS THREE RUNGS, NOT FOUR, and this is the pricing of clause 4
+///
+/// The crowd's ladder has a fourth rung because a crowd agent can be made
+/// cheap: `Far` drops the body and the pose and keeps one entity, and NPC1b's
+/// impostors draw a thousand of them out of one instanced batch. **A car cannot
+/// go through that path.** A vehicle body is a union of built-in primitives
+/// derived from a Ring-0 table with no `.inf_mesh` at all — which is wave
+/// VEH1a's whole argument for why the fleet costs no committed content — and
+/// `PcgKind::mesh` is a mesh GUID. Scattering parked cars would mean committing
+/// a car mesh, which is exactly the content that argument avoided.
+///
+/// So a car is entities all the way down: fourteen of them at
+/// [`RigDetail::Full`] and five or six at [`RigDetail::Body`]. The ladder
+/// therefore stops one rung earlier and the radius is where a car stops being
+/// readable rather than where it stops being cheap. `Far` is unreachable by
+/// construction — [`TRAFFIC_RADII`] sets `near == far`, and `CrowdBand::tier`'s
+/// `d <= far_m` branch cannot fire after `d <= near_m` has.
+pub const TRAFFIC_NEAR_M: f64 = 128.0;
+
+/// The three radii a car is banded by. `near == far` — see [`TRAFFIC_NEAR_M`].
+pub const TRAFFIC_RADII: (f64, f64, f64) = (TRAFFIC_FULL_M, TRAFFIC_NEAR_M, TRAFFIC_NEAR_M);
+
+/// The share of kerb slots that actually hold a car.
+///
+/// Not one: `frames/steal-car/0016` and `frames/driving/0014` both show kerbs
+/// with gaps in them, and a row with no gaps in it reads as a wall rather than
+/// as parking. Drawn per slot from [`SALT_PARK`], so it is a function of the
+/// level and not of a spawn order, and it is what bounds the population against
+/// the geometry: a hundred-metre block edge offers seven slots a side and holds
+/// about three cars.
+pub const KERB_OCCUPANCY: f64 = 0.45;
+
+/// The share of parked cars that go somewhere in the morning.
+///
+/// A third, so a rush hour empties a visible fraction of the kerb and leaves
+/// the rest of the street parked — which is what a street does, and which makes
+/// the difference between eight o'clock and midnight something a viewer can see
+/// without counting.
+pub const COMMUTER_SHARE: f64 = 0.35;
+
+/// Salts the parked/empty draw.
+pub const SALT_PARK: u64 = 0x5041_524b_0000_0011;
+/// Salts the commuter draw.
+pub const SALT_COMMUTE: u64 = 0x434f_4d4d_0000_0012;
+/// Salts which catalogue row a slot's car is.
+pub const SALT_CLASS: u64 = 0x434c_4153_0000_0013;
+/// Salts a car's paint.
+pub const SALT_PAINT: u64 = 0x5041_494e_0000_0014;
+/// Salts a commuter's destination.
+pub const SALT_DEST: u64 = 0x4445_5354_0000_0015;
+
+/// The most cars one level's traffic may hold.
+///
+/// [`MAX_VEHICLE_DEFS`]'s rule at a city's scale: a population derived from
+/// authored geometry needs a bound, so a recipe with a thousand blocks in it is
+/// an error message rather than a memory problem. Four thousand is an order
+/// over what the island's seven settlements offer.
+///
+/// [`MAX_VEHICLE_DEFS`]: crate::vehicle::MAX_VEHICLE_DEFS
+pub const MAX_TRAFFIC_CARS: usize = 4096;
+
+/// The most cars that may have a day.
+///
+/// A commuter costs a Dijkstra and a lane route to derive, where a parked car
+/// costs a hash. This is the bound on the expensive half, and it is a hundred
+/// and twenty-eight because that is far more cars than
+/// [`TRAFFIC_NEAR_M`] can hold at once and therefore more than a viewer can be
+/// looking at.
+pub const MAX_COMMUTERS: usize = 128;
+
+/// How many commuter routes are planned per fixed step.
+///
+/// [`crate::society::SOCIETY_PLANS_PER_STEP`]'s shape and its reason: a
+/// derivation that ran a hundred and twenty-eight Dijkstras in one step would
+/// be a hitch on the step a settlement pages in. Four a step spreads it over
+/// half a second and every one of them is a pure function of the level, so a
+/// host that took longer to get there arrives at the same population.
+pub const TRAFFIC_PLANS_PER_STEP: usize = 4;
+
+/// How far before a parking slot the approach point is laid, metres.
+///
+/// A leg's path ends `[.., slot - kerb_heading x this, slot]`, so the last
+/// segment of a drive runs *along the kerb* and the car ends up pointing the
+/// way the row points. Without it the final heading is the diagonal from the
+/// lane to the space, and a car finishes its commute parked at forty degrees to
+/// the pavement.
+pub const APPROACH_M: f64 = 6.0;
+
+/// **How much of a car is built** — the tier's other axis.
+///
+/// A crowd agent's tiers differ in what *runs*; a car's differ in what
+/// *exists*, because there is no impostor path for one (see
+/// [`TRAFFIC_NEAR_M`]). `Body` is the chassis and its panels: no wheels, no
+/// tyres, no `VehicleClass`, no sensor colliders — so `rig_of` finds no wheels,
+/// answers `None`, and **`step_vehicles` cannot see the car at all**. That is
+/// the watched-car honesty sentence made structural rather than promised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RigDetail {
+    /// Nothing at all.
+    #[default]
+    None,
+    /// The chassis and its body panels, drawn and solid, moved by a clock.
+    Body,
+    /// Everything: wheels, tyres, the class, and a rig `step_vehicles` drives.
+    Full,
+}
+
+impl RigDetail {
+    /// What a tier builds.
+    pub fn of(tier: CrowdTier) -> Self {
+        match tier {
+            CrowdTier::Full => RigDetail::Full,
+            CrowdTier::Near | CrowdTier::Far => RigDetail::Body,
+            CrowdTier::Dormant => RigDetail::None,
+        }
+    }
+
+    /// The byte the trace folds. Frozen: compared between two hosts.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            RigDetail::None => 0,
+            RigDetail::Body => 1,
+            RigDetail::Full => 2,
+        }
+    }
+}
+
+/// **One traffic car**: a body, a kerb space, and possibly a day.
+///
+/// The schedule is [`crate::crowd::CrowdSchedule`] — the *same* type a resident
+/// carries, resolved by the *same* [`crate::crowd::CrowdClock`] against the
+/// *same* hours ([`crate::society::WORK_START_H`],
+/// [`crate::society::HOME_H`], [`crate::society::COMMUTE_H`]). That is what
+/// "commuter cars join the society schedule" means here, precisely: one
+/// vocabulary, one clock, one set of hours. What it does **not** mean is that a
+/// named resident owns a named car — see the wave's carried list.
+///
+/// A car with **no** schedule never moves. A car with one is parked at its own
+/// kerb slot overnight, drives to a second slot over the morning window, stands
+/// there all day and drives back in the evening — which is a real street's rush
+/// hour, expressed as `CrowdSchedule::at`'s existing "the walk is a fraction of
+/// its WINDOW, then you stand at the far end".
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrafficRecord {
+    /// Which catalogue row it is.
+    pub def: crate::vehicle::VehicleDef,
+    /// Its paint.
+    pub paint: crate::math::Color,
+    /// Its own kerb space, world metres (the chassis origin, already lifted to
+    /// its resting height).
+    pub home: DVec3,
+    /// The way the row it is parked in points, degrees.
+    pub home_yaw_deg: f64,
+    /// Its day, or `None` for a car that never moves.
+    pub schedule: Option<crate::crowd::CrowdSchedule>,
+    /// The tier it took on the last step.
+    pub tier: CrowdTier,
+    /// How much of it is built right now.
+    pub detail: RigDetail,
+    /// Where it was then.
+    pub last: DVec3,
+    /// Which way it was pointing then, degrees.
+    pub yaw_deg: f64,
+    /// Which leg of its day it was on. `0` for a car with no schedule.
+    pub leg: u8,
+    /// **What the steered tier did to the clock**, metres of phase — the
+    /// [`crate::crowd::CrowdRecord::rephase_m`] of a car, with that field's
+    /// whole argument: a body that has been driven by a controller is not where
+    /// its clock says, and snapping it back would teleport it.
+    pub rephase_m: f64,
+    /// **Somebody has interfered with this car** — its driver was pulled out of
+    /// it, or a character who is not its driver is sitting in it.
+    ///
+    /// One flag for both, because they are one rule: *a car the player has
+    /// touched is no longer traffic's*. Once it is set, the traffic step never
+    /// steers this car again, never gives it another driver, and never takes
+    /// its body down — so a stolen car keeps its rig wherever it is left, which
+    /// makes it an ordinary vehicle exactly like the seven the island authors.
+    ///
+    /// It is never unset. A car that reverted to traffic control the moment the
+    /// player got out would drive itself away from under them, and a car that
+    /// grew a second driver while the first was still lying in the road would
+    /// be two people in one seat.
+    ///
+    /// Genuine sim state, and folded into [`traffic_state_bytes`] for
+    /// [`crate::crowd::CrowdRecord::rephase_m`]'s reason: it is produced by the
+    /// simulation, and two hosts that disagreed about it have diverged.
+    pub taken: bool,
+}
+
+impl TrafficRecord {
+    /// A car that never moves, parked at `home`.
+    pub fn parked(
+        def: crate::vehicle::VehicleDef,
+        paint: crate::math::Color,
+        home: DVec3,
+        yaw: f64,
+    ) -> Self {
+        Self {
+            def,
+            paint,
+            home,
+            home_yaw_deg: yaw,
+            schedule: None,
+            tier: CrowdTier::Dormant,
+            detail: RigDetail::None,
+            last: home,
+            yaw_deg: yaw,
+            leg: 0,
+            rephase_m: 0.0,
+            taken: false,
+        }
+    }
+
+    /// Whether this car goes anywhere at all.
+    pub fn commutes(&self) -> bool {
+        self.schedule.is_some()
+    }
+
+    /// Which leg it is on and how far through, or `None` for a car with no day.
+    ///
+    /// The jitter is [`crate::crowd::CrowdRecord::hour_of`]'s, drawn on the
+    /// car's own guid: a town whose eighty commuters all pull out at exactly
+    /// eight o'clock is a tide rather than a street.
+    pub fn leg_at(&self, guid: Uuid, clock: crate::crowd::CrowdClock) -> crate::crowd::ActiveLeg {
+        let s = self.schedule.as_ref()?;
+        let jitter = crate::crowd::SCHEDULE_JITTER_H
+            * (2.0 * crate::crowd::agent_unit(guid, 0, crate::crowd::SALT_SCHEDULE) - 1.0);
+        Some(s.at((clock.hour - jitter).rem_euclid(24.0)))
+    }
+
+    /// The path it is driving right now, or `None` when it is standing.
+    pub fn path_on(&self, leg: crate::crowd::ActiveLeg) -> Option<&NavPath> {
+        match (&self.schedule, leg) {
+            (Some(s), Some((i, _))) => Some(&s.legs()[i].path),
+            _ => None,
+        }
+    }
+
+    /// **Where the clock says it is, and which way it is pointing** — the one
+    /// place a traffic car's place is decided, so the tier that draws it and the
+    /// tier that steers it cannot disagree.
+    ///
+    /// A car with no leg stands in its own space. A car on a leg is
+    /// `length x u + rephase`, clamped, with its heading the lane's own
+    /// direction there — so a car standing at the end of a leg is parked facing
+    /// the way the row faces (see [`APPROACH_M`]).
+    pub fn place_on(&self, leg: crate::crowd::ActiveLeg) -> (DVec3, f64) {
+        let (Some(path), Some((i, u))) = (self.path_on(leg), leg) else {
+            return (self.home, self.home_yaw_deg);
+        };
+        let len = self
+            .schedule
+            .as_ref()
+            .map(|s| s.legs()[i].path.length_m())
+            .unwrap_or(0.0);
+        let raw = len * u + self.rephase_m;
+        let s_m = if raw.is_finite() {
+            raw.clamp(0.0, len)
+        } else {
+            0.0
+        };
+        (path.position_at(s_m), yaw_of_dir(path.direction_at(s_m)))
+    }
+
+    /// How far along its current leg the clock says it is, metres.
+    pub fn progress_on(&self, leg: crate::crowd::ActiveLeg) -> f64 {
+        let (Some(_), Some((i, u))) = (self.path_on(leg), leg) else {
+            return 0.0;
+        };
+        let len = self
+            .schedule
+            .as_ref()
+            .map(|s| s.legs()[i].path.length_m())
+            .unwrap_or(0.0);
+        let raw = len * u + self.rephase_m;
+        if raw.is_finite() {
+            raw.clamp(0.0, len)
+        } else {
+            0.0
+        }
+    }
+
+    /// **The phase change that puts the clock on the metre the BODY reached** —
+    /// [`crate::crowd::CrowdRecord::rephase_delta_on`]'s schedule branch, for a
+    /// car.
+    pub fn rephase_delta_on(&self, leg: crate::crowd::ActiveLeg, s_m: f64) -> f64 {
+        let (Some(_), Some((i, u))) = (self.path_on(leg), leg) else {
+            return 0.0;
+        };
+        let len = self
+            .schedule
+            .as_ref()
+            .map(|s| s.legs()[i].path.length_m())
+            .unwrap_or(0.0);
+        if !(len.is_finite() && s_m.is_finite() && self.rephase_m.is_finite()) {
+            return 0.0;
+        }
+        (s_m.clamp(0.0, len) - len * u) - self.rephase_m
+    }
+
+    /// Whether the car is **driving** right now — on a leg, and not yet at the
+    /// far end of it.
+    ///
+    /// This is what decides whether it carries a driver, which is what decides
+    /// whether it can be carjacked rather than merely stolen.
+    pub fn is_driving(&self, leg: crate::crowd::ActiveLeg) -> bool {
+        matches!(leg, Some((_, u)) if u < 1.0) && self.schedule.is_some()
+    }
+}
+
+/// **A traffic car's driver**, as a guid derived from the car's.
+///
+/// Derived rather than stored for `CrowdRecord::speed_of`'s reason: a guid
+/// written into the record at spawn time is a second copy of a pure function.
+pub fn driver_guid(chassis: Uuid) -> Uuid {
+    let (hi, lo) = chassis.as_u64_pair();
+    Uuid::from_u64_pair(mix64(hi ^ DRIVER_SALT), mix64(lo ^ mix64(DRIVER_SALT)))
+}
+
+/// Salts [`driver_guid`].
+pub const DRIVER_SALT: u64 = 0x4452_4956_4552_0001;
+
+/// **The traffic population** — every car a level has, whether or not it
+/// currently has a body.
+#[derive(bevy_ecs::prelude::Resource, Debug, Clone, Default, PartialEq)]
+pub struct TrafficPopulationRes {
+    /// The records, in `Guid` order.
+    pub records: BTreeMap<Uuid, TrafficRecord>,
+    /// Kerb slots whose commuter route has not been planned yet, in `Guid`
+    /// order — the batch queue [`TRAFFIC_PLANS_PER_STEP`] drains.
+    pub pending: BTreeMap<Uuid, DVec3>,
+    /// Fixed steps since the population was installed.
+    pub steps: u64,
+    /// The carriageway stamp this population was derived from.
+    pub stamp: u64,
+    /// Somebody installed this population by hand, so nothing derives one.
+    /// [`CrowdPopulationRes::hand_installed`]'s rule, verbatim.
+    ///
+    /// [`CrowdPopulationRes::hand_installed`]: crate::crowd::CrowdPopulationRes::hand_installed
+    pub hand_installed: bool,
+}
+
+/// What one traffic step did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrafficStats {
+    /// How many records there are.
+    pub cars: usize,
+    /// How many of them have a day.
+    pub commuters: usize,
+    /// How many are on a leg and not yet at the end of it, this step.
+    pub driving: usize,
+    /// Cars per tier, indexed by [`CrowdTier::as_u8`].
+    pub per_tier: [usize; 4],
+    /// How many were built this step.
+    pub built: usize,
+    /// How many were taken down.
+    pub removed: usize,
+    /// How many changed tier.
+    pub retiered: usize,
+    /// How many handed their clock back to their body on the way down.
+    pub rephased: usize,
+    /// How many carry an NPC driver right now.
+    pub drivers: usize,
+    /// How many the traffic has let go of — see [`TrafficRecord::taken`].
+    pub taken: usize,
+    /// How many commuter routes were planned this step.
+    pub planned_now: usize,
+    /// How many slots are still waiting for a route.
+    pub pending: usize,
+    /// The band's membership stamp.
+    pub band_stamp: u64,
+}
+
+/// **Grow the level's traffic** — the derivation, one batch per step.
+///
+/// Parked cars are derived **whole** on the step the carriageway changes: a
+/// kerb slot costs a hash and there is nothing to plan. Commuter routes are
+/// planned [`TRAFFIC_PLANS_PER_STEP`] at a time, because each one is a Dijkstra
+/// over the street graph and a hundred and twenty-eight of them in one step is
+/// the hitch [`crate::society::SOCIETY_PLANS_PER_STEP`] exists to avoid.
+///
+/// Returns how many routes were planned this step.
+pub fn sync_traffic(world: &mut EcsWorld) -> usize {
+    let Some(stamp) = carriageway_of(world).map(|r| r.stamp) else {
+        return 0;
+    };
+    if world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .is_some_and(|p| p.hand_installed)
+    {
+        return 0;
+    }
+    let stale = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .is_none_or(|p| p.stamp != stamp);
+    if stale {
+        derive_parked(world, stamp);
+    }
+    plan_batch(world)
+}
+
+/// Every kerb slot's car, in one pass — the cheap half of the derivation.
+fn derive_parked(world: &mut EcsWorld, stamp: u64) {
+    let Some(res) = carriageway_of(world) else {
+        return;
+    };
+    let slots = kerb_slots(&res.streets);
+    let fleet = crate::vehicle::VehicleDefs::default();
+    let _ = fleet;
+    let mut records: BTreeMap<Uuid, TrafficRecord> = BTreeMap::new();
+    let mut pending: BTreeMap<Uuid, DVec3> = BTreeMap::new();
+    for (p, yaw) in slots {
+        if records.len() >= MAX_TRAFFIC_CARS {
+            break;
+        }
+        let guid = parked_car_guid(p);
+        if crate::crowd::agent_unit(guid, 0, SALT_PARK) >= KERB_OCCUPANCY {
+            continue;
+        }
+        let def = catalogue_row(guid);
+        let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);
+        records.insert(guid, TrafficRecord::parked(def, car_paint(guid), at, yaw));
+        if crate::crowd::agent_unit(guid, 0, SALT_COMMUTE) < COMMUTER_SHARE
+            && pending.len() < MAX_COMMUTERS
+        {
+            pending.insert(guid, at);
+        }
+    }
+    let steps = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .map(|p| p.steps)
+        .unwrap_or(0);
+    // Any car that is no longer derived loses its body first: a record dropped
+    // while its entities stand is the crowd's own two-opinions defect
+    // (`set_population` despawns before it replaces).
+    let gone: Vec<(Uuid, crate::vehicle::VehicleDef)> = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .map(|p| {
+            p.records
+                .iter()
+                .filter(|(g, r)| r.detail != RigDetail::None && !records.contains_key(g))
+                .map(|(g, r)| (*g, r.def))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (g, def) in gone {
+        crate::vehicle::despawn_rig(world, g, &def);
+    }
+    world.world_mut().insert_resource(TrafficPopulationRes {
+        records,
+        pending,
+        steps,
+        stamp,
+        hand_installed: false,
+    });
+}
+
+/// Plan up to [`TRAFFIC_PLANS_PER_STEP`] commuter routes.
+fn plan_batch(world: &mut EcsWorld) -> usize {
+    let Some(res) = world.world().get_resource::<TrafficRes>().cloned() else {
+        return 0;
+    };
+    let Some(mut pop) = world.world_mut().remove_resource::<TrafficPopulationRes>() else {
+        return 0;
+    };
+    let graph = carriageway_graph(&res.streets);
+    let slots = kerb_slots(&res.streets);
+    let mut planned = 0;
+    while planned < TRAFFIC_PLANS_PER_STEP {
+        let Some((&guid, &home)) = pop.pending.iter().next() else {
+            break;
+        };
+        pop.pending.remove(&guid);
+        planned += 1;
+        if let Some(sched) = plan_commute(&graph, &res.lanes, &slots, guid, home) {
+            if let Some(rec) = pop.records.get_mut(&guid) {
+                rec.schedule = Some(sched);
+            }
+        }
+    }
+    let left = pop.pending.len();
+    let _ = left;
+    world.world_mut().insert_resource(pop);
+    planned
+}
+
+/// **One commuter's day**, as two legs over the carriageway.
+///
+/// Home is the car's own kerb space; work is another slot, drawn from
+/// [`SALT_DEST`] and taken far enough away to be a journey. The path is
+/// `[home, approach, lane route…, approach, work]`, so a drive leaves its space,
+/// runs the lanes and pulls in facing the way the destination row faces.
+///
+/// `None` when the two ends are not connected, which is a refusal as a value:
+/// the car stays parked, for ever, which is a thing cars do.
+pub fn plan_commute(
+    graph: &NavGraph,
+    lanes: &LaneNetwork,
+    slots: &[(DVec3, f64)],
+    guid: Uuid,
+    home: DVec3,
+) -> Option<crate::crowd::CrowdSchedule> {
+    if slots.len() < 2 {
+        return None;
+    }
+    // The destination: a slot drawn from this car's own seed, at least a
+    // hundred metres off, walked forward until one qualifies so the draw cannot
+    // fail on a small town.
+    let start = (crate::crowd::agent_unit(guid, 0, SALT_DEST) * slots.len() as f64) as usize;
+    let mut dest: Option<(DVec3, f64)> = None;
+    for k in 0..slots.len() {
+        let (p, yaw) = slots[(start + k) % slots.len()];
+        let d = p - home;
+        if (d.x * d.x + d.z * d.z).sqrt() >= COMMUTE_MIN_M {
+            dest = Some((p, yaw));
+            break;
+        }
+    }
+    let (dest_p, dest_yaw) = dest?;
+    let out = drive_path(graph, lanes, home, dest_p, dest_yaw)?;
+    let back = drive_path(graph, lanes, dest_p, home, 0.0)?;
+    crate::crowd::CrowdSchedule::new(vec![
+        crate::crowd::ScheduleLeg {
+            start_h: crate::society::WORK_START_H,
+            travel_h: crate::society::COMMUTE_H,
+            path: out,
+        },
+        crate::crowd::ScheduleLeg {
+            start_h: crate::society::HOME_H,
+            travel_h: crate::society::COMMUTE_H,
+            path: back,
+        },
+    ])
+}
+
+/// How far a commute has to be to be worth driving, metres.
+///
+/// A hundred metres is one city block: shorter than that and the "commute" is a
+/// car pulling out of one space and into the next, which reads as a glitch
+/// rather than as traffic.
+pub const COMMUTE_MIN_M: f64 = 100.0;
+
+/// **One drive, as a path** — out of a space, along the lanes, into a space.
+///
+/// The two ends are kerb slots and the middle is a lane route, joined by the
+/// nearest carriageway node at each end. `to_yaw` is the row the destination
+/// belongs to, so the last two points run *along* it (see [`APPROACH_M`]).
+pub fn drive_path(
+    graph: &NavGraph,
+    lanes: &LaneNetwork,
+    from: DVec3,
+    to: DVec3,
+    to_yaw: f64,
+) -> Option<NavPath> {
+    let a = graph.nearest_planar(from, f64::INFINITY)?;
+    let b = graph.nearest_planar(to, f64::INFINITY)?;
+    if a == b {
+        return None;
+    }
+    let route = inf_nav::route(graph, a, b).route()?;
+    let ids = lanes.lane_route(&route.nodes, 0);
+    if ids.is_empty() {
+        return None;
+    }
+    let mid = lanes.path_of(&ids);
+    let mut pts: Vec<DVec3> = Vec::with_capacity(mid.points().len() + 3);
+    pts.push(from);
+    pts.extend_from_slice(mid.points());
+    // The approach: `APPROACH_M` back along the destination row's own heading,
+    // then the space itself.
+    let h = heading_of_yaw(to_yaw);
+    pts.push(to - h * APPROACH_M);
+    pts.push(to);
+    let path = NavPath::new(pts);
+    (!path.is_stand()).then_some(path)
+}
+
+/// The unit ground heading a compass yaw names — [`yaw_of_dir`]'s inverse.
+///
+/// `psin64`/`pcos64` and never `f64::sin`/`cos`: this vector decides a metre a
+/// committed drive passes through (the P14 law).
+pub fn heading_of_yaw(yaw_deg: f64) -> DVec3 {
+    let r = yaw_deg.to_radians();
+    DVec3::new(inf_math::psin64(r), 0.0, inf_math::pcos64(r))
+}
+
+/// **Which catalogue row a slot's car is** — drawn from the car's own guid.
+///
+/// The rows are the five the island's own fleet declares, named here rather
+/// than read from it because `inf-ecs` is Ring 0 and the catalogue is authoring
+/// input in Ring 1. What Ring 0 owns is the *geometry and tuning* of a class
+/// ([`crate::vehicle::VehicleDef`]), and these are that type's own defaults
+/// wearing five different silhouettes — a traffic stream of five shapes rather
+/// than of one, which is what `frames/driving/0014` shows (a van, a saloon and
+/// a pickup in three consecutive lanes).
+pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
+    use crate::vehicle::VehicleBody;
+    let bodies = VehicleBody::ALL;
+    let i = (crate::crowd::agent_unit(guid, 0, SALT_CLASS) * bodies.len() as f64) as usize;
+    let body = bodies[i.min(bodies.len() - 1)];
+    let mut def = crate::vehicle::VehicleDef {
+        body,
+        ..Default::default()
+    };
+    // The silhouettes differ in size as well as in shape, or five families draw
+    // as one box in five costumes.
+    let (l, w, h) = match body {
+        VehicleBody::Sports => (2.10, 0.90, 0.60),
+        VehicleBody::Sedan => (2.25, 0.92, 0.72),
+        VehicleBody::Suv => (2.35, 0.98, 0.88),
+        VehicleBody::Truck => (2.70, 1.02, 0.85),
+        VehicleBody::Van => (2.70, 1.00, 1.05),
+    };
+    def.half_extents = crate::math::Vec3d::new(w, h, l);
+    def.half_track_m = w - 0.12;
+    def.half_wheelbase_m = l - 0.55;
+    def
+}
+
+/// **A traffic car's paint** — eight body colours, drawn per car.
+///
+/// A street of one colour is a car park of clones; eight is enough that a row of
+/// seven at a kerb is very unlikely to repeat, and it is
+/// [`crate::crowd::CROWD_LOOKS`]'s own argument one system over.
+pub fn car_paint(guid: Uuid) -> crate::math::Color {
+    const PAINT: [[f32; 3]; 8] = [
+        [0.72, 0.73, 0.75],
+        [0.10, 0.11, 0.13],
+        [0.62, 0.14, 0.13],
+        [0.14, 0.24, 0.46],
+        [0.90, 0.90, 0.88],
+        [0.20, 0.36, 0.26],
+        [0.55, 0.47, 0.30],
+        [0.35, 0.36, 0.40],
+    ];
+    let i = (crate::crowd::agent_unit(guid, 0, SALT_PAINT) * PAINT.len() as f64) as usize;
+    let c = PAINT[i.min(PAINT.len() - 1)];
+    crate::math::Color::new(c[0], c[1], c[2], 1.0)
+}
+
+/// The traffic population, if a level has one.
+pub fn traffic_of(world: &EcsWorld) -> Option<&TrafficPopulationRes> {
+    world.world().get_resource::<TrafficPopulationRes>()
+}
+
+/// **Install a traffic population by hand** — the instrument's door, and the
+/// one that stops the derivation.
+///
+/// [`crate::crowd::set_population`]'s rule verbatim: a caller that installs a
+/// population by hand owns it, so [`sync_traffic`] stops deriving one. Without
+/// it a gate that installed a measured fleet would find the level's own kerbs
+/// filling back up on the next step.
+pub fn set_traffic(world: &mut EcsWorld, records: BTreeMap<Uuid, TrafficRecord>) {
+    clear_traffic(world);
+    let stamp = carriageway_of(world).map(|r| r.stamp).unwrap_or(0);
+    world.world_mut().insert_resource(TrafficPopulationRes {
+        records,
+        pending: BTreeMap::new(),
+        steps: 0,
+        stamp,
+        hand_installed: true,
+    });
+}
+
+/// Forget the traffic: take down every body and remove the resource.
+pub fn clear_traffic(world: &mut EcsWorld) {
+    let built: Vec<(Uuid, crate::vehicle::VehicleDef)> = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .map(|p| {
+            p.records
+                .iter()
+                .filter(|(_, r)| r.detail != RigDetail::None)
+                .map(|(g, r)| (*g, r.def))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (g, def) in built {
+        crate::vehicle::despawn_rig(world, g, &def);
+    }
+    world.world_mut().remove_resource::<TrafficPopulationRes>();
+}
+
+/// **The bytes two hosts compare** — one row per car, in `Guid` order.
+///
+/// [`crate::crowd::crowd_state_bytes`]'s shape and its reasons: the guid, the
+/// tier, the detail, the place, the heading and the phase, because those are
+/// the things the *simulation* decides. The schedule is not folded — it is
+/// derived from the level and a host that had a different one would already
+/// differ in every place below it.
+pub fn traffic_state_bytes(world: &EcsWorld) -> Vec<u8> {
+    let Some(pop) = traffic_of(world) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(pop.records.len() * CAR_TRACE_BYTES);
+    for (guid, rec) in &pop.records {
+        out.extend_from_slice(guid.as_bytes());
+        out.push(rec.tier.as_u8());
+        out.push(rec.detail.as_u8());
+        out.push(rec.leg);
+        out.extend_from_slice(&rec.last.x.to_le_bytes());
+        out.extend_from_slice(&rec.last.y.to_le_bytes());
+        out.extend_from_slice(&rec.last.z.to_le_bytes());
+        out.extend_from_slice(&rec.yaw_deg.to_le_bytes());
+        out.extend_from_slice(&rec.rephase_m.to_le_bytes());
+        out.push(u8::from(rec.taken));
+    }
+    out
+}
+
+/// How many bytes one car folds into [`traffic_state_bytes`].
+pub const CAR_TRACE_BYTES: usize = 16 + 1 + 1 + 1 + 24 + 8 + 8 + 1;
+
+/// **Mark a car as no longer traffic's** — the one door both interferences go
+/// through.
+///
+/// Returns whether the flag moved. Called by the carjack (which pulls a driver
+/// out before anybody is sitting in the seat) and by the traffic step itself
+/// (which sees a seat taken by somebody who is not this car's own driver). Two
+/// callers, one rule, and neither of them owns a second copy of it.
+pub fn mark_taken(world: &mut EcsWorld, chassis: Uuid) -> bool {
+    let Some(mut pop) = world.world_mut().get_resource_mut::<TrafficPopulationRes>() else {
+        return false;
+    };
+    match pop.records.get_mut(&chassis) {
+        Some(rec) if !rec.taken => {
+            rec.taken = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Whether this car is one the traffic has let go of.
+pub fn is_taken(world: &EcsWorld, chassis: Uuid) -> bool {
+    traffic_of(world).is_some_and(|p| p.records.get(&chassis).is_some_and(|r| r.taken))
 }
 
 #[cfg(test)]

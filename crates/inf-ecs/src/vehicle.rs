@@ -1173,6 +1173,30 @@ pub struct RigNode {
 /// caller that walked this list backwards would produce a level with different
 /// bytes and the same contents.
 pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNode> {
+    rig_nodes_at(chassis, def, spawn, true)
+}
+
+/// [`rig_nodes`] with the **wheels** made optional (wave VEH2b).
+///
+/// `wheels = false` answers the chassis and its body panels alone, and drops
+/// the [`VehicleClass`](crate::components::VehicleClass) with them. That is not
+/// a level-of-detail convenience: it is what makes a distant traffic car
+/// *structurally* unable to be simulated. [`rig_of`] needs wheel sensors to
+/// answer a [`VehicleRig`], the bridge needs a rig to build a `RaycastVehicle`,
+/// and `step_vehicles` walks the bridge's vehicles — so a car built without
+/// wheels cannot be reached by the vehicle phase even by accident.
+///
+/// The visible cost is stated: **past
+/// [`inf_ecs::traffic::TRAFFIC_FULL_M`](crate::traffic::TRAFFIC_FULL_M) a
+/// parked car is drawn without its wheels**, sitting on its floor pan. At 64 m
+/// a 0.35 m wheel is a couple of pixels; what it buys is eight entities a car
+/// against fourteen, over a population sized by a settlement's kerbs.
+pub fn rig_nodes_at(
+    chassis: Uuid,
+    def: &VehicleDef,
+    spawn: &RigSpawn,
+    wheels: bool,
+) -> Vec<RigNode> {
     use crate::components::{
         AudioSource, BodyKind3D, Collider3D, ColliderShape3DKind, Material, MeshRef, Primitive,
         RigidBody3D, Transform,
@@ -1191,7 +1215,16 @@ pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNo
             scale: Vec3d::ONE,
         },
         body: Some(RigidBody3D {
-            kind: BodyKind3D::Dynamic,
+            // A car the vehicle phase drives is a DYNAMIC body under four
+            // suspension rays; a car its clock draws is a KINEMATIC one that
+            // the solver pushes nothing through. The two travel together with
+            // the wheels for one reason: they are the same decision about
+            // whether this car is being simulated.
+            kind: if wheels {
+                BodyKind3D::Dynamic
+            } else {
+                BodyKind3D::Kinematic
+            },
             angular_damping: CHASSIS_ANGULAR_DAMPING,
             ..Default::default()
         }),
@@ -1204,7 +1237,10 @@ pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNo
         }),
         mesh: None,
         material: None,
-        class: Some(def.class),
+        // The tuning rides with the wheels: a body with no wheels is not a
+        // vehicle, and a `VehicleClass` on one would be a class the bridge
+        // installs on a rig that does not exist.
+        class: wheels.then_some(def.class),
         audio: Some(AudioSource {
             clip: spawn.clip,
             looping: true,
@@ -1254,6 +1290,9 @@ pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNo
         });
     }
 
+    if !wheels {
+        return out;
+    }
     let r = def.wheel_radius_m;
     for (i, mount) in def.wheel_mounts().into_iter().enumerate() {
         let wheel = part_guid(&format!("wheel{i}"));
@@ -1317,7 +1356,25 @@ pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNo
 /// overwrote an authored one would leave the author's entity unreachable while
 /// it still existed.
 pub fn spawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Uuid {
-    for node in rig_nodes(chassis, def, spawn) {
+    spawn_rig_at(world, chassis, def, spawn, true)
+}
+
+/// [`spawn_rig`] over [`rig_nodes_at`] — the door a traffic car's tier uses.
+///
+/// A `Near` car is built with `wheels = false` and is therefore invisible to
+/// `step_vehicles`; a `Full` one is built whole. The transition between the two
+/// is a despawn and a respawn rather than a component edit, because the guids
+/// are content-derived and a respawn is byte-identical — and because a car
+/// crossing a tier boundary is a thing that happens to one car every few
+/// hundred steps, which is the budget the crowd takes its own pose digest on.
+pub fn spawn_rig_at(
+    world: &mut EcsWorld,
+    chassis: Uuid,
+    def: &VehicleDef,
+    spawn: &RigSpawn,
+    wheels: bool,
+) -> Uuid {
+    for node in rig_nodes_at(chassis, def, spawn, wheels) {
         if world.entity_of(node.guid).is_some() {
             continue;
         }
