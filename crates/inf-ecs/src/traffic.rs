@@ -316,7 +316,7 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
             }
             for w in merged.windows(2) {
                 let gap = w[1].0 - w[0].1;
-                if !(gap >= MIN_STREET_GAP_M && gap <= MAX_STREET_GAP_M) {
+                if !(MIN_STREET_GAP_M..=MAX_STREET_GAP_M).contains(&gap) {
                     continue;
                 }
                 let mid = (w[0].1 + w[1].0) * 0.5;
@@ -628,7 +628,7 @@ pub struct DriveIntent {
 /// A straight has no curvature and no limit, which is `f64::INFINITY` — a value
 /// the caller's `min` handles without a branch.
 pub fn corner_speed_mps(path: &NavPath, s_m: f64, lookahead_m: f64, loops: bool) -> f64 {
-    if !(lookahead_m > 0.0) || !s_m.is_finite() {
+    if !(lookahead_m.is_finite() && lookahead_m > 0.0) || !s_m.is_finite() {
         return f64::INFINITY;
     }
     let a = path.direction_at(s_m);
@@ -650,7 +650,7 @@ pub fn corner_speed_mps(path: &NavPath, s_m: f64, lookahead_m: f64, loops: bool)
     let b = path.direction_at(ahead);
     // The ground-plane component of `a x b`, which is the Y one.
     let sin = (a.z * b.x - a.x * b.z).abs();
-    if !(sin > 1.0e-6) {
+    if !(sin.is_finite() && sin > 1.0e-6) {
         return f64::INFINITY;
     }
     let curvature = sin / lookahead_m;
@@ -865,7 +865,7 @@ pub fn kerb_slots(streets: &[Street]) -> Vec<(DVec3, f64)> {
         }
         let d = DVec2::new(s.b.x - s.a.x, s.b.y - s.a.y);
         let len = (d.x * d.x + d.y * d.y).sqrt();
-        if !(len > KERB_SLOT_M) {
+        if !(len.is_finite() && len > KERB_SLOT_M) {
             continue;
         }
         let dir = DVec3::new(d.x / len, 0.0, d.y / len);
@@ -1375,7 +1375,7 @@ impl TrafficRecord {
         leg: crate::crowd::ActiveLeg,
     ) -> Option<&NavPath> {
         match &self.circuit {
-            Some(c) => c.running(clock.hour).then(|| &c.route.path),
+            Some(c) => c.running(clock.hour).then_some(&c.route.path),
             None => self.path_on(leg),
         }
     }

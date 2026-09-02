@@ -6258,7 +6258,7 @@ fn the_derived_carriageway_is_the_settlements_own_street_grid() {
     .expect("design");
     let settlement = walk_target_settlement(&design);
     let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
-    let hero = hero_entity(&mut sim).expect("a hero");
+    let hero = hero_entity(&sim).expect("a hero");
     set_hero(&mut sim, hero, centre);
     sim.world_mut().mark_dirty();
     freeze_clock(&mut sim, SETTLE_HOUR);
@@ -6350,7 +6350,7 @@ fn the_traffic_phase_costs_what_it_costs_on_the_island() {
     .expect("design");
     let settlement = walk_target_settlement(&design);
     let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
-    let hero = hero_entity(&mut sim).expect("a hero");
+    let hero = hero_entity(&sim).expect("a hero");
     set_hero(&mut sim, hero, centre);
     sim.world_mut().mark_dirty();
     freeze_clock(&mut sim, SETTLE_HOUR);

@@ -237,7 +237,12 @@ pub const MAX_LANES_PER_EDGE: u32 = 8;
 pub fn right_of(d: DVec3) -> DVec3 {
     let (x, z) = (d.x, d.z);
     let len = (x * x + z * z).sqrt();
-    if !(len > 0.0) || !len.is_finite() {
+    // The tree's spelling for this (`crowd::CrowdRoute::is_walkable`,
+    // `Vehicle::static_load_n`): a conjunction of `is_finite` and the
+    // comparison, negated once. `!(len > 0.0)` alone reads NaN correctly and
+    // lets an infinite length through, and clippy's `neg_cmp_op_on_partial_ord`
+    // is right that it reads badly.
+    if !(len.is_finite() && len > 0.0) {
         return DVec3::X;
     }
     DVec3::new(z / len, 0.0, -x / len)
