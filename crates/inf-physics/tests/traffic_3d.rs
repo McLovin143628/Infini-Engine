@@ -873,3 +873,155 @@ fn clear_view(lane: &inf_ecs::traffic::LanePath) -> traffic::DriveView<'_> {
         loops: false,
     }
 }
+
+/// **A re-derivation is not a fresh start.** A block paging in across town
+/// changes the level's own stamp; the cars that did not move keep everything
+/// they had — including the fact that the player stole one.
+#[test]
+fn a_block_arriving_does_not_un_steal_the_car_the_player_is_in() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(8.5);
+    town.step(120);
+    let before = inf_physics::d3::traffic::records(&town.world).len();
+    assert!(before > 20);
+
+    // Steal one.
+    let near = inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 60.0);
+    let (target, _) = near[0];
+    let e = town.world.entity_of(HERO).expect("the hero");
+    town.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(CharacterMovement {
+            player_controlled: true,
+            mode: MovementMode::Driving,
+            ..Default::default()
+        });
+    if let Some(mut cm) = town.world.world_mut().get_mut::<CharacterMovement>(e) {
+        cm.runtime.seat = inf_ecs::components::SeatState {
+            vehicle: target,
+            entering: false,
+            time_s: 0.0,
+            start: Vec3d::ZERO,
+            start_yaw_deg: 0.0,
+        };
+    }
+    town.step(2);
+    assert!(traffic::is_taken(&town.world, target));
+    let phases: Vec<f64> = inf_physics::d3::traffic::records(&town.world)
+        .values()
+        .map(|r| r.rephase_m)
+        .collect();
+
+    // A fourth column of blocks arrives — a real streaming event, and a
+    // different block stamp.
+    blocks(&mut town.world, 4, 3);
+    town.world.propagate();
+    let stamp_before = traffic::carriageway_of(&town.world).unwrap().stamp;
+    town.step(4);
+    let res = traffic::carriageway_of(&town.world).expect("a carriageway");
+    assert_ne!(res.stamp, stamp_before, "the new block changed nothing");
+    assert_eq!(res.derivations, 2, "it re-derived more than once");
+
+    // The town grew…
+    let after = inf_physics::d3::traffic::records(&town.world);
+    assert!(after.len() > before, "{} then {}", before, after.len());
+    // …the stolen car is still stolen…
+    assert!(
+        traffic::is_taken(&town.world, target),
+        "the re-derivation un-stole the player's car"
+    );
+    // …and the cars that were already there kept their phase rather than
+    // snapping back to their clock.
+    let now: Vec<f64> = after.values().map(|r| r.rephase_m).collect();
+    assert!(
+        now.iter().filter(|p| **p != 0.0).count() >= phases.iter().filter(|p| **p != 0.0).count(),
+        "phases were reset by the re-derivation"
+    );
+}
+
+/// **A stolen car drives.** The falsifier for the island gate's own modest
+/// number: on the CI fixture the hero's stolen car tops out under a metre a
+/// second, and this arm is what says that is the *town* — two streets, sixteen
+/// cars and three hundred and twenty-nine residents crossing them — rather than
+/// a car this wave cannot make go.
+///
+/// Here the street is empty of everything but the traffic itself, and the same
+/// press through the same door produces a car that accelerates.
+#[test]
+fn a_stolen_car_answers_the_throttle_on_an_empty_street() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(8.5);
+    town.step(60);
+    let near = inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 40.0);
+    let (target, _) = *near.first().expect("a car near the crossroads");
+
+    // Sit in it, the way the seat step does.
+    let e = town.world.entity_of(HERO).expect("the hero");
+    town.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(CharacterMovement {
+            player_controlled: true,
+            mode: MovementMode::Driving,
+            ..Default::default()
+        });
+    let seat = inf_physics::d3::vehicle::seat_pose(&town.bridge, target).expect("a seat");
+    if let Some(mut cm) = town.world.world_mut().get_mut::<CharacterMovement>(e) {
+        cm.runtime.seat = inf_ecs::components::SeatState {
+            vehicle: target,
+            entering: false,
+            time_s: 1.0,
+            start: Vec3d::from_dvec3(seat.0),
+            start_yaw_deg: 0.0,
+        };
+        cm.runtime.intent_move = inf_ecs::math::Vec2d::new(0.0, 1.0);
+    }
+    inf_physics::d3::vehicle::park_collider(&mut town.bridge, HERO, true);
+    town.step(2);
+    assert!(
+        traffic::is_taken(&town.world, target),
+        "the traffic kept the car"
+    );
+
+    // Hold the throttle. The intent has to be re-asserted each step because
+    // `write_driver_back` writes the whole model back and the gate is not
+    // running `apply_intent`.
+    let from = town
+        .world
+        .entity_of(target)
+        .and_then(|c| town.world.world().get::<Transform>(c))
+        .map(|t| t.translation.to_dvec3())
+        .expect("a chassis");
+    let mut top = 0.0f64;
+    for _ in 0..600 {
+        if let Some(mut cm) = town.world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.runtime.intent_move = inf_ecs::math::Vec2d::new(0.0, 1.0);
+        }
+        town.step(1);
+        if let Some(body) = town.bridge.body_of(target) {
+            if let (Some(v), Some(r)) = (
+                town.bridge.world().body_linvel(body),
+                town.bridge.world().body_rotation(body),
+            ) {
+                top = top.max(v.dot(r * DVec3::Z));
+            }
+        }
+    }
+    let to = town
+        .world
+        .entity_of(target)
+        .and_then(|c| town.world.world().get::<Transform>(c))
+        .map(|t| t.translation.to_dvec3())
+        .expect("a chassis");
+    let went = (to - from).length();
+    println!("stolen: {went:.1} m, top {top:.2} m/s");
+    assert!(
+        top > 4.0,
+        "the stolen car topped {top:.2} m/s on an empty street"
+    );
+    assert!(
+        went > 25.0,
+        "the stolen car covered {went:.1} m in ten seconds"
+    );
+}

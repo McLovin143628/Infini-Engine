@@ -6211,3 +6211,502 @@ fn the_vehicle_phase_costs_what_it_costs_on_the_island() {
         inf_player::budget::RATCHET_NOTE
     );
 }
+
+// ── VEH2b: RUSH HOUR, WITH CARS ─────────────────────────────────────────────
+//
+// The wave's gate. NPC1d proved a town WALKS; VEH2a proved one car DRIVES. This
+// is the arm that says the two happen at once, on committed content, on both
+// hosts, byte for byte — and that the player can walk up to one of the cars in
+// it, pull the driver out and take it.
+//
+// Everything it asserts is a count with a floor on it, because a rush-hour gate
+// that passes with zero cars is a rush-hour gate that certifies nothing.
+
+/// How many steps the rush-hour window runs on each host.
+///
+/// Six hundred is ten seconds at 60 Hz, which is long enough for a `Full`-tier
+/// traffic car to cover a city block at town speed and for the carjack's own
+/// press/release edges to land inside it.
+const RUSH_STEPS: usize = 600;
+
+/// The local hour the gate freezes the island's day at for the window.
+///
+/// Twenty-four minutes past eight: `inf_ecs::society::WORK_START_H` is 8 and
+/// `COMMUTE_H` is 1, and `CrowdRecord::hour_of` shifts each agent's own day by
+/// up to `SCHEDULE_JITTER_H` either way -- so at 8.4 the great majority of cars
+/// with a commute are inside their morning leg rather than either side of it.
+/// **Frozen** (`rate = 0`), because a census of a rush hour has to be a census
+/// of one hour rather than of however far a compressed clock got.
+const RUSH_HOUR: f64 = 8.4;
+
+/// The hour the gate SETTLES at, before it winds on to the rush.
+///
+/// Noon, and it is load-bearing rather than arbitrary. A `Full`-tier traffic car
+/// is steered along its whole route by `drive_intent` -- the controller follows
+/// the PATH, not the clock -- so any long phase that runs at the rush hour
+/// consumes the drive before the window opens. The first cut settled at
+/// whatever hour the level carried, and by the time the window started every
+/// commuter had **arrived**: measured at `s_m` 176 m of a 176 m route,
+/// `remaining_m` 0.0, holding the handbrake. Nothing was broken; the instrument
+/// was late.
+///
+/// At noon a commuter's morning leg is finished on the CLOCK, so
+/// `TrafficRecord::is_driving` is false, the car holds the handbrake at its own
+/// kerb and nothing is consumed. The society is at work, which is the quiet the
+/// settle wants anyway.
+const SETTLE_HOUR: f64 = 12.0;
+
+/// How long the gate holds the throttle down in the car it stole.
+///
+/// Ten seconds. What it asserts on is the car's RESPONSE -- revs off idle and a
+/// top speed -- rather than a distance, because the fixture's town is two
+/// streets wide with three hundred and twenty-nine residents walking across
+/// them and traffic in this engine YIELDS to anything in its lane. A distance
+/// floor on that street would be a measurement of the jam.
+const STOLEN_STEPS: usize = 600;
+
+/// What one host's rush hour looked like.
+struct RushRun {
+    digests: Vec<u64>,
+    distinct: usize,
+    /// The carriageway the level re-derived for itself: street lines, lanes,
+    /// and how many times the derivation actually ran.
+    streets: usize,
+    lanes: usize,
+    derivations: u64,
+    /// The traffic census at the end of the window.
+    traffic: inf_ecs::traffic::TrafficStats,
+    /// The tiers a kilometre away, and at the town's edge -- the ladder's own
+    /// two ends, read off the same population.
+    away_tiers: [usize; 4],
+    edge_tiers: [usize; 4],
+    /// …and the crowd's, so "the society walks AND drives" is two numbers rather
+    /// than a sentence.
+    crowd: inf_ecs::crowd::CrowdStats,
+    /// Steering intents written to walking agents over the window.
+    walked: u64,
+    /// The furthest any one traffic car travelled over the window, metres.
+    car_moved_m: f64,
+    /// The carjack: whether the driver came out, whether the hero got in, how
+    /// many presses it took, and how far the stolen car was then driven.
+    jacked: bool,
+    seated: bool,
+    presses: usize,
+    stolen_m: f64,
+    /// The highest revs and the top speed the stolen car reached under the
+    /// player's own throttle -- the RESPONSE, which is what says the car became
+    /// the player's rather than how far a jammed street let it get.
+    stolen_revs: f64,
+    stolen_top_mps: f64,
+    /// Where the victim ended up, relative to the car it was pulled out of.
+    victim_away_m: f64,
+}
+
+/// Freeze this host's day at `hour`, local.
+fn freeze_clock(sim: &mut RuntimeSim, hour: f64) {
+    let w = sim.world_mut().world_mut();
+    let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+    let mut wound = 0usize;
+    for mut tod in q.iter_mut(w) {
+        tod.seconds = (hour * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+        tod.rate = 0.0;
+        wound += 1;
+    }
+    assert!(wound > 0, "the island carries no clock to freeze");
+}
+
+/// Run one host's rush hour, and steal a car out of it.
+fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
+    let hero = hero_entity(sim).expect("a hero");
+    set_hero(sim, hero, centre);
+    sim.world_mut().mark_dirty();
+    // Settle at NOON -- see `SETTLE_HOUR`. The clock is frozen first, so no
+    // commuter spends the settle driving the route the window is about.
+    freeze_clock(sim, SETTLE_HOUR);
+    let mut peak = [0usize; 4];
+    let mut steered = 0u64;
+    settle_the_society(sim, &mut peak, &mut steered);
+
+    // Let the traffic's own plan queue drain. It is bounded
+    // (`TRAFFIC_PLANS_PER_STEP` a step, `MAX_COMMUTERS` in total), so this
+    // terminates or the arm says which number it stopped at.
+    let mut drained = 0usize;
+    for i in 0..2_000 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        if sim.traffic_stats().pending == 0 && i > 8 {
+            drained = i + 1;
+            break;
+        }
+    }
+    assert!(
+        drained > 0,
+        "the traffic plan queue never drained: {} still pending",
+        sim.traffic_stats().pending
+    );
+
+    // -- the ladder, before the window. The fixture's whole town is inside the
+    //    64 m `Full` ring from its own crossroads, so standing there and
+    //    counting rungs measures the fixture rather than the band. Walk the hero
+    //    out and back: away, everything is `Dormant`; at the town's edge, the
+    //    ladder has cars on both of the rungs a car has.
+    set_hero(sim, hero, centre + glam::DVec3::new(TOWN_AWAY_M, 0.0, 0.0));
+    sim.world_mut().mark_dirty();
+    for _ in 0..20 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let away_tiers = sim.traffic_stats().per_tier;
+    set_hero(sim, hero, centre + glam::DVec3::new(TOWN_EDGE_M, 0.0, 0.0));
+    sim.world_mut().mark_dirty();
+    for _ in 0..20 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let edge_tiers = sim.traffic_stats().per_tier;
+    set_hero(sim, hero, centre);
+    sim.world_mut().mark_dirty();
+    for _ in 0..20 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+
+    // -- and NOW the rush hour, so the window is the drive rather than its
+    //    aftermath.
+    freeze_clock(sim, RUSH_HOUR);
+
+    let res = inf_ecs::traffic::carriageway_of(sim.world()).expect("a carriageway");
+    let (streets, lanes, derivations) = (res.streets.len(), res.lanes.len(), res.derivations);
+
+    // ── the window ──────────────────────────────────────────────────────────
+    let start: std::collections::BTreeMap<uuid::Uuid, glam::DVec3> =
+        inf_physics::d3::traffic::records(sim.world())
+            .into_iter()
+            .map(|(g, r)| (g, r.last))
+            .collect();
+    let mut digests = Vec::with_capacity(RUSH_STEPS);
+    let mut seen: std::collections::BTreeSet<u64> = Default::default();
+    let mut walked = 0u64;
+    for _ in 0..RUSH_STEPS {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let d = digest(&sim.state_bytes());
+        seen.insert(d);
+        digests.push(d);
+        walked += sim.crowd_stats().steered;
+    }
+    let traffic = sim.traffic_stats();
+    let crowd = sim.crowd_stats();
+    let car_moved_m = inf_physics::d3::traffic::records(sim.world())
+        .into_iter()
+        .filter_map(|(g, r)| start.get(&g).map(|s| (r.last - *s).length()))
+        .fold(0.0f64, f64::max);
+
+    // ── the carjack ─────────────────────────────────────────────────────────
+    //
+    // The target is the LOWEST-GUID car that currently has somebody at the
+    // wheel, so both hosts pick the same one out of the same world rather than
+    // out of an index.
+    // **The most ISOLATED driven car**, not the first one. The interact rule is
+    // nearest-wins over every candidate, so a gate that stood at the door of a
+    // car with a parked one a metre and a half behind it measures the ranking
+    // rather than the carjack -- which is exactly what the first cut did
+    // (resolve answered Enter on a neighbour at 1.65 m against the target's
+    // 2.02). Deterministic, and a function of the world.
+    let seats: Vec<(uuid::Uuid, glam::DVec3)> = cars(sim)
+        .into_iter()
+        .filter_map(|g| {
+            inf_physics::d3::vehicle::seat_pose(sim.bridge3d(), g).map(|(p, _, _)| (g, p))
+        })
+        .collect();
+    let target = inf_physics::d3::traffic::records(sim.world())
+        .into_iter()
+        .filter(|(g, r)| {
+            r.tier == inf_ecs::crowd::CrowdTier::Full
+                && inf_physics::d3::carjack::occupant_of(sim.world(), *g).is_some()
+        })
+        .filter_map(|(g, _)| {
+            let mine = seats.iter().find(|(h, _)| *h == g)?.1;
+            let nearest = seats
+                .iter()
+                .filter(|(h, _)| *h != g)
+                .map(|(_, p)| (*p - mine).length())
+                .fold(f64::INFINITY, f64::min);
+            Some((g, nearest))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+        .map(|(g, _)| g);
+    let mut run = RushRun {
+        digests,
+        distinct: seen.len(),
+        streets,
+        lanes,
+        derivations,
+        traffic,
+        away_tiers,
+        edge_tiers,
+        crowd,
+        walked,
+        car_moved_m,
+        jacked: false,
+        seated: false,
+        presses: 0,
+        stolen_m: 0.0,
+        stolen_revs: 0.0,
+        stolen_top_mps: 0.0,
+        victim_away_m: 0.0,
+    };
+    let Some(chassis) = target else {
+        return run;
+    };
+    let victim = inf_physics::d3::carjack::occupant_of(sim.world(), chassis).expect("checked");
+
+    // Stand at the DRIVER'S door — the `+X` side, which is the side the exit
+    // puts a driver out on and the only side the carjack candidate is offered
+    // from.
+    let (seat, rot, _) =
+        inf_physics::d3::vehicle::seat_pose(sim.bridge3d(), chassis).expect("a seat");
+    let beside = seat + (rot * glam::DVec3::X) * 1.7 - glam::DVec3::Y * 0.2;
+    for _ in 0..24 {
+        set_hero(sim, hero, beside);
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    // Press E, release, press again — `just_pressed` is an edge, and the
+    // carjack's resist draw is a function of the step, so a real player presses
+    // more than once.
+    for _ in 0..24 {
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default()
+                .press(inf_ecs::movement::actions::INTERACT),
+        );
+        run.presses += 1;
+        if inf_physics::d3::carjack::occupant_of(sim.world(), chassis) != Some(victim) {
+            run.jacked = true;
+        }
+        run.seated = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| {
+                m.mode == inf_ecs::components::MovementMode::Driving
+                    && m.runtime.seat.vehicle == chassis
+            });
+        if run.seated {
+            break;
+        }
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let took = chassis_at(sim, chassis);
+    // ...and drive it away. The throttle held, through the shipped input door,
+    // exactly as `drive_a_car` holds it.
+    for _ in 0..STOLEN_STEPS {
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default()
+                .axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0),
+        );
+        if let Some(o) = sim.vehicles().iter().find(|o| o.chassis == chassis) {
+            run.stolen_revs = run.stolen_revs.max(o.revs);
+            run.stolen_top_mps = run.stolen_top_mps.max(o.forward_mps);
+        }
+    }
+    run.stolen_m = (chassis_at(sim, chassis) - took).length();
+    run.victim_away_m = sim
+        .world()
+        .entity_of(victim)
+        .and_then(|e| sim.world().world().get::<inf_ecs::components::Transform>(e))
+        .map(|t| (t.translation.to_dvec3() - seat).length())
+        .unwrap_or(0.0);
+    run
+}
+
+/// **THE VEH2b GATE.** A settlement at half past eight: the residents walk to
+/// work, the traffic drives past them, and the player pulls one of the drivers
+/// out and takes their car — identically on both hosts, byte for byte.
+#[test]
+fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = build_project(tmp.path());
+    let pack = cook(tmp.path());
+    let content = proj.join("Content");
+    let design = inf_island::read_design(
+        &inf_island::IslandRecipe::load(&fixture_recipe()).expect("recipe"),
+    )
+    .expect("design");
+    let slug = inf_island::slug(&design.recipe.name);
+    let settlement = walk_target_settlement(&design);
+    let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+
+    let mut hosts: Vec<(&str, RuntimeSim)> = vec![
+        ("shipping", pack_sim(&pack)),
+        ("PIE", loose_sim(&content, &slug)),
+    ];
+    let mut runs: Vec<(&str, RushRun)> = Vec::new();
+    for (label, sim) in hosts.iter_mut() {
+        let run = rush_hour(sim, centre);
+        println!(
+            "VEH2b {label}: {} street line(s) -> {} lane(s), derived {} time(s); \
+             {} car(s): {} with a day, {} driving, {} with a driver, tiers {:?}; \
+             the busiest car moved {:.1} m",
+            run.streets,
+            run.lanes,
+            run.derivations,
+            run.traffic.cars,
+            run.traffic.commuters,
+            run.traffic.driving,
+            run.traffic.drivers,
+            run.traffic.per_tier,
+            run.car_moved_m
+        );
+        println!(
+            "VEH2b {label}: the society WALKS -- {} agent(s), tiers {:?}, {} \
+             steering intent(s) over the window -- and DRIVES: {} car(s) on the \
+             road at {RUSH_HOUR:.1} local",
+            run.crowd.per_tier.iter().sum::<usize>(),
+            run.crowd.per_tier,
+            run.walked,
+            run.traffic.driving
+        );
+        println!(
+            "VEH2b {label}: the ladder -- a kilometre away {:?}, at the town \
+             edge {:?}, at the crossroads {:?}",
+            run.away_tiers, run.edge_tiers, run.traffic.per_tier
+        );
+        println!(
+            "VEH2b {label}: carjack -- {} press(es), driver out {}, hero seated \
+             {}; the stolen car revved to {:.2}, topped {:.2} m/s and covered \
+             {:.1} m; the victim is {:.1} m from the seat",
+            run.presses,
+            run.jacked,
+            run.seated,
+            run.stolen_revs,
+            run.stolen_top_mps,
+            run.stolen_m,
+            run.victim_away_m
+        );
+        runs.push((label, run));
+    }
+
+    // ── the per-host arms, BEFORE the compare. Two empty streets agree
+    //    perfectly, so every claim below is armed with a count.
+    for (label, r) in &runs {
+        assert!(
+            r.streets > 0,
+            "{label}: the level re-derived NO streets from its own blocks"
+        );
+        assert!(r.lanes >= r.streets * 2, "{label}: {} lanes", r.lanes);
+        assert!(
+            r.traffic.cars > 0,
+            "{label}: a rush hour with no cars in it certifies nothing"
+        );
+        assert!(
+            r.traffic.commuters > 0,
+            "{label}: no car has a day, so nothing can be driving"
+        );
+        assert!(
+            r.traffic.driving > 0,
+            "{label}: {} cars and not one of them is on the road at half past \
+             eight",
+            r.traffic.cars
+        );
+        assert!(
+            r.traffic.drivers > 0,
+            "{label}: {} cars are driving and none of them has a person in it",
+            r.traffic.driving
+        );
+        assert!(
+            r.traffic.per_tier[0] > 0,
+            "{label}: no car is a rig — nothing is simulated, so nothing can be \
+             stolen"
+        );
+        assert_eq!(
+            r.traffic.per_tier[2], 0,
+            "{label}: a car reached the Far rung, which a car does not have"
+        );
+        // The ladder's own two ends, read off the same population: a kilometre
+        // away NOTHING is built, and at the town's edge the middle rung has
+        // cars on it. Both are measured by moving the anchor, which is the only
+        // thing the band reads.
+        // A kilometre away NOTHING is built. On the CI fixture nothing is
+        // *recorded* either, and that is the honest reading rather than a
+        // weaker arm: the settlement's own cells deactivate, its blocks stop
+        // being volumes, and the carriageway derived from those blocks goes
+        // with them. **The traffic streams with the town it belongs to** --
+        // which is also why `derivations` is more than one on this gate.
+        assert_eq!(
+            r.away_tiers.iter().take(3).sum::<usize>(),
+            0,
+            "{label}: a car a kilometre from the hero still has a body: {:?}",
+            r.away_tiers
+        );
+        assert!(
+            r.edge_tiers[1] > 0,
+            "{label}: at the town edge no car is on the middle rung, so the \
+             band is not banding: {:?}",
+            r.edge_tiers
+        );
+        assert!(
+            r.car_moved_m > 5.0,
+            "{label}: the busiest car in town moved {:.2} m in {RUSH_STEPS} \
+             steps — the street is a photograph",
+            r.car_moved_m
+        );
+        // THE SOCIETY WALKS AND DRIVES — the wave's own sentence, as two
+        // numbers taken from the same step.
+        assert!(
+            r.crowd.per_tier.iter().sum::<usize>() > 0,
+            "{label}: nobody lives here"
+        );
+        assert!(
+            r.walked > 0,
+            "{label}: the town has a population and not one of them took a step"
+        );
+        // THE CARJACK.
+        assert!(
+            r.jacked,
+            "{label}: {} press(es) and the driver never came out",
+            r.presses
+        );
+        assert!(
+            r.seated,
+            "{label}: the driver came out and the hero never got in"
+        );
+        assert!(
+            r.victim_away_m > 1.0,
+            "{label}: the victim is still inside the car ({:.2} m)",
+            r.victim_away_m
+        );
+        assert!(
+            r.stolen_revs > 0.1,
+            "{label}: the stolen car's engine never came off idle ({:.3}) -- the \
+             player is sitting in something that is not theirs to drive",
+            r.stolen_revs
+        );
+        // Anti-vacuity: a window whose every step hashed the same would compare
+        // equal and mean nothing.
+        assert!(
+            r.distinct > RUSH_STEPS / 2,
+            "{label}: only {} distinct states over {RUSH_STEPS} steps",
+            r.distinct
+        );
+    }
+
+    // ── and the two hosts agree, step for step.
+    let (a, b) = (&runs[0].1, &runs[1].1);
+    assert_eq!(
+        a.streets, b.streets,
+        "the two hosts derived different streets"
+    );
+    assert_eq!(a.lanes, b.lanes);
+    assert_eq!(a.derivations, b.derivations);
+    assert_eq!(a.traffic.cars, b.traffic.cars);
+    assert_eq!(a.traffic.commuters, b.traffic.commuters);
+    assert_eq!(a.traffic.per_tier, b.traffic.per_tier);
+    assert_eq!(a.away_tiers, b.away_tiers);
+    assert_eq!(a.edge_tiers, b.edge_tiers);
+    assert_eq!(
+        a.presses, b.presses,
+        "the carjack took a different number of presses"
+    );
+    assert_eq!(a.digests.len(), b.digests.len());
+    for (i, (x, y)) in a.digests.iter().zip(b.digests.iter()).enumerate() {
+        assert_eq!(
+            x, y,
+            "PIE and shipping diverged at rush-hour step {i} of {RUSH_STEPS}"
+        );
+    }
+}

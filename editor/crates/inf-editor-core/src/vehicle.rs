@@ -134,6 +134,9 @@ pub fn spawn_vehicle(
             yaw_deg: spawn.yaw_deg,
             paint: spawn.paint,
             clip: spawn.clip,
+            // An authored car keeps its engine emitter: it is the one a player
+            // drives, and VEH1a's loop is addressed to it.
+            engine_voice: true,
         },
     );
     for node in nodes {

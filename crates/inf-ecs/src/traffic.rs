@@ -82,6 +82,14 @@ pub const MAX_STREET_GAP_M: f64 = 32.0;
 /// pavement either side. A gap this small is left as ground.
 pub const MIN_STREET_GAP_M: f64 = 6.0;
 
+/// How near a street line a block has to be to say what its ground height is,
+/// metres.
+///
+/// A block and a half of a city grid. Wider and a street takes its height from
+/// blocks on the far side of the town; narrower and a line that happens to run
+/// along the edge of a settlement finds nothing and falls back to the cluster.
+pub const PAD_REACH_M: f64 = 150.0;
+
 /// The sign on a settlement street, km/h.
 ///
 /// Thirty, because these are the streets a town's own residents walk across:
@@ -227,11 +235,37 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
         if members.len() < 2 {
             continue;
         }
-        let pad_y = {
-            // The median would need a sort of its own; the mean of a levelled
-            // pad is the same number to a centimetre and is one pass.
-            let sum: f64 = members.iter().map(|&i| sites[i].pad_y).sum();
-            sum / members.len() as f64
+        // **The pad is per STREET, not per settlement.** A cluster's mean is the
+        // same number to a centimetre on a levelled pad and is metres out on a
+        // town that climbs — and a street laid metres under its own ground is a
+        // row of cars inside a heightfield, which rapier answers by launching
+        // them. (Measured: one car left the island fixture at 72 m/s.) So the
+        // mean is taken over the blocks that actually BOUND each line, below.
+        let pad_of = |a: DVec2, b: DVec2| -> f64 {
+            let mut near: Vec<f64> = Vec::new();
+            for &i in members {
+                let c = DVec2::new(sites[i].centre.x, sites[i].centre.z);
+                let d = DVec2::new(
+                    ((c.x - a.x).min(c.x - b.x)).max(0.0) + ((a.x - c.x).min(b.x - c.x)).max(0.0),
+                    ((c.y - a.y).min(c.y - b.y)).max(0.0) + ((a.y - c.y).min(b.y - c.y)).max(0.0),
+                );
+                if (d.x * d.x + d.y * d.y).sqrt() <= PAD_REACH_M {
+                    near.push(sites[i].pad_y);
+                }
+            }
+            if near.is_empty() {
+                near = members.iter().map(|&i| sites[i].pad_y).collect();
+            }
+            // **The MEDIAN, not the mean.** `volume_sites` falls back to a
+            // volume's entity `y` when it offers no exterior ground-floor
+            // doorway, and the island authors that as zero — so a settlement on
+            // a pad at 130 m whose blocks are a mix answers 86 to a mean and
+            // 130 to a median. Both are only a first guess (the ray in
+            // `inf_physics::d3::traffic` is the authority), but a first guess
+            // forty-five metres out is one a body can be built on before the
+            // ray has anything to hit.
+            near.sort_by(f64::total_cmp);
+            near[near.len() / 2]
         };
         let span = |f: &dyn Fn(usize) -> (f64, f64)| -> (f64, f64) {
             let mut lo = f64::INFINITY;
@@ -295,7 +329,7 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
                 out.push(Street {
                     a,
                     b,
-                    y: pad_y,
+                    y: pad_of(a, b),
                     gap_m: gap,
                 });
             }
@@ -568,6 +602,11 @@ pub struct DriveIntent {
     pub lateral_m: f64,
     /// The lookahead used, metres.
     pub lookahead_m: f64,
+    /// How far along its path the car is, metres — the projection the whole
+    /// decision was taken at.
+    pub s_m: f64,
+    /// How much road is left, metres. `INFINITY` on a loop.
+    pub remaining_m: f64,
 }
 
 /// **The speed a bend allows**, m/s — `sqrt(a_lat / curvature)`.
@@ -704,6 +743,12 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
             -(off.x * r.x + off.z * r.z)
         },
         lookahead_m: lookahead,
+        s_m: view.s_m,
+        remaining_m: if view.loops {
+            f64::INFINITY
+        } else {
+            (view.path.length_m() - view.s_m).max(0.0)
+        },
     }
 }
 
@@ -1162,6 +1207,21 @@ pub struct TrafficRecord {
     /// whole argument: a body that has been driven by a controller is not where
     /// its clock says, and snapping it back would teleport it.
     pub rephase_m: f64,
+    /// **The ground under its own space**, world Y, once something has measured
+    /// it — see `inf_physics::d3::traffic::settle_on_the_ground`.
+    ///
+    /// `None` until the first time the car has a body, because measuring it
+    /// needs a collision world and the derivation has none: the street's own
+    /// `y` is the mean pad of the blocks that bound it, which is right on a
+    /// levelled town and metres out on one that climbs. A car placed metres
+    /// under a heightfield is a car rapier launches, and the island fixture
+    /// launched one at **72 m/s** before this field existed.
+    ///
+    /// Derived once and then kept, rather than re-measured every step: a Y that
+    /// depended on which terrain tiles were resident would be a position that
+    /// depended on streaming, which is the `NavPath::snapped` doctrine's own
+    /// refusal.
+    pub ground_y: Option<f64>,
     /// **Somebody has interfered with this car** — its driver was pulled out of
     /// it, or a character who is not its driver is sitting in it.
     ///
@@ -1203,6 +1263,7 @@ impl TrafficRecord {
             yaw_deg: yaw,
             leg: 0,
             rephase_m: 0.0,
+            ground_y: None,
             taken: false,
         }
     }
@@ -1260,17 +1321,29 @@ impl TrafficRecord {
         clock: crate::crowd::CrowdClock,
         leg: crate::crowd::ActiveLeg,
     ) -> (DVec3, f64) {
-        let Some(c) = self.circuit.as_ref() else {
-            return self.place_on(leg);
+        let (p, yaw) = match self.circuit.as_ref() {
+            None => self.place_on(leg),
+            Some(c) if !c.running(clock.hour) => (self.home, self.home_yaw_deg),
+            Some(c) => {
+                let s = c.route.progress_at(clock.t_s, self.phase_of(guid)).s_m;
+                (
+                    c.route.path.position_at(s),
+                    yaw_of_dir(c.route.path.direction_at(s)),
+                )
+            }
         };
-        if !c.running(clock.hour) {
-            return (self.home, self.home_yaw_deg);
+        // **The measured ground wins over the derived one.** The street's `y`
+        // is a mean of the blocks that bound it; `ground_y` is a ray. Applied
+        // here, in the one place a car's place is decided, so the tier that
+        // draws a car and the tier that steers one are lifted by the same
+        // number.
+        match self.ground_y {
+            Some(g) => (
+                DVec3::new(p.x, crate::vehicle::resting_origin_y(&self.def, g), p.z),
+                yaw,
+            ),
+            None => (p, yaw),
         }
-        let s = c.route.progress_at(clock.t_s, self.phase_of(guid)).s_m;
-        (
-            c.route.path.position_at(s),
-            yaw_of_dir(c.route.path.direction_at(s)),
-        )
     }
 
     /// The phase change that puts the clock on the metre the body reached, over
@@ -1443,6 +1516,11 @@ pub struct TrafficStats {
     pub drivers: usize,
     /// How many the traffic has let go of — see [`TrafficRecord::taken`].
     pub taken: usize,
+    /// How many measured the ground under themselves this step.
+    pub settled: usize,
+    /// How many are waiting for something to say what they are standing on —
+    /// a slot whose terrain has not paged in, or one over a hole.
+    pub groundless: usize,
     /// How many commuter routes were planned this step.
     pub planned_now: usize,
     /// How many slots are still waiting for a route.
@@ -1487,8 +1565,23 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         return;
     };
     let slots = kerb_slots(&res.streets);
-    let fleet = crate::vehicle::VehicleDefs::default();
-    let _ = fleet;
+    // **What the level already had.** A re-derivation is not a fresh start: a
+    // settlement paging in one block across town changes the block stamp, and a
+    // rebuild that dropped every record would reset the phase of every car on
+    // the road AND un-steal the one the player is sitting in. Every guid this
+    // derivation produces again keeps the record it already had — the guid is a
+    // pure function of the space, so "again" is exactly the cars that did not
+    // move.
+    let kept: BTreeMap<Uuid, TrafficRecord> = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .map(|p| p.records.clone())
+        .unwrap_or_default();
+    let planned: BTreeMap<Uuid, DVec3> = world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .map(|p| p.pending.clone())
+        .unwrap_or_default();
     let mut records: BTreeMap<Uuid, TrafficRecord> = BTreeMap::new();
     let mut pending: BTreeMap<Uuid, DVec3> = BTreeMap::new();
     for (p, yaw) in slots {
@@ -1501,9 +1594,25 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         }
         let def = catalogue_row(guid);
         let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);
-        records.insert(guid, TrafficRecord::parked(def, car_paint(guid), at, yaw));
-        if day_of(guid) != TrafficDay::Parked && pending.len() < MAX_COMMUTERS {
-            pending.insert(guid, at);
+        match kept.get(&guid) {
+            Some(old) => {
+                records.insert(guid, old.clone());
+                // A car whose route never got planned is still waiting for one.
+                if day_of(guid) != TrafficDay::Parked
+                    && old.schedule.is_none()
+                    && old.circuit.is_none()
+                    && planned.contains_key(&guid)
+                    && pending.len() < MAX_COMMUTERS
+                {
+                    pending.insert(guid, at);
+                }
+            }
+            None => {
+                records.insert(guid, TrafficRecord::parked(def, car_paint(guid), at, yaw));
+                if day_of(guid) != TrafficDay::Parked && pending.len() < MAX_COMMUTERS {
+                    pending.insert(guid, at);
+                }
+            }
         }
     }
     let steps = world
@@ -1708,14 +1817,26 @@ fn pick_destination(slots: &[(DVec3, f64)], guid: Uuid, home: DVec3) -> Option<(
         return None;
     }
     let start = (crate::crowd::agent_unit(guid, 0, SALT_DEST) * slots.len() as f64) as usize;
+    let mut furthest: Option<(f64, DVec3, f64)> = None;
     for k in 0..slots.len() {
         let (p, yaw) = slots[(start + k) % slots.len()];
         let d = p - home;
-        if (d.x * d.x + d.z * d.z).sqrt() >= COMMUTE_MIN_M {
+        let m = (d.x * d.x + d.z * d.z).sqrt();
+        if m >= COMMUTE_MIN_M {
             return Some((p, yaw));
         }
+        if furthest.is_none_or(|(b, _, _)| m > b) {
+            furthest = Some((m, p, yaw));
+        }
     }
-    None
+    // **A small town still has traffic.** The first cut answered `None` when no
+    // slot was a hundred metres off, and on the CI island's own two-street
+    // fixture that is EVERY slot — fifteen cars, none of them with a day, and a
+    // rush-hour gate reporting an empty street. A journey shorter than a city
+    // block is still a journey; what it must not be is a car pulling out of one
+    // space and into the next, which is what the walk above prefers and this
+    // falls back from.
+    furthest.and_then(|(m, p, yaw)| (m > KERB_SLOT_M * 2.0).then_some((p, yaw)))
 }
 
 /// How far a commute has to be to be worth driving, metres.

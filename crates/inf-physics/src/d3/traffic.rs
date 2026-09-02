@@ -187,8 +187,39 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
             }
         }
 
+        // ── the ground, measured once, and **NO BODY UNTIL IT IS KNOWN**.
+        //
+        //    Measuring first is not enough: on the step a settlement's cells
+        //    activate there is no terrain collider under the slot yet, the ray
+        //    finds nothing, and a car built anyway sits at the street's own
+        //    derived height. That height is a MEAN over the blocks that bound
+        //    the line, and a block whose volume offers no exterior ground-floor
+        //    doorway falls back to its entity's `y` — which the island authors
+        //    as **zero**. Mixing zeros with a settlement pad at 130 m gives 86,
+        //    and the island fixture's cars were built forty-five metres under
+        //    the island and fell for the whole window: measured at **-631 m**
+        //    after ten seconds, which is free fall to the digit.
+        //
+        //    So a car whose ground nothing can answer for stays `Dormant` and is
+        //    asked again next step. A car that never gets an answer is never
+        //    built, which is the right outcome for a slot over a hole.
+        let mut want = RigDetail::of(tier);
+        if want != RigDetail::None && rec.ground_y.is_none() {
+            match settle_on_the_ground(bridge, at) {
+                Some(g) => {
+                    rec.ground_y = Some(g);
+                    let (a2, y2) = rec.place(guid, clock, leg);
+                    at = a2;
+                    yaw = y2;
+                    stats.settled += 1;
+                }
+                None => {
+                    want = RigDetail::None;
+                    stats.groundless += 1;
+                }
+            }
+        }
         // ── the body its tier calls for.
-        let want = RigDetail::of(tier);
         if want != rec.detail {
             inf_ecs::vehicle::despawn_rig(world, guid, &rec.def);
             despawn_driver(world, bridge, guid);
@@ -203,6 +234,10 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                         yaw_deg: yaw,
                         paint: rec.paint,
                         clip: None,
+                        // **Silent until the emitter can follow the car** — see
+                        // `RigSpawn::engine_voice` for VEH2a's carried item 5,
+                        // which is the whole reason.
+                        engine_voice: false,
                     },
                     want == RigDetail::Full,
                 );
@@ -369,6 +404,57 @@ fn gap_ahead(
 /// `VehicleControls::from_intent` and calls `Vehicle::control`, which is
 /// exactly what happens when a player holds the same stick. There is no second
 /// path into a vehicle's controls in this engine and this wave did not add one.
+fn view_of<'a>(
+    bridge: &PhysicsBridge3D,
+    chassis: Uuid,
+    rec: &'a TrafficRecord,
+    clock: CrowdClock,
+    leg: inf_ecs::crowd::ActiveLeg,
+    obstacles: &[(Uuid, DVec3)],
+) -> Option<DriveView<'a>> {
+    let path = rec.active_path(clock, leg)?;
+    let body = bridge.body_of(chassis)?;
+    let w = bridge.world();
+    let at = w.body_translation(body)?;
+    let rot = w.body_rotation(body)?;
+    let linvel = w.body_linvel(body).unwrap_or(DVec3::ZERO);
+    let forward = rot * DVec3::Z;
+    let s_m = path.project(at).s_m;
+    let driver = traffic::driver_guid(chassis);
+    Some(DriveView {
+        at,
+        forward,
+        forward_mps: linvel.dot(forward),
+        path,
+        s_m,
+        speed_limit_mps: traffic::street_speed_mps(),
+        gap_m: gap_ahead(path, s_m, chassis, driver, obstacles),
+        loops: rec.circuit.is_some(),
+    })
+}
+
+/// **What one traffic car's driver is asking for right now** — the same view
+/// [`steer_car`] builds, for an instrument that wants the decision rather than
+/// its consequence.
+///
+/// One door for both: an arm that rebuilt the view itself would be measuring a
+/// controller the engine does not run, which is this repository's own "a gate
+/// must aim at the thing it names".
+pub fn probe_intent(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+    chassis: Uuid,
+    dt: f64,
+) -> Option<inf_ecs::traffic::DriveIntent> {
+    let pop = traffic::traffic_of(world)?;
+    let rec = pop.records.get(&chassis)?;
+    let clock = CrowdClock::from_world(world, pop.steps as f64 * dt);
+    let leg = rec.leg_at(chassis, clock);
+    let obstacles = obstacles_of(world);
+    let view = view_of(bridge, chassis, rec, clock, leg, &obstacles)?;
+    Some(traffic::drive_intent(&view))
+}
+
 fn steer_car(
     world: &mut EcsWorld,
     bridge: &PhysicsBridge3D,
@@ -378,29 +464,9 @@ fn steer_car(
     leg: inf_ecs::crowd::ActiveLeg,
     obstacles: &[(Uuid, DVec3)],
 ) {
-    let Some(path) = rec.active_path(clock, leg) else {
-        return;
-    };
-    let Some(body) = bridge.body_of(chassis) else {
-        return;
-    };
-    let w = bridge.world();
-    let (Some(at), Some(rot)) = (w.body_translation(body), w.body_rotation(body)) else {
-        return;
-    };
-    let linvel = w.body_linvel(body).unwrap_or(DVec3::ZERO);
-    let forward = rot * DVec3::Z;
-    let s_m = path.project(at).s_m;
     let driver = traffic::driver_guid(chassis);
-    let view = DriveView {
-        at,
-        forward,
-        forward_mps: linvel.dot(forward),
-        path,
-        s_m,
-        speed_limit_mps: traffic::street_speed_mps(),
-        gap_m: gap_ahead(path, s_m, chassis, driver, obstacles),
-        loops: rec.circuit.is_some(),
+    let Some(view) = view_of(bridge, chassis, rec, clock, leg, obstacles) else {
+        return;
     };
     let intent = traffic::drive_intent(&view);
     let Some(e) = world.entity_of(driver) else {
@@ -474,6 +540,38 @@ fn despawn_driver(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: U
     super::vehicle::park_collider(bridge, driver, false);
     world.despawn(e);
 }
+
+/// **What is under this car**, world Y — a ray straight down through
+/// everything solid.
+///
+/// `AllSolid` and from well above, so a slot whose derived height is under the
+/// terrain still finds the terrain above it: the ray starts
+/// [`SETTLE_UP_M`] over the derived point and reaches [`SETTLE_DOWN_M`] past
+/// it, which brackets every error a per-street pad mean can make on a graded
+/// settlement.
+///
+/// `None` when nothing is there — a slot over a hole, or a terrain tile that
+/// has not paged in. The honest fallback is the derived height, which is what
+/// the caller keeps: a car on the street's own pad is wrong by a metre where a
+/// car at `y = 0` would be wrong by a hundred.
+pub fn settle_on_the_ground(bridge: &mut PhysicsBridge3D, at: DVec3) -> Option<f64> {
+    let from = at + DVec3::Y * SETTLE_UP_M;
+    bridge
+        .world_mut()
+        .cast_ray_where(
+            from,
+            -DVec3::Y,
+            SETTLE_UP_M + SETTLE_DOWN_M,
+            &Default::default(),
+            super::query::CastTargets::AllSolid,
+        )
+        .map(|hit| hit.point.y)
+}
+
+/// How far above its derived place the settle ray starts, metres.
+pub const SETTLE_UP_M: f64 = 40.0;
+/// How far below it the ray reaches, metres.
+pub const SETTLE_DOWN_M: f64 = 40.0;
 
 /// **Every traffic car within reach of a point, nearest first** — the query a
 /// gate makes and a HUD would.

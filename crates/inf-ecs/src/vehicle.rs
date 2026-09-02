@@ -1114,6 +1114,23 @@ pub struct RigSpawn {
     /// *command stream* — which is what PIE == shipping compares — is the same
     /// either way.
     pub clip: Option<Uuid>,
+    /// **Whether this car gets an engine emitter at all** (wave VEH2b).
+    ///
+    /// `true` for a car somebody authored. **`false` for traffic**, and the
+    /// reason is VEH2a's own carried item 5, quoted: *"the engine's emitter
+    /// still does not MOVE — no `AudioCommand::SetPosition`, so a driving car's
+    /// engine is spatialized where its `Play` was issued."* One car that a
+    /// player drives away from its own engine noise is a bug you notice once; a
+    /// dozen traffic cars each leaving a stationary engine loop behind at the
+    /// kerb they pulled out of is a town that sounds broken.
+    ///
+    /// So traffic is **silent until the emitter can follow the car**, which is
+    /// the honest order to do these two things in, and it is named in the
+    /// wave's carried list rather than hidden. It also stops a dozen cars
+    /// flooding the shipped player's bounded `audio_command_log` — which the
+    /// island's own drive gate caught, by losing the one `Play` it exists to
+    /// count off the front of an evicting ring.
+    pub engine_voice: bool,
 }
 
 /// **One entity of a vehicle rig, as a DESCRIPTION** — wave VEH2b.
@@ -1241,7 +1258,7 @@ pub fn rig_nodes_at(
         // vehicle, and a `VehicleClass` on one would be a class the bridge
         // installs on a rig that does not exist.
         class: wheels.then_some(def.class),
-        audio: Some(AudioSource {
+        audio: spawn.engine_voice.then(|| AudioSource {
             clip: spawn.clip,
             looping: true,
             spatial: true,
@@ -1424,6 +1441,7 @@ pub fn despawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef) -> usi
         yaw_deg: 0.0,
         paint: crate::math::Color::WHITE,
         clip: None,
+        engine_voice: false,
     };
     let nodes = rig_nodes(chassis, def, &spawn);
     let present = nodes
@@ -3506,6 +3524,7 @@ mod tests {
             yaw_deg: 45.0,
             paint: crate::math::Color::new(0.2, 0.4, 0.9, 1.0),
             clip: None,
+            engine_voice: true,
         }
     }
 
