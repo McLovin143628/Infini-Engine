@@ -3516,6 +3516,103 @@ pub struct ScatteredInstance {
     /// Mirrors `inf_pcg::PcgInstance::glow`. Authored, not resolved: the hour is
     /// applied once, by the projector, which is the only place that knows it.
     pub glow: f32,
+    /// **What this instance's surface IS** (wave VEN1a) — its authored emission,
+    /// its metal, its roughness and its tint.
+    ///
+    /// Mirrors `inf_pcg::PcgInstance::surface` field for field, on exactly the
+    /// terms this whole struct mirrors `PcgInstance`. Authored, not resolved:
+    /// the *pulse* and the hour are applied by the projector, which is the only
+    /// place that knows what time it is.
+    pub surface: ScatteredSurface,
+}
+
+/// **The appearance a scattered instance carries beyond its tint index** (wave
+/// VEN1a) — the dependency-light mirror of `inf_pcg::PcgSurface`, on exactly the
+/// terms [`ScatteredInstance`] mirrors `inf_pcg::PcgInstance`.
+///
+/// Not reflected, not serialized: it rides a derived cache, so it moves no
+/// schema. (That is the whole reason the venue wave could give every scattered
+/// module a material inside a spent schema window.)
+///
+/// # Why the projectors need it and `Material` will not do
+///
+/// A `Material` component belongs to an *entity*, and a settlement block is one
+/// entity holding two thousand modules. Before this wave both projectors wrote
+/// `metallic: 0.0, roughness: 0.75` for every one of them and coloured them from
+/// a five-entry debug palette indexed by `kind`, so a chrome pole, a glazed
+/// shopfront and a brick wall were the same plaster.
+///
+/// # What is per batch and what is per instance
+///
+/// [`emissive`](Self::emissive), [`pulse_hz`](Self::pulse_hz),
+/// [`metallic`](Self::metallic) and [`roughness`](Self::roughness) are what a
+/// whole `ScatterBatch` must share, so the projectors **bucket** on them: a
+/// volume grows one extra batch per distinct surface it holds, and none at all
+/// for a volume whose modules all answer the default. [`tint`](Self::tint) is
+/// per instance, because a scattered instance has carried its own colour since
+/// P18.5 — so six neon hues cost one draw, not six.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatteredSurface {
+    /// Linear self-emitted colour, **authored** — before any time of day or
+    /// pulse. Mirrors `inf_pcg::PcgSurface::emissive`.
+    pub emissive: [f32; 3],
+    /// Emissive pulse rate in hertz; `0.0` is steady. Applied by the projector
+    /// as a pure function of the level clock, never by a stateful generator.
+    pub pulse_hz: f32,
+    /// Metallic, `[0, 1]`. `0.0` is the pre-VEN1a value for all scatter.
+    pub metallic: f32,
+    /// Roughness, `[0, 1]`. `0.75` is the pre-VEN1a value for all scatter.
+    pub roughness: f32,
+    /// Authored linear tint (rgba), or `None` for the placeholder kind-index
+    /// palette both projectors have used since P18.5.
+    pub tint: Option<[f32; 4]>,
+}
+
+impl ScatteredSurface {
+    /// The surface every placement that predates wave VEN1a has — and, exactly,
+    /// the constants both projectors used to write inline.
+    ///
+    /// `roughness` is **0.75** rather than zero for that reason: a default that
+    /// did not reproduce it would re-shade every tree, wall and rock in the
+    /// engine as a mirror.
+    pub const DEFAULT: Self = Self {
+        emissive: [0.0; 3],
+        pulse_hz: 0.0,
+        metallic: 0.0,
+        roughness: 0.75,
+        tint: None,
+    };
+
+    /// Whether this surface emits anything at all.
+    #[inline]
+    pub fn emits(&self) -> bool {
+        self.emissive.iter().any(|c| *c > 0.0)
+    }
+
+    /// **The key a projector buckets on** — every field a whole batch must
+    /// share, as bit patterns so the map key is `Ord` and exact.
+    ///
+    /// Bit patterns and not the floats, because a bucket key is an *identity*:
+    /// two surfaces are the same batch when they are the same numbers, and
+    /// `PartialOrd` on `f32` has no total order to build a `BTreeMap` on. The
+    /// `tint` is deliberately absent — it rides the instance.
+    #[inline]
+    pub fn batch_key(&self) -> [u32; 6] {
+        [
+            self.emissive[0].to_bits(),
+            self.emissive[1].to_bits(),
+            self.emissive[2].to_bits(),
+            self.pulse_hz.to_bits(),
+            self.metallic.to_bits(),
+            self.roughness.to_bits(),
+        ]
+    }
+}
+
+impl Default for ScatteredSurface {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// One placed **collision box** a `.inf_pcg` graph produced (P19.5) — the solid
@@ -6630,6 +6727,7 @@ mod tests {
                 mesh: None,
                 extent: None,
                 glow: 0.0,
+                surface: ScatteredSurface::DEFAULT,
             }],
             // P19.5's solid half is derived state on exactly the same terms —
             // and **this is the whole schema answer for the batch**: a field
@@ -6729,6 +6827,7 @@ mod tests {
             mesh: None,
             extent: None,
             glow: 0.0,
+            surface: ScatteredSurface::DEFAULT,
         };
         let group = |start, len, inst_start, inst_len| StructureGroup {
             shell: solid,
@@ -6841,6 +6940,7 @@ mod tests {
                     mesh: None,
                     extent: None,
                     glow: 0.0,
+                    surface: ScatteredSurface::DEFAULT,
                 })
                 .collect(),
             ..Terrain::configured(5, 1.0)

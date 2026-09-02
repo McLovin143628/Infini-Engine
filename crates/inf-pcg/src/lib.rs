@@ -88,7 +88,7 @@ pub use sampler::{
     Multiply, Noise, SlopeFilter, MAX_FEATHER_SAMPLES,
 };
 pub use scatter::{
-    scatter_region, scatter_region_in, PcgCollider, PcgInstance, Region, RotationMode,
+    scatter_region, scatter_region_in, PcgCollider, PcgInstance, PcgSurface, Region, RotationMode,
     ScatterParams,
 };
 pub use volume::{compose_volume, VolumeOutput};

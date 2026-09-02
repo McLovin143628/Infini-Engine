@@ -132,6 +132,8 @@ fn module_def() -> impl Strategy<Value = ModuleDef> {
             // I8b: derived by `Grammar::stamp_module_meshes`, never parsed, so
             // the DSL round-trip generator produces the parser's own value.
             glow: 0.0,
+            // VEN1a: likewise derived and never parsed.
+            surface: inf_pcg::PcgSurface::DEFAULT,
         })
 }
 

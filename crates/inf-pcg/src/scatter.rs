@@ -230,6 +230,94 @@ pub struct PcgInstance {
     /// hour is applied once, at the one place that knows it. The 16-light
     /// ceiling is untouched — this is emission, not a light.
     pub glow: f32,
+    /// **What this instance's surface IS** (wave VEN1a) — its authored emission,
+    /// its metal and its roughness, and the tint that replaces the placeholder
+    /// palette.
+    ///
+    /// Derived from the module's shape family by
+    /// [`ModuleShape::surface`](crate::building::modules::ModuleShape::surface)
+    /// and stamped onto the palette by
+    /// [`Grammar::stamp_module_meshes`](crate::grammar::Grammar::stamp_module_meshes),
+    /// on exactly the terms [`mesh`](Self::mesh) and [`glow`](Self::glow)
+    /// already are: *what a module is* is the palette's business, not the DSL's,
+    /// so a chrome pole is chrome in every archetype by one rule rather than by
+    /// N authored numbers that can disagree.
+    ///
+    /// [`PcgSurface::DEFAULT`] is exactly what both projectors hard-coded before
+    /// this wave, so every placement that predates it draws byte-identically.
+    pub surface: PcgSurface,
+}
+
+/// **The appearance a placement carries beyond its tint index** (wave VEN1a) —
+/// the ECS mirror is `inf_ecs::components::ScatteredSurface`.
+///
+/// # Why a struct rather than four fields on [`PcgInstance`]
+///
+/// Because three of the four are what a whole *batch* must share and one is
+/// per-instance, and the projectors have to bucket on the first three. Naming
+/// the group once means the bucket key is one value and not a tuple somebody
+/// can forget a member of — the failure mode is a chrome pole rendered with a
+/// plaster wall's roughness, which nothing would report.
+///
+/// # Why the default is not `Default::default()`
+///
+/// `roughness` defaults to **0.75** and not to zero, because 0.75 is the number
+/// both projectors wrote for every scattered instance from P18.5 until this
+/// wave. A default that did not reproduce it would re-shade every tree, wall
+/// and rock in the engine as a mirror, and no golden holds scatter with GI on to
+/// catch it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcgSurface {
+    /// Linear self-emitted colour, **authored** — the neon's own hue, before any
+    /// time of day or pulse. `[0, 0, 0]` for everything that does not emit.
+    ///
+    /// Distinct from [`PcgInstance::glow`], which is a *scalar* multiplier on a
+    /// warm interior white and is what a lit window has. A window is warm
+    /// whatever the wall around it is; a neon sign is magenta because somebody
+    /// chose magenta.
+    pub emissive: [f32; 3],
+    /// Emissive pulse rate in **hertz**; `0.0` is steady.
+    ///
+    /// Applied by the projector as a pure function of the level clock (see
+    /// `inf_render::pulse_emissive`), never by a stateful generator: PIE and the
+    /// shipped player read the same clock and must agree byte for byte.
+    pub pulse_hz: f32,
+    /// Metallic, `[0, 1]`. `0.0` is the pre-VEN1a value for all scatter.
+    pub metallic: f32,
+    /// Roughness, `[0, 1]`. `0.75` is the pre-VEN1a value for all scatter.
+    pub roughness: f32,
+    /// **Authored linear tint (rgba)**, or `None` for the placeholder
+    /// kind-index palette both projectors have used since P18.5.
+    ///
+    /// Per *instance*, not per batch — a scattered instance has carried its own
+    /// colour since P18.5 and the batch never has. So this costs no extra
+    /// bucket and a venue can hold six tints in one draw.
+    pub tint: Option<[f32; 4]>,
+}
+
+impl PcgSurface {
+    /// The surface every placement that predates wave VEN1a has: no emission,
+    /// no pulse, dielectric, roughness 0.75, and the placeholder palette.
+    pub const DEFAULT: Self = Self {
+        emissive: [0.0; 3],
+        pulse_hz: 0.0,
+        metallic: 0.0,
+        roughness: 0.75,
+        tint: None,
+    };
+
+    /// Whether this surface emits anything at all — the test the projectors
+    /// bucket and the GI staging reject on.
+    #[inline]
+    pub fn emits(&self) -> bool {
+        self.emissive.iter().any(|c| *c > 0.0)
+    }
+}
+
+impl Default for PcgSurface {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// One placed **collision box** — the solid half of a placement, beside
@@ -413,6 +501,10 @@ fn scatter_cell(
                 mesh: None,
                 extent: None,
                 glow: 0.0,
+                // A scatter rule places foliage and rocks; a surface is a
+                // *grammar module's* property, so the kernel writes the
+                // pre-VEN1a constants and nothing moves.
+                surface: PcgSurface::DEFAULT,
             });
         }
     }

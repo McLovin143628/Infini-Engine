@@ -216,6 +216,16 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
             mesh: i.mesh,
             extent: i.extent,
             glow: i.glow,
+            // **Wave VEN1a**: the surface a module's shape family stamped. The
+            // whole reason the venue wave needed no schema window: this rides a
+            // `#[serde(skip)]` derived cache and reaches no bytes.
+            surface: inf_ecs::components::ScatteredSurface {
+                emissive: i.surface.emissive,
+                pulse_hz: i.surface.pulse_hz,
+                metallic: i.surface.metallic,
+                roughness: i.surface.roughness,
+                tint: i.surface.tint,
+            },
         })
         .collect();
     let solids: Vec<inf_ecs::components::ScatteredSolid> = out
@@ -1118,6 +1128,16 @@ pub async fn pcg_evaluate_biomes(
                     mesh: i.mesh,
                     extent: i.extent,
                     glow: i.glow,
+                    // **Wave VEN1a**: the surface a module's shape family stamped. The
+                    // whole reason the venue wave needed no schema window: this rides a
+                    // `#[serde(skip)]` derived cache and reaches no bytes.
+                    surface: inf_ecs::components::ScatteredSurface {
+                        emissive: i.surface.emissive,
+                        pulse_hz: i.surface.pulse_hz,
+                        metallic: i.surface.metallic,
+                        roughness: i.surface.roughness,
+                        tint: i.surface.tint,
+                    },
                 })
                 .collect();
             let placed = baked.len() as u32;

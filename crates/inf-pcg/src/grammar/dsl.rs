@@ -265,6 +265,20 @@ pub struct ModuleDef {
     /// so a window is a window in every archetype by one rule rather than by
     /// seven authored numbers that can disagree.
     pub glow: f32,
+    /// **What a module of this name is made of** (wave VEN1a) — emission,
+    /// metal, roughness and tint.
+    ///
+    /// **Derived, not parsed**, on exactly the terms [`glow`](Self::glow) is
+    /// and for exactly the reason: there is no `metallic` keyword and there
+    /// will not be one. [`Grammar::stamp_module_meshes`] sets it from the
+    /// module's shape family
+    /// ([`ModuleShape::surface`](crate::building::modules::ModuleShape::surface)),
+    /// so a chrome pole is chrome in every archetype by one rule.
+    ///
+    /// [`PcgSurface::DEFAULT`] for every module of every palette that predates
+    /// the venue families, which is what keeps every building the engine has
+    /// ever drawn byte-identical.
+    pub surface: crate::scatter::PcgSurface,
 }
 
 impl ModuleDef {
@@ -278,6 +292,7 @@ impl ModuleDef {
             size: None,
             collider: None,
             glow: 0.0,
+            surface: crate::scatter::PcgSurface::DEFAULT,
         }
     }
 }
@@ -349,6 +364,12 @@ impl Grammar {
             if shape.is_glazing() {
                 m.glow = crate::building::modules::GLAZING_GLOW;
             }
+            // **Wave VEN1a**: the same stamp, one field wider. An authored
+            // `mesh` still wins above; a surface has no authored spelling at
+            // all, so this is unconditional -- a module of a family IS made of
+            // what that family is made of, and there is nothing for an author
+            // to have said differently.
+            m.surface = shape.surface();
         }
     }
 

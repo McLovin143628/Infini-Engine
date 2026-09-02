@@ -907,6 +907,21 @@ pub struct ScatterSource {
     /// quantized step is what makes dusk a re-pack instead of a city whose
     /// windows are lit at noon.
     pub glow_step: u16,
+    /// **The quantized level-clock tick a pulsing emitter's gain was written
+    /// at** (wave VEN1a), from [`pulse_tick`] -- or `0` for a volume that holds
+    /// no pulsing module, which is every volume of every level before the venue
+    /// archetypes.
+    ///
+    /// Exactly [`glow_step`](Self::glow_step)'s argument, one clock over: the
+    /// pulse gain is not part of `ScatterData` (the uploaded bytes are unmoved
+    /// by it) but it IS part of the `ScatterBatch` record, so a carried batch
+    /// would keep the phase of the frame it was packed in and a club's string
+    /// lights would freeze mid-breath the moment the volume stopped changing.
+    ///
+    /// **The zero is what keeps it cheap.** A key that always carried the tick
+    /// would re-pack all 172 of the island's settlement volumes -- 365 545
+    /// instances -- eight times a second for a festoon in one of them.
+    pub pulse_tick: u32,
     /// The world anchor the payload's offsets were packed against.
     pub anchor: DVec3,
 }
@@ -924,6 +939,7 @@ impl ScatterSource {
         draw_distance_bits: 0,
         table: 0,
         glow_step: 0,
+        pulse_tick: 0,
         anchor: DVec3::ZERO,
     };
 
@@ -1013,6 +1029,91 @@ pub fn glow_emissive(glow: f32, step: u16) -> [f32; 3] {
     }
     let g = glow * (step as f32 / NIGHT_GLOW_STEPS as f32);
     [g, g * 0.86, g * 0.62]
+}
+
+/// **How many times a second a pulsing emitter's gain is re-derived** (wave
+/// VEN1a).
+///
+/// The gain is a continuous function of the level clock and it decides a
+/// `ScatterBatch`'s emission, which is part of the scatter memo's key — exactly
+/// the shape [`NIGHT_GLOW_STEPS`] already has, for exactly its reason. A
+/// continuous key would re-pack every volume that holds a pulsing module on
+/// every frame; eight ticks a second make it eight, and at the slowest rate a
+/// venue authors (0.27 Hz, a filament's breath) that is thirty samples a cycle,
+/// which reads as a breath and not as a staircase.
+///
+/// The projector writes `0` for a volume that holds **no** pulsing module,
+/// which is every volume of every level that predates the venue archetypes — so
+/// the tick joins the memo key without making a settlement re-pack for a club
+/// three blocks away.
+pub const PULSE_TICKS_PER_S: f64 = 8.0;
+
+/// The **quantized** level-clock tick a pulsing emitter's gain is computed at.
+///
+/// One door, called by both projectors, so the memo key and the emission it
+/// stands for cannot be computed two ways — the argument [`night_glow_step`]
+/// makes verbatim. A non-finite or negative clock reads as `0`, which is the
+/// answer that changes nothing.
+pub fn pulse_tick(clock_s: f64) -> u32 {
+    if !clock_s.is_finite() || clock_s <= 0.0 {
+        return 0;
+    }
+    // Saturating rather than wrapping: a level clock running for a year of
+    // wall time reaches 2.5e8 ticks, well inside `u32`, and a saturated tick is
+    // a frozen pulse rather than a discontinuity.
+    (clock_s * PULSE_TICKS_PER_S).min(f64::from(u32::MAX)) as u32
+}
+
+/// **The floor a pulsing emitter dims to.** A neon tube that goes fully dark
+/// reads as a fault; the reference's string lights breathe between about a third
+/// and full.
+const PULSE_FLOOR: f32 = 0.34;
+
+/// The linear emission an authored emitter contributes at `tick`.
+///
+/// `hz` of `0.0` — every emitter in the engine except a festoon — returns
+/// `emissive` **unchanged and untouched by any arithmetic**, so a steady sign is
+/// byte-identical to what a projector without this function would have written.
+///
+/// # A pure function of the clock, and that is the whole contract
+///
+/// PIE and the shipped player read the same `ResolvedSky` clock and must agree
+/// byte for byte on the trace; a golden renders one frame from cold. So there is
+/// no state, no frame index and no generator here — the same rule the scatter
+/// dither hash and the foliage wind phase are written to. The sine is
+/// [`inf_math::psin64`], not `f64::sin`, because `std` trig is not bit-portable
+/// across targets (the P14 law) and this value reaches a `ScatterBatch` that two
+/// hosts compare.
+pub fn pulse_emissive(emissive: [f32; 3], hz: f32, tick: u32) -> [f32; 3] {
+    // `!is_finite() || <= 0.0` rather than `<= 0.0`, the island wave I8a
+    // spelling: the readable rewrite is FALSE for a NaN, and a NaN rate would
+    // multiply straight through into an emission a batch carries for ever.
+    if !hz.is_finite() || hz <= 0.0 {
+        return emissive;
+    }
+    let t = f64::from(tick) / PULSE_TICKS_PER_S;
+    let phase = std::f64::consts::TAU * f64::from(hz) * t;
+    // Reduced in f64 before the sine, like the foliage wind's phase: at a
+    // level's fourth hour `TAU * 0.27 * 14400` is 24 400 radians, and f32 has
+    // no fractional radians left at that magnitude.
+    let s = inf_math::psin64(phase % std::f64::consts::TAU) as f32;
+    let gain = PULSE_FLOOR + (1.0 - PULSE_FLOOR) * (0.5 + 0.5 * s);
+    [emissive[0] * gain, emissive[1] * gain, emissive[2] * gain]
+}
+
+/// **The two quantized clocks a scatter projection reads** (wave VEN1a).
+///
+/// Bundled rather than passed as two scalars because they travel together
+/// through five functions in each of two mirrored projectors, and a tenth
+/// parameter that one host adds and the other does not is exactly the drift the
+/// projector mirror test exists to catch. Both are *quantized* for the same
+/// reason — see [`night_glow_step`] and [`pulse_tick`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScatterClock {
+    /// The night-glow step, from [`night_glow_step`].
+    pub glow_step: u16,
+    /// The pulse tick, from [`pulse_tick`].
+    pub pulse_tick: u32,
 }
 
 /// **The scatter carry-forward memo** — the scatter twin of what
@@ -2969,6 +3070,72 @@ mod tests {
     /// step is EXACTLY zero and a daytime emission is exactly `[0, 0, 0]`, so a
     /// level with no night in it packs the bytes it packed before this feature
     /// existed.
+    /// **A steady emitter is untouched, and a pulsing one breathes** (wave
+    /// VEN1a).
+    ///
+    /// The first half is the byte-stability guarantee every emitter in the
+    /// engine except a festoon relies on: `hz == 0` must not merely *round* to
+    /// the input, it must **be** the input, or every neon sign and every screen
+    /// would acquire a rounding nobody asked for.
+    #[test]
+    fn a_steady_emitter_is_untouched_and_a_pulsing_one_breathes() {
+        let neon = [2.6, 0.4, 2.2];
+        for tick in [0u32, 1, 7, 4096, u32::MAX] {
+            assert_eq!(
+                pulse_emissive(neon, 0.0, tick),
+                neon,
+                "a steady emitter moved at tick {tick}"
+            );
+        }
+        // A NaN or negative rate is steady too, not a NaN emission carried for
+        // ever (the island wave I8a spelling).
+        assert_eq!(pulse_emissive(neon, f32::NAN, 5), neon);
+        assert_eq!(pulse_emissive(neon, -1.0, 5), neon);
+
+        // A festoon at 0.27 Hz: one cycle is 3.70 s, which is 29.6 ticks.
+        let hz = 0.27_f32;
+        let gains: Vec<f32> = (0..60)
+            .map(|t| pulse_emissive([1.0, 1.0, 1.0], hz, t)[0])
+            .collect();
+        let lo = gains.iter().copied().fold(f32::MAX, f32::min);
+        let hi = gains.iter().copied().fold(f32::MIN, f32::max);
+        // It really moves, it stays inside the authored envelope, and it never
+        // goes dark -- a neon tube that reaches zero reads as a fault.
+        assert!(hi - lo > 0.5, "the pulse barely moved ({lo:.3}..{hi:.3})");
+        assert!(
+            lo >= PULSE_FLOOR - 1e-4,
+            "the pulse went below its floor ({lo})"
+        );
+        assert!(
+            hi <= 1.0 + 1e-4,
+            "the pulse exceeded the authored value ({hi})"
+        );
+        // The hue is preserved: every channel takes the same gain.
+        let p = pulse_emissive(neon, hz, 11);
+        let g = p[0] / neon[0];
+        assert!((p[1] / neon[1] - g).abs() < 1e-5);
+        assert!((p[2] / neon[2] - g).abs() < 1e-5);
+        // …and it is a pure function of the tick, twice over.
+        assert_eq!(pulse_emissive(neon, hz, 11), p);
+    }
+
+    /// **The tick quantizes the clock and refuses nonsense** (wave VEN1a).
+    #[test]
+    fn the_pulse_tick_quantizes_the_level_clock() {
+        assert_eq!(pulse_tick(0.0), 0);
+        assert_eq!(pulse_tick(-3.0), 0, "a clock before zero reads as zero");
+        assert_eq!(pulse_tick(f64::NAN), 0);
+        assert_eq!(pulse_tick(f64::INFINITY), 0, "not finite, so no tick");
+        assert_eq!(pulse_tick(1.0), PULSE_TICKS_PER_S as u32);
+        // Eight ticks a second: two clocks inside one eighth share a tick, and
+        // the memo therefore does not re-pack between them.
+        assert_eq!(pulse_tick(2.010), pulse_tick(2.100));
+        assert_ne!(pulse_tick(2.100), pulse_tick(2.200));
+        // A year of level clock still fits, so the saturation is unreachable in
+        // practice and is a guard rather than a policy.
+        assert!(pulse_tick(365.0 * 24.0 * 3600.0) < u32::MAX);
+    }
+
     #[test]
     fn the_night_glow_ramps_on_the_sun_and_quantizes() {
         use glam::Vec3;

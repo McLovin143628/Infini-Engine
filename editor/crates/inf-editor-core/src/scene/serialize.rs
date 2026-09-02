@@ -8113,6 +8113,7 @@ mod tests {
                 mesh: None,
                 extent: None,
                 glow: 0.0,
+                surface: Default::default(),
             });
             doc.world_mut().world_mut().entity_mut(e).insert(vol);
             doc.world_mut().mark_dirty();

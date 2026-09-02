@@ -780,6 +780,7 @@ mod tests {
                 mesh: None,
                 extent: None,
                 glow: 0.0,
+                surface: inf_pcg::PcgSurface::DEFAULT,
             }],
             colliders: vec![],
             groups: vec![],

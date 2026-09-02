@@ -132,6 +132,7 @@ fn block_population(
             mesh: p.mesh,
             extent: None,
             glow: 0.0,
+            surface: inf_ecs::components::ScatteredSurface::DEFAULT,
         })
         .collect();
     let solids = composed

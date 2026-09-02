@@ -991,6 +991,7 @@ fn place_module(
             mesh: module.mesh,
             extent: drawn_extent(module),
             glow: module.glow,
+            surface: module.surface,
         },
         solid,
     ))

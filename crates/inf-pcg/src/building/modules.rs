@@ -65,6 +65,12 @@
 use uuid::Uuid;
 
 use super::palettes::archetypes;
+use crate::scatter::PcgSurface;
+
+/// The worn-timber tint the stage, the catwalk and the benches share (wave
+/// VEN1a) — one constant, because the reference's stage and the bench at its
+/// edge are the same planks and two numbers would let them drift apart.
+const WOOD: [f32; 4] = [0.38, 0.26, 0.16, 1.0];
 
 /// Salt for [`module_mesh_guid`] — its own constant, so a module mesh can never
 /// alias a door leaf, a doorway, a structure collider or an imported asset.
@@ -353,6 +359,119 @@ impl ModuleShape {
     /// (island wave I8b clause 3).
     pub fn is_glazing(self) -> bool {
         self == ModuleShape::Glazing
+    }
+
+    /// **What a module of this family is MADE of** (wave VEN1a): its authored
+    /// emission, its metal, its roughness and its tint.
+    ///
+    /// # Why here and not in the DSL
+    ///
+    /// The exact argument [`crate::grammar::ModuleDef::glow`] already makes and
+    /// which this wave only extends: *the DSL describes where a module goes, and
+    /// what a module is is the palette's business*. There is no `metallic`
+    /// keyword and there will not be one. A chrome pole is chrome in every
+    /// archetype by one rule, rather than by seven authored numbers that can
+    /// disagree — and a palette that adds a pole and forgets to say "chrome"
+    /// cannot exist, because saying "pole" is saying chrome.
+    ///
+    /// # Why the twelve older families answer the default
+    ///
+    /// [`PcgSurface::DEFAULT`] is exactly `metallic 0.0, roughness 0.75, tint
+    /// None, no emission` — the constants both projectors hard-coded for every
+    /// scattered instance from P18.5 until this wave. So every building the
+    /// engine has ever drawn draws byte-identically, and the venue families are
+    /// the only ones that move.
+    ///
+    /// # The tints, and where they come from
+    ///
+    /// The reference frames (`venues/0020`–`0060`): a wood catwalk and wood
+    /// benches, a chrome pole catching the stage wash as one vertical streak, a
+    /// glossy dark bar top with a blue rim, near-black walls, and neon in
+    /// saturated primaries. The **authored** tints here are the wood, the chrome
+    /// and the bar; the neon's *hue* is per-archetype and arrives through the
+    /// palette's own furniture table, because a strip club's sign is not a
+    /// cocktail bar's.
+    pub fn surface(self) -> PcgSurface {
+        match self {
+            // ── the twelve that predate the venue wave: unmoved ──
+            ModuleShape::Panel
+            | ModuleShape::Glazing
+            | ModuleShape::Column
+            | ModuleShape::Deck
+            | ModuleShape::Tread
+            | ModuleShape::Course
+            | ModuleShape::Legged
+            | ModuleShape::Carcass
+            | ModuleShape::Soft
+            | ModuleShape::Planter
+            | ModuleShape::Crate
+            | ModuleShape::Shutter => PcgSurface::DEFAULT,
+            // Stage planks and benches: warm, worn wood with a little sheen, so
+            // a red wash pools on it instead of going flat. The reference's
+            // catwalk is the brightest surface in the room that is not a light.
+            ModuleShape::Stage => PcgSurface {
+                roughness: 0.55,
+                tint: Some(WOOD),
+                ..PcgSurface::DEFAULT
+            },
+            // **Chrome.** Fully metallic and very smooth: a pole in a near-black
+            // room is one bright vertical specular streak and nothing else, and
+            // a dielectric at 0.75 roughness would be a grey stick.
+            ModuleShape::Pole => PcgSurface {
+                metallic: 1.0,
+                roughness: 0.12,
+                tint: Some([0.90, 0.91, 0.94, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // A glossy dark bar top over a dark carcass, with a faint blue rim —
+            // the "blue bar rim" of the reference, which is a light strip under
+            // the overhang and reads as emission rather than as reflection.
+            ModuleShape::Bar => PcgSurface {
+                emissive: [0.06, 0.16, 0.42],
+                metallic: 0.25,
+                roughness: 0.22,
+                tint: Some([0.10, 0.09, 0.10, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // Brass foot rail and a padded top, averaged into one surface: a
+            // stool is 0.4 m across and never carries two materials on screen.
+            ModuleShape::Stool => PcgSurface {
+                metallic: 0.6,
+                roughness: 0.35,
+                tint: Some([0.42, 0.33, 0.18, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // A television: a cool, bright panel that is on whatever the hour
+            // is. Not `glow`, which is the night-window ramp — a screen in a
+            // windowless club does not know what time it is.
+            ModuleShape::Screen => PcgSurface {
+                emissive: [0.9, 1.15, 1.7],
+                pulse_hz: 0.0,
+                roughness: 0.25,
+                tint: Some([0.04, 0.04, 0.05, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // A neon plate. The family carries the BRIGHTNESS and the palette
+            // carries the hue, so `Neon`'s own default is a warm white a
+            // furniture entry overrides — see `FurnitureDef::emissive`.
+            ModuleShape::Sign => PcgSurface {
+                emissive: [2.6, 2.2, 2.0],
+                roughness: 0.3,
+                tint: Some([0.05, 0.05, 0.06, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // A string-light swag: dim per bulb, and it BREATHES. 0.27 Hz is
+            // slow enough to read as a filament rather than as a strobe, and it
+            // is the one place in this table a pulse is the default rather than
+            // an authored exception.
+            ModuleShape::Festoon => PcgSurface {
+                emissive: [1.5, 1.15, 0.75],
+                pulse_hz: 0.27,
+                roughness: 0.4,
+                tint: Some([0.06, 0.06, 0.06, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+        }
     }
 
     /// This family's mesh, in unit space.
@@ -770,6 +889,115 @@ mod tests {
         assert_eq!(shape_of("Glazing"), Some(ModuleShape::Glazing));
         assert_eq!(shape_of("Shopfront"), Some(ModuleShape::Glazing));
         assert_eq!(shape_of("Brick"), Some(ModuleShape::Panel));
+    }
+
+    /// **The twelve families that predate the venue wave answer exactly what
+    /// both projectors used to hard-code** (wave VEN1a).
+    ///
+    /// This is the byte-stability arm for every building the engine has ever
+    /// drawn. `metallic: 0.0` and `roughness: 0.75` were literals in
+    /// `push_scatter` on both hosts and `tint: None` is what makes
+    /// `pcg_kind_color` still run; a surface table that quietly moved one of
+    /// them would re-shade every wall, tree and rock in the engine, and no
+    /// committed golden holds scatter with GI on to catch it.
+    #[test]
+    fn the_older_families_are_exactly_the_constants_the_projectors_had() {
+        for s in ModuleShape::ALL {
+            let venue = matches!(
+                s,
+                ModuleShape::Stage
+                    | ModuleShape::Pole
+                    | ModuleShape::Bar
+                    | ModuleShape::Stool
+                    | ModuleShape::Screen
+                    | ModuleShape::Sign
+                    | ModuleShape::Festoon
+            );
+            if venue {
+                continue;
+            }
+            assert_eq!(
+                s.surface(),
+                PcgSurface::DEFAULT,
+                "{} moved off the pre-VEN1a surface",
+                s.name()
+            );
+        }
+        // …and the default really is the two literals, or the arm above is a
+        // tautology about whatever the default happens to be today.
+        assert_eq!(PcgSurface::DEFAULT.metallic, 0.0);
+        assert_eq!(PcgSurface::DEFAULT.roughness, 0.75);
+        assert_eq!(PcgSurface::DEFAULT.tint, None);
+        assert!(!PcgSurface::DEFAULT.emits());
+    }
+
+    /// **A venue family is made of something, and the something is specific**
+    /// (wave VEN1a).
+    ///
+    /// Named per family rather than swept, because "not the default" would be
+    /// satisfied by a chrome pole made of matte plastic. What the reference
+    /// frames demand of each is a different sentence.
+    #[test]
+    fn every_venue_family_states_a_real_material() {
+        // The pole is a MIRROR. Its whole contribution to a near-black room is
+        // one bright vertical specular streak.
+        let pole = ModuleShape::Pole.surface();
+        assert_eq!(pole.metallic, 1.0, "the pole is not metal");
+        assert!(pole.roughness < 0.2, "a rough pole makes no streak");
+        assert!(!pole.emits(), "the pole is lit, it is not a light");
+        // The stage is WOOD: rough enough to pool a wash, tinted, not metal.
+        let stage = ModuleShape::Stage.surface();
+        assert_eq!(stage.tint, Some(WOOD));
+        assert_eq!(stage.metallic, 0.0);
+        assert!(stage.roughness > 0.4 && stage.roughness < 0.7);
+        // The three emitters emit, and the two that should not pulse do not.
+        for s in [ModuleShape::Screen, ModuleShape::Sign, ModuleShape::Festoon] {
+            assert!(s.surface().emits(), "{} does not emit", s.name());
+            assert!(
+                !s.is_glazing(),
+                "{} would take the night-window ramp as well",
+                s.name()
+            );
+        }
+        assert_eq!(ModuleShape::Screen.surface().pulse_hz, 0.0);
+        assert_eq!(ModuleShape::Sign.surface().pulse_hz, 0.0);
+        // Exactly one family breathes, and slowly enough to read as a filament.
+        let pulsing: Vec<&str> = ModuleShape::ALL
+            .into_iter()
+            .filter(|s| s.surface().pulse_hz > 0.0)
+            .map(|s| s.name())
+            .collect();
+        assert_eq!(pulsing, vec!["festoon"]);
+        let hz = ModuleShape::Festoon.surface().pulse_hz;
+        assert!((0.1..0.6).contains(&hz), "a festoon at {hz} Hz is a strobe");
+        // The bar has its blue rim and its gloss, and the stool its brass.
+        assert!(ModuleShape::Bar.surface().emits(), "the bar rim is dark");
+        assert!(ModuleShape::Bar.surface().roughness < 0.3);
+        assert!(ModuleShape::Stool.surface().metallic > 0.4);
+    }
+
+    /// **A palette becoming a grammar stamps the surface onto every module**
+    /// (wave VEN1a) — the arm that says the door is wired, not merely written.
+    #[test]
+    fn the_palette_stamp_carries_the_surface_to_the_module() {
+        let mut g = crate::grammar::Grammar::parse(
+            "module Pole = size 1 offset 0,0,0 collider 0.05,1.5,0.05\n\
+             module Wall = size 1 offset 0,0,0 collider 0.1,1.5,0.5\n\
+             Run -> Wall+\n",
+        )
+        .expect("the fixture parses");
+        // Before the stamp every module answers the default, so the assertion
+        // below is about the stamp and not about the parser.
+        assert!(g.modules().iter().all(|m| m.surface == PcgSurface::DEFAULT));
+        g.stamp_module_meshes();
+        let by = |n: &str| {
+            g.modules()
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("no module {n}"))
+        };
+        assert_eq!(by("Pole").surface, ModuleShape::Pole.surface());
+        assert_eq!(by("Wall").surface, PcgSurface::DEFAULT);
     }
 
     /// **The pole is round, and the assertion says what "round" means** (wave

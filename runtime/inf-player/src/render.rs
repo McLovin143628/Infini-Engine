@@ -695,8 +695,16 @@ pub fn project_scene_full(
     // glow is a function of it rather than of a second read of the clock. The
     // step is QUANTIZED because it is part of the scatter memo's key -- see
     // `inf_render::night_glow_step`.
-    // MIRROR: the same two lines in the other host, in the same place.
-    let glow_step = inf_render::night_glow_step(scene.sun.direction);
+    //
+    // **Wave VEN1a pairs it with the pulse tick**: a venue's string lights
+    // breathe as a pure function of the LEVEL clock (never a frame index, never
+    // a wall clock), quantized on the same argument. `water_environment` below
+    // is the Ring-0 door that says what "now" is, so both hosts read one clock.
+    // MIRROR: the same lines in the other host, in the same place.
+    let clock = inf_render::ScatterClock {
+        glow_step: inf_render::night_glow_step(scene.sun.direction),
+        pulse_tick: inf_render::pulse_tick(inf_ecs::sky::water_environment(world).0),
+    };
     // The clock and wind every water body responds to, resolved ONCE per
     // projection in Ring 0 (`inf_ecs::sky`) so the two MIRROR projectors cannot
     // disagree about what "now" and "the wind" mean — the same reasoning that put
@@ -851,7 +859,7 @@ pub fn project_scene_full(
                     scatter_meshes,
                     translation,
                     id,
-                    glow_step,
+                    clock,
                 );
             }
         }
@@ -872,7 +880,7 @@ pub fn project_scene_full(
             if !terrain.biome_population.is_empty() {
                 let id = next_id;
                 next_id += 1;
-                push_biome_population(scene, terrain, scatter_meshes, translation, id, glow_step);
+                push_biome_population(scene, terrain, scatter_meshes, translation, id, clock);
             }
         }
         // Water surfaces (P20.1): an ocean, a lake or a spline river. A river
@@ -1325,7 +1333,7 @@ fn push_scatter(
     draw_distance: f64,
     near_distance: f64,
     id: u32,
-    glow_step: u16,
+    clock: inf_render::ScatterClock,
     casts_shadows: bool,
 ) {
     // MIRROR-BEGIN scatter_mesh_buckets
@@ -1338,7 +1346,20 @@ fn push_scatter(
     // cannot share one -- and a window pane and the wall beside it are exactly
     // that pair. Bucketing on the authored glow costs one extra batch per
     // volume that has any, and nothing at all for one that has none.
-    let mut buckets: std::collections::BTreeMap<(Option<u128>, u32), Vec<ScatterInstance>> =
+    //
+    // **…and a third** (wave VEN1a): the SURFACE it draws with. `metallic`,
+    // `roughness` and the authored `emissive` are all per-batch fields on
+    // `ScatterBatch`, so the same argument reaches all four numbers at once and
+    // `ScatteredSurface::batch_key` states them in one place rather than
+    // letting a fifth reader forget one. A volume grows one extra batch per
+    // distinct surface it holds and NONE at all for a volume whose modules all
+    // answer `ScatteredSurface::DEFAULT` -- which is every level that predates
+    // the venue archetypes, so no committed content changes its batch count.
+    //
+    // The TINT is deliberately not in the key: a scattered instance has carried
+    // its own colour since P18.5, so a venue's six neon hues cost one draw.
+    type BucketKey = (Option<u128>, u32, [u32; 6]);
+    let mut buckets: std::collections::BTreeMap<BucketKey, Vec<ScatterInstance>> =
         std::collections::BTreeMap::new();
     for si in instances {
         // A GUID the host could not resolve buckets with the meshless ones, so an
@@ -1358,28 +1379,52 @@ fn push_scatter(
             |e| glam::Vec3::new(e[0] * 2.0, e[1] * 2.0, e[2] * 2.0),
         );
         buckets
-            .entry((key, si.glow.to_bits()))
+            .entry((key, si.glow.to_bits(), si.surface.batch_key()))
             .or_default()
             .push(ScatterInstance {
                 position: si.position,
                 rotation: si.rotation.as_quat(),
                 scale,
-                color: pcg_kind_color(si.kind),
+                // **The authored tint wins over the placeholder palette** (wave
+                // VEN1a). `pcg_kind_color` is a five-entry debug ramp indexed by
+                // a RULE-LOCAL kind, so a chrome pole and a brick wall could
+                // draw the same green; a module whose family states a colour
+                // states it here, and the palette survives for everything that
+                // does not.
+                color: si.surface.tint.unwrap_or_else(|| pcg_kind_color(si.kind)),
             });
     }
-    for ((key, glow_bits), bucket) in buckets {
+    for ((key, glow_bits, surface), bucket) in buckets {
         let data = ScatterData::build_with_geometry(
             PrimMesh::Cube,
             key.and_then(|k| meshes.get(&k)).cloned(),
             translation,
             bucket,
         );
+        // The batch's emission is the night-window ramp PLUS the module's own
+        // authored colour, pulsed. Added and not chosen between, because a lit
+        // shopfront pane is both: a window that glows warm at dusk and a sign
+        // that is magenta at every hour.
+        let authored = inf_render::pulse_emissive(
+            [
+                f32::from_bits(surface[0]),
+                f32::from_bits(surface[1]),
+                f32::from_bits(surface[2]),
+            ],
+            f32::from_bits(surface[3]),
+            clock.pulse_tick,
+        );
+        let glow = inf_render::glow_emissive(f32::from_bits(glow_bits), clock.glow_step);
         scene.scatter.push(ScatterBatch {
             data: Arc::new(data),
             anchor: translation,
-            metallic: 0.0,
-            roughness: 0.75,
-            emissive: inf_render::glow_emissive(f32::from_bits(glow_bits), glow_step),
+            metallic: f32::from_bits(surface[4]),
+            roughness: f32::from_bits(surface[5]),
+            emissive: [
+                glow[0] + authored[0],
+                glow[1] + authored[1],
+                glow[2] + authored[2],
+            ],
             id,
             draw_distance,
             near_distance,
@@ -1431,7 +1476,7 @@ fn push_pcg_scatter(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
-    glow_step: u16,
+    clock: inf_render::ScatterClock,
 ) {
     // MIRROR-BEGIN pcg_scatter_lod
     if vol.structure_groups.is_empty() {
@@ -1443,7 +1488,7 @@ fn push_pcg_scatter(
             vol.draw_distance,
             0.0,
             id,
-            glow_step,
+            clock,
             true,
         );
         return;
@@ -1473,7 +1518,7 @@ fn push_pcg_scatter(
         vol.draw_distance,
         0.0,
         id,
-        glow_step,
+        clock,
         // Loose content -- a fence, a scatter -- has no shell standing in for
         // it, so it casts its own shadow exactly as it always has.
         true,
@@ -1505,7 +1550,7 @@ fn push_pcg_scatter(
         parts_far,
         0.0,
         id,
-        glow_step,
+        clock,
         // **THE PARTS DO NOT CAST; THEIR SHELL DOES** (island wave I8b). Every
         // instance in this batch stands inside the oriented box `push_shells`
         // is about to emit, and that box is packed as a caster at every
@@ -1537,6 +1582,23 @@ fn push_pcg_scatter(
             mesh: None,
             extent: None,
             glow: 0.0,
+            // **A shell never emits** (wave VEN1a). It wears the first part's
+            // metal and roughness for the same reason it wears its colour --
+            // a district of chrome-fronted clubs must not turn to plaster at
+            // the LOD distance -- but its EMISSION is dropped, because a shell
+            // is one box standing for a whole building and a building whose
+            // first part happened to be a neon plate would become a
+            // building-sized neon plate at 96 m.
+            surface: inf_ecs::components::ScatteredSurface {
+                emissive: [0.0; 3],
+                pulse_hz: 0.0,
+                ..vol
+                    .evaluated
+                    .get(g.inst_start as usize)
+                    .map_or(inf_ecs::components::ScatteredSurface::DEFAULT, |i| {
+                        i.surface
+                    })
+            },
         })
         .collect();
     push_shells(scene, &shells, vol, translation, vol.draw_distance, lod, id);
@@ -1587,7 +1649,7 @@ fn carry_or_push_pcg_scatter(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
-    glow_step: u16,
+    clock: inf_render::ScatterClock,
 ) {
     // MIRROR-BEGIN pcg_scatter_memo
     let source = inf_render::ScatterSource {
@@ -1595,7 +1657,19 @@ fn carry_or_push_pcg_scatter(
         stamp: vol.structures_gen,
         draw_distance_bits: vol.draw_distance.to_bits(),
         table,
-        glow_step,
+        glow_step: clock.glow_step,
+        // **Zero unless this volume actually pulses** (wave VEN1a). The tick
+        // must be in the key or a carried batch keeps the phase it was packed
+        // at and a club's string lights freeze mid-breath -- but a key that
+        // always carried it would re-pack all 172 of the island's settlement
+        // volumes eight times a second for a festoon in one of them. The scan
+        // is O(instances) and runs only on a memo MISS, where the pack that
+        // follows is already O(instances).
+        pulse_tick: if vol.evaluated.iter().any(|i| i.surface.pulse_hz > 0.0) {
+            clock.pulse_tick
+        } else {
+            0
+        },
         anchor: translation,
     };
     if let Some(batches) = prev.take(source) {
@@ -1608,7 +1682,7 @@ fn carry_or_push_pcg_scatter(
         return;
     }
     let at = scene.scatter.len();
-    push_pcg_scatter(scene, vol, meshes, translation, id, glow_step);
+    push_pcg_scatter(scene, vol, meshes, translation, id, clock);
     let packed = scene.scatter[at..].to_vec();
     scene.scatter_memo.insert(source, packed);
     // MIRROR-END pcg_scatter_memo
@@ -1691,7 +1765,7 @@ fn push_biome_population(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
-    glow_step: u16,
+    clock: inf_render::ScatterClock,
 ) {
     push_scatter(
         scene,
@@ -1701,7 +1775,7 @@ fn push_biome_population(
         0.0,
         0.0,
         id,
-        glow_step,
+        clock,
         true,
     )
 }

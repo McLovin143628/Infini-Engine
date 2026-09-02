@@ -53,6 +53,7 @@ use crate::grammar::expand::{expand_span, GrammarOutput, GrammarPass, Ground, Sp
 use crate::grammar::span::{positive, yaw_onto, Span};
 use crate::hash::Hash64;
 use crate::height::HeightProvider;
+use crate::scatter::PcgSurface;
 use crate::scatter::{PcgCollider, PcgInstance};
 
 /// Per-draw salts, so the wall runs, the furniture stations and the free-grid
@@ -306,6 +307,9 @@ impl Ctx<'_> {
             mesh: def.and_then(|m| m.mesh),
             extent: Some([half.x as f32, half.y as f32, half.z as f32]),
             glow: def.map_or(0.0, |m| m.glow),
+            // **Wave VEN1a**: the module's own surface, from the same
+            // `ModuleDef` the mesh and the glow come from.
+            surface: def.map_or(PcgSurface::DEFAULT, |m| m.surface),
         }
     }
 

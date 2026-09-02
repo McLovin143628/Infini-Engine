@@ -85,6 +85,7 @@ mod tests {
             mesh: None,
             extent: None,
             glow: 0.0,
+            surface: crate::scatter::PcgSurface::DEFAULT,
         }
     }
     fn col(i: u32) -> PcgCollider {
