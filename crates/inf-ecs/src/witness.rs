@@ -305,7 +305,7 @@ mod tests {
         for i in 0..20u128 {
             records.insert(
                 guid(100 - i),
-                CrowdRecord::standing(a.clone(), DVec3::new(1.0 + i as f64, 0.0, 0.0)),
+                CrowdRecord::standing(a, DVec3::new(1.0 + i as f64, 0.0, 0.0)),
             );
         }
         crate::crowd::set_population(&mut w, records);

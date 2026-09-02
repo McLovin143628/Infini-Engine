@@ -426,7 +426,7 @@ mod tests {
         let mut below = 0;
         for q in &l.quads {
             let (x, y) = (q.position.x as f32, q.position.y as f32);
-            let (w, h) = (q.size.x as f32, q.size.y as f32);
+            let (w, h) = (q.size.x, q.size.y);
             // Nothing covers the middle.
             assert!(
                 !(x <= cx && cx <= x + w && y <= cy && cy <= y + h),

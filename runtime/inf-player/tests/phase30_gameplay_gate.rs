@@ -596,7 +596,7 @@ fn seed_the_cast(world: &mut inf_ecs::EcsWorld, feet: glam::DVec3) {
     let mut records = std::collections::BTreeMap::new();
     for i in 0..CROWD_NEAR {
         let at = ground + DVec3::new(3.0 + i as f64 * 1.5, 0.0, -3.0);
-        records.insert(crowd_guid(i), CrowdRecord::standing(a.clone(), at));
+        records.insert(crowd_guid(i), CrowdRecord::standing(a, at));
     }
     for i in 0..CROWD_FAR {
         let at = ground
@@ -605,10 +605,7 @@ fn seed_the_cast(world: &mut inf_ecs::EcsWorld, feet: glam::DVec3) {
                 0.0,
                 inf_physics::d3::gameplay::PANIC_RADIUS_M + 30.0 + i as f64,
             );
-        records.insert(
-            crowd_guid(CROWD_NEAR + i),
-            CrowdRecord::standing(a.clone(), at),
-        );
+        records.insert(crowd_guid(CROWD_NEAR + i), CrowdRecord::standing(a, at));
     }
     assert_eq!(
         inf_ecs::crowd::add_agents(world, records),

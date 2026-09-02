@@ -1638,12 +1638,12 @@ fn gunfire_scatters_the_crowd_and_a_brawl_does_not() {
         for (i, g) in near.iter().enumerate() {
             // A few metres either side of the hero, well inside the radius.
             let at = DVec3::new(4.0 + i as f64, 0.0, 2.0);
-            records.insert(*g, CrowdRecord::standing(a.clone(), at));
+            records.insert(*g, CrowdRecord::standing(a, at));
         }
         for (i, g) in far.iter().enumerate() {
             // Past `PANIC_RADIUS_M` — the same street, a long way down it.
             let at = DVec3::new(0.0, 0.0, d3::gameplay::PANIC_RADIUS_M + 20.0 + i as f64);
-            records.insert(*g, CrowdRecord::standing(a.clone(), at));
+            records.insert(*g, CrowdRecord::standing(a, at));
         }
         assert_eq!(
             inf_ecs::crowd::add_agents(&mut rig.world, records),
@@ -1767,15 +1767,9 @@ fn a_gunshot_is_recorded_with_the_people_who_could_see_it() {
     let a = CrowdArchetype::humanoid(None, None, None);
     let mut records = std::collections::BTreeMap::new();
     // In the open, off to the side: nothing between it and the muzzle.
-    records.insert(
-        seen,
-        CrowdRecord::standing(a.clone(), DVec3::new(8.0, 0.0, 0.0)),
-    );
+    records.insert(seen, CrowdRecord::standing(a, DVec3::new(8.0, 0.0, 0.0)));
     // Directly behind the wall.
-    records.insert(
-        blind,
-        CrowdRecord::standing(a.clone(), DVec3::new(0.0, 0.0, 12.0)),
-    );
+    records.insert(blind, CrowdRecord::standing(a, DVec3::new(0.0, 0.0, 12.0)));
     assert_eq!(inf_ecs::crowd::add_agents(&mut rig.world, records), 0);
     rig.world.mark_dirty();
     rig.world.propagate();
@@ -1995,7 +1989,7 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
         records.insert(
             Uuid::from_u128(0x1601_1000 + i as u128),
             CrowdRecord::standing(
-                a.clone(),
+                a,
                 DVec3::new(r * inf_math::pcos64(t), 0.0, r * inf_math::psin64(t) + 40.0),
             ),
         );
@@ -2124,7 +2118,7 @@ fn a_struck_bystander_either_runs_or_stands_its_ground() {
         assert!(inf_ecs::crowd::adopt(
             &mut rig.world,
             TARGET,
-            CrowdRecord::standing(a.clone(), DVec3::new(0.0, 0.0, 1.0))
+            CrowdRecord::standing(a, DVec3::new(0.0, 0.0, 1.0))
         ));
         let records = std::collections::BTreeMap::from([(
             victim,

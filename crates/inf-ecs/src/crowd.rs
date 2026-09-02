@@ -4860,7 +4860,7 @@ mod tests {
                 face: DVec3::Z,
             },
         }];
-        let rec = CrowdRecord::scheduled(a.clone(), CrowdSchedule::new(legs).expect("a day"));
+        let rec = CrowdRecord::scheduled(a, CrowdSchedule::new(legs).expect("a day"));
         set_population(&mut w, BTreeMap::from([(who, rec)]));
         assert!(w.entity_of(who).is_none(), "the fixture materialized it");
         // Run the population's clock on, so the session time is not zero — which
