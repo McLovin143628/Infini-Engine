@@ -59,7 +59,10 @@ const HZ: f64 = 60.0;
 /// A grab is a whole second at 60 Hz (`GRAB_EASE_S` in, `GRAB_HOLD_S` held,
 /// `GRAB_EASE_S` out), and the point of the last arm is that the hand OPENS
 /// again — so the course has to outlast it rather than stop while it is closed.
-const STEPS: u32 = 140;
+///
+/// **Twenty more since wave WPN1**, for the punch: the release arm has to land
+/// on step 139 exactly as it always did, so the swing goes after it.
+const STEPS: u32 = 160;
 
 const HERO: Uuid = Uuid::from_u128(0x5C1C_0000_0000_0000_0000_0000_0000_0001);
 const SM: Uuid = Uuid::from_u128(0x5C1C_0000_0000_0000_0000_0000_0000_0002);
@@ -265,6 +268,8 @@ fn build(world: &mut EcsWorld) {
 /// | 71 | **E** on a crate that names a grip |
 /// | 72–131 | the grab eases in, holds and opens |
 /// | 132–139 | open again, settled |
+/// | 140 | **punch** (wave WPN1) — an empty hand takes the attack edge |
+/// | 141–159 | the fist's own cycle runs out |
 ///
 /// **Carrying and aiming are separate bands on purpose.** The claim the aim arm
 /// makes is that *aiming* moves the hand, and comparing an aiming step against
@@ -282,6 +287,10 @@ fn course(step: u32) -> (Vec<&'static str>, BTreeMap<String, f32>) {
         46 => vec!["aim", "reload"],
         47..=60 => vec!["aim"],
         71 => vec!["interact"],
+        // WPN1: the punch, AFTER the release arm's step 139 — an empty hand is
+        // the third consumer of the attack edge and the one case that could
+        // have tripped `muzzles_without_a_socket` on a rigged character.
+        140 => vec!["attack"],
         _ => Vec::new(),
     };
     (down, axes)
@@ -308,6 +317,15 @@ struct Step {
     pose: Vec<u8>,
     /// `(weapon holds, grabs, shots, reloads)` — the engagement counters.
     engagement: (u32, u32, u32, u32),
+    /// `(swings, muzzles_without_a_socket)` — wave WPN1's two.
+    ///
+    /// The second is the SK1b tripwire, and this is the course it belongs on:
+    /// the hero here has a real 161-bone rig that publishes `hand_r`, so a shot
+    /// that fell back to 1.4 m above the feet would be a rig that quietly lost
+    /// its hand. `phase30_gameplay_gate`'s capsule hero publishes no pose at
+    /// all and is the legitimate fallback the counter deliberately does not
+    /// count, so only this file can arm it.
+    melee: (u32, u32),
     /// Whether a weapon entity exists this step, and the magazine.
     armed: (bool, u32),
 }
@@ -339,6 +357,7 @@ fn player_trace() -> Vec<Step> {
             Step {
                 pose: inf_ecs::pose::pose_state_bytes(sim.world()),
                 engagement: (r.hands.0, r.hands.1, r.shots, r.reloads),
+                melee: (r.swings, r.muzzles_without_a_socket),
                 armed: armed_of(sim.world()),
             }
         })
@@ -361,6 +380,7 @@ fn editor_trace() -> Vec<Step> {
             Step {
                 pose: inf_ecs::pose::pose_state_bytes(doc.world()),
                 engagement: (r.hands.0, r.hands.1, r.shots, r.reloads),
+                melee: (r.swings, r.muzzles_without_a_socket),
                 armed: armed_of(doc.world()),
             }
         })
@@ -451,11 +471,13 @@ fn assert_not_vacuous(t: &[Step]) {
     assert_eq!(t[31].engagement.2, 1, "the shot is not on step 31");
 
     // -- FIRE and RELOAD really happened --
-    assert_eq!(
-        t.iter().map(|s| s.engagement.2).sum::<u32>(),
-        1,
-        "expected exactly one shot over the course"
-    );
+    // **`shots` counts every attack that left, ROUNDS AND SWINGS** — wave WPN1
+    // put a punch through the same trigger, the same clock and the same
+    // counter, so this is the round count and `melee.0` is subtracted rather
+    // than a second counter being invented.
+    let rounds: u32 =
+        t.iter().map(|s| s.engagement.2).sum::<u32>() - t.iter().map(|s| s.melee.0).sum::<u32>();
+    assert_eq!(rounds, 1, "expected exactly one ROUND over the course");
     assert_eq!(
         t.iter().map(|s| s.engagement.3).sum::<u32>(),
         1,
@@ -494,6 +516,35 @@ fn assert_not_vacuous(t: &[Step]) {
     );
     // …and it OPENS again, back to the settled unarmed pose, to the bit.
     assert_eq!(t[0].pose, t[139].pose, "the hand never let go of the crate");
+
+    // -- THE PUNCH (wave WPN1), and the tripwire it could have sprung --
+    //
+    // An empty hand takes the attack edge and swings. On a RIGGED character
+    // that is the one case that could have counted against
+    // `muzzles_without_a_socket`: a fist has no weapon entity to hang off a
+    // socket, so `muzzle_of` takes the capsule rule *correctly* and a tripwire
+    // that did not know about melee would fire on every swing.
+    assert_eq!(
+        t.iter().map(|s| s.melee.0).sum::<u32>(),
+        1,
+        "expected exactly one swing over the course"
+    );
+    assert_eq!(t[140].melee.0, 1, "the punch is not on step 140");
+    assert_eq!(
+        t.iter().map(|s| s.melee.1).sum::<u32>(),
+        0,
+        "a POSED character fired from the 1.4 m capsule rule — its rig does not \
+         publish `hand_r`, or its weapon entity was never placed, and every \
+         shot in this course is a silent half-metre out"
+    );
+    // …and the swing moved no bone, which is the honest bound: a fist asks the
+    // hand pass for nothing (`equipped_weapon` answers `None`), so a punch is
+    // damage and an animation trigger and no pose. Carried by name.
+    assert_eq!(
+        t[0].pose, t[145].pose,
+        "the punch moved the pose — which would be an improvement, and would \
+         mean this arm and the wave's carried list are both out of date"
+    );
 
     // The course really is a course: a solver that collapsed everything onto one
     // pose would satisfy the pairs above only by accident.
@@ -536,6 +587,10 @@ fn pie_equals_shipping_over_the_weapon_verbs_with_hands_on_the_weapon() {
         assert_eq!(
             x.engagement, y.engagement,
             "step {i}: the two hosts asked their hands for different things"
+        );
+        assert_eq!(
+            x.melee, y.melee,
+            "step {i}: the two hosts disagree about the swing or the muzzle"
         );
         assert_eq!(
             x.armed, y.armed,

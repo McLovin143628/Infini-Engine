@@ -32,7 +32,7 @@ use inf_project::ProjectManifest;
 
 use inf_editor_core::samples::{
     gameplay_dir, GAMEPLAY_GATE_AT, GAMEPLAY_HATCH_AT, GAMEPLAY_HERO_GUID, GAMEPLAY_HERO_J,
-    GAMEPLAY_SHED_AT, GAMEPLAY_TARGET_GUID,
+    GAMEPLAY_HERO_START, GAMEPLAY_SHED_AT, GAMEPLAY_TARGET_GUID,
 };
 
 const HZ: f64 = 60.0;
@@ -422,10 +422,19 @@ enum Verb {
     KickIn,
     SprintCrash,
     DiveThrough,
+    // ── wave WPN1 ──
+    /// An empty hand takes the attack edge and lands on somebody.
+    Punch,
+    /// A body runs out of joules and is handed to the ragdoll.
+    DownAnNpc,
+    /// The street hears the shots and leaves.
+    ScatterTheCrowd,
+    /// Somebody who is not the player pulls a trigger.
+    NpcOpensFire,
 }
 
 /// **The catalogue**, in the order a player meets them.
-const ALL_VERBS: [Verb; 13] = [
+const ALL_VERBS: [Verb; 17] = [
     Verb::PickUp,
     Verb::OpenInventory,
     Verb::EquipFromPanel,
@@ -439,6 +448,10 @@ const ALL_VERBS: [Verb; 13] = [
     Verb::KickIn,
     Verb::SprintCrash,
     Verb::DiveThrough,
+    Verb::Punch,
+    Verb::DownAnNpc,
+    Verb::ScatterTheCrowd,
+    Verb::NpcOpensFire,
 ];
 
 /// What the trace owes a verb.
@@ -465,6 +478,10 @@ fn duty_of(v: Verb) -> Duty {
         Verb::KickIn => Duty::Forced("LMB kicks the locked gate in"),
         Verb::SprintCrash => Duty::Forced("a sprint breaches the shed door"),
         Verb::DiveThrough => Duty::Forced("a dive goes through the hatch"),
+        Verb::Punch => Duty::Forced("an empty hand lands on a bystander"),
+        Verb::DownAnNpc => Duty::Forced("rifle rounds down an NPC and ragdoll it"),
+        Verb::ScatterTheCrowd => Duty::Forced("the gunfire scatters the street"),
+        Verb::NpcOpensFire => Duty::Forced("an armed NPC fires back"),
     }
 }
 
@@ -484,8 +501,8 @@ fn every_verb_the_mandate_names_is_on_the_list() {
     println!("the gate owes {} verbs: {forced:?}", forced.len());
     assert_eq!(
         forced.len(),
-        13,
-        "the obligation is thirteen verbs and this list has {} — a row was \
+        17,
+        "the obligation is seventeen verbs and this list has {} — a row was \
          deleted, and the coverage check below only says when one is MISSING",
         forced.len()
     );
@@ -494,6 +511,132 @@ fn every_verb_the_mandate_names_is_on_the_list() {
 }
 
 // ── the script ──────────────────────────────────────────────────────────────
+
+// ── the WPN1 cast, and the one function that puts it on the street ──────────
+//
+// The fixture's `.inf_lvl` has one hero, one house and one destructible, and
+// this wave's four verbs need somebody to punch, somebody to shoot and a street
+// to empty. Adding them to the committed level would move its bytes for a
+// scene that already reads well; adding them HERE — in the shared course, at a
+// fixed step, through the engine's own doors — is `weapon_hands_gate::
+// unequip_at`'s precedent exactly, and it is what makes the two hosts do the
+// same thing on the same step by construction.
+
+/// The bystander a fist lands on and rifle rounds finish.
+const BYSTANDER: Uuid = Uuid::from_u128(0x8460_0F01);
+/// The armed NPC that fires back.
+const GUNMAN: Uuid = Uuid::from_u128(0x8460_0F02);
+/// The crowd that hears it. Five near the shooting, three a long way off.
+const CROWD_NEAR: usize = 5;
+const CROWD_FAR: usize = 3;
+fn crowd_guid(i: usize) -> Uuid {
+    Uuid::from_u128(0x8460_0F10 + i as u128)
+}
+
+/// Stand one capsule character up at `at`, on the shipped defaults.
+fn stand_up(world: &mut inf_ecs::EcsWorld, guid: Uuid, name: &str, at: glam::DVec3) {
+    use inf_ecs::components::{
+        BodyKind3D, CharacterController3D, Collider3D, ColliderShape3DKind, RigidBody3D,
+    };
+    use inf_ecs::math::Vec3d;
+    let cm = CharacterMovement::default();
+    let radius = 0.3;
+    let e = world.spawn_with_guid(guid, name, None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(at.x, at.y + cm.stand_half_height_m + radius, at.z);
+    world.world_mut().entity_mut(e).insert((
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(radius, cm.stand_half_height_m, radius),
+            radius,
+            ..Default::default()
+        },
+        CharacterController3D::default(),
+        cm,
+        t,
+    ));
+}
+
+/// **Put the cast on the street** — one function, called by both hosts on one
+/// step, so the two worlds cannot differ by a body.
+///
+/// `feet` is where the hero is standing when it runs; everything is placed
+/// relative to that, so the station does not depend on the exact metre the
+/// hatch run ended at (which the earlier stations own) while still being
+/// identical on both hosts, because their traces are identical up to here.
+fn seed_the_cast(world: &mut inf_ecs::EcsWorld, feet: glam::DVec3) {
+    use glam::DVec3;
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+
+    let ground = DVec3::new(feet.x, GAMEPLAY_HERO_START.1, feet.z);
+    // A metre in front along +X — the hero faces +X (yaw 90) at the end of the
+    // hatch run, and a punch reaches 1.2 m.
+    stand_up(world, BYSTANDER, "Bystander", ground + DVec3::X * 1.0);
+    // The gunman, six metres away and off the punch line.
+    stand_up(world, GUNMAN, "Gunman", ground + DVec3::new(6.0, 0.0, 3.0));
+    assert!(inf_ecs::item::give_inventory(world, GUNMAN, 4));
+    assert_eq!(
+        inf_ecs::item::give(world, GUNMAN, "rifle", 1),
+        0,
+        "the gunman's bag would not take a rifle (the count is the LEFTOVER)"
+    );
+    assert!(
+        inf_physics::d3::gameplay::equip_weapon(world, GUNMAN, "rifle"),
+        "the gunman would not take a rifle — the level's catalogue is missing"
+    );
+
+    // The street. Near ones inside `PANIC_RADIUS_M`, far ones well outside it,
+    // so the radius is what the arm measures rather than the pass firing at
+    // everybody.
+    let a = CrowdArchetype::humanoid(None, None, None);
+    let mut records = std::collections::BTreeMap::new();
+    for i in 0..CROWD_NEAR {
+        let at = ground + DVec3::new(3.0 + i as f64 * 1.5, 0.0, -3.0);
+        records.insert(crowd_guid(i), CrowdRecord::standing(a.clone(), at));
+    }
+    for i in 0..CROWD_FAR {
+        let at = ground
+            + DVec3::new(
+                0.0,
+                0.0,
+                inf_physics::d3::gameplay::PANIC_RADIUS_M + 30.0 + i as f64,
+            );
+        records.insert(
+            crowd_guid(CROWD_NEAR + i),
+            CrowdRecord::standing(a.clone(), at),
+        );
+    }
+    assert_eq!(
+        inf_ecs::crowd::add_agents(world, records),
+        0,
+        "the street was refused (the count is the REFUSALS)"
+    );
+    world.mark_dirty();
+    world.reindex_guids();
+    world.propagate();
+}
+
+/// The hero's bag, the panel's own door — used to put the rifle away for the
+/// punch and take it out again afterwards.
+fn set_equipped(world: &mut inf_ecs::EcsWorld, id: Option<&str>) {
+    match id {
+        Some(id) => assert!(inf_physics::d3::gameplay::equip_weapon(
+            world,
+            GAMEPLAY_HERO_GUID,
+            id
+        )),
+        None => {
+            let e = world.entity_of(GAMEPLAY_HERO_GUID).expect("the hero");
+            if let Some(mut inv) = world.world_mut().get_mut::<inf_ecs::item::Inventory>(e) {
+                inv.unequip();
+            }
+        }
+    }
+}
 
 /// What one run of the course saw.
 #[derive(Default)]
@@ -511,6 +654,33 @@ struct Run {
     debris_after_fire: u32,
     /// Numbers the ledger quotes, printed by the arm that measures them.
     notes: Vec<String>,
+    // ── wave WPN1: the engagement counters, read for the first time outside
+    //    `gameplay.rs` — `GameplayReport` has carried `hits`, `kills` and
+    //    `shots` since I6 and no gate had ever looked at any of them. ──
+    /// Rounds and swings the whole course produced.
+    shots: u32,
+    /// Of those, swings.
+    swings: u32,
+    /// Blows that landed on a body.
+    hits_on_flesh: u32,
+    /// Non-fatal blows that armed a hit reaction, and the heavy subset.
+    staggers: u32,
+    knockdowns: u32,
+    /// Bodies handed to the ragdoll.
+    kills: u32,
+    /// Agents the gunfire put on the run.
+    fled: usize,
+    /// Acts written into the witness log.
+    witnessed: u32,
+    /// Rounds fired by somebody who is not the player.
+    npc_shots: u32,
+    /// Shots that fell back to the capsule muzzle on a POSED character.
+    muzzles_without_a_socket: u32,
+    /// The whole audio command stream, and whether it is a tail.
+    audio: Vec<inf_audio::AudioCommand>,
+    audio_dropped: u64,
+    /// How many of those were the gunshot report.
+    reports: usize,
 }
 
 impl Run {
@@ -523,8 +693,30 @@ impl Run {
 fn run_course(sim: RuntimeSim) -> Run {
     let mut h = Host::new(sim);
     let mut run = Run::default();
+    // **The trace AND the engagement counters** (wave WPN1). The counters are
+    // read here rather than at each station because a report is per-step and a
+    // station is many steps — and because `GameplayReport::hits`, `kills` and
+    // `shots` have existed since I6 with no reader outside `gameplay.rs`, which
+    // is exactly the condition under which a counter quietly stops counting.
     let rec = |h: &mut Host, run: &mut Run| {
         run.trace.push(h.sim.state_bytes());
+        let r = h.sim.gameplay();
+        run.shots += r.shots;
+        run.swings += r.swings;
+        run.staggers += r.staggers;
+        run.knockdowns += r.knockdowns;
+        run.kills += r.kills;
+        run.fled += r.panic.fled;
+        run.witnessed += r.witnessed;
+        run.muzzles_without_a_socket += r.muzzles_without_a_socket;
+        for hit in &r.hits {
+            if hit.on_flesh {
+                run.hits_on_flesh += 1;
+            }
+            if hit.shooter != GAMEPLAY_HERO_GUID {
+                run.npc_shots += 1;
+            }
+        }
     };
 
     // ── 0. Settle, and let BeginPlay author the level ──
@@ -946,6 +1138,128 @@ fn run_course(sim: RuntimeSim) -> Run {
             h.hero_pos().x
         ));
     }
+
+    // ══ wave WPN1 ══════════════════════════════════════════════════════════
+    //
+    // ── 11. The cast arrives, and a bare hand lands on a bystander ──
+    //
+    //    The rifle goes away first, through the panel's own `unequip` — an
+    //    empty hand is what makes the attack edge a punch, and this is the one
+    //    station where the hero has to have nothing in it.
+    let feet = h.hero_pos();
+    seed_the_cast(h.sim.world_mut(), feet);
+    set_equipped(h.sim.world_mut(), None);
+    // Face the bystander (it stands at +X, and +X is yaw 90).
+    let t = h.turn_to(90.0);
+    h.frame(&[], t, 0.0, &[]);
+    rec(&mut h, &mut run);
+    for _ in 0..20 {
+        h.frame(&[], (0.0, 0.0), 0.0, &[]);
+        rec(&mut h, &mut run);
+    }
+    let punches_before = run.swings;
+    let hurt = |h: &Host, g: Uuid| {
+        inf_ecs::weapon::health_of(h.sim.world(), g)
+            .map(|x| x.joules)
+            .unwrap_or(f64::INFINITY)
+    };
+    // Presses with a gap, and the gap is `FIST_RPM`'s own: 90 rpm is a punch
+    // every forty fixed steps at 60 Hz, so pressing faster than that is
+    // refused by the ammunition clock — which is the property `weapon_3d`
+    // measures and this station relies on rather than restates.
+    for i in 0..150 {
+        let press = i % 45 == 1;
+        h.frame(&[], (0.0, 0.0), 0.0, &[press, false]);
+        rec(&mut h, &mut run);
+    }
+    let after_punches = hurt(&h, BYSTANDER);
+    if run.swings > punches_before && after_punches < f64::INFINITY {
+        run.saw(Verb::Punch);
+        run.notes.push(format!(
+            "{} punch(es) landed on a bystander with no authored health at all; \
+             it now has {after_punches} J of {}",
+            run.swings - punches_before,
+            inf_ecs::weapon::DEFAULT_VITALITY_J
+        ));
+    }
+
+    // ── 12. The rifle comes back out, and it finishes the job ──
+    set_equipped(h.sim.world_mut(), Some("rifle"));
+    let kills_before = run.kills;
+    let fled_before = run.fled;
+    for _ in 0..90 {
+        h.frame(&[], (0.0, 0.0), 0.0, &[true, true]);
+        rec(&mut h, &mut run);
+    }
+    h.frame(&[], (0.0, 0.0), 0.0, &[false, false]);
+    rec(&mut h, &mut run);
+    if run.kills > kills_before {
+        run.saw(Verb::DownAnNpc);
+        run.notes.push(format!(
+            "the bystander ran out of joules and was handed to the ragdoll \
+             ({} kill(s)); its mode is now {:?}",
+            run.kills - kills_before,
+            h.sim
+                .world()
+                .entity_of(BYSTANDER)
+                .and_then(|e| h.sim.world().world().get::<CharacterMovement>(e))
+                .map(|cm| cm.mode)
+        ));
+    }
+    // ── 13. …and the street heard all of it ──
+    let near_running = (0..CROWD_NEAR)
+        .filter(|i| inf_ecs::crowd::is_panicked(h.sim.world(), crowd_guid(*i)))
+        .count();
+    let far_running = (0..CROWD_FAR)
+        .filter(|i| inf_ecs::crowd::is_panicked(h.sim.world(), crowd_guid(CROWD_NEAR + *i)))
+        .count();
+    if run.fled > fled_before && far_running == 0 {
+        run.saw(Verb::ScatterTheCrowd);
+        run.notes.push(format!(
+            "the gunfire put {} of {CROWD_NEAR} near agents on the run and left \
+             all {CROWD_FAR} of the far ones standing ({} flee(s) counted)",
+            near_running,
+            run.fled - fled_before
+        ));
+    }
+
+    // ── 14. The gunman fires back — ONCE ──
+    //
+    //    One round, deliberately: a rifle carries 1 700 J and the hero has
+    //    2 000, so a second would end the course in a ragdoll and every station
+    //    after it would be measuring a corpse. What this proves is that
+    //    somebody who is not the player can pull a trigger.
+    let npc_before = run.npc_shots;
+    let hero_before = hurt(&h, GAMEPLAY_HERO_GUID);
+    inf_physics::d3::gameplay::npc_aim_at(h.sim.world_mut(), GUNMAN, GAMEPLAY_HERO_GUID, true);
+    h.frame(&[], (0.0, 0.0), 0.0, &[]);
+    rec(&mut h, &mut run);
+    inf_physics::d3::gameplay::npc_aim_at(h.sim.world_mut(), GUNMAN, GAMEPLAY_HERO_GUID, false);
+    for _ in 0..20 {
+        h.frame(&[], (0.0, 0.0), 0.0, &[]);
+        rec(&mut h, &mut run);
+    }
+    let hero_after = hurt(&h, GAMEPLAY_HERO_GUID);
+    if run.npc_shots > npc_before && hero_after < hero_before {
+        run.saw(Verb::NpcOpensFire);
+        run.notes.push(format!(
+            "an armed NPC fired {} round(s) at the hero, taking it from \
+             {hero_before} J to {hero_after} J",
+            run.npc_shots - npc_before
+        ));
+    }
+
+    // ── the audio, read once at the end ──
+    run.audio = h.sim.audio_command_log().to_vec();
+    run.audio_dropped = h.sim.dropped_audio_commands();
+    run.reports = run
+        .audio
+        .iter()
+        .filter(|c| {
+            matches!(c, inf_audio::AudioCommand::Play(p)
+            if p.clip == inf_ecs::weapon::WEAPON_REPORT_CLIP)
+        })
+        .count();
     run
 }
 
@@ -997,6 +1311,105 @@ fn pie_equals_shipping_over_every_gameplay_verb() {
             "step {i}: the cooked pack and the PIE payload disagree"
         );
     }
+
+    // ── wave WPN1: the AUDIO STREAM, which the trace cannot see ──
+    //
+    // `state_bytes` is the world; the command queue is what a player *hears*,
+    // and P12's doctrine is that the stream — not the audible output — is the
+    // observable contract. A report queued by one host and not the other is a
+    // divergence no `state_bytes` comparison in this repository can find.
+    assert_eq!(
+        ship.audio_dropped, 0,
+        "the shipped run's audio log is a TAIL ({} command(s) fell off the \
+         8192 ring), so the comparison below is between two windows and not \
+         between two streams",
+        ship.audio_dropped
+    );
+    assert_eq!(pie.audio_dropped, 0, "the PIE run's audio log is a tail");
+    println!(
+        "AUDIO: {} command(s) over the course, {} of them the gunshot report \
+         ({} dropped from the ring)",
+        ship.audio.len(),
+        ship.reports,
+        ship.audio_dropped
+    );
+    assert!(
+        ship.reports > 0,
+        "not one gunshot report reached the queue on a course that fires {} \
+         rounds — the report is wired to nothing",
+        ship.shots
+    );
+    assert_eq!(
+        ship.audio.len(),
+        pie.audio.len(),
+        "the two hosts queued different numbers of audio commands"
+    );
+    for (i, (s, p)) in ship.audio.iter().zip(pie.audio.iter()).enumerate() {
+        assert_eq!(s, p, "audio command {i}: the two hosts disagree");
+    }
+    assert_eq!(ship.reports, pie.reports);
+
+    // ── …and the ENGAGEMENT COUNTERS, which are their first reader outside
+    //    `gameplay.rs` ──
+    //
+    // A trace comparison is satisfied by two hosts doing nothing identically.
+    // These say what was actually done, and the PIE side has to agree about
+    // every one of them.
+    println!(
+        "ENGAGEMENT: {} shot(s) of which {} swings; {} landed on flesh; {} \
+         stagger(s) / {} knockdown(s); {} kill(s); {} agent(s) fled; {} act(s) \
+         witnessed; {} round(s) fired by somebody who is not the player",
+        ship.shots,
+        ship.swings,
+        ship.hits_on_flesh,
+        ship.staggers,
+        ship.knockdowns,
+        ship.kills,
+        ship.fled,
+        ship.witnessed,
+        ship.npc_shots
+    );
+    for (name, s, p) in [
+        ("shots", ship.shots, pie.shots),
+        ("swings", ship.swings, pie.swings),
+        ("hits on flesh", ship.hits_on_flesh, pie.hits_on_flesh),
+        ("staggers", ship.staggers, pie.staggers),
+        ("knockdowns", ship.knockdowns, pie.knockdowns),
+        ("kills", ship.kills, pie.kills),
+        ("witnessed acts", ship.witnessed, pie.witnessed),
+        ("NPC shots", ship.npc_shots, pie.npc_shots),
+    ] {
+        assert_eq!(s, p, "the two hosts disagree about {name}: {s} vs {p}");
+    }
+    assert_eq!(
+        ship.fled, pie.fled,
+        "the two hosts scattered different crowds"
+    );
+    // Non-vacuity, counter by counter: a course that fired nothing, hurt
+    // nobody and frightened no one satisfies every equality above perfectly.
+    assert!(ship.swings > 0, "no swing was thrown");
+    assert!(ship.hits_on_flesh > 0, "nothing was hit");
+    assert!(ship.staggers > 0, "no hit reaction was armed");
+    assert!(
+        ship.knockdowns > 0,
+        "no blow was heavy enough to take a mode"
+    );
+    assert!(ship.kills > 0, "nothing was killed");
+    assert!(ship.fled > 0, "nobody ran");
+    assert!(ship.witnessed > 0, "nothing was witnessed");
+    assert!(ship.npc_shots > 0, "no NPC fired");
+    // **The muzzle tripwire.** Zero here says nothing on this course — the
+    // fixture's hero is a bare capsule and publishes no pose, which is the
+    // legitimate fallback the counter deliberately does not count. It is armed
+    // on the RIGGED course (`weapon_hands_gate`), and it is asserted here so a
+    // day when this fixture gains a rig does not gain a silent half-metre with
+    // it.
+    assert_eq!(
+        ship.muzzles_without_a_socket, 0,
+        "a posed character fired from the capsule rule {} time(s)",
+        ship.muzzles_without_a_socket
+    );
+    assert_eq!(pie.muzzles_without_a_socket, 0);
 }
 
 /// **A BULLET REALLY BREAKS THE WALL** — the joules cross the P22 door and the
