@@ -30424,7 +30424,8 @@ shipped at I6/SK1b/SK1c — the thirteen-field `WeaponDef` TOML door, the
 ammunition clock in the trace, a real ray, the weapon as an entity on a `hand_r`
 socket, health in joules with a `Downed` latch and a ragdoll handoff, and two
 gates already running PIE == shipping over all of it. So this is a **completion**
-in fourteen commits.
+in eighteen commits (`fe5e257b..91e8b8e5`; the block first said eight, then
+fourteen, and both were written before the commits that followed them).
 
 **THE REPORT.** A round leaving a barrel made no noise; only the *impact* did, so
 a miss was silent. `weapon::report_source()` is one Ring-0 description
@@ -30546,3 +30547,48 @@ release arm's step 139 which still holds to the bit.
 
 Ledger, tables, rulings and the carried list in `docs/memos/island-progress.md`
 under *"Wave WPN1"*.
+
+**THE ADVERSARIAL AUDIT of WPN1** (`fe5e257b..91e8b8e5`, eighteen commits, not pushed).
+Full diff read commit by commit; the battery re-run whole at head **before a line was
+touched** (exit 0, no failure). **Every headline number reproduces, three of them to the
+digit**: the engagement table exactly (27 shots / 4 swings / 18 on flesh / 5 staggers /
+1 knockdown / 1 kill / 5 of 5 near fled and 0 of 3 far / 24 witnessed / 1 NPC round /
+0 socketless muzzles / 23 audio commands, all the report, 0 dropped / 17 verbs), the
+rigged course's **24** poses over 160 steps on both hosts — and the six really are the
+cycle, because `recoil_fraction` reads 1.000 / 0.833 / 0.667 / 0.500 / 0.333 / 0.167 on
+steps 31–36 and 0.0 on 37 — the resist draw's **31 ran / 9 stood** of 40, and the panic
+pass at 0.087 → **0.494** → 0.075 ms with **336 fled** identical (ledger 0.077 / 0.457 /
+0.074). Scene **v27 / payload v12 unmoved**, `EXPECTED_LEVELS` 24, goldens **62 none
+added or blessed**, manifests and `Cargo.lock` untouched, zero CRLF in the diff.
+**Both load-bearing pins were attacked rather than read:** swapping the impact ahead of
+the report *in both hosts* reddens the mirror arm on its **order** clause alone (so the
+order pin is genuinely independent of the equality pin), and dropping `want_fire`'s
+guards makes the unarmed hero punch a locked door.
+**Findings: one MED on the screen, one MED in the ledger, six LOW, all fixed.**
+(1) **The HUD counted a pair of hands as a magazine** — `fist_def` carries
+`MAX_MAGAZINE` so a fist never runs out and the clock is *kept* because it paces the
+swings, so one punch put **"9999 / 10000"** at the bottom of the viewport for the rest
+of the level and drew a reticle for an empty hand, which is the exact case both
+functions' docs say they exclude. Closed with one Ring-0 predicate
+(`weapon::carries_ammunition`) both callers ask, and an arm that throws the punch and
+asserts the string. (2) **"once a body is in the section the band cannot take it out"
+is false at `Dormant`** — `Full → Near → Far` keeps the entity (so a granted `Health`
+survives), `→ Dormant` **despawns** it and `CrowdRecord` has no joules, so a wounded
+agent that leaves at 512 m comes back **whole**; a bound rather than a divergence (both
+hosts tier together; a `Far` agent has no collider to be shot through), fixed as the
+record and carried as the `crowd_state_bytes` move it really is. (3–6) Four
+over-statements corrected where they were written: `FIST_RPM`'s recoil claim (a punch
+moves no bone — the wave's own carried list said so), `MAX_PANIC_SOURCES` "folded into
+the nearest" (past the cap a shot is **dropped**), `FIST_ITEM`'s "by construction"
+namespacing (`canonical_id` rejects nothing; TOML's bare key does), and the block's own
+commit count. (7–8) Two arms that could not fail: the scatter's **near** half was
+printed and not asserted (now 5 and 0), and **nothing armed the attack arbitration** —
+`door_3d`'s kick arm now asserts `swings == 0` and that no clock was installed, and
+measuring it showed `!kicking` in `want_fire` is **redundant** (`try_kick` inserts
+`PendingKick` before `pending_kick` is read), which is named rather than removed.
+LAWS: *a component installed for its clock is still a component every reader can see*;
+*"the band cannot take it out" is a claim about the bottom rung, not about the ladder*;
+*a paragraph in three places is not an arm anywhere*. Carried in the memo under *"Wave
+WPN1 — the adversarial audit"*: the paged-out wound, the report's shared audio
+source-key namespace, the eviction table's reports-only divisor, and the un-refused
+colon.

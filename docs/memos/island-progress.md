@@ -26158,7 +26158,7 @@ body on the first hit that lands on it.
 |---|---|---|
 | every character at spawn | **33 kB a step** (33 B × 1000) | moves every committed trace for levels with a crowd and no combat — all of them |
 | every *materialized* agent | 33 B × the band | the trace becomes a function of the crowd BAND — the tier-dependent-state trap `crowd_state_bytes` exists to keep out |
-| **first hit (taken)** | **0** until something is shot | nothing; and once a body is in the section the band cannot take it out |
+| **first hit (taken)** | **0** until something is shot | nothing above `Dormant` — see the audit's correction below |
 
 **The other half of the flood**: a round only owes the P22 door anything if what
 it hit HAS a `Destructible`. The ground is the case a level cannot avoid, and
@@ -26488,3 +26488,160 @@ subtracting the swings rather than by inventing a second counter.
   one-step muzzle latency (**do not fix** — it moves committed traces); no
   projectile ballistics; no particle system (a flash is a debug line, blood is
   nothing); the between-frames inventory verb.
+
+## Wave WPN1 — the adversarial audit (2026-09-02)
+
+Range `fe5e257b..91e8b8e5`, **eighteen** commits, **not pushed**. The battery was
+re-run at the wave's head before a line was touched and came back **exit 0 with
+no failure**, on a volume with 155 GB free.
+
+**Every headline number reproduces on this machine, and three of them to the
+digit.** The engagement table is exact — **27** shots of which **4** swings,
+**18** on flesh, **5** staggers / **1** knockdown, **1** kill, **5** fled, **24**
+acts witnessed, **1** NPC round, **0** socketless muzzles, **23** audio commands
+all of them the report with **0** dropped, **17** verbs, four punches taking a
+bystander 2 000 → **1 400 J** and one NPC round taking the hero 2 000 → **300 J**.
+The rigged course poses **24** distinct poses over 160 steps on both hosts, and
+the six really are the cycle: at 600 rpm `recoil_fraction` reads 1.000, 0.833,
+0.667, 0.500, 0.333, 0.167 on steps 31–36 and **0.0** on 37, which is the aimed
+pose again — 18 + 6, arithmetic rather than coincidence. The resist draw is the
+ledger's own **31 ran / 9 stood** of 40. The panic pass measured **0.087 ms**
+quiet → **0.494 ms** on the scatter step → **0.075 ms** on the next step of the
+same burst at N=1000 with 300 props, against a ledger of 0.077 / 0.457 / 0.074 —
+debug-clock noise on the milliseconds, and **336 fled** identical, which is the
+half that is a function of the code.
+
+**Both load-bearing pins were attacked rather than read.** Swapping the impact
+ahead of the report *in both hosts* — so the equality assert stays satisfied —
+reddens `both_hosts_report_a_gunshot_the_same_way` on the order clause alone,
+with the message it was written for: the order pin is genuinely independent of
+the mirror pin, which is the claim it makes about itself. And the attack
+arbitration falsifies: dropping the guards from `want_fire` makes the unarmed
+hero throw a **punch at a locked door** and reddens the new `door_3d` arm. What
+the audit found is one defect that was **on the screen**, one ledger sentence
+that is false at the bottom of the crowd ladder, and a handful of smaller
+over-statements.
+
+### MEDIUM — the HUD counted a pair of hands as a magazine
+
+`fist_def` carries `MAX_MAGAZINE` rounds *precisely so a fist never runs out*,
+`try_fire` decrements it like any other clock, and `WeaponState` is installed on
+the first press and **kept**, because that clock is what paces the swings. The
+player's window read the clock it found. So one punch put
+
+```
+9999 / 10000
+```
+
+at the bottom-centre of the viewport and left it there for the rest of the level,
+on a character holding nothing — and `is_aiming`'s second half ("an ammunition
+clock, because a reticle on an empty-handed character is a crosshair for a weapon
+that is not there") answered *true* for exactly the empty-handed character it
+names, so aiming drew a crosshair for a 1.2 m arc that has no line to be true
+about. Both functions' own docs describe behaviour the code did not have.
+
+**Fixed** in Ring 0, where `ammo_readout`'s own split says the decision belongs:
+`weapon::carries_ammunition(&WeaponState)` is one predicate, both callers ask it,
+and `a_pair_of_hands_is_not_an_ammunition_clock` throws the punch and asserts the
+string that used to reach the screen. *Law: a component installed for its clock
+is still a component every reader of that component can see.*
+
+### MEDIUM — "once a body is in the section the band cannot take it out" is false at `Dormant`
+
+The lazy-health ruling is right and its trace argument holds, but the sentence it
+closes with does not. The tier owns the components: `Full → Near → Far` removes
+the collider, the controller and `CharacterMovement` and **leaves the entity**,
+so a granted `Health` survives all three — and `→ Dormant` **despawns the
+entity**, and `CrowdRecord` carries a position, a route phase and a pose digest
+and does not carry joules. So a wounded crowd agent that leaves the world at
+`DEFAULT_CROWD_FAR_M` (**512 m**) comes back **whole**, and for that agent the
+health section really is a function of the band — the trap the ruling names, met
+at the one rung it did not check.
+
+It is a **bound, not a divergence**: both hosts tier from one rule on the same
+step so they lose it together and no trace comparison can see a disagreement, and
+a `Far` agent has no collider, so the window in which a body is wounded *and*
+pageable is a walk away from somebody you have already shot. **Fixed as the
+record** — `apply_hit`'s doc and the table above now say where the body stops.
+Persisting it is a field on `CrowdRecord`, which moves `crowd_state_bytes` and
+the `AGENT_TRACE_BYTES` ratio quoted against it: a wave, not an audit fix, and
+carried by name. *Law: "the band cannot take it out" is a claim about the bottom
+rung, not about the ladder.*
+
+### LOW — four over-statements, corrected where they were written
+
+* **`FIST_RPM`** said the swing's pose is carried "through `recoil_fraction`".
+  `recoil_of` is gated on `equipped_weapon` and a fist is not in the catalogue,
+  so it answers `0.0` and **a punch moves no bone** — which is what the wave's
+  own carried list and `weapon_hands_gate`'s `t[0] == t[145]` arm already said.
+  The constant now says it too.
+* **`MAX_PANIC_SOURCES`** said shots past the cap "are folded into the nearest".
+  The loop `break`s: a ninth distinct place, more than half a radius from all
+  eight, frightens **nobody** that step. Folding is what the *coalescing* does;
+  the cap is a refusal and now reads as one.
+* **`FIST_ITEM`** said the colon keeps the id out of `item::canonical_id`'s space
+  "by construction". `canonical_id` trims and lower-cases and rejects nothing;
+  what rejects a colon is the TOML **bare key**, so an author reaching the id has
+  to quote it deliberately. Corrected to the convention it actually is, with the
+  enforcement (`ItemDefs::insert` refusing a colon) carried as the
+  content-visible refusal it would be.
+* **The ROADMAP block** said the wave is fourteen commits; the range is
+  **eighteen**. Corrected, with the arithmetic of how it went stale.
+
+### LOW — two gate arms that could not fail, and one message that had gone stale
+
+* **The scatter's near half was printed, not armed.** `far_running == 0` gated
+  the verb; `near_running` only reached a `format!`, so a course that scattered
+  one agent of five would have satisfied the gate and printed "1 of 5". Both
+  counts are asserted now (**5** and **0**), which is what the ledger quotes.
+* **Nothing armed the attack arbitration.** "Kick, then punch, then fire" was a
+  paragraph in three places and no test pressed the attack button at a locked
+  door with an empty hand. `door_3d`'s kick arm now asserts `swings == 0` **and**
+  that no ammunition clock was installed — mutation-verified above. It also
+  measured something worth knowing: `!kicking` in `want_fire` is **redundant**,
+  because `try_kick` inserts `PendingKick` before `pending_kick` is read, so
+  `!pending_kick` alone carries the arbitration. Dropping only `!kicking` leaves
+  the arm green; dropping both reds it. Left in place as belt and braces, named
+  here so nobody reads it as the load-bearing half.
+* `weapon_hands_gate`'s pose-count message said "of 140 steps" after `STEPS`
+  moved to 160. And the gameplay gate's kill note printed "handed to the ragdoll
+  … its mode is now `Grounded`", which reads like a contradiction and is not:
+  `kills` moves only when `start_ragdoll` answers true, and this bystander is a
+  bare capsule that `ragdoll_bridge::RIG_WAIT_S` lets out of the mode after a
+  quarter-second rather than leaving limp for ever. The note says so now; the
+  limp mode itself stays armed on the fixture that can hold it.
+
+### Read and found honest
+
+The melee cone is **total**, not a half-angle (`interact::resolve` halves it), and
+a body one metre **behind** the swinger is armed as a miss — a punch cannot reach
+backwards. The no-line-of-sight bound is carried in three places and is real.
+`engine:fists` is inert in every door that could have met it: `item.count` walks
+the `Inventory` and answers **0**, the bag panel walks the same `Inventory`, and
+`equipped_weapon` reads the catalogue — the fists are only ever a `WeaponState`.
+`npc_aim_at` writes the trigger's level and never `press_attack` (which
+`apply_intent` alone writes, from `intent.attack_pressed`), so an armed NPC does
+not kick every locked door it faces. The witness seed takes **both** description
+digests rather than deferring them, its candidate walk is `BTreeMap` order → a
+stable distance sort → `Guid` order, and its line of sight is
+`cast_ray_excluding` past the observer's and the actor's own colliders.
+`clear_panic` and `clear_witness` sit beside **both** `clear_crowd` call sites.
+The `weapon_report` fence is line-identical at the head. The ring table's
+arithmetic is right (8192 / 10 = 819 s, / 40 = 205, / 80 = 102).
+
+### Carried out of the audit
+
+* **A wounded crowd agent heals by paging** — `Dormant` despawns the entity and
+  `CrowdRecord` has no joules. Persisting it moves `crowd_state_bytes`.
+* **The gunshot shares the emitter source-key namespace.** The report is keyed on
+  `guid_source_key(shooter)` and `apply_play` is one-voice-per-source, which is
+  what makes a barrel one voice — and it is the first `Play` in either host whose
+  key is not the entity's own emitter. A shooter carrying an autoplay
+  `AudioSource` (nothing committed does) loses that voice permanently, because
+  the autoplay walk starts a source once. A salt on the report's key closes it
+  and moves the audio stream both gates compare.
+* **The eviction table divides by REPORTS a second.** Impacts share the same 8192
+  ring, so a firefight among destructible emitters reaches the first eviction
+  sooner than 819 / 205 / 102 s — still nowhere near a two-thousand-step course.
+* **`ItemDefs::insert` does not refuse a colon**, so `engine:fists` is namespaced
+  by convention plus TOML's bare-key rule rather than by construction.
