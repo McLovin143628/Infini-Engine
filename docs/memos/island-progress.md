@@ -26240,6 +26240,41 @@ lootable, which is the picture this engine's no-cleanup ragdoll already produces
 **Carried**: a swing has no line-of-sight test (a body behind a shut leaf inside
 1.2 m is hit) and no cleave (the nearest body in the arc takes it).
 
+### Clause 3b — what a person does about being hit
+
+The half the melee clause left open. `struck_reaction` takes
+`carjack::RESIST_CHANCE` — a quarter, drawn per attempt from the victim's own
+guid and the sim step, a function of who they are and when you hit them, agreed
+by both hosts and deliberately **not** a stored counter — against a salt of its
+own, so somebody who resisted a carjack is not thereby the person who stands
+their ground when punched. **Measured over 40 struck bystanders: 31 ran, 9 stood
+their ground** — 22.5 % against a 25 % chance.
+
+It is a draw and not a certainty *because the reference shows both*: the
+encampment brawl (`police-bike/0033`) has a bystander standing a metre from a
+fight watching it, and people who are plainly not there any more. A rule that
+always fled would empty a brawl of everybody but the two people in it.
+
+It reaches `crowd::flee_from` — the one door — so somebody the crowd does not
+own is **refused** rather than conjured into a population: the arm shoots the
+hero and asserts that being hit does not make it a crowd agent.
+`crowd::is_in_population` is the cheap pre-test that keeps this `O(1)` for those.
+Two counters (`panic.fled`, `stood_their_ground`), because a course where
+everybody fled and one where nobody did look identical from a flee count alone.
+
+**AND THE ARM FOUND A DEFECT IN THIS WAVE'S OWN CODE.** `step_panic` runs
+several passes after `apply_hit` and **assigned** the whole `PanicReport`,
+erasing the struck bystander's flee — the `Panicked` latch said an agent was
+running and the counter said nobody had. Merged now, and the arm asserts the
+counter *against the latch*, because a counter that disagrees with the world is
+worse than no counter. **Law: a report field written by two passes is written by
+neither unless the second one merges.**
+
+A swing also no longer draws a **tracer**: a punch arrives in the same `hits`
+vector as a round, so a fist was drawing a bullet trail and a muzzle flash out of
+an empty hand. `WeaponHit::loud` is the discriminator the audio queue already
+uses, which is what keeps the two answers one answer.
+
 ### Clause 4 — one flee door, and a gunshot that scatters the street
 
 `carjack::flee` becomes `inf_ecs::crowd::flee_from(world, guid, from, away_from,
@@ -26423,6 +26458,8 @@ subtracting the swings rather than by inventing a second counter.
   is damage plus an animation trigger and no pose. Asserted, so the day it
   changes the arm fails.
 * **A swing has no line of sight and no cleave.**
+* **A struck NPC does not fight back** — it stands or it leaves; a swing in
+  return is `npc_aim_at` growing a policy, which is EMS3's.
 * **A person panics once** — `PanickedRes` never clears.
 * **A fled agent does not resume its day** — the carjack's bound, inherited by
   the hoist.

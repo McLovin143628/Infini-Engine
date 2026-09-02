@@ -30507,6 +30507,17 @@ a distance list — measured, a bystander 8 m away in the open sees and one 12 m
 away behind a wall does not, both inside the 120 m radius. Bounded at 4 acts and
 8 observers a step (≤ 32 rays, **0** on a quiet street) and 256 acts in the ring.
 
+**WHAT A PERSON DOES ABOUT BEING HIT.** `struck_reaction` takes the carjack's
+own `RESIST_CHANCE` against a salt of its own — measured over 40 struck
+bystanders, **31 ran and 9 stood their ground** (22.5 % against 25 %) — and
+reaches the one flee door, so somebody the crowd does not own is refused rather
+than conjured into a population. **The arm found a defect in the wave's own
+code**: `step_panic` ASSIGNED the whole `PanicReport` several passes after
+`apply_hit` had counted a struck bystander's flee, so the latch said an agent
+was running and the counter said nobody had. Merged, and the arm now asserts the
+counter against the latch — *a report field written by two passes is written by
+neither unless the second one merges.*
+
 **AN ARMED NPC CAN FIRE.** `apply_intent` writes the aim and `want_attack` only
 onto `player_controlled` characters, so nothing in the tree could write them onto
 an NPC. `npc_aim_at` is the complement — VEH2b's `drive_intent` shape, one
