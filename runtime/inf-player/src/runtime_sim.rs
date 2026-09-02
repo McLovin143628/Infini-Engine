@@ -2579,21 +2579,51 @@ impl RuntimeSim {
     ///
     /// Positioned at the **hit**, not at the emitter: a round that struck the far
     /// end of a wall should be heard from there.
+    ///
+    /// **And since wave WPN1 the shot itself makes a noise**, before the impact
+    /// does — see the fenced block, which is the character-identical mirror of
+    /// the other host's and is pinned by `fixed_step_mirror`.
     fn fire_weapon_audio(&mut self, hits: &[inf_physics::d3::WeaponHit]) {
         if hits.is_empty() {
             return;
         }
+        // The borrow split: the fenced block reads the world and writes the
+        // queue, and both are fields of this struct.
+        let Self {
+            world, audio_cmds, ..
+        } = self;
+        let world: &EcsWorld = world;
+        // MIRROR-BEGIN weapon_report
         for hit in hits {
+            // **THE REPORT** (wave WPN1) — one shot at the shooter's own muzzle,
+            // whether or not the round found anything. It is FIRST, because a
+            // gunshot is heard before its impact is and the queue is ordered.
+            //
+            // Keyed on the SHOOTER, so a barrel has one voice: a second round
+            // restarts it rather than stacking, which is what a barrel does and
+            // what keeps a 600 rpm burst from being 10 live voices a second.
+            // The clip is the engine's own (`inf_ecs::weapon::report_source`)
+            // rather than a slot on `WeaponDef`, on the impact's own P22 §5
+            // reasoning one field along.
+            let report = inf_ecs::weapon::report_source();
+            let cmd = play_command_for(
+                guid_source_key(hit.shooter),
+                &report,
+                report.spatial.then_some(hit.from),
+            );
+            audio_cmds.push(AudioCommand::Play(cmd));
+            // **THE IMPACT** — the target's own emitter, at the hit.
             let Some(target) = hit.target else {
                 continue;
             };
-            let Some((src, _)) = destroyed_emitter(&self.world, target) else {
+            let Some((src, _)) = destroyed_emitter(world, target) else {
                 continue;
             };
             let cmd =
                 play_command_for(guid_source_key(target), &src, src.spatial.then_some(hit.to));
-            self.audio_cmds.push(AudioCommand::Play(cmd));
+            audio_cmds.push(AudioCommand::Play(cmd));
         }
+        // MIRROR-END weapon_report
     }
 
     /// Drain the FIFO dispatch queue (Wave 3) — MIRROR of

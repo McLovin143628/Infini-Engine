@@ -9,6 +9,11 @@ the hero's own health. That is the one authoring surface which reaches the
 editor's Simulate, a PIE payload AND a cooked pack with no schema move; see
 `inf_blueprint::nodekit`'s `gameplay_nodes` for the accounting.
 
+Beside them, since wave WPN1, **one `.inf_audio`**: the gunshot every round
+leaving a barrel names by GUID (`inf_ecs::weapon::WEAPON_REPORT_CLIP`). It is
+engine content that happens to live here because this is the one committed
+level in the tree that fires a weapon.
+
 The gate over it is `runtime/inf-player/tests/phase30_gameplay_gate.rs`.
 
 Generated - do not hand-edit. Regenerate with:

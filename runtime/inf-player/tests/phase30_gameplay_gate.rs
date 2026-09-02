@@ -74,6 +74,10 @@ fn the_fixture_copies_every_committed_file() {
         "Gameplay.inf_act",
         "GameplayHouse.inf_pcg",
         "Target.inf_mesh",
+        // WPN1: the gunshot the report names by GUID. A fixture that lost it
+        // would still make every `Play` this wave adds — the command stream is
+        // the contract — and every one of them would resolve to silence.
+        "Report.inf_audio",
         "README.md",
     ] {
         assert!(files.iter().any(|f| f == want), "{want} is missing");

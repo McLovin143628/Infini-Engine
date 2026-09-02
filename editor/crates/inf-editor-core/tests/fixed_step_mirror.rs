@@ -422,3 +422,70 @@ fn both_audio_steps_hear_the_same_doorway() {
         );
     }
 }
+
+/// **THE GUNSHOT IS THE SAME NOISE ON BOTH HOSTS** (wave WPN1).
+///
+/// The report is a *command*, not an entity: there is nothing in the world to
+/// compare, so the only thing that can keep the two hosts saying the same thing
+/// about a shot is the source text. That is what this fence is — the
+/// `vehicle_engine_audio` argument at a weapon, and the reason a report was
+/// built inside `fire_weapon_audio` rather than as a second host-side loop.
+#[test]
+fn both_hosts_report_a_gunshot_the_same_way() {
+    let editor = fenced(&read(EDITOR), "weapon_report", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "weapon_report", "the shipped RuntimeSim");
+    assert!(
+        editor.len() > 300,
+        "the `weapon_report` fence is {} chars — an empty fence would make this \
+         gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the gunshot report has drifted between the editor's Simulate and the \
+         shipped player. A preview that made a different noise from the shipped \
+         build is a bug no compiler and no screenshot finds"
+    );
+    for (needle, why) in [
+        (
+            "inf_ecs::weapon::report_source()",
+            "the clip, the bus, the volume and the reach are ONE Ring-0 \
+             description — the `venue_music_source` shape, and the alternative \
+             is four constants in two host-side loops that have to be compared \
+             character for character to stay in step",
+        ),
+        (
+            "guid_source_key(hit.shooter)",
+            "the report is keyed on the SHOOTER, so a barrel has one voice: \
+             keyed per shot a 600 rpm burst is ten live voices a second, and \
+             keyed on the target a miss would be silent",
+        ),
+        (
+            "report.spatial.then_some(hit.from)",
+            "a report is heard at the MUZZLE and the impact at the hit — the \
+             two positions are the whole difference between the two commands, \
+             and a report at `hit.to` would put a miss's noise 400 m away",
+        ),
+        (
+            "guid_source_key(target)",
+            "the impact is still the target's own emitter, unchanged by this \
+             wave — a report that replaced it would have made every wall in \
+             every level silent again",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&n),
+            "the weapon report no longer carries `{needle}`: {why}"
+        );
+    }
+    // …and the report really is FIRST: a queue is ordered, and a gate that
+    // compares two command streams cannot tell an ordering it never asserted.
+    let report = only(&editor, "guid_source_key(hit.shooter)", "the fence");
+    let impact = only(&editor, "guid_source_key(target)", "the fence");
+    assert!(
+        report < impact,
+        "the impact is queued before the report — a shot would be heard after \
+         the thing it hit"
+    );
+}

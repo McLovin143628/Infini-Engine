@@ -10038,6 +10038,36 @@ pub fn gameplay_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase30-gameplay")
 }
 
+/// **The file the engine's gunshot lives in** (wave WPN1), beside the fixture
+/// that fires it.
+///
+/// `inf_editor_core::settlement::VENUE_MUSIC_FILE`'s shape and its argument: a
+/// clip an engine constant names by GUID
+/// ([`inf_ecs::weapon::WEAPON_REPORT_CLIP`]) has to have the same GUID every
+/// time, or the committed bytes are a different set of files on every build.
+///
+/// It sits here rather than in the settlement library because a gunshot is not
+/// settlement content and there is no weapon library to put it in; the gameplay
+/// fixture is the one committed level in this tree that fires a weapon, and a
+/// second copy in `samples/harbour-heist` would be the same bytes twice.
+pub const GAMEPLAY_REPORT_FILE: &str = "Report.inf_audio";
+
+/// **The committed gunshot**, as an [`inf_audio::AudioAsset`].
+///
+/// A short deterministic tone, generated rather than recorded, on
+/// [`playground_audio_asset`]'s own terms — a committed `.inf_audio` needs no
+/// binary fixture, and a clip a test can regenerate is a clip a reviewer can
+/// diff. **Eight hundred samples at 8 kHz is a tenth of a second**, which is a
+/// tenth of the venue loop and is the one thing about it that is right: a
+/// gunshot is a transient, and a report that outlasted its own weapon's cycle
+/// time at 600 rpm would overlap itself for ever. It is not a gunshot and is not
+/// pretending to be. What it makes true is the thing the wave needs true: the
+/// `Play` a shot issues **names a clip that resolves**.
+pub fn gameplay_report_asset() -> inf_audio::AudioAsset {
+    inf_audio::AudioAsset::from_encoded(tone_wav(800, 8000), inf_audio::AudioFormat::Wav)
+        .expect("tone wav decodes")
+}
+
 /// One `House`, grown on the volume's own datum — the level carries no terrain,
 /// so a `Terrain` lookup would fail closed and the house would be nothing.
 pub fn gameplay_house_graph() -> inf_graph::Graph {
@@ -10403,6 +10433,11 @@ const GAMEPLAY_README: &str = concat!(
     "editor's Simulate, a PIE payload AND a cooked pack with no schema move; see\n",
     "`inf_blueprint::nodekit`'s `gameplay_nodes` for the accounting.\n",
     "\n",
+    "Beside them, since wave WPN1, **one `.inf_audio`**: the gunshot every round\n",
+    "leaving a barrel names by GUID (`inf_ecs::weapon::WEAPON_REPORT_CLIP`). It is\n",
+    "engine content that happens to live here because this is the one committed\n",
+    "level in the tree that fires a weapon.\n",
+    "\n",
     "The gate over it is `runtime/inf-player/tests/phase30_gameplay_gate.rs`.\n",
     "\n",
     "Generated - do not hand-edit. Regenerate with:\n",
@@ -10456,6 +10491,16 @@ pub fn write_gameplay() -> Result<(), String> {
         &encode_actor(&gameplay_controller())?,
         GAMEPLAY_ACTOR_GUID,
         inf_asset::AssetKind::Blueprint,
+    )?;
+
+    // **The gunshot** (wave WPN1), with the GUID `inf_ecs::weapon` names it by —
+    // the VEN1b club-loop precedent verbatim.
+    write_anim_asset(
+        &dir,
+        GAMEPLAY_REPORT_FILE,
+        inf_ecs::weapon::WEAPON_REPORT_CLIP,
+        inf_asset::AssetKind::Audio,
+        &gameplay_report_asset(),
     )?;
 
     std::fs::write(dir.join("README.md"), GAMEPLAY_README)

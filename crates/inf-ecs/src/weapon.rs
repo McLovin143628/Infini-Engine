@@ -37,7 +37,7 @@ use bevy_ecs::prelude::{Component, With};
 use glam::DVec3;
 use uuid::Uuid;
 
-use crate::components::Guid;
+use crate::components::{AudioSource, DistanceModel, Guid};
 use crate::world::EcsWorld;
 
 // ── the numbers ─────────────────────────────────────────────────────────────
@@ -300,6 +300,99 @@ pub const KICK_TRIGGER: &str = "door_kick";
 /// lock the instant the button went down would break it before the leg moved,
 /// which is the whole reason P29.4 built a notify seam.
 pub const KICK_NOTIFY: &str = "door_kick_impact";
+
+// ── the report ──────────────────────────────────────────────────────────────
+
+/// **The engine's committed gunshot** — the `.inf_audio` a round leaving a
+/// barrel plays.
+///
+/// A fixed GUID, on [`crate::venue::VENUE_MUSIC_CLIP`]'s own terms: an asset a
+/// weapon names by id must have the same id every time or the committed bytes
+/// are a different set of files on every build. The clip itself is committed
+/// beside the gameplay fixture (`samples/phase30-gameplay/Report.inf_audio`).
+///
+/// A host that has not loaded it resolves nothing and plays silence; the
+/// **command** is issued either way, which is the Phase-12 doctrine's own
+/// observable — the command stream, not the audible output, is the contract.
+pub const WEAPON_REPORT_CLIP: Uuid = Uuid::from_u128(0x5750_4e31_0000_0001);
+
+/// The bus a gunshot plays on. `sfx`, so a player who turns the effects down
+/// turns the shooting down and the music stays where they put it.
+pub const REPORT_BUS: &str = "sfx";
+
+/// The base linear volume of a gunshot.
+///
+/// Just under unity, [`crate::venue::VENUE_MUSIC_VOLUME`]'s reasoning inverted:
+/// this is the loudest *transient* in the engine and it is heard at the muzzle,
+/// so the headroom is left for the mixer rather than spent here.
+pub const REPORT_VOLUME: f64 = 0.9;
+
+/// Metres inside which a gunshot is at full volume.
+///
+/// Three — an arm's length and a barrel. Inside that the shooter is the shooter,
+/// and the spatial model has nothing useful to say about half a metre.
+pub const REPORT_MIN_M: f64 = 3.0;
+
+/// Metres past which a gunshot is silent.
+///
+/// **Two hundred and fifty**, which is deliberately much further than anything
+/// else this engine emits (a venue's music stops at forty). A gunshot in a town
+/// is heard three streets away and that is the whole point of the sound: it is
+/// the one emitter whose *range* is the gameplay. It is also the number the
+/// crowd's panic radius is set against — see
+/// `inf_physics::d3::gameplay::PANIC_RADIUS_M`, which is deliberately smaller,
+/// because hearing a shot and running from it are different distances.
+pub const REPORT_MAX_M: f64 = 250.0;
+
+/// The rolloff exponent of a gunshot. `1.0` is the inverse-distance default;
+/// the model is [`DistanceModel::Inverse`].
+pub const REPORT_ROLLOFF: f64 = 1.0;
+
+/// **The `AudioSource` one round leaving a barrel plays** (wave WPN1).
+///
+/// One place, so the two hosts cannot describe the same shot differently — the
+/// [`crate::venue::venue_music_source`] shape exactly, and for its reason: this
+/// used to be the class of thing that gets written twice in two host-side loops
+/// with a constant beside each copy.
+///
+/// # It is NOT an entity, and it is NOT occluded, and the two facts are one fact
+///
+/// A venue's music is an entity with an `AudioSource` on it, because a speaker
+/// is a thing in a room. A gunshot is not: it happens at a point in the air for
+/// three hundredths of a second and there is nothing left of it afterwards, so
+/// it is a **command** built here and pushed straight onto the queue.
+///
+/// That decides the occlusion, rather than this flag doing it. The one-shot
+/// occlusion pass in each host walks the queued `Play`s and looks each one's
+/// source key up in the **Blueprint entity map**, then asks the world for that
+/// entity's own `AudioSource::occlusion`. A gunshot's source key is its
+/// shooter's, a shooter is not an audio emitter, and the lookup answers `None` —
+/// so a report is unoccluded whatever this field says. It is set `false` because
+/// that is what is true, not because setting it `true` would have done anything.
+///
+/// **The honest bound, stated:** a shot fired inside a building is heard at full
+/// spatial gain by a listener outside it. Muffling it needs the *looping*
+/// source's path — the per-step `SetOcclusion` the doorway model drives — and a
+/// one-shot has no voice to keep re-evaluating. The fix is to give one-shots the
+/// doorway model at `Play` time, which is a change to `portal_gain`'s call site
+/// in both hosts and is named on this wave's carried list rather than done
+/// quietly.
+pub fn report_source() -> AudioSource {
+    AudioSource {
+        clip: Some(WEAPON_REPORT_CLIP),
+        bus: REPORT_BUS.to_string(),
+        volume: REPORT_VOLUME,
+        pitch: 1.0,
+        looping: false,
+        spatial: true,
+        min_distance: REPORT_MIN_M,
+        max_distance: REPORT_MAX_M,
+        distance_model: DistanceModel::Inverse,
+        rolloff: REPORT_ROLLOFF,
+        occlusion: false,
+        autoplay: false,
+    }
+}
 
 impl WeaponState {
     /// A full magazine of `def`.
@@ -1024,6 +1117,49 @@ automatic = true
         let worse: toml::Value =
             toml::from_str("[x.weapon]\nkind = \"beam\"\n").expect("a document");
         assert!(WeaponDef::from_toml_table(worse["x"].as_table().expect("a table")).is_err());
+    }
+
+    /// **The gunshot is one description, and it is a ONE-SHOT that is not
+    /// occluded** (wave WPN1).
+    ///
+    /// Every field here is load-bearing somewhere and each one is asserted where
+    /// it is: `looping: false` because a report that looped would be a siren;
+    /// `spatial: true` because a shot has a place and that place is the whole of
+    /// what a listener learns from it; `occlusion: false` because the one-shot
+    /// occlusion pass keys on the Blueprint entity map and a gunshot has no
+    /// entity to be found in it — see [`report_source`]'s own doc.
+    #[test]
+    fn a_gunshot_is_a_placed_one_shot_that_carries_much_further_than_anything_else() {
+        let s = report_source();
+        assert_eq!(s.clip, Some(WEAPON_REPORT_CLIP));
+        assert_eq!(s.bus, REPORT_BUS);
+        assert!(!s.looping, "a gunshot that loops is a siren");
+        assert!(
+            s.spatial,
+            "a gunshot with no place tells a listener nothing"
+        );
+        assert!(
+            !s.autoplay,
+            "a report is issued by a trigger, not by a level"
+        );
+        assert!(
+            !s.occlusion,
+            "the one-shot occlusion pass looks its source up in the BLUEPRINT \
+             entity map and a gunshot has no entity there, so `true` here would \
+             be a claim the engine cannot honour"
+        );
+        // The reach is the claim: a gunshot is heard streets away, which is what
+        // makes it the one emitter whose range is the gameplay.
+        println!(
+            "a gunshot reaches {} m; a venue's music reaches {} m",
+            s.max_distance,
+            crate::venue::VENUE_MUSIC_MAX_M
+        );
+        assert!(
+            s.max_distance > crate::venue::VENUE_MUSIC_MAX_M * 4.0,
+            "a gunshot does not carry meaningfully further than a nightclub"
+        );
+        assert!(s.min_distance < s.max_distance && s.min_distance > 0.0);
     }
 
     /// **The traces are empty until something exists**, and move when it does.
