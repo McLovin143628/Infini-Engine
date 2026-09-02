@@ -550,13 +550,19 @@ impl PlayerApp {
     /// be tested and that one can — `drive_readout`'s own split, verbatim.
     ///
     /// A character with no `WeaponState` has nothing to say, which is every
-    /// character that has not equipped a weapon and (since WPN1's melee) every
-    /// one that has not thrown a punch either.
+    /// character that has not equipped a weapon and has not thrown a punch.
+    ///
+    /// **And neither has one carrying only its fists** (WPN1 audit): the melee
+    /// clock is a real `WeaponState` with `MAX_MAGAZINE` rounds in it, so before
+    /// `carries_ammunition` this read `"9999 / 10000"` at the bottom of the
+    /// screen for the rest of a level after one punch. The question is asked in
+    /// Ring 0 for this function's own reason.
     fn ammo_readout(sim: &RuntimeSim) -> Option<String> {
         let world = sim.world();
         let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
         let s = world.world().get::<inf_ecs::weapon::WeaponState>(entity)?;
-        Some(inf_ecs::weapon::ammo_readout(s.magazine, s.reserve))
+        inf_ecs::weapon::carries_ammunition(s)
+            .then(|| inf_ecs::weapon::ammo_readout(s.magazine, s.reserve))
     }
 
     /// **Is the camera subject pointing a weapon?** — the reticle's condition.
@@ -565,6 +571,11 @@ impl PlayerApp {
     /// rifle hangs where the animation puts it and only an aimed one is on the
     /// line the shot leaves along; and an ammunition clock, because a reticle on
     /// an empty-handed character is a crosshair for a weapon that is not there.
+    ///
+    /// **The fists are the empty-handed case wearing a clock** (WPN1 audit), so
+    /// the second half asks `carries_ammunition` rather than "is there a
+    /// `WeaponState`": a punch reaches 1.2 m through an arc and there is no line
+    /// for a crosshair to be true about.
     fn is_aiming(sim: &RuntimeSim) -> bool {
         let world = sim.world();
         let Some(entity) =
@@ -583,7 +594,7 @@ impl PlayerApp {
             && world
                 .world()
                 .get::<inf_ecs::weapon::WeaponState>(entity)
-                .is_some()
+                .is_some_and(inf_ecs::weapon::carries_ammunition)
     }
 
     /// **What the camera subject is carrying**, as the panel renders it

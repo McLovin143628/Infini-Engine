@@ -664,6 +664,26 @@ pub fn ammo_readout(magazine: u32, reserve: u32) -> String {
     format!("{magazine} / {reserve}")
 }
 
+/// **Is this clock a magazine, or is it a pair of hands?** (wave WPN1 audit).
+///
+/// [`WeaponState`] is the ammunition clock, and since this wave's melee it is
+/// also what paces a punch — [`fist_def`] carries [`MAX_MAGAZINE`] rounds
+/// precisely so a fist never runs out, and [`try_fire`] decrements it like any
+/// other. So a character who has thrown one punch carries a perfectly valid
+/// clock reading **9 999 / 10 000**, and anything that renders a `WeaponState`
+/// without asking this question puts that on the screen.
+///
+/// It is in Ring 0 rather than in the player's window for [`ammo_readout`]'s own
+/// reason verbatim — the window cannot be tested and this can — and it is one
+/// predicate rather than two `item_id` comparisons, because the ammunition
+/// readout and the reticle are the same question asked by two callers.
+///
+/// The fists are the only answer today; the rule is *"an ammunition clock a
+/// player can count down"*, not *"anything with a magazine field"*.
+pub fn carries_ammunition(state: &WeaponState) -> bool {
+    state.item_id != FIST_ITEM
+}
+
 /// What pulling the trigger did. **A refusal is a value.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FireVerdict {
@@ -1545,6 +1565,43 @@ automatic = true
         // Empty is a readout, not a blank: a player has to be able to tell
         // "no rounds" from "no weapon", and the second one draws nothing at all.
         assert_eq!(ammo_readout(0, 0), "0 / 0");
+    }
+
+    /// **A PAIR OF HANDS IS NOT A MAGAZINE** (wave WPN1 audit).
+    ///
+    /// The defect this closes was on the screen: `fist_def` carries
+    /// [`MAX_MAGAZINE`] rounds so a fist never runs out, `try_fire` decrements
+    /// it like any other clock, and the HUD read the clock it found — so one
+    /// punch put **"9999 / 10000"** at the bottom of the viewport and left it
+    /// there for the rest of the level, on a character holding nothing.
+    ///
+    /// Measured as the string, because the string is what a player sees.
+    #[test]
+    fn a_pair_of_hands_is_not_an_ammunition_clock() {
+        let rifle = WeaponDef::default();
+        let armed = WeaponState::full("rifle", &rifle);
+        assert!(carries_ammunition(&armed), "a rifle has no magazine");
+
+        let fists = fist_def();
+        let mut hands = WeaponState::full(FIST_ITEM, &fists);
+        assert!(
+            !carries_ammunition(&hands),
+            "an empty hand is being counted as ammunition"
+        );
+        // …and this is what it would have said. One punch, and the clock is a
+        // perfectly valid one — which is the whole reason the question has to
+        // be asked about the ITEM rather than about the numbers.
+        assert_eq!(try_fire(&fists, &mut hands, true), FireVerdict::Fired);
+        println!(
+            "one punch leaves the fists' clock reading \"{}\"",
+            ammo_readout(hands.magazine, hands.reserve)
+        );
+        assert_eq!(
+            ammo_readout(hands.magazine, hands.reserve),
+            format!("{} / {}", MAX_MAGAZINE - 1, MAX_MAGAZINE),
+            "the fists' clock stopped being the thing this predicate exists for"
+        );
+        assert!(!carries_ammunition(&hands));
     }
 
     /// **The traces are empty until something exists**, and move when it does.
