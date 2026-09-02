@@ -422,6 +422,34 @@ fn assert_not_vacuous(t: &[Step]) {
     );
     assert_eq!(t[25].pose, t[28].pose, "the aimed pose is not settled");
 
+    // -- THE RECOIL (wave WPN1): the shot MOVES the hands, and the weapon
+    //    settles back onto the aim line by the time it may fire again --
+    //
+    // The claim is a *return*, not a change: an `assert_ne!` on the firing step
+    // alone is satisfied by a hand that kicked and stayed kicked, which is the
+    // shape a recoil written as a latch nobody clears has. The rifle here is
+    // 600 rpm, so its cycle is 0.1 s = six steps at 60 Hz — step 31 fires, 32–36
+    // are the settle, and 37 is the weapon back where aiming put it.
+    assert_ne!(
+        t[30].pose, t[31].pose,
+        "the shot did not move the hands at all — the recoil is not reaching \
+         `HandIk::reach`, and the pose two hosts compare cannot see it"
+    );
+    assert_ne!(
+        t[31].pose, t[33].pose,
+        "the recoil is a LATCH rather than a decay: the pose on the firing step \
+         and two steps into the settle are identical"
+    );
+    assert_eq!(
+        t[30].pose, t[37].pose,
+        "the weapon never came back onto the aim line — a recoil that does not \
+         recover is a weapon pointing somewhere else for the rest of the level"
+    );
+    // …and the aim itself did NOT move, which is the ruling `aim_hold_point`
+    // states: the pose climbs and the bullet goes where the player is pointing.
+    // Measured as the SHOT: exactly one round left and it left on step 31.
+    assert_eq!(t[31].engagement.2, 1, "the shot is not on step 31");
+
     // -- FIRE and RELOAD really happened --
     assert_eq!(
         t.iter().map(|s| s.engagement.2).sum::<u32>(),
@@ -476,9 +504,16 @@ fn assert_not_vacuous(t: &[Step]) {
     let mut distinct: Vec<&Vec<u8>> = t.iter().map(|s| &s.pose).collect();
     distinct.sort();
     distinct.dedup();
+    //
+    // **Eighteen until wave WPN1, twenty-four since**, and the six are the
+    // recoil: a 600 rpm weapon's cycle is six fixed steps at 60 Hz and the hold
+    // point is a different point on each of them. The number is quoted rather
+    // than relaxed because that is the arithmetic — a recoil that snapped to one
+    // displaced pose and back would add ONE, and a recoil that never recovered
+    // would add six and break the `t[30] == t[37]` arm above.
     assert_eq!(
         distinct.len(),
-        18,
+        24,
         "the course posed {} distinct poses of 140 steps",
         distinct.len()
     );

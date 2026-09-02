@@ -414,6 +414,38 @@ impl WeaponState {
     }
 }
 
+/// **How much of a weapon's recoil is still on it**, `[0, 1]` (wave WPN1).
+///
+/// # It is DERIVED, and that is the whole design
+///
+/// A recoil field on [`WeaponState`] would be a second copy of a number the
+/// state already answers: `cooldown_s` is set to [`WeaponDef::fire_interval_s`]
+/// the instant a round leaves and counts down to zero as the weapon cycles, so
+/// *"how far through its own cycle is this weapon"* is already sim state, is
+/// already in [`weapon_state_bytes`], and is already identical on both hosts.
+/// The copy is the thing that drifts (`CrowdRecord::speed_of`'s own argument),
+/// and it would have cost eight bytes an armed character in every trace in the
+/// tree for a number that was already there.
+///
+/// So the recoil **is** the cycle: `1.0` on the step the shot is fired, falling
+/// linearly to `0.0` as the action closes. At 600 rpm that is a tenth of a
+/// second of kick per round and the next round arrives exactly as the last one
+/// finishes, which is what an automatic weapon looks like; at a pistol's 400 rpm
+/// it is a hundred and fifty milliseconds and a visible settle between shots.
+///
+/// **A reload is not a recoil.** `advance` runs the cooldown and the reload
+/// clock independently, and this reads only the first.
+///
+/// Answers `0.0` for a weapon whose rate makes the interval non-finite, which is
+/// the same refusal-as-a-value `fire_interval_s` makes.
+pub fn recoil_fraction(def: &WeaponDef, state: &WeaponState) -> f64 {
+    let interval = def.fire_interval_s();
+    if !interval.is_finite() || interval <= 0.0 {
+        return 0.0;
+    }
+    (state.cooldown_s / interval).clamp(0.0, 1.0)
+}
+
 /// **What a shooter's own instruments say** — the magazine and the reserve, as
 /// one line (wave WPN1).
 ///
@@ -1180,6 +1212,60 @@ automatic = true
             "a gunshot does not carry meaningfully further than a nightclub"
         );
         assert!(s.min_distance < s.max_distance && s.min_distance > 0.0);
+    }
+
+    /// **The recoil IS the weapon's own cycle** (wave WPN1) — full on the step
+    /// the round leaves, gone by the time the next one may.
+    ///
+    /// The mutation this kills: a recoil derived from `shots` alone would be
+    /// `1.0` for ever after the first round, and a recoil derived from
+    /// `reload_left_s` would fire on a reload and never on a shot.
+    #[test]
+    fn the_recoil_is_full_on_the_shot_and_gone_when_the_action_closes() {
+        let d = WeaponDef::default();
+        let mut s = WeaponState::full("rifle", &d);
+        assert_eq!(recoil_fraction(&d, &s), 0.0, "a rested weapon has recoil");
+        assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
+        assert!(
+            (recoil_fraction(&d, &s) - 1.0).abs() < 1e-12,
+            "the shot did not kick: {}",
+            recoil_fraction(&d, &s)
+        );
+        // It falls, monotonically, and is spent exactly when the weapon may fire
+        // again — which is the property that makes it the cycle rather than a
+        // second clock beside it.
+        let mut last = 1.0_f64;
+        let mut steps = 0;
+        while recoil_fraction(&d, &s) > 0.0 && steps < 600 {
+            advance(&d, &mut s, DT);
+            let now = recoil_fraction(&d, &s);
+            assert!(now <= last, "the recoil went back up: {last} -> {now}");
+            last = now;
+            steps += 1;
+        }
+        println!(
+            "a {} rpm weapon's kick lasted {steps} steps ({:.4} s)",
+            d.rounds_per_minute,
+            steps as f64 * DT
+        );
+        assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
+        // A RELOAD is not a recoil: the two clocks are independent and this
+        // reads one of them.
+        let mut r = WeaponState::full("rifle", &d);
+        r.magazine = 1;
+        assert_eq!(try_reload(&d, &mut r), ReloadVerdict::Started);
+        assert!(r.reloading());
+        assert_eq!(
+            recoil_fraction(&d, &r),
+            0.0,
+            "a reload registered as a recoil"
+        );
+        // A weapon whose rate cannot make an interval refuses as a value.
+        let dead = WeaponDef {
+            rounds_per_minute: 0.0,
+            ..d
+        };
+        assert_eq!(recoil_fraction(&dead, &s), 0.0);
     }
 
     /// **The ammunition readout is the two numbers and nothing else** (wave

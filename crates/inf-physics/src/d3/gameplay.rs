@@ -496,6 +496,22 @@ fn fore_grip_m(def: &WeaponDef) -> f32 {
 /// metres.
 pub const AIM_REACH_M: f64 = 0.42;
 
+/// **How far a shot drives the weapon back into the shoulder**, metres (wave
+/// WPN1).
+///
+/// Six centimetres against [`AIM_REACH_M`]'s forty-two — a seventh of the reach,
+/// which is enough to read as a shove at 60 Hz and small enough that the hand
+/// stays in front of the chest rather than passing through it.
+pub const RECOIL_PULL_M: f64 = 0.06;
+
+/// **How far a shot lifts the muzzle**, degrees.
+///
+/// Four. The hold point is on the aim line at shoulder height, so lifting the
+/// *point* is what lifts the weapon; four degrees at forty-two centimetres is
+/// three centimetres of rise, which is a muzzle climbing rather than a weapon
+/// being thrown over a shoulder.
+pub const RECOIL_RISE_DEG: f64 = 4.0;
+
 /// The fraction of a character's height its shoulder line sits at.
 ///
 /// The same proportion `inf_anim::BodyParams` uses for a default biped, spelled
@@ -645,6 +661,43 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
 /// that points somewhere the bullet does not. Portable for the shot's own
 /// reason: this number is folded into `pose_state_bytes` and compared between
 /// two machines (the P14 law).
+///
+/// # THE RECOIL IS HERE, and it is a POSE (wave WPN1)
+///
+/// A shot lifts this point by [`RECOIL_RISE_DEG`] and pulls it back by
+/// [`RECOIL_PULL_M`], scaled by [`weapon::recoil_fraction`] — which is the
+/// weapon's own cycle and therefore already sim state on both hosts. It reaches
+/// `HandIk::reach`, then `apply_hand_ik`, then `pose_state_bytes`, so the two
+/// hosts are compared on it byte for byte and a replay reproduces it.
+///
+/// **It does NOT move the aim, and that is deliberate.** `cm.runtime.aim_*` is
+/// what the bullet leaves along and what the camera chases; this reads those two
+/// numbers and writes neither. A shot fired during a burst goes exactly where the
+/// player is pointing while the weapon visibly climbs, which is a game with a
+/// climbing weapon and honest aim rather than one with recoil.
+///
+/// # Why there is no CAMERA recoil, stated as a ruling
+///
+/// The obvious companion — kick the camera's pitch and let it settle — was
+/// priced and refused, and the refusal has two halves that meet:
+///
+/// * a camera kick that does **not** move the aim makes the reticle **lie**. The
+///   shot leaves along `aim_pitch_deg`, the reticle is drawn at the centre of the
+///   screen, and the camera's pitch is the entire mapping between the two; kick
+///   one and not the other and the crosshair stops being where the rounds go,
+///   permanently under sustained fire.
+/// * a camera kick that **does** move the aim is a camera → sim write, which is
+///   the one thing `d3::camera`'s Ruling 4 exists to forbid ("`ViewMode` never
+///   crosses the sim wire, and there is no camera → sim path at all"), and which
+///   `phase29_gate` pins by running the same course under two different cameras
+///   and comparing the sim trace.
+///
+/// The honest form is an **aim** recoil: the movement step's own aim integrator
+/// gaining a per-shot impulse and a recovery, so the aim really moves, the camera
+/// follows it because it always did, and the reticle stays true. That is a change
+/// to `step_character_movement`'s look integration and it moves every committed
+/// aim in the tree; it is named on this wave's carried list rather than done
+/// quietly at the end of a different clause.
 fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     let entity = world.entity_of(guid)?;
     let cm = world.world().get::<CharacterMovement>(entity)?;
@@ -655,9 +708,36 @@ fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     // The stand height is what the capsule was built from, so this tracks a
     // 1.2 m character and a 2.4 m one without a second opinion about either.
     let height = (cm.stand_half_height_m * 2.0).max(0.4);
-    let dir = weapon::aim_forward(cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg);
-    let at = feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT) + dir * AIM_REACH_M;
+    // The recoil, read off the weapon's own cycle. Zero — and every byte below
+    // identical to what it was before this wave — for a character whose weapon
+    // is not cooling, which is every step but the ten a second a rifle fires on.
+    let kick = recoil_of(world, guid);
+    let dir = weapon::aim_forward(
+        cm.runtime.aim_yaw_deg,
+        cm.runtime.aim_pitch_deg + RECOIL_RISE_DEG * kick,
+    );
+    let reach = (AIM_REACH_M - RECOIL_PULL_M * kick).max(0.05);
+    let at = feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT) + dir * reach;
     at.is_finite().then_some(at)
+}
+
+/// **How much recoil is on this character's weapon**, `[0, 1]` — the equipped
+/// definition and the live ammunition clock, through the one Ring-0 rule.
+///
+/// `0.0` for a character with nothing equipped or no clock, which is the answer
+/// that leaves [`aim_hold_point`] byte-identical to its pre-WPN1 self.
+fn recoil_of(world: &EcsWorld, guid: Uuid) -> f64 {
+    let Some(entity) = world.entity_of(guid) else {
+        return 0.0;
+    };
+    let Some((_, def)) = equipped_weapon(world, guid) else {
+        return 0.0;
+    };
+    world
+        .world()
+        .get::<WeaponState>(entity)
+        .map(|s| weapon::recoil_fraction(&def, s))
+        .unwrap_or(0.0)
 }
 
 /// The equipped weapon's definition, if the character has one equipped and the
