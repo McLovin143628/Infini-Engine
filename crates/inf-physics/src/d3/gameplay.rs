@@ -1188,10 +1188,11 @@ pub struct PanicReport {
 ///
 /// The obvious shape is "for each shot, for each agent, how far apart are they",
 /// which is `O(shots × agents)` — and at 600 rpm with several shooters that is a
-/// per-step cost that grows with how exciting the scene is, measured against a
-/// [`NPC_STEP_BUDGET_MS`] that was set at a thousand *walking* agents.
-///
-/// [`NPC_STEP_BUDGET_MS`]: inf_player::budget::NPC_STEP_BUDGET_MS
+/// per-step cost that grows with how exciting the scene is, measured against an
+/// `inf_player::budget::NPC_STEP_BUDGET_MS` that was set at a thousand *walking*
+/// agents. (Named in a code span rather than linked: `inf-physics` does not
+/// depend on `inf-player`, so an intra-doc link there resolves to nothing and
+/// costs a rustdoc warning for a reference a reader can follow by name.)
 ///
 /// So this is **one walk over the population** with a bounded inner loop: the
 /// step's loud shots are coalesced into at most [`MAX_PANIC_SOURCES`] places
@@ -1586,8 +1587,9 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, dt: f64, report: &mut Gamepl
 ///
 /// It is not a fight-back: an NPC that resists simply stays, and the day one
 /// swings back is the day `npc_aim_at` grows a policy — which is EMS3's, for
-/// the reason that function's own doc gives. And it reaches [`inf_ecs::crowd::
-/// flee_from`], so a person who is not in the population is not made one:
+/// the reason that function's own doc gives. And it reaches
+/// [`inf_ecs::crowd::flee_from`], so a person who is not in the population is
+/// not made one:
 /// the hero, a scripted actor and a shopkeeper with no crowd record are all
 /// refused by that door, and the honest answer for them is that being hit does
 /// not give them somewhere to be.
