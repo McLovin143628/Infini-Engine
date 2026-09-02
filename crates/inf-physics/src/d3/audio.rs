@@ -144,8 +144,10 @@ impl PortalVerdict {
 /// What one occlusion query answered.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PortalGain {
-    /// The obstruction gain in `[0, 1]` — what
-    /// [`PlayCommand::occlusion_gain`](inf_audio::PlayCommand) carries.
+    /// The obstruction gain in `[0, 1]` — what `inf_audio`'s
+    /// `PlayCommand::occlusion_gain` carries. (Named and not linked: this crate
+    /// does not depend on `inf-audio`, and the seam is deliberately one way —
+    /// the physics side decides a number and the host puts it on a command.)
     pub gain: f64,
     /// The one-pole low-pass this path puts on the source, hertz, or `None` for
     /// a path that only attenuates.

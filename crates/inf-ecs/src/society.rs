@@ -252,8 +252,8 @@ pub const NIGHT_JOB_MAX_M: f64 = 600.0;
 /// work is a routine: a kilometre is the whole of one of the island's cities,
 /// and a resident who would cross it for a nightclub is a resident who wants a
 /// nightclub. Two settlements are kilometres apart and stay separate towns,
-/// which the network already enforces — an unroutable pair is refused by
-/// [`leg`] whatever this says.
+/// which the network already enforces — an unroutable pair is refused by the
+/// leg search whatever this says.
 pub const NIGHT_OUT_MAX_M: f64 = 1_000.0;
 
 /// Salts an agent's derived `Guid`. See [`agent_guid`].

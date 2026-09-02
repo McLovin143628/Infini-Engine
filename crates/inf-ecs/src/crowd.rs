@@ -1660,7 +1660,8 @@ pub struct CrowdStats {
     /// **Agents turned to face something this step** (wave VEN1b) — one per
     /// materialized agent whose active leg's arrival names a direction.
     ///
-    /// Counted because [`face_body`] writes through two different doors
+    /// Counted because `face_body` — the private door both branches of the
+    /// ladder turn a body through — writes through two different doors
     /// depending on the tier and a write to the wrong one is *invisible*: a
     /// steered body would simply keep the yaw it walked in with. A gate can
     /// hold this against the number of agents it knows are sitting down.

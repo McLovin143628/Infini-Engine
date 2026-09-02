@@ -10,9 +10,10 @@
 //! **assembler** put in the rectangle.
 //!
 //! So a station is derived where the furniture is placed, in
-//! [`assemble`](super::assemble), and carried out on
-//! [`GrammarOutput::stations`](crate::GrammarOutput) beside the doorways. It is
-//! `#[serde(skip)]` all the way down for the reason a doorway and a slot are:
+//! [`assemble`](mod@super::assemble), and carried out on
+//! [`GrammarOutput::stations`](crate::grammar::GrammarOutput::stations) beside
+//! the doorways. It is `#[serde(skip)]` all the way down for the reason a
+//! doorway and a slot are:
 //! it is a pure function of the plan, the palette and the seed, so every host
 //! re-derives it and **no schema moves**.
 //!

@@ -433,7 +433,8 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
 ///
 /// [`slots_of`] is a pure function of a `BuildingPlan`, and a plan does not
 /// know where a stool ended up: furniture is placed by
-/// [`assemble`](super::assemble), against blockers, with a hash. The two halves
+/// [`assemble`](mod@super::assemble), against blockers, with a hash. The two
+/// halves
 /// answer different questions from different inputs and the split is what keeps
 /// `slots_of`'s own arms — *a bedroom holds one person whatever its area* — true
 /// sentences about a plan.
