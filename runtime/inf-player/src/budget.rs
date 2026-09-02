@@ -490,6 +490,74 @@ pub const VEHICLE_BUDGET_CARS: usize = 64;
 /// (VEH2b).
 pub const TRAFFIC_STEP_BUDGET_MS: f64 = 1.0;
 
+/// **What the `audio` phase may cost**, milliseconds (island wave VEN1b audit).
+///
+/// # Why a phase gets its own number, a fourth time
+///
+/// [`NPC_STEP_BUDGET_MS`]'s argument, then [`VEHICLE_STEP_BUDGET_MS`]'s, then
+/// [`TRAFFIC_STEP_BUDGET_MS`]'s: a whole-step total works while every phase is
+/// something the engine has always done, and stops working the moment a phase
+/// **grows**, because new growth is invisible inside a total that has an island
+/// in it.
+///
+/// The `audio` row has existed since the step profile did and had never been
+/// asserted, because until wave VEN1b it was a walk over the emitters and a
+/// listener pose. That wave gave it real per-step work — see below — and the
+/// wave's own arms measured `society` and `crowd`, the two phases it barely
+/// touched. This constant is the audit's answer to that.
+///
+/// # What is IN it, and the shape that makes it worth watching
+///
+/// The autoplay walk over every `AudioSource` in the world, the despawn sweep,
+/// the listener pose, the vehicle engine loop's pitch/volume pair per car — and
+/// VEN1b's **doorway re-evaluation**: one `inf_physics::d3::audio::portal_gain`
+/// for every looping spatial source that opts into occlusion and stands inside
+/// its own `max_distance`, every step.
+///
+/// The last of those is the one with a shape in it. `portal_gain` falls through
+/// to `portal_of`, which reads `d3::door::placements` — the **unbanded** list,
+/// which builds a `DoorPlacement` (and a label `String`) for every authored door
+/// and every grammar `PcgDoorway` in the resident world.
+/// `placements_near`'s own doc is the measurement of what that can cost: *"the
+/// shipped city plans 19 790 doorways and the band keeps 234"*. The venue's
+/// speakers are the first content ever to take that path.
+///
+/// # The number, and the measurement that sized it
+///
+/// Measured at the club on the CI fixture — **six speakers, 750 doors resident,
+/// 750 `SetOcclusion` over 120 steps** — with the profiler armed, on both hosts:
+///
+/// ```text
+///   society 0.028 ms | crowd 0.178 ms | audio 0.185 ms
+/// ```
+///
+/// The audio row is the dearest of the three, which is the fact this constant
+/// exists to keep visible: the wave that grew it measured the other two.
+///
+/// **0.55 ms before the hoist.** The first reading was `audio 0.549 / 0.556 ms`
+/// — three times the crowd phase — because the door list was rebuilt inside
+/// `portal_gain` once per source, five times a step over 750 doors.
+/// `audio::portal_gain_in` takes the list the step already built; the verdicts,
+/// the 120 step digests and the audio command stream are identical either way.
+/// What is left scales with `doors + sources × doors` comparisons rather than
+/// with `sources × doors` allocations.
+///
+/// One millisecond, [`NPC_STEP_BUDGET_MS`]'s and [`TRAFFIC_STEP_BUDGET_MS`]'s
+/// figure, and a sixth of [`CITY_STEP_BUDGET_MS`] — which is the property that
+/// makes it able to see anything at all: an audio phase that grew to a visible
+/// share of a 6 ms step trips this first. The fixture sits at 19 % of it, and
+/// the headroom is deliberately not spent: a city block's 19 790 doorways is
+/// twenty-six times this fixture's 750, and the day a gate stands a listener in
+/// one, this is the arm that says so.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 1.0
+/// (VEN1b audit).
+pub const AUDIO_STEP_BUDGET_MS: f64 = 1.0;
+
 /// Hard ceiling on **terrain** page bytes resident at any point of the gate
 /// flythrough (`TerrainStreamStats::bytes_resident`, summed over every streamed
 /// terrain — the camera's render cut plus the pages the sim pinned).

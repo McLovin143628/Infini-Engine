@@ -376,11 +376,20 @@ fn both_audio_steps_hear_the_same_doorway() {
     );
     for (needle, why) in [
         (
-            "inf_physics::d3::audio::portal_gain(",
+            "inf_physics::d3::audio::portal_gain_in(",
             "the DECISION is Ring 0 — a host that decided its own cut would be \
              the second authority the P12 doctrine exists to prevent, and it is \
              the shape this wave replaced (two copies of one raycast with a \
              -12 dB constant beside each)",
+        ),
+        (
+            "inf_physics::d3::audio::portal_doors(world)",
+            "the door list is built ONCE for the step and not once per source \
+             (VEN1b audit). `d3::door::placements` allocates a label per door \
+             over every doorway in the resident world, and the audio phase \
+             measured 0.55 ms a step at the club rebuilding it five times over \
+             — a host that dropped the hoist would put the cost back without \
+             changing a single verdict",
         ),
         (
             "src.occlusion&&src.spatial&&src.looping",

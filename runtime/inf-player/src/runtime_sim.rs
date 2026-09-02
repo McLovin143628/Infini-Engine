@@ -2028,9 +2028,32 @@ impl RuntimeSim {
             }
             portals.push((guid_source_key(*guid), pos));
         }
+        // **The door list is built ONCE for the whole step** (VEN1b audit).
+        //
+        // `portal_gain` builds it inside itself, which is right for one query
+        // and wrong for a loop: `d3::door::placements` walks every authored door
+        // and every grammar `PcgDoorway` in the resident world and allocates a
+        // label per door. Measured at the club on the CI fixture -- 6 speakers,
+        // 750 doors resident -- the `audio` phase was 0.55 ms a step, three
+        // times the crowd phase, because the list was rebuilt five times over.
+        // Hoisted, the cost is one build plus a scan per source.
+        //
+        // Empty when nothing is on the path, so a level with no occluded
+        // looping source pays nothing at all -- which is every level committed
+        // before this wave.
+        let doors = if portals.is_empty() {
+            Vec::new()
+        } else {
+            inf_physics::d3::audio::portal_doors(world)
+        };
         for (source, pos) in portals {
-            let p =
-                inf_physics::d3::audio::portal_gain(world, bridge.world_mut(), listener_pos, pos);
+            let p = inf_physics::d3::audio::portal_gain_in(
+                world,
+                bridge.world_mut(),
+                &doors,
+                listener_pos,
+                pos,
+            );
             cmds.push(AudioCommand::SetOcclusion {
                 source,
                 gain: p.gain,

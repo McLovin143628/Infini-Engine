@@ -7615,6 +7615,24 @@ struct ClubRun {
     plays: usize,
     occlusions: usize,
     occlusions_here: usize,
+    /// **How many commands fell off the front of the log's ring** (VEN1b
+    /// audit).
+    ///
+    /// `audio_command_log` is a `BoundedLog` of 8 192 and its own doc says a
+    /// test that reasons about the stream must assert this is zero first. The
+    /// `audio` field above calls itself *the whole* stream and is compared
+    /// between the hosts; the counts beside it are counts over the same slice.
+    /// Non-zero would make all three claims about a **tail** — and this wave is
+    /// what put the island's first per-step `SetListener` into that ring, by
+    /// giving the hero an ear, so the headroom is a fact worth pinning rather
+    /// than assuming.
+    dropped_audio: u64,
+    /// **Every door the doorway rule walks, per occluded source, per step**
+    /// (VEN1b audit) — `d3::door::placements` is the UNBANDED list.
+    doors: usize,
+    /// The mean `audio` phase cost over the window, ms — the phase this wave
+    /// added per-step work to.
+    audio_ms: f64,
     /// How far the hero stood from that speaker, metres.
     heard_from_m: f64,
     /// How many exterior doors the block opened for the second reading.
@@ -7973,7 +7991,7 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
 
         // ── the traces ──────────────────────────────────────────────────────
         let mut seen: std::collections::BTreeSet<u64> = Default::default();
-        let (mut soc_ms, mut crowd_ms) = (0.0f64, 0.0f64);
+        let (mut soc_ms, mut crowd_ms, mut audio_ms) = (0.0f64, 0.0f64, 0.0f64);
         for _ in 0..CLUB_STEPS {
             sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
             let d = digest(&sim.state_bytes());
@@ -7987,6 +8005,15 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
                 match name {
                     "society" => soc_ms += ms,
                     "crowd" => crowd_ms += ms,
+                    // **THE PHASE THIS WAVE ACTUALLY GREW** (VEN1b audit). The
+                    // society and the crowd rows above are the two the wave
+                    // barely touched; what it added per-step work to is the
+                    // AUDIO step -- a `portal_gain` for every looping occluded
+                    // source in earshot, every step, each one an unbanded walk
+                    // over every door in the resident world. A new phase cost
+                    // that no arm measures is `set_debris_budget`'s shape, and
+                    // the file already has the row.
+                    "audio" => audio_ms += ms,
                     _ => {}
                 }
             }
@@ -7994,6 +8021,9 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
         r.distinct = seen.len();
         r.society_ms = soc_ms / CLUB_STEPS as f64;
         r.crowd_ms = crowd_ms / CLUB_STEPS as f64;
+        r.audio_ms = audio_ms / CLUB_STEPS as f64;
+        r.dropped_audio = sim.dropped_audio_commands();
+        r.doors = inf_physics::d3::door::placements(sim.world()).len();
 
         let log = sim.audio_command_log();
         // The audio source key is the guid's low bits -- `guid_source_key`'s
@@ -8020,7 +8050,9 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
         println!(
             "VEN1b {label}: {} speaker(s) ({} spawned), the nearest {:.1} m off, \
              {} door(s) opened; {} Play(s), {} SetOcclusion(s) ({} for that \
-             speaker); society {:.3} ms / crowd {:.3} ms a step over {CLUB_STEPS}",
+             speaker), {} command(s) dropped from the log's ring; society \
+             {:.3} ms / crowd {:.3} ms / audio {:.3} ms a step over \
+             {CLUB_STEPS}, with {} door(s) in the resident world",
             r.venue.live,
             r.venue.spawned,
             r.heard_from_m,
@@ -8028,8 +8060,11 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
             r.plays,
             r.occlusions,
             r.occlusions_here,
+            r.dropped_audio,
             r.society_ms,
-            r.crowd_ms
+            r.crowd_ms,
+            r.audio_ms,
+            r.doors
         );
         runs.push((label, r));
     }
@@ -8164,7 +8199,34 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
             r.open[1].db,
             r.open[2].db
         );
+        // **THE LOG IS WHOLE** (VEN1b audit). `audio_command_log` is a ring of
+        // `inf_core::DEFAULT_LOG_CAPACITY` and its own doc says a test that
+        // reasons about the stream must assert this first. Three claims below
+        // and above rest on it: the `Play`/`SetOcclusion` counts, the
+        // `occlusions_here >= CLUB_STEPS` floor, and the host-to-host equality
+        // of `r.audio`, which calls itself *the whole* stream. This wave is
+        // also what put the island's first per-step `SetListener` into that
+        // ring — the hero had no ear before it — so the headroom moved and is
+        // pinned rather than assumed.
+        assert_eq!(
+            r.dropped_audio, 0,
+            "{label}: {} audio command(s) fell off the front of an 8 192-entry \
+             ring, so the {} Play(s) and {} SetOcclusion(s) counted here are a \
+             TAIL and the two hosts are being compared on one",
+            r.dropped_audio, r.plays, r.occlusions
+        );
         // THE BUDGETS, on the phases this wave added work to.
+        assert!(
+            r.audio_ms <= inf_player::budget::AUDIO_STEP_BUDGET_MS,
+            "{label}: the audio phase costs {:.3} ms a step against a ratchet \
+             of {} — {} door(s) in the resident world, walked once per occluded \
+             looping source per step ({} SetOcclusion over {CLUB_STEPS}). {}",
+            r.audio_ms,
+            inf_player::budget::AUDIO_STEP_BUDGET_MS,
+            r.doors,
+            r.occlusions,
+            inf_player::budget::RATCHET_NOTE
+        );
         assert!(
             r.society_ms <= inf_player::budget::SOCIETY_STEP_BUDGET_MS,
             "{label}: the society phase costs {:.3} ms a step against a ratchet \

@@ -209,6 +209,47 @@ pub fn portal_gain(
     listener: DVec3,
     emitter: DVec3,
 ) -> PortalGain {
+    portal_gain_in(world, phys, &portal_doors(world), listener, emitter)
+}
+
+/// **The doors the rule reads**, built once — see [`portal_gain_in`].
+///
+/// A named door rather than a bare `placements` call at each site, so "what
+/// counts as a door to this rule" stays one answer: the authored leaves and
+/// every grammar `PcgDoorway`, in `Guid` order, which is what makes the tie
+/// break the same on two hosts.
+pub fn portal_doors(world: &EcsWorld) -> Vec<inf_ecs::door::DoorPlacement> {
+    super::door::placements(world)
+}
+
+/// [`portal_gain`] over a door list the caller already holds (VEN1b audit) —
+/// the door a *step* uses when it has several sources and one world.
+///
+/// # This exists because the list is dear and the answer is not
+///
+/// `super::door::placements` builds a `DoorPlacement` — with a label `String` —
+/// for every authored door and every grammar `PcgDoorway` in the resident
+/// world, and `placements_near`'s own doc is the measurement of what that
+/// means: *"the shipped city plans 19 790 doorways and the band keeps 234, so
+/// collecting all of them to throw 98.8 % away would copy about 2 MB and
+/// allocate a label string per door"*. The audio step asks this question once
+/// per occluded looping source per step, so building the list inside the rule
+/// made the cost `sources × doors` **allocations** rather than
+/// `doors + sources × doors` comparisons.
+///
+/// Measured at the club on the CI fixture — six speakers, 750 doors resident —
+/// the `audio` phase went **0.549 ms → 0.185 ms** a step with nothing else
+/// changed, against a crowd phase of 0.178 ms. The verdict is identical by
+/// construction: this is the same body, and [`portal_gain`] is now the
+/// one-source spelling of it. (The gate's 120 step digests and its whole audio
+/// command stream are byte-for-byte what they were.)
+pub fn portal_gain_in(
+    world: &EcsWorld,
+    phys: &mut PhysicsWorld3D,
+    doors: &[inf_ecs::door::DoorPlacement],
+    listener: DVec3,
+    emitter: DVec3,
+) -> PortalGain {
     let delta = emitter - listener;
     let dist = delta.length();
     if !(dist.is_finite() && dist > 1e-6) {
@@ -222,17 +263,50 @@ pub fn portal_gain(
     if !blocked {
         return PortalGain::CLEAR;
     }
-    portal_of(world, listener, emitter, dist).unwrap_or(PortalGain::WALL)
+    portal_of_in(world, doors, listener, emitter, dist).unwrap_or(PortalGain::WALL)
 }
 
 /// **The doorway this sound comes through, if any** — the half of
 /// [`portal_gain`] that needs no physics and is therefore testable without one.
 ///
-/// The portal is the door with the smallest **detour**; ties break on the
-/// door's own `Guid`, which `d3::door::placements` has already sorted by, so
-/// two hosts pick the same hole out of the same world.
+/// The portal is the opening **nearest the listener** among the ones that are
+/// on the way at all — a listener within [`PORTAL_LISTENER_REACH_M`] of it and
+/// a detour within [`PORTAL_DETOUR_MAX_M`]. Ties keep the first in
+/// `d3::door::placements`' own `Guid` order, so two hosts pick the same hole
+/// out of the same world.
+///
+/// **The detour is the filter and not the ranking**, and saying which is which
+/// is the whole of [`PORTAL_DETOUR_MAX_M`]'s measurement: a detour is nearly
+/// scale-free, so ranking on it would rate a door sixty metres away against one
+/// four metres away and could not tell them apart. (This doc said "the smallest
+/// detour" until the VEN1b audit read it against the code, which has always
+/// ranked on the listener's own distance — the same reading the gain is a
+/// function of.)
+///
+/// # The bound this leaves, stated
+///
+/// "Nearest the listener" is a rule about the LISTENER and not about the
+/// emitter's room, so on a block of six bars a listener out in the street can
+/// pick a *neighbour's* interior door as the way the sound arrives. That is
+/// exactly what the club gate's fifth defect measured, and what
+/// `CLUB_OPENS_M` there works around by opening the block rather than one leaf.
+/// Ranking on the detour instead would name the opening on the sound's own
+/// line; it is priced and not taken here because it moves every number this
+/// wave measured. Carried.
 pub fn portal_of(
     world: &EcsWorld,
+    listener: DVec3,
+    emitter: DVec3,
+    direct_m: f64,
+) -> Option<PortalGain> {
+    portal_of_in(world, &portal_doors(world), listener, emitter, direct_m)
+}
+
+/// [`portal_of`] over a door list the caller already holds — see
+/// [`portal_gain_in`] for why the list is hoisted.
+pub fn portal_of_in(
+    world: &EcsWorld,
+    doors: &[inf_ecs::door::DoorPlacement],
     listener: DVec3,
     emitter: DVec3,
     direct_m: f64,
@@ -243,7 +317,7 @@ pub fn portal_of(
     // `d3::door::placements` has already sorted by, so two hosts pick the same
     // hole out of the same world.
     let mut best: Option<(f64, f64, bool)> = None;
-    for p in super::door::placements(world) {
+    for p in doors {
         if !p.hinge.is_finite() {
             continue;
         }
