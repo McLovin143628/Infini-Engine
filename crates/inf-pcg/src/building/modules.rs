@@ -26,7 +26,7 @@
 //! onto its instance's extent at projection. Two consequences, both deliberate:
 //!
 //! * a module's mesh is a function of its *shape family* and nothing else, so
-//!   there are twelve meshes rather than one per palette entry;
+//!   there are nineteen meshes rather than one per palette entry;
 //! * every feature is **proportional** — a frame rail is a fraction of the
 //!   panel, never a fixed 40 mm — because the same mesh is stretched onto a
 //!   0.3 m mullion and a 12 m slab. A fixed-size chamfer would be invisible on
@@ -35,14 +35,21 @@
 //! # Boxes, composed
 //!
 //! Every shape is a small union of axis-aligned boxes with flat normals: two to
-//! six of them, 24 to 72 triangles. No half-edge kernel (`inf-dcc` is a **dev**
-//! dependency of the shipped player and this code is Ring 0 on its draw path),
-//! no trigonometry (the P14 law — these vertices are a pure function of
+//! eight of them, 24 to 96 triangles. No half-edge kernel (`inf-dcc` is a
+//! **dev** dependency of the shipped player and this code is Ring 0 on its draw
+//! path), no trigonometry (the P14 law — these vertices are a pure function of
 //! constants and reach a content hash), and no boolean. The relief is in the
 //! **silhouette**: a window has a frame standing proud of a recessed pane, a
 //! desk has legs with air between them, a slab has a fascia. That is what
 //! separates "real geometry, modestly" from a re-textured box, and the meshlet
 //! path is not asked to carry any of it.
+//!
+//! **One family is not a box** (wave VEN1a): [`ModuleShape::Pole`] and
+//! [`ModuleShape::Stool`] are eight-sided prisms, because a chrome dance pole's
+//! entire contribution to a near-black room is one bright vertical specular
+//! streak and a square post does not make one. The octagon is a table of eight
+//! **literal** constants — see [`ModuleMesh::push_prism_y`] for why a `cos` call
+//! is not available to geometry that reaches a content hash.
 //!
 //! # The GUIDs are content-derived
 //!
@@ -131,9 +138,94 @@ impl ModuleMesh {
                 .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
+
+    /// Append an **eight-sided prism about the Y axis** (wave VEN1a) — the one
+    /// non-box primitive in this module, and the reason a chrome dance pole
+    /// reads as a cylinder rather than as a square post.
+    ///
+    /// # No trigonometry, and that is the P14 law and not fastidiousness
+    ///
+    /// The octagon's directions are the eight `[±1, 0]`, `[0, ±1]` and
+    /// `[±√2/2, ±√2/2]` written as **literals**. These vertices reach a
+    /// `ScatterGeometry` content key and a committed level's bytes, and
+    /// `f32::cos` is not bit-portable across platforms — the law this repository
+    /// paid for at P14 and met again at P21.3 and P22. A table of eight
+    /// constants is a pure function of nothing at all.
+    ///
+    /// # Eight sides, not sixteen
+    ///
+    /// A pole is a 60–80 mm shaft in a room lit only by practicals: its whole
+    /// visual contribution is one bright vertical specular streak, and eight
+    /// facets carry that at 28 triangles where sixteen would cost 60 and every
+    /// family in this table has to stay under 128.
+    ///
+    /// `radius` is in unit space; `y0`/`y1` are the prism's ends.
+    fn push_prism_y(&mut self, radius: f32, y0: f32, y1: f32) {
+        /// √2/2, the octagon's diagonal component.
+        const D: f32 = 0.707_106_77;
+        const RING: [[f32; 2]; 8] = [
+            [1.0, 0.0],
+            [D, D],
+            [0.0, 1.0],
+            [-D, D],
+            [-1.0, 0.0],
+            [-D, -D],
+            [0.0, -1.0],
+            [D, -D],
+        ];
+        if !(radius > 0.0 && y1 > y0) {
+            return;
+        }
+        let p = |k: usize, y: f32| [RING[k][0] * radius, y, RING[k][1] * radius];
+        // ── the eight side quads ──
+        //
+        // `A(k, y0) B(k, y1) C(k+1, y1) D(k+1, y0)` — the winding whose geometric
+        // normal is `(dz, 0, -dx)` for `d = p[k+1] - p[k]`, which is the outward
+        // radial direction of the face's own midpoint. Worked out rather than
+        // guessed, because the box table above records what guessing the
+        // symmetry cost the first time.
+        for k in 0..8 {
+            let j = (k + 1) % 8;
+            let n = {
+                let (x, z) = (RING[k][0] + RING[j][0], RING[k][1] + RING[j][1]);
+                // The midpoint direction, normalized by its own length — which
+                // for two adjacent octagon vertices is a constant, but is
+                // written as the division so a different `RING` stays correct.
+                let l = (x * x + z * z).sqrt();
+                [x / l, 0.0, z / l]
+            };
+            let base = self.positions.len() as u32;
+            for v in [p(k, y0), p(k, y1), p(j, y1), p(j, y0)] {
+                self.positions.push(v);
+                self.normals.push(n);
+            }
+            self.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        // ── the two caps, as fans from vertex 0 ──
+        //
+        // The ring runs counter-clockwise in `(x, z)`, so the fan
+        // `(0, k, k+1)` has a geometric normal of −Y: the bottom cap takes it
+        // as written and the top cap takes the reverse.
+        for (y, up) in [(y0, false), (y1, true)] {
+            let n = [0.0, if up { 1.0 } else { -1.0 }, 0.0];
+            let base = self.positions.len() as u32;
+            for k in 0..8 {
+                self.positions.push(p(k, y));
+                self.normals.push(n);
+            }
+            for k in 1..7u32 {
+                if up {
+                    self.indices.extend([base, base + k + 1, base + k]);
+                } else {
+                    self.indices.extend([base, base + k, base + k + 1]);
+                }
+            }
+        }
+    }
 }
 
-/// The twelve shape families a palette module draws as.
+/// The nineteen shape families a palette module draws as.
 ///
 /// A family and not a per-module mesh, because a palette entry's *dimensions*
 /// live on the instance now: an office mullion and a house quoin are the same
@@ -167,11 +259,48 @@ pub enum ModuleShape {
     Crate,
     /// A roller shutter: a leaf with horizontal ribs.
     Shutter,
+    /// **A raised in-room platform** (wave VEN1a): a plank deck on a skirt — a
+    /// stage, a catwalk, a riser. Distinct from [`Deck`](ModuleShape::Deck),
+    /// which is a *storey's* floor and has a fascia lip rather than a solid
+    /// skirt a bench can be pushed against.
+    Stage,
+    /// **A vertical round shaft** (wave VEN1a): an eight-sided prism with a
+    /// floor plate and a ceiling plate. The dance pole, and the only family in
+    /// this table that is not a union of axis-aligned boxes.
+    Pole,
+    /// **A counter run** (wave VEN1a): a carcass under a top that **overhangs
+    /// the front**, with a foot rail below it. A bar, not a shop counter —
+    /// [`Carcass`](ModuleShape::Carcass) is the shop counter and has neither.
+    Bar,
+    /// **A stool** (wave VEN1a): a round seat on a round pedestal over a base
+    /// plate.
+    Stool,
+    /// **A screen** (wave VEN1a): a bezel around a panel standing **proud** of
+    /// it, so the lit surface is in front of its frame rather than recessed
+    /// behind it — the one thing that tells a television from a window at a
+    /// glance, and the reason this is not [`Glazing`](ModuleShape::Glazing).
+    Screen,
+    /// **A sign plate** (wave VEN1a): a face on standoffs over a backer, so the
+    /// lit plate floats off the wall it is bolted to and its glow has somewhere
+    /// to spill.
+    Sign,
+    /// **A string-light run** (wave VEN1a): two cable strands with bulbs hung
+    /// off them. Authored as one module rather than as one bulb, because a
+    /// chain is a *run* — the assembler places it along a wall the way it places
+    /// a counter, and a per-bulb module would be forty instances where one will
+    /// do.
+    Festoon,
 }
 
 impl ModuleShape {
     /// Every family, in the canonical order [`module_meshes`] emits.
-    pub const ALL: [ModuleShape; 12] = [
+    ///
+    /// **Append-only.** The order is not a wire contract — every id is derived
+    /// from [`name`](ModuleShape::name) and never from a position — but a table
+    /// both hosts register is easier to read against a diff when it grows at the
+    /// end, and the seven venue families (wave VEN1a) are appended for that
+    /// reason rather than filed beside their nearest relatives.
+    pub const ALL: [ModuleShape; 19] = [
         ModuleShape::Panel,
         ModuleShape::Glazing,
         ModuleShape::Column,
@@ -184,6 +313,13 @@ impl ModuleShape {
         ModuleShape::Planter,
         ModuleShape::Crate,
         ModuleShape::Shutter,
+        ModuleShape::Stage,
+        ModuleShape::Pole,
+        ModuleShape::Bar,
+        ModuleShape::Stool,
+        ModuleShape::Screen,
+        ModuleShape::Sign,
+        ModuleShape::Festoon,
     ];
 
     /// The stable name the GUID is derived from. **Never change one of these
@@ -203,6 +339,13 @@ impl ModuleShape {
             ModuleShape::Planter => "planter",
             ModuleShape::Crate => "crate",
             ModuleShape::Shutter => "shutter",
+            ModuleShape::Stage => "stage",
+            ModuleShape::Pole => "pole",
+            ModuleShape::Bar => "bar",
+            ModuleShape::Stool => "stool",
+            ModuleShape::Screen => "screen",
+            ModuleShape::Sign => "sign",
+            ModuleShape::Festoon => "festoon",
         }
     }
 
@@ -316,6 +459,80 @@ impl ModuleShape {
                     m.push_box([0.0, y, 0.0], [0.5, 0.06, 0.48]);
                 }
             }
+            // A plank deck over a solid skirt: the top face is what a dancer
+            // stands on and the skirt is what a bench at the edge is pushed
+            // against, so the two read as one riser and not as a floating slab.
+            ModuleShape::Stage => {
+                m.push_box([0.0, 0.35, 0.0], [0.5, 0.15, 0.5]);
+                for (cx, cz, hx, hz) in [
+                    (0.44, 0.0, 0.06, 0.44),
+                    (-0.44, 0.0, 0.06, 0.44),
+                    (0.0, 0.44, 0.5, 0.06),
+                    (0.0, -0.44, 0.5, 0.06),
+                ] {
+                    m.push_box([cx, -0.15, cz], [hx, 0.35, hz]);
+                }
+            }
+            // An octagonal shaft floor to ceiling, with a plate at each end so
+            // it lands on something instead of ending in mid-air.
+            ModuleShape::Pole => {
+                m.push_prism_y(0.5, -0.42, 0.42);
+                m.push_box([0.0, -0.46, 0.0], [0.42, 0.04, 0.42]);
+                m.push_box([0.0, 0.46, 0.0], [0.42, 0.04, 0.42]);
+            }
+            // A carcass under a top that overhangs the FRONT (`+Z`), with a foot
+            // rail under the overhang. The overhang is the whole silhouette of a
+            // bar: it is what a stool tucks under and what an elbow rests on.
+            ModuleShape::Bar => {
+                m.push_box([0.0, -0.06, -0.15], [0.5, 0.44, 0.35]);
+                m.push_box([0.0, 0.43, 0.0], [0.5, 0.07, 0.5]);
+                m.push_box([0.0, -0.3, 0.36], [0.5, 0.05, 0.06]);
+                m.push_box([0.0, -0.46, -0.2], [0.44, 0.04, 0.28]);
+            }
+            // A round seat on a round pedestal over a base plate.
+            ModuleShape::Stool => {
+                m.push_prism_y(0.5, 0.32, 0.5);
+                m.push_prism_y(0.14, -0.4, 0.32);
+                m.push_box([0.0, -0.46, 0.0], [0.34, 0.04, 0.34]);
+            }
+            // A bezel around a panel standing PROUD of it. The panel is separate
+            // geometry, like `Glazing`'s pane, so a lit screen has a surface of
+            // its own to emit from that is not its frame — and it is in FRONT of
+            // the frame, which is what tells a television from a window.
+            ModuleShape::Screen => {
+                m.push_box([0.0, 0.0, -0.34], [0.5, 0.5, 0.16]);
+                for (cx, cy, hx, hy) in [
+                    (0.45, 0.0, 0.05, 0.5),
+                    (-0.45, 0.0, 0.05, 0.5),
+                    (0.0, 0.45, 0.4, 0.05),
+                    (0.0, -0.45, 0.4, 0.05),
+                ] {
+                    m.push_box([cx, cy, 0.1], [hx, hy, 0.28]);
+                }
+                m.push_box([0.0, 0.0, 0.34], [0.42, 0.42, 0.16]);
+            }
+            // A face on two standoffs over a backer. The gap is the point: a
+            // sign bolted flat to a wall has nowhere for its glow to spill, and
+            // in the reference every neon plate throws a halo onto the boards
+            // behind it.
+            ModuleShape::Sign => {
+                m.push_box([0.0, 0.0, -0.44], [0.5, 0.5, 0.06]);
+                for cx in [0.3f32, -0.3] {
+                    m.push_box([cx, 0.0, -0.1], [0.06, 0.24, 0.3]);
+                }
+                m.push_box([0.0, 0.0, 0.36], [0.5, 0.5, 0.14]);
+            }
+            // Two cable strands with three bulbs each, hung at opposite depths
+            // so the run reads as a swag rather than as a painted line.
+            ModuleShape::Festoon => {
+                for cz in [0.42f32, -0.42] {
+                    m.push_box([0.0, 0.42, cz], [0.5, 0.08, 0.08]);
+                    for k in 0..3 {
+                        let x = -0.32 + 0.32 * k as f32;
+                        m.push_box([x, -0.1, cz], [0.11, 0.4, 0.08]);
+                    }
+                }
+            }
         }
         m
     }
@@ -367,6 +584,19 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
         "Plant" => ModuleShape::Planter,
         "Crate" => ModuleShape::Crate,
         "RollDoor" => ModuleShape::Shutter,
+        // ── the venue vocabulary (wave VEN1a) ──
+        //
+        // A `Catwalk` is a `Stage` that happens to be long and thin, which is a
+        // fact about the *extent* the assembler writes and not about the shape:
+        // one family, two names, exactly as `Mullion` and `Quoin` share
+        // `Column`.
+        "Stage" | "Catwalk" => ModuleShape::Stage,
+        "Pole" => ModuleShape::Pole,
+        "BarRun" => ModuleShape::Bar,
+        "Stool" => ModuleShape::Stool,
+        "Screen" => ModuleShape::Screen,
+        "Neon" => ModuleShape::Sign,
+        "Festoon" => ModuleShape::Festoon,
         _ => return None,
     })
 }
@@ -542,7 +772,55 @@ mod tests {
         assert_eq!(shape_of("Brick"), Some(ModuleShape::Panel));
     }
 
-    /// The table is what a host registers: twelve entries, distinct ids, real
+    /// **The pole is round, and the assertion says what "round" means** (wave
+    /// VEN1a).
+    ///
+    /// Every other family is a union of axis-aligned boxes, so a
+    /// `push_prism_y` that silently produced one would pass every other arm in
+    /// this module: the span check, the winding check and the triangle bounds
+    /// are all satisfied by a cube. What separates a prism from a box is that
+    /// its side normals point in **more than four** directions, and that its
+    /// silhouette has vertices strictly inside the box's corners.
+    #[test]
+    fn a_prism_is_not_a_box() {
+        for s in [ModuleShape::Pole, ModuleShape::Stool] {
+            let m = s.mesh();
+            // Side normals: horizontal, and the four DIAGONAL ones a union of
+            // axis-aligned boxes can never produce. (Counting distinct
+            // horizontals would not do it — the pole's own end plates are boxes
+            // and contribute the four axis directions themselves.)
+            let mut diagonals: Vec<(i32, i32)> = m
+                .normals
+                .iter()
+                .filter(|n| n[1].abs() < 0.01 && n[0].abs() > 0.01 && n[2].abs() > 0.01)
+                .map(|n| ((n[0] * 1000.0) as i32, (n[2] * 1000.0) as i32))
+                .collect();
+            diagonals.sort_unstable();
+            diagonals.dedup();
+            assert_eq!(
+                diagonals.len(),
+                8,
+                "{}: {} distinct diagonal side normals — an axis-aligned box has none,                  and an octagon's eight faces all sit BETWEEN the axes",
+                s.name(),
+                diagonals.len()
+            );
+            // A corner of the unit box is 0.707 out on both axes; the octagon's
+            // diagonal vertex is 0.354. So no vertex may sit near a corner.
+            assert!(
+                !m.positions
+                    .iter()
+                    .any(|p| p[0].abs() > 0.45 && p[2].abs() > 0.45),
+                "{}: a vertex sits in a corner of the unit box — that is a box",
+                s.name()
+            );
+            // …and it really does reach the box's faces, or "round" would be
+            // satisfied by a small cylinder rattling inside it.
+            assert!(m.positions.iter().any(|p| p[0] >= 0.499));
+            assert!(m.positions.iter().any(|p| p[2] <= -0.499));
+        }
+    }
+
+    /// The table is what a host registers: nineteen entries, distinct ids, real
     /// meshes.
     #[test]
     fn the_table_is_the_families() {
