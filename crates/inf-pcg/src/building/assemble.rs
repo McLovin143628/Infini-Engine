@@ -564,10 +564,19 @@ impl Ctx<'_> {
         //
         // It rides `street_face` rather than a pass of its own because this is
         // the one place in the assembler that has resolved *which wall is the
-        // street face and which way is out* — and the guard is a station for
-        // exactly the same reason the sign is decor: it is a property of the
-        // entrance, not of a room. `GUARD_STAND_M` is one pace clear of the
-        // swing, so the bouncer never stands in the leaf's arc.
+        // street face and which way is out*. `GUARD_STAND_M` is one pace clear
+        // of the swing, so the bouncer never stands in the leaf's arc.
+        //
+        // **But it carries its own gate** (VEN1b audit). Riding this pass means
+        // inheriting its early return, and that return is on `entrance_sign` —
+        // so "a venue's door is watched at night" was really "a building with a
+        // lit sign is watched at night". It measured right for a reason that has
+        // nothing to do with venues, and a shop given a signboard would have
+        // grown a night job. `watches_its_door` is a rule about the ROOMS, which
+        // is the rule the rest of this module's derivation is gated on.
+        if !super::station::watches_its_door(self.plan.rooms.iter().map(|r| r.kind)) {
+            return;
+        }
         let g = if along_x {
             DVec2::new(
                 mid.x,

@@ -453,12 +453,26 @@ impl RoomType {
     /// **Every kind of room this generator draws**, in declaration order (wave
     /// VEN1b).
     ///
-    /// Written out rather than derived, and that is the point: it is an array
-    /// with a length, so a variant added to the enum and forgotten here fails
-    /// to compile. Two waves have now added a rule that has to answer for
-    /// *every* room type — `is_errand_destination` and
-    /// [`society::shift_of`] — and a sweep over a hand-written `vec!` is the
-    /// exact shape `phase29_gate`'s `ALL_MODES` was minted to retire.
+    /// Written out because Rust cannot enumerate a variant, and a sweep over a
+    /// hand-written `vec!` at each call site is the exact shape
+    /// `phase29_gate`'s `ALL_MODES` was minted to retire. Two rules now have to
+    /// answer for *every* room type — [`is_errand_destination`](Self::is_errand_destination)
+    /// and [`society::shift_of`] — and both are exhaustive `match`es, so a
+    /// fifteenth variant fails to **compile** there.
+    ///
+    /// # What guards THIS array (VEN1b audit)
+    ///
+    /// Not the length. `[RoomType; 17]` is a number and not a census: adding a
+    /// variant to the enum compiles fine against it, and the new room would
+    /// simply be **absent from every sweep written over `ALL`** — including
+    /// `the_social_rooms_are_the_night_rooms`, the arm that keeps
+    /// `station::is_social` and [`society::shift_of`] from drifting apart. (The
+    /// first spelling of this doc claimed the compile error; it was wrong, and
+    /// a sweep believed to be total is worse than one known to be partial.)
+    ///
+    /// The guard is `components.rs`'s own shape, one crate over: a **census of
+    /// this module's source**, checked name for name against this array —
+    /// `the_room_type_sweep_covers_every_variant`.
     pub const ALL: [RoomType; 17] = [
         RoomType::Corridor,
         RoomType::Stair,
@@ -1290,6 +1304,65 @@ fn wall_band(w: &Wall, from: f64, to: f64, thickness: f64) -> Rect2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **[`RoomType::ALL`] really is every variant** (wave VEN1b audit).
+    ///
+    /// The array's own doc used to claim that a variant added to the enum
+    /// "fails to compile" here. It does not — `[RoomType; 17]` is a length, not
+    /// a census — so a fifteenth room type would have been silently absent from
+    /// every sweep written over `ALL`, and the first of those is
+    /// `station::tests::the_social_rooms_are_the_night_rooms`, the arm that
+    /// keeps `station::is_social` and `society::shift_of` from drifting apart.
+    /// A sweep believed to be total and known to be partial is the vacuity this
+    /// tree has a law about.
+    ///
+    /// Rust cannot enumerate a variant, so the guard is the one
+    /// `inf_ecs::components`' freeze census uses: read the module's **source**.
+    /// The enum's declared names are checked against `ALL`'s own
+    /// [`RoomType::name`]s, in order — and `name` is an exhaustive `match`, so a
+    /// new variant cannot reach this test without a name to be missing.
+    #[test]
+    fn the_room_type_sweep_covers_every_variant() {
+        // The P22 CRLF law: a `.rs` read by a test is normalized first.
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let body = src
+            .split_once("pub enum RoomType {")
+            .expect("the enum this test is about")
+            .1
+            .split_once("\n}\n")
+            .expect("its closing brace");
+        // A variant line and nothing else: `    Lobby,`. A doc line starts with
+        // a slash and fails the first character test; an attribute starts with
+        // `#`; a field would carry a colon.
+        let declared: Vec<String> = body
+            .0
+            .lines()
+            .filter_map(|l| l.strip_suffix(','))
+            .map(str::trim)
+            .filter(|v| {
+                v.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    && v.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+            .map(|v| v.to_ascii_lowercase())
+            .collect();
+        assert!(
+            declared.len() >= 17,
+            "the census read {} variants out of `pub enum RoomType` — it is not \
+             reading what it thinks it is, and a census that finds nothing \
+             covers everything: {declared:?}",
+            declared.len()
+        );
+        let swept: Vec<String> = RoomType::ALL
+            .iter()
+            .map(|k| k.name().to_ascii_lowercase())
+            .collect();
+        assert_eq!(
+            declared, swept,
+            "`RoomType::ALL` is not the enum's own list, in the enum's own \
+             order. Every sweep written over it — `the_social_rooms_are_the_\
+             night_rooms` first — silently skips whatever is missing."
+        );
+    }
 
     #[test]
     fn rects_normalize_and_measure() {

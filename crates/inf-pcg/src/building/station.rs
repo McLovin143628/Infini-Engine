@@ -268,6 +268,33 @@ pub fn is_social(kind: RoomType) -> bool {
     )
 }
 
+/// **Whether a building watches its own door** (wave VEN1b audit) — whether any
+/// of its rooms is one people go to be in.
+///
+/// # The bouncer was gated on the NEON SIGN
+///
+/// A `Guard` station is emitted from `assemble::street_face`, which is where the
+/// assembler has resolved which wall is the street and which way is out — the
+/// right place, and the reason it is there. But `street_face` returns early on
+/// `BuildingArchetype::entrance_sign`, so until this function existed the rule
+/// *"a venue's door is watched at night"* was really *"a building with a lit
+/// sign over its door is watched at night"*. It measured correctly — the three
+/// venues are exactly the three archetypes that declare a sign — and it was
+/// correct for a reason that has nothing to do with venues. A shop given a
+/// signboard would have grown a **night job**: a bouncer on a bakery, and an
+/// agent planned onto a night shift there.
+///
+/// So the gate is a rule about the ROOMS, which is what
+/// [`is_social`] already is and what the wave's own law says outlives a rule
+/// about an archetype. Behaviour today is unchanged to the station: all three
+/// venues have a `BarRoom`, a `DanceFloor` or a `Stage`, and the seven that
+/// predate them have none — which is what
+/// `a_venue_offers_a_countable_number_of_places_to_be`'s guard column already
+/// measures.
+pub fn watches_its_door(kinds: impl IntoIterator<Item = RoomType>) -> bool {
+    kinds.into_iter().any(is_social)
+}
+
 /// **Whether a room's floor is standing room** — the dance floor, and nothing
 /// else.
 ///
@@ -459,6 +486,32 @@ mod tests {
         assert!(performs_of("Stage") && performs_of("Catwalk") && !performs_of("Deck"));
         assert!(is_standing_room(RoomType::DanceFloor));
         assert!(!is_standing_room(RoomType::BarRoom) && !is_standing_room(RoomType::Bedroom));
+    }
+
+    /// **A door is watched because of the ROOMS behind it**, not because of the
+    /// sign over it (wave VEN1b audit).
+    ///
+    /// The arm on [`watches_its_door`] itself, because the thing it replaces —
+    /// `street_face`'s early return on `entrance_sign` — cannot be measured
+    /// through the archetype table: no archetype in the tree has a sign and no
+    /// social room, which is exactly why the coupling was invisible. Here the
+    /// two cases are both spellable.
+    #[test]
+    fn a_door_is_watched_for_the_rooms_behind_it() {
+        assert!(watches_its_door([RoomType::Lobby, RoomType::BarRoom]));
+        assert!(watches_its_door([RoomType::DanceFloor]));
+        assert!(watches_its_door([RoomType::Corridor, RoomType::Stage]));
+        // A shop with a signboard over its door is still a shop.
+        assert!(!watches_its_door([
+            RoomType::Retail,
+            RoomType::Storage,
+            RoomType::Lobby,
+        ]));
+        assert!(!watches_its_door([]));
+        // …and it is the same rule `is_social` is, rather than a second list.
+        for kind in RoomType::ALL {
+            assert_eq!(watches_its_door([kind]), is_social(kind), "{}", kind.name());
+        }
     }
 
     /// The uses split cleanly into "a person is here" and "a person is not".
