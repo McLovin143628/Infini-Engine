@@ -30491,9 +30491,15 @@ as **60.0 m of a 60.0 m route** (finished before a step is taken); with the
 re-phase, **0.000 m**, and the un-rephased control is in the arm. Gunfire scatters
 the street at `PANIC_RADIUS_M` = 45 m against the report's 250 m audible reach,
 through one `O(agents)` walk whose sources are coalesced to at most **8**:
-measured at N=1000, **0.035 ms quiet → 0.502 ms with one round** (debug, against
-`NPC_STEP_BUDGET_MS` 1.0), 1000 considered, 336 fled, and 16 shooters 45 m apart
-coalescing to 8 while 16 rounds from one place coalesce to 1. **A punch frightens
+measured at N=1000 with 300 props, **0.077 ms quiet → 0.457 ms on the round that
+scatters them → 0.074 ms on the next step of the same burst** (debug, against
+`NPC_STEP_BUDGET_MS` 1.0) — the third figure is the one that matters, because the
+latch means a burst frightens each person once and the walk over a thousand
+agents is free. 16 shooters 45 m apart coalesce to 8 while 16 rounds from one
+place coalesce to 1. The fixture also found a **cost defect**: `flee_from` asked
+`level_archetype` — an `O(entities)` walk — unconditionally, which on a furnished
+town is one walk over every entity *per fleeing bystander*; it is asked for only
+in the arm that needs it now. **A punch frightens
 nobody** (`WeaponHit::loud`) — the reference's own reading: a brawl draws watchers,
 gunfire empties a street. The **one-step latency** (crowd is phase 5, gameplay
 phase 14) is stated. `PanickedRes` is a **resource and not a component**, because

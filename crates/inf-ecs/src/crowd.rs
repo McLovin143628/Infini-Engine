@@ -2665,29 +2665,35 @@ pub fn flee_from(
         FLEE_MPS,
         RouteMode::Once,
     );
-    let archetype = crate::society::level_archetype(world);
     let t_s = population_steps(world) as f64 * dt;
     let mut pop = world
         .world_mut()
         .remove_resource::<CrowdPopulationRes>()
         .unwrap_or_default();
-    match pop.records.get_mut(&guid) {
+    if let Some(rec) = pop.records.get_mut(&guid) {
         // **An agent the population already holds keeps its identity and takes a
         // new route.** `adopt` refuses this case and is right to for its own
         // caller — adopting twice would restart a walking agent's day — but the
         // whole point of a panic is that it interrupts somebody who was already
         // doing something.
-        Some(rec) => {
-            rec.route = route;
-            rec.schedule = None;
-            rec.leg = 0;
-            rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
-        }
-        None => {
-            let mut rec = CrowdRecord::walking(archetype, route);
-            rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
-            pop.records.insert(guid, rec);
-        }
+        rec.route = route;
+        rec.schedule = None;
+        rec.leg = 0;
+        rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
+    } else {
+        // **`level_archetype` is asked for HERE and nowhere above**, and the
+        // difference is measured in walks over the world: it is `O(entities)`
+        // over a furnished town, and this door's *hot* caller is the crowd
+        // panic, which reaches it once per frightened agent — every one of
+        // which already has a record and takes the arm above. Computed
+        // unconditionally it would have been one walk over every entity in the
+        // level **per fleeing bystander**, on the step a shot goes off in a
+        // square. Only a body with no record at all needs one, which is the
+        // carjack's victim and nobody else.
+        let archetype = crate::society::level_archetype(world);
+        let mut rec = CrowdRecord::walking(archetype, route);
+        rec.rephase_m = -(rec.speed_of(guid) * t_s + agent_unit(guid, 0, SALT_PHASE) * 8.0);
+        pop.records.insert(guid, rec);
     }
     world.world_mut().insert_resource(pop);
     let mut latch = world

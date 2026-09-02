@@ -26305,14 +26305,32 @@ the `SlotArrival` claim holding it at its desk or its bar stool.
 | `PANIC_FLEE_M` | 60 m — half again as far as a carjacked driver goes |
 | `MAX_PANIC_SOURCES` | 8 — what makes the inner loop a constant rather than the firefight's shooter count |
 
-**COST, MEASURED** at the population `NPC_STEP_BUDGET_MS` (1.0 ms) was minted at:
+**COST, MEASURED** at the population `NPC_STEP_BUDGET_MS` (1.0 ms) was minted
+at, with 300 props in the level so that `level_archetype`'s own `O(entities)`
+walk would show if it were on this path:
 
-| N = 1000 agents | sources | considered | fled | gameplay step (debug) |
+| N = 1000 agents, 300 props | sources | considered | fled | gameplay step (debug) |
 |---|---|---|---|---|
-| no gunfire | 0 | **0** (inert) | 0 | **0.035 ms** |
-| one round | 1 | **1000** (one walk) | 336 | **0.502 ms** |
+| no gunfire | 0 | **0** (inert) | 0 | **0.077 ms** |
+| the round that scatters them | 1 | **1000** (one walk) | 336 | **0.457 ms** |
+| the next step of the same burst | 1 | 1000 | **0** (the latch) | **0.074 ms** |
 
-and the source bound is armed structurally rather than with a stopwatch:
+The third row is the one that matters: a burst frightens each person **once**,
+so what a held trigger costs afterwards is the walk and nothing else — and the
+walk over a thousand agents is free to three decimal places. The 0.457 ms is a
+one-off spike, and it is the worst case by construction (a shot in the middle of
+a thousand standing people).
+
+**AND THE FIXTURE FOUND A COST DEFECT.** `flee_from` asked
+`society::level_archetype` — an `O(entities)` walk over the world —
+*unconditionally*, and its hot caller is the panic, which reaches it once per
+frightened agent. On a furnished town that is one walk over every entity in the
+level **per fleeing bystander**: 336 × 300 here, and 336 × thousands on the city.
+It is asked for only in the arm that needs it now (a body with **no** crowd
+record, which is the carjack's victim and nobody else). *Law: a helper hoisted
+above a branch is paid for by the branch that does not need it.*
+
+The source bound is armed structurally rather than with a stopwatch:
 **16 shooters 45 m apart coalesce to 8**; 16 rounds from one place coalesce to
 **1**, which is what makes a held trigger cost the same as a single round.
 

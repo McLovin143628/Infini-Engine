@@ -33,8 +33,6 @@
 //! call, and the position is named here so it is not a decision anybody has to
 //! make twice.
 
-use std::collections::BTreeSet;
-
 use bevy_ecs::prelude::Resource;
 use glam::DVec3;
 use uuid::Uuid;
@@ -224,27 +222,20 @@ pub fn candidates_near(world: &EcsWorld, at: DVec3, radius_m: f64) -> Vec<(Uuid,
     // Nearest first, ties on the `Guid` — the `BTreeMap` walk above is already
     // `Guid`-ordered and `sort_by` is stable, so two agents at one distance keep
     // that order on both hosts.
+    // **Nearest first to CHOOSE, `Guid` order to RECORD**, and the two are
+    // different questions. The first is the cost bound — an act in a crowded
+    // square must cast a bounded number of rays, and the nearest few are the
+    // ones a dispatcher would name anyway. The second is the record: "who saw
+    // it" is a set, and a set written in an order that depends on where
+    // somebody happened to stand is a set two readers can compare wrongly.
+    //
+    // `sort_by` is stable and the walk above is already `Guid`-ordered, so two
+    // agents at one distance keep that order on both hosts.
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
     near.truncate(MAX_OBSERVERS);
-    // …and the RECORD is `Guid`-ordered, not distance-ordered: "who saw it" is a
-    // set, and a set written in an order that depends on where somebody stood is
-    // a set two readers can compare wrongly.
-    let mut out: BTreeSet<(Uuid, [u64; 3])> = BTreeSet::new();
-    for (_, guid, at) in near {
-        out.insert((guid, [at.x.to_bits(), at.y.to_bits(), at.z.to_bits()]));
-    }
-    out.into_iter()
-        .map(|(g, p)| {
-            (
-                g,
-                DVec3::new(
-                    f64::from_bits(p[0]),
-                    f64::from_bits(p[1]),
-                    f64::from_bits(p[2]),
-                ),
-            )
-        })
-        .collect()
+    let mut out: Vec<(Uuid, DVec3)> = near.into_iter().map(|(_, g, at)| (g, at)).collect();
+    out.sort_by_key(|(g, _)| *g);
+    out
 }
 
 #[cfg(test)]

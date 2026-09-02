@@ -1969,7 +1969,22 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
     use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
 
     const AGENTS: usize = 1000;
+    /// **The level's own furniture**, and it is load-bearing rather than
+    /// scenery: `crowd::flee_from` asks `society::level_archetype` for a body
+    /// with **no** crowd record, and that walk is `O(entities)`. Asked for
+    /// unconditionally it would have been one walk over every entity in the
+    /// level *per fleeing bystander* — 336 × 300 here — so the fixture carries
+    /// entities in order that the milliseconds below mean something.
+    const PROPS: usize = 300;
     let mut rig = Rig::new();
+    for i in 0..PROPS {
+        let e = rig
+            .world
+            .spawn_with_guid(Uuid::from_u128(0x1601_3000 + i as u128), "Prop", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(i as f64 * 0.5 - 400.0, 0.0, -200.0);
+        rig.world.world_mut().entity_mut(e).insert(t);
+    }
     let a = CrowdArchetype::humanoid(None, None, None);
     let mut records = std::collections::BTreeMap::new();
     for i in 0..AGENTS {
@@ -2004,12 +2019,32 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
     let loud = rig.step(&hold_trigger());
     let loud_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!(
-        "PANIC at N={AGENTS}: {} source(s), {} considered, {} fled; the whole \
-         gameplay step took {loud_ms:.3} ms against {quiet_ms:.3} ms with no \
-         gunfire (debug build; NPC_STEP_BUDGET_MS is 1.0 at this population)",
+        "PANIC at N={AGENTS} with {PROPS} props: {} source(s), {} considered, \
+         {} fled; the whole gameplay step took {loud_ms:.3} ms against \
+         {quiet_ms:.3} ms with no gunfire (debug build; NPC_STEP_BUDGET_MS is \
+         1.0 at this population)",
         loud.panic.sources, loud.panic.considered, loud.panic.fled
     );
+    // **The SECOND loud step is the steady state**, and it is the number that
+    // matters: the latch means a burst frightens each person once, so what a
+    // held trigger costs afterwards is the walk and nothing else. The first
+    // step's figure is a one-off spike — 336 routes handed out at once, which
+    // is a shot in the middle of a thousand standing people.
+    let t0 = std::time::Instant::now();
+    let again = rig.step(&hold_trigger_no_edge());
+    let again_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "…and the STEADY state, one step later: {} fled, {again_ms:.3} ms \
+         (the latch means the walk is all that is left)",
+        again.panic.fled
+    );
     assert_eq!(loud.shots, 1);
+    assert_eq!(
+        again.panic.fled, 0,
+        "the second round of the burst re-routed {} agents — the latch is not \
+         holding and every step of a held trigger pays the whole scatter again",
+        again.panic.fled
+    );
     assert_eq!(
         loud.panic.considered, AGENTS,
         "the pass did not walk the whole population exactly once"
