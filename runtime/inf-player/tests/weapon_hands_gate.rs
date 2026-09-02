@@ -565,7 +565,7 @@ fn assert_not_vacuous(t: &[Step]) {
     assert_eq!(
         distinct.len(),
         24,
-        "the course posed {} distinct poses of 140 steps",
+        "the course posed {} distinct poses of {STEPS} steps",
         distinct.len()
     );
     println!(

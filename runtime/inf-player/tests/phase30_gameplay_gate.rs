@@ -1192,9 +1192,19 @@ fn run_course(sim: RuntimeSim) -> Run {
     rec(&mut h, &mut run);
     if run.kills > kills_before {
         run.saw(Verb::DownAnNpc);
+        // The counter is the claim: `kills` moves only when
+        // `ragdoll_bridge::start_ragdoll` ANSWERS TRUE, so the handoff really
+        // happened. The mode printed beside it is `Grounded` and that is not a
+        // contradiction (WPN1 audit, saying so because the two lines read like
+        // one): this bystander is a bare capsule with no skeleton, and
+        // `ragdoll_bridge::RIG_WAIT_S` gives such a body a quarter-second for a
+        // rig to answer and then lets it out of the mode rather than leaving it
+        // limp for ever. The limp mode itself is armed on the fixture that can
+        // hold it — `weapon_3d::a_body_that_runs_out_of_joules_is_handed_to_
+        // the_ragdoll`, which asserts `modes.contains(Ragdoll)`.
         run.notes.push(format!(
             "the bystander ran out of joules and was handed to the ragdoll \
-             ({} kill(s)); its mode is now {:?}",
+             ({} kill(s)); its mode a moment later is {:?} — see RIG_WAIT_S",
             run.kills - kills_before,
             h.sim
                 .world()
@@ -1210,6 +1220,24 @@ fn run_course(sim: RuntimeSim) -> Run {
     let far_running = (0..CROWD_FAR)
         .filter(|i| inf_ecs::crowd::is_panicked(h.sim.world(), crowd_guid(CROWD_NEAR + *i)))
         .count();
+    // **Both halves of the radius, ASSERTED** (wave WPN1 audit). The ledger
+    // quotes "5 of 5 near and 0 of 3 far"; only the far half was armed, and the
+    // near half was a printed number a course that scattered one agent would
+    // have satisfied. The near five stand 3–9 m from the shooting and the far
+    // three stand past `PANIC_RADIUS_M + 30`, so both counts are the radius
+    // doing its work rather than the pass firing at everybody or at nobody.
+    assert_eq!(
+        near_running, CROWD_NEAR,
+        "{near_running} of {CROWD_NEAR} agents beside the shooting ran — the \
+         panic radius is not reaching people standing in it"
+    );
+    assert_eq!(
+        far_running,
+        0,
+        "{far_running} of {CROWD_FAR} agents {} m away ran — the radius is not \
+         being applied and gunfire empties the map",
+        inf_physics::d3::gameplay::PANIC_RADIUS_M + 30.0
+    );
     if run.fled > fled_before && far_running == 0 {
         run.saw(Verb::ScatterTheCrowd);
         run.notes.push(format!(

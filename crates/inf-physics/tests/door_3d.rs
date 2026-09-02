@@ -527,6 +527,26 @@ fn a_kick_breaks_a_locked_door_and_the_energies_are_the_p22_rules() {
     // the notify (or the fuse), never on the button.
     let armed = rig.step(&press_attack());
     assert_eq!(armed.kicks, 0, "the kick landed on the button press");
+    // **THE ARBITRATION** (wave WPN1 audit). The attack button has three
+    // consumers since WPN1 — kick, punch, fire — and the order is a claim:
+    // *"a player at a locked gate pressing attack wants the gate open, not a
+    // bruised hand."* This hero is unarmed, so if the kick did not take the
+    // press the punch would, and `step_weapons` would install the fists' clock
+    // and throw a swing on this very step. Nothing else in the tree armed the
+    // order; measured here because this is the fixture that has a locked door.
+    assert_eq!(
+        armed.swings, 0,
+        "the press threw a punch at a locked door — the kick no longer beats \
+         the fists, and a player standing at a gate is bruising their hand"
+    );
+    assert!(
+        rig.world
+            .world()
+            .get::<inf_ecs::weapon::WeaponState>(rig.world.entity_of(HERO).expect("the hero"))
+            .is_none(),
+        "the kick press installed an ammunition clock — the fists were reached \
+         even though the swing did not land"
+    );
     assert!(
         rig.door_state().locked,
         "the lock broke before the leg moved"
