@@ -6228,6 +6228,104 @@ fn the_vehicle_phase_costs_what_it_costs_on_the_island() {
     );
 }
 
+/// **THE RE-DERIVED GRID IS THE SETTLEMENT'S OWN** (island wave VEH2b).
+///
+/// `inf_ecs::traffic::streets_of` recovers a street grid from nothing but the
+/// block rectangles a committed level carries, because the PLAN that placed
+/// those blocks — `inf_editor_core::settlement::Settlement` — is Ring 1 and the
+/// shipped player cannot have it. That is the whole design of clause 1b, and
+/// until this arm existed it was a claim in a module doc with nothing behind it.
+///
+/// So the plan is loaded here, where a dev-dependency may see it, and the
+/// runtime's answer is held against it: **every line the runtime recovered lies
+/// on a line the plan drew**, to a centimetre, and it recovered the interior
+/// ones rather than none.
+///
+/// The inequality is the honest half. The plan draws the outermost line of a
+/// settlement too, and that line has ground on one side and no block to bound
+/// it — so it is not a gap, the runtime does not find it, and the recovered
+/// network is a strict subset. That is stated in `streets_of`'s own doc and it
+/// is measured here.
+#[test]
+fn the_derived_carriageway_is_the_settlements_own_street_grid() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let _proj = build_project(tmp.path());
+    let pack = cook(tmp.path());
+    let mut sim = pack_sim(&pack);
+    let design = inf_island::read_design(
+        &inf_island::IslandRecipe::load(&fixture_recipe()).expect("recipe"),
+    )
+    .expect("design");
+    let settlement = walk_target_settlement(&design);
+    let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+    let hero = hero_entity(&mut sim).expect("a hero");
+    set_hero(&mut sim, hero, centre);
+    sim.world_mut().mark_dirty();
+    freeze_clock(&mut sim, SETTLE_HOUR);
+    let mut peak = [0usize; 4];
+    let mut steered = 0u64;
+    settle_the_society(&mut sim, &mut peak, &mut steered);
+
+    let derived = inf_ecs::traffic::streets_of(sim.world());
+    assert!(
+        !derived.is_empty(),
+        "the runtime recovered no street at all from a settled settlement"
+    );
+
+    // The PLAN's own lines, as the pairs of world-XZ ends it drew.
+    let planned = &settlement.streets;
+    assert!(
+        planned.len() > derived.len(),
+        "the runtime recovered {} line(s) of a plan that drew {} — the interior \
+         grid is a strict subset and this fixture no longer shows it",
+        derived.len(),
+        planned.len()
+    );
+
+    // **Every recovered line lies on a planned one.** A settlement's grid is
+    // axis-aligned, so a line is identified by its own constant coordinate and
+    // which axis it runs along.
+    let mut worst = 0.0f64;
+    for d in &derived {
+        let along_x = d.along_x();
+        let mine = if along_x { d.a.y } else { d.a.x };
+        let best = planned
+            .iter()
+            .filter(|p| {
+                let p_along_x = p.a.y == p.b.y;
+                p_along_x == along_x
+            })
+            .map(|p| {
+                let theirs = if along_x { p.a.y } else { p.a.x };
+                (theirs - mine).abs()
+            })
+            .fold(f64::INFINITY, f64::min);
+        worst = worst.max(best);
+    }
+    assert!(
+        worst < 0.01,
+        "a recovered street line is {worst:.4} m off the nearest line the \
+         settlement plan drew — the runtime is recovering a different grid"
+    );
+
+    // …and the reserve it recovered is the reserve the plan reserved.
+    for d in &derived {
+        assert!(
+            (d.gap_m - settlement.street_m).abs() < 0.01,
+            "a recovered street is {:.3} m wide against the plan's {:.3}",
+            d.gap_m,
+            settlement.street_m
+        );
+    }
+    println!(
+        "VEH2b: the runtime recovered {} of the plan's {} street line(s) at {:.3} m \
+         wide, worst offset {worst:.5} m",
+        derived.len(),
+        planned.len(),
+        settlement.street_m
+    );
+}
+
 /// **WHAT A STREET COSTS THE ISLAND'S STEP** (island wave VEH2b) — the
 /// `traffic` phase's first numbers on real content, and where
 /// `TRAFFIC_STEP_BUDGET_MS` is asserted.
