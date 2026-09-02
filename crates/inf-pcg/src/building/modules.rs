@@ -48,7 +48,7 @@
 //! [`ModuleShape::Stool`] are eight-sided prisms, because a chrome dance pole's
 //! entire contribution to a near-black room is one bright vertical specular
 //! streak and a square post does not make one. The octagon is a table of eight
-//! **literal** constants — see [`ModuleMesh::push_prism_y`] for why a `cos` call
+//! **literal** constants — see `ModuleMesh::push_prism_y` for why a `cos` call
 //! is not available to geometry that reaches a content hash.
 //!
 //! # The GUIDs are content-derived
