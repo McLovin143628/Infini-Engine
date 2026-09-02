@@ -25977,3 +25977,39 @@ not a seat. Rewritten as what it is: nothing solves a seated body's feet.
   it. Forced by: the crowd-avoidance work the wave's own ruling defers.
 * **A stray tracked file `0` at the repo root** - empty, committed 2026-08-19,
   predating this wave (the shape of a `2>0` redirect). Out of scope, named.
+
+### The audit's closing numbers
+
+| | wave head (`f609ae5c`) | **audit head** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 359 / 6 819 / 0 / 20 | **359 / 6 821 / 0 / 20** |
+| battery exit, `INF_GOLDEN_STRICT=1`, `-j 3` | 0 | **0** |
+| compiler warnings over the whole run | 0 | **0** |
+| goldens | 62, none blessed | **62 — none added, none blessed** |
+| `cargo fmt --all --check` | clean | **clean** |
+| `cargo clippy --workspace --all-targets -D warnings` | 0 | **0**, exit 0, run LAST |
+| rustdoc, after `cargo clean --doc` (ceiling 450) | 410 stated | **380 over 30 crates**, and **0 on any line `8820694a..HEAD` added** |
+| schemas | scene v27 | **scene v27 — no move**; `ScenePayload` unmoved |
+| `Cargo.lock` / manifests / frontend | untouched | **untouched** |
+| committed content (`samples/`) | 7 files | **untouched by the audit** |
+| club `audio` ms a step | **unmeasured** | **0.185** against a minted ratchet of 1.0 |
+| audio commands dropped from the ring | **unasserted** | **0**, asserted on both hosts |
+| the range | 13 commits | **16** (13 the implementer's, 3 the audit's), 49 files, +6 836 / −144 |
+
+**The rustdoc figure is stated with its method**, because it does not match the
+wave's: `cargo doc --workspace --no-deps` after `cargo clean --doc`, counting
+`warning:` lines that are not a crate's own "generated N warnings" summary — 380
+individual over 30 crates. The wave's block quotes 410 over 48, which is a
+different invocation; both are under the 450 ceiling and the load-bearing half is
+the same either way, measured here by intersecting every warning's `-->` location
+with the diff's own added-line ranges: **zero**, for the wave's lines and the
+audit's alike.
+
+**Three tables reproduced verbatim**, each from the arm that prints it:
+`a_venue_offers_a_countable_number_of_places_to_be` (Bar 11/0/1/0/1/1, Nightclub
+55/16/1/1/1/1, Strip club 47/0/1/1/1/1, the other seven zero),
+`a_doorway_attenuates_where_a_wall_occludes` (in the opening 0.0 dB, 4 m out
+−1.4 dB, round the corner −2.6 dB; shut −24.0 dB at 500 Hz; the wall −12.0 dB, and
+the detours 0.22 / 1.99 m), and `a_nightclubs_dance_floor_fills_with_dancers`
+(226 agents, 31 night jobs all taken, 246 leisure places → 63 revellers; at 22:30
+**47 seated, 16 on the dance floor, 4 performing, 27 tending**).
