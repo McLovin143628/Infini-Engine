@@ -1256,6 +1256,13 @@ fn plan_day(
             }
         }
     }
+    // **The evening is planned at most once.** Both day branches below append
+    // one, and the first falls through to the second if `CrowdSchedule::new`
+    // refuses its legs — which today it cannot (leg 0 is walkable by
+    // construction) and which would otherwise claim a second leisure place for
+    // one agent and count it twice. A flag rather than a comment, because
+    // "unreachable in practice" is the shape this tree has a law about.
+    let mut evening_done = false;
     if let Some(w) = nearest(&soc.work, home.at) {
         if let Some(out) = leg(soc, &home, &w, stats) {
             let back = leg(soc, &w, &home, stats);
@@ -1289,7 +1296,7 @@ fn plan_day(
             // desk at six has no front door to leave from, and giving it a
             // night out would teleport it across the town at eight.
             if came_home {
-                plan_evening(soc, guid, &home, &mut legs, stats);
+                plan_evening(soc, guid, &home, &mut legs, stats, &mut evening_done);
             }
             if let Some(sched) = CrowdSchedule::new(legs) {
                 return (CrowdRecord::scheduled(archetype, sched), DayKind::Full);
@@ -1305,7 +1312,7 @@ fn plan_day(
             ];
             // A homebound agent has an evening too — it is the *day* it has
             // nowhere to be, and the venues do not care where somebody works.
-            plan_evening(soc, guid, &home, &mut legs, stats);
+            plan_evening(soc, guid, &home, &mut legs, stats, &mut evening_done);
             if let Some(sched) = CrowdSchedule::new(legs) {
                 return (CrowdRecord::scheduled(archetype, sched), DayKind::Homebound);
             }
@@ -1336,10 +1343,12 @@ fn plan_evening(
     home: &SocietyPlace,
     legs: &mut Vec<ScheduleLeg>,
     stats: &mut SocietyStats,
+    done: &mut bool,
 ) {
-    if !goes_out(guid) {
+    if *done || !goes_out(guid) {
         return;
     }
+    *done = true;
     let Some(i) = nearest_unclaimed(&soc.leisure, &soc.taken_leisure, home.at, NIGHT_OUT_MAX_M)
     else {
         stats.turned_away += 1;

@@ -482,6 +482,13 @@ pub fn apply_posture(
     let mut report = PostureReport::default();
     let roles = RoleIndex::new(&rig.roles);
     if roles.is_empty() || pose.is_empty() {
+        // **The early return says WHY it returned.** "Absent costs nothing" is
+        // right — a rig with no role table is left exactly as it was — but a
+        // report of all zeroes cannot be told from one where every track
+        // matched and moved nothing, and that is the difference a caller asking
+        // "did this rig understand the clip" needs. Every track went unmatched,
+        // because there was nothing to match them against.
+        report.unmatched = clip.tracks.len();
         return report;
     }
     let t = if clip.duration_s > 0.0 && t_s.is_finite() {
@@ -587,6 +594,10 @@ mod tests {
         let mut sit = stand.clone();
         let report = apply_posture(&rig, &mut sit, Posture::Sit, 0.0);
         assert!(report.wrote(), "the sit pass wrote nothing: {report:?}");
+        assert_eq!(
+            report.unmatched, 0,
+            "the mannequin is missing a role the sit names: {report:?}"
+        );
 
         let (hip, knee, ankle) = (
             joint(&rig, BoneRoleKind::Thigh, BoneSide::Left),
@@ -735,6 +746,17 @@ mod tests {
         assert_eq!(before, after);
         assert!(!r.wrote());
         assert_eq!(r.rotated, 0);
+        // …and the counter says WHY it wrote nothing, which is the difference
+        // between "this rig has no arms" and "the pass never ran". A counter
+        // nothing reads is the shape this tree has a law about, so the arm that
+        // proves the refusal is the arm that reads it.
+        assert_eq!(
+            r.unmatched,
+            SIT.tracks.len(),
+            "the sit named {} roles and {} went unmatched on a rig with none",
+            SIT.tracks.len(),
+            r.unmatched
+        );
     }
 
     /// The euler helper is the portable trig and agrees with glam's own
