@@ -2,7 +2,7 @@
 //!
 //! The fixture is the committed `samples/phase19-town`: a partitioned level over
 //! a biome-painted terrain, a spline road with a grammar fence running its whole
-//! length, and **seven building lots, one per archetype**, each a `PcgVolume`
+//! length, and **one building lot per archetype**, each a `PcgVolume`
 //! carrying its own `.inf_pcg`.
 //!
 //! Six arms, in the order the phase's claim needs them:
@@ -144,8 +144,8 @@ fn pie_built() -> BuiltWorld {
     .expect("payload builds");
     assert_eq!(
         payload.pcgs.len(),
-        8,
-        "the road graph and all seven lot graphs must ride the payload"
+        1 + inf_pcg::ArchetypeId::ALL.len(),
+        "the road graph and every lot graph must ride the payload"
     );
     inf_player::build_world_from_payload(&payload).expect("PIE world builds")
 }
@@ -406,7 +406,7 @@ fn cooked_equals_uncooked() {
 }
 
 /// The cook follows the whole chain with only the level as an explicit root: the
-/// biome set, the roadside graph and all seven lot graphs land in the pack.
+/// biome set, the roadside graph and every lot graph land in the pack.
 #[test]
 fn the_cook_follows_the_level_to_every_graph_and_the_biome_set() {
     let dir = tempfile::tempdir().unwrap();
@@ -440,8 +440,8 @@ fn the_cook_follows_the_level_to_every_graph_and_the_biome_set() {
     .expect("cook succeeds");
     assert_eq!(
         report.kinds.get("pcg").copied(),
-        Some(8),
-        "the road graph plus seven lot graphs must be reached from the level alone"
+        Some(1 + inf_pcg::ArchetypeId::ALL.len()),
+        "the road graph plus every lot graph must be reached from the level alone"
     );
     assert_eq!(
         report
@@ -888,7 +888,7 @@ fn stepping_the_town_stays_cheap_with_thirteen_thousand_colliders() {
 /// Deliberately no new ratchet constant: the arm asserts against the shared
 /// load-class ceiling [`LOAD_BUDGET_MS`], and the absolute milliseconds are
 /// printed rather than asserted (a number from one machine is not a contract).
-/// What is asserted is that building an entire seven-archetype furnished town —
+/// What is asserted is that building an entire ten-archetype furnished town —
 /// every plan, every wall expansion, every furniture walk, every collider — stays
 /// **bounded**: linear in the content it was handed, on any machine.
 ///

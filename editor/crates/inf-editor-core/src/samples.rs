@@ -4614,11 +4614,21 @@ pub const PHASE19_TOWN_HALF_WIDTH: f64 = 90.0;
 /// enough that the partition really partitions.
 pub const PHASE19_LOT_EXTENT: (f64, f64) = (22.0, 15.0);
 /// Metres between lot centres along the road.
-pub const PHASE19_LOT_PITCH: f64 = 62.0;
+///
+/// **Sized to the terrain, and re-sized when the palette grew** (wave VEN1a).
+/// The lots spread symmetrically about the town centre, so the outermost sits
+/// `(n - 1) / 2 x pitch` out -- and the terrain is 512 m across, i.e. +-256 m.
+/// At seven archetypes and 62 m that reach was 186 m and fitted; at TEN it is
+/// 279 m, and the two outermost lots stood off the terrain entirely.
+/// `jobs_of`'s fail-closed rule then says "no ground, no building", so `Office`
+/// (the leftmost) simply placed nothing and the gate said so. 50 m puts the
+/// reach at 225 m, plus a lot's own 22 m half-extent = 247 m, inside the pad
+/// with nine metres to spare.
+pub const PHASE19_LOT_PITCH: f64 = 50.0;
 /// Metres from the road's Z line to a lot centre.
 pub const PHASE19_LOT_SETBACK: f64 = 34.0;
 /// Storeys every lot is pinned to, so the gate's stair walk has the same shape
-/// for all seven and a retuned archetype range cannot silently make one of them
+/// for all ten and a retuned archetype range cannot silently make one of them
 /// single-storey.
 pub const PHASE19_LOT_FLOORS: u32 = 3;
 
@@ -5068,7 +5078,7 @@ pub fn phase19_town_scene() -> SceneDoc {
         );
     }
 
-    // ── The seven lots: one building per archetype, one volume each. ──
+    // ── The lots: one building per archetype, one volume each. ──
     for (i, id) in inf_pcg::ArchetypeId::ALL.into_iter().enumerate() {
         let guid = phase19_lot_guid(i);
         doc.create_with_guid(
