@@ -25396,8 +25396,11 @@ The wave's economy is one sentence: *everything a venue needs already existed an
 nothing was reading it.* The assembler knew where the stools were and nobody
 asked; the door system knew which leaves were open and audio asked a raycast
 instead; the anim substrate had a role table on every rig and no clip addressed
-by it. Five of the six clauses are a **reader** for something already written
-down.
+by it. Four of the six engineering clauses are a **reader** for something already
+written down — the stations read the assembler's own furniture, the shift reads
+the room table, the doorway reads `DoorField`, and the posture reads the rig's
+role table — and the two that are not are the schedule and the ruling about
+where bodies stop.
 
 ### Clause 1 — the places a venue offers a BODY
 
