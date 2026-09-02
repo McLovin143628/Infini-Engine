@@ -29973,3 +29973,56 @@ rmeta law, with **six** findings on the way and every one of them in this wave's
 `neg_cmp_op_on_partial_ord` that were letting an INFINITE length into a division, and not one of
 them allowed. Ledger, laws and the carried list in `docs/memos/island-progress.md` under
 *"Wave VEH2b"*.
+
+**`audit:` VEH2b — the independent read (2026-09-01).** A second adversarial pass over the whole
+range, treating commit `8643fd22`'s own twenty-two fixes as ordinary code. **The wave's substance
+holds and three of its four headline claims are now mutation-verified**: a `.cos()` dropped into
+`lane::fold_of` reds the P14 ban gate by file and line; making `rig_nodes_at` ignore its `wheels`
+flag reds the watched-car arm with *"a Near car has wheels"* and nothing else; a no-op
+`size_the_suspension` reds `every_catalogue_row_sits_inside_its_own_travel` at *"Suv at 2432 kg sags
+0.298 m into 0.250 m of travel"*. The carjack's refusal/supply split has **no dead zone and no
+overlap** — `carjack::candidates` offers exactly the set `d3::interact::candidates` unions into what
+`vehicle_candidates` excludes — and the phase table reproduces (0.1438 ms against 0.1455;
+4.09 µs a car against 4.15).
+
+**The 64 m boundary, measured rather than promised**: the demotion moves a car **0.144 m in plan and
+0.126 m in Y** (2.793 m with the rephase branch disabled), so the hand-off is continuous and the new
+arm reds on the number as well as on the counter.
+
+**Two defects, both fixed.** (1) **A settling car took a pedestrian's head for the road.**
+`settle_on_the_ground` casts `AllSolid`, which is every solid body, and a `Full` crowd agent carries
+a kinematic capsule; a kerb slot is 5 m from the centreline and the society walks residents straight
+across the gap. `ground_y` is **latched**, so one bad ray parks a `Near` car — which is kinematic and
+has `place` written onto it every step — **1.8 m in the air for the rest of the session**. Measured
+at 1.800 m on the unit town; fixed with a broad-phase exclusion set (`not_the_ground`) rather than a
+downstream rejection, because rejecting after the cast turns *"a person is not the ground"* into
+*"a person HIDES the ground"* (the P22.3 M4 law). (2) **The gate's byte-identical claim stopped
+before the steal**: `digests` covers the six hundred rush-hour steps, every one of which ends before
+the hero touches anything, so the approach, every press, the seat swap, the ejection, the victim's
+adopted route and ten seconds of driving the stolen car were compared as three booleans and a press
+count. `RushRun::jack_digests` now puts **631 more steps** inside the equality, armed against vacuity
+the same way the rush window is.
+
+**Four arms did not aim at what they named**, and were strengthened rather than trusted: the
+suspension sweep took forty draws off one seed and never said which silhouettes it met (it now
+asserts all five); `a_parked_cars_guid_is_its_own_place` compared two guids at the same height, so
+`parked_car_guid`'s load-bearing *"no Y"* had no arm; the carry-forward was armed on a block
+**arriving** and not on a town paging **out**, which is the case with no slots in it at all (the new
+arm pages the whole town out — records fall to one, the stolen car — and back in, and pins the guid
+set, the theft and the `Entity`); and `probe_intent` had **no caller anywhere**, which made its own
+"one door for both" a claim about a gate that did not exist. **Ledger corrections**: `inf_nav::lane`
+is 982 lines and not 874; the wave is +8 878 / −200 and not +8 847; the clippy row says six findings
+and enumerates eight; and the whole-step "+1.0134 ms — 4.7 %" is a difference of two noisy 21 ms
+totals that re-measures at **+0.8186 ms — 3.8 %** with two of its four rows changing sign, so the
+honest headline is **0.8–1.0 ms, 3.8–4.7 %** and the number actually armed is the `traffic` row.
+**VERIFICATION at the audit head**: `cargo fmt --all --check` clean; battery **359 / 6 767 / 0 / 20**,
+exit 0, `INF_GOLDEN_STRICT=1`, zero compiler warnings (the four over the wave's 6 763 are this audit's
+arms); goldens **60, none blessed**; `Cargo.lock`, the manifests, `samples/` and `editor/studio/` are
+not in the diff; rustdoc **380** of 450 from cold over 48 crates with none naming a file this audit
+touched; clippy `-D warnings` **0**, run last. The wave's own reported numbers reproduce to the digit — `stolen: 87.4 m, top
+18.14 m/s`, `63 cars, tiers [11, 26, 0, 26], 11 rigs / 26 bodies`, `03:00 2 driving, 08:30 30, 13:00
+10`, and the gate's 2 streets → 8 lanes, 11 cars, four presses, victim 4.8 m from the seat.
+Carried: the resist draw is a constant on a level with no traffic population (unreachable today);
+the ejected victim is placed without a clearance check, exactly as `finish_driving`'s own exit always
+has been; `is_traffic`, `is_kinematic` and `LaneId::opposing` have no callers. Full ledger in
+`docs/memos/island-progress.md` under *"AUDIT — the independent read"*.

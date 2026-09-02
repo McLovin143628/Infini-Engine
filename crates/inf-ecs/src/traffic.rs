@@ -2694,10 +2694,19 @@ mod tests {
     /// The falsifier for `size_the_suspension`: a class whose static sag is past
     /// its travel is a car resting on its chassis collider, which is a car that
     /// does not steer, does not brake and cannot be driven away.
+    ///
+    /// **`audit:` VEH2b — and it covers every silhouette by NAME.** Forty draws
+    /// off one seed are whatever `SALT_CLASS` happened to produce; a sweep that
+    /// silently stopped covering the Van — the heaviest row and the one the
+    /// belly defect was measured on — would still be forty green assertions.
     #[test]
     fn every_catalogue_row_sits_inside_its_own_travel() {
+        let mut seen: Vec<crate::vehicle::VehicleBody> = Vec::new();
         for k in 0..40u64 {
             let def = catalogue_row(Uuid::from_u64_pair(0xC0FFEE, k));
+            if !seen.contains(&def.body) {
+                seen.push(def.body);
+            }
             let mass = 8.0
                 * def.half_extents.x
                 * def.half_extents.y
@@ -2729,6 +2738,12 @@ mod tests {
                 def.body
             );
         }
+        assert_eq!(
+            seen.len(),
+            crate::vehicle::VehicleBody::ALL.len(),
+            "the sweep only met {seen:?} — a silhouette this arm does not draw is a \
+             silhouette nothing checks the springs of"
+        );
     }
 
     /// **Every catalogue row can actually be driven.** The wave's own arms found
@@ -2828,6 +2843,14 @@ mod tests {
         let c = parked_car_guid(DVec3::new(12.0, 3.0, -41.0));
         assert_eq!(a, b);
         assert_ne!(a, c);
+        // **`audit:` VEH2b — and the HEIGHT is not in it.** A street's `y` is a
+        // median over the blocks that bound it, and that median moves when any
+        // one of them pages in — so a guid that folded Y in would re-mint every
+        // car in a settlement in exactly the case `derive_parked`'s
+        // carry-forward exists for. The doc has said so since the fix; this is
+        // the arm that would notice it coming back.
+        assert_eq!(a, parked_car_guid(DVec3::new(12.0, 131.5, -40.0)));
+        assert_eq!(a, parked_car_guid(DVec3::new(12.0, f64::NAN, -40.0)));
         assert_eq!(derived_guids(&grid_streets()).len(), 2 * 2 * 12);
     }
 }

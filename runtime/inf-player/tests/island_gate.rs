@@ -6554,11 +6554,18 @@ const SETTLE_HOUR: f64 = 12.0;
 
 /// How long the gate holds the throttle down in the car it stole.
 ///
-/// Ten seconds. What it asserts on is the car's RESPONSE -- revs off idle and a
-/// top speed -- rather than a distance, because the fixture's town is two
-/// streets wide with three hundred and twenty-nine residents walking across
-/// them and traffic in this engine YIELDS to anything in its lane. A distance
-/// floor on that street would be a measurement of the jam.
+/// Ten seconds. What it asserts on is **the player's own throttle reaching the
+/// car** (`stolen_throttle`) rather than a distance, because the fixture's town
+/// is two streets wide with three hundred and twenty-nine residents walking
+/// across them and traffic in this engine YIELDS to anything in its lane. A
+/// distance floor on that street would be a measurement of the jam.
+///
+/// **`audit:` VEH2b — this doc used to say the arm asserts "revs off idle and a
+/// top speed", and it does not.** Both are collected and PRINTED, and on the
+/// fixture both read 0.00: the car is walled in by kinematic capsules so
+/// `forward_mps` never leaves zero, and this engine's `engine_state` has no idle
+/// floor. That is a VEH2a property of the model rather than anything this wave
+/// did, and the sentence is corrected instead of the arm being weakened.
 const STOLEN_STEPS: usize = 600;
 
 /// What one host's rush hour looked like.
@@ -6598,6 +6605,17 @@ struct RushRun {
     stolen_throttle: f64,
     /// Where the victim ended up, relative to the car it was pulled out of.
     victim_away_m: f64,
+    /// **`audit:` VEH2b — the steps of the STEAL, digested.**
+    ///
+    /// `digests` above covers the six hundred steps of the rush hour, which end
+    /// before the hero has touched anything. Without this the wave's own
+    /// headline — *the player pulls a driver out and takes their car,
+    /// byte-identical on both hosts* — was compared as three booleans and a
+    /// press count: the seat swap, the ejection pose, the victim's adopted
+    /// route and ten seconds of driving the stolen car were in no equality at
+    /// all. These are the same `state_bytes` digest over the approach, every
+    /// press and the whole stolen drive.
+    jack_digests: Vec<u64>,
 }
 
 /// Freeze this host's day at `hour`, local.
@@ -6749,6 +6767,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
         stolen_top_mps: 0.0,
         stolen_throttle: 0.0,
         victim_away_m: 0.0,
+        jack_digests: Vec::new(),
     };
     let Some(chassis) = target else {
         return run;
@@ -6764,6 +6783,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     for _ in 0..24 {
         set_hero(sim, hero, beside);
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        run.jack_digests.push(digest(&sim.state_bytes()));
     }
     // Press E, release, press again — `just_pressed` is an edge, and the
     // carjack's resist draw is a function of the step, so a real player presses
@@ -6773,6 +6793,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
             inf_player::runtime_sim::RuntimeInput::default()
                 .press(inf_ecs::movement::actions::INTERACT),
         );
+        run.jack_digests.push(digest(&sim.state_bytes()));
         run.presses += 1;
         if inf_physics::d3::carjack::occupant_of(sim.world(), chassis) != Some(victim) {
             run.jacked = true;
@@ -6789,6 +6810,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
             break;
         }
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        run.jack_digests.push(digest(&sim.state_bytes()));
     }
     let took = chassis_at(sim, chassis);
     // ...and drive it away. The throttle held, through the shipped input door,
@@ -6798,6 +6820,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
             inf_player::runtime_sim::RuntimeInput::default()
                 .axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0),
         );
+        run.jack_digests.push(digest(&sim.state_bytes()));
         if let Some(o) = sim.vehicles().iter().find(|o| o.chassis == chassis) {
             run.stolen_revs = run.stolen_revs.max(o.revs);
             run.stolen_top_mps = run.stolen_top_mps.max(o.forward_mps);
@@ -6873,7 +6896,7 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             "VEH2b {label}: carjack -- {} press(es), driver out {}, hero seated \
              {}; the player's throttle reached the car at {:.2}, which revved to \
              {:.2}, topped {:.2} m/s and covered {:.1} m through the crowd; the \
-             victim is {:.1} m from the seat",
+             victim is {:.1} m from the seat; {} step(s) of the steal digested",
             run.presses,
             run.jacked,
             run.seated,
@@ -6881,7 +6904,8 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             run.stolen_revs,
             run.stolen_top_mps,
             run.stolen_m,
-            run.victim_away_m
+            run.victim_away_m,
+            run.jack_digests.len()
         );
         runs.push((label, run));
     }
@@ -7002,6 +7026,22 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             "{label}: only {} distinct states over {RUSH_STEPS} steps",
             r.distinct
         );
+        // **`audit:` VEH2b — and the STEAL's own steps are a trace, with the
+        // same floor under it.** An empty or constant `jack_digests` would make
+        // the equality below certify nothing.
+        assert!(
+            r.jack_digests.len() >= 24 + STOLEN_STEPS,
+            "{label}: the steal produced only {} digested step(s)",
+            r.jack_digests.len()
+        );
+        let distinct_jack: std::collections::BTreeSet<u64> =
+            r.jack_digests.iter().copied().collect();
+        assert!(
+            distinct_jack.len() > r.jack_digests.len() / 2,
+            "{label}: only {} distinct states over {} steps of the steal",
+            distinct_jack.len(),
+            r.jack_digests.len()
+        );
     }
 
     // ── and the two hosts agree, step for step.
@@ -7026,6 +7066,31 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
         assert_eq!(
             x, y,
             "PIE and shipping diverged at rush-hour step {i} of {RUSH_STEPS}"
+        );
+    }
+    // ── **`audit:` VEH2b — and so does the STEAL**, step for step. The rush
+    //    window above ends before the hero has touched anything; this is the
+    //    approach, every press, the seat swap, the ejection, the victim's
+    //    adopted route and ten seconds of driving the car away.
+    assert_eq!(
+        a.jacked, b.jacked,
+        "the driver came out on one host and not the other"
+    );
+    assert_eq!(
+        a.seated, b.seated,
+        "the hero got in on one host and not the other"
+    );
+    assert_eq!(
+        a.jack_digests.len(),
+        b.jack_digests.len(),
+        "the steal ran for a different number of steps on the two hosts"
+    );
+    for (i, (x, y)) in a.jack_digests.iter().zip(b.jack_digests.iter()).enumerate() {
+        assert_eq!(
+            x,
+            y,
+            "PIE and shipping diverged at step {i} of {} of the carjack and the drive away",
+            a.jack_digests.len()
         );
     }
 }

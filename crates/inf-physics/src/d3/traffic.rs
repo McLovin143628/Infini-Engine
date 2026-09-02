@@ -161,6 +161,10 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    hours — so it is built the first time something actually steers and
     //    not at all otherwise.
     let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
+    // ── and the colliders a settle ray must look THROUGH, on the same terms:
+    //    built the first time a car actually asks what it is standing on, and
+    //    not at all on a settled street where every car already knows.
+    let mut look_through: Option<std::collections::BTreeSet<super::ColliderId3D>> = None;
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -259,7 +263,14 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         //    built, which is the right outcome for a slot over a hole.
         let mut want = RigDetail::of(tier);
         if want != RigDetail::None && rec.ground_y.is_none() {
-            match settle_on_the_ground(bridge, at) {
+            // …and it asks about the GROUND, which is why it is handed a set to
+            // look through. See `not_the_ground`. Built at most once a step, and
+            // only on a step something actually settles.
+            if look_through.is_none() {
+                look_through = Some(not_the_ground(world, bridge));
+            }
+            let through = look_through.as_ref().expect("just built");
+            match settle_on_the_ground(bridge, at, through) {
                 Some(g) => {
                     rec.ground_y = Some(g);
                     let (a2, y2) = rec.place(guid, clock, leg);
@@ -577,21 +588,67 @@ fn despawn_driver(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: U
     world.despawn(e);
 }
 
+/// **`audit:` VEH2b — the colliders a settle ray must look THROUGH**, because a
+/// person is not the ground.
+///
+/// [`settle_on_the_ground`] casts `CastTargets::AllSolid`, which is *every*
+/// solid body and not only the level's geometry — and a crowd agent at
+/// [`CrowdTier::Full`] carries a **kinematic capsule**
+/// (`inf_ecs::crowd::set_tier_components`). A kerb slot is 5 m from the street's
+/// centreline and the society links two blocks' pavements straight across the
+/// gap, so a resident crossing the road stands on a parking space several times
+/// a day; the hero can stand on one deliberately.
+///
+/// One ray that landed on a head is **permanent**, which is what makes this
+/// worth a set rather than a note: `ground_y` is latched on purpose (see its own
+/// doc), a `Near` car is kinematic and [`TrafficRecord::place`] writes its
+/// transform every step from that number — so the car is parked 1.8 m in the air
+/// for the rest of the session. A `Full` car falls the 1.8 m and looks fine
+/// until it drops a rung.
+///
+/// Excluded in the **broad phase** rather than rejected after the cast, which is
+/// the P22.3 M4 law one system over: a downstream check would turn "a person is
+/// not the ground" into "a person HIDES the ground", and the road underneath —
+/// which is what the ray was asking about — would never be seen at all.
+///
+/// `O(characters)`, built at most once per fixed step and only on a step a car
+/// actually settles. **What it deliberately does not exclude**: another vehicle.
+/// Kerb slots are [`inf_ecs::traffic::KERB_SLOT_M`] apart so two derived cars
+/// cannot share one, and a car the player parked across a space is a case with
+/// no arm behind it — named here rather than guessed at.
+///
+/// [`CrowdTier::Full`]: inf_ecs::crowd::CrowdTier::Full
+/// [`TrafficRecord::place`]: inf_ecs::traffic::TrafficRecord::place
+fn not_the_ground(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+) -> std::collections::BTreeSet<super::ColliderId3D> {
+    inf_ecs::movement::movement_targets(world)
+        .into_iter()
+        .filter_map(|g| bridge.collider_of(g))
+        .collect()
+}
+
 /// **What is under this car**, world Y — a ray straight down through
-/// everything solid.
+/// everything solid that is not a person.
 ///
 /// `AllSolid` and from well above, so a slot whose derived height is under the
 /// terrain still finds the terrain above it: the ray starts
 /// [`SETTLE_UP_M`] over the derived point and reaches [`SETTLE_DOWN_M`] past
 /// it, which brackets every error a per-street pad mean can make on a graded
-/// settlement.
+/// settlement. `look_through` is `not_the_ground`'s set, and it is a parameter
+/// rather than a default so the one call site names what it is asking about.
 ///
 /// `None` when nothing is there — a slot over a hole, or a terrain tile that
 /// has not paged in. **The caller does not fall back**: it leaves the car
 /// `Dormant` and asks again next step, because the derived height is a median
 /// over blocks and has been measured forty-five metres out. See the call site,
 /// which is the only one.
-pub fn settle_on_the_ground(bridge: &mut PhysicsBridge3D, at: DVec3) -> Option<f64> {
+pub fn settle_on_the_ground(
+    bridge: &mut PhysicsBridge3D,
+    at: DVec3,
+    look_through: &std::collections::BTreeSet<super::ColliderId3D>,
+) -> Option<f64> {
     let from = at + DVec3::Y * SETTLE_UP_M;
     bridge
         .world_mut()
@@ -599,7 +656,7 @@ pub fn settle_on_the_ground(bridge: &mut PhysicsBridge3D, at: DVec3) -> Option<f
             from,
             -DVec3::Y,
             SETTLE_UP_M + SETTLE_DOWN_M,
-            &Default::default(),
+            look_through,
             super::query::CastTargets::AllSolid,
         )
         .map(|hit| hit.point.y)

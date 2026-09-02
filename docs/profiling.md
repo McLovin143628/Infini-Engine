@@ -123,6 +123,32 @@ one**: 4.15 against `VEHICLE_STEP_BUDGET_MS`'s 2.00, because these rays cast int
 a streamed heightfield under a settlement rather than into a four-tile box, which
 is the same dilution the VEH2a audit measured in the other direction.
 
+**`audit:` VEH2b — the last row of that table is a DIFFERENCE OF TWO NOISY
+TOTALS, and it does not reproduce to four decimal places.** The independent
+re-run of the same arm on the same machine, same release profile, same MIN of
+three rounds of sixty:
+
+| row | with a street | without | delta | first run's delta |
+|---|---|---|---|---|
+| `traffic` | 0.1438 ms | 0.0223 | +0.1215 | +0.1224 |
+| `vehicle` | 0.0409 (10 rigs, **4.09 µs a car**) | 0.0093 | +0.0316 | +0.0316 |
+| `solver` | 3.2909 | 3.2998 | **−0.0089** | +0.0863 |
+| `physics3d sync` | 3.0136 | 3.0418 | **−0.0282** | +0.0139 |
+| **whole step** | 21.3435 ms | 20.5248 ms | **+0.8186 ms — 3.8 %** | +1.0134 — 4.7 % |
+
+The **phase rows reproduce to about one per cent** (0.1438 against 0.1455;
+4.09 µs against 4.15), and so does the population the row is measured over — 11
+cars, tiers `[10, 0, 0, 1]`, six driving with six drivers, both times. What does
+not reproduce is the *whole-step* delta: it is the difference of two ~21 ms means
+whose own run-to-run spread is larger than the 0.2 ms the two answers differ by,
+and the `solver` and `physics3d sync` rows changed **sign** between the runs,
+which is the tell. So the honest statement of the headline is **a street costs
+0.8–1.0 ms of a ~21 ms step, 3.8–4.7 %**, and the number the budget is actually
+armed on — the `traffic` row against `TRAFFIC_STEP_BUDGET_MS` — is the one that
+is a measurement rather than a subtraction. This is `p26-frame-budget-scope`'s
+own rule met one system over: price the phase, and read a whole-step delta as a
+range.
+
 The `vehicle` row was **re-priced at wave VEH2a** and the constant deliberately did not move: the driving model grew a wheel state, a torque curve, a gearbox, a differential, a Pacejka tyre, anti-roll bars, aero and three driver aids for **+16 %** (0.1101 → 0.1277 ms at 64 cars, dev), because the expensive work in this phase was always the four ray casts and none of the new work casts anything. Re-minting at the original ~4.5× rule would have meant 0.575 ms, and §8 forbids raising a budget — so the headroom tightened from ~4.5× to ~3.9× instead. See `VEHICLE_STEP_BUDGET_MS`'s own doc for the full table. **`audit:` VEH2a — the +16 % is a fact about the ISLAND's fixture, not about the model.** The island's rows are a heightfield ray cast four times a car, which dominates and dilutes everything else; on a flat box ground the audit measured the same change at **+32 % (dev) / +44 % (release)** — 0.0629 → 0.0830 ms and 0.0440 → 0.0633 ms at 64 cars. The two agree in absolute terms (a 0.0201 ms delta against the island's 0.0176) and the budget holds either way. Note also that the island's N-car table has **no arm**: `VEHICLE_BUDGET_CARS` appears once, in a `println!`, and the row asserted by `the_vehicle_phase_costs_what_it_costs_on_the_island` is the level's own resident fleet, not 64 cars.
 
 Notes:

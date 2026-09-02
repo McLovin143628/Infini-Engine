@@ -24680,3 +24680,186 @@ pure function of the space, so "again" is exactly the cars that did not move.
 | frontend | not run | **not run — `editor/studio/src/` is untouched by this wave.** The one piece of UI it adds is the speed-and-gear readout, and that is `runtime/inf-player/src/{ui,window}.rs`, the windowed player, not the editor |
 | disk | 139 GB free | **135 GB free** at the end; no `cargo clean` was needed |
 | the wave | — | **13 commits**, 30 files, **+8 847 / −200** lines |
+
+### AUDIT — the independent read (2026-09-01, `f5ec084f..0dabe0db`)
+
+A second adversarial pass over the whole range, taking commit `8643fd22`'s own
+twenty-two fixes as ordinary code rather than as settled ground. **The wave's
+substance holds.** Every headline claim below was re-derived rather than read:
+
+* **Determinism.** No `HashMap`/`HashSet` anywhere in the four new modules, no
+  `std` transcendental in any of them (`inf_math::psin64`/`pcos64`/`patan2_64`
+  throughout), and the one entity walk that is not over a `BTreeMap` —
+  `obstacles_of` — sorts by `Guid` before it is read. **Mutation-verified**: a
+  single `(1.0f64).cos()` inserted into `lane::fold_of` reds
+  `the_animation_blend_uses_no_platform_dependent_trigonometry` by file *and by
+  line* (`inf_nav::lane calls .cos() at line(s) [278]`).
+* **The structural sentence.** **Mutation-verified**: making `rig_nodes_at`
+  ignore its `wheels` flag reds
+  `a_towns_kerbs_fill_with_cars_and_only_the_near_ones_are_rigs` with *"a Near
+  car has wheels"* and nothing else. A `Body`-tier car really has no wheel
+  sensors, so `rig_of` really answers `None`.
+* **The belly fix.** **Mutation-verified**: a no-op `size_the_suspension` reds
+  `every_catalogue_row_sits_inside_its_own_travel` — *"Suv at 2432 kg sags
+  0.298 m into 0.250 m of travel"*. Note which arm does **not** red:
+  `every_catalogue_row_makes_torque_at_a_standstill` grounds its wheels by hand
+  and is about the gearbox, not the springs; it is not a falsifier for the belly
+  and does not claim to be.
+* **The refusal/supply split** (clause 5) is sound with **no dead zone and no
+  overlap**: `carjack::candidates` only offers a chassis `occupants` names, and
+  `d3::interact::candidates` unions exactly that set into what
+  `vehicle_candidates` excludes — so the two are complementary by construction
+  rather than by agreement. The one place neither offers a verb is an occupied
+  car seen from the passenger side, which is the door-side rule working.
+* **The tables** reproduce — see `docs/profiling.md` for the second measurement
+  and for the one number in them that does not.
+* **The 64 m boundary, measured.** The module doc promises the demotion *"moves
+  nothing"* and nothing measured it. It is worth measuring because the two tiers
+  are not two views of one thing: a `Full` car is a dynamic chassis on four rays
+  somewhere near its lane, and a `Near` car is a kinematic body written to
+  `place(clock)`, which is *exactly* on the lane centreline at the latched
+  `ground_y`. Measured on the unit town: **0.144 m in plan and 0.126 m in Y** —
+  continuous, not a teleport. **Mutation-verified in the number as well as in the
+  counter**: with the `rephase_delta` branch disabled the same hand-off is
+  **2.793 m**, and `a_car_leaving_the_steered_tier_lands_where_its_body_already_was`
+  reds on both. (A car that has spent longer behind a queue than this fixture's
+  will spend more; 2.793 m is what this seed produced, and it is a measurement
+  rather than an estimate.)
+
+#### Two defects found, both fixed here
+
+1. **A settling car took a pedestrian's head for the road.**
+   `settle_on_the_ground` casts `CastTargets::AllSolid`, which is *every* solid
+   body — and a `Full` crowd agent carries a kinematic capsule. A kerb slot is
+   5 m from the centreline and the society links two blocks' pavements straight
+   across the gap, so a resident crossing the road stands in a parking space
+   several times a day; the hero can stand in one on purpose. `ground_y` is
+   **latched**, a `Near` car is kinematic, and `place` writes that number onto
+   its transform every step — so **one bad ray parks a car 1.8 m in the air for
+   the rest of the session**. Measured on the unit town: `ground_y` **1.800 m**
+   over ground at zero. Fixed with an exclusion set applied in the **broad
+   phase** — `not_the_ground`, `O(characters)`, built at most once a step and
+   only on a step something settles — because a downstream rejection would turn
+   *"a person is not the ground"* into *"a person HIDES the ground"* (the P22.3
+   M4 law). `a_car_does_not_settle_onto_the_pedestrian_standing_in_its_space` is
+   the arm, and handing an empty set back in reds it. **What it deliberately
+   does not exclude is another vehicle**: derived slots are `KERB_SLOT_M` apart
+   so two derived cars cannot share one, and a car the player parked across a
+   space has no arm behind it — named rather than guessed at.
+2. **The gate's byte-identical claim stopped before the steal.** `digests`
+   covers the six hundred rush-hour steps, and all of them end *before* the hero
+   has touched anything; the approach, every press, the seat swap, the ejection
+   pose, the victim's adopted route and the ten seconds of driving the stolen car
+   away were compared between the two hosts as **three booleans and a press
+   count**. The wave's own headline sentence — *the player pulls a driver out and
+   takes their car, byte-identical on both hosts* — was therefore the one
+   sentence the equality did not cover. `RushRun::jack_digests` now digests every
+   step of it (**631** on the CI fixture), the two hosts are compared step for
+   step, and it is armed against vacuity the way the rush window is: a floor on
+   the count and a floor on the distinct states.
+
+#### Four arms that did not aim at what they named
+
+* `every_catalogue_row_sits_inside_its_own_travel` swept **forty draws off one
+  seed** and asserted nothing about which silhouettes it met. It now asserts it
+  met **all five** — a sweep that silently stopped covering the Van, which is the
+  row the belly defect was measured on, would still have been forty green
+  assertions.
+* `a_parked_cars_guid_is_its_own_place` compared two guids at **the same
+  height**, so the load-bearing half of `parked_car_guid`'s doc — *"the PLAN
+  position only, because the median moves when any block pages in"* — had no arm
+  at all. Two heights (and a `NaN` one) now pin it.
+* `a_block_arriving_does_not_un_steal_the_car_the_player_is_in` armed a block
+  **appearing**. The carry-forward's real case is the other direction, where the
+  derivation names *no slot at all*:
+  `a_town_that_pages_out_and_back_keeps_its_guids_and_the_car_the_player_stole`
+  pages the whole town out (the records fall to **one** — the stolen car), pages
+  it back in, and asserts the guid set is **identical**, the car is still stolen,
+  it has not moved, and its `Entity` is the same one. A despawn-and-rebuild under
+  the player would be a new `Entity`, and that is what the arm falsifies.
+* `d3::traffic::probe_intent` had **no caller anywhere**, which made its own
+  doc — *"an arm that rebuilt the view itself would be measuring a controller the
+  engine does not run"* — a claim about a gate that did not exist. It has one
+  now, and the comparison is exact because it is taken immediately after a bare
+  `step_traffic`, before the solver has moved the car (a probe taken a whole
+  frame later differs by 0.0006 of steer, which is a step of motion and not a
+  defect).
+
+#### Ledger corrections
+
+* `inf_nav::lane` is **982** lines, not 874.
+* The wave is **+8 878 / −200** at `0dabe0db`, not +8 847 — the counts row does
+  not include the commit that wrote it.
+* The clippy row says **six** findings and then enumerates **eight**
+  (4 + 1 + 1 + 2); the ROADMAP block repeats the six.
+* The rustdoc row says *"380 over 30 crates"* in one clause and *"over 48
+  documented crates"* in the next; 48 is the figure its own method describes.
+* `STOLEN_STEPS`' doc said the arm asserts *"revs off idle and a top speed"*. It
+  asserts `stolen_throttle`; revs and top speed are printed. On the fixture both
+  read **0.00**, because the car is walled in by the crowd and this engine's
+  `engine_state` has no idle floor — which is a VEH2a property, not this wave's.
+
+#### Carried by this audit
+
+* **`try_carjack`'s resist draw is a constant when there is no traffic
+  population.** The tick is `traffic::steps`, which answers `0` for a level with
+  none, so `agent_unit(victim, 0, SALT_RESIST)` never changes and a victim whose
+  draw lands under `RESIST_CHANCE` resists **for ever**. Unreachable today — the
+  only producer of a non-`player_controlled` `Driving` occupant is
+  `traffic::ensure_driver`, which needs the population — and left alone rather
+  than fixed, because any other tick source changes the draw sequence the gate's
+  "four presses" is measured on.
+* **A victim is placed without a clearance check.** `door_point` is
+  `finish_driving`'s own arithmetic, and that door has never collide-checked its
+  exit either — so a driver pulled out against a wall is placed inside it exactly
+  as a driver who climbed out would be. Pre-existing, and one fix for both.
+* **A settle ray still trusts any non-character solid.** See defect 1's own
+  bound.
+* **`is_traffic`, `is_kinematic` and `LaneId::opposing` have no callers.**
+  Instruments with no consumer, kept rather than deleted, and named here so the
+  next wave can decide.
+* **`streets_of` spans a group's whole bounding box.** A gap in the merged X
+  intervals means no block occupies that x *anywhere* in the group, so a derived
+  line never crosses a building — but it does run the full Z extent of the
+  group's bounding box, which on a settlement that is not a filled rectangle
+  lays street past the last block. Sound on every grid this engine plans; named.
+* **A wheel-less car does not sit on its floor pan.** `rig_nodes_at`'s doc says
+  a `Body`-tier car sits on its pan past 64 m; `place` lifts it to
+  `resting_origin_y`, so its hull floats `GROUND_CLEARANCE_M` plus the static
+  sag — about 31 cm — above the road. Cosmetic, and past 64 m it is the pixels
+  the doc says it is.
+
+#### Closing verification (audit head)
+
+`cargo fmt --all --check` **clean**. Battery **359 / 6 767 / 0 / 20**, exit 0,
+`INF_GOLDEN_STRICT=1`, run at the head this block is written at — the four
+passed over the wave's 6 763 are this audit's four arms, and the whole run
+emitted **zero compiler warnings**. Goldens **60, none blessed**; `git status`
+over `crates/inf-render/tests/goldens` is empty and this audit's diff touches
+none. `Cargo.lock`, every manifest, `samples/` and `editor/studio/` are **not in
+the diff at all**.
+
+`pie_equals_shipping_at_rush_hour_with_cars_on_the_streets` is green with the
+steal inside the equality, and reproduces the wave's own numbers exactly:
+2 street lines → 8 lanes derived 3 times; 11 cars, 7 with a day, 6 driving with
+6 drivers; tiers `[0, 0, 0, 0]` a kilometre away, `[0, 3, 0, 8]` at the town
+edge and `[10, 0, 0, 1]` at the crossroads; the busiest car 33.4 m; 329
+residents with 44 376 steering intents; **four presses**, the victim 4.8 m from
+the seat, the player's throttle reaching the car at 1.00 — **plus 631 digested
+steps of the steal, byte-identical on both hosts**.
+
+rustdoc from cold (`cargo clean --doc` first): **380** individual warnings — 410
+`^warning` lines minus 30 per-crate summaries, cross-checked against the sum of
+those summaries' own counts, **380 exactly** — over **48** documented crates,
+exit 0, ceiling 450, headroom **70**. Not one of them names a file this audit
+touched. `clippy --workspace --all-targets` at `RUSTFLAGS=-D warnings`, run
+**LAST** per the rmeta law: **0 errors, 0 warnings**, exit 0.
+
+`inf-physics/tests/traffic_3d.rs` is **19 arms** (15 the wave's, 4 this
+audit's) and `inf-ecs`'s `traffic::` is **20**. Their reported numbers
+reproduce to the digit: `stolen: 87.4 m, top 18.14 m/s`;
+`traffic: 63 cars, 32 commuters, tiers [11, 26, 0, 26], 11 rigs / 26 bodies`;
+`street: 03:00 2 driving, 08:30 30, 13:00 10`. This audit's own three:
+`settle: ground_y 0.000 m` (1.800 with the exclusion set emptied),
+`hand-off: 0.144 m` (2.793 with the rephase branch disabled), and
+`probe: 10 driver(s) agree with the step`.

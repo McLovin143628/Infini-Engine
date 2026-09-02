@@ -368,6 +368,72 @@ fn a_car_somebody_sits_in_is_let_go_of_and_never_taken_back() {
     );
 }
 
+/// **`audit:` VEH2b — a person standing in a parking space is not the ground.**
+///
+/// `settle_on_the_ground` casts `AllSolid`, which is every solid body and not
+/// only the level's geometry, and a `Full` crowd agent carries a KINEMATIC
+/// capsule. `ground_y` is latched on purpose, so one ray that landed on a
+/// pedestrian's head is a car parked in mid-air for the rest of the session — a
+/// `Near` car is kinematic and `place` writes that number onto its transform
+/// every step.
+///
+/// Measured: without the exclusion set this arm reads **1.500 m** of ground
+/// under a slot whose ground is at zero.
+#[test]
+fn a_car_does_not_settle_onto_the_pedestrian_standing_in_its_space() {
+    let hero_at = DVec3::new(50.0, 0.0, 50.0);
+    // The slot, chosen the way the derivation chooses it — the occupancy draw
+    // and the day draw, so this is a car that really is parked there.
+    let streets = {
+        let mut w = EcsWorld::new();
+        blocks(&mut w, 3, 3);
+        w.propagate();
+        inf_ecs::traffic::streets_of(&w)
+    };
+    let slot = inf_ecs::traffic::kerb_slots(&streets)
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| {
+            let g = inf_ecs::traffic::parked_car_guid(*p);
+            inf_ecs::crowd::agent_unit(g, 0, inf_ecs::traffic::SALT_PARK)
+                < inf_ecs::traffic::KERB_OCCUPANCY
+                && inf_ecs::traffic::day_of(g) == inf_ecs::traffic::TrafficDay::Parked
+        })
+        .filter(|p| (*p - hero_at).length() < 40.0)
+        .min_by(|a, b| (*a - hero_at).length().total_cmp(&(*b - hero_at).length()))
+        .expect("a parked car's space near the crossroads");
+
+    let mut town = Town::new(hero_at);
+    town.set_hour(12.0);
+    // Somebody is standing in it, built through the crowd's own door so the
+    // capsule is the one a resident wears. **Mirrored into rapier before the
+    // first traffic step**, because the step runs before the physics sync and a
+    // body spawned this step is invisible to this step's rays — which is the
+    // real world's ordering for a pedestrian who has been crossing for a while.
+    let arch = inf_ecs::society::level_archetype(&town.world);
+    inf_ecs::crowd::spawn_body(
+        &mut town.world,
+        Uuid::from_u128(0x9E_D0),
+        &arch,
+        DVec3::new(slot.x, 0.9, slot.z),
+    );
+    town.world.propagate();
+    town.bridge
+        .sync_from_world_sim(&town.world, &Default::default(), &Default::default());
+
+    town.step(40);
+    let guid = inf_ecs::traffic::parked_car_guid(slot);
+    let rec = inf_physics::d3::traffic::records(&town.world)
+        .remove(&guid)
+        .expect("the car whose space the pedestrian is standing in");
+    let ground = rec.ground_y.expect("it settled on something");
+    println!("settle: slot {slot:?} -> ground_y {ground:.3} m");
+    assert!(
+        ground.abs() < 0.05,
+        "the car settled at {ground:.3} m — it took the pedestrian's head for the road"
+    );
+}
+
 /// **A level with no blocks has no traffic and costs one look.**
 #[test]
 fn a_world_with_no_streets_grows_no_traffic() {
@@ -404,6 +470,90 @@ fn the_trace_moves_when_a_car_changes_tier() {
     assert_eq!(stats.per_tier[0], 0);
     assert_eq!(stats.per_tier[1], 0);
     assert!(stats.per_tier[3] > 0);
+}
+
+/// **`audit:` VEH2b — WHAT THE PLAYER SEES AT 64 m.**
+///
+/// The module doc promises the demotion *"moves nothing"* — `rephase_delta_on`
+/// hands the clock the metre the BODY reached — and nothing measured it. It is
+/// worth measuring because the two tiers are not two views of one thing: a
+/// `Full` car is a dynamic chassis on four rays, somewhere near its lane; a
+/// `Near` car is a kinematic body written to `place(clock)`, which is *exactly*
+/// on the lane centreline at the latched `ground_y`. Whatever lateral error the
+/// steering was carrying is spent in one step, and this is how big that step is.
+///
+/// The falsifier is the number, not the sentence: **without the rephase the
+/// hand-off is the whole distance between where the body got to and where the
+/// clock ran on to**, which on a car that has spent ten seconds behind a queue
+/// is tens of metres. Measured here at well under a metre.
+#[test]
+fn a_car_leaving_the_steered_tier_lands_where_its_body_already_was() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(8.5);
+    town.step(240);
+    // A car that is being STEERED — the only kind the hand-off is about.
+    let (target, _) = inf_physics::d3::traffic::records(&town.world)
+        .into_iter()
+        .find(|(g, r)| {
+            r.tier == inf_ecs::crowd::CrowdTier::Full
+                && r.commutes()
+                && town
+                    .world
+                    .entity_of(traffic::driver_guid(*g))
+                    .is_some_and(|e| {
+                        town.world
+                            .world()
+                            .get::<CharacterMovement>(e)
+                            .is_some_and(|cm| cm.runtime.seat.vehicle == *g)
+                    })
+        })
+        .expect("a steered commuter");
+    let at = |t: &Town| {
+        t.world
+            .entity_of(target)
+            .and_then(|e| t.world.world().get::<Transform>(e))
+            .map(|x| x.translation.to_dvec3())
+            .expect("the chassis")
+    };
+    // Stand between the two rungs — 100 m is outside `TRAFFIC_FULL_M` and well
+    // inside `TRAFFIC_NEAR_M`, so the car drops to `Near` rather than vanishing.
+    town.stand(at(&town) + DVec3::new(100.0, 0.0, 0.0));
+    // The band is read off `GlobalTransform`, which the propagate at the END of
+    // a step publishes — so the anchor's move lands a step later, and `before`
+    // has to be re-read each step or it is stale by a step of driving.
+    let mut before = at(&town);
+    let mut stats = traffic::TrafficStats::default();
+    let mut demoted = false;
+    for _ in 0..20 {
+        before = at(&town);
+        stats = town.step(1);
+        if inf_physics::d3::traffic::records(&town.world)[&target].tier
+            == inf_ecs::crowd::CrowdTier::Near
+        {
+            demoted = true;
+            break;
+        }
+    }
+    assert!(demoted, "the car never left the steered rung: {stats:?}");
+    assert!(
+        stats.rephased > 0,
+        "nothing handed its clock back: {stats:?}"
+    );
+    assert!(
+        inf_ecs::vehicle::rig_of(&town.world, target).is_none(),
+        "it kept its wheels across the boundary"
+    );
+    let after = at(&town);
+    let jump = ((after.x - before.x).powi(2) + (after.z - before.z).powi(2)).sqrt();
+    println!(
+        "hand-off: {jump:.3} m across the 64 m boundary, dy {:.3}",
+        after.y - before.y
+    );
+    assert!(
+        jump < 1.0,
+        "a car crossing the steered boundary jumped {jump:.2} m — the clock was \
+         not handed the metre the body reached"
+    );
 }
 
 /// Two identical towns run byte for byte — the determinism the whole ladder
@@ -975,6 +1125,158 @@ fn a_block_arriving_does_not_un_steal_the_car_the_player_is_in() {
         now.iter().filter(|p| **p != 0.0).count() >= phases.iter().filter(|p| **p != 0.0).count(),
         "phases were reset by the re-derivation"
     );
+}
+
+/// **`audit:` VEH2b — the kerb's guids are the SPACE's, and paging OUT is the
+/// direction the carry-forward was written for.**
+///
+/// `a_block_arriving_does_not_un_steal_the_car_the_player_is_in` armed a block
+/// APPEARING. The claim `derive_parked` actually rests on is the other
+/// direction: a settlement whose blocks page out has no slots at all, so every
+/// derived guid disappears from the derivation and the only thing keeping the
+/// player's stolen car is the `taken` branch. Paging back in must then re-mint
+/// **the same guids** — which is what makes `parked_car_guid` a function of the
+/// space rather than of the derivation — and must leave the stolen car's own
+/// entity untouched rather than rebuilding it.
+#[test]
+fn a_town_that_pages_out_and_back_keeps_its_guids_and_the_car_the_player_stole() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(12.0);
+    town.step(60);
+    let before: std::collections::BTreeSet<Uuid> = inf_physics::d3::traffic::records(&town.world)
+        .into_keys()
+        .collect();
+    assert!(before.len() > 20, "{} cars", before.len());
+
+    // The player takes one, through the seat state the enter door writes.
+    let (target, _) =
+        inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 60.0)[0];
+    let hero = town.world.entity_of(HERO).expect("the hero");
+    town.world
+        .world_mut()
+        .entity_mut(hero)
+        .insert(CharacterMovement {
+            player_controlled: true,
+            mode: MovementMode::Driving,
+            ..Default::default()
+        });
+    if let Some(mut cm) = town.world.world_mut().get_mut::<CharacterMovement>(hero) {
+        cm.runtime.seat = inf_ecs::components::SeatState {
+            vehicle: target,
+            entering: false,
+            time_s: 0.0,
+            start: Vec3d::ZERO,
+            start_yaw_deg: 0.0,
+        };
+    }
+    town.step(4);
+    assert!(traffic::is_taken(&town.world, target));
+    let entity_before = town.world.entity_of(target).expect("a chassis");
+    let where_it_was = inf_physics::d3::traffic::records(&town.world)[&target].last;
+
+    // ── PAGE OUT. Every block goes; the level's own stamp moves; the
+    //    derivation names no slot at all.
+    for row in 0..3i32 {
+        for col in 0..3i32 {
+            let g = Uuid::from_u64_pair(0x51, (row as u64) << 32 | col as u64);
+            if let Some(e) = town.world.entity_of(g) {
+                town.world.despawn(e);
+            }
+        }
+    }
+    town.world.propagate();
+    town.step(6);
+    assert!(
+        inf_ecs::traffic::streets_of(&town.world).is_empty(),
+        "the blocks are gone and the streets are not"
+    );
+    let while_out = inf_physics::d3::traffic::records(&town.world);
+    assert_eq!(
+        while_out.len(),
+        1,
+        "a town with no blocks kept {} cars — only the stolen one is the traffic's to keep",
+        while_out.len()
+    );
+    assert!(
+        while_out.contains_key(&target),
+        "the stolen car was forgotten"
+    );
+    assert!(traffic::is_taken(&town.world, target));
+    assert_eq!(
+        town.world.entity_of(target),
+        Some(entity_before),
+        "the stolen car's rig was taken down and rebuilt while it paged out"
+    );
+
+    // ── PAGE BACK IN, the same blocks in the same places.
+    blocks(&mut town.world, 3, 3);
+    town.world.propagate();
+    town.step(6);
+    let after: std::collections::BTreeSet<Uuid> = inf_physics::d3::traffic::records(&town.world)
+        .into_keys()
+        .collect();
+    assert_eq!(
+        after, before,
+        "the town came back with a different set of cars — a guid is not a function of the space"
+    );
+    assert!(
+        traffic::is_taken(&town.world, target),
+        "paging the town back in un-stole the player's car"
+    );
+    assert_eq!(
+        town.world.entity_of(target),
+        Some(entity_before),
+        "the stolen car was re-derived under the player"
+    );
+    let now = inf_physics::d3::traffic::records(&town.world)[&target].last;
+    assert!(
+        (now - where_it_was).length() < 1.0,
+        "the stolen car moved {:.2} m across a page cycle",
+        (now - where_it_was).length()
+    );
+}
+
+/// **`audit:` VEH2b — the instrument reads the controller the engine runs.**
+///
+/// `d3::traffic::probe_intent`'s doc says it exists so *"an arm that rebuilt the
+/// view itself would be measuring a controller the engine does not run"*. Until
+/// this arm it had no caller at all, which made that a claim about a gate that
+/// did not exist. Here it is, held against the stick the step actually wrote
+/// onto the driver.
+///
+/// The comparison is taken **immediately after a bare `step_traffic`**, before
+/// the solver has moved anything: `view_of` reads the live chassis pose, so a
+/// probe taken a whole frame later is a different view of a car that has since
+/// travelled, and the two numbers would differ by a step of motion rather than
+/// by a defect. Measured: 0.0006 of steer over one frame.
+#[test]
+fn the_intent_probe_answers_the_same_stick_the_step_wrote() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(8.5);
+    town.step(120);
+    inf_physics::d3::traffic::step_traffic(&mut town.world, &mut town.bridge, DT);
+    let mut checked = 0;
+    for (guid, rec) in inf_physics::d3::traffic::records(&town.world) {
+        if rec.tier != inf_ecs::crowd::CrowdTier::Full {
+            continue;
+        }
+        let Some(de) = town.world.entity_of(traffic::driver_guid(guid)) else {
+            continue;
+        };
+        let Some(cm) = town.world.world().get::<CharacterMovement>(de) else {
+            continue;
+        };
+        let probed = inf_physics::d3::traffic::probe_intent(&town.world, &town.bridge, guid, DT)
+            .expect("a driving car's driver is asking for something");
+        assert_eq!(
+            probed.move_input, cm.runtime.intent_move,
+            "the probe and the step disagree about what {guid} is asking for"
+        );
+        assert!(probed.target_mps.is_finite());
+        checked += 1;
+    }
+    assert!(checked > 0, "no Full-tier car had a driver to probe");
+    println!("probe: {checked} driver(s) agree with the step");
 }
 
 /// **A stolen car drives.** The falsifier for the island gate's own modest
