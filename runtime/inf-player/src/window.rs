@@ -555,10 +555,7 @@ impl PlayerApp {
     fn ammo_readout(sim: &RuntimeSim) -> Option<String> {
         let world = sim.world();
         let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
-        let s = world
-            .world()
-            .get::<inf_ecs::weapon::WeaponState>(entity)?
-            .clone();
+        let s = world.world().get::<inf_ecs::weapon::WeaponState>(entity)?;
         Some(inf_ecs::weapon::ammo_readout(s.magazine, s.reserve))
     }
 

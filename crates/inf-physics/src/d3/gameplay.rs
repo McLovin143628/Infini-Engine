@@ -1163,13 +1163,18 @@ fn panic_sources(hits: &[WeaponHit]) -> Vec<DVec3> {
     sources
 }
 
-/// **How many distinct places this step's gunfire came from** — [`panic_sources`]
+/// **How many distinct places this step's gunfire came from** — `panic_sources`
 /// counted, for a gate that wants the cost bound without a population.
+///
+/// (A code span rather than a link: the function it names is private, and a
+/// public doc that links to one is a rustdoc warning for a reference no reader
+/// of the public API could follow anyway.)
 pub fn panic_sources_for(hits: &[WeaponHit]) -> usize {
     panic_sources(hits).len()
 }
 
-/// What one [`step_panic`] did.
+/// What one `step_panic` did — a code span for `panic_sources_for`'s reason:
+/// the pass is private and this type is not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PanicReport {
     /// Distinct places this step's gunfire came from, after coalescing.
