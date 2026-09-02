@@ -541,6 +541,54 @@ impl PlayerApp {
         ))
     }
 
+    /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for
+    /// whoever has a weapon loaded, or `None`.
+    ///
+    /// The numbers are the sim's own `WeaponState`, which is the ammunition
+    /// clock the fixed step advances; the FORMATTING is
+    /// `inf_ecs::weapon::ammo_readout`, in Ring 0, because this function cannot
+    /// be tested and that one can — `drive_readout`'s own split, verbatim.
+    ///
+    /// A character with no `WeaponState` has nothing to say, which is every
+    /// character that has not equipped a weapon and (since WPN1's melee) every
+    /// one that has not thrown a punch either.
+    fn ammo_readout(sim: &RuntimeSim) -> Option<String> {
+        let world = sim.world();
+        let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
+        let s = world
+            .world()
+            .get::<inf_ecs::weapon::WeaponState>(entity)?
+            .clone();
+        Some(inf_ecs::weapon::ammo_readout(s.magazine, s.reserve))
+    }
+
+    /// **Is the camera subject pointing a weapon?** — the reticle's condition.
+    ///
+    /// Two halves, and both are needed: the aim mode (RMB), because a carried
+    /// rifle hangs where the animation puts it and only an aimed one is on the
+    /// line the shot leaves along; and an ammunition clock, because a reticle on
+    /// an empty-handed character is a crosshair for a weapon that is not there.
+    fn is_aiming(sim: &RuntimeSim) -> bool {
+        let world = sim.world();
+        let Some(entity) =
+            inf_ecs::movement::camera_subject(world).and_then(|g| world.entity_of(g))
+        else {
+            return false;
+        };
+        let aiming = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)
+            .is_some_and(|cm| {
+                cm.rotation_mode == inf_ecs::components::RotationMode::Aiming
+                    && !cm.runtime.seat.is_seated()
+            });
+        aiming
+            && world
+                .world()
+                .get::<inf_ecs::weapon::WeaponState>(entity)
+                .is_some()
+    }
+
     /// **What the camera subject is carrying**, as the panel renders it
     /// (island wave I6).
     ///
@@ -729,8 +777,23 @@ impl PlayerApp {
         }
         // VEH2b: the driver's own instruments. Absent unless somebody is at a
         // wheel, which is what makes it a readout rather than a HUD.
+        //
+        // WPN1 puts the ammunition beside it, in the same slot and behind an
+        // `else`: the two are one line at the bottom of the screen, a character
+        // cannot be at a wheel and pointing a rifle at the same time in this
+        // engine (`step_driving` parks the collider and `clear_edges` eats the
+        // attack), and two readouts stacked in one place would be a HUD that
+        // draws over itself on the one frame both are true.
         if let Some(text) = Self::drive_readout(&self.sim) {
             self.ui.readout(&text);
+        } else if let Some(text) = Self::ammo_readout(&self.sim) {
+            self.ui.readout(&text);
+        }
+        // …and the reticle, which is the aim's own half. Only while aiming: see
+        // `inf_ui::view::reticle` for why a permanent crosshair would be a claim
+        // this engine's carried weapons do not honour.
+        if Self::is_aiming(&self.sim) {
+            self.ui.reticle();
         }
         live.host.set_ui(self.ui.list());
         if let Some(view) = view {

@@ -441,6 +441,24 @@ impl PlayerUi {
         );
     }
 
+    /// **Draw the aiming reticle** (wave WPN1) — the centre of the screen, and
+    /// only while the character is pointing a weapon.
+    ///
+    /// The caller decides *whether*, this decides *how*, and the split is
+    /// [`readout`](Self::readout)'s: the condition is a question about the world
+    /// (is the camera subject in `RotationMode::Aiming` with something loaded)
+    /// and the drawing is a question about a viewport.
+    ///
+    /// Nothing is drawn while the menu is open, for `prompt`'s reason: a
+    /// crosshair over a settings dialog points at a control the dialog is
+    /// currently eating.
+    pub fn reticle(&mut self) {
+        if self.menu.open {
+            return;
+        }
+        inf_ui::view::reticle(&mut self.list, inf_ui::view::palette::TEXT);
+    }
+
     /// The finished list.
     pub fn list(&self) -> &UiDrawList {
         &self.list

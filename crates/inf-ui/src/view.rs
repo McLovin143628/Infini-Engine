@@ -218,6 +218,50 @@ pub fn prompt(list: &mut UiDrawList, at: Vec2, text: &str, colour: Color) {
     list.text_in(r, PAD * 0.5, Align::Center, text, scale, colour);
 }
 
+/// How long each arm of the reticle is, in pixels at scale 1.
+const RETICLE_ARM_PX: f32 = 7.0;
+/// How wide the gap at the centre is, in pixels at scale 1 — the thing that
+/// makes it a reticle rather than a plus sign, because what a player is aiming
+/// at has to be visible through it.
+const RETICLE_GAP_PX: f32 = 4.0;
+/// How thick each arm is, in pixels at scale 1.
+const RETICLE_THICK_PX: f32 = 1.0;
+
+/// **Draw the aiming reticle** at the centre of the viewport (wave WPN1).
+///
+/// Four arms and a hole, in the same integral [`text_scale`] the rest of this
+/// module uses — for its reason one shape along: an arm 1.5 pixels thick is
+/// resolved by the rasterizer into two arms of different brightness, and a
+/// crosshair that is brighter on one side than the other reads as a mis-aligned
+/// crosshair.
+///
+/// It is drawn **only while aiming**, which is the caller's decision and not
+/// this function's: a reticle on screen at all times is a claim that the
+/// character is always pointing a weapon, and in this engine a carried rifle
+/// hangs where the animation puts it (see
+/// `inf_physics::d3::gameplay::aim_hold_point`). The one thing the reticle has
+/// to be true about is that the shot goes through it, and that is only true on
+/// the aim line.
+pub fn reticle(list: &mut UiDrawList, colour: Color) {
+    let vp = list.viewport;
+    if !vp.x.is_finite() || !vp.y.is_finite() || vp.x <= 0.0 || vp.y <= 0.0 {
+        return;
+    }
+    let s = text_scale(vp.y);
+    let (arm, gap, t) = (RETICLE_ARM_PX * s, RETICLE_GAP_PX * s, RETICLE_THICK_PX * s);
+    // The centre is rounded to a whole pixel, so the two horizontal arms are the
+    // same length as each other on an odd-width viewport.
+    let (cx, cy) = ((vp.x * 0.5).round(), (vp.y * 0.5).round());
+    for r in [
+        Rect::new(cx - gap - arm, cy - t * 0.5, arm, t),
+        Rect::new(cx + gap, cy - t * 0.5, arm, t),
+        Rect::new(cx - t * 0.5, cy - gap - arm, t, arm),
+        Rect::new(cx - t * 0.5, cy + gap, t, arm),
+    ] {
+        list.rect(r, colour);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +405,64 @@ mod tests {
         prompt(&mut l, Vec2::new(f32::NAN, 0.0), "x", palette::TEXT);
         prompt(&mut l, Vec2::new(1.0, 1.0), "", palette::TEXT);
         assert!(l.is_empty());
+    }
+
+    /// **The reticle is four arms around a HOLE**, centred, and it draws nothing
+    /// on a viewport that does not exist (wave WPN1).
+    ///
+    /// The hole is the arm this is really for: a crosshair whose arms met would
+    /// cover the thing the player is aiming at, which is the one pixel the whole
+    /// element exists to point at. Measured as a gap the centre pixel is not
+    /// inside any quad of.
+    #[test]
+    fn the_reticle_is_centred_and_leaves_its_own_middle_clear() {
+        let mut l = UiDrawList::new(vp());
+        reticle(&mut l, palette::TEXT);
+        assert_eq!(l.quads.len(), 4, "a reticle is four arms");
+        let (cx, cy) = (vp().x * 0.5, vp().y * 0.5);
+        let mut left = 0;
+        let mut right = 0;
+        let mut above = 0;
+        let mut below = 0;
+        for q in &l.quads {
+            let (x, y) = (q.position.x as f32, q.position.y as f32);
+            let (w, h) = (q.size.x as f32, q.size.y as f32);
+            // Nothing covers the middle.
+            assert!(
+                !(x <= cx && cx <= x + w && y <= cy && cy <= y + h),
+                "an arm covers the centre pixel: ({x}, {y}) {w} x {h}"
+            );
+            if x + w < cx {
+                left += 1;
+            }
+            if x > cx {
+                right += 1;
+            }
+            if y + h < cy {
+                above += 1;
+            }
+            if y > cy {
+                below += 1;
+            }
+        }
+        assert_eq!(
+            (left, right, above, below),
+            (1, 1, 1, 1),
+            "the four arms are not one per side — a reticle that lost an arm is \
+             an aiming aid that points off to one side"
+        );
+        // …and a viewport that is not a viewport draws nothing at all, which is
+        // `menu`'s own rule and is what keeps a headless host from pushing a
+        // quad at NaN.
+        for bad in [
+            Vec2::new(f32::NAN, 1080.0),
+            Vec2::new(1920.0, 0.0),
+            Vec2::new(-1.0, -1.0),
+        ] {
+            let mut l = UiDrawList::new(bad);
+            reticle(&mut l, palette::TEXT);
+            assert!(l.is_empty(), "viewport {bad:?} drew a reticle");
+        }
     }
 
     /// The text scale is integral at every resolution the video page offers —

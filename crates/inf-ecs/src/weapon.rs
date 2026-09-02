@@ -414,6 +414,26 @@ impl WeaponState {
     }
 }
 
+/// **What a shooter's own instruments say** — the magazine and the reserve, as
+/// one line (wave WPN1).
+///
+/// The whole of this wave's ammunition HUD, and it is in Ring 0 rather than in
+/// the player's window for [`crate::vehicle::drive_readout`]'s reason verbatim:
+/// the window cannot be tested and this can. What the window does is read the
+/// two numbers and hand them here.
+///
+/// `"12 / 120"`. Four spaces would have matched the driver's readout and are
+/// deliberately not used: a gear and a speed are two unrelated facts, so they are
+/// spaced apart, and a magazine and a reserve are one fact counted twice, so they
+/// are joined by the slash a player already reads as "of".
+///
+/// **A reloading weapon shows the magazine it HAS**, not the one it is about to
+/// have. The alternative — blanking it, or showing the target — is a readout
+/// that lies for the two seconds a player most wants it to be honest.
+pub fn ammo_readout(magazine: u32, reserve: u32) -> String {
+    format!("{magazine} / {reserve}")
+}
+
 /// What pulling the trigger did. **A refusal is a value.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FireVerdict {
@@ -1160,6 +1180,28 @@ automatic = true
             "a gunshot does not carry meaningfully further than a nightclub"
         );
         assert!(s.min_distance < s.max_distance && s.min_distance > 0.0);
+    }
+
+    /// **The ammunition readout is the two numbers and nothing else** (wave
+    /// WPN1) — and it does not lie during a reload.
+    #[test]
+    fn the_ammo_readout_says_the_magazine_it_has_and_the_reserve_behind_it() {
+        let d = WeaponDef::default();
+        let mut s = WeaponState::full("rifle", &d);
+        assert_eq!(ammo_readout(s.magazine, s.reserve), "30 / 120");
+        for _ in 0..18 {
+            s.magazine -= 1;
+        }
+        assert_eq!(ammo_readout(s.magazine, s.reserve), "12 / 120");
+        // **A reload in flight reads what the magazine HOLDS**, which is the
+        // number that decides whether the next trigger pull does anything.
+        assert_eq!(try_reload(&d, &mut s), ReloadVerdict::Started);
+        assert_eq!(ammo_readout(s.magazine, s.reserve), "12 / 120");
+        assert!(finish_reload(&d, &mut s));
+        assert_eq!(ammo_readout(s.magazine, s.reserve), "30 / 102");
+        // Empty is a readout, not a blank: a player has to be able to tell
+        // "no rounds" from "no weapon", and the second one draws nothing at all.
+        assert_eq!(ammo_readout(0, 0), "0 / 0");
     }
 
     /// **The traces are empty until something exists**, and move when it does.
