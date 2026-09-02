@@ -1028,7 +1028,7 @@ mod tests {
             assert_eq!(
                 diagonals.len(),
                 8,
-                "{}: {} distinct diagonal side normals — an axis-aligned box has none,                  and an octagon's eight faces all sit BETWEEN the axes",
+                "{}: {} diagonal side normals; a box has none and an octagon has eight",
                 s.name(),
                 diagonals.len()
             );

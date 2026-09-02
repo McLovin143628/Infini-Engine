@@ -1509,7 +1509,7 @@ mod tests {
         for (name, worst, _) in &table {
             assert!(
                 *worst <= VENUE_LIGHT_CEILING,
-                "{name} hangs {worst} fixtures — the frame budget is                  `inf_render::MAX_LIGHTS` = 16 for the WHOLE scene, shared with the sun"
+                "{name} hangs {worst} fixtures against a frame budget of 16 for the WHOLE scene"
             );
         }
         // …and the venues really do hang some, or the ceiling above is a
@@ -1658,7 +1658,7 @@ mod tests {
                         })
                         .unwrap_or_else(|| {
                             panic!(
-                                "{}: lot {w}x{d} seed {seed}: no plate is drawn at its authored                                  {want:?} — the {} plate(s) present are {:?}",
+                                "{}: lot {w}x{d} seed {seed}: no plate at its authored {want:?}; {} present: {:?}",
                                 arch.display,
                                 plates.len(),
                                 plates.iter().map(|i| i.extent).collect::<Vec<_>>()
@@ -1686,7 +1686,7 @@ mod tests {
                     let stand = (DVec2::new(street.pos.x, street.pos.z) - on_wall).dot(out_dir);
                     assert!(
                         stand >= arch.wall_thickness * 0.5,
-                        "{}: lot {w}x{d} seed {seed}: the sign stands {stand:.3} m out from                          the wall line, which is inside a {} m wall",
+                        "{}: lot {w}x{d} seed {seed}: the sign stands {stand:.3} m out, inside a {} m wall",
                         arch.display,
                         arch.wall_thickness
                     );
@@ -1701,7 +1701,7 @@ mod tests {
             // the arm is a statement about one of them.
             assert!(
                 wide > 0 && deep > 0,
-                "{}: {wide} X-running and {deep} Z-running entrances — this arm                  exercised one branch",
+                "{}: {wide} X-running and {deep} Z-running entrances; this arm took one branch",
                 arch.display
             );
         }

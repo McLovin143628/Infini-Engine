@@ -4493,11 +4493,11 @@ fn golden_venue_interior() {
     eprintln!("venue_interior: neon {neon:.2}, halo blue/green {halo:.3}");
     assert!(
         neon > stage + 40.0,
-        "the neon ({neon:.2}) is not the brightest thing in the room          (the stage wash is {stage:.2})"
+        "the neon ({neon:.2}) is not the brightest thing in the room (stage {stage:.2})"
     );
     assert!(
         halo > 1.25,
-        "the wall beside the neon plate is not magenta (blue/green {halo:.3}) —          a sign bolted flat to a wall has nowhere for its glow to spill, which is          why `ModuleShape::Sign` has standoffs"
+        "the wall beside the neon plate is not magenta (blue/green {halo:.3}); a sign bolted flat to a wall has nowhere for its glow to spill"
     );
 }
 
