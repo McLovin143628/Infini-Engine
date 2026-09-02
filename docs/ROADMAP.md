@@ -30156,3 +30156,13 @@ the light budget did not survive composition.
 
 Ledger, laws and the carried list in `docs/memos/island-progress.md` under *"Wave
 VEN1a"*.
+
+**VERIFICATION at the wave head**: `cargo fmt --all --check` clean; battery
+**359 / 6 790 / 0 / 20**, exit 0, `INF_GOLDEN_STRICT=1`, with **zero compiler
+warnings** over the whole run; goldens **62, two added and none re-blessed**
+(digest `26faf4da53ff1e002cfa469528ff8253` in all three pins); rustdoc **410**
+of 450 over 48 crates, and **zero on a line this wave added** (measured by
+intersecting the warning locations with the diff's own added-line ranges);
+clippy `-D warnings` **0**, exit 0, run LAST. Scene schema **v27, unmoved**;
+`Cargo.lock` and every manifest untouched; no new dependency of any kind.
+Fourteen commits, 62 files, +5 664 / −169, **23 new `#[test]` arms**.

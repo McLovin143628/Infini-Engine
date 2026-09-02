@@ -25199,3 +25199,38 @@ moved.
   throws a pool and no cone of light.
 * **The exterior sign is one plate.** The reference's façades carry vertical
   channel letters, poster boxes and a lit awning.
+
+### Counts
+
+| | last recorded (VEH2b, `4c8e7c1a`) | **wave (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 359 / 6 767 / 0 / 20 | **359 / 6 790 / 0 / 20** |
+| battery exit, `INF_GOLDEN_STRICT=1` | 0 | **0** |
+| compiler warnings over the whole run | 0 | **0** |
+| goldens | 60, none blessed | **62** (`gi_scatter_neon`, `venue_interior`), **none re-blessed** |
+| `GOLDEN_SET_DIGEST` (×3) | `9460b53a…` | **`26faf4da53ff1e002cfa469528ff8253`** |
+| rustdoc individual warnings (ceiling 450) | 380 over 48 crates | **410 over 48 crates**, and **zero on a line this wave added** |
+| `cargo clippy --workspace --all-targets` | 0 | **0**, exit 0, run LAST |
+| `cargo fmt --all --check` | clean | **clean** |
+| `Cargo.lock` / manifests | untouched | **untouched** |
+| schemas | scene v27 | **scene v27 — no move** |
+| new external dependencies | — | **none** |
+| committed content | — | 20 files: 3 zone documents, 3 phase19 lots, both island levels + recipes, the phase-19 town |
+| frontend (`editor/studio/src/`) | untouched | **untouched** (`src-tauri/commands/pcg.rs` only, the projector mirror) |
+| the wave | — | **14 commits, 62 files, +5 664 / −169, 23 new `#[test]` arms** |
+
+**The rustdoc figure is stated with its measurement**, because 380 → 410 looks
+like a regression and is not one: the warning locations were intersected with
+the diff's own added-line ranges and exactly **one** fell inside them (an
+unresolved `PcgSurface::DEFAULT` link in `dsl.rs`), which is fixed. The
+remaining delta is not attributable to this wave's diff.
+
+**Working-tree note.** 32 tracked `.rs` files were CRLF at the start of the
+verification — eleven from earlier sessions and the rest from this wave's own
+scripted edits, because Python's `write_text` translates `\n` to `\r\n` on
+Windows. `.gitattributes` says `*.rs text eol=lf`, so the committed bytes were
+always LF and CI never saw it; what it broke was a source-scanning gate reading
+the local tree (`the_shipped_players_frame_path_does_not_wait_for_the_gpu`
+looks for `"\n    }\n"`, which does not occur in a CRLF file). The tree was
+renormalized by deleting and re-checking-out every tracked `.rs`; the diff was
+empty and the count is now zero. **Fifth time.**
