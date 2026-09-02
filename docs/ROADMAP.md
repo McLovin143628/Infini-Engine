@@ -30157,12 +30157,66 @@ the light budget did not survive composition.
 Ledger, laws and the carried list in `docs/memos/island-progress.md` under *"Wave
 VEN1a"*.
 
-**VERIFICATION at the wave head**: `cargo fmt --all --check` clean; battery
-**359 / 6 790 / 0 / 20**, exit 0, `INF_GOLDEN_STRICT=1`, with **zero compiler
+**THE AUDIT (2026-09-02, adversarial, at `2a5d55a8`).** Verification reproduced
+exactly — battery **359 / 6 790 / 0 / 20** exit 0 under `INF_GOLDEN_STRICT=1`
+with zero compiler warnings, 62 goldens with the tree clean, scene v27, no
+manifest moved. Three findings, all fixed.
+
+**THE MEMO KEY WALKED THE POPULATION THE MEMO WAS CARRYING** (the one with a
+number on it). `ScatterSource::pulse_tick` is *zero unless this volume actually
+pulses* — right, and the reason a festoon in one settlement does not re-pack the
+other 171 eight times a second. But the condition was `vol.evaluated.iter()
+.any(…)`, and that expression builds the memo's **key**, so it runs before the
+lookup: on a HIT as much as a miss. A carried projection therefore walked every
+instance it was carrying, precisely so as not to touch them — and the comment
+beside it said the opposite ("runs only on a memo MISS"). Measured on
+`projection_budget`'s 20 020-instance fixture by stubbing the scan: the hit path
+is **0.350 ms** with it and **0.009 ms** without, 39× on a path whose own test
+calls a hit "a pointer copy". `PcgVolume::pulses` answers it in `O(1)`, derived
+in `set_population` (grep-proven to be the only assignment of `evaluated` in the
+tree), `#[serde(skip)]` like everything else there, **schema unmoved**; pinned
+both ways, because only the *lowering* half fails a `|=`. After: **0.017 ms**.
+
+**A DOC CLAIM THE CODE DOES NOT MAKE.** `SCATTER_WALK_CEILING` and
+`GiAudit::scatter_decimated` both said the stride bites "only on a batch with
+more than 16 384 instances **inside the volume**"; `stride` is
+`data.len().div_ceil(…)` — the whole payload, chosen before an instance is
+examined. Corrected, with the half of the argument that survives it stated (a
+batch that trips it and is mostly *inside* saturates the grid several times over;
+one mostly *outside* loses fidelity it would have had, no committed level holds
+one, and the counter is what says so).
+
+**TWO COUNTERS NOBODY READ.** `scatter_rejected` / `scatter_decimated` were added
+for `skinned_rejected`'s reason and then read by nothing — the exact state
+`skinned_rejected` exists to escape. Both now ride `fps_instrument`'s `gi audit`
+row beside it.
+
+**THE CRLF SWEEP WAS `.rs`-SCOPED.** The wave's own note records renormalizing 32
+`.rs` files; the same scripted edits also wrote `samples/island/island.toml` and
+`samples/island-fixture/island.toml`, which were still CRLF **in the working
+tree** under an `attr/text eol=lf`. Committed bytes were never wrong (the whole
+index holds **zero** CRLF blobs, verified `git ls-files --eol` over every tracked
+file), and `.gitattributes` covers every extension the wave touched — so this
+cost nothing and is recorded because the fifth catch of a five-time law should
+close on the whole diff and not on one extension. **Sixth time.** Renormalized;
+no file among the wave's 62 is CRLF on disk. 238 files elsewhere in the tree are
+in the same state from earlier sessions (mostly `editor/studio/src/**/*.ts`) —
+carried, out of scope.
+
+**THE GATE-COST CLAIM WAS INVERTED IN THE HAND-OFF, NOT IN THE TREE.** The 539 s
+belongs to the **withdrawn** whole-block-lot approach; the ROADMAP, the memo and
+`zone_lots`'s own comment all say so. Measured at head:
+`pie_equals_shipping_inside_a_venue_at_night` is **17.73 s** in isolation and the
+whole `island_gate` binary is 140.65 s for 23 arms. There is no battery-shape
+problem and CI grew by seconds, not minutes.
+
+**VERIFICATION at the audit head**: `cargo fmt --all --check` clean; battery
+**359 / 6 791 / 0 / 20**, exit 0, `INF_GOLDEN_STRICT=1`, with **zero compiler
 warnings** over the whole run; goldens **62, two added and none re-blessed**
 (digest `26faf4da53ff1e002cfa469528ff8253` in all three pins); rustdoc **410**
 of 450 over 48 crates, and **zero on a line this wave added** (measured by
 intersecting the warning locations with the diff's own added-line ranges);
 clippy `-D warnings` **0**, exit 0, run LAST. Scene schema **v27, unmoved**;
 `Cargo.lock` and every manifest untouched; no new dependency of any kind.
-Fourteen commits, 62 files, +5 664 / −169, **23 new `#[test]` arms**.
+Eighteen commits (fifteen the implementer's, three the audit's), 63 files,
++5 996 / −174, **24 new `#[test]` arms**.

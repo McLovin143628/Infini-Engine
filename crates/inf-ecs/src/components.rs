@@ -3863,10 +3863,12 @@ pub struct PcgVolume {
     /// # One writer
     ///
     /// [`set_population`](Self::set_population) is the only code in the tree
-    /// that assigns `evaluated`, and it derives this in the same pass — so the
-    /// two cannot disagree. A struct literal that sets `evaluated` directly
-    /// must set this too; `a_volumes_pulse_flag_tracks_its_own_population`
-    /// pins the derivation both ways.
+    /// that **assigns** `evaluated`, and it derives this in the same pass — so
+    /// the two cannot disagree. Exactly one other site touches the list at all
+    /// (a `push` in `scene::serialize`'s round-trip test, of a steady
+    /// instance), and a struct literal that fills `evaluated` directly must set
+    /// this too. `a_volumes_pulse_flag_tracks_its_own_population` pins the
+    /// derivation both ways.
     ///
     /// `#[serde(skip)]` + `#[reflect(ignore)]` like everything else derived
     /// here: it reaches no bytes and moves no schema.

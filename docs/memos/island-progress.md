@@ -25204,7 +25204,7 @@ moved.
 
 | | last recorded (VEH2b, `4c8e7c1a`) | **wave (`HEAD`)** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 359 / 6 767 / 0 / 20 | **359 / 6 790 / 0 / 20** |
+| battery blocks / passed / failed / ignored | 359 / 6 767 / 0 / 20 | **359 / 6 791 / 0 / 20** (6 790 at the implementer's head; the audit's arm is the 6 791st) |
 | battery exit, `INF_GOLDEN_STRICT=1` | 0 | **0** |
 | compiler warnings over the whole run | 0 | **0** |
 | goldens | 60, none blessed | **62** (`gi_scatter_neon`, `venue_interior`), **none re-blessed** |
@@ -25217,7 +25217,7 @@ moved.
 | new external dependencies | — | **none** |
 | committed content | — | 20 files: 3 zone documents, 3 phase19 lots, both island levels + recipes, the phase-19 town |
 | frontend (`editor/studio/src/`) | untouched | **untouched** (`src-tauri/commands/pcg.rs` only, the projector mirror) |
-| the wave | — | **14 commits, 62 files, +5 664 / −169, 23 new `#[test]` arms** |
+| the wave | — | **18 commits (15 implementer + 3 audit), 63 files, +5 996 / −174, 24 new `#[test]` arms** |
 
 **The rustdoc figure is stated with its measurement**, because 380 → 410 looks
 like a regression and is not one: the warning locations were intersected with
@@ -25234,3 +25234,106 @@ the local tree (`the_shipped_players_frame_path_does_not_wait_for_the_gpu`
 looks for `"\n    }\n"`, which does not occur in a CRLF file). The tree was
 renormalized by deleting and re-checking-out every tracked `.rs`; the diff was
 empty and the count is now zero. **Fifth time.**
+
+**…and the sweep was `.rs`-SCOPED** (the audit). The same scripted edits wrote
+`samples/island/island.toml` and `samples/island-fixture/island.toml`, which
+were still **CRLF in the working tree** under an `attr/text eol=lf`. Nothing
+committed was ever wrong — the whole index holds **zero** CRLF blobs
+(`git ls-files --eol` over every tracked file), because `text eol=lf`
+normalizes on check-IN, which is also exactly why `git status` stayed clean and
+the residue was invisible. No gate reads those bytes today (`IslandRecipe::load`
+parses TOML; `scratch_fixture` rewrites the string), and "no gate reads it
+today" is how a CRLF survives to bite a gate written next wave. `.gitattributes`
+covers every extension the wave touched, verified. Renormalized; no file among
+the wave's 63 is CRLF on disk. **Sixth time — and the lesson is that the sweep
+must cover the DIFF, not an extension.** 238 files elsewhere in the tree are in
+the same state from earlier sessions (mostly `editor/studio/src/**/*.ts`, plus
+`.github/workflows/ci.yml`, `scripts/battery.sh` and four `themes/*.json`);
+carried, out of this wave's scope.
+
+### THE AUDIT (2026-09-02, adversarial, base `2a5d55a8`)
+
+Verification reproduced exactly at the implementer's head: battery
+**359 / 6 790 / 0 / 20** exit 0 under `INF_GOLDEN_STRICT=1`, zero compiler
+warnings, 62 goldens with a clean tree, scene v27, `Cargo.lock` and every
+manifest unmoved, 23 new arms. The claims that could be checked by construction
+hold: `ScatteredInstance` is `#[derive(Clone, Copy, Debug, PartialEq)]` with no
+serde and `PcgVolume::evaluated` / `::lights` are `#[serde(skip)]
+#[reflect(ignore)]`, so the surface and the rig genuinely cost the spent window
+nothing; `ArchetypeId`'s wire form is its `name()`, so appending three is not a
+document change; `RoomType` has no serde derive, so there is no freeze pin to
+move; the three `GOLDEN_SET_DIGEST` pins moved **once**, additively, with the
+purpose stated in all three.
+
+**Finding 1 — the memo key walked the population the memo was carrying.**
+`ScatterSource::pulse_tick`'s "zero unless this volume actually pulses" was
+spelled `vol.evaluated.iter().any(…)`, and that expression builds the memo's
+KEY: it runs *before* the lookup, on a hit as much as a miss. So a carried
+projection walked every instance it was carrying, precisely so as not to touch
+them — while the comment beside it said "runs only on a memo MISS".
+
+| `projection_budget`, 20 020 instances | memo-HIT path |
+|---|---|
+| at the implementer's head | **0.350 ms** |
+| with the scan stubbed to `false` (the probe) | **0.009 ms** |
+| with `PcgVolume::pulses` (the fix) | **0.017 ms** |
+
+17 ns an instance, every frame, on both hosts, for a question whose answer is
+`false` in every volume of every level that holds no festoon — and the island's
+settlements hold 365 545 instances across 172 volumes. `PcgVolume::pulses` is
+derived in `set_population`, which `grep` proves is the only assignment of
+`evaluated` in the tree, so the two cannot drift; it is `#[serde(skip)]` +
+`#[reflect(ignore)]` like its neighbours, so **v27 is still v27**.
+`a_volumes_pulse_flag_tracks_its_own_population` pins it both ways, and only the
+*lowering* half fails a `|=`.
+
+**Finding 2 — a doc claim the code does not make.** `SCATTER_WALK_CEILING` and
+`GiAudit::scatter_decimated` both said the stride bites only above 16 384
+instances *inside the volume*; `stride` is `data.len().div_ceil(…)`, the whole
+payload, chosen before an instance is examined. Corrected, and the surviving
+half of the argument written down: a batch that trips it and is mostly INSIDE
+saturates a 262 144-voxel grid several times over against a 4 096 budget, so the
+stride removes nothing a probe could have seen; one mostly OUTSIDE loses
+fidelity it would have had, no committed level holds one, and the counter is
+what says so.
+
+**Finding 3 — two counters nobody read.** `scatter_rejected` and
+`scatter_decimated` were added for `skinned_rejected`'s stated reason and then
+read by nothing in the tree, which is the exact condition `skinned_rejected`
+exists to escape. Both now ride `fps_instrument`'s `gi audit` row beside it.
+
+**The 539 s was inverted in the hand-off, not in the tree.** It belongs to the
+*withdrawn* whole-block-lot approach, as `zone_lots`, the ROADMAP and this memo
+all say. Measured at head: `pie_equals_shipping_inside_a_venue_at_night` is
+**17.73 s** in isolation, and the whole `island_gate` binary is **140.65 s** for
+23 arms. CI grew by seconds.
+
+**Read and not faulted**: `scatter_batch_stages` orders its conditional so an
+emitter can never be dust (`!emits && …`), and the stride is a pure function of
+the payload's length, so both hosts walk the same subset; `swept_colour` and
+`pulse_emissive` are pure in the clock with no libm on the path;
+`ground_anchors` sorts by `total_cmp` on area with the plan's own index as the
+tie-break, so no hash and no float ordering reach it; the venue-block selection
+sorts on `to_bits`; `VOLUME_LIGHT_CAP` truncates in the volume's own building
+order at the one door both hosts pass; the goldens' two controls do isolate the
+path (a zeroed-emissive arm and a GI-off arm, plus the sky-hue arm that keeps
+the ratio claim honest).
+
+**Carried out of the audit** (beyond the wave's own list):
+
+* **The 14-of-16 worst frame is inferred, not measured.** The CI fixture holds
+  ONE venue block; three in one frame is arithmetic over a per-volume cap plus
+  an assumption that the sky contributes two. `frame_lights <= MAX_LIGHTS` is a
+  standing tripwire on the fixture, and no other content produces a light today
+  (`grep`: no vehicle headlights anywhere), so the inference is sound — but it
+  is an inference, and this repository has a law about that.
+* **The two new goldens' pixel arms run only where an adapter exists.** CI has
+  no lavapipe or WARP, so `gpu_or_skip` no-ops the whole harness there; what CI
+  checks is the three `GOLDEN_SET_DIGEST` content pins, which need no GPU. The
+  tightest new threshold is `venue_interior`'s cool-lamp arm at 1.13 measured
+  against `< 1.4`.
+* **`swept_colour` extrapolates for a negative clock.** `fract()` of a negative
+  is negative, so `t = 2·|x − 0.5|` can reach ~3 and leave the authored segment.
+  Guarded against NaN and against `cycle_hz <= 0`, not against `clock_s < 0`; a
+  level clock is never negative today.
+* **238 CRLF working-tree files elsewhere in the tree**, from earlier sessions.
