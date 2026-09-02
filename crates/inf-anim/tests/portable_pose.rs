@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 43] = [
+const SIM_PATH: [(&str, &str, &str); 44] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
@@ -67,6 +67,17 @@ const SIM_PATH: [(&str, &str, &str); 43] = [
         "inf_ecs::pose",
         include_str!("../../inf-ecs/src/pose.rs"),
         "step_pose_evaluation is the door every pose writer reaches `pose_state_bytes` through, and both hosts compare those bytes",
+    ),
+    // ── VEN1b's postures ──
+    //
+    // A sit and a dance are poses. They are composed onto the machine's own
+    // result inside `step_pose_evaluation`, so they land in `pose_state_bytes`
+    // by the same route every writer above them does — and the club gate
+    // compares those bytes between the editor's PIE and the shipped player.
+    (
+        "posture.rs",
+        include_str!("../src/posture.rs"),
+        "a seated or dancing body is a pose, folded into pose_state_bytes and compared between the two hosts",
     ),
     // ── SK1b's hand solver ──
     //

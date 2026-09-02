@@ -79,6 +79,9 @@ pub mod pose;
 pub mod propose;
 // P29.2 pose snapshot + pose matching (P29.4's get-up and landing consumers).
 pub mod pose_match;
+// VEN1b: what a body does when it is not walking -- the seated and dancing
+// poses a venue's crowd wears, as clip data addressed by bone ROLE.
+pub mod posture;
 // P29.4 the ragdoll bridge's animation half: the motor drive, the face-up read
 // and the blend weight that is a pure function of sim state.
 pub mod ragdoll;
@@ -157,6 +160,7 @@ pub use pose::{
 pub use pose_match::{
     match_clip, match_clips, pose_cost, PoseMatch, PoseMatchWeights, PoseSnapshot,
 };
+pub use posture::{apply_posture, sit_drop_m, Posture, PostureClip, PostureReport};
 pub use propose::{
     facts_of, propose_machine, ClipFacts, Proposal, ProposalOptions, ProposeError, SPEED_PARAM,
 };

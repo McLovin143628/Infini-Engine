@@ -1061,7 +1061,16 @@ pub fn step_pose_evaluation<'c>(
     // every fixture in this tree — answers `Full` and takes exactly the path it
     // took before NPC1a. That is what makes "the hero is untouched" structural
     // rather than a promise.
-    let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState, Option<Uuid>, bool)> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut targets: Vec<(
+        Entity,
+        Uuid,
+        Uuid,
+        SmRuntimeState,
+        Option<Uuid>,
+        bool,
+        Option<(inf_anim::Posture, f32)>,
+    )> = Vec::new();
     {
         let w = world.world_mut();
         let mut q = w.query::<(
@@ -1076,6 +1085,13 @@ pub fn step_pose_evaluation<'c>(
             if !tier.poses() {
                 continue;
             }
+            // **The posture rides the query that was already reading the
+            // component** (VEN1b). `CrowdAgent` is read here for the tier; a
+            // posture asked for anywhere else would be a second lookup per
+            // posed character per step for an answer already in hand. An entity
+            // with no `CrowdAgent` -- every hero, every authored character --
+            // answers `None` and takes exactly the path it took before.
+            let posture = agent.and_then(|a| a.posture.anim().map(|p| (p, a.posture_t)));
             if let Some(sm_guid) = asm.sm {
                 targets.push((
                     e,
@@ -1084,6 +1100,7 @@ pub fn step_pose_evaluation<'c>(
                     asm.runtime,
                     sm.and_then(|s| s.skeleton),
                     tier.hand_ik(),
+                    posture,
                 ));
             }
         }
@@ -1127,7 +1144,7 @@ pub fn step_pose_evaluation<'c>(
         }
         return;
     }
-    targets.sort_by_key(|(_, guid, _, _, _, _)| *guid);
+    targets.sort_by_key(|(_, guid, _, _, _, _, _)| *guid);
 
     // 2. Advance + evaluate.
     //
@@ -1195,7 +1212,7 @@ pub fn step_pose_evaluation<'c>(
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
     let clip_len = |c: ClipRef| clips(c).map(|a| a.duration as f64);
-    for (entity, guid, sm_guid, rt_state, skeleton_id, hands_ok) in targets {
+    for (entity, guid, sm_guid, rt_state, skeleton_id, hands_ok, posture) in targets {
         let Some(machine) = machines(sm_guid) else {
             continue;
         };
@@ -1420,6 +1437,23 @@ pub fn step_pose_evaluation<'c>(
                             &asset.twists,
                             &asset.ik_follow,
                         );
+                        // ── VEN1b: the POSTURE, if the agent has one ──
+                        //
+                        // Here, immediately after the drive and before every
+                        // correction, on `drive_pose`'s own argument: sitting
+                        // down is pose CONSTRUCTION and the pelvis drop, the
+                        // goals and the foot pass are corrections **of** it. A
+                        // seated body wants the foot IK below to solve from the
+                        // shins it actually has, not from the standing ones the
+                        // machine authored.
+                        //
+                        // **Absent costs nothing**, twice over: an entity with
+                        // no `CrowdAgent` answers `Stand` (every hero, every
+                        // authored character), and `Stand` has no clip, so this
+                        // is one `Option` on a value the query already read.
+                        if let Some((p, t)) = posture {
+                            inf_anim::apply_posture(asset, &mut pose, p, t);
+                        }
                         // ── P29.5: the pelvis IK offset, APPLIED ──
                         //
                         // P29.4 computed it and wrote it down (`SetPelvisIKOffset`
@@ -4119,6 +4153,85 @@ mod tests {
     fn joint_at(posed: &EvaluatedPose, rig: &SkeletonAsset, joint: u16) -> glam::Vec3 {
         inf_anim::global_transforms(&rig.skeleton, &posed.pose)[joint as usize]
             .transform_point3(glam::Vec3::ZERO)
+    }
+
+    /// **THE POSTURE REACHES THE POSE** (wave VEN1b) — the end-to-end arm for
+    /// the seated and dancing crowd, through the one fixed-step door both hosts
+    /// call.
+    ///
+    /// Three claims, and the first is the one a wiring mistake fails silently:
+    ///
+    /// * an agent whose `CrowdAgent` says `Sit` poses **differently** from the
+    ///   same agent standing, and the difference is at the knee rather than
+    ///   somewhere;
+    /// * an agent whose posture is `Dance` poses differently at two clock
+    ///   times, so the per-agent `posture_t` really is reaching the sampler;
+    /// * and an entity with **no** `CrowdAgent` — every hero in this tree —
+    ///   poses exactly what it posed before this wave existed.
+    #[test]
+    fn a_seated_crowd_agent_poses_seated_and_a_hero_is_untouched() {
+        let rig = mannequin_rig();
+        let knee = rig
+            .role_index()
+            .first(inf_anim::BoneRoleKind::Calf, inf_anim::BoneSide::Left)
+            .expect("a left knee");
+
+        // (a) the hero: no `CrowdAgent` at all.
+        let hero = Uuid::from_u128(0x5E_0001);
+        let mut w = world_with_mannequin(hero);
+        step_mannequin(&mut w, &rig, 0.1);
+        let hero_pose = evaluated_pose(&w, hero).expect("a pose").clone();
+
+        // (b) the same body, standing, as a crowd agent.
+        let agent = |posture: crate::components::SlotPosture, t: f32| -> EvaluatedPose {
+            let g = Uuid::from_u128(0x5E_0002);
+            let mut w = world_with_mannequin(g);
+            let e = w.entity_of(g).expect("the body");
+            w.world_mut()
+                .entity_mut(e)
+                .insert(crate::crowd::CrowdAgent {
+                    tier: crate::crowd::CrowdTier::Full,
+                    guid: g,
+                    feet_offset_m: 0.9,
+                    blocked: false,
+                    posture,
+                    face: glam::DVec3::ZERO,
+                    posture_t: t,
+                });
+            step_mannequin(&mut w, &rig, 0.1);
+            evaluated_pose(&w, g).expect("a pose").clone()
+        };
+        let standing = agent(crate::components::SlotPosture::Stand, 0.0);
+        let seated = agent(crate::components::SlotPosture::Sit, 0.0);
+        let dance_a = agent(crate::components::SlotPosture::Dance, 0.0);
+        let dance_b = agent(crate::components::SlotPosture::Dance, 0.6);
+
+        // A standing crowd agent poses exactly what a hero does.
+        assert_eq!(
+            standing.pose, hero_pose.pose,
+            "a `Stand` agent poses differently from a body with no verdict at              all, so `Stand` is not the absence of a posture"
+        );
+        let at = |p: &EvaluatedPose| joint_at(p, &rig, knee);
+        println!(
+            "VEN1b pose: knee stand {:?} / sit {:?}; dance t=0 {:?} t=0.6 {:?}",
+            at(&standing),
+            at(&seated),
+            at(&dance_a),
+            at(&dance_b)
+        );
+        // The sit moved the knee, forward and down.
+        let (s, k) = (at(&standing), at(&seated));
+        assert!(
+            (k - s).length() > 0.1,
+            "the seated knee is {:.4} m from the standing one",
+            (k - s).length()
+        );
+        assert!(k.z > s.z + 0.1, "the seated knee did not go forward");
+        // The dance is a clip: two times, two poses.
+        assert_ne!(
+            dance_a.pose, dance_b.pose,
+            "a dancing body is in the same pose at both ends of its own loop,              so `posture_t` is not reaching the sampler"
+        );
     }
 
     /// **The headline for the reaching half**: a hand set on a point in the world

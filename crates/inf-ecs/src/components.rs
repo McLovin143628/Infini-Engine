@@ -4081,6 +4081,22 @@ impl SlotPosture {
             SlotPosture::Dance => 2,
         }
     }
+
+    /// **The authored clip this posture plays**, or `None` for
+    /// [`Stand`](SlotPosture::Stand).
+    ///
+    /// The one place the society's vocabulary meets the animation's, so a
+    /// posture cannot mean one thing in a schedule and another in a pose.
+    /// `None` is the whole of `Stand`: standing is the *absence* of an overlay,
+    /// which is what keeps a level with no venue posing exactly the bytes it
+    /// posed before wave VEN1b.
+    pub fn anim(self) -> Option<inf_anim::Posture> {
+        match self {
+            SlotPosture::Stand => None,
+            SlotPosture::Sit => Some(inf_anim::Posture::Sit),
+            SlotPosture::Dance => Some(inf_anim::Posture::Dance),
+        }
+    }
 }
 
 /// **WHEN a slot is filled** (wave VEN1b) — the mirror of

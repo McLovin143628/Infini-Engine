@@ -1619,6 +1619,19 @@ pub struct CrowdAgent {
     /// Published beside the posture because they are answered together and a
     /// seated body facing the wall it walked in past is not a seated body.
     pub face: DVec3,
+    /// **Where in its posture's own loop this agent is**, seconds (wave VEN1b).
+    ///
+    /// Already wrapped into `[0, duration)` and already carrying this agent's
+    /// own phase and tempo — see [`posture_time`], and see it in particular for
+    /// why the wrap happens in `f64` *before* the cast: at a level's fourth
+    /// hour `t_s` is 14 400, where an `f32` has about a millisecond of
+    /// resolution left, and a 1.2-second loop sampled in `f32` at that scale
+    /// steps rather than moves. (The same arithmetic VEN1a's `pulse_tick`
+    /// carries, one system over.)
+    ///
+    /// `0.0` for [`SlotPosture::Stand`](crate::components::SlotPosture::Stand),
+    /// which plays no clip.
+    pub posture_t: f32,
 }
 
 /// What one [`step_crowd`] did — the instrument's read, and the gate's.
@@ -2114,10 +2127,12 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
             face_body(world, entity, tier.steers(), arrival.face);
             stats.faced += 1;
         }
+        let posture_t = posture_time(guid, clock, arrival.posture);
         if let Some(mut a) = world.world_mut().get_mut::<CrowdAgent>(entity) {
             a.tier = tier;
             a.posture = arrival.posture;
             a.face = arrival.face;
+            a.posture_t = posture_t;
             if !tier.steers() {
                 // An agent the clock moves cannot fall behind the clock, and a
                 // stale `true` here would send the door pass looking for a body
@@ -2179,6 +2194,48 @@ pub const ARRIVE_M: f64 = 0.5;
 /// (`inf_physics::d3::gameplay`, which can open the door in its way) and,
 /// beyond that, NPC1d's.
 pub const BLOCKED_LAG_M: f64 = 2.0;
+
+/// Salts the per-agent posture phase — where in a dance loop an agent starts.
+pub const SALT_POSTURE_PHASE: u64 = 0x504f_5354_5552_4501;
+
+/// Salts the per-agent posture tempo.
+pub const SALT_POSTURE_RATE: u64 = 0x504f_5354_5552_4502;
+
+/// **How far either side of the authored tempo an agent dances**, as a
+/// fraction.
+///
+/// A tenth. `CrowdRecord::speed_of` spreads a walk by 0.15 for the same reason
+/// and the same amount of it is right here: twenty agents on one dance floor
+/// playing one 1.2-second loop at one rate are twenty copies of one body, and
+/// the *phase* spread alone does not fix that — two agents a beat apart are
+/// still in lockstep, for ever.
+pub const POSTURE_RATE_SPREAD: f64 = 0.1;
+
+/// **Where in its own posture loop an agent is**, seconds — the value
+/// [`CrowdAgent::posture_t`] carries.
+///
+/// A pure function of `(guid, clock, posture)` with the two per-agent draws
+/// taken at `tick = 0`, on [`CrowdRecord::speed_of`]'s own terms: derived,
+/// never stored, and therefore incapable of drifting from the thing it is
+/// derived from.
+///
+/// **Wrapped in `f64` and cast once.** `t_s` is a level's whole run in seconds,
+/// and the clip is a second and a bit; doing the modulo after the cast would
+/// quantize a dance floor's phase to whatever an `f32` has left at four hours,
+/// which is about a millisecond. This is VEN1a's `pulse_tick` argument in a
+/// different system.
+pub fn posture_time(guid: Uuid, clock: CrowdClock, posture: crate::components::SlotPosture) -> f32 {
+    let Some(p) = posture.anim() else {
+        return 0.0;
+    };
+    let d = f64::from(p.clip().duration_s);
+    if !(d.is_finite() && d > 0.0 && clock.t_s.is_finite()) {
+        return 0.0;
+    }
+    let rate = 1.0 + POSTURE_RATE_SPREAD * (2.0 * agent_unit(guid, 0, SALT_POSTURE_RATE) - 1.0);
+    let offset = agent_unit(guid, 0, SALT_POSTURE_PHASE) * d;
+    ((clock.t_s * rate + offset).rem_euclid(d)) as f32
+}
 
 /// **Turn a body to face `face`** (wave VEN1b) — the one door, because the
 /// ladder has two ways to own a rotation and writing to the wrong one is
@@ -2246,6 +2303,7 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -
             blocked: false,
             posture: crate::components::SlotPosture::Stand,
             face: DVec3::ZERO,
+            posture_t: 0.0,
         },
     ));
     set_tier_components(world, e, rec.tier, &a);
@@ -2387,6 +2445,7 @@ pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec
             blocked: false,
             posture: crate::components::SlotPosture::Stand,
             face: DVec3::ZERO,
+            posture_t: 0.0,
         },
     ));
     set_tier_components(world, e, CrowdTier::Full, a);
