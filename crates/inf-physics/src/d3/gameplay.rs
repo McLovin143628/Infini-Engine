@@ -1720,6 +1720,99 @@ pub fn side_of(world: &EcsWorld, door_guid: Uuid, feet: DVec3) -> Option<DoorSid
     Some(p.spec.side_of(p.hinge, feet))
 }
 
+/// **AN ARMED NPC AIMS AND FIRES** (wave WPN1) — the one door an intent that is
+/// not the local player's crosses into a character.
+///
+/// # Why a door at all
+///
+/// `inf_ecs::movement::apply_intent` writes every field this writes — and it
+/// writes them **only onto `player_controlled` characters**, which is the line
+/// that makes an NPC's body the crowd's business and not the input layer's. So
+/// an armed NPC had no way to pull a trigger at all: nothing in the tree could
+/// write `want_attack` onto one.
+///
+/// This is the complement, and it is deliberately the same shape as VEH2b's
+/// `drive_intent` door: **one function, refusing the other half of the world.**
+/// `apply_intent` refuses everything that is not player-controlled; this refuses
+/// everything that is. Between them every character's intent has exactly one
+/// author, which is the property that makes a divergence findable.
+///
+/// # What it does NOT do
+///
+/// No cover, no squad, no target selection, no reaction time, no leading a moving
+/// target, no decision to *stop*. Those are EMS3's, and the reason to keep them
+/// out is that each one is a policy: a policy in this function would be a policy
+/// two hosts have to agree about, written where nobody would look for it. What
+/// this answers is the mechanical question — *can an armed NPC point a weapon at
+/// somebody and pull the trigger* — and the answer is now yes.
+///
+/// The **spread is free and already deterministic**: `shot_direction` folds the
+/// weapon's own `spread_seed` with its shot index, so two NPCs firing the same
+/// rifle at the same target do not put their rounds in the same hole, and a
+/// replay reproduces every one of them.
+///
+/// `hold_trigger` is the trigger's **level**, exactly as the player's is, so a
+/// semi-automatic weapon in an NPC's hands fires once per press through
+/// `try_fire`'s own edge rule and needs no second mechanism. It does **not**
+/// write `press_attack`: that edge is the door-kick's, and an NPC that kicked
+/// every locked door it happened to face is not what "an armed NPC can fire" is
+/// asking for.
+///
+/// Answers `false` for a shooter that is not there, is player-controlled, or has
+/// no target to aim at — refusals as values, all the way down.
+pub fn npc_aim_at(world: &mut EcsWorld, shooter: Uuid, target: Uuid, hold_trigger: bool) -> bool {
+    let Some(entity) = world.entity_of(shooter) else {
+        return false;
+    };
+    if world
+        .world()
+        .get::<CharacterMovement>(entity)
+        .is_none_or(|cm| cm.player_controlled)
+    {
+        return false;
+    }
+    // From the shooter's own muzzle to the point a swing would land on — the
+    // same `strike_point` melee aims at, so a rifle and a fist agree about where
+    // a person is.
+    let Some((from, _, _, _)) = muzzle_of(world, shooter) else {
+        return false;
+    };
+    let Some(at) = strike_point(world, target) else {
+        return false;
+    };
+    let to = at - from;
+    let planar = (to.x * to.x + to.z * to.z).sqrt();
+    if !to.is_finite() || (planar <= 1.0e-9 && to.y.abs() <= 1.0e-9) {
+        return false;
+    }
+    // **Portable trigonometry** (the P14 law): these two numbers reach
+    // `shot_direction`, whose output reaches the ray cast, whose hit reaches the
+    // damage door, which reaches the trace.
+    let yaw = inf_ecs::movement::planar_yaw_deg(inf_ecs::math::Vec2d::new(to.x, to.z));
+    let pitch = if planar <= 1.0e-9 {
+        // Straight up or straight down: the yaw is whatever it was and the pitch
+        // is the limit `aim_forward` clamps to anyway.
+        if to.y > 0.0 {
+            89.9
+        } else {
+            -89.9
+        }
+    } else {
+        // `asin(y/|to|)` written as `90 - acos`, because `pacos64` is the
+        // portable inverse this engine has and `f64::asin` is not bit-portable.
+        90.0 - inf_math::pacos64((to.y / to.length()).clamp(-1.0, 1.0)).to_degrees()
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
+        return false;
+    };
+    cm.runtime.aim_yaw_deg = yaw;
+    cm.runtime.aim_pitch_deg = pitch.clamp(-89.9, 89.9);
+    // The LEVEL, assigned — `apply_intent`'s own treatment of this field, and the
+    // reason a semi-automatic weapon needs nothing else.
+    cm.runtime.want_attack = hold_trigger;
+    true
+}
+
 /// Give `character` an equipped weapon by item id — the door a Blueprint and a
 /// gate both use, so a weapon cannot be equipped without its ammunition clock.
 pub fn equip_weapon(world: &mut EcsWorld, character: Uuid, item_id: &str) -> bool {

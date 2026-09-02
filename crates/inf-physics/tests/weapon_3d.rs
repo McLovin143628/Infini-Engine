@@ -1828,3 +1828,125 @@ fn a_gunshot_is_recorded_with_the_people_who_could_see_it() {
          being cast, and the record is a distance list wearing a witness's name"
     );
 }
+
+/// **AN ARMED NPC AIMS AND FIRES** (wave WPN1) — the one door, and the half of
+/// the world it refuses.
+///
+/// Four claims:
+///
+/// 1. the door **writes** an NPC's aim and trigger, which nothing in this engine
+///    could do before: `apply_intent` writes only `player_controlled`
+///    characters, so an armed NPC had no way to pull a trigger at all;
+/// 2. the aim it writes really **points at the target** — measured as the round
+///    landing on it, not as the two numbers looking plausible;
+/// 3. it **refuses the player**, which is what keeps every character's intent to
+///    exactly one author;
+/// 4. releasing the trigger stops the fire, so an NPC is not a turret that
+///    cannot be turned off.
+#[test]
+fn an_armed_npc_aims_at_a_target_and_pulls_the_trigger() {
+    // The hero is the TARGET here; the shooter is an NPC standing off to one
+    // side, so the aim it has to compute is not the identity.
+    let shooter = TARGET;
+    let mut rig = Rig::new();
+    {
+        let cm = CharacterMovement::default();
+        let e = rig.world.spawn_with_guid(shooter, "Gunman", None);
+        let mut t = Transform::IDENTITY;
+        // 6 m along +X and 3 m along +Z: a yaw of about 63 degrees, which no
+        // default and no accident produces.
+        t.translation = Vec3d::new(6.0, cm.stand_half_height_m + RADIUS, 3.0);
+        rig.world.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+                radius: RADIUS,
+                ..Default::default()
+            },
+            CharacterController3D::default(),
+            cm,
+            t,
+        ));
+    }
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    // Arm the NPC through the same door a Blueprint and the panel use.
+    assert!(item::give_inventory(&mut rig.world, shooter, 4));
+    let defs = item::item_defs(&rig.world).cloned().unwrap_or_default();
+    {
+        let e = rig.world.entity_of(shooter).expect("the gunman");
+        let mut inv = rig
+            .world
+            .world_mut()
+            .get_mut::<item::Inventory>(e)
+            .expect("a bag");
+        assert_eq!(inv.add(&defs, "rifle", 1), 0);
+    }
+    assert!(d3::gameplay::equip_weapon(&mut rig.world, shooter, "rifle"));
+    rig.step(&idle());
+
+    // **The player is refused**, so the two authors cannot both write one body.
+    assert!(
+        !d3::gameplay::npc_aim_at(&mut rig.world, HERO, shooter, true),
+        "the NPC door wrote the player's intent — every character's intent must \
+         have exactly one author"
+    );
+
+    assert!(
+        d3::gameplay::npc_aim_at(&mut rig.world, shooter, HERO, true),
+        "the door refused an armed NPC"
+    );
+    let aim = {
+        let e = rig.world.entity_of(shooter).expect("the gunman");
+        let cm = rig
+            .world
+            .world()
+            .get::<CharacterMovement>(e)
+            .expect("a mover");
+        (
+            cm.runtime.aim_yaw_deg,
+            cm.runtime.aim_pitch_deg,
+            cm.runtime.want_attack,
+        )
+    };
+    println!(
+        "the gunman aims at yaw {:.2}, pitch {:.2}, trigger {}",
+        aim.0, aim.1, aim.2
+    );
+    assert!(aim.2, "the trigger is not down");
+    // **THE WORLD**: the round lands on the hero, which is the only thing that
+    // says the two numbers are an aim rather than a pair of plausible floats.
+    let r = rig.step(&idle());
+    assert_eq!(r.shots, 1, "the NPC did not fire");
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(
+        r.hits[0].shooter, shooter,
+        "somebody else fired: {:?}",
+        r.hits[0].shooter
+    );
+    assert_eq!(
+        r.hits[0].target,
+        Some(HERO),
+        "the NPC's round went to {:?} instead of the hero",
+        r.hits[0].target
+    );
+    assert!(r.hits[0].on_flesh);
+    let h = weapon::health_of(&rig.world, HERO).expect("the round gave the hero a body");
+    println!("the hero has {} J of {} left", h.joules, h.capacity_j);
+    assert!((weapon::DEFAULT_VITALITY_J - h.joules - RIFLE_J).abs() < 1e-9);
+
+    // **Releasing stops it**: an NPC is not a turret.
+    assert!(d3::gameplay::npc_aim_at(
+        &mut rig.world,
+        shooter,
+        HERO,
+        false
+    ));
+    let more = rig.steps(&idle(), 30);
+    let fired: u32 = more.iter().map(|r| r.shots).sum();
+    assert_eq!(fired, 0, "the NPC kept firing after the trigger came up");
+}
