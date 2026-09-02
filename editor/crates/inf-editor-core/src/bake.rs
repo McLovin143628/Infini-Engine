@@ -788,6 +788,7 @@ mod tests {
             decor: vec![],
             slots: vec![],
             interior: Default::default(),
+            lights: vec![],
         };
         assert_eq!(
             parts_from_output(&out, &grammar),

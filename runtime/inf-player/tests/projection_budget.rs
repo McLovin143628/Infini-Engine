@@ -519,6 +519,7 @@ fn scatter_fixture() -> RuntimeSim {
         Vec::new(),
         Vec::new(),
         Default::default(),
+        Vec::new(),
     );
     world
         .world_mut()
@@ -626,6 +627,7 @@ fn a_carried_scatter_still_sees_a_new_population() {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
     }
 
@@ -682,6 +684,7 @@ fn a_reincarnated_volume_never_serves_the_old_population() {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
         assert_ne!(
             fresh.structures_gen, old_stamp,

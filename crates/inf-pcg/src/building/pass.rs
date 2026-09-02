@@ -395,6 +395,11 @@ pub fn evaluate_buildings_in(
             doorways,
             slots,
             interior,
+            // The rig the assembler hung (VEN1a). `assemble_in` has already
+            // moved every fixture into the lot's frame beside the instances
+            // and the colliders, so these are world metres like everything
+            // else here.
+            lights: out.lights,
             // `build_in` has already folded the assembler's decoration tail
             // into `instances` (I8b), so a building's panes are inside its own
             // group's instance range and there is nothing left here.

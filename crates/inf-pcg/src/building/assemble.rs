@@ -47,6 +47,7 @@ use glam::{DVec2, DVec3};
 
 use super::palettes::{archetype, BuildingArchetype, FurnitureDef, Placement};
 use super::plan::BuildingParams;
+use super::PcgLight;
 use super::{BuildingPlan, Opening, OpeningKind, Rect2, Room, RoomType, Wall};
 use crate::grammar::dsl::Grammar;
 use crate::grammar::expand::{expand_span, GrammarOutput, GrammarPass, Ground, SpanSource};
@@ -101,6 +102,41 @@ const RUN_END_MARGIN_M: f64 = 0.9;
 /// stretch cannot carry one is refused and the next edge tried.
 const RUN_MIN_HALF_M: f64 = 1.0;
 
+/// How far below the underside of the slab above a rig fixture hangs, metres
+/// (wave VEN1a). A lamp *in* the slab lights the storey above it.
+const RIG_DROP_M: f64 = 0.25;
+
+/// The fraction of a stage room's long axis a rig spreads across (wave VEN1a).
+/// Less than one, so the outermost lamp is over the stage and not over the wall.
+const RIG_SPREAD: f64 = 0.45;
+
+/// How far the outer lamps of a rig toe IN, as a fraction of straight down
+/// (wave VEN1a). The beams cross over the middle of the stage rather than
+/// drilling three separate holes in it.
+const RIG_TOE_IN: f64 = 0.35;
+
+/// A fixture's influence radius, in storey heights (wave VEN1a). Two storeys
+/// reaches the far corner of any room this generator draws and stops well
+/// inside the next building.
+const RIG_RANGE_STOREYS: f64 = 2.0;
+
+/// **The most spots one room's rig may hang** (wave VEN1a).
+///
+/// A ceiling rather than a hope, on `MAX_FURNITURE_PER_ROOM`'s own argument:
+/// `MAX_LIGHTS` is 16 for the whole FRAME, so a palette that asked for twenty
+/// would not merely be extravagant — it would push the sun out of the uniform,
+/// because the truncation is first-N in projection order with no priority.
+const MAX_RIG_SPOTS: u32 = 4;
+
+/// **The most fixtures one BUILDING may hang** (wave VEN1a).
+///
+/// Not a clamp — nothing enforces it at placement — but an asserted bound, so
+/// that a palette which grew a rig per room would fail a test rather than
+/// quietly push the sun out of `inf_render::MAX_LIGHTS`. Eight is half the
+/// frame budget, which is the most one building may claim while a settlement
+/// can hold three venues and a sun.
+const VENUE_LIGHT_CEILING: usize = 8;
+
 /// How much a room-centre piece shrinks per attempt when it fouls an opening
 /// void or a door swing, and how many attempts it gets (wave VEN1a).
 ///
@@ -140,6 +176,10 @@ pub struct BuildingOutput {
     pub instances: Vec<PcgInstance>,
     /// The solid boxes — walls, slabs, stairs, lintels, parapets and furniture.
     pub colliders: Vec<PcgCollider>,
+    /// **The real lights this building hangs** (wave VEN1a) — empty for every
+    /// archetype that declares no [`StageRig`](super::palettes::StageRig),
+    /// which is the seven that predate the venues.
+    pub lights: Vec<super::PcgLight>,
 }
 
 /// The height seam expansion demands but a building never uses: every module is
@@ -177,6 +217,7 @@ pub fn build_in(
         plan,
         instances: out.instances,
         colliders: out.colliders,
+        lights: out.lights,
     }
 }
 
@@ -267,6 +308,15 @@ fn place_in_frame(out: &mut GrammarOutput, frame: crate::building::LotFrame) {
     for c in &mut out.colliders {
         c.center = map(c.center);
         c.rotation = yaw * c.rotation;
+    }
+    // **A fixture turns with its lot** (VEN1a). Its position maps like any
+    // other point and its BEAM turns with the yaw — a spot aimed down the long
+    // axis of a catwalk in lot space is aimed down the long axis of the same
+    // catwalk in the world, which is the whole reason the direction is carried
+    // rather than recomputed from the room.
+    for l in &mut out.lights {
+        l.at = map(l.at);
+        l.dir = yaw * l.dir;
     }
 }
 
@@ -571,6 +621,9 @@ impl Ctx<'_> {
             let blockers = self.blockers(floor);
             for (ri, room) in self.plan.rooms_on(floor) {
                 self.furnish(&mut out, ri, room, y, &blockers);
+                // …and the real lights it hangs (VEN1a), aimed at what the
+                // furniture above just put in the middle of the room.
+                self.rig(&mut out, room, y);
             }
         }
         out
@@ -789,6 +842,113 @@ impl Ctx<'_> {
             }
         }
         out
+    }
+
+    /// **THE RIG** (wave VEN1a) — the real lights a venue's stage rooms hang.
+    ///
+    /// Runs per room, after its furniture, because the fixtures are aimed at
+    /// what the furniture put there: the spots point down at the room's centre,
+    /// which is where `Placement::Centre` puts the stage, and the bar glow sits
+    /// behind the counter's own wall.
+    ///
+    /// # The spots are spread along the room's LONG axis
+    ///
+    /// A rig whose lamps all hang over one point is one lamp. Spreading them
+    /// along the long axis is what makes the pool in `venues/0044` an oval with
+    /// a red middle and magenta ends rather than a circle, and it is also what
+    /// makes the phase decorrelation visible — three colours at once, in three
+    /// places.
+    ///
+    /// # Nothing here reads a clock
+    ///
+    /// A fixture carries the two colours it sweeps between and its own phase
+    /// slot; **which** colour it is showing at an instant is the projector's
+    /// business, resolved once per frame from the level clock. That is the same
+    /// division `PcgInstance::glow` has had since I8b, for the same reason: this
+    /// is committed, cacheable content and the hour is not.
+    fn rig(&self, out: &mut GrammarOutput, room: &Room, y: f64) {
+        let Some(rig) = self.arch.rig else {
+            return;
+        };
+        let inner = room
+            .rect
+            .inset(self.arch.wall_thickness * 0.5 + FURNITURE_WALL_GAP);
+        if !inner.is_positive() {
+            return;
+        }
+        let c = inner.center();
+        // Just under the ceiling: the slab above starts at `floor_height`, and a
+        // lamp inside the slab lights the storey above.
+        let hang = y + self.arch.floor_height - self.arch.slab_thickness - RIG_DROP_M;
+        match room.kind {
+            RoomType::Stage | RoomType::DanceFloor if rig.spots > 0 => {
+                let along_x = inner.size_x() >= inner.size_z();
+                let reach = if along_x {
+                    inner.size_x()
+                } else {
+                    inner.size_z()
+                } * RIG_SPREAD
+                    * 0.5;
+                let n = rig.spots.min(MAX_RIG_SPOTS);
+                for k in 0..n {
+                    // Evenly spaced across `[-reach, reach]`, derived from `k`
+                    // and never accumulated: a single lamp sits at the centre.
+                    let t = if n > 1 {
+                        f64::from(k) / f64::from(n - 1) * 2.0 - 1.0
+                    } else {
+                        0.0
+                    };
+                    let off = t * reach;
+                    let at = if along_x {
+                        DVec3::new(c.x + off, hang, c.y)
+                    } else {
+                        DVec3::new(c.x, hang, c.y + off)
+                    };
+                    // Aimed down and INWARD, so the beams cross over the middle
+                    // of the stage instead of drilling three separate holes.
+                    let aim = if along_x {
+                        DVec3::new(-t * RIG_TOE_IN, -1.0, 0.0)
+                    } else {
+                        DVec3::new(0.0, -1.0, -t * RIG_TOE_IN)
+                    };
+                    out.lights.push(PcgLight {
+                        at,
+                        dir: aim.normalize_or_zero(),
+                        sweep: rig.sweep,
+                        intensity: rig.intensity,
+                        range_m: (self.arch.floor_height * RIG_RANGE_STOREYS) as f32,
+                        inner_deg: rig.inner_deg,
+                        outer_deg: rig.outer_deg.max(rig.inner_deg),
+                        cycle_hz: rig.cycle_hz,
+                        phase: k,
+                        phases: n,
+                    });
+                }
+            }
+            RoomType::BarRoom => {
+                let Some((colour, intensity)) = rig.bar_glow else {
+                    return;
+                };
+                // A point light, not a spot: the pool behind a counter has no
+                // edge to it. `dir` is unread for a point and is written down
+                // rather than left arbitrary.
+                out.lights.push(PcgLight {
+                    at: DVec3::new(c.x, hang, c.y),
+                    dir: DVec3::NEG_Y,
+                    sweep: (colour, colour),
+                    intensity,
+                    range_m: (self.arch.floor_height * RIG_RANGE_STOREYS) as f32,
+                    // 180 deg outer: a cone that covers the sphere IS a point
+                    // light, and saying so here keeps `PcgLight` one type.
+                    inner_deg: 180.0,
+                    outer_deg: 180.0,
+                    cycle_hz: 0.0,
+                    phase: 0,
+                    phases: 1,
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Populate one room from its type's furniture set.
@@ -1297,6 +1457,135 @@ mod tests {
             seed,
             true,
         )
+    }
+
+    /// **THE LIGHT-BUDGET MEASUREMENT** (wave VEN1a).
+    ///
+    /// `inf_render::MAX_LIGHTS` is **16 for the whole frame**, and the
+    /// truncation is first-N in projection order with no distance
+    /// prioritization anywhere between the ECS and the uniform. So a venue's
+    /// rig is spending a budget it shares with the sun, and the honest question
+    /// is not "does a rig look good" but "how many venues fit in a frame".
+    ///
+    /// This arm answers it in the only place that can: the number of fixtures
+    /// one building actually hangs. The island's own frame carries **two**
+    /// authored lights (the sky's sun/moon and the level's one directional), so
+    /// the headroom is fourteen — and the settlement generator places at most
+    /// three venues per settlement, on blocks a grid pitch apart.
+    ///
+    /// The ceiling is asserted per BUILDING rather than per frame because a
+    /// frame is the renderer's business and a building is this crate's; the
+    /// frame-scale arm belongs to the wave gate, which can see a camera.
+    #[test]
+    fn a_venue_hangs_a_countable_number_of_lights() {
+        let mut table: Vec<(&str, usize, usize)> = Vec::new();
+        for id in ArchetypeId::ALL {
+            let arch = archetype(id);
+            let mut worst = 0usize;
+            let mut spots = 0usize;
+            for seed in [3u64, 44, 512, 900] {
+                for floors in [1u32, 2] {
+                    let out = build(
+                        &BuildingParams {
+                            floors,
+                            ..BuildingParams::new(id, lot(40.0, 30.0), 4.0, seed)
+                        },
+                        seed,
+                        true,
+                    );
+                    worst = worst.max(out.lights.len());
+                    spots = spots.max(out.lights.iter().filter(|l| l.outer_deg < 180.0).count());
+                }
+            }
+            table.push((arch.display, worst, spots));
+        }
+        for (name, worst, spots) in &table {
+            println!("VEN1a rig: {name} hangs at most {worst} fixture(s), {spots} of them spots");
+        }
+        for (name, worst, _) in &table {
+            assert!(
+                *worst <= VENUE_LIGHT_CEILING,
+                "{name} hangs {worst} fixtures — the frame budget is                  `inf_render::MAX_LIGHTS` = 16 for the WHOLE scene, shared with the sun"
+            );
+        }
+        // …and the venues really do hang some, or the ceiling above is a
+        // statement about nothing.
+        for id in [
+            ArchetypeId::Bar,
+            ArchetypeId::Nightclub,
+            ArchetypeId::StripClub,
+        ] {
+            let (_, worst, _) = table[ArchetypeId::ALL.iter().position(|a| *a == id).unwrap()];
+            assert!(worst > 0, "{id:?} hangs no light at all");
+        }
+        // Every non-venue hangs none: a rig is not something the seven that
+        // predate it acquired by accident.
+        for id in ArchetypeId::ALL.into_iter().filter(|a| !a.is_venue()) {
+            let (name, worst, _) = table[ArchetypeId::ALL.iter().position(|a| *a == id).unwrap()];
+            assert_eq!(worst, 0, "{name} grew a lighting rig");
+        }
+    }
+
+    /// **A rig points at what the furniture put there, and never inside the
+    /// slab** (wave VEN1a).
+    #[test]
+    fn a_rig_hangs_under_the_ceiling_and_aims_down() {
+        for id in [ArchetypeId::Nightclub, ArchetypeId::StripClub] {
+            let arch = archetype(id);
+            let out = build(
+                &BuildingParams {
+                    floors: 1,
+                    ..BuildingParams::new(id, lot(40.0, 30.0), 4.0, 44)
+                },
+                44,
+                true,
+            );
+            assert!(!out.lights.is_empty(), "{id:?}: no rig");
+            let ceiling = out.plan.floor_y(0) + arch.floor_height - arch.slab_thickness;
+            for l in &out.lights {
+                assert!(
+                    l.at.y < ceiling,
+                    "{id:?}: a fixture at {} is inside the slab whose underside is {ceiling}",
+                    l.at.y
+                );
+                assert!(
+                    l.at.y > out.plan.floor_y(0) + 2.0,
+                    "{id:?}: a fixture at head height"
+                );
+                // Every beam has a real downward component: a stage wash aimed
+                // sideways lights the wall.
+                assert!(
+                    l.dir.y < -0.5,
+                    "{id:?}: a fixture aimed {:?} is not a stage wash",
+                    l.dir
+                );
+                assert!(
+                    (l.dir.length() - 1.0).abs() < 1e-9,
+                    "{id:?}: a non-unit beam"
+                );
+                assert!(l.intensity > 0.0 || l.outer_deg >= 180.0);
+                assert!(l.inner_deg <= l.outer_deg, "{id:?}: an inverted cone");
+            }
+            // The spots are SPREAD, or three lamps are one lamp.
+            let spots: Vec<&PcgLight> = out.lights.iter().filter(|l| l.outer_deg < 180.0).collect();
+            if spots.len() > 1 {
+                let spread = spots.iter().map(|l| l.at.x).fold(f64::MIN, f64::max)
+                    - spots.iter().map(|l| l.at.x).fold(f64::MAX, f64::min)
+                    + spots.iter().map(|l| l.at.z).fold(f64::MIN, f64::max)
+                    - spots.iter().map(|l| l.at.z).fold(f64::MAX, f64::min);
+                assert!(
+                    spread > 1.0,
+                    "{id:?}: {} spots within {spread:.2} m of each other is one lamp",
+                    spots.len()
+                );
+                // …and their phases are distinct, or they are one colour.
+                let mut ph: Vec<u32> = spots.iter().map(|l| l.phase).collect();
+                ph.sort_unstable();
+                let n = ph.len();
+                ph.dedup();
+                assert_eq!(ph.len(), n, "{id:?}: two spots share a phase slot");
+            }
+        }
     }
 
     /// **THE VENUE ANCHOR ASSERTION** (wave VEN1a): a venue's largest ground

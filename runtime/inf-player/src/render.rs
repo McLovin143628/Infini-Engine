@@ -701,9 +701,13 @@ pub fn project_scene_full(
     // a wall clock), quantized on the same argument. `water_environment` below
     // is the Ring-0 door that says what "now" is, so both hosts read one clock.
     // MIRROR: the same lines in the other host, in the same place.
+    // The LEVEL clock, resolved once, in seconds. `water_environment` is
+    // the Ring-0 door that says what "now" is (P20.4), so a venue's stage
+    // wash, a festoon's breath and a river's swell all read one number.
+    let clock_s = inf_ecs::sky::water_environment(world).0;
     let clock = inf_render::ScatterClock {
         glow_step: inf_render::night_glow_step(scene.sun.direction),
-        pulse_tick: inf_render::pulse_tick(inf_ecs::sky::water_environment(world).0),
+        pulse_tick: inf_render::pulse_tick(clock_s),
     };
     // The clock and wind every water body responds to, resolved ONCE per
     // projection in Ring 0 (`inf_ecs::sky`) so the two MIRROR projectors cannot
@@ -847,6 +851,57 @@ pub fn project_scene_full(
         // MIRROR: `push_pcg_scatter` matches `inf_viewport::host`'s PCG projection
         // (minus its pick-id map).
         if let Some(vol) = w.get::<PcgVolume>(entity) {
+            // **THE VENUE RIG** (wave VEN1a): the real, coloured, cone-shaped
+            // lights a grammar-built venue hangs over its stage and behind its
+            // bar. PCG produced no light of any kind until this wave.
+            //
+            // Emission -- a lit pane, a neon plate, a festoon -- is free against
+            // the 16-light frame ceiling and bounces through the GI volume,
+            // which is why clause 1 spent itself on it. What emission cannot
+            // throw is a shaped pool with a soft edge, and that is a cone.
+            //
+            // **This is the ONE place a fixture's colour is resolved.** The
+            // derived `ScatteredLight` carries the two colours it sweeps between
+            // and its own phase slot; which of them it is showing NOW is a pure
+            // function of the LEVEL clock through `inf_render::swept_colour`, so
+            // PIE and the shipped player agree byte for byte and a golden
+            // renders one frame from cold.
+            //
+            // Outside the `evaluated.is_empty()` guard below, deliberately: a
+            // rig is derived beside the population and is not part of it, and a
+            // volume with lights and no instances is a defect this branch should
+            // make visible rather than hide.
+            //
+            // MIRROR: the same block in the other host, in the same place.
+            for l in &vol.lights {
+                let colour =
+                    inf_render::swept_colour(l.sweep, l.cycle_hz, l.phase, l.phases, clock_s);
+                // A cone that covers the sphere IS a point light, and the rig
+                // says so with a 180-degree outer angle rather than a second
+                // type. Resolved here, once, because `RenderLight` has a kind.
+                let point = l.outer_deg >= 180.0;
+                scene.lights.push(RenderLight {
+                    kind: if point {
+                        LightKind::Point
+                    } else {
+                        LightKind::Spot
+                    },
+                    color: colour,
+                    intensity: l.intensity,
+                    // The renderer's convention is TOWARD the light; a fixture
+                    // carries the direction its beam is emitted along.
+                    direction: (-l.dir).as_vec3(),
+                    position: l.at,
+                    range: l.range_m,
+                    inner_cos: l.inner_deg.to_radians().cos(),
+                    outer_cos: l.outer_deg.to_radians().cos(),
+                    // **Never a shadow caster.** A venue rig is three lamps in
+                    // one room; giving each its own virtual-shadow quadtree
+                    // would spend `VSM_MAX_PROJECTIONS` on a pool whose whole
+                    // content is a stage floor and two benches.
+                    cast_shadows: false,
+                });
+            }
             if !vol.evaluated.is_empty() {
                 let id = next_id;
                 next_id += 1;

@@ -191,6 +191,7 @@ pub type VolumePopulation = (
     Vec<inf_ecs::components::DoorwaySlot>,
     Vec<inf_ecs::components::ResidentSlot>,
     inf_nav::NavGraph,
+    Vec<inf_ecs::components::ScatteredLight>,
 );
 
 /// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
@@ -283,7 +284,29 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
             node: s.node,
         })
         .collect();
-    (instances, solids, groups, doorways, residents, interior)
+    // **The rig** (VEN1a) — one `ScatteredLight` per fixture the grammar hung.
+    // A straight field-for-field mirror, like the doorways above it: the
+    // *colour* a fixture is showing at an instant is the projector's business
+    // and is nowhere in this conversion.
+    let lights = out
+        .lights
+        .iter()
+        .map(|l| inf_ecs::components::ScatteredLight {
+            at: l.at,
+            dir: l.dir,
+            sweep: l.sweep,
+            intensity: l.intensity,
+            range_m: l.range_m,
+            inner_deg: l.inner_deg,
+            outer_deg: l.outer_deg,
+            cycle_hz: l.cycle_hz,
+            phase: l.phase,
+            phases: l.phases,
+        })
+        .collect();
+    (
+        instances, solids, groups, doorways, residents, interior, lights,
+    )
     // MIRROR-END population_of
 }
 
@@ -969,14 +992,14 @@ pub async fn pcg_evaluate(
         // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
         // load-bearing (a `StructureGroup` carries index ranges into these very
         // lists), so it is stated once in Ring 0 rather than twice here.
-        let (baked, solid, groups, doorways, residents, interior) =
+        let (baked, solid, groups, doorways, residents, interior, lights) =
             population_of(inf_pcg::compose_volume(instances, generated));
         let placed = baked.len() as u32;
 
         {
             let w = doc.world_mut().world_mut();
             if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
-                vol.set_population(baked, solid, groups, doorways, residents, interior);
+                vol.set_population(baked, solid, groups, doorways, residents, interior, lights);
             }
         }
         doc.bump_version_for_runtime();

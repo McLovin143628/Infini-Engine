@@ -1101,6 +1101,61 @@ pub fn pulse_emissive(emissive: [f32; 3], hz: f32, tick: u32) -> [f32; 3] {
     [emissive[0] * gain, emissive[1] * gain, emissive[2] * gain]
 }
 
+/// **The colour a sweeping fixture is showing at `clock_s`** (wave VEN1a).
+///
+/// One door, called by both projectors, so a stage wash cannot be one colour in
+/// the editor and another in the shipped player — the argument
+/// [`night_glow_step`] and [`pulse_emissive`] both make, and the one that makes
+/// a PIE-versus-shipping byte comparison mean anything at all.
+///
+/// # A triangle, and no trigonometry anywhere
+///
+/// The sweep is `lerp(a, b, tri(x))` with `tri(x) = 2·|frac(x) − 0.5|` — a pure
+/// function of the clock built from `floor` and `abs`, which are exact on every
+/// target. A sine would have been prettier by a hair and would have put a libm
+/// call on a path two hosts compare byte for byte (the P14 law). The triangle
+/// also *dwells* at each end, which is what a moving head actually does.
+///
+/// # The phase is what makes a rig a rig
+///
+/// `phase / phases` offsets each fixture around the cycle, so a three-lamp rig
+/// shows three colours at once. Without it the three lamps are one lamp with
+/// three positions, which is a floodlight.
+///
+/// A `cycle_hz` of `0.0` — every fixture that is not a stage wash — returns `a`
+/// **untouched by any arithmetic**, so a steady lamp is exactly its authored
+/// colour.
+pub fn swept_colour(
+    sweep: ([f32; 3], [f32; 3]),
+    cycle_hz: f32,
+    phase: u32,
+    phases: u32,
+    clock_s: f64,
+) -> [f32; 3] {
+    let (a, b) = sweep;
+    // `!is_finite() || <= 0.0`, the island wave I8a spelling: the readable
+    // rewrite is FALSE for a NaN, and a NaN rate would carry a NaN colour into
+    // the lights uniform.
+    if !cycle_hz.is_finite() || cycle_hz <= 0.0 || !clock_s.is_finite() {
+        return a;
+    }
+    let off = if phases > 1 {
+        f64::from(phase % phases) / f64::from(phases)
+    } else {
+        0.0
+    };
+    // Reduced in f64 before it reaches an f32, like the foliage wind's phase:
+    // at a level's fourth hour `0.19 × 14400` is 2 736 cycles and an f32 has
+    // little fraction left there.
+    let x = (clock_s * f64::from(cycle_hz) + off).fract();
+    let t = (2.0 * (x - 0.5).abs()) as f32;
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
 /// **The two quantized clocks a scatter projection reads** (wave VEN1a).
 ///
 /// Bundled rather than passed as two scalars because they travel together
@@ -3070,6 +3125,69 @@ mod tests {
     /// step is EXACTLY zero and a daytime emission is exactly `[0, 0, 0]`, so a
     /// level with no night in it packs the bytes it packed before this feature
     /// existed.
+
+    /// **A steady fixture is untouched, and a sweeping rig shows three colours
+    /// at once** (wave VEN1a).
+    #[test]
+    fn a_rig_sweeps_in_phase_and_a_steady_lamp_does_not_move() {
+        let warm = [1.0, 0.62, 0.30];
+        let sweep = ([3.0, 0.12, 0.22], [2.4, 0.18, 1.9]);
+        // Steady: the FIRST colour, exactly, at every clock.
+        for t in [0.0, 0.5, 13.7, 1e6] {
+            assert_eq!(swept_colour((warm, warm), 0.0, 0, 1, t), warm);
+            assert_eq!(swept_colour(sweep, 0.0, 2, 3, t), sweep.0);
+        }
+        // A NaN rate or a NaN clock holds the first colour rather than carrying
+        // a NaN into the lights uniform.
+        assert_eq!(swept_colour(sweep, f32::NAN, 0, 3, 4.0), sweep.0);
+        assert_eq!(swept_colour(sweep, 0.11, 0, 3, f64::NAN), sweep.0);
+
+        // A three-lamp rig at one instant: three DIFFERENT colours.
+        let at = |t: f64| {
+            (0..3)
+                .map(|k| swept_colour(sweep, 0.11, k, 3, t))
+                .collect::<Vec<_>>()
+        };
+        let now = at(4.0);
+        assert_ne!(now[0], now[1], "two lamps of a rig show one colour");
+        assert_ne!(now[1], now[2]);
+        // …and every one of them is ON the segment between the two authored
+        // colours, so a sweep cannot invent a hue nobody chose.
+        for c in &now {
+            for k in 0..3 {
+                let (lo, hi) = (sweep.0[k].min(sweep.1[k]), sweep.0[k].max(sweep.1[k]));
+                assert!(
+                    c[k] >= lo - 1e-5 && c[k] <= hi + 1e-5,
+                    "{c:?} left the sweep"
+                );
+            }
+        }
+        // It really moves over a cycle, and it reaches BOTH ends: the triangle
+        // dwells at each, which a mid-range-only wobble would not.
+        let hz = 0.11_f32;
+        let period = 1.0 / f64::from(hz);
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for i in 0..64 {
+            let c = swept_colour(sweep, hz, 0, 1, period * f64::from(i) / 64.0);
+            lo = lo.min(c[2]);
+            hi = hi.max(c[2]);
+        }
+        assert!(
+            lo < sweep.0[2] + 0.05,
+            "the sweep never reached its first end"
+        );
+        assert!(
+            hi > sweep.1[2] - 0.05,
+            "the sweep never reached its second end"
+        );
+        // Pure: the same clock is the same colour.
+        assert_eq!(
+            swept_colour(sweep, hz, 1, 3, 9.25),
+            swept_colour(sweep, hz, 1, 3, 9.25)
+        );
+    }
+
     /// **A steady emitter is untouched, and a pulsing one breathes** (wave
     /// VEN1a).
     ///

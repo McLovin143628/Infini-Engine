@@ -908,6 +908,10 @@ pub struct GrammarOutput {
     /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in), like
     /// [`doorways`](Self::doorways) and [`slots`](Self::slots).
     pub interior: inf_nav::NavGraph,
+    /// **Every real light this output's buildings hang** (wave VEN1a). Located
+    /// in the world and naming no index, so composition neither shifts nor
+    /// re-bases them — exactly like `doorways` and `slots`.
+    pub lights: Vec<crate::building::PcgLight>,
 }
 
 impl GrammarOutput {
@@ -928,6 +932,8 @@ impl GrammarOutput {
         // across the whole call, and world metres, so concatenation is the
         // whole of it (NPC1d).
         self.slots.extend(other.slots);
+        // A fixture is world metres and names no index either (VEN1a).
+        self.lights.extend(other.lights);
         // The interiors are salted apart building by building, so absorbing is
         // the union it looks like — and `absorb`'s "the first record wins" rule
         // never fires, which is exactly what the salt is for.
@@ -1050,6 +1056,8 @@ pub fn expand_span(
         // …and nobody lives in a fence (NPC1d).
         slots: Vec::new(),
         interior: inf_nav::NavGraph::new(),
+        // …and a fence hangs no lights (VEN1a).
+        lights: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

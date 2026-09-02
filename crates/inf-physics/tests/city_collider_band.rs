@@ -182,7 +182,15 @@ fn city(at: DVec3) -> City {
             extent: Vec2d::new(BLOCK.x * 0.5, BLOCK.y * 0.5),
             ..Default::default()
         };
-        vol.set_population(inst, s, g, Vec::new(), Vec::new(), Default::default());
+        vol.set_population(
+            inst,
+            s,
+            g,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+        );
         assert_eq!(
             vol.structure_groups.len(),
             b,
@@ -458,6 +466,7 @@ fn a_solid_covered_by_no_group_is_banded_box_by_box() {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
         assert_eq!(
             vol.structures.len(),

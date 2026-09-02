@@ -3550,7 +3550,7 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
                 inf_pcg::evaluate_buildings(&passes, &inf_pcg::NoSplines, &height, &cx),
             )
         };
-        let (baked, solid, groups, doorways, residents, interior) =
+        let (baked, solid, groups, doorways, residents, interior, lights) =
             inf_player::level::population_of(out);
         let e = sim
             .world()
@@ -3561,7 +3561,7 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
             .world_mut()
             .get_mut::<inf_ecs::components::PcgVolume>(e)
         {
-            v.set_population(baked, solid, groups, doorways, residents, interior);
+            v.set_population(baked, solid, groups, doorways, residents, interior, lights);
             replaced += 1;
         }
     }

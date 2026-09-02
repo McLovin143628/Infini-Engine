@@ -1403,11 +1403,11 @@ pub fn evaluate_pcg_volumes_in(
                 (v, g)
             }
         };
-        let (baked, solid, groups, doorways, residents, interior) =
+        let (baked, solid, groups, doorways, residents, interior, lights) =
             population_of(inf_pcg::compose_volume(scatter, grammar));
 
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
-            vol.set_population(baked, solid, groups, doorways, residents, interior);
+            vol.set_population(baked, solid, groups, doorways, residents, interior, lights);
         }
     }
 }
@@ -1422,6 +1422,7 @@ pub type VolumePopulation = (
     Vec<inf_ecs::components::DoorwaySlot>,
     Vec<inf_ecs::components::ResidentSlot>,
     inf_nav::NavGraph,
+    Vec<inf_ecs::components::ScatteredLight>,
 );
 
 /// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
@@ -1524,7 +1525,29 @@ pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
             node: s.node,
         })
         .collect();
-    (instances, solids, groups, doorways, residents, interior)
+    // **The rig** (VEN1a) — one `ScatteredLight` per fixture the grammar hung.
+    // A straight field-for-field mirror, like the doorways above it: the
+    // *colour* a fixture is showing at an instant is the projector's business
+    // and is nowhere in this conversion.
+    let lights = out
+        .lights
+        .iter()
+        .map(|l| inf_ecs::components::ScatteredLight {
+            at: l.at,
+            dir: l.dir,
+            sweep: l.sweep,
+            intensity: l.intensity,
+            range_m: l.range_m,
+            inner_deg: l.inner_deg,
+            outer_deg: l.outer_deg,
+            cycle_hz: l.cycle_hz,
+            phase: l.phase,
+            phases: l.phases,
+        })
+        .collect();
+    (
+        instances, solids, groups, doorways, residents, interior, lights,
+    )
     // MIRROR-END population_of
 }
 

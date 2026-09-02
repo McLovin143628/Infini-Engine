@@ -39,6 +39,10 @@ pub struct VolumeOutput {
     /// **The walkable interior of this volume's slot-bearing buildings**
     /// (NPC1d), already in the level's own namespace.
     pub interior: inf_nav::NavGraph,
+    /// **Every real light this volume's buildings hang** (wave VEN1a). Located
+    /// in the world and naming no index, so composition neither shifts nor
+    /// re-bases them.
+    pub lights: Vec<crate::building::PcgLight>,
 }
 
 /// Join a volume's scatter instances with its grammar/building output.
@@ -58,6 +62,7 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
         doorways: grammar.doorways,
         slots: grammar.slots,
         interior: grammar.interior,
+        lights: grammar.lights,
         groups: grammar
             .groups
             .into_iter()
@@ -115,6 +120,7 @@ mod tests {
             decor: Vec::new(),
             slots: Vec::new(),
             interior: inf_nav::NavGraph::new(),
+            lights: Vec::new(),
         };
         let scatter: Vec<PcgInstance> = (0..7).map(inst).collect();
         let out = compose_volume(scatter, grammar);

@@ -171,6 +171,44 @@ pub enum Placement {
     },
 }
 
+/// **A venue's lighting rig** (wave VEN1a) — the real, coloured, cone-shaped
+/// lights a stage room hangs over its platform.
+///
+/// # Why the count is three and not thirty
+///
+/// The frame light budget is `inf_render::MAX_LIGHTS = 16` for the WHOLE
+/// scene, and it is a first-`N`-in-projection-order truncation with no distance
+/// prioritization anywhere between the ECS and the uniform. Measured on the
+/// committed island, a frame carries **two** lights — the sky's sun/moon and
+/// the level's one authored directional — so a venue's rig has fourteen slots
+/// to spend and a settlement holds at most three venues.
+///
+/// Three spots per stage room is what the reference actually shows: `0036` has
+/// one red key over the catwalk and two rim lamps either side of it, and the
+/// pool on the planks is one circle with two coloured edges. Thirty would be a
+/// truss, and a truss over a 6 m stage is not what a club looks like.
+///
+/// See the wave ledger for the measurement and for what a fourth venue in one
+/// frame would cost.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StageRig {
+    /// Spots hung over a [`RoomType::Stage`] or [`RoomType::DanceFloor`].
+    pub spots: u32,
+    /// The two linear colours a spot sweeps between.
+    pub sweep: ([f32; 3], [f32; 3]),
+    /// Radiant intensity of one spot.
+    pub intensity: f32,
+    /// Cone inner half-angle, degrees.
+    pub inner_deg: f32,
+    /// Cone outer half-angle, degrees.
+    pub outer_deg: f32,
+    /// Sweep rate, hertz.
+    pub cycle_hz: f32,
+    /// A steady point light behind a [`RoomType::BarRoom`]'s counter — the warm
+    /// pool a bartender works in — as `(linear colour, intensity)`, or `None`.
+    pub bar_glow: Option<([f32; 3], f32)>,
+}
+
 /// **A venue's street face** (wave VEN1a) — the signage the assembler hangs
 /// over the building's one exterior door.
 ///
@@ -363,6 +401,10 @@ pub struct BuildingArchetype {
     /// for a building that does not announce itself — which is the seven that
     /// predate the venues.
     pub entrance_sign: Option<EntranceSign>,
+    /// **The real lights this archetype's stage rooms hang** (wave VEN1a), or
+    /// `None` for a building that produces no light of its own — which, before
+    /// this wave, was every building the engine could grow.
+    pub rig: Option<StageRig>,
 }
 
 impl BuildingArchetype {
@@ -593,6 +635,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const APARTMENT: BuildingArchetype = BuildingArchetype {
@@ -756,6 +799,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const INDUSTRIAL: BuildingArchetype = BuildingArchetype {
@@ -886,6 +930,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const HOUSE: BuildingArchetype = BuildingArchetype {
@@ -1043,6 +1088,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const ESTATE: BuildingArchetype = BuildingArchetype {
@@ -1224,6 +1270,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const HOTEL: BuildingArchetype = BuildingArchetype {
@@ -1373,6 +1420,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 const SHOP: BuildingArchetype = BuildingArchetype {
@@ -1514,6 +1562,7 @@ Inner  -> Partition+
     ],
     ground_anchors: &[],
     entrance_sign: None,
+    rig: None,
 };
 
 /// **What is in a venue's rooms** (wave VEN1a) — shared by all three, because
@@ -1862,6 +1911,18 @@ Inner  -> Partition+\n\
         height_m: 3.0,
         festoon: Some("Festoon"),
     }),
+    // A bar has no stage, so it has no spots -- but it does have the warm
+    // pool behind its counter that every reference frame of a bar puts a
+    // bartender in.
+    rig: Some(StageRig {
+        spots: 0,
+        sweep: ([1.0, 0.55, 0.22], [1.0, 0.55, 0.22]),
+        intensity: 0.0,
+        inner_deg: 28.0,
+        outer_deg: 44.0,
+        cycle_hz: 0.0,
+        bar_glow: Some(([1.0, 0.62, 0.30], 5.0)),
+    }),
 };
 
 /// **A nightclub** (wave VEN1a) -- a dance floor with a stage on it, a bar room
@@ -1969,6 +2030,16 @@ Inner  -> Partition+\n\
         height_m: 3.4,
         festoon: Some("Festoon"),
     }),
+    // Magenta into blue, quickly: a dance floor's rig moves.
+    rig: Some(StageRig {
+        spots: 3,
+        sweep: ([2.6, 0.22, 2.0], [0.28, 0.5, 2.8]),
+        intensity: 26.0,
+        inner_deg: 22.0,
+        outer_deg: 40.0,
+        cycle_hz: 0.19,
+        bar_glow: Some(([0.55, 0.75, 1.0], 4.0)),
+    }),
 };
 
 /// **A strip club** (wave VEN1a) -- `venues/0020`-`0052` exactly: a raised
@@ -2072,6 +2143,17 @@ Inner  -> Partition+\n\
         half: [0.9, 0.38, 0.08],
         height_m: 3.2,
         festoon: Some("Festoon"),
+    }),
+    // Deep red into magenta, slowly -- `venues/0036` to `0044` is exactly this
+    // sweep, and it takes several seconds.
+    rig: Some(StageRig {
+        spots: 3,
+        sweep: ([3.0, 0.12, 0.22], [2.4, 0.18, 1.9]),
+        intensity: 30.0,
+        inner_deg: 18.0,
+        outer_deg: 34.0,
+        cycle_hz: 0.11,
+        bar_glow: Some(([1.0, 0.55, 0.28], 4.0)),
     }),
 };
 

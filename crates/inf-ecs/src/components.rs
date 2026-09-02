@@ -3670,6 +3670,48 @@ pub struct DoorwaySlot {
     pub floor: u32,
 }
 
+/// **One real light a `.inf_pcg` graph's buildings hang** (wave VEN1a) — a
+/// dependency-light mirror of `inf_pcg::building::PcgLight`, on exactly the
+/// terms [`ScatteredSolid`] mirrors `inf_pcg::PcgCollider`.
+///
+/// Not reflected, not serialized: derived state, recomputed wherever
+/// `evaluated` is, so it moves no schema. **That is the whole schema answer for
+/// the venue lighting rig** — PCG produced no light of any kind before this
+/// wave, and giving it one cost the spent v27 window nothing.
+///
+/// # This is what emission could not do
+///
+/// A neon plate and a lit pane are *emission*: free against the 16-light frame
+/// ceiling, and they bounce through the GI volume. What they cannot throw is a
+/// shaped pool with a soft edge — the deep red circle on the planks in
+/// `venues/0036`, with a chrome pole standing in a bright vertical streak down
+/// its middle. That is a cone, and a cone is a spot light.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatteredLight {
+    /// The fixture, world metres.
+    pub at: DVec3,
+    /// The unit direction the beam is **emitted** along. The projector negates
+    /// it once on the way to the renderer's toward-the-light convention.
+    pub dir: DVec3,
+    /// The two linear colours the fixture sweeps between; a steady fixture sets
+    /// both the same.
+    pub sweep: ([f32; 3], [f32; 3]),
+    /// Radiant intensity.
+    pub intensity: f32,
+    /// Influence radius, metres.
+    pub range_m: f32,
+    /// Spot cone inner half-angle, degrees.
+    pub inner_deg: f32,
+    /// Spot cone outer half-angle, degrees.
+    pub outer_deg: f32,
+    /// Sweep rate in hertz; `0.0` holds the first colour.
+    pub cycle_hz: f32,
+    /// Which slot of its own rig this fixture is.
+    pub phase: u32,
+    /// How many slots the rig has.
+    pub phases: u32,
+}
+
 /// **Which run of a volume's derived lists is one building**, and what that
 /// building's shell box is (IB-2b).
 ///
@@ -3790,6 +3832,19 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub doorways: Vec<DoorwaySlot>,
+    /// **Every real light this volume's buildings hang** (wave VEN1a).
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` for exactly the reason
+    /// [`doorways`](Self::doorways) is: derived from the graph and the terrain,
+    /// reaching no bytes, forcing no schema move. Read by both projectors,
+    /// which resolve each fixture's colour from the level clock and push one
+    /// `RenderLight`.
+    ///
+    /// Located in the world and naming no index, so nothing here has to be
+    /// re-based when populations are concatenated.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub lights: Vec<ScatteredLight>,
     /// Bumped every time the derived population is replaced through
     /// [`set_structures`](Self::set_structures) or
     /// [`set_population`](Self::set_population) — the **change stamp** the
@@ -3945,6 +4000,7 @@ impl Default for PcgVolume {
             evaluated: Vec::new(),
             structures: Vec::new(),
             doorways: Vec::new(),
+            lights: Vec::new(),
             structures_gen: 0,
             structure_groups: Vec::new(),
             residents: Vec::new(),
@@ -4022,8 +4078,10 @@ impl PcgVolume {
         doorways: Vec<DoorwaySlot>,
         residents: Vec<ResidentSlot>,
         interior_nav: inf_nav::NavGraph,
+        lights: Vec<ScatteredLight>,
     ) {
         self.doorways = doorways;
+        self.lights = lights;
         self.residents = residents;
         self.interior_nav = interior_nav;
         let (ns, ni) = (solids.len(), instances.len());
@@ -6719,6 +6777,7 @@ mod tests {
             seed: 7,
             draw_distance: 600.0,
             doorways: Vec::new(),
+            lights: Vec::new(),
             evaluated: vec![ScatteredInstance {
                 position: DVec3::new(1.0, 2.0, 3.0),
                 rotation: DQuat::IDENTITY,
@@ -6849,6 +6908,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
         assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
         assert_eq!(v.structure_groups[0].range(), 0..3);
@@ -6870,6 +6930,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
         let second = v.structures_gen;
         assert!(second > first, "{first} then {second}");
@@ -6915,6 +6976,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Default::default(),
+            Vec::new(),
         );
         assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
         assert_eq!(w.structure_groups[0].range(), 0..2);

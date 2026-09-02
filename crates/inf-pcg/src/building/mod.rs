@@ -360,6 +360,58 @@ pub fn solid_bounds(solid: &PcgCollider) -> Rect2 {
     }
 }
 
+/// **One real light a building's grammar hangs** (wave VEN1a) — the first time
+/// PCG has produced a light of any kind.
+///
+/// # Why a venue needed one and windows did not
+///
+/// Every lit thing in this engine's buildings until now has been *emission*: a
+/// glowing window pane, and since this wave a neon plate and a string-light
+/// swag. Emission costs nothing against the 16-light frame ceiling and it
+/// bounces through the GI volume, which is exactly why the venue wave spent its
+/// first clause on it. What emission cannot do is throw a **shaped pool** — the
+/// deep red circle on the planks in `venues/0036`, soft at its edge, with a
+/// chrome pole standing in a bright vertical streak down its middle. That is a
+/// cone, and a cone is a spot light.
+///
+/// So a rig is a handful of REAL lights, and the number is small on purpose:
+/// see [`palettes::StageRig::spots`].
+///
+/// # Derived, never serialized
+///
+/// It rides `PcgVolume::lights`, `#[serde(skip)]` on exactly the terms
+/// [`PcgDoorway`] rides `PcgVolume::doorways`: recomputed wherever the
+/// population is, reaching no bytes, and therefore moving no schema. A venue's
+/// rig cost the spent v27 window nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcgLight {
+    /// The fixture, world metres.
+    pub at: DVec3,
+    /// The unit direction the beam is **emitted** along (a stage wash points
+    /// down). Deliberately not the renderer's toward-the-light convention: a
+    /// projector negates it, in one place, on the way to `RenderLight`.
+    pub dir: DVec3,
+    /// The two linear colours the fixture sweeps between. A steady fixture sets
+    /// both the same rather than carrying a flag.
+    pub sweep: ([f32; 3], [f32; 3]),
+    /// Radiant intensity.
+    pub intensity: f32,
+    /// Influence radius, metres.
+    pub range_m: f32,
+    /// Spot cone inner half-angle, degrees.
+    pub inner_deg: f32,
+    /// Spot cone outer half-angle, degrees; `>= inner_deg`.
+    pub outer_deg: f32,
+    /// Sweep rate in hertz; `0.0` holds the first colour.
+    pub cycle_hz: f32,
+    /// Which slot of its own rig this fixture is, `0..phases`. Decorrelates the
+    /// sweep so a three-lamp rig is three colours at once rather than three
+    /// lamps of one colour, which is a floodlight and not a rig.
+    pub phase: u32,
+    /// How many slots the rig has, so the phase means something.
+    pub phases: u32,
+}
+
 /// What a room is for. Drives the wall grammar chosen for its walls, whether it
 /// takes windows, and which furniture set populates it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

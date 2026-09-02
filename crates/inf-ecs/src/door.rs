@@ -1639,6 +1639,7 @@ mod tests {
                 slots,
                 Vec::new(),
                 Default::default(),
+                Vec::new(),
             );
             w.world_mut().entity_mut(e).insert(vol);
         }

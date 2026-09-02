@@ -1085,6 +1085,7 @@ mod tests {
             }],
             residents,
             g,
+            Vec::new(),
         );
         world.world_mut().entity_mut(e).insert((
             Transform {
