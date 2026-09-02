@@ -128,15 +128,6 @@ const RIG_RANGE_STOREYS: f64 = 2.0;
 /// because the truncation is first-N in projection order with no priority.
 const MAX_RIG_SPOTS: u32 = 4;
 
-/// **The most fixtures one BUILDING may hang** (wave VEN1a).
-///
-/// Not a clamp — nothing enforces it at placement — but an asserted bound, so
-/// that a palette which grew a rig per room would fail a test rather than
-/// quietly push the sun out of `inf_render::MAX_LIGHTS`. Eight is half the
-/// frame budget, which is the most one building may claim while a settlement
-/// can hold three venues and a sun.
-const VENUE_LIGHT_CEILING: usize = 8;
-
 /// How much a room-centre piece shrinks per attempt when it fouls an opening
 /// void or a door swing, and how many attempts it gets (wave VEN1a).
 ///
@@ -1447,6 +1438,15 @@ mod tests {
     use crate::building::palettes::{archetypes, ArchetypeId};
     use crate::building::plan::plan_building;
     use crate::building::solid_bounds;
+
+    /// **The most fixtures one BUILDING may hang** (wave VEN1a).
+    ///
+    /// Not a clamp — nothing enforces it at placement — but an asserted bound, so
+    /// that a palette which grew a rig per room would fail a test rather than
+    /// quietly push the sun out of `inf_render::MAX_LIGHTS`. Eight is half the
+    /// frame budget, which is the most one building may claim while a settlement
+    /// can hold three venues and a sun.
+    const VENUE_LIGHT_CEILING: usize = 8;
 
     fn lot(w: f64, h: f64) -> Rect2 {
         Rect2::new(DVec2::ZERO, DVec2::new(w, h))
