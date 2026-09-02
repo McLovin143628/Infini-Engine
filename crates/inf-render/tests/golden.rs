@@ -4226,6 +4226,128 @@ fn golden_gi_emissive() {
     );
 }
 
+/// **Scattered emission reaches the bounce** (wave VEN1a) —
+/// `golden_gi_scatter_neon`.
+///
+/// The venue substrate's first claim, made falsifiable. A white floor, a
+/// **scatter batch** of small magenta plates on a wall line, and *no analytic
+/// light at all*: the scene's one directional light has zero radiance, so a
+/// voxel's bounce term is `albedo × 0 + emissive` and every magenta photon on
+/// that floor arrived through `passes::gi`'s scatter staging.
+///
+/// It is deliberately a scatter batch and not a `MeshInstance`, because that is
+/// the whole point: `golden_gi_emissive` beside it has proved instance emission
+/// bounces since P18.4, and a grammar-built venue's neon, string lights and lit
+/// panes are **none of them instances**. Before this wave they were drawn and
+/// lit nothing.
+///
+/// Two control arms, because one is not enough to name the path:
+///
+/// * the same scene with the batch's `emissive` **zeroed** — if the floor is
+///   magenta in both, the emission is not what put it there;
+/// * the same *emissive* scene with **GI off** — if the floor is magenta in
+///   both, the emission reached it through the raster rather than through the
+///   bounce, and this arm would pass on an engine where nothing was staged.
+///
+/// The GI-on control's floor is not dark: it carries the volume's **sky** term.
+/// That is why the claim is made about the red/green *ratio* and not about
+/// brightness alone — a bluish sky bounce and a magenta neon bounce are the
+/// same number of lumens and opposite hues.
+#[test]
+fn golden_gi_scatter_neon() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let neon = |emissive: [f32; 3]| {
+        let mut scene = RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        // White floor slab (top surface at y = 0).
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(0.0, -0.25, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(14.0, 0.5, 14.0),
+            [0.92, 0.92, 0.92, 1.0],
+            1,
+        ));
+        // A run of near-black plates on a line, ALL of them scattered. Each is
+        // 0.8 m across — above the volume's half-voxel dust floor, so the arm
+        // is about emission and not about the size reject.
+        let plates: Vec<ScatterInstance> = (0..7)
+            .map(|i| ScatterInstance {
+                position: DVec3::new(f64::from(i) * 1.1 - 3.3, 1.5, -2.2),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.8, 0.8, 0.4),
+                color: [0.02, 0.02, 0.02, 1.0],
+            })
+            .collect();
+        scene.scatter.push(ScatterBatch {
+            emissive,
+            ..ScatterBatch::lit(
+                Arc::new(ScatterData::build(PrimMesh::Cube, DVec3::ZERO, plates)),
+                DVec3::ZERO,
+                0.6,
+                2,
+            )
+        });
+        // Present so the shaders take the light-loop path rather than the
+        // fallback editor sun, and contributing exactly nothing.
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color: [0.0, 0.0, 0.0],
+            intensity: 0.0,
+            direction: Vec3::Y,
+            ..RenderLight::default()
+        });
+        scene.mark_dirty();
+        scene
+    };
+
+    let scene = neon([3.4, 0.20, 2.6]);
+    let dark = neon([0.0, 0.0, 0.0]);
+    let view = look_view(DVec3::new(0.0, 3.2, 6.0), DVec3::new(0.0, 0.2, -1.6));
+    let gi_on = gi_settings(24.0, 64, 2.0);
+
+    let img = check_golden_with(&gpu, "gi_scatter_neon", &scene, &view, gi_on);
+    let unlit_batch = render_with(&gpu, &dark, &view, gi_on);
+    let no_gi = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    // The floor, well below the plates.
+    let (fx, fy) = (
+        (W * 30 / 100)..(W * 70 / 100),
+        (H * 72 / 100)..(H * 95 / 100),
+    );
+    let ratio = |img: &[u8]| region_channel_ratio(img, fx.clone(), fy.clone(), 0, 1);
+    let mean = |img: &[u8]| region_mean(img, fx.clone(), fy.clone());
+    let (r_on, r_dark, r_nogi) = (ratio(&img), ratio(&unlit_batch), ratio(&no_gi));
+    let (m_on, m_dark) = (mean(&img), mean(&unlit_batch));
+    eprintln!(
+        "gi_scatter_neon floor red/green: neon+GI {r_on:.3} (mean {m_on:.2}), \
+         unlit batch+GI {r_dark:.3} (mean {m_dark:.2}), neon no-GI {r_nogi:.3}"
+    );
+    assert!(
+        r_on > r_dark + 0.08,
+        "the scattered neon did not bleed magenta onto the floor \
+         (neon {r_on:.3} vs unlit batch {r_dark:.3}) — scatter is not staged into GI"
+    );
+    assert!(
+        r_on > r_nogi + 0.08,
+        "the floor is as magenta with GI off ({r_nogi:.3}) as with it on ({r_on:.3}) — \
+         whatever tinted it, it was not the bounce"
+    );
+    assert!(
+        m_on > m_dark + 1.0,
+        "a scattered emissive source lit nothing (mean {m_on:.2} vs {m_dark:.2})"
+    );
+    // The GI-on control's floor IS lit — by the sky term — so the arm above is
+    // about hue, and this pins that the sky's hue is the opposite one. Without
+    // it a scene whose sky happened to be magenta would satisfy everything.
+    assert!(
+        r_dark < 1.0,
+        "the sky bounce alone is already red-dominant ({r_dark:.3}); the ratio \
+         arms above cannot then name the neon as the source"
+    );
+}
+
 /// **Specular** (P18.4 deliverable 4a) — `golden_gi_specular`.
 ///
 /// A smooth, semi-metallic floor under a bright red wall. With the SH specular on,

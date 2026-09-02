@@ -93,6 +93,21 @@ const KIND_SPHERE: f32 = 1.0;
 /// its neighbours until a character voxelized as one slab.
 const JOINT_DOMINANT_WEIGHT: f32 = 0.35;
 
+/// **The most instances one scatter batch may be walked for** (wave VEN1a).
+///
+/// Four times the largest tier budget, so a batch can never be the reason the
+/// per-frame cost of *staging* stops being a function of the per-frame cost of
+/// *voxelizing*. Past it the batch is walked with a stride — every `n`th
+/// instance, `n` chosen so the walk lands here — which is deterministic, is a
+/// pure function of the payload's own length, and is reported as
+/// [`GiAudit::scatter_decimated`] rather than being silent.
+///
+/// It bites only on a batch with more than 16 384 instances **inside the 40 m
+/// GI volume**, where the 64³ grid holds 262 144 voxels and the budget admits
+/// 4 096 primitives: the grid is saturated several times over before the stride
+/// removes anything a probe could have seen.
+const SCATTER_WALK_CEILING: usize = 4 * 4096;
+
 /// One cached mesh's joint boxes, **and the `Arc` whose address is its key**.
 ///
 /// The pair is the point, not an implementation detail: see
@@ -932,6 +947,105 @@ impl RenderNode for GiNode {
             }
         }
 
+        // **Scattered instances, as spheres** (wave VEN1a) — the path that had
+        // never reached the bounce.
+        //
+        // # Why this was the cheapest real win the venue wave had
+        //
+        // Every practical light in a night interior — a neon sign plate, a
+        // string-light chain, a stage skirt, a lit shopfront pane — is a
+        // *scattered module*, and a scattered module is what `RenderScene`
+        // carries in `scatter` rather than in `instances`. Until this wave GI
+        // staged instances, skinned meshes and vgeom and nothing else, so a
+        // grammar-built building's every window and every sign contributed
+        // exactly zero bounced light: the emissive was drawn, and the wall
+        // opposite it stayed at the ambient term. Staging them costs no light
+        // slot at all — the 16-light frame ceiling is untouched — because an
+        // emissive voxel lights the room through `gi_probes.wgsl`'s injection,
+        // which needs no analytic light to exist.
+        //
+        // # The three rejects, and why each is O(1) before it is O(instances)
+        //
+        // * **Dust.** A batch whose largest instance is under half a voxel
+        //   across cannot be *represented* by the grid: it would fill a voxel
+        //   with its albedo and occlude everything behind it, which is how a
+        //   meadow of 0.3 m grass tufts becomes an opaque slab at 0.6 m voxels.
+        //   So a non-emitting batch below that size is skipped whole, by two
+        //   scalars the payload already carries (`bounding_radius × max_scale`)
+        //   and without touching one instance. **An emitting batch is never
+        //   dust** — a string-light bulb is 40 mm and is the entire point.
+        // * **The far band.** A structure-LOD *shell* batch is banded
+        //   `[STRUCTURE_LOD_M, cull)`, and no point of a volume 40 m across
+        //   centred on the eye is 96 m from it, so the whole batch is provably
+        //   invisible here. One compare against the volume's half-diagonal.
+        // * **Per instance**, the band test the cull compute applies and the
+        //   volume test the generic filter below applies — done *inline*, so a
+        //   settlement's 2 000-instance batch pushes only what survives instead
+        //   of allocating 2 000 × 112 bytes for the filter to throw away.
+        let mut scatter_rejected = 0_u32;
+        let mut scatter_decimated = 0_u32;
+        for batch in &frame.scene.scatter {
+            let data = &batch.data;
+            if data.is_empty() {
+                continue;
+            }
+            let emits = batch.emissive.iter().any(|c| *c > 0.0);
+            if !crate::gi::scatter_batch_stages(
+                emits,
+                data.bounding_radius() * data.max_scale(),
+                batch.near_distance,
+                vsize,
+                extent,
+            ) {
+                scatter_rejected += 1;
+                continue;
+            }
+            let emissive = batch.emissive;
+            let unit_radius = data.bounding_radius();
+            let stride = data.len().div_ceil(SCATTER_WALK_CEILING).max(1);
+            if stride > 1 {
+                scatter_decimated += 1;
+            }
+            for inst in data.instances.iter().step_by(stride) {
+                let model = crate::passes::scatter::instance_model(origin, batch.anchor, inst);
+                let center = model.w_axis.truncate();
+                // The band the cull compute would apply to this instance. The
+                // volume is 40 m across and a draw distance is hundreds, so this
+                // is inert for almost every batch — and it is what stops a
+                // *shell* whose near cut the O(1) test above could not settle
+                // from voxelizing a building around the camera's ears.
+                let d = f64::from((center - eye).length());
+                if d < batch.near_distance
+                    || (batch.draw_distance > 0.0 && d >= batch.draw_distance)
+                {
+                    continue;
+                }
+                // The instance's own radius: the payload's unit bound scaled by
+                // this instance's own largest axis, not the batch's widest — a
+                // batch holds one mesh at many sizes.
+                let s = inst
+                    .scale
+                    .abs()
+                    .max(inst.scale_yz[0].abs())
+                    .max(inst.scale_yz[1].abs());
+                let radius = unit_radius * s;
+                let bounds = GiBounds { center, radius };
+                if !intersects_volume(&bounds, vol_min, extent) {
+                    continue;
+                }
+                // **Albedo per instance, emission per batch** — the one
+                // asymmetry this path has that the others do not. A scatter's
+                // tint rides on the instance (`ScatterInstanceRaw::color`) and
+                // its emission on the batch, because the batch is what the
+                // raster binds as a uniform; the projectors bucket on the
+                // emission for exactly that reason.
+                let albedo = [inst.color[0], inst.color[1], inst.color[2]];
+                if let Some(p) = stage_sphere(center, radius, albedo, emissive) {
+                    staged.push(p);
+                }
+            }
+        }
+
         // ── clip to the volume, prioritize, budget ──────────────────────────
         let mut kept: Vec<Staged> = staged
             .into_iter()
@@ -1080,6 +1194,8 @@ impl RenderNode for GiNode {
                 probes_updated: probe_count,
                 probe_cursor: self.schedule.cursor(),
                 skinned_rejected,
+                scatter_rejected,
+                scatter_decimated,
             };
         }
 

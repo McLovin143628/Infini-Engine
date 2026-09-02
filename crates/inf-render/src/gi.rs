@@ -503,6 +503,28 @@ pub struct GiAudit {
     /// Counted rather than inferred, because "the pre-reject is working" and
     /// "there was nothing to reject" produce the same millisecond.
     pub skinned_rejected: u32,
+    /// **Scatter batches rejected whole, before a single instance was walked**
+    /// (wave VEN1a) — the dust reject and the far-band reject together.
+    ///
+    /// A batch is dust when its widest instance is under half a voxel across and
+    /// it emits nothing: at the volume's 0.6 m voxels a 0.3 m grass tuft cannot
+    /// be *represented*, only occlude. A batch is far-banded when its inner
+    /// draw cut is beyond every point of the volume — which every structure
+    /// **shell** batch is, since the shell band starts at 96 m and the volume
+    /// reaches 35.
+    ///
+    /// Counted for exactly the reason [`skinned_rejected`](Self::skinned_rejected)
+    /// is: a meadow that stages nothing and a meadow that is not there produce
+    /// the same millisecond, and only one of them is the pass working.
+    pub scatter_rejected: u32,
+    /// **Scatter batches walked with a stride** (wave VEN1a) — batches longer
+    /// than `SCATTER_WALK_CEILING` whose instances were sampled every `n`th
+    /// rather than every one.
+    ///
+    /// Non-zero means the staging walk hit its own ceiling, which is a
+    /// *reportable* loss of fidelity and not a silent one. It cannot happen
+    /// below 16 384 instances of one batch inside the volume.
+    pub scatter_decimated: u32,
 }
 
 /// **A skinned instance's whole posed extent, in MODEL space** (island wave
@@ -596,6 +618,56 @@ pub fn intersects_volume(b: &GiBounds, vol_min: Vec3, extent: f32) -> bool {
     let vol_max = vol_min + Vec3::splat(extent);
     let closest = b.center.clamp(vol_min, vol_max);
     (closest - b.center).length_squared() <= b.radius * b.radius
+}
+
+/// The largest distance from the volume's centre to any point of it — the
+/// half-diagonal of a cube of side `extent` (wave VEN1a).
+///
+/// A literal `√3/2` rather than a `sqrt` call: it is a constant of the volume's
+/// shape, and the P14 law wants the number a committed decision rests on written
+/// down rather than computed.
+#[inline]
+pub fn volume_reach(extent: f32) -> f32 {
+    extent * 0.866_025_4
+}
+
+/// **Whether a scatter batch can contribute to the bounce at all** (wave VEN1a)
+/// — the whole-batch reject, `O(1)` in the payload's length.
+///
+/// One door, because the answer decides a *cost* (2 000 instances walked or
+/// none) and a *look* (a meadow that occludes the sky or one that does not), and
+/// two spellings of it would let the pass and its test disagree about which.
+///
+/// Two independent reasons to refuse a batch:
+///
+/// * **Dust.** `widest_radius` is the batch's largest instance's bounding-sphere
+///   radius. Under half a voxel the grid cannot *represent* the instance: it
+///   would fill a voxel with the instance's albedo and occlude everything behind
+///   it, which is how a meadow of 0.3 m grass tufts becomes an opaque slab at
+///   the volume's 0.6 m voxels. **An emitting batch is never dust** — a
+///   string-light bulb is 40 mm across and is the entire reason this path
+///   exists.
+/// * **The far band.** A batch with an inner draw cut (`near_distance`) at or
+///   beyond [`volume_reach`] has no instance inside the volume by construction,
+///   which is exactly a structure **shell** batch: shells are banded from 96 m
+///   and the 40 m volume reaches 34.6.
+///
+/// Neither reason looks at the camera, so the answer is a function of the batch
+/// and the settings alone.
+pub fn scatter_batch_stages(
+    emits: bool,
+    widest_radius: f32,
+    near_distance: f64,
+    voxel_size: f32,
+    extent: f32,
+) -> bool {
+    if !emits && !(widest_radius >= voxel_size * 0.5) {
+        return false;
+    }
+    if near_distance > 0.0 && near_distance >= f64::from(volume_reach(extent)) {
+        return false;
+    }
+    true
 }
 
 /// Deterministic nearest-first ordering of `bounds` around `center`.
@@ -1388,6 +1460,57 @@ mod tests {
             "the surviving entry must be the near one's rank"
         );
         assert_eq!(*offsets.last().unwrap(), 1);
+    }
+
+    // ── the scatter whole-batch reject (wave VEN1a) ──
+
+    /// **The dust rule, and the exemption that is the whole point.** A meadow of
+    /// sub-voxel tufts must not reach the grid; a string-light bulb of exactly
+    /// the same size must.
+    #[test]
+    fn sub_voxel_scatter_is_dust_unless_it_emits() {
+        // 0.6 m voxels (the 40 m volume at 64³), a 0.15 m grass tuft.
+        let (vsize, extent) = (0.625_f32, 40.0_f32);
+        assert!(
+            !scatter_batch_stages(false, 0.15, 0.0, vsize, extent),
+            "a 0.15 m tuft is a third of a voxel and would occlude, not light"
+        );
+        assert!(
+            scatter_batch_stages(true, 0.02, 0.0, vsize, extent),
+            "a 40 mm bulb that EMITS is the reason this path exists"
+        );
+        // …and the rule really is the half-voxel and not some other number: a
+        // wall panel clears it, and the exact boundary is inclusive.
+        assert!(scatter_batch_stages(false, 1.75, 0.0, vsize, extent));
+        assert!(scatter_batch_stages(false, vsize * 0.5, 0.0, vsize, extent));
+        assert!(!scatter_batch_stages(
+            false,
+            vsize * 0.5 - 1e-4,
+            0.0,
+            vsize,
+            extent
+        ));
+        // A NaN radius is not "at least half a voxel", so it is dust — the
+        // `!(a >= b)` spelling rather than `a < b`, the island wave I8a finding.
+        assert!(!scatter_batch_stages(false, f32::NAN, 0.0, vsize, extent));
+    }
+
+    /// **A structure SHELL never voxelizes**, because no point of the volume is
+    /// as far from its centre as the shell band's inner cut.
+    #[test]
+    fn a_shell_batch_is_outside_every_point_of_the_volume() {
+        let (vsize, extent) = (0.625_f32, 40.0_f32);
+        // The volume reaches 34.6 m; a shell is banded from 96.
+        assert!(volume_reach(extent) < 35.0);
+        assert!(
+            !scatter_batch_stages(false, 12.0, 96.0, vsize, extent),
+            "a 24 m shell box banded from 96 m has no instance in a 40 m volume"
+        );
+        // The same box with no inner cut is ordinary geometry and stages.
+        assert!(scatter_batch_stages(false, 12.0, 0.0, vsize, extent));
+        // An inner cut *inside* the volume's reach is not decidable here, so the
+        // batch stages and the per-instance band test settles it.
+        assert!(scatter_batch_stages(false, 12.0, 10.0, vsize, extent));
     }
 
     // ── emissive packing ──

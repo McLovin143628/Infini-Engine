@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 60] = [
+const GOLDENS: [&str; 61] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1506,6 +1506,11 @@ const GOLDENS: [&str; 60] = [
     "editor_default.png",
     "gi_bleed.png",
     "gi_emissive.png",
+    // Wave VEN1a: a scatter batch of emissive plates lighting a white floor
+    // through the GI volume, with a zero-radiance sun -- the venue substrate's
+    // proof that SCATTERED emission reaches the bounce. The wave's ONE new
+    // golden.
+    "gi_scatter_neon.png",
     "gi_specular.png",
     "gi_terrain.png",
     "grid_sky.png",
