@@ -25797,3 +25797,43 @@ settlement's content.
   made at *society* scale on a real nightclub rather than at world scale.
   Forced by: a fixture recipe with a settlement big enough for a city's strip.
 * **`y = 0` hero placement** in every other arm of `island_gate.rs` (defect 2).
+
+### Counts
+
+| | last recorded (VEN1a, `8820694a`) | **wave (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 359 / 6 791 / 0 / 20 | **359 / 6 819 / 0 / 20** |
+| battery exit, `INF_GOLDEN_STRICT=1` | 0 | **0** |
+| compiler warnings over the whole run | 0 | **0** |
+| goldens | 62, none blessed | **62 — none added, none blessed** |
+| `GOLDEN_SET_DIGEST` (×3) | `26faf4da…` | **unmoved** |
+| rustdoc individual warnings (ceiling 450) | 410 over 48 crates | **410 over 48 crates**, and **zero on a line this wave added** |
+| `cargo clippy --workspace --all-targets` | 0 | **0**, exit 0, run LAST |
+| `cargo fmt --all --check` | clean | **clean** |
+| `Cargo.lock` / manifests | untouched | **untouched** |
+| schemas | scene v27 | **scene v27 — no move** |
+| new external dependencies | — | **none** |
+| committed content | — | 7 files: the club loop + sidecar, both island levels + sidecars, both recipes, the settlement README |
+| frontend (`editor/studio/src/`) | untouched | **untouched** (`src-tauri/commands/pcg.rs` only, the projector mirror) |
+| the wave | — | **12 commits, 48 files, +6 224 / −144, 28 new `#[test]` arms** |
+
+**The rustdoc figure is stated with its measurement.** 410 → **416** on the
+first pass, and all six of the new warnings were on lines this wave wrote —
+measured by intersecting the warning locations with the diff's own added-line
+ranges, VEN1a's own method. All six fixed; back to 410, with zero attributable
+to this diff.
+
+**The battery number is the one at `37f3b7a9`**, and three commits have landed
+since it: two doc-comment-only (the rustdoc links) and one that changed literals
+in `island_gate.rs` and `venue.rs` (the clippy findings). `inf-ecs` and
+`inf-player` — every crate whose *code* moved after the battery — were re-run at
+head: **81 binaries, 957 passed, 0 failed, 3 ignored**, zero compiler warnings.
+The one number that MOVED is the nightclub census, because `0x0C_1` is 193 and
+`0x0C01` is 3 073, so regrouping a fixture GUID is a different volume and
+therefore a different population; re-measured and quoted above.
+
+**Working-tree note.** No file in this wave's 48 is CRLF on disk, and the index
+holds **zero** CRLF blobs (`git ls-files --eol` over every tracked file). The 238
+working-tree CRLF files that remain are the pre-existing frontend `.ts`/`.tsx`
+set from earlier sessions; none is in this diff. The `\`-continuation law, on the
+other hand, **fired** — see the laws above.
