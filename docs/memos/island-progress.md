@@ -24863,3 +24863,339 @@ reproduce to the digit: `stolen: 87.4 m, top 18.14 m/s`;
 `settle: ground_y 0.000 m` (1.800 with the exclusion set emptied),
 `hand-off: 0.144 m` (2.793 with the rephase branch disabled), and
 `probe: 10 driver(s) agree with the step`.
+
+## Wave VEN1a — the venue substrate: emissive, materials, three archetypes, a rig (2026-09-02)
+
+Base `4c8e7c1a`. Reference: `docs/reference_videos/frames/venues/0004–0060` and
+`steal-car/0016` (outside the repo, never committed). Six clauses, **no schema
+move** — scene stays v27 — and **no new dependency of any kind**.
+
+The wave's whole economy is one sentence: *emission is free against the light
+budget and a cone is not*. Clause 1 spends itself on making emission reach the
+bounce so that clause 4 only has to buy the handful of lights that actually need
+a shape.
+
+### Clause 1 — scattered emission reaches the bounce
+
+`passes::gi` staged rigid instances, skinned meshes and vgeom, and nothing else.
+Every practical in a night interior — a neon plate, a string-light chain, a lit
+shopfront pane — is a **scattered module**, so a grammar-built building's whole
+emissive vocabulary was drawn and lit nothing. `gi_probes.wgsl` has injected a
+voxel's emissive word since P18.4 (*"a light source does not need the sun's
+permission to glow"*), so colour that bounces this way costs zero light slots.
+
+Three rejects, each `O(1)` before it is `O(instances)`:
+
+| reject | rule | why |
+|---|---|---|
+| dust | widest instance under half a voxel **and** does not emit | a 0.3 m tuft at 0.625 m voxels fills a voxel with albedo and occludes; it cannot be *represented* |
+| far band | `near_distance >= volume_reach(extent)` | a structure shell is banded from 96 m; a 40 m volume reaches 34.6 |
+| per instance | the cull compute's band test + the volume test, **inline** | a 2 000-instance batch pushes only survivors instead of allocating 2 000 × 112 B for the filter to discard |
+
+`gi::scatter_batch_stages` is ONE DOOR for the first two, because the answer
+decides a cost and a look at once. Past `SCATTER_WALK_CEILING` (16 384 = 4× the
+largest tier budget) a batch is strided and `GiAudit::scatter_decimated` says so;
+`scatter_rejected` counts whole-batch refusals beside `skinned_rejected`, because
+a meadow that stages nothing and a meadow that is not there produce the same
+millisecond.
+
+**Golden `gi_scatter_neon`** (additive): a white floor, magenta-emissive scatter
+plates, a zero-radiance sun. Floor red/green **0.739 → 1.518**, mean
+**122.3 → 180.3**. Two controls name the *path* rather than the delta — the same
+batch unlit (the emission is the cause) and the same neon with GI off, **0.842**
+(it arrived through the bounce, not the raster) — and a fourth arm pins the sky
+term as the opposite hue.
+
+### Clause 2 — a scattered module carries its own surface
+
+Buildings had no materials. Both projectors wrote `metallic 0.0, roughness 0.75`
+for every one of a settlement's 365 545 modules and coloured them from
+`pcg_kind_color`, a five-entry debug ramp indexed by a **rule-local** kind. There
+was nowhere to say otherwise: a `Material` belongs to an ENTITY and a block is
+one entity holding two thousand modules.
+
+`PcgSurface` / `ScatteredSurface` — authored emissive rgb, pulse rate, metallic,
+roughness, tint — rides `PcgInstance` / `ScatteredInstance`, both `#[serde(skip)]`
+derived caches. **This is the whole schema answer for the wave.**
+
+**Derived, not parsed**, on the door `ModuleDef::glow` opened: *the DSL says
+where a module goes; what a module IS is the palette's business.* There is no
+`metallic` keyword and there will not be one. `PcgSurface::DEFAULT` is exactly the
+two literals the projectors had, and the twelve pre-venue families answer it —
+pinned both ways, because "they answer the default" is a tautology without "the
+default is 0.0/0.75/None" beside it.
+
+The bucket key grew a third part (`ScatteredSurface::batch_key`, six bit
+patterns). A volume grows one batch per distinct surface and **none** for a
+volume whose modules all answer the default, which is every committed level. The
+**tint** stays out of the key: an instance has carried its own colour since
+P18.5, so six neon hues cost one draw.
+
+### Clause 2b — the pulse
+
+`pulse_emissive` / `pulse_tick` sit beside `glow_emissive` / `night_glow_step`
+and quantize on the identical argument: a continuous key re-packs every volume
+every frame; eight ticks a second make it eight, and at a festoon's 0.27 Hz that
+is thirty samples a cycle. `hz == 0` returns the input **untouched by any
+arithmetic**. The sine is `inf_math::psin64` with the phase reduced in f64 first
+— `std` trig is not bit-portable (P14), and at a level's fourth hour f32 has no
+fractional radians left at 24 400.
+
+`ScatterSource::pulse_tick` is **zero unless the volume actually pulses**: the
+tick must be in the memo key or a carried batch freezes its string lights
+mid-breath, and a key that always carried it would re-pack all 172 island
+settlement volumes eight times a second for a festoon in one of them.
+
+### Clause 3 — seven shape families, one of them round
+
+`Stage`, `Pole`, `Bar`, `Stool`, `Screen`, `Sign`, `Festoon` — nineteen families
+in all. Each is a statement about what separates it from its nearest relative:
+
+* **Stage** vs `Deck` — a skirt, not a fascia lip, because the bench at the stage
+  edge in `venues/0028` is pushed against it;
+* **Bar** vs `Carcass` — a top that OVERHANGS the front and a foot rail, which is
+  the whole silhouette of a bar and the thing a stool tucks under;
+* **Screen** vs `Glazing` — a panel standing **proud** of its bezel where a pane
+  is recessed behind it; proud-versus-recessed is what tells a television from a
+  window at a glance;
+* **Sign** — a face on standoffs, because a plate bolted flat to a wall has
+  nowhere for its glow to spill and every neon in the reference throws a halo;
+* **Festoon** — two strands with three bulbs each at opposite depths, so a run
+  reads as a swag. One module, not one per bulb: a chain is a RUN.
+
+`ModuleMesh::push_prism_y` is the first non-box primitive in the table. Eight
+**literal** directions, no `cos` — these vertices reach a `ScatterGeometry`
+content key (P14). Eight facets and not sixteen: a pole's whole contribution to a
+near-black room is one bright vertical specular streak, and eight carries it at
+28 triangles against the 128 every family must stay under.
+
+`a_prism_is_not_a_box` is the arm that makes "round" mean something — every other
+check here (unit-box span, outward winding, triangle bounds) is satisfied
+perfectly by a cube. It counts the **eight diagonal side normals** a union of
+axis-aligned boxes cannot produce. The first spelling counted *distinct
+horizontals* and read 12, because the pole's own end plates are boxes and
+contribute the four axis directions themselves.
+
+### Clause 3b — the three archetypes
+
+**RULING: three, not one with variants.** The furniture table is why the answer
+is not obvious — *rooms* differ between the three, not fittings, and all three
+share one `VENUE_FURNITURE`. What forced three:
+
+* `zone_table` picks an `ArchetypeId` and `zone_graph` writes
+  `P::Enum(a.name())` into a committed `.inf_pcg`. A variant needs a second
+  authored parameter on `building.archetype` — **a wire change in every zone
+  document in the tree**.
+* `zone_lots` gives each its own frontage: a bar is a 22 m shopfront, a nightclub
+  a 32 m box, and it has to be — a nightclub's `max_room_area` is 260 m² and a
+  20 m frontage never yields a room that big to anchor a dance floor in.
+* `floors`, `floor_height`, `max_room_area` and the whole window band differ, and
+  every one is a *plan* input read before any variant could be consulted.
+
+**THE ANCHOR.** A room's kind was a weighted hash draw — right for a house, a
+catastrophe for a club, whose dance floor would come out in the 8 m² room beside
+the stair about a third of the time. `ground_anchors` claims the largest un-forced
+ground rooms by AREA, descending, ties broken on the plan's fixed spatial order,
+so the answer holds **no hash at all**. Empty for the seven that predate it, and
+armed both ways: 54 anchored rooms over 6 seeds × 3 lot sizes × 3 archetypes, and
+`an_archetype_with_no_anchors_keeps_its_weighted_draw` beside it, because a loop
+that ran on everything and picked the same kinds would look identical.
+
+**THE COUNTER IS ONE PIECE** — the limitation the mandate names. `Placement`
+replaces `against_wall: bool` with five modes, because both old ones are
+*density* placements and a venue's three defining objects are singular.
+
+`RoomType` gains `DanceFloor`, `BarRoom`, `Stage`. **No freeze pin was moved and
+none exists to move**: `RoomType` has no serde derive, is never bincoded and
+crosses no IPC — the P19 wire-enum law is about enums that reach bytes. Three
+exhaustive matches guard it and all three are arm'd.
+
+`slots_of`'s two `== Retail` tests become one rule,
+`RoomType::is_errand_destination`, because a room added to one arm and not the
+other is a destination nobody can reach or a node with nothing on it. That is
+structural: `pass.rs` hands a building with **no slots** an EMPTY interior nav
+graph, so a venue whose rooms held none would have every room orphaned, silently.
+
+**THE STREET FACE.** `street_face` hangs the sign and the festoon over the one
+exterior door — an assembler placement and not a grammar rule, because every
+element of a wall alternative CONSUMES SPAN, so a `Bay -> Clad | Neon` puts a 1 m
+sign in a 4 m wall and leaves the rest a **hole**, which is this engine's
+definition of a doorway. Both pieces are decor with no collider, like the pane.
+
+### Clause 4 — the rig, and the measurement that sized it
+
+PCG could not produce a light of any kind. `PcgLight` / `ScatteredLight` ride
+`PcgVolume::lights`, `#[serde(skip)]` like `doorways`.
+
+**Three spots and a bar glow, and that is the reference, not the budget.**
+`venues/0036` has one red key over the catwalk and two rim lamps either side.
+The lamps spread across 45 % of the room's long axis and toe IN so the beams
+cross, and each takes its own phase slot — without that a three-lamp rig is one
+lamp with three positions.
+
+`swept_colour` is `lerp(a, b, tri(x))` with `tri(x) = 2·|frac(x) − 0.5|`, built
+from `floor` and `abs`, which are exact on every target. A sine would have been
+prettier by a hair and would have put a libm call on a path two hosts compare
+byte for byte. The triangle also DWELLS at each end, which is what a moving head
+does. One door, both projectors. A fixture is **never a shadow caster**: three
+lamps in one room would spend `VSM_MAX_PROJECTIONS` on a pool whose whole content
+is a stage floor and two benches.
+
+**THE MEASUREMENT, in two stages, and the second contradicts the first.**
+
+Per building (`a_venue_hangs_a_countable_number_of_lights`, 4 seeds × 2 storey
+counts):
+
+| archetype | fixtures | of which spots |
+|---|---|---|
+| Bar | 1 | 0 |
+| Nightclub | 4 | 3 |
+| Strip club | 4 | 3 |
+| the other seven | **0**, asserted | — |
+
+The island's frame carries **two** authored lights (sky sun/moon + one
+directional). At most three venues per settlement. `2 + 1 + 4 + 4 = 11 of 16` —
+and that reading was **wrong**, because a venue is placed per BLOCK and a block
+is subdivided into LOTS. The fixture's 76 m town block at a bar's 22 m frontage
+is **six bars**; a 100 m city block at a nightclub's 32 m is **nine nightclubs =
+36 lights**. `MAX_LIGHTS` is 16 and the truncation is first-N in projection order
+with no distance priority, so the seventeenth light is not dimmed — it is
+deleted, and which sixteen survive depends on GUID order. The sun goes out.
+
+Only the gate's **frame-scale** measurement could say so.
+
+**RULING: the cap goes at the source, not on the lot rule.** Whole-block venue
+lots hold the budget by construction and read better — and they took the gate arm
+from **11 s to 539 s**, because one 54 × 54 m building is a different shape of
+problem from six 20 × 30 ones with the same floor area. `VOLUME_LIGHT_CAP = 4` in
+`compose_volume` (the one door both hosts pass) holds it instead, because the
+scarce thing is *lights in a frame* and a lot rule is a statement about
+*frontage*. A block of six bars lights four; which four is the volume's own
+building order — deterministic, identical on both hosts, and **not a function of
+the camera**, which is what keeps a level's content from depending on where
+somebody stood. Worst frame: `3 × 4 + 2` = **14 of 16**.
+
+**RULING: no ceiling raise, and no distance-prioritized selection *here*.** A
+raise is a ratchet STOP and buys nothing. The selection is the right long answer
+and belongs to the renderer, where the eye is — and it is not free:
+`vsm_light_trees` and `VsmSystem::receiver_slots` are both written against
+*"index < MAX_LIGHTS in SCENE ORDER"* (`vsm.rs`: *"the sun then becomes handle 10,
+takes the point light's table block and its bit range, and marks its clipmap
+pages into another light's address space — no error, no counter"*), so reordering
+inside `LightsUniform::from_scene` mis-addresses the shadow page trees silently.
+Carried, with the number that forces it.
+
+### Clause 5 — the strip
+
+A weighted table cannot say "one of these per settlement" — it is a per-block
+draw, so a nightclub at weight 1 gives a city eleven and a town none. The venues
+take the **industrial cluster's** own shape: a deterministic pre-selection of
+specific blocks, nearest the centre, one ring OUT of a city's office core (ring 0
+is the ground the offices pay for) and on a town's high street, sorted by
+`to_bits` so no float ordering reaches a committed decision.
+
+| recipe | settlement | strip |
+|---|---|---|
+| island | Harbour City (52 blocks) | Bar, Nightclub, StripClub |
+| island | Eastgate (52) | Bar, Nightclub, StripClub |
+| island | the five towns (12–16 each) | Bar |
+| fixture | Fixture Town (4) | — |
+| fixture | Fixture Camp (4) | Bar |
+
+`Fixture Town` getting none is **correct**: it is a four-block reservation
+wearing a `city` label, a city's strip starts at ring 1, and `VENUE_SHARE` refuses
+to spend more than a third of a settlement on nightlife. A hamlet with a
+nightclub is stranger than a hamlet without one.
+
+### Clause 6 — THE GATE
+
+`pie_equals_shipping_inside_a_venue_at_night` (`island_gate.rs`). Settle, WIND
+the clock to 22:00 (walking there reached 10.72 h in 2 400 steps — the island
+authors an eighty-minute day), assert the night-glow ramp is at FULL, then 240
+fixed steps compared byte for byte.
+
+| | shipping | PIE |
+|---|---|---|
+| hour | 22.02 | 22.02 |
+| volumes / instances | 4 / 12 834 | 4 / 12 834 |
+| coloured emitters (peak) | 12 (3.00) | 12 (3.00) |
+| pulsing / metal | 22 / 50 | 22 / 50 |
+| fixtures (spots) | 4 (0) | 4 (0) |
+| nav nodes / errand slots | 1 331 / 6 | 1 331 / 6 |
+| FRAME: lights / batches / emissive | 6 / 47 / 9 | 6 / 47 / 9 |
+| digests over 240 steps | identical | identical |
+
+Every claim is a count with a floor, because two venues with nothing in them
+agree perfectly. "Coloured" means brightest channel > 1.0 **and** more than twice
+the dimmest — a warm-white pane has glowed since I8b and is not what this wave
+added. `frame_lights <= MAX_LIGHTS` is a standing tripwire.
+
+**Golden `venue_interior`**: a CLOSED near-black room lit only by practicals.
+
+| measurement | value |
+|---|---|
+| far corner / stage | **4.2** / 45.3 of 255 |
+| stage red/blue, two lamps | 3.37 and 1.13 |
+| chrome pole / wall behind it | 38.2 / 11.4 |
+| neon plate / halo blue-green | 160.4 / 5.81 |
+
+Goldens **60 → 62** (`gi_scatter_neon`, `venue_interior`), additive branch,
+**nothing re-blessed** — measured under `INF_GOLDEN_STRICT=1` before the pins
+moved.
+
+### THE LAWS THIS WAVE PAID FOR
+
+* **A budget measured per unit is not measured per frame.** Four fixtures a
+  venue looked comfortable against sixteen until a *block* was measured: content
+  is placed per block and a block is subdivided into lots. Measure the scarce
+  thing where it is scarce.
+* **A cap belongs on the scarce thing, not on a proxy for it.** Whole-block lots
+  held the light budget and cost 49× the gate's runtime. `VOLUME_LIGHT_CAP` is
+  about lights; `zone_lots` is about frontage.
+* **A closed room is a lighting decision, not scene dressing.** With the golden's
+  roof and side walls removed, the GI volume's sky ray lit the far corner to 40
+  of 255 — a daylit frame with some neon in it.
+* **A gate must not name a claim by the harness's convention.** The stage-wash
+  arm asserted "left is red" and measured the opposite; a view's handedness is
+  not what the arm is about.
+* **A new placement mode inherits none of the old one's guards.**
+  `wall_furniture` and `free_furniture` have tested the door voids and swings
+  since P19.5; `centre_furniture` and `run_furniture` did not, and a 5 m catwalk
+  stood in a doorway. Then the fix exposed the next one: a run spans a wall and a
+  swing reaches a metre out from it, so a counter could never share a wall with a
+  door — `Bar` at seed 512 built a bar room with nothing to drink at.
+* **"Not a box" is not asserted by anything a box fails.** Unit-box span, outward
+  winding and triangle bounds are all satisfied perfectly by a cube; only the
+  diagonal normals are not.
+* **A default that does not reproduce the constant it replaces re-shades the
+  world.** `PcgSurface::DEFAULT.roughness` is 0.75 and not zero, and the arm that
+  pins the twelve older families to it is worthless without the arm that pins the
+  default to 0.0/0.75/None.
+* **The P19 wire-enum law is about enums that reach BYTES.** `RoomType` has no
+  serde derive and crosses no IPC; what guards it is three exhaustive matches,
+  and finding that out is cheaper than freezing a pin that does not exist.
+
+### CARRIED
+
+* **Distance-prioritized light selection** — the right answer to the frame
+  budget, blocked on the VSM handle invariant (`vsm_light_trees` and
+  `receiver_slots` read scene order). Forced by: a fourth venue block in one
+  frame, or the first street-lamp content of any kind.
+* **The rig's fixtures cast no shadows**, so a dancer on a lit stage throws none.
+  Priced against `VSM_MAX_PROJECTIONS`, deferred.
+* **GI sees a pulsing emitter's BASE colour**, not its pulsed one: the raster
+  reads the batch's `emissive` (pulsed by the projector) and the GI staging reads
+  the same field, so this is in fact correct — but the *pulse tick* is quantized
+  to 8 Hz while the raster is not, so a festoon's bounce lags its own glow by at
+  most an eighth of a second. Unmeasured; stated.
+* **A venue has no seated life.** `SitPoint`, dance clips, `SlotRole::Leisure`,
+  evening legs, music and doorway-aware attenuation are VEN1b in full.
+* **A crowd is a wall** (carried in from VEH2b) — kinematic `Full` agents do not
+  part, and a dance floor is the densest interior this engine has. VEN1b must
+  either fix `steer_agent` avoidance or cap interior occupancy.
+* **`GLAZING_GLOW` is still one number for the whole engine.** A venue's windows
+  glow exactly as brightly as a house's.
+* **No haze in the beams.** The reference's shafts are volumetric; a spot here
+  throws a pool and no cone of light.
+* **The exterior sign is one plate.** The reference's façades carry vertical
+  channel letters, poster boxes and a lit awning.
