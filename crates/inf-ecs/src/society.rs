@@ -377,7 +377,7 @@ pub fn agent_guid(volume: Uuid, building: u32, room: u32, index: u32) -> Uuid {
 ///
 /// The same constants `crate::crowd::agent_rand` pins, spelled out here rather
 /// than borrowed so this module's ids do not move if that one's salts ever do.
-fn mix64(x: u64) -> u64 {
+pub(crate) fn mix64(x: u64) -> u64 {
     let mut x = x ^ 0x9e37_79b9_7f4a_7c15;
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -433,7 +433,7 @@ fn ring_points(centre: DVec3, extent: DVec2, y: f64) -> [DVec3; 8] {
 
 /// The plan distance between two axis-aligned block rectangles, metres — `0.0`
 /// when they overlap.
-fn rect_gap(a_c: DVec3, a_e: DVec2, b_c: DVec3, b_e: DVec2) -> f64 {
+pub(crate) fn rect_gap(a_c: DVec3, a_e: DVec2, b_c: DVec3, b_e: DVec2) -> f64 {
     let dx = ((a_c.x - b_c.x).abs() - (a_e.x + b_e.x)).max(0.0);
     let dz = ((a_c.z - b_c.z).abs() - (a_e.y + b_e.y)).max(0.0);
     (dx * dx + dz * dz).sqrt()
@@ -448,11 +448,11 @@ fn rect_gap(a_c: DVec3, a_e: DVec2, b_c: DVec3, b_e: DVec2) -> f64 {
 /// of graphs of a hundred nodes, sixty times a second, to discover that nothing
 /// had changed. This is a walk and four scalars; [`heavy_facts`] is what is paid
 /// once, for a volume that is actually being folded.
-struct VolumeSite {
-    guid: Uuid,
-    centre: DVec3,
-    extent: DVec2,
-    pad_y: f64,
+pub(crate) struct VolumeSite {
+    pub(crate) guid: Uuid,
+    pub(crate) centre: DVec3,
+    pub(crate) extent: DVec2,
+    pub(crate) pad_y: f64,
 }
 
 /// What one volume contributes the once, read out of the world before anything
@@ -463,7 +463,7 @@ struct VolumeFacts {
 }
 
 /// Every volume that offers a resident, in `Guid` order — positions only.
-fn volume_sites(world: &EcsWorld) -> Vec<VolumeSite> {
+pub(crate) fn volume_sites(world: &EcsWorld) -> Vec<VolumeSite> {
     let mut out: Vec<VolumeSite> = Vec::new();
     for e in world.world().iter_entities() {
         let (Some(g), Some(v)) = (e.get::<Guid>(), e.get::<PcgVolume>()) else {
