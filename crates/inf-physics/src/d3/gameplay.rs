@@ -142,6 +142,14 @@ pub struct GameplayReport {
     pub locks_broken: u32,
     /// Characters that stopped working this step and were handed to the ragdoll.
     pub kills: u32,
+    /// **Melee swings thrown** this step (wave WPN1) — the subset of
+    /// [`shots`](Self::shots) that were an arc rather than a ray.
+    ///
+    /// Its own counter because the two are the same verb through the same
+    /// trigger and the same clock: without it a gate cannot tell a course that
+    /// punched from one that fired, and "the attack button has three consumers"
+    /// is a claim about which one ran.
+    pub swings: u32,
     /// **Non-fatal blows that landed on a body** this step (wave WPN1) — every
     /// one of them armed a hit reaction.
     ///
@@ -816,13 +824,20 @@ fn step_weapons(
                 inv.cycle_equipped(&defs, want_switch, |d| d.is_weapon());
             }
         }
-        // **THE ATTACK BUTTON'S TWO VERBS**, arbitrated once, here.
+        // **THE ATTACK BUTTON'S THREE VERBS**, arbitrated once, here.
         //
         // A locked door in kicking reach takes the press; anything else lets it
-        // through to the trigger. It is decided on the **edge** and not the
-        // level, because a kick is a press — and while a kick is pending the
-        // weapon does not fire, so holding the button against a door kicks it
-        // rather than kicking and then shooting it.
+        // through to the trigger; and since wave WPN1 an empty hand is a trigger
+        // too. It is decided on the **edge** and not the level, because a kick is
+        // a press — and while a kick is pending the weapon does not fire, so
+        // holding the button against a door kicks it rather than kicking and
+        // then shooting it.
+        //
+        // The order is the arbitration and it is not arbitrary: a kick beats a
+        // punch, because a player standing at a locked gate pressing the attack
+        // button wants the gate open and not a bruised hand. `try_kick` refuses
+        // every door that is not locked and in reach, so the punch is what the
+        // press means everywhere else.
         let kicking = if press_attack {
             let feet = feet_of(world, guid);
             let yaw = world
@@ -842,8 +857,27 @@ fn step_weapons(
         };
         let pending_kick = world.world().get::<PendingKick>(entity).is_some();
         let want_fire = held_attack && !kicking && !pending_kick;
-        // Now the weapon, if there is one.
-        let Some((item_id, def)) = equipped_weapon(world, guid) else {
+        // Now the weapon, if there is one — **or the fists, if there is not and
+        // the button is down** (wave WPN1).
+        //
+        // A pair of hands is the third consumer of the edge and it goes through
+        // the same `try_fire`, the same cooldown and the same
+        // `weapon_state_bytes` a rifle does. The one thing it does not do is
+        // arrive uninvited: the clock is installed on the first press and not at
+        // spawn, so an unarmed character that has never thrown a punch carries
+        // no `WeaponState` at all and every trace committed before this wave is
+        // byte-identical. Once installed it stays, because that clock is what
+        // stops the second punch arriving before the first has landed.
+        let armed = equipped_weapon(world, guid);
+        let punching = armed.is_none()
+            && (want_fire
+                || world
+                    .world()
+                    .get::<WeaponState>(entity)
+                    .is_some_and(|s| s.item_id == weapon::FIST_ITEM));
+        let Some((item_id, def)) =
+            armed.or_else(|| punching.then(|| (weapon::FIST_ITEM.to_string(), weapon::fist_def())))
+        else {
             // A character who put their weapon away keeps no ammunition clock:
             // a stale state is a magazine two weapons would share.
             world.world_mut().entity_mut(entity).remove::<WeaponState>();
@@ -903,8 +937,22 @@ fn step_weapons(
         if !fired {
             continue;
         }
-        inf_ecs::anim_bridge::set_anim_trigger(world, guid, weapon::FIRE_TRIGGER);
+        // The animation, and it is a different one for a swing: a rig that
+        // played `weapon_fire` when somebody threw a punch would be firing an
+        // empty hand.
+        inf_ecs::anim_bridge::set_anim_trigger(
+            world,
+            guid,
+            if def.is_melee() {
+                weapon::MELEE_TRIGGER
+            } else {
+                weapon::FIRE_TRIGGER
+            },
+        );
         report.shots += 1;
+        if def.is_melee() {
+            report.swings += 1;
+        }
         let Some((from, yaw, pitch, from_weapon)) = aim else {
             continue;
         };
@@ -914,11 +962,21 @@ fn step_weapons(
         // capsule rule is a rig that does not publish `WEAPON_SOCKET`, or a
         // weapon entity that has not been placed yet, and it puts every shot back
         // at 1.4 m in silence. See `GameplayReport::muzzles_without_a_socket`.
-        if !from_weapon && inf_ecs::pose::evaluated_pose(world, guid).is_some() {
+        //
+        // **A punch is not counted either** (wave WPN1), and it would have been:
+        // a fist has no weapon entity to hang off a socket, so a rigged
+        // character throwing one takes the capsule rule *correctly* and would
+        // have tripped the tripwire on every swing. A gate that asserts this is
+        // zero on a rigged course has to be able to punch on it.
+        if !def.is_melee() && !from_weapon && inf_ecs::pose::evaluated_pose(world, guid).is_some() {
             report.muzzles_without_a_socket += 1;
         }
         let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
-        let hit = resolve_shot(world, bridge, guid, &def, from, dir);
+        let hit = if def.is_melee() {
+            resolve_swing(world, guid, &def, from, dir, yaw)
+        } else {
+            resolve_shot(world, bridge, guid, &def, from, dir)
+        };
         apply_hit(world, &hit, report);
         report.hits.push(hit);
     }
@@ -965,6 +1023,106 @@ fn resolve_shot(
             target: None,
             from,
             to: from + dir * range,
+            energy_j: def.damage_j,
+            on_flesh: false,
+        },
+    }
+}
+
+/// **Where a swing lands on a body**, world metres — the point a punch is aimed
+/// at and measured to.
+///
+/// [`MUZZLE_HEIGHT_M`] above the feet, which is the same height a rig-less
+/// character's own shot leaves from. Both ends of a swing are therefore measured
+/// at chest height, so the vertical term cancels between two characters of the
+/// same size and a punch at a metre is a punch at a metre rather than
+/// `sqrt(1² + 1.4²)`.
+fn strike_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+    Some(feet_of(world, guid)? + DVec3::Y * MUZZLE_HEIGHT_M)
+}
+
+/// **Resolve a SWING** — a reach and an arc, not a ray (wave WPN1).
+///
+/// # One door, and it is the interaction rule's
+///
+/// The reach and the cone go through [`inf_ecs::interact::resolve`], which is
+/// what the E-key prompt, the door press and `try_kick` already resolve through.
+/// Writing the arithmetic a second time here is exactly the defect `try_kick`'s
+/// own doc names — *"spelling it a second way would let a player kick a door the
+/// prompt says is out of reach"* — one verb along: a punch that could land on
+/// somebody the prompt calls unreachable is a punch through a wall.
+///
+/// It also buys the portable trigonometry for free: the cone test goes through
+/// `inf_math::patan2_64` and the boundary epsilon that exists because of it (the
+/// P14 law), so a swing lands identically on two machines.
+///
+/// # What it does NOT do
+///
+/// * **No line of sight.** A body on the far side of a shut door within reach is
+///   hit. The reach is 1.2 m and a leaf is 5 cm thick, so this is reachable in
+///   principle, and closing it is one `cast_ray_excluding` per candidate — which
+///   this function deliberately does not spend on a press that resolves at most
+///   one target. Carried by name.
+/// * **No cleave.** The nearest body in the arc takes the blow and nobody else
+///   does, which is `resolve`'s own rule (*"the first of two equals wins"*). A
+///   swing that hit everything in its cone is a different weapon and would want
+///   its own `WeaponDef` field.
+///
+/// `O(characters)`, over the same walk [`gunners`] already makes — and only on
+/// the steps a swing actually leaves, which at [`weapon::FIST_RPM`] is at most
+/// one and a half a second.
+fn resolve_swing(
+    world: &EcsWorld,
+    shooter: Uuid,
+    def: &WeaponDef,
+    from: DVec3,
+    dir: DVec3,
+    yaw_deg: f64,
+) -> WeaponHit {
+    use inf_ecs::interact::{InteractCandidate, InteractVerb};
+    let reach = def.reach_m();
+    let arc = def.melee_arc_deg.clamp(0.0, 360.0);
+    let mut candidates: Vec<InteractCandidate> = Vec::new();
+    for guid in gunners(world) {
+        if guid == shooter {
+            continue;
+        }
+        let Some(position) = strike_point(world, guid) else {
+            continue;
+        };
+        candidates.push(InteractCandidate {
+            guid,
+            // The verb is not read by anything downstream — this resolution
+            // answers "which body" and nothing else — so it carries the neutral
+            // one `try_kick` gives a door rather than inventing a fourth.
+            verb: InteractVerb::Use,
+            label: String::new(),
+            position,
+            range_m: reach,
+            view_cone_deg: arc,
+            grip: None,
+        });
+    }
+    // `gunners` is already `Guid`-ordered, so ties break on the guid — two
+    // bodies at exactly one distance answer the same one on both hosts.
+    match inf_ecs::interact::resolve(&candidates, from, yaw_deg) {
+        Some(hit) => WeaponHit {
+            shooter,
+            target: Some(hit.guid),
+            from,
+            to: hit.position,
+            energy_j: def.damage_j,
+            // Every candidate here IS a character, which is what `is_flesh`
+            // answers `true` for — so this is a fact rather than an assumption.
+            on_flesh: true,
+        },
+        None => WeaponHit {
+            shooter,
+            target: None,
+            from,
+            // A miss ends at the end of the reach along the aim, so a tracer and
+            // a debug line draw the swing rather than nothing.
+            to: from + dir * reach,
             energy_j: def.damage_j,
             on_flesh: false,
         },

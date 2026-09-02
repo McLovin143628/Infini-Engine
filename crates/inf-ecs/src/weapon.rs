@@ -64,6 +64,14 @@ pub const MAX_RANGE_M: f64 = 20_000.0;
 /// [`WeaponDef::muzzle_forward_m`]. A barrel longer than this is a vehicle.
 pub const MAX_MUZZLE_FORWARD_M: f64 = 3.0;
 
+/// How far a melee weapon may reach, metres — the bound on a melee
+/// [`WeaponDef::range_m`].
+///
+/// Two and a half. A halberd is at the top of it and anything longer is a
+/// vehicle, on [`MAX_MUZZLE_FORWARD_M`]'s own reasoning: the bound exists to
+/// stop hostile content, not to express a design.
+pub const MAX_MELEE_REACH_M: f64 = 2.5;
+
 /// How a shot travels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShotKind {
@@ -72,6 +80,29 @@ pub enum ShotKind {
     Hitscan,
     /// A body in flight, resolved when it arrives.
     Projectile,
+    /// **Not a shot at all** (wave WPN1): a reach and an arc, resolved against
+    /// the bodies in front of the swinger.
+    ///
+    /// # Why this is a `WeaponDef` and not a system beside it
+    ///
+    /// Everything a punch needs, a rifle already has: a rate
+    /// ([`WeaponDef::rounds_per_minute`] is how fast you can swing), a damage in
+    /// joules, an automatic/semi flag (a held button either keeps swinging or it
+    /// does not), an ammunition clock that stops the second swing arriving before
+    /// the first has finished, and a trigger arbitration that already decides
+    /// between kicking a door and using the weapon. A parallel melee system would
+    /// have re-derived every one of them, and the attack button would then have
+    /// had two arbitrations to agree about.
+    ///
+    /// What melee does **not** have is a ray, and that is the whole of the
+    /// difference: [`WeaponDef::range_m`] is a *reach* (bounded by
+    /// [`MAX_MELEE_REACH_M`]), [`WeaponDef::melee_arc_deg`] is the cone it
+    /// sweeps, and the resolution is the interaction rule's own reach-and-cone
+    /// (`inf_ecs::interact::resolve`) rather than a cast. A magazine is
+    /// meaningless, so a melee definition simply carries a large one and never
+    /// runs out — stated rather than special-cased, because a special case here
+    /// is a second `try_fire`.
+    Melee,
 }
 
 /// **What a weapon IS.**
@@ -118,6 +149,14 @@ pub struct WeaponDef {
     /// place in this arc where that is true, and the reason the muzzle is
     /// described here rather than in a new component.
     pub muzzle_forward_m: f64,
+    /// **The cone a melee swing sweeps**, degrees (total) — ignored by every
+    /// other [`ShotKind`].
+    ///
+    /// A swing is a reach and an arc; this is the arc, and it goes straight into
+    /// `InteractCandidate::view_cone_deg`, so a punch and a door prompt are
+    /// refused by the same rule and a player who is told a thing is out of reach
+    /// cannot hit it.
+    pub melee_arc_deg: f64,
 }
 
 impl Default for WeaponDef {
@@ -137,7 +176,82 @@ impl Default for WeaponDef {
             spread_seed: 0,
             // A rifle: the muzzle is 45 cm along the barrel from the grip.
             muzzle_forward_m: 0.45,
+            // A rifle does not swing; this is what a melee definition would use.
+            melee_arc_deg: FIST_ARC_DEG,
         }
+    }
+}
+
+/// **The item id an unarmed character's fists carry** (wave WPN1).
+///
+/// It is deliberately **not** in [`crate::item::ItemDefs`] and cannot be picked
+/// up, dropped, equipped or seen in a bag: a pair of hands is not an item, and
+/// putting one in the catalogue would make it a thing a level could take away.
+/// What the id is for is [`WeaponState::item_id`], which is the field that
+/// decides whether an ammunition clock is stale — so a character that punches
+/// and then equips a rifle gets a fresh magazine rather than the fist's.
+///
+/// The colon is the same namespace mark `BlueprintClass::new("act:…")` uses, and
+/// it is what keeps this out of `item::canonical_id`'s space by construction.
+pub const FIST_ITEM: &str = "engine:fists";
+
+/// **What a punch carries**, joules.
+///
+/// A hundred and fifty. A trained fist arrives at 6–9 m/s carrying an effective
+/// mass of about 4 kg, which is `0.5 · 4 · 8²` ≈ 130 J — the same "name the real
+/// quantities" arithmetic [`DEFAULT_VITALITY_J`] is arrived at by. Against a
+/// 2 000 J body that is thirteen punches, which is a fist-fight; against the
+/// same body after a rifle round it is two, which is why the stagger threshold is
+/// a proportion.
+pub const FIST_DAMAGE_J: f64 = 150.0;
+
+/// **How far a punch reaches**, metres — from the swinger's own feet to the body
+/// it lands on, which is the same measurement `interact::resolve` makes for a
+/// door prompt.
+///
+/// One metre two. `DOOR_REACH_M`'s neighbourhood on purpose: a player who can
+/// open a door at this distance can hit a person at it, and a reach a player
+/// cannot see the edge of reads as a broken control (`ENTER_REACH_M`'s own note).
+pub const FIST_REACH_M: f64 = 1.2;
+
+/// **The cone a punch sweeps**, degrees (total).
+///
+/// A hundred, which is wider than a rifle's aim and narrower than a shove: you
+/// can hit somebody a little off to the side, and you cannot hit somebody beside
+/// you.
+pub const FIST_ARC_DEG: f64 = 100.0;
+
+/// **How fast a person can throw punches**, "rounds" per minute.
+///
+/// Ninety — two thirds of a second a swing, which is a jab-and-recover rather
+/// than a flurry, and which through [`recoil_fraction`] is also how long the body
+/// carries the swing's own pose.
+pub const FIST_RPM: f64 = 90.0;
+
+/// **A pair of hands, as a weapon** (wave WPN1) — what an unarmed character's
+/// attack button reaches.
+///
+/// Semi-automatic on purpose: a held button throws one punch, and the next one
+/// needs the button released. Holding a trigger down is what an automatic weapon
+/// is for; a person who holds the button down is not punching continuously, and
+/// `try_fire`'s edge rule expresses that without a second mechanism.
+pub fn fist_def() -> WeaponDef {
+    WeaponDef {
+        kind: ShotKind::Melee,
+        automatic: false,
+        damage_j: FIST_DAMAGE_J,
+        rounds_per_minute: FIST_RPM,
+        spread_deg: 0.0,
+        // A magazine is meaningless for a fist and it must never run out, so it
+        // carries the bound rather than a special case in `try_fire`.
+        magazine: MAX_MAGAZINE,
+        reserve: MAX_MAGAZINE,
+        reload_s: 0.05,
+        range_m: FIST_REACH_M,
+        muzzle_speed_mps: 1.0,
+        spread_seed: 0,
+        muzzle_forward_m: 0.0,
+        melee_arc_deg: FIST_ARC_DEG,
     }
 }
 
@@ -163,6 +277,7 @@ impl WeaponDef {
             "range_m" => self.range_m = value.clamp(0.1, MAX_RANGE_M),
             "muzzle_speed_mps" => self.muzzle_speed_mps = value.clamp(1.0, 10_000.0),
             "muzzle_forward_m" => self.muzzle_forward_m = value.clamp(0.0, MAX_MUZZLE_FORWARD_M),
+            "melee_arc_deg" => self.melee_arc_deg = value.clamp(0.0, 360.0),
             // Booleans and the kind come across the same door as numbers,
             // because the door is one `(name, f64)` pair and a second door for
             // three flags would be a second thing to keep in step.
@@ -170,6 +285,17 @@ impl WeaponDef {
             "projectile" => {
                 self.kind = if value != 0.0 {
                     ShotKind::Projectile
+                } else {
+                    ShotKind::Hitscan
+                }
+            }
+            // The third kind across the same `(name, f64)` door, for
+            // `projectile`'s reason: a second door for three flags would be a
+            // second thing to keep in step. Turning melee OFF answers `Hitscan`,
+            // which is the default and is what `projectile` does.
+            "melee" => {
+                self.kind = if value != 0.0 {
+                    ShotKind::Melee
                 } else {
                     ShotKind::Hitscan
                 }
@@ -186,6 +312,8 @@ impl WeaponDef {
             "automatic",
             "damage_j",
             "magazine",
+            "melee",
+            "melee_arc_deg",
             "muzzle_forward_m",
             "muzzle_speed_mps",
             "projectile",
@@ -195,6 +323,29 @@ impl WeaponDef {
             "rounds_per_minute",
             "spread_deg",
         ]
+    }
+
+    /// **Whether this weapon is swung rather than fired.**
+    ///
+    /// One reader-facing question rather than a `match` at every call site: the
+    /// gameplay step asks it to choose between a cast and an arc, and the
+    /// difference between "is a melee" and "is not a hitscan" is a projectile.
+    pub fn is_melee(&self) -> bool {
+        self.kind == ShotKind::Melee
+    }
+
+    /// **How far this weapon reaches**, metres — the range a cast is given, or
+    /// the reach an arc is resolved over.
+    ///
+    /// One door, because the two bounds differ by an order of magnitude
+    /// ([`MAX_RANGE_M`] against [`MAX_MELEE_REACH_M`]) and a call site that
+    /// clamped a swing to a rifle's bound would let a 20 km punch through.
+    pub fn reach_m(&self) -> f64 {
+        if self.is_melee() {
+            self.range_m.clamp(0.1, MAX_MELEE_REACH_M)
+        } else {
+            self.range_m.clamp(0.1, MAX_RANGE_M)
+        }
     }
 
     /// How long one round takes, seconds.
@@ -231,6 +382,7 @@ impl WeaponDef {
                         def.kind = match s.trim().to_ascii_lowercase().as_str() {
                             "projectile" => ShotKind::Projectile,
                             "hitscan" => ShotKind::Hitscan,
+                            "melee" => ShotKind::Melee,
                             other => return Err(format!("unknown weapon kind {other}")),
                         };
                         continue;
@@ -289,6 +441,13 @@ pub const FIRE_TRIGGER: &str = "weapon_fire";
 
 /// The animation trigger a reload arms.
 pub const RELOAD_TRIGGER: &str = "weapon_reload";
+
+/// **The animation trigger a melee swing arms** (wave WPN1).
+///
+/// Its own name rather than [`FIRE_TRIGGER`]: a rig that played `weapon_fire`
+/// when somebody threw a punch would be firing an empty hand, and a state
+/// machine cannot tell the two apart from a trigger alone.
+pub const MELEE_TRIGGER: &str = "melee_swing";
 
 /// The animation trigger a door kick arms — a P29-style one-shot, reached
 /// through `inf_ecs::anim_bridge::set_anim_trigger` exactly as the ragdoll's is.
@@ -1195,6 +1354,43 @@ automatic = true
         assert!((def.damage_j - 1900.0).abs() < 1e-12);
         assert!((def.rounds_per_minute - 750.0).abs() < 1e-12);
         assert!(def.automatic);
+        // **The third kind reads out of the same table** (wave WPN1), and a
+        // melee reach is bounded by a different number from a rifle's range.
+        let doc: toml::Value = toml::from_str(
+            "[bat.weapon]\nkind = \"melee\"\ndamage_j = 900.0\nrange_m = 2.0\n\
+             melee_arc_deg = 120.0\n",
+        )
+        .expect("a document");
+        let bat = WeaponDef::from_toml_table(doc["bat"].as_table().expect("a table"))
+            .expect("a weapon")
+            .expect("it is a weapon");
+        assert!(bat.is_melee());
+        assert!((bat.reach_m() - 2.0).abs() < 1e-12);
+        assert!((bat.melee_arc_deg - 120.0).abs() < 1e-12);
+        // A melee reach is clamped by `MAX_MELEE_REACH_M` and a rifle's range by
+        // `MAX_RANGE_M`, which differ by four orders of magnitude — a call site
+        // that used one bound for both would let a 20 km punch through.
+        let long = WeaponDef {
+            range_m: 4000.0,
+            ..bat
+        };
+        assert_eq!(long.reach_m(), MAX_MELEE_REACH_M);
+        let rifle = WeaponDef {
+            range_m: 4000.0,
+            ..WeaponDef::default()
+        };
+        assert!(!rifle.is_melee());
+        assert!((rifle.reach_m() - 4000.0).abs() < 1e-12);
+        // The fists are a melee definition and they never run out.
+        let fist = fist_def();
+        assert!(fist.is_melee() && !fist.automatic);
+        assert!((fist.reach_m() - FIST_REACH_M).abs() < 1e-12);
+        assert!((fist.damage_j - FIST_DAMAGE_J).abs() < 1e-12);
+        assert_eq!(
+            try_reload(&fist, &mut WeaponState::full(FIST_ITEM, &fist)),
+            ReloadVerdict::Full,
+            "a pair of hands can be reloaded"
+        );
         // No sub-table is not a weapon.
         let plain: toml::Value = toml::from_str("[bandage]\nlabel = \"x\"\n").expect("a document");
         assert!(

@@ -290,7 +290,12 @@ impl Rig {
 
     fn arm(&mut self, id: &str) {
         assert!(item::give_inventory(&mut self.world, HERO, 6));
-        let defs = defs();
+        // **The world's own catalogue, not this file's** (wave WPN1). They are
+        // the same table for every arm that predates this one — `Rig::new` seeds
+        // the world from `defs()` — and they stop being the same the moment a
+        // test authors an item of its own, which the melee arm does. Reading the
+        // world is also what an equip really does.
+        let defs = item::item_defs(&self.world).cloned().unwrap_or_default();
         let e = self.world.entity_of(HERO).expect("the hero");
         {
             let mut inv = self
@@ -851,17 +856,47 @@ fn the_e_key_picks_an_item_up_off_the_floor() {
     );
 }
 
-/// **An unarmed character costs the step nothing and carries no clock.**
+/// **An unarmed character costs the step nothing and carries no clock** — until
+/// it throws a punch.
+///
+/// The second half changed shape at wave WPN1 and the change is the finding: an
+/// empty hand is now the third consumer of the attack edge, so *pressing the
+/// button* installs a fist clock and swings. What the arm still holds — and what
+/// keeps every trace committed before this wave byte-identical — is that an
+/// unarmed character which has **not** pressed it carries nothing at all, and
+/// that a fist is not a *shot*: it costs the ray cast nothing and resolves as a
+/// swing.
 #[test]
 fn a_character_with_no_weapon_has_no_ammunition_clock() {
     let mut rig = Rig::new();
-    rig.step(&idle());
+    let r = rig.step(&idle());
     let e = rig.world.entity_of(HERO).expect("the hero");
     assert!(rig.world.world().get::<WeaponState>(e).is_none());
-    let r = rig.step(&hold_trigger());
-    assert_eq!(r.shots, 0, "an unarmed character fired something");
-    assert!(r.hits.is_empty());
+    assert_eq!(r.shots, 0);
     assert!(inf_ecs::weapon::weapon_state_bytes(&rig.world).is_empty());
+    // …and it stays empty over a whole second of doing nothing, which is the
+    // half a lazy install that fired on every step would break.
+    for r in rig.steps(&idle(), 60) {
+        assert_eq!(r.shots, 0, "an idle unarmed character did something");
+    }
+    assert!(inf_ecs::weapon::weapon_state_bytes(&rig.world).is_empty());
+    // The BUTTON is what changes it, and what it makes is a swing at nobody.
+    let r = rig.step(&hold_trigger());
+    assert_eq!(
+        r.shots, 1,
+        "the attack button did nothing with an empty hand"
+    );
+    assert_eq!(r.swings, 1, "the punch resolved as a shot");
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(
+        r.hits[0].target, None,
+        "there is nobody in the fixture to hit"
+    );
+    assert!(
+        !inf_ecs::weapon::weapon_state_bytes(&rig.world).is_empty(),
+        "the punch left no ammunition clock, so a second one could arrive on \
+         the next step"
+    );
     // Arm it, then take the weapon away: the clock goes with it.
     rig.arm("rifle");
     rig.step(&idle());
@@ -1383,5 +1418,196 @@ fn a_non_fatal_hit_arms_a_reaction_and_a_heavy_one_takes_the_mode() {
     assert_ne!(
         soft.target_mode(),
         inf_ecs::components::MovementMode::FallControlled
+    );
+}
+
+/// **AN EMPTY HAND IS THE THIRD CONSUMER OF THE ATTACK EDGE** (wave WPN1).
+///
+/// The claims, and each one kills a different mutation:
+///
+/// 1. an unarmed character that has **never** pressed the button carries no
+///    `WeaponState` at all — the lazy install, which is what keeps every trace
+///    committed before this wave byte-identical;
+/// 2. pressing it throws a punch that reaches a body **1 m** away and takes
+///    `FIST_DAMAGE_J` out of it, through the same `Health` door a bullet uses;
+/// 3. the punch is a **swing** and not a shot: `swings` counts it, and the arc
+///    resolution is what found the target rather than a cast;
+/// 4. a body **behind** the swinger is not hit, so the cone is doing work.
+#[test]
+fn an_unarmed_character_punches_the_body_in_front_of_it() {
+    let mut rig = Rig::new();
+    spawn_bare_body(&mut rig.world, 1.0);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    // NO `arm()`: the hero has nothing in its hands and nothing in its bag.
+    rig.step(&idle());
+    let e = rig.world.entity_of(HERO).expect("the hero");
+    assert!(
+        rig.world.world().get::<WeaponState>(e).is_none(),
+        "an unarmed character that has never punched carries an ammunition clock"
+    );
+
+    let r = rig.step(&hold_trigger());
+    println!(
+        "one punch: {} shot(s), {} swing(s), {} hit(s), {} stagger(s); the body has {:?} J",
+        r.shots,
+        r.swings,
+        r.hits.len(),
+        r.staggers,
+        weapon::health_of(&rig.world, TARGET).map(|h| h.joules)
+    );
+    assert_eq!(
+        r.shots, 1,
+        "the attack button did nothing with an empty hand"
+    );
+    assert_eq!(
+        r.swings, 1,
+        "the punch resolved as a SHOT rather than a swing"
+    );
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(r.hits[0].target, Some(TARGET), "the punch found nobody");
+    assert!(r.hits[0].on_flesh);
+    // **The world**: the body it landed on, read back out of the ECS.
+    let h = weapon::health_of(&rig.world, TARGET).expect("the punch gave it a body");
+    assert!(
+        (h.joules - (weapon::DEFAULT_VITALITY_J - weapon::FIST_DAMAGE_J)).abs() < 1e-9,
+        "the punch took {} J and a fist carries {}",
+        weapon::DEFAULT_VITALITY_J - h.joules,
+        weapon::FIST_DAMAGE_J
+    );
+    assert_eq!(r.staggers, 1, "the punch armed no hit reaction");
+    assert_eq!(
+        r.knockdowns,
+        0,
+        "a punch worth {} J of a {} J body knocked it down",
+        weapon::FIST_DAMAGE_J,
+        weapon::DEFAULT_VITALITY_J
+    );
+    // The clock is installed and it is the FIST's, so equipping a rifle later
+    // gets a fresh magazine rather than this.
+    let s = rig
+        .world
+        .world()
+        .get::<WeaponState>(e)
+        .expect("the punch installed a clock")
+        .clone();
+    assert_eq!(s.item_id, weapon::FIST_ITEM);
+
+    // …and it is SEMI-AUTOMATIC: the button held throws one punch, not sixty.
+    let before = weapon::health_of(&rig.world, TARGET)
+        .expect("a body")
+        .joules;
+    let rs = rig.steps(&hold_trigger_no_edge(), 30);
+    let more: u32 = rs.iter().map(|r| r.swings).sum();
+    println!(
+        "holding the button for another 30 steps threw {more} more punch(es); \
+         the body went {before} -> {} J",
+        weapon::health_of(&rig.world, TARGET)
+            .expect("a body")
+            .joules
+    );
+    assert_eq!(
+        more, 0,
+        "a held button threw {more} punches — the fist is automatic"
+    );
+
+    // **THE CONE**: the same press with the body BEHIND the hero lands nothing.
+    let mut behind = Rig::new();
+    spawn_bare_body(&mut behind.world, -1.0);
+    behind.world.mark_dirty();
+    behind.world.propagate();
+    behind.step(&idle());
+    let r = behind.step(&hold_trigger());
+    println!(
+        "a punch at a body 1 m BEHIND the hero: {} swing(s), target {:?}",
+        r.swings, r.hits[0].target
+    );
+    assert_eq!(r.swings, 1, "the swing did not happen at all");
+    assert_eq!(
+        r.hits[0].target, None,
+        "the swing reached a body behind the swinger — the arc is not being applied"
+    );
+    assert!(
+        weapon::health_of(&behind.world, TARGET).is_none(),
+        "a body behind the swinger was hurt"
+    );
+}
+
+/// **A MELEE `WeaponDef` IS A REACH AND AN ARC, NOT A RAY** (wave WPN1) — a bat
+/// out of the catalogue, through the same equip door a rifle takes.
+///
+/// The arm a fist alone cannot make: the fist's numbers are engine constants, so
+/// a `WeaponDef` whose kind is melee but which never reached the arc resolution
+/// would still let the punch through. This one is authored **by name**, through
+/// `WeaponDef::set` — the live-tuning door a designer's slider and the item
+/// TOML's own reader both go through. (The TOML spelling `kind = "melee"` is
+/// pinned in `inf_ecs::weapon`'s own tests; `inf-physics` has no `toml`
+/// dependency and this arm is about the resolution, not about the parser.)
+#[test]
+fn an_authored_melee_weapon_swings_instead_of_casting() {
+    let mut rig = Rig::new();
+    spawn_bare_body(&mut rig.world, 1.6);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    let mut def = WeaponDef::default();
+    for (name, value) in [
+        ("melee", 1.0),
+        ("damage_j", 900.0),
+        ("range_m", 2.0),
+        ("melee_arc_deg", 120.0),
+        ("rounds_per_minute", 60.0),
+    ] {
+        assert!(def.set(name, value), "the tuning door does not know {name}");
+    }
+    assert!(def.is_melee(), "`melee` did not reach the def");
+    assert!((def.reach_m() - 2.0).abs() < 1e-12);
+    {
+        let defs = item::item_defs_mut(&mut rig.world);
+        assert!(defs.insert(ItemDef {
+            id: "bat".into(),
+            label: "Bat".into(),
+            stack_max: 1,
+            mass_kg: 1.1,
+            weapon: Some(def),
+        }));
+    }
+    rig.arm("bat");
+    rig.step(&idle());
+    let r = rig.step(&hold_trigger());
+    println!(
+        "a 2 m bat at a body 1.6 m away: {} swing(s), target {:?}, {} J left",
+        r.swings,
+        r.hits[0].target,
+        weapon::health_of(&rig.world, TARGET)
+            .map(|h| h.joules)
+            .unwrap_or(-1.0)
+    );
+    assert_eq!(r.swings, 1);
+    assert_eq!(r.hits[0].target, Some(TARGET));
+    let h = weapon::health_of(&rig.world, TARGET).expect("a body");
+    assert!((weapon::DEFAULT_VITALITY_J - h.joules - 900.0).abs() < 1e-9);
+    // …and the reach is the CLAIM: the same bat cannot touch a body at 3 m,
+    // where a hitscan of the same `range_m` would have reached easily.
+    let mut far = Rig::new();
+    spawn_bare_body(&mut far.world, 3.0);
+    far.world.mark_dirty();
+    far.world.propagate();
+    {
+        let defs = item::item_defs_mut(&mut far.world);
+        assert!(defs.insert(ItemDef {
+            id: "bat".into(),
+            label: "Bat".into(),
+            stack_max: 1,
+            mass_kg: 1.1,
+            weapon: Some(def),
+        }));
+    }
+    far.arm("bat");
+    far.step(&idle());
+    let r = far.step(&hold_trigger());
+    assert_eq!(r.swings, 1, "the swing did not happen");
+    assert_eq!(
+        r.hits[0].target, None,
+        "a 2 m bat reached a body 3 m away — the reach is not being applied"
     );
 }
