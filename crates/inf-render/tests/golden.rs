@@ -4413,8 +4413,18 @@ fn golden_venue_interior() {
         "the stage ({stage:.2}) is not markedly brighter than the room's corner \
          ({corner:.2}) — this frame is lit by a fill, not by practicals"
     );
+    // **42 was ABOVE the defect it names** (VEN1a audit). The roofless first cut
+    // measured 40.06, so this clause passed on the very frame it exists to
+    // reject and the mutation was caught by the *ratio* clause above it instead
+    // — an accident, and one that evaporates the day the stage gets brighter.
+    // Mutation-verified at the audit: with the roof and three walls removed the
+    // corner reads **40.06** and the closed room reads **4.2**, so 15 falsifies
+    // the named defect with 2.7× under it and 3.6× of headroom over the frame
+    // that passes. (A near-black region mean is where an adapter would differ
+    // most in relative terms and least in absolute ones; the headroom is 10.8
+    // of 255.)
     assert!(
-        corner < 42.0,
+        corner < 15.0,
         "the room's far corner is at {corner:.2} — a venue interior's ambient is \
          near black and everything else in this arm rests on it"
     );
