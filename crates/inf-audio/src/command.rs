@@ -84,6 +84,29 @@ pub enum AudioCommand {
     SetVolume { source: u64, volume: f64 },
     /// Set a live source's pitch (playback-rate factor).
     SetPitch { source: u64, pitch: f64 },
+    /// **Re-evaluate a live source's obstruction** (island wave VEN1b).
+    ///
+    /// [`PlayCommand::occlusion_gain`] is taken once, when the voice starts,
+    /// which is the right shape for a one-shot and the wrong one for a loop: a
+    /// venue's music began muffled behind its own door and stayed muffled for
+    /// the whole session however far in the listener walked. This is the same
+    /// factor, pushed by the sim every step it changes.
+    ///
+    /// `lowpass_hz` is the cutoff the sim's occlusion model decided on, or
+    /// `None` for a path that only attenuates. It is **modelled and
+    /// inspectable, not yet audible** — `backend.rs` has no filter code and the
+    /// mixer's own `Effect::Lowpass` has been in the same state since P12 —
+    /// so it is carried here, where the two hosts' command streams are
+    /// compared, and read back through
+    /// [`AudioEngine::effective_lowpass_hz`](crate::AudioEngine::effective_lowpass_hz).
+    SetOcclusion {
+        /// The source, as [`PlayCommand::source`].
+        source: u64,
+        /// The obstruction gain in `[0, 1]`; `1.0` is clear.
+        gain: f64,
+        /// The cutoff this path implies, hertz, or `None`.
+        lowpass_hz: Option<f64>,
+    },
     /// Update the listener pose (position + orientation) for spatial mixing.
     SetListener(Listener),
 }

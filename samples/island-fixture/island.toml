@@ -122,6 +122,8 @@ content = [
   "../settlement/Zone_Apartment.inf_pcg.toml",
   "../settlement/Zone_Bar.inf_pcg",
   "../settlement/Zone_Bar.inf_pcg.toml",
+  "../settlement/Venue_Music.inf_audio",
+  "../settlement/Venue_Music.inf_audio.toml",
   "../settlement/Zone_Estate.inf_pcg",
   "../settlement/Zone_Estate.inf_pcg.toml",
   "../settlement/Zone_Hotel.inf_pcg",

@@ -349,3 +349,67 @@ fn the_movement_door_no_longer_steps_the_vehicles_itself() {
          row measuring half of it"
     );
 }
+
+/// **The two hosts hear the same doorway** (island wave VEN1b).
+///
+/// The re-evaluation half of the same trade, and it needs the same gate for the
+/// same reason: `inf_physics::d3::audio::portal_gain` is Ring 0 and is the
+/// *decision*; this is the mapping onto the queue, and there is one copy of it
+/// per host by construction. Two copies that drifted would make a PIE preview
+/// and a shipped build muffle a club by different amounts from the same
+/// doorway — and the audio command stream is exactly what `physics_demo`'s
+/// gate (c) compares between them.
+#[test]
+fn both_audio_steps_hear_the_same_doorway() {
+    let editor = fenced(&read(EDITOR), "doorway_occlusion", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "doorway_occlusion", "the shipped RuntimeSim");
+    assert!(
+        editor.len() > 400,
+        "the `doorway_occlusion` fence is {} chars — an empty fence would make \
+         this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the doorway occlusion has drifted between the editor's Simulate and \
+         the shipped player"
+    );
+    for (needle, why) in [
+        (
+            "inf_physics::d3::audio::portal_gain(",
+            "the DECISION is Ring 0 — a host that decided its own cut would be \
+             the second authority the P12 doctrine exists to prevent, and it is \
+             the shape this wave replaced (two copies of one raycast with a \
+             -12 dB constant beside each)",
+        ),
+        (
+            "src.occlusion&&src.spatial&&src.looping",
+            "only a LOOPING spatial source that opts in is re-evaluated — a \
+             one-shot's gain is right when it is taken, and re-testing every \
+             emitter in a settlement every step is the cost this predicate \
+             refuses",
+        ),
+        (
+            ">src.max_distance",
+            "the emitter's own reach is the cull — past it the spatial model \
+             has already taken the gain to zero, and this is the only distance \
+             cull the audio step has at all",
+        ),
+        (
+            "AudioCommand::SetOcclusion",
+            "the per-step push is what makes a loop's occlusion live; \
+             `PlayCommand::occlusion_gain` alone is taken once and never again",
+        ),
+        (
+            "lowpass_hz:p.lowpass_hz",
+            "the cutoff a shut door implies rides the command, so it is a \
+             number two hosts are compared on rather than a claim in a doc",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&n),
+            "the doorway loop no longer carries `{needle}`: {why}"
+        );
+    }
+}

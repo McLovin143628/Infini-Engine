@@ -435,6 +435,13 @@ pub struct RuntimeSim {
     /// population has been derived, and what its network holds. MIRROR of
     /// `SimSession::society`.
     society: inf_ecs::society::SocietyStats,
+    /// **This step's venue-audio counters** (VEN1b) — how many speakers the
+    /// resident venues offer, how many exist, and what was spawned or taken
+    /// away. The `society` shape one system along and read for its reason: a
+    /// gate that wants to know whether the club is PLAYING has to ask something
+    /// other than "did the function get called". All zeroes on a level with no
+    /// venue.
+    venue_audio: inf_ecs::venue::VenueAudioStats,
     /// This step's traffic counters (VEH2b) — cars per tier, how many are
     /// driving, how many carry a driver and how many the traffic has let go of.
     /// The `crowd` shape one system along, and read for the same reason: a gate
@@ -493,10 +500,6 @@ pub fn camera_centroid(positions: &BTreeMap<Uuid, DVec3>) -> DVec3 {
     let sum: DVec3 = positions.values().copied().sum();
     sum / positions.len() as f64
 }
-
-/// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
-/// cut (P12.3); the shipped mirror of the editor constant.
-const OCCLUSION_CUT_LINEAR: f64 = 0.251_188_643_150_958; // 10^(-12/20)
 
 impl RuntimeSim {
     /// Build a runtime sim over `world`, ticking `actors` (each an entity `Guid`
@@ -596,6 +599,7 @@ impl RuntimeSim {
             fracture_audit: FractureAudit::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
             society: inf_ecs::society::SocietyStats::default(),
+            venue_audio: inf_ecs::venue::VenueAudioStats::default(),
             traffic: inf_ecs::traffic::TrafficStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
@@ -764,6 +768,12 @@ impl RuntimeSim {
     /// gate tells "no society" from "a society that is not being derived".
     pub fn society_stats(&self) -> inf_ecs::society::SocietyStats {
         self.society
+    }
+
+    /// **The most recent fixed step's venue-audio counters** (VEN1b) — the
+    /// emitters a level's own venues imply and the entities that carry them.
+    pub fn venue_audio_stats(&self) -> inf_ecs::venue::VenueAudioStats {
+        self.venue_audio
     }
 
     /// **The most recent fixed step's traffic counters** (VEH2b) — cars per
@@ -1474,6 +1484,18 @@ impl RuntimeSim {
         //    every level committed before this wave: one entity walk that finds
         //    nothing and inserts no resource.
         self.society = inf_ecs::society::sync_society(&mut self.world);
+        // ── VEN1b THE MUSIC ── and, in the same phase and for the same
+        //    reason, the emitters those buildings imply. A venue's main room
+        //    gets one `AudioSource` entity, minted from the level's own content
+        //    so both hosts spawn the same speaker, and it goes when its block
+        //    streams out.
+        //
+        //    HERE rather than in a phase of its own: this is the society's own
+        //    question asked about a room instead of a person — *what does this
+        //    level's own building imply* — and it is measured against
+        //    `SOCIETY_STEP_BUDGET_MS` beside the answer about people. Inert on
+        //    a level with no venue: one walk that finds no emitter.
+        self.venue_audio = inf_ecs::venue::sync_venue_audio(&mut self.world);
         clk.mark(phase::SOCIETY);
         self.crowd = inf_ecs::crowd::step_crowd_banded(&mut self.world, dt, self.crowd_radii);
         clk.mark(phase::CROWD);
@@ -1925,7 +1947,8 @@ impl RuntimeSim {
             still_alive.insert(guid);
             let mut cmd = play_command_for(guid_source_key(guid), &src, src.spatial.then_some(pos));
             if src.occlusion && src.spatial {
-                cmd.occlusion_gain = self.occlusion_gain(listener_pos, pos);
+                cmd.occlusion_gain =
+                    portal(&self.world, &mut self.bridge3d, listener_pos, pos).gain;
             }
             self.audio_cmds.push(AudioCommand::Play(cmd));
         }
@@ -1946,6 +1969,59 @@ impl RuntimeSim {
             });
         }
 
+        // -- VEN1b the doorway -- a looping spatial source that opts into
+        //    occlusion is re-evaluated EVERY step, not once when its voice
+        //    started.
+        //
+        //    `PlayCommand::occlusion_gain` is taken at `Play` time, which is
+        //    right for a footstep and wrong for a loop: a venue's music began
+        //    muffled behind its own front door and stayed muffled however far
+        //    in the listener walked. The three commands this costs are the
+        //    engine-loop pattern one system over -- a `Play` once, then a
+        //    per-step parameter -- and the DECISION is Ring 0
+        //    (`inf_physics::d3::audio::portal_gain`), so the stream stays a pure
+        //    function of sim state.
+        //
+        //    Inert on every level committed before this wave: `AudioSource::
+        //    occlusion` is `false` by default and nothing else sets it.
+        //    (MIRROR of the other host's `audio_step`.)
+        let (world, started, bridge, cmds) = (
+            &self.world,
+            &self.audio_started,
+            &mut self.bridge3d,
+            &mut self.audio_cmds,
+        );
+        // MIRROR-BEGIN doorway_occlusion
+        let mut portals: Vec<(u64, DVec3)> = Vec::new();
+        for guid in started.iter() {
+            let Some(src) = audio_source_of(world, *guid) else {
+                continue;
+            };
+            if !(src.occlusion && src.spatial && src.looping) {
+                continue;
+            }
+            let pos = emitter_position(world, *guid);
+            // Past its own `max_distance` the spatial model has already taken
+            // the gain to zero, so a raycast there would buy silence a second
+            // time. This is also the only distance cull the audio step has --
+            // the walk above has none -- and it is what keeps the cost a
+            // function of the emitters you can HEAR.
+            if (pos - listener_pos).length() > src.max_distance {
+                continue;
+            }
+            portals.push((guid_source_key(*guid), pos));
+        }
+        for (source, pos) in portals {
+            let p =
+                inf_physics::d3::audio::portal_gain(world, bridge.world_mut(), listener_pos, pos);
+            cmds.push(AudioCommand::SetOcclusion {
+                source,
+                gain: p.gain,
+                lowpass_hz: p.lowpass_hz,
+            });
+        }
+        // MIRROR-END doorway_occlusion
+
         // Occlusion for Blueprint-queued Plays (source = actor entity id).
         let mut occ: Vec<(usize, DVec3)> = Vec::new();
         for (i, cmd) in self.audio_cmds.iter().enumerate() {
@@ -1963,7 +2039,7 @@ impl RuntimeSim {
             }
         }
         for (i, emitter) in occ {
-            let gain = self.occlusion_gain(listener_pos, emitter);
+            let gain = portal(&self.world, &mut self.bridge3d, listener_pos, emitter).gain;
             if let AudioCommand::Play(p) = &mut self.audio_cmds[i] {
                 p.occlusion_gain = gain;
             }
@@ -1977,28 +2053,6 @@ impl RuntimeSim {
         // Host-side reap of naturally-finished voices (device bookkeeping only —
         // not sim state, so the command stream above is untouched).
         self.audio.reap();
-    }
-
-    /// One occlusion raycast from `listener` toward `emitter` (the shipped mirror
-    /// of the editor helper).
-    fn occlusion_gain(&mut self, listener: DVec3, emitter: DVec3) -> f64 {
-        let delta = emitter - listener;
-        let dist = delta.length();
-        if dist < 1e-6 {
-            return 1.0;
-        }
-        let dir = delta / dist;
-        match self.bridge3d.world_mut().cast_ray(listener, dir, dist) {
-            Some(hit) => {
-                let hit_dist = (hit.point - listener).length();
-                if hit_dist + 1e-3 < dist {
-                    OCCLUSION_CUT_LINEAR
-                } else {
-                    1.0
-                }
-            }
-            None => 1.0,
-        }
     }
 
     /// Step every entity's [`AnimStateMachine`] (P11.2) **and evaluate the pose it
@@ -3706,6 +3760,28 @@ fn guid_source_key(guid: Uuid) -> u64 {
     guid.as_u128() as u64
 }
 
+/// **How obstructed a source is from the listener** — the Ring-0 door,
+/// and the whole of this host's opinion about it (island wave VEN1b).
+///
+/// This used to be the raycast itself, written out twice — once here and
+/// once in the other host — with a −12 dB constant beside each copy, and
+/// neither copy could see a DOORWAY. The rule now lives in
+/// `inf_physics::d3::audio`, which can: two hosts cannot muffle by
+/// different amounts, and a level's audio command stream stays comparable
+/// between them, which is the one thing `physics_demo`'s gate (c) asserts
+/// about it.
+///
+/// A free function rather than a method because the two things it needs —
+/// the world and the physics bridge — are disjoint fields of the host, and
+/// a `&mut self` method could not hold both.
+fn portal(
+    world: &inf_ecs::EcsWorld,
+    bridge: &mut inf_physics::PhysicsBridge3D,
+    listener: DVec3,
+    emitter: DVec3,
+) -> inf_physics::d3::audio::PortalGain {
+    inf_physics::d3::audio::portal_gain(world, bridge.world_mut(), listener, emitter)
+}
 /// Read a clone of an entity's [`AudioSource`] by `Guid`.
 fn audio_source_of(world: &EcsWorld, guid: Uuid) -> Option<AudioSource> {
     let e = world.entity_of(guid)?;

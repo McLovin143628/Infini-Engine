@@ -1293,8 +1293,33 @@ pub fn settlement_files() -> Vec<String> {
         out.push(format!("{n}.toml"));
         out.push(n);
     }
+    // VEN1b: and the club loop the venue archetypes' own music emitter names.
+    out.push(VENUE_MUSIC_FILE.to_string());
+    out.push(format!("{VENUE_MUSIC_FILE}.toml"));
     out.sort();
     out
+}
+
+/// **The file a venue's music loop lives in**, beside the zone documents.
+///
+/// The settlement library is where a settlement's own content goes, and a club
+/// loop is settlement content: it is named by `inf_ecs::venue::VENUE_MUSIC_CLIP`
+/// from the engine and by every island recipe's `[content]` list, exactly as a
+/// zone document is.
+pub const VENUE_MUSIC_FILE: &str = "Venue_Music.inf_audio";
+
+/// **The committed club loop**, as an [`inf_audio::AudioAsset`].
+///
+/// A short deterministic tone, generated rather than recorded, on
+/// `crate::samples::playground_audio_asset`'s own terms: a committed `.inf_audio`
+/// needs no binary fixture, and a clip a test can regenerate is a clip a
+/// reviewer can diff. Four thousand samples at 8 kHz is half a second, looped —
+/// which is not music and is not pretending to be. What it makes true is the
+/// thing the wave needs true: the `Play` a venue issues **names a clip that
+/// resolves**, so the doorway model is attenuating a real voice rather than a
+/// command into the void.
+pub fn venue_music_asset() -> inf_audio::AudioAsset {
+    crate::samples::playground_audio_asset()
 }
 
 /// Write the seven zone documents and the README.
@@ -1313,6 +1338,20 @@ pub fn write_settlement_library(dir: &std::path::Path) -> Result<(), String> {
         .save(&p)
         .map_err(|e| format!("write the {} zone sidecar: {e}", a.name()))?;
     }
+    // **The club loop** (VEN1b), with the GUID `inf_ecs::venue` names it by —
+    // an asset a level references by id has to have the same id every time or
+    // the committed bytes are a different set of files on every build.
+    let audio = venue_music_asset();
+    let bytes = inf_asset::encode(&audio).map_err(|e| format!("encode the venue music: {e}"))?;
+    let p = dir.join(VENUE_MUSIC_FILE);
+    std::fs::write(&p, &bytes).map_err(|e| format!("write {}: {e}", p.display()))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(inf_ecs::venue::VENUE_MUSIC_CLIP),
+        inf_asset::AssetKind::Audio,
+        inf_asset::ContentHash::of(&bytes),
+    )
+    .save(&p)
+    .map_err(|e| format!("write the venue music sidecar: {e}"))?;
     std::fs::write(dir.join("README.md"), SETTLEMENT_README)
         .map_err(|e| format!("write readme: {e}"))
 }

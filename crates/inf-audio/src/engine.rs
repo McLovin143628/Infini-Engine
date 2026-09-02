@@ -144,6 +144,15 @@ struct Voice {
     occlusion: bool,
     /// Extra obstruction multiplier in `[0, 1]` (`1.0` = clear).
     occlusion_gain: f64,
+    /// **The cutoff the sim's occlusion model put on this voice**, hertz, or
+    /// `None` (island wave VEN1b).
+    ///
+    /// Modelled and inspectable rather than audible, exactly as
+    /// [`AudioEngine::named_bus_lowpass_hz`] has been since P12: nothing in
+    /// `backend.rs` filters. It is here so a shut door is a *number in the
+    /// command stream* the two hosts are compared on rather than a claim in a
+    /// doc.
+    occlusion_lowpass_hz: Option<f64>,
 }
 
 /// The audio facade over kira. Construct with [`new`](Self::new) (opens a device
@@ -381,6 +390,7 @@ impl AudioEngine {
                 attenuation: settings.attenuation,
                 occlusion: settings.position.is_some(),
                 occlusion_gain: 1.0,
+                occlusion_lowpass_hz: None,
             },
         )
     }
@@ -571,6 +581,18 @@ impl AudioEngine {
                         self.set_pitch(h, *pitch);
                     }
                 }
+                AudioCommand::SetOcclusion {
+                    source,
+                    gain,
+                    lowpass_hz,
+                } => {
+                    if let Some(&h) = self.sources.get(source) {
+                        self.set_occlusion(h, *gain);
+                        if let Some(v) = self.voices.get_mut(&h.0) {
+                            v.occlusion_lowpass_hz = *lowpass_hz;
+                        }
+                    }
+                }
                 AudioCommand::SetListener(l) => self.set_listener(*l),
             }
         }
@@ -579,6 +601,19 @@ impl AudioEngine {
     /// The live handle for a source id (from a drained `Play`), if any.
     pub fn source_handle(&self, source: u64) -> Option<SoundHandle> {
         self.sources.get(&source).copied()
+    }
+
+    /// **The cutoff a voice's own occlusion path put on it**, hertz (island
+    /// wave VEN1b), or `None` for a voice nothing filters.
+    ///
+    /// The per-VOICE twin of [`named_bus_lowpass_hz`](Self::named_bus_lowpass_hz)
+    /// and on exactly its terms: modelled and inspectable, audible once per-bus
+    /// kira sub-tracks are wired. A gate reads it to say a shut door muffled
+    /// rather than merely quietened.
+    pub fn effective_lowpass_hz(&self, handle: SoundHandle) -> Option<f64> {
+        self.voices
+            .get(&handle.0)
+            .and_then(|v| v.occlusion_lowpass_hz)
     }
 
     fn apply_play(&mut self, p: &PlayCommand, resolve: &dyn Fn(Uuid) -> Option<SoundData>) {
@@ -617,6 +652,9 @@ impl AudioEngine {
                 // does not clobber it.
                 occlusion: false,
                 occlusion_gain: p.occlusion_gain.clamp(0.0, 1.0),
+                // A `Play` carries no cutoff: the model that decides one
+                // re-evaluates every step and says so with `SetOcclusion`.
+                occlusion_lowpass_hz: None,
             },
         ) else {
             return; // the backend refused it; `play_voice` counted that

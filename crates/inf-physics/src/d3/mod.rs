@@ -14,6 +14,9 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 
 // P29.6 the locomotion camera: the fixed-step door both hosts call, and
 // `cast_shape`'s third consumer (Ruling 3).
+// VEN1b: what a listener hears through a DOORWAY, which is the half the
+// P12.3 single-ray model had no answer for.
+pub mod audio;
 pub mod camera;
 pub mod carjack;
 mod character;

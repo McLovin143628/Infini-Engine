@@ -64,6 +64,9 @@ pub mod vehicle;
 // module header for why a hit-point would put back the conversion table
 // `docs/memos/p22-strength.md` exists to refuse.
 pub mod weapon;
+// VEN1b: the music a venue's own building implies -- an emitter entity per
+// main room, reconciled against the resident volumes.
+pub mod venue;
 pub mod world;
 
 pub use attach::update_attachments;

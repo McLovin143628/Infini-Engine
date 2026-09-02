@@ -157,6 +157,13 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
     // host gets these from the cook's own index; this one reads the same content
     // root the recipe's `[content]` list filled.
     .with_anim_assets(skeletons, clips, machines)
+    // **The club loop** (VEN1b), for the anim index's reason exactly and it is
+    // the FOURTH thing this function was missing: the pack host gets its
+    // `.inf_audio` payloads from the cook's own index, so without this line the
+    // two hosts would issue the same `Play` and one of them would resolve it.
+    // The command stream is the observable contract, and it stays comparable
+    // either way — what this buys is that both hosts are given the same world.
+    .with_audio(inf_player::level::load_audio_assets_from_dir(content))
     .with_terrain_resolver(std::sync::Arc::new(move |g| {
         inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
     }));
