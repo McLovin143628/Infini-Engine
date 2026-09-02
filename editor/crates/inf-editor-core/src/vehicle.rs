@@ -47,12 +47,8 @@
 use glam::DVec3;
 use uuid::Uuid;
 
-use inf_ecs::components::{
-    AudioSource, BodyKind3D, Collider3D, ColliderShape3DKind, Material, MeshRef, Primitive,
-    RigidBody3D, Transform,
-};
-use inf_ecs::math::{Color, Vec3d};
-use inf_ecs::vehicle::{VehicleDef, TYRE_ROLL_DEG, TYRE_WIDTH_FRAC};
+use inf_ecs::math::Color;
+use inf_ecs::vehicle::{rig_nodes, RigSpawn, VehicleDef};
 
 use crate::ipc::SpawnKind;
 use crate::scene::SceneDoc;
@@ -75,7 +71,10 @@ macro_rules! insert {
 
 /// The tyres' colour — dark, unlit-looking rubber, so a wheel reads against the
 /// body whatever the body is painted.
-pub const TYRE_COLOR: Color = Color::new(0.07, 0.07, 0.08, 1.0);
+///
+/// **Ring 0's** since wave VEH2b: the runtime spawner paints the same tyre, and
+/// a colour named twice is a colour that drifts.
+pub use inf_ecs::vehicle::TYRE_COLOR;
 
 /// **Where one authored vehicle goes, and what it looks like** — the half of a
 /// spawn that is not the class.
@@ -104,176 +103,60 @@ pub struct VehicleSpawn<'a> {
 /// same car twice is byte-identical and re-authoring one in place replaces its
 /// own parts rather than accumulating a second set.
 ///
-/// What is built:
+/// # ONE RECIPE, TWO DOORS (wave VEH2b)
 ///
-/// * the **chassis** — a `Dynamic` `RigidBody3D`, a box `Collider3D` at the
-///   def's half-extents and density, and the def's
-///   [`VehicleClass`](inf_ecs::components::VehicleClass) (scene v25, applied
-///   once at creation by the bridge);
-/// * the **body** — one child per [`BodyPart`] of the def's family, drawing its
-///   own primitive at its own size;
-/// * the **wheels** — four sphere **sensors** with no body of their own, which
-///   is what `inf_ecs::vehicle::wheel_of` recognises, each with a **tyre** child
-///   that draws the cylinder the door's own rotation write cannot lay down;
-/// * an [`AudioSource`] on the chassis, looping and spatial, so the VEH1a engine
-///   loop has an emitter to address. Its `clip` is the caller's: `None` is a
-///   silent voice, and the *command stream* — which is what PIE == shipping
-///   compares — is the same either way.
+/// What a car is *made of* moved to Ring 0 as
+/// [`inf_ecs::vehicle::rig_nodes`] — the chassis with its body, collider,
+/// class and engine emitter; a child per `BodyPart`; four wheel sensors each
+/// with a tyre. This function is now the half that is genuinely an *authoring*
+/// concern: creating the entities through `SceneDoc::create_with_guid`, which
+/// tracks creation order and the undo step. Wave VEH2b's traffic materializes
+/// the same list straight into an `EcsWorld` through
+/// [`inf_ecs::vehicle::spawn_rig`], and the two cannot disagree about what a
+/// car is because there is only one list.
 ///
-/// [`BodyPart`]: inf_ecs::vehicle::BodyPart
+/// The **order** of that list is load-bearing here and nowhere else: a
+/// `SceneDoc` writes its entities in creation order, so a walk in any other
+/// order would produce a committed `.inf_lvl` with different bytes and the same
+/// contents. `committed_sample_matches_generators` is what says it did not.
 pub fn spawn_vehicle(
     doc: &mut SceneDoc,
     chassis: Uuid,
     def: &VehicleDef,
     spawn: VehicleSpawn<'_>,
 ) -> Uuid {
-    let part_guid = |part: &str| inf_ecs::vehicle::body_part_guid(chassis, part);
-    let h = def.half_extents;
-
-    doc.create_with_guid(chassis, SpawnKind::Empty, spawn.name, None);
-    insert!(
-        doc,
+    let nodes = rig_nodes(
         chassis,
-        Transform {
-            translation: Vec3d::from_dvec3(spawn.at),
-            rotation: Vec3d::new(0.0, spawn.yaw_deg, 0.0),
-            scale: Vec3d::ONE,
-        }
-    );
-    insert!(
-        doc,
-        chassis,
-        RigidBody3D {
-            kind: BodyKind3D::Dynamic,
-            // A car does not spin on its own axis for want of damping; the
-            // suspension supplies the rest of the resistance. (P29.7's number.)
-            angular_damping: 0.5,
-            ..Default::default()
-        }
-    );
-    insert!(
-        doc,
-        chassis,
-        Collider3D {
-            shape_kind: ColliderShape3DKind::Box,
-            half_extents: h,
-            density: def.density_kg_m3,
-            friction: 0.5,
-            ..Default::default()
-        }
-    );
-    insert!(doc, chassis, def.class);
-    insert!(
-        doc,
-        chassis,
-        AudioSource {
+        def,
+        &RigSpawn {
+            name: spawn.name.to_string(),
+            at: spawn.at,
+            yaw_deg: spawn.yaw_deg,
+            paint: spawn.paint,
             clip: spawn.clip,
-            looping: true,
-            spatial: true,
-            // Not autoplay: the VEH1a engine loop emits the `Play` itself, on
-            // the step the vehicle first appears in an outcome, and two paths
-            // both starting one voice is two `Play`s for one source.
-            autoplay: false,
-            ..Default::default()
-        }
+        },
     );
-
-    // ── the body ──
-    for part in def.body.parts() {
-        let guid = part_guid(part.name);
-        doc.create_with_guid(guid, SpawnKind::Empty, part.name, Some(chassis));
-        insert!(
-            doc,
-            guid,
-            Transform {
-                translation: Vec3d::new(
-                    part.centre.x * h.x,
-                    part.centre.y * h.y,
-                    part.centre.z * h.z,
-                ),
-                rotation: Vec3d::ZERO,
-                // The built-in primitives span ±0.5, so a part's SCALE is its
-                // full extent — twice its half-extent. This is the line the
-                // committed car never had: without it every part draws as the
-                // unit primitive whatever the collider says.
-                scale: Vec3d::new(
-                    2.0 * part.half.x * h.x,
-                    2.0 * part.half.y * h.y,
-                    2.0 * part.half.z * h.z,
-                ),
-            }
-        );
-        insert!(
-            doc,
-            guid,
-            MeshRef {
-                primitive: part.primitive,
-                asset: None,
-            }
-        );
-        insert!(
-            doc,
-            guid,
-            Material {
-                base_color: spawn.paint,
-                metallic: 0.35,
-                roughness: 0.42,
-                ..Default::default()
-            }
-        );
-    }
-
-    // ── the wheels, and the tyres that draw them ──
-    let r = def.wheel_radius_m;
-    for (i, mount) in def.wheel_mounts().into_iter().enumerate() {
-        let wheel = part_guid(&format!("wheel{i}"));
-        doc.create_with_guid(wheel, SpawnKind::Empty, "Wheel", Some(chassis));
-        insert!(doc, wheel, Transform::from_translation(mount.to_dvec3()));
-        insert!(
-            doc,
-            wheel,
-            Collider3D {
-                shape_kind: ColliderShape3DKind::Sphere,
-                radius: r,
-                // A wheel is a SENSOR and has no body: that is the whole of
-                // `inf_ecs::vehicle::wheel_of`, and the bridge consumes it
-                // rather than mirroring it into rapier.
-                sensor: true,
-                ..Default::default()
-            }
-        );
-        // The tyre is a child of the wheel because `step_vehicles` writes the
-        // wheel's rotation every step as euler `(spin, steer, 0)` — there is no
-        // roll slot left to lay a `+Y`-axis cylinder on its side with.
-        let tyre = part_guid(&format!("tyre{i}"));
-        doc.create_with_guid(tyre, SpawnKind::Empty, "Tyre", Some(wheel));
-        insert!(
-            doc,
-            tyre,
-            Transform {
-                translation: Vec3d::ZERO,
-                rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
-                scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
-            }
-        );
-        insert!(
-            doc,
-            tyre,
-            MeshRef {
-                primitive: Primitive::Cylinder,
-                asset: None,
-            }
-        );
-        insert!(
-            doc,
-            tyre,
-            Material {
-                base_color: TYRE_COLOR,
-                metallic: 0.0,
-                roughness: 0.9,
-                ..Default::default()
-            }
-        );
+    for node in nodes {
+        doc.create_with_guid(node.guid, SpawnKind::Empty, &node.name, node.parent);
+        insert!(doc, node.guid, node.transform);
+        if let Some(c) = node.body {
+            insert!(doc, node.guid, c);
+        }
+        if let Some(c) = node.collider {
+            insert!(doc, node.guid, c);
+        }
+        if let Some(c) = node.mesh {
+            insert!(doc, node.guid, c);
+        }
+        if let Some(c) = node.material {
+            insert!(doc, node.guid, c);
+        }
+        if let Some(c) = node.class {
+            insert!(doc, node.guid, c);
+        }
+        if let Some(c) = node.audio {
+            insert!(doc, node.guid, c);
+        }
     }
     chassis
 }
@@ -609,6 +492,12 @@ pub fn island_vehicles() -> inf_ecs::vehicle::VehicleDefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The recipe moved to Ring 0 at wave VEH2b, so the arms that read a spawned
+    // car's components name the component types here rather than at the top of
+    // the file: nothing outside this module builds one any more.
+    use inf_ecs::components::{AudioSource, MeshRef, Primitive, Transform};
+    use inf_ecs::math::Vec3d;
+    use inf_ecs::vehicle::TYRE_ROLL_DEG;
 
     /// **The catalogue is five rows and all of them are cars** — and no two of
     /// them are the same car with two names.

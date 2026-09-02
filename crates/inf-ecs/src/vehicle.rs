@@ -1082,6 +1082,316 @@ pub fn body_part_guid(chassis: Uuid, part: &str) -> Uuid {
     Uuid::from_u128(x)
 }
 
+// ── what a car is made of (wave VEH2b) ──────────────────────────────────────
+
+/// The tyres' colour — dark, unlit-looking rubber, so a wheel reads against the
+/// body whatever the body is painted.
+pub const TYRE_COLOR: crate::math::Color = crate::math::Color::new(0.07, 0.07, 0.08, 1.0);
+
+/// The chassis's own angular damping.
+///
+/// A car does not spin on its own axis for want of damping; the suspension
+/// supplies the rest of the resistance. (P29.7's number, lifted here with the
+/// rest of the recipe.)
+pub const CHASSIS_ANGULAR_DAMPING: f64 = 0.5;
+
+/// The chassis collider's friction.
+pub const CHASSIS_FRICTION: f64 = 0.5;
+
+/// **Where one vehicle goes and what it looks like** — the half of a rig that is
+/// not the [`VehicleDef`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigSpawn {
+    /// The entity name in the outliner.
+    pub name: String,
+    /// The **chassis origin** in world space.
+    pub at: DVec3,
+    /// Heading about `+Y`, degrees. `0` faces `+Z`, which is forward.
+    pub yaw_deg: f64,
+    /// The body colour. The tyres are always [`TYRE_COLOR`].
+    pub paint: crate::math::Color,
+    /// The engine loop's `.inf_audio` clip. `None` is a silent voice, and the
+    /// *command stream* — which is what PIE == shipping compares — is the same
+    /// either way.
+    pub clip: Option<Uuid>,
+}
+
+/// **One entity of a vehicle rig, as a DESCRIPTION** — wave VEH2b.
+///
+/// # Why a description and not a spawn
+///
+/// Two callers build a car and they build it into two different things. The
+/// island's generator writes one into a `SceneDoc`, through
+/// `create_with_guid`, which tracks creation order and an undo step; traffic
+/// materializes one straight into an `EcsWorld` sixty times a second, where
+/// there is no document and nothing to undo. Before this wave only the first
+/// existed, and the second would have been a second recipe for what a car is —
+/// which is the shape this tree has caught and refused a dozen times (the P22.3
+/// "one door for three paths", the P29.6 A14 restated selection rule).
+///
+/// So the recipe is a value: `rig_nodes` says what entities a car is and what
+/// is on each of them, and the two callers differ only in how they create an
+/// entity. `inf_editor_core::vehicle::spawn_vehicle` walks it into a document
+/// and [`spawn_rig`] walks it into a world, and the day a car grows a wing
+/// mirror it grows one in both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigNode {
+    /// The entity's `Guid` — [`body_part_guid`]'s, except for the chassis,
+    /// which is the caller's.
+    pub guid: Uuid,
+    /// The outliner name.
+    pub name: String,
+    /// `None` for the chassis, the chassis for a panel or a wheel, the wheel
+    /// for a tyre. Always a guid this same list already introduced.
+    pub parent: Option<Uuid>,
+    /// Its local transform.
+    pub transform: crate::components::Transform,
+    pub body: Option<crate::components::RigidBody3D>,
+    pub collider: Option<crate::components::Collider3D>,
+    pub mesh: Option<crate::components::MeshRef>,
+    pub material: Option<crate::components::Material>,
+    /// The tuning, on the chassis only (scene v25 onward).
+    pub class: Option<crate::components::VehicleClass>,
+    /// The engine loop's emitter, on the chassis only.
+    pub audio: Option<crate::components::AudioSource>,
+}
+
+/// **Every entity one vehicle is made of, in creation order.**
+///
+/// * the **chassis** — a `Dynamic` `RigidBody3D`, a box `Collider3D` at the
+///   def's half-extents and density, the def's
+///   [`VehicleClass`](crate::components::VehicleClass) and a looping spatial
+///   [`AudioSource`](crate::components::AudioSource) for the engine;
+/// * the **body** — one child per [`BodyPart`] of the def's family, drawing its
+///   own primitive at its own size;
+/// * the **wheels** — four sphere **sensors** with no body of their own, which
+///   is what [`wheel_of`] recognises, each with a **tyre** child that draws the
+///   cylinder the vehicle door's own rotation write cannot lay down.
+///
+/// The order is load-bearing: it is the order the island's committed `.inf_lvl`
+/// was authored in, and `SceneDoc` writes its entities in creation order. A
+/// caller that walked this list backwards would produce a level with different
+/// bytes and the same contents.
+pub fn rig_nodes(chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Vec<RigNode> {
+    use crate::components::{
+        AudioSource, BodyKind3D, Collider3D, ColliderShape3DKind, Material, MeshRef, Primitive,
+        RigidBody3D, Transform,
+    };
+    let h = def.half_extents;
+    let part_guid = |part: &str| body_part_guid(chassis, part);
+    let mut out: Vec<RigNode> = Vec::with_capacity(1 + def.body.parts().len() + 8);
+
+    out.push(RigNode {
+        guid: chassis,
+        name: spawn.name.clone(),
+        parent: None,
+        transform: Transform {
+            translation: Vec3d::from_dvec3(spawn.at),
+            rotation: Vec3d::new(0.0, spawn.yaw_deg, 0.0),
+            scale: Vec3d::ONE,
+        },
+        body: Some(RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: CHASSIS_ANGULAR_DAMPING,
+            ..Default::default()
+        }),
+        collider: Some(Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: h,
+            density: def.density_kg_m3,
+            friction: CHASSIS_FRICTION,
+            ..Default::default()
+        }),
+        mesh: None,
+        material: None,
+        class: Some(def.class),
+        audio: Some(AudioSource {
+            clip: spawn.clip,
+            looping: true,
+            spatial: true,
+            // Not autoplay: the VEH1a engine loop emits the `Play` itself, on
+            // the step the vehicle first appears in an outcome, and two paths
+            // both starting one voice is two `Play`s for one source.
+            autoplay: false,
+            ..Default::default()
+        }),
+    });
+
+    for part in def.body.parts() {
+        out.push(RigNode {
+            guid: part_guid(part.name),
+            name: part.name.to_string(),
+            parent: Some(chassis),
+            transform: Transform {
+                translation: Vec3d::new(
+                    part.centre.x * h.x,
+                    part.centre.y * h.y,
+                    part.centre.z * h.z,
+                ),
+                rotation: Vec3d::ZERO,
+                // The built-in primitives span ±0.5, so a part's SCALE is its
+                // full extent — twice its half-extent.
+                scale: Vec3d::new(
+                    2.0 * part.half.x * h.x,
+                    2.0 * part.half.y * h.y,
+                    2.0 * part.half.z * h.z,
+                ),
+            },
+            body: None,
+            collider: None,
+            mesh: Some(MeshRef {
+                primitive: part.primitive,
+                asset: None,
+            }),
+            material: Some(Material {
+                base_color: spawn.paint,
+                metallic: 0.35,
+                roughness: 0.42,
+                ..Default::default()
+            }),
+            class: None,
+            audio: None,
+        });
+    }
+
+    let r = def.wheel_radius_m;
+    for (i, mount) in def.wheel_mounts().into_iter().enumerate() {
+        let wheel = part_guid(&format!("wheel{i}"));
+        out.push(RigNode {
+            guid: wheel,
+            name: "Wheel".to_string(),
+            parent: Some(chassis),
+            transform: Transform::from_translation(mount.to_dvec3()),
+            body: None,
+            collider: Some(Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: r,
+                // A wheel is a SENSOR and has no body: that is the whole of
+                // `wheel_of`, and the bridge consumes it rather than mirroring
+                // it into rapier.
+                sensor: true,
+                ..Default::default()
+            }),
+            mesh: None,
+            material: None,
+            class: None,
+            audio: None,
+        });
+        // The tyre is a child of the wheel because `step_vehicles` writes the
+        // wheel's rotation every step as euler `(spin, steer, 0)` — there is no
+        // roll slot left to lay a `+Y`-axis cylinder on its side with.
+        out.push(RigNode {
+            guid: part_guid(&format!("tyre{i}")),
+            name: "Tyre".to_string(),
+            parent: Some(wheel),
+            transform: Transform {
+                translation: Vec3d::ZERO,
+                rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
+                scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
+            },
+            body: None,
+            collider: None,
+            mesh: Some(MeshRef {
+                primitive: Primitive::Cylinder,
+                asset: None,
+            }),
+            material: Some(Material {
+                base_color: TYRE_COLOR,
+                metallic: 0.0,
+                roughness: 0.9,
+                ..Default::default()
+            }),
+            class: None,
+            audio: None,
+        });
+    }
+    out
+}
+
+/// **Build a rig straight into a world** — the RUNTIME door (wave VEH2b's
+/// traffic), over the same [`rig_nodes`] recipe the authoring door walks.
+///
+/// Returns the chassis guid. A guid the world already holds is **left alone**
+/// rather than overwritten, for `crowd::add_agents`' reason: `spawn_with_guid`
+/// does not refuse a key the world already has, and a traffic car that
+/// overwrote an authored one would leave the author's entity unreachable while
+/// it still existed.
+pub fn spawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef, spawn: &RigSpawn) -> Uuid {
+    for node in rig_nodes(chassis, def, spawn) {
+        if world.entity_of(node.guid).is_some() {
+            continue;
+        }
+        let parent = node.parent.and_then(|p| world.entity_of(p));
+        let e = world.spawn_with_guid(node.guid, &node.name, parent);
+        let mut em = world.world_mut().entity_mut(e);
+        em.insert(node.transform);
+        if let Some(c) = node.body {
+            em.insert(c);
+        }
+        if let Some(c) = node.collider {
+            em.insert(c);
+        }
+        if let Some(c) = node.mesh {
+            em.insert(c);
+        }
+        if let Some(c) = node.material {
+            em.insert(c);
+        }
+        if let Some(c) = node.class {
+            em.insert(c);
+        }
+        if let Some(c) = node.audio {
+            em.insert(c);
+        }
+    }
+    world.mark_dirty();
+    chassis
+}
+
+/// **Take a rig back out of a world** — the other half of [`spawn_rig`], and
+/// the door a traffic car's `Dormant` tier goes through.
+///
+/// Returns how many of the recipe's entities **were in the world**, counted
+/// before anything is despawned.
+///
+/// Counted first on purpose. `EcsWorld::despawn` walks the hierarchy, so taking
+/// the chassis takes its panels, its wheels and its tyres with it — a loop that
+/// counted as it went would answer **one** for a whole car, which reads as "a
+/// rig went out" and is a number nothing can hold against the recipe. The
+/// count as written is the one an arm can assert is the recipe's own length,
+/// and it goes to zero on a second call.
+pub fn despawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef) -> usize {
+    let spawn = RigSpawn {
+        name: String::new(),
+        at: DVec3::ZERO,
+        yaw_deg: 0.0,
+        paint: crate::math::Color::WHITE,
+        clip: None,
+    };
+    let nodes = rig_nodes(chassis, def, &spawn);
+    let present = nodes
+        .iter()
+        .filter(|n| world.entity_of(n.guid).is_some())
+        .count();
+    for node in &nodes {
+        if let Some(e) = world.entity_of(node.guid) {
+            world.despawn(e);
+        }
+    }
+    present
+}
+
+/// Where a vehicle's chassis origin goes if its wheels are to touch `ground`
+/// with the suspension at full extension — the placement an author makes.
+///
+/// Lifted from `inf_editor_core::vehicle` at wave VEH2b so the runtime spawner
+/// and the authoring one place a car the same way. "Wheel drop plus wheel
+/// radius" written out twice is two chances to write it once with the sign
+/// wrong.
+pub fn resting_origin_y(def: &VehicleDef, ground_y: f64) -> f64 {
+    ground_y - def.wheel_drop_m + def.wheel_radius_m
+}
+
 /// The share of its target's force an aid actually asks for.
 ///
 /// Two per cent under, and the two per cent is load-bearing: the aid's cap is one
@@ -3129,6 +3439,102 @@ impl Vehicle for RaycastVehicle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the recipe (wave VEH2b) ─────────────────────────────────────────────
+
+    fn spawn_of(name: &str) -> RigSpawn {
+        RigSpawn {
+            name: name.to_string(),
+            at: DVec3::new(10.0, 2.0, -30.0),
+            yaw_deg: 45.0,
+            paint: crate::math::Color::new(0.2, 0.4, 0.9, 1.0),
+            clip: None,
+        }
+    }
+
+    /// The recipe is one list and the RUNTIME door builds every entity in it —
+    /// which is what makes "two callers, one car" a structural claim rather
+    /// than a comment.
+    #[test]
+    fn the_runtime_door_builds_every_node_of_the_recipe() {
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0x1234);
+        let nodes = rig_nodes(chassis, &def, &spawn_of("Test Car"));
+        // A chassis, its body panels, and four wheels each wearing a tyre.
+        assert_eq!(nodes.len(), 1 + def.body.parts().len() + 8);
+        assert_eq!(nodes[0].guid, chassis);
+        assert!(nodes[0].parent.is_none());
+        assert!(nodes[0].class.is_some() && nodes[0].audio.is_some());
+        for n in &nodes[1..] {
+            assert!(n.parent.is_some(), "{} has no parent", n.name);
+            assert!(n.class.is_none() && n.audio.is_none(), "{}", n.name);
+        }
+        // Every parent is introduced before it is named — the property a walk
+        // in creation order rests on.
+        let mut seen = std::collections::BTreeSet::new();
+        for n in &nodes {
+            if let Some(p) = n.parent {
+                assert!(seen.contains(&p), "{} names an unseen parent", n.name);
+            }
+            seen.insert(n.guid);
+        }
+
+        let mut w = EcsWorld::new();
+        assert_eq!(
+            spawn_rig(&mut w, chassis, &def, &spawn_of("Test Car")),
+            chassis
+        );
+        for n in &nodes {
+            let e = w.entity_of(n.guid).unwrap_or_else(|| panic!("{}", n.name));
+            assert_eq!(w.world().get::<Transform>(e).copied(), Some(n.transform));
+        }
+        // …and the rig the vehicle door reads is derivable from what was built.
+        let r = rig_of(&w, chassis).expect("a rig");
+        assert_eq!(r.wheels.len(), 4);
+    }
+
+    /// Spawning twice is idempotent — a traffic car that materializes on a
+    /// guid the level already authored leaves the author's entity alone.
+    #[test]
+    fn the_runtime_door_never_overwrites_an_entity_the_world_holds() {
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0x99);
+        let mut w = EcsWorld::new();
+        spawn_rig(&mut w, chassis, &def, &spawn_of("First"));
+        let first = w.entity_of(chassis).expect("the chassis");
+        spawn_rig(&mut w, chassis, &def, &spawn_of("Second"));
+        assert_eq!(w.entity_of(chassis), Some(first));
+        assert_eq!(
+            w.world().get::<Transform>(first).map(|t| t.translation.x),
+            Some(10.0)
+        );
+    }
+
+    #[test]
+    fn a_rig_goes_back_out_of_the_world_it_came_into() {
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0x55);
+        let mut w = EcsWorld::new();
+        spawn_rig(&mut w, chassis, &def, &spawn_of("Gone"));
+        let n = 1 + def.body.parts().len() + 8;
+        assert_eq!(despawn_rig(&mut w, chassis, &def), n);
+        for node in rig_nodes(chassis, &def, &spawn_of("Gone")) {
+            assert!(w.entity_of(node.guid).is_none(), "{}", node.name);
+        }
+        // …and again is a no-op rather than a panic.
+        assert_eq!(despawn_rig(&mut w, chassis, &def), 0);
+    }
+
+    /// The placement rule, once: wheel drop plus wheel radius, with the sign
+    /// the right way round.
+    #[test]
+    fn a_rig_rests_with_its_wheels_on_the_ground() {
+        let def = VehicleDef::default();
+        let y = resting_origin_y(&def, 12.0);
+        assert_eq!(y, 12.0 - def.wheel_drop_m + def.wheel_radius_m);
+        // The lowest point of a wheel at full extension is the ground.
+        assert!((y + def.wheel_drop_m - def.wheel_radius_m - 12.0).abs() < 1e-12);
+    }
 
     fn rig(n: usize) -> VehicleRig {
         let wheels = (0..n)
