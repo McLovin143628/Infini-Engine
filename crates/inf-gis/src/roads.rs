@@ -552,6 +552,90 @@ impl RoadGraph {
         }
         g
     }
+
+    /// **The lanes this road layer carries** (wave VEH2b) — the same graph
+    /// [`nav_graph`](Self::nav_graph) hands back, with a carriageway on each
+    /// side of every spine.
+    ///
+    /// This is where the two numbers the importer already probes off the source
+    /// features finally do something: [`RoadSegment::lane_count`] decides how
+    /// many carriageways a road has, and [`RoadSegment::speed_limit_kmh`] the
+    /// sign on them. Before this they reached the *width* of the ribbon and
+    /// nothing else, so a four-lane highway and a two-lane arterial imported
+    /// from the same shapefile differed only in how much tarmac was drawn.
+    ///
+    /// # `Rail` carries no lanes
+    ///
+    /// A railway is in the road layer because the source data puts it there
+    /// (`RoadKind::classify` maps `"rail"`), and it is drawn as a four-metre
+    /// ribbon per track. It is not a carriageway, nothing in this engine drives
+    /// a train, and a car routed onto one would be a car on a railway line — so
+    /// the spec closure answers `None` for it, which is the door
+    /// [`LaneNetwork::from_graph`] documents for a one-way street.
+    ///
+    /// # The arithmetic is not here
+    ///
+    /// `inf-nav` owns the offset, the mitre and the junction join
+    /// ([`inf_nav::lane`]), because the settlement grids re-derived at runtime
+    /// need exactly the same three things and this crate is banned from the
+    /// shipped player. What lives here is the *translation*: a road class into a
+    /// [`LaneSpec`], which is the one fact `inf-nav` must not know.
+    ///
+    /// [`LaneNetwork::from_graph`]: inf_nav::LaneNetwork::from_graph
+    /// [`LaneSpec`]: inf_nav::LaneSpec
+    pub fn lane_network(&self) -> inf_nav::LaneNetwork {
+        let graph = self.nav_graph();
+        // Keyed by the pair of tagged node ids, both ways, so the lookup inside
+        // the closure is a `BTreeMap` hit rather than a walk over the segments.
+        let mut spec_by_pair: BTreeMap<(u64, u64), inf_nav::LaneSpec> = BTreeMap::new();
+        for s in self.segments.values() {
+            if s.kind == RoadKind::Rail {
+                continue;
+            }
+            let spec = inf_nav::LaneSpec {
+                lane_count: s.lane_count,
+                width_m: LANE_WIDTH_M,
+                speed_limit_kmh: s.speed_limit_kmh.unwrap_or(default_speed_kmh(s.kind)),
+            };
+            let (a, b) = (
+                inf_nav::domain::ROAD | s.start_node,
+                inf_nav::domain::ROAD | s.end_node,
+            );
+            // Two segments between one pair of junctions — a dual carriageway
+            // digitised as two features — keep the WIDER of the two, because a
+            // lane the network refuses is a lane no car can use and a lane it
+            // invents is a car in a hedge.
+            let entry = spec_by_pair.entry((a.min(b), a.max(b))).or_insert(spec);
+            if spec.lane_count > entry.lane_count {
+                *entry = spec;
+            }
+        }
+        inf_nav::LaneNetwork::from_graph(&graph, |from, edge| {
+            spec_by_pair
+                .get(&(from.min(edge.to), from.max(edge.to)))
+                .copied()
+        })
+    }
+}
+
+/// **The sign a road class wears when the source data has none**, km/h.
+///
+/// Every committed road layer in this tree is one of these: `write_roads` emits
+/// `name` and `road_type` and nothing else, so on the island *every* limit comes
+/// from this function. Stated as a table rather than as one default, because a
+/// highway and a farm track sharing a fifty is the kind of number that makes a
+/// whole island's traffic move at one speed.
+pub fn default_speed_kmh(kind: RoadKind) -> u32 {
+    match kind {
+        RoadKind::Highway => 90,
+        RoadKind::Arterial => 60,
+        RoadKind::Residential => 50,
+        RoadKind::DirtTrack => 30,
+        RoadKind::Path => 10,
+        // Not a carriageway; `lane_network` never asks. Answered rather than
+        // panicked, so the match stays total and a future caller gets a number.
+        RoadKind::Rail => 0,
+    }
 }
 
 /// A quad-ribbon mesh generated along a road spine.
@@ -1391,6 +1475,117 @@ mod tests {
             arterial(&[(100.0, 0.0), (200.0, 0.0)], "Broadway East"),
             b,
         ]))
+    }
+
+    // ── the lanes (wave VEH2b) ──────────────────────────────────────────────
+
+    /// The one number two crates share: a lane derived in `inf-nav` has to fit
+    /// inside the ribbon drawn here, and `inf-nav` restates the width rather
+    /// than importing it (it depends on `glam` alone, on purpose). This is the
+    /// arm that keeps the restatement honest — the `inf_nav::lane` doc names it.
+    #[test]
+    fn the_lane_width_agrees_with_the_surface_it_is_drawn_on() {
+        assert_eq!(LANE_WIDTH_M, inf_nav::lane::DEFAULT_LANE_WIDTH_M);
+        // …and the carriageway a class implies is the width the ribbon is built
+        // at, so lane 0 and lane `n-1` both land on tarmac.
+        for kind in [RoadKind::Highway, RoadKind::Arterial, RoadKind::Residential] {
+            let lanes = kind.default_lanes();
+            assert_eq!(kind.width_m(lanes), LANE_WIDTH_M * f64::from(lanes));
+        }
+    }
+
+    /// A two-lane arterial gets one carriageway each way, offset half a lane
+    /// from the paint — and the two run in opposite directions, which is the
+    /// whole point.
+    #[test]
+    fn a_two_way_street_gets_a_carriageway_on_each_side_of_its_paint() {
+        let net = t_junction().lane_network();
+        // The two Broadway halves are arterials — four lanes, so two each way —
+        // and Elm carries no `road_type`, so it is residential: two lanes, one
+        // each way. 4 + 4 + 2 = 10, and the arithmetic is the class table's.
+        assert_eq!(net.len(), 10);
+        assert_eq!(net.worst_fold_m(), 0.0);
+        // Broadway East runs +X from the junction at (100, 0) to (200, 0), so
+        // its inner lane sits at z = -1.75; the other way sits at +1.75.
+        let mut east = None;
+        let mut west = None;
+        for lane in net.lanes().filter(|l| l.id.index == 0) {
+            let a = lane.entry();
+            let b = lane.exit();
+            if (a.x - 100.0).abs() < 2.0 && (b.x - 200.0).abs() < 2.0 {
+                east = Some(lane.clone());
+            }
+            if (a.x - 200.0).abs() < 2.0 && (b.x - 100.0).abs() < 2.0 {
+                west = Some(lane.clone());
+            }
+        }
+        let (east, west) = (east.expect("eastbound"), west.expect("westbound"));
+        assert!((east.entry().z + 1.75).abs() < 1e-9, "{:?}", east.entry());
+        assert!((west.entry().z - 1.75).abs() < 1e-9, "{:?}", west.entry());
+        // …and neither of them is on the paint, which is where VEH1a parked.
+        assert!(east.entry().z != 0.0 && west.entry().z != 0.0);
+    }
+
+    /// The source's own attributes finally reach something a car reads.
+    #[test]
+    fn the_layers_lane_count_and_speed_limit_reach_the_carriageway() {
+        let mut f = GeoFeature::new(line(&[(0.0, 0.0), (400.0, 0.0)]));
+        f.attributes
+            .insert("road_type".into(), Attr::Text("highway".into()));
+        f.attributes.insert("lanes".into(), Attr::Number(4.0));
+        f.attributes
+            .insert("speed_limit_kmh".into(), Attr::Number(90.0));
+        let net = RoadGraph::from_layer(&layer(vec![f])).lane_network();
+        // Four lanes: two out, two back.
+        assert_eq!(net.len(), 4);
+        for lane in net.lanes() {
+            assert_eq!(lane.speed_limit_kmh, 90);
+            assert!((lane.speed_limit_mps() - 25.0).abs() < 1e-12);
+        }
+        let outer: Vec<f64> = net
+            .lanes()
+            .filter(|l| l.id.index == 1)
+            .map(|l| l.entry().z.abs())
+            .collect();
+        assert_eq!(outer.len(), 2);
+        for z in outer {
+            assert!((z - 5.25).abs() < 1e-9, "{z}");
+        }
+    }
+
+    /// A source with no `speed_limit` attribute — which is every committed
+    /// layer in this tree — gets the class's own sign, not one number for the
+    /// whole island.
+    #[test]
+    fn a_layer_with_no_signs_takes_the_class_default() {
+        let of = |class: &str| {
+            let mut f = GeoFeature::new(line(&[(0.0, 0.0), (300.0, 0.0)]));
+            f.attributes
+                .insert("road_type".into(), Attr::Text(class.into()));
+            RoadGraph::from_layer(&layer(vec![f]))
+                .lane_network()
+                .lanes()
+                .next()
+                .map(|l| l.speed_limit_kmh)
+        };
+        assert_eq!(of("highway"), Some(90));
+        assert_eq!(of("arterial"), Some(60));
+        assert_eq!(of("residential"), Some(50));
+        assert_eq!(of("track"), Some(30));
+    }
+
+    /// Nothing in this engine drives a train, and a car routed onto a railway
+    /// line is worse than a car with nowhere to go.
+    #[test]
+    fn a_railway_carries_no_carriageway() {
+        let mut f = GeoFeature::new(line(&[(0.0, 0.0), (500.0, 0.0)]));
+        f.attributes
+            .insert("road_type".into(), Attr::Text("rail".into()));
+        let graph = RoadGraph::from_layer(&layer(vec![f]));
+        // It is still a road segment and still paves ground…
+        assert_eq!(graph.segments.len(), 1);
+        // …and it is not somewhere to drive.
+        assert!(graph.lane_network().is_empty());
     }
 
     /// **The road follows the ground, and the step that makes it do so is the

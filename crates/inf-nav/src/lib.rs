@@ -63,10 +63,12 @@
 //! are metres, arc length is metres. There is no unit-scale factor anywhere.
 
 pub mod graph;
+pub mod lane;
 pub mod path;
 pub mod route;
 
 pub use graph::{NavEdge, NavGraph, NavKind, NavNode, NavNodeId};
+pub use lane::{Lane, LaneId, LaneNetwork, LaneSpec};
 pub use path::{NavPath, PathProjection};
 pub use route::{route, route_counted, NavRoute, NavVerdict, SearchStats};
 
@@ -101,6 +103,17 @@ pub mod domain {
     /// tag is exactly the collision this module's domains exist to prevent, so
     /// they get a tag each.
     pub const PAVEMENT: u64 = 4 << 60;
+    /// **The carriageway grid** (wave VEH2b) — the street crossings
+    /// `inf_ecs::traffic` re-derives from a level's own block rectangles, and
+    /// the graph [`crate::lane::LaneNetwork`] is built over.
+    ///
+    /// A separate tag from [`STREET`] for [`PAVEMENT`]'s reason, one street
+    /// over: a settlement *plan* names a crossing by `(site, column, row)`, and
+    /// a level that has been committed, cooked and paged back in has no plan —
+    /// only the rectangles the blocks left behind. So this producer keys on a
+    /// hash of the crossing's own quantized position, which is a different id
+    /// LAYOUT, which is a different tag.
+    pub const CARRIAGEWAY: u64 = 5 << 60;
 
     /// Reserved for a caller composing nodes of its own — a gate placing a
     /// destination, a level naming a spawn point.

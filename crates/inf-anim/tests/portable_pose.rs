@@ -345,6 +345,18 @@ const SIM_PATH: [(&str, &str, &str); 42] = [
         include_str!("../../inf-nav/src/route.rs"),
         "the Dijkstra whose tie-break makes two hosts pick the same one of a grid's six equally short routes",
     ),
+    // ── VEH2b: the lane, on DAY ONE, for the same reason its three siblings are
+    //    here. A lane centreline is a spine offset sideways by a normal, and the
+    //    normal is a ROTATION BY NINETY DEGREES — two component swaps and a
+    //    negation rather than a sine, which is the whole reason this file can
+    //    hold the module at all. The metres it produces become a traffic car's
+    //    `Transform` and therefore the replay trace, so the law binds exactly as
+    //    it binds on `position_at` one file over.
+    (
+        "inf_nav::lane",
+        include_str!("../../inf-nav/src/lane.rs"),
+        "offset_path's mitre is a reciprocal of a dot product and never a cosine, and the metres it lays down are the ones a traffic car's Transform is read off",
+    ),
     // ── NPC1d: the society, BOTH halves, on DAY ONE ──
     //
     // The third wave running to name its modules with them, and the case is the
