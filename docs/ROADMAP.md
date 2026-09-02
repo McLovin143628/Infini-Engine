@@ -29961,5 +29961,15 @@ is VEH2a's carried item 5. And the carjack arm had to pick the most ISOLATED dri
 interact rule is nearest-wins and a parked neighbour 1.65 m away wins.
 
 Schemas **unmoved**: scene v27, `ScenePayload` v12. Goldens **60, none blessed**. No new crate, no new
-dependency, `Cargo.lock` byte-identical. Ledger, laws and the carried list in
-`docs/memos/island-progress.md` under *"Wave VEH2b"*.
+dependency, `Cargo.lock` byte-identical.
+
+**VERIFICATION.** `cargo fmt --all --check` clean. Battery **359 / 6 763 / 0 / 20**, exit 0,
+`INF_GOLDEN_STRICT=1`, `-j 3 --no-fail-fast`, re-run at the head this block is written at; the
+`#[test]` diff is **+70 / -0** and the one new binary is `inf-physics/tests/traffic_3d.rs`. rustdoc
+**380** individual of a 450 ceiling over 48 documented crates after `cargo clean --doc`, exit 0 -
+the wave added **three** private-intra-doc links and all three were removed rather than allowed.
+`clippy --workspace --all-targets` at `RUSTFLAGS=-D warnings`: **0**, exit 0, run **last** per the
+rmeta law, with **six** findings on the way and every one of them in this wave's code - four
+`neg_cmp_op_on_partial_ord` that were letting an INFINITE length into a division, and not one of
+them allowed. Ledger, laws and the carried list in `docs/memos/island-progress.md` under
+*"Wave VEH2b"*.
