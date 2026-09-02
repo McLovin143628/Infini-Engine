@@ -1118,6 +1118,40 @@ pub const PANIC_FLEE_M: f64 = 60.0;
 /// distances a step against `NPC_STEP_BUDGET_MS`'s own 1 000-agent figure.
 pub const MAX_PANIC_SOURCES: usize = 8;
 
+/// **The distinct places this step's gunfire came from**, coalesced and capped.
+///
+/// The half of [`step_panic`] that decides its cost, hoisted so a gate can
+/// measure it without a crowd: shots inside half a [`PANIC_RADIUS_M`] of each
+/// other frighten the same people and are one source, and past
+/// [`MAX_PANIC_SOURCES`] the rest of the step's shots are simply not distinct
+/// places — which is what keeps the pass's inner loop a constant rather than a
+/// function of how many people are shooting.
+///
+/// A **brawl is not a source**: see [`WeaponHit::loud`] and the reference frames
+/// it cites.
+fn panic_sources(hits: &[WeaponHit]) -> Vec<DVec3> {
+    let mut sources: Vec<DVec3> = Vec::new();
+    for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
+        if sources.len() >= MAX_PANIC_SOURCES {
+            break;
+        }
+        if sources
+            .iter()
+            .any(|s| (*s - hit.from).length() < PANIC_RADIUS_M * 0.5)
+        {
+            continue;
+        }
+        sources.push(hit.from);
+    }
+    sources
+}
+
+/// **How many distinct places this step's gunfire came from** — [`panic_sources`]
+/// counted, for a gate that wants the cost bound without a population.
+pub fn panic_sources_for(hits: &[WeaponHit]) -> usize {
+    panic_sources(hits).len()
+}
+
 /// What one [`step_panic`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PanicReport {
@@ -1163,21 +1197,8 @@ pub struct PanicReport {
 /// returns and no allocation.
 fn step_panic(world: &mut EcsWorld, hits: &[WeaponHit], dt: f64) -> PanicReport {
     let mut report = PanicReport::default();
-    // 1. The sources, coalesced. A brawl is not a source — see `WeaponHit::loud`
-    //    and the reference frames it cites.
-    let mut sources: Vec<DVec3> = Vec::new();
-    for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
-        if sources
-            .iter()
-            .any(|s| (*s - hit.from).length() < PANIC_RADIUS_M * 0.5)
-        {
-            continue;
-        }
-        if sources.len() >= MAX_PANIC_SOURCES {
-            break;
-        }
-        sources.push(hit.from);
-    }
+    // 1. The sources, coalesced.
+    let sources = panic_sources(hits);
     if sources.is_empty() {
         return report;
     }

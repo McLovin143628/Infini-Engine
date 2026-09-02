@@ -1950,3 +1950,108 @@ fn an_armed_npc_aims_at_a_target_and_pulls_the_trigger() {
     let fired: u32 = more.iter().map(|r| r.shots).sum();
     assert_eq!(fired, 0, "the NPC kept firing after the trigger came up");
 }
+
+/// **THE PANIC PASS IS O(AGENTS) WITH A BOUNDED CONSTANT** (wave WPN1) —
+/// measured at the population `NPC_STEP_BUDGET_MS` was minted at.
+///
+/// The claim is structural rather than a stopwatch, because a stopwatch in a
+/// debug build is a number that fails on somebody else's machine. What is
+/// asserted is the two things that make the cost a constant multiple of one
+/// walk:
+///
+/// 1. the whole population is **considered once** — one walk, not one per shot;
+/// 2. the sources are **coalesced to at most `MAX_PANIC_SOURCES`** however many
+///    shooters there are, so the inner loop cannot grow with the firefight.
+///
+/// The milliseconds are printed for the ledger rather than asserted.
+#[test]
+fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+
+    const AGENTS: usize = 1000;
+    let mut rig = Rig::new();
+    let a = CrowdArchetype::humanoid(None, None, None);
+    let mut records = std::collections::BTreeMap::new();
+    for i in 0..AGENTS {
+        // A ring around the hero, half inside the panic radius and half out —
+        // so neither branch of the distance test is the only one exercised.
+        let t = i as f64 * 0.37;
+        let r = 5.0 + (i % 90) as f64;
+        records.insert(
+            Uuid::from_u128(0x1601_1000 + i as u128),
+            CrowdRecord::standing(
+                a.clone(),
+                DVec3::new(r * inf_math::pcos64(t), 0.0, r * inf_math::psin64(t) + 40.0),
+            ),
+        );
+    }
+    assert_eq!(inf_ecs::crowd::add_agents(&mut rig.world, records), 0);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.arm("rifle");
+    rig.step(&idle());
+
+    let t0 = std::time::Instant::now();
+    let quiet = rig.step(&idle());
+    let quiet_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        quiet.panic.considered, 0,
+        "a step with no gunfire walked the population anyway — the pass is not \
+         inert on a quiet street"
+    );
+
+    let t0 = std::time::Instant::now();
+    let loud = rig.step(&hold_trigger());
+    let loud_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "PANIC at N={AGENTS}: {} source(s), {} considered, {} fled; the whole \
+         gameplay step took {loud_ms:.3} ms against {quiet_ms:.3} ms with no \
+         gunfire (debug build; NPC_STEP_BUDGET_MS is 1.0 at this population)",
+        loud.panic.sources, loud.panic.considered, loud.panic.fled
+    );
+    assert_eq!(loud.shots, 1);
+    assert_eq!(
+        loud.panic.considered, AGENTS,
+        "the pass did not walk the whole population exactly once"
+    );
+    assert!(
+        loud.panic.fled > 0 && loud.panic.fled < AGENTS,
+        "{} of {AGENTS} fled — the radius is doing no work in one direction or \
+         the other",
+        loud.panic.fled
+    );
+
+    // **THE SOURCE BOUND.** Sixteen shooters spread far enough apart that none
+    // of them coalesces, fired on one step: the source list must still stop at
+    // `MAX_PANIC_SOURCES`, or the inner loop grows with the firefight.
+    let hits: Vec<d3::WeaponHit> = (0..16)
+        .map(|i| d3::WeaponHit {
+            shooter: Uuid::from_u128(0x1601_2000 + i as u128),
+            target: None,
+            from: DVec3::new(i as f64 * d3::gameplay::PANIC_RADIUS_M, 0.0, 0.0),
+            to: DVec3::ZERO,
+            energy_j: 1.0,
+            on_flesh: false,
+            loud: true,
+        })
+        .collect();
+    let n = d3::gameplay::panic_sources_for(&hits);
+    println!(
+        "16 shooters {} m apart coalesced to {n} source(s)",
+        d3::gameplay::PANIC_RADIUS_M
+    );
+    assert_eq!(
+        n,
+        d3::gameplay::MAX_PANIC_SOURCES,
+        "sixteen distinct shooters produced {n} sources — the cap is not being \
+         applied and the inner loop grows with the firefight"
+    );
+    // …and shots on top of each other are ONE source, which is what makes a
+    // held trigger cost the same as a single round.
+    let same: Vec<d3::WeaponHit> = (0..16).map(|_| hits[0]).collect();
+    assert_eq!(
+        d3::gameplay::panic_sources_for(&same),
+        1,
+        "sixteen rounds from one place were sixteen sources"
+    );
+}
