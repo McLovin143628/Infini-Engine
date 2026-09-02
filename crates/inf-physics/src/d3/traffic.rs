@@ -91,6 +91,47 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         return TrafficStats::default();
     }
     let band = CrowdBand::from_world(world, TRAFFIC_RADII);
+    // **A level with no streaming source has no traffic**, which is the exact
+    // opposite of the crowd's rule and has its own reason.
+    // `CrowdBand::unbounded` fails toward `Full` because dropping an NPC's tier
+    // is the dangerous direction and keeping it is "merely slow". For a car it
+    // is not merely slow: every one of up to `MAX_TRAFFIC_CARS` records would
+    // become a fourteen-entity rig with a `RaycastVehicle`, a settle ray and an
+    // NPC driver, in ONE step. A world with nothing to be near has nothing for
+    // traffic to be near, so the honest answer is none of it.
+    if band.is_unbounded() {
+        let mut pop = match world
+            .world_mut()
+            .remove_resource::<traffic::TrafficPopulationRes>()
+        {
+            Some(p) => p,
+            None => return TrafficStats::default(),
+        };
+        let gone: Vec<(Uuid, inf_ecs::vehicle::VehicleDef)> = pop
+            .records
+            .iter()
+            .filter(|(_, r)| r.detail != RigDetail::None && !r.taken)
+            .map(|(g, r)| (*g, r.def))
+            .collect();
+        for (g, def) in &gone {
+            inf_ecs::vehicle::despawn_rig(world, *g, def);
+            despawn_driver(world, bridge, *g);
+        }
+        for (_, rec) in pop.records.iter_mut().filter(|(_, r)| !r.taken) {
+            rec.detail = RigDetail::None;
+            rec.tier = CrowdTier::Dormant;
+        }
+        let cars = pop.records.len();
+        pop.steps += 1;
+        world.world_mut().insert_resource(pop);
+        return TrafficStats {
+            cars,
+            removed: gone.len(),
+            per_tier: [0, 0, 0, cars],
+            band_stamp: 0,
+            ..TrafficStats::default()
+        };
+    }
     let mut pop = match world
         .world_mut()
         .remove_resource::<traffic::TrafficPopulationRes>()
@@ -108,9 +149,18 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     };
     let archetype = inf_ecs::society::level_archetype(world);
 
-    // ── the obstacles, once. A `Full` car's following rule reads every solid
-    //    body near it, and gathering that per car would be `O(cars x world)`.
-    let obstacles = obstacles_of(world);
+    // ── who is in which car, ONCE. The seat check below runs for every record
+    //    the traffic still owns, and `occupant_of` is `O(characters)` each
+    //    time — which on a settlement with three hundred and twenty-nine
+    //    residents is `O(cars x characters)` sixty times a second.
+    let occupants = super::carjack::occupants(world);
+    // ── the obstacles, LAZILY. A `Full` car's following rule reads every solid
+    //    body in the world, and gathering that per car would be
+    //    `O(cars x world)`. Gathering it unconditionally would be `O(world)` on
+    //    a street where every car is parked, which is most streets at most
+    //    hours — so it is built the first time something actually steers and
+    //    not at all otherwise.
+    let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -125,7 +175,11 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         //    check is here rather than in the carjack door because a hero can
         //    also just get into an EMPTY traffic car, which no carjack ever
         //    hears about.
-        if !rec.taken && seat_taken_by_other(world, guid) {
+        if !rec.taken
+            && occupants
+                .get(&guid)
+                .is_some_and(|who| *who != traffic::driver_guid(guid))
+        {
             rec.taken = true;
         }
         if rec.taken {
@@ -267,7 +321,11 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                 if driving {
                     let driver = ensure_driver(world, bridge, guid, &archetype, at);
                     stats.drivers += usize::from(driver);
-                    steer_car(world, bridge, guid, rec, clock, leg, &obstacles);
+                    if obstacles.is_none() {
+                        obstacles = Some(obstacles_of(world));
+                    }
+                    let obs = obstacles.as_deref().unwrap_or(&[]);
+                    steer_car(world, bridge, guid, rec, clock, leg, obs);
                 } else {
                     despawn_driver(world, bridge, guid);
                     if let Some(v) = bridge.vehicle_mut(guid) {
@@ -303,31 +361,6 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         world.mark_dirty();
     }
     stats
-}
-
-/// **Is somebody who is not this car's own driver sitting in it?**
-///
-/// `O(characters)`, and only for a car the traffic still owns. The answer is
-/// latched into [`TrafficRecord::taken`] on the first step it is true, so this
-/// stops being asked about a car the moment it is stolen.
-fn seat_taken_by_other(world: &EcsWorld, chassis: Uuid) -> bool {
-    let driver = traffic::driver_guid(chassis);
-    for guid in inf_ecs::movement::movement_targets(world) {
-        if guid == driver {
-            continue;
-        }
-        let Some(e) = world.entity_of(guid) else {
-            continue;
-        };
-        if world
-            .world()
-            .get::<CharacterMovement>(e)
-            .is_some_and(|cm| cm.runtime.seat.vehicle == chassis)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Everything a traffic car has to not drive into: every solid body in the
@@ -397,13 +430,9 @@ fn gap_ahead(
     best
 }
 
-/// Write a driving car's stick — the whole of "an AI drives".
-///
-/// The intent goes onto the **driver's** `CharacterMovement`, not onto the car:
-/// `step_driving` five phases later reads it, hands it to
-/// `VehicleControls::from_intent` and calls `Vehicle::control`, which is
-/// exactly what happens when a player holds the same stick. There is no second
-/// path into a vehicle's controls in this engine and this wave did not add one.
+/// **What one car's driver can see** — the `DriveView` both the steering and
+/// the instrument build, so an arm cannot measure a controller the engine does
+/// not run.
 fn view_of<'a>(
     bridge: &PhysicsBridge3D,
     chassis: Uuid,
@@ -455,6 +484,13 @@ pub fn probe_intent(
     Some(traffic::drive_intent(&view))
 }
 
+/// Write a driving car's stick — the whole of "an AI drives".
+///
+/// The intent goes onto the **driver's** `CharacterMovement`, not onto the car:
+/// `step_driving` six phases later reads it, hands it to
+/// `VehicleControls::from_intent` and calls `Vehicle::control`, which is
+/// exactly what happens when a player holds the same stick. There is no second
+/// path into a vehicle's controls in this engine and this wave did not add one.
 fn steer_car(
     world: &mut EcsWorld,
     bridge: &PhysicsBridge3D,
@@ -551,9 +587,10 @@ fn despawn_driver(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: U
 /// settlement.
 ///
 /// `None` when nothing is there — a slot over a hole, or a terrain tile that
-/// has not paged in. The honest fallback is the derived height, which is what
-/// the caller keeps: a car on the street's own pad is wrong by a metre where a
-/// car at `y = 0` would be wrong by a hundred.
+/// has not paged in. **The caller does not fall back**: it leaves the car
+/// `Dormant` and asks again next step, because the derived height is a median
+/// over blocks and has been measured forty-five metres out. See the call site,
+/// which is the only one.
 pub fn settle_on_the_ground(bridge: &mut PhysicsBridge3D, at: DVec3) -> Option<f64> {
     let from = at + DVec3::Y * SETTLE_UP_M;
     bridge
@@ -569,9 +606,16 @@ pub fn settle_on_the_ground(bridge: &mut PhysicsBridge3D, at: DVec3) -> Option<f
 }
 
 /// How far above its derived place the settle ray starts, metres.
-pub const SETTLE_UP_M: f64 = 40.0;
+///
+/// Eighty, and the number is the measurement: the worst pad error this wave met
+/// on the CI island was **forty-five metres** (a median of blocks whose `y`
+/// fell back to an entity origin the island authors as zero, against a
+/// settlement pad at 130). A forty-metre ray would have started *below* the
+/// terrain on that case and never hit — a safe failure, but one that leaves a
+/// street with no cars on it and no way to say why.
+pub const SETTLE_UP_M: f64 = 80.0;
 /// How far below it the ray reaches, metres.
-pub const SETTLE_DOWN_M: f64 = 40.0;
+pub const SETTLE_DOWN_M: f64 = 80.0;
 
 /// **Every traffic car within reach of a point, nearest first** — the query a
 /// gate makes and a HUD would.

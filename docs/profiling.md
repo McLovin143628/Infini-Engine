@@ -81,6 +81,7 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | **The `crowd` phase alone** (the sim-LOD tier decision over `NPC_BUDGET_AGENTS` = 1 000 NPCs) | `NPC_STEP_BUDGET_MS` | 1.0 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `society` phase on a SETTLED level** (one entity walk that folds nothing) | `SOCIETY_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `vehicle` phase alone** (four wheel rays a car over `VEHICLE_BUDGET_CARS` = 64 cars) | `VEHICLE_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/island_gate.rs` |
+| **The `traffic` phase alone** (a settlement's whole car population: the carriageway, the band, the tier per record, the steering) | `TRAFFIC_STEP_BUDGET_MS` | 1.0 ms | `inf-player` · `tests/island_gate.rs` |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
@@ -93,6 +94,34 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | VT tiles *wanted* per frame (peak) | `VT_WANTS_PER_FRAME_CEILING` | 48 | `inf-player` · `tests/phase26_gate.rs` |
 | Agents the NPC budget is measured over | `NPC_BUDGET_AGENTS` | 1 000 | `inf-player` · `tests/crowd_sweep.rs` |
 | Cars the vehicle budget is measured over | `VEHICLE_BUDGET_CARS` | 64 | `inf-player` · `tests/island_gate.rs` |
+| Traffic cars one level may hold | `inf_ecs::traffic::MAX_TRAFFIC_CARS` | 4 096 | `inf-ecs` · `src/traffic.rs` |
+| …of which may have a route planned | `inf_ecs::traffic::MAX_COMMUTERS` | 128 | `inf-ecs` · `src/traffic.rs` |
+
+The `traffic` row was **minted at wave VEH2b**, and it is minted with a control
+beside it. `the_traffic_phase_costs_what_it_costs_on_the_island` measures the CI
+fixture's settlement at half past eight — 16 derived cars, 15 of them rigs, four
+of them driving with a person at the wheel, over 329 walking residents — and
+then measures **the same settlement at the same hour with the traffic taken
+out**, through `RuntimeSim::set_traffic_population(empty)`, which stops the
+derivation as well as taking the bodies down. Dev build, MIN of three rounds of
+sixty settled steps:
+
+| row | with a street | without | delta |
+|---|---|---|---|
+| `traffic` | **0.2029 ms** | 0.0558 | +0.1471 |
+| `vehicle` | 0.0707 (15 rigs, **4.72 µs a car**) | 0.0107 | +0.0600 |
+| `solver` | 4.3663 | 4.1811 | +0.1852 |
+| `physics3d sync` | 4.6912 | 4.6324 | +0.0588 |
+| **whole step** | **25.8459 ms** | **24.5641 ms** | **+1.2818 ms — 5.0 %** |
+
+Two things that table says which the phase row alone does not. **A traffic car
+costs more OUTSIDE its own phase than inside it**: the four named rows account
+for 0.45 ms of the 1.28, and the rest is `character move` and `animation` paying
+for the NPC drivers, which are ordinary characters with ordinary capsules and
+ordinary poses. And **the island's µs-a-car is higher than the flat-fixture
+one**: 4.72 against `VEHICLE_STEP_BUDGET_MS`'s 2.00, because these rays cast into
+a streamed heightfield under a settlement rather than into a four-tile box, which
+is the same dilution the VEH2a audit measured in the other direction.
 
 The `vehicle` row was **re-priced at wave VEH2a** and the constant deliberately did not move: the driving model grew a wheel state, a torque curve, a gearbox, a differential, a Pacejka tyre, anti-roll bars, aero and three driver aids for **+16 %** (0.1101 → 0.1277 ms at 64 cars, dev), because the expensive work in this phase was always the four ray casts and none of the new work casts anything. Re-minting at the original ~4.5× rule would have meant 0.575 ms, and §8 forbids raising a budget — so the headroom tightened from ~4.5× to ~3.9× instead. See `VEHICLE_STEP_BUDGET_MS`'s own doc for the full table. **`audit:` VEH2a — the +16 % is a fact about the ISLAND's fixture, not about the model.** The island's rows are a heightfield ray cast four times a car, which dominates and dilutes everything else; on a flat box ground the audit measured the same change at **+32 % (dev) / +44 % (release)** — 0.0629 → 0.0830 ms and 0.0440 → 0.0633 ms at 64 cars. The two agree in absolute terms (a 0.0201 ms delta against the island's 0.0176) and the budget holds either way. Note also that the island's N-car table has **no arm**: `VEHICLE_BUDGET_CARS` appears once, in a `println!`, and the row asserted by `the_vehicle_phase_costs_what_it_costs_on_the_island` is the level's own resident fleet, not 64 cars.
 

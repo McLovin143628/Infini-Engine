@@ -68,9 +68,14 @@ pub const DEFAULT_LANE_WIDTH_M: f64 = 3.5;
 ///
 /// The same 4.0 the road ribbon mitres at, and for the same reason: at a sharp
 /// enough bend the exact offset of two segments meets arbitrarily far from the
-/// corner, so the join is clamped and the corner is *cut* instead. A lane
-/// offset is 1.75 m where a ribbon's is 7, so this clamp bites four times later
-/// here than it does there.
+/// corner, so the stretch is **clamped**. A lane offset is 1.75 m where a
+/// ribbon's is 7, so this clamp bites four times later here than it does there.
+///
+/// Clamped, and not bevelled: the corner keeps its one vertex, pushed out along
+/// the bisector by at most this multiple. A clamped corner is therefore *inside*
+/// the exact offset — the two lanes meeting there fall short of their true
+/// intersection — which on a hairpin is a metre and on anything this engine
+/// plans is nothing.
 pub const MITER_LIMIT: f64 = 4.0;
 
 /// The default speed limit a lane takes when its producer names none, km/h.
@@ -238,6 +243,39 @@ pub fn right_of(d: DVec3) -> DVec3 {
     DVec3::new(z / len, 0.0, -x / len)
 }
 
+/// **How much of an offset ran BACKWARDS**, metres — the fold measure.
+///
+/// # It is not "how much shorter it came out"
+///
+/// The first cut of this measured `spine.length - offset.length`, which is a
+/// number every inside bend produces by construction: offsetting a curve toward
+/// its centre shortens it, and that is correct geometry rather than a defect.
+/// On a straight producer it reads zero and looks right; on `inf-gis`'s graded
+/// road spines it would have read positive on every right-hand bend in the
+/// island and called each one a fold. (Found by this wave's own adversarial
+/// read, and the arms could not see it because they only offset straights.)
+///
+/// A **fold** is the polyline crossing itself, and its signature is a segment
+/// whose direction has *reversed* against the spine segment it came from: the
+/// mitre pushed the corner past its neighbour. So that is what is measured —
+/// the summed length of the offset segments whose heading opposes their own
+/// spine's. Zero for any offset that merely tightened.
+pub fn fold_of(spine: &NavPath, offset: &NavPath) -> f64 {
+    let (a, b) = (spine.points(), offset.points());
+    if a.len() != b.len() || a.len() < 2 {
+        return 0.0;
+    }
+    let mut folded = 0.0;
+    for i in 0..a.len() - 1 {
+        let (sx, sz) = (a[i + 1].x - a[i].x, a[i + 1].z - a[i].z);
+        let (ox, oz) = (b[i + 1].x - b[i].x, b[i + 1].z - b[i].z);
+        if sx * ox + sz * oz < 0.0 {
+            folded += (ox * ox + oz * oz).sqrt();
+        }
+    }
+    folded
+}
+
 /// **The path shifted `offset_m` metres to its own right**, corners mitred.
 ///
 /// Positive is to the right of travel; negative is to the left. Y is carried
@@ -387,10 +425,7 @@ impl LaneNetwork {
                         to: edge.to,
                         index,
                     };
-                    // A fold is an offset that came out SHORTER than the spine by
-                    // more than the mitre can explain — the polyline crossing
-                    // itself. Reported, never repaired: see `offset_path`.
-                    let fold = spine.length_m() - path.length_m();
+                    let fold = fold_of(&spine, &path);
                     if fold > out.worst_fold_m {
                         out.worst_fold_m = fold;
                     }
@@ -498,6 +533,14 @@ impl LaneNetwork {
         let mut best: Option<(LaneId, f64, f64)> = None;
         for lane in self.lanes.values() {
             let proj = lane.path.project(p);
+            // A NaN distance is skipped rather than accepted. The obvious
+            // spelling — `None => true` and then `proj.distance_m < d` — LATCHES
+            // one: a NaN taken as the first candidate compares false against
+            // every later lane and wins for ever, which turns the documented
+            // `LaneId` tie-break into "whichever lane sorted first".
+            if !proj.distance_m.is_finite() {
+                continue;
+            }
             let better = match best {
                 None => true,
                 Some((_, _, d)) => proj.distance_m < d,
@@ -847,6 +890,66 @@ mod tests {
         );
         assert!((s - 50.0).abs() < 1e-9, "{s}");
         assert!(d < 1e-9, "{d}");
+    }
+
+    /// **An inside bend is not a fold.** The measure the first cut used —
+    /// length lost — reads positive on every curve offset toward its centre,
+    /// which is correct geometry, and would have called every bend on the
+    /// island a defect.
+    #[test]
+    fn offsetting_a_bend_inwards_is_not_a_fold() {
+        // A right turn: offsetting to the right shortens the inside line.
+        let bend = NavPath::new([p(0.0, 0.0), p(50.0, 0.0), p(50.0, 50.0)]);
+        let inside = offset_path(&bend, -3.0);
+        assert!(
+            inside.length_m() < bend.length_m(),
+            "the inside of a bend is shorter, or this fixture bends the other way"
+        );
+        assert_eq!(
+            fold_of(&bend, &inside),
+            0.0,
+            "an inside bend read as a fold"
+        );
+        assert_eq!(fold_of(&bend, &offset_path(&bend, 3.0)), 0.0);
+    }
+
+    /// …and a real fold does read. A dogleg tighter than the offset pushes one
+    /// segment past its neighbour and it comes out pointing backwards.
+    #[test]
+    fn a_connector_shorter_than_the_offset_folds_and_says_so() {
+        // A U-turn with a ONE-METRE connector, turned so that the right-hand
+        // offset is the INSIDE of it. Offset six metres, the connector's own
+        // segment comes out pointing the other way — which is the polyline
+        // crossing itself, and is the only thing `fold_of` calls a fold.
+        let u = NavPath::new([p(0.0, 0.0), p(20.0, 0.0), p(20.0, -1.0), p(0.0, -1.0)]);
+        let out = offset_path(&u, 6.0);
+        assert!(
+            fold_of(&u, &out) > 0.0,
+            "a one-metre connector offset by six metres did not fold: {:?}",
+            out.points()
+        );
+        // …and the network reports it rather than hiding it.
+        let mut g = NavGraph::new();
+        g.add_node(0, p(0.0, 0.0), NavKind::Road);
+        g.add_node(1, p(0.0, -1.0), NavKind::Road);
+        g.link(0, 1, NavKind::Road, vec![p(20.0, 0.0), p(20.0, -1.0)]);
+        let net = LaneNetwork::from_graph(&g, |_, _| {
+            Some(LaneSpec {
+                lane_count: 8,
+                width_m: 3.0,
+                ..Default::default()
+            })
+        });
+        assert!(net.worst_fold_m() > 0.0, "{}", net.worst_fold_m());
+    }
+
+    /// A NaN projection must not win the nearest query for ever.
+    #[test]
+    fn a_non_finite_query_point_finds_nothing_rather_than_the_first_lane() {
+        let net = LaneNetwork::from_graph(&cross(), |_, _| Some(LaneSpec::default()));
+        assert!(net.nearest(DVec3::new(f64::NAN, 0.0, 0.0)).is_none());
+        // …and a finite one still answers.
+        assert!(net.nearest(p(50.0, -1.75)).is_some());
     }
 
     #[test]

@@ -691,7 +691,7 @@ fn step_one(
             // wrong side — is a value, and the press does nothing rather than
             // half-doing something.
             Some((inf_ecs::interact::InteractVerb::Carjack, target)) => {
-                match super::carjack::try_carjack(world, bridge, target, guid, overlays) {
+                match super::carjack::try_carjack(world, bridge, target, guid, dt, overlays) {
                     Some(super::carjack::Carjack::Ejected { chassis, .. }) => Some(chassis),
                     // They held on. The press is spent; the player presses again.
                     Some(super::carjack::Carjack::Resisted { .. }) | None => None,

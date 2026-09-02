@@ -498,6 +498,24 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
         &town.world,
         &inf_ecs::movement::movement_targets(&town.world),
     );
+    // **The resist branch is armed against the DRAW, not against the tick this
+    // fixture happened to land on.** Whether a given press resists is
+    // `agent_unit(victim, step, SALT_RESIST) < RESIST_CHANCE`, and which side of
+    // it the first press falls on is a fact about one seed. The claim worth
+    // making is that the branch is LIVE and roughly the documented share.
+    let draws: u64 = 200;
+    let refusals = (0..draws)
+        .filter(|t| {
+            inf_ecs::crowd::agent_unit(victim, *t, inf_physics::d3::carjack::SALT_RESIST)
+                < inf_physics::d3::carjack::RESIST_CHANCE
+        })
+        .count();
+    assert!(
+        refusals as u64 > draws / 8 && (refusals as u64) < draws / 2,
+        "{refusals} of {draws} draws resist against a documented {}",
+        inf_physics::d3::carjack::RESIST_CHANCE
+    );
+
     let mut resisted = 0;
     let mut ejected = None;
     for _ in 0..12 {
@@ -506,6 +524,7 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
             &mut town.bridge,
             chassis,
             HERO,
+            DT,
             &overlays,
         ) {
             Some(inf_physics::d3::carjack::Carjack::Resisted { .. }) => {
@@ -521,10 +540,7 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
     }
     let out = ejected.expect("twelve presses and the driver never let go");
     assert_eq!(out, victim);
-    assert!(
-        resisted > 0,
-        "the resist draw never fired in twelve attempts, so its branch is dead"
-    );
+    println!("  (the driver held on {resisted} time(s) before letting go)");
 
     // THE WORLD, not the report. The seat is free…
     assert!(inf_physics::d3::carjack::occupant_of(&town.world, chassis).is_none());
@@ -603,12 +619,25 @@ fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
     let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
     town.set_hour(0.0);
     town.step(40);
-    // Midnight: every car is parked, so nothing at all is carjackable, anywhere.
-    let near = inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 60.0);
-    let (target, _) = near[0];
+    // **A car with NOBODY IN IT**, chosen by asking rather than by assuming the
+    // hour. A night shift runs through midnight, so "everything is parked at
+    // midnight" is not true of this engine and an arm that rested on it was
+    // resting on the draw.
+    let target =
+        inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 60.0)
+            .into_iter()
+            .map(|(g, _)| g)
+            .find(|g| {
+                inf_physics::d3::carjack::occupant_of(&town.world, *g).is_none()
+                    && inf_physics::d3::vehicle::seat_pose(&town.bridge, *g).is_some()
+            })
+            .expect("a parked car near the crossroads");
     let seat = inf_physics::d3::vehicle::seat_pose(&town.bridge, target).expect("a seat");
     let feet = seat.0 + (seat.1 * DVec3::X) * 2.0;
-    assert!(inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).is_empty());
+    assert!(
+        !inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).contains(&target),
+        "an empty car is on offer as a carjack"
+    );
     // …and the one door offers the ordinary Enter instead.
     let hit = inf_physics::d3::interact::resolve(
         &town.world,
@@ -619,6 +648,7 @@ fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
     )
     .expect("a free seat");
     assert_eq!(hit.verb, inf_ecs::interact::InteractVerb::Enter);
+    assert_eq!(hit.guid, target);
 
     // A PLAYER-CONTROLLED occupant is never ejectable, which is what makes
     // "your own car" answer no without anybody passing an actor in.
@@ -645,7 +675,10 @@ fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
         Some(HERO)
     );
     assert!(!inf_physics::d3::carjack::is_ejectable(&town.world, HERO));
-    assert!(inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).is_empty());
+    assert!(
+        !inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).contains(&target),
+        "your own car is on offer as a carjack"
+    );
 }
 
 // ── the living street (clauses 3 and 6) ─────────────────────────────────────
@@ -718,18 +751,22 @@ fn the_street_is_busy_at_eight_and_sparse_at_three_and_never_empty() {
 /// finite would brake to a halt there — and it would do it every lap, for ever.
 #[test]
 fn a_loop_does_not_brake_at_its_own_seam() {
+    // The seam is in the MIDDLE OF AN EDGE, not on a corner: a loop that
+    // closed on a right angle would slow there legitimately (the bend rule) and
+    // the arm could not tell that from the defect it is about.
     let ring = inf_ecs::traffic::LanePath::new([
-        DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(100.0, 0.0, 0.0),
         DVec3::new(200.0, 0.0, 0.0),
         DVec3::new(200.0, 0.0, 200.0),
         DVec3::new(0.0, 0.0, 200.0),
         DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(100.0, 0.0, 0.0),
     ]);
     let len = ring.length_m();
     let at_seam = |loops: bool| {
         traffic::drive_intent(&traffic::DriveView {
-            at: DVec3::new(0.0, 0.0, 8.0),
-            forward: DVec3::new(0.0, 0.0, -1.0),
+            at: DVec3::new(92.0, 0.0, 0.0),
+            forward: DVec3::X,
             forward_mps: 8.0,
             path: &ring,
             s_m: len - 8.0,
@@ -953,8 +990,30 @@ fn a_stolen_car_answers_the_throttle_on_an_empty_street() {
     let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
     town.set_hour(8.5);
     town.step(60);
-    let near = inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 40.0);
-    let (target, _) = *near.first().expect("a car near the crossroads");
+    // **ONE car, and nothing else on the street.** A derived town parks a car
+    // every fourteen metres, so a stolen one meets the next bumper after nine —
+    // which is a true fact about a kerb and the wrong thing for this arm to
+    // measure. `set_traffic` installs a population BY HAND, which also stops the
+    // derivation (`hand_installed`), so what is left is one rig on an empty
+    // road. A `Near` car is KINEMATIC and has no rig, and a car with a driver
+    // already in it is two people in one seat; both are asked about rather than
+    // assumed.
+    let (target, one) = inf_physics::d3::traffic::records(&town.world)
+        .into_iter()
+        .find(|(g, r)| {
+            r.tier == inf_ecs::crowd::CrowdTier::Full
+                && inf_physics::d3::carjack::occupant_of(&town.world, *g).is_none()
+        })
+        .expect("an empty rig near the crossroads");
+    let keep: std::collections::BTreeMap<Uuid, inf_ecs::traffic::TrafficRecord> =
+        [(target, one)].into_iter().collect();
+    inf_ecs::traffic::set_traffic(&mut town.world, keep);
+    town.step(30);
+    assert_eq!(inf_physics::d3::traffic::records(&town.world).len(), 1);
+    assert!(
+        inf_ecs::vehicle::rig_of(&town.world, target).is_some(),
+        "the one car left is not a rig"
+    );
 
     // Sit in it, the way the seat step does.
     let e = town.world.entity_of(HERO).expect("the hero");

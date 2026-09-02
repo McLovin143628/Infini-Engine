@@ -29836,3 +29836,120 @@ caps now, the tyre curve evaluated at the aid's own target slip; and `(0.0f64).s
 the stick force applied a full 12 kN of brake to a stationary car and drove it **backwards at
 7.3 cm/s**. Ledger, laws and the carried list in `docs/memos/island-progress.md` under
 *"Wave VEH2a"*.
+
+**ISLAND WAVE VEH2b — traffic, parked cars, carjacking, living streets (2026-09-01, base
+`f5ec084f`).** VEH2a's carried item 9 read *"Traffic is still VEH1b's. The fleet parks; nothing
+drives itself."* This wave is that item, and the user mandate behind it: *"there should be NPCs
+driving around the streets and walking on the sidewalks… they should be able to steal cars."*
+Eight clauses, **no schema move** (VEH2a spent this arc's window; every piece of traffic state is a
+bevy **resource** or is derived from the level's own blocks), and **no new dependency of any kind**.
+
+**The lane** (`inf_nav::lane`, new). Every road producer in this tree hands over a CENTRELINE —
+`RoadSegment::spine`, a settlement's street lines, the ribbon builder's polyline — and VEH1a parked
+seven cars on it, where nothing moved and so nothing noticed. `offset_path` shifts a `NavPath`
+sideways along a mitred normal, signed **positive to the right of travel**, which is where this
+engine decides it drives on the right and decides it ONCE. `LaneNetwork::from_graph` derives a
+carriageway per DIRECTED edge half, so an undirected link grows its own opposing lane without the
+crate knowing a road has two sides; `LaneId` is `(from, to, index)` rather than a packed integer,
+because a lane is derived from an edge that already has two ids. The junction is the half geometry
+cannot recover — two lanes meeting at a T are offset to two sides of two headings, so their ends are
+metres apart while the roads touch exactly — so `join` reads the GRAPH: a lane leads everywhere but
+back the way it came, except at a dead end. The module joins its three `inf-nav` siblings on the P14
+ban list on day one (the normal is `up × forward`, two swaps and a negation; the mitre is a
+reciprocal of a dot product and never a cosine). `RoadGraph::lane_network` is the translation and
+nothing else — a road class into a `LaneSpec` — and it is where `RoadSegment::lane_count` and
+`speed_limit_kmh` finally reach something a car reads.
+
+**The streets are RE-DERIVED, and that is the honest reason.**
+`inf_editor_core::settlement::Settlement::street_graph` knows every street of every settlement
+exactly, and the shipped player cannot have it: Ring 1, a plan is not a component, and the schema
+window is spent. What a committed `.inf_lvl` does carry is the blocks, and **a street is the gap
+between two of them**. `inf_ecs::traffic::streets_of` reads the same `volume_sites` the society reads
+every step, groups the rectangles by proximity (two towns are not neighbours), reduces each axis to
+its occupied intervals and calls the gaps streets. Price stated: only the streets BETWEEN blocks are
+recovered — a settlement's outermost grid line has ground on one side and is not a gap.
+
+**The driver** answers a `Vec2d` — the same stick a player holds — and never a `VehicleControls`,
+because `VehicleControls::from_intent` is the one place a stick becomes a throttle and a brake and an
+AI that produced controls directly would be the second. Look one second ahead; take the lowest of the
+sign, the bend and the gap; close the speed error over a band; pursue the aim point as
+`lateral / ahead`, a tangent. **No lane change and no overtaking**, expressed as the ABSENCE of a
+rule rather than as a rule that refuses. The hazard it pinned: `from_intent` reads a negative stick at
+rest as REVERSE, so a stopped traffic car asks for nothing and holds the handbrake, and `STOPPED_MPS`
+is matched to that same 0.5 on purpose.
+
+**The ladder is the crowd's, with one rung fewer and a reason.** A crowd agent can be made cheap —
+NPC1b draws a thousand `Far` ones out of one instanced batch — and **a car cannot go through that
+path**: a vehicle body is a union of built-in primitives with no `.inf_mesh` at all (VEH1a's whole
+argument for a fleet that costs no committed content) and `PcgKind::mesh` is a mesh GUID. That is the
+scatter-kind-versus-entity pricing, and it is structural rather than a measurement. So
+`TRAFFIC_RADII` is `(64, 128, 128)` and `Far` is unreachable by construction. Past 64 m a car is built
+with **no wheels**, which means no `VehicleClass`, which means `rig_of` answers `None`, which means
+`step_vehicles` **cannot reach it even by accident** — the watched-car sentence as a fact about what
+exists rather than as a promise. The honest half of it: those cars do not queue, do not collide with
+each other, and two on one lane pass through one another.
+
+**A commuter is a parked car with a day**, and its day is `inf_ecs::crowd::CrowdSchedule` — the same
+type a resident carries, resolved by the same `CrowdClock` against `society::WORK_START_H`, `HOME_H`
+and `COMMUTE_H`. That is what "commuter cars join the society schedule" means, precisely: one
+vocabulary, one clock, one set of hours. A **circuit** is the other kind — a `CrowdRoute` in
+`RouteMode::Loop`, with a STATED speed and no window, because a schedule's implied speed is
+`length / window` and a 400 m commute over an hour of an eighteen-times clock is two metres a second,
+a pedestrian's pace in a car. A day shift runs 06:00–22:00 and a night shift 22:00–06:00, which is
+what puts cars on a street at three in the morning. `day_of` is ONE draw split into four bands, after
+the first cut drew "does it commute" (35 %) and then "is it a circuit" (3 %) inside it and produced a
+night shift of one per cent — zero cars, and an empty three a.m.
+
+**An NPC drives the way a player does**: the traffic step writes the driver's `intent_move` and
+`step_driving` six phases later hands it to `from_intent` and calls `Vehicle::control`. There is no
+second path into a vehicle's controls in this engine and this wave did not add one.
+
+**The carjack is the seat door seen from the outside.** It builds the candidate
+`vehicle_candidates` refuses, with `InteractVerb::Carjack` so the prompt says "[E] Pull out driver"
+instead of lying, and makes the seat free before the ordinary enter runs — one press, one resolution
+site, one warp. Three conditions, all visible: somebody is in it and is not `player_controlled`; you
+are at the DRIVER's door (the `+X` half-space, which is the side `finish_driving` puts a driver out
+on); and one `mix64` a quarter of the time says they held on. The victim lands at the door in
+`FallControlled` through `eject_from_seat` — `finish_driving` with the mode TAKEN rather than
+requested, which is the sentence `transition_is_legal` was already written for (*"the table permits a
+driver to be pulled out of a seat by something that is a fact about its body rather than a choice.
+Nothing pulls it yet"*) — and then **flees by becoming an ordinary crowd agent with a route away from
+you**, so it tiers, poses and eventually goes Dormant with no flee mode and nothing to leak. One flag,
+`TrafficRecord::taken`, covers both interferences: once set, traffic never steers the car again,
+never gives it another driver and never takes its body down, so a stolen car is an ordinary vehicle
+exactly like the seven the island authors.
+
+**And it closed a divergence that was already there.** The press path excluded `occupied_seats` and
+the HUD excluded `{self, own car}`, and the two were the same set only because nothing but the player
+had ever sat down; the first NPC driver would have made the prompt read "[E] Enter vehicle" over an
+occupied car. Occupancy is a fact about the WORLD, so `d3::interact::candidates` reads it itself now.
+
+**THE GATE**: `pie_equals_shipping_at_rush_hour_with_cars_on_the_streets`. The CI fixture's
+settlement at 08:24 — 2 street lines → 8 lanes derived 3 times as the town pages; 16 cars, 6 with a
+day, 4 driving with 4 drivers; 329 residents walking with 44 563 steering intents; the ladder
+`[0,0,0,0]` a kilometre away, `[0,3,0,13]` at the town edge, `[15,0,0,1]` at the crossroads; the
+carjack in 8 presses, driver out, hero seated — **byte-identical on both hosts over 600 steps**.
+Every claim is a count with a floor, because a rush-hour gate that passes with zero cars certifies
+nothing. `traffic` is `STEP_PHASES` index 6 with `TRAFFIC_STEP_BUDGET_MS` = 1.0 ms minted beside a
+CONTROL: the same settlement with the traffic taken out is **24.5641 ms against 25.8459**, so a street
+costs **1.2818 ms — 5.0 % of the step** — of which the four named rows are only 0.45, the rest being
+`character move` and `animation` paying for NPC drivers who are ordinary characters.
+
+**Five defects the gate found by being written.** The cars were **falling through the island at
+72 m/s** — a street's derived height is a mean over the blocks that bound it and `volume_sites` falls
+back to a volume's entity `y`, which the island authors as zero, so mixing zeros with a pad at 130 m
+gave 86 and every car was built forty-five metres under the world (measured at −631 m after ten
+seconds, free fall to the digit); fixed with a per-street MEDIAN and a real ray, with **no body built
+until something can say what it is standing on**. No car had a day, because a destination had to be
+a hundred metres off and on a two-street fixture nothing is. The gate was **measuring the aftermath**
+— a `Full` car is steered along its whole route by a controller that follows the path and not the
+clock, so the settle consumed the drive and every commuter had ARRIVED (`s_m` 176 of 176,
+`remaining_m` 0.0) before the window opened. A dozen engine loops **flooded the shipped player's
+bounded audio log** and cost VEH2a's own drive gate the single `Play` it exists to count; the fix is a
+ruling rather than a bigger buffer — **traffic is silent until the emitter can follow the car**, which
+is VEH2a's carried item 5. And the carjack arm had to pick the most ISOLATED driven car, because the
+interact rule is nearest-wins and a parked neighbour 1.65 m away wins.
+
+Schemas **unmoved**: scene v27, `ScenePayload` v12. Goldens **60, none blessed**. No new crate, no new
+dependency, `Cargo.lock` byte-identical. Ledger, laws and the carried list in
+`docs/memos/island-progress.md` under *"Wave VEH2b"*.

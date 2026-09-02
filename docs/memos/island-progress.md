@@ -38,6 +38,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **VEH1a** | **the car drives the island** — the audited heightfield ride, a body and a fleet, the `vehicle` step phase, the drive-the-circuit gate | **DONE** — see *Wave VEH1a* at the end of this file. **Both of wave I7's open road items die**: the island parks seven cars (38 drawn body parts, **no new committed file**), the hero enters through the shipped seat door and drives **34.1 m at up to 16.81 m/s byte-identically on both hosts**, and **all 42 of Vancouver Island's ordered site pairs are reachable** over a real `RoadGraph`. The routed wheel-normal smoothing is **refused with a falsifier** — the snap is 15.69° on open ground and reaches **0.000000 m** of force — and the P29.7 sensor-ride bound is **closed** by `CastTargets::AllSolid`. `STEP_PHASES` **26 → 27**, `VEHICLE_STEP_BUDGET_MS` **0.5** minted at 64 cars from a measured 0.1101 ms, engine audio through the P12.3 queue with **zero new API**. The sedan climbs I7's audited **0.108** grade at 94 km/h |
 | **NPC1b** | **the crowd renderer** — instanced skinning over a palette atlas, VSM proxy casters, crowd variation, the headline at N = 1 000 | **DONE** — see *Wave NPC1b* at the end of this file. The renderer reads the tier: draws **2 002 → 2**, palette blocks **1 001 → 292**, palette upload **9.3–9.4×** smaller, shadow groups **1 001 → 32** of a 1 024 ceiling (wall 4 retired), a crowd golden that is not eight clones, and the exact posed caster bound at **67 % of the margin's radius**. **A thousand island-class NPCs do NOT fit the island's headroom** (42.0 → 16.8 fps p50, 74.3 → 34.0 pipelined) **and the wall is not the renderer**: +9.09 ms of fixed step, +3.67 of CPU-side recording, +2.95 of projection, against one draw call and 0.249 ms of skinned GPU. The `Far → Near` pop is measured at **0.95 m in one step** and routed |
 
+| **VEH2b** | **traffic, parked cars, carjacking, living streets** — the lane centreline, the path-steering controller, traffic on the crowd's tier ladder, kerb parking, the carjack, the rush-hour gate | **DONE** — see *Wave VEH2b* at the end of this file. VEH2a's carried item 9 (*"the fleet parks; nothing drives itself"*) dies. A level **re-derives its own street grid from the block rectangles it committed** (there is nowhere in a `.inf_lvl` for a centreline and the schema window is spent), lays a lane each way and a parked row on both kerbs, and puts commuters and day/night circuits on them — **49 cars on a 3×3-block town, 7 rigs and 20 drawn bodies at the crossroads**. Past 64 m a car is built with **no wheels**, so `rig_of` answers `None` and `step_vehicles` **cannot reach it even by accident**: the watched-car sentence as a fact rather than a promise. An NPC drives through the SAME `VehicleControls::from_intent` a player's stick goes through, and the carjack is the P29.7 seat door seen from the outside — the candidate `vehicle_candidates` refuses, a new `InteractVerb::Carjack` so the prompt stops lying, and the victim flees as an ordinary crowd agent. `STEP_PHASES` **27 → 28**, `TRAFFIC_STEP_BUDGET_MS` **1.0** minted beside a **control**: a street costs **1.22 ms of a 22.45 ms release step, 5.4 %**, two thirds of it the NPC drivers being characters. Gate: rush hour at 08:24, 329 residents walking while four cars drive with people in them, the hero pulls one out in eight presses — **byte-identical on both hosts over 600 steps**. Five defects found by writing the arms, the worst of them cars **falling through the island at 72 m/s** |
+
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
 on its first frame, and measuring them against a real city was cheaper than measuring them
@@ -24091,3 +24093,533 @@ byte-identical.
     new integration arm measures a *parked* car, because `camera_3d`'s fixture
     does not run `step_vehicles`; a real accelerating drive would also pin the
     FOV and look-ahead terms end to end.
+
+## Wave VEH2b — traffic, parked cars, carjacking, living streets (2026-09-01)
+
+Base `f5ec084f`. VEH2a's carried item 9 read *"Traffic is still VEH1b's. The
+fleet parks; nothing drives itself."* This wave is that item, and the mandate
+behind it, verbatim: *"there should be NPCs driving around the streets and
+walking on the sidewalks… The world should feel alive and full… they should be
+able to steal cars — just like you can see in the GTA 6 examples."* Reference
+frames: `driving/0014` (opposing traffic, a kerb of parked cars),
+`driving/0030` (a full hotel forecourt), `steal-car/0016` (a kerb row at night,
+the hero at a driver's door), `steal-car/0028` (sparse night traffic stopped at
+a light), `steal-car/0040` (pedestrians on a pavement at night).
+
+Eight clauses. **No schema move** — VEH2a spent this arc's window on
+`VehicleClass`, so every piece of traffic state is a bevy **resource** or is
+derived from the level's own blocks. **No new dependency of any kind**, and no
+new crate.
+
+### Clause 1 — the lane centreline
+
+`inf_nav::lane`, new, 874 lines with its arms. Every road producer in this tree hands over a
+CENTRELINE — `RoadSegment::spine`, a settlement's street lines, the ribbon
+builder's polyline — and wave VEH1a parked seven cars on it, where nothing moved
+and so nothing noticed. A car that drove the paint sits astride the crown of the
+road with its offside wheels in the oncoming traffic.
+
+* `offset_path` shifts a `NavPath` sideways along a **mitred** normal, signed
+  positive **to the right of travel**. That sign is where this engine decides it
+  drives on the right, and it decides it in one function rather than in three
+  crates: the day two producers disagreed, the cars in one settlement would meet
+  the cars in another head on.
+* `LaneNetwork::from_graph` derives a carriageway per **directed edge half**, so
+  an undirected link grows its own opposing lane without this crate knowing that
+  a road has two sides. `LaneId` is `(from, to, index)` and not a packed
+  integer, because a lane is derived from an edge that already has two ids — no
+  hash, no collision, no twenty-bit field, and `BTreeMap` order is the source
+  graph's order.
+* The **junction** is the half geometry cannot recover: two lanes meeting at a T
+  are offset to two sides of two headings, so their ends are metres apart while
+  the roads touch exactly. `join` reads the GRAPH — a lane leads everywhere but
+  back the way it came, except at a dead end, where turning round is the only
+  way out.
+
+The module joins its three `inf-nav` siblings on the P14 ban list **on day one**:
+the normal is `up × forward` (two component swaps and a negation) and the mitre
+is a reciprocal of a dot product, never a cosine, so there is no trigonometry in
+it at all.
+
+`inf_gis::RoadGraph::lane_network` is the translation and nothing else — a road
+class into a `LaneSpec`. It is where `RoadSegment::lane_count` and
+`speed_limit_kmh` finally reach something a car reads; before it they set the
+width of a ribbon and nothing more. `default_speed_kmh` is a table rather than
+one number, because every committed layer in this tree carries `name` and
+`road_type` alone and without it a farm track and a highway share a fifty. Rail
+carries no lanes — nothing here drives a train.
+
+The arithmetic lives in `inf-nav` and not beside the ribbon it fits, because
+**`inf-gis` is banned from the shipped player by manifest** and the settlement
+grids this wave re-derives at runtime need exactly the same offset, mitre and
+join. `the_lane_width_agrees_with_the_surface_it_is_drawn_on` holds the two 3.5s
+together.
+
+Named bounds: a bend tighter than the offset folds the polyline through itself,
+which is a fact about offsetting polylines — `LaneNetwork::worst_fold_m` reports
+it rather than hiding it, and it is **0.0** on both producers in this tree. A
+turn between two lanes is a **chord** across the junction, not a fillet struck
+on a kerb radius; that is the same road-modelling project `inf_gis::roads` names
+as out of scope for its own junction fans.
+
+### Clause 1b — the streets a level re-derives for itself
+
+`inf_editor_core::settlement::Settlement::street_graph` already knows every
+street of every settlement, exactly, from the plan that placed the blocks. **The
+shipped player cannot have it**: that is Ring 1, a plan is not a component, and
+the schema window is spent — so there is nowhere in a committed `.inf_lvl` for a
+street centreline to live.
+
+What a committed level *does* carry is the blocks, and **a street is the gap
+between two of them**. `streets_of` reads the same `volume_sites` the society
+reads every fixed step, groups the rectangles by proximity (`MAX_STREET_GAP_M`
+is 32 m: two towns are not neighbours), reduces each axis to its occupied
+intervals and calls the gaps between consecutive intervals streets. Both hosts
+recover the same grid because both read the same world.
+
+The price is stated: **only the streets BETWEEN blocks are recovered.** A
+settlement's outermost grid line has ground on one side and no block to bound
+it, so it is not a gap and it is not derived. That is a smaller network than the
+plan drew, and it is a network entirely inside the town.
+
+`carriageway` lays two lanes on each — 3.5 m each way, **not half the gap**. A
+twenty-metre city street is seven metres of tarmac with six and a half of verge
+either side, and that is what leaves `KERB_PARK_OFFSET_M` somewhere to put a
+car. `TrafficRes` caches the whole derivation behind a `block_stamp`, and
+`the_derivation_runs_when_the_blocks_move_and_not_otherwise` asserts a settled
+level derives **once**.
+
+### Clause 2 — the path-steering controller
+
+`drive_intent` answers a `Vec2d` — the same stick a player holds — and **never a
+`VehicleControls`**, because `VehicleControls::from_intent` is the one place a
+stick becomes a throttle and a brake in this engine and an AI that produced
+controls directly would be the second. That is not a preference: `from_intent`'s
+"back into forward motion is a BRAKE, not reverse" rule is a *control decision*,
+and a traffic car that did not obey it would stop differently from the way the
+player's car stops.
+
+Four decisions: look one second ahead, clamped; take the lowest of the sign, the
+bend and the gap; close the speed error over `SPEED_BAND_MPS`; and pursue the
+aim point as `lateral / ahead` — a tangent, clamped at `STEER_FULL_TAN`. The
+bend reads curvature as the magnitude of a **cross product** of two unit
+directions rather than as an angle, which is why the module can go on the P14
+ban list beside its lane substrate. The gap rule is the stopping-distance one,
+`v = sqrt(2 a (gap − standing))`, so a car closing on a queue slows continuously
+rather than arriving and slamming on.
+
+**The hazard this clause found and pinned.** `from_intent`'s `rolling_forward`
+test is `> 0.5`, so a negative stick at rest is **REVERSE** — a controller that
+kept asking for −1 at a red light would roll backwards through the queue. A
+stopped car asks for nothing and holds the handbrake, and `STOPPED_MPS` is
+matched to that same 0.5 on purpose: the two numbers are one decision about when
+a car is stopped and they must not disagree.
+
+**The honest sentence: there is no lane change and no overtaking.** A car behind
+a slower one slows to its speed and stays there; a car behind a stopped one
+stops. It is expressed as the ABSENCE of a rule rather than as a rule that
+refuses — there is no lane choice in `drive_intent` at all, because
+`LaneNetwork::lane_route` picks one index for a whole journey.
+
+### Clause 3 — traffic agents on the crowd's tier template
+
+**The ladder is the crowd's, with one rung fewer and a reason.** A crowd agent
+can be made cheap: `Far` drops the body and the pose, and NPC1b's impostors draw
+a thousand of them out of one instanced batch. **A car cannot go through that
+path.** A vehicle body is a union of built-in primitives derived from a Ring-0
+table with **no `.inf_mesh` at all** — which is VEH1a's whole argument for why
+the fleet costs no committed content — and `PcgKind::mesh` is a mesh GUID.
+Scattering parked cars would mean committing a car mesh, which is exactly the
+content that argument avoided.
+
+**That is the scatter-kind-versus-entity pricing of clause 4, and it is
+structural rather than a measurement.** A car is entities all the way down:
+fourteen at `RigDetail::Full` and six at `RigDetail::Body`. So `TRAFFIC_RADII`
+is `(64, 128, 128)`, `Far` is unreachable by construction, and the radius is
+where a car stops being readable rather than where it stops being cheap.
+
+**The watched-car sentence is not a promise.** Past `TRAFFIC_FULL_M` a car is
+built with no wheels, which means no `VehicleClass` and no sensor colliders,
+which means `rig_of` answers `None`, which means the bridge never builds a
+`RaycastVehicle`, which means **`step_vehicles` cannot reach it even by
+accident**. Its transform is `place(clock)`. The honest half, stated: those cars
+are not driving, they are being drawn where the clock says a drive would have
+got to; they do not queue, and two of them on one lane pass through one another.
+
+**A commuter is a parked car with a day.** Its schedule is
+`inf_ecs::crowd::CrowdSchedule` — the same type a resident carries, resolved by
+the same `CrowdClock` against `society::WORK_START_H`, `HOME_H` and
+`COMMUTE_H`. That is precisely what *"commuter cars join the society schedule"*
+means here: one vocabulary, one clock, one set of hours. What it does **not**
+mean is that a named resident owns a named car; that is carried.
+
+**A circuit is the other kind of day**, and it exists because a schedule cannot
+do this one. `CrowdSchedule` puts a car at a fraction of its leg's WINDOW, so
+the implied speed is `length / window` and a 400 m commute over an hour of a
+level clock running at eighteen is **two metres a second** — a pedestrian's
+pace, in a car. A `Circuit` is a `CrowdRoute` in `RouteMode::Loop`: a **stated
+speed** and no window, so a car on one does town speed whatever rate the day
+runs at. Out along one carriageway and home down the other. A day shift runs
+06:00–22:00 and a night shift 22:00–06:00, which is `frames/steal-car/0028`'s
+reference — a street at night is not empty, it is sparse. Outside its hours a
+circuit car is **Dormant** rather than parked back at its space, because a
+day-shift van that teleported home at ten at night would be a teleport somebody
+watched.
+
+**An NPC drives the way a player does.** The traffic step writes the driver's
+`intent_move`; `step_driving` six phases later hands it to `from_intent` and
+calls `Vehicle::control`. There is no second path into a vehicle's controls in
+this engine and this wave did not add one. The driver is built through
+`crowd::spawn_body` — the level's own archetype, the same capsule and mesh every
+resident wears — and dropped straight into `Driving` with the warp already
+finished, because a traffic car's driver did not climb in while anybody was
+watching.
+
+**One recipe, two doors.** `inf_ecs::vehicle::rig_nodes` says what entities a
+car IS; `spawn_rig` walks it into a world and
+`inf_editor_core::vehicle::spawn_vehicle` walks it into a document. Before this
+there was one builder, in Ring 1, and the runtime one would have been a SECOND
+recipe — the shape this tree has caught and refused a dozen times. The ORDER of
+the list is load-bearing in exactly one of the two (a `SceneDoc` writes its
+entities in creation order), and `committed_sample_matches_generators` passes
+with an empty `git status`, which is what says the hoist moved no byte of the two
+committed islands or the phase-29 course.
+
+`traffic` is `STEP_PHASES` index 6, between `crowd` and `physics2d sync`, in a
+`MIRROR-BEGIN traffic_step` fence pinned character-for-character on both hosts —
+plus an **order** arm, because run after the character step the intent would be
+one step stale and run after the 3D sync a new car would be drawn a step before
+it is solid, and an equality gate can see neither. `traffic_state_bytes` folds
+sixty bytes a car onto the end of `state_bytes` for the crowd's reason verbatim:
+without it the tier decision is invisible to every trace comparison in this
+repository.
+
+### Clause 4 — parked cars, and the pricing
+
+`kerb_slots` puts one slot every `KERB_SLOT_M` (14 m) down **both** sides of
+every street wide enough to park on, offset `KERB_PARK_OFFSET_M` (5 m) from the
+centreline, **facing the way traffic runs on that side** — so a kerb reads as a
+parked row rather than as a scatter of yaws, which is `frames/steal-car/0016`.
+`clear_of_junctions` keeps them out of the crossings; the first draft parked a
+car two metres from the middle of a four-way. `KERB_OCCUPANCY` is 0.45, because
+both reference frames show kerbs with **gaps** in them and a row with no gaps
+reads as a wall.
+
+**The promotion rule is the tier, and there is no second one.**
+`ENTER_REACH_M` is 3 m and `TRAFFIC_FULL_M` is 64, so *every car the hero can
+reach the seat of is Full* — the claim is not "we also check whether you can
+enter it", it is that the only thing that could stop the one interaction door is
+a missing rig and the tier has already built one.
+`every_car_the_hero_can_reach_is_one_the_interact_door_can_enter` measures it
+through `try_enter` rather than through a flag.
+
+**The off-street lot is CARRIED, with its reason.** A lot is a polygon of ground
+reserved for parking, and a committed level has no such polygon: the blocks are
+buildings and the gaps are streets. `frames/driving/0030`'s full forecourt is a
+hotel's private ground — content this island does not author. The kerb is the
+parking this wave derives.
+
+### Clause 5 — the carjack
+
+**It is the seat door seen from the outside.** P29.7 built one door into a car,
+and everything about it is right for a carjack except one line:
+`vehicle_candidates` skips an occupied chassis. So `inf_physics::d3::carjack`
+does not build a second way in — it builds **the candidate the first one
+refuses**, with `InteractVerb::Carjack` so the prompt says "[E] Pull out driver"
+instead of lying, and it makes the seat free before the ordinary enter runs. One
+press, one resolution site, one warp, and the code that seats the hero after a
+carjack is the code that has always seated the hero. The `match` in the movement
+step is exhaustive over the verb enum, so the new arm was a **compile error**
+rather than a silent decline.
+
+Three conditions, all visible to the player:
+
+* **Somebody is in it and is not the player.** The test is `!player_controlled`,
+  which is exactly "an NPC" and is why "can I carjack my own car" answers no
+  without anybody passing an actor in.
+* **You are at the driver's door** — the `+X` half-space, because that is the
+  side `finish_driving` puts a driver out on, so the side you pull one out of
+  and the side one climbs out of are one number.
+* **They do not fight you off this time** — one `mix64` on the victim's guid and
+  the sim step, a quarter of the time, DERIVED rather than counted for the
+  reason this module's three neighbours all refused to store a draw.
+
+The victim lands at the door in `FallControlled` through `eject_from_seat` —
+`finish_driving` with the mode **taken rather than requested**, which is the
+sentence `inf_ecs::movement::transition_is_legal` was already written for:
+*"the table permits a driver to be pulled out of a seat by something that is a
+fact about its body rather than a choice. Nothing pulls it yet."* Something does
+now. Then they **flee by becoming an ordinary crowd agent** with a route away
+from you (`crowd::adopt`, a new door because `add_agents` refuses a guid the
+world already holds and this is the one caller whose body this module built) —
+so the victim tiers, poses, collides and eventually goes Dormant like every other
+pedestrian, with no flee mode and nothing to leak.
+
+`TrafficRecord::taken` is one flag for both interferences — the carjack, and a
+hero simply getting into an empty traffic car. Once set, traffic never steers the
+car again, never gives it another driver and never takes its body down, so a
+stolen car keeps its rig wherever it is left and is an ordinary vehicle exactly
+like the seven the island authors. It is never unset: a car that reverted the
+moment the player got out would drive itself away from under them.
+
+**And it closed a divergence that was already there.** The press path passed
+`occupied_seats` as its exclusion and the HUD passed `{self, own car}`, and the
+two were the same set only because nothing but the player had ever sat down. The
+first NPC driver would have made the prompt read "[E] Enter vehicle" over an
+occupied car while the press did something else — I5's own law ("what the player
+is told and what the press does cannot come apart") in the one place I5 did not
+reach. Occupancy is a fact about the WORLD, so `d3::interact::candidates` reads
+it itself now and unions the caller's exclusion on top. **The test found it**:
+with an empty exclusion the same chassis produced both an `Enter` and a
+`Carjack` candidate and the `Enter` won.
+
+### Clause 6 — living sidewalks
+
+**The honest finding is that the peds were already on them.**
+`inf_ecs::society` has never routed a resident down the road centre: it lays a
+pavement ring `PAVEMENT_M` outside every block, which on a twenty-metre street
+is eight metres from the centreline. What was missing was anything checking that
+the traffic this wave puts in the street does not drive over it.
+
+`the_pavement_the_parked_row_and_the_lanes_are_three_separate_places` measures
+all three on the same geometry: a lane inside 3.5 m of its own centreline, a
+parked car at exactly 5.0 m with its own body allowed for, the pavement at 8.0.
+And `a_body_in_the_lane_is_a_gap_the_car_slows_for` pins the yield rule —
+**traffic stops for anything standing in its lane**, which is why a town does not
+run over its own residents and why a hero standing in the road stops the street.
+`obstacles_of` gathers characters as well as vehicles, deliberately, and the
+visible consequence is stated rather than hidden.
+
+`frames/steal-car/0040` shows pedestrians on a pavement at night; the night
+circuit of clause 3 is what puts cars past them.
+
+**The near-miss flinch is PRICED AND NOT TAKEN**, and the price is the reason. A
+flinch is an animation, so it needs a state in the committed
+`samples/starter-character` `.inf_sm` and a trigger the machine answers — content
+this wave would have to author and re-bless — and the behaviour it would key off
+(a car passing within a couple of metres at speed) is already **prevented** by
+the yield rule, which stops the car instead. What the flinch would actually buy
+is the other half: a crowd that **parts** for a car rather than blocking it. That
+is a change to the crowd's steering, not an animation, and it is carried.
+
+### Clause 7 — THE GATE
+
+`pie_equals_shipping_at_rush_hour_with_cars_on_the_streets`, in
+`island_gate.rs`. The CI fixture's settlement at 08:24 local, frozen: the
+residents walk to work, the traffic drives past them, and the player pulls one of
+the drivers out and takes their car — identically on both hosts, byte for byte
+over six hundred steps.
+
+| | shipping | PIE |
+|---|---|---|
+| street lines → lanes, derivations | 2 → 8, **3** | 2 → 8, 3 |
+| cars / with a day / driving / with a driver | 16 / 6 / 4 / **4** | 16 / 6 / 4 / 4 |
+| residents, steering intents over the window | 329, **44 563** | 329, 44 563 |
+| tiers a km away / at the town edge / at the crossroads | `[0,0,0,0]` / `[0,3,0,13]` / `[15,0,0,1]` | same |
+| carjack: presses / driver out / hero seated | **8** / yes / yes | 8 / yes / yes |
+| distinct states over 600 steps | > 300 | > 300 |
+| **per-step `state_bytes` digests** | — | **equal, all 600** |
+
+Every claim is a count with a floor on it, because a rush-hour gate that passes
+with zero cars certifies nothing.
+
+**A kilometre away the traffic is not merely Dormant — there are no records at
+all**, because the settlement's cells deactivate, its blocks stop being volumes
+and the carriageway derived from them goes with them. *The traffic streams with
+the town it belongs to*, which is why `derivations` is three rather than one.
+
+### Clause 7b — THE TABLES
+
+**THE STEP, WITH A STREET IN IT AND WITHOUT ONE.** The CI island fixture's
+settlement at 08:24, MIN of three rounds of sixty settled steps, on the authoring
+machine. The control is the same settlement at the same hour with the traffic
+taken out through `set_traffic_population(empty)`, which stops the derivation as
+well as taking the bodies down — because a phase table with a new row in it
+prices nothing unless the alternative is priced too (the I1 audit law).
+
+| row | dev, street | dev, none | **release, street** | **release, none** |
+|---|---|---|---|---|
+| `character move` (329 residents) | 8.5246 ms | — | 8.9763 ms | — |
+| `solver` | 4.3663 | 4.1811 | 4.0786 | 3.9332 |
+| `animation` | 4.6138 | — | 3.6495 | — |
+| `physics3d sync` | 4.6912 | 4.6324 | 3.1341 | 3.0928 |
+| `gameplay` | 1.9343 | — | 1.2751 | — |
+| `write-back` | 0.4458 | — | 0.4196 | — |
+| `terrain stream` | 0.4255 | — | 0.2819 | — |
+| **`traffic`** | **0.2029** | 0.0558 | **0.1479** | 0.0362 |
+| `crowd` | 0.1688 | — | 0.1313 | — |
+| `deformation` | 0.1219 | — | 0.0931 | — |
+| **`vehicle`** (15 rigs) | **0.0707** (4.72 µs/car) | 0.0107 | **0.0616** (4.11 µs/car) | 0.0094 |
+| `propagate` | 0.0837 | — | 0.0599 | — |
+| `camera` | 0.0692 | — | 0.0587 | — |
+| `society` | 0.0188 | — | 0.0121 | — |
+| **WHOLE STEP** | **25.8459** | **24.5641** | **22.4481** | **21.2298** |
+| **THE COST OF A STREET** | **+1.2818 — 5.0 %** | | **+1.2183 — 5.4 %** | |
+
+The release row is the one `TRAFFIC_STEP_BUDGET_MS` is **asserted** against, per
+`CITY_STEP_BUDGET_MS`'s conditioning: **0.1479 ms of a 1.0 ms ceiling, 15 %**,
+with `cargo test --release` off CI.
+
+Two things that table says which the phase row alone does not. **A traffic car
+costs more OUTSIDE its own phase than inside it**: the four named rows account
+for 0.35 ms of the release build's 1.22, and the rest is `character move` and
+`animation` paying for the NPC drivers, who are ordinary characters with ordinary
+capsules and ordinary poses. And **the island's µs-a-car is twice the
+flat-fixture one** — 4.11 release against `VEHICLE_STEP_BUDGET_MS`'s 2.00 —
+because these rays cast into a streamed heightfield under a settlement rather
+than into a four-tile box, which is the same dilution the VEH2a audit measured in
+the other direction (its own island row was +16 % where a flat box was +44 %).
+
+**THE TIER POPULATIONS, AND THE ARITHMETIC THAT SIZES THEM.** The population is
+bounded by GEOMETRY rather than by a setting: `KERB_SLOT_M` is 14 m,
+`KERB_OCCUPANCY` is 0.45, `TRAFFIC_FULL_M` is 64 m and `TRAFFIC_NEAR_M` is 128.
+
+| world | streets | cars | with a day | Full | Near | Dormant |
+|---|---|---|---|---|---|---|
+| 3×3 city blocks, 100 m pitch, 20 m streets (unit fixture) | 4 | **49** | 26 | **7** | 20 | 22 |
+| the CI island's settlement, hero at the crossroads | 2 | **16** | 6 | **15** | 0 | 1 |
+| …hero at the town's edge (150 m) | 2 | 16 | 6 | 0 | **3** | 13 |
+| …hero a kilometre away | — | **0** | — | 0 | 0 | 0 |
+
+**The budget arithmetic.** Ten `Full` rigs at VEH2a's own 2.00 µs is **0.020 ms
+of the 0.5 ms `vehicle` budget — four per cent**; at the island's measured
+4.11 µs (release), fifteen rigs is **0.0616 ms — twelve per cent**. The budget
+alone would allow **121 rigs** at the island's rate and 250 at the flat fixture's;
+the GEOMETRY allows about **twenty**, because a 64 m disc over a 100 m-pitch grid
+covers roughly two street lines' worth of kerb and 45 % of those slots hold a
+car. **The geometry bound is six times tighter than the budget bound**, which is
+the property that makes this population safe without a cap on it — and it is why
+`MAX_TRAFFIC_CARS` (4 096) is a table bound against a malformed recipe rather
+than a performance knob.
+
+`TRAFFIC_STEP_BUDGET_MS` is minted at **1.0 ms** — `NPC_STEP_BUDGET_MS`'s figure,
+because the two phases do the same shape of work over populations of the same
+order, and a sixth of `CITY_STEP_BUDGET_MS`, which is the property that makes it
+able to see anything.
+
+**THE 60-FPS TRAJECTORY, HONESTLY.** The fixed step above is **22.4 ms in a
+release build** and it is dominated by `character move` (8.98) and `solver`
+(4.08) over 329 residents — **neither of which is this wave's**, and both of
+which were there before it. `SHIPPING_FRAME_BUDGET_MS` is 16.6 ms and it is a
+*target printed as a distance, never asserted*; `fps_instrument` owns the
+shipping frame claim over the phase-30 city and this wave did not move it or
+re-measure it.
+
+What this wave can say is the delta it is responsible for, and it is small:
+**a street costs 1.22 ms — 5.4 % — of the step it is on**, of which its own phase
+is 0.11 and the rest is the NPC drivers being ordinary characters. A settlement
+of this island's size is therefore **not** what stands between this engine and
+sixty frames; three hundred and twenty-nine `move_and_slide` characters at
+`CITY_STEP_BUDGET_MS`'s own six-millisecond ceiling are, and that is the crowd
+arc's number rather than this one's. **This wave does not claim 60 fps on the
+island, and no arm here asserts one.**
+
+### THE LAWS THIS WAVE PAID FOR
+
+**A first guess a body is built on has to be a guess a body can survive.** The
+street's derived height is a mean over the blocks that bound it, and
+`volume_sites` falls back to a volume's entity `y` when it offers no exterior
+ground-floor doorway — which the island authors as **zero**. Mixing zeros with a
+settlement pad at 130 m gives 86, every car was built forty-five metres under the
+island, and rapier answered by launching them: measured at **−631 m after ten
+seconds**, free fall to the digit. Three fixes, and the third is the law: the pad
+is per STREET, it is a MEDIAN (robust to a minority of zeros), and **no body is
+built until a ray can say what it is standing on**. Measuring first is not
+enough — on the step a settlement's cells activate there is nothing under the
+slot to hit.
+
+**A share of a share is not a share.** The first cut drew "does this car
+commute" (35 %) and then "is it a circuit instead" (3 %) inside that, which makes
+the night shift **one per cent of the street** — zero cars on a forty-nine-car
+town, and a three-in-the-morning that is a photograph. `day_of` is one draw split
+into four bands now, and every share is a share of the same thing.
+
+**A controller that follows a PATH cannot be measured after a phase that lets it
+run.** The gate settled at whatever hour the level carried and opened its window
+afterwards; by then every commuter had **arrived** (`s_m` 176 of a 176 m route,
+`remaining_m` 0.0, holding the handbrake). Nothing was broken and the instrument
+was late. It settles at noon now, where a commuter's leg is finished on the clock
+and the car does not move.
+
+**A bounded log is a shared resource, and a new subsystem can spend somebody
+else's arm.** A dozen traffic engine loops flooded
+`RuntimeSim::audio_command_log` — 8 192 entries, evicting — and VEH2a's drive
+gate lost the single `Play` it exists to count off the front of the ring. The fix
+is a ruling rather than a bigger buffer: **traffic is silent until the emitter
+can follow the car**, which is VEH2a's own carried item 5 (no
+`AudioCommand::SetPosition`, so a driving car's engine is spatialized where its
+`Play` was issued). One car a player drives away from its own noise is a bug you
+notice once; a dozen leaving stationary engine loops at the kerbs they pulled out
+of is a town that sounds broken.
+
+**A gate that stages its subject next to its subject's competitor measures the
+ranking.** The carjack arm stood the hero at the target's driver door with a
+parked car 1.65 m behind it, and `resolve` — nearest wins — answered `Enter` on
+the neighbour. The target is the most ISOLATED driven car now, which is
+deterministic and a function of the world.
+
+**Two exclusion sets that have always agreed have agreed by accident.** The press
+path and the HUD both filtered occupied seats, differently, and were identical
+only because nothing but the player had ever sat in a car. Occupancy is a fact
+about the world; it is read at the candidate source now.
+
+**A refusal that is right for a city is wrong for a village.** `plan_commute`
+required a destination a hundred metres off and answered `None` otherwise; on a
+two-street fixture that is every slot, and the gate reported sixteen cars and not
+one of them with a day. A journey shorter than a city block is still a journey.
+
+**A re-derivation is not a fresh start.** A block paging in across town changes
+the level's own stamp, and a rebuild that dropped every record would reset the
+phase of every car on the road AND un-steal the one the player is sitting in.
+Every guid the derivation produces again keeps the record it had — the guid is a
+pure function of the space, so "again" is exactly the cars that did not move.
+
+### CARRIED
+
+1. **No overtaking and no lane change.** A car behind a slower one stays behind
+   it. `LaneNetwork::lane_route` picks one index for a whole journey and
+   `drive_intent` has no lane choice in it at all.
+2. **Police and a wanted response are NOT in scope, and they are not this arc's.**
+   Stealing a car in front of somebody has no consequence: nobody reacts, nothing
+   is dispatched, and `TrafficRecord::taken` is the whole of what the world
+   remembers. That belongs to the **EMS arc** (police, fire, ambulance), which
+   owns the dispatch model, the wanted level and the pursuit driving that would
+   need `drive_intent` to grow a target it chases rather than a lane it holds.
+3. **No off-street parking lot.** A lot is a polygon of reserved ground and a
+   committed level has none — the blocks are buildings and the gaps are streets.
+   `frames/driving/0030`'s forecourt is a hotel's private ground.
+4. **No passenger seat.** `VehicleRig::seat_local` is one `Vec3d`, not a `Vec`,
+   and `SeatState` has no index. A carjack takes the driver's seat because it is
+   the only seat there is.
+5. **Traffic is silent.** Deliberate, and it unblocks on VEH2a's carried item 5:
+   the moment an engine emitter can follow its car, `RigSpawn::engine_voice`
+   becomes `true` for traffic and a street sounds like one.
+6. **A crowd does not part for a car.** Traffic yields to anything in its lane,
+   which is why nothing gets run over — and on a two-street town with 329
+   residents it is also why the hero's stolen car covers **0.6 m at 0.98 m/s**.
+   `a_stolen_car_answers_the_throttle_on_an_empty_street` is the falsifier that
+   says that is the town rather than the car: the same press on an empty street
+   is **194.8 m at 24.86 m/s**. The fix is pedestrian avoidance in the crowd's
+   own steering, not an animation.
+7. **A `Near` car holds one height along its whole route.** `ground_y` is
+   measured once, at its own space, and applied to every point of its path. Right
+   on a levelled settlement pad, wrong on a route that climbs. A `Full` car is on
+   four rays and follows the ground exactly.
+8. **A commuter is not a named resident's car.** The hours are the society's and
+   the geography is the carriageway's; nobody owns a vehicle. Tying a car to a
+   `SocietyPlace` pair is a `SocietyRes` read the derivation does not make.
+9. **An ejected driver does not resume its day.** It walks `FLEE_M` and stands.
+   `crowd::adopt` gives it a route, not a schedule.
+10. **The inter-settlement circuit carries no traffic.** The island's 33.74 km of
+    graded road is cook-side geometry with **no runtime representation** — the
+    route polylines are not components, the "Roads" entity is a mesh, and
+    `inf-gis` is banned from the shipped player. Traffic runs on the settlement
+    street grids, which is where the reference frames' streets, kerbs, shops and
+    pedestrians are. Giving the circuit traffic needs a runtime road spine, which
+    needs the schema window this wave does not have.
+11. **No tyre smoke and no skid marks** (VEH2a's carried item 4, unmoved). The
+    slip ratio is still published and still read by nobody.
+12. **No vehicle HUD** (VEH2a's carried item 8, unmoved). Priced and not taken:
+    a speed-and-gear readout is a Ring-2 overlay in `inf-ui` plus a projection
+    seam, and this wave's eight clauses did not leave room for a new panel that
+    nothing else needs.

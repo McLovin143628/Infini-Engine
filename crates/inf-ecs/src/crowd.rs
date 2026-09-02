@@ -2235,6 +2235,19 @@ pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec
     e
 }
 
+/// **How many fixed steps the crowd has run** — the `t_s` half of a
+/// [`CrowdClock`], for a caller that has to phase a route onto NOW.
+///
+/// `0` for a level with no population, which is the value a fresh one starts
+/// at, so a caller cannot tell the two apart and does not need to.
+pub fn population_steps(world: &EcsWorld) -> u64 {
+    world
+        .world()
+        .get_resource::<CrowdPopulationRes>()
+        .map(|p| p.steps)
+        .unwrap_or(0)
+}
+
 /// **Give an existing body a route** (wave VEH2b) — the door a carjacked driver
 /// walks out of.
 ///

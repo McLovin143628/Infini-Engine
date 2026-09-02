@@ -441,6 +441,55 @@ pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
 /// first time a level puts cars on its roads.
 pub const VEHICLE_BUDGET_CARS: usize = 64;
 
+/// **What the `traffic` phase may cost**, milliseconds (island wave VEH2b) —
+/// `inf_physics::d3::traffic::step_traffic` over a settlement's whole car
+/// population.
+///
+/// # Why a phase gets its own number, a third time
+///
+/// [`NPC_STEP_BUDGET_MS`]'s argument and then
+/// [`VEHICLE_STEP_BUDGET_MS`]'s, one system along: a whole-step total works
+/// while every phase is something the engine has always done, and stops working
+/// the moment a phase is NEW, because a new phase's growth is invisible inside a
+/// total that has an island in it.
+///
+/// # What is IN it
+///
+/// Everything a car costs that is not the rig: the block-stamp walk, the
+/// carriageway derivation when the blocks move, one batch of commuter routes,
+/// the band, the tier decision for every record, the body build or take-down,
+/// the kinematic transform write for the clock's tier, the obstacle gather and
+/// the steering decision for each `Full` car. What it does **not** hold is
+/// `step_vehicles` — a steered traffic car pays the `vehicle` row exactly as the
+/// hero's car does, at [`VEHICLE_STEP_BUDGET_MS`]'s own 2.00 µs — nor the solver
+/// its chassis is a body in, nor `character move` for its driver.
+///
+/// # The number, and the arithmetic that sizes it
+///
+/// The population is bounded by GEOMETRY rather than by a setting:
+/// `inf_ecs::traffic::KERB_SLOT_M` is 14 m, `KERB_OCCUPANCY` is 0.45, and
+/// `TRAFFIC_NEAR_M` is 128 m — so the cars that exist at once are the occupied
+/// slots inside a 128 m disc, and the cars that are RIGS are the ones inside
+/// 64 m. Measured on a 3x3 city-block town (four 20 m streets, 49 parked cars):
+/// **10 `Full` and 21 `Near`** at the crossroads. Ten rigs at VEH2a's own
+/// 2.00 µs is **0.020 ms of the 0.5 ms `vehicle` budget — four per cent** — and
+/// the whole of that town's traffic phase is under a tenth of this ceiling.
+///
+/// One millisecond, which is [`NPC_STEP_BUDGET_MS`]'s figure, because the two
+/// phases do the same shape of work over populations of the same order: a band,
+/// a tier per record and a materialization on transitions. It is a sixth of
+/// [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
+/// anything — a traffic phase that grew to a visible share of a 6 ms step trips
+/// this first.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 1.0
+/// (VEH2b).
+pub const TRAFFIC_STEP_BUDGET_MS: f64 = 1.0;
+
 /// Hard ceiling on **terrain** page bytes resident at any point of the gate
 /// flythrough (`TerrainStreamStats::bytes_resident`, summed over every streamed
 /// terrain — the camera's render cut plus the pages the sim pinned).

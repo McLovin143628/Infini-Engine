@@ -514,6 +514,33 @@ impl PlayerApp {
         Some((at, text))
     }
 
+    /// **The driver's readout** (wave VEH2b) — speed and gear for whoever is at
+    /// a wheel, or `None`.
+    ///
+    /// The numbers are the sim's own: the speed is the chassis velocity
+    /// `step_driving` writes onto the driver every step, and the gear is
+    /// `Vehicle::gear`. The FORMATTING is `inf_ecs::vehicle::drive_readout`,
+    /// in Ring 0, because this function cannot be tested and that one can.
+    ///
+    /// It closes half of VEH2a's carried item 8: the gear is drawn now. The rev
+    /// counter and the aids' intervention are still published and still read by
+    /// nobody.
+    fn drive_readout(sim: &RuntimeSim) -> Option<String> {
+        let world = sim.world();
+        let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
+        let cm = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)?;
+        if cm.mode != inf_ecs::components::MovementMode::Driving || !cm.runtime.seat.is_seated() {
+            return None;
+        }
+        let gear = sim.bridge3d().vehicle_of(cm.runtime.seat.vehicle)?.gear();
+        Some(inf_ecs::vehicle::drive_readout(
+            cm.runtime.velocity.to_dvec3().length(),
+            gear,
+        ))
+    }
+
     /// **What the camera subject is carrying**, as the panel renders it
     /// (island wave I6).
     ///
@@ -699,6 +726,11 @@ impl PlayerApp {
             if let Some((at, text)) = Self::interaction_prompt(&self.sim, v, &self.input_state) {
                 self.ui.prompt(Some(at), &text);
             }
+        }
+        // VEH2b: the driver's own instruments. Absent unless somebody is at a
+        // wheel, which is what makes it a readout rather than a HUD.
+        if let Some(text) = Self::drive_readout(&self.sim) {
+            self.ui.readout(&text);
         }
         live.host.set_ui(self.ui.list());
         if let Some(view) = view {

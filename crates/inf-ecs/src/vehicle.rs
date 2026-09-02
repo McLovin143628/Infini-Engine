@@ -1467,6 +1467,42 @@ pub fn resting_origin_y(def: &VehicleDef, ground_y: f64) -> f64 {
     ground_y - def.wheel_drop_m + def.wheel_radius_m
 }
 
+/// **What a driver's own instruments say** — speed and gear, as one line.
+///
+/// The whole of wave VEH2b's HUD, and it is in Ring 0 rather than in the
+/// player's window for the reason every other decision in this crate is: the
+/// window cannot be tested and this can. What the window does is read the
+/// numbers and hand them here.
+///
+/// Speed is a MAGNITUDE, so a car rolling backwards reads a positive number and
+/// an `R` beside it, which is what a speedometer does. Non-finite reads zero
+/// rather than `NaN km/h`.
+pub fn drive_readout(speed_mps: f64, gear: i32) -> String {
+    let kmh = if speed_mps.is_finite() {
+        (speed_mps.abs() * 3.6).round()
+    } else {
+        0.0
+    };
+    format!("{kmh:.0} km/h    {}", gear_label(gear))
+}
+
+/// The letter or number on the gate for one gear.
+///
+/// `-1` and below is reverse, `0` is neutral, and everything above is its own
+/// number up to [`MAX_GEARS`]; past that it is the top gear's number, because a
+/// gearbox this engine cannot build is not a case a readout should invent a
+/// symbol for.
+pub fn gear_label(gear: i32) -> &'static str {
+    const FORWARD: [&str; MAX_GEARS] = ["1", "2", "3", "4", "5", "6", "7", "8"];
+    if gear <= -1 {
+        "R"
+    } else if gear == 0 {
+        "N"
+    } else {
+        FORWARD[(gear as usize - 1).min(MAX_GEARS - 1)]
+    }
+}
+
 /// The share of its target's force an aid actually asks for.
 ///
 /// Two per cent under, and the two per cent is load-bearing: the aid's cap is one
@@ -2144,6 +2180,15 @@ pub trait Vehicle: Send + Sync + 'static {
     /// computed, so this stays a pure function of numbers the class holds and
     /// adds no state.
     ///
+    /// **Which gear the box is in** — `-1` reverse, `0` neutral, `1..` forward.
+    ///
+    /// On the trait rather than only on `RaycastVehicle` because wave VEH2b's
+    /// readout is the first thing in this engine that DRAWS it, and it holds a
+    /// `&dyn Vehicle`. VEH2a's carried item 8 (*"rpm, gear and the aids'
+    /// intervention are all published and nothing draws them"*) is half closed
+    /// by that: the gear is drawn, the rest is still carried.
+    fn gear(&self) -> i32;
+
     /// The default is **silence** (`(0.0, 0.0)`), which is what a class that has
     /// not thought about sound should make.
     fn engine_state(&self, forward_mps: f64) -> (f64, f64) {
@@ -2749,6 +2794,10 @@ pub fn steer_direction(forward: DVec3, right: DVec3, deg: f64) -> DVec3 {
 }
 
 impl Vehicle for RaycastVehicle {
+    fn gear(&self) -> i32 {
+        RaycastVehicle::gear(self)
+    }
+
     fn rig(&self) -> &VehicleRig {
         &self.rig
     }
@@ -3514,6 +3563,24 @@ impl Vehicle for RaycastVehicle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The readout a driver reads, and the two edges of it.
+    #[test]
+    fn the_readout_says_a_speed_and_a_gear() {
+        assert_eq!(drive_readout(0.0, 0), "0 km/h    N");
+        assert_eq!(drive_readout(27.7777778, 3), "100 km/h    3");
+        // Backwards is a POSITIVE number with an R beside it -- a speedometer
+        // does not go below zero.
+        assert_eq!(drive_readout(-2.0, -1), "7 km/h    R");
+        // Nonsense in, a readable line out.
+        assert_eq!(drive_readout(f64::NAN, 0), "0 km/h    N");
+        assert_eq!(drive_readout(f64::INFINITY, 1), "0 km/h    1");
+        // Every gear the box can be in has a symbol, and one it cannot does not
+        // invent one.
+        assert_eq!(gear_label(-9), "R");
+        assert_eq!(gear_label(MAX_GEARS as i32), "8");
+        assert_eq!(gear_label(99), "8");
+    }
 
     // ── the recipe (wave VEH2b) ─────────────────────────────────────────────
 
@@ -4660,6 +4727,10 @@ mod tests {
         // sound makes none, rather than inheriting a road car's curve.
         struct Mute(VehicleRig);
         impl Vehicle for Mute {
+            fn gear(&self) -> i32 {
+                0
+            }
+
             fn rig(&self) -> &VehicleRig {
                 &self.0
             }

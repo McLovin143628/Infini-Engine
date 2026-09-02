@@ -125,7 +125,8 @@ pub const KERB_PARK_OFFSET_M: f64 = 5.0;
 /// A saloon is 4.4 m long and this engine's longest catalogue row is a 5.4 m
 /// van, so fourteen metres is a car plus enough room to get out of the space —
 /// which is what makes a kerb look parked rather than shunted. It also bounds
-/// the population: a 100 m city block edge holds seven a side.
+/// the population: with a slot's clearance at each end, a 100 m run holds
+/// **six** a side before the occupancy draw.
 pub const KERB_SLOT_M: f64 = 14.0;
 
 /// Whether a street of this width has room to park at the kerb.
@@ -362,7 +363,14 @@ pub fn carriageway_graph(streets: &[Street]) -> NavGraph {
     let along_z: Vec<&Street> = streets.iter().filter(|s| !s.along_x()).collect();
     let add = |g: &mut NavGraph, p: DVec2, y: f64| -> NavNodeId {
         let id = carriageway_node_id(p);
-        g.add_node(id, DVec3::new(p.x, y, p.y), NavKind::Street);
+        // **First writer wins.** `NavGraph::add_node` overwrites, and a crossing
+        // is added once per street that carries it — so the last line walked
+        // would silently decide the junction's height while the first line's
+        // edge cost had already been measured against the other one. The walk is
+        // in `streets_of`'s sorted order, so "first" is a function of the level.
+        if !g.contains(id) {
+            g.add_node(id, DVec3::new(p.x, y, p.y), NavKind::Street);
+        }
         id
     };
     for s in streets {
@@ -619,12 +627,27 @@ pub struct DriveIntent {
 ///
 /// A straight has no curvature and no limit, which is `f64::INFINITY` — a value
 /// the caller's `min` handles without a branch.
-pub fn corner_speed_mps(path: &NavPath, s_m: f64, lookahead_m: f64) -> f64 {
+pub fn corner_speed_mps(path: &NavPath, s_m: f64, lookahead_m: f64, loops: bool) -> f64 {
     if !(lookahead_m > 0.0) || !s_m.is_finite() {
         return f64::INFINITY;
     }
     let a = path.direction_at(s_m);
-    let b = path.direction_at(s_m + lookahead_m);
+    // The lookahead wraps on a loop, exactly as the aim point does.
+    // `direction_at` CLAMPS, so without this a circuit car is blind to the
+    // curvature across its own seam — it steers round the corner and does not
+    // slow for it, which is half of `DriveView::loops`' claim applied and half
+    // forgotten.
+    let ahead = if loops {
+        let len = path.length_m();
+        if len > 0.0 {
+            (s_m + lookahead_m).rem_euclid(len)
+        } else {
+            0.0
+        }
+    } else {
+        s_m + lookahead_m
+    };
+    let b = path.direction_at(ahead);
     // The ground-plane component of `a x b`, which is the Y one.
     let sin = (a.z * b.x - a.x * b.z).abs();
     if !(sin > 1.0e-6) {
@@ -677,7 +700,7 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
     } else {
         0.0
     };
-    let bend = corner_speed_mps(view.path, view.s_m, lookahead);
+    let bend = corner_speed_mps(view.path, view.s_m, lookahead, view.loops);
     let ahead_of_us = match view.gap_m {
         Some(g) if g.is_finite() => {
             let clear = (g - STANDING_GAP_M).max(0.0);
@@ -829,9 +852,11 @@ pub fn clear_carriageway(world: &mut EcsWorld) {
 /// what `frames/steal-car/0016` shows and what a row of randomly-yawed cars
 /// does not).
 ///
-/// The count is geometry and not a setting: a hundred-metre block edge holds
-/// seven a side. What decides whether a slot is *taken* is the caller's own
-/// draw — see `inf_physics::d3::traffic`.
+/// The count is geometry and not a setting: a hundred-metre run holds **six** a
+/// side, and the slots are on a **world lattice** rather than measured from the
+/// line's own end, so a line that grows keeps the slots it had. What decides
+/// whether a slot is *taken* is the caller's own draw — see
+/// `inf_physics::d3::traffic`.
 pub fn kerb_slots(streets: &[Street]) -> Vec<(DVec3, f64)> {
     let mut out = Vec::new();
     for (i, s) in streets.iter().enumerate() {
@@ -845,16 +870,34 @@ pub fn kerb_slots(streets: &[Street]) -> Vec<(DVec3, f64)> {
         }
         let dir = DVec3::new(d.x / len, 0.0, d.y / len);
         let r = right_of(dir);
-        // Whole slots only, and a half-slot of clearance at each end, so a row
-        // does not run into the junction it ends at.
-        let n = ((len - KERB_SLOT_M) / KERB_SLOT_M) as usize;
+        // **The slots sit on a GLOBAL lattice, not on this line's own end.**
+        //
+        // A street's `a` is the group's bounding-box corner, so one block
+        // arriving anywhere in a settlement moves it — and with it every slot
+        // on every line, and with those every `parked_car_guid`, which
+        // quantizes at a centimetre. `derive_parked`'s whole carry-forward
+        // ("the guid is a pure function of the space, so the cars that did not
+        // move keep their records") was therefore dead in exactly the case it
+        // was written for. Measured from the world origin instead: a line that
+        // grows keeps the slots it had and gains new ones at the end.
+        //
+        // A full slot of clearance at each end, so a row does not run into the
+        // junction it ends at. (The comment here used to say "half", and the
+        // arithmetic has always said whole.)
+        let origin = if s.along_x() { s.a.x } else { s.a.y };
+        let first = (origin / KERB_SLOT_M).floor() + 1.0;
+        let n = ((len - KERB_SLOT_M) / KERB_SLOT_M).max(0.0) as usize;
         for side in [1.0f64, -1.0] {
             // The near side faces the way this line runs; the far side faces
             // back, because that is the direction traffic runs on it.
             let heading = if side > 0.0 { dir } else { -dir };
             let yaw = yaw_of_dir(heading);
-            for k in 0..n {
-                let along = KERB_SLOT_M * (k as f64 + 1.0);
+            for k in 0..=n {
+                let lattice = (first + k as f64) * KERB_SLOT_M;
+                let along = lattice - origin;
+                if !(along >= KERB_SLOT_M * 0.5 && along <= len - KERB_SLOT_M * 0.5) {
+                    continue;
+                }
                 let p =
                     DVec3::new(s.a.x, s.y, s.a.y) + dir * along + r * (side * KERB_PARK_OFFSET_M);
                 if !clear_of_junctions(streets, i, DVec2::new(p.x, p.z)) {
@@ -925,8 +968,14 @@ pub fn parked_car_guid(p: DVec3) -> Uuid {
             0
         }
     };
+    // **The PLAN position only.** The height a slot is derived at is a median
+    // over the blocks that bound its street, and that median moves when any of
+    // them does — so folding Y in would re-mint every guid in a settlement the
+    // first time one block paged in, which is the carry-forward defect this
+    // wave's adversarial read found. Two cars at one `(x, z)` and two heights
+    // is an overpass, and this engine's settlements do not build one.
     let hi = mix64(q(p.x) ^ mix64(q(p.z)));
-    let lo = mix64(q(p.y) ^ mix64(PARKED_SALT));
+    let lo = mix64(q(p.x).rotate_left(17) ^ mix64(PARKED_SALT));
     Uuid::from_u64_pair(hi, lo)
 }
 
@@ -988,8 +1037,8 @@ pub const TRAFFIC_RADII: (f64, f64, f64) = (TRAFFIC_FULL_M, TRAFFIC_NEAR_M, TRAF
 /// with gaps in them, and a row with no gaps in it reads as a wall rather than
 /// as parking. Drawn per slot from [`SALT_PARK`], so it is a function of the
 /// level and not of a spawn order, and it is what bounds the population against
-/// the geometry: a hundred-metre block edge offers seven slots a side and holds
-/// about three cars.
+/// the geometry: a hundred-metre run offers six slots a side and holds about
+/// three cars.
 pub const KERB_OCCUPANCY: f64 = 0.45;
 
 /// **What kind of day a car has**, as one draw split into four bands.
@@ -1041,6 +1090,11 @@ pub const MAX_TRAFFIC_CARS: usize = 4096;
 /// and twenty-eight because that is far more cars than
 /// [`TRAFFIC_NEAR_M`] can hold at once and therefore more than a viewer can be
 /// looking at.
+///
+/// Counted over the **cars that have one**, not over one derivation's queue.
+/// The first cut checked the freshly built queue alone, so every re-derivation
+/// opened another hundred and twenty-eight slots on top of the days already
+/// planned and the bound did not bound what its own name says.
 pub const MAX_COMMUTERS: usize = 128;
 
 /// How many commuter routes are planned per fixed step.
@@ -1217,10 +1271,24 @@ pub struct TrafficRecord {
     /// under a heightfield is a car rapier launches, and the island fixture
     /// launched one at **72 m/s** before this field existed.
     ///
-    /// Derived once and then kept, rather than re-measured every step: a Y that
-    /// depended on which terrain tiles were resident would be a position that
-    /// depended on streaming, which is the `NavPath::snapped` doctrine's own
-    /// refusal.
+    /// # It IS a streaming-dependent measurement, latched
+    ///
+    /// The honest statement, which an earlier draft of this doc got backwards.
+    /// The ray reads the live collision world, so *which step it first ran on*
+    /// decides the answer — and it is kept rather than re-measured precisely so
+    /// that the answer stops moving afterwards. `NavPath::snapped`'s doctrine is
+    /// satisfied in the only way it can be here: the dependency is paid **once**
+    /// and never again, so a car does not change height because a tile paged
+    /// out. Both hosts pay it on the same step because both build the car on the
+    /// same step — which is a property `traffic_state_bytes` folds `last` for,
+    /// and the rush-hour gate compares.
+    ///
+    /// # One height for a whole journey
+    ///
+    /// [`place`](Self::place) applies this single Y to every point of the car's
+    /// path, so a `Near` car crossing a graded town holds the height of the
+    /// space it started in. Right on a levelled settlement pad, which is what
+    /// this engine carves; wrong on a route that climbs, and carried.
     pub ground_y: Option<f64>,
     /// **Somebody has interfered with this car** — its driver was pulled out of
     /// it, or a character who is not its driver is sitting in it.
@@ -1584,6 +1652,16 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         .unwrap_or_default();
     let mut records: BTreeMap<Uuid, TrafficRecord> = BTreeMap::new();
     let mut pending: BTreeMap<Uuid, DVec3> = BTreeMap::new();
+    // How many cars already HAVE a day -- see `MAX_COMMUTERS`.
+    let mut with_a_day = 0usize;
+    // A car the player has touched is kept whatever the geometry did: it is not
+    // the traffic's any more, so a derivation that no longer names its slot has
+    // no business forgetting it.
+    for (g, r) in &kept {
+        if r.taken {
+            records.insert(*g, r.clone());
+        }
+    }
     for (p, yaw) in slots {
         if records.len() >= MAX_TRAFFIC_CARS {
             break;
@@ -1593,24 +1671,29 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
             continue;
         }
         let def = catalogue_row(guid);
+        // The record's own space is LIFTED to the car's ride height; the route
+        // planner is handed the slot as it is on the ground (see `drive_path`).
         let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);
+        let flat = p;
         match kept.get(&guid) {
             Some(old) => {
+                let has_day = old.schedule.is_some() || old.circuit.is_some();
+                with_a_day += usize::from(has_day);
                 records.insert(guid, old.clone());
                 // A car whose route never got planned is still waiting for one.
                 if day_of(guid) != TrafficDay::Parked
-                    && old.schedule.is_none()
-                    && old.circuit.is_none()
+                    && !has_day
                     && planned.contains_key(&guid)
-                    && pending.len() < MAX_COMMUTERS
+                    && with_a_day + pending.len() < MAX_COMMUTERS
                 {
-                    pending.insert(guid, at);
+                    pending.insert(guid, flat);
                 }
             }
             None => {
                 records.insert(guid, TrafficRecord::parked(def, car_paint(guid), at, yaw));
-                if day_of(guid) != TrafficDay::Parked && pending.len() < MAX_COMMUTERS {
-                    pending.insert(guid, at);
+                if day_of(guid) != TrafficDay::Parked && with_a_day + pending.len() < MAX_COMMUTERS
+                {
+                    pending.insert(guid, flat);
                 }
             }
         }
@@ -1629,7 +1712,13 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         .map(|p| {
             p.records
                 .iter()
-                .filter(|(g, r)| r.detail != RigDetail::None && !records.contains_key(g))
+                // **Never a car the player has touched.** `taken`'s own doc
+                // promises the traffic never takes its body down, and a block
+                // paging in across town would otherwise despawn the chassis the
+                // player is sitting in.
+                .filter(|(g, r)| {
+                    r.detail != RigDetail::None && !r.taken && !records.contains_key(g)
+                })
                 .map(|(g, r)| (*g, r.def))
                 .collect()
         })
@@ -1648,6 +1737,21 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
 
 /// Plan up to [`TRAFFIC_PLANS_PER_STEP`] commuter routes.
 fn plan_batch(world: &mut EcsWorld) -> usize {
+    // **Nothing to plan is nothing to build.** The queue is the guard, and it
+    // has to be checked BEFORE the two derivations below: a settled level would
+    // otherwise rebuild its whole street graph and its whole slot list every
+    // fixed step for the life of the session, to plan zero routes. Found by
+    // this wave's own adversarial read, and it falsified three doc claims at
+    // once — including `TrafficRes::derivations`' *"a counter a gate can assert
+    // is one, which is what says the cache is a cache"*, which stayed at one
+    // while the expensive products were recomputed outside it.
+    if world
+        .world()
+        .get_resource::<TrafficPopulationRes>()
+        .is_none_or(|p| p.pending.is_empty())
+    {
+        return 0;
+    }
     let Some(res) = world.world().get_resource::<TrafficRes>().cloned() else {
         return 0;
     };
@@ -1690,8 +1794,6 @@ fn plan_batch(world: &mut EcsWorld) -> usize {
             }
         }
     }
-    let left = pop.pending.len();
-    let _ = left;
     world.world_mut().insert_resource(pop);
     planned
 }
@@ -1713,8 +1815,9 @@ pub fn plan_commute(
     home: DVec3,
 ) -> Option<crate::crowd::CrowdSchedule> {
     let (dest_p, dest_yaw) = pick_destination(slots, guid, home)?;
-    let out = drive_path(graph, lanes, home, dest_p, dest_yaw)?;
-    let back = drive_path(graph, lanes, dest_p, home, home_yaw_at(slots, home))?;
+    let home_yaw = home_yaw_at(slots, home);
+    let out = drive_path(graph, lanes, home, home_yaw, dest_p, dest_yaw)?;
+    let back = drive_path(graph, lanes, dest_p, dest_yaw, home, home_yaw)?;
     crate::crowd::CrowdSchedule::new(vec![
         crate::crowd::ScheduleLeg {
             start_h: crate::society::WORK_START_H,
@@ -1775,8 +1878,9 @@ pub fn plan_circuit(
     hours: (f64, f64),
 ) -> Option<Circuit> {
     let (dest_p, dest_yaw) = pick_destination(slots, guid, home)?;
-    let out = drive_path(graph, lanes, home, dest_p, dest_yaw)?;
-    let back = drive_path(graph, lanes, dest_p, home, home_yaw_at(slots, home))?;
+    let home_yaw = home_yaw_at(slots, home);
+    let out = drive_path(graph, lanes, home, home_yaw, dest_p, dest_yaw)?;
+    let back = drive_path(graph, lanes, dest_p, dest_yaw, home, home_yaw)?;
     let mut pts: Vec<DVec3> = out.points().to_vec();
     pts.extend_from_slice(back.points());
     // The ends coincide, which is what makes `RouteMode::Loop` a loop rather
@@ -1849,12 +1953,20 @@ pub const COMMUTE_MIN_M: f64 = 100.0;
 /// **One drive, as a path** — out of a space, along the lanes, into a space.
 ///
 /// The two ends are kerb slots and the middle is a lane route, joined by the
-/// nearest carriageway node at each end. `to_yaw` is the row the destination
-/// belongs to, so the last two points run *along* it (see [`APPROACH_M`]).
+/// nearest carriageway node at each end. `from_yaw` and `to_yaw` are the rows
+/// the two spaces belong to, so the first two points and the last two run
+/// *along* the kerb rather than diagonally out of it (see [`APPROACH_M`]).
+///
+/// Both ends are **unlifted** — the slot's own plan position at its street's
+/// height. A car's ride height is applied once, in
+/// [`TrafficRecord::place`], from the ground it measured; putting it into the
+/// path as well would make a leg start a wheel-radius above the road and drop
+/// to the pad for the whole drive.
 pub fn drive_path(
     graph: &NavGraph,
     lanes: &LaneNetwork,
     from: DVec3,
+    from_yaw: f64,
     to: DVec3,
     to_yaw: f64,
 ) -> Option<NavPath> {
@@ -1869,13 +1981,18 @@ pub fn drive_path(
         return None;
     }
     let mid = lanes.path_of(&ids);
-    let mut pts: Vec<DVec3> = Vec::with_capacity(mid.points().len() + 3);
+    let mut pts: Vec<DVec3> = Vec::with_capacity(mid.points().len() + 4);
+    // **An approach at BOTH ends.** The doc has always said `[home, approach,
+    // lanes…, approach, work]` and the first cut only laid the far one, so a
+    // car left its space on a diagonal straight into the lane — the exact
+    // symptom `APPROACH_M` exists to prevent, applied to the arrival and not to
+    // the departure.
+    let out_h = heading_of_yaw(from_yaw);
     pts.push(from);
+    pts.push(from + out_h * APPROACH_M);
     pts.extend_from_slice(mid.points());
-    // The approach: `APPROACH_M` back along the destination row's own heading,
-    // then the space itself.
-    let h = heading_of_yaw(to_yaw);
-    pts.push(to - h * APPROACH_M);
+    let in_h = heading_of_yaw(to_yaw);
+    pts.push(to - in_h * APPROACH_M);
     pts.push(to);
     let path = NavPath::new(pts);
     (!path.is_stand()).then_some(path)
@@ -1920,7 +2037,88 @@ pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
     def.half_extents = crate::math::Vec3d::new(w, h, l);
     def.half_track_m = w - 0.12;
     def.half_wheelbase_m = l - 0.55;
+    size_the_suspension(&mut def);
     def
+}
+
+/// The share of a strut's travel a parked car sits at.
+///
+/// Forty-five per cent, which is a road car: enough left to absorb a kerb, and
+/// enough used that the spring is doing something at rest.
+pub const STATIC_SAG_FRAC: f64 = 0.45;
+
+/// How close to critically damped a traffic car's strut is.
+///
+/// 0.4 — under-damped, like a road car, so it settles in about a second instead
+/// of arriving dead and instead of pogoing.
+pub const DAMPING_RATIO: f64 = 0.4;
+
+/// Tractive effort a class is given, as a multiple of its own mass — so the
+/// number is an acceleration.
+///
+/// 3.5 N a kilogram is 0.36 g, which is a brisk road car and is what the
+/// driveline ceiling `max_engine_force_n` is for.
+pub const DRIVE_N_PER_KG: f64 = 3.5;
+
+/// Braking effort, same units. 9.0 is 0.92 g — the tyre runs out first, which
+/// is what `abs_slip` is there to manage.
+pub const BRAKE_N_PER_KG: f64 = 9.0;
+
+/// How much air a parked car has under its hull, metres.
+///
+/// Twenty centimetres, measured at the STATIC SAG rather than at full
+/// extension — which is the whole point of the number. A hull that clears the
+/// road only with its springs unloaded is a hull that lands on the road the
+/// moment anybody sits in it.
+pub const GROUND_CLEARANCE_M: f64 = 0.20;
+
+/// **Give a class springs that can hold up the body it is bolted to.**
+///
+/// # The defect this exists to fix, in numbers
+///
+/// `VehicleDef::default()`'s suspension is the P29.7 test rig's: 20 kN/m over
+/// 0.25 m of travel, sized for a 1.2-tonne box. [`catalogue_row`] gives a Van a
+/// 2 x 2.1 x 5.4 m hull, which at the 150 kg/m³ hollow-shell convention is
+/// **3 402 kg** — and 20 kN/m over four corners carries 5 kN of a 33 kN car. The
+/// struts bottom out, the chassis collider lands on the road, and the van drives
+/// on its BELLY: the wheels see a tenth of the load they should, the tyres make
+/// almost no force, and a player who steals it holds full throttle and goes
+/// nowhere. Measured before this function existed: 4 104 N of suspension load
+/// under 33 373 N of weight, `slip_ratio` 0.0 and 3.5 m travelled in ten
+/// seconds under full throttle.
+///
+/// So the geometry decides the mass and the **mass decides the springs**, in one
+/// place, rather than a table of numbers a silhouette can outgrow.
+/// `every_catalogue_row_sits_inside_its_own_travel` is the arm.
+pub fn size_the_suspension(def: &mut crate::vehicle::VehicleDef) {
+    let mass =
+        8.0 * def.half_extents.x * def.half_extents.y * def.half_extents.z * def.density_kg_m3;
+    if !(mass.is_finite() && mass > 0.0) {
+        return;
+    }
+    let corner = mass * 0.25;
+    let travel = if def.class.travel_m.is_finite() && def.class.travel_m > 0.0 {
+        def.class.travel_m
+    } else {
+        0.25
+    };
+    // **The wheels hang below the BODY, whatever the body is.**
+    //
+    // `wheel_drop_m` is the default rig's -0.75, which suits a hull half a metre
+    // tall and buries one that is a metre. Solving for the hull's bottom edge at
+    // static sag: `origin = -drop + radius - sag`, `bottom = origin - h`, and
+    // `bottom = GROUND_CLEARANCE_M` gives the drop below. Without it a Van's
+    // hull sits 6 cm UNDER the road, the chassis collider carries the car
+    // instead of the tyres, and full throttle produces 2.7 m in ten seconds.
+    let sag = travel * STATIC_SAG_FRAC;
+    def.wheel_drop_m = -(def.half_extents.y + GROUND_CLEARANCE_M + sag - def.wheel_radius_m);
+    // `k x sag = corner x g`, with the sag a fixed share of the travel.
+    let k = corner * 9.81 / (travel * STATIC_SAG_FRAC);
+    def.class.stiffness_n_per_m = k;
+    def.class.damping_ns_per_m = 2.0 * DAMPING_RATIO * (k * corner).sqrt();
+    def.class.max_engine_force_n = mass * DRIVE_N_PER_KG;
+    def.class.brake_force_n = mass * BRAKE_N_PER_KG;
+    def.class.handbrake_force_n = mass * BRAKE_N_PER_KG * 0.7;
 }
 
 /// **A traffic car's paint** — eight body colours, drawn per car.
@@ -1956,8 +2154,18 @@ pub fn traffic_of(world: &EcsWorld) -> Option<&TrafficPopulationRes> {
 /// population by hand owns it, so [`sync_traffic`] stops deriving one. Without
 /// it a gate that installed a measured fleet would find the level's own kerbs
 /// filling back up on the next step.
-pub fn set_traffic(world: &mut EcsWorld, records: BTreeMap<Uuid, TrafficRecord>) {
+pub fn set_traffic(world: &mut EcsWorld, mut records: BTreeMap<Uuid, TrafficRecord>) {
     clear_traffic(world);
+    // **Every installed record arrives bodiless.** `clear_traffic` above has
+    // just despawned every rig in the world, so a record handed in carrying a
+    // `detail` from a previous life would tell the step it already had a body
+    // and the step would never build one — a car that exists in the table and
+    // nowhere else. A caller cannot pre-decide a tier, which is
+    // `set_crowd_population`'s own rule.
+    for rec in records.values_mut() {
+        rec.detail = RigDetail::None;
+        rec.tier = CrowdTier::Dormant;
+    }
     let stamp = carriageway_of(world).map(|r| r.stamp).unwrap_or(0);
     world.world_mut().insert_resource(TrafficPopulationRes {
         records,
@@ -2155,12 +2363,12 @@ mod tests {
     fn a_bend_is_taken_slower_than_a_straight() {
         let straight = path(&[(0.0, 0.0), (400.0, 0.0)]);
         assert_eq!(
-            corner_speed_mps(&straight, 10.0, 20.0),
+            corner_speed_mps(&straight, 10.0, 20.0, false),
             f64::INFINITY,
             "a straight has no bend"
         );
         let bend = path(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]);
-        let v = corner_speed_mps(&bend, 95.0, 20.0);
+        let v = corner_speed_mps(&bend, 95.0, 20.0, false);
         assert!(v.is_finite() && v > 0.0, "{v}");
         // A 90 degrees turn over 20 m of lookahead: curvature is 1/20, so the
         // speed is sqrt(2.5 * 20) = 7.07 m/s. The cross product is sin(90) = 1.
@@ -2479,6 +2687,138 @@ mod tests {
         assert!(sync_carriageway(&mut w));
         assert!(carriageway_of(&w).unwrap().lanes.is_empty());
         assert!(kerb_slots(&[]).is_empty());
+    }
+
+    /// **Every catalogue row sits INSIDE its own suspension travel.**
+    ///
+    /// The falsifier for `size_the_suspension`: a class whose static sag is past
+    /// its travel is a car resting on its chassis collider, which is a car that
+    /// does not steer, does not brake and cannot be driven away.
+    #[test]
+    fn every_catalogue_row_sits_inside_its_own_travel() {
+        for k in 0..40u64 {
+            let def = catalogue_row(Uuid::from_u64_pair(0xC0FFEE, k));
+            let mass = 8.0
+                * def.half_extents.x
+                * def.half_extents.y
+                * def.half_extents.z
+                * def.density_kg_m3;
+            let sag = mass * 0.25 * 9.81 / def.class.stiffness_n_per_m;
+            assert!(
+                sag < def.class.travel_m,
+                "{:?} at {mass:.0} kg sags {sag:.3} m into {:.3} m of travel",
+                def.body,
+                def.class.travel_m
+            );
+            assert!(
+                (sag / def.class.travel_m - STATIC_SAG_FRAC).abs() < 1e-6,
+                "{:?} sags {:.3} of its travel",
+                def.body,
+                sag / def.class.travel_m
+            );
+            // …and it has the effort to move its own mass.
+            assert!(def.class.max_engine_force_n > mass * 2.0);
+            assert!(def.class.brake_force_n > def.class.max_engine_force_n);
+            // …and its hull is off the road WITH the springs loaded, which is
+            // the case the default rig's `wheel_drop_m` did not survive.
+            let origin = crate::vehicle::resting_origin_y(&def, 0.0) - sag;
+            let clearance = origin - def.half_extents.y;
+            assert!(
+                (clearance - GROUND_CLEARANCE_M).abs() < 1e-9,
+                "{:?} clears the road by {clearance:.3} m at static sag",
+                def.body
+            );
+        }
+    }
+
+    /// **Every catalogue row can actually be driven.** The wave's own arms found
+    /// a traffic car that would not move under full throttle, and the question a
+    /// world-level test cannot answer is whether the fault is the world or the
+    /// ROW: `catalogue_row` overrides four of a `VehicleDef`'s geometry fields,
+    /// and a rig whose wheels the recogniser cannot tell apart, or whose gearbox
+    /// hands out no ratio, is a car nothing can drive anywhere.
+    #[test]
+    fn every_catalogue_row_makes_torque_at_a_standstill() {
+        use crate::vehicle::{ChassisState, RaycastVehicle, Vehicle, VehicleControls, WheelForce};
+        for k in 0..40u64 {
+            let guid = Uuid::from_u64_pair(0xCA7, k);
+            let def = catalogue_row(guid);
+            let rig = crate::vehicle::VehicleRig {
+                chassis: guid,
+                seat_local: crate::math::Vec3d::new(0.0, def.half_extents.y, 0.0),
+                wheels: def
+                    .wheel_mounts()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, m)| crate::vehicle::WheelMount {
+                        guid: Uuid::from_u64_pair(0x7777, i as u64),
+                        mount_local: m,
+                        radius_m: def.wheel_radius_m,
+                    })
+                    .collect(),
+            };
+            let mut v = RaycastVehicle::new(rig);
+            def.class.install(&mut v);
+            let mass = 8.0
+                * def.half_extents.x
+                * def.half_extents.y
+                * def.half_extents.z
+                * def.density_kg_m3;
+            let state = ChassisState {
+                position: DVec3::new(0.0, crate::vehicle::resting_origin_y(&def, 0.0), 0.0),
+                rotation: glam::DQuat::IDENTITY,
+                linvel: DVec3::ZERO,
+                angvel: DVec3::ZERO,
+                mass_kg: mass,
+            };
+            let mut out: Vec<WheelForce> = Vec::new();
+            // Ground every wheel at its own rest, so the model has a contact to
+            // push against.
+            let rest = v.suspension_rest_m();
+            // **First, ninety steps of being PARKED** — which is what the
+            // traffic step does to a `Full` car nobody is driving: the
+            // handbrake, held. A model that latched anything over that would be
+            // a car the player gets into and cannot drive away.
+            v.control(VehicleControls {
+                handbrake: true,
+                ..Default::default()
+            });
+            for _ in 0..90 {
+                for w in v.wheels_mut().iter_mut() {
+                    w.contact = Some(crate::vehicle::WheelContact {
+                        point: DVec3::ZERO,
+                        normal: DVec3::Y,
+                        distance_m: rest + def.wheel_radius_m - 0.08,
+                    });
+                }
+                out.clear();
+                v.solve(state, 1.0 / 60.0, &mut out);
+            }
+            v.control(VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            });
+            for _ in 0..40 {
+                for w in v.wheels_mut().iter_mut() {
+                    w.contact = Some(crate::vehicle::WheelContact {
+                        point: DVec3::ZERO,
+                        normal: DVec3::Y,
+                        distance_m: rest + def.wheel_radius_m - 0.08,
+                    });
+                }
+                out.clear();
+                v.solve(state, 1.0 / 60.0, &mut out);
+            }
+            let drive: f64 = out.iter().map(|f| f.force.x.abs() + f.force.z.abs()).sum();
+            let load: f64 = v.wheels().iter().map(|w| w.load_n).sum();
+            let omega: f64 = v.wheels().iter().map(|w| w.omega_rad_s.abs()).sum();
+            assert!(
+                drive > 1.0,
+                "row {k} ({body:?}) makes {drive:.4} N at full throttle -- mass {mass:.0} kg, load {load:.0} N, omega {omega:.4}, gear {gear}, rest {rest:.3}",
+                body = def.body,
+                gear = v.gear(),
+            );
+        }
     }
 
     #[test]

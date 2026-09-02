@@ -511,6 +511,7 @@ mod tests {
             phase::SKY,
             phase::SOCIETY,
             phase::CROWD,
+            phase::TRAFFIC,
             phase::PHYSICS2D_SYNC,
             phase::PHYSICS3D_SYNC,
             phase::WATER,

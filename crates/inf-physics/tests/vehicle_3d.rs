@@ -585,6 +585,11 @@ struct Hover {
 }
 
 impl inf_ecs::vehicle::Vehicle for Hover {
+    /// A hovercraft has no gearbox; neutral is the honest answer.
+    fn gear(&self) -> i32 {
+        0
+    }
+
     fn rig(&self) -> &VehicleRig {
         &self.rig
     }

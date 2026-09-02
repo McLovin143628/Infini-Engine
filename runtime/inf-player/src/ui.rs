@@ -421,6 +421,26 @@ impl PlayerUi {
         }
     }
 
+    /// **Draw the driver's readout** (wave VEH2b) — speed and gear, bottom
+    /// centre.
+    ///
+    /// The same box `prompt` draws, at a fixed place instead of a projected
+    /// one, because a HUD element and a world prompt are the same thing to a
+    /// draw list and a second style would be a second thing to keep in step.
+    /// Nothing is drawn while the menu is open, for `prompt`'s reason.
+    pub fn readout(&mut self, text: &str) {
+        if self.menu.open || text.is_empty() {
+            return;
+        }
+        let vp = self.list.viewport;
+        inf_ui::view::prompt(
+            &mut self.list,
+            Vec2::new(vp.x * 0.5, vp.y),
+            text,
+            inf_ui::view::palette::TEXT,
+        );
+    }
+
     /// The finished list.
     pub fn list(&self) -> &UiDrawList {
         &self.list

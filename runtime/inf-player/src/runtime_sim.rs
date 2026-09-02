@@ -788,6 +788,21 @@ impl RuntimeSim {
         inf_ecs::crowd::set_population(&mut self.world, records);
     }
 
+    /// **Install a traffic population by hand** (VEH2b) — the door an
+    /// instrument prices a street through, and the one that stops the
+    /// derivation.
+    ///
+    /// `set_crowd_population`'s rule verbatim: a caller that installs a
+    /// population by hand owns it, so `sync_traffic` derives no more. An EMPTY
+    /// one is therefore a real control — a street the engine is not putting
+    /// cars on, rather than one it has not got to yet.
+    pub fn set_traffic_population(
+        &mut self,
+        records: BTreeMap<Uuid, inf_ecs::traffic::TrafficRecord>,
+    ) {
+        inf_ecs::traffic::set_traffic(&mut self.world, records);
+    }
+
     /// **Retune the sim-LOD ladder** (NPC1a) — `(full_m, near_m, far_m)`.
     ///
     /// Refused unless the radii are finite and ascending, because a ladder that

@@ -399,6 +399,10 @@ struct ScrambledNormals {
 }
 
 impl Vehicle for ScrambledNormals {
+    fn gear(&self) -> i32 {
+        self.inner.gear()
+    }
+
     fn rig(&self) -> &VehicleRig {
         self.inner.rig()
     }

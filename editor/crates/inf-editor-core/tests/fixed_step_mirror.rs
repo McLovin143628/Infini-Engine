@@ -239,11 +239,11 @@ fn the_traffic_step_sits_between_the_crowd_and_the_physics_sync_on_both_hosts() 
         let mover = only(&src, "inf_physics::d3::step_character_movement(", who);
         assert!(
             crowd < traffic,
-            "{who}: the traffic step runs BEFORE the crowd, so a car and a              pedestrian would be tiered against two different bands"
+            "{who}: the traffic step runs BEFORE the crowd, so a car and a pedestrian would be tiered against two different bands"
         );
         assert!(
             traffic < mover,
-            "{who}: the traffic step runs AFTER the character step, so every              driver's intent is one step stale — the car would steer where the              lane was last step, for ever"
+            "{who}: the traffic step runs AFTER the character step, so a driver's intent is one step stale for ever"
         );
         // …and before the 3D sync, so a car built this step is a body the
         // solver has this step. The LAST occurrence, because both hosts also
@@ -254,7 +254,7 @@ fn the_traffic_step_sits_between_the_crowd_and_the_physics_sync_on_both_hosts() 
             .unwrap_or_else(|| panic!("{who}: no 3D sync"));
         assert!(
             traffic < sync_at,
-            "{who}: the traffic step runs after the 3D sync, so a car it builds              is drawn a step before it is solid"
+            "{who}: the traffic step runs after the 3D sync, so a car it builds is drawn a step before it is solid"
         );
     }
 }

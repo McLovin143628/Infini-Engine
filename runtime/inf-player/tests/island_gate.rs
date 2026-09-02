@@ -754,7 +754,16 @@ fn pie_equals_shipping_on_an_island_drive() {
         // unexplained doubling of the pose store would sail through it. The
         // hero plus the society the level derived is the only source of
         // characters on this level, and that is the ceiling.
-        posed_ceilings.push(1 + sim.society_stats().agents);
+        //
+        // **Plus the traffic's own drivers** (wave VEH2b). A `Full` traffic car
+        // that is on a leg of its day carries a person, built from the level's
+        // own archetype through `crowd::spawn_body` — a real character with a
+        // real capsule and a real pose, which is what makes it something a
+        // player can pull out. It is NOT a `CrowdRecord`, so `society.agents`
+        // has never heard of it, and this arm caught exactly that: 333 posed
+        // against a ceiling of 330, three drivers. The ceiling is the number of
+        // people the level has, and the drivers are people.
+        posed_ceilings.push(1 + sim.society_stats().agents + sim.traffic_stats().drivers);
         assert!(
             bytes.len() >= POSED_BYTES,
             "{who} published {} bytes of pose, less than one 161-bone character's \
@@ -1179,11 +1188,18 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     // drive's state from 35 366 B to 119 554 B a step and left every assertion
     // in this arm green. The equality is what falsifies, because it is the pose
     // store's own count against the ladder's own verdict.
-    let hero_and_posing =
-        1 + stats.at(inf_ecs::crowd::CrowdTier::Full) + stats.at(inf_ecs::crowd::CrowdTier::Near);
+    // …plus the traffic's drivers, for the reason the drive arm's ceiling grew
+    // (wave VEH2b): a driver is a person the crowd population has never heard
+    // of, and it poses because it is `Full` — which it is exactly while its car
+    // is.
+    let drivers = ship.traffic_stats().drivers;
+    let hero_and_posing = 1
+        + drivers
+        + stats.at(inf_ecs::crowd::CrowdTier::Full)
+        + stats.at(inf_ecs::crowd::CrowdTier::Near);
     assert_eq!(
         posed_agents, hero_and_posing,
-        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
+        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero, {drivers} traffic driver(s), plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
         stats.at(inf_ecs::crowd::CrowdTier::Full),
         stats.at(inf_ecs::crowd::CrowdTier::Near),
     );
@@ -6212,6 +6228,188 @@ fn the_vehicle_phase_costs_what_it_costs_on_the_island() {
     );
 }
 
+/// **WHAT A STREET COSTS THE ISLAND'S STEP** (island wave VEH2b) — the
+/// `traffic` phase's first numbers on real content, and where
+/// `TRAFFIC_STEP_BUDGET_MS` is asserted.
+///
+/// The vehicle arm above profiles ONE car with a hero in it. This one profiles
+/// the settlement: the derivation, the band, the tier decision for every record
+/// and the steering for the ones that are rigs — at the busiest hour, with the
+/// hero standing in the middle of it.
+///
+/// # A clock, so: release only, real machine only
+///
+/// `CITY_STEP_BUDGET_MS`'s conditioning, for its reasons.
+#[test]
+fn the_traffic_phase_costs_what_it_costs_on_the_island() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let _proj = build_project(tmp.path());
+    let pack = cook(tmp.path());
+    let mut sim = pack_sim(&pack);
+    let design = inf_island::read_design(
+        &inf_island::IslandRecipe::load(&fixture_recipe()).expect("recipe"),
+    )
+    .expect("design");
+    let settlement = walk_target_settlement(&design);
+    let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+    let hero = hero_entity(&mut sim).expect("a hero");
+    set_hero(&mut sim, hero, centre);
+    sim.world_mut().mark_dirty();
+    freeze_clock(&mut sim, SETTLE_HOUR);
+    let mut peak = [0usize; 4];
+    let mut steered = 0u64;
+    settle_the_society(&mut sim, &mut peak, &mut steered);
+    freeze_clock(&mut sim, RUSH_HOUR);
+    for _ in 0..200 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    sim.set_step_profiling(true);
+
+    // MIN of three rounds, the discipline everywhere else in this tree; each
+    // round is the mean over sixty settled steps, because a step profile is one
+    // step and a single one of them is a fact about a scheduler.
+    let rounds = 3u32;
+    let per_round = 60u32;
+    let mut best: Option<inf_player::step_profile::StepProfile> = None;
+    for _ in 0..rounds {
+        let mut mean = inf_player::step_profile::StepProfile::default();
+        for _ in 0..per_round {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            mean.accumulate(&sim.step_profile());
+        }
+        mean.scale(1.0 / f64::from(per_round));
+        let take = match &best {
+            None => true,
+            Some(b) => mean.total_ms() < b.total_ms(),
+        };
+        if take {
+            best = Some(mean);
+        }
+    }
+    let mean = best.expect("three rounds");
+    let idx = |name: &str| {
+        inf_player::step_profile::STEP_PHASE_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("the `{name}` phase exists"))
+    };
+    let row = |name: &str| mean.ms[idx(name)];
+    let traffic = row("traffic");
+    let st = sim.traffic_stats();
+
+    // ── THE CONTROL. The same settlement, the same hour, the same hero, with
+    //    the traffic taken out -- because a phase table with a new row in it
+    //    prices nothing unless the alternative is priced too (the I1 audit law).
+    //    `set_traffic` with an empty population takes every body down AND stops
+    //    the derivation (`hand_installed`), so what is measured is a street the
+    //    engine is not putting cars on rather than a street it has not got to
+    //    yet.
+    sim.set_traffic_population(Default::default());
+    for _ in 0..90 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let mut control: Option<inf_player::step_profile::StepProfile> = None;
+    for _ in 0..rounds {
+        let mut m = inf_player::step_profile::StepProfile::default();
+        for _ in 0..per_round {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            m.accumulate(&sim.step_profile());
+        }
+        m.scale(1.0 / f64::from(per_round));
+        if control.as_ref().is_none_or(|b| m.total_ms() < b.total_ms()) {
+            control = Some(m);
+        }
+    }
+    let control = control.expect("three rounds");
+    assert_eq!(
+        sim.traffic_stats().cars,
+        0,
+        "the control still has cars in it, so it is not a control"
+    );
+
+    println!(
+        "\nTHE ISLAND'S STEP WITH A STREET IN IT ({} build), {:.4} ms total, \
+         MIN of {rounds} rounds of {per_round}:",
+        if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "release"
+        },
+        mean.total_ms()
+    );
+    for (name, ms) in mean.dearest_first() {
+        if ms > 0.0005 {
+            println!("  {name:>18}  {ms:.4} ms");
+        }
+    }
+    println!(
+        "  the `traffic` row: {traffic:.4} ms for {} car(s) -- tiers {:?}, {} \
+         driving, {} with a driver -- against a {:.1} ms budget",
+        st.cars,
+        st.per_tier,
+        st.driving,
+        st.drivers,
+        inf_player::budget::TRAFFIC_STEP_BUDGET_MS
+    );
+    println!(
+        "  the `vehicle` row: {:.4} ms for {} rig(s) -- {:.2} us a car; the \
+         `crowd` row {:.4} ms and `society` {:.4} ms for {} agent(s)",
+        row("vehicle"),
+        st.per_tier[0],
+        row("vehicle") * 1000.0 / st.per_tier[0].max(1) as f64,
+        row("crowd"),
+        row("society"),
+        sim.crowd_stats().per_tier.iter().sum::<usize>()
+    );
+    println!(
+        "\nTHE SAME STEP WITH THE TRAFFIC TAKEN OUT: {:.4} ms total against \
+         {:.4} -- traffic {:.4} -> {:.4}, vehicle {:.4} -> {:.4}, solver \
+         {:.4} -> {:.4}, physics3d sync {:.4} -> {:.4}",
+        control.total_ms(),
+        mean.total_ms(),
+        traffic,
+        control.ms[idx("traffic")],
+        row("vehicle"),
+        control.ms[idx("vehicle")],
+        row("solver"),
+        control.ms[idx("solver")],
+        row("physics3d sync"),
+        control.ms[idx("physics3d sync")],
+    );
+    println!(
+        "  THE WHOLE COST OF A STREET: {:.4} ms of a {:.4} ms step -- {:.1} %",
+        mean.total_ms() - control.total_ms(),
+        mean.total_ms(),
+        100.0 * (mean.total_ms() - control.total_ms()) / mean.total_ms()
+    );
+
+    // The phase really ran: a budget met by a door that returned early is a
+    // budget about nothing.
+    assert!(
+        st.cars > 0,
+        "the `traffic` phase reported no car at all on a settlement whose kerbs \
+         it derives"
+    );
+    assert!(
+        st.per_tier[0] > 0,
+        "no car is a rig, so the dearest half of this phase never ran"
+    );
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the traffic phase is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the traffic phase is reported, not asserted (shared runner)");
+        return;
+    }
+    assert!(
+        traffic <= inf_player::budget::TRAFFIC_STEP_BUDGET_MS,
+        "the `traffic` phase cost {traffic:.4} ms against a {} ms ceiling {}",
+        inf_player::budget::TRAFFIC_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
+    );
+}
+
 // ── VEH2b: RUSH HOUR, WITH CARS ─────────────────────────────────────────────
 //
 // The wave's gate. NPC1d proved a town WALKS; VEH2a proved one car DRIVES. This
@@ -6294,10 +6492,12 @@ struct RushRun {
     presses: usize,
     stolen_m: f64,
     /// The highest revs and the top speed the stolen car reached under the
-    /// player's own throttle -- the RESPONSE, which is what says the car became
-    /// the player's rather than how far a jammed street let it get.
+    /// player's own throttle.
     stolen_revs: f64,
     stolen_top_mps: f64,
+    /// The throttle the SEAT STEP wrote into the car from the player's stick --
+    /// `VehicleOutcome::load`. This is the arm's real claim; see its assertion.
+    stolen_throttle: f64,
     /// Where the victim ended up, relative to the car it was pulled out of.
     victim_away_m: f64,
 }
@@ -6449,6 +6649,7 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
         stolen_m: 0.0,
         stolen_revs: 0.0,
         stolen_top_mps: 0.0,
+        stolen_throttle: 0.0,
         victim_away_m: 0.0,
     };
     let Some(chassis) = target else {
@@ -6502,6 +6703,10 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
         if let Some(o) = sim.vehicles().iter().find(|o| o.chassis == chassis) {
             run.stolen_revs = run.stolen_revs.max(o.revs);
             run.stolen_top_mps = run.stolen_top_mps.max(o.forward_mps);
+            // `VehicleOutcome::load` IS `controls.throttle.abs()` — the number
+            // the seat step wrote from the player's own stick. It is the claim
+            // this arm can make on a street this crowded; see below.
+            run.stolen_throttle = run.stolen_throttle.max(o.load);
         }
     }
     run.stolen_m = (chassis_at(sim, chassis) - took).length();
@@ -6568,11 +6773,13 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
         );
         println!(
             "VEH2b {label}: carjack -- {} press(es), driver out {}, hero seated \
-             {}; the stolen car revved to {:.2}, topped {:.2} m/s and covered \
-             {:.1} m; the victim is {:.1} m from the seat",
+             {}; the player's throttle reached the car at {:.2}, which revved to \
+             {:.2}, topped {:.2} m/s and covered {:.1} m through the crowd; the \
+             victim is {:.1} m from the seat",
             run.presses,
             run.jacked,
             run.seated,
+            run.stolen_throttle,
             run.stolen_revs,
             run.stolen_top_mps,
             run.stolen_m,
@@ -6670,11 +6877,25 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             "{label}: the victim is still inside the car ({:.2} m)",
             r.victim_away_m
         );
+        // **THE PLAYER'S THROTTLE REACHES THE CAR THEY STOLE.** That is what
+        // this arm can honestly assert on this street, and it is the whole of
+        // the control claim: the stick goes through `apply_intent`, the seat
+        // step, `VehicleControls::from_intent` and `Vehicle::control`, and the
+        // vehicle phase reports it back as `load`.
+        //
+        // What it deliberately does NOT assert is a speed. The fixture's
+        // crossroads holds **eighty-one `Full` crowd agents**, and a `Full`
+        // crowd agent is a KINEMATIC capsule — a thing a car cannot push, at
+        // any torque. The stolen car is walled in by people, moves a few metres
+        // and stops. `a_stolen_car_answers_the_throttle_on_an_empty_street` in
+        // `inf-physics` is the falsifier that says that is the CROWD and not the
+        // car: the same press on a street with one car and nobody on it is
+        // **87.4 m at 18.14 m/s**. Carried, and named.
         assert!(
-            r.stolen_revs > 0.1,
-            "{label}: the stolen car's engine never came off idle ({:.3}) -- the \
-             player is sitting in something that is not theirs to drive",
-            r.stolen_revs
+            r.stolen_throttle > 0.5,
+            "{label}: the player's throttle never reached the car they stole \
+             ({:.3}) -- the seat step is not driving it",
+            r.stolen_throttle
         );
         // Anti-vacuity: a window whose every step hashed the same would compare
         // equal and mean nothing.

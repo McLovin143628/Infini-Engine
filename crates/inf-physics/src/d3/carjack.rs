@@ -124,14 +124,30 @@ pub fn occupant_of(world: &EcsWorld, chassis: Uuid) -> Option<Uuid> {
 /// it here rather than in the movement step is what closed the wave's own
 /// prompt/press divergence — see that function.
 pub fn occupied_chassis(world: &EcsWorld) -> BTreeSet<Uuid> {
-    let mut out = BTreeSet::new();
+    occupants(world).into_keys().collect()
+}
+
+/// **Who is in which car**, in one walk — the map the set above is the keys of.
+///
+/// `O(characters)` ONCE. [`occupant_of`] answers for one chassis and is
+/// `O(characters)` each time, which is right for a press and wrong for a step
+/// that asks about every car it holds: the first cut of
+/// `inf_physics::d3::traffic::step_traffic` called it per record, which is
+/// `O(cars x characters)` sixty times a second on a settlement with three
+/// hundred residents in it.
+///
+/// A car with two people in it answers the lower `Guid`, which cannot happen —
+/// the seat is one seat — and is stated so the walk has one answer rather than
+/// an insertion order.
+pub fn occupants(world: &EcsWorld) -> std::collections::BTreeMap<Uuid, Uuid> {
+    let mut out = std::collections::BTreeMap::new();
     for guid in inf_ecs::movement::movement_targets(world) {
         let Some(e) = world.entity_of(guid) else {
             continue;
         };
         if let Some(cm) = world.world().get::<CharacterMovement>(e) {
             if cm.runtime.seat.is_seated() {
-                out.insert(cm.runtime.seat.vehicle);
+                out.entry(cm.runtime.seat.vehicle).or_insert(guid);
             }
         }
     }
@@ -156,7 +172,12 @@ pub fn is_ejectable(world: &EcsWorld, victim: Uuid) -> bool {
 /// The exit's own arithmetic ([`super::vehicle::EXIT_CLEARANCE_M`]), read off
 /// the live chassis pose, so the place a driver is thrown to is the place a
 /// driver climbs out to.
-pub fn door_point(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> Option<DVec3> {
+pub fn door_point(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+    chassis: Uuid,
+    victim: Uuid,
+) -> Option<DVec3> {
     let (seat, rot, _) = seat_pose(bridge, chassis)?;
     let half_width = world
         .entity_of(chassis)
@@ -171,7 +192,27 @@ pub fn door_point(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> 
             _ => c.half_extents.x,
         })
         .unwrap_or(1.0);
-    Some(seat + (rot * DVec3::X) * (half_width + super::vehicle::EXIT_CLEARANCE_M))
+    // **The exit's arithmetic, ALL of it.** The first cut dropped two terms —
+    // the vertical lift that turns a seat point into a capsule CENTRE, and the
+    // body's own radius in the lateral offset — so the victim was placed about
+    // a metre too low and one radius too close, which is a capsule with its
+    // feet under the road and its shoulder in the bodywork. The doc claimed
+    // "the place a driver is thrown to is the place a driver climbs out to" and
+    // it now is.
+    let (half_height, radius) = world
+        .entity_of(victim)
+        .and_then(|e| {
+            let cm = world.world().get::<CharacterMovement>(e)?;
+            let r = world
+                .world()
+                .get::<inf_ecs::components::Collider3D>(e)
+                .map(|c| c.radius)
+                .unwrap_or(0.3);
+            Some((cm.stand_half_height_m, r))
+        })
+        .unwrap_or((0.6, 0.3));
+    let target = seat + DVec3::Y * (half_height + radius);
+    Some(target + (rot * DVec3::X) * (half_width + super::vehicle::EXIT_CLEARANCE_M + radius))
 }
 
 /// **Is the asker at the driver's door?**
@@ -181,11 +222,19 @@ pub fn door_point(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> 
 /// rather than a point on it, and a refusal a player cannot see the edge of
 /// reads as a broken control ([`ENTER_REACH_M`]'s own note).
 pub fn at_the_door(bridge: &PhysicsBridge3D, chassis: Uuid, feet: DVec3) -> bool {
-    let Some((seat, rot, _)) = seat_pose(bridge, chassis) else {
+    let Some(body) = bridge.body_of(chassis) else {
         return false;
     };
+    let w = bridge.world();
+    let (Some(origin), Some(rot)) = (w.body_translation(body), w.body_rotation(body)) else {
+        return false;
+    };
+    // **Through the CHASSIS, not through the seat.** `seat_local` is offset from
+    // the chassis origin, so a plane through the seat sits outboard of the
+    // centreline and refuses a player standing beside the middle of the car on
+    // the correct side. The car's own `+X` half is the driver's half.
     let side = rot * DVec3::X;
-    let d = feet - seat;
+    let d = feet - origin;
     (d.x * side.x + d.z * side.z) > 0.0
 }
 
@@ -207,8 +256,11 @@ pub fn candidates(
     feet: DVec3,
 ) -> Vec<InteractCandidate> {
     let mut out = Vec::new();
+    // ONE walk over the characters, not one per vehicle. This function is on
+    // the prompt path, which runs every frame.
+    let seated = occupants(world);
     for chassis in bridge.vehicle_guids() {
-        let Some(victim) = occupant_of(world, chassis) else {
+        let Some(victim) = seated.get(&chassis).copied() else {
             continue;
         };
         if !is_ejectable(world, victim) {
@@ -273,6 +325,7 @@ pub fn try_carjack(
     bridge: &mut PhysicsBridge3D,
     chassis: Uuid,
     actor: Uuid,
+    dt: f64,
     overlays: &inf_ecs::movement::OverlayRegistry,
 ) -> Option<Carjack> {
     let victim = occupant_of(world, chassis)?;
@@ -285,7 +338,7 @@ pub fn try_carjack(
     if inf_ecs::crowd::agent_unit(victim, tick, SALT_RESIST) < RESIST_CHANCE {
         return Some(Carjack::Resisted { chassis, victim });
     }
-    let at = door_point(world, bridge, chassis)?;
+    let at = door_point(world, bridge, chassis, victim)?;
     // The mode is taken rather than requested: being pulled out of a car is a
     // fact about your body and not a choice, which is the sentence
     // `inf_ecs::movement::transition_is_legal`'s own `(Driving, FallControlled)`
@@ -305,7 +358,7 @@ pub fn try_carjack(
     // …and the person walks away. An ordinary crowd agent with a route, so it
     // tiers, poses and eventually goes Dormant like every other pedestrian —
     // rather than a statue in the road with a bespoke state machine.
-    flee(world, victim, at, actor);
+    flee(world, victim, at, actor, dt);
     Some(Carjack::Ejected { chassis, victim })
 }
 
@@ -320,7 +373,7 @@ pub fn try_carjack(
 ///
 /// `RouteMode::Once`: they arrive, and then they stand. **They do not resume
 /// their day** — see the wave's carried list.
-fn flee(world: &mut EcsWorld, victim: Uuid, from: DVec3, actor: Uuid) {
+fn flee(world: &mut EcsWorld, victim: Uuid, from: DVec3, actor: Uuid, dt: f64) {
     let away = world
         .entity_of(actor)
         .and_then(|e| world.world().get::<Transform>(e))
@@ -338,7 +391,22 @@ fn flee(world: &mut EcsWorld, victim: Uuid, from: DVec3, actor: Uuid) {
         FLEE_MPS,
         RouteMode::Once,
     );
-    inf_ecs::crowd::adopt(world, victim, CrowdRecord::walking(archetype, route));
+    let mut rec = CrowdRecord::walking(archetype, route);
+    // **The route has to START now.** `CrowdRoute::progress_at` is
+    // `speed x t_s + phase`, and `t_s` is the crowd's own elapsed SESSION time —
+    // so a fresh forty-metre `Once` route handed to a population that has been
+    // running for a minute reads as finished before the victim has taken a
+    // step. Two things go wrong if it does: the agent is permanently `blocked`
+    // (which the door pass reads), and the moment it drops off the steered tier
+    // its transform is written at the route's END, forty metres away.
+    //
+    // `rephase_m` is the field that exists for exactly this — the metre the
+    // clock is moved by — so it is set once, here, to the negative of whatever
+    // the clock has already run up.
+    let t_s = inf_ecs::crowd::population_steps(world) as f64 * dt;
+    rec.rephase_m = -(rec.speed_of(victim) * t_s
+        + inf_ecs::crowd::agent_unit(victim, 0, inf_ecs::crowd::SALT_PHASE) * 8.0);
+    inf_ecs::crowd::adopt(world, victim, rec);
 }
 
 /// Which chassis a carjack candidate names, for a caller that wants to ask
