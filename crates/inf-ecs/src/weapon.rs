@@ -191,8 +191,16 @@ impl Default for WeaponDef {
 /// decides whether an ammunition clock is stale — so a character that punches
 /// and then equips a rifle gets a fresh magazine rather than the fist's.
 ///
-/// The colon is the same namespace mark `BlueprintClass::new("act:…")` uses, and
-/// it is what keeps this out of `item::canonical_id`'s space by construction.
+/// The colon is the same namespace mark `BlueprintClass::new("act:…")` uses.
+/// **It is a convention with one mechanical leg, not a construction** (the WPN1
+/// audit's correction, which read "by construction"): [`crate::item::
+/// canonical_id`] only trims and lower-cases, so nothing in the catalogue
+/// *rejects* a colon — what a TOML catalogue rejects is the **bare key**, and an
+/// author reaching this id has to quote it deliberately (`["engine:fists"]`).
+/// A level that did would get an item the ammunition readout refuses to count
+/// (see [`carries_ammunition`]); refusing colons at
+/// [`crate::item::ItemDefs::insert`] would make the sentence true and is a
+/// content-visible refusal rather than an audit fix. Carried by name.
 pub const FIST_ITEM: &str = "engine:fists";
 
 /// **What a punch carries**, joules.
@@ -224,8 +232,15 @@ pub const FIST_ARC_DEG: f64 = 100.0;
 /// **How fast a person can throw punches**, "rounds" per minute.
 ///
 /// Ninety — two thirds of a second a swing, which is a jab-and-recover rather
-/// than a flurry, and which through [`recoil_fraction`] is also how long the body
-/// carries the swing's own pose.
+/// than a flurry.
+///
+/// It paces the swings and **nothing else** (the WPN1 audit's correction: this
+/// used to add *"and through [`recoil_fraction`] is also how long the body
+/// carries the swing's own pose"*, which the wave's own carried list already
+/// contradicted). A fist is not *equipped* — it is not in the catalogue at all —
+/// so `d3::gameplay`'s `recoil_of` answers `0.0` for it and a punch moves no
+/// bone. `weapon_hands_gate` asserts exactly that, so the day it changes the arm
+/// fails.
 pub const FIST_RPM: f64 = 90.0;
 
 /// **A pair of hands, as a weapon** (wave WPN1) — what an unarmed character's
@@ -575,6 +590,19 @@ pub const REPORT_ROLLOFF: f64 = 1.0;
 /// doorway model at `Play` time, which is a change to `portal_gain`'s call site
 /// in both hosts and is named on this wave's carried list rather than done
 /// quietly.
+///
+/// # The other honest bound: the SOURCE KEY is shared (WPN1 audit)
+///
+/// Each host queues this under `guid_source_key(hit.shooter)`, and
+/// `AudioEngine::apply_play` is *one voice per source: replace any existing*.
+/// That is exactly what makes a barrel one voice — and it is the **first** use
+/// of that key namespace for a source which is not the entity's own emitter.
+/// Every other `Play` in both hosts keys an entity's own `AudioSource`, so a
+/// shooter which is *itself* an emitter (a character carrying an autoplay
+/// `AudioSource` — nothing in the committed tree does) has its voice replaced by
+/// the gunshot, and the autoplay walk starts a source **once**, so it never
+/// comes back. Closing it is a salt on the report's key, which moves the audio
+/// command stream both gates compare; carried rather than done inside an audit.
 pub fn report_source() -> AudioSource {
     AudioSource {
         clip: Some(WEAPON_REPORT_CLIP),

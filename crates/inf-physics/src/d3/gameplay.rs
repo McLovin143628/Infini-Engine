@@ -1129,10 +1129,16 @@ pub const PANIC_FLEE_M: f64 = 60.0;
 ///
 /// The pass is `O(agents × sources)` and this is what makes the second factor a
 /// constant rather than a firefight's shooter count: shots inside half a panic
-/// radius of each other are one source, and past this many the rest of the step's
-/// shots are folded into the nearest. Eight is more than a street fight has
+/// radius of each other are one source. Eight is more than a street fight has
 /// distinct corners, and it bounds the walk at 8 × 1 000 agents = 8 000 squared
 /// distances a step against `NPC_STEP_BUDGET_MS`'s own 1 000-agent figure.
+///
+/// **Past the cap a shot is DROPPED, not folded** (the WPN1 audit's correction —
+/// this said "folded into the nearest", which is what the *coalescing* does and
+/// is not what the cap does). A ninth distinct place, more than half a radius
+/// from all eight, frightens nobody on that step. That is the right trade for a
+/// bound — the ninth corner of a firefight is not where the interesting people
+/// are standing — but it is a refusal and it is said as one.
 pub const MAX_PANIC_SOURCES: usize = 8;
 
 /// **The distinct places this step's gunfire came from**, coalesced and capped.
@@ -1140,9 +1146,10 @@ pub const MAX_PANIC_SOURCES: usize = 8;
 /// The half of [`step_panic`] that decides its cost, hoisted so a gate can
 /// measure it without a crowd: shots inside half a [`PANIC_RADIUS_M`] of each
 /// other frighten the same people and are one source, and past
-/// [`MAX_PANIC_SOURCES`] the rest of the step's shots are simply not distinct
-/// places — which is what keeps the pass's inner loop a constant rather than a
-/// function of how many people are shooting.
+/// [`MAX_PANIC_SOURCES`] the rest of the step's shots are **dropped** — which is
+/// what keeps the pass's inner loop a constant rather than a function of how
+/// many people are shooting, and which is a refusal rather than a fold (see
+/// [`MAX_PANIC_SOURCES`]).
 ///
 /// A **brawl is not a source**: see [`WeaponHit::loud`] and the reference frames
 /// it cites.
@@ -1517,8 +1524,30 @@ fn is_flesh(world: &EcsWorld, guid: Uuid) -> bool {
 ///   do with anybody's health.
 ///
 /// Lazily, the section is empty until something is shot, which keeps every
-/// pre-WPN1 trace byte-identical, and once a body is in it it stays there
-/// however the band moves.
+/// pre-WPN1 trace byte-identical.
+///
+/// # WHERE THE BODY STOPS (the WPN1 audit's correction)
+///
+/// This used to end *"and once a body is in it it stays there however the band
+/// moves"*, and the last clause is not true at the bottom of the ladder. The
+/// tier owns the components: `Full → Near → Far` removes the collider, the
+/// controller and `CharacterMovement` and **leaves the entity**, so a granted
+/// [`Health`] survives all three — but `→ Dormant` **despawns the entity**
+/// (`crowd::step_crowd`), and the health goes with it. `CrowdRecord` carries the
+/// position, the route phase and a pose digest; it does not carry joules.
+///
+/// So the honest statement is: a wounded crowd agent that leaves the world at
+/// `crowd::DEFAULT_CROWD_FAR_M` (**512 m**) comes back **whole**, and for such an
+/// agent the health section really is a function of the band. Two things keep
+/// that a design bound rather than a divergence: both hosts tier from the same
+/// rule on the same step, so they lose it together and no trace comparison can
+/// see a disagreement; and a `Far` agent has no collider, so nothing between
+/// 96 m and 512 m can be shot at all — the window in which a body is wounded
+/// *and* pageable is a walk away from somebody you have already shot.
+///
+/// Persisting it is a field on `CrowdRecord`, which moves `crowd_state_bytes`
+/// and the `AGENT_TRACE_BYTES` ratio quoted against it — a wave, not a doc fix.
+/// On this wave's carried list by name.
 fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, dt: f64, report: &mut GameplayReport) {
     let Some(target) = hit.target else {
         return;
