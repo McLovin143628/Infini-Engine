@@ -684,6 +684,19 @@ fn step_one(
         }
         let entered = match hit.as_ref().map(|h| (h.verb, h.guid)) {
             Some((inf_ecs::interact::InteractVerb::Enter, target)) => Some(target),
+            // VEH2b. **One press, one door, one warp**: the carjack makes the
+            // seat free and then falls through to the ordinary enter below, so
+            // the code that seats a hero after a carjack is the code that has
+            // always seated a hero. A refusal — nobody in it, a resist, the
+            // wrong side — is a value, and the press does nothing rather than
+            // half-doing something.
+            Some((inf_ecs::interact::InteractVerb::Carjack, target)) => {
+                match super::carjack::try_carjack(world, bridge, target, guid, overlays) {
+                    Some(super::carjack::Carjack::Ejected { chassis, .. }) => Some(chassis),
+                    // They held on. The press is spent; the player presses again.
+                    Some(super::carjack::Carjack::Resisted { .. }) | None => None,
+                }
+            }
             Some((inf_ecs::interact::InteractVerb::Use, target)) => {
                 // A `Use` hit is a door if the world has one under that guid,
                 // and nothing at all otherwise — which is the correct answer for
@@ -2348,6 +2361,42 @@ fn step_driving(
         grounded: true,
         landed: LandingKind::None,
     })
+}
+
+/// **Take somebody out of a seat they did not choose to leave** (wave VEH2b) —
+/// the carjack's half of the exit.
+///
+/// [`finish_driving`] with the mode **taken rather than requested**, which is
+/// the difference between getting out of a car and being pulled out of one:
+/// `inf_ecs::movement::transition_is_legal`'s own comment says the table
+/// *"permits a driver to be pulled out of a seat by something that is a fact
+/// about its body rather than a choice"*, and this is that something.
+///
+/// It does everything the ordinary exit does — restores the collider, clears
+/// [`inf_ecs::components::SeatState`], places the body and republishes its
+/// animation parameters — so the seat is genuinely free afterwards and
+/// `occupied_seats` says so on the same step.
+///
+/// `false` when the guid has no body or is not in a seat, which are both things
+/// a caller can produce by pressing at the wrong moment.
+pub(crate) fn eject_from_seat(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    at: DVec3,
+    mode: MovementMode,
+    overlays: &model::OverlayRegistry,
+) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(cm) = world.world().get::<CharacterMovement>(e).cloned() else {
+        return false;
+    };
+    if !cm.runtime.seat.is_seated() {
+        return false;
+    }
+    finish_driving(world, bridge, guid, cm, overlays, Some(at), mode).is_some()
 }
 
 /// Consume every edge a seated or flying character does not act on, so a press

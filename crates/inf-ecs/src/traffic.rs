@@ -1630,6 +1630,14 @@ pub fn mark_taken(world: &mut EcsWorld, chassis: Uuid) -> bool {
     }
 }
 
+/// **How many fixed steps the traffic has run** — the tick a per-attempt draw
+/// is taken on.
+///
+/// `0` on a level with no traffic, which is a value both hosts agree about.
+pub fn steps(world: &EcsWorld) -> u64 {
+    traffic_of(world).map(|p| p.steps).unwrap_or(0)
+}
+
 /// Whether this car is one the traffic has let go of.
 pub fn is_taken(world: &EcsWorld, chassis: Uuid) -> bool {
     traffic_of(world).is_some_and(|p| p.records.get(&chassis).is_some_and(|r| r.taken))

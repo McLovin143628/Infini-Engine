@@ -62,6 +62,16 @@ pub enum InteractVerb {
     Grab,
     /// Speak to it.
     Talk,
+    /// **Pull whoever is in it out of it** (wave VEH2b): an occupied driver's
+    /// seat, from the door side.
+    ///
+    /// A verb of its own rather than an `Enter` on an occupied car, because the
+    /// two differ in what the player is TOLD: "Enter vehicle" over a car with a
+    /// person in it is a prompt that lies about what the press will do. It is
+    /// also what makes the dispatch a compile error rather than a silent
+    /// decline — the `match` in `inf_physics::d3::movement` is exhaustive over
+    /// this enum on purpose.
+    Carjack,
 }
 
 impl InteractVerb {
@@ -73,6 +83,9 @@ impl InteractVerb {
             InteractVerb::PickUp => "Pick up",
             InteractVerb::Grab => "Grab",
             InteractVerb::Talk => "Talk to",
+            // Not "Carjack": a prompt is a thing a player reads in a tenth of a
+            // second, and the word for the gesture is what it looks like.
+            InteractVerb::Carjack => "Pull out",
         }
     }
 }

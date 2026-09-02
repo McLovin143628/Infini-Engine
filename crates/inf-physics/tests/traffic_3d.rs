@@ -419,3 +419,227 @@ fn two_identical_towns_produce_the_same_traffic() {
         );
     }
 }
+
+// ── the carjack (clause 5) ──────────────────────────────────────────────────
+
+/// **THE CARJACK.** A commuter is driving, the hero walks up to the driver's
+/// door, presses the one interact key, and ends up behind the wheel with the
+/// driver staggering away down the street.
+///
+/// Every step of it goes through a door that already existed: the prompt is
+/// `inf_ecs::interact::resolve`, the eject is `finish_driving`, the seat entry
+/// is the P29.7 warp, and the victim's walk is an ordinary `CrowdRecord`.
+#[test]
+fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(8.5);
+    town.step(90);
+
+    // Find a Full-tier car with somebody at the wheel.
+    let mut target = None;
+    for (guid, rec) in inf_physics::d3::traffic::records(&town.world) {
+        if rec.tier != inf_ecs::crowd::CrowdTier::Full {
+            continue;
+        }
+        if let Some(v) = inf_physics::d3::carjack::occupant_of(&town.world, guid) {
+            target = Some((guid, v));
+            break;
+        }
+    }
+    let (chassis, victim) = target.expect("no Full-tier car has a driver in it");
+    assert!(inf_physics::d3::carjack::is_ejectable(&town.world, victim));
+
+    // The wrong side of the car offers nothing at all — the door-side rule.
+    let seat = inf_physics::d3::vehicle::seat_pose(&town.bridge, chassis).expect("a seat");
+    let wrong = seat.0 - (seat.1 * DVec3::X) * 2.0;
+    assert!(
+        !inf_physics::d3::carjack::at_the_door(&town.bridge, chassis, wrong),
+        "the passenger side counts as the driver door"
+    );
+    // …and THIS car is not on offer from there. (Another car may be — the set
+    // is every carjackable car in reach of the point, and a street has cars on
+    // both sides of it.)
+    assert!(
+        !inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, wrong).contains(&chassis),
+        "a candidate from the wrong side of the car"
+    );
+
+    // The driver's side offers the car, with the verb and the label a player
+    // reads — through the SAME resolution site the enter prompt uses.
+    let feet = seat.0 + (seat.1 * DVec3::X) * 2.0;
+    assert!(inf_physics::d3::carjack::at_the_door(
+        &town.bridge,
+        chassis,
+        feet
+    ));
+    let hit = inf_physics::d3::interact::resolve(
+        &town.world,
+        &town.bridge,
+        feet,
+        0.0,
+        &Default::default(),
+    )
+    .expect("the one door answers something");
+    assert_eq!(hit.guid, chassis);
+    assert_eq!(hit.verb, inf_ecs::interact::InteractVerb::Carjack);
+    assert_eq!(
+        inf_ecs::interact::prompt_text(hit.verb, &hit.label, "E"),
+        "[E] Pull out driver"
+    );
+
+    // The press. The resist draw is a function of the step, so a real player
+    // pressing twice is what the arm does — and BOTH outcomes are asserted, so
+    // neither branch is dead.
+    let overlays = inf_ecs::movement::overlay_registry(
+        &town.world,
+        &inf_ecs::movement::movement_targets(&town.world),
+    );
+    let mut resisted = 0;
+    let mut ejected = None;
+    for _ in 0..12 {
+        match inf_physics::d3::carjack::try_carjack(
+            &mut town.world,
+            &mut town.bridge,
+            chassis,
+            HERO,
+            &overlays,
+        ) {
+            Some(inf_physics::d3::carjack::Carjack::Resisted { .. }) => {
+                resisted += 1;
+                town.step(1);
+            }
+            Some(inf_physics::d3::carjack::Carjack::Ejected { victim, .. }) => {
+                ejected = Some(victim);
+                break;
+            }
+            None => panic!("the door refused a car with a driver in it"),
+        }
+    }
+    let out = ejected.expect("twelve presses and the driver never let go");
+    assert_eq!(out, victim);
+    assert!(
+        resisted > 0,
+        "the resist draw never fired in twelve attempts, so its branch is dead"
+    );
+
+    // THE WORLD, not the report. The seat is free…
+    assert!(inf_physics::d3::carjack::occupant_of(&town.world, chassis).is_none());
+    // …the victim is out of the car, staggering, with its collider back…
+    let ve = town
+        .world
+        .entity_of(victim)
+        .expect("the victim still exists");
+    let cm = town
+        .world
+        .world()
+        .get::<CharacterMovement>(ve)
+        .expect("with a movement model");
+    assert_eq!(cm.mode, MovementMode::FallControlled);
+    assert!(!cm.runtime.seat.is_seated());
+    // …standing at the driver's door rather than inside the car…
+    let at = town
+        .world
+        .world()
+        .get::<Transform>(ve)
+        .expect("a transform")
+        .translation
+        .to_dvec3();
+    let d = at - seat.0;
+    assert!(
+        (d.x * d.x + d.z * d.z).sqrt() > 1.0,
+        "the victim is still inside the car"
+    );
+    // …and the traffic has let the car go.
+    assert!(traffic::is_taken(&town.world, chassis));
+
+    // The victim now has somewhere to be, as an ordinary crowd agent.
+    let route_end = {
+        let p = town
+            .world
+            .world()
+            .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+            .expect("the crowd adopted the victim");
+        p.records
+            .get(&victim)
+            .expect("the victim is a crowd agent now")
+            .route
+            .destination()
+    };
+    let flee = route_end - at;
+    assert!(
+        ((flee.x * flee.x + flee.z * flee.z).sqrt() - inf_physics::d3::carjack::FLEE_M).abs() < 1.0,
+        "the flee route is not {} m long",
+        inf_physics::d3::carjack::FLEE_M
+    );
+
+    // …and the seat the hero now walks up to is a free one, answered by the
+    // ordinary enter door.
+    let seat_now = inf_physics::d3::vehicle::try_enter(&town.bridge, feet, &Default::default());
+    assert_eq!(seat_now, Some(chassis));
+
+    // The victim walks: some steps later it is further from the car than it
+    // started, and it is doing that as a crowd agent rather than a statue.
+    let before = at;
+    town.step(120);
+    let after = town
+        .world
+        .entity_of(victim)
+        .and_then(|e| town.world.world().get::<Transform>(e))
+        .map(|t| t.translation.to_dvec3())
+        .unwrap_or(before);
+    let walked = ((after.x - before.x).powi(2) + (after.z - before.z).powi(2)).sqrt();
+    assert!(walked > 1.0, "the victim has not moved: {walked} m");
+    println!("carjack: {resisted} resists, victim walked {walked:.2} m");
+}
+
+/// **You cannot pull yourself out of your own car**, and a car nobody is in is
+/// not a carjack at all — it is an ordinary theft, through the ordinary door.
+#[test]
+fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    town.set_hour(0.0);
+    town.step(40);
+    // Midnight: every car is parked, so nothing at all is carjackable, anywhere.
+    let near = inf_physics::d3::traffic::cars_near(&town.world, DVec3::new(50.0, 0.0, 50.0), 60.0);
+    let (target, _) = near[0];
+    let seat = inf_physics::d3::vehicle::seat_pose(&town.bridge, target).expect("a seat");
+    let feet = seat.0 + (seat.1 * DVec3::X) * 2.0;
+    assert!(inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).is_empty());
+    // …and the one door offers the ordinary Enter instead.
+    let hit = inf_physics::d3::interact::resolve(
+        &town.world,
+        &town.bridge,
+        feet,
+        0.0,
+        &Default::default(),
+    )
+    .expect("a free seat");
+    assert_eq!(hit.verb, inf_ecs::interact::InteractVerb::Enter);
+
+    // A PLAYER-CONTROLLED occupant is never ejectable, which is what makes
+    // "your own car" answer no without anybody passing an actor in.
+    let e = town.world.entity_of(HERO).expect("the hero");
+    town.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(CharacterMovement {
+            player_controlled: true,
+            mode: MovementMode::Driving,
+            ..Default::default()
+        });
+    if let Some(mut cm) = town.world.world_mut().get_mut::<CharacterMovement>(e) {
+        cm.runtime.seat = inf_ecs::components::SeatState {
+            vehicle: target,
+            entering: false,
+            time_s: 0.0,
+            start: Vec3d::ZERO,
+            start_yaw_deg: 0.0,
+        };
+    }
+    assert_eq!(
+        inf_physics::d3::carjack::occupant_of(&town.world, target),
+        Some(HERO)
+    );
+    assert!(!inf_physics::d3::carjack::is_ejectable(&town.world, HERO));
+    assert!(inf_physics::d3::carjack::carjackable(&town.world, &town.bridge, feet).is_empty());
+}

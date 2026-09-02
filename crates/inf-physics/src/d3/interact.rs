@@ -94,7 +94,21 @@ pub fn candidates(
     feet: DVec3,
     exclude: &BTreeSet<Uuid>,
 ) -> Vec<InteractCandidate> {
-    let mut out = vehicle_candidates(bridge, exclude);
+    // **A seat with somebody in it is not an Enter candidate anywhere** (wave
+    // VEH2b). It used to be the CALLER's job to say so — the movement step
+    // passed `occupied_seats` and the HUD passed `{self, own car}` — and the two
+    // were only ever the same set because nothing but the player ever sat down.
+    // The moment an NPC drives, the prompt would read "[E] Enter vehicle" over
+    // an occupied car while the press did something else entirely, which is the
+    // I5 divergence ("what the player is told and what the press does cannot
+    // come apart") in the one place I5 did not reach.
+    //
+    // Occupancy is a fact about the WORLD, not about who is asking, so it is
+    // read here and unioned with whatever the caller excluded for its own
+    // reasons.
+    let mut occupied = super::carjack::occupied_chassis(world);
+    occupied.extend(exclude.iter().copied());
+    let mut out = vehicle_candidates(bridge, &occupied);
     out.extend(interact::candidates_in_world(world, exclude));
     // I6: doors. Excluded like anything else, so a door a character is somehow
     // already the subject of does not offer itself.
@@ -103,6 +117,11 @@ pub fn candidates(
             .into_iter()
             .filter(|c| !exclude.contains(&c.guid)),
     );
+    // VEH2b: the cars with somebody in them. Deliberately NOT filtered against
+    // `exclude`, because at the press site `exclude` is `occupied_seats` and
+    // every chassis this adds is in it — which is the whole point. See
+    // `carjack::candidates`.
+    out.extend(super::carjack::candidates(world, bridge, feet));
     // One sorted walk, because the rule's tie-break is only deterministic over
     // one: a seat and an item at exactly the same distance must resolve the same
     // way in both hosts.

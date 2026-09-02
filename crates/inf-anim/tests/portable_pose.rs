@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 42] = [
+const SIM_PATH: [(&str, &str, &str); 43] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is

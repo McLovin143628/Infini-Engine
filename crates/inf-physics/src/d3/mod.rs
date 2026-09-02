@@ -15,6 +15,7 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 // P29.6 the locomotion camera: the fixed-step door both hosts call, and
 // `cast_shape`'s third consumer (Ruling 3).
 pub mod camera;
+pub mod carjack;
 mod character;
 // I6 doors: the leaf's collider, the swing's blocking probe, and the door half
 // of the interaction candidate list. The rules are `inf_ecs::door`.
