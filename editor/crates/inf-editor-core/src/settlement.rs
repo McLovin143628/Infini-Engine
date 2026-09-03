@@ -217,6 +217,70 @@ fn venue_min_ring(kind: SiteKind) -> u32 {
 /// costs the strip its club and then its bar in that order.
 const VENUE_SHARE: usize = 3;
 
+/// **A settlement's institutions, in the order the strip assigns them** (wave
+/// EMS1).
+///
+/// A city gets all four; a town gets a fire hall and a clinic. That is the
+/// answer to *what does a settlement of this size actually have*, and the order
+/// is not decorative for [`venue_strip`]'s reason exactly — the blocks are
+/// handed out nearest-first, so the first entry is the one closest to the
+/// centre.
+///
+/// # Why a town gets these two and not the other two
+///
+/// A **fire hall** is the one civic building a settlement of any size has,
+/// because the alternative is that it burns down; it is first so it is central,
+/// which is where a hall goes when the thing that matters about it is how long
+/// it takes to leave. A **clinic** is a hospital a town can afford: one or two
+/// storeys, a waiting room and consulting rooms, on a high-street lot — which is
+/// exactly what `zone_lots` gives it and why it is the institution that scales
+/// down.
+///
+/// A town gets no **hospital** because a hospital is a 52 × 50 m lot and five
+/// storeys and a town's whole grid is 76 m on a side; and no **police station**
+/// because a station without a city to police is a building with a cell block
+/// and nobody in it. Both are city facts, and this list is where they are
+/// stated rather than emerging from a weight nobody can read.
+fn civic_strip(kind: SiteKind) -> &'static [ArchetypeId] {
+    const CITY: &[ArchetypeId] = &[
+        ArchetypeId::FireHall,
+        ArchetypeId::Hospital,
+        ArchetypeId::PoliceStation,
+        ArchetypeId::Clinic,
+    ];
+    const TOWN: &[ArchetypeId] = &[ArchetypeId::FireHall, ArchetypeId::Clinic];
+    match kind {
+        SiteKind::City => CITY,
+        _ => TOWN,
+    }
+}
+
+/// The innermost ring an institution may take (wave EMS1).
+///
+/// **Ring 0 everywhere, and that is the difference from the venue strip.** A
+/// venue sits one ring out of a city's core because ring 0 is the most
+/// expensive ground in the settlement and a bar cannot pay for it. A fire hall
+/// does not care what the ground costs; what it cares about is how long the
+/// appliance takes to reach the far side of the city, and that is minimised at
+/// the crossroads. The same is true of an emergency room.
+///
+/// A function rather than a constant, on `venue_min_ring`'s own shape, so the
+/// day a city wants its hospital pushed out of the core there is one place to
+/// say so.
+fn civic_min_ring(_kind: SiteKind) -> u32 {
+    0
+}
+
+/// At most one block in this many becomes an institution (wave EMS1) — the
+/// `VENUE_SHARE` guard, for its reason.
+///
+/// **Four, not three**, and the extra rung is deliberate: the civic strip is
+/// evaluated *after* the venue strip and takes from what is left, so a share as
+/// generous as nightlife's would let a nine-block town spend three blocks on
+/// civic buildings and one on a bar. A settlement is mostly the places people
+/// live and work in; the institutions are what it *has*, not what it is made of.
+const CIVIC_SHARE: usize = 4;
+
 /// **Which archetypes are furnished** (island wave I8a, ruling 3).
 ///
 /// The orchestrator's ruling was *measure, then decide, default ON*, and the
@@ -797,6 +861,48 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
             .collect()
     };
 
+    // **THE CIVIC STRIP** (wave EMS1): the settlement's institutions, on the
+    // venue strip's pattern exactly and for its argument -- "a city has a
+    // hospital" is a fact about the settlement and not a probability per block,
+    // so it cannot live in `zone_table` any more than `Industrial` or a
+    // nightclub can.
+    //
+    // Where: nearest the centre, from ring 0 -- and that is the one line that
+    // differs from the venues. A bar sits one ring out of a city's core because
+    // it cannot pay for the ground; a fire hall does not care what the ground
+    // costs, it cares how long the appliance takes to reach the far side of the
+    // city, and that is minimised at the crossroads.
+    //
+    // **AFTER the venues, and that ordering is load-bearing.** Both strips take
+    // the blocks nearest the centre, so evaluating civics first would shrink the
+    // venue strip's candidate list -- and on the small fixture that costs a city
+    // its strip club, which `the_nightlife_strip_is_one_per_settlement_and_
+    // three_kinds_per_city` asserts by name. Two gate arms also pick their
+    // target venue with `find(|b| b.archetype.is_venue())` over block order, so
+    // a venue that moved would move a whole PIE-versus-shipping trace.
+    //
+    // Blocks either earlier rule has claimed are skipped rather than
+    // overwritten, so no two rules can silently disagree about one block.
+    let civics: Vec<((i32, i32), ArchetypeId)> = {
+        let want = civic_strip(s.kind);
+        let floor = civic_min_ring(s.kind);
+        let mut near: Vec<(u64, i32, i32)> = cells
+            .iter()
+            .filter(|(col, row, ring, _)| {
+                *ring >= floor
+                    && !industrial.contains(&(*col, *row))
+                    && !venues.iter().any(|(k, _)| *k == (*col, *row))
+            })
+            .map(|(col, row, _, c)| ((*c - centre).length_squared().to_bits(), *col, *row))
+            .collect();
+        near.sort();
+        near.truncate(want.len().min(near.len() / CIVIC_SHARE));
+        near.into_iter()
+            .zip(want.iter().copied())
+            .map(|((_, col, row), a)| ((col, row), a))
+            .collect()
+    };
+
     let name_seed = Hash64::new(design.recipe.seed)
         .mix_u64(SETTLEMENT_SALT)
         .mix_u64(site as u64);
@@ -807,6 +913,8 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
             let archetype = if industrial.contains(&(*col, *row)) {
                 ArchetypeId::Industrial
             } else if let Some((_, a)) = venues.iter().find(|(k, _)| *k == (*col, *row)) {
+                *a
+            } else if let Some((_, a)) = civics.iter().find(|(k, _)| *k == (*col, *row)) {
                 *a
             } else {
                 pick(zone_table(s.kind, *ring), h.mix_u64(ZONE_SALT).unit())
@@ -2201,5 +2309,127 @@ mod tests {
             vec!["Bar", "Nightclub", "StripClub"],
             "the committed recipes do not place one venue of each kind"
         );
+    }
+
+    /// **THE CIVIC STRIP, on both committed recipes** (wave EMS1) — the
+    /// nightlife strip's arm, one wave later, plus the three claims that are
+    /// only true of institutions.
+    ///
+    /// * every settlement on the shipped island has a **fire hall**, because
+    ///   the alternative is that it burns down and because it is the first
+    ///   entry of both strips;
+    /// * the cities and only the cities have a **hospital** and a **police
+    ///   station** — a town's grid is 76 m on a side and a hospital's lot is
+    ///   52 × 50 m, and a station with no city to police is a cell block with
+    ///   nobody in it;
+    /// * no settlement spends more than a quarter of itself on civic buildings,
+    ///   the `CIVIC_SHARE` guard asserted rather than trusted.
+    ///
+    /// And the ordering claim the whole placement rests on: **the venue strip
+    /// is unchanged**. Both strips take blocks nearest the centre, so a civic
+    /// strip evaluated first would eat a city's strip club — and two island-gate
+    /// arms pick their target venue by block order, so a venue that moved would
+    /// move a whole PIE-versus-shipping trace. The arm above is the pin on that;
+    /// this one records the count that would have changed.
+    #[test]
+    fn the_civic_strip_gives_every_settlement_a_hall_and_the_cities_a_hospital() {
+        let mut kinds: std::collections::BTreeSet<String> = Default::default();
+        for (which, recipe) in crate::island::ISLAND_RECIPES.iter().enumerate() {
+            let Some(design) = crate::island::committed_design(recipe) else {
+                eprintln!("SKIP: no committed island design for {recipe}");
+                return;
+            };
+            for plan in settlements(&design) {
+                let mut v: Vec<String> = plan
+                    .blocks
+                    .iter()
+                    .filter(|b| b.archetype.is_institution())
+                    .map(|b| b.archetype.name().to_string())
+                    .collect();
+                v.sort();
+                println!(
+                    "EMS1 civic strip: {recipe} {} ({:?}, {} blocks) -> {v:?}",
+                    plan.name,
+                    plan.kind,
+                    plan.blocks.len()
+                );
+                for n in &v {
+                    kinds.insert(n.clone());
+                }
+                assert!(
+                    v.len() * CIVIC_SHARE <= plan.blocks.len().max(CIVIC_SHARE),
+                    "{}: {} institution(s) on {} blocks",
+                    plan.name,
+                    v.len(),
+                    plan.blocks.len()
+                );
+                // A hospital and a station are CITY facts. Asserted as an
+                // implication rather than as a count, because "a town has no
+                // hospital" is the half a widened `civic_strip` would silently
+                // break.
+                if plan.kind != SiteKind::City {
+                    for c in ["Hospital", "PoliceStation"] {
+                        assert!(
+                            !v.iter().any(|n| n == c),
+                            "{} is a {:?} and has a {c}",
+                            plan.name,
+                            plan.kind
+                        );
+                    }
+                }
+                if which == 0 {
+                    assert!(
+                        v.iter().any(|n| n == "FireHall"),
+                        "{} has no fire hall — every settlement has one, or the \
+                         strip's first entry is not reaching the smallest \
+                         reservations",
+                        plan.name
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            vec!["Clinic", "FireHall", "Hospital", "PoliceStation"],
+            "the committed recipes do not place one institution of each kind"
+        );
+    }
+
+    /// **The civic floor is the CROSSROADS, and the venue floor is not** (wave
+    /// EMS1) — the one line that differs between the two strips, pinned.
+    ///
+    /// Written as an arm rather than as a comment for
+    /// `the_industrial_floor_is_the_outer_half_and_never_the_core`'s reason: a
+    /// min-ring rule that quietly picked up the venue's `1` would push a city's
+    /// fire hall out of its core, and nothing else in the tree would notice.
+    #[test]
+    fn the_civic_floor_is_the_crossroads_and_the_venue_floor_is_not() {
+        for kind in [SiteKind::City, SiteKind::Town, SiteKind::Waypoint] {
+            assert_eq!(
+                civic_min_ring(kind),
+                0,
+                "{kind:?}: an appliance is quickest from the crossroads"
+            );
+        }
+        assert_eq!(venue_min_ring(SiteKind::City), 1, "the venue floor moved");
+        // …and the two strips never name the same archetype, or one block would
+        // be claimed by whichever rule ran first.
+        for kind in [SiteKind::City, SiteKind::Town] {
+            for a in civic_strip(kind) {
+                assert!(a.is_institution(), "{a:?} is on the civic strip");
+                assert!(!a.is_venue(), "{a:?} is on both strips");
+            }
+            for a in venue_strip(kind) {
+                assert!(!a.is_institution(), "{a:?} is on both strips");
+            }
+        }
+        // A town has the two that scale down and neither of the two that do
+        // not, which is the whole of `civic_strip`'s doc as an assertion.
+        let town: Vec<&str> = civic_strip(SiteKind::Town)
+            .iter()
+            .map(|a| a.name())
+            .collect();
+        assert_eq!(town, vec!["FireHall", "Clinic"]);
+        assert_eq!(civic_strip(SiteKind::City).len(), 4);
     }
 }
