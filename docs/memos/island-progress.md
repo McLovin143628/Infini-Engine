@@ -27915,6 +27915,13 @@ or not.
 * **(f) the budget** — the `dispatch` row at **~0.006 ms** dev with recognition
   in it, against a 0.5 ms ceiling this wave does not move, and armed (a ceiling
   over zero work is satisfied by a pass that never ran);
+  *[AUDIT CORRECTION: measured at `dda8d836`, and the arm printed `0 recognition
+  ray(s)` beside it — the arming clauses covered the file and the officer and not
+  the LOOKING, so the row contained the range test and no line-of-sight work at
+  all. With the hero stood in front of the officer and a `rays > 0` clause added,
+  at head the same row reads **0.0037 ms** over **602 rays in 602 steps** —
+  lower, because a hero the unit is standing next to costs the row a route solve
+  and gains it 32 rays a step, and the route was the dearer half.]*
 * **(g) the falsifier** — the same town with no crime files nothing, casts no
   ray, folds no byte, draws no star, and **asserts the traffic clock is
   advancing**, so no arm above is certified against a frozen counter.
@@ -27949,6 +27956,13 @@ anyway.
    also want the car — and it is why the vehicle channel outweighs the outfit,
    but a town where the police stop the wrong man one time in eight is a design
    decision somebody should get to make rather than inherit.
+   *[AUDIT CORRECTION: the collision is real in the CHANNEL and cannot reach an
+   officer's eyes. `d3::crime::look` walks `officers × wanted` and scores each
+   suspect against **their own file**, so somebody with no file is never in a
+   scored pair: the false-positive rate is **zero**, not one in eight. Measured
+   and pinned by `crime_3d::an_innocent_in_the_same_coat_is_never_looked_at` —
+   an innocent twin in the criminal's exact outfit standing 2 m from the officer
+   gives `in_range 0, rays 0, recognised 0` once the criminal is out of range.]*
 3. **A level with no streets has no clock.** Every step in the crime feed is
    `traffic::steps`, which lives on the traffic population, so a street-less
    level stamps every act `0`, the feed's forward read never advances and the
@@ -27974,3 +27988,165 @@ anyway.
    is still carjackable; doing it now also puts an `ActKind::Carjack` on the
    player's file with the *cruiser's* description in the vehicle channel, which
    is arguably correct and definitely untested.
+
+### EMS3 — the adversarial audit (2026-09-03)
+
+Every table in the ledger above reproduces at the wave's head. The recognition
+ranges print `outfit 16.7 / 1.1`, `vehicle 23.5 / 12.5`, `both 25.1 / 15.2`; the
+freshness curve prints `0.940 / 0.801 / 0.598 / 0.000`; the 8 m checkpoint prints
+`0.752 SEEN / 0.451 SEEN`, `0.480 SEEN / 0.288 ----`, `0.680 SEEN / 0.408 SEEN`,
+`0.000 ---- / 0.000 ----`, which is the four verdicts §7 claims; the failure
+trace is `1 798 recognition(s) over 1 800 ray(s)`; the two police-don't-cheat
+measurements are `32 rays cast, 32 blocked, suspect at (107, 0), ledger at
+(200, 200)` and `hero at x = 389, police believe (52.5, 1.4, 0)`. Two numbers
+drifted and are corrected in place above (§7 (f) and carried item 2).
+
+Every claim below was mutation-verified before it was believed. Routing the guid
+back into `look_digest` reds three independent arms
+(`witness::a_description_is_what_you_wear_and_not_who_you_are`,
+`crime_3d::changing_the_clothes_and_leaving_the_car_defeats_the_description`, and
+the gate's escape arm, at 1 798 recognitions); reverting one projector to
+`agent_look` reds the `projector_mirror` fragment pin; deleting one exit
+`clear_*` reds `simulate_forgets_on_exit_exactly_what_it_forgot_on_entry` by
+name; deleting `crime::profile_state_bytes` from the fold reds the `SECTIONS`
+pin; making `re_anchor` read the suspect's transform reds the law arm at
+`followed: 300`; and `RECOGNIZE_SCORE = 0.0` reds the checkpoint table.
+
+**Six defects found and fixed.**
+
+**1. A KILLING WAS FILED AGAINST THE MAN WHO WAS KILLED** — the one that matters.
+`step_witness` raises a death off `step_deaths`' list of bodies that stopped
+working, so the guid nearest to hand is the **victim's**, and
+`WitnessedAct::actor` is documented as *"who did it"*. Nothing read the field for
+two waves. EMS3 made two things read it and both read it as the culprit:
+`crime::report_act` keys a profile on it and `open_incidents` files the search
+row under it.
+
+Measured at `dda8d836` on `weapon_3d`'s rifle rig with one bystander: the record
+is `Killed actor = TARGET` carrying the **target's** `actor_look`. So shooting a
+man dead opened a **three-heat file — `MultiUnit`, two cars — on the person who
+had just been murdered, wearing his description**, and left the shooter on the
+two heat his `Shot` earned. Every arm in the tree passed; nothing asserted who a
+death was attributed to.
+
+A death is now attributed to the shooter of the hit that named the victim (the
+blow is in the same step's hits, because `weapon::damage_entity` is the only
+writer of `Health::dead` and `apply_hit` its only per-step caller) and to
+`Uuid::nil()` when nothing in the step's hits accounts for it. `report_act`
+refuses a nil actor and `open_incidents` files no search row for one; the crime
+scene still opens where the body is, so EMS2's call is unchanged.
+
+**2. …AND THE `Assault` CHANNEL WAS UNREACHABLE, which is the same bug one wave
+younger.** A death and a punch are both recorded at `strike_point` of the person
+hit — a point **inside their own capsule**. The witness pass excludes the
+observer's collider and the *actor's*, so every sight ray to one of them stopped
+a capsule-radius short and came back blocked. For `ActKind::Assault`, one of this
+wave's own two new kinds, that was true from the moment it was written:
+measured, a bat swung 1.6 m from a bystander with a clear line records **zero
+observers**, `report_act` refuses a crime nobody saw, and no arm in the tree said
+so. The act now carries the body its position is measured on and the ray is let
+through it. A corpse is also no longer a witness to its own murder — the actor
+exclusion used to cover the victim for free, and one observer is all `report_act`
+needs to open a file.
+
+Two new arms, both mutation-verified:
+`weapon_3d::a_homicide_is_filed_against_whoever_pulled_the_trigger` and
+`weapon_3d::a_punch_is_witnessed_by_the_bystander_who_can_see_it`.
+
+**3. THE SEVERITY LADDER ABOVE ONE CAR RAN IN NO TEST AT ALL.** EMS3 minted
+`Response::{MultiUnit, Swat}`, `wanted_units`, `units_on` and a new disjunct in
+`assign`'s pending filter — and §4 claims *"until this line nothing in the engine
+could ever ask for three cars at once"*. A grep for `Swat`, `MultiUnit`,
+`wanted_units` or `units_on` across **every test file in the repository**
+returned nothing at `dda8d836`. The only coverage was `Response::for_heat`'s own
+table, which is a pure function of a `u32`, and the gate's single carjack, which
+is `Patrol`. The edit it rests on changes the pending filter for **every**
+incident kind, not only for crimes.
+
+`dispatch_3d::a_serious_file_pulls_a_second_car_and_a_petty_one_does_not`: one
+town, two cruisers, the same crime at two heats. Measured — the ladder does work:
+`a killed file (multi-unit) drew 2 car(s); a carjack file (patrol) drew 1`. The
+petty row is the falsifier. Mutation-verified: `wanted_units` pinned to 1 reds it
+at `left: 1, right: 2`.
+
+**4. THE BUDGET ARM MEASURED A PASS THAT CAST NO RAYS.** Hardened at `dda8d836`
+against an empty ledger (`worst_files > 0`, `looked > 0`) and still measuring
+nothing: the cruiser's search takes it about a hundred metres from a hero who
+never moves off the crime scene, so the range gate rejects every pair before a
+ray is spent. The arm printed `0 recognition ray(s) over 899 step(s) with an
+officer out` in plain sight, and its ceiling assertion was `0 <= 899 * 32`. The
+hero now stands eight metres in front of the officer on every step of both loops,
+and a third arming clause, `rays > 0`, refuses a budget row with no ray in it.
+See §7 (f) for the corrected numbers.
+
+**5. THE INNOCENT LOOK-ALIKE IS A PARAGRAPH, NOT A BEHAVIOUR.** Three doc
+comments and carried item 2 say two people dressed alike collide *"on purpose"*
+and that this is *"what a description costs somebody innocent"*. The channel does
+collide — `witness`' own arm measures it — but `d3::crime::look` walks
+`officers × wanted` and scores each suspect **against their own file**, so
+somebody with no file is never in a scored pair, no ray is spent on them and
+`in_range` never counts them. **The cost of a description to an innocent man is
+zero.**
+
+Nothing about the police-don't-cheat law is weakened: `match_score` still takes
+no `Uuid`, `last_seen` still has two writers, and `sight` is still behind a range
+gate, a ray and a threshold. The pairing decides *who gets scored*, and it is a
+legitimate **cost** bound — the honest walk is `officers × candidates_near ×
+files`, which multiplies the pass by the population of a street. Written down as
+an arm (`crime_3d::an_innocent_in_the_same_coat_is_never_looked_at`) so the day
+somebody implements the wrong man being stopped, a test fails instead of a
+paragraph being believed. Corrected in the same pass:
+`RecognitionStats::unrecognised` was documented as *"pairs that had a clear
+view"* and is incremented in two branches, the one a successful evasion takes
+being the other — the gate printed `311 clear view(s)` on a run whose ray count
+was `0`.
+
+**6. THE DESCRIPTION WAS REBUILT ONCE PER OFFICER.** `d3::crime`'s header prices
+the pass at `O(officers × files)` distance tests; the distance tests were, the
+descriptions were not. `crime::describe` (four ECS lookups), `profile_of` and
+`match_score` all sat inside the pair loop and none of them reads the officer. At
+the constants' own ceiling — `MAX_UNITS` 64 × `MAX_PROFILES` 32 — that is two
+thousand descriptions a step to answer thirty-two officer-independent questions.
+Hoisted to one pass over `wanted`; `in_range` and `unrecognised` are still
+counted per pair and in the same order, and every gate is byte-identical.
+
+Also repaired: three assertion messages and a `println!` **the audit itself**
+wrote arrived from scripted edits with their backslash continuations eaten — runs
+of 10 to 14 spaces inside literals, caught by `inf_packager::cook`'s workspace
+sweep, which is exactly what it exists for. The P22 law's own shorthand is worth
+restating: only `chr(92)` and a heredoc are remedies.
+
+### Carried by the audit (beyond the wave's own eight)
+
+9. **`Response::Swat` is a COUNT, not a crew.** The top rung asks for three
+   police units, and `UnitKind::Police` is *"a cruiser or a tactical van"* — so
+   nothing prefers the SWAT van EMS1 parked, and a town with three cruisers
+   answers a spree with three cruisers. The escalation is real (defect 3's arm
+   measures it); the *tactical* half of the name is not yet implemented.
+10. **An unattributable death opens a call and no file.** A `damage_entity` from
+    a Blueprint or a host's debug door kills somebody nobody hit, so the act
+    names `Uuid::nil()` and no profile opens. That is the honest outcome and it
+    means a scripted execution is not a crime anybody is wanted for.
+11. **A homicide's observers are the people who could see the BODY**, not the
+    people who could see the shooter. The act is recorded at the victim's chest
+    because that is where the crime scene is; a witness behind the shooter with
+    no line to the body is not on the list. Two rays would price it honestly, and
+    `MAX_ACTS_PER_STEP × MAX_OBSERVERS` is the budget it would come out of.
+12. **Changing clothes in an officer's line of sight is instant and total.**
+    `crime_3d::changing_the_clothes_and_leaving_the_car_defeats_the_description`
+    pins it: same officer, same 8 m, same noon, and the pass after the swap reads
+    `rays 0, recognised 0`. There is no "I watched you do that" state, which is
+    the gap carried item 5 names from the other end.
+13. **`wardrobe::candidates` walks every scattered instance in the world, every
+    frame.** The mesh compare is one `Option<Uuid>` and the band filter is behind
+    it, but the walk is `O(all instances)` per prompt query and it allocates a
+    sorted `Vec` of every `PcgVolume` per call. `door::placements_near` is the
+    pattern it cites, and that one walks `doorways` (tens per volume) rather than
+    `evaluated` (thousands). Unmeasured at island scale; the interaction prompt
+    is not in the step profile.
+14. **`simulate_forgets_on_exit_exactly_what_it_forgot_on_entry` reads a
+    6 000-character window.** Measured margins at head: the entry block's last
+    `clear_` sits at 4 820 of 6 000 and the exit block's at 4 435, with 21 603
+    characters between the two anchors. It works and has about 20 % of headroom;
+    a fifteenth `clear_*` door with a long comment is what would silently
+    truncate it.

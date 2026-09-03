@@ -123,8 +123,11 @@ pub struct RecognitionStats {
 ///
 /// The order is load-bearing:
 ///
-/// 1. **file** the witness log's new acts, so a crime committed this step is on
-///    a file before anybody is asked to recognise its author;
+/// 1. **file** the witness log's new acts, so a crime is on a file before
+///    anybody is asked to recognise its author. (The act is the *previous*
+///    step's: `dispatch` is phase 7 and `gameplay`, which observes an act, is
+///    phase 15, so a crime committed on step *n* is filed at the top of step
+///    *n + 1*. One step of latency, on both hosts, by construction.);
 /// 2. **look** — every on-duty officer against every open file, gated by range,
 ///    then by a ray, then by the score;
 /// 3. **decay** — heat falls for everybody nobody saw, which must be last or a
