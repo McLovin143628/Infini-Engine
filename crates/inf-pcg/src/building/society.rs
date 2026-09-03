@@ -806,34 +806,61 @@ mod tests {
     #[test]
     fn every_archetype_holds_what_its_rooms_imply() {
         println!(
-            "{:<10} {:>6} {:>6} {:>6} {:>7} {:>7}",
-            "archetype", "floors", "rooms", "homes", "workers", "errands"
+            "{:<14} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7}",
+            "archetype", "floors", "rooms", "homes", "day", "night", "errands"
         );
         let mut homes_of = std::collections::BTreeMap::new();
+        let mut night_of = std::collections::BTreeMap::new();
+        let mut day_of = std::collections::BTreeMap::new();
         for id in ArchetypeId::ALL {
             let floors = 3;
             let plan = plan_of(id, floors);
             let slots = slots_of(&plan, 0, 0);
             let h = slots.iter().filter(|s| s.role == SlotRole::Home).count();
-            let w = slots.iter().filter(|s| s.role == SlotRole::Work).count();
+            let work = |sh: SlotShift| {
+                slots
+                    .iter()
+                    .filter(|s| s.role == SlotRole::Work && s.shift == sh)
+                    .count()
+            };
+            let (d, n) = (work(SlotShift::Day), work(SlotShift::Night));
             let e = slots.iter().filter(|s| s.role == SlotRole::Errand).count();
             println!(
-                "{:<10} {:>6} {:>6} {:>6} {:>7} {:>7}",
+                "{:<14} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7}",
                 id.name(),
                 floors,
                 plan.rooms.len(),
                 h,
-                w,
+                d,
+                n,
                 e
             );
             homes_of.insert(id.name(), h);
+            day_of.insert(id.name(), d);
+            night_of.insert(id.name(), n);
             assert!(
-                h + w + e > 0,
+                h + d + n + e > 0,
                 "{} holds nobody at all on {floors} storeys of {} room(s)",
                 id.name(),
                 plan.rooms.len()
             );
         }
+        // **THE INSTITUTIONS ARE STAFFED AT BOTH HOURS, AND THE CLINIC SHUTS**
+        // (wave EMS1). The falsifying half is the clinic: if every institution
+        // held a night crew this arm would be satisfied by a table that made no
+        // distinction at all, and "an institution is open" would be a property
+        // of the word rather than of the rooms.
+        for name in ["PoliceStation", "FireHall", "Hospital"] {
+            assert!(day_of[name] > 0, "{name} is empty at ten in the morning");
+            assert!(night_of[name] > 0, "{name} is empty at ten at night");
+            assert_eq!(homes_of[name], 0, "{name} is somebody's home");
+        }
+        assert!(day_of["Clinic"] > 0, "a Clinic holds no clinician");
+        assert_eq!(
+            night_of["Clinic"], 0,
+            "a Clinic works nights — then nothing in this table says what a \
+             round-the-clock room IS"
+        );
         // The three sentences the module docs make about archetypes, each one a
         // consequence of the ROOM table rather than an entry in it.
         assert!(

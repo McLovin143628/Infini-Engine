@@ -700,6 +700,23 @@ impl Ctx<'_> {
     /// the venues — emits nothing, which is why a house is byte-identical to
     /// its pre-VEN1b self.
     ///
+    /// # THE ANCHOR WAS A PROXY FOR "VENUE", AND WAVE EMS1 CAUGHT IT
+    ///
+    /// `ground_anchors.first()` was the whole gate, and it measured right for a
+    /// reason that has nothing to do with music: the three archetypes with an
+    /// anchor were the three venues. The institutions declare anchors too — a
+    /// fire hall's ground floor IS its bay, and that is a fact about the
+    /// building, not a probability — and the first thing they got for it was a
+    /// **speaker in a police station**. That is `street_face`'s
+    /// bouncer-gated-on-the-neon-sign defect exactly, one function along, and it
+    /// is fixed the same way the VEN1b audit fixed that one: with a rule about
+    /// the ROOM. A room's music comes from a room people go to *be* in, which is
+    /// [`station::is_social`](super::station::is_social) — the same predicate
+    /// that gates every other station in this file.
+    ///
+    /// All three venues' first anchor is a social room (`BarRoom`,
+    /// `DanceFloor`, `Stage`), so nothing a venue emits moves.
+    ///
     /// It hangs at [`MUSIC_HANG`](super::station::MUSIC_HANG) of the storey:
     /// above head height, below the rig, and — the reason that matters — high
     /// enough that the doorway rule's ray from a listener out in the street
@@ -711,6 +728,9 @@ impl Ctx<'_> {
         let Some(&anchor) = self.arch.ground_anchors.first() else {
             return;
         };
+        if !super::station::is_social(anchor) {
+            return;
+        }
         let Some((ri, room)) = self.plan.rooms_on(0).find(|(_, r)| r.kind == anchor) else {
             return;
         };
@@ -1913,8 +1933,27 @@ mod tests {
                 "{id:?} raises a deck nobody performs on"
             );
         }
+        // **An institution offers a COUNTER and nothing else** (wave EMS1),
+        // which is the whole of its staffing as a station: a front desk is a
+        // `Tend`, and a waiting room's bench is furniture rather than a place
+        // somebody spends an evening. Armed per archetype, because "the four
+        // offer something" is satisfied by any one of them.
+        for id in ArchetypeId::ALL.into_iter().filter(|a| a.is_institution()) {
+            let w = best[archetype(id).display];
+            assert!(w[2] > 0, "{id:?} has no front desk anybody stands behind");
+            assert_eq!(
+                w[0] + w[1] + w[3],
+                0,
+                "{id:?} offers {w:?} — an institution is not a night out"
+            );
+            assert_eq!(w[4], 0, "{id:?} put a bouncer on a civic door");
+            assert_eq!(w[5], 0, "{id:?} plays music at its patients");
+        }
         // …and the seven that predate the venues offer nothing at all.
-        for id in ArchetypeId::ALL.into_iter().filter(|a| !a.is_venue()) {
+        for id in ArchetypeId::ALL
+            .into_iter()
+            .filter(|a| !a.is_venue() && !a.is_institution())
+        {
             let w = best[archetype(id).display];
             assert_eq!(
                 w.iter().sum::<usize>(),
@@ -2357,6 +2396,44 @@ mod tests {
             let out = built(id, 2, 44);
             let emitters: Vec<&PcgInstance> =
                 out.instances.iter().filter(|i| i.surface.emits()).collect();
+            // **An institution emits too, and differently** (wave EMS1): a lamp
+            // over its door and a board over its counter, and nothing that
+            // pulses. Asserted rather than exempted, because "not a venue" would
+            // be satisfied by a station with no lamp at all — and the lamp is
+            // how a building an emergency is called to is found at night.
+            if id.is_institution() {
+                // **THE LAMP IS THE CLAIM, AND IT IS THE ARCHETYPE'S OWN
+                // COLOUR.** Not a count: a count is satisfied by any two lit
+                // things, and what makes a fire hall findable at night is that
+                // the lamp over its door is RED. So the arm asks for the
+                // palette's authored colour on a real instance — which is the
+                // whole path, palette → `street_face` → surface — at every seed,
+                // because an entrance is not a probability.
+                let want = arch
+                    .entrance_sign
+                    .unwrap_or_else(|| panic!("{}: no lamp declared", arch.display))
+                    .colour;
+                for seed in [2u64, 44, 512, 900] {
+                    let out = built(id, 2, seed);
+                    let lit: Vec<&PcgInstance> =
+                        out.instances.iter().filter(|i| i.surface.emits()).collect();
+                    assert!(
+                        lit.iter().any(|i| i.surface.emissive == want),
+                        "{} at seed {seed}: {} emitter(s) and none is the \
+                         {want:?} lamp over its door — a civic building an \
+                         emergency is called to cannot be found at night",
+                        arch.display,
+                        lit.len()
+                    );
+                    assert!(
+                        lit.iter().all(|i| i.surface.pulse_hz == 0.0),
+                        "{} at seed {seed}: a civic sign is STEADY — a flashing \
+                         one is a vehicle's light bar, and that is wave EMS2's",
+                        arch.display
+                    );
+                }
+                continue;
+            }
             if !id.is_venue() {
                 assert!(
                     emitters.is_empty(),

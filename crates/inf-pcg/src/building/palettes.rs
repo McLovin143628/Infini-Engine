@@ -67,18 +67,36 @@ pub enum ArchetypeId {
     Nightclub,
     /// **A strip club** (wave VEN1a).
     StripClub,
+    /// **A police station** (wave EMS1) — a front counter, a cell block, offices
+    /// over them and a garage the cruisers and the tactical van live in.
+    PoliceStation,
+    /// **A fire hall** (wave EMS1) — one tall apparatus bay and the crew that
+    /// waits in it, at every hour.
+    FireHall,
+    /// **A hospital** (wave EMS1) — wards, consulting rooms, a public waiting
+    /// room and the administration behind it.
+    Hospital,
+    /// **A clinic** (wave EMS1) — consulting rooms and a waiting room, and
+    /// nothing that keeps it open overnight. The hospital's small twin, and
+    /// deliberately the one institution that **shuts**.
+    Clinic,
 }
 
 impl ArchetypeId {
     /// Every archetype, in the canonical order the node's choice param and the
     /// gate both use.
-    /// **Append-only**, and the venues are appended for that reason. The
-    /// wire form of an archetype is its NAME (`graph.rs` writes
-    /// `P::Enum(a.name())` and parses it back), so reordering this array is not
-    /// observable in a committed document -- but the gate, the zone library and
-    /// three ledgers all read it in order, and a diff that moves seven rows to
-    /// insert three is a diff nobody can read.
-    pub const ALL: [ArchetypeId; 10] = [
+    /// **Append-only**, and the venues (VEN1a) and the institutions (EMS1) are
+    /// appended for that reason. The wire form of an archetype is its NAME
+    /// (`graph.rs` writes `P::Enum(a.name())` and parses it back), so reordering
+    /// this array is not observable in a committed document -- but the gate, the
+    /// zone library and three ledgers all read it in order, and a diff that
+    /// moves seven rows to insert three is a diff nobody can read.
+    ///
+    /// It is also read by POSITION in one place that reaches bytes:
+    /// `settlement::zone_graph` seeds a zone document off `1 + position(a)`, so
+    /// appending keeps the ten documents that predate this wave byte-identical
+    /// and inserting would re-write every one of them.
+    pub const ALL: [ArchetypeId; 14] = [
         ArchetypeId::Office,
         ArchetypeId::Apartment,
         ArchetypeId::Industrial,
@@ -89,6 +107,10 @@ impl ArchetypeId {
         ArchetypeId::Bar,
         ArchetypeId::Nightclub,
         ArchetypeId::StripClub,
+        ArchetypeId::PoliceStation,
+        ArchetypeId::FireHall,
+        ArchetypeId::Hospital,
+        ArchetypeId::Clinic,
     ];
 
     /// The stable identifier used in the node param, diagnostics and traces.
@@ -104,6 +126,10 @@ impl ArchetypeId {
             ArchetypeId::Bar => "Bar",
             ArchetypeId::Nightclub => "Nightclub",
             ArchetypeId::StripClub => "StripClub",
+            ArchetypeId::PoliceStation => "PoliceStation",
+            ArchetypeId::FireHall => "FireHall",
+            ArchetypeId::Hospital => "Hospital",
+            ArchetypeId::Clinic => "Clinic",
         }
     }
 
@@ -118,6 +144,31 @@ impl ArchetypeId {
         matches!(
             self,
             ArchetypeId::Bar | ArchetypeId::Nightclub | ArchetypeId::StripClub
+        )
+    }
+
+    /// **Whether this archetype is an INSTITUTION** (wave EMS1) — a building the
+    /// town calls rather than one it lives, works or drinks in.
+    ///
+    /// One door, on [`is_venue`](Self::is_venue)'s argument exactly, and minted
+    /// at the same time as its four readers. Three of them are the **negative
+    /// filters** the venue wave left behind: `assemble`'s arms say "every
+    /// archetype that is not a venue hangs no rig / offers no station / emits no
+    /// authored colour", and two of those three are false of a police station
+    /// the moment it has a front desk and a lit lamp over its door. A widened
+    /// `is_venue` would have made a hospital a venue in six other places; a
+    /// second `matches!` in each arm would have been three chances to forget the
+    /// clinic.
+    ///
+    /// The fourth reader is `settlement::furnishes`, which is a *policy* and is
+    /// stated there rather than here.
+    pub fn is_institution(self) -> bool {
+        matches!(
+            self,
+            ArchetypeId::PoliceStation
+                | ArchetypeId::FireHall
+                | ArchetypeId::Hospital
+                | ArchetypeId::Clinic
         )
     }
 
@@ -457,11 +508,15 @@ pub fn archetype(id: ArchetypeId) -> &'static BuildingArchetype {
         ArchetypeId::Bar => &BAR,
         ArchetypeId::Nightclub => &NIGHTCLUB,
         ArchetypeId::StripClub => &STRIP_CLUB,
+        ArchetypeId::PoliceStation => &POLICE_STATION,
+        ArchetypeId::FireHall => &FIRE_HALL,
+        ArchetypeId::Hospital => &HOSPITAL,
+        ArchetypeId::Clinic => &CLINIC,
     }
 }
 
-/// All ten archetypes, in [`ArchetypeId::ALL`] order.
-pub fn archetypes() -> [&'static BuildingArchetype; 10] {
+/// All fourteen archetypes, in [`ArchetypeId::ALL`] order.
+pub fn archetypes() -> [&'static BuildingArchetype; 14] {
     ArchetypeId::ALL.map(archetype)
 }
 
@@ -2155,6 +2210,704 @@ Inner  -> Partition+\n\
         cycle_hz: 0.11,
         bar_glow: Some(([1.0, 0.55, 0.28], 4.0)),
     }),
+};
+
+// ── the institutions (wave EMS1) ────────────────────────────────────────────
+//
+// Four archetypes and one vocabulary, on `VENUE_FURNITURE`'s argument and with
+// one difference from it: the venues share a *whole* furniture table because a
+// bar, a club and a strip club are made of the same six things in three
+// proportions. The institutions are not — a cell block and a ward have nothing
+// in common — so what is shared here is the ROOM's furniture, and each
+// archetype's table is a list of which rooms it has.
+//
+// The rule text is still written out per palette (this module's own header says
+// why), and the four are deliberately the same *structure* in four sizes: a
+// pier-and-clad façade with punched windows. A civic building is not trying to
+// be interesting from the street; what tells a fire hall from a clinic is the
+// bay door, the sign over the entrance and what is inside.
+
+/// The public room of every institution: a counter, seating, a plant and a
+/// board.
+///
+/// **The counter is a `Run` and that is what makes the staff** — a `Tend`
+/// station is derived where a run is placed (`assemble::run_furniture`), and
+/// `station::tends_of` names `FrontDesk` as a counter worked in a `Waiting`
+/// room. Change this to a `Wall` placement and every institution silently loses
+/// its receptionist.
+const WAITING_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "FrontDesk",
+        half: [2.4, 0.55, 0.36],
+        place: Placement::Run,
+        per_10m2: 0.0,
+        clearance: 0.0,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Bench",
+        half: [0.95, 0.24, 0.26],
+        place: Placement::Wall,
+        per_10m2: 0.8,
+        clearance: 1.7,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Plant",
+        half: [0.3, 0.6, 0.3],
+        place: Placement::Wall,
+        per_10m2: 0.25,
+        clearance: 2.6,
+        emissive: None,
+    },
+    // The board over the counter — the lit rectangle every waiting room in the
+    // world has a queue number on. It is what makes an institution's interior
+    // visible from the street at night, and it is the one authored emitter
+    // these palettes carry indoors.
+    FurnitureDef {
+        module: "Screen",
+        half: [0.44, 0.26, 0.05],
+        place: Placement::Mounted { height_m: 2.4 },
+        per_10m2: 0.22,
+        clearance: 3.0,
+        emissive: None,
+    },
+];
+
+/// A civic back office: desks and filing. **The administration behind the
+/// scenes** — an `Office` room holds `Work` slots by area exactly as an office
+/// block's does, which is the whole of "administrative workers" as a
+/// derivation.
+const CIVIC_OFFICE_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "Desk",
+        half: [0.7, 0.37, 0.35],
+        place: Placement::Free,
+        per_10m2: 1.2,
+        clearance: 1.7,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Cabinet",
+        half: [0.5, 0.9, 0.25],
+        place: Placement::Wall,
+        per_10m2: 0.7,
+        clearance: 1.2,
+        emissive: None,
+    },
+];
+
+/// A civic store room: racking and crates.
+const CIVIC_STORAGE_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "Rack",
+        half: [0.5, 0.95, 0.3],
+        place: Placement::Wall,
+        per_10m2: 1.1,
+        clearance: 1.0,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Crate",
+        half: [0.45, 0.4, 0.4],
+        place: Placement::Free,
+        per_10m2: 0.7,
+        clearance: 1.2,
+        emissive: None,
+    },
+];
+
+/// **A cell block**: the barred fronts, the bunks behind them and a basin.
+///
+/// The `Grille` is a `Run` for the counter's reason turned inside out — a cell
+/// block's fronts are ONE continuous barred screen along the block's longest
+/// wall, not eleven discrete panels with hashed gaps, and a gap in a row of
+/// cells is a cell with no front. It is placed against the longest clear stretch
+/// exactly as a bar is, so it never crosses a doorway.
+const CELL_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "Grille",
+        half: [3.6, 1.3, 0.07],
+        place: Placement::Run,
+        per_10m2: 0.0,
+        clearance: 0.0,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Bunk",
+        half: [0.98, 0.26, 0.36],
+        place: Placement::Wall,
+        per_10m2: 0.9,
+        clearance: 1.5,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Basin",
+        half: [0.24, 0.42, 0.2],
+        place: Placement::Wall,
+        per_10m2: 0.4,
+        clearance: 2.0,
+        emissive: None,
+    },
+];
+
+/// **An apparatus bay**: the roll door, the turnout lockers and the racking.
+///
+/// The door is a `Run` and is the `Shutter` family at bay dimensions — the
+/// brief's own reuse, and the reason `RollDoor` needed no new family: a factory's
+/// roll door and a fire hall's are the same leaf with the same ribs at two
+/// sizes, which is the argument the whole `modules` table is built on.
+const BAY_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "RollDoor",
+        half: [3.4, 2.1, 0.11],
+        place: Placement::Run,
+        per_10m2: 0.0,
+        clearance: 0.0,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Locker",
+        half: [0.4, 0.9, 0.3],
+        place: Placement::Wall,
+        per_10m2: 0.8,
+        clearance: 0.95,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Rack",
+        half: [0.5, 0.95, 0.3],
+        place: Placement::Wall,
+        per_10m2: 0.35,
+        clearance: 1.6,
+        emissive: None,
+    },
+];
+
+/// **A ward**: beds against the walls and a cabinet between them.
+const WARD_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "Bed",
+        half: [0.5, 0.35, 1.05],
+        place: Placement::Wall,
+        per_10m2: 0.55,
+        clearance: 2.1,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Cabinet",
+        half: [0.28, 0.45, 0.26],
+        place: Placement::Wall,
+        per_10m2: 0.5,
+        clearance: 2.2,
+        emissive: None,
+    },
+];
+
+/// **A consulting room**: a gurney, a desk and a basin. One of each, near
+/// enough — the room holds one clinician by
+/// [`occupancy`](super::society::occupancy) and it is furnished to match.
+const EXAM_FURNITURE: &[FurnitureDef] = &[
+    FurnitureDef {
+        module: "Gurney",
+        half: [0.42, 0.4, 1.0],
+        place: Placement::Centre,
+        per_10m2: 0.0,
+        clearance: 0.0,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Desk",
+        half: [0.62, 0.37, 0.34],
+        place: Placement::Wall,
+        per_10m2: 0.5,
+        clearance: 2.2,
+        emissive: None,
+    },
+    FurnitureDef {
+        module: "Basin",
+        half: [0.24, 0.42, 0.2],
+        place: Placement::Wall,
+        per_10m2: 0.35,
+        clearance: 2.4,
+        emissive: None,
+    },
+];
+
+/// The rule text every institution shares, written out per palette below with
+/// its own dimensions. Kept here as prose rather than as a fragment because a
+/// palette is meant to read as one thing.
+///
+/// Modules: `Pier`/`Clad`/`Glazing` make the façade, `Partition` the inside,
+/// and the eleven fittings are the six shared tables above. Every one of them
+/// is classified by [`modules::shape_of`](super::modules::shape_of), and
+/// `every_palette_module_has_a_shape` is what says none was forgotten.
+const POLICE_STATION: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::PoliceStation,
+    display: "Police station",
+    rules: "# Police station -- a public counter in front of a cell block.\n\
+# The civic vocabulary (wave EMS1). A station's street wall is solid masonry\n\
+# with punched windows: an institution's ground floor is not a shopfront, and\n\
+# the windows it does have are above the counter. The lamp over the door is\n\
+# HUNG by the assembler -- see `BuildingArchetype::entrance_sign`.\n\
+module Pier     = size 0.5 offset 0,1.8,0.24  collider 0.12,1.8,0.24\n\
+module Clad     = size 1.3 offset 0,1.8,0.65  collider 0.12,1.8,0.65\n\
+module Glazing  = size 1.0 offset 0,1.8,0.5   collider 0.05,1.8,0.5\n\
+module Partition= size 1.1 offset 0,1.7,0.55  collider 0.07,1.7,0.55\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0       collider 0.12,0.22,0.5\n\
+module Parapet  = size 1   offset 0,0,0       collider 0.12,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0       collider 1,0.11,1\n\
+module Step     = size 1   offset 0,0,0       collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0       collider 1,0.13,1\n\
+# Fittings. None is placed by a wall RULE, so their colliders may be wider than\n\
+# a door jamb -- the furniture placer stations them at plan-derived positions\n\
+# clear of every opening.\n\
+module FrontDesk= size 1   offset 0,0,0       collider 2.4,0.55,0.36\n\
+module Grille   = size 1   offset 0,0,0       collider 3,1.3,0.07\n\
+module RollDoor = size 1   offset 0,0,0       collider 3.4,2.1,0.11\n\
+module Bunk     = size 1   offset 0,0,0       collider 0.98,0.26,0.36\n\
+module Basin    = size 1   offset 0,0,0       collider 0.24,0.42,0.2\n\
+module Bench    = size 1   offset 0,0,0       collider 0.95,0.24,0.26\n\
+module Desk     = size 1   offset 0,0,0       collider 0.7,0.37,0.35\n\
+module Cabinet  = size 1   offset 0,0,0       collider 0.5,0.9,0.25\n\
+module Locker   = size 1   offset 0,0,0       collider 0.4,0.9,0.3\n\
+module Rack     = size 1   offset 0,0,0       collider 0.5,0.95,0.3\n\
+module Crate    = size 1   offset 0,0,0       collider 0.45,0.4,0.4\n\
+module Plant    = size 1   offset 0,0,0       collider 0.3,0.6,0.3\n\
+module Screen   = size 1   offset 0,0,0       collider 0.44,0.26,0.05\n\
+module Neon     = size 1   offset 0,0,0       collider 0.6,0.3,0.07\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.28\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (2, 3),
+    floor_height: 3.7,
+    slab_thickness: 0.25,
+    min_room: 4.0,
+    // Wide, because the garage is the biggest room and the anchor below takes
+    // it: a `max_room_area` that split the bay in three would park a cruiser in
+    // three cupboards.
+    max_room_area: 150.0,
+    corridor: true,
+    corridor_width: 2.2,
+    wall_thickness: 0.24,
+    stair_size: (5.0, 3.8),
+    door_width: 1.1,
+    door_height: 2.15,
+    // High and far apart: a station's ground floor is masonry with punched
+    // openings above the counter, not glass.
+    window_width: 1.0,
+    window_sill: 1.5,
+    window_head: 2.7,
+    window_pitch: 4.2,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Lobby,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 4.0,
+        },
+        RoomWeight {
+            kind: RoomType::Cell,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Meeting,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+    ],
+    furniture: &[
+        (RoomType::Waiting, WAITING_FURNITURE),
+        (RoomType::Cell, CELL_FURNITURE),
+        (RoomType::ApparatusBay, BAY_FURNITURE),
+        (RoomType::Office, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Meeting, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Storage, CIVIC_STORAGE_FURNITURE),
+    ],
+    // **A station's ground floor IS its garage, its counter and its cells**,
+    // largest first — the venue anchor rule, applied to a building whose room
+    // sizes are equally not anybody's business to hash. The bay is the biggest
+    // room in the building by a wide margin, so the fleet's home is a fact and
+    // not a probability.
+    ground_anchors: &[RoomType::ApparatusBay, RoomType::Waiting, RoomType::Cell],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // The blue lamp over a station door. Cold and not bright: this is a
+        // lamp you can read a building by, not a sign that sells anything.
+        colour: [0.35, 0.9, 2.9],
+        half: [0.7, 0.3, 0.07],
+        height_m: 3.1,
+        festoon: None,
+    }),
+    rig: None,
+};
+
+/// **A fire hall** (wave EMS1) — one tall bay, and the crew that waits in it.
+const FIRE_HALL: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::FireHall,
+    display: "Fire hall",
+    rules: "# Fire hall -- an apparatus bay with a watch room beside it.\n\
+# The civic vocabulary (wave EMS1), at bay height: the storey is 4.6 m because\n\
+# an appliance is 3.3 m to the top of its light bar and the door has to clear\n\
+# it. That one number is why this is its own palette and not the station's.\n\
+module Pier     = size 0.6 offset 0,2.3,0.26  collider 0.13,2.3,0.26\n\
+module Clad     = size 1.4 offset 0,2.3,0.7   collider 0.13,2.3,0.7\n\
+module Glazing  = size 1.2 offset 0,2.3,0.6   collider 0.05,2.3,0.6\n\
+module Partition= size 1.1 offset 0,2.2,0.55  collider 0.07,2.2,0.55\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0       collider 0.13,0.24,0.5\n\
+module Parapet  = size 1   offset 0,0,0       collider 0.13,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0       collider 1,0.12,1\n\
+module Step     = size 1   offset 0,0,0       collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0       collider 1,0.14,1\n\
+module FrontDesk= size 1   offset 0,0,0       collider 2.4,0.55,0.36\n\
+module RollDoor = size 1   offset 0,0,0       collider 3.4,2.1,0.11\n\
+module Bench    = size 1   offset 0,0,0       collider 0.95,0.24,0.26\n\
+module Desk     = size 1   offset 0,0,0       collider 0.7,0.37,0.35\n\
+module Cabinet  = size 1   offset 0,0,0       collider 0.5,0.9,0.25\n\
+module Locker   = size 1   offset 0,0,0       collider 0.4,0.9,0.3\n\
+module Rack     = size 1   offset 0,0,0       collider 0.5,0.95,0.3\n\
+module Crate    = size 1   offset 0,0,0       collider 0.45,0.4,0.4\n\
+module Plant    = size 1   offset 0,0,0       collider 0.3,0.6,0.3\n\
+module Screen   = size 1   offset 0,0,0       collider 0.44,0.26,0.05\n\
+module Neon     = size 1   offset 0,0,0       collider 0.6,0.3,0.07\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.32\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (1, 2),
+    // **An appliance is 3.3 m tall and the door has to clear it.** The one
+    // number that makes this a palette and not a variant of the station.
+    floor_height: 4.6,
+    slab_thickness: 0.26,
+    min_room: 4.0,
+    // The widest in the tree, and it has to be: a bay is 220 m² of undivided
+    // floor and anything that split it is a garage that fits nothing.
+    max_room_area: 240.0,
+    corridor: false,
+    corridor_width: 1.8,
+    wall_thickness: 0.26,
+    stair_size: (3.8, 3.0),
+    door_width: 1.1,
+    door_height: 2.2,
+    window_width: 1.2,
+    window_sill: 2.0,
+    window_head: 3.4,
+    window_pitch: 5.0,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.5,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 2.5,
+        },
+        RoomWeight {
+            kind: RoomType::Meeting,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 2.0,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+    ],
+    furniture: &[
+        (RoomType::Waiting, WAITING_FURNITURE),
+        (RoomType::ApparatusBay, BAY_FURNITURE),
+        (RoomType::Office, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Meeting, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Storage, CIVIC_STORAGE_FURNITURE),
+    ],
+    // **A fire hall IS its bay.** One anchor and a small public room beside it,
+    // so the back of house still draws from the table.
+    ground_anchors: &[RoomType::ApparatusBay, RoomType::Waiting],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // Red, and warmer than the station's lamp is cold.
+        colour: [3.1, 0.42, 0.3],
+        half: [0.8, 0.32, 0.07],
+        height_m: 3.6,
+        festoon: None,
+    }),
+    rig: None,
+};
+
+/// **A hospital** (wave EMS1) — wards over consulting rooms over a public floor.
+const HOSPITAL: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::Hospital,
+    display: "Hospital",
+    rules: "# Hospital -- wards and consulting rooms over a public floor.\n\
+# The civic vocabulary (wave EMS1) with more glass than the station: a ward\n\
+# has windows and a corridor a bed can be wheeled down, which is the widest\n\
+# corridor in the tree and the reason this palette exists.\n\
+module Pier     = size 0.45 offset 0,1.7,0.22 collider 0.11,1.7,0.22\n\
+module Clad     = size 1.3 offset 0,1.7,0.65  collider 0.11,1.7,0.65\n\
+module Glazing  = size 1.4 offset 0,1.7,0.7   collider 0.05,1.7,0.7\n\
+module Partition= size 1.1 offset 0,1.6,0.55  collider 0.06,1.6,0.55\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0       collider 0.11,0.2,0.5\n\
+module Parapet  = size 1   offset 0,0,0       collider 0.11,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0       collider 1,0.12,1\n\
+module Step     = size 1   offset 0,0,0       collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0       collider 1,0.13,1\n\
+module FrontDesk= size 1   offset 0,0,0       collider 2.4,0.55,0.36\n\
+module Bed      = size 1   offset 0,0,0       collider 0.5,0.35,1.05\n\
+module Gurney   = size 1   offset 0,0,0       collider 0.42,0.4,1\n\
+module Basin    = size 1   offset 0,0,0       collider 0.24,0.42,0.2\n\
+module Bench    = size 1   offset 0,0,0       collider 0.95,0.24,0.26\n\
+module Desk     = size 1   offset 0,0,0       collider 0.7,0.37,0.35\n\
+module Cabinet  = size 1   offset 0,0,0       collider 0.5,0.9,0.25\n\
+module Rack     = size 1   offset 0,0,0       collider 0.5,0.95,0.3\n\
+module Crate    = size 1   offset 0,0,0       collider 0.45,0.4,0.4\n\
+module Plant    = size 1   offset 0,0,0       collider 0.3,0.6,0.3\n\
+module Screen   = size 1   offset 0,0,0       collider 0.44,0.26,0.05\n\
+module Neon     = size 1   offset 0,0,0       collider 0.6,0.3,0.07\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.5\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (3, 5),
+    floor_height: 3.5,
+    slab_thickness: 0.24,
+    min_room: 4.0,
+    max_room_area: 120.0,
+    corridor: true,
+    // **The widest corridor in the tree**, and for one reason: a bed has to be
+    // wheeled down it. 2.8 m is a trolley plus somebody passing it.
+    corridor_width: 2.8,
+    wall_thickness: 0.2,
+    stair_size: (5.2, 4.0),
+    door_width: 1.3,
+    door_height: 2.15,
+    window_width: 1.4,
+    window_sill: 0.95,
+    window_head: 2.5,
+    window_pitch: 3.2,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::Lobby,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 1.0,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::Ward,
+            weight: 3.5,
+        },
+        RoomWeight {
+            kind: RoomType::ExamRoom,
+            weight: 2.5,
+        },
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 1.0,
+        },
+    ],
+    furniture: &[
+        (RoomType::Waiting, WAITING_FURNITURE),
+        (RoomType::Ward, WARD_FURNITURE),
+        (RoomType::ExamRoom, EXAM_FURNITURE),
+        (RoomType::Office, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Meeting, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Storage, CIVIC_STORAGE_FURNITURE),
+    ],
+    // The public room first, because it is what a hospital's ground floor is;
+    // a ward and a consulting room take the next two largest, so the building
+    // is somewhere staffed on its own ground floor as well as above it.
+    ground_anchors: &[RoomType::Waiting, RoomType::Ward, RoomType::ExamRoom],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // The one sign in the tree that has to be legible from a moving
+        // ambulance: white-hot, and brighter than anything the venues hang.
+        colour: [3.4, 3.4, 3.2],
+        half: [1.0, 0.34, 0.07],
+        height_m: 3.2,
+        festoon: None,
+    }),
+    rig: None,
+};
+
+/// **A clinic** (wave EMS1) — consulting rooms and a waiting room, and nothing
+/// that keeps it open overnight.
+const CLINIC: BuildingArchetype = BuildingArchetype {
+    id: ArchetypeId::Clinic,
+    display: "Clinic",
+    rules: "# Clinic -- a waiting room and consulting rooms over it.\n\
+# The civic vocabulary (wave EMS1) at high-street scale: one or two storeys,\n\
+# small rooms, and a shopfront's worth of glass, because a clinic sits in a\n\
+# parade and not on a campus.\n\
+module Pier     = size 0.4 offset 0,1.55,0.2  collider 0.1,1.55,0.2\n\
+module Clad     = size 1.2 offset 0,1.55,0.6  collider 0.1,1.55,0.6\n\
+module Glazing  = size 1.3 offset 0,1.55,0.65 collider 0.05,1.55,0.65\n\
+module Partition= size 1.0 offset 0,1.5,0.5   collider 0.06,1.5,0.5\n\
+module Pane     = size 1   offset 0,0,0\n\
+module Lintel   = size 1   offset 0,0,0       collider 0.1,0.2,0.5\n\
+module Parapet  = size 1   offset 0,0,0       collider 0.1,0.5,0.5\n\
+module Slab     = size 1   offset 0,0,0       collider 1,0.1,1\n\
+module Step     = size 1   offset 0,0,0       collider 0.6,0.09,0.14\n\
+module Roof     = size 1   offset 0,0,0       collider 1,0.12,1\n\
+module FrontDesk= size 1   offset 0,0,0       collider 2.4,0.55,0.36\n\
+module Gurney   = size 1   offset 0,0,0       collider 0.42,0.4,1\n\
+module Basin    = size 1   offset 0,0,0       collider 0.24,0.42,0.2\n\
+module Bench    = size 1   offset 0,0,0       collider 0.95,0.24,0.26\n\
+module Desk     = size 1   offset 0,0,0       collider 0.7,0.37,0.35\n\
+module Cabinet  = size 1   offset 0,0,0       collider 0.5,0.9,0.25\n\
+module Rack     = size 1   offset 0,0,0       collider 0.5,0.95,0.3\n\
+module Crate    = size 1   offset 0,0,0       collider 0.45,0.4,0.4\n\
+module Plant    = size 1   offset 0,0,0       collider 0.3,0.6,0.3\n\
+module Screen   = size 1   offset 0,0,0       collider 0.44,0.26,0.05\n\
+module Neon     = size 1   offset 0,0,0       collider 0.6,0.3,0.07\n\
+\n\
+Facade -> Pier Bay* Pier\n\
+Bay    -> Clad | Glazing@0.45\n\
+Inner  -> Partition+\n\
+",
+    exterior_axiom: "Facade",
+    interior_axiom: "Inner",
+    pane: "Pane",
+    lintel: "Lintel",
+    parapet: "Parapet",
+    slab: "Slab",
+    step: "Step",
+    roof: "Roof",
+    floors: (1, 2),
+    floor_height: 3.2,
+    slab_thickness: 0.2,
+    min_room: 3.2,
+    max_room_area: 75.0,
+    corridor: true,
+    corridor_width: 1.9,
+    wall_thickness: 0.18,
+    stair_size: (3.6, 2.8),
+    door_width: 1.1,
+    door_height: 2.1,
+    window_width: 1.3,
+    window_sill: 0.9,
+    window_head: 2.4,
+    window_pitch: 3.0,
+    ground_rooms: &[
+        RoomWeight {
+            kind: RoomType::ExamRoom,
+            weight: 2.5,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+        RoomWeight {
+            kind: RoomType::Storage,
+            weight: 1.0,
+        },
+    ],
+    upper_rooms: &[
+        RoomWeight {
+            kind: RoomType::ExamRoom,
+            weight: 3.5,
+        },
+        RoomWeight {
+            kind: RoomType::Office,
+            weight: 1.5,
+        },
+        RoomWeight {
+            kind: RoomType::Service,
+            weight: 1.0,
+        },
+    ],
+    furniture: &[
+        (RoomType::Waiting, WAITING_FURNITURE),
+        (RoomType::ExamRoom, EXAM_FURNITURE),
+        (RoomType::Office, CIVIC_OFFICE_FURNITURE),
+        (RoomType::Storage, CIVIC_STORAGE_FURNITURE),
+    ],
+    // A clinic's largest room is where you wait, and its next is where you are
+    // seen. Two anchors and no third, because a clinic has no ward, no cells
+    // and no bay — which is exactly why it is the one institution that shuts.
+    ground_anchors: &[RoomType::Waiting, RoomType::ExamRoom],
+    entrance_sign: Some(EntranceSign {
+        plate: "Neon",
+        // Green, and the dimmest sign in the tree: a clinic announces itself to
+        // the pavement it is on and to nothing further.
+        colour: [0.5, 2.2, 0.9],
+        half: [0.6, 0.26, 0.06],
+        height_m: 2.9,
+        festoon: None,
+    }),
+    rig: None,
 };
 
 #[cfg(test)]

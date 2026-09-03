@@ -140,6 +140,14 @@ content = [
   "../settlement/Zone_Shop.inf_pcg.toml",
   "../settlement/Zone_StripClub.inf_pcg",
   "../settlement/Zone_StripClub.inf_pcg.toml",
+  "../settlement/Zone_Clinic.inf_pcg",
+  "../settlement/Zone_Clinic.inf_pcg.toml",
+  "../settlement/Zone_FireHall.inf_pcg",
+  "../settlement/Zone_FireHall.inf_pcg.toml",
+  "../settlement/Zone_Hospital.inf_pcg",
+  "../settlement/Zone_Hospital.inf_pcg.toml",
+  "../settlement/Zone_PoliceStation.inf_pcg",
+  "../settlement/Zone_PoliceStation.inf_pcg.toml",
 ]
 
 # The same UTM zone and the same ground as the full island, offset to sit over

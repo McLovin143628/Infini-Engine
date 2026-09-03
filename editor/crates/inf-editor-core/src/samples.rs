@@ -4621,10 +4621,20 @@ pub const PHASE19_LOT_EXTENT: (f64, f64) = (22.0, 15.0);
 /// At seven archetypes and 62 m that reach was 186 m and fitted; at TEN it is
 /// 279 m, and the two outermost lots stood off the terrain entirely.
 /// `jobs_of`'s fail-closed rule then says "no ground, no building", so `Office`
-/// (the leftmost) simply placed nothing and the gate said so. 50 m puts the
-/// reach at 225 m, plus a lot's own 22 m half-extent = 247 m, inside the pad
-/// with nine metres to spare.
-pub const PHASE19_LOT_PITCH: f64 = 50.0;
+/// (the leftmost) simply placed nothing and the gate said so.
+///
+/// **And again at FOURTEEN** (wave EMS1), which is why this doc reads like a
+/// ledger: 50 m puts thirteen gaps at 325 m of reach plus a lot's own 22 m
+/// half-extent = 347 m against a ±256 m pad, so the same defect would have
+/// eaten two lots at each end — silently, because a lot with no ground places
+/// nothing and says nothing. 34 m puts the reach at 221 m + 22 = 243 m, inside
+/// the pad with thirteen metres to spare, and leaves 24 m of clear ground
+/// between two lots on the same side of the road.
+///
+/// The arithmetic is `(n - 1) / 2 * pitch + half_extent.x <= world_size / 2`,
+/// and `the_phase19_lots_all_stand_on_the_terrain` is the arm that checks it
+/// rather than this comment.
+pub const PHASE19_LOT_PITCH: f64 = 34.0;
 /// Metres from the road's Z line to a lot centre.
 pub const PHASE19_LOT_SETBACK: f64 = 34.0;
 /// Storeys every lot is pinned to, so the gate's stair walk has the same shape
@@ -10703,6 +10713,53 @@ const STARTER_CHARACTER_README: &str = concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every phase-19 lot stands on the terrain** (wave EMS1).
+    ///
+    /// The layout spreads one lot per archetype about the town centre, so the
+    /// reach grows with the palette — and it has now outgrown the pad **twice**
+    /// (7 → 10 at VEN1a, 10 → 14 here). The failure mode is silent both times:
+    /// a lot with no ground under it places nothing at all, because `jobs_of`
+    /// fails closed, so the sample simply comes out with two fewer buildings and
+    /// no message anywhere. `PHASE19_LOT_PITCH`'s doc records the arithmetic;
+    /// this is the arm that runs it, so the next wave to append an archetype
+    /// finds out here rather than in a gate ten minutes into a player build.
+    #[test]
+    fn the_phase19_lots_all_stand_on_the_terrain() {
+        let half = phase19_world_size() * 0.5;
+        let n = inf_pcg::ArchetypeId::ALL.len();
+        for i in 0..n {
+            let p = phase19_lot_position(i);
+            for (axis, v, extent) in [
+                ("x", p.x, PHASE19_LOT_EXTENT.0),
+                ("z", p.z, PHASE19_LOT_EXTENT.1),
+            ] {
+                let c = phase19_world_center();
+                let centre = if axis == "x" { c.x } else { c.z };
+                let reach = (v - centre).abs() + extent;
+                assert!(
+                    reach <= half,
+                    "lot {i} ({}) reaches {reach:.1} m from the centre on {axis} \
+                     against a {half:.1} m pad — it stands off the terrain, and \
+                     a lot with no ground under it places NOTHING and says so \
+                     nowhere",
+                    inf_pcg::ArchetypeId::ALL[i].name()
+                );
+            }
+        }
+        // …and the lots do not stand inside one another, or the pitch has been
+        // shrunk past the point where the town is a street.
+        for i in 0..n.saturating_sub(2) {
+            let gap = (phase19_lot_position(i + 2).x - phase19_lot_position(i).x).abs();
+            assert!(
+                gap > 2.0 * PHASE19_LOT_EXTENT.0,
+                "lots {i} and {} on the same side of the road are {gap:.1} m \
+                 apart and are {:.1} m wide",
+                i + 2,
+                2.0 * PHASE19_LOT_EXTENT.0
+            );
+        }
+    }
 
     // ── Phase 23 workshop shape (P23.6) ────────────────────────────────────
 
