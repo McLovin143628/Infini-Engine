@@ -19,7 +19,12 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 pub mod audio;
 pub mod camera;
 pub mod carjack;
+// EMS3: recognition — the officer looks at somebody and decides whether they are
+// the person on the file. The applying half of `inf_ecs::crime`, because the
+// line-of-sight primitive is `PhysicsBridge3D::cast_ray_excluding` and Ring 0
+// cannot reach it.
 mod character;
+pub mod crime;
 // I6 doors: the leaf's collider, the swing's blocking probe, and the door half
 // of the interaction candidate list. The rules are `inf_ecs::door`.
 pub mod door;
@@ -48,6 +53,7 @@ mod world;
 
 pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
+pub use crime::{step_recognition, RecognitionStats};
 pub use dispatch::{step_dispatch, DispatchStats};
 pub use door::{door_leaf_guid, step_doors, DoorReport};
 pub use ecs::{

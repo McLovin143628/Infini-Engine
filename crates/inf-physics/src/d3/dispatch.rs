@@ -83,6 +83,9 @@ pub struct DispatchStats {
     pub unanswered: usize,
     /// Units running with lights and siren right now.
     pub running_hot: usize,
+    /// **What the wanted system did this step** (wave EMS3) — who looked, who
+    /// was recognised, and how many rays it cost.
+    pub recognition: super::crime::RecognitionStats,
 }
 
 /// **Advance the dispatcher one fixed step.**
@@ -105,8 +108,22 @@ pub struct DispatchStats {
 /// 5. work every scene a crew is standing at, and send home what is finished.
 pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -> DispatchStats {
     dispatch::sync_fleet(world);
+    // **THE WANTED SYSTEM RUNS FIRST, AND IT RUNS ON EVERY LEVEL** (wave EMS3),
+    // above both early returns below. A crime is witnessed by whoever was
+    // standing there, and it goes on a file whether or not the town has a
+    // police station — what a town with no cruisers cannot do is *answer* it,
+    // which is a different fact and one `DispatchStats::unanswered` already
+    // says. Filing it here also means a profile exists before the crime feed a
+    // few lines down opens an incident about the same act.
+    //
+    // Two `get_resource`s and an empty log walk on a level where nothing has
+    // ever happened, which is every level committed before this wave.
+    let recognition = super::crime::step_recognition(world, bridge, traffic::steps(world));
     let Some(fleet) = world.world().get_resource::<FleetRes>().cloned() else {
-        return DispatchStats::default();
+        return DispatchStats {
+            recognition,
+            ..DispatchStats::default()
+        };
     };
     // **Absent costs nothing.** A level with no emergency vehicle in it never
     // gets a `DispatchRes` at all, so `dispatch_state_bytes` stays empty and
@@ -122,7 +139,10 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
     // exists, the step below runs and retires it properly — every run is dropped,
     // every crew is parked, every siren gets its `Stop`.
     if fleet.units.is_empty() && world.world().get_resource::<DispatchRes>().is_none() {
-        return DispatchStats::default();
+        return DispatchStats {
+            recognition,
+            ..DispatchStats::default()
+        };
     }
     let mut res = world
         .world_mut()
@@ -167,10 +187,15 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
 
     let mut stats = DispatchStats {
         units: fleet.units.len(),
+        recognition,
         ..DispatchStats::default()
     };
 
     open_incidents(world, &mut res, step, &mut stats);
+    // **THE SEARCH FOLLOWS THE FILE** (wave EMS3) — between opening and
+    // assigning, so a scene that moved this step is assigned at its new address
+    // rather than at last step's.
+    re_anchor(world, &mut res);
     assign(world, &fleet, &mut res, step, &mut stats);
     run_units(world, bridge, &fleet, &mut res, step, dt, &mut stats);
     forget_old(&mut res, step);
@@ -214,7 +239,7 @@ fn open_incidents(
     // Read FORWARD by step, so an act cannot be reported twice and a ring that
     // has evicted its front is not re-scanned.
     let mut newest = res.seen_act_step;
-    let acts: Vec<(DVec3, u64, u8)> = inf_ecs::witness::witnessed(world)
+    let acts: Vec<(DVec3, u64, u8, Uuid)> = inf_ecs::witness::witnessed(world)
         .iter()
         .filter(|a| a.step > res.seen_act_step)
         .map(|a| {
@@ -234,10 +259,15 @@ fn open_incidents(
                     inf_ecs::witness::ActKind::Killed => 2,
                     inf_ecs::witness::ActKind::Carjack | inf_ecs::witness::ActKind::Assault => 1,
                 },
+                // EMS3: WHO did it, so the scene can be linked to their file
+                // and the search can follow them. Nothing on the recognition
+                // path reads this guid — see `inf_ecs::crime`'s header — it is
+                // the case number the call is filed under.
+                a.actor,
             )
         })
         .collect();
-    for (at, act_step, severity) in acts {
+    for (at, act_step, severity, actor) in acts {
         newest = newest.max(act_step);
         // **One crime scene, not one per round.** A burst is many acts in one
         // place, and a dispatcher that opened an incident per shot would empty a
@@ -251,6 +281,13 @@ fn open_incidents(
             continue;
         }
         open(res, IncidentKind::Crime { severity }, at, step, stats);
+        // Linked only if the open actually minted one — `open` refuses past
+        // `MAX_OPEN_INCIDENTS`, and a search pointing at an incident that was
+        // never created would be a row that outlives its subject.
+        let guid = dispatch::incident_guid(IncidentKind::Crime { severity }, at, step);
+        if res.incidents.contains_key(&guid) {
+            res.searches.insert(guid, actor);
+        }
     }
     res.seen_act_step = newest;
 
@@ -412,6 +449,89 @@ fn body_at(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     p.is_finite().then_some(p)
 }
 
+// ── 2b. the search follows the file ─────────────────────────────────────────
+
+/// **Move every crime scene onto the last place its suspect was seen** (wave
+/// EMS3) — what turns a call into a *search*.
+///
+/// # This is the police-don't-cheat law's other end
+///
+/// The destination is [`inf_ecs::crime::Profile::last_seen`], which is a private
+/// field with exactly two writers — a witnessed act and a recognition — so a
+/// unit can only ever be sent to a place a person actually put the suspect. It
+/// is emphatically **not** the suspect's transform, and the arm
+/// `ems3_crime_gate::the_police_search_converges_on_last_seen_and_never_on_the_player`
+/// walks a suspect a long way out of sight and watches the destination stay
+/// where it was.
+///
+/// A file that has gone cold takes its search with it: there is no address to
+/// drive to any more, so the row is dropped and the incident finishes its own
+/// lifecycle where it stands.
+///
+/// `O(searches)`, bounded by [`inf_ecs::dispatch::MAX_OPEN_INCIDENTS`], and one
+/// `get_resource` on every level where nobody is wanted.
+fn re_anchor(world: &EcsWorld, res: &mut DispatchRes) {
+    if res.searches.is_empty() {
+        return;
+    }
+    // ONE walk, gathering both answers, because the loop borrows the incident
+    // table through the search table and the writes have to come after it.
+    let mut moves: Vec<(Uuid, DVec3)> = Vec::new();
+    let mut closed: Vec<Uuid> = Vec::new();
+    for (incident, suspect) in &res.searches {
+        let Some(open) = res.incidents.get(incident) else {
+            // The incident was forgotten by `forget_old`; the row outlived it.
+            closed.push(*incident);
+            continue;
+        };
+        match inf_ecs::crime::profile_of(world, *suspect) {
+            Some(file) if file.heat > 0 => {
+                let at = file.last_seen();
+                if at.is_finite() && open.state != IncidentState::Resolved {
+                    moves.push((*incident, at));
+                }
+            }
+            // Cold, or never filed: nobody is looking any more, so the scene
+            // stops moving and finishes its own lifecycle where it stands.
+            _ => closed.push(*incident),
+        }
+    }
+    for (incident, at) in moves {
+        if let Some(open) = res.incidents.get_mut(&incident) {
+            open.at = at;
+        }
+    }
+    for g in closed {
+        res.searches.remove(&g);
+    }
+}
+
+/// **How many units this incident wants at it right now** — the severity ladder,
+/// applied (wave EMS3).
+///
+/// One for anything that is not a search, and
+/// [`inf_ecs::crime::Response::units`] for one that is: a petty file brings a
+/// patrol car, a serious one brings a second, and a spree brings everything the
+/// town has. **This is where SWAT stops being a parked van and becomes a
+/// behaviour** — EMS1 built the vehicle, EMS2 gave it a crew and a siren, and
+/// until this line nothing in the engine could ever ask for three cars at once.
+fn wanted_units(world: &EcsWorld, res: &DispatchRes, incident: Uuid) -> usize {
+    let Some(suspect) = res.searches.get(&incident) else {
+        return 1;
+    };
+    inf_ecs::crime::profile_of(world, *suspect)
+        .map(|f| f.response().units().max(1))
+        .unwrap_or(1)
+}
+
+/// How many units are on this incident right now.
+fn units_on(res: &DispatchRes, incident: Uuid) -> usize {
+    res.runs
+        .values()
+        .filter(|r| r.incident == Some(incident))
+        .count()
+}
+
 // ── 3. who goes ─────────────────────────────────────────────────────────────
 
 /// Send the nearest free unit of the right service to the oldest open incident
@@ -466,10 +586,23 @@ fn assign(
         .map(|(_, unit)| unit.kind)
         .collect();
     // Oldest first, guid tiebreak — and only the ones somebody could go to.
+    //
+    // **An incident that already has a unit is a candidate too** (wave EMS3),
+    // when the severity ladder wants more of them than are on it. That is what
+    // makes `Response::MultiUnit` and `Response::Swat` mean anything: without
+    // it, `state == Reported` retires an incident from consideration the moment
+    // one car is sent, so a five-star spree and a stolen bicycle both bring
+    // exactly one cruiser. `wanted_units` answers 1 for everything that is not
+    // a search, so nothing else in the dispatcher changes shape.
     let mut pending: Vec<(u64, Uuid)> = res
         .incidents
         .iter()
-        .filter(|(_, i)| i.state == IncidentState::Reported && free.contains(&i.kind.service()))
+        .filter(|(g, i)| {
+            i.state != IncidentState::Resolved
+                && free.contains(&i.kind.service())
+                && (i.state == IncidentState::Reported
+                    || units_on(res, **g) < wanted_units(world, res, **g))
+        })
         .map(|(g, i)| (i.opened_step, *g))
         .collect();
     pending.sort_unstable();
@@ -484,6 +617,8 @@ fn assign(
             .values()
             .any(|i| i.state == IncidentState::Reported)
         {
+            // (Only unanswered `Reported` calls are counted, not understaffed
+            // searches: a two-car search that has one car is being answered.)
             res.unanswered = res.unanswered.saturating_add(1);
             stats.unanswered += 1;
         }
@@ -559,8 +694,14 @@ fn assign(
             },
         );
         if let Some(i) = res.incidents.get_mut(&incident_guid) {
-            i.state = IncidentState::Assigned;
-            i.unit = Some(chassis);
+            // **`Reported` only.** A second cruiser joining a scene a crew is
+            // already standing at must not walk the incident's state backwards
+            // from `OnScene`, or the scene would be worked twice and the timer
+            // restarted every time the ladder sent somebody else.
+            if i.state == IncidentState::Reported {
+                i.state = IncidentState::Assigned;
+                i.unit = Some(chassis);
+            }
         }
         res.assigned = res.assigned.saturating_add(1);
         stats.assigned += 1;

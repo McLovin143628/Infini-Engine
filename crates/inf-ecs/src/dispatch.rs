@@ -748,6 +748,23 @@ pub struct DispatchRes {
     /// be met. EMS3 gives an ambient casualty a person, which retires the whole
     /// question.
     pub treated: BTreeSet<Uuid>,
+    /// **Which criminal file a crime scene is about** (wave EMS3), incident guid
+    /// to suspect guid.
+    ///
+    /// # Why the dispatcher holds the link and not the incident
+    ///
+    /// `IncidentKind::Crime` carries a severity and no subject, and giving it
+    /// one would have been a variant field on a frozen enum for the sake of a
+    /// map with at most `MAX_OPEN_INCIDENTS` rows in it. It is also the right
+    /// owner on principle: *"who is this call about"* is dispatcher state — it
+    /// decides where the car drives and how many of them go — and the incident
+    /// is a fact about a place.
+    ///
+    /// It is what makes a search **follow** rather than sit at the address the
+    /// first witness gave, and it is folded into
+    /// [`dispatch_state_bytes`] because two hosts that were searching for
+    /// different people have diverged in a way no position can show.
+    pub searches: std::collections::BTreeMap<Uuid, Uuid>,
     /// **The smoke a fire is making**, puff guid to the step it was let go of.
     ///
     /// Real entities this session spawned, so they are cleared with everything
@@ -1417,6 +1434,10 @@ pub const INCIDENT_TRACE_BYTES: usize = 66;
 /// `guid (16) | state (1) | since (8) | incident (16) | path length_m (8)`.
 pub const UNIT_TRACE_BYTES: usize = 49;
 
+/// Bytes one search folds into [`dispatch_state_bytes`] — `incident (16) |
+/// suspect (16)` (wave EMS3).
+pub const SEARCH_TRACE_BYTES: usize = 32;
+
 /// **The dispatcher, as bytes** — the section a replay trace folds.
 ///
 /// The crowd's argument verbatim, one system over: a unit's *state* decides
@@ -1457,6 +1478,14 @@ pub fn dispatch_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(run.incident.unwrap_or(Uuid::nil()).as_bytes());
         let len = run.path.as_ref().map(|p| p.length_m()).unwrap_or(0.0);
         out.extend_from_slice(&len.to_le_bytes());
+    }
+    // EMS3, appended: two hosts searching for different people have diverged in
+    // a way no unit state and no position can show — both cars are driving
+    // somewhere sensible until one of them arrives at somebody the other has
+    // never heard of.
+    for (incident, suspect) in &res.searches {
+        out.extend_from_slice(incident.as_bytes());
+        out.extend_from_slice(suspect.as_bytes());
     }
     out
 }
