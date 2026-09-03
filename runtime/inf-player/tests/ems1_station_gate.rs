@@ -90,22 +90,22 @@ const STEPS: u32 = 90;
 fn stations() -> [(Uuid, ArchetypeId, DVec3); 4] {
     [
         (
-            Uuid::from_u128(0x0E_5A1_0001),
+            Uuid::from_u128(0x0E5A_0001),
             ArchetypeId::PoliceStation,
             DVec3::new(-PITCH, 0.0, -PITCH),
         ),
         (
-            Uuid::from_u128(0x0E_5A1_0002),
+            Uuid::from_u128(0x0E5A_0002),
             ArchetypeId::FireHall,
             DVec3::new(PITCH, 0.0, -PITCH),
         ),
         (
-            Uuid::from_u128(0x0E_5A1_0003),
+            Uuid::from_u128(0x0E5A_0003),
             ArchetypeId::Hospital,
             DVec3::new(-PITCH, 0.0, PITCH),
         ),
         (
-            Uuid::from_u128(0x0E_5A1_0004),
+            Uuid::from_u128(0x0E5A_0004),
             ArchetypeId::Clinic,
             DVec3::new(PITCH, 0.0, PITCH),
         ),
@@ -123,17 +123,17 @@ fn stations() -> [(Uuid, ArchetypeId, DVec3); 4] {
 fn homes() -> [(Uuid, ArchetypeId, DVec3); 3] {
     [
         (
-            Uuid::from_u128(0x0E_5A1_1001),
+            Uuid::from_u128(0x0E5A_1001),
             ArchetypeId::Apartment,
             DVec3::ZERO,
         ),
         (
-            Uuid::from_u128(0x0E_5A1_1002),
+            Uuid::from_u128(0x0E5A_1002),
             ArchetypeId::Apartment,
             DVec3::new(0.0, 0.0, -PITCH),
         ),
         (
-            Uuid::from_u128(0x0E_5A1_1003),
+            Uuid::from_u128(0x0E5A_1003),
             ArchetypeId::Apartment,
             DVec3::new(0.0, 0.0, PITCH),
         ),

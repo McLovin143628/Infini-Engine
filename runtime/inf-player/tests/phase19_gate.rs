@@ -820,6 +820,42 @@ fn the_painted_biomes_survive_the_cook() {
     }
 }
 
+/// The town, cooked and booted, with a step profile armed.
+fn timed_town(dir: &Path) -> (usize, inf_player::runtime_sim::RuntimeSim) {
+    let (_content, pack) = cook_town(dir);
+    let built = pack_built(&pack);
+    let colliders = solids(&built).len();
+    assert!(colliders > 1_000, "only {colliders} solids to time");
+    let mut sim = inf_player::sim_from_built(built);
+    sim.set_step_profiling(true);
+    (colliders, sim)
+}
+
+/// Mean phase profile and wall-clock ms/step over `steps` settled steps.
+fn time_steps(
+    sim: &mut inf_player::runtime_sim::RuntimeSim,
+    steps: u32,
+) -> (f64, inf_player::step_profile::StepProfile) {
+    let mut mean = inf_player::step_profile::StepProfile::default();
+    let start = std::time::Instant::now();
+    for _ in 0..steps {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        mean.accumulate(&sim.step_profile());
+    }
+    let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(steps);
+    mean.scale(1.0 / f64::from(steps));
+    (ms, mean)
+}
+
+/// Print a mean profile's dearest rows.
+fn print_phases(mean: &inf_player::step_profile::StepProfile) {
+    for (name, ms) in mean.dearest_first() {
+        if ms > 0.05 {
+            eprintln!("  {name:>18}  {ms:.3} ms");
+        }
+    }
+}
+
 /// **The per-fixed-step cost of the town's colliders.**
 ///
 /// The budget arm below times a *load*; this one times the loop. `sync_from_world`
@@ -859,44 +895,6 @@ fn the_painted_biomes_survive_the_cook() {
 /// [`a_full_crowd_agent_costs_more_than_the_whole_collider_band`], which
 /// carries the finding as its own assertion.
 ///
-/// The helper below is shared by both.
-
-/// The town, cooked and booted, with a step profile armed.
-fn timed_town(dir: &Path) -> (usize, inf_player::runtime_sim::RuntimeSim) {
-    let (_content, pack) = cook_town(dir);
-    let built = pack_built(&pack);
-    let colliders = solids(&built).len();
-    assert!(colliders > 1_000, "only {colliders} solids to time");
-    let mut sim = inf_player::sim_from_built(built);
-    sim.set_step_profiling(true);
-    (colliders, sim)
-}
-
-/// Mean phase profile and wall-clock ms/step over `steps` settled steps.
-fn time_steps(
-    sim: &mut inf_player::runtime_sim::RuntimeSim,
-    steps: u32,
-) -> (f64, inf_player::step_profile::StepProfile) {
-    let mut mean = inf_player::step_profile::StepProfile::default();
-    let start = std::time::Instant::now();
-    for _ in 0..steps {
-        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-        mean.accumulate(&sim.step_profile());
-    }
-    let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(steps);
-    mean.scale(1.0 / f64::from(steps));
-    (ms, mean)
-}
-
-/// Print a mean profile's dearest rows.
-fn print_phases(mean: &inf_player::step_profile::StepProfile) {
-    for (name, ms) in mean.dearest_first() {
-        if ms > 0.05 {
-            eprintln!("  {name:>18}  {ms:.3} ms");
-        }
-    }
-}
-
 #[test]
 fn stepping_the_town_stays_cheap_with_its_collider_band() {
     let dir = tempfile::tempdir().unwrap();
@@ -977,7 +975,10 @@ fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
     let (colliders, mut sim) = timed_town(dir.path());
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
 
-    let mut rows: Vec<((f64, f64, f64), f64, [usize; 4], f64)> = Vec::new();
+    /// One row of the sweep: the band, the wall-clock ms/step it produced, the
+    /// tier census, and what `character move` cost inside it.
+    type SweepRow = ((f64, f64, f64), f64, [usize; 4], f64);
+    let mut rows: Vec<SweepRow> = Vec::new();
     for r in [
         (0.0f64, 0.0f64, 0.0f64),
         (8.0, 16.0, 32.0),
