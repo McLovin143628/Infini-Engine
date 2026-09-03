@@ -23,6 +23,9 @@ mod character;
 // I6 doors: the leaf's collider, the swing's blocking probe, and the door half
 // of the interaction candidate list. The rules are `inf_ecs::door`.
 pub mod door;
+// EMS2 dispatch: what has happened, who is going, and the stick their driver is
+// handed. The rules are `inf_ecs::dispatch`.
+pub mod dispatch;
 mod ecs;
 mod events;
 pub mod fracture;
@@ -45,6 +48,7 @@ mod world;
 
 pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
+pub use dispatch::{step_dispatch, DispatchStats};
 pub use door::{door_leaf_guid, step_doors, DoorReport};
 pub use ecs::{
     pcg_shell_guid, pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid,

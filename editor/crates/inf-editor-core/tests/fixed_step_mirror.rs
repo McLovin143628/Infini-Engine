@@ -219,6 +219,74 @@ fn both_fixed_steps_step_their_traffic_the_same_way() {
     );
 }
 
+/// **BOTH HOSTS DISPATCH THE SAME WAY** (wave EMS2).
+///
+/// The fence holds one statement, and the statement decides which ambulance
+/// goes to which fire. Two hosts that ran different dispatchers would not
+/// diverge on a transform — they would diverge on a *decision*, one step before
+/// the transform moved, which is the shape an equality-on-positions gate reads
+/// as a lag and lets through.
+#[test]
+fn both_fixed_steps_dispatch_the_same_way() {
+    let editor = fenced(&read(EDITOR), "dispatch_step", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "dispatch_step", "the shipped RuntimeSim");
+    assert_eq!(
+        editor, player,
+        "the two hosts' dispatch steps differ character for character"
+    );
+    assert!(
+        editor.len() > 40,
+        "the dispatch fence is {} characters — an empty fence is equal to an          empty fence, and this arm would then be about nothing",
+        editor.len()
+    );
+    for needle in ["step_dispatch(", "self.dispatch="] {
+        assert!(
+            editor.replace(' ', "").contains(needle),
+            "the dispatch fence does not `{needle}`: {editor}"
+        );
+    }
+}
+
+/// **…and they run it in the same PLACE** (wave EMS2).
+///
+/// Between the traffic and the 3D sync, on both hosts, and each side of that is
+/// a different one-step lag rather than a divergence — which is exactly why an
+/// equality gate cannot see either:
+///
+/// * run **before** the traffic and the yield rule reads last step's siren, so
+///   a car pulls over one step after the ambulance has gone past it;
+/// * run **after** the character step and a responding unit's driver holds an
+///   intent nothing reads until the next step, for the whole drive;
+/// * run **after** the 3D sync and a crew body built this step is a person the
+///   renderer can see and the solver cannot.
+#[test]
+fn the_dispatch_step_sits_between_the_traffic_and_the_physics_sync_on_both_hosts() {
+    for (who, rel) in [
+        ("the editor SimSession", EDITOR),
+        ("the shipped RuntimeSim", PLAYER),
+    ] {
+        let src = read(rel);
+        let traffic = only(&src, "// MIRROR-BEGIN traffic_step", who);
+        let dispatch = only(&src, "// MIRROR-BEGIN dispatch_step", who);
+        let mover = only(&src, "inf_physics::d3::step_character_movement(", who);
+        assert!(
+            traffic < dispatch,
+            "{who}: the dispatcher runs BEFORE the traffic, so every yield is              one step in the past"
+        );
+        assert!(
+            dispatch < mover,
+            "{who}: the dispatcher runs AFTER the character step, so a              responding unit's stick is one step stale for the whole drive"
+        );
+        let sync_at = src
+            .rfind("sync_from_world_sim(")
+            .unwrap_or_else(|| panic!("{who}: no 3D sync"));
+        assert!(
+            dispatch < sync_at,
+            "{who}: the dispatcher runs after the 3D sync, so a crew body it              builds is drawn a step before it is solid"
+        );
+    }
+}
+
 /// **…and they run it in the same PLACE.**
 ///
 /// The traffic step writes a driver's INTENT and builds bodies. Run after the

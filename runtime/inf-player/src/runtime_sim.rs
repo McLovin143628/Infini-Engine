@@ -449,6 +449,13 @@ pub struct RuntimeSim {
     /// other than "did the function get called". All zeroes on a level with no
     /// blocks. MIRROR of `SimSession::traffic`.
     traffic: inf_ecs::traffic::TrafficStats,
+    /// **This step's dispatch counters** (EMS2) — units owned, incidents open,
+    /// and what was opened, assigned, driven, reached, resolved and sent home on
+    /// this step. The `traffic` shape one system along, and read for the same
+    /// reason: a gate that wants to know whether the town ANSWERS has to ask
+    /// something other than "did the function get called". All zeroes on a level
+    /// with no emergency vehicle in it. MIRROR of the other host's field.
+    dispatch: inf_physics::d3::DispatchStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). Data rather than a
     /// constant `step_crowd` reads for itself, for `debris_budget`'s reason one
     /// system over: a level's own crowd block will set it, and the sweep
@@ -601,6 +608,7 @@ impl RuntimeSim {
             society: inf_ecs::society::SocietyStats::default(),
             venue_audio: inf_ecs::venue::VenueAudioStats::default(),
             traffic: inf_ecs::traffic::TrafficStats::default(),
+            dispatch: inf_physics::d3::DispatchStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
             vehicles: Vec::new(),
@@ -802,6 +810,13 @@ impl RuntimeSim {
     /// "no streets" from "streets with nothing on them".
     pub fn traffic_stats(&self) -> inf_ecs::traffic::TrafficStats {
         self.traffic
+    }
+
+    /// **What the dispatcher did on the last step** (EMS2) — the mirror of
+    /// [`Self::traffic_stats`], and the one door a gate reads a response
+    /// through.
+    pub fn dispatch_stats(&self) -> inf_physics::d3::DispatchStats {
+        self.dispatch
     }
 
     /// **Install a crowd population** (NPC1a) — the door the sweep instrument
@@ -1332,6 +1347,25 @@ impl RuntimeSim {
         // with no streets produces an empty vec, so every pre-VEH2b trace is
         // byte-identical.
         out.extend_from_slice(&inf_ecs::traffic::traffic_state_bytes(&self.world));
+        // EMS2 appends the dispatcher, last, on the traffic's argument verbatim:
+        // a unit's STATE decides everything the dispatch step does with it and
+        // is not a transform anything else folds, so without this section two
+        // hosts that sent different ambulances to one fire would compare equal
+        // at every step until one of them happened to solve a chassis the other
+        // did not. 66 bytes an incident and 49 a unit; the drive is folded as
+        // its own LENGTH rather than point by point, which is one number that
+        // moves when a route changes against a kilometre of them that do not.
+        //
+        // This is the reader `inf_ecs::witness`' own doc named — *"the day
+        // something reads it … folding it becomes the right call"* — met one
+        // wave early, and the position it names is honoured: the new section
+        // goes AFTER the traffic, and `projector_mirror`'s `SECTIONS` allowlist
+        // is extended in the same commit rather than two waves later.
+        //
+        // **The position is frozen**, exactly as the ten above it are. A level
+        // with no emergency vehicle in it never gets a `DispatchRes` at all and
+        // produces an empty vec, so every pre-EMS2 trace is byte-identical.
+        out.extend_from_slice(&inf_ecs::dispatch::dispatch_state_bytes(&self.world));
         out
     }
 
@@ -1527,6 +1561,21 @@ impl RuntimeSim {
         self.traffic = inf_physics::d3::traffic::step_traffic(tw, tb, dt);
         // MIRROR-END traffic_step
         clk.mark(phase::TRAFFIC);
+        // ── EMS2 dispatch ── what has happened, who is going, and the stick
+        //    their driver is handed. HERE, immediately after the traffic, for
+        //    the traffic's own two reasons one system along: a crew body built
+        //    this step must be mirrored by the sync below on this step, and a
+        //    responding unit's driver's INTENT must be written before `character
+        //    move` reads it. After the traffic rather than before, because the
+        //    yield rule reads the dispatcher and a car must be told a siren is
+        //    behind it in the step the siren decided it was coming. Inert on a
+        //    level with no emergency vehicle in it. (MIRROR of the other host's
+        //    fixed step.)
+        let (dw, db) = (&mut self.world, &mut self.bridge3d);
+        // MIRROR-BEGIN dispatch_step
+        self.dispatch = inf_physics::d3::dispatch::step_dispatch(dw, db, dt);
+        // MIRROR-END dispatch_step
+        clk.mark(phase::DISPATCH);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         clk.mark(phase::PHYSICS2D_SYNC);

@@ -28,6 +28,7 @@
 use std::collections::BTreeSet;
 
 use bevy_ecs::prelude::Resource;
+use glam::DVec3;
 use uuid::Uuid;
 
 use crate::world::EcsWorld;
@@ -97,12 +98,842 @@ pub fn responders(world: &EcsWorld) -> Vec<Uuid> {
         .unwrap_or_default()
 }
 
-/// **Forget who was on duty** — [`crate::crowd::clear_crowd`]'s twin, for its
-/// reason: an editor Simulate session must leave nothing behind in the author's
-/// document, and a resource is outside the `ScenePersist::Memory` snapshot by
-/// construction.
+/// **Forget who was on duty, what was on fire and who was on the way** —
+/// [`crate::crowd::clear_crowd`]'s twin, for its reason: an editor Simulate
+/// session must leave nothing behind in the author's document, and a resource is
+/// outside the `ScenePersist::Memory` snapshot by construction.
 pub fn clear_dispatch(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RespondersRes>();
+    world.world_mut().remove_resource::<FleetRes>();
+    world.world_mut().remove_resource::<DispatchRes>();
+}
+
+// ── what a service is ───────────────────────────────────────────────────────
+
+/// **The three services**, and no fourth.
+///
+/// SWAT is a *crew* and not a service — a van full of officers is still the
+/// police — which is the EMS1 audit's own reading and is why there are three
+/// here against four rows in the fleet catalogue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnitKind {
+    /// A cruiser or a tactical van.
+    Police,
+    /// An appliance.
+    Fire,
+    /// An ambulance.
+    Ambulance,
+}
+
+impl UnitKind {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            UnitKind::Police => "police",
+            UnitKind::Fire => "fire",
+            UnitKind::Ambulance => "ambulance",
+        }
+    }
+
+    /// The byte this service folds into a trace. **Frozen, append-only** on
+    /// [`crate::components::SlotRole::as_u8`]'s terms: `Police` 0, `Fire` 1,
+    /// `Ambulance` 2.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            UnitKind::Police => 0,
+            UnitKind::Fire => 1,
+            UnitKind::Ambulance => 2,
+        }
+    }
+}
+
+/// **The entity name every emergency light bar carries.**
+///
+/// EMS1's three light-bar `BodyPart`s (`SEDAN_BAR`, `VAN_BAR`, `TRUCK_BAR`) are
+/// all spelled `light_bar`, and `inf_ecs::vehicle::rig_nodes_at` names the
+/// entity after the part — so this string is the persisted trace of a livery,
+/// and it is the one thing in a *committed document* that says "this vehicle is
+/// an emergency vehicle".
+pub const LIGHT_BAR_PART: &str = "light_bar";
+
+/// How long a chassis has to be, in half-metres of its own collider, before a
+/// red-barred vehicle is an **appliance** rather than an ambulance.
+///
+/// # The number is a measurement, and the first guess was nearly wrong
+///
+/// It was written as 3.0 from a remembered table, and
+/// `every_livery_is_recognised_as_the_service_it_declares` printed what the
+/// island's four rows *actually* build: cruiser **2.32**, SWAT van **2.80**,
+/// ambulance **2.95**, appliance **3.90** metres of half-length. Three metres
+/// left the ambulance five centimetres from being dispatched to house fires —
+/// one editorial tweak to a `.toml` row away from a silent misrouting that no
+/// arm in this tree would have named.
+///
+/// 3.4 is the middle of the measured gap: 45 cm of margin on each side, which is
+/// more than any of the four rows has ever moved. It is a *rule* and not a table
+/// lookup — a red-barred vehicle seven metres long is a fire appliance whoever
+/// authored it — which is what lets a project that adds a fifth row be
+/// recognised without touching this crate.
+pub const APPLIANCE_HALF_LENGTH_M: f64 = 3.4;
+
+/// **What service a vehicle in the world belongs to**, or `None` for a civilian
+/// one — the ONE recogniser.
+///
+/// # Why the level is read and not the recipe
+///
+/// The fleet is authored: EMS1's generator parks it into the `.inf_lvl` with a
+/// guid salted on `island.ems.{site}.{col}.{row}.{k}.{id}`, and the *recipe*
+/// that knows a row is called `"ambulance"` lives in Ring 1 and is not there
+/// when a shipped player opens the document. Nothing on a chassis says what it
+/// is — `VehicleClass` is forty-seven suspension numbers and a schema this wave
+/// may not move — so the only honest answer is to read what the livery **left
+/// in the world**:
+///
+/// * a child entity named [`LIGHT_BAR_PART`] whose material is **bloomed**
+///   (emissive over 1, which `PartPaint` requires or the HDR path does not see
+///   it) — that is an emergency vehicle and nothing else in this engine has one;
+/// * its hue: blue is police, red is fire or medical (`BEACON_BLUE` /
+///   `BEACON_RED`);
+/// * and, for the red pair, the chassis's own length against
+///   [`APPLIANCE_HALF_LENGTH_M`].
+///
+/// Two observable channels, three services, no ambiguity. `Livery::service`
+/// declares the same answer on the authoring side and
+/// `every_livery_is_recognised_as_the_service_it_declares` holds the two
+/// together, so a fifth livery that disagreed with this rule fails a test rather
+/// than dispatching an ambulance to a fire.
+///
+/// `O(children)` — the shape [`crate::vehicle::rig_of`] already is, and asked
+/// once per block stamp rather than once per step.
+pub fn unit_kind_of(world: &EcsWorld, chassis: Uuid) -> Option<UnitKind> {
+    let entity = world.entity_of(chassis)?;
+    let w = world.world();
+    // A chassis, so a stray named prop cannot be dispatched.
+    let collider = w.get::<crate::components::Collider3D>(entity)?;
+    crate::vehicle::chassis_of(
+        Some(collider),
+        w.get::<crate::components::RigidBody3D>(entity),
+    )?;
+    let half_length_m = collider.half_extents.z;
+    for child in world.children_of(entity) {
+        let named = w
+            .get::<crate::components::Name>(child)
+            .is_some_and(|n| n.0 == LIGHT_BAR_PART);
+        if !named {
+            continue;
+        }
+        let Some(m) = w.get::<crate::components::Material>(child) else {
+            continue;
+        };
+        let lin = m.emissive_linear();
+        // Not bloomed is not a beacon: an unlit grey box named `light_bar` is a
+        // part somebody modelled, not a unit somebody can send.
+        if lin[0].max(lin[1]).max(lin[2]) <= 1.0 {
+            continue;
+        }
+        return Some(if lin[2] > lin[0] {
+            UnitKind::Police
+        } else if half_length_m >= APPLIANCE_HALF_LENGTH_M {
+            UnitKind::Fire
+        } else {
+            UnitKind::Ambulance
+        });
+    }
+    None
+}
+
+// ── the fleet, and who owns it ──────────────────────────────────────────────
+
+/// How far from a block a parked vehicle may be and still be **its** vehicle,
+/// metres.
+///
+/// EMS1 parks a fleet on an apron 6 m off the nearest route vertex to the
+/// block's centre, at 11 m pitches, at most sixteen shunts along — so the
+/// furthest a station's own third appliance can legitimately sit from the block
+/// centre is a long way down one street and nowhere near another block. Eighty
+/// metres reaches the whole apron of a 52 m lot and stops well short of the
+/// island's own settlement pitch.
+pub const STATION_CLAIM_M: f64 = 80.0;
+
+/// The most units one level's dispatcher owns.
+///
+/// The island parks seventeen. Sixty-four is four times that and is the same
+/// bound `inf_player::budget::VEHICLE_BUDGET_CARS` is measured at, which is the
+/// point: a unit that is responding is a vehicle with a rig on four rays, and
+/// the two ceilings should be the same number for the same reason.
+pub const MAX_UNITS: usize = 64;
+
+/// **One emergency vehicle, and the institution it belongs to** (wave EMS2) —
+/// the ownership edge EMS1 left out.
+///
+/// EMS1's audit put it plainly: *the fleet is parked, not owned*. Nothing linked
+/// a vehicle to a station, so a dispatcher had nothing to send and nowhere to
+/// send it back to. This is that edge, derived rather than authored — see
+/// [`sync_fleet`] for why it can be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FleetUnit {
+    /// What service it is — [`unit_kind_of`]'s answer.
+    pub kind: UnitKind,
+    /// The block it is parked at. A diagnostic and a *return address*: a unit
+    /// goes home to the space it came out of, and the station is what says two
+    /// units belong to one institution.
+    pub station: Uuid,
+    /// The space it was parked in, world metres — where it goes back to.
+    pub home: DVec3,
+    /// The way that space points, degrees.
+    pub home_yaw_deg: f64,
+}
+
+/// **The level's own fleet**, derived once and rebuilt when the blocks move.
+///
+/// A resource on [`crate::traffic::TrafficRes`]' exact terms: no schema moves,
+/// absent until something asks, and one `block_stamp` walk to decide whether it
+/// is stale — which is the same walk `sync_society` and `sync_carriageway`
+/// already make.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct FleetRes {
+    /// Every unit, in `Guid` order.
+    pub units: std::collections::BTreeMap<Uuid, FleetUnit>,
+    /// The block-set fold this was derived from. `0` before the first
+    /// derivation.
+    pub stamp: u64,
+    /// How many times the derivation has actually run — a counter a gate can
+    /// assert is **one** over a settled level, which is what says the cache is a
+    /// cache.
+    pub derivations: u64,
+}
+
+/// **Derive the fleet if the level's blocks have moved** — the one door both
+/// hosts call, through their applier.
+///
+/// Returns whether it rebuilt.
+///
+/// # A unit's station is the block it is parked at, and that is a rule
+///
+/// The recipe parks a fleet on its own institution's apron and nowhere else, so
+/// *the nearest block within [`STATION_CLAIM_M`]* recovers the edge the recipe
+/// drew. It is deliberately not "the nearest **institution**": `inf-ecs` is
+/// Ring 0 and an archetype is Ring 1 authoring vocabulary, and the question
+/// being asked here — **where does this vehicle live** — is answered correctly
+/// by the block whether or not this crate can name what kind of building it is.
+///
+/// A unit parked on no block at all is refused rather than given a station at
+/// the origin, because a return address that is wrong is worse than a unit that
+/// never leaves.
+///
+/// `O(vehicles × blocks)` on the step a level's geometry changes and one
+/// `block_stamp` walk on every other, which on a settled level is never.
+pub fn sync_fleet(world: &mut EcsWorld) -> bool {
+    let stamp = crate::traffic::block_stamp(world);
+    if let Some(res) = world.world().get_resource::<FleetRes>() {
+        if res.stamp == stamp {
+            return false;
+        }
+    }
+    // The blocks, once: every `PcgVolume` with a place in the world.
+    let mut blocks: Vec<(Uuid, DVec3)> = Vec::new();
+    let mut candidates: Vec<Uuid> = Vec::new();
+    for e in world.world().iter_entities() {
+        let Some(g) = e.get::<crate::components::Guid>() else {
+            continue;
+        };
+        if e.get::<crate::components::PcgVolume>().is_some() {
+            if let Some(t) = e.get::<crate::components::GlobalTransform>() {
+                let p = t.translation();
+                if p.is_finite() {
+                    blocks.push((g.0, p));
+                }
+            }
+            continue;
+        }
+        if e.get::<crate::components::Collider3D>().is_some()
+            && e.get::<crate::components::RigidBody3D>().is_some()
+        {
+            candidates.push(g.0);
+        }
+    }
+    blocks.sort_by_key(|(g, _)| *g);
+    candidates.sort_unstable();
+    let mut units: std::collections::BTreeMap<Uuid, FleetUnit> = std::collections::BTreeMap::new();
+    for chassis in candidates {
+        if units.len() >= MAX_UNITS {
+            break;
+        }
+        let Some(kind) = unit_kind_of(world, chassis) else {
+            continue;
+        };
+        let Some(e) = world.entity_of(chassis) else {
+            continue;
+        };
+        let Some(t) = world.world().get::<crate::components::Transform>(e) else {
+            continue;
+        };
+        let home = t.translation.to_dvec3();
+        let home_yaw_deg = t.rotation.y;
+        if !home.is_finite() {
+            continue;
+        }
+        // The nearest block, ties on the `Guid` — `blocks` is `Guid`-ordered and
+        // the comparison is strict, so the first of two equidistant blocks wins
+        // on both hosts.
+        let mut best: Option<(f64, Uuid)> = None;
+        for (g, p) in &blocks {
+            let d = (*p - home).length();
+            if !d.is_finite() || d > STATION_CLAIM_M {
+                continue;
+            }
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, *g));
+            }
+        }
+        let Some((_, station)) = best else {
+            continue;
+        };
+        units.insert(
+            chassis,
+            FleetUnit {
+                kind,
+                station,
+                home,
+                home_yaw_deg,
+            },
+        );
+    }
+    let derivations = world
+        .world()
+        .get_resource::<FleetRes>()
+        .map(|r| r.derivations)
+        .unwrap_or(0);
+    world.world_mut().insert_resource(FleetRes {
+        units,
+        stamp,
+        derivations: derivations + 1,
+    });
+    true
+}
+
+/// The level's fleet, or `None` — the read side, for a caller that must not
+/// derive.
+pub fn fleet_of(world: &EcsWorld) -> Option<&FleetRes> {
+    world.world().get_resource::<FleetRes>()
+}
+
+// ── what happens, and what is done about it ─────────────────────────────────
+
+/// **Something that needs somebody.**
+///
+/// Three, each carrying the one fact its own service needs and nothing else:
+/// what is burning, who has collapsed, and how bad the crime was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IncidentKind {
+    /// A building is alight. `intensity` is the fire's own size, unitless in
+    /// `[0, 1]`, and it is what a fire crew spends down — see
+    /// [`SUPPRESSION_PER_S`].
+    Fire { building: Uuid, intensity: f64 },
+    /// Somebody is on the ground. `severity` is `1` for a collapse and `2` for a
+    /// body that has been shot.
+    Medical { npc: Uuid, severity: u8 },
+    /// Something was done to somebody. `severity` is `1` for a shot fired and
+    /// `2` for a death.
+    Crime { severity: u8 },
+}
+
+impl IncidentKind {
+    /// **Who goes** — the whole of the routing rule.
+    pub fn service(self) -> UnitKind {
+        match self {
+            IncidentKind::Fire { .. } => UnitKind::Fire,
+            IncidentKind::Medical { .. } => UnitKind::Ambulance,
+            IncidentKind::Crime { .. } => UnitKind::Police,
+        }
+    }
+
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            IncidentKind::Fire { .. } => "fire",
+            IncidentKind::Medical { .. } => "medical",
+            IncidentKind::Crime { .. } => "crime",
+        }
+    }
+
+    /// The byte this kind folds into a trace. **Frozen, append-only.**
+    pub fn as_u8(self) -> u8 {
+        match self {
+            IncidentKind::Fire { .. } => 0,
+            IncidentKind::Medical { .. } => 1,
+            IncidentKind::Crime { .. } => 2,
+        }
+    }
+}
+
+/// **How far through its own life an incident is.**
+///
+/// A lifecycle and not a flag, because "reported" and "nobody could go" are the
+/// same world with different meanings, and a dispatcher that could not tell them
+/// apart would look identical to one that had no units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IncidentState {
+    /// Known, nobody sent yet.
+    Reported,
+    /// A unit is on the way.
+    Assigned,
+    /// A unit is at it.
+    OnScene,
+    /// Dealt with. Kept for [`INCIDENT_KEEP_STEPS`] so a gate, a HUD and a
+    /// later wave's reputation ledger can read what happened.
+    Resolved,
+}
+
+impl IncidentState {
+    /// A stable short name.
+    pub fn name(self) -> &'static str {
+        match self {
+            IncidentState::Reported => "reported",
+            IncidentState::Assigned => "assigned",
+            IncidentState::OnScene => "on-scene",
+            IncidentState::Resolved => "resolved",
+        }
+    }
+
+    /// The byte this state folds into a trace. **Frozen, append-only.**
+    pub fn as_u8(self) -> u8 {
+        match self {
+            IncidentState::Reported => 0,
+            IncidentState::Assigned => 1,
+            IncidentState::OnScene => 2,
+            IncidentState::Resolved => 3,
+        }
+    }
+}
+
+/// **One thing that has happened and is being dealt with.**
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Incident {
+    /// What it is.
+    pub kind: IncidentKind,
+    /// Where, world metres.
+    pub at: DVec3,
+    /// How far through its life it is.
+    pub state: IncidentState,
+    /// The fixed step it was opened on.
+    pub opened_step: u64,
+    /// The unit sent to it, once one has been.
+    pub unit: Option<Uuid>,
+    /// The step it was resolved on, or `None`.
+    pub resolved_step: Option<u64>,
+}
+
+impl Incident {
+    /// **How long it took, in fixed steps** — `None` while it is still open.
+    ///
+    /// The number a gate prints as a response time, and the one thing about a
+    /// dispatcher a player actually experiences.
+    pub fn response_steps(&self) -> Option<u64> {
+        self.resolved_step
+            .map(|s| s.saturating_sub(self.opened_step))
+    }
+}
+
+/// **Where a unit is in its own run.**
+///
+/// **NOT on [`crate::traffic::TrafficRecord`]** — and the reason is that record's
+/// own doc: it is *re-derived on block stamps*, so a unit's state would be
+/// silently reset the moment a cell streamed in. It is also the wrong home on
+/// principle: an emergency vehicle is authored content on EMS1's Path A and the
+/// traffic has never heard of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnitState {
+    /// Parked at its station.
+    InStation,
+    /// Driving to an incident.
+    EnRoute,
+    /// Stopped at one, with its crew out.
+    OnScene,
+    /// Driving home.
+    Returning,
+}
+
+impl UnitState {
+    /// A stable short name.
+    pub fn name(self) -> &'static str {
+        match self {
+            UnitState::InStation => "in-station",
+            UnitState::EnRoute => "en-route",
+            UnitState::OnScene => "on-scene",
+            UnitState::Returning => "returning",
+        }
+    }
+
+    /// The byte this state folds into a trace. **Frozen, append-only.**
+    pub fn as_u8(self) -> u8 {
+        match self {
+            UnitState::InStation => 0,
+            UnitState::EnRoute => 1,
+            UnitState::OnScene => 2,
+            UnitState::Returning => 3,
+        }
+    }
+
+    /// **Whether a unit in this state is running with its lights and siren on.**
+    ///
+    /// The one door, because three separate systems ask it — the audio emit, the
+    /// projector's flashing bar and the yield rule — and three spellings of "is
+    /// this thing responding" is the defect this repository has paid for at four
+    /// seams. A returning unit is **not** running hot, which is what an
+    /// ambulance that has already dropped its patient does.
+    pub fn running_hot(self) -> bool {
+        matches!(self, UnitState::EnRoute | UnitState::OnScene)
+    }
+}
+
+/// **What one unit is doing** — the sim state a fleet derivation must not touch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnitRun {
+    /// Where it is in its run.
+    pub state: UnitState,
+    /// The incident it is on, or `None`.
+    pub incident: Option<Uuid>,
+    /// The step it entered [`state`](Self::state) on — what an on-scene timer
+    /// counts from.
+    pub since_step: u64,
+    /// The drive it is on: out to the scene, or home again. `None` in station.
+    pub path: Option<inf_nav::NavPath>,
+}
+
+impl Default for UnitRun {
+    fn default() -> Self {
+        Self {
+            state: UnitState::InStation,
+            incident: None,
+            since_step: 0,
+            path: None,
+        }
+    }
+}
+
+/// The most incidents one level holds open at once.
+///
+/// Sixteen. It is a **cost** bound: every open incident is a candidate for an
+/// assignment search, and an assignment search is a Dijkstra over the whole
+/// carriageway. A town with sixteen simultaneous emergencies has more than a
+/// player can watch, and the seventeenth is refused rather than queued — a
+/// refusal is a value, and a queue nobody can reach is a leak with a deadline.
+pub const MAX_OPEN_INCIDENTS: usize = 16;
+
+/// How long a resolved incident is kept before it is forgotten, fixed steps.
+///
+/// Sixty seconds at 60 Hz. Long enough that a gate which resolves an incident
+/// and then measures the response time finds it, short enough that an hour's
+/// play does not accumulate a ledger nothing reads.
+pub const INCIDENT_KEEP_STEPS: u64 = 3600;
+
+/// **The dispatcher's own state** — what is open, and what every unit is doing.
+///
+/// Separate from [`FleetRes`] on purpose, and the separation is load-bearing:
+/// the fleet is a **derivation** that is thrown away and rebuilt whenever the
+/// level's blocks move, and this is **sim state** that must survive that. Fusing
+/// them would reset a unit half-way to a fire because a terrain cell paged in —
+/// which is the trap `TrafficRecord`'s own *"a re-derivation is not a fresh
+/// start"* names, met one system over.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct DispatchRes {
+    /// What is open, in `Guid` order.
+    pub incidents: std::collections::BTreeMap<Uuid, Incident>,
+    /// What every unit is doing, in `Guid` order. Keyed on the chassis.
+    pub runs: std::collections::BTreeMap<Uuid, UnitRun>,
+    /// How many fixed steps the dispatcher has run.
+    pub steps: u64,
+    /// The highest witnessed-act step already turned into a crime — so the log
+    /// is read forward once and an act cannot be reported twice.
+    pub seen_act_step: u64,
+    /// Incidents opened over the session. A lifetime counter, so a gate can
+    /// arm itself before it asserts anything about a table that is allowed to
+    /// be empty at the end.
+    pub opened: u64,
+    /// …assigned to a unit.
+    pub assigned: u64,
+    /// …resolved.
+    pub resolved: u64,
+    /// **Incidents that found no free unit this step.** The falsifier for "the
+    /// dispatcher works": a town whose every incident goes unanswered reads zero
+    /// `assigned` and a rising number here, which is a different fact from a
+    /// town where nothing happened.
+    pub unanswered: u64,
+}
+
+/// The dispatcher's state, or `None`.
+pub fn dispatch_of(world: &EcsWorld) -> Option<&DispatchRes> {
+    world.world().get_resource::<DispatchRes>()
+}
+
+// ── where incidents come from ───────────────────────────────────────────────
+
+/// Salts the ambient-incident draw.
+pub const SALT_INCIDENT: u64 = 0x494e_4349_4400_0001;
+
+/// Salts which kind an ambient incident is.
+pub const SALT_INCIDENT_KIND: u64 = 0x494e_4349_4400_0002;
+
+/// Salts the guid an incident is minted with.
+pub const SALT_INCIDENT_GUID: u64 = 0x494e_4349_4400_0003;
+
+/// Salts a unit's crew guid.
+pub const SALT_CREW: u64 = 0x4352_4557_0000_0001;
+
+/// How many fixed steps one ambient draw covers.
+///
+/// 1 800 — thirty seconds at 60 Hz. The draw is taken on the *epoch*
+/// (`step / AMBIENT_PERIOD`) rather than on the step, which is what makes it
+/// sparse without a per-step random walk: a block is asked once every thirty
+/// seconds whether something has happened to it, and the answer is a pure
+/// function of `(block, epoch)` that both hosts compute without exchanging a
+/// byte.
+pub const AMBIENT_PERIOD: u64 = 1800;
+
+/// The chance one block has an incident in one epoch.
+///
+/// One in fifty. On a settlement of forty blocks that is a little under one
+/// incident every thirty seconds somewhere in town — often enough that a player
+/// crossing a city hears sirens, rare enough that a station's two ambulances are
+/// not permanently out.
+pub const AMBIENT_CHANCE: f64 = 0.02;
+
+/// **Whether something has happened at this block in this epoch**, and what.
+///
+/// A pure function of `(block, epoch)`: no counter, no stored state, no RNG —
+/// the house doctrine (`agent_rand`), so two hosts set the same town on fire at
+/// the same moment without exchanging anything.
+///
+/// A **fire** and a **medical collapse** only. An ambient *crime* is deliberately
+/// not drawn: a crime with no criminal is a siren with nothing behind it, and
+/// the crimes this wave dispatches to are the ones somebody actually committed —
+/// WPN1's witness log. Wave EMS3 gives them profiles.
+pub fn ambient_draw(block: Uuid, epoch: u64) -> Option<IncidentKind> {
+    if crate::crowd::agent_unit(block, epoch, SALT_INCIDENT) >= AMBIENT_CHANCE {
+        return None;
+    }
+    let which = crate::crowd::agent_unit(block, epoch, SALT_INCIDENT_KIND);
+    Some(if which < 0.5 {
+        IncidentKind::Fire {
+            building: block,
+            intensity: 1.0,
+        }
+    } else {
+        // The person is the block: an ambient collapse has no named victim, and
+        // naming the building is more honest than minting a guid for somebody
+        // who does not exist. The applier reads it only to decide where the
+        // paramedic kneels.
+        IncidentKind::Medical {
+            npc: block,
+            severity: 1,
+        }
+    })
+}
+
+/// **The guid an incident is minted with** — content-addressed, so two hosts
+/// that opened the same incident agree about its identity without a counter.
+///
+/// A counter would have been the obvious shape and is the wrong one: a host that
+/// started mid-trace, or one that refused an incident the other took, would
+/// number every later incident differently for ever. This is `mix64` over what
+/// the incident *is* — its kind, where it is and the step it opened on — which
+/// is the same argument `inf_ecs::traffic::parked_car_guid` and the P22 debris
+/// guids rest on.
+pub fn incident_guid(kind: IncidentKind, at: DVec3, step: u64) -> Uuid {
+    let q = |v: f64| -> u64 {
+        // Quantized to a millimetre before it is hashed, so two hosts that
+        // computed a position through different-but-equal arithmetic mint one
+        // guid. (They do not — the position is derived — but a guid is an
+        // identity and an identity that could depend on a last bit is a bug
+        // waiting for a compiler flag.)
+        if v.is_finite() {
+            (v * 1000.0).round() as i64 as u64
+        } else {
+            0
+        }
+    };
+    let seed = Uuid::from_u64_pair(
+        q(at.x) ^ (u64::from(kind.as_u8()) << 56),
+        q(at.z) ^ q(at.y).rotate_left(17),
+    );
+    let hi = crate::crowd::agent_rand(seed, step, SALT_INCIDENT_GUID);
+    let lo = crate::crowd::agent_rand(seed, step ^ 0x5a5a_5a5a, SALT_INCIDENT_GUID);
+    Uuid::from_u64_pair(hi, lo)
+}
+
+/// **The person who drives a unit and works its scene** — derived from the
+/// chassis.
+///
+/// `inf_ecs::traffic::driver_guid`'s shape and its reason: the crew is not
+/// authored, so it needs a stable identity both hosts mint the same way. A
+/// **different salt** from the traffic driver's, so a unit that was once a
+/// traffic car could not end up with one body claimed by two systems.
+pub fn crew_guid(chassis: Uuid) -> Uuid {
+    let n = crate::crowd::agent_rand(chassis, 0, SALT_CREW);
+    let m = crate::crowd::agent_rand(chassis, 1, SALT_CREW);
+    Uuid::from_u64_pair(n, m)
+}
+
+// ── how an incident is answered ─────────────────────────────────────────────
+
+/// How close a unit has to get to be **at** an incident, metres.
+///
+/// Twelve. A fire appliance is 7.8 m long and stops in the road outside the
+/// building rather than on top of it, so the distance from the chassis origin to
+/// the thing that is burning is most of a vehicle plus a pavement.
+pub const ON_SCENE_M: f64 = 12.0;
+
+/// How close a returning unit has to get to its own space to be home, metres.
+///
+/// Eight — the parking pitch less a car, so a unit that has been shunted one
+/// space along still arrives.
+pub const HOME_M: f64 = 8.0;
+
+/// How far from the incident a crew member stands, metres.
+///
+/// Four. Near enough that a firefighter is at the fire and a paramedic is at the
+/// patient; far enough that the body is not inside the thing it is working on.
+pub const SCENE_STAND_M: f64 = 4.0;
+
+/// How much of a fire's intensity one appliance puts out per second.
+///
+/// A fifth, so a full-intensity fire takes **five seconds of a crew on scene**
+/// to put out. That is a game's minute rather than a real one, and the number is
+/// a *rate* rather than a duration precisely so a bigger fire takes longer — a
+/// half-intensity blaze is two and a half seconds and reads as the smaller
+/// emergency it is.
+pub const SUPPRESSION_PER_S: f64 = 0.2;
+
+/// How long a paramedic works on a patient before the incident is closed,
+/// seconds.
+pub const STABILIZE_S: f64 = 6.0;
+
+/// How long the police stand at a crime scene before it is closed, seconds.
+///
+/// Longer than a stabilisation, because securing a scene is the one of the three
+/// that is *waiting* rather than *working*.
+pub const SECURE_S: f64 = 10.0;
+
+/// **What it costs each candidate to get there** — one `inf_nav` search per
+/// candidate, over the level's own carriageway.
+///
+/// # Why the search and not the crow's flight
+///
+/// A straight-line distance is one subtraction and is wrong in exactly the case
+/// that matters: an ambulance across a river, or on the other side of a
+/// settlement's one bridge, is *near* and cannot get there. `NavRoute::cost_m`
+/// is the sum of the **edge** costs, so a builder that made a stair — or a
+/// bridge, or a ferry ramp — dear is telling the search something the geometry
+/// does not say, and this is the number that hears it.
+///
+/// Lives here, in the deciding half, rather than in the applier: the applier may
+/// not decide anything, and *which* unit goes is the whole decision. It also
+/// keeps `inf-physics` from having to name `inf-nav` at all.
+///
+/// A candidate whose home is off the graph, or which cannot reach `dest`, is
+/// **left out** rather than given an infinite cost — the two are the same to
+/// [`nearest_unit`] and a `Vec` a caller can count is a better diagnostic than a
+/// column of infinities.
+pub fn route_costs(
+    graph: &inf_nav::NavGraph,
+    dest: inf_nav::NavNodeId,
+    homes: &[(Uuid, DVec3)],
+) -> Vec<(Uuid, f64)> {
+    let mut out: Vec<(Uuid, f64)> = Vec::with_capacity(homes.len());
+    for (guid, home) in homes {
+        let Some(from) = graph.nearest_planar(*home, f64::INFINITY) else {
+            continue;
+        };
+        if let Some(route) = inf_nav::route(graph, from, dest).route() {
+            out.push((*guid, route.cost_m));
+        }
+    }
+    out
+}
+
+/// **Where on the carriageway an incident is** — the node a route to it ends at.
+///
+/// `None` for a level with no streets, which is the honest answer to "how do I
+/// drive there" for a place with no roads.
+pub fn scene_node(graph: &inf_nav::NavGraph, at: DVec3) -> Option<inf_nav::NavNodeId> {
+    graph.nearest_planar(at, f64::INFINITY)
+}
+
+/// **Which unit goes** — the nearest free one of the right service, by route
+/// cost.
+///
+/// `costs` is `(chassis, cost_m)` for every candidate the caller has already
+/// routed; this is the choosing rule alone, hoisted out of the applier so it can
+/// be tested without a carriageway.
+///
+/// **Ties break on the `Guid`**, which is the whole reason this is a function:
+/// a station parks two identical ambulances the same distance from the same
+/// junction more often than not, and a `min_by` over an unsorted map answers
+/// whichever the iterator reached first. `f64::total_cmp` and then the guid, so
+/// two hosts send the same ambulance.
+pub fn nearest_unit(costs: &[(Uuid, f64)]) -> Option<Uuid> {
+    costs
+        .iter()
+        .filter(|(_, c)| c.is_finite())
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+        .map(|(g, _)| *g)
+}
+
+// ── the trace ───────────────────────────────────────────────────────────────
+
+/// Bytes one incident folds into [`dispatch_state_bytes`].
+///
+/// `guid (16) | kind (1) | state (1) | at.x/y/z (24) | opened (8) | unit (16)`.
+pub const INCIDENT_TRACE_BYTES: usize = 66;
+
+/// Bytes one unit run folds into [`dispatch_state_bytes`].
+///
+/// `guid (16) | state (1) | since (8) | incident (16) | path length_m (8)`.
+pub const UNIT_TRACE_BYTES: usize = 49;
+
+/// **The dispatcher, as bytes** — the section a replay trace folds.
+///
+/// The crowd's argument verbatim, one system over: a unit's *state* decides
+/// everything the dispatch step does with it and is not a transform anything
+/// else folds, so without this section two hosts that assigned different
+/// ambulances to one fire would compare equal at every step until one of them
+/// happened to solve a chassis the other did not.
+///
+/// What is folded is the **decision**, not its geometry: a unit's position is
+/// its chassis's `Transform` and the sim snapshot already carries it, so the
+/// path is folded as its own **length** rather than point by point — one number
+/// that changes when a route changes and costs eight bytes instead of a
+/// kilometre of them.
+///
+/// Empty on a level with no dispatcher, which is what keeps every trace
+/// committed before this wave byte-identical.
+pub fn dispatch_state_bytes(world: &EcsWorld) -> Vec<u8> {
+    let Some(res) = dispatch_of(world) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(
+        res.incidents.len() * INCIDENT_TRACE_BYTES + res.runs.len() * UNIT_TRACE_BYTES,
+    );
+    for (guid, inc) in &res.incidents {
+        out.extend_from_slice(guid.as_bytes());
+        out.push(inc.kind.as_u8());
+        out.push(inc.state.as_u8());
+        out.extend_from_slice(&inc.at.x.to_le_bytes());
+        out.extend_from_slice(&inc.at.y.to_le_bytes());
+        out.extend_from_slice(&inc.at.z.to_le_bytes());
+        out.extend_from_slice(&inc.opened_step.to_le_bytes());
+        out.extend_from_slice(inc.unit.unwrap_or(Uuid::nil()).as_bytes());
+    }
+    for (guid, run) in &res.runs {
+        out.extend_from_slice(guid.as_bytes());
+        out.push(run.state.as_u8());
+        out.extend_from_slice(&run.since_step.to_le_bytes());
+        out.extend_from_slice(run.incident.unwrap_or(Uuid::nil()).as_bytes());
+        let len = run.path.as_ref().map(|p| p.length_m()).unwrap_or(0.0);
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -141,5 +972,180 @@ mod tests {
         clear_dispatch(&mut w);
         assert!(!is_responder(&w, guid(2)));
         assert!(responders(&w).is_empty());
+    }
+
+    /// **THE TIE BREAKS ON THE GUID**, which is the whole reason
+    /// [`nearest_unit`] is a function.
+    ///
+    /// A station parks two identical ambulances the same distance from the same
+    /// junction more often than not, and a `min_by` over a map answers whichever
+    /// the iterator reached first. Two hosts that iterated differently would send
+    /// different ambulances to one fire — a divergence no *position* check can
+    /// see, because both cars are in the right place until one of them starts
+    /// driving.
+    #[test]
+    fn two_units_at_one_distance_are_chosen_by_guid() {
+        // Given in the WRONG order on purpose: a rule that kept the first finite
+        // entry would answer `guid(9)`.
+        let tied = [(guid(9), 120.0), (guid(2), 120.0), (guid(5), 120.0)];
+        assert_eq!(nearest_unit(&tied), Some(guid(2)));
+        // …and the cost still wins when there is one.
+        let apart = [(guid(2), 120.0), (guid(9), 11.5)];
+        assert_eq!(nearest_unit(&apart), Some(guid(9)));
+        // A non-finite cost is not a candidate — a unit that cannot get there is
+        // not "infinitely far", it is out.
+        let broken = [(guid(1), f64::NAN), (guid(3), f64::INFINITY)];
+        assert_eq!(nearest_unit(&broken), None);
+        assert_eq!(nearest_unit(&[]), None);
+    }
+
+    /// **THE AMBIENT DRAW IS SPARSE, DETERMINISTIC AND SPREAD.**
+    ///
+    /// Three claims, and the third is the one a constant-`None` implementation
+    /// passes the other two of: over a town's worth of blocks and two minutes'
+    /// worth of epochs the draw fires at about [`AMBIENT_CHANCE`], it fires the
+    /// same way twice, and it produces **both** kinds.
+    #[test]
+    fn the_ambient_draw_is_sparse_and_reproducible() {
+        const BLOCKS: u128 = 200;
+        const EPOCHS: u64 = 120;
+        let mut fires = 0u32;
+        let (mut fire, mut medical) = (0u32, 0u32);
+        for b in 0..BLOCKS {
+            for e in 0..EPOCHS {
+                let Some(kind) = ambient_draw(guid(0xB10C_0000 + b), e) else {
+                    continue;
+                };
+                fires += 1;
+                match kind {
+                    IncidentKind::Fire {
+                        building,
+                        intensity,
+                    } => {
+                        assert_eq!(building, guid(0xB10C_0000 + b));
+                        assert!((0.0..=1.0).contains(&intensity));
+                        fire += 1;
+                    }
+                    IncidentKind::Medical { .. } => medical += 1,
+                    IncidentKind::Crime { .. } => {
+                        panic!("the ambient draw produced a crime with no criminal")
+                    }
+                }
+            }
+        }
+        let trials = f64::from(BLOCKS as u32) * EPOCHS as f64;
+        let rate = f64::from(fires) / trials;
+        println!(
+            "EMS2 ambient: {fires} of {trials:.0} draws ({rate:.4} against \
+             {AMBIENT_CHANCE}) — {fire} fire(s), {medical} medical"
+        );
+        assert!(
+            rate > AMBIENT_CHANCE * 0.5 && rate < AMBIENT_CHANCE * 2.0,
+            "the draw fired at {rate:.4} against a declared {AMBIENT_CHANCE}"
+        );
+        assert!(fire > 0 && medical > 0, "the draw only ever makes one kind");
+        // …and it is a pure function.
+        for b in 0..20u128 {
+            for e in 0..5u64 {
+                assert_eq!(
+                    ambient_draw(guid(b), e),
+                    ambient_draw(guid(b), e),
+                    "the draw is not a pure function of (block, epoch)"
+                );
+            }
+        }
+    }
+
+    /// **AN INCIDENT'S IDENTITY IS WHAT IT IS**, not a counter.
+    ///
+    /// A counter would number every later incident differently on a host that
+    /// refused one the other took — for ever. This is content-addressed, so the
+    /// same thing at the same place on the same step is the same incident, and
+    /// three different things are three.
+    #[test]
+    fn an_incidents_guid_is_content_addressed() {
+        let at = DVec3::new(120.5, 0.0, -40.25);
+        let fire = IncidentKind::Fire {
+            building: guid(7),
+            intensity: 1.0,
+        };
+        let a = incident_guid(fire, at, 900);
+        assert_eq!(a, incident_guid(fire, at, 900), "not a pure function");
+        assert_ne!(a, incident_guid(fire, at, 901), "the step is not in it");
+        assert_ne!(
+            a,
+            incident_guid(fire, at + DVec3::X, 900),
+            "the place is not in it"
+        );
+        assert_ne!(
+            a,
+            incident_guid(IncidentKind::Crime { severity: 1 }, at, 900),
+            "the kind is not in it"
+        );
+        // **The intensity is NOT an identity.** A fire that has been partly put
+        // out is the same fire, and a guid that moved as it burned down would
+        // have made every step of a suppression a new incident.
+        assert_eq!(
+            a,
+            incident_guid(
+                IncidentKind::Fire {
+                    building: guid(7),
+                    intensity: 0.25
+                },
+                at,
+                900
+            ),
+            "a fire changed identity as it was put out"
+        );
+    }
+
+    /// **THE TRACE IS EMPTY WHEN THERE IS NO DISPATCHER, AND THE RIGHT SIZE WHEN
+    /// THERE IS.**
+    ///
+    /// The first half is what keeps every hash committed before this wave
+    /// byte-identical; the second is what says the section carries the *decision*
+    /// rather than a length prefix.
+    #[test]
+    fn the_dispatch_trace_is_empty_until_there_is_something_to_say() {
+        let mut w = EcsWorld::new();
+        assert!(dispatch_state_bytes(&w).is_empty());
+
+        let mut res = DispatchRes::default();
+        res.incidents.insert(
+            guid(1),
+            Incident {
+                kind: IncidentKind::Crime { severity: 2 },
+                at: DVec3::new(1.0, 2.0, 3.0),
+                state: IncidentState::Assigned,
+                opened_step: 12,
+                unit: Some(guid(4)),
+                resolved_step: None,
+            },
+        );
+        res.runs.insert(
+            guid(4),
+            UnitRun {
+                state: UnitState::EnRoute,
+                incident: Some(guid(1)),
+                since_step: 12,
+                path: None,
+            },
+        );
+        w.world_mut().insert_resource(res.clone());
+        let bytes = dispatch_state_bytes(&w);
+        assert_eq!(bytes.len(), INCIDENT_TRACE_BYTES + UNIT_TRACE_BYTES);
+
+        // …and it MOVES when the decision does. A trace that folded only the
+        // positions would be identical here, which is the whole reason this
+        // section exists: two hosts that sent different units to one incident are
+        // in the same world with different plans.
+        let mut other = res.clone();
+        other.runs.get_mut(&guid(4)).expect("the run").state = UnitState::Returning;
+        w.world_mut().insert_resource(other);
+        assert_ne!(
+            bytes,
+            dispatch_state_bytes(&w),
+            "a unit that turned round left the trace unchanged"
+        );
     }
 }

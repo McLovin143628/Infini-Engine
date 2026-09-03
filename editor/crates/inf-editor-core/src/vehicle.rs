@@ -794,6 +794,7 @@ pub const CRUISER_LIVERY: Livery = Livery {
         ("boot", PartPaint::flat(SERVICE_WHITE)),
     ],
     extra: &[(SEDAN_BAR, BEACON_BLUE)],
+    service: Some(inf_ecs::dispatch::UnitKind::Police),
 };
 
 /// **White with a dark sill** — the ambulance.
@@ -806,6 +807,7 @@ pub const AMBULANCE_LIVERY: Livery = Livery {
         ("roof", PartPaint::flat(SERVICE_WHITE)),
     ],
     extra: &[(VAN_BAR, BEACON_RED)],
+    service: Some(inf_ecs::dispatch::UnitKind::Ambulance),
 };
 
 /// **Unrelieved charcoal** — the tactical van. The one livery whose point is
@@ -819,6 +821,7 @@ pub const SWAT_LIVERY: Livery = Livery {
         ("roof", PartPaint::flat(TACTICAL_GREY)),
     ],
     extra: &[(VAN_BAR, BEACON_BLUE)],
+    service: Some(inf_ecs::dispatch::UnitKind::Police),
 };
 
 /// **One red** — the appliance, with a dark deck because a pump bed is not
@@ -834,6 +837,7 @@ pub const ENGINE_LIVERY: Livery = Livery {
         ("headboard", PartPaint::flat(FIRE_RED)),
     ],
     extra: &[(TRUCK_BAR, BEACON_RED)],
+    service: Some(inf_ecs::dispatch::UnitKind::Fire),
 };
 
 /// **The livery a catalogue row wears**, or `None` for a civilian one.
@@ -932,6 +936,98 @@ mod tests {
         // …and the sweep really walked some liveries, or it is a statement about
         // an empty fleet table.
         assert!(painted >= 16, "only {painted} liveried part(s) swept");
+    }
+
+    /// **EVERY LIVERY IS RECOGNISED AS THE SERVICE IT DECLARES** (wave EMS2).
+    ///
+    /// # The two halves of one fact, held together
+    ///
+    /// A livery *declares* its service in a Ring-1 code const, and
+    /// `inf_ecs::dispatch::unit_kind_of` *recovers* it in Ring 0 from what the
+    /// livery left in the world — a bloomed `light_bar` child, its hue, and the
+    /// chassis's own length. The recogniser cannot read the declaration: a
+    /// shipped player opens an `.inf_lvl` and has no livery table at all, which
+    /// is the whole reason the rule is written in terms of the document.
+    ///
+    /// Two answers to one question is the shape this tree has paid for at four
+    /// seams, so they are pinned against each other here, over the **real** four
+    /// rows, built through the **real** spawn door. A fifth livery painted amber,
+    /// or an appliance shortened below `APPLIANCE_HALF_LENGTH_M`, fails this arm
+    /// instead of sending an ambulance to a house fire.
+    ///
+    /// Falsifies four ways: the sweep must be non-empty, every fleet row must
+    /// declare a service, the recogniser must answer for every one of them, and
+    /// it must answer **more than one distinct thing** — a rule that returned
+    /// `Police` unconditionally would satisfy the cruiser and the van and is
+    /// caught by the last assertion.
+    #[test]
+    fn every_livery_is_recognised_as_the_service_it_declares() {
+        use inf_ecs::dispatch::UnitKind;
+        let defs = island_vehicles();
+        let mut world = inf_ecs::EcsWorld::new();
+        let mut seen: std::collections::BTreeSet<UnitKind> = Default::default();
+        let mut rows = 0usize;
+        for a in inf_pcg::ArchetypeId::ALL {
+            for (k, id) in crate::island::station_fleet(a).iter().enumerate() {
+                let def = defs.get(id).unwrap_or_else(|| panic!("no `{id}` row"));
+                let livery =
+                    island_vehicle_livery(id).unwrap_or_else(|| panic!("`{id}` has no livery"));
+                let declared = livery
+                    .service
+                    .unwrap_or_else(|| panic!("the `{}` livery declares no service", livery.name));
+                // A guid per (archetype, slot, row), so two stations' cruisers do
+                // not collide in one world.
+                let chassis = uuid::Uuid::from_u64_pair(
+                    0x0E52_0F1E,
+                    (a as u64) << 32 | (k as u64) << 16 | rows as u64,
+                );
+                inf_ecs::vehicle::spawn_rig_at(
+                    &mut world,
+                    chassis,
+                    def,
+                    &inf_ecs::vehicle::RigSpawn {
+                        name: format!("{id} {k}"),
+                        at: glam::DVec3::new(rows as f64 * 20.0, 1.0, 0.0),
+                        yaw_deg: 0.0,
+                        paint: inf_ecs::math::Color::new(0.35, 0.36, 0.38, 1.0),
+                        clip: None,
+                        engine_voice: false,
+                        livery: Some(livery),
+                    },
+                    true,
+                );
+                let recognised = inf_ecs::dispatch::unit_kind_of(&world, chassis);
+                println!(
+                    "EMS2 livery `{}` ({:?}, half-length {:.2} m): declares {}, \
+                     recognised {:?}",
+                    livery.name,
+                    def.body,
+                    def.half_extents.z,
+                    declared.name(),
+                    recognised.map(|k| k.name()),
+                );
+                assert_eq!(
+                    recognised,
+                    Some(declared),
+                    "the `{}` livery declares {} and the world says {:?} — the \
+                     recogniser and the authoring table disagree about what this \
+                     vehicle is, and only one of them is what a shipped player \
+                     reads",
+                    livery.name,
+                    declared.name(),
+                    recognised.map(|k| k.name()),
+                );
+                seen.insert(declared);
+                rows += 1;
+            }
+        }
+        assert!(rows >= 4, "only {rows} fleet row(s) swept");
+        assert!(
+            seen.len() >= 3,
+            "the sweep only ever saw {:?} — a recogniser that answered one \
+             service unconditionally would pass every assertion above",
+            seen
+        );
     }
 
     #[test]

@@ -414,6 +414,13 @@ pub struct SimSession {
     /// This step's traffic counters (VEH2b) — the MIRROR of
     /// `RuntimeSim::traffic`, and read for the same reason.
     traffic: inf_ecs::traffic::TrafficStats,
+    /// **This step's dispatch counters** (EMS2) — units owned, incidents open,
+    /// and what was opened, assigned, driven, reached, resolved and sent home on
+    /// this step. The `traffic` shape one system along, and read for the same
+    /// reason: a gate that wants to know whether the town ANSWERS has to ask
+    /// something other than "did the function get called". All zeroes on a level
+    /// with no emergency vehicle in it. MIRROR of the other host's field.
+    dispatch: inf_physics::d3::DispatchStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). MIRROR of
     /// `RuntimeSim::crowd_radii`, and mirrored *because* it is an argument to
     /// the one Ring-0 door both hosts call: a host that read a constant while
@@ -648,6 +655,7 @@ impl SimSession {
             society: inf_ecs::society::SocietyStats::default(),
             venue_audio: inf_ecs::venue::VenueAudioStats::default(),
             traffic: inf_ecs::traffic::TrafficStats::default(),
+            dispatch: inf_physics::d3::DispatchStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             voxels: BTreeMap::new(),
         };
@@ -1182,6 +1190,13 @@ impl SimSession {
         self.traffic
     }
 
+    /// **What the dispatcher did on the last step** (EMS2) — the mirror of
+    /// [`Self::traffic_stats`], and the one door a gate reads a response
+    /// through.
+    pub fn dispatch_stats(&self) -> inf_physics::d3::DispatchStats {
+        self.dispatch
+    }
+
     /// **Install a crowd population** (NPC1d) — the MIRROR of
     /// `RuntimeSim::set_crowd_population`, and the editor's own door onto the
     /// tier system.
@@ -1430,6 +1445,20 @@ impl SimSession {
         // MIRROR-BEGIN traffic_step
         self.traffic = inf_physics::d3::traffic::step_traffic(tw, tb, dt);
         // MIRROR-END traffic_step
+        // ── EMS2 dispatch ── what has happened, who is going, and the stick
+        //    their driver is handed. HERE, immediately after the traffic, for
+        //    the traffic's own two reasons one system along: a crew body built
+        //    this step must be mirrored by the sync below on this step, and a
+        //    responding unit's driver's INTENT must be written before `character
+        //    move` reads it. After the traffic rather than before, because the
+        //    yield rule reads the dispatcher and a car must be told a siren is
+        //    behind it in the step the siren decided it was coming. Inert on a
+        //    level with no emergency vehicle in it. (MIRROR of the other host's
+        //    fixed step.)
+        let (dw, db) = (doc.world_mut(), &mut self.bridge3d);
+        // MIRROR-BEGIN dispatch_step
+        self.dispatch = inf_physics::d3::dispatch::step_dispatch(dw, db, dt);
+        // MIRROR-END dispatch_step
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         // ── P22.3 fracture follow ── an INTACT destructible is a normal

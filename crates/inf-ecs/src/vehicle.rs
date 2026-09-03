@@ -890,6 +890,24 @@ pub struct Livery {
     /// Parts this livery adds — a light bar, a beacon — in fractions of the
     /// chassis half-extents exactly as [`BodyPart`] is.
     pub extra: &'static [(BodyPart, PartPaint)],
+    /// **What service a vehicle wearing this livery belongs to** (wave EMS2), or
+    /// `None` for a livery that is only paint.
+    ///
+    /// # It is a DECLARATION, and the recogniser does not read it
+    ///
+    /// `inf_ecs::dispatch::unit_kind_of` answers the same question off the
+    /// *world* — a bloomed `light_bar` child, its hue, and the chassis's own
+    /// length — because that is the only channel that survives being written to
+    /// an `.inf_lvl` and opened by a shipped player, which has no livery table at
+    /// all. This field is the authoring side of the same fact, and
+    /// `every_livery_is_recognised_as_the_service_it_declares` holds the two
+    /// together: a fifth livery whose colours disagreed with the rule fails a
+    /// test instead of sending an ambulance to a fire.
+    ///
+    /// It is read rather than decorative: a fixture that spawns a unit and then
+    /// asks the dispatcher about it takes its expectation from here, so the
+    /// declaration and the recognition are never the same sentence twice.
+    pub service: Option<crate::dispatch::UnitKind>,
 }
 
 impl Livery {

@@ -1085,6 +1085,38 @@ pub fn is_downed(world: &EcsWorld, guid: Uuid) -> bool {
         .is_some_and(|e| world.world().get::<Downed>(e).is_some())
 }
 
+/// **Every body on the ground**, in `Guid` order — a CENSUS, not an event
+/// (wave EMS2).
+///
+/// [`newly_dead`] is a one-shot: it answers the bodies that have not been handed
+/// to the ragdoll *yet*, and it answers each of them exactly once because the
+/// pass that consumes it latches [`Downed`]. That is right for a handoff and
+/// wrong for a dispatcher, which asks *"is there anybody who needs an
+/// ambulance"* — a question whose answer must stay `yes` while the body is still
+/// lying there. Reading `newly_dead` would have meant an ambulance was only ever
+/// called on the single step somebody died, and missing that step (a saturated
+/// incident table, a station with no free unit) meant nobody ever came.
+///
+/// So this is the latch read the other way round, and the two doors are one
+/// component apart rather than two rules.
+///
+/// `O(bodies)`, and `O(1)` on a level where nothing has been hurt — the negative
+/// filter is read per entity for [`newly_dead`]'s own measured reason.
+pub fn downed(world: &EcsWorld) -> Vec<Uuid> {
+    let w = world.world();
+    let Some(mut q) = w.try_query_filtered::<(&Guid, bevy_ecs::prelude::Entity), With<Health>>()
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Uuid> = q
+        .iter(w)
+        .filter(|(_, e)| w.get::<Downed>(*e).is_some())
+        .map(|(g, _)| g.0)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// **Spend energy on one body, by `Guid`** — the world-level door beside
 /// [`damage`]'s component-level one.
 ///

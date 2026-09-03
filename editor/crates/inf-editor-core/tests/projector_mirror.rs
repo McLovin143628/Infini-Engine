@@ -2774,7 +2774,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 10] = [
+    const SECTIONS: [&str; 11] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2798,6 +2798,13 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // measurement the I6 audit made about `door` and `weapon`, unlearned in
         // the time it takes to write one line.
         "traffic::traffic_state_bytes",
+        // EMS2, pinned in the SAME commit that folded it -- which is the whole
+        // of what the line above learned. A unit's state (in station, en route,
+        // on scene, returning) decides everything the dispatch step does with a
+        // vehicle and is not a transform anything else folds, so two hosts that
+        // sent different ambulances to one fire would compare equal until one
+        // of them happened to solve a chassis the other did not.
+        "dispatch::dispatch_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()
