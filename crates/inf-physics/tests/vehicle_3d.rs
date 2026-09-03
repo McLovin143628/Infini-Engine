@@ -33,6 +33,16 @@ const LAKE: Uuid = Uuid::from_u128(0x2907_1098);
 /// The wheel-less hull and its screw (wave VEH2c).
 const HULL: Uuid = Uuid::from_u128(0x2907_1200);
 const THRUSTER: Uuid = Uuid::from_u128(0x2907_1201);
+/// A hull is far denser than a car body: it is a shell full of engine, tanks and
+/// people, and 400 kg/m3 in 1 000 kg/m3 water floats it with 40 % of its depth
+/// under — which is a launch with freeboard and, crucially, a screw that is IN
+/// the water at rest. (At the car's 150 it would float with its propeller in the
+/// air, which the immersion rule correctly refuses to drive.)
+const HULL_DENSITY: f64 = 400.0;
+/// The equilibrium origin height for that density: half the hull, less the 40 %
+/// of its full depth that is under. Spawned here so the arms measure a boat and
+/// not a splash.
+const HULL_FLOAT_Y: f64 = HALF.y - 2.0 * HALF.y * 0.4;
 
 /// The chassis is 4 × 1 × 2 m at 150 kg/m³ — a hollow shell, per
 /// `Collider3D::density`'s own note, which is 1 200 kg.
@@ -122,7 +132,7 @@ fn hull(world: &mut EcsWorld, y: f64) {
         Collider3D {
             shape_kind: ColliderShape3DKind::Box,
             half_extents: HALF,
-            density: DENSITY,
+            density: HULL_DENSITY,
             friction: 0.5,
             ..Default::default()
         },
@@ -135,12 +145,13 @@ fn thruster(world: &mut EcsWorld, guid: Uuid, parent: Uuid) {
     let parent = world.entity_of(parent).expect("a chassis to hang it on");
     let p = world.spawn_with_guid(guid, "Screw", Some(parent));
     let mut pt = Transform::IDENTITY;
-    pt.translation = Vec3d::new(0.0, -0.3, -1.9);
+    // Just above the keel, so it is under water whenever the hull is floating.
+    pt.translation = Vec3d::new(0.0, -0.45, -1.9);
     world.world_mut().entity_mut(p).insert((
         pt,
         Collider3D {
             shape_kind: ColliderShape3DKind::Box,
-            half_extents: Vec3d::new(0.25, 0.2, 0.25),
+            half_extents: Vec3d::new(0.25, 0.15, 0.25),
             sensor: true,
             ..Default::default()
         },
@@ -385,7 +396,7 @@ fn a_wheel_less_hull_is_a_vehicle_and_its_thruster_is_consumed() {
     assert_eq!(rig.parts.len(), 1);
     assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Thruster);
     assert_eq!(rig.parts[0].guid, THRUSTER);
-    assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.3, -1.9));
+    assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.45, -1.9));
     // …and the seat is still the collider's top face, so the interact door
     // needs nothing new to find it.
     assert_eq!(rig.seat_local, Vec3d::new(0.0, HALF.y, 0.0));
@@ -1642,4 +1653,316 @@ fn an_authored_vehicle_class_reaches_the_running_vehicle() {
         tuned.z(),
         plain.z()
     );
+}
+
+// ── the boat, against a real world (wave VEH2c) ─────────────────────────────
+
+/// The sea the boat arms run on: flat, so a measured heading is the boat's and
+/// not the swell's.
+fn sea(world: &mut EcsWorld) {
+    use inf_ecs::components::WaterBody;
+    let e = world.spawn_with_guid(LAKE, "Sea", None);
+    world.world_mut().entity_mut(e).insert((
+        WaterBody {
+            wave_amplitude_m: 0.0,
+            ..WaterBody::lake(0.0, inf_ecs::math::Vec2d::splat(4_000.0))
+        },
+        Transform::IDENTITY,
+    ));
+}
+
+/// A boat: the wheel-less hull, buoyant, on the sea, with a catalogue-shaped
+/// tuning rather than a car's defaults.
+struct Boat {
+    world: EcsWorld,
+    bridge: PhysicsBridge3D,
+}
+
+impl Boat {
+    fn new() -> Self {
+        use inf_ecs::components::Buoyancy;
+        let mut world = EcsWorld::new();
+        sea(&mut world);
+        // Floating with the origin near the waterline: a 150 kg/m³ hull in
+        // 1 000 kg/m³ water sits 15 % down, which is a launch with freeboard.
+        hull(&mut world, HULL_FLOAT_Y);
+        let chassis = world.entity_of(HULL).expect("the hull exists");
+        world.world_mut().entity_mut(chassis).insert(Buoyancy {
+            density_kg_m3: HULL_DENSITY,
+            // A hull is SHAPED to go through water: P20.2's isotropic linear
+            // drag defaults to a blunt body and it is what sets a boat top
+            // speed, not the class. See the boat-feel note in the wave ledger.
+            linear_drag: 0.25,
+            ..Default::default()
+        });
+        world.mark_dirty();
+        world.propagate();
+        let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        bridge.sync_from_world(&world);
+        assert!(bridge.is_buoyant(HULL), "the boat must float");
+        let mut boat = Self { world, bridge };
+        boat.tune();
+        boat
+    }
+
+    /// The launch's numbers — the row `samples`' catalogue carries, applied
+    /// through the same `tune` door an authored `VehicleClass` uses.
+    fn tune(&mut self) {
+        let v = self
+            .bridge
+            .vehicle_mut(HULL)
+            .expect("the boat is a vehicle");
+        for (name, value) in [
+            ("max_engine_force_n", 9_000.0),
+            ("max_speed_mps", 16.0),
+            ("drag_n_per_mps2", 35.0),
+            ("drag_lateral_n_per_mps2", 6_000.0),
+            ("max_steer_deg", 35.0),
+            ("min_steer_deg", 20.0),
+            ("steer_rate_deg_per_s", 90.0),
+            ("steer_return_deg_per_s", 120.0),
+        ] {
+            assert!(v.tune(name, value), "the hull refused `{name}`");
+        }
+    }
+
+    /// The runtime's own order, water pass included — the shape
+    /// `a_buoyant_vehicle_keeps_the_force_the_water_pass_owns` established.
+    fn drive(&mut self, controls: VehicleControls, n: u32) {
+        for _ in 0..n {
+            self.bridge.sync_from_world(&self.world);
+            self.bridge.apply_water_forces(DT);
+            if let Some(v) = self.bridge.vehicle_mut(HULL) {
+                v.control(controls);
+            }
+            inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge, DT);
+            inf_physics::d3::step_vehicles(&mut self.world, &mut self.bridge, DT);
+            self.bridge.step(DT);
+            self.bridge.write_back_into(&mut self.world);
+            self.world.propagate();
+        }
+    }
+
+    fn at(&self) -> DVec3 {
+        let e = self.world.entity_of(HULL).expect("the boat exists");
+        self.world
+            .world()
+            .get::<Transform>(e)
+            .expect("…with a transform")
+            .translation
+            .to_dvec3()
+    }
+
+    fn speed(&self) -> f64 {
+        self.bridge
+            .body_of(HULL)
+            .and_then(|b| self.bridge.world().body_linvel(b))
+            .map(|v| v.length())
+            .unwrap_or(0.0)
+    }
+}
+
+const AHEAD: VehicleControls = VehicleControls {
+    throttle: 1.0,
+    steer: 0.0,
+    brake: 0.0,
+    handbrake: false,
+    vertical: 0.0,
+};
+
+/// **THE BOAT DRIVES** — and the table it prints is this wave's boat-feel row.
+///
+/// Three claims: it accelerates, it reaches a top speed and settles there
+/// (drag balances thrust, which is what makes a top speed a property rather
+/// than a clamp), and it stops when the throttle is closed instead of coasting
+/// for ever.
+#[test]
+fn a_boat_makes_way_reaches_a_top_speed_and_carries_its_way() {
+    let mut b = Boat::new();
+    // Let the buoyancy settle before anything is measured, or the first
+    // seconds are a splash.
+    b.drive(VehicleControls::default(), 180);
+    let start = b.at();
+    assert!(
+        b.speed() < 0.2,
+        "the boat had not settled: {} m/s",
+        b.speed()
+    );
+
+    let mut samples = Vec::new();
+    for s in 1..=16u32 {
+        b.drive(AHEAD, 60);
+        samples.push((s, b.speed(), (b.at() - start).length()));
+    }
+    let (_, top, run) = *samples.last().expect("eight seconds");
+    println!("BOAT, full ahead from rest (16 s):");
+    for (s, v, d) in &samples {
+        println!("  t={s}s  {v:.2} m/s ({:.1} kn)  {d:.1} m", v * 1.94384);
+    }
+
+    // (a) it accelerates.
+    assert!(
+        top > 8.0,
+        "the boat reached only {top:.2} m/s in sixteen seconds"
+    );
+    // (b) it SETTLES: the last second adds little, because the hull's drag has
+    //     caught the screw's thrust. A boat still accelerating at eight seconds
+    //     has no top speed, it has a clamp somewhere else.
+    let prev = samples[samples.len() - 2].1;
+    assert!(
+        (top - prev).abs() < 0.10,
+        "the boat was at {prev:.2} m/s and {top:.2} m/s — it has not settled"
+    );
+    // …and the settled speed is the balance point, below the tuning's own
+    // `max_speed_mps` because the falloff reaches zero there.
+    assert!(top < 16.0, "the boat passed its own top speed: {top:.2}");
+    assert!(
+        run > 100.0,
+        "sixteen seconds of full ahead covered {run:.1} m"
+    );
+
+    // (c) it carries its way and stops — a boat has no brakes and the hull is
+    //     what slows it.
+    let coast_from = b.at();
+    b.drive(VehicleControls::default(), 600);
+    let carried = (b.at() - coast_from).length();
+    println!(
+        "  ten seconds with the throttle closed: {carried:.1} m carried, {:.2} m/s left",
+        b.speed()
+    );
+    assert!(
+        carried > 5.0,
+        "the boat stopped dead in the water: {carried:.1} m"
+    );
+    assert!(
+        b.speed() < top * 0.35,
+        "the boat did not slow at all: {:.2} m/s of {top:.2}",
+        b.speed()
+    );
+}
+
+/// **THE BOAT TURNS**, to the side the helm is put over, in a measurable
+/// circle — the second half of this wave's boat-feel row.
+#[test]
+fn a_boat_turns_toward_its_helm_and_the_circle_is_measurable() {
+    let radius = |steer: f64| -> (f64, f64) {
+        let mut b = Boat::new();
+        b.drive(VehicleControls::default(), 180);
+        b.drive(AHEAD, 300);
+        let entry = b.at();
+        let turning = VehicleControls { steer, ..AHEAD };
+        // Long enough to be well into a steady turn.
+        b.drive(turning, 240);
+        let mut minx = f64::MAX;
+        let mut maxx = f64::MIN;
+        let mut minz = f64::MAX;
+        let mut maxz = f64::MIN;
+        for _ in 0..240 {
+            b.drive(turning, 1);
+            let p = b.at();
+            minx = minx.min(p.x);
+            maxx = maxx.max(p.x);
+            minz = minz.min(p.z);
+            maxz = maxz.max(p.z);
+        }
+        // The mean semi-axis of the arc the boat swept — a circle's diameter
+        // measured off the world rather than inferred from a yaw rate.
+        let r = ((maxx - minx) + (maxz - minz)) / 4.0;
+        (r, b.at().x - entry.x)
+    };
+    let (r_stbd, dx_stbd) = radius(1.0);
+    let (r_port, dx_port) = radius(-1.0);
+    println!("BOAT turning circle: starboard r≈{r_stbd:.1} m, port r≈{r_port:.1} m");
+
+    // Starboard helm takes the boat to starboard (+X), port to port.
+    assert!(dx_stbd > 5.0, "starboard helm went {dx_stbd:.1} m in X");
+    assert!(dx_port < -5.0, "port helm went {dx_port:.1} m in X");
+    // The circle is a circle: bounded, and the two hands mirror each other.
+    assert!(
+        r_stbd > 2.0 && r_stbd < 60.0,
+        "the turning circle is {r_stbd:.1} m — that is not a boat"
+    );
+    assert!(
+        (r_stbd - r_port).abs() < r_stbd * 0.25,
+        "the boat turns better one way than the other: {r_stbd:.1} against {r_port:.1}"
+    );
+}
+
+/// **A boat on dry land is inert** — the falsifier for the whole immersion
+/// rule, asserted on the WORLD rather than on a force list.
+///
+/// The identical hull, the identical throttle, and no water: it must not move.
+/// Without the bite term this hull drives across a car park.
+#[test]
+fn a_boat_out_of_the_water_goes_nowhere() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    hull(&mut world, SPAWN_Y);
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    assert_eq!(bridge.vehicle_count(), 1);
+    let start = {
+        let e = world.entity_of(HULL).unwrap();
+        world.world().get::<Transform>(e).unwrap().translation.z
+    };
+    for _ in 0..600 {
+        bridge.sync_from_world(&world);
+        if let Some(v) = bridge.vehicle_mut(HULL) {
+            v.control(AHEAD);
+        }
+        inf_physics::d3::step_character_movement(&mut world, &mut bridge, DT);
+        inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
+        bridge.step(DT);
+        bridge.write_back_into(&mut world);
+        world.propagate();
+    }
+    let end = {
+        let e = world.entity_of(HULL).unwrap();
+        world.world().get::<Transform>(e).unwrap().translation.z
+    };
+    assert!(
+        (end - start).abs() < 0.5,
+        "a boat on a car park drove {} m at full throttle",
+        end - start
+    );
+}
+
+/// **The rudder is DRAWN**: the part's own transform carries the helm angle,
+/// and its translation is never written (wave VEH2c).
+///
+/// The second half matters more than the first: a part whose translation the
+/// door wrote would be re-read as a moved mount by the next reconcile, which is
+/// the feedback loop `RaycastVehicle`'s "the authored mount is taken once" note
+/// exists to prevent.
+#[test]
+fn the_rudder_is_drawn_and_its_mount_never_moves() {
+    let mut b = Boat::new();
+    let mount = {
+        let e = b.world.entity_of(THRUSTER).expect("the screw exists");
+        b.world.world().get::<Transform>(e).unwrap().translation
+    };
+    b.drive(
+        VehicleControls {
+            steer: 1.0,
+            ..AHEAD
+        },
+        180,
+    );
+    let e = b.world.entity_of(THRUSTER).expect("the screw survives");
+    let t = *b.world.world().get::<Transform>(e).unwrap();
+    assert!(
+        t.rotation.y > 1.0,
+        "the drawn rudder never turned: {:?}",
+        t.rotation
+    );
+    assert_eq!(t.rotation.x, 0.0);
+    assert_eq!(t.rotation.z, 0.0);
+    assert_eq!(t.translation, mount, "the door moved a part's mount");
+    // …and the rig still reports the authored mount after a reconcile, which is
+    // the property the translation write would have broken.
+    b.bridge.sync_from_world(&b.world);
+    let rig = b.bridge.vehicle_of(HULL).unwrap().rig();
+    assert_eq!(rig.parts[0].mount_local, mount);
 }

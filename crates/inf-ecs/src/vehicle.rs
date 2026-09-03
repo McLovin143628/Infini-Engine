@@ -2636,10 +2636,13 @@ pub fn engine_cue(revs: f64, load: f64, base_pitch: f64, base_volume: f64) -> En
 ///
 /// A wheel-less [`RaycastVehicle`] is genuinely inert: its solve loops over an
 /// empty wheel list, so it applies **no force at all**. That is what a rig whose
-/// parts nothing recognises should do, and it is what this function answered for
-/// every rig on the commit that opened the seam.
+/// parts nothing recognises should do.
 pub fn class_for_parts(rig: VehicleRig) -> Box<dyn Vehicle> {
-    Box::new(RaycastVehicle::new(rig))
+    if rig.parts_of(PartKind::Thruster).next().is_some() {
+        Box::new(HullVehicle::new(rig))
+    } else {
+        Box::new(RaycastVehicle::new(rig))
+    }
 }
 
 // ── the implementation this phase ships ─────────────────────────────────────
@@ -3937,9 +3940,696 @@ impl Vehicle for RaycastVehicle {
     }
 }
 
+// ── the boat (wave VEH2c) ───────────────────────────────────────────────────
+
+/// How much of its ahead thrust a screw makes going **astern**.
+///
+/// A propeller is an aerofoil designed to work in one direction; run backwards
+/// it stalls, and the usual figure for a fixed-pitch screw is a little under
+/// half. It is also why a boat has no brakes and stops by going astern — which
+/// is exactly what [`VehicleControls::from_intent`] hands this class when the
+/// driver pulls back at speed, so the mapping needs no special case.
+pub const HULL_ASTERN_FRACTION: f64 = 0.45;
+
+/// The share of the screw's own thrust a hard-over rudder can turn sideways.
+///
+/// A rudder sitting in the propeller race is far more effective than its area
+/// suggests — the water reaching it is already moving fast, which is why a boat
+/// with no way on can still be swung by a burst of throttle. Ahead of the race
+/// there is nothing to deflect, and this constant is the ahead figure.
+pub const RUDDER_WASH_GAIN: f64 = 0.35;
+
+/// The rudder's own lift from the hull's motion through the water, as a fraction
+/// of [`VehicleTuning::drag_lateral_n_per_mps2`]'s force at the same speed.
+///
+/// Derived from the keel's number rather than authored as a second one: a rudder
+/// is a small vertical surface in the same flow, so its lift scales with the
+/// same `v²` and the same water. This is what lets a boat that has closed the
+/// throttle still steer while it carries its way — without it a drifting boat is
+/// uncontrollable, which is wrong and reads as broken.
+///
+/// # Why it is well under one percent
+///
+/// Because the number it is a fraction OF is the whole immersed profile. A
+/// hull's resistance to sideways motion is the largest force on a boat that is
+/// not gravity — it is why boats do not slide — and a rudder is a fraction of a
+/// percent of that area. Both terms carry the same square of speed, so their
+/// ratio does not move with speed, which is why a boat's turning circle is
+/// roughly constant in hull lengths however fast it is going. It is also why
+/// this could be sized once, against a measurement: the launch fixture's steady
+/// circle is **10.6 m** for a 4 m hull — about two and a half lengths, and the
+/// same to the digit at either helm.
+pub const RUDDER_FLOW_GAIN: f64 = 0.006;
+
+/// Where a hull's lateral drag acts, as a fraction of the lever arm the rig
+/// names — the bow and quarter points.
+///
+/// **Two points and not one**, on the buoyancy pass's own argument: a hull
+/// resists turning because every section of it resists moving sideways, so
+/// applying the keel's force at two points separated along the hull turns the
+/// same coefficient into yaw damping. One force at the centre of mass would damp
+/// sway and leave a boat spinning like a top.
+pub const HULL_DRAG_ARM_FRACTION: f64 = 0.6;
+
+/// **The boat**: a screw, a rudder and a hull, over the wheel-less rig
+/// (wave VEH2c).
+///
+/// # What holds it up is NOT here
+///
+/// Buoyancy is P20.2's and it stays P20.2's. A boat is a chassis with a
+/// [`Buoyancy`](crate::components::Buoyancy) component, so the water pass at
+/// fixed-step stage 8 does the Archimedes solve over its four mid-plane samples
+/// — including the righting moment that makes it heel and pitch on a swell —
+/// and the vehicle door at stage 12 **adds** to that rather than resetting it
+/// (`PhysicsBridge3D::is_buoyant`, the interlock P20.2 wrote and P29.7 armed).
+/// This class contributes thrust, steering and the hull's own resistance, and
+/// nothing vertical at all.
+///
+/// # The draught bound does NOT bite this hull, and that is a measurement
+///
+/// `inf_physics::d3::water::sample_geometry`'s doc carries a v1 bound — a convex
+/// hull's draught is approximated by its AABB, which "over-states the waterplane
+/// of anything that is not a box" — and names the fix as belonging "with
+/// whatever first needs floating debris". A boat was the obvious candidate. It
+/// is not one: the bound is on the `ConvexHull` and `Trimesh` branches, and a
+/// boat's chassis is a **`Box`**, whose branch states its own half-extent
+/// exactly. The sampled draught of this hull is therefore exact rather than
+/// optimistic, and the waterplane-section fix stays where its own doc put it.
+///
+/// # Which of the sixty-two tunables it reads
+///
+/// Every one of them by the meaning its own name already has, which is why this
+/// class needed no schema window (the VEH2a one is spent):
+///
+/// | tunable | what it is on a boat |
+/// |---|---|
+/// | `max_engine_force_n` | peak ahead thrust at the screw, newtons |
+/// | `max_speed_mps` | the speed the thrust falls to zero at |
+/// | `drag_n_per_mps2` | the hull's resistance along its length |
+/// | `drag_lateral_n_per_mps2` | the keel — resistance to sideways motion |
+/// | `max_steer_deg` / `min_steer_deg` | rudder angle at rest / at full speed |
+/// | `steer_rate_deg_per_s` / `steer_return_deg_per_s` | how fast the wheel turns it |
+/// | `enter_time_s`, `enter_warp_start`, `enter_warp_end` | the seat warp, unchanged |
+///
+/// The other fifty-two are accepted by [`tune`](Self::tune) — a catalogue row is
+/// one table and refusing half of it would leave an author's file half-read —
+/// and are not consulted. A gearbox on a boat is a thing that does not exist.
+#[derive(Clone, Debug)]
+pub struct HullVehicle {
+    rig: VehicleRig,
+    tuning: VehicleTuning,
+    controls: VehicleControls,
+    /// The rudder's actual angle, degrees, positive to starboard — the RACK's
+    /// own state, exactly as `RaycastVehicle`'s steer angle is, so a rudder takes
+    /// time to come over and comes back faster than it goes across.
+    rudder_deg: f64,
+    /// How much of the hull was in the water at the last solve, `[0, 1]` —
+    /// published for a readout and a test rather than held for the model, which
+    /// recomputes it.
+    immersion: f64,
+    /// Nothing. A hull has no wheels, and the trait's wheel channel is the
+    /// suspension's; answering an empty slice is the honest shape.
+    no_wheels: Vec<WheelState>,
+}
+
+impl HullVehicle {
+    /// Build one over a derived rig, with the default tuning.
+    pub fn new(rig: VehicleRig) -> Self {
+        Self {
+            rig,
+            tuning: VehicleTuning::default(),
+            controls: VehicleControls::default(),
+            rudder_deg: 0.0,
+            immersion: 0.0,
+            no_wheels: Vec::new(),
+        }
+    }
+
+    /// The tuning, for a test or a UI to read.
+    pub fn tuning(&self) -> &VehicleTuning {
+        &self.tuning
+    }
+
+    /// The rudder's angle this step, degrees, positive to starboard.
+    pub fn rudder_deg(&self) -> f64 {
+        self.rudder_deg
+    }
+
+    /// How much of the hull was under water at the last solve, `[0, 1]`.
+    pub fn immersion(&self) -> f64 {
+        self.immersion
+    }
+
+    /// The hull's half-length, metres — **derived from the rig**, never
+    /// authored.
+    ///
+    /// The aftmost thruster the scene named is where the screw is, and a screw
+    /// is at the stern; a class that carried its own length could disagree with
+    /// its own geometry, which is the defect `RaycastVehicle`'s derived
+    /// wheelbase exists to avoid. A rig whose parts are all amidships answers
+    /// the seat height instead, so the lever is never zero.
+    fn half_length(&self) -> f64 {
+        self.rig
+            .parts_of(PartKind::Thruster)
+            .map(|(_, p)| p.mount_local.z.abs())
+            .fold(0.0f64, f64::max)
+            .max(self.rig.seat_local.y.abs())
+            .max(0.1)
+    }
+
+    /// How much of the hull is under `water_y`, `[0, 1]`.
+    ///
+    /// The hull's half-height is the seat's own — `chassis_of` derives the seat
+    /// as the collider's top face, so the number is the collider's rather than a
+    /// second opinion about it.
+    fn hull_immersion(&self, chassis: &ChassisState) -> f64 {
+        let Some(surface) = chassis.water_y else {
+            return 0.0;
+        };
+        let half = self.rig.seat_local.y.abs().max(1e-6);
+        ((surface - (chassis.position.y - half)) / (2.0 * half)).clamp(0.0, 1.0)
+    }
+}
+
+impl Vehicle for HullVehicle {
+    fn rig(&self) -> &VehicleRig {
+        &self.rig
+    }
+
+    fn set_rig(&mut self, rig: VehicleRig) {
+        self.rig = rig;
+    }
+
+    fn wheels(&self) -> &[WheelState] {
+        &self.no_wheels
+    }
+
+    fn wheels_mut(&mut self) -> &mut [WheelState] {
+        &mut self.no_wheels
+    }
+
+    fn control(&mut self, controls: VehicleControls) {
+        self.controls = controls;
+    }
+
+    fn tune(&mut self, name: &str, value: f64) -> bool {
+        self.tuning.set(name, value)
+    }
+
+    fn seat_warp(&self) -> (f64, inf_anim::WarpWindow) {
+        (self.tuning.enter_time_s, self.tuning.enter_window())
+    }
+
+    /// Zero: a hull has no suspension, so a ray anchor would be the mount
+    /// itself. There are no rays either, this rig having no wheels — but the
+    /// trait's contract is answered rather than left to a default.
+    fn suspension_rest_m(&self) -> f64 {
+        0.0
+    }
+
+    fn gear(&self) -> i32 {
+        // A boat has no gearbox and a telegraph has three positions. `1` ahead,
+        // `-1` astern, `0` stopped — which `drive_readout` already draws as
+        // "1" / "R" / "N", and which is the truth about a boat rather than an
+        // imitation of a car's.
+        let demand = self.controls.throttle - self.controls.brake;
+        if demand > 0.05 {
+            1
+        } else if demand < -0.05 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    fn engine_state(&self, forward_mps: f64) -> (f64, f64) {
+        let top = self.tuning.max_speed_mps.max(1e-6);
+        let revs = (forward_mps.abs() / top).clamp(0.0, 1.0);
+        let load = (self.controls.throttle - self.controls.brake)
+            .abs()
+            .min(1.0);
+        // A screw out of the water races and a screw driving a hull is loaded,
+        // so the sound follows the immersion for the same reason the thrust
+        // does.
+        (revs.max(load * 0.35), load * self.immersion.max(0.15))
+    }
+
+    /// The rudder, drawn. Yaw only, in the part's own frame.
+    fn part_pose(&self, index: usize) -> Option<Vec3d> {
+        let part = self.rig.parts.get(index)?;
+        (part.kind == PartKind::Thruster).then(|| Vec3d::new(0.0, self.rudder_deg, 0.0))
+    }
+
+    fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
+        if !dt.is_finite() || dt <= 0.0 || !(chassis.mass_kg.is_finite() && chassis.mass_kg > 0.0) {
+            return;
+        }
+        let (fwd, right, _up) = chassis.basis();
+        let forward_mps = chassis.linvel.dot(fwd);
+        self.immersion = self.hull_immersion(&chassis);
+
+        // ── the rudder rack. The car's rule, by its own names: a rate to go
+        //    across, a faster one to come back, and a limit that tightens with
+        //    speed (a rudder hard over at twenty knots is how a boat broaches).
+        let limit = steer_limit_deg(&self.tuning, forward_mps);
+        let want = self.controls.steer.clamp(-1.0, 1.0) * limit;
+        let returning = want.abs() < self.rudder_deg.abs() || want * self.rudder_deg < 0.0;
+        let rate = if returning {
+            self.tuning.steer_return_deg_per_s
+        } else {
+            self.tuning.steer_rate_deg_per_s
+        };
+        let step = if rate.is_finite() {
+            rate.max(0.0) * dt
+        } else {
+            f64::INFINITY
+        };
+        self.rudder_deg += (want - self.rudder_deg).clamp(-step, step);
+        self.rudder_deg = self.rudder_deg.clamp(-limit, limit);
+
+        // ── the screw. Ahead is the throttle and astern is the brake, because
+        //    `from_intent` has already decided which of the two a pull-back at
+        //    speed is — and a boat stops by going astern either way.
+        let ahead = self.controls.throttle.clamp(-1.0, 1.0);
+        let astern = self.controls.brake.clamp(0.0, 1.0);
+        let demand = if ahead >= 0.0 {
+            ahead - astern * HULL_ASTERN_FRACTION
+        } else {
+            (ahead - astern) * HULL_ASTERN_FRACTION
+        };
+        let top = self.tuning.max_speed_mps.max(1e-6);
+        // The thrust falls off as the hull approaches its own top speed — the
+        // same shape `RaycastVehicle` uses and the same reason: a screw at the
+        // speed of its own wake is doing no work.
+        let falloff = if demand == 0.0 {
+            0.0
+        } else {
+            (1.0 - (forward_mps / top).clamp(-1.0, 1.0) * demand.signum()).clamp(0.0, 1.0)
+        };
+        let peak = self.tuning.max_engine_force_n.max(0.0);
+        let lateral = self.tuning.drag_lateral_n_per_mps2.max(0.0);
+        let thrusters: Vec<(DVec3, f64)> = self
+            .rig
+            .parts_of(PartKind::Thruster)
+            .map(|(_, p)| {
+                let point = chassis.position + chassis.rotation * p.mount_local.to_dvec3();
+                // A screw pushes only while it is IN the water, and its own
+                // half-height is the band it fades over: a boat lifted clear by
+                // a swell loses its bite and gets it back on the way down.
+                let bite = match chassis.water_y {
+                    Some(surface) => {
+                        let band = (2.0 * p.size.y).max(1e-6);
+                        ((surface - point.y) / band).clamp(0.0, 1.0)
+                    }
+                    None => 0.0,
+                };
+                (point, bite)
+            })
+            .collect();
+        let share = if thrusters.is_empty() {
+            0.0
+        } else {
+            1.0 / thrusters.len() as f64
+        };
+        let rad = self.rudder_deg.to_radians();
+        for (point, bite) in &thrusters {
+            let thrust_n = demand * peak * falloff * bite * share;
+            if thrust_n != 0.0 {
+                out.push(WheelForce {
+                    point: *point,
+                    force: fwd * thrust_n,
+                });
+            }
+            // ── the rudder: the screw's race turned sideways, plus the rudder's
+            //    own lift from the hull's way through the water. Applied AT THE
+            //    STERN, which is what makes it a yaw moment and a little sway —
+            //    exactly what a real rudder does. A turn to starboard swings the
+            //    stern to port, so the force is along `-right`.
+            let wash = thrust_n.abs() * RUDDER_WASH_GAIN;
+            let flow = lateral * forward_mps * forward_mps * RUDDER_FLOW_GAIN * share;
+            let side = inf_math::psin64(rad) * (wash + flow) * bite;
+            if side != 0.0 {
+                out.push(WheelForce {
+                    point: *point,
+                    force: -right * side,
+                });
+            }
+        }
+
+        // ── the hull. Two resistances, both scaled by how much of it is wet: a
+        //    boat out of the water is a box, and a box has neither.
+        let wet = self.immersion;
+        if wet > 0.0 {
+            let along = self.tuning.drag_n_per_mps2.max(0.0);
+            let drag_n = along * forward_mps * forward_mps.abs() * wet;
+            if drag_n != 0.0 {
+                out.push(WheelForce {
+                    point: chassis.position,
+                    force: -fwd * drag_n,
+                });
+            }
+            // The keel, at the bow and the quarter — see `HULL_DRAG_ARM_FRACTION`
+            // for why two points and not one.
+            let arm = self.half_length() * HULL_DRAG_ARM_FRACTION;
+            for sign in [1.0f64, -1.0] {
+                let point = chassis.position + fwd * (arm * sign);
+                let v = chassis.point_velocity(point).dot(right);
+                let f = lateral * v * v.abs() * wet * 0.5;
+                if f != 0.0 {
+                    out.push(WheelForce {
+                        point,
+                        force: -right * f,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One fixed step, seconds — the rate both hosts run at.
+    const DT: f64 = 1.0 / 60.0;
+
+    // ── the boat (wave VEH2c) ───────────────────────────────────────────────
+
+    /// A 5 m hull with one screw at the stern, floating with its deck clear.
+    fn hull_rig() -> VehicleRig {
+        VehicleRig {
+            chassis: Uuid::from_u128(0xB0A7),
+            // A 1.6 m half-height hull, so the seat (= the top face) is 0.8.
+            seat_local: Vec3d::new(0.0, 0.8, 0.0),
+            wheels: Vec::new(),
+            parts: vec![PartMount {
+                guid: Uuid::from_u128(0x5C7E),
+                kind: PartKind::Thruster,
+                mount_local: Vec3d::new(0.0, -0.5, -2.2),
+                size: Vec3d::new(0.25, 0.2, 0.25),
+            }],
+        }
+    }
+
+    /// The chassis of a hull afloat with `water_y` at zero: the origin sits on
+    /// the waterline, so the hull is exactly half in.
+    fn afloat(linvel: DVec3, angvel: DVec3) -> ChassisState {
+        ChassisState {
+            position: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            linvel,
+            angvel,
+            mass_kg: 2_000.0,
+            water_y: Some(0.0),
+        }
+    }
+
+    /// Sum the forces a solve produced, and the yaw torque about the origin.
+    fn resultant(out: &[WheelForce], about: DVec3) -> (DVec3, f64) {
+        let mut f = DVec3::ZERO;
+        let mut tau = DVec3::ZERO;
+        for w in out {
+            f += w.force;
+            tau += (w.point - about).cross(w.force);
+        }
+        (f, tau.y)
+    }
+
+    /// **A boat pushes only while its screw is in the water** — the one claim
+    /// that makes it a boat and not a car with a rudder (wave VEH2c).
+    ///
+    /// Three states of one hull: afloat, lifted clear by a swell, and on a level
+    /// with no water at all. The third is what a boat trailered up a slipway
+    /// meets, and it must be inert rather than driveable.
+    #[test]
+    fn a_screw_out_of_the_water_pushes_nothing() {
+        let mut v = HullVehicle::new(hull_rig());
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+
+        // Afloat: the screw at y = -0.5 is half a metre under, its band is
+        // 0.4 m, so it is fully wetted and pushing.
+        v.solve(afloat(DVec3::ZERO, DVec3::ZERO), DT, &mut out);
+        let (afloat_f, _) = resultant(&out, DVec3::ZERO);
+        assert!(
+            afloat_f.z > 1_000.0,
+            "a boat at full ahead made {} N",
+            afloat_f.z
+        );
+        assert_eq!(v.immersion(), 0.5, "the origin is on the waterline");
+
+        // Lifted clear: the same hull a metre up. Nothing wet, nothing pushed.
+        out.clear();
+        let mut high = afloat(DVec3::ZERO, DVec3::ZERO);
+        high.position.y = 1.0;
+        v.solve(high, DT, &mut out);
+        let (clear_f, clear_tau) = resultant(&out, high.position);
+        assert_eq!(
+            clear_f,
+            DVec3::ZERO,
+            "a screw in the air pushed {clear_f:?}"
+        );
+        assert_eq!(clear_tau, 0.0);
+        assert_eq!(v.immersion(), 0.0);
+
+        // No water at all: the same answer by a different road, which is the
+        // one a slipway takes.
+        out.clear();
+        let mut dry = afloat(DVec3::ZERO, DVec3::ZERO);
+        dry.water_y = None;
+        v.solve(dry, DT, &mut out);
+        assert_eq!(resultant(&out, DVec3::ZERO).0, DVec3::ZERO);
+
+        // …and the band is a fade, not a cliff: half out is half the push. The
+        // screw sits 0.5 m below the origin and its band is 0.4 m, so lifting
+        // the hull 0.3 m puts exactly half of it in the air.
+        out.clear();
+        let mut awash = afloat(DVec3::ZERO, DVec3::ZERO);
+        awash.position.y = 0.3;
+        v.solve(awash, DT, &mut out);
+        let mid = resultant(&out, awash.position).0.z;
+        assert!(
+            (mid / afloat_f.z - 0.5).abs() < 0.02,
+            "half a screw out of the water gave {mid} N of {}",
+            afloat_f.z
+        );
+    }
+
+    /// **The rudder turns the boat toward the side it is put over**, and it does
+    /// it by pushing the STERN the other way — which is what makes the moment.
+    ///
+    /// Asserted as a torque about the hull's own centre rather than as a sign on
+    /// a field: a rudder force applied at the centre of mass would sum to the
+    /// same lateral force and turn nothing at all.
+    #[test]
+    fn the_rudder_swings_the_stern_and_turns_the_bow() {
+        let mut v = HullVehicle::new(hull_rig());
+        v.control(VehicleControls {
+            throttle: 1.0,
+            steer: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        // Long enough for the rack to reach its stop.
+        for _ in 0..120 {
+            out.clear();
+            v.solve(afloat(DVec3::new(0.0, 0.0, 4.0), DVec3::ZERO), DT, &mut out);
+        }
+        assert!(
+            v.rudder_deg() > 1.0,
+            "the rudder never came over: {}",
+            v.rudder_deg()
+        );
+        let (f, tau) = resultant(&out, DVec3::ZERO);
+        // Positive yaw about +Y turns +Z toward +X, which is a turn to
+        // starboard — the side the wheel was put over.
+        assert!(tau > 0.0, "starboard rudder made a yaw torque of {tau}");
+        // …and the stern really is being pushed to port: the net side force is
+        // negative even though the boat is turning to starboard.
+        assert!(f.x < 0.0, "the rudder pushed the stern to {}", f.x);
+
+        // Port rudder is the mirror image, to the digit.
+        let mut v2 = HullVehicle::new(hull_rig());
+        v2.control(VehicleControls {
+            throttle: 1.0,
+            steer: -1.0,
+            ..Default::default()
+        });
+        let mut out2 = Vec::new();
+        for _ in 0..120 {
+            out2.clear();
+            v2.solve(
+                afloat(DVec3::new(0.0, 0.0, 4.0), DVec3::ZERO),
+                DT,
+                &mut out2,
+            );
+        }
+        let (f2, tau2) = resultant(&out2, DVec3::ZERO);
+        assert!((tau2 + tau).abs() < 1e-9, "{tau} against {tau2}");
+        assert!((f2.x + f.x).abs() < 1e-9);
+    }
+
+    /// **A boat that has closed the throttle still steers.**
+    ///
+    /// The half of `RUDDER_FLOW_GAIN` that is not the propeller race, and the
+    /// reason it exists: without it a drifting boat has no control at all, which
+    /// is wrong about boats and reads as a broken vehicle.
+    #[test]
+    fn a_boat_carrying_its_way_still_answers_the_helm() {
+        let mut v = HullVehicle::new(hull_rig());
+        v.control(VehicleControls {
+            throttle: 0.0,
+            steer: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        for _ in 0..120 {
+            out.clear();
+            v.solve(afloat(DVec3::new(0.0, 0.0, 8.0), DVec3::ZERO), DT, &mut out);
+        }
+        let (_, tau) = resultant(&out, DVec3::ZERO);
+        assert!(
+            tau > 0.0,
+            "a boat with no throttle and 8 m/s of way made no turning moment"
+        );
+        // …and it is genuinely weaker than the same helm under power, which is
+        // the thing that makes a burst of throttle a manoeuvre.
+        let mut u = HullVehicle::new(hull_rig());
+        u.control(VehicleControls {
+            throttle: 1.0,
+            steer: 1.0,
+            ..Default::default()
+        });
+        let mut out2 = Vec::new();
+        for _ in 0..120 {
+            out2.clear();
+            u.solve(
+                afloat(DVec3::new(0.0, 0.0, 8.0), DVec3::ZERO),
+                DT,
+                &mut out2,
+            );
+        }
+        let (_, powered) = resultant(&out2, DVec3::ZERO);
+        assert!(
+            powered > tau * 1.5,
+            "the race added nothing: {tau} coasting against {powered} under power"
+        );
+    }
+
+    /// **The keel damps yaw**, because it is applied at two points and not one.
+    ///
+    /// Mutation-verified in the ledger: moving both lateral-drag forces to the
+    /// centre of mass leaves the same sway resistance and **zero** yaw damping,
+    /// which is a boat that spins for ever once it is turning.
+    #[test]
+    fn the_keel_resists_a_spin_and_not_only_a_slide() {
+        let v = |angvel: DVec3, linvel: DVec3| {
+            let mut h = HullVehicle::new(hull_rig());
+            let mut out = Vec::new();
+            h.solve(afloat(linvel, angvel), DT, &mut out);
+            resultant(&out, DVec3::ZERO)
+        };
+        // Spinning in place: no net force, and a torque that opposes the spin.
+        let (f, tau) = v(DVec3::new(0.0, 0.5, 0.0), DVec3::ZERO);
+        assert!(f.length() < 1e-9, "a spin made a net force of {f:?}");
+        assert!(tau < 0.0, "the keel did not resist a spin: {tau}");
+        let (_, faster) = v(DVec3::new(0.0, 1.0, 0.0), DVec3::ZERO);
+        assert!(faster < tau, "the resistance does not grow with the rate");
+        // Sliding sideways: a force that opposes the slide, and no torque.
+        let (f, tau) = v(DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0));
+        assert!(f.x < 0.0, "the keel did not resist a slide: {f:?}");
+        assert!(tau.abs() < 1e-9, "a pure slide made a torque of {tau}");
+    }
+
+    /// The hull's tunables are the sixty-two by their own names — and the whole
+    /// catalogue row is accepted even though most of it means nothing to a boat.
+    #[test]
+    fn the_hull_reads_the_names_it_claims_and_accepts_the_rest() {
+        let mut v = HullVehicle::new(hull_rig());
+        // Every one of the sixty-two is taken, so an authored row is never half
+        // read — the reason `install` counts what it took.
+        for name in VehicleTuning::names() {
+            assert!(v.tune(name, 1.0), "the hull refused `{name}`");
+        }
+        assert!(!v.tune("hoist_speed", 1.0), "the hull invented a name");
+        // …and the seven it READS reach the model. Thrust is the clearest: with
+        // `max_engine_force_n` at zero a boat at full ahead makes no push.
+        let mut v = HullVehicle::new(hull_rig());
+        v.tune("max_engine_force_n", 0.0);
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        v.solve(afloat(DVec3::ZERO, DVec3::ZERO), DT, &mut out);
+        assert_eq!(resultant(&out, DVec3::ZERO).0, DVec3::ZERO);
+    }
+
+    /// A boat's telegraph, not a car's gearbox: ahead, astern, stopped — and
+    /// astern is weaker than ahead, which is why a boat takes so long to stop.
+    #[test]
+    fn the_telegraph_says_ahead_astern_or_stopped() {
+        let push = |c: VehicleControls| {
+            let mut v = HullVehicle::new(hull_rig());
+            v.control(c);
+            let mut out = Vec::new();
+            v.solve(afloat(DVec3::ZERO, DVec3::ZERO), DT, &mut out);
+            (v.gear(), resultant(&out, DVec3::ZERO).0.z)
+        };
+        let (g, ahead) = push(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        assert_eq!(g, 1);
+        assert!(ahead > 0.0);
+        let (g, astern) = push(VehicleControls {
+            throttle: -1.0,
+            ..Default::default()
+        });
+        assert_eq!(g, -1);
+        assert!(astern < 0.0);
+        assert!(
+            (astern.abs() / ahead - HULL_ASTERN_FRACTION).abs() < 1e-9,
+            "astern made {astern} N against {ahead} N ahead"
+        );
+        // A pull-back at speed arrives as a BRAKE, and on a boat that is astern
+        // power — the mapping `from_intent` already made, with no special case.
+        let (g, stopping) = push(VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        });
+        assert_eq!(g, -1);
+        assert!(stopping < 0.0, "the brake did not go astern: {stopping}");
+        assert_eq!(push(VehicleControls::default()).0, 0);
+    }
+
+    /// **`class_for_parts` picks the boat for a thruster** — the one place a
+    /// scene's parts become a model (wave VEH2c).
+    #[test]
+    fn a_thruster_rig_gets_the_hull_and_a_bare_one_gets_nothing() {
+        let v = class_for_parts(hull_rig());
+        assert_eq!(v.rig().parts.len(), 1);
+        // The identity is asserted through BEHAVIOUR, not a downcast: a hull
+        // has no suspension and reports its telegraph, an inert `RaycastVehicle`
+        // reports the gear its box is in.
+        assert_eq!(v.suspension_rest_m(), 0.0);
+        assert_eq!(v.gear(), 0, "a stopped boat is not in first");
+        // A rig with parts that are neither answers the inert class, which
+        // applies no force at all rather than panicking.
+        let mut bare = hull_rig();
+        bare.parts.clear();
+        let mut v = class_for_parts(bare);
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        v.solve(afloat(DVec3::ZERO, DVec3::ZERO), DT, &mut out);
+        assert!(out.is_empty(), "the inert class pushed {out:?}");
+    }
 
     /// The readout a driver reads, and the two edges of it.
     #[test]
