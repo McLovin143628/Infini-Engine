@@ -26645,3 +26645,363 @@ arithmetic is right (8192 / 10 = 819 s, / 40 = 205, / 80 = 102).
   sooner than 819 / 205 / 102 s — still nowhere near a two-thousand-step course.
 * **`ItemDefs::insert` does not refuse a colon**, so `engine:fists` is namespaced
   by convention plus TOML's bare-key rule rather than by construction.
+
+## Wave EMS1 — the institutions: four archetypes, their staff and their fleet (2026-09-02)
+
+The first of the EMS arc's three waves: the **buildings, the vehicles and the
+people**. Dispatch and response are EMS2's, crimes and profiles EMS3's.
+
+Zero schema moves — scene stays **v27**, `ScenePayload` **v12**. Everything is a
+code const, a TOML row, a derived `#[serde(skip)]` cache or a Resource. Goldens
+stay **62**, none added and none re-blessed.
+
+### The room vocabulary, and the rule that had to change shape
+
+Five room types — `Cell`, `ApparatusBay`, `Ward`, `ExamRoom`, `Waiting` — and one
+new `ModuleShape`, `Grille`. The three exhaustive matches the wave was warned
+about went red on purpose and are answered; the source census that guards
+`RoomType::ALL` moved with them.
+
+`shift_of(kind) -> SlotShift` **could not say what an institution is**. A ward
+with nobody on it at four in the morning is not a ward, and a fire hall's bay is
+manned at ten in the morning *and* at ten at night by two crews rather than by
+one person working sixteen hours. Both cheap answers were lies: `Night` would
+have made a fire hall a building that opens when the bars do — measuring
+"staffed at 22:00" correctly *for a reason that has nothing to do with fire
+halls*, which is `street_face`'s bouncer-gated-on-the-neon-sign defect exactly —
+and `Day` would have emptied three buildings overnight.
+
+So the one door answers the **set** of crews (`crews_of(kind) -> &[SlotShift]`)
+and `slots_of` mints the room's occupancy once per crew, day watch first.
+`PcgSlot::shift` is still a `SlotShift`, so nothing downstream learns a third
+word and the two ECS mirrors keep their two-arm matches. Every pre-EMS1 room type
+answers a **one-element** list, so the index arithmetic collapses to what it was
+(`0 * n + k == k`, `i * 1 + 0 == i`) and every committed level is byte-identical;
+`the_pre_ems1_rooms_are_worked_by_exactly_one_crew` is the arm that says so.
+
+**And the VEN1b pin survives intact**, which is why the crews are a list rather
+than a third `SlotShift` variant. `the_social_rooms_are_the_night_rooms` now
+reads "worked at night AND NOT BY DAY": the weaker reading would have been
+satisfied by a ward, and `is_social` gates the whole leisure derivation — so a
+ward that answered true would have seated patients on a bed as a night out and
+put a bouncer on the hospital's door.
+
+`tends_of` returns the ROOMS a counter is worked in instead of a bool. The arm in
+`assemble` read `tends_of(module) && is_social(room)`, and `is_social` is the
+*leisure* gate; a reception counter is not leisure, so gating a front desk on it
+meant either no desk or a waiting room that offers the town a night out.
+
+`ModuleShape::Grille` is the only family in the table whose point is what it does
+**not** contain — measured and asserted at **67% open** across its mid-height
+line, which at a 1.2 m cell front is 60 mm bars on 290 mm centres. It stays a
+*solid* to the assembler, because seeing through a thing and passing through it
+are different questions this engine has answered separately once already.
+
+### THE SECOND PROXY, AND IT WAS A REAL DEFECT
+
+`assemble::music()` gated on `ground_anchors.first()`, which measured right for a
+reason that has nothing to do with music: the three archetypes with an anchor
+were the three venues. The institutions declare anchors too — a fire hall's
+ground floor **is** its bay — and the first thing they got for it was **a speaker
+in a police station**. That is `street_face`'s defect one function along, and it
+is fixed the same way the VEN1b audit fixed that one: with a rule about the ROOM
+(`station::is_social`). All three venues' first anchor is a social room, so
+nothing a venue emits moved.
+
+### The four archetypes, measured
+
+Three storeys on an 18 x 14 m lot, `slots_of` alone:
+
+| archetype | rooms | homes | day | night | errands |
+|---|---|---|---|---|---|
+| PoliceStation | 12 | 0 | 19 | 3 | 1 |
+| FireHall | 12 | 0 | 2 | 2 | 1 |
+| Hospital | 12 | 0 | 8 | 6 | 1 |
+| Clinic | 18 | 0 | 18 | 0 | 1 |
+
+The **clinic's zero** is the falsifying entry of the whole wave. If every
+institution held a night crew, "an institution is open" would be a property of
+the word and not of the rooms.
+
+A fire hall's storey is **4.6 m** — an appliance is 3.3 m to the top of its light
+bar and the door has to clear it — and its range is closed at **two**: a hall is
+a bay with quarters over it. That second number was `(1, 2)` until the island
+gate found what a one-or-two-storey civic block does to a settlement that has
+only one guaranteed-multi-storey block (below).
+
+### Placement: the civic strip
+
+`civic_strip(kind)` + `civic_min_ring` + `CIVIC_SHARE`, a fourth arm in the block
+ladder between the venue arm and the weighted draw. "A city has a hospital" is a
+fact about the settlement and not a probability per block, so it cannot live in
+`zone_table` any more than `Industrial` or a nightclub can — the same argument,
+the third time.
+
+| settlement | blocks | institutions |
+|---|---|---|
+| Harbour City | 52 | Clinic, FireHall, Hospital, PoliceStation |
+| Eastgate | 52 | Clinic, FireHall, Hospital, PoliceStation |
+| Cedar Cove / Millbrook | 16 | Clinic, FireHall |
+| Fernhill / Alder Bay / Stonewater | 12 | Clinic, FireHall |
+| Fixture Town (City, 4 blocks) | 4 | — |
+| Fixture Camp (Town, 4 blocks) | 4 | FireHall |
+
+A town gets the two institutions that scale down. A fire hall is the one civic
+building a settlement of any size has, because the alternative is that it burns
+down; a clinic is a hospital a town can afford, on a high-street lot. It gets no
+hospital because a hospital's lot is 52 x 50 m and a town's whole grid is 76 m on
+a side, and no police station because a station with no city to police is a cell
+block with nobody in it.
+
+**A CITY KEEPS ITS CORE, and the first draft did not.** `civic_min_ring` was
+`0` everywhere on the argument that a hall cares about response time and not
+about ground rent. That is right about the appliance and wrong about the city:
+ring 0 IS a city's office core, and a hall on the crossroads has bought the one
+block a downtown is made of. It is now `venue_min_ring` exactly — one ring out
+of a city, ring 0 of a town, whose ring 0 is a high street and not a core — and
+`CIVIC_SHARE` follows `VENUE_SHARE` to three so a four-block camp with a bar in
+it still gets its hall.
+
+**The order is load-bearing.** Both strips take the blocks nearest the centre, so
+a civic strip evaluated FIRST would have shrunk the venue strip's candidate list
+and cost a city its strip club — and two island-gate arms pick their target venue
+with `find(|b| b.is_venue())` over block order. Measured after the change: every
+venue row is what it was.
+
+### THE PHASE-19 PAD HAS NOW EATEN A LOT TWICE
+
+The showcase spreads one lot per archetype about a 512 m town, so its reach grows
+with the palette: at fourteen and a 50 m pitch that is **347 m against a +-256 m
+pad**, and a lot with no ground under it places NOTHING and says so nowhere
+(`jobs_of` fails closed — the same defect ate two lots at the 7-to-10
+transition). The pitch drops to 34 m (243 m of reach, 24 m of clear ground
+between neighbours), and `the_phase19_lots_all_stand_on_the_terrain` now runs the
+arithmetic the comment used only to describe.
+
+### THE FINDING: one Full crowd agent costs more than the whole collider band
+
+The phase-19 town's step went from a few milliseconds to **302 ms** with the
+institutions in it, and the obvious reading — "22 853 colliders is too many" — is
+wrong. The four-point sweep is the evidence:
+
+```
+  radii (0, 0, 0)          1.24 ms/step   tiers [0, 0, 0, 252]
+  radii (8, 16, 32)        1.27 ms/step   tiers [0, 0, 32, 220]
+  radii (20, 40, 80)       1.31 ms/step   tiers [0, 32, 50, 170]
+  radii (32, 96, 512)    302.28 ms/step   tiers [32, 50, 170, 0]
+                                          character move 300.21 ms
+```
+
+The static band is free. Fifty `Near` agents and a hundred and seventy `Far` ones
+are free. **Thirty-two `Full` ones are 300 ms** — **9.30 ms per standing agent
+per step**, 101% of it `character move`, against a town whose whole physics sync
+and solve together are 1.5 ms.
+
+`stepping_the_town_stays_cheap_with_thirteen_thousand_colliders` had been
+measuring that since NPC1a without anybody noticing: an arm named for colliders
+whose number was the character controller. It is split in two —
+`..._with_its_collider_band` (crowd banded out, 2.95 ms, asserted against
+`FRAME_BUDGET_MS`) and
+`a_full_crowd_agent_costs_more_than_the_whole_collider_band`, which carries the
+finding **as an assertion**: the default band must be OVER the frame budget and
+`character move` must be over 80% of the difference. The day somebody gives the
+character controller a broadphase, that arm goes red and this entry gets
+rewritten — the P22 pattern, and the only honest thing to do with a number
+nobody may raise a budget to.
+
+### The fleet: Path A only, and the trap it walks into twice
+
+Four catalogue rows and **no new `VehicleBody`** — `traffic::catalogue_row` draws
+a parked car's silhouette uniformly over `VehicleBody::ALL`, so a sixth variant
+would have put an ambulance at every sixth kerb slot on the island.
+
+The **liveries then walk straight into the same trap wearing the other hat**. The
+obvious home for a per-part colour is `BodyPart`, and a `VehicleBody`'s parts
+table is SHARED by every row that names that body — so a white-over-blue entry on
+`SEDAN_PARTS` would have repainted every saloon in the town. So a livery is a
+property of the VEHICLE (`RigSpawn::livery`), looked up by the part's own name,
+applied at `rig_nodes_at`'s one material site. The material is BUILT unliveried
+and then overwritten, so an unliveried car is byte-identical rather than believed
+equal; `a_livery_repaints_named_parts_and_leaves_the_rest_exactly_as_they_were`
+compares node for node against a `livery: None` recipe.
+
+`Livery::extra` is what makes a light bar possible at all: a saloon has a lower
+body, a greenhouse, a bonnet and a boot, and none of them is a roof bar. **The
+bar is STATIC** — flashing is a per-step material write from two fenced hosts,
+and that is EMS2's. It is asserted to BLOOM (`emissive_intensity` 3.0, because
+the HDR path thresholds at a linear luminance of 1.0 and a `Color` cannot exceed
+it).
+
+The nine-row catalogue, all distinct on the six axes a driver feels:
+
+| row | body | mass | top speed |
+|---|---|---|---|
+| sedan | Sedan | 1 185 kg | 122 km/h |
+| sports | Sports | 1 374 kg | 223 km/h |
+| **cruiser** | Sedan | 1 466 kg | 148 km/h |
+| suv | Suv | 2 098 kg | 166 km/h |
+| truck | Truck | 2 341 kg | 97 km/h |
+| **ambulance** | Van | 2 875 kg | 130 km/h |
+| van | Van | 3 296 kg | 115 km/h |
+| **swat** | Van | 3 424 kg | 108 km/h |
+| **engine** | Truck | 8 850 kg | 90 km/h |
+
+**The appliance has two axles, honestly.** `wheel_mounts` derives four wheels from
+a track and a wheelbase and `WheelMount::steered` is a sign test on the mount's
+own `z`, so three axles is not one more table — it is a different rig, and this
+ledger already refused a bus on exactly that ground. This is a two-axle pumper,
+7.8 x 2.44 x 3.1 m over 1.1 m tyres, with a 5.2 m wheelbase.
+
+Its mass moved the fleet test's ceiling from 3 600 kg to 12 t, and **the
+exception is named**: `kg > 3600` must equal `id == "engine"`, or a widened bound
+would quietly stop catching a five-tonne saloon — the density typo the ceiling
+exists for.
+
+| recipe | vehicles |
+|---|---|
+| samples/island | 17 — 7 engine, 4 cruiser, 4 ambulance, 2 swat |
+| samples/island-fixture | 1 — 1 engine |
+
+A **clinic keeps nothing**, and the arm says so: a table where every institution
+had a fleet would make "an institution has vehicles" a property of the word.
+
+### PARKED, AND THE THREE THINGS THAT WENT WRONG THERE
+
+Where is said out loud: **on the apron at each institution's own street
+frontage, not inside the bay.** A station's `ApparatusBay` is a room of a
+building the generator does not build — the block is a `PcgVolume` derived at
+load — and the one thing that would place a car in it is a ground height, which
+`settlement.rs` is FORBIDDEN to read by its own source gate.
+
+Getting that right cost three corrections, and every one of them was found by an
+existing gate rather than by inspection:
+
+1. **The fleet was centred ON the route vertex** — where a settlement's own
+   civilian car is parked. On a town whose institution block resolves to the
+   settlement's own vertex an appliance materialized *inside a saloon*. The gate
+   found it the way an interpenetration is always found: not as an overlap, but
+   as a hero who could no longer stand up beside the car it was trying to drive.
+2. **Then it was 11 m ahead of that car, in the lane.** The drive arm read 7.8 m
+   in five seconds of throttle and said "that is a parked car" — it was right,
+   something was parked in front of it. The fleet moved 6 m off the centreline,
+   onto the side its own station is (a perpendicular and a dot product; no
+   trigonometry reaches a committed transform). The drive came back to VEH2a's
+   published numbers exactly: **27.0 m, top 7.65 m/s, 1 200 of 1 200 contacts.**
+3. **And every parked appliance was idling.** An authored vehicle keeps its
+   engine emitter because it is "the one a player drives"; seventeen of them
+   across an island are seventeen stationary loops in a bounded audio log, and
+   the drive gate caught it as a second `Play` in a stream whose whole claim is
+   one voice per car. `VehicleSpawn::engine_voice` is now a field, and the
+   emergency fleet is silent until EMS2 makes it drive — VEH2a's carried item 5,
+   applied.
+
+### The gate, and the tripwire VEH2b left behind
+
+`projector_mirror`'s `SECTIONS` allowlist pinned **nine of the trace's ten**
+folds. VEH2b appended `traffic::traffic_state_bytes` to `state_bytes` and did not
+move the pin, so for two waves deleting or moving the traffic fold would have
+left every `inf-player` binary green — precisely the measurement the I6 audit
+made about `door` and `weapon` *before* it made the arm an allowlist. Fixed, and
+mutation-verified: deleting the fold line fails the arm by name.
+
+**And the weakness that verification exposed**, recorded rather than hidden: the
+pin is a substring search over the fn body, so a fold **commented out** still
+matches. That is true of all ten entries and is carried.
+
+`ems1_station_gate.rs`, five arms. The headline, on a town of four institutions
+and three apartment blocks (761 agents, 1 014 day jobs, 183 night jobs to 183
+night workers):
+
+| institution | at 10:00 | at 22:00 |
+|---|---|---|
+| Police station | 160 | 30 |
+| Fire hall | 152 | 17 |
+| Hospital | 103 | 136 |
+| Clinic | 163 | **0** |
+
+…plus the front desk and back office per archetype (one counter each, 2-14
+offices behind it), the fleet read out of the **committed** `.inf_lvl` (one light
+bar, blooming, on a rig), PIE == shipping byte for byte over 90 steps of crowd
+fold, and the budget: `crowd` 0.4728 ms for 761 agents against a 1.0 ms ceiling,
+`society` 0.0525 against 0.5. **No new budget constant is minted** — an
+institution is a `PcgVolume` and its people are crowd agents, so a wave that
+added a row here would be a wave that added a step phase, and this one did not.
+
+**What the PIE arm cost to get right**, because it is a finding about the two
+hosts and not about this wave: a pre-settled fixture compared a populated player
+against an EMPTY editor. `SimSession::enter` **clears the crowd, the society and
+the traffic on purpose** — a Simulate session starts from the author's document
+and not from a world somebody already simulated. So the society is derived BY the
+sim in both hosts, the trace starts empty and fills, and the arming moved to the
+far end where there is something to compare.
+
+### What the island gate had to be told, and one A14 scar
+
+Four of its arms were measuring proxies that this wave's content made false, and
+one was a restated rule:
+
+* **"nothing emits by day"** was a proxy for "the night-window ramp is off". A
+  venue's neon and a civic lamp emit at every hour by design, so the arm now
+  records the day-lit set and makes the night claim about the DIFFERENCE — which
+  is what it was always about, and which an authored emitter can no longer make
+  vacuous.
+* **"no night job"** was a proxy for "no nightlife". A fire hall's bay is worked
+  round the clock and sells nobody a drink. The arm keeps `leisure_places == 0`
+  (the real claim) and bounds the night shift at a tenth of the town.
+* **the four-leg accounting** had two ways to be short of a leg, and a night
+  worker's day is the TWO-leg one. The term is not slack: remove it and the arm
+  fails again.
+* **"the nearest vehicle"** made an 8.85-tonne appliance the subject of the
+  circuit drive. `civilian_cars` excludes the fleet by the CLASS its catalogue
+  row carries — read from `station_fleet` and `island_vehicles`, never restated.
+* and **`walk_door`**: `town_plan` carried a copy of the walk gate's
+  door-selection rule under a comment reading *"the same one
+  `walk_into_a_building` picks"*. It went stale the instant the rule grew a
+  clause — the walk chose one door and the plan chose another, and the arm failed
+  on a building nobody was walking into. One function now, and the new clause is
+  in it: the door must be on a block some street line is **level with**, because
+  every building takes its datum from the terrain under its own footprint and on
+  a slope two blocks of one settlement are two storeys.
+
+### Bytes that moved, and none of them a schema
+
+`samples/settlement` gains eight files and its README; `samples/phase19-town`
+gains eight and its level moves (fourteen lots at a new pitch); both island
+recipes name the four new zone documents and both committed island levels
+regenerate. The VEH2a precedent: bytes move, schema does not.
+
+### Carried out of EMS1, for EMS2
+
+* **A `Full` crowd agent costs 9.3 ms of `character move` per step** against a
+  22 853-collider town — the wave's headline finding, asserted so a fix cannot
+  land silently, and the reason a furnished town with people in it is not a
+  frame's work today.
+* **The front desk is a DAY post everywhere.** `crews_of(Waiting)` is `[Day]`,
+  because it is a rule about the room and a clinic's reception is not manned
+  overnight. A hospital's is, in life.
+* **A waiting room's benches are furniture, not stations.** `seats_of` is gated
+  on `is_social`, and a waiting room is deliberately not social — a seat there
+  would become a `Leisure` slot, i.e. a night out. A patient *waiting* needs an
+  errand-postured station, which EMS2's incidents will want.
+* **The fleet is parked, not owned.** Nothing links a vehicle to the institution
+  it stands outside: the guid encodes the block, but no Resource says "this
+  appliance belongs to that hall". A dispatcher needs that edge.
+* **A light bar does not flash**, and `pulse_emissive` has no caller on the
+  `MeshInstance` path — the two existing callers are PCG scatter projectors. A
+  flashing bar is a NEW application path and therefore a new mirrored pair.
+* **`station_fleet` is keyed on the ARCHETYPE, not on the building.** Every
+  police station on the island keeps the same three vehicles.
+* **No siren.** `AudioEngine::set_position` is still reachable-and-unreached
+  (VEH2a's carried item 5), and the fleet is deliberately silent until it is.
+* **A seat is the top face of the chassis collider**, so the appliance's driver
+  sits 3.45 m up — outside a standing hero's 3 m reach. The fire engine is
+  parked scenery until that rule or that height changes.
+* **The `SECTIONS` pin cannot see a commented-out fold** (above).
+* **`vehicle_grade.rs`'s `SPECS` table is still five rows.** The four emergency
+  rows have no sprint/brake/top-speed measurement; the fleet test's six-axis
+  uniqueness stands in for it.
+* **An institution's door is unwatched.** `watches_its_door` is gated on
+  `is_social`, so nobody stands at a station's step.
+* **SWAT is a van and a crew, not a behaviour.** The tactical team is the
+  `ApparatusBay` crew of a police station and the vehicle they ride; nothing
+  distinguishes them from patrol until a dispatcher does.

@@ -383,8 +383,10 @@ pub fn plan_building_in(params: &BuildingParams, frame: crate::building::LotFram
         // can be a NaN, and a sort that panics inside a level load is worse than
         // one that puts the NaN somewhere definite.
         //
-        // Empty for the seven archetypes that predate the venues, so this loop
-        // does nothing at all and their plans are byte-identical.
+        // Empty for the seven archetypes that predate the venues — and for no
+        // others, since wave EMS1's four institutions each anchor their ground
+        // floor too — so for those seven this loop does nothing at all and
+        // their plans are byte-identical.
         if floor == 0 && !arch.ground_anchors.is_empty() {
             let mut order: Vec<usize> =
                 (0..rects.len()).filter(|k| rects[*k].1.is_none()).collect();

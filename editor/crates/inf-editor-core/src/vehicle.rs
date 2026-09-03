@@ -98,6 +98,16 @@ pub struct VehicleSpawn<'a> {
     /// **The livery** (wave EMS1), or `None` for a car painted one colour —
     /// which is every civilian vehicle. See [`inf_ecs::vehicle::Livery`].
     pub livery: Option<&'static inf_ecs::vehicle::Livery>,
+    /// **Whether this car runs its engine where it stands** (wave EMS1).
+    ///
+    /// `true` for a car a player is meant to walk up to and drive — which is
+    /// what every authored vehicle was until this wave. **`false` for the
+    /// emergency fleet**, and for `RigSpawn::engine_voice`'s reason verbatim:
+    /// an idling appliance's emitter does not follow it, so seventeen of them
+    /// parked across an island are seventeen stationary engine loops, and the
+    /// island's own drive gate caught it as a second `Play` in a stream whose
+    /// whole claim is one voice per car.
+    pub engine_voice: bool,
 }
 
 /// **Author one vehicle**, returning its chassis `Guid`.
@@ -137,9 +147,7 @@ pub fn spawn_vehicle(
             yaw_deg: spawn.yaw_deg,
             paint: spawn.paint,
             clip: spawn.clip,
-            // An authored car keeps its engine emitter: it is the one a player
-            // drives, and VEH1a's loop is addressed to it.
-            engine_voice: true,
+            engine_voice: spawn.engine_voice,
             livery: spawn.livery,
         },
     );
@@ -1015,6 +1023,7 @@ mod tests {
                     paint: Color::new(0.6, 0.1, 0.1, 1.0),
                     clip: None,
                     livery: None,
+                    engine_voice: true,
                 },
             );
             doc.world_mut().propagate();
@@ -1195,6 +1204,7 @@ mod tests {
             paint: Color::WHITE,
             clip: None,
             livery: None,
+            engine_voice: true,
         };
         let mut a = SceneDoc::new();
         spawn_vehicle(&mut a, chassis, &def, spawn);

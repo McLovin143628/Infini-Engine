@@ -257,37 +257,53 @@ fn civic_strip(kind: SiteKind) -> &'static [ArchetypeId] {
 
 /// The innermost ring an institution may take (wave EMS1).
 ///
-/// **Ring 0 everywhere, and that is the difference from the venue strip.** A
-/// venue sits one ring out of a city's core because ring 0 is the most
-/// expensive ground in the settlement and a bar cannot pay for it. A fire hall
-/// does not care what the ground costs; what it cares about is how long the
-/// appliance takes to reach the far side of the city, and that is minimised at
-/// the crossroads. The same is true of an emergency room.
+/// **One ring out of a city, ring 0 of a town — [`venue_min_ring`] exactly.**
 ///
-/// A function rather than a constant, on `venue_min_ring`'s own shape, so the
-/// day a city wants its hospital pushed out of the core there is one place to
-/// say so.
-fn civic_min_ring(_kind: SiteKind) -> u32 {
-    0
+/// The first draft of this rule was `0` everywhere, on the argument that a fire
+/// hall does not care what the ground costs, it cares how long the appliance
+/// takes to reach the far side of the city. That argument is right about the
+/// appliance and wrong about the city: ring 0 IS a city's office core, it is the
+/// most expensive ground in the settlement, and a hall on the crossroads is a
+/// hall that has bought the one block a downtown is made of. Halls and emergency
+/// rooms sit a block off the main street in every city that has them, and a ring
+/// in a city is 120 m.
+///
+/// **The island gate is what made this get looked at**, and the way it failed is
+/// worth keeping: taking the block nearest the crossroads took the settlement's
+/// only guaranteed-multi-storey block — the subject
+/// `pie_equals_shipping_when_an_npc_walks_across_town` walks into — and the
+/// arm reported it as *"no street line is on the same storey as its own
+/// buildings"*, which is a true sentence about a building nobody meant to
+/// choose. A rule that moves another wave's subject is a rule worth re-reading.
+///
+/// A town keeps ring 0: its ring 0 is its high street, not a core, which is
+/// `venue_min_ring`'s own reasoning for the same number.
+fn civic_min_ring(kind: SiteKind) -> u32 {
+    match kind {
+        SiteKind::City => 1,
+        _ => 0,
+    }
 }
 
 /// At most one block in this many becomes an institution (wave EMS1) — the
-/// `VENUE_SHARE` guard, for its reason.
+/// `VENUE_SHARE` guard, at `VENUE_SHARE`'s own value.
 ///
-/// **Four, not three**, and the extra rung is deliberate: the civic strip is
-/// evaluated *after* the venue strip and takes from what is left, so a share as
-/// generous as nightlife's would let a nine-block town spend three blocks on
-/// civic buildings and one on a bar. A settlement is mostly the places people
-/// live and work in; the institutions are what it *has*, not what it is made of.
-const CIVIC_SHARE: usize = 4;
+/// Three, and not the four the first draft carried. The extra rung was there to
+/// stop the civic strip and the nightlife strip between them spending too much
+/// of a small settlement — and with [`civic_min_ring`] corrected to keep a
+/// city's core, it costs the CI fixture its only institution instead: a
+/// four-block camp with one bar has three eligible blocks, and three over four
+/// is none. A share is a fraction of a settlement, and a quarter and a third are
+/// the same answer everywhere the two rules can both bite.
+const CIVIC_SHARE: usize = 3;
 
 /// **Which archetypes are furnished** (island wave I8a, ruling 3).
 ///
 /// The orchestrator's ruling was *measure, then decide, default ON*, and the
 /// measurement is `the_furnish_battery_prices_a_city_block_at_island_scale` in
 /// `runtime/inf-player/tests/island_gate.rs`. What it found is in the wave's
-/// ledger; what it decided is here, in one place, read by all seven zone
-/// documents so a reader cannot find two answers.
+/// ledger; what it decided is here, in one place, read by every zone
+/// document so a reader cannot find two answers.
 ///
 /// The split is not a compromise for its own sake — it is the shape the
 /// measurement implies. Furniture is per **room**, so its cost scales with
@@ -1470,7 +1486,7 @@ pub fn venue_music_asset() -> inf_audio::AudioAsset {
     crate::samples::playground_audio_asset()
 }
 
-/// Write the seven zone documents and the README.
+/// Write every archetype zone document and the README.
 pub fn write_settlement_library(dir: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
     for a in ArchetypeId::ALL {
@@ -2395,21 +2411,32 @@ mod tests {
         );
     }
 
-    /// **The civic floor is the CROSSROADS, and the venue floor is not** (wave
-    /// EMS1) — the one line that differs between the two strips, pinned.
+    /// **A CITY KEEPS ITS CORE** (wave EMS1) — the civic floor, pinned.
     ///
     /// Written as an arm rather than as a comment for
     /// `the_industrial_floor_is_the_outer_half_and_never_the_core`'s reason: a
-    /// min-ring rule that quietly picked up the venue's `1` would push a city's
-    /// fire hall out of its core, and nothing else in the tree would notice.
+    /// min-ring rule that quietly went back to `0` would put a fire hall on a
+    /// city's crossroads, and the only thing in the tree that noticed last time
+    /// was another wave's walk gate, reporting it as a building with no street
+    /// on its storey.
     #[test]
-    fn the_civic_floor_is_the_crossroads_and_the_venue_floor_is_not() {
-        for kind in [SiteKind::City, SiteKind::Town, SiteKind::Waypoint] {
+    fn a_citys_civic_strip_starts_one_ring_out_and_a_towns_does_not() {
+        assert_eq!(
+            civic_min_ring(SiteKind::City),
+            1,
+            "a fire hall took a city's office core"
+        );
+        for kind in [SiteKind::Town, SiteKind::Waypoint] {
             assert_eq!(
                 civic_min_ring(kind),
                 0,
-                "{kind:?}: an appliance is quickest from the crossroads"
+                "{kind:?}: a town's ring 0 is its high street, not a core"
             );
+        }
+        // …and it is the venue floor exactly, which is the point: the two
+        // strips want the same ground for the same reason.
+        for kind in [SiteKind::City, SiteKind::Town, SiteKind::Waypoint] {
+            assert_eq!(civic_min_ring(kind), venue_min_ring(kind), "{kind:?}");
         }
         assert_eq!(venue_min_ring(SiteKind::City), 1, "the venue floor moved");
         // …and the two strips never name the same archetype, or one block would

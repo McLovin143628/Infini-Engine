@@ -1847,7 +1847,11 @@ mod tests {
             assert!(worst > 0, "{id:?} hangs no light at all");
         }
         // Every non-venue hangs none: a rig is not something the seven that
-        // predate it acquired by accident.
+        // predate it — or the four institutions that came after — acquired by
+        // accident. The institutions are deliberately INSIDE this sweep rather
+        // than exempted from it (wave EMS1): a hospital with a sweeping
+        // coloured spot over its ward is a nightclub, and the stronger claim is
+        // free because none of the four declares a rig.
         for id in ArchetypeId::ALL.into_iter().filter(|a| !a.is_venue()) {
             let (name, worst, _) = table[ArchetypeId::ALL.iter().position(|a| *a == id).unwrap()];
             assert_eq!(worst, 0, "{name} grew a lighting rig");

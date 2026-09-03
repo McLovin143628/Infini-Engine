@@ -133,6 +133,7 @@ fn ramp_world(grade: f64, id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
             paint: Color::new(0.6, 0.1, 0.1, 1.0),
             clip: None,
             livery: None,
+            engine_voice: true,
         },
     );
     doc.world_mut().mark_dirty();
@@ -192,6 +193,7 @@ fn flat_world(id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
             paint: Color::new(0.1, 0.1, 0.6, 1.0),
             clip: None,
             livery: None,
+            engine_voice: true,
         },
     );
     doc.world_mut().mark_dirty();

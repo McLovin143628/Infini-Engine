@@ -1,4 +1,4 @@
-//! The seven **building archetypes**, shipped as code-level constants.
+//! The fourteen **building archetypes**, shipped as code-level constants.
 //!
 //! # What a palette is
 //!
@@ -8,7 +8,7 @@
 //!   a post, a slab, a stair step, a desk *are*) plus the wall rules that lay
 //!   modules along a run. It is parsed by [`Grammar::parse`], the same parser the
 //!   `grammar.rules` node uses, so an archetype is exactly as expressive as
-//!   anything an author can type — and a test parses all seven.
+//!   anything an author can type — and a test parses all fourteen.
 //! * a **table of plan parameters** — storey range, room sizes, corridor width,
 //!   opening dimensions, the weighted room-type table and the per-room-type
 //!   furniture set.
@@ -35,7 +35,7 @@
 //!
 //! # Why constants and not assets
 //!
-//! v1 ships the seven as `&'static` data. An archetype has no identity a user
+//! v1 ships them as `&'static` data. An archetype has no identity a user
 //! edits, no dependency edges, and no versioning story yet; making it an asset
 //! kind would buy a `.inf_barch` format, a sidecar, a migration ladder and a
 //! Content Drawer glyph before anybody has asked to author one. The seam is
@@ -51,7 +51,7 @@
 
 use super::RoomType;
 
-/// Which of the seven palettes a plan is built from.
+/// Which of the fourteen palettes a plan is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArchetypeId {
     Office,
@@ -305,7 +305,7 @@ pub struct EntranceSign {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FurnitureDef {
     /// The palette module placed — must be declared by the archetype's grammar
-    /// text, which a unit test checks for all ten.
+    /// text, which a unit test checks for all fourteen.
     pub module: &'static str,
     /// Half-extents in metres `(x, y, z)`, in the **piece's own frame**: `+Z` is
     /// the direction it faces (away from the wall, for a wall-aligned piece).
@@ -450,7 +450,9 @@ pub struct BuildingArchetype {
     pub ground_anchors: &'static [RoomType],
     /// **The signage on this archetype's street face** (wave VEN1a), or `None`
     /// for a building that does not announce itself — which is the seven that
-    /// predate the venues.
+    /// predate the venues, and only those: wave EMS1's four institutions each
+    /// hang a lamp, because a building an emergency is called to has to be
+    /// findable at night.
     pub entrance_sign: Option<EntranceSign>,
     /// **The real lights this archetype's stage rooms hang** (wave VEN1a), or
     /// `None` for a building that produces no light of its own — which, before
@@ -459,7 +461,7 @@ pub struct BuildingArchetype {
 }
 
 impl BuildingArchetype {
-    /// The parsed grammar. Every shipped palette parses — asserted for all seven
+    /// The parsed grammar. Every shipped palette parses — asserted for all fourteen
     /// by [`every_palette_parses`](self::tests::every_palette_parses) — so a
     /// caller may treat a failure here as a programming error in a *new*
     /// palette rather than as authored input.
@@ -2434,14 +2436,17 @@ const EXAM_FURNITURE: &[FurnitureDef] = &[
     },
 ];
 
-/// The rule text every institution shares, written out per palette below with
-/// its own dimensions. Kept here as prose rather than as a fragment because a
-/// palette is meant to read as one thing.
+/// **A police station** (wave EMS1) — a public counter in front of a cell
+/// block, with a garage under the offices.
 ///
-/// Modules: `Pier`/`Clad`/`Glazing` make the façade, `Partition` the inside,
-/// and the eleven fittings are the six shared tables above. Every one of them
-/// is classified by [`modules::shape_of`](super::modules::shape_of), and
-/// `every_palette_module_has_a_shape` is what says none was forgotten.
+/// The four institutions share a *vocabulary* and not a rule text:
+/// `Pier`/`Clad`/`Glazing` make the façade, `Partition` the inside, and the
+/// fittings come from the six tables above. The text is still written out per
+/// palette with its own dimensions, for this module's own header's reason — a
+/// palette is meant to read as one thing. Every module named is classified by
+/// [`shape_of`](super::modules::shape_of), and
+/// `modules::tests::every_palette_module_has_a_shape` is what says none was
+/// forgotten.
 const POLICE_STATION: BuildingArchetype = BuildingArchetype {
     id: ArchetypeId::PoliceStation,
     display: "Police station",
@@ -2614,7 +2619,14 @@ Inner  -> Partition+\n\
     slab: "Slab",
     step: "Step",
     roof: "Roof",
-    floors: (1, 2),
+    // **A hall is a bay with QUARTERS over it**, and the range is closed at two
+    // for a reason the island gate found: `civic_min_ring` puts the civic strip
+    // on the block nearest the crossroads, which in a four-block town is the
+    // one block a walk-into-a-building gate can rely on being multi-storey. A
+    // `(1, 2)` hall took that block and made the guarantee a coin toss. It is
+    // also simply what a fire hall is — the crew that waits in the bay round
+    // the clock waits somewhere, and that somewhere is upstairs.
+    floors: (2, 2),
     // **An appliance is 3.3 m tall and the door has to clear it.** The one
     // number that makes this a palette and not a variant of the station.
     floor_height: 4.6,

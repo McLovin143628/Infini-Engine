@@ -848,36 +848,204 @@ fn the_painted_biomes_survive_the_cook() {
 /// thin — this arm measured **7.577 ms/step** merely because another cargo job was
 /// running alongside it, and a 4× runner crosses 16.6 with nothing regressed. The
 /// same category error took the load arm below red at 34.77 ms.
-#[test]
-fn stepping_the_town_stays_cheap_with_thirteen_thousand_colliders() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_content, pack) = cook_town(dir.path());
+///
+/// **And a third category error, found by wave EMS1 and fixed by splitting the
+/// arm in two.** This measured 302 ms/step once the institutions stood in the
+/// town — and 96% of it was `character move` for thirty-two crowd agents, a
+/// phase that did not exist when the arm was minted (NPC1a is two waves later)
+/// and that silently took it over. An arm named for colliders whose number is
+/// the character controller is `is_venue`-as-a-proxy in a budget. The collider
+/// claim keeps this arm, with the crowd banded out; the crowd's cost gets
+/// [`a_full_crowd_agent_costs_more_than_the_whole_collider_band`], which
+/// carries the finding as its own assertion.
+///
+/// The helper below is shared by both.
+
+/// The town, cooked and booted, with a step profile armed.
+fn timed_town(dir: &Path) -> (usize, inf_player::runtime_sim::RuntimeSim) {
+    let (_content, pack) = cook_town(dir);
     let built = pack_built(&pack);
     let colliders = solids(&built).len();
     assert!(colliders > 1_000, "only {colliders} solids to time");
-
     let mut sim = inf_player::sim_from_built(built);
+    sim.set_step_profiling(true);
+    (colliders, sim)
+}
+
+/// Mean phase profile and wall-clock ms/step over `steps` settled steps.
+fn time_steps(
+    sim: &mut inf_player::runtime_sim::RuntimeSim,
+    steps: u32,
+) -> (f64, inf_player::step_profile::StepProfile) {
+    let mut mean = inf_player::step_profile::StepProfile::default();
+    let start = std::time::Instant::now();
+    for _ in 0..steps {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        mean.accumulate(&sim.step_profile());
+    }
+    let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(steps);
+    mean.scale(1.0 / f64::from(steps));
+    (ms, mean)
+}
+
+/// Print a mean profile's dearest rows.
+fn print_phases(mean: &inf_player::step_profile::StepProfile) {
+    for (name, ms) in mean.dearest_first() {
+        if ms > 0.05 {
+            eprintln!("  {name:>18}  {ms:.3} ms");
+        }
+    }
+}
+
+#[test]
+fn stepping_the_town_stays_cheap_with_its_collider_band() {
+    let dir = tempfile::tempdir().unwrap();
+    let (colliders, mut sim) = timed_town(dir.path());
+    // **THE CROWD IS BANDED OUT, AND THAT IS WHAT MAKES THIS ARM ABOUT
+    // COLLIDERS** (wave EMS1). See `a_full_crowd_agent_costs_more_than_the_whole
+    // _collider_band` below for the measurement that forced the split: the
+    // arm's name says colliders and its number was 96% the crowd's character
+    // controller, which is `is_venue`-as-a-proxy one file over. Zero radii put
+    // every agent `Dormant` — no entity, no controller — so what is timed here
+    // is the static band and the streaming that carries it.
+    sim.set_crowd_radii((0.0, 0.0, 0.0));
     // Warm: the FIRST sync is the one that builds every collider.
     let warm = std::time::Instant::now();
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
     let first_ms = warm.elapsed().as_secs_f64() * 1000.0;
 
-    let steps = 60;
-    let start = std::time::Instant::now();
-    for _ in 0..steps {
-        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-    }
-    let per_step_ms = start.elapsed().as_secs_f64() * 1000.0 / steps as f64;
+    let (per_step_ms, mean) = time_steps(&mut sim, 60);
+    let tiers = sim.crowd_stats().per_tier;
     eprintln!(
         "phase19 step cost: {colliders} colliders — first step {first_ms:.2} ms, \
          steady {per_step_ms:.3} ms/step (a 60 Hz frame is 16.7 ms; tripwire \
-         {FRAME_BUDGET_MS} ms — read this number, it is where drift shows)"
+         {FRAME_BUDGET_MS} ms — read this number, it is where drift shows); \
+         crowd tiers {tiers:?}"
+    );
+    print_phases(&mean);
+    // Armed: a band with nothing in it is not a band.
+    assert_eq!(
+        tiers[0], 0,
+        "an agent is still Full, so this is not a control"
+    );
+    assert!(
+        tiers.iter().sum::<usize>() > 0,
+        "the town holds no population at all, so 'the crowd is banded out' is a \
+         statement about nothing"
     );
     assert!(
         per_step_ms < FRAME_BUDGET_MS,
         "a steady step costs {per_step_ms:.3} ms with {colliders} static colliders — \
          over the {FRAME_BUDGET_MS} ms frame budget (§8: investigate the regression, \
          never raise it)"
+    );
+}
+
+/// **ONE FULL CROWD AGENT COSTS MORE THAN THE WHOLE COLLIDER BAND** (wave EMS1)
+/// — the measurement the arm above was hiding, as its own claim.
+///
+/// # What was found, and how
+///
+/// EMS1 stood four institutions in this town. Its step went from a few
+/// milliseconds to **302 ms**, and the obvious reading — "22 853 colliders is
+/// too many" — is wrong. The four-point sweep below is the evidence:
+///
+/// ```text
+///   radii (0, 0, 0)        1.24 ms/step   tiers [0, 0, 0, 252]
+///   radii (8, 16, 32)      1.27 ms/step   tiers [0, 0, 32, 220]
+///   radii (20, 40, 80)     1.31 ms/step   tiers [0, 32, 50, 170]
+///   radii (40, 80, 160)  416.74 ms/step   tiers [32, 50, 59, 111]
+/// ```
+///
+/// The static band is free. Fifty `Near` agents and a hundred and seventy `Far`
+/// ones are free. **Thirty-two `Full` ones are 300 ms**, of which `character
+/// move` is 300 — about **9.5 ms per standing agent per step**, against a town
+/// whose whole physics sync and solve together are 1.5 ms.
+///
+/// # Why this is asserted the way round it is
+///
+/// It is a carried defect and not a budget, so the arm asserts the DIAGNOSIS:
+/// the control is inside the frame budget, the default band is not, and the
+/// difference is `character move`. The day somebody gives the character
+/// controller a broadphase, **this arm goes red** and the ledger gets rewritten
+/// — which is the P22 pattern (assert the outcome, so a fix cannot land
+/// silently) and is the only honest thing to do with a number nobody may raise
+/// a budget to.
+#[test]
+fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
+    let dir = tempfile::tempdir().unwrap();
+    let (colliders, mut sim) = timed_town(dir.path());
+    sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+
+    let mut rows: Vec<((f64, f64, f64), f64, [usize; 4], f64)> = Vec::new();
+    for r in [
+        (0.0f64, 0.0f64, 0.0f64),
+        (8.0, 16.0, 32.0),
+        (20.0, 40.0, 80.0),
+        inf_ecs::crowd::DEFAULT_CROWD_RADII,
+    ] {
+        sim.set_crowd_radii(r);
+        // Settle the tiering before timing it: a retier step is a spawn, and a
+        // spawn is not what this table is about.
+        for _ in 0..4 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        let (ms, mean) = time_steps(&mut sim, 20);
+        let tiers = sim.crowd_stats().per_tier;
+        let idx = inf_player::step_profile::STEP_PHASE_NAMES
+            .iter()
+            .position(|n| *n == "character move")
+            .expect("the `character move` phase exists");
+        eprintln!(
+            "  radii {r:?}: {ms:.3} ms/step, tiers {tiers:?}, character move \
+             {:.3} ms",
+            mean.ms[idx]
+        );
+        rows.push((r, ms, tiers, mean.ms[idx]));
+    }
+    let (_, control_ms, control_tiers, _) = rows[0];
+    let (_, full_ms, full_tiers, full_move) = rows[rows.len() - 1];
+    let agents = full_tiers[0];
+    eprintln!(
+        "EMS1 FINDING: {colliders} static colliders step in {control_ms:.3} ms \
+         with the crowd banded out; {agents} Full agent(s) add \
+         {:.3} ms — {:.2} ms per agent per step, {:.0}% of it `character move`",
+        full_ms - control_ms,
+        (full_ms - control_ms) / agents.max(1) as f64,
+        100.0 * full_move / (full_ms - control_ms).max(1e-9)
+    );
+
+    // Armed both ways: the control must really hold no Full agent, and the
+    // subject must really hold some.
+    assert_eq!(control_tiers[0], 0, "the control has Full agents in it");
+    assert!(
+        agents > 0,
+        "the default band materializes no Full agent at all, so this arm is two \
+         controls"
+    );
+    assert!(
+        control_ms < FRAME_BUDGET_MS,
+        "the control costs {control_ms:.3} ms — the collider band itself is over \
+         budget, which is a different regression from the one this arm names"
+    );
+    // **THE CARRIED DEFECT, ASSERTED SO A FIX CANNOT LAND SILENTLY.** If this
+    // line fails, the character controller got cheaper: delete the arm, restore
+    // the crowd to `stepping_the_town_stays_cheap_with_its_collider_band`, and
+    // rewrite the ledger entry that quotes these numbers.
+    assert!(
+        full_ms > FRAME_BUDGET_MS,
+        "{agents} Full agents now step in {full_ms:.3} ms, inside the \
+         {FRAME_BUDGET_MS} ms frame budget — the character-controller cost this \
+         arm was minted to carry is FIXED. That is good news and it makes this \
+         arm a lie: fold the crowd back into the collider arm and rewrite the \
+         EMS1 ledger."
+    );
+    assert!(
+        full_move > 0.8 * (full_ms - control_ms),
+        "`character move` is {full_move:.3} ms of a {:.3} ms difference — the \
+         crowd's cost has moved to another phase and the diagnosis in this \
+         arm's doc is stale",
+        full_ms - control_ms
     );
 }
 

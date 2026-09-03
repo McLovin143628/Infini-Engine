@@ -690,6 +690,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 paint: car_paint(plan.site),
                 clip: None,
                 livery: None,
+                engine_voice: true,
             },
         );
     }
@@ -715,6 +716,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // a city's four institutions are four separate placements; the vehicles of
     // one station are then spaced along the road by `EMS_PARK_PITCH_M`, centred
     // on the vertex, so a two-car station does not stack two cars on one point.
+    let fleet_defs = crate::vehicle::island_vehicles();
     for plan in &plans {
         for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
             let fleet = station_fleet(b.archetype);
@@ -725,19 +727,43 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 continue;
             };
             let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
-            // Centred on the vertex: one vehicle sits on it, two straddle it.
-            let span = (fleet.len() as f64 - 1.0) * 0.5 * EMS_PARK_PITCH_M;
+            // **The apron is the side the station is on.** The perpendicular of
+            // the road direction in XZ, signed by which way the block lies —
+            // a dot product and a sign, so no trigonometry reaches a committed
+            // transform (the P14 law).
+            let perp = glam::DVec2::new(-dir.y, dir.x);
+            let side = if perp.dot(b.centre - glam::DVec2::new(v.x, v.z)) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let apron = perp * (side * EMS_APRON_OFFSET_M);
+            // **PAST the vertex, never ON it**, and that is a bug this wave paid
+            // for. The first cut centred the fleet on the vertex — and a
+            // settlement's own civilian car is parked EXACTLY there, so on a
+            // small town whose institution block resolves to the settlement's
+            // own route vertex an appliance materialized inside a saloon. The
+            // island gate found it the way an interpenetration is always found:
+            // not as an overlap, but as a hero who could no longer stand up
+            // beside the car it was trying to drive.
+            //
+            // So the run starts one pitch along and grows from there, which
+            // clears the longest vehicle in the catalogue (a 7.8 m appliance)
+            // against the longest thing already at the vertex with 1.1 m to
+            // spare.
             for (k, id) in fleet.iter().enumerate() {
-                let Some(def) = crate::vehicle::island_vehicles().get(id).copied() else {
+                // The catalogue is parsed once for the whole pass: the emergency
+                // rows live in the same table the civilian ones do.
+                let Some(def) = fleet_defs.get(id).copied() else {
                     continue;
                 };
-                let along = k as f64 * EMS_PARK_PITCH_M - span;
+                let along = (k + 1) as f64 * EMS_PARK_PITCH_M;
                 // Derived from `k`, never accumulated — the P17.4 exact-linear
                 // rule, which is what keeps two hosts agreeing about a metre.
                 let at = DVec3::new(
-                    v.x + dir.x * along,
+                    v.x + dir.x * along + apron.x,
                     crate::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
-                    v.z + dir.y * along,
+                    v.z + dir.y * along + apron.y,
                 );
                 let guid = derived(
                     name,
@@ -757,6 +783,14 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                         paint: inf_ecs::math::Color::new(0.35, 0.36, 0.38, 1.0),
                         clip: None,
                         livery: crate::vehicle::island_vehicle_livery(id),
+                        // **A parked appliance does not idle.** The emitter
+                        // does not follow a car yet (VEH2a's carried item 5),
+                        // so seventeen of these across the island would be
+                        // seventeen stationary engine loops in a bounded audio
+                        // log — which the drive gate caught as a second `Play`
+                        // in a stream whose claim is one voice per car. The
+                        // fleet gets its voice when EMS2 makes it drive.
+                        engine_voice: false,
                     },
                 );
             }
@@ -945,6 +979,21 @@ pub fn station_fleet(a: inf_pcg::ArchetypeId) -> &'static [&'static str] {
 /// that two of them at one station do not begin the level interpenetrating,
 /// which is a physics solve nobody authored.
 pub const EMS_PARK_PITCH_M: f64 = 11.0;
+
+/// Metres an emergency vehicle stands **off the road's centreline**, on the side
+/// its own station is.
+///
+/// **The apron, not the carriageway**, and the island gate is what taught this
+/// wave the difference. The first cut parked the fleet ON the route line — clear
+/// of the settlement's own car along it, which was the bug before that — and an
+/// appliance eleven metres ahead of a saloon is a saloon that drives 7.8 m in
+/// five seconds of throttle and stops. "The car is parked" is what the gate said,
+/// and it was right: something was parked in front of it.
+///
+/// Six metres is `inf_ecs::traffic::KERB_PARK_OFFSET_M`'s five plus the width an
+/// appliance has over a saloon, so the widest thing in the catalogue still has
+/// its flank out of the lane.
+pub const EMS_APRON_OFFSET_M: f64 = 6.0;
 
 /// Every committed island recipe, as repo-relative paths.
 ///

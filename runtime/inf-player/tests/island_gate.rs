@@ -2357,9 +2357,28 @@ fn the_scattered_cover_draws_its_authored_meshes() {
     // Wound in the world rather than passed to the projector, because the hour
     // reaches the projection through `project_sky` -> `scene.sun.direction` and
     // that is the seam a shipped build uses.
-    assert!(
-        scene.scatter.iter().all(|b| b.emissive == [0.0; 3]),
-        "something emits by day, so the night comparison below would be vacuous"
+    //
+    // **AUTHORED EMISSION IS NOT THE NIGHT-WINDOW RAMP** (wave EMS1). This arm
+    // used to read "not one batch emits by day", and that was a PROXY: it was
+    // true only because no resident block had ever held an authored emitter. A
+    // venue's neon and an institution's door lamp emit at every hour BY DESIGN
+    // (`PcgSurface::emissive`, chosen so a building an emergency is called to
+    // can be found at night), so the proxy went false the moment a fire hall
+    // stood on the fixture's crossroads — and the assertion it stood in for was
+    // never about them. What has to be true for the comparison below to mean
+    // anything is that the GLAZING is dark by day, which is exactly the set of
+    // batches that light up when the clock is wound. So the day set is recorded
+    // and the night claim is made about the DIFFERENCE.
+    let day_lit: Vec<bool> = scene
+        .scatter
+        .iter()
+        .map(|b| b.emissive != [0.0; 3])
+        .collect();
+    let day_lit_n = day_lit.iter().filter(|b| **b).count();
+    println!(
+        "AUTHORED BY DAY: {day_lit_n} of {} batches emit before the clock is \
+         wound — a venue's neon and a civic lamp, and not one window",
+        scene.scatter.len()
     );
     let glowing_instances: usize = {
         let w = sim.world().world();
@@ -2387,10 +2406,23 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         assert!(wound > 0, "the island carries no clock to wind");
     }
     let night = project(&sim, &shipped);
+    // The two projections are the same population under two clocks, so the
+    // batches pair by index — asserted, because an index pairing that silently
+    // slipped would compare a window against a neon sign.
+    assert_eq!(
+        night.scatter.len(),
+        day_lit.len(),
+        "the night projection produced a different batch set from the day one, \
+         so the day/night difference below pairs nothing"
+    );
+    // **The batches that were NOT lit by day and are lit now** — the glazing,
+    // and the only thing this arm has ever been about.
     let lit: Vec<&inf_render::ScatterBatch> = night
         .scatter
         .iter()
-        .filter(|b| b.emissive != [0.0; 3])
+        .zip(day_lit.iter())
+        .filter(|(b, was)| !**was && b.emissive != [0.0; 3])
+        .map(|(b, _)| b)
         .collect();
     let lit_instances: usize = lit.iter().map(|b| b.data.len()).sum();
     println!(
@@ -2407,7 +2439,11 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         "the clock did not put the sun below the horizon: y = {}",
         night.sun.direction.y
     );
-    assert!(!lit.is_empty(), "no batch emits at midnight");
+    assert!(
+        !lit.is_empty(),
+        "no batch lights up between day and midnight — every emitter in this \
+         scene was already on, so nothing here measures the night-window ramp"
+    );
     assert_eq!(
         lit_instances, glowing_instances,
         "{lit_instances} instances reached a lit batch of {glowing_instances} \
@@ -2919,6 +2955,135 @@ const SWING_STEPS: usize = 45;
 /// Steps spent standing inside, and then upstairs.
 const DWELL_STEPS: usize = 15;
 
+/// **THE DOOR THE WALK USES**, and the one place the rule is written.
+///
+/// Three clauses, and every one of them was paid for:
+///
+/// * an **exterior ground-floor** doorway, because that is a front door;
+/// * on a block whose archetype is **guaranteed multi-storey**, because a
+///   `Shop` is one or two storeys and a `House` one to three, so on any other
+///   block "climb a stair" would be a claim about which seed came up;
+/// * on a block some **street line is level with** (wave EMS1). Every block
+///   takes its datum from the terrain under its own footprint (`ground:
+///   Terrain`), so on sloping ground two blocks of one settlement are two
+///   storeys — and a walk that starts six metres below its destination walks a
+///   body at the cut face of the pad. That rule was already downstream, applied
+///   to the STREETS after the building had been chosen, which left the choice
+///   free to pick a building no street is level with. Measured when the EMS1
+///   civic strip claimed `Fixture Town`'s crossroads block: pad at 125.76 m
+///   against street lines from 90.02 to 157.24, and not one within two metres.
+///
+/// **And it is ONE function because it used to be two.** `town_plan` carried a
+/// copy under a comment reading *"the same one `walk_into_a_building` picks"* —
+/// the A14 restated-rule defect, and it went stale the moment the third clause
+/// was added to only one of them: the walk chose a street-level door and the
+/// plan chose the fire hall's, and the arm failed on a building nobody was
+/// walking into.
+fn walk_door(
+    sim: &RuntimeSim,
+    content: &Path,
+    recipe: &inf_island::IslandRecipe,
+    plan: &inf_editor_core::settlement::Settlement,
+) -> (Uuid, usize, inf_ecs::components::DoorwaySlot) {
+    let centre = glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y);
+    let tall_blocks: std::collections::BTreeSet<Uuid> = plan
+        .blocks
+        .iter()
+        .filter(|b| always_multistorey(b.archetype))
+        .map(|b| inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row))
+        .collect();
+    let w = sim.world().world();
+    let terrain = w
+        .iter_entities()
+        .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+        .expect("the island has ground");
+    let street_ys: Vec<f64> = plan
+        .street_graph()
+        .nodes()
+        .filter(|n| inf_nav::domain::of(n.id) == inf_nav::domain::STREET)
+        .filter_map(|n| {
+            terrain
+                .data
+                .height_at(glam::DVec2::new(n.position.x, n.position.z))
+        })
+        .collect();
+    assert!(
+        !street_ys.is_empty(),
+        "{}: no street line found ground under it at all",
+        plan.name
+    );
+    // **The pad is the BUILDING'S, not the block's.** A block is subdivided
+    // into lots and every building takes its own datum, so a block centre is
+    // two metres out on any slope — measured, and it is why the first cut of
+    // this filter still chose the fire hall.
+    let height =
+        inf_pcg::FnHeight::new(|x: f64, z: f64| terrain.data.height_at(glam::DVec2::new(x, z)));
+    let volumes = resident_volumes(sim);
+    let arch_of: std::collections::BTreeMap<Uuid, inf_pcg::ArchetypeId> = plan
+        .blocks
+        .iter()
+        .map(|b| {
+            (
+                inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row),
+                b.archetype,
+            )
+        })
+        .collect();
+    let mut plans_of: std::collections::BTreeMap<Uuid, Vec<inf_pcg::BuildingPlan>> =
+        Default::default();
+    let mut candidates: Vec<(Uuid, usize, inf_ecs::components::DoorwaySlot)> =
+        inf_ecs::door::volume_doorways(sim.world())
+            .into_iter()
+            .filter(|(v, _, d)| d.exterior && d.floor == 0 && tall_blocks.contains(v))
+            .collect();
+    candidates.sort_by(|a, b| {
+        (a.2.hinge - centre)
+            .length_squared()
+            .total_cmp(&(b.2.hinge - centre).length_squared())
+            .then((a.0, a.1).cmp(&(b.0, b.1)))
+    });
+    for (v, idx, slot) in candidates {
+        let plans = plans_of.entry(v).or_insert_with(|| {
+            let Some((_, vcentre, vextent, vseed)) =
+                volumes.iter().find(|(g, _, _, _)| *g == v).copied()
+            else {
+                return Vec::new();
+            };
+            let Some(a) = arch_of.get(&v).copied() else {
+                return Vec::new();
+            };
+            inf_pcg::plans_of(
+                &zone_passes(content, a),
+                &inf_pcg::NoSplines,
+                &height,
+                &inf_pcg::GrammarContext {
+                    entity: Some(v),
+                    center: vcentre,
+                    extent: vextent,
+                    seed_offset: u64::from(vseed),
+                },
+            )
+        });
+        let owner = plans.iter().find(|p| {
+            let mut ds = inf_pcg::building::doorways_of(p);
+            inf_pcg::building::place_doorways_in_frame(&mut ds, p.frame);
+            ds.iter().any(|d| {
+                d.hinge.to_array().map(f64::to_bits) == slot.hinge.to_array().map(f64::to_bits)
+            })
+        });
+        let Some(pad) = owner.map(|p| p.floor_y(0)) else {
+            continue;
+        };
+        if street_ys.iter().any(|y| (pad - y).abs() <= 2.0) {
+            return (v, idx, slot);
+        }
+    }
+    panic!(
+        "{}: no resident multi-storey block offers an exterior door on a storey          one of its street lines is level with",
+        plan.name
+    )
+}
+
 /// **THE WALK**: enter the city, find a door, open it, step through, go up.
 ///
 /// Every target is computed from the host's OWN world; nothing is passed in but
@@ -2940,31 +3105,11 @@ fn walk_into_a_building(
         states.push(sim.state_bytes());
     }
 
-    // ── 2. FIND A DOOR ── the EXTERIOR doorway on the ground floor nearest the
-    //    crossroads, over the doorways the simulation is holding, **on a block
-    //    whose archetype is guaranteed multi-storey**. The last clause is not
-    //    fussiness: a `Shop` is one or two storeys and a `House` is one to
-    //    three, so on any other block "climb a stair" would be a claim about
-    //    which seed came up. Ties break on `(volume guid, index)`, which
-    //    `volume_doorways` already walks in.
-    let tall_blocks: std::collections::BTreeSet<Uuid> = plan
-        .blocks
-        .iter()
-        .filter(|b| always_multistorey(b.archetype))
-        .map(|b| inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row))
-        .collect();
+    // ── 2. FIND A DOOR ── see `walk_door`, which is the one place the
+    //    rule lives.
     let doorways = inf_ecs::door::volume_doorways(sim.world());
     let solids = resident_solids(sim);
-    let (vol, idx, slot) = doorways
-        .iter()
-        .filter(|(v, _, d)| d.exterior && d.floor == 0 && tall_blocks.contains(v))
-        .min_by(|a, b| {
-            (a.2.hinge - centre)
-                .length_squared()
-                .total_cmp(&(b.2.hinge - centre).length_squared())
-        })
-        .copied()
-        .expect("a resident multi-storey block offers an exterior door");
+    let (vol, idx, slot) = walk_door(sim, content, recipe, plan);
     let door = inf_physics::d3::door::pcg_doorway_guid(vol, idx);
     let placement = inf_physics::d3::door::placement_of(sim.world(), door)
         .expect("the doorway the walk found resolves to a placement");
@@ -3847,8 +3992,6 @@ fn plan_town_walk(
     recipe: &inf_island::IslandRecipe,
     plan: &inf_editor_core::settlement::Settlement,
 ) -> TownPlan {
-    let centre = glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y);
-
     // 1. THE STREETS, on the ground the simulation is standing on.
     let mut graph = plan.street_graph();
     {
@@ -3874,24 +4017,10 @@ fn plan_town_walk(
         );
     }
 
-    // 2. THE DOOR, the same one `walk_into_a_building` picks.
-    let tall_blocks: std::collections::BTreeSet<Uuid> = plan
-        .blocks
-        .iter()
-        .filter(|b| always_multistorey(b.archetype))
-        .map(|b| inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row))
-        .collect();
-    let doorways = inf_ecs::door::volume_doorways(sim.world());
-    let (vol, idx, slot) = doorways
-        .iter()
-        .filter(|(v, _, d)| d.exterior && d.floor == 0 && tall_blocks.contains(v))
-        .min_by(|a, b| {
-            (a.2.hinge - centre)
-                .length_squared()
-                .total_cmp(&(b.2.hinge - centre).length_squared())
-        })
-        .copied()
-        .expect("a resident multi-storey block offers an exterior door");
+    // 2. THE DOOR — through `walk_door`, the ONE place the rule lives. This
+    //    used to be a copy of it under a comment saying so, which is the A14
+    //    restated-rule defect and went stale the moment the rule grew a clause.
+    let (vol, idx, slot) = walk_door(sim, content, recipe, plan);
     let door = inf_physics::d3::door::pcg_doorway_guid(vol, idx);
 
     // 3. THE BUILDING, re-derived through the shipped host's own resolution and
@@ -5203,16 +5332,26 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             "{label}: {} agent(s) have a workplace and no walk home",
             r.society.no_return
         );
+        // **AND THE NIGHT SHIFT IS THE THIRD WAY** (wave EMS1). A night
+        // worker's day is the TWO-leg one — out at eighteen, home at three —
+        // and never the four-leg commute; `a_town_with_a_venue_in_it_has_a_night`
+        // is where that is stated as a rule. It was absent from this sum only
+        // because the CI fixture's one venue is in a settlement whose night job
+        // nobody had claimed: the moment a fire hall's round-the-clock bay put
+        // nine night workers on the island, the arm read nine agents short with
+        // nothing to charge them to. The term is not slack — remove it and the
+        // arm fails again.
         assert_eq!(
             r.scheduled.0 - r.scheduled.1,
-            r.society.errandless + r.society.homebound,
+            r.society.errandless + r.society.homebound + r.society.night_workers,
             "{label}: {} of {} scheduled agents have fewer than four legs, \
-             against {} errandless + {} homebound -- with no_return at zero \
-             those are the only two ways to be short of a leg",
+             against {} errandless + {} homebound + {} night worker(s) -- with \
+             no_return at zero those are the only three ways to be short of a leg",
             r.scheduled.0 - r.scheduled.1,
             r.scheduled.0,
             r.society.errandless,
-            r.society.homebound
+            r.society.homebound,
+            r.society.night_workers
         );
         assert!(
             r.society.crossings > 0 && r.society.frontages > 0,
@@ -5304,10 +5443,22 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             "{label}: this settlement offers {} places to spend an evening, so the arms below are measuring the wrong thing — they say a town empties BECAUSE it has nowhere to go",
             r.society.leisure_places
         );
-        assert_eq!(
-            r.society.night_jobs, 0,
-            "{label}: …and it offers {} night job(s)",
-            r.society.night_jobs
+        // **A NIGHT JOB IS NOT A NIGHT OUT** (wave EMS1). This used to assert
+        // zero night jobs, and that was a proxy for the same thing the line
+        // above states directly: the only night work on this island was a
+        // venue's counter, so "no night job" and "no nightlife" were one
+        // sentence. A fire hall's apparatus bay is worked round the clock and
+        // sells nobody a drink, so the two came apart the moment a civic strip
+        // stood one on the fixture's crossroads. What the arms below need is
+        // that the town has nowhere to GO — which is `leisure_places` — and that
+        // the people still out are a small watch rather than a population.
+        assert!(
+            r.society.night_jobs * 10 < r.society.agents.max(1),
+            "{label}: {} of {} agents have a night job — that is a shift town, \
+             not a civic watch, and 'the town goes to bed' below is measuring \
+             the wrong thing",
+            r.society.night_jobs,
+            r.society.agents
         );
         assert_eq!(r.society.revellers, 0);
         assert!(
@@ -5607,6 +5758,60 @@ fn cars(sim: &RuntimeSim) -> Vec<uuid::Uuid> {
     out
 }
 
+/// **The tuning of every EMERGENCY catalogue row** (wave EMS1) — read from the
+/// two doors the island's own recipe parks a fleet with, never restated.
+///
+/// `station_fleet` says which rows a station keeps and `island_vehicles` is the
+/// catalogue they are built from, so a wave that adds an ambulance to a hospital
+/// is covered here without touching this function. A restated list is the A14
+/// defect this file already carries a scar from.
+fn emergency_classes() -> Vec<inf_ecs::components::VehicleClass> {
+    let defs = inf_editor_core::vehicle::island_vehicles();
+    let mut out = Vec::new();
+    for a in inf_pcg::ArchetypeId::ALL {
+        for id in inf_editor_core::island::station_fleet(a) {
+            if let Some(d) = defs.get(id) {
+                if !out.contains(&d.class) {
+                    out.push(d.class);
+                }
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "no emergency row in the catalogue at all, so the filter below excludes \
+         nothing and the arms that use it are not measuring what they name"
+    );
+    out
+}
+
+/// **The civilian cars**, which is what a drive arm means by "a car".
+///
+/// An 8.85-tonne fire appliance is a road vehicle and it is not a car: it covers
+/// 7.8 m in five seconds of throttle where the settlement's saloon covers 27,
+/// and a "nearest vehicle" rule quietly made it the subject of the circuit drive
+/// the moment wave EMS1 parked one. The exclusion is by CLASS — the tuning the
+/// catalogue row carries — rather than by name or by guid, so it cannot go stale
+/// against a renamed entity.
+fn civilian_cars(sim: &RuntimeSim) -> Vec<uuid::Uuid> {
+    let emergency = emergency_classes();
+    let world = sim.world();
+    cars(sim)
+        .into_iter()
+        .filter(|g| {
+            world
+                .entity_of(*g)
+                .and_then(|e| {
+                    world
+                        .world()
+                        .get::<inf_ecs::components::VehicleClass>(e)
+                        .copied()
+                })
+                .is_none_or(|c| !emergency.contains(&c))
+        })
+        .collect()
+}
+
 /// Where a chassis is, right now.
 fn chassis_at(sim: &RuntimeSim, guid: uuid::Uuid) -> glam::DVec3 {
     let e = sim.world().entity_of(guid).expect("a live chassis");
@@ -5655,10 +5860,13 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
     // read as a defect; the loop was right and the instrument was late.
     let before_audio = sim.audio_command_log().len();
     let hero = hero_entity(sim).expect("the island has a player-controlled hero");
-    let fleet = cars(sim);
+    // **The CIVILIAN cars** (wave EMS1): an appliance is a road vehicle and not
+    // a car, and a "nearest vehicle" rule made it this arm's subject the moment
+    // a fire hall parked one. See `civilian_cars`.
+    let fleet = civilian_cars(sim);
     assert!(
         !fleet.is_empty(),
-        "no vehicle in the resident world — the level parks one at each \
+        "no civilian vehicle in the resident world — the level parks one at each \
          settlement and the recogniser found none of them"
     );
     // The nearest car to the hero's own start, so the walk is short and the
