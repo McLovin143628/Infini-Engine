@@ -1525,8 +1525,17 @@ fn both_projectors_draw_skeletal_meshes_the_same_way() {
         // `Guid` through the one Ring-0 door (drop it and PIE's crowd is grey
         // while the shipped one is not), its build multiplies the drawn scale, and
         // its tier decides whether it casts a skinned shadow or a proxy.
+        //
+        // **The look door took a WORLD at wave EMS3**, and moving both hosts in
+        // the same commit is the whole reason this line is pinned. `agent_look`
+        // is the *derived* draw; `agent_look_in` is that draw with the
+        // appearance channel read, which is what a wardrobe changes. A host left
+        // on the old door would keep drawing a criminal in the coat they were
+        // wearing when they committed the crime while the other host drew the
+        // one they changed into — a PIE-vs-shipping divergence in the exact
+        // pixels the wanted system is played through.
         "w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied()",
-        "agent.map(|a| inf_ecs::crowd::agent_look(a.guid))",
+        "agent.map(|a| inf_ecs::crowd::agent_look_in(world, a.guid))",
         "Some(a) if !a.tier.poses() =>",
         "let shadow = crowd_shadow(agent);",
         // ONE `skinned_meshes` slot per (mesh, skeleton) pair…

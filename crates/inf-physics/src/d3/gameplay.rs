@@ -1336,6 +1336,34 @@ fn step_witness(
         }
         acts.push((ActKind::Shot, hit.shooter, hit.from));
     }
+    // **THE QUIET CRIME** (wave EMS3) — a swing or a kick that landed on
+    // somebody. `loud` is false for a fist by WPN1's own definition, so an
+    // assault is exactly the attack the gunshot filter above drops, and
+    // `on_flesh` is what tells hitting a person from hitting a wall. Nobody flees
+    // from it (that is `step_panic`'s loud-only rule, unchanged) — the only
+    // people who know about a punch are the ones who saw it, which is what makes
+    // the observer list the whole of the evidence.
+    for hit in hits
+        .iter()
+        .filter(|h| !h.loud && h.on_flesh && h.from.is_finite())
+    {
+        if acts.len() >= MAX_ACTS_PER_STEP {
+            break;
+        }
+        acts.push((ActKind::Assault, hit.shooter, hit.to));
+    }
+    // **…and everything a phase earlier in this step raised** (wave EMS3) — the
+    // carjack, applied in `character move` where there is no collision world to
+    // ask about sight lines. Drained unconditionally, BEFORE the emptiness check
+    // below, so a queue can never survive a step it was raised on: an act the
+    // ray budget refuses is an act nobody saw, which is the honest outcome and
+    // not a backlog.
+    for (kind, actor, at) in inf_ecs::witness::take_raised(world) {
+        if acts.len() >= MAX_ACTS_PER_STEP {
+            break;
+        }
+        acts.push((kind, actor, at));
+    }
     if acts.is_empty() {
         return 0;
     }
@@ -1382,7 +1410,7 @@ fn step_witness(
                 at,
                 step,
                 observers,
-                actor_look: inf_ecs::witness::look_digest(actor),
+                actor_look: inf_ecs::witness::look_digest(world, actor),
                 actor_vehicle: inf_ecs::witness::actor_vehicle(world, actor),
             },
         );

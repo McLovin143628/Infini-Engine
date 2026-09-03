@@ -1133,7 +1133,7 @@ pub fn project_scene_full(
                 // here can move a trace byte, and both hosts derive the same
                 // answers from the same `Guid`.
                 let agent = w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied();
-                let look = agent.map(|a| inf_ecs::crowd::agent_look(a.guid));
+                let look = agent.map(|a| inf_ecs::crowd::agent_look_in(world, a.guid));
                 let color = look.map_or(color, |l| l.over(color));
                 let body = look.map_or(1.0, |l| l.build);
                 let shadow = crowd_shadow(agent);

@@ -614,12 +614,158 @@ pub const CROWD_BUILD_RANGE: (f32, f32) = (0.92, 1.08);
 /// Drawn at `tick = 0`, so an agent's look does not change as it walks.
 #[inline]
 pub fn agent_look(guid: Uuid) -> CrowdLook {
-    let swap = (agent_rand(guid, 0, SALT_LOOK) % CROWD_LOOKS.len() as u64) as usize;
+    // Through `derived_outfit` (wave EMS3), so the default an absent
+    // `AppearanceRes` falls back to and the draw this function makes are ONE
+    // expression: a second spelling of `% CROWD_LOOKS.len()` is a second answer
+    // to "what is this person wearing before anybody dressed them", and the
+    // whole appearance channel rests on the two being the same number.
+    let swap = derived_outfit(guid) as usize;
     let u = agent_unit(guid, 0, SALT_BUILD) as f32;
     let (lo, hi) = CROWD_BUILD_RANGE;
     CrowdLook {
         tint: CROWD_LOOKS[swap],
         build: lo + (hi - lo) * u,
+    }
+}
+
+/// **What somebody is WEARING** (wave EMS3) — the appearance channel, and the
+/// one thing about a person a witness can actually describe.
+///
+/// # Why this type exists at all, which is the wave's headline
+///
+/// Wave WPN1 recorded a description as `crate::witness::look_digest`, which was
+/// `agent_rand(guid, 0, SALT_LOOK)` — **the agent's identity, hashed**. Two
+/// people in the same coat got different numbers and one person who changed
+/// coats kept theirs, so a police force keyed on it would have been recognising
+/// *who you are* through a channel dressed up as *what you look like*. That is
+/// omniscient tagging: no clothes change could ever have defeated it, and the
+/// mandate's whole sentence — *"the user will realistically have to ditch their
+/// car and/or their clothes to evade the police"* — was unimplementable while
+/// it stood.
+///
+/// So an appearance is a **value**, not an identity: the index of the palette
+/// swap the person is drawn in. Two people in the same swap describe
+/// identically (which is what "they have your description" costs somebody
+/// innocent), and one person who changes swap describes differently (which is
+/// what makes a wardrobe worth walking into).
+///
+/// # It defaults to the DERIVED draw, and that is what keeps the tree still
+///
+/// [`agent_look`] has drawn every crowd agent's tint from its `Guid` since
+/// NPC1b, and both projectors read it. An `Appearance` is therefore **absent**
+/// for everybody until something dresses them, and absent means
+/// [`derived_outfit`] — the exact swap `agent_look` already chose. Every level
+/// committed before this wave draws the same pixels and folds the same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct Appearance {
+    /// Which of [`CROWD_LOOKS`] this person is wearing. Out-of-range values are
+    /// wrapped by [`CrowdLook::of`] rather than refused, because an appearance
+    /// is content and content that is out of range should be visible rather
+    /// than fatal.
+    pub outfit: u8,
+}
+
+impl Appearance {
+    /// **This appearance as one number** — the description a witness gives.
+    ///
+    /// `mix64` over the outfit and nothing else. A digest rather than the raw
+    /// index because it is compared against a *record* of what somebody was
+    /// wearing and a record wants a fixed-width opaque token, and because the
+    /// day a second channel joins the outfit (a build, a hat) it folds in here
+    /// without changing a single caller.
+    ///
+    /// **No `Guid` reaches this function**, which is the police-don't-cheat law
+    /// in its compile-checked form: a description cannot accidentally become an
+    /// identity if the identity is not in scope.
+    #[inline]
+    pub fn digest(self) -> u64 {
+        // The mixer is `agent_rand`'s, asked of a VALUE rather than of a guid —
+        // one `Uuid::from_u64_pair(0, outfit)` would work and would put a guid
+        // shape in a function whose whole point is that there is no guid in it.
+        let mut x = u64::from(self.outfit) ^ SALT_LOOK;
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+}
+
+/// **The swap this guid is drawn in when nothing has dressed it** — NPC1b's own
+/// draw, hoisted so the default and the override cannot disagree.
+#[inline]
+pub fn derived_outfit(guid: Uuid) -> u8 {
+    (agent_rand(guid, 0, SALT_LOOK) % CROWD_LOOKS.len() as u64) as u8
+}
+
+/// **Who is wearing what** (wave EMS3) — the appearance channel, per guid.
+///
+/// [`crate::item::ItemDefs`]' shape, a fourth time: derived at run time, nothing
+/// can save it, and **no schema moves** — scene v27 and `ScenePayload` v12
+/// stand. A body's clothes are not a component for [`PanickedRes`]' reason
+/// exactly: a `Dormant` crowd agent has no entity at all and is still a person
+/// wearing something, and a marker component would have been silently absent on
+/// every one of them.
+///
+/// **Sparse on purpose.** Only somebody who has *changed* has an entry, so a
+/// city of four hundred residents costs nothing until one of them opens a
+/// wardrobe.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceRes {
+    /// The overrides, in `Guid` order.
+    pub worn: std::collections::BTreeMap<Uuid, Appearance>,
+}
+
+/// **What this person is wearing** — the override if there is one, the derived
+/// draw otherwise. The ONE reader.
+pub fn appearance_of(world: &EcsWorld, guid: Uuid) -> Appearance {
+    world
+        .world()
+        .get_resource::<AppearanceRes>()
+        .and_then(|r| r.worn.get(&guid).copied())
+        .unwrap_or(Appearance {
+            outfit: derived_outfit(guid),
+        })
+}
+
+/// **Dress somebody.** The one door, so a second producer cannot invent a second
+/// shape of the channel.
+///
+/// Returns whether it changed anything — an engagement counter, and the thing a
+/// wardrobe press reports: pressing E on a wardrobe you are already dressed out
+/// of is a refusal, and a refusal is a value.
+pub fn set_appearance(world: &mut EcsWorld, guid: Uuid, look: Appearance) -> bool {
+    if appearance_of(world, guid) == look {
+        return false;
+    }
+    let mut res = world
+        .world_mut()
+        .remove_resource::<AppearanceRes>()
+        .unwrap_or_default();
+    res.worn.insert(guid, look);
+    world.world_mut().insert_resource(res);
+    true
+}
+
+/// **Forget who changed their clothes** — [`clear_crowd`]'s twin, for its
+/// reason: an editor Simulate session must leave nothing behind in the author's
+/// document, and a resource is outside the `ScenePersist::Memory` snapshot by
+/// construction.
+pub fn clear_appearance(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<AppearanceRes>();
+}
+
+/// **What one agent looks like RIGHT NOW** (wave EMS3) — [`agent_look`] with the
+/// appearance channel read.
+///
+/// The door both projectors call. It is a *different function* from
+/// [`agent_look`] rather than a changed one because the two answer different
+/// questions: `agent_look` is the draw (a pure function of the guid, and still
+/// the default), and this is the draw **as worn**. The build is untouched —
+/// nobody changes their height at a wardrobe.
+#[inline]
+pub fn agent_look_in(world: &EcsWorld, guid: Uuid) -> CrowdLook {
+    CrowdLook {
+        tint: CrowdLook::of(appearance_of(world, guid).outfit).tint,
+        build: agent_look(guid).build,
     }
 }
 
@@ -640,6 +786,22 @@ pub struct CrowdLook {
 }
 
 impl CrowdLook {
+    /// **The look one outfit index draws**, wrapping out-of-range values — the
+    /// one place [`CROWD_LOOKS`] is indexed, so an [`Appearance`] a wardrobe or
+    /// a mod handed a `200` tints rather than panics.
+    ///
+    /// The build is [`CROWD_BUILD_RANGE`]'s midpoint, because an outfit says
+    /// nothing about a body; [`agent_look_in`] overwrites it with the wearer's
+    /// own draw.
+    #[inline]
+    pub fn of(outfit: u8) -> Self {
+        let (lo, hi) = CROWD_BUILD_RANGE;
+        Self {
+            tint: CROWD_LOOKS[outfit as usize % CROWD_LOOKS.len()],
+            build: (lo + hi) * 0.5,
+        }
+    }
+
     /// This look applied to a base colour, alpha untouched.
     #[inline]
     pub fn over(self, base: [f32; 4]) -> [f32; 4] {

@@ -221,9 +221,18 @@ fn open_incidents(
             (
                 a.at,
                 a.step,
+                // **The dispatcher's own two-step severity**, which is NOT
+                // `ActKind::heat` and is deliberately a different number: this
+                // one decides how many officers a scene gets, and EMS3's heat
+                // decides how wanted the person who did it is. A carjack in an
+                // empty street is a small scene and a large profile.
+                //
+                // The `match` is exhaustive on purpose — a fifth `ActKind` is a
+                // compile error here rather than a crime nobody is sent to.
                 match a.kind {
                     inf_ecs::witness::ActKind::Shot => 1,
                     inf_ecs::witness::ActKind::Killed => 2,
+                    inf_ecs::witness::ActKind::Carjack | inf_ecs::witness::ActKind::Assault => 1,
                 },
             )
         })

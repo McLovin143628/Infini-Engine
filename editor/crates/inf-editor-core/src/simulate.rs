@@ -570,6 +570,12 @@ impl SimSession {
         // WPN1: and what the street saw, for the same reason — the witness log
         // is a resource a Simulate session fills and the author never authored.
         inf_ecs::witness::clear_witness(doc.world_mut());
+        // EMS3: and what everybody is WEARING, for the same reason again — an
+        // appearance override is a resource, so a second run would begin with
+        // the hero still in whatever they changed into at run 1's wardrobe,
+        // which is a criminal profile's whole evidence channel restored by
+        // accident.
+        inf_ecs::crowd::clear_appearance(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the
@@ -982,6 +988,12 @@ impl SimSession {
         // WPN1: and what the street saw, for the same reason — the witness log
         // is a resource a Simulate session fills and the author never authored.
         inf_ecs::witness::clear_witness(doc.world_mut());
+        // EMS3: and what everybody is WEARING, for the same reason again — an
+        // appearance override is a resource, so a second run would begin with
+        // the hero still in whatever they changed into at run 1's wardrobe,
+        // which is a criminal profile's whole evidence channel restored by
+        // accident.
+        inf_ecs::crowd::clear_appearance(doc.world_mut());
         inf_ecs::society::clear_society(doc.world_mut());
         // VEN1b: and the speakers, for the same reason — a venue's music is a
         // real entity this session spawned, and one left behind is a row in the

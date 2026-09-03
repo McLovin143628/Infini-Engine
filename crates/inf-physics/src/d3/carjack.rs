@@ -351,6 +351,16 @@ pub fn try_carjack(
     }
     // The car is nobody's business but the player's from here.
     inf_ecs::traffic::mark_taken(world, chassis);
+    // **AND THE STREET SAW IT** (wave EMS3). Raised rather than recorded,
+    // because this runs in the `character move` phase and the question "who
+    // could see it" needs a collision world three phases later — see
+    // `inf_ecs::witness::raise_act`. At the DOOR the victim came out of, which
+    // is where a witness would say it happened rather than at the chassis
+    // origin, and it is the same point the ejection itself used.
+    //
+    // After `mark_taken`, so that when the witness pass asks what the actor was
+    // driving one step later the answer is already this car.
+    inf_ecs::witness::raise_act(world, inf_ecs::witness::ActKind::Carjack, actor, at);
     // …and the person walks away. An ordinary crowd agent with a route, so it
     // tiers, poses and eventually goes Dormant like every other pedestrian —
     // rather than a statue in the road with a bespoke state machine.
