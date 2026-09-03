@@ -120,11 +120,14 @@ pub enum AudioCommand {
     /// so a driving car's engine is spatialized where its `Play` was issued"* as
     /// the reason **traffic is silent**. This is that command. It does not by
     /// itself give traffic a voice — a dozen cars each pushing a position every
-    /// step is a bounded log that evicts, which is what
-    /// [`crate::log`]-shaped rings are for and what the island's own drive gate
-    /// caught — so the debt is paid for the system that needs it (a handful of
-    /// responding units at a tenth of the step rate) and named for the one that
-    /// still does not.
+    /// step is a bounded log that evicts, which is what `inf_core::BoundedLog`
+    /// is for and what the island's own drive gate caught — so the debt is paid
+    /// for the system that needs it (a handful of responding units at a tenth of
+    /// the step rate) and named for the one that still does not.
+    ///
+    /// (A code span rather than a link: `inf-audio` does not depend on
+    /// `inf-core`, so an intra-doc link there resolves to nothing and costs a
+    /// rustdoc warning for a reference a reader can follow by name.)
     ///
     /// A source that is not playing is a silent no-op, exactly as every other
     /// addressed command here is. A **non-spatial** voice becomes spatial from

@@ -242,7 +242,7 @@ fn open_incidents(
     // Taken on the EPOCH and not on the step, so the walk over the level's
     // blocks happens once every `AMBIENT_PERIOD` steps and costs nothing on the
     // other one thousand seven hundred and ninety-nine.
-    if step % dispatch::AMBIENT_PERIOD != 0 {
+    if !step.is_multiple_of(dispatch::AMBIENT_PERIOD) {
         return;
     }
     let epoch = step / dispatch::AMBIENT_PERIOD;
@@ -1000,7 +1000,7 @@ fn sound_and_light(world: &mut EcsWorld, res: &mut DispatchRes, step: u64, dt: f
         if res.siren_on.contains(&chassis) {
             // **The move is on a CADENCE, not on a change.** See
             // `SIREN_POSITION_PERIOD` for the ring arithmetic that decides it.
-            if step % dispatch::SIREN_POSITION_PERIOD == 0 {
+            if step.is_multiple_of(dispatch::SIREN_POSITION_PERIOD) {
                 res.sirens.push(dispatch::SirenCue::Move { source, at });
             }
         } else {
@@ -1132,7 +1132,7 @@ fn smoke(world: &mut EcsWorld, res: &mut DispatchRes, step: u64, dt: f64) {
         }
     }
     // ── and let one go, on the period, from every fire that is still burning.
-    if step % dispatch::PUFF_PERIOD != 0 {
+    if !step.is_multiple_of(dispatch::PUFF_PERIOD) {
         return;
     }
     let fires: Vec<(Uuid, DVec3)> = res

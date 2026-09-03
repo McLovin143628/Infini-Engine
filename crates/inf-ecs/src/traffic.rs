@@ -2389,12 +2389,18 @@ mod tests {
         );
         // …and the 2.6 m of bias really does clear the 2.5 m corridor, which is
         // the load-bearing inequality of the whole clause.
+        // Bound to locals rather than compared as constants, and not only to
+        // satisfy a lint: `CORRIDOR_HALF_M` lives in `inf_physics::d3::traffic`,
+        // which this crate may not name (the split's own wall), so the 2.5 is a
+        // literal here and the pair reads as the measurement it is.
+        let bias = crate::dispatch::YIELD_BIAS_M;
+        let corridor_half_m = 2.5_f64;
         assert!(
-            crate::dispatch::YIELD_BIAS_M > 2.5,
-            "the pull-over ({} m) no longer clears the following rule's 2.5 m \
-             corridor half-width, so a yielding car stays an obstacle and the \
-             design silently degenerates into the stop-in-lane this arm rejects",
-            crate::dispatch::YIELD_BIAS_M
+            bias > corridor_half_m,
+            "the pull-over ({bias} m) no longer clears the following rule's \
+             {corridor_half_m} m corridor half-width, so a yielding car stays \
+             an obstacle and the design silently degenerates into the \
+             stop-in-lane this arm rejects"
         );
     }
 
