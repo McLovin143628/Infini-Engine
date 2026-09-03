@@ -82,7 +82,93 @@ impl WheelMount {
     }
 }
 
-/// A vehicle's geometry: its chassis and its wheels, in `Guid` order.
+/// **What a vehicle's non-wheel part IS** (wave VEH2c) — the discriminator that
+/// lets a wheel-less craft be recognised at all.
+///
+/// # Why the COLLIDER SHAPE says which, and nothing else does
+///
+/// [`wheel_of`] has answered "is this a wheel" since P29.7 with one rule: a
+/// **sphere** sensor with no body of its own. That rule is derived rather than
+/// authored, which is this engine's whole doctrine for rigs — *"the rig is
+/// DERIVED never authored"* — and it costs no schema, because a `Collider3D` on
+/// a child entity is a component every level has been able to write since v1.
+///
+/// The authored vocabulary of collider shapes is **exactly three**
+/// ([`ColliderShape3DKind`]), the sphere is taken, and so the other two are the
+/// whole space of parts a rig can name:
+///
+/// | shape, as a sensor child with no body | part |
+/// |---|---|
+/// | sphere | a **wheel** ([`wheel_of`], unchanged since P29.7) |
+/// | box | a **thruster** — a hull's screw and its rudder |
+/// | capsule | a **rotor** — a rotorcraft's disc |
+///
+/// That the space is exhausted is worth stating rather than hiding: a fourth
+/// part kind is not expressible without a fourth collider shape, and the day one
+/// is wanted the honest move is a new shape, not a second recogniser keyed off
+/// something else. **One door per rule**, and this is the door.
+///
+/// # The regression surface, and why it is bounded
+///
+/// A part is only a part if its parent is a chassis *and that chassis has no
+/// wheels* — see [`rig_of`]. So no existing car changes behaviour at all: a
+/// trigger volume parented to a car is mirrored into rapier exactly as it always
+/// was. What is exposed is the narrow case of a wheel-less dynamic body with a
+/// box or capsule sensor child, which is a shape nothing in this repository
+/// authors today (`the_islands_only_wheel_less_vehicles_are_the_ones_it_placed`
+/// measures it on the committed island).
+///
+/// [`ColliderShape3DKind`]: crate::components::ColliderShape3DKind
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PartKind {
+    /// A hull thruster: a screw that pushes along the chassis's forward axis and
+    /// a rudder that deflects that push sideways. Recognised as a **box** sensor.
+    Thruster,
+    /// A lifting rotor: a disc that pushes along the chassis's up axis.
+    /// Recognised as a **capsule** sensor.
+    Rotor,
+}
+
+impl PartKind {
+    /// A stable short name, for a gate trace and a diagnostic.
+    pub fn name(self) -> &'static str {
+        match self {
+            PartKind::Thruster => "thruster",
+            PartKind::Rotor => "rotor",
+        }
+    }
+}
+
+/// One non-wheel part's **geometry**, read off the scene (wave VEH2c).
+///
+/// The sibling of [`WheelMount`], and deliberately a separate list on
+/// [`VehicleRig`] rather than a `kind` field on that one: a wheel is the only
+/// part the fixed-step door **casts a ray for** and the only one carrying
+/// suspension state, so folding the two together would give every boat a
+/// suspension and every wheel a kind nobody reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartMount {
+    /// The part entity's stable identity — the door writes the part's own
+    /// rotation back onto its `Transform` (a spinning rotor, a turned rudder).
+    pub guid: Uuid,
+    /// Which kind of part this is — the collider shape, resolved once.
+    pub kind: PartKind,
+    /// Where it is bolted to the chassis, in the chassis frame, metres. **The
+    /// force is applied here**, so a screw below and behind the centre of mass
+    /// makes a boat squat under power exactly as one does.
+    pub mount_local: Vec3d,
+    /// The part's own size, metres: a box's half-extents, or a capsule's
+    /// `(radius, half_height, radius)`.
+    ///
+    /// Read by the class, not by the door. A rotor's `x` is its **disc
+    /// radius**, which is what the drawn blade is scaled to and what a tip-speed
+    /// bound would be measured against; a thruster's `y` is how deep the screw
+    /// sits, which is the tolerance band on [`ChassisState::water_y`].
+    pub size: Vec3d,
+}
+
+/// A vehicle's geometry: its chassis, its wheels and its other parts, in `Guid`
+/// order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VehicleRig {
     /// The chassis entity — the dynamic body the forces are applied to.
@@ -94,6 +180,23 @@ pub struct VehicleRig {
     /// The wheels, sorted by `Guid` so the order is a function of the level's
     /// contents and not of a bevy archetype walk.
     pub wheels: Vec<WheelMount>,
+    /// The **non-wheel** parts — thrusters and rotors — sorted by `Guid` for the
+    /// same reason (wave VEH2c). Empty for every wheeled vehicle, and empty is
+    /// what every level written before this wave produces.
+    pub parts: Vec<PartMount>,
+}
+
+impl VehicleRig {
+    /// The parts of one kind, in `Guid` order.
+    ///
+    /// The one place a class asks "which of my parts are rotors", so a class
+    /// cannot invent a second filter that disagrees about `Guid` order.
+    pub fn parts_of(&self, kind: PartKind) -> impl Iterator<Item = (usize, &PartMount)> {
+        self.parts
+            .iter()
+            .enumerate()
+            .filter(move |(_, p)| p.kind == kind)
+    }
 }
 
 /// Whether `entity`'s components describe a **wheel** — the one recogniser.
@@ -106,6 +209,36 @@ pub fn wheel_of(collider: Option<&Collider3D>, body: Option<&RigidBody3D>) -> Op
         return None;
     }
     (c.radius.is_finite() && c.radius > 0.0).then_some(c.radius)
+}
+
+/// Whether `entity`'s components describe a **non-wheel part** — a thruster or a
+/// rotor (wave VEH2c), with its size.
+///
+/// [`wheel_of`]'s sibling and deliberately the same shape: a sensor with no body
+/// of its own, discriminated by [`PartKind`]'s shape table. A sphere is a wheel
+/// and answers `None` here, so the two recognisers partition the vocabulary
+/// rather than overlapping in it.
+pub fn part_of(
+    collider: Option<&Collider3D>,
+    body: Option<&RigidBody3D>,
+) -> Option<(PartKind, Vec3d)> {
+    let c = collider?;
+    if body.is_some() || !c.sensor {
+        return None;
+    }
+    let (kind, size) = match c.shape_kind {
+        // A wheel. `wheel_of` owns the sphere and this function does not.
+        ColliderShape3DKind::Sphere => return None,
+        ColliderShape3DKind::Box => (PartKind::Thruster, c.half_extents),
+        ColliderShape3DKind::Capsule => (
+            PartKind::Rotor,
+            Vec3d::new(c.radius, c.half_extents.y, c.radius),
+        ),
+    };
+    // A part with no size is a part that can neither push nor be drawn, and a
+    // refusal is a value: the entity stays an ordinary sensor.
+    (size.x.is_finite() && size.z.is_finite() && size.x > 0.0 && size.z > 0.0)
+        .then_some((kind, size))
 }
 
 /// Whether `entity`'s components describe a **chassis** — a dynamic body with a
@@ -132,37 +265,64 @@ pub fn chassis_of(collider: Option<&Collider3D>, body: Option<&RigidBody3D>) -> 
 /// generator and an editor tool all want the question answered directly, and two
 /// spellings of "what is a wheel" is the defect this repository has paid for at
 /// four separate seams.
+///
+/// # WHEELS WIN, and that is the whole compatibility rule (wave VEH2c)
+///
+/// P29.7 through VEH2b answered `None` for a chassis with no wheels, so a
+/// wheel-less craft was **structurally invisible to the recogniser** however
+/// completely the [`Vehicle`] trait supported one — the trait's own doc has said
+/// *"a tank, a hovercraft and a boat can share one fixed-step door"* since the
+/// day it was written, and the derivation did not.
+///
+/// The seam opens with one rule and one rule only: **a chassis that has wheels
+/// is a wheeled vehicle, and its box and capsule sensor children are ordinary
+/// sensors exactly as they always were.** Only a chassis with *no* wheels looks
+/// for [`part_of`]. So every level ever written keeps the rig it had, byte for
+/// byte, and the new surface is bounded to a shape nothing in this repository
+/// authored before this wave.
 pub fn rig_of(world: &EcsWorld, chassis: Uuid) -> Option<VehicleRig> {
     let entity = world.entity_of(chassis)?;
     let w = world.world();
     let seat_local = chassis_of(w.get::<Collider3D>(entity), w.get::<RigidBody3D>(entity))?;
     let mut wheels: Vec<WheelMount> = Vec::new();
+    let mut parts: Vec<PartMount> = Vec::new();
     for child in world.children_of(entity) {
         let Some(guid) = world.guid_of(child) else {
             continue;
         };
-        let Some(radius_m) = wheel_of(w.get::<Collider3D>(child), w.get::<RigidBody3D>(child))
-        else {
-            continue;
-        };
+        let (col, body) = (w.get::<Collider3D>(child), w.get::<RigidBody3D>(child));
         let mount_local = w
             .get::<Transform>(child)
             .map(|t| t.translation)
             .unwrap_or(Vec3d::ZERO);
-        wheels.push(WheelMount {
-            guid,
-            mount_local,
-            radius_m,
-        });
+        if let Some(radius_m) = wheel_of(col, body) {
+            wheels.push(WheelMount {
+                guid,
+                mount_local,
+                radius_m,
+            });
+        } else if let Some((kind, size)) = part_of(col, body) {
+            parts.push(PartMount {
+                guid,
+                kind,
+                mount_local,
+                size,
+            });
+        }
     }
-    if wheels.is_empty() {
+    if !wheels.is_empty() {
+        // Wheels win: a car's trigger children stay triggers.
+        parts.clear();
+    } else if parts.is_empty() {
         return None;
     }
     wheels.sort_unstable_by_key(|wm| wm.guid);
+    parts.sort_unstable_by_key(|p| p.guid);
     Some(VehicleRig {
         chassis,
         seat_local,
         wheels,
+        parts,
     })
 }
 
@@ -2021,6 +2181,20 @@ pub struct VehicleControls {
     pub brake: f64,
     /// Handbrake, held.
     pub handbrake: bool,
+    /// **Vertical demand**, `[-1, 1]` — a rotorcraft's collective (wave VEH2c).
+    ///
+    /// # It costs no new control and no new intent field
+    ///
+    /// `MovementIntent::vertical` has existed since P20 as *"vertical intent
+    /// while swimming or flying"*, is already written onto the runtime by
+    /// `apply_intent`, and is already the axis a player uses to rise and sink.
+    /// Routing it to the vehicle is one argument, so a helicopter is flown with
+    /// the controls a swimmer already has rather than with a second binding
+    /// table that could mean something different in the two hosts.
+    ///
+    /// A class that cannot climb ignores it, which is what
+    /// [`RaycastVehicle`] and [`HullVehicle`] both do.
+    pub vertical: f64,
 }
 
 impl VehicleControls {
@@ -2039,6 +2213,7 @@ impl VehicleControls {
         move_input: crate::math::Vec2d,
         forward_speed_mps: f64,
         handbrake: bool,
+        vertical: f64,
     ) -> Self {
         let fwd = move_input.y.clamp(-1.0, 1.0);
         let steer = move_input.x.clamp(-1.0, 1.0);
@@ -2057,6 +2232,7 @@ impl VehicleControls {
             steer,
             brake,
             handbrake,
+            vertical: vertical.clamp(-1.0, 1.0),
         }
     }
 }
@@ -2186,6 +2362,31 @@ pub struct ChassisState {
     pub angvel: DVec3,
     /// Mass, kg — the friction model's only use of it.
     pub mass_kg: f64,
+    /// **The water surface over the chassis origin**, world metres, or `None`
+    /// where no water body covers it (wave VEH2c).
+    ///
+    /// # Why the door samples it, and why once
+    ///
+    /// A hull's screw pushes only while it is *in the water*, which is the whole
+    /// difference between a boat and a car with a rudder — and the honest way to
+    /// know is to ask the same water index the buoyancy pass asks, at the same
+    /// sim-clock time, so PIE and the shipped player cannot disagree about the
+    /// sea state. The door has that seam already
+    /// (`PhysicsBridge3D::water_surface_at`), so the class does not need one and
+    /// [`Vehicle::solve`] stays a pure function of numbers.
+    ///
+    /// **One sample per vehicle, not one per part.** The chassis origin is the
+    /// reference and a part's own immersion is derived from it through the
+    /// chassis pose, which costs a subtraction rather than a second index query
+    /// per thruster. The error that buys is a wave's *slope* across the hull, and
+    /// on the island's sea (0.6 m amplitude over a 34 m wavelength) a 5 m boat
+    /// spans 15 % of a wave and the slope term is under 6 cm — smaller than the
+    /// draught band a screw sits in. Stated rather than hidden, and the fix if it
+    /// ever matters is a sample per part.
+    ///
+    /// `None` on every level with no water, which is every level written before
+    /// P20 and most of them since — so a wheeled vehicle never pays for this.
+    pub water_y: Option<f64>,
 }
 
 impl ChassisState {
@@ -2303,6 +2504,23 @@ pub trait Vehicle: Send + Sync + 'static {
         Some((w.length_m, w.steer_deg, w.spin_deg))
     }
 
+    /// The **rotation to draw each non-wheel part at**, euler YXZ degrees, in
+    /// [`VehicleRig::parts`] order (wave VEH2c).
+    ///
+    /// The sibling of [`wheel_pose`](Self::wheel_pose) and deliberately a
+    /// rotation only: a wheel travels on its suspension and a rotor does not, so
+    /// a part's translation stays the authored mount and there is nothing for a
+    /// re-read to feed back in.
+    ///
+    /// A **visual write only**, exactly as the wheel pose is — nothing reads it
+    /// back, so a rig with no drawn blade simulates identically to one with a
+    /// blade. The default is `None`, which is what a class with no parts should
+    /// answer.
+    fn part_pose(&self, index: usize) -> Option<Vec3d> {
+        let _ = index;
+        None
+    }
+
     /// **What the engine is doing**, as two numbers in `[0, 1]`: how hard the
     /// driver is asking (`load`) and how fast it is turning over (`revs`).
     ///
@@ -2398,6 +2616,30 @@ pub fn engine_cue(revs: f64, load: f64, base_pitch: f64, base_volume: f64) -> En
         pitch: base_pitch * (ENGINE_IDLE_PITCH + (ENGINE_TOP_PITCH - ENGINE_IDLE_PITCH) * revs),
         volume: base_volume * (ENGINE_IDLE_GAIN + (1.0 - ENGINE_IDLE_GAIN) * load),
     }
+}
+
+/// **Which class drives a wheel-less rig** (wave VEH2c) — the one place the
+/// parts a scene authored become the model that reads them.
+///
+/// In Ring 0, beside the classes it chooses between, rather than as a `match` in
+/// the physics bridge: the choice is a pure function of a rig and it is tested
+/// as one. `rig_of` has already guaranteed that a rig reaching here has no
+/// wheels, so this is not competing with `RaycastVehicle` — it is the other
+/// branch of a decision already made.
+///
+/// **Rotors outrank thrusters**, and it is a real rule rather than an arbitrary
+/// order: a craft with both is an amphibious rotorcraft, whose behaviour is
+/// dominated by the thing holding it up. A rig with neither cannot occur (a rig
+/// with no wheels and no parts is not a rig at all) and answers with the
+/// inert wheel-less `RaycastVehicle` rather than with a panic — a refusal is a
+/// value here as everywhere.
+///
+/// A wheel-less [`RaycastVehicle`] is genuinely inert: its solve loops over an
+/// empty wheel list, so it applies **no force at all**. That is what a rig whose
+/// parts nothing recognises should do, and it is what this function answered for
+/// every rig on the commit that opened the seam.
+pub fn class_for_parts(rig: VehicleRig) -> Box<dyn Vehicle> {
+    Box::new(RaycastVehicle::new(rig))
 }
 
 // ── the implementation this phase ships ─────────────────────────────────────
@@ -3906,6 +4148,7 @@ mod tests {
             chassis: Uuid::from_u128(1),
             seat_local: Vec3d::new(0.0, 0.5, 0.0),
             wheels,
+            parts: Vec::new(),
         }
     }
 
@@ -3916,6 +4159,7 @@ mod tests {
             linvel: DVec3::ZERO,
             angvel: DVec3::ZERO,
             mass_kg: mass,
+            water_y: None,
         }
     }
 
@@ -3950,6 +4194,203 @@ mod tests {
         };
         assert_eq!(wheel_of(Some(&boxy), None), None);
         assert_eq!(wheel_of(None, None), None);
+    }
+
+    /// **The two recognisers PARTITION the collider vocabulary** (wave VEH2c).
+    ///
+    /// Not "each answers for its own shape" — that is what a pair of functions
+    /// written independently would look like while both claiming a sphere. The
+    /// claim asserted here is exclusivity in both directions over the whole
+    /// three-shape vocabulary, which is what makes [`PartKind`]'s table a
+    /// partition rather than two overlapping opinions.
+    #[test]
+    fn the_part_recogniser_takes_the_two_shapes_the_wheel_does_not() {
+        let sensor = Collider3D {
+            sensor: true,
+            radius: 0.35,
+            half_extents: Vec3d::new(0.4, 0.1, 0.6),
+            ..Default::default()
+        };
+        let of = |k| {
+            let c = Collider3D {
+                shape_kind: k,
+                ..sensor
+            };
+            (wheel_of(Some(&c), None).is_some(), part_of(Some(&c), None))
+        };
+        // Sphere: a wheel, and NOT a part.
+        assert_eq!(of(ColliderShape3DKind::Sphere), (true, None));
+        // Box: a thruster, and NOT a wheel. Its half-extents come through.
+        assert_eq!(
+            of(ColliderShape3DKind::Box),
+            (false, Some((PartKind::Thruster, Vec3d::new(0.4, 0.1, 0.6))))
+        );
+        // Capsule: a rotor, whose size is its own radius and half-height.
+        assert_eq!(
+            of(ColliderShape3DKind::Capsule),
+            (false, Some((PartKind::Rotor, Vec3d::new(0.35, 0.1, 0.35))))
+        );
+        // …and every clause of `wheel_of`'s own rule binds here too.
+        let boxy = Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            ..sensor
+        };
+        assert_eq!(
+            part_of(Some(&boxy), Some(&RigidBody3D::default())),
+            None,
+            "a part has no body: the chassis is the body"
+        );
+        assert_eq!(
+            part_of(
+                Some(&Collider3D {
+                    sensor: false,
+                    ..boxy
+                }),
+                None
+            ),
+            None,
+            "a solid box collides"
+        );
+        assert_eq!(
+            part_of(
+                Some(&Collider3D {
+                    half_extents: Vec3d::new(0.0, 0.1, 0.6),
+                    ..boxy
+                }),
+                None
+            ),
+            None,
+            "a part with no width can push nothing"
+        );
+        assert_eq!(part_of(None, None), None);
+    }
+
+    /// **WHEELS WIN** — the whole of what this wave's seam costs every level
+    /// that already exists (wave VEH2c).
+    ///
+    /// A car with a trigger volume bolted to it keeps four wheels and NO parts,
+    /// so the box sensor is mirrored into rapier exactly as it was before this
+    /// wave; the same box on a wheel-less hull is a thruster. One scene shape,
+    /// two answers, and the discriminator is the wheels.
+    #[test]
+    fn wheels_win_so_an_existing_cars_trigger_child_stays_a_trigger() {
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0xB0A7);
+        let trigger = Uuid::from_u128(0x7616);
+        let boxy = Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(0.3, 0.2, 0.4),
+            sensor: true,
+            ..Default::default()
+        };
+
+        // (a) With wheels: four wheels, no parts.
+        let mut w = EcsWorld::new();
+        spawn_rig(&mut w, chassis, &def, &spawn_of("Car"));
+        let parent = w.entity_of(chassis).expect("a chassis");
+        let e = w.spawn_with_guid(trigger, "Trigger", Some(parent));
+        w.world_mut()
+            .entity_mut(e)
+            .insert(Transform::from_translation(DVec3::new(0.0, 0.0, -2.0)))
+            .insert(boxy);
+        let rig = rig_of(&w, chassis).expect("a car is a rig");
+        assert_eq!((rig.wheels.len(), rig.parts.len()), (4, 0));
+
+        // (b) The same trigger on a hull with no wheels IS a thruster — so the
+        //     discrimination above is the wheels and not the box.
+        let mut w = EcsWorld::new();
+        spawn_rig_at(&mut w, chassis, &def, &spawn_of("Hull"), false);
+        // …and a wheel-less hull was invisible to the recogniser until now.
+        assert!(
+            rig_of(&w, chassis).is_none(),
+            "a body with no wheels and no parts is not a vehicle"
+        );
+        let parent = w.entity_of(chassis).expect("a chassis");
+        let e = w.spawn_with_guid(trigger, "Screw", Some(parent));
+        w.world_mut()
+            .entity_mut(e)
+            .insert(Transform::from_translation(DVec3::new(0.0, -0.2, -2.0)))
+            .insert(boxy);
+        // A hull is spawned Kinematic; the chassis rule wants a dynamic body,
+        // which is the one thing a wheel-less craft has to say for itself.
+        w.world_mut().entity_mut(parent).insert(RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        });
+        let rig = rig_of(&w, chassis).expect("a hull with a thruster is a rig");
+        assert_eq!((rig.wheels.len(), rig.parts.len()), (0, 1));
+        assert_eq!(rig.parts[0].kind, PartKind::Thruster);
+        assert_eq!(rig.parts[0].guid, trigger);
+        assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.2, -2.0));
+        assert_eq!(rig.parts_of(PartKind::Thruster).count(), 1);
+        assert_eq!(rig.parts_of(PartKind::Rotor).count(), 0);
+        // The seat is still derived from the chassis collider, unchanged.
+        assert_eq!(rig.seat_local, Vec3d::new(0.0, def.half_extents.y, 0.0));
+    }
+
+    /// The parts come back in `Guid` order, like the wheels — so a rig's part
+    /// indices are a function of the level's contents and not of an archetype
+    /// walk (wave VEH2c).
+    #[test]
+    fn the_parts_are_sorted_by_guid_whatever_order_they_were_spawned_in() {
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0xCAFE);
+        let ids = [
+            Uuid::from_u128(0x30),
+            Uuid::from_u128(0x10),
+            Uuid::from_u128(0x20),
+        ];
+        let mut w = EcsWorld::new();
+        spawn_rig_at(&mut w, chassis, &def, &spawn_of("Heli"), false);
+        let parent = w.entity_of(chassis).expect("a chassis");
+        w.world_mut().entity_mut(parent).insert(RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        });
+        for (i, g) in ids.into_iter().enumerate() {
+            let e = w.spawn_with_guid(g, "Rotor", Some(parent));
+            w.world_mut()
+                .entity_mut(e)
+                .insert(Transform::from_translation(DVec3::new(0.0, i as f64, 0.0)))
+                .insert(Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    radius: 4.0,
+                    half_extents: Vec3d::new(4.0, 0.05, 4.0),
+                    sensor: true,
+                    ..Default::default()
+                });
+        }
+        let rig = rig_of(&w, chassis).expect("a rotorcraft is a rig");
+        let got: Vec<Uuid> = rig.parts.iter().map(|p| p.guid).collect();
+        let mut want = ids.to_vec();
+        want.sort();
+        assert_eq!(got, want, "the parts are not in Guid order");
+        assert!(rig.parts.iter().all(|p| p.kind == PartKind::Rotor));
+        assert_eq!(
+            rig.parts[0].size.x, 4.0,
+            "a rotor's size is its disc radius"
+        );
+    }
+
+    /// The vertical axis reaches the controls, is clamped there, and every other
+    /// control is untouched by it (wave VEH2c).
+    #[test]
+    fn the_vertical_axis_reaches_the_controls_and_is_clamped() {
+        let none = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, 0.0);
+        assert_eq!(none.vertical, 0.0);
+        assert_eq!(none, VehicleControls::default());
+        let up = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, 4.0);
+        assert_eq!(up.vertical, 1.0, "a wild axis is clamped, not refused");
+        let down = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, -4.0);
+        assert_eq!(down.vertical, -1.0);
+        // …and it changes nothing else: the same stick with and without it.
+        let stick = crate::math::Vec2d::new(0.5, 1.0);
+        let a = VehicleControls::from_intent(stick, 3.0, true, 0.0);
+        let b = VehicleControls::from_intent(stick, 3.0, true, 1.0);
+        assert_eq!(
+            (a.throttle, a.steer, a.brake, a.handbrake),
+            (b.throttle, b.steer, b.brake, b.handbrake)
+        );
     }
 
     /// The seat is the chassis collider's top face, so a character's feet land
@@ -4544,15 +4985,15 @@ mod tests {
     #[test]
     fn pressing_back_at_speed_brakes_and_at_rest_reverses() {
         let back = crate::math::Vec2d::new(0.0, -1.0);
-        let c = VehicleControls::from_intent(back, 12.0, false);
+        let c = VehicleControls::from_intent(back, 12.0, false, 0.0);
         assert_eq!((c.throttle, c.brake), (0.0, 1.0));
-        let c = VehicleControls::from_intent(back, 0.0, false);
+        let c = VehicleControls::from_intent(back, 0.0, false, 0.0);
         assert_eq!((c.throttle, c.brake), (-1.0, 0.0));
         // …and symmetrically, forward while reversing is a brake.
         let fwd = crate::math::Vec2d::new(0.0, 1.0);
-        let c = VehicleControls::from_intent(fwd, -12.0, false);
+        let c = VehicleControls::from_intent(fwd, -12.0, false, 0.0);
         assert_eq!((c.throttle, c.brake), (0.0, 1.0));
-        let c = VehicleControls::from_intent(crate::math::Vec2d::new(1.0, 0.0), 0.0, true);
+        let c = VehicleControls::from_intent(crate::math::Vec2d::new(1.0, 0.0), 0.0, true, 0.0);
         assert_eq!(c.steer, 1.0);
         assert!(c.handbrake);
     }

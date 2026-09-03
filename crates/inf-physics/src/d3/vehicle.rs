@@ -124,14 +124,22 @@ fn step_one(
     forces: &mut Vec<WheelForce>,
 ) -> Option<VehicleOutcome> {
     let body = bridge.body_of(chassis)?;
+    let position = bridge.world().body_translation(body)?;
+    // Wave VEH2c: the sea under this vehicle, from the SAME index and the same
+    // sim clock the buoyancy pass reads at stage 8 — never a wall clock and
+    // never a second opinion, so PIE and the shipped player cannot disagree
+    // about where the water is. `O(bodies over the cell)`, and `O(1)` on a level
+    // with no water, which is what keeps a wheeled vehicle from paying for it.
+    let water_y = bridge.water_surface_at(glam::DVec2::new(position.x, position.z));
     let state = {
         let w = bridge.world();
         ChassisState {
-            position: w.body_translation(body)?,
+            position,
             rotation: w.body_rotation(body)?,
             linvel: w.body_linvel(body).unwrap_or(DVec3::ZERO),
             angvel: w.body_angvel(body).unwrap_or(DVec3::ZERO),
             mass_kg: w.body_mass(body).unwrap_or(0.0),
+            water_y,
         }
     };
     let (_, _, up) = state.basis();
@@ -224,6 +232,19 @@ fn step_one(
         }
     }
 
+    // ── 3b. the parts, as they are drawn (wave VEH2c). The same visual-only
+    //    write the wheels get below, and for the same reason: a spinning rotor
+    //    is a rotation on a part's own transform and nothing reads it back.
+    let part_poses: Vec<(Uuid, Vec3d)> = {
+        let v = bridge.vehicle_of(chassis)?;
+        v.rig()
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| v.part_pose(i).map(|rot| (p.guid, rot)))
+            .collect()
+    };
+
     // ── 4. the wheels, as they are drawn. A visual write only: nothing reads
     //    these back (the mount is taken once — see `reconcile_vehicles`), so a
     //    rig with no wheel meshes simulates identically to one with them.
@@ -244,6 +265,19 @@ fn step_one(
         // Euler YXZ degrees, the `Transform` convention: yaw is the steer and
         // pitch is the roll of the wheel about its own axle.
         t.rotation = Vec3d::new(spin, steer, 0.0);
+        moved = true;
+    }
+    for (guid, rotation) in part_poses {
+        let Some(entity) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) else {
+            continue;
+        };
+        // The translation is NOT written: a part does not travel on a
+        // suspension, so its authored mount is where it stays and there is
+        // nothing for a later reconcile to read back as a moved mount.
+        t.rotation = rotation;
         moved = true;
     }
     if moved {

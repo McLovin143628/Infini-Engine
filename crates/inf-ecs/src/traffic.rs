@@ -2525,7 +2525,7 @@ mod tests {
         assert!(i.handbrake);
         // And what `from_intent` makes of it: nothing at all, rather than a
         // reverse gear.
-        let c = crate::vehicle::VehicleControls::from_intent(i.move_input, 0.0, i.handbrake);
+        let c = crate::vehicle::VehicleControls::from_intent(i.move_input, 0.0, i.handbrake, 0.0);
         assert_eq!(c.throttle, 0.0);
         assert_eq!(c.brake, 0.0);
         assert!(c.handbrake);
@@ -2982,6 +2982,7 @@ mod tests {
                         radius_m: def.wheel_radius_m,
                     })
                     .collect(),
+                parts: Vec::new(),
             };
             let mut v = RaycastVehicle::new(rig);
             def.class.install(&mut v);
@@ -2996,6 +2997,7 @@ mod tests {
                 linvel: DVec3::ZERO,
                 angvel: DVec3::ZERO,
                 mass_kg: mass,
+                water_y: None,
             };
             let mut out: Vec<WheelForce> = Vec::new();
             // Ground every wheel at its own rest, so the model has a contact to

@@ -747,6 +747,10 @@ impl PhysicsBridge3D {
         > = BTreeMap::new();
         let mut wheel_candidates: Vec<(Uuid, inf_ecs::vehicle::WheelMount, EntitySync3D)> =
             Vec::new();
+        // Wave VEH2c: the same holding pen, for the parts a wheel-less craft is
+        // made of. Both are decided below, once every chassis is known.
+        let mut part_candidates: Vec<(Uuid, inf_ecs::vehicle::PartMount, EntitySync3D)> =
+            Vec::new();
         for entity in world.world().iter_entities() {
             let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
                 continue;
@@ -859,6 +863,26 @@ impl PhysicsBridge3D {
                     continue;
                 }
             }
+            // …and a **part** — a hull's thruster, a rotorcraft's disc — on the
+            // same rule and for the same reason (wave VEH2c). A box or capsule
+            // sensor under a WHEELED chassis is an ordinary trigger and is
+            // mirrored as it always was: the wheels-win decision is below, where
+            // both maps are complete.
+            if let Some((kind, size)) = inf_ecs::vehicle::part_of(col.as_ref(), rb.as_ref()) {
+                if let Some(parent) = world.parent_of(entity.id()).and_then(|p| world.guid_of(p)) {
+                    part_candidates.push((
+                        parent,
+                        inf_ecs::vehicle::PartMount {
+                            guid,
+                            kind,
+                            mount_local: transform.translation,
+                            size,
+                        },
+                        snap,
+                    ));
+                    continue;
+                }
+            }
             snaps.push(snap);
         }
         // The wheel decision, now that every chassis is known. A sphere sensor
@@ -873,7 +897,21 @@ impl PhysicsBridge3D {
                 snaps.push(snap);
             }
         }
-        self.reconcile_vehicles(&chassis_seats, wheels_by_chassis);
+        // The part decision, on the same rule plus **WHEELS WIN** — the one
+        // clause that keeps every level written before wave VEH2c byte-identical
+        // (see `inf_ecs::vehicle::rig_of`, which states it once for both doors).
+        // A part under a wheeled chassis, or under something that is not a
+        // chassis at all, is an ordinary sensor and is mirrored.
+        let mut parts_by_chassis: BTreeMap<Uuid, Vec<inf_ecs::vehicle::PartMount>> =
+            BTreeMap::new();
+        for (parent, mount, snap) in part_candidates {
+            if chassis_seats.contains_key(&parent) && !wheels_by_chassis.contains_key(&parent) {
+                parts_by_chassis.entry(parent).or_default().push(mount);
+            } else {
+                snaps.push(snap);
+            }
+        }
+        self.reconcile_vehicles(&chassis_seats, wheels_by_chassis, parts_by_chassis);
         self.reconcile_water(buoyancy);
         // P19.5: a volume's derived solids. Unchanged volumes are **retained**
         // rather than re-described — see the doc on `structure_stamps`.
@@ -915,10 +953,21 @@ impl PhysicsBridge3D {
 
     /// Bring the vehicle set in line with what the walk found (P29.7).
     ///
-    /// A chassis with wheels gets a vehicle; a chassis whose wheels have all
-    /// gone stops being one; a chassis that already had one keeps it — including
-    /// the class an island installed and the tunables an author has been
-    /// editing.
+    /// A chassis with wheels — or, since wave VEH2c, with **parts** — gets a
+    /// vehicle; a chassis whose wheels and parts have all gone stops being one;
+    /// a chassis that already had one keeps it — including the class an island
+    /// installed and the tunables an author has been editing.
+    ///
+    /// # Which class, and the rule is one line
+    ///
+    /// `inf_ecs::vehicle::rig_of` has already decided that a rig with wheels has
+    /// no parts, so the two maps are **disjoint by construction** and the choice
+    /// is not a precedence puzzle: a rig in `wheels` is a
+    /// [`RaycastVehicle`](inf_ecs::vehicle::RaycastVehicle) and a rig in `parts`
+    /// is whatever its parts say it is. The parts' own choice lives in
+    /// `inf_ecs::vehicle::class_for_parts`, in Ring 0 where it can be tested
+    /// without a world, rather than as a `match` in this file where it could
+    /// not.
     ///
     /// # The authored mount is taken ONCE
     ///
@@ -940,12 +989,14 @@ impl PhysicsBridge3D {
             ),
         >,
         wheels: BTreeMap<Uuid, Vec<inf_ecs::vehicle::WheelMount>>,
+        mut parts: BTreeMap<Uuid, Vec<inf_ecs::vehicle::PartMount>>,
     ) {
         // The off path: no vehicle in the scene and none running is one compare.
-        if wheels.is_empty() && self.vehicles.is_empty() {
+        if wheels.is_empty() && parts.is_empty() && self.vehicles.is_empty() {
             return;
         }
-        self.vehicles.retain(|guid, _| wheels.contains_key(guid));
+        self.vehicles
+            .retain(|guid, _| wheels.contains_key(guid) || parts.contains_key(guid));
         for (chassis, mut mounts) in wheels {
             let Some((seat_local, class)) = chassis_seats.get(&chassis).copied() else {
                 continue;
@@ -965,6 +1016,7 @@ impl PhysicsBridge3D {
                         chassis,
                         seat_local,
                         wheels: mounts,
+                        parts: Vec::new(),
                     });
                 }
                 None => {
@@ -972,6 +1024,7 @@ impl PhysicsBridge3D {
                         chassis,
                         seat_local,
                         wheels: mounts,
+                        parts: Vec::new(),
                     };
                     let mut v: Box<dyn inf_ecs::vehicle::Vehicle> =
                         Box::new(inf_ecs::vehicle::RaycastVehicle::new(rig));
@@ -991,6 +1044,50 @@ impl PhysicsBridge3D {
                         tracing::debug!(
                             "inf-physics: vehicle {chassis} installed its class \
                              ({took} of {of} tunables taken)"
+                        );
+                    }
+                    self.vehicles.insert(chassis, v);
+                }
+            }
+        }
+        // …and the wheel-less craft, on the same two rules: the authored mount is
+        // taken ONCE (a rotor's transform is written every step to spin it, so
+        // re-reading it would feed the spin back in as the mount), and the
+        // authored class is installed ONCE at creation.
+        for (chassis, mounts) in &mut parts {
+            let Some((seat_local, class)) = chassis_seats.get(chassis).copied() else {
+                continue;
+            };
+            mounts.sort_unstable_by_key(|m| m.guid);
+            let chassis = *chassis;
+            match self.vehicles.get_mut(&chassis) {
+                Some(v) => {
+                    let known = v.rig();
+                    for m in mounts.iter_mut() {
+                        if let Some(old) = known.parts.iter().find(|p| p.guid == m.guid) {
+                            m.mount_local = old.mount_local;
+                        }
+                    }
+                    v.set_rig(inf_ecs::vehicle::VehicleRig {
+                        chassis,
+                        seat_local,
+                        wheels: Vec::new(),
+                        parts: std::mem::take(mounts),
+                    });
+                }
+                None => {
+                    let rig = inf_ecs::vehicle::VehicleRig {
+                        chassis,
+                        seat_local,
+                        wheels: Vec::new(),
+                        parts: std::mem::take(mounts),
+                    };
+                    let mut v = inf_ecs::vehicle::class_for_parts(rig);
+                    if let Some(class) = class {
+                        let took = class.install(v.as_mut());
+                        let of = class.settings().len();
+                        tracing::debug!(
+                            "inf-physics: wheel-less vehicle {chassis} installed its                              class ({took} of {of} tunables taken)"
                         );
                     }
                     self.vehicles.insert(chassis, v);

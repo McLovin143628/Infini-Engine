@@ -2289,6 +2289,7 @@ fn step_driving(
         cm.runtime.intent_move,
         forward_mps,
         cm.runtime.want_handbrake,
+        cm.runtime.intent_vertical,
     );
     if let Some(v) = bridge.vehicle_mut(vehicle) {
         v.control(controls);

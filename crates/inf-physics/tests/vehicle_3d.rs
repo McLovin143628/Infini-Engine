@@ -30,6 +30,9 @@ const WHEEL_BASE: u128 = 0x2907_1010;
 const LOOSE_SENSOR: Uuid = Uuid::from_u128(0x2907_1099);
 /// The lake the buoyancy-ownership arm floats the car on.
 const LAKE: Uuid = Uuid::from_u128(0x2907_1098);
+/// The wheel-less hull and its screw (wave VEH2c).
+const HULL: Uuid = Uuid::from_u128(0x2907_1200);
+const THRUSTER: Uuid = Uuid::from_u128(0x2907_1201);
 
 /// The chassis is 4 × 1 × 2 m at 150 kg/m³ — a hollow shell, per
 /// `Collider3D::density`'s own note, which is 1 200 kg.
@@ -101,6 +104,47 @@ fn car(world: &mut EcsWorld, y: f64) {
             },
         ));
     }
+}
+
+/// A wheel-less hull: the same dynamic box, with a **box sensor** at the stern
+/// where a screw goes (wave VEH2c).
+fn hull(world: &mut EcsWorld, y: f64) {
+    let e = world.spawn_with_guid(HULL, "Boat", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, y, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: HALF,
+            density: DENSITY,
+            friction: 0.5,
+            ..Default::default()
+        },
+    ));
+    thruster(world, THRUSTER, HULL);
+}
+
+/// One box sensor, at the stern and below the waterline.
+fn thruster(world: &mut EcsWorld, guid: Uuid, parent: Uuid) {
+    let parent = world.entity_of(parent).expect("a chassis to hang it on");
+    let p = world.spawn_with_guid(guid, "Screw", Some(parent));
+    let mut pt = Transform::IDENTITY;
+    pt.translation = Vec3d::new(0.0, -0.3, -1.9);
+    world.world_mut().entity_mut(p).insert((
+        pt,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(0.25, 0.2, 0.25),
+            sensor: true,
+            ..Default::default()
+        },
+    ));
 }
 
 struct Rig {
@@ -312,6 +356,72 @@ fn a_wheel_never_reaches_the_physics_world() {
     assert_eq!(rig.bridge.body_count(), 2, "{:?}", rig.bridge.body_count());
 }
 
+/// **THE SEAM OPENS** (wave VEH2c): a chassis with NO wheels is a vehicle, its
+/// thruster is consumed exactly as a wheel is, and the same box on a wheeled car
+/// stays a trigger.
+///
+/// Three claims in one arm because they are one rule read from three sides, and
+/// the third is the one that protects every level that already exists. Before
+/// this wave `rig_of` answered `None` for a wheel-less chassis and
+/// `reconcile_vehicles` walked the wheels map, so a boat was **structurally
+/// invisible**: `vehicle_count()` was 0 and nothing could be sat in.
+#[test]
+fn a_wheel_less_hull_is_a_vehicle_and_its_thruster_is_consumed() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    hull(&mut world, 1.0);
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+
+    // (a) It is a vehicle, with the rig the scene describes.
+    assert_eq!(bridge.vehicle_count(), 1, "the hull is not recognised");
+    let rig = bridge
+        .vehicle_of(HULL)
+        .expect("the hull is a vehicle")
+        .rig();
+    assert_eq!(rig.wheels.len(), 0);
+    assert_eq!(rig.parts.len(), 1);
+    assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Thruster);
+    assert_eq!(rig.parts[0].guid, THRUSTER);
+    assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.3, -1.9));
+    // …and the seat is still the collider's top face, so the interact door
+    // needs nothing new to find it.
+    assert_eq!(rig.seat_local, Vec3d::new(0.0, HALF.y, 0.0));
+
+    // (b) The thruster is CONSUMED, exactly as a wheel is: two bodies (the
+    //     ground and the hull) and no body or collider of its own.
+    assert!(
+        bridge.collider_of(THRUSTER).is_none(),
+        "the screw is in rapier"
+    );
+    assert!(bridge.body_of(THRUSTER).is_none());
+    assert_eq!(bridge.body_count(), 2);
+
+    // (c) THE COMPATIBILITY CLAIM. The identical box under a WHEELED chassis is
+    //     an ordinary trigger — mirrored, and not a part — so no car in any
+    //     committed level changes by one byte.
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(&mut world, SPAWN_Y);
+    thruster(&mut world, THRUSTER, CHASSIS);
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    let rig = bridge.vehicle_of(CHASSIS).expect("the car").rig();
+    assert_eq!((rig.wheels.len(), rig.parts.len()), (4, 0));
+    assert!(
+        bridge.collider_of(THRUSTER).is_some(),
+        "a trigger on a car was eaten by the part recogniser"
+    );
+    // Ground + chassis + the trigger's own body: THREE, where the hull above
+    // had two. That difference is the consume rule, measured rather than
+    // described — a mirrored sensor costs a body and a consumed part does not.
+    assert_eq!(bridge.body_count(), 3);
+}
+
 /// …and the falsifier: a sphere sensor whose parent is **not** a chassis is an
 /// ordinary sensor and is mirrored exactly as it always was.
 ///
@@ -498,6 +608,7 @@ fn two_identical_rigs_drive_byte_for_byte() {
                 steer: if i % 70 < 35 { 0.8 } else { -0.6 },
                 brake: 0.0,
                 handbrake: i % 121 == 0,
+                vertical: 0.0,
             };
             rig.drive(controls, 1);
             let t = rig.chassis();
