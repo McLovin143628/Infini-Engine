@@ -209,14 +209,13 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
     // `AudioCommand` is an enum the whole tree matches on exhaustively, and a
     // new variant would be a new API. `Stop` in particular stays out: an engine
     // loop this step never ends is one the despawn sweep owns.
-    for forbidden in ["AudioCommand::Stop"] {
-        let n: String = forbidden.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            !editor.contains(&n),
-            "the engine loop reaches for `{forbidden}`, which is a lifetime \
-             decision and belongs to whoever despawns the vehicle"
-        );
-    }
+    let forbidden = "AudioCommand::Stop";
+    let n: String = forbidden.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        !editor.contains(&n),
+        "the engine loop reaches for `{forbidden}`, which is a lifetime \
+         decision and belongs to whoever despawns the vehicle"
+    );
 }
 
 /// **Both hosts step their TRAFFIC the same way** (wave VEH2b).
