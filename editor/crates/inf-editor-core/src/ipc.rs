@@ -947,6 +947,24 @@ pub struct ProjectInfoDto {
     pub template: String,
 }
 
+/// **The project the application opens when it is launched with none** (wave
+/// CERT1) — the answer `inf_project::boot::resolve` gave, with the rung that
+/// gave it.
+///
+/// The rung is carried rather than inferred because the status line the shell
+/// prints says *why* a project opened, and "you pinned this" and "this is the
+/// showcase the engine found beside your checkout" are two different sentences
+/// for an author to act on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ProjectBootDto {
+    /// The opened project.
+    pub project: ProjectInfoDto,
+    /// `inf_project::BootSource::phrase` — a short human clause, already
+    /// wordable into a sentence ("opened Vancouver Island — the showcase
+    /// island").
+    pub source: String,
+}
+
 /// One entry in the recent-projects list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct RecentProjectDto {

@@ -35,6 +35,12 @@ interface ProjectState {
   applyChanged: (info: ProjectInfoDto) => void;
   setShowStartScreen: (v: boolean) => void;
 
+  /**
+   * Open the application's boot project, if it has one (wave CERT1). Resolves
+   * to the rung that answered, or null when the start screen should show.
+   */
+  bootDefault: () => Promise<string | null>;
+
   newProject: (name: string, template: string, parentDir: string) => Promise<void>;
   openProject: (root: string) => Promise<void>;
   openViaDialog: () => Promise<void>;
@@ -98,6 +104,24 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setShowStartScreen: (v) => set({ showStartScreen: v, error: null }),
+
+  bootDefault: async () => {
+    try {
+      const boot = await projectIpc.bootDefault();
+      if (!boot) return null;
+      // `project://changed` already applied the project; this line only says
+      // WHICH rung chose it, because "your last project" and "the showcase the
+      // engine found beside your checkout" are two different sentences for an
+      // author who did not expect either.
+      useShellStore
+        .getState()
+        .pushStatus(`Opened ${boot.project.name} — ${boot.source}.`, 8000);
+      return boot.source;
+    } catch (e) {
+      console.error("project.bootDefault failed", e);
+      return null;
+    }
+  },
 
   newProject: async (name, template, parentDir) => {
     if (!name.trim()) {
@@ -219,5 +243,18 @@ export const initProjectSync = refCountedInit(async (sink) => {
   // subscription above for the life of the process (round-2 finding R2-7).
   sink(unlisten);
   await useProjectStore.getState().refresh();
+  // ...AND OPEN THE APPLICATION'S BOOT PROJECT (wave CERT1).
+  //
+  // `refresh` sets `current` and does NOT open anything -- so a cold launch
+  // used to land on the start screen with the showcase one file dialog away.
+  // The backend resolves which project (`inf_project::boot::resolve`) and
+  // opens it through the same `apply_open` the start screen uses, so the
+  // `project://changed` subscribed above is what actually applies it.
+  //
+  // Only when nothing is open: a re-mount must not re-root a live session,
+  // and the backend refuses that case too.
+  if (useProjectStore.getState().current === null) {
+    await useProjectStore.getState().bootDefault();
+  }
   return () => unlisten();
 });

@@ -235,6 +235,22 @@ pub struct EditorSettings {
     /// edit and a cap of zero imports nothing while looking like a preference.
     #[serde(default = "default_gis_max_entities")]
     pub gis_max_entities: u32,
+    /// **The project the application opens when it is launched with none**
+    /// (wave CERT1) — rung 2 of `inf_project::boot::resolve`.
+    ///
+    /// An absolute project root, or **empty for "not pinned"**. A `String`
+    /// rather than an `Option<String>` because this file is TOML and TOML has no
+    /// `None` to write; the alternative is a `skip_serializing_if`, which is the
+    /// attribute this repository has been bitten by three times and which would
+    /// make an absent key and an empty key two different states for a reader to
+    /// hold.
+    ///
+    /// **Written by every successful project open**, so the plain meaning is
+    /// *the last project you opened*. Setting it by hand pins one deliberately,
+    /// and a pin that names a project the author has since deleted is skipped
+    /// rather than fatal — `inf_project::boot` falls through to the showcase.
+    #[serde(default)]
+    pub boot_project: String,
     /// 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
     #[serde(default = "default_snap_3d")]
     pub snap_3d: Snap3DDto,
@@ -276,6 +292,7 @@ impl Default for EditorSettings {
             rmb_click_travel_px: DEFAULT_RMB_CLICK_TRAVEL_PX,
             rmb_click_ms: DEFAULT_RMB_CLICK_MS,
             gis_max_entities: default_gis_max_entities(),
+            boot_project: String::new(),
             snap_3d: default_snap_3d(),
             foliage: default_foliage(),
             keybindings: BTreeMap::new(),
@@ -358,6 +375,13 @@ impl EditorSettings {
         self.schema_version = EDITOR_SETTINGS_VERSION;
         if self.theme_id.trim().is_empty() {
             self.theme_id = default_theme_id();
+        }
+        // A hand-edited path with stray whitespace around it is the same pin as
+        // one without, and `inf_project::boot::resolve` trims for the same
+        // reason — but normalizing here is what makes the file itself agree with
+        // what the resolution does, rather than leaving two places that trim.
+        if self.boot_project.trim() != self.boot_project {
+            self.boot_project = self.boot_project.trim().to_string();
         }
         self.autosave_interval_s = guard_f32(
             self.autosave_interval_s,

@@ -74,6 +74,7 @@ import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { GeoAnchorDto } from "../bindings/GeoAnchorDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
+import type { ProjectBootDto } from "../bindings/ProjectBootDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { EditorSettings } from "../bindings/EditorSettings";
 import type { GameBindingApplyDto } from "../bindings/GameBindingApplyDto";
@@ -146,6 +147,7 @@ export type {
   LayoutSummary,
   PackageErrorDto,
   PackageResultDto,
+  ProjectBootDto,
   ProjectInfoDto,
   ProjectTemplateDto,
   ProjectSettingsDto,
@@ -923,6 +925,19 @@ export const project = {
    * build starts in" are the same sentence.
    */
   bootLevel: (): Promise<string | null> => invoke<string | null>("project_boot_level"),
+  /**
+   * Open the project the application boots with when it was launched with none
+   * (wave CERT1), or null for the start screen. `INF_BOOT_PROJECT`, then the
+   * `boot_project` pin (the last project opened), then the showcase island
+   * discovered beside the checkout -- `inf_project::boot::resolve` is the whole
+   * rule and this is its only caller.
+   *
+   * It opens through `apply_open`, so `project://changed` fires and the boot
+   * level opens exactly as it does from the start screen. Calling it while a
+   * project is already open is a no-op that returns null.
+   */
+  bootDefault: (): Promise<ProjectBootDto | null> =>
+    invoke<ProjectBootDto | null>("project_boot_default"),
   close: (): Promise<void> => invoke("project_close"),
 };
 

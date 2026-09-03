@@ -64,6 +64,23 @@ rmb_click_ms: number,
  */
 gis_max_entities: number, 
 /**
+ * **The project the application opens when it is launched with none**
+ * (wave CERT1) — rung 2 of `inf_project::boot::resolve`.
+ *
+ * An absolute project root, or **empty for "not pinned"**. A `String`
+ * rather than an `Option<String>` because this file is TOML and TOML has no
+ * `None` to write; the alternative is a `skip_serializing_if`, which is the
+ * attribute this repository has been bitten by three times and which would
+ * make an absent key and an empty key two different states for a reader to
+ * hold.
+ *
+ * **Written by every successful project open**, so the plain meaning is
+ * *the last project you opened*. Setting it by hand pins one deliberately,
+ * and a pin that names a project the author has since deleted is skipped
+ * rather than fatal — `inf_project::boot` falls through to the showcase.
+ */
+boot_project: string, 
+/**
  * 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
  */
 snap_3d: Snap3DDto, 

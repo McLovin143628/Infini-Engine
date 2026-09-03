@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use inf_editor_core::ipc::{ProjectInfoDto, ProjectTemplateDto, RecentProjectDto};
+use inf_editor_core::editor_settings::EditorSettings;
+use inf_editor_core::ipc::{ProjectBootDto, ProjectInfoDto, ProjectTemplateDto, RecentProjectDto};
 use inf_project::{Project, ProjectTemplate, RecentProjects};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -81,6 +82,7 @@ fn apply_open(
     // two paths idempotent instead of ordered.
     if let Ok(cfg) = app.path().app_config_dir() {
         let _ = RecentProjects::push(&cfg, &project);
+        pin_boot_project(&cfg, &project.root);
     }
     *state.current.lock().map_err(|e| e.to_string())? = Some(project);
 
@@ -191,6 +193,102 @@ pub async fn project_boot_level(assets: State<'_, AssetState>) -> Result<Option<
     })
 }
 
+/// **Remember this project as the one to open next launch** (wave CERT1).
+///
+/// Rung 2 of [`inf_project::boot::resolve`]. Written on every successful open,
+/// so the plain meaning of the pin is *the last project you opened* — the
+/// behaviour every other editor on this machine already has, and the reason the
+/// showcase rung below it only fires for someone who has never opened anything.
+///
+/// **Best effort, deliberately.** A settings directory that cannot be written
+/// must not turn opening a project into an error; the consequence is that the
+/// next launch falls one rung further down, which is exactly the outcome an
+/// author who has never had a pin already lives with. It is logged rather than
+/// swallowed silently.
+fn pin_boot_project(cfg: &std::path::Path, root: &std::path::Path) {
+    let mut settings = match EditorSettings::load_or_default(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("boot project not pinned (settings unreadable): {e}");
+            return;
+        }
+    };
+    let pin = root.to_string_lossy().to_string();
+    if settings.boot_project == pin {
+        return;
+    }
+    settings.boot_project = pin;
+    settings.normalize();
+    if let Err(e) = settings.save(cfg) {
+        tracing::warn!("boot project not pinned: {e}");
+    }
+}
+
+/// **Open the project the application boots with, when it was launched with
+/// none** (wave CERT1) — or `null` for the start screen.
+///
+/// # The rule
+///
+/// [`inf_project::boot::resolve`] and nothing else: `INF_BOOT_PROJECT`, then the
+/// `boot_project` pin (the last project opened), then the showcase island
+/// discovered beside the checkout, then nothing. Ring 2 supplies the three
+/// inputs the rule cannot read for itself — the environment, the settings file
+/// under `app_config_dir`, and the running executable's directory — and Ring 0
+/// decides. That split is why the whole ordering is unit-tested against a temp
+/// directory rather than against this machine.
+///
+/// # Why this is a command and not a `.setup()` hook
+///
+/// `apply_open` ends in `app.emit("project://changed")`, which is what makes the
+/// Content Drawer re-sync and the boot level open. During `.setup()` there is no
+/// webview to receive it. So the frontend asks for this once, on mount, when
+/// `project_current` came back `null` — and a project opened this way takes
+/// exactly the same path as one opened from the start screen.
+///
+/// **It refuses to act when a project is already open**, because the frontend
+/// asking twice (a re-mount, a second window) must not re-root the asset
+/// database under a session that is already running.
+#[tauri::command]
+pub async fn project_boot_default(
+    app: AppHandle,
+    state: State<'_, ProjectState>,
+) -> Result<Option<ProjectBootDto>, String> {
+    if state.current.lock().map_err(|e| e.to_string())?.is_some() {
+        return Ok(None);
+    }
+    let env = std::env::var(inf_project::BOOT_PROJECT_ENV).ok();
+    let pinned = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .and_then(|cfg| EditorSettings::load_or_default(&cfg).ok())
+        .map(|s| s.boot_project)
+        .unwrap_or_default();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let Some(choice) =
+        inf_project::resolve_boot_project(env.as_deref(), &pinned, exe_dir.as_deref())
+    else {
+        return Ok(None);
+    };
+    // A root that resolves and then fails to OPEN is not an error either: a
+    // half-written `inf.toml` beside the checkout must not stop the application
+    // starting. The start screen is the fallback, as it is for every other rung.
+    let project = match Project::open(choice.root.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("boot project {} did not open: {e}", choice.root.display());
+            return Ok(None);
+        }
+    };
+    let project = apply_open(&app, &state, project)?;
+    Ok(Some(ProjectBootDto {
+        project,
+        source: choice.source.phrase().to_string(),
+    }))
+}
+
 /// Scaffold a new project under `parent` from `template` and open it.
 #[tauri::command]
 pub async fn project_new(
@@ -229,4 +327,52 @@ pub async fn project_close(app: AppHandle, state: State<'_, ProjectState>) -> Re
         viewport.set_content_root(super::Target::All, None);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pin is written, and **nothing else in the file is disturbed**.
+    ///
+    /// The second half is the one worth an arm: `pin_boot_project` is called on
+    /// every project open, so a bug that round-tripped the settings through a
+    /// default would silently wipe an author's theme and keybindings the first
+    /// time they opened a project.
+    #[test]
+    fn opening_a_project_pins_it_without_disturbing_the_settings_around_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        let mut before = EditorSettings::default();
+        before.theme_id = "a-theme-the-author-chose".to_string();
+        before.autosave_interval_s = 17.0;
+        before
+            .keybindings
+            .insert("Ctrl+K".to_string(), "some.command".to_string());
+        before.save(&cfg).unwrap();
+
+        let root = tmp.path().join("Vancouver Island");
+        pin_boot_project(&cfg, &root);
+
+        let after = EditorSettings::load_or_default(&cfg).unwrap();
+        assert_eq!(after.boot_project, root.to_string_lossy());
+        assert_eq!(after.theme_id, "a-theme-the-author-chose");
+        assert_eq!(after.autosave_interval_s, 17.0);
+        assert_eq!(
+            after.keybindings.get("Ctrl+K").map(String::as_str),
+            Some("some.command")
+        );
+    }
+
+    /// A settings directory that cannot be written does not make opening a
+    /// project fail — the pin is best-effort, and the consequence is one rung
+    /// further down at the next launch.
+    #[test]
+    fn a_pin_that_cannot_be_written_is_not_an_error() {
+        let missing = std::path::Path::new("this-directory-does-not-exist-cert1");
+        pin_boot_project(missing, std::path::Path::new("anywhere"));
+        // Reached: `pin_boot_project` returns `()` and must not panic.
+    }
 }

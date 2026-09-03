@@ -875,6 +875,17 @@ fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("  project    {}", out.display());
+        // Wave CERT1: the built project is what the editor's THIRD boot rung
+        // looks for (`inf_project::boot::find_showcase` walks up from the
+        // executable for `island-build/project`). Saying so here is the only
+        // place a reader learns that building the island is what makes the
+        // application open on it — and the only place to learn the override on
+        // a machine whose layout the walk cannot reach.
+        println!(
+            "             the editor opens this project on launch once it is built here; 
+                          set {}=<project root> to point it somewhere else",
+            inf_project::BOOT_PROJECT_ENV
+        );
     }
 
     // C4-40: a blocking finding exits non-zero.
