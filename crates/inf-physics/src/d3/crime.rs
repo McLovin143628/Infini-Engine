@@ -32,8 +32,9 @@
 //!
 //! # What it costs
 //!
-//! `O(officers × files)` distance tests, both bounded by constants
-//! ([`inf_ecs::dispatch::MAX_UNITS`] and [`inf_ecs::crime::MAX_PROFILES`]), and
+//! `O(officers × files)` distance tests and `O(files)` descriptions — every
+//! bound a constant ([`inf_ecs::dispatch::MAX_UNITS`] and
+//! [`inf_ecs::crime::MAX_PROFILES`]) — and
 //! at most [`MAX_RECOGNITION_RAYS`] rays a step — WPN1's own witness budget,
 //! reused rather than raised, so the two passes together are bounded at 64.
 //! **Zero of everything** on a level where nobody is wanted, which is every
@@ -228,6 +229,27 @@ fn look(
         return;
     }
     let night = crime::is_night(inf_ecs::sky::local_hour(world));
+    // **The channel half is officer-independent, so it is computed ONCE per
+    // suspect** (EMS3 audit). `describe` is four ECS lookups and `match_score`
+    // is a walk of the file's evidence, and neither reads the officer — so
+    // inside the pair loop they were `O(officers x files)` of work that this
+    // module's own header priced as `O(officers x files)` *distance tests*.
+    // At the constants' ceiling (`MAX_UNITS` 64 x `MAX_PROFILES` 32) that is
+    // two thousand descriptions a step to answer thirty-two questions.
+    //
+    // Hoisting it changes nothing a gate can see: the pair loop still counts
+    // `in_range` and `unrecognised` per pair and in the same order, and the
+    // suspects a hoist drops (no position, no file) are exactly the ones the
+    // inner `continue`s dropped before the counters moved.
+    let subjects: Vec<(Uuid, DVec3, Description, f64)> = wanted
+        .iter()
+        .filter_map(|suspect| {
+            let at = eye_of(world, *suspect)?;
+            let look = crime::describe(world, *suspect);
+            let file = crime::profile_of(world, *suspect)?;
+            Some((*suspect, at, look, crime::match_score(file, look, step)))
+        })
+        .collect();
     // Gathered before anything is written, so the write-back never overlaps a
     // read of the ledger, and in `Guid` order both ways: two hosts look in the
     // same order and therefore spend the ray budget on the same pairs.
@@ -236,14 +258,11 @@ fn look(
         let Some(eye) = eye_of(world, *officer) else {
             continue;
         };
-        for suspect in wanted {
+        for (suspect, at, look, channels) in &subjects {
             if suspect == officer {
                 continue;
             }
-            let Some(at) = eye_of(world, *suspect) else {
-                continue;
-            };
-            let to = at - eye;
+            let to = *at - eye;
             let d = to.length();
             if !d.is_finite() || d >= crime::RECOGNITION_RANGE_M {
                 continue;
@@ -254,12 +273,7 @@ fn look(
             // their car scores zero, and spending a ray to confirm that they are
             // visible costs the budget an officer needs for somebody who is
             // still recognisable.
-            let look = crime::describe(world, *suspect);
-            let Some(file) = crime::profile_of(world, *suspect) else {
-                continue;
-            };
-            let channels = crime::match_score(file, look, step);
-            if channels <= 0.0 {
+            if *channels <= 0.0 {
                 stats.unrecognised += 1;
                 continue;
             }
@@ -276,7 +290,7 @@ fn look(
                 stats.unrecognised += 1;
                 continue;
             }
-            seen.push((*suspect, at, look));
+            seen.push((*suspect, *at, *look));
         }
     }
     // **`sight` is called HERE and nowhere else**, which is the applier's half
