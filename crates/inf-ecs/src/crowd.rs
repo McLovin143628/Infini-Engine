@@ -4164,6 +4164,66 @@ mod tests {
         }
     }
 
+    /// **AN UNDRESSED WORLD DRAWS EXACTLY WHAT IT DREW BEFORE THE WAVE** (wave
+    /// EMS3 audit) — the byte-stability claim, as an assertion.
+    ///
+    /// EMS3 moved both projectors from [`agent_look`] to [`agent_look_in`] and
+    /// says every level committed before the wave draws identical pixels,
+    /// because an absent [`AppearanceRes`] falls back to [`derived_outfit`] —
+    /// the exact swap `agent_look` chooses. `projector_mirror` pins that the two
+    /// hosts call the same door; nothing pinned that the door answers the same
+    /// thing, and a wrong `agent_look_in` would be wrong on BOTH hosts
+    /// identically, so PIE == shipping would go on passing.
+    ///
+    /// The build is the half that would go quietly: `agent_look_in` takes its
+    /// tint from [`CrowdLook::of`] and its build from [`agent_look`], and
+    /// `CrowdLook::of`'s own build is the range's **midpoint** — so an
+    /// `agent_look_in` "simplified" to one `CrowdLook::of` call would resize
+    /// every crowd agent in the engine to one body and change no test.
+    #[test]
+    fn an_undressed_agent_draws_exactly_what_the_derived_look_draws() {
+        let bare = EcsWorld::new();
+        for i in 0..256u128 {
+            let g = guid(i);
+            assert_eq!(
+                agent_look_in(&bare, g),
+                agent_look(g),
+                "an undressed agent is drawn differently since wave EMS3 — every \
+                 level committed before it moves"
+            );
+        }
+        // …and dressing somebody moves the TINT and leaves the BUILD alone,
+        // which is what "nobody changes their height at a wardrobe" means.
+        let mut w = EcsWorld::new();
+        let g = guid(0xc0a7);
+        let before = agent_look_in(&w, g);
+        let other = (derived_outfit(g) as usize + 3) % CROWD_LOOKS.len();
+        assert!(set_appearance(
+            &mut w,
+            g,
+            Appearance {
+                outfit: other as u8
+            }
+        ));
+        let after = agent_look_in(&w, g);
+        assert_ne!(before.tint, after.tint, "the wardrobe changed no pixels");
+        assert_eq!(
+            before.build, after.build,
+            "a coat changed somebody's height"
+        );
+        assert_eq!(after.tint, CROWD_LOOKS[other]);
+        // An out-of-range appearance wraps rather than panicking — content that
+        // is wrong should be visible, and `CROWD_LOOKS` is indexed in one place.
+        assert!(set_appearance(&mut w, g, Appearance { outfit: 200 }));
+        assert_eq!(
+            agent_look_in(&w, g).tint,
+            CROWD_LOOKS[200 % CROWD_LOOKS.len()]
+        );
+        // …and clearing it returns the derived draw exactly.
+        clear_appearance(&mut w);
+        assert_eq!(agent_look_in(&w, g), agent_look(g));
+    }
+
     /// **A crowd is not a thousand clones, and the look is derived rather than
     /// stored** (wave NPC1b).
     ///
