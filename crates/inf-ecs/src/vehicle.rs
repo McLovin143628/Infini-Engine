@@ -4952,6 +4952,28 @@ impl RotorVehicle {
     /// hold's couples use, which is why the marker's size is read rather than
     /// decorative. A rig with several rotors uses the largest disc and their
     /// mean position, which is what a tandem's thrust line is.
+    /// **The fuselage's own drag** — two coefficients, along and across, both
+    /// quadratic (wave VEH2c).
+    ///
+    /// Its own function because it runs on BOTH paths: a machine nobody is
+    /// flying still falls through air rather than through vacuum, and a drag
+    /// that only applied to a flown aircraft would make an abandoned one
+    /// accelerate for ever.
+    fn fuselage_drag(&self, chassis: ChassisState, fwd: DVec3, out: &mut Vec<WheelForce>) {
+        let along = self.tuning.drag_n_per_mps2.max(0.0);
+        let across = self.tuning.drag_lateral_n_per_mps2.max(0.0);
+        let v = chassis.linvel;
+        let v_along = v.dot(fwd);
+        let rest = v - fwd * v_along;
+        let drag = -fwd * (along * v_along * v_along.abs()) - rest * (across * rest.length());
+        if drag != DVec3::ZERO {
+            out.push(WheelForce {
+                point: chassis.position,
+                force: drag,
+            });
+        }
+    }
+
     fn hub(&self) -> (Vec3d, f64) {
         let mut sum = Vec3d::ZERO;
         let mut radius = 0.0f64;
@@ -5050,6 +5072,13 @@ impl Vehicle for RotorVehicle {
         // hand on it differ by.
         if !self.controls.occupied {
             self.thrust_n = 0.0;
+            // The stick goes back to centre with the pilot: a command left
+            // standing would be applied the instant somebody else climbed in.
+            self.pitch_cmd_deg = 0.0;
+            // …but the FUSELAGE is still a fuselage. An unmanned machine falls
+            // through air, not through vacuum, so the drag below still runs —
+            // which is why this is not a return.
+            self.fuselage_drag(chassis, fwd, out);
             return;
         }
         let lift_cos = up.y.max(HELI_MIN_LIFT_COS);
@@ -5138,18 +5167,7 @@ impl Vehicle for RotorVehicle {
         // ── the fuselage. Two coefficients, along and across, both quadratic —
         //    and this is what gives the machine a top speed: nose down tilts the
         //    thrust forward until the drag catches it.
-        let along = self.tuning.drag_n_per_mps2.max(0.0);
-        let across = self.tuning.drag_lateral_n_per_mps2.max(0.0);
-        let v = chassis.linvel;
-        let v_along = v.dot(fwd);
-        let rest = v - fwd * v_along;
-        let drag = -fwd * (along * v_along * v_along.abs()) - rest * (across * rest.length());
-        if drag != DVec3::ZERO {
-            out.push(WheelForce {
-                point: chassis.position,
-                force: drag,
-            });
-        }
+        self.fuselage_drag(chassis, fwd, out);
 
         // ── the blade, drawn. Visual only; nothing reads it back.
         let turn = ROTOR_SPIN_DEG_PER_S * (self.thrust_n / peak.max(1e-6)).clamp(0.0, 1.0) * dt;

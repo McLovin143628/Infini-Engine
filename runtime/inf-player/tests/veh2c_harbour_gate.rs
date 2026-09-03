@@ -38,8 +38,8 @@ use glam::DVec3;
 use uuid::Uuid;
 
 use inf_ecs::components::{
-    BodyKind3D, Buoyancy, CharacterController3D, CharacterMovement, Collider3D,
-    ColliderShape3DKind, MovementMode, RigidBody3D, Transform, WaterBody,
+    BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind,
+    MovementMode, RigidBody3D, Transform, WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use inf_ecs::EcsWorld;
