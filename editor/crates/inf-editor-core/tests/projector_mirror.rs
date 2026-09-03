@@ -2743,7 +2743,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 9] = [
+    const SECTIONS: [&str; 10] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2758,6 +2758,15 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // would produce two identical traces until one of them ran a pose the
         // other did not.
         "crowd::crowd_state_bytes",
+        // VEH2b, pinned at EMS1 -- and the gap is the point. The fold grew a
+        // tenth section on the crowd's own argument (a `Near` car is not
+        // simulated and a `Dormant` one has no entity, so a tier decision that
+        // differed between two hosts would be invisible), and the PIN was not
+        // moved with it. For two waves, deleting or moving the traffic fold
+        // would have left every `inf-player` binary green -- which is the exact
+        // measurement the I6 audit made about `door` and `weapon`, unlearned in
+        // the time it takes to write one line.
+        "traffic::traffic_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()
