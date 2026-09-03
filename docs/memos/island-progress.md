@@ -28012,7 +28012,7 @@ name; deleting `crime::profile_state_bytes` from the fold reds the `SECTIONS`
 pin; making `re_anchor` read the suspect's transform reds the law arm at
 `followed: 300`; and `RECOGNIZE_SCORE = 0.0` reds the checkpoint table.
 
-**Six defects found and fixed.**
+**Six defects found and fixed, and one vacuity closed.**
 
 **1. A KILLING WAS FILED AGAINST THE MAN WHO WAS KILLED** — the one that matters.
 `step_witness` raises a death off `step_deaths`' list of bodies that stopped
@@ -28110,7 +28110,21 @@ thousand descriptions a step to answer thirty-two officer-independent questions.
 Hoisted to one pass over `wanted`; `in_range` and `unrecognised` are still
 counted per pair and in the same order, and every gate is byte-identical.
 
-Also repaired: three assertion messages and a `println!` **the audit itself**
+**7. NOTHING ASSERTED THAT AN UNDRESSED AGENT STILL DRAWS THE SAME.** §1's
+byte-stability claim was carried by `projector_mirror`'s fragment pin, which
+asserts only that the two hosts call the same door — and a wrong `agent_look_in`
+would be wrong on both hosts identically, so PIE == shipping would go on passing
+and no committed golden holds a crowd. The **build** is the half that goes
+quietly: `agent_look_in` takes its tint from `CrowdLook::of` and its build from
+`agent_look`, and `CrowdLook::of`'s own build is `CROWD_BUILD_RANGE`'s
+*midpoint*, so an `agent_look_in` "simplified" to one `CrowdLook::of` call
+resizes every crowd agent in the engine to one body and changes no test.
+`crowd::an_undressed_agent_draws_exactly_what_the_derived_look_draws` walks 256
+guids through the new door, checks that a wardrobe moves the tint and not the
+build, that an out-of-range appearance wraps rather than panics, and that
+clearing the resource returns the derived draw. Mutation-verified.
+
+Also repaired: four assertion messages and a `println!` **the audit itself**
 wrote arrived from scripted edits with their backslash continuations eaten — runs
 of 10 to 14 spaces inside literals, caught by `inf_packager::cook`'s workspace
 sweep, which is exactly what it exists for. The P22 law's own shorthand is worth
