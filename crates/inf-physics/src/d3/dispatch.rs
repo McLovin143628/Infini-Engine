@@ -136,6 +136,7 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
     run_units(world, bridge, &fleet, &mut res, step, dt, &mut stats);
     forget_old(&mut res, step);
     sound_and_light(world, &mut res, step, dt);
+    smoke(world, &mut res, step, dt);
 
     stats.incidents = res.incidents.len();
     stats.running_hot = res.runs.values().filter(|r| r.state.running_hot()).count();
@@ -201,6 +202,12 @@ fn open_incidents(
     // makes this cheap and correct at once: a body is handed to the ragdoll
     // once, and it is a medical incident once.
     for npc in downed_bodies(world) {
+        // **A body an ambulance has already been to does not call another one.**
+        // See `DispatchRes::treated` for the honest sentence about what having
+        // been to one means, and for the loop this closes.
+        if res.treated.contains(&npc) {
+            continue;
+        }
         if res
             .incidents
             .values()
@@ -492,7 +499,16 @@ fn run_units(
                 };
                 if (here - target).length() <= reach {
                     if run.state == UnitState::EnRoute {
-                        arrive(world, bridge, res, chassis, crew, here, step);
+                        arrive(
+                            world,
+                            bridge,
+                            res,
+                            chassis,
+                            crew,
+                            Some(unit.kind),
+                            here,
+                            step,
+                        );
                         stats.arrived += 1;
                     } else {
                         park(world, bridge, res, chassis, crew);
@@ -557,7 +573,13 @@ fn ensure_crew(
         if seated {
             return true;
         }
-        // Coming back from a scene: the same body goes back in the same seat.
+        // Coming back from a scene: the same body goes back in the same seat,
+        // and back on its feet — a paramedic who drove home on one knee would be
+        // the posture write with no release.
+        if let Some(mut a) = world.world_mut().get_mut::<inf_ecs::crowd::CrowdAgent>(e) {
+            a.posture = inf_ecs::components::SlotPosture::Stand;
+            a.posture_t = 0.0;
+        }
         if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
             cm.mode = MovementMode::Driving;
             cm.runtime.seat = SeatState {
@@ -659,6 +681,7 @@ fn arrive(
     res: &mut DispatchRes,
     chassis: Uuid,
     crew: Uuid,
+    kind: Option<UnitKind>,
     here: DVec3,
     step: u64,
 ) {
@@ -692,6 +715,21 @@ fn arrive(
     };
     let stand = at - dir * dispatch::SCENE_STAND_M;
     unseat_crew(world, bridge, crew, stand, dir);
+    // ── what the crew DOES, once it is out. Written onto the body's own
+    //    `CrowdAgent`, which is where `step_pose_evaluation` reads a posture
+    //    from — and which nothing else writes for this body, because a crew
+    //    member is a `spawn_body` and not a population record, so `step_crowd`
+    //    has never heard of it. One authority, no overwrite.
+    if let Some(kind) = kind {
+        let posture = dispatch::scene_posture(kind);
+        if let Some(e) = world.entity_of(crew) {
+            if let Some(mut a) = world.world_mut().get_mut::<inf_ecs::crowd::CrowdAgent>(e) {
+                a.posture = posture;
+                a.face = dir;
+                a.posture_t = 0.0;
+            }
+        }
+    }
 }
 
 /// Take the crew out of the seat and stand it at `stand`, facing `dir`.
@@ -783,9 +821,16 @@ fn work_the_scene(
         _ => false,
     };
     if done {
+        let treated = match incident.kind {
+            IncidentKind::Medical { npc, .. } => Some(npc),
+            _ => None,
+        };
         incident.state = IncidentState::Resolved;
         incident.resolved_step = Some(step);
         res.resolved = res.resolved.saturating_add(1);
+        if let Some(npc) = treated {
+            res.treated.insert(npc);
+        }
         let _ = world;
     }
     done
@@ -959,7 +1004,177 @@ fn chassis_at_no_bridge(world: &EcsWorld, chassis: Uuid) -> Option<DVec3> {
     p.is_finite().then_some(p)
 }
 
+/// **A burning building makes smoke** (wave EMS2) — sprite billboards, spawned
+/// and reaped by the sim.
+///
+/// # There is no particle system, and this is what that means
+///
+/// The tree says so three times over and this wave did not add one. What it has
+/// is `inf_ecs::components::Sprite`, a textured camera-facing quad the 2D
+/// batcher already draws over the 3D scene, so a puff is **one entity** with a
+/// `Cylindrical` billboard, a size that grows with age and an alpha that falls.
+/// A column of them is a fire.
+///
+/// # They never reach the author's document
+///
+/// This is P21's own law (*"in the editor the render store IS the save's
+/// staging source"*) applied one system over. Two things keep it:
+/// [`inf_ecs::dispatch::DispatchRes::puffs`] is the list of what was spawned,
+/// and `clear_dispatch` — which the editor calls at **both** ends of a Simulate
+/// session — **despawns** them rather than forgetting them. A puff that outlived
+/// its session would be a row in the author's Outliner that no Outliner row put
+/// there, which is the VEN1b speaker's rule verbatim.
+///
+/// The identity is content-addressed on `(incident, step)`, so both hosts spawn
+/// the same entity and neither needs a counter.
+fn smoke(world: &mut EcsWorld, res: &mut DispatchRes, step: u64, dt: f64) {
+    // ── reap first, so a level at the ceiling can still make new smoke.
+    let dead: Vec<Uuid> = res
+        .puffs
+        .iter()
+        .filter(|(_, born)| (step.saturating_sub(**born) as f64) * dt >= dispatch::PUFF_LIFETIME_S)
+        .map(|(g, _)| *g)
+        .collect();
+    for guid in dead {
+        if let Some(e) = world.entity_of(guid) {
+            world.despawn(e);
+        }
+        res.puffs.remove(&guid);
+    }
+    // ── age what is left: rise, grow, fade. A pure function of `(born, step)`,
+    //    so a puff is where it is because of when it was let go of and for no
+    //    other reason.
+    let live: Vec<(Uuid, u64)> = res.puffs.iter().map(|(g, b)| (*g, *b)).collect();
+    for (guid, born) in live {
+        let age_s = (step.saturating_sub(born) as f64) * dt;
+        let u = (age_s / dispatch::PUFF_LIFETIME_S).clamp(0.0, 1.0);
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+            t.translation.y += dispatch::PUFF_RISE_MPS * dt;
+        }
+        if let Some(mut sp) = world.world_mut().get_mut::<inf_ecs::components::Sprite>(e) {
+            let grow = dispatch::PUFF_SIZE_M * (1.0 + u);
+            sp.size = inf_ecs::math::Vec2d::new(grow, grow);
+            sp.color.a = (0.55 * (1.0 - u)) as f32;
+        }
+    }
+    // ── and let one go, on the period, from every fire that is still burning.
+    if step % dispatch::PUFF_PERIOD != 0 {
+        return;
+    }
+    let fires: Vec<(Uuid, DVec3)> = res
+        .incidents
+        .iter()
+        .filter(|(_, i)| {
+            matches!(i.kind, IncidentKind::Fire { .. }) && i.state != IncidentState::Resolved
+        })
+        .map(|(g, i)| (*g, i.at))
+        .collect();
+    for (incident, at) in fires {
+        if res.puffs.len() >= dispatch::MAX_PUFFS {
+            break;
+        }
+        let guid = dispatch::puff_guid(incident, step);
+        if world.entity_of(guid).is_some() {
+            continue;
+        }
+        // A little spread, drawn off the puff's own guid so the column is not a
+        // line of quads at one x.
+        let jx = inf_ecs::crowd::agent_unit(guid, 0, dispatch::SALT_PUFF) - 0.5;
+        let jz = inf_ecs::crowd::agent_unit(guid, 1, dispatch::SALT_PUFF) - 0.5;
+        let e = world.spawn_with_guid(guid, "Smoke", None);
+        world.world_mut().entity_mut(e).insert((
+            Transform {
+                translation: Vec3d::new(at.x + jx * 3.0, at.y + 2.0, at.z + jz * 3.0),
+                ..Transform::IDENTITY
+            },
+            inf_ecs::components::Sprite {
+                size: inf_ecs::math::Vec2d::new(dispatch::PUFF_SIZE_M, dispatch::PUFF_SIZE_M),
+                color: inf_ecs::math::Color::new(0.22, 0.21, 0.20, 0.55),
+                billboard: inf_ecs::components::BillboardMode::Cylindrical,
+                ..Default::default()
+            },
+        ));
+        res.puffs.insert(guid, step);
+    }
+}
+
+/// **Report an incident by hand** — the staging door.
+///
+/// The three feeds above are what a *level* produces on its own: a witnessed
+/// act, a body on the ground, an ambient draw. This is the fourth way one can
+/// exist, and it is deliberately narrow: a gate that wants a fire at a named
+/// building at a named moment, a designer's script, a later wave's mission.
+///
+/// It goes through the **same** `open`: the same ceiling, the same
+/// content-addressed guid, the same `Reported` state and the same counters — so
+/// a staged incident is answered by exactly the dispatcher a real one is, and a
+/// gate that staged one is not testing a second code path. Returns the incident's
+/// guid, or `None` if the level has no dispatcher yet (no fleet) or the table is
+/// full.
+///
+/// **It does not create the dispatcher.** A level with no emergency vehicle in
+/// it has no `DispatchRes` by construction (the "absent costs nothing" rule), and
+/// a staging door that manufactured one would make every trace committed before
+/// this wave depend on whether anybody had ever called it.
+pub fn report_incident(world: &mut EcsWorld, kind: IncidentKind, at: DVec3) -> Option<Uuid> {
+    let mut res = world.world_mut().remove_resource::<DispatchRes>()?;
+    let step = res.steps;
+    let mut stats = DispatchStats::default();
+    open(&mut res, kind, at, step, &mut stats);
+    let guid = (stats.opened > 0).then(|| dispatch::incident_guid(kind, at, step));
+    world.world_mut().insert_resource(res);
+    guid
+}
+
 // ── the read side ───────────────────────────────────────────────────────────
+
+/// **Every extinguish line a fire crew is working right now** — `(from, to)` in
+/// world metres, in `Guid` order.
+///
+/// A **debug line**, and that is the muzzle flash's own sentence one wave along:
+/// *"there is no particle system, so a muzzle flash is the first twenty
+/// centimetres of the same line drawn brighter"*. A hose here is a segment from
+/// the crew member's shoulder to the fire, which is the substrate this engine
+/// has. It is drawn by the host's render side, out of this list, so there is no
+/// path from a beam back into the sim and a frame that drew none and a frame
+/// that drew three are the same simulation.
+///
+/// Empty and allocation-free on a level with no dispatcher, and on every level
+/// where nothing is on fire.
+pub fn extinguish_beams(world: &EcsWorld) -> Vec<(DVec3, DVec3)> {
+    let Some(res) = dispatch::dispatch_of(world) else {
+        return Vec::new();
+    };
+    let Some(fleet) = world.world().get_resource::<FleetRes>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(DVec3, DVec3)> = Vec::new();
+    for (chassis, run) in &res.runs {
+        if run.state != UnitState::OnScene {
+            continue;
+        }
+        if fleet.units.get(chassis).map(|u| u.kind) != Some(UnitKind::Fire) {
+            continue;
+        }
+        let Some(incident) = run.incident.and_then(|g| res.incidents.get(&g)) else {
+            continue;
+        };
+        if !matches!(incident.kind, IncidentKind::Fire { .. }) {
+            continue;
+        }
+        let crew = dispatch::crew_guid(*chassis);
+        let Some(from) = body_at(world, crew) else {
+            continue;
+        };
+        // From the shoulder rather than from the feet: a line that starts at
+        // ground level reads as a crack in the road.
+        out.push((from + DVec3::Y * 1.4, incident.at));
+    }
+    out
+}
 
 /// **Every unit running with its lights and siren on, and where it is** — the
 /// query the audio emit, the projector and the yield rule all make.

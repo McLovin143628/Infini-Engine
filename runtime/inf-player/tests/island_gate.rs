@@ -8092,7 +8092,14 @@ fn pie_equals_shipping_at_a_club_on_a_saturday_night() {
                 match arrival.posture {
                     inf_ecs::components::SlotPosture::Sit => r.seated += 1,
                     inf_ecs::components::SlotPosture::Dance => r.dancing += 1,
-                    inf_ecs::components::SlotPosture::Stand => {}
+                    // EMS2 appended `Kneel`, which no building PLAN produces —
+                    // it is chosen by the dispatcher for a crew member at a
+                    // scene, and a `ResidentSlot`'s arrival can never carry it.
+                    // Named rather than swept into a wildcard so the day a room
+                    // does offer one, this census has to say what it counts it
+                    // as.
+                    inf_ecs::components::SlotPosture::Kneel
+                    | inf_ecs::components::SlotPosture::Stand => {}
                 }
                 if working {
                     r.on_shift += 1;

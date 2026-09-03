@@ -764,6 +764,8 @@ impl PlayerApp {
         // debug list — see `draw_tracers` for why a tracer is a line and not a
         // particle.
         live.host.draw_tracers(&self.sim);
+        // EMS2: and the hoses, out of the same list and into the same layer.
+        live.host.draw_extinguish(&self.sim);
         // ── the in-game UI (island wave I5) ──
         //
         //    BETWEEN the projection and the render, which is the only window in

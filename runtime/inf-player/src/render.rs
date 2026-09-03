@@ -436,6 +436,31 @@ impl PlayerRenderHost {
         }
     }
 
+    /// **Draw this step's extinguish lines** (wave EMS2) — one per fire crew
+    /// working a scene, from the crew member's shoulder to what is burning.
+    ///
+    /// `draw_tracers`' sentence verbatim, one system along: there is no particle
+    /// system, so a hose is a debug-line segment, which is the substrate this
+    /// engine has. Read-only — it copies out of `inf_physics::d3::dispatch`'s
+    /// own list and writes into `scene.debug`, so there is no path from here
+    /// back into the sim.
+    ///
+    /// # THE LEDGER SENTENCE: this is a SHIPPED-HOST overlay only
+    ///
+    /// `draw_tracers` has exactly one caller (`window.rs`) and no editor twin,
+    /// and this follows it. So a beam is drawn by the player and by embedded
+    /// PIE, and **not** in the editor's Simulate viewport — which is a fact
+    /// about where the tracer path was built rather than a decision this wave
+    /// took, and it is written down here so nobody has to discover it.
+    pub fn draw_extinguish(&mut self, sim: &RuntimeSim) {
+        let beams = inf_physics::d3::dispatch::extinguish_beams(sim.world());
+        for (from, to) in beams {
+            let a = self.origin.to_render(from);
+            let b = self.origin.to_render(to);
+            self.scene.debug.line(a, b, EXTINGUISH_COLOR);
+        }
+    }
+
     /// Whether the GPU meshlet path is active (the auto-picked tier is High).
     /// **The one line a host logs about virtual shadow maps** (P27.5) — the
     /// P27.1 remainder *"nothing logs `vsm_summary` in a host"*, closed on the
@@ -546,6 +571,10 @@ const MUZZLE_COLOR: [f32; 4] = [1.0, 0.96, 0.80, 1.0];
 /// point-blank shot still has one and a four-hundred-metre one does not have a
 /// forty-metre flash.
 const MUZZLE_FLASH_FRACTION: f32 = 0.02;
+
+/// An extinguish line's colour (wave EMS2) — a pale blue-white, so a hose does
+/// not read as a tracer.
+const EXTINGUISH_COLOR: [f32; 4] = [0.72, 0.86, 1.0, 0.9];
 
 /// Fill `scene` from `sim`'s world, blending actor positions by `alpha`.
 /// Deterministic `Guid` iteration order. `vmeshes` resolves a `MeshRef.asset` to

@@ -4060,6 +4060,16 @@ pub enum SlotPosture {
     Sit,
     /// Dancing on the spot.
     Dance,
+    /// **Down on one knee** (wave EMS2) — a paramedic at a patient.
+    ///
+    /// Appended, and it is the one variant here that **no building plan
+    /// produces**: `inf_pcg::SlotPosture` has three and this has four, because
+    /// this posture is chosen by the *dispatcher* for a crew member at a scene
+    /// rather than by a room for somebody standing in it. The two mirrors are
+    /// therefore deliberately not the same size, and the conversions that cross
+    /// between them (`inf_player::level`, the Ring-2 `pcg` command) go
+    /// `inf_pcg` → here and stay exhaustive.
+    Kneel,
 }
 
 impl SlotPosture {
@@ -4069,16 +4079,19 @@ impl SlotPosture {
             SlotPosture::Stand => "stand",
             SlotPosture::Sit => "sit",
             SlotPosture::Dance => "dance",
+            SlotPosture::Kneel => "kneel",
         }
     }
 
     /// The byte this posture folds into a trace. Frozen on the same terms
-    /// [`SlotRole::as_u8`] is: `Stand` 0, `Sit` 1, `Dance` 2.
+    /// [`SlotRole::as_u8`] is: `Stand` 0, `Sit` 1, `Dance` 2, `Kneel` 3
+    /// (appended, wave EMS2).
     pub fn as_u8(self) -> u8 {
         match self {
             SlotPosture::Stand => 0,
             SlotPosture::Sit => 1,
             SlotPosture::Dance => 2,
+            SlotPosture::Kneel => 3,
         }
     }
 
@@ -4095,6 +4108,7 @@ impl SlotPosture {
             SlotPosture::Stand => None,
             SlotPosture::Sit => Some(inf_anim::Posture::Sit),
             SlotPosture::Dance => Some(inf_anim::Posture::Dance),
+            SlotPosture::Kneel => Some(inf_anim::Posture::Kneel),
         }
     }
 }

@@ -66,7 +66,7 @@ use crate::Pose;
 
 /// **What a body is doing instead of standing.**
 ///
-/// Two, and no `Stand`: standing is the absence of a posture, and an enum with
+/// Three, and no `Stand`: standing is the absence of a posture, and an enum with
 /// an identity member would put a branch that does nothing on every posed
 /// character in the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,6 +75,9 @@ pub enum Posture {
     Sit,
     /// Dancing on the spot — a weight shift, a hip sway and the arms up.
     Dance,
+    /// **Down on one knee** (wave EMS2) — a paramedic working on somebody who
+    /// is on the ground.
+    Kneel,
 }
 
 impl Posture {
@@ -83,6 +86,7 @@ impl Posture {
         match self {
             Posture::Sit => "sit",
             Posture::Dance => "dance",
+            Posture::Kneel => "kneel",
         }
     }
 
@@ -91,6 +95,7 @@ impl Posture {
         match self {
             Posture::Sit => &SIT,
             Posture::Dance => &DANCE,
+            Posture::Kneel => &KNEEL,
         }
     }
 }
@@ -370,6 +375,116 @@ pub static DANCE: PostureClip = PostureClip {
     }),
 };
 
+/// **DOWN ON ONE KNEE** (wave EMS2) — a paramedic at a patient, a firefighter at
+/// a hydrant, an officer over evidence.
+///
+/// The geometry is one sentence and it is the SIT's sentence applied to one leg
+/// each way: the **left** leg folds under (a small thigh rotation and a big
+/// calf one, so the shin lies along the ground behind the knee), the **right**
+/// leg takes the sit's own pose (thigh forward, shin down, foot flat), and the
+/// hips drop between the two — see [`KNEEL_DROP_FRAC`] for why that is a
+/// fraction of the femur rather than the whole of it.
+///
+/// The rest is what stops it reading as a mannequin folded in half: a small
+/// forward lean on the spine, because somebody working on the ground is looking
+/// at it, and the arms brought forward and down onto whatever they are doing.
+///
+/// **It breathes**, on [`SIT`]'s terms and for its reason: four seconds, ±1.5°
+/// on the spine, so a crew standing at a scene for ten seconds is not a
+/// photograph. Every other channel is one key and is therefore constant.
+pub static KNEEL: PostureClip = PostureClip {
+    name: "kneel",
+    duration_s: 4.0,
+    tracks: &[
+        PostureTrack {
+            kind: BoneRoleKind::Pelvis,
+            side: BoneSide::Center,
+            pick: Pick::First,
+            keys: &[(0.0, [-4.0, 0.0, 0.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::Spine,
+            side: BoneSide::Center,
+            pick: Pick::All,
+            keys: &[
+                (0.0, [6.0, 0.0, 0.0]),
+                (2.0, [7.5, 0.0, 0.0]),
+                (4.0, [6.0, 0.0, 0.0]),
+            ],
+        },
+        // The kneeling leg: the thigh stays nearly vertical and the shin folds
+        // back along the ground.
+        PostureTrack {
+            kind: BoneRoleKind::Thigh,
+            side: BoneSide::Left,
+            pick: Pick::All,
+            keys: &[(0.0, [-12.0, 0.0, 6.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::Calf,
+            side: BoneSide::Left,
+            pick: Pick::All,
+            keys: &[(0.0, [125.0, 0.0, 0.0])],
+        },
+        // The standing leg: the sit's own thigh and shin, so the foot is flat
+        // and the knee is up.
+        PostureTrack {
+            kind: BoneRoleKind::Thigh,
+            side: BoneSide::Right,
+            pick: Pick::All,
+            keys: &[(0.0, [-85.0, 0.0, -6.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::Calf,
+            side: BoneSide::Right,
+            pick: Pick::All,
+            keys: &[(0.0, [85.0, 0.0, 0.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::UpperArm,
+            side: BoneSide::Left,
+            pick: Pick::First,
+            keys: &[(0.0, [-38.0, 0.0, 8.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::UpperArm,
+            side: BoneSide::Right,
+            pick: Pick::First,
+            keys: &[(0.0, [-38.0, 0.0, -8.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::LowerArm,
+            side: BoneSide::Left,
+            pick: Pick::First,
+            keys: &[(0.0, [-50.0, 0.0, 0.0])],
+        },
+        PostureTrack {
+            kind: BoneRoleKind::LowerArm,
+            side: BoneSide::Right,
+            pick: Pick::First,
+            keys: &[(0.0, [-50.0, 0.0, 0.0])],
+        },
+    ],
+    // The drop is DERIVED like the sit's — see `KNEEL_DROP_FRAC` — so the
+    // authored shift carries only the small slide back over the trailing heel.
+    shift: Some(PostureShift {
+        keys: &[(0.0, [0.0, 0.0, -0.04])],
+    }),
+};
+
+/// **How much of a femur a kneeling body's hips drop**, as a fraction.
+///
+/// A seated body's hips fall a whole femur: the thigh goes horizontal and the
+/// shin takes over as the vertical member. A body on one knee has **one** shin
+/// on the ground and one thigh still carrying it, so its hips sit between the
+/// two — a little over half a femur, measured from the same bone rather than
+/// from a metre constant that would be wrong for every character but one.
+///
+/// 0.55, and the arm that says it is right is
+/// `a_kneeling_body_has_one_shin_down_and_one_knee_up`, which measures the pose
+/// in model space instead of asserting the table back.
+pub const KNEEL_DROP_FRAC: f32 = 0.55;
+
 /// What one [`apply_posture`] did — the falsifier for a pass that ran and wrote
 /// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -527,8 +642,12 @@ pub fn apply_posture(
         {
             if let Some(local) = pose.locals.get_mut(p as usize) {
                 let mut d = sample(shift.keys, t);
-                if posture == Posture::Sit {
-                    d.y -= sit_drop_m(rig);
+                match posture {
+                    Posture::Sit => d.y -= sit_drop_m(rig),
+                    // One shin down and one thigh still carrying — see
+                    // `KNEEL_DROP_FRAC`.
+                    Posture::Kneel => d.y -= sit_drop_m(rig) * KNEEL_DROP_FRAC,
+                    Posture::Dance => {}
                 }
                 local.translation[0] += d.x;
                 local.translation[1] += d.y;
@@ -732,6 +851,95 @@ mod tests {
             &wrapped.locals[pelvis as usize],
             &b.locals[pelvis as usize]
         ));
+    }
+
+    /// **THE KNEEL READS AS KNEELING** (wave EMS2), measured in model space
+    /// rather than asserted from the table:
+    ///
+    /// * the **left** shin lies along the ground — its ankle is well BEHIND its
+    ///   knee, which is what folding a leg under you means;
+    /// * the **right** shin is vertical — its ankle is under its knee, and its
+    ///   knee is in front of its hip, exactly as the sit's is;
+    /// * the hips come down by about [`KNEEL_DROP_FRAC`] of a femur, which is
+    ///   between standing and sitting rather than either;
+    /// * and the two legs are doing **different** things, which is the whole
+    ///   difference between kneeling and squatting.
+    ///
+    /// Every one of the four is a claim a wrong-signed euler fails.
+    #[test]
+    fn a_kneeling_body_has_one_shin_down_and_one_knee_up() {
+        let rig = manny();
+        let stand = Pose::rest(&rig.skeleton);
+        let mut kneel = stand.clone();
+        let report = apply_posture(&rig, &mut kneel, Posture::Kneel, 0.0);
+        assert!(report.wrote(), "the kneel pass wrote nothing: {report:?}");
+        assert_eq!(
+            report.unmatched, 0,
+            "the mannequin is missing a role the kneel names: {report:?}"
+        );
+
+        let j = |kind, side| joint(&rig, kind, side);
+        let (lh, lk, la) = (
+            j(BoneRoleKind::Thigh, BoneSide::Left),
+            j(BoneRoleKind::Calf, BoneSide::Left),
+            j(BoneRoleKind::Foot, BoneSide::Left),
+        );
+        let (rh, rk, ra) = (
+            j(BoneRoleKind::Thigh, BoneSide::Right),
+            j(BoneRoleKind::Calf, BoneSide::Right),
+            j(BoneRoleKind::Foot, BoneSide::Right),
+        );
+        let femur = (model_of(&rig, &stand, lk) - model_of(&rig, &stand, lh)).length();
+        assert!(femur > 0.1, "the fixture rig has no femur ({femur})");
+
+        let (h0, h1) = (model_of(&rig, &stand, lh).y, model_of(&rig, &kneel, lh).y);
+        let lk1 = model_of(&rig, &kneel, lk);
+        let la1 = model_of(&rig, &kneel, la);
+        let rk1 = model_of(&rig, &kneel, rk);
+        let ra1 = model_of(&rig, &kneel, ra);
+        let rh1 = model_of(&rig, &kneel, rh);
+        println!(
+            "EMS2 kneel: femur {femur:.3} m; hips {h0:.3} -> {h1:.3}; left \
+             ankle-behind-knee {:.3}; right ankle-under-knee {:.3}; right \
+             knee-ahead-of-hip {:.3}",
+            lk1.z - la1.z,
+            (ra1.z - rk1.z).abs(),
+            rk1.z - rh1.z
+        );
+        // The kneeling shin lies BACK along the ground.
+        assert!(
+            lk1.z - la1.z > femur * 0.5,
+            "the left ankle is {:.3} m behind its knee against a {femur:.3} m \
+             femur — that leg is not folded under",
+            lk1.z - la1.z
+        );
+        // The standing shin is vertical, and its knee is forward.
+        assert!(
+            (ra1.z - rk1.z).abs() < femur * 0.35,
+            "the right ankle is {:.3} m off its knee in plan — that shin is not \
+             down",
+            (ra1.z - rk1.z).abs()
+        );
+        assert!(
+            rk1.z - rh1.z > femur * 0.6,
+            "the right knee is {:.3} m in front of the hip — the standing leg \
+             is not forward",
+            rk1.z - rh1.z
+        );
+        // The hips are between standing and sitting.
+        let drop = h0 - h1;
+        assert!(
+            drop > femur * (KNEEL_DROP_FRAC - 0.2) && drop < femur * (KNEEL_DROP_FRAC + 0.25),
+            "the hips dropped {drop:.3} m against {KNEEL_DROP_FRAC} of a \
+             {femur:.3} m femur"
+        );
+        // …and the two legs really differ, which a squat would fail.
+        let asymmetry = ((lk1.z - la1.z) - (rk1.z - ra1.z)).abs();
+        assert!(
+            asymmetry > femur * 0.5,
+            "the two shins are doing the same thing ({asymmetry:.3} m apart) — \
+             that is a squat, not a kneel"
+        );
     }
 
     /// A rig with no role table poses exactly what it posed before, which is

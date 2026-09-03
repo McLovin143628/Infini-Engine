@@ -105,6 +105,20 @@ pub fn responders(world: &EcsWorld) -> Vec<Uuid> {
 pub fn clear_dispatch(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RespondersRes>();
     world.world_mut().remove_resource::<FleetRes>();
+    // **The puffs are DESPAWNED, not forgotten** — the VEN1b speaker's rule: a
+    // sprite this session spawned and left behind is a row in the author's
+    // Outliner that no Outliner row put there. Read before the resource goes,
+    // because the resource is the only list of them.
+    let puffs: Vec<Uuid> = world
+        .world()
+        .get_resource::<DispatchRes>()
+        .map(|d| d.puffs.keys().copied().collect())
+        .unwrap_or_default();
+    for guid in puffs {
+        if let Some(e) = world.entity_of(guid) {
+            world.despawn(e);
+        }
+    }
     world.world_mut().remove_resource::<DispatchRes>();
 }
 
@@ -683,6 +697,29 @@ pub struct DispatchRes {
     /// **What every flashing bar should be set to this step** — rebuilt every
     /// step, drained by the hosts' `light_bar_flash` fence. See [`bar_flashes`].
     pub flashes: Vec<BarFlash>,
+    /// **Bodies an ambulance has already been to.**
+    ///
+    /// # The honest sentence about what "stabilized" means here
+    ///
+    /// It does not mean carried anywhere. This engine has no stretcher, no
+    /// gurney animation and no hospital bed a body can occupy — EMS1's wards
+    /// hold `Soft` modules and a `Ward` room's occupancy, not a place a
+    /// simulated person lies down in — so a patient who has been attended stays
+    /// exactly where they fell. What changes is that **the street has been
+    /// attended**: the body is in this set, so no second ambulance is called for
+    /// it.
+    ///
+    /// Without it the loop is visible and was measured: the `Downed` latch is
+    /// permanent, `INCIDENT_KEEP_STEPS` forgets the resolved incident after a
+    /// minute, and the same body calls another ambulance — for ever.
+    pub treated: BTreeSet<Uuid>,
+    /// **The smoke a fire is making**, puff guid to the step it was let go of.
+    ///
+    /// Real entities this session spawned, so they are cleared with everything
+    /// else — see [`clear_dispatch`], which despawns them rather than merely
+    /// forgetting them: a puff left behind is a row in the author's Outliner
+    /// that no Outliner row put there (the VEN1b speaker's own rule).
+    pub puffs: std::collections::BTreeMap<Uuid, u64>,
 }
 
 /// The dispatcher's state, or `None`.
@@ -901,6 +938,58 @@ pub fn nearest_unit(costs: &[(Uuid, f64)]) -> Option<Uuid> {
         .filter(|(_, c)| c.is_finite())
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
         .map(|(g, _)| *g)
+}
+
+// ── the scene ───────────────────────────────────────────────────────────────
+
+/// **What a crew member does at a scene**, by service.
+///
+/// The one place the three services meet the pose pipeline's vocabulary, so a
+/// paramedic cannot kneel in one system and stand in another.
+///
+/// A **paramedic kneels** — the patient is on the ground, and everything else a
+/// paramedic does follows from that. A **firefighter stands**: the appliance's
+/// line is worked from the feet, and this engine has no two-handed hose pose.
+/// An **officer stands**, which is what securing a scene is.
+pub fn scene_posture(kind: UnitKind) -> crate::components::SlotPosture {
+    match kind {
+        UnitKind::Ambulance => crate::components::SlotPosture::Kneel,
+        UnitKind::Fire | UnitKind::Police => crate::components::SlotPosture::Stand,
+    }
+}
+
+/// Salts a smoke puff's guid.
+pub const SALT_PUFF: u64 = 0x5055_4646_0000_0001;
+
+/// How often a burning building lets go of a puff, in fixed steps.
+///
+/// Twenty — three a second. Against [`PUFF_LIFETIME_S`] that is about eleven
+/// alive at once per fire, which is a column of smoke rather than a cloud and is
+/// eleven entities rather than a particle system this engine does not have.
+pub const PUFF_PERIOD: u64 = 20;
+
+/// How long one puff lives, seconds.
+pub const PUFF_LIFETIME_S: f64 = 3.5;
+
+/// How fast a puff rises, m/s.
+pub const PUFF_RISE_MPS: f64 = 1.6;
+
+/// How wide a puff starts, metres, and it grows with age.
+pub const PUFF_SIZE_M: f64 = 2.2;
+
+/// The most puffs one level holds at once.
+///
+/// Sixty-four — six simultaneous fires' worth. A **cost** bound and a refusal:
+/// past it a fire simply stops smoking, which is a visible outcome rather than a
+/// level that grows an entity every twenty steps for ever.
+pub const MAX_PUFFS: usize = 64;
+
+/// **One smoke puff's identity** — content-addressed on its fire and the step it
+/// was let go of, so two hosts spawn the same entity without exchanging a byte.
+pub fn puff_guid(incident: Uuid, step: u64) -> Uuid {
+    let n = crate::crowd::agent_rand(incident, step, SALT_PUFF);
+    let m = crate::crowd::agent_rand(incident, step ^ 0x3c3c_3c3c, SALT_PUFF);
+    Uuid::from_u64_pair(n, m)
 }
 
 // ── the siren ───────────────────────────────────────────────────────────────

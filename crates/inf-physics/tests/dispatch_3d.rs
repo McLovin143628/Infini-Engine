@@ -45,6 +45,7 @@ const GROUND: Uuid = Uuid::from_u128(0x0E52_1002);
 const AMBULANCE: Uuid = Uuid::from_u128(0x0E52_1003);
 const CRUISER: Uuid = Uuid::from_u128(0x0E52_1004);
 const PATIENT: Uuid = Uuid::from_u128(0x0E52_1005);
+const APPLIANCE: Uuid = Uuid::from_u128(0x0E52_1006);
 
 /// A red beacon, EMS1's own `BEACON_RED` numbers — the emissive is over 1 or
 /// the HDR path never sees it, which is exactly what the recogniser keys on.
@@ -75,6 +76,12 @@ static CRUISER_LIVERY: Livery = Livery {
     parts: &[],
     extra: &[(BAR, BLUE)],
     service: Some(UnitKind::Police),
+};
+static ENGINE_LIVERY: Livery = Livery {
+    name: "engine",
+    parts: &[],
+    extra: &[(BAR, RED)],
+    service: Some(UnitKind::Fire),
 };
 
 fn blocks(world: &mut EcsWorld, cols: i32, rows: i32) {
@@ -154,13 +161,30 @@ fn hero(world: &mut EcsWorld, at: DVec3) {
 
 /// An ambulance-shaped rig, parked at `at` — the same door EMS1's generator and
 /// the traffic both build a car through.
-fn park_unit(world: &mut EcsWorld, guid: Uuid, at: DVec3, livery: &'static Livery, van: bool) {
+/// What silhouette a fixture unit is built at.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    /// The default test saloon — a cruiser.
+    Sedan,
+    /// A box van — an ambulance.
+    Van,
+    /// A 7.8 m appliance, past `APPLIANCE_HALF_LENGTH_M`.
+    Appliance,
+}
+
+fn park_unit(world: &mut EcsWorld, guid: Uuid, at: DVec3, livery: &'static Livery, shape: Shape) {
     let mut def = VehicleDef::default();
-    if van {
+    if shape == Shape::Van {
         def.body = inf_ecs::vehicle::VehicleBody::Van;
         def.half_extents = Vec3d::new(1.0, 0.9, 2.4);
         def.half_track_m = 0.88;
         def.half_wheelbase_m = 1.85;
+    }
+    if shape == Shape::Appliance {
+        def.body = inf_ecs::vehicle::VehicleBody::Truck;
+        def.half_extents = Vec3d::new(1.05, 1.1, 3.9);
+        def.half_track_m = 0.92;
+        def.half_wheelbase_m = 2.6;
     }
     inf_ecs::traffic::size_the_suspension(&mut def);
     // **AT ITS OWN RESTING HEIGHT, and this cost the fixture an afternoon.**
@@ -206,14 +230,21 @@ impl Town {
             AMBULANCE,
             DVec3::new(-46.0, 0.0, 0.0),
             &AMBULANCE_LIVERY,
-            true,
+            Shape::Van,
         );
         park_unit(
             &mut world,
             CRUISER,
             DVec3::new(-46.0, 0.0, 12.0),
             &CRUISER_LIVERY,
-            false,
+            Shape::Sedan,
+        );
+        park_unit(
+            &mut world,
+            APPLIANCE,
+            DVec3::new(-46.0, 0.0, 26.0),
+            &ENGINE_LIVERY,
+            Shape::Appliance,
         );
         hero(&mut world, DVec3::new(50.0, 0.0, 50.0));
         world.mark_dirty();
@@ -304,14 +335,21 @@ fn a_parked_unit_is_owned_by_the_block_it_is_parked_at() {
     );
     assert_eq!(
         fleet.units.len(),
-        2,
-        "the fleet holds {} unit(s) against the two parked — a town whose kerbs \
+        3,
+        "the fleet holds {} unit(s) against the three parked — a town whose kerbs \
          are full of traffic must contribute NONE of it, or the light bar is \
          not doing the discriminating",
         fleet.units.len()
     );
     assert_eq!(fleet.units[&AMBULANCE].kind, UnitKind::Ambulance);
     assert_eq!(fleet.units[&CRUISER].kind, UnitKind::Police);
+    assert_eq!(
+        fleet.units[&APPLIANCE].kind,
+        UnitKind::Fire,
+        "a 7.8 m red-barred vehicle is not an appliance — the length rule is \
+         `APPLIANCE_HALF_LENGTH_M` and it is the one thing separating a fire \
+         engine from an ambulance"
+    );
     assert_eq!(
         fleet.units[&AMBULANCE].station, fleet.units[&CRUISER].station,
         "two vehicles on one apron belong to two different stations"
@@ -641,7 +679,191 @@ fn bar_intensity(world: &EcsWorld, bar: Uuid) -> f32 {
         .expect("the bar is drawn")
 }
 
-// ── (e) absent costs nothing ────────────────────────────────────────────────
+// ── (e) the scene ───────────────────────────────────────────────────────────
+
+/// **A BUILDING BURNS, THE APPLIANCE COMES, IT SMOKES, IT IS PUT OUT — AND THE
+/// SMOKE LEAVES NOTHING BEHIND.**
+///
+/// Six claims, and the last two are the ones a screenshot cannot make:
+///
+/// 1. the right unit goes — the appliance and not the ambulance parked beside
+///    it;
+/// 2. the fire's **intensity** falls while a crew is on it, so a bigger fire
+///    takes longer rather than every fire taking the same five seconds;
+/// 3. smoke exists while it burns — real `Sprite` entities, spawned by the sim;
+/// 4. the puffs are **bounded and reaped**: they never exceed `MAX_PUFFS` and
+///    an old one is despawned rather than left rising for ever;
+/// 5. a hose is drawn — `extinguish_beams` answers a segment while the crew
+///    works and nothing when it does not;
+/// 6. and after `clear_dispatch` **no smoke entity is left in the world**,
+///    which is the P21 law applied to a sprite: a puff in the author's document
+///    is a row in the Outliner that no Outliner row put there.
+#[test]
+fn a_fire_brings_the_appliance_smokes_and_leaves_nothing_behind() {
+    let mut town = Town::new();
+    town.steps(20);
+
+    let at = DVec3::new(100.0, 0.0, 100.0);
+    let fire = inf_physics::d3::dispatch::report_incident(
+        &mut town.world,
+        inf_ecs::dispatch::IncidentKind::Fire {
+            building: Uuid::from_u128(0x0E52_2001),
+            intensity: 1.0,
+        },
+        at,
+    )
+    .expect("the staging door opened a fire");
+
+    let mut peak_puffs = 0usize;
+    let mut ever_beamed = false;
+    let mut min_intensity = 1.0f64;
+    let mut resolved = false;
+    let mut spawned_total = 0usize;
+    let mut seen: std::collections::BTreeSet<Uuid> = Default::default();
+    for _ in 0..6000 {
+        let s = town.step();
+        let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+        peak_puffs = peak_puffs.max(res.puffs.len());
+        for g in res.puffs.keys() {
+            if seen.insert(*g) {
+                spawned_total += 1;
+            }
+        }
+        if let Some(i) = res.incidents.get(&fire) {
+            if let inf_ecs::dispatch::IncidentKind::Fire { intensity, .. } = i.kind {
+                min_intensity = min_intensity.min(intensity);
+            }
+            resolved |= i.state == IncidentState::Resolved;
+        }
+        ever_beamed |= !inf_physics::d3::dispatch::extinguish_beams(&town.world).is_empty();
+        if s.returned > 0 {
+            break;
+        }
+    }
+    let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+    let incident = res.incidents.get(&fire).expect("the fire is in the ledger");
+    println!(
+        "EMS2 fire: unit {:?}; intensity fell to {min_intensity:.3}; {peak_puffs} \
+         puff(s) at peak, {spawned_total} over the whole fire; beam {ever_beamed}",
+        incident.unit.map(|u| if u == APPLIANCE {
+            "appliance"
+        } else {
+            "the WRONG one"
+        })
+    );
+    assert_eq!(
+        incident.unit,
+        Some(APPLIANCE),
+        "the wrong unit was sent to a fire"
+    );
+    assert!(resolved, "the fire was never put out");
+    assert!(
+        min_intensity <= 0.0,
+        "the fire resolved at intensity {min_intensity:.3} — it was closed by a \
+         clock rather than put out, so a bigger fire would take the same time"
+    );
+    assert!(peak_puffs > 0, "a burning building made no smoke");
+    assert!(
+        peak_puffs <= dispatch::MAX_PUFFS,
+        "{peak_puffs} puffs against a ceiling of {}",
+        dispatch::MAX_PUFFS
+    );
+    assert!(
+        spawned_total > peak_puffs,
+        "{spawned_total} puff(s) were ever spawned and {peak_puffs} were alive \
+         at once — nothing was ever REAPED, so the column grows for the whole \
+         session"
+    );
+    assert!(
+        ever_beamed,
+        "no extinguish line was ever drawn while a crew worked a fire"
+    );
+    assert!(
+        inf_physics::d3::dispatch::extinguish_beams(&town.world).is_empty(),
+        "a hose is still being played on a fire that is out"
+    );
+
+    // (6) …and the session leaves nothing behind.
+    inf_ecs::dispatch::clear_dispatch(&mut town.world);
+    let left = town
+        .world
+        .world()
+        .iter_entities()
+        .filter(|e| e.get::<inf_ecs::components::Sprite>().is_some())
+        .count();
+    assert_eq!(
+        left, 0,
+        "{left} smoke sprite(s) survived `clear_dispatch` — a puff in the \
+         author's document is a row in the Outliner that no Outliner row put \
+         there"
+    );
+}
+
+/// **THE PARAMEDIC KNEELS, AND STANDS UP AGAIN.**
+///
+/// The posture is written onto the crew body's own `CrowdAgent`, which is where
+/// `step_pose_evaluation` reads one from — and nothing else writes it for that
+/// body, because a crew member is a `spawn_body` and not a population record.
+/// The release is the half that is easy to leave out: a paramedic who drove home
+/// on one knee is the posture write with no undo.
+///
+/// …and the same run proves the repeat-call loop is closed: the patient is still
+/// on the ground at the end, and no second ambulance was called.
+#[test]
+fn a_paramedic_kneels_at_the_patient_and_stands_up_to_leave() {
+    let mut town = Town::new();
+    town.steps(10);
+    collapse(&mut town.world, PATIENT, DVec3::new(150.0, 0.0, 50.0));
+    let crew = dispatch::crew_guid(AMBULANCE);
+
+    let mut knelt = 0usize;
+    let mut opened = 0usize;
+    for _ in 0..6000 {
+        let s = town.step();
+        opened += s.opened;
+        if let Some(e) = town.world.entity_of(crew) {
+            if let Some(a) = town.world.world().get::<inf_ecs::crowd::CrowdAgent>(e) {
+                if a.posture == inf_ecs::components::SlotPosture::Kneel {
+                    knelt += 1;
+                }
+            }
+        }
+        if s.returned > 0 {
+            break;
+        }
+    }
+    println!("EMS2 kneel: {knelt} step(s) on one knee, {opened} incident(s) opened");
+    assert!(
+        knelt > 100,
+        "the paramedic knelt for {knelt} step(s) — `STABILIZE_S` is {} seconds, \
+         so a working crew should be down for hundreds",
+        dispatch::STABILIZE_S
+    );
+    assert!(
+        town.world.entity_of(crew).is_none(),
+        "the crew is still in the street"
+    );
+
+    // The repeat-call loop, closed. The body is still `Downed` — this engine has
+    // no stretcher — and it does not call a second ambulance.
+    assert!(
+        inf_ecs::weapon::is_downed(&town.world, PATIENT),
+        "the patient stopped being downed, so this half is about a body that is \
+         no longer there rather than about the `treated` set"
+    );
+    let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+    assert!(
+        res.treated.contains(&PATIENT),
+        "the patient was never marked treated"
+    );
+    assert_eq!(
+        opened, 1,
+        "{opened} incident(s) were opened for one body — the `treated` set is \
+         not stopping the second call"
+    );
+}
+
+// ── (f) absent costs nothing ────────────────────────────────────────────────
 
 /// **A TOWN WITH NO EMERGENCY VEHICLE IN IT HAS NO DISPATCHER.**
 ///
