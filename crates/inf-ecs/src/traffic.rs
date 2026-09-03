@@ -573,6 +573,19 @@ pub struct DriveView<'a> {
     pub speed_limit_mps: f64,
     /// Metres to the car in front along this path, or `None` for clear road.
     pub gap_m: Option<f64>,
+    /// **How far right of its lane this driver should aim**, metres (wave EMS2).
+    ///
+    /// `0.0` for every car that is not getting out of somebody's way, which is
+    /// every car in every level committed before this wave — and the term below
+    /// is *guarded* on exactly that, so a zero bias is bit-identical to the
+    /// arithmetic that had no bias at all. (Not merely "adds nothing": `x + 0.0`
+    /// turns a `-0.0` into a `+0.0`, and a sign of zero that reached
+    /// `move_input` would move a trace byte.)
+    ///
+    /// The sign is [`right_of`]'s, so positive is the kerb on a right-hand-drive
+    /// carriageway — which is the side this engine's `lanes_of_spine` lays its
+    /// forward lanes on.
+    pub lateral_bias_m: f64,
     /// **Whether the path closes on itself** — a [`Circuit`]'s loop.
     ///
     /// Two things turn on it and both are wrong without it: the aim point wraps
@@ -738,6 +751,26 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
         view.s_m + lookahead
     };
     let aim = view.path.position_at(ahead_s);
+    // ── EMS2 the yield. One term, guarded, on an aim point the pure pursuit was
+    //    going to chase anyway: a car told to get out of the way aims a lane's
+    //    half-width to its right and the existing wheel rule takes it there,
+    //    slowing for the corner and stopping for the queue exactly as before.
+    //
+    //    Guarded rather than unconditional so a level with no siren in it
+    //    produces the same bits it always did — see `DriveView::lateral_bias_m`.
+    let aim = if view.lateral_bias_m != 0.0 && view.lateral_bias_m.is_finite() {
+        let f0 = {
+            let len = (view.forward.x * view.forward.x + view.forward.z * view.forward.z).sqrt();
+            if len > 0.0 {
+                DVec3::new(view.forward.x / len, 0.0, view.forward.z / len)
+            } else {
+                DVec3::Z
+            }
+        };
+        aim + right_of(f0) * view.lateral_bias_m
+    } else {
+        aim
+    };
     let to = aim - view.at;
     let f = {
         let len = (view.forward.x * view.forward.x + view.forward.z * view.forward.z).sqrt();
@@ -2278,8 +2311,160 @@ mod tests {
             s_m: s,
             speed_limit_mps: 14.0,
             gap_m: None,
+            lateral_bias_m: 0.0,
             loops: false,
         }
+    }
+
+    /// **THE TWO YIELDS, PRICED** (wave EMS2) — and the cheaper one deadlocks.
+    ///
+    /// # The choice this arm exists to settle
+    ///
+    /// A siren coming up behind a civilian car can be answered two ways:
+    ///
+    /// * **stop in lane** — the responder is injected into the civilian's own
+    ///   `gap_m` as a phantom obstacle and the *existing* stopping-distance rule
+    ///   brings it to a halt. **Zero new fields**, zero new terms, and it reuses
+    ///   a rule already proven by `a_car_behind_a_queue_slows_to_a_stop`;
+    /// * **pull over** — one field on [`DriveView`] and one guarded term in
+    ///   [`drive_intent`]'s wheel step.
+    ///
+    /// The first is cheaper by every measure of *edits*. It is also **wrong**,
+    /// and the reason is arithmetic rather than taste: `drive_intent` "never
+    /// changes lane and never overtakes" — its own stated v1 bound — so a
+    /// civilian stopped in the lane stays inside
+    /// `inf_physics::d3::traffic::CORRIDOR_HALF_M` for ever, `gap_ahead` keeps
+    /// answering [`STANDING_GAP_M`], and the responder's own stopping-distance
+    /// rule holds it at **exactly zero** behind it. The siren arrives at the
+    /// back of the queue it created and stops there.
+    ///
+    /// The numbers below are the two `target_mps` a responder is left with, and
+    /// they are what settled the clause. [`YIELD_BIAS_M`] is 2.6 m against a
+    /// 2.5 m corridor half-width, which is the whole of why the pull-over works:
+    /// the yielding car leaves the corridor, so the gap re-opens.
+    ///
+    /// [`YIELD_BIAS_M`]: crate::dispatch::YIELD_BIAS_M
+    /// [`STANDING_GAP_M`]: STANDING_GAP_M
+    #[test]
+    fn a_car_that_stops_in_lane_stops_the_ambulance_behind_it() {
+        let p = path(&[(0.0, 0.0), (300.0, 0.0)]);
+        let limit = 11.7;
+        let responder = |gap: Option<f64>| -> DriveIntent {
+            let mut v = view(&p, DVec3::new(50.0, 0.0, 0.0), DVec3::X, 8.0);
+            v.speed_limit_mps = limit;
+            v.gap_m = gap;
+            drive_intent(&v)
+        };
+        // (a) the cheap design: the civilian stops IN the lane, so it stays an
+        //     obstacle at the standing gap for ever.
+        let stopped = responder(Some(STANDING_GAP_M));
+        // (b) the shipped design: the civilian has left the corridor, so
+        //     `gap_ahead` no longer sees it at all.
+        let cleared = responder(None);
+        println!(
+            "EMS2 yield pricing: stop-in-lane leaves the responder at \
+             {:.3} m/s; pull-over leaves it at {:.3} m/s (limit {limit})",
+            stopped.target_mps, cleared.target_mps
+        );
+        assert_eq!(
+            stopped.target_mps, 0.0,
+            "a civilian stopped at the standing gap left the responder \
+             {:.3} m/s — if this is ever non-zero the pricing below has changed \
+             and the ruling should be revisited",
+            stopped.target_mps
+        );
+        assert_eq!(
+            cleared.target_mps, limit,
+            "a cleared lane did not give the responder its limit back"
+        );
+        // …and the 2.6 m of bias really does clear the 2.5 m corridor, which is
+        // the load-bearing inequality of the whole clause.
+        assert!(
+            crate::dispatch::YIELD_BIAS_M > 2.5,
+            "the pull-over ({} m) no longer clears the following rule's 2.5 m \
+             corridor half-width, so a yielding car stays an obstacle and the \
+             design silently degenerates into the stop-in-lane this arm rejects",
+            crate::dispatch::YIELD_BIAS_M
+        );
+    }
+
+    /// **THE BIAS MOVES THE CAR, AND ZERO MOVES NOTHING AT ALL.**
+    ///
+    /// The second half is the one worth having: the term is *guarded* so a level
+    /// with no siren in it steers the bits it always steered, and a guard that
+    /// was quietly dropped would still pass an "it steers right" assertion.
+    /// Compared as `==` on the whole intent, because "bit-identical" is the
+    /// claim.
+    #[test]
+    fn a_yielding_car_aims_at_the_kerb_and_a_zero_bias_changes_nothing() {
+        let p = path(&[(0.0, 0.0), (300.0, 0.0)]);
+        let base = view(&p, DVec3::new(50.0, 0.0, 0.0), DVec3::X, 8.0);
+        let plain = drive_intent(&base);
+        let mut zero = base;
+        zero.lateral_bias_m = 0.0;
+        assert_eq!(
+            plain,
+            drive_intent(&zero),
+            "a zero bias changed the intent — the guard is gone and every level \
+             committed before this wave steers different bits"
+        );
+        let mut over = base;
+        over.lateral_bias_m = crate::dispatch::YIELD_BIAS_M;
+        let yielded = drive_intent(&over);
+        println!(
+            "EMS2 yield: steer {:.4} -> {:.4}",
+            plain.move_input.x, yielded.move_input.x
+        );
+        assert!(
+            plain.move_input.x.abs() < 1e-12,
+            "the control is not straight to begin with: {plain:?}"
+        );
+        assert!(
+            yielded.move_input.x > 0.05,
+            "a car told to pull {} m over steered {:.4} — `right_of`'s sign is \
+             positive, so this must be a right-hand turn onto the kerb",
+            crate::dispatch::YIELD_BIAS_M,
+            yielded.move_input.x
+        );
+        // …and it does not become a hard turn: the pull-over is a lane's
+        // half-width over a lookahead, not a swerve.
+        assert!(
+            yielded.move_input.x < 0.9,
+            "the yield asks for {:.4} of full lock — that is a swerve, not a \
+             pull-over",
+            yielded.move_input.x
+        );
+    }
+
+    /// **THE RULE FIRES FOR A SIREN BEHIND AND FOR NOTHING ELSE.**
+    ///
+    /// Four negatives, and each is a street this rule must not stop: a unit in
+    /// front, a unit on the next street over, a unit three blocks back, and an
+    /// empty list.
+    #[test]
+    fn only_a_siren_behind_and_in_line_makes_a_car_pull_over() {
+        use crate::dispatch::{yield_bias_m, YIELD_BIAS_M};
+        let at = DVec3::new(100.0, 0.0, 0.0);
+        let fwd = DVec3::X;
+        let unit = |x: f64, z: f64| vec![(Uuid::from_u128(1), DVec3::new(x, 0.0, z))];
+        assert_eq!(yield_bias_m(at, fwd, &unit(70.0, 0.0)), YIELD_BIAS_M);
+        assert_eq!(
+            yield_bias_m(at, fwd, &unit(130.0, 0.0)),
+            0.0,
+            "a car pulled over for a unit coming the other way — it would be \
+             moving INTO it"
+        );
+        assert_eq!(
+            yield_bias_m(at, fwd, &unit(70.0, 20.0)),
+            0.0,
+            "a car pulled over for a unit on the next street"
+        );
+        assert_eq!(
+            yield_bias_m(at, fwd, &unit(-100.0, 0.0)),
+            0.0,
+            "a car pulled over for a unit 200 m back"
+        );
+        assert_eq!(yield_bias_m(at, fwd, &[]), 0.0);
     }
 
     /// A car on its lane, pointing down it, at the limit, asks for nothing.
@@ -2387,6 +2572,7 @@ mod tests {
             s_m: 95.0,
             speed_limit_mps: 25.0,
             gap_m: None,
+            lateral_bias_m: 0.0,
             loops: false,
         });
         assert!(i.target_mps < 25.0, "{i:?}");
@@ -2446,6 +2632,7 @@ mod tests {
             path: &p,
             s_m: 0.0,
             speed_limit_mps: f64::NAN,
+            lateral_bias_m: 0.0,
             gap_m: Some(f64::NAN),
             loops: false,
         });

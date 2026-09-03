@@ -625,6 +625,8 @@ fn steer(
         // a siren buys and it is the one number a responding vehicle does
         // differently from a taxi; everything else about the drive is identical.
         speed_limit_mps: traffic::street_speed_mps() * RESPONSE_SPEED_FACTOR,
+        // A unit under way never yields to itself.
+        lateral_bias_m: 0.0,
         gap_m: None,
         loops: false,
     };

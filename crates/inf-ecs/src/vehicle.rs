@@ -3801,6 +3801,7 @@ mod tests {
                     emissive_intensity: 3.0,
                 },
             )],
+            service: None,
         };
         let def = VehicleDef::default();
         let chassis = Uuid::from_u128(0xE_5A1);

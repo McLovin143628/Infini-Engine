@@ -1008,6 +1008,84 @@ pub fn siren_cues(world: &EcsWorld) -> &[SirenCue] {
         .unwrap_or(&[])
 }
 
+// ── the yield ───────────────────────────────────────────────────────────────
+
+/// How far behind a car a siren is felt, metres.
+///
+/// Sixty. It is `inf_physics::d3::traffic::LOOK_AHEAD_M`'s number seen from the
+/// other end — four seconds at a 50 km/h limit — so a car begins moving over
+/// about as far out as it begins braking for a queue. Further than that and a
+/// street pulls over for a siren three blocks away, which reads as a bug.
+pub const YIELD_RANGE_M: f64 = 60.0;
+
+/// How far to either side of a car's own heading a siren behind it counts,
+/// metres.
+///
+/// Six — a carriageway. A unit on the parallel street one block over is not
+/// behind this car in any sense that matters, and a rule with no lateral bound
+/// would have a whole junction pulling over for a unit crossing it.
+pub const YIELD_CORRIDOR_M: f64 = 6.0;
+
+/// **How far a yielding car pulls over**, metres, and the number is the whole
+/// design.
+///
+/// 2.6 m, and it is chosen against `inf_physics::d3::traffic::CORRIDOR_HALF_M`
+/// (2.5 m) — the half-width inside which the following rule counts a body as
+/// *in the way*. A car that pulls over by 2.6 m has left the responding unit's
+/// corridor, so `gap_ahead` stops seeing it and the unit's own
+/// stopping-distance rule stops braking for it.
+///
+/// **That is why the pull-over was shipped and the stop-in-lane was not.** See
+/// `a_car_that_stops_in_lane_stops_the_ambulance_behind_it` for the
+/// measurement: the cheaper design costs zero fields and *deadlocks*.
+pub const YIELD_BIAS_M: f64 = 2.6;
+
+/// **How far right this car should aim to let a siren past** — the whole yield
+/// rule, as a pure function.
+///
+/// `hot` is [`crate::dispatch`]'s own running-hot list (position only; the guid
+/// is the caller's business). `at` and `forward` are the car's.
+///
+/// A unit counts when it is **behind** this car — `d · forward > 0` where `d`
+/// runs from the unit to the car — inside [`YIELD_RANGE_M`] and inside
+/// [`YIELD_CORRIDOR_M`] of its heading. A unit *in front* is somebody this car
+/// is already going to meet, and moving over for it would be moving into it.
+///
+/// `0.0` on a street with no sirens on it, which is every street in every level
+/// committed before this wave — and `drive_intent`'s term is guarded on exactly
+/// that value, so those levels steer the bits they always steered.
+///
+/// `O(hot)`, and `hot` is at most the units a level owns.
+pub fn yield_bias_m(at: DVec3, forward: DVec3, hot: &[(Uuid, DVec3)]) -> f64 {
+    if hot.is_empty() || !at.is_finite() {
+        return 0.0;
+    }
+    let len = (forward.x * forward.x + forward.z * forward.z).sqrt();
+    if !(len.is_finite() && len > 1.0e-6) {
+        return 0.0;
+    }
+    let f = DVec3::new(forward.x / len, 0.0, forward.z / len);
+    for (_, unit) in hot {
+        let d = *unit - at;
+        if !d.is_finite() {
+            continue;
+        }
+        // Behind: the car is ahead of the unit along its own heading.
+        let along = -(d.x * f.x + d.z * f.z);
+        if along <= 0.0 || along > YIELD_RANGE_M {
+            continue;
+        }
+        // …and roughly on the same line. `|d x f|` in the ground plane, which is
+        // a cross product and no trigonometry (the P14 law).
+        let lateral = (d.z * f.x - d.x * f.z).abs();
+        if lateral > YIELD_CORRIDOR_M {
+            continue;
+        }
+        return YIELD_BIAS_M;
+    }
+    0.0
+}
+
 // ── the light bar ───────────────────────────────────────────────────────────
 
 /// How fast a responding unit's bar flashes, hertz.

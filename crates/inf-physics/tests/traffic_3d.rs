@@ -925,6 +925,7 @@ fn a_loop_does_not_brake_at_its_own_seam() {
             s_m: len - 8.0,
             speed_limit_mps: 8.4,
             gap_m: None,
+            lateral_bias_m: 0.0,
             loops,
         })
     };
@@ -1031,6 +1032,7 @@ fn a_body_in_the_lane_is_a_gap_the_car_slows_for() {
         s_m: 0.0,
         speed_limit_mps: 8.4,
         gap_m: None,
+        lateral_bias_m: 0.0,
         loops: false,
     });
     assert_eq!(clear.target_mps, 8.4);
@@ -1060,6 +1062,7 @@ fn clear_view(lane: &inf_ecs::traffic::LanePath) -> traffic::DriveView<'_> {
         s_m: 0.0,
         speed_limit_mps: 8.4,
         gap_m: None,
+        lateral_bias_m: 0.0,
         loops: false,
     }
 }

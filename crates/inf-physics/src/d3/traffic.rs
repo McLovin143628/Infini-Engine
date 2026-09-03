@@ -161,6 +161,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    hours — so it is built the first time something actually steers and
     //    not at all otherwise.
     let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
+    // ── and the sirens, on the same terms and for the same reason (EMS2). The
+    //    yield rule is `O(hot)` per steered car; gathering the list per car
+    //    would be `O(cars x units)`, and gathering it unconditionally would walk
+    //    the dispatcher's runs on every street in the world that has no
+    //    emergency vehicle within a mile of it.
+    let mut hot: Option<Vec<(Uuid, DVec3)>> = None;
     // ── and the colliders a settle ray must look THROUGH, on the same terms:
     //    built the first time a car actually asks what it is standing on, and
     //    not at all on a settled street where every car already knows.
@@ -341,8 +347,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     if obstacles.is_none() {
                         obstacles = Some(obstacles_of(world));
                     }
+                    if hot.is_none() {
+                        hot = Some(super::dispatch::running_hot(world));
+                    }
                     let obs = obstacles.as_deref().unwrap_or(&[]);
-                    steer_car(world, bridge, guid, rec, clock, leg, obs);
+                    let sirens = hot.as_deref().unwrap_or(&[]);
+                    steer_car(world, bridge, guid, rec, clock, leg, obs, sirens);
                 } else {
                     despawn_driver(world, bridge, guid);
                     if let Some(v) = bridge.vehicle_mut(guid) {
@@ -457,6 +467,7 @@ fn view_of<'a>(
     clock: CrowdClock,
     leg: inf_ecs::crowd::ActiveLeg,
     obstacles: &[(Uuid, DVec3)],
+    hot: &[(Uuid, DVec3)],
 ) -> Option<DriveView<'a>> {
     let path = rec.active_path(clock, leg)?;
     let body = bridge.body_of(chassis)?;
@@ -467,6 +478,10 @@ fn view_of<'a>(
     let forward = rot * DVec3::Z;
     let s_m = path.project(at).s_m;
     let driver = traffic::driver_guid(chassis);
+    // ── EMS2 the yield. The rule is `inf_ecs::dispatch`'s; what is here is the
+    //    list, gathered once a step by the caller and handed down — the
+    //    `obstacles` shape one system along.
+    let yield_bias = inf_ecs::dispatch::yield_bias_m(at, forward, hot);
     Some(DriveView {
         at,
         forward,
@@ -475,6 +490,7 @@ fn view_of<'a>(
         s_m,
         speed_limit_mps: traffic::street_speed_mps(),
         gap_m: gap_ahead(path, s_m, chassis, driver, obstacles),
+        lateral_bias_m: yield_bias,
         loops: rec.circuit.is_some(),
     })
 }
@@ -497,7 +513,8 @@ pub fn probe_intent(
     let clock = CrowdClock::from_world(world, pop.steps as f64 * dt);
     let leg = rec.leg_at(chassis, clock);
     let obstacles = obstacles_of(world);
-    let view = view_of(bridge, chassis, rec, clock, leg, &obstacles)?;
+    let hot = super::dispatch::running_hot(world);
+    let view = view_of(bridge, chassis, rec, clock, leg, &obstacles, &hot)?;
     Some(traffic::drive_intent(&view))
 }
 
@@ -516,9 +533,10 @@ fn steer_car(
     clock: CrowdClock,
     leg: inf_ecs::crowd::ActiveLeg,
     obstacles: &[(Uuid, DVec3)],
+    hot: &[(Uuid, DVec3)],
 ) {
     let driver = traffic::driver_guid(chassis);
-    let Some(view) = view_of(bridge, chassis, rec, clock, leg, obstacles) else {
+    let Some(view) = view_of(bridge, chassis, rec, clock, leg, obstacles, hot) else {
         return;
     };
     let intent = traffic::drive_intent(&view);
