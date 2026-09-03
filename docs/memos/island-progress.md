@@ -28313,20 +28313,47 @@ carried it, VEH2a carried it again, and VEH2b's silent traffic carried it a
 third time.
 
 `AudioCommand::SetPosition` arrived at EMS2 for sirens and is the same command
-on the same queue, so the fix is four lines in a fence that is character-
-identical across the two hosts. Armed against the WORLD rather than against the
-stream's own shape: over the boat leg the launch issues **one** `Play` and a
-`SetPosition` on every step it is stepped, the **last** of them is where the
-hull actually is to 1 µm, and the positions **span 40 m or more** of the
-crossing — a `SetPosition` that shipped a constant would satisfy the first two
-claims and fail the third.
+on the same queue, so the fix is **six lines of code inside sixteen** (the other
+ten are the comment saying why), in a fence the audit checked is **byte**-identical
+across the two hosts — md5 `37b93867…` on both spans, chosen by the same counted
+`MIRROR-BEGIN vehicle_engine_audio` marker rather than by two hand-picked
+regions. *The ledger first said "four lines"; the diff is +16 per host.*
 
-On the island **both craft carry a voice**. In the GATE'S fixture only the
-launch does, and deliberately: two looping spatial sources in one world would
-make *"the emitter that moved"* ambiguous. Traffic's mute ruling is about
-seventeen parked cars and is
+Armed against the WORLD rather than against the stream's own shape: over the
+boat leg the launch issues **one** `Play` and a `SetPosition` on every step it
+is stepped, the **last** of them is where the hull actually is to 1 µm, and the
+positions **span 40 m or more** of the crossing — a `SetPosition` that shipped a
+constant would satisfy the first two claims and fail the third. Mutation-checked
+by the audit: freezing the fence's `position` to the origin reds it by name in
+both hosts.
+
+**On the island both craft carry a voice, AND SO DO BOTH IN THE GATE NOW** —
+this is the audit's correction. The fixture voiced only the launch, on the
+reasoning that two looping spatial sources would make *"the emitter that moved"*
+ambiguous. The ambiguity was in the **arm**: it filtered `SetPosition` with
+`{ position, .. }` and threw the **source key away**, so it was reading every
+emitter in the world at once and only stayed about the launch because the world
+had been quietened around it. A stream is per-source or it is a mixture. The arm
+filters by `guid_source_key` now, the fixture voices both craft as the island
+does, and the parked helicopter is what makes the launch's span a measurement:
+
+| | `Play` | `SetPosition` | span | ends from its own craft |
+|---|---|---|---|---|
+| the launch, under helm | 1 | 800 | **51.7 m** | 0.000 m |
+| the helicopter, nobody aboard | 1 | 800 | **0.001 m** | 0.000 m |
+
+Eight hundred beats rather than the leg's 1 652, and that is a **bound with a
+cause**: `RuntimeSim`'s audio log is a bounded ring, and two voiced craft over
+the full script overrun it by 2 048 commands — "one `Play` each" is not a claim a
+tail can carry. The helicopter's emitter had **no arm at all** before this.
+
+Traffic's mute ruling is about seventeen parked cars and is
 unchanged — what this unblocks is stated in VEH2b's own carried item 5, and
-taking it is that wave's business rather than this one's.
+taking it is that wave's business rather than this one's. One thing the audit
+found and did not fix: the island drive gate's own audio tally
+(`island_gate.rs:6013`) counts `Play`/`SetPitch`/`SetVolume` with a catch-all,
+so **that** two-host comparison is blind to `SetPosition` entirely; the mirror
+fence is what covers the seam there.
 
 ### Clause 2 — the helicopter
 
@@ -28585,7 +28612,7 @@ certify a boat this game does not ship.
 | the boat leg | 1 411 of 1 652 steps seated, **147.7 m** reached, afloat at the end (y = 0.24), and nearer the mooring than its furthest point — so the helm turned it |
 | the air leg | 2 221 of 2 311 steps seated, **42.5 m** of altitude, 45.7 m of circuit, back on the ground at y = 0.91 with **5 mm** of drift over the three seconds after it landed |
 | PIE == shipping | **both legs, step for step**, on the craft's pose to the millimetre and the driver's mode; the shipped host's own `state_bytes` fold checked to be a moving trace (1 623 of 1 652 distinct poses on the boat leg) |
-| the launch's voice | **one** `Play` and **1 652** `SetPosition`s, one a step, spanning **147.7 m** and ending where the hull is to a micrometre |
+| the launch's voice | **one** `Play` and a `SetPosition` a step, ending where the hull is to a micrometre. *Measured at `4c69d3b5` as 1 652 commands spanning 147.7 m over the whole leg with the helicopter silent; the audit voices both craft, which overruns the bounded log, so the arm now reads the leg's first **800** beats — **51.7 m** of span, and the parked helicopter's **0.001 m** beside it* |
 | the vehicle phase | **0.00110 ms** a step over the boat leg and **0.00123 ms** over the air leg, with a boat and a helicopter in the world, against a 0.5 ms ceiling minted for 64 cars |
 
 **`VEHICLE_STEP_BUDGET_MS` does not move.** A hull solve is one thruster and

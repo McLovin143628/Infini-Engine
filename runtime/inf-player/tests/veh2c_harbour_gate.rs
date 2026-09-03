@@ -80,6 +80,16 @@ const PAD_AT: DVec3 = DVec3::new(0.0, 0.0, 26.0);
 /// meeting an aircraft. This is the standoff that reaches.
 const HERO_STANDOFF_M: f64 = 1.8;
 
+/// How many beats of the boat leg the ENGINE-EMITTER arm runs.
+///
+/// The whole script, with both craft voiced, pushes about ten thousand audio
+/// commands and `RuntimeSim`'s command log is a BOUNDED ring — the slice would
+/// be a *tail*, and "one `Play` each" is not a claim a tail can carry
+/// (`dropped_audio_commands` reads 2 048 over the full script). Eight hundred
+/// beats is a prefix that fits, and by then the launch has already carried its
+/// emitter 51.7 m, which is past the span arm's 40 m.
+const AUDIO_BEATS: usize = 800;
+
 const PAD_HALF_Y: f64 = 0.3;
 const PAD_LIP: f64 = 0.12;
 
@@ -153,9 +163,7 @@ fn build(world: &mut EcsWorld) {
             paint: Color::new(0.86, 0.87, 0.88, 1.0),
             clip: None,
             // The launch has a VOICE, because the arm below is about where that
-            // voice is. The helicopter deliberately does not: two looping
-            // spatial sources in one fixture would make "the emitter that
-            // moved" ambiguous.
+            // voice is.
             engine_voice: true,
             livery: None,
         },
@@ -176,7 +184,15 @@ fn build(world: &mut EcsWorld) {
             yaw_deg: 0.0,
             paint: Color::new(0.22, 0.30, 0.42, 1.0),
             clip: None,
-            engine_voice: false,
+            // …AND SO DOES THE HELICOPTER, which is what the island itself gives
+            // both craft (`island.rs:902` and `:1016`). This fixture's first cut
+            // silenced it so that "the emitter that moved" could not be
+            // ambiguous; the audit's reading is that the ambiguity was in the
+            // ARM, which filtered no source at all, and that a fixture voicing
+            // one of the two craft the island voices certifies a different
+            // world. Both sing now and the arm tells them apart by key — and the
+            // parked one is what makes the moving one's span a measurement.
+            engine_voice: true,
             livery: None,
         },
     );
@@ -772,13 +788,13 @@ fn a_liveried_helicopter_would_be_claimed_by_the_dispatcher() {
 fn the_launchs_engine_is_heard_where_the_launch_is() {
     use inf_audio::AudioCommand;
 
-    let s = script();
+    let s = &script()[..AUDIO_BEATS];
     let hero_at = DVec3::new(MOORING.x, 1.25, MOORING.z + 2.2);
     let mut world = EcsWorld::new();
     build(&mut world);
     place_hero(&mut world, hero_at);
     let mut sim = RuntimeSim::with_gravity(world, Vec::new(), WorldGravity::EARTH, HZ);
-    for beat in &s {
+    for beat in s {
         let input = RuntimeInput::with_down(beat.down.iter().copied()).with_axes(beat.axes());
         sim.step_once(input);
     }
@@ -788,54 +804,106 @@ fn the_launchs_engine_is_heard_where_the_launch_is() {
         "the log is a tail, so the first command in it is not the first command"
     );
 
-    let moves: Vec<DVec3> = sim
-        .audio_command_log()
-        .iter()
-        .filter_map(|c| match c {
-            AudioCommand::SetPosition { position, .. } => Some(*position),
-            _ => None,
-        })
-        .collect();
-    let plays = sim
-        .audio_command_log()
-        .iter()
-        .filter(|c| matches!(c, AudioCommand::Play(_)))
-        .count();
-    let hull = look(sim.world(), LAUNCH).1;
-    // Guarded rather than indexed: an empty stream is a claim this arm should
-    // report, not an index panic three lines before the assertion that says so.
-    let spread = match moves.first() {
-        Some(first) => moves
+    // BY SOURCE KEY, which is the audit's correction. The first cut filtered
+    // `SetPosition` with `{ position, .. }` and threw the source away, so the
+    // arm was reading every emitter in the world at once and only stayed about
+    // the launch because the fixture had silenced the other craft. A stream is
+    // per-source or it is a mixture.
+    let key_of = |guid: Uuid| guid.as_u128() as u64;
+    let moves_of = |want: u64| -> Vec<DVec3> {
+        sim.audio_command_log()
             .iter()
-            .map(|p| (*p - *first).length())
-            .fold(0.0f64, f64::max),
-        None => 0.0,
+            .filter_map(|c| match c {
+                AudioCommand::SetPosition { source, position } if *source == want => {
+                    Some(*position)
+                }
+                _ => None,
+            })
+            .collect()
     };
+    let plays_of = |want: u64| -> usize {
+        sim.audio_command_log()
+            .iter()
+            .filter(|c| matches!(c, AudioCommand::Play(p) if p.source == want))
+            .count()
+    };
+    let spread_of = |moves: &[DVec3]| -> f64 {
+        match moves.first() {
+            Some(first) => moves
+                .iter()
+                .map(|p| (*p - *first).length())
+                .fold(0.0f64, f64::max),
+            None => 0.0,
+        }
+    };
+
+    let (boat_key, heli_key) = (key_of(LAUNCH), key_of(CHOPPER));
+    let (boat_moves, heli_moves) = (moves_of(boat_key), moves_of(heli_key));
+    let (hull, chopper) = (look(sim.world(), LAUNCH).1, look(sim.world(), CHOPPER).1);
+    let (boat_spread, heli_spread) = (spread_of(&boat_moves), spread_of(&heli_moves));
     println!(
-        "THE LAUNCH'S VOICE: {plays} Play(s), {} SetPosition(s) spanning {spread:.1} m; the last is {:.1} m from the hull",
-        moves.len(),
-        (moves.last().copied().unwrap_or(DVec3::ZERO) - hull).length()
+        "THE LAUNCH'S VOICE: {} Play(s), {} SetPosition(s) spanning {boat_spread:.1} m; \
+         the last is {:.3} m from the hull",
+        plays_of(boat_key),
+        boat_moves.len(),
+        (boat_moves.last().copied().unwrap_or(DVec3::ZERO) - hull).length()
+    );
+    println!(
+        "THE HELICOPTER'S VOICE: {} Play(s), {} SetPosition(s) spanning {heli_spread:.3} m; \
+         the last is {:.3} m from the airframe",
+        plays_of(heli_key),
+        heli_moves.len(),
+        (heli_moves.last().copied().unwrap_or(DVec3::ZERO) - chopper).length()
     );
 
-    // One voice, and it really is being repositioned.
-    assert_eq!(plays, 1, "the launch was given {plays} voices");
+    // ONE voice each, and each one really is being repositioned — every step it
+    // is stepped, which on this script is every step there is.
+    for (what, key, moves) in [
+        ("launch", boat_key, &boat_moves),
+        ("helicopter", heli_key, &heli_moves),
+    ] {
+        assert_eq!(
+            plays_of(key),
+            1,
+            "the {what} was given {} voices",
+            plays_of(key)
+        );
+        assert_eq!(
+            moves.len(),
+            s.len(),
+            "the {what}'s emitter was moved on {} of {} steps",
+            moves.len(),
+            s.len()
+        );
+    }
+
+    // EACH IS WHERE ITS OWN CRAFT IS — the emitter's own transform, not a guess,
+    // and not the other craft's. Two sources reading one position would satisfy
+    // the launch's clause and fail the helicopter's.
+    let last_boat = *boat_moves.last().expect("a last launch position");
     assert!(
-        moves.len() > s.len() / 2,
-        "only {} of {} steps moved the emitter",
-        moves.len(),
-        s.len()
+        (last_boat - hull).length() < 1e-6,
+        "the engine is at {last_boat:?} and the hull is at {hull:?}"
     );
-    // It is WHERE THE BOAT IS — the emitter's own transform, not a guess.
-    let last = *moves.last().expect("a last position");
+    let last_heli = *heli_moves.last().expect("a last helicopter position");
     assert!(
-        (last - hull).length() < 1e-6,
-        "the engine is at {last:?} and the hull is at {hull:?}"
+        (last_heli - chopper).length() < 1e-6,
+        "the rotor is at {last_heli:?} and the airframe is at {chopper:?}"
     );
-    // …and it MOVED, over the distance the boat covered. A `SetPosition` that
-    // shipped a constant would pass the two claims above and fail this one.
+
+    // …and the launch's MOVED, over the distance the boat covered. A
+    // `SetPosition` that shipped a constant would pass every claim above and
+    // fail this one. The helicopter's is the control: nobody flew it, so its
+    // emitter is issued every step and goes nowhere — which is what says the
+    // span above is the hull's motion and not the stream's own shape.
     assert!(
-        spread > 40.0,
-        "the emitter spanned {spread:.1} m over a crossing of the bay"
+        boat_spread > 40.0,
+        "the emitter spanned {boat_spread:.1} m over a crossing of the bay"
+    );
+    assert!(
+        heli_spread < 0.05,
+        "nobody flew the helicopter and its emitter still wandered \
+         {heli_spread:.3} m"
     );
 }
 
