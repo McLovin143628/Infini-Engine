@@ -290,6 +290,7 @@ pub fn step_gameplay(
     report.panic.sources = panic.sources;
     report.panic.considered = panic.considered;
     report.panic.fled += panic.fled;
+    report.panic.exempt += panic.exempt;
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
@@ -1191,6 +1192,17 @@ pub struct PanicReport {
     /// Agents that started running on this step. `considered - fled` is mostly
     /// distance, and it is the number that says the radius is doing work.
     pub fled: usize,
+    /// **Responders inside the radius that the flee door refused** (wave EMS2) —
+    /// the engagement counter behind *an officer under fire does not rout*.
+    ///
+    /// The rule itself lives at [`inf_ecs::crowd::flee_from`], where it holds for
+    /// every caller; this is the pass reading
+    /// [`inf_ecs::dispatch::is_responder`] back for the people the door said no
+    /// to, so a gate can tell **the officers held** from **no officer was ever in
+    /// the radius**. A zero here on a scene with police at it is the second
+    /// thing, and a gate that could not tell them apart would pass on a
+    /// dispatcher that never sent anybody.
+    pub exempt: usize,
 }
 
 /// **A GUNSHOT SCATTERS THE STREET** (wave WPN1) — the crowd's panic, through
@@ -1265,6 +1277,14 @@ fn step_panic(world: &mut EcsWorld, hits: &[WeaponHit], dt: f64) -> PanicReport 
     for (guid, here, away_from) in want {
         if inf_ecs::crowd::flee_from(world, guid, here, away_from, dt, PANIC_FLEE_M) {
             report.fled += 1;
+        } else if inf_ecs::dispatch::is_responder(world, guid) {
+            // **The exemption, counted where it was applied** (wave EMS2). The
+            // door above is where the rule lives — it refuses a responder for
+            // every caller, not only this one — and this reads the named
+            // predicate back for the people it said no to. A door whose guard
+            // was mutated away answers `true` here instead, so `fled` rises and
+            // this stays at zero: the counter cannot agree with a broken rule.
+            report.exempt += 1;
         }
     }
     report
@@ -1653,6 +1673,12 @@ fn struck_reaction(
     // the one point in a `WeaponHit` that is always the attacker's.
     if inf_ecs::crowd::flee_from(world, target, from, hit.from, dt, PANIC_FLEE_M) {
         report.panic.fled += 1;
+    } else if inf_ecs::dispatch::is_responder(world, target) {
+        // **A responder shot at point blank does not leave either** (wave EMS2).
+        // The rule is the flee door's and holds here without a line; what this
+        // adds is the count, on `step_panic`'s own terms — an officer that was
+        // hit is exactly the officer a gate wants to see stay.
+        report.panic.exempt += 1;
     }
 }
 

@@ -30,6 +30,10 @@ pub mod components;
 // camera. `band`'s shape with a fourth rung.
 pub mod crowd;
 pub mod deform;
+// EMS2: the dispatcher — who is sent to what, and the named responder predicate
+// the panic exemption is written in terms of. Decides only; the applying half is
+// `inf_physics::d3::dispatch`.
+pub mod dispatch;
 // I6: doors — a leaf on a hinge, a lock priced as one P22 bond, and the sparse
 // resource that holds what a player has done to them.
 pub mod door;

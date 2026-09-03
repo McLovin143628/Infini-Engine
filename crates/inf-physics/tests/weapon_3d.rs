@@ -1743,6 +1743,152 @@ fn gunfire_scatters_the_crowd_and_a_brawl_does_not() {
     }
 }
 
+/// **AN OFFICER UNDER FIRE DOES NOT ROUT** (wave EMS2) — the panic exemption,
+/// as a law arm.
+///
+/// # Why this is the first thing the wave built
+///
+/// `flee_from` **clears the schedule** of everybody it reaches and
+/// `PanickedRes` is never released, so an officer routed by one gunshot has
+/// dropped its post for the rest of the session — with its incident still open
+/// and nobody on the way. Every later clause of EMS2 stands on this not
+/// happening, so it was written before the dispatcher that needs it.
+///
+/// # Built to falsify, four ways
+///
+/// The fixture puts a responder and a bystander **side by side, the same
+/// distance from the same shot**, so the only thing that can separate them is
+/// the exemption:
+///
+/// 1. the bystander runs — otherwise this arm is about a shot that frightened
+///    nobody and would pass with the whole panic pass deleted;
+/// 2. the responder does **not**;
+/// 3. the responder keeps its **schedule** — the thing `flee_from` clears, and
+///    the half of the trap that a `PanickedRes` check alone would not see;
+/// 4. `PanicReport::exempt` is exactly one. Delete the guard at the door and the
+///    responder flees: `fled` becomes 2 and this reads 0, so the counter cannot
+///    agree with a broken rule.
+///
+/// …and then the roster is cleared and the same shot fired again, which routs
+/// the ex-officer — the arm that says this is a *duty roster* and not an immunity
+/// somebody was born with.
+#[test]
+fn an_officer_under_fire_does_not_rout() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord, CrowdSchedule, ScheduleLeg, SlotArrival};
+
+    let officer = Uuid::from_u128(0x0E52_0001);
+    let bystander = Uuid::from_u128(0x0E52_0002);
+    // A one-leg day, so "the schedule survived" is a claim with something in it:
+    // `flee_from` sets `rec.schedule = None`, which is the release that makes a
+    // routed officer never come back to its post.
+    let post = |at: DVec3| -> CrowdSchedule {
+        CrowdSchedule::new(vec![ScheduleLeg {
+            start_h: 0.0,
+            travel_h: 1.0,
+            path: inf_ecs::traffic::LanePath::new([at, at + DVec3::Z * 2.0]),
+            arrival: SlotArrival::STANDING,
+        }])
+        .expect("a one-leg day is a schedule")
+    };
+
+    let populate = |rig: &mut Rig| {
+        let a = CrowdArchetype::humanoid(None, None, None);
+        let mut records = std::collections::BTreeMap::new();
+        // **Side by side**: same x, same z, one metre apart, both well inside
+        // `PANIC_RADIUS_M` of the hero's muzzle.
+        for (i, g) in [officer, bystander].iter().enumerate() {
+            let at = DVec3::new(4.0 + i as f64, 0.0, 2.0);
+            let mut rec = CrowdRecord::standing(a, at);
+            rec.schedule = Some(post(at));
+            records.insert(*g, rec);
+        }
+        assert_eq!(
+            inf_ecs::crowd::add_agents(&mut rig.world, records),
+            0,
+            "the fixture's population was refused (the count is the REFUSALS)"
+        );
+        rig.world.mark_dirty();
+        rig.world.propagate();
+    };
+
+    let mut rig = Rig::new();
+    populate(&mut rig);
+    assert!(
+        inf_ecs::dispatch::set_responder(&mut rig.world, officer, true),
+        "the roster refused the officer"
+    );
+    assert!(inf_ecs::dispatch::is_responder(&rig.world, officer));
+    assert!(!inf_ecs::dispatch::is_responder(&rig.world, bystander));
+
+    rig.arm("rifle");
+    rig.step(&idle());
+    let r = rig.step(&hold_trigger());
+    println!(
+        "EMS2 exemption: {} source(s), {} considered, {} fled, {} exempt",
+        r.panic.sources, r.panic.considered, r.panic.fled, r.panic.exempt
+    );
+    assert_eq!(r.shots, 1, "the trigger did not fire");
+    assert_eq!(r.panic.sources, 1, "the shot was not a panic source");
+    // (1) the control ran.
+    assert!(
+        inf_ecs::crowd::is_panicked(&rig.world, bystander),
+        "the bystander standing beside the officer did not run — this arm is \
+         then about a shot that frightened nobody"
+    );
+    // (2) the subject held.
+    assert!(
+        !inf_ecs::crowd::is_panicked(&rig.world, officer),
+        "an officer on duty routed from a gunshot"
+    );
+    assert_eq!(
+        r.panic.fled, 1,
+        "{} of 2 agents fled — exactly one of them is a responder",
+        r.panic.fled
+    );
+    // (3) …and kept its post, which is the half a latch check cannot see.
+    let kept = rig
+        .world
+        .world()
+        .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        .expect("a population")
+        .records
+        .get(&officer)
+        .expect("the officer is still in the population")
+        .schedule
+        .is_some();
+    assert!(
+        kept,
+        "the officer kept its latch and lost its SCHEDULE — `flee_from` clears \
+         the day, and an officer with no day never returns to its post"
+    );
+    // (4) the counter says the rule fired, and says it once.
+    assert_eq!(
+        r.panic.exempt, 1,
+        "the pass exempted {} responder(s) against one on duty inside the \
+         radius — a zero here with `fled` at 2 is the guard deleted",
+        r.panic.exempt
+    );
+
+    // ── and it is a ROSTER, not an immunity ──
+    assert!(inf_ecs::dispatch::set_responder(
+        &mut rig.world,
+        officer,
+        false
+    ));
+    let off = rig.steps(&hold_trigger_no_edge(), 30);
+    let shots: u32 = off.iter().map(|r| r.shots).sum();
+    let fled: usize = off.iter().map(|r| r.panic.fled).sum();
+    let exempt: usize = off.iter().map(|r| r.panic.exempt).sum();
+    println!("off duty: {shots} shot(s), {fled} fled, {exempt} exempt");
+    assert!(shots >= 1, "the burst stopped, so this half proves nothing");
+    assert!(
+        inf_ecs::crowd::is_panicked(&rig.world, officer),
+        "an agent taken off the roster is still exempt — the predicate is not \
+         being read, it is being remembered"
+    );
+    assert_eq!(exempt, 0, "nobody is on duty and somebody was exempt");
+}
+
 /// **WHO SAW IT** (wave WPN1) — the witnessed-act seed, and the line of sight
 /// that makes it a *witness* record rather than a distance one.
 ///

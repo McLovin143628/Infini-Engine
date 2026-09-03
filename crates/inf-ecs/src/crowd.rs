@@ -2631,6 +2631,31 @@ pub fn clear_panic(world: &mut EcsWorld) {
 /// record is in the population, it still steps, and it is exactly the agent a
 /// shot at the far edge of a panic radius reaches. So the body is optional here
 /// and the record is not.
+///
+/// # AN OFFICER UNDER FIRE DOES NOT ROUT (wave EMS2)
+///
+/// The third refusal, and the one that is a **rule about the world** rather than
+/// a fact about the argument: somebody
+/// [`crate::dispatch::is_responder`] answers `true` for is on duty at
+/// something, and this door refuses them.
+///
+/// It is here — at the one flee door — rather than inside the crowd panic,
+/// because every caller needs it: the panic pass frightens a whole street, the
+/// carjack frightens one driver, and an officer securing a crime scene while a
+/// second shot goes off is reached by the first. Putting it in one caller would
+/// have left the others, and a *second* copy of the test is the thing this
+/// module's own hoist of `carjack::flee` existed to remove.
+///
+/// The consequence is stated rather than hidden. Fleeing **clears the schedule**
+/// and [`PanickedRes`] is never released, so a responder that routed once would
+/// have dropped its post *permanently* — for the rest of the session, on both
+/// hosts, with its incident still open and no unit on the way. That is the trap
+/// [`PanickedRes`]' own doc names, met by a wave that put people at gunfights on
+/// purpose.
+///
+/// `inf_physics::d3::gameplay::PanicReport::exempt` counts the times this arm
+/// fired, so a gate can tell *the officers held* from *no officer was in the
+/// radius*.
 pub fn flee_from(
     world: &mut EcsWorld,
     guid: Uuid,
@@ -2644,6 +2669,9 @@ pub fn flee_from(
         .get_resource::<CrowdPopulationRes>()
         .is_some_and(|p| p.records.contains_key(&guid));
     if (!known && world.entity_of(guid).is_none()) || is_panicked(world, guid) {
+        return false;
+    }
+    if crate::dispatch::is_responder(world, guid) {
         return false;
     }
     let away = from - away_from;

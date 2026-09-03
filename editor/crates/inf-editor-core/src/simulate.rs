@@ -573,6 +573,11 @@ impl SimSession {
         // them, and neither touches a resource, so without this a stopped
         // session's parked cars would stay in the author's document.
         inf_ecs::traffic::clear_traffic(doc.world_mut());
+        // EMS2: and the duty roster, the fleet and the open incidents, for the
+        // same reason again — the dispatcher is a resource a Simulate session
+        // fills and the author never authored, and a second run that began with
+        // run 1's officers still on duty could not frighten them.
+        inf_ecs::dispatch::clear_dispatch(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
@@ -979,6 +984,11 @@ impl SimSession {
         // them, and neither touches a resource, so without this a stopped
         // session's parked cars would stay in the author's document.
         inf_ecs::traffic::clear_traffic(doc.world_mut());
+        // EMS2: and the duty roster, the fleet and the open incidents, for the
+        // same reason again — the dispatcher is a resource a Simulate session
+        // fills and the author never authored, and a second run that began with
+        // run 1's officers still on duty could not frighten them.
+        inf_ecs::dispatch::clear_dispatch(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
     }
 
