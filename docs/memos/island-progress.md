@@ -27372,9 +27372,19 @@ guard, covers the 2.6 m in under two seconds.
 
 6 assigned / 4 arrived / 4 resolved / 4 returned (the extras are the ambient feed
 doing its job); **37 528 sticks** over **14 820** hot steps, on a town with **63**
-traffic cars on it. PIE == shipping over **15 000 steps compared byte for byte**.
-The falsifier — the same town with no fleet — grows no dispatcher and 15 000 empty
-traces.
+traffic cars on it.
+
+**PIE == shipping over 15 000 steps compared byte for byte** — and the trace is
+**three** sections, not one: `dispatch_state_bytes` proves the two hosts made the
+same decisions, and this wave also changed how *civilian* traffic steers (the
+yield's bias and its creep) and spawns *crowd* bodies (a unit's crew), neither of
+which the dispatch section can see. A car that pulled over on one host and not
+the other leaves every incident, every unit state and every route length
+identical. 4 059 bytes at the end.
+
+The falsifier — the same town with no fleet — grows no dispatcher, and the
+dispatch section is empty *beside a traffic section that is not*, so the
+emptiness is a statement about a missing fleet rather than about an empty world.
 
 Step table (dev, MIN of 3 × 240):
 
@@ -27414,6 +27424,22 @@ sat 6.6 m behind an abandoned civilian at (133.9, 48.3) for **5 600 steps** and
 never reached its fire. The gate runs at **14:00** — same town, same 63 cars, 10
 driving commuters — and `TRAFFIC_HOUR`'s own doc says why. **That is VEH2b's to
 fix.**
+
+### Verification
+
+`cargo fmt --all --check` clean. Full battery `-j 3 --no-fail-fast
+INF_GOLDEN_STRICT=1` green. Rustdoc **409 of a 450 ceiling** over 48 documented
+crates — **EMS2 adds none** (the one it did add, a `crate::log` link in a crate
+that has no `log` module, was caught and turned into a code span). `clippy
+--workspace --all-targets -D warnings` clean, run last.
+
+The workspace's own `no_string_literal_in_the_workspace_carries_an_eaten_continuation`
+gate caught **five** literals in `fixed_step_mirror` where a scripted edit had
+dropped the `\` and left ten- and fourteen-space runs inside an assertion
+message — P22's law, met for the fourth time, by exactly the tooling the law
+warns about. The whole wave diff is LF-clean; goldens stay **62** with none added
+or re-blessed; `EXPECTED_LEVELS` stays **24**; no committed `.inf_lvl`, `.inf_pcg`,
+golden, `Cargo.lock` or `deny.toml` was touched.
 
 ### Laws this wave paid for
 
