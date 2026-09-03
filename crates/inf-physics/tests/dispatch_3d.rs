@@ -497,7 +497,151 @@ fn a_responding_unit_covers_the_ground_between() {
     assert!(ever_seated, "nobody was ever in the ambulance");
 }
 
-// ── (d) absent costs nothing ────────────────────────────────────────────────
+// ── (d) the siren and the bar ───────────────────────────────────────────────
+
+/// **A RESPONDING UNIT SOUNDS ITS SIREN AND FLASHES ITS BAR — AND STOPS DOING
+/// BOTH WHEN IT GETS HOME.**
+///
+/// Five claims, each killing a different degeneration:
+///
+/// 1. exactly **one** `Start` over the whole run — a siren re-started every step
+///    is a `Play` that restarts the loop sixty times a second, which is silence
+///    with a full command log;
+/// 2. the `Move`s arrive on the **cadence**, not every step: the ring
+///    arithmetic in `SIREN_POSITION_PERIOD` is the whole reason
+///    `AudioCommand::SetPosition` was safe to add, and a per-step emit would
+///    reintroduce the VEH2a eviction it exists to avoid;
+/// 3. the emitter actually **moves** — a `SetPosition` stream that carried one
+///    position would be a siren nailed to the station;
+/// 4. exactly one `Stop`, and the unit is silent afterwards;
+/// 5. the bar's authored intensity is **given back**. A pin with no release is a
+///    leak with a deadline, and this one has a picture: an ambulance that comes
+///    home with a black light on its roof.
+#[test]
+fn a_responding_unit_sounds_its_siren_and_gives_its_bar_back() {
+    let mut town = Town::new();
+    town.steps(10);
+    let bar = dispatch::light_bar_of(&town.world, AMBULANCE).expect("the ambulance has a bar");
+    let authored = bar_intensity(&town.world, bar);
+    println!("EMS2 bar {bar} authored at {authored}");
+    assert!(
+        authored > 1.0,
+        "the fixture's bar is not bloomed ({authored}) — nothing below is then \
+         about a light"
+    );
+
+    collapse(&mut town.world, PATIENT, DVec3::new(150.0, 0.0, 50.0));
+    let (mut starts, mut moves, mut stops) = (0usize, 0usize, 0usize);
+    let mut positions: Vec<DVec3> = Vec::new();
+    let mut move_steps: Vec<u64> = Vec::new();
+    let mut lit: Vec<f32> = Vec::new();
+    let mut hot_steps = 0usize;
+    for _ in 0..6000 {
+        let s = town.step();
+        let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+        let step = res.steps.saturating_sub(1);
+        for cue in &res.sirens {
+            match *cue {
+                dispatch::SirenCue::Start { source, at } => {
+                    assert_eq!(source, dispatch::siren_guid(AMBULANCE));
+                    starts += 1;
+                    positions.push(at);
+                }
+                dispatch::SirenCue::Move { at, .. } => {
+                    moves += 1;
+                    move_steps.push(step);
+                    positions.push(at);
+                }
+                dispatch::SirenCue::Stop { .. } => stops += 1,
+            }
+        }
+        if !res.flashes.is_empty() {
+            hot_steps += 1;
+            // The host fence is what writes the material; this arm drives the
+            // same rule through the same door so the cue's own claim is tested
+            // without a renderer.
+            let f = res.flashes[0];
+            assert_eq!(f.bar, bar);
+            assert_eq!(
+                f.base_intensity, authored,
+                "the flash is pinned to {} rather than to the authored {authored} \
+                 — the pin is reading the LIVE value and will compound",
+                f.base_intensity
+            );
+            lit.push(f.base_intensity);
+        }
+        if s.returned > 0 {
+            break;
+        }
+    }
+    println!(
+        "EMS2 siren: {starts} start(s), {moves} move(s), {stops} stop(s) over \
+         {hot_steps} hot step(s)"
+    );
+    assert_eq!(starts, 1, "the siren was started {starts} time(s)");
+    assert_eq!(stops, 1, "the siren was stopped {stops} time(s)");
+    assert!(hot_steps > 100, "only {hot_steps} hot step(s)");
+    assert!(!lit.is_empty(), "the bar never flashed");
+
+    // (2) THE CADENCE. Every `Move` lands on a multiple of the period, and there
+    //     are about `hot / period` of them — a per-step emit would read `hot`.
+    for at in &move_steps {
+        assert_eq!(
+            at % dispatch::SIREN_POSITION_PERIOD,
+            0,
+            "a siren moved on step {at}, which is not on the cadence"
+        );
+    }
+    let want = hot_steps / dispatch::SIREN_POSITION_PERIOD as usize;
+    println!("EMS2 cadence: {moves} move(s) against ~{want} expected");
+    assert!(
+        moves > want / 2 && moves <= want + 2,
+        "{moves} `SetPosition`(s) over {hot_steps} hot steps at a period of {} \
+         — a per-step emit would read about {hot_steps}",
+        dispatch::SIREN_POSITION_PERIOD
+    );
+
+    // (3) …and the emitter travelled.
+    let spread = positions
+        .iter()
+        .fold(0.0f64, |m, p| m.max((*p - positions[0]).length()));
+    println!("EMS2 siren travelled {spread:.1} m");
+    assert!(
+        spread > 50.0,
+        "the siren's emitter moved {spread:.1} m — a `SetPosition` stream that \
+         carries one position is a siren nailed to the station"
+    );
+
+    // (5) THE RELEASE.
+    let back = bar_intensity(&town.world, bar);
+    println!("EMS2 bar back at {back} against an authored {authored}");
+    assert_eq!(
+        back, authored,
+        "the bar came home at {back} against the {authored} the level authored \
+         — the pin was never released"
+    );
+    let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+    assert!(
+        res.bars.is_empty(),
+        "a released pin is still held: {:?}",
+        res.bars
+    );
+    assert!(
+        res.siren_on.is_empty(),
+        "a unit in station still has a siren on"
+    );
+}
+
+/// A light bar's live emissive intensity.
+fn bar_intensity(world: &EcsWorld, bar: Uuid) -> f32 {
+    world
+        .entity_of(bar)
+        .and_then(|e| world.world().get::<inf_ecs::components::Material>(e))
+        .map(|m| m.emissive_intensity)
+        .expect("the bar is drawn")
+}
+
+// ── (e) absent costs nothing ────────────────────────────────────────────────
 
 /// **A TOWN WITH NO EMERGENCY VEHICLE IN IT HAS NO DISPATCHER.**
 ///

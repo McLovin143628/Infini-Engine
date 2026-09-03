@@ -1575,6 +1575,34 @@ impl RuntimeSim {
         // MIRROR-BEGIN dispatch_step
         self.dispatch = inf_physics::d3::dispatch::step_dispatch(dw, db, dt);
         // MIRROR-END dispatch_step
+        // ── EMS2 the light bar ── a responding unit's bar flashes, through the
+        //    ONE pulse this engine has. `inf_render::pulse_emissive` had two
+        //    callers before this wave and both were PCG scatter projectors, so
+        //    this is a new APPLICATION of an old rule rather than a second rule:
+        //    the same portable sine, the same floor, the same argument about
+        //    reducing the phase in f64 before it is sampled.
+        //
+        //    It writes the ECS `Material` rather than modulating a projector,
+        //    because the bar is one entity and two projectors would have to
+        //    agree about it. The base intensity is a PIN the dispatcher takes
+        //    when the unit goes hot and gives back when it stops — see
+        //    `DispatchRes::bars`, and see it for the version of this that came
+        //    home with a black light on its roof.
+        //
+        //    Inert on a level with no dispatcher: one `get_resource` and an
+        //    empty slice. (MIRROR of the other host's fixed step.)
+        let fworld = &mut self.world;
+        // MIRROR-BEGIN light_bar_flash
+        for flash in inf_ecs::dispatch::bar_flashes(fworld).to_vec() {
+            let tick = inf_render::pulse_tick(flash.clock_s);
+            let lit = inf_render::pulse_emissive(
+                [flash.base_intensity, 0.0, 0.0],
+                inf_ecs::dispatch::SIREN_FLASH_HZ,
+                tick,
+            );
+            inf_ecs::dispatch::set_bar_intensity(fworld, flash.bar, lit[0]);
+        }
+        // MIRROR-END light_bar_flash
         clk.mark(phase::DISPATCH);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
@@ -1962,6 +1990,57 @@ impl RuntimeSim {
             });
         }
         // MIRROR-END vehicle_engine_audio
+
+        // ── EMS2 the siren ── a looping spatial `Play` when a unit starts
+        //    running hot, a `SetPosition` on a CADENCE while it is, and a `Stop`
+        //    when it is not. The decisions — which units, what a siren sounds
+        //    like, how often it moves — are all `inf_ecs::dispatch`'s; what is
+        //    here is a `match` and three commands.
+        //
+        //    `AudioCommand::SetPosition` is new in this wave and is the second
+        //    half of a debt VEH2a named: without it an emitter stays where its
+        //    `Play` was issued, which is why traffic is still silent. See
+        //    `inf_ecs::dispatch::SIREN_POSITION_PERIOD` for the ring arithmetic
+        //    that decides the cadence, and note the source guid is the SIREN's
+        //    and not the chassis's — one key is one voice, and a siren on the
+        //    chassis key would silence the engine under it.
+        //
+        //    Inert on a level with no dispatcher: one `get_resource` and an
+        //    empty slice. (MIRROR of the other host's fixed step.)
+        let (dworld, dcmds) = (&self.world, &mut self.audio_cmds);
+        // MIRROR-BEGIN siren_audio
+        for cue in inf_ecs::dispatch::siren_cues(dworld) {
+            match *cue {
+                inf_ecs::dispatch::SirenCue::Start { source, at } => {
+                    dcmds.push(AudioCommand::Play(PlayCommand {
+                        source: guid_source_key(source),
+                        clip: siren_clip(),
+                        bus: inf_ecs::dispatch::SIREN_BUS.to_string(),
+                        volume: inf_ecs::dispatch::SIREN_VOLUME,
+                        pitch: 1.0,
+                        looping: true,
+                        position: Some(at),
+                        attenuation: Attenuation::linear(
+                            inf_ecs::dispatch::SIREN_MIN_DISTANCE_M,
+                            inf_ecs::dispatch::SIREN_MAX_DISTANCE_M,
+                        ),
+                        occlusion_gain: 1.0,
+                    }));
+                }
+                inf_ecs::dispatch::SirenCue::Move { source, at } => {
+                    dcmds.push(AudioCommand::SetPosition {
+                        source: guid_source_key(source),
+                        position: at,
+                    });
+                }
+                inf_ecs::dispatch::SirenCue::Stop { source } => {
+                    dcmds.push(AudioCommand::Stop {
+                        source: guid_source_key(source),
+                    });
+                }
+            }
+        }
+        // MIRROR-END siren_audio
 
         // Autoplay once per not-yet-started `AudioSource`, plus the **started**
         // emitters still alive (for despawn pruning below).
@@ -3881,6 +3960,20 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
 
 /// A stable audio source key for a scene-placed emitter (the `Guid`'s low bits) —
 /// the shipped mirror of the editor helper.
+/// **The clip a siren plays**, or the nil guid for a project that has not
+/// authored one (wave EMS2).
+///
+/// `RigSpawn::clip`'s own sentence: an unresolvable clip guid is a **silent
+/// no-op** at drain time, and *the command stream — which is what PIE ==
+/// shipping compares — is the same either way*. So the engine's sirens are
+/// modelled, positioned, attenuated, logged and compared today, and audible the
+/// day a project drops an `.inf_audio` in and names it here. Stating that is the
+/// point: a reader who hears nothing should find out why from the code rather
+/// than from a bug report.
+fn siren_clip() -> Uuid {
+    Uuid::nil()
+}
+
 fn guid_source_key(guid: Uuid) -> u64 {
     guid.as_u128() as u64
 }

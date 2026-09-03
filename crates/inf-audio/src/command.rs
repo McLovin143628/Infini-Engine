@@ -107,6 +107,36 @@ pub enum AudioCommand {
         /// The cutoff this path implies, hertz, or `None`.
         lowpass_hz: Option<f64>,
     },
+    /// **Move a live source's emitter** (wave EMS2).
+    ///
+    /// [`PlayCommand::position`] is taken once, when the voice starts, which is
+    /// the right shape for a footstep and the wrong one for anything that
+    /// travels: a siren spatialized where its `Play` was issued stays outside
+    /// the station it left, however far across town the ambulance gets.
+    ///
+    /// [`SetOcclusion`](Self::SetOcclusion)'s argument verbatim, one property
+    /// over, and the second half of a debt this tree has carried since VEH2a:
+    /// `RigSpawn::engine_voice`'s own doc names *"no `AudioCommand::SetPosition`,
+    /// so a driving car's engine is spatialized where its `Play` was issued"* as
+    /// the reason **traffic is silent**. This is that command. It does not by
+    /// itself give traffic a voice — a dozen cars each pushing a position every
+    /// step is a bounded log that evicts, which is what
+    /// [`crate::log`]-shaped rings are for and what the island's own drive gate
+    /// caught — so the debt is paid for the system that needs it (a handful of
+    /// responding units at a tenth of the step rate) and named for the one that
+    /// still does not.
+    ///
+    /// A source that is not playing is a silent no-op, exactly as every other
+    /// addressed command here is. A **non-spatial** voice becomes spatial from
+    /// this command on, which is [`crate::AudioEngine::set_position`]'s own
+    /// documented behaviour and is the honest answer for a caller that has
+    /// decided a sound has a place.
+    SetPosition {
+        /// The source, as [`PlayCommand::source`].
+        source: u64,
+        /// Where the emitter is now, world metres.
+        position: DVec3,
+    },
     /// Update the listener pose (position + orientation) for spatial mixing.
     SetListener(Listener),
 }

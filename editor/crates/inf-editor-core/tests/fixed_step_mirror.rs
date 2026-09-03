@@ -219,6 +219,111 @@ fn both_fixed_steps_step_their_traffic_the_same_way() {
     );
 }
 
+/// **BOTH HOSTS SOUND THE SAME SIREN** (wave EMS2).
+///
+/// The fence is a `match` over a list the sim decided, and every literal in it —
+/// the bus, the volume, the attenuation, the loop flag — is part of the command
+/// stream two hosts are compared on. A siren that started at a different volume
+/// in the editor would be a `Play` that differed field for field, which is
+/// exactly what a PIE-vs-shipping audio comparison exists to catch.
+///
+/// The needles are chosen so the arm fails on a *degeneration* rather than only
+/// on a divergence: drop the `SetPosition` arm and the emitter stops following
+/// the vehicle (VEH2a's whole carried defect, reintroduced); drop the `Stop` and
+/// a unit that got home keeps wailing in its own bay for the rest of the
+/// session; drop `looping` and a siren is one whoop.
+#[test]
+fn both_audio_steps_sound_the_same_siren() {
+    let editor = fenced(&read(EDITOR), "siren_audio", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "siren_audio", "the shipped RuntimeSim");
+    assert_eq!(
+        editor, player,
+        "the two hosts' siren emits differ character for character"
+    );
+    assert!(
+        editor.len() > 300,
+        "the siren fence is {} characters — an empty fence is equal to an empty \
+         fence",
+        editor.len()
+    );
+    for needle in [
+        "siren_cues(",
+        "SirenCue::Start",
+        "SirenCue::Move",
+        "SirenCue::Stop",
+        "AudioCommand::SetPosition",
+        "AudioCommand::Stop",
+        "looping:true",
+        "SIREN_MAX_DISTANCE_M",
+    ] {
+        assert!(
+            editor.contains(needle),
+            "the siren fence does not mention `{needle}`: {editor}"
+        );
+    }
+}
+
+/// **BOTH HOSTS FLASH THE SAME BAR** (wave EMS2).
+///
+/// `pulse_emissive` had two callers before this wave and both were PCG scatter
+/// projectors, so this is a **new application path** for an old rule — and a new
+/// application path is exactly where two hosts drift, because nothing else in
+/// the tree was checking that this one existed twice.
+///
+/// The needles falsify the two degenerations that would be invisible: a fence
+/// that stopped calling `pulse_emissive` leaves a bar lit steadily (which reads
+/// as "on" and not as "broken"), and one that stopped calling
+/// `set_bar_intensity` leaves it at whatever the level authored, which is also
+/// lit steadily. Both look like a working light bar in a screenshot.
+#[test]
+fn both_fixed_steps_flash_the_same_light_bar() {
+    let editor = fenced(&read(EDITOR), "light_bar_flash", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "light_bar_flash", "the shipped RuntimeSim");
+    assert_eq!(
+        editor, player,
+        "the two hosts' light-bar flashes differ character for character"
+    );
+    assert!(
+        editor.len() > 120,
+        "the flash fence is {} characters — an empty fence is equal to an empty          fence",
+        editor.len()
+    );
+    for needle in [
+        "bar_flashes(",
+        "pulse_emissive(",
+        "pulse_tick(",
+        "SIREN_FLASH_HZ",
+        "set_bar_intensity(",
+        "base_intensity",
+    ] {
+        assert!(
+            editor.contains(needle),
+            "the light-bar fence does not mention `{needle}`: {editor}"
+        );
+    }
+}
+
+/// **THE SIREN IS A SEPARATE VOICE FROM THE ENGINE, ON BOTH HOSTS.**
+///
+/// One source key is one voice: a siren played on the chassis's own key would
+/// silence the engine loop underneath it, and the symptom would be an ambulance
+/// that goes quiet the moment it is dispatched. The rule is `siren_guid`'s and
+/// this is the arm that says both hosts use it.
+#[test]
+fn a_siren_never_borrows_the_chassiss_own_source_key() {
+    for (who, rel) in [
+        ("the editor SimSession", EDITOR),
+        ("the shipped RuntimeSim", PLAYER),
+    ] {
+        let siren = fenced(&read(rel), "siren_audio", who);
+        assert!(
+            !siren.contains("out.chassis") && !siren.contains(".chassis)"),
+            "{who}: the siren emit keys a voice on a chassis guid — one key is \
+             one voice, so the engine under it goes silent"
+        );
+    }
+}
+
 /// **BOTH HOSTS DISPATCH THE SAME WAY** (wave EMS2).
 ///
 /// The fence holds one statement, and the statement decides which ambulance

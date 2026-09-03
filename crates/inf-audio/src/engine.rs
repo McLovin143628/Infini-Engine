@@ -593,6 +593,11 @@ impl AudioEngine {
                         }
                     }
                 }
+                AudioCommand::SetPosition { source, position } => {
+                    if let Some(&h) = self.sources.get(source) {
+                        self.set_position(h, *position);
+                    }
+                }
                 AudioCommand::SetListener(l) => self.set_listener(*l),
             }
         }

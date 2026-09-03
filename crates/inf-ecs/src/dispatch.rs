@@ -660,6 +660,29 @@ pub struct DispatchRes {
     /// `assigned` and a rising number here, which is a different fact from a
     /// town where nothing happened.
     pub unanswered: u64,
+    /// **Which units had a siren running at the end of the last step** — what
+    /// tells a [`SirenCue::Start`] from a [`SirenCue::Move`].
+    ///
+    /// Not folded into [`dispatch_state_bytes`], and that is a ruling rather
+    /// than an omission: this is the previous step's image of
+    /// [`UnitState::running_hot`] over [`runs`](Self::runs), which **is** folded
+    /// — so two hosts that agree about the runs on every step of a trace agree
+    /// about this one by construction, and folding it would put sixteen bytes a
+    /// unit into every committed hash to say a thing the hash already says.
+    pub siren_on: BTreeSet<Uuid>,
+    /// **What the audio step should do about this level's sirens this step** —
+    /// rebuilt every step, drained at the audio phase. See [`siren_cues`].
+    pub sirens: Vec<SirenCue>,
+    /// **The emissive intensity each flashing bar was authored with**, held
+    /// while its unit is running hot and **given back** when it stops.
+    ///
+    /// A pin with a release, which is P21.4's own law: the first cut multiplied
+    /// the live value and a bar that had been out for a minute came home black.
+    /// Keyed on the bar entity's guid.
+    pub bars: std::collections::BTreeMap<Uuid, f32>,
+    /// **What every flashing bar should be set to this step** — rebuilt every
+    /// step, drained by the hosts' `light_bar_flash` fence. See [`bar_flashes`].
+    pub flashes: Vec<BarFlash>,
 }
 
 /// The dispatcher's state, or `None`.
@@ -878,6 +901,195 @@ pub fn nearest_unit(costs: &[(Uuid, f64)]) -> Option<Uuid> {
         .filter(|(_, c)| c.is_finite())
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
         .map(|(g, _)| *g)
+}
+
+// ── the siren ───────────────────────────────────────────────────────────────
+
+/// How often a running siren's emitter is moved, in fixed steps.
+///
+/// # SIZE THE RING FIRST — the VEH2a loss, not repeated
+///
+/// `inf_core::DEFAULT_LOG_CAPACITY` is **8 192** commands, and the shipped
+/// host's `audio_command_log` is a ring that *evicts*: `RigSpawn::engine_voice`
+/// is `false` for all of traffic precisely because a dozen cars pushing two
+/// commands a step lost the one `Play` the island's drive gate exists to count.
+/// A siren that pushed a position every step would be the same mistake wearing
+/// a different hat.
+///
+/// So it is pushed every **six** steps — ten hertz at 60 Hz — and the
+/// arithmetic is written down rather than hoped for:
+///
+/// * one hot unit costs one `Play`, one `Stop` and **10 commands a second**;
+/// * an authored vehicle's engine voice costs **120 a second** (a `SetPitch`
+///   and a `SetVolume` every step), so a siren is a **twelfth** of one engine;
+/// * four units hot at once — more than a town of this size ever has — is 40 a
+///   second, which is 205 seconds of ring.
+///
+/// And ten hertz is not a compromise on the *sound*: a unit at 12 m/s moves
+/// 1.2 m between updates, which is inside the ear's own localisation blur at
+/// any distance a siren is audible from.
+pub const SIREN_POSITION_PERIOD: u64 = 6;
+
+/// The mixer bus a siren plays on.
+pub const SIREN_BUS: &str = "sfx";
+
+/// A siren's base linear volume.
+///
+/// 0.9 — under unity, because the whole point of the attenuation curve below is
+/// that distance decides how loud it is, and a source that starts clipped has
+/// nowhere to go.
+pub const SIREN_VOLUME: f64 = 0.9;
+
+/// Inside this many metres a siren is at full volume.
+pub const SIREN_MIN_DISTANCE_M: f64 = 8.0;
+
+/// Beyond this many metres a siren is silent.
+///
+/// Two hundred and twenty. A real two-tone carries much further; this is the
+/// distance at which a player is *meant* to notice one, and it is deliberately
+/// larger than `inf_ecs::traffic::TRAFFIC_FULL_M` (64 m) so a siren is heard
+/// well before the vehicle making it is a rig on four rays.
+pub const SIREN_MAX_DISTANCE_M: f64 = 220.0;
+
+/// Salts a unit's siren emitter guid.
+pub const SALT_SIREN: u64 = 0x5349_5245_4e00_0001;
+
+/// **The emitter a unit's siren plays from** — derived from the chassis.
+///
+/// A guid of its own rather than the chassis's, because the chassis may already
+/// carry an engine voice keyed on exactly that guid, and one source key is one
+/// voice: a siren `Play` on the chassis would silence the engine it is sitting
+/// on top of.
+pub fn siren_guid(chassis: Uuid) -> Uuid {
+    let n = crate::crowd::agent_rand(chassis, 0, SALT_SIREN);
+    let m = crate::crowd::agent_rand(chassis, 1, SALT_SIREN);
+    Uuid::from_u64_pair(n, m)
+}
+
+/// **One thing the audio step should do about one siren this step.**
+///
+/// Decided here, on the sim side, so that the two hosts' fenced audio blocks
+/// contain a `match` and no policy at all: what a siren *is*, when it starts,
+/// how often it moves and when it stops are all facts about the simulation, and
+/// a host that decided any of them would be the second answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SirenCue {
+    /// Begin a looping spatial voice at `at`.
+    Start { source: Uuid, at: DVec3 },
+    /// Move the running voice to `at` — every [`SIREN_POSITION_PERIOD`] steps.
+    Move { source: Uuid, at: DVec3 },
+    /// The unit has stopped running hot; silence it.
+    Stop { source: Uuid },
+}
+
+impl SirenCue {
+    /// The emitter guid this cue addresses.
+    pub fn source(self) -> Uuid {
+        match self {
+            SirenCue::Start { source, .. }
+            | SirenCue::Move { source, .. }
+            | SirenCue::Stop { source } => source,
+        }
+    }
+}
+
+/// **What the audio step should do about this level's sirens this step** — the
+/// list the two fenced host blocks drain.
+///
+/// Rebuilt by the dispatch step and read at the audio phase of the **same**
+/// step, which is the `GameplayReport::hits` shape: a decision the sim took at
+/// phase 7 turned into commands at phase 26, with nothing in between able to
+/// change it.
+///
+/// Empty and allocation-free on a level with no dispatcher.
+pub fn siren_cues(world: &EcsWorld) -> &[SirenCue] {
+    dispatch_of(world)
+        .map(|d| d.sirens.as_slice())
+        .unwrap_or(&[])
+}
+
+// ── the light bar ───────────────────────────────────────────────────────────
+
+/// How fast a responding unit's bar flashes, hertz.
+///
+/// Two. A real light bar strobes faster than that per head, and this engine has
+/// **one** emissive box per vehicle rather than a rotator with two lamps in it —
+/// so what is being modelled is the *impression* a bar makes at a distance, not
+/// a flash pattern. Two hertz is the rate at which a box that brightens and dims
+/// reads as an emergency vehicle rather than as a fault.
+pub const SIREN_FLASH_HZ: f32 = 2.0;
+
+/// **One light bar that should be flashing this step, and what it flashes
+/// from.**
+///
+/// The base intensity travels with the cue because it is a *pin*: the authored
+/// value is captured the step a unit goes hot and given back the step it stops
+/// (see [`DispatchRes::bars`]). A flash that multiplied the live value would
+/// dim the bar a little further on every step of a drive and leave it black.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarFlash {
+    /// The light-bar entity — [`light_bar_of`]'s answer.
+    pub bar: Uuid,
+    /// The `Material::emissive_intensity` the level authored.
+    pub base_intensity: f32,
+    /// The dispatcher's own clock, seconds — what the pulse is a function of.
+    ///
+    /// Carried rather than read from the sky, so the flash is a pure function of
+    /// the *fixed step* and not of a level clock a designer can pause: an
+    /// ambulance with its lights on does not stop flashing because somebody
+    /// froze the time of day.
+    pub clock_s: f64,
+}
+
+/// **The light bar on this chassis**, or `None`.
+///
+/// The child entity named [`LIGHT_BAR_PART`] — the same channel
+/// [`unit_kind_of`] recognises a unit by, asked for its guid instead of its
+/// colour, so there is one answer to *"which entity is this vehicle's bar"* and
+/// not two.
+pub fn light_bar_of(world: &EcsWorld, chassis: Uuid) -> Option<Uuid> {
+    let entity = world.entity_of(chassis)?;
+    for child in world.children_of(entity) {
+        let named = world
+            .world()
+            .get::<crate::components::Name>(child)
+            .is_some_and(|n| n.0 == LIGHT_BAR_PART);
+        if named {
+            return world.guid_of(child);
+        }
+    }
+    None
+}
+
+/// **What every flashing bar should be set to this step** — the list the two
+/// hosts' fenced blocks drain.
+///
+/// Empty and allocation-free on a level with no dispatcher.
+pub fn bar_flashes(world: &EcsWorld) -> &[BarFlash] {
+    dispatch_of(world)
+        .map(|d| d.flashes.as_slice())
+        .unwrap_or(&[])
+}
+
+/// **Write one bar's emissive intensity** — the one door, so the flash and the
+/// release cannot spell the write two ways.
+///
+/// Returns whether anything was written. A bar with no `Material` is a refusal
+/// and not a failure: a project that models a light bar without painting one has
+/// a vehicle that does not flash, which is a visible outcome rather than a
+/// crash.
+pub fn set_bar_intensity(world: &mut EcsWorld, bar: Uuid, intensity: f32) -> bool {
+    let Some(e) = world.entity_of(bar) else {
+        return false;
+    };
+    let Some(mut m) = world.world_mut().get_mut::<crate::components::Material>(e) else {
+        return false;
+    };
+    if !intensity.is_finite() {
+        return false;
+    }
+    m.emissive_intensity = intensity;
+    true
 }
 
 // ── the trace ───────────────────────────────────────────────────────────────

@@ -135,6 +135,7 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
     assign(world, &fleet, &mut res, step, &mut stats);
     run_units(world, bridge, &fleet, &mut res, step, dt, &mut stats);
     forget_old(&mut res, step);
+    sound_and_light(world, &mut res, step, dt);
 
     stats.incidents = res.incidents.len();
     stats.running_hot = res.runs.values().filter(|r| r.state.running_hot()).count();
@@ -850,6 +851,110 @@ fn forget_old(res: &mut DispatchRes, step: u64) {
             || i.resolved_step
                 .is_none_or(|s| step.saturating_sub(s) < dispatch::INCIDENT_KEEP_STEPS)
     });
+}
+
+/// **Decide what this level's sirens do this step** — the list the two hosts'
+/// fenced audio blocks drain.
+///
+/// Three cues and no policy left over: a unit that has just started running hot
+/// gets a `Start`, one that already was gets a `Move` every
+/// `SIREN_POSITION_PERIOD` steps, and one that has stopped gets a `Stop`. The
+/// walk is in `Guid` order — the `BTreeMap`'s — so a bounded audio ring evicts
+/// the same commands on both hosts.
+///
+/// `O(units)`, and it allocates only on a level that actually has a fleet.
+fn sound_and_light(world: &mut EcsWorld, res: &mut DispatchRes, step: u64, dt: f64) {
+    res.sirens.clear();
+    res.flashes.clear();
+    let clock_s = step as f64 * dt;
+    let mut now: std::collections::BTreeSet<Uuid> = Default::default();
+    let mut hot_bars: std::collections::BTreeSet<Uuid> = Default::default();
+    let chassis_list: Vec<Uuid> = res.runs.keys().copied().collect();
+    for chassis in chassis_list {
+        if !res.runs[&chassis].state.running_hot() {
+            continue;
+        }
+        now.insert(chassis);
+        let source = dispatch::siren_guid(chassis);
+        let Some(at) = chassis_at_no_bridge(world, chassis) else {
+            continue;
+        };
+        if res.siren_on.contains(&chassis) {
+            // **The move is on a CADENCE, not on a change.** See
+            // `SIREN_POSITION_PERIOD` for the ring arithmetic that decides it.
+            if step % dispatch::SIREN_POSITION_PERIOD == 0 {
+                res.sirens.push(dispatch::SirenCue::Move { source, at });
+            }
+        } else {
+            res.sirens.push(dispatch::SirenCue::Start { source, at });
+        }
+        // ── the bar. The PIN is taken once, on the step the unit goes hot, off
+        //    the value the level authored — after that the live intensity is the
+        //    flash's own output and reading it back would compound.
+        let Some(bar) = dispatch::light_bar_of(world, chassis) else {
+            continue;
+        };
+        hot_bars.insert(bar);
+        let base = match res.bars.get(&bar) {
+            Some(v) => *v,
+            None => {
+                let authored = authored_intensity(world, bar);
+                res.bars.insert(bar, authored);
+                authored
+            }
+        };
+        res.flashes.push(dispatch::BarFlash {
+            bar,
+            base_intensity: base,
+            clock_s,
+        });
+    }
+    for chassis in res.siren_on.iter() {
+        if !now.contains(chassis) {
+            res.sirens.push(dispatch::SirenCue::Stop {
+                source: dispatch::siren_guid(*chassis),
+            });
+        }
+    }
+    res.siren_on = now;
+    // ── THE RELEASE. A pin with no release is a leak with a deadline (P21.4),
+    //    and here the leak is visible: a bar left at the bottom of its own pulse
+    //    is a unit that came home with a black light on its roof.
+    let stale: Vec<(Uuid, f32)> = res
+        .bars
+        .iter()
+        .filter(|(bar, _)| !hot_bars.contains(bar))
+        .map(|(bar, base)| (*bar, *base))
+        .collect();
+    for (bar, base) in stale {
+        dispatch::set_bar_intensity(world, bar, base);
+        res.bars.remove(&bar);
+    }
+}
+
+/// The emissive intensity a light bar's material was authored with.
+///
+/// `0.0` for a bar with no material at all, which flashes nothing — the same
+/// refusal `set_bar_intensity` makes, spelled once on each side of the pin.
+fn authored_intensity(world: &EcsWorld, bar: Uuid) -> f32 {
+    world
+        .entity_of(bar)
+        .and_then(|e| world.world().get::<inf_ecs::components::Material>(e))
+        .map(|m| m.emissive_intensity)
+        .unwrap_or(0.0)
+}
+
+/// Where a chassis is, off the ECS alone.
+///
+/// The bridge is not consulted here and does not need to be: the write-back has
+/// already put the solver's answer onto the `Transform` by the time anything
+/// reads a siren's position, and a siren that needed a physics world would be a
+/// decision that could not be taken without one.
+fn chassis_at_no_bridge(world: &EcsWorld, chassis: Uuid) -> Option<DVec3> {
+    let e = world.entity_of(chassis)?;
+    let t = world.world().get::<Transform>(e)?;
+    let p = t.translation.to_dvec3();
+    p.is_finite().then_some(p)
 }
 
 // ── the read side ───────────────────────────────────────────────────────────
