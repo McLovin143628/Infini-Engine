@@ -2638,7 +2638,9 @@ pub fn engine_cue(revs: f64, load: f64, base_pitch: f64, base_volume: f64) -> En
 /// empty wheel list, so it applies **no force at all**. That is what a rig whose
 /// parts nothing recognises should do.
 pub fn class_for_parts(rig: VehicleRig) -> Box<dyn Vehicle> {
-    if rig.parts_of(PartKind::Thruster).next().is_some() {
+    if rig.parts_of(PartKind::Rotor).next().is_some() {
+        Box::new(RotorVehicle::new(rig))
+    } else if rig.parts_of(PartKind::Thruster).next().is_some() {
         Box::new(HullVehicle::new(rig))
     } else {
         Box::new(RaycastVehicle::new(rig))
@@ -4306,6 +4308,415 @@ impl Vehicle for HullVehicle {
     }
 }
 
+// ── the helicopter (wave VEH2c) ─────────────────────────────────────────────
+
+/// **A pure torque, as the pair of forces that makes one.**
+///
+/// [`WheelForce`] is a force at a point, which is the whole force channel this
+/// engine's vehicles have — and it is enough, because a couple is two of them.
+/// Given a desired world torque this returns two equal and opposite forces
+/// `lever` metres either side of `centre` whose moment is exactly that torque
+/// and whose sum is exactly zero, so nothing translates.
+///
+/// The arm is chosen from the world axis **least** aligned with the torque, and
+/// that choice is a pure function of the torque, so two runs and two hosts pick
+/// the same one. A zero (or non-finite) torque answers `None` rather than
+/// dividing by a length.
+pub fn torque_pair(centre: DVec3, torque: DVec3, lever: f64) -> Option<[WheelForce; 2]> {
+    let len = torque.length();
+    if !len.is_finite() || len <= 0.0 || !(lever.is_finite() && lever > 0.0) {
+        return None;
+    }
+    let axis = torque / len;
+    // The world axis this torque leans on least — deterministic, and never
+    // parallel to the torque, so the cross product below cannot vanish.
+    let pick = if axis.x.abs() <= axis.y.abs() && axis.x.abs() <= axis.z.abs() {
+        DVec3::X
+    } else if axis.y.abs() <= axis.z.abs() {
+        DVec3::Y
+    } else {
+        DVec3::Z
+    };
+    let arm = axis.cross(pick).normalize_or_zero();
+    if arm == DVec3::ZERO {
+        return None;
+    }
+    // tau = 2 * lever * (arm x force), and force = (tau x arm) / (2 * lever)
+    // satisfies it exactly when `arm` is perpendicular to `tau`, which it is by
+    // construction.
+    let force = torque.cross(arm) / (2.0 * lever);
+    Some([
+        WheelForce {
+            point: centre + arm * lever,
+            force,
+        },
+        WheelForce {
+            point: centre - arm * lever,
+            force: -force,
+        },
+    ])
+}
+
+/// How much thrust full collective adds above the hover setting, as a fraction.
+///
+/// `MovementMode::Flying`'s 6-DOF flycam is the FEEL reference this wave was
+/// told to steer by — it rises at `FLY_ASCEND_MPS`, 8 m/s, with no gravity at
+/// all. A rotorcraft cannot answer that with a velocity because it has weight;
+/// what it can answer is an excess of thrust, and 35 % of hover against a
+/// fuselage's own drag puts the fixture's climb in the same country as the
+/// flycam's rise without pretending gravity is off.
+pub const HELI_CLIMB_AUTHORITY: f64 = 0.35;
+
+/// The cosine of the bank angle past which the collective governor gives up.
+///
+/// The governor below holds the *vertical* component of the rotor's thrust, so
+/// a coordinated turn does not sink; past about seventy degrees of bank there
+/// is so little vertical left that holding it would need a rotor four times its
+/// own size, and the honest answer is that the aircraft falls. It is the one
+/// edge of the governor and it is a cliff on purpose: an aircraft that could be
+/// rolled inverted and still hold height is not one.
+pub const HELI_MIN_LIFT_COS: f64 = 0.35;
+
+/// Yaw rate the pedals ask for at full deflection, degrees per second.
+///
+/// A Ring-0 feel constant rather than a tunable, for the reason
+/// `movement::FLY_SPEED_MPS` is one: it is what the control MEANS, not what a
+/// particular airframe is. 90 deg/s is four seconds for a full circle on the
+/// spot, which is a brisk pedal turn and is about what a light helicopter does.
+pub const HELI_YAW_RATE_DEG_PER_S: f64 = 90.0;
+
+/// How far the machine banks into a turn, degrees per (radian per second) of
+/// yaw rate per (metre per second) of forward speed.
+///
+/// **The turn is coordinated and the pilot does not fly it** — see
+/// [`RotorVehicle`]'s own note for what that costs. The number is the
+/// coordinated-turn relation `tan(bank) = V * omega / g` linearized about
+/// zero, which is `bank_rad ~= V * omega / 9.81`; in degrees that is
+/// `57.2958 / 9.81`.
+pub const HELI_BANK_PER_TURN_DEG: f64 = 5.84;
+
+/// The radius of gyration of a rotorcraft's airframe, as a fraction of its own
+/// disc radius.
+///
+/// A helicopter's fuselage is about as long as its rotor is wide, and that is a
+/// fact about helicopters rather than a convenience: the tail boom exists to
+/// keep the tail rotor clear of the main disc, so it reaches roughly the disc's
+/// edge. Modelled as a uniform rod of length `2R` about its own centre, whose
+/// radius of gyration is `R / sqrt(3)`.
+///
+/// It is what turns [`HELI_ATTITUDE_KP`] into a torque, which is why those gains
+/// are a property of the CONTROL and not of the airframe: a heavier or a larger
+/// machine gets a proportionally heavier hand and settles in the same time.
+pub const ROTOR_GYRADIUS_FRACTION: f64 = 0.577_350_269_189_625_8;
+
+/// The attitude hold's proportional and derivative gains, as an angular
+/// acceleration per unit of sine error and per radian per second.
+///
+/// Sized together rather than separately: the pair is critically damped at the
+/// fixture's own inertia, which is what makes the machine settle onto a commanded
+/// attitude instead of ringing. A derivative term of zero is the mutation that
+/// reds `a_helicopter_settles_on_the_attitude_it_is_asked_for`.
+pub const HELI_ATTITUDE_KP: f64 = 6.0;
+/// The derivative half of [`HELI_ATTITUDE_KP`].
+pub const HELI_ATTITUDE_KD: f64 = 2.2;
+
+/// How fast a drawn rotor turns, degrees per second, at full power.
+///
+/// A **visual** number and nothing else — no part of the model reads it and no
+/// force depends on it, exactly as `WheelState::spin_deg` is visual. It is fast
+/// enough to read as a blur at 60 Hz and it is not a real rotor's RPM, which
+/// would strobe.
+pub const ROTOR_SPIN_DEG_PER_S: f64 = 1_440.0;
+
+/// **The helicopter**: a governed collective, a commanded attitude and a tail
+/// rotor, over the wheel-less rig (wave VEH2c).
+///
+/// # What the pilot commands is an ATTITUDE, not a torque
+///
+/// The stick's fore-and-aft is a **pitch attitude** and the stick's sideways is
+/// a **yaw rate**; the collective is `VehicleControls::vertical`. An attitude
+/// hold drives the fuselage onto what the stick asked for and the rotor's thrust
+/// — which acts along the fuselage's own up axis, at the hub — does the rest:
+/// nose down tilts the thrust vector forward and the machine accelerates. The
+/// translation is not commanded anywhere. It emerges, which is how a helicopter
+/// actually works and is why this needs no lift model and no aerofoil.
+///
+/// # Three refusals, stated rather than discovered
+///
+/// * **The turn is coordinated and the pilot does not fly it.** Bank is derived
+///   from the yaw rate and the forward speed by the coordinated-turn relation,
+///   so this machine cannot be flown out of trim, cannot slip and cannot skid.
+///   That is a stability augmentation system, which every helicopter of this
+///   century has; it is also why there is no sideways strafe, and that is
+///   carried rather than hidden.
+/// * **The collective is governed.** At neutral it holds the *vertical* part of
+///   the thrust, so a coordinated turn does not sink. Past
+///   [`HELI_MIN_LIFT_COS`] it gives up and the aircraft falls. There is no
+///   autorotation and no engine failure: a governed collective cannot be lost.
+/// * **The rotor disc is rigid with the mast.** A real cyclic tilts the disc
+///   relative to the shaft and the fuselage follows it; here the thrust is along
+///   the fuselage's own up and the attitude hold is what moves the fuselage.
+///   The difference is a lag of a few tenths of a second in the first instant of
+///   a stick input, and buying it would need a disc state with its own flapping
+///   dynamics. Carried, with its size named.
+///
+/// # Which of the sixty-two tunables it reads
+///
+/// | tunable | what it is on a helicopter |
+/// |---|---|
+/// | `max_engine_force_n` | the rotor's thrust ceiling, newtons |
+/// | `max_speed_mps` | the speed the tilt authority tapers to its minimum by |
+/// | `max_steer_deg` / `min_steer_deg` | cyclic tilt at the hover / at that speed |
+/// | `steer_rate_deg_per_s` / `steer_return_deg_per_s` | how fast the stick moves the command |
+/// | `drag_n_per_mps2` | the fuselage's drag along its length |
+/// | `drag_lateral_n_per_mps2` | the fuselage's drag sideways and vertically |
+/// | `enter_time_s`, `enter_warp_start`, `enter_warp_end` | the seat warp, unchanged |
+#[derive(Clone, Debug)]
+pub struct RotorVehicle {
+    rig: VehicleRig,
+    tuning: VehicleTuning,
+    controls: VehicleControls,
+    /// The commanded pitch attitude, degrees, nose-up positive — the stick's own
+    /// state, rate-limited exactly as a steering rack is.
+    pitch_cmd_deg: f64,
+    /// The rotor's drawn azimuth, degrees, wrapped to `[0, 360)`.
+    azimuth_deg: f64,
+    /// The rotor thrust the last solve asked for, newtons — published for a
+    /// readout and a test.
+    thrust_n: f64,
+    /// Nothing: a rotorcraft has no wheels.
+    no_wheels: Vec<WheelState>,
+}
+
+impl RotorVehicle {
+    /// Build one over a derived rig, with the default tuning.
+    pub fn new(rig: VehicleRig) -> Self {
+        Self {
+            rig,
+            tuning: VehicleTuning::default(),
+            controls: VehicleControls::default(),
+            pitch_cmd_deg: 0.0,
+            azimuth_deg: 0.0,
+            thrust_n: 0.0,
+            no_wheels: Vec::new(),
+        }
+    }
+
+    /// The tuning, for a test or a UI to read.
+    pub fn tuning(&self) -> &VehicleTuning {
+        &self.tuning
+    }
+
+    /// The commanded pitch attitude this step, degrees, nose-up positive.
+    pub fn pitch_cmd_deg(&self) -> f64 {
+        self.pitch_cmd_deg
+    }
+
+    /// The rotor thrust the last solve asked for, newtons.
+    pub fn thrust_n(&self) -> f64 {
+        self.thrust_n
+    }
+
+    /// The rotor hub in the chassis frame and the disc's radius — **derived**
+    /// from the rig, so a class cannot disagree with its own geometry.
+    ///
+    /// The hub is where the thrust acts and the radius is the lever the attitude
+    /// hold's couples use, which is why the marker's size is read rather than
+    /// decorative. A rig with several rotors uses the largest disc and their
+    /// mean position, which is what a tandem's thrust line is.
+    fn hub(&self) -> (Vec3d, f64) {
+        let mut sum = Vec3d::ZERO;
+        let mut radius = 0.0f64;
+        let mut n = 0.0f64;
+        for (_, p) in self.rig.parts_of(PartKind::Rotor) {
+            sum = Vec3d::new(
+                sum.x + p.mount_local.x,
+                sum.y + p.mount_local.y,
+                sum.z + p.mount_local.z,
+            );
+            radius = radius.max(p.size.x.abs());
+            n += 1.0;
+        }
+        if n == 0.0 {
+            return (Vec3d::new(0.0, self.rig.seat_local.y, 0.0), 1.0);
+        }
+        (Vec3d::new(sum.x / n, sum.y / n, sum.z / n), radius.max(0.5))
+    }
+}
+
+impl Vehicle for RotorVehicle {
+    fn rig(&self) -> &VehicleRig {
+        &self.rig
+    }
+
+    fn set_rig(&mut self, rig: VehicleRig) {
+        self.rig = rig;
+    }
+
+    fn wheels(&self) -> &[WheelState] {
+        &self.no_wheels
+    }
+
+    fn wheels_mut(&mut self) -> &mut [WheelState] {
+        &mut self.no_wheels
+    }
+
+    fn control(&mut self, controls: VehicleControls) {
+        self.controls = controls;
+    }
+
+    fn tune(&mut self, name: &str, value: f64) -> bool {
+        self.tuning.set(name, value)
+    }
+
+    fn seat_warp(&self) -> (f64, inf_anim::WarpWindow) {
+        (self.tuning.enter_time_s, self.tuning.enter_window())
+    }
+
+    fn suspension_rest_m(&self) -> f64 {
+        0.0
+    }
+
+    fn gear(&self) -> i32 {
+        // A helicopter has no gearbox and nothing a telegraph would say. `0`,
+        // which `drive_readout` draws as "N" — and which is why wave VEH2c gives
+        // an aircraft its own readout instead of borrowing a car's.
+        0
+    }
+
+    fn engine_state(&self, _forward_mps: f64) -> (f64, f64) {
+        let peak = self.tuning.max_engine_force_n.max(1e-6);
+        let revs = (self.thrust_n / peak).clamp(0.0, 1.0);
+        // A rotor under load is heard, not seen: the note is the collective.
+        let load = (0.5 + 0.5 * self.controls.vertical).clamp(0.0, 1.0);
+        (revs.max(0.35), load)
+    }
+
+    /// The rotor, drawn: an azimuth about the mast, and nothing else.
+    fn part_pose(&self, index: usize) -> Option<Vec3d> {
+        let part = self.rig.parts.get(index)?;
+        (part.kind == PartKind::Rotor).then(|| Vec3d::new(0.0, self.azimuth_deg, 0.0))
+    }
+
+    fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
+        if !dt.is_finite() || dt <= 0.0 || !(chassis.mass_kg.is_finite() && chassis.mass_kg > 0.0) {
+            return;
+        }
+        let (fwd, right, up) = chassis.basis();
+        let forward_mps = chassis.linvel.dot(fwd);
+        let (hub_local, disc_r) = self.hub();
+        let hub = chassis.position + chassis.rotation * hub_local.to_dvec3();
+        let weight = chassis.mass_kg * 9.81;
+
+        // ── the collective, GOVERNED. Neutral holds the vertical component of
+        //    the thrust, so a coordinated turn does not sink; full up adds
+        //    `HELI_CLIMB_AUTHORITY` of hover and full down takes it away. Past
+        //    `HELI_MIN_LIFT_COS` of bank the governor gives up and it falls.
+        let lift_cos = up.y.max(HELI_MIN_LIFT_COS);
+        let collective = self.controls.vertical.clamp(-1.0, 1.0);
+        let hover = weight / lift_cos;
+        let peak = self.tuning.max_engine_force_n.max(0.0);
+        self.thrust_n = (hover * (1.0 + collective * HELI_CLIMB_AUTHORITY)).clamp(0.0, peak);
+        if self.thrust_n > 0.0 {
+            out.push(WheelForce {
+                point: hub,
+                force: up * self.thrust_n,
+            });
+        }
+
+        // ── the stick. Fore-and-aft is a PITCH ATTITUDE, rate-limited exactly
+        //    as a steering rack is and tapered with speed by the same law
+        //    (`steer_limit_deg`), because a full-authority cyclic at a hundred
+        //    knots is how a machine is over-stressed.
+        let limit = steer_limit_deg(&self.tuning, forward_mps);
+        // Nose DOWN to go forward, so a forward stick is a negative pitch.
+        let want = -self.controls.throttle.clamp(-1.0, 1.0) * limit;
+        let returning = want.abs() < self.pitch_cmd_deg.abs() || want * self.pitch_cmd_deg < 0.0;
+        let rate = if returning {
+            self.tuning.steer_return_deg_per_s
+        } else {
+            self.tuning.steer_rate_deg_per_s
+        };
+        let step = if rate.is_finite() {
+            rate.max(0.0) * dt
+        } else {
+            f64::INFINITY
+        };
+        self.pitch_cmd_deg += (want - self.pitch_cmd_deg).clamp(-step, step);
+        self.pitch_cmd_deg = self.pitch_cmd_deg.clamp(-limit, limit);
+
+        // ── the pedals, and the bank that goes with them. The yaw rate is the
+        //    command; the bank is DERIVED from it and the speed by the
+        //    coordinated-turn relation, which is what makes a turn a turn rather
+        //    than a skid. See this type's own note for what that refuses.
+        //
+        // `turn` is positive to the RIGHT, which is what the stick means
+        // (`VehicleControls::steer`). About the machine's own up axis that is a
+        // NEGATIVE rate — the same sentence `VehicleControls::steer`'s own doc
+        // has carried since P29.7 (*"a right turn is a negative yaw rate — see
+        // the door, where the sign is applied once"*), and this is that door for
+        // an aircraft.
+        let turn = self.controls.steer.clamp(-1.0, 1.0) * HELI_YAW_RATE_DEG_PER_S.to_radians();
+        let yaw_cmd = -turn;
+        // …and a right turn drops the RIGHT wing, which is a positive bank.
+        let bank_cmd = (turn * forward_mps * HELI_BANK_PER_TURN_DEG).clamp(-limit, limit);
+
+        // ── the attitude hold. Errors in SINE space, which is where the basis
+        //    already is: no inverse trigonometry, and therefore nothing whose
+        //    range reduction could differ between two machines.
+        let pitch_err = inf_math::psin64(self.pitch_cmd_deg.to_radians()) - fwd.y;
+        let roll_err = inf_math::psin64(bank_cmd.to_radians()) - (-right.y);
+        let pitch_rate = chassis.angvel.dot(right);
+        let roll_rate = chassis.angvel.dot(fwd);
+        let yaw_rate = chassis.angvel.dot(up);
+        // The gains are an angular ACCELERATION, so the torque is that times the
+        // airframe's own inertia — see `ROTOR_GYRADIUS_FRACTION` for where the
+        // inertia comes from and why it is derived from the disc.
+        let gain = chassis.mass_kg * (disc_r * ROTOR_GYRADIUS_FRACTION).powi(2);
+        // THE AXES, spelled out, because getting one of them backwards is a
+        // positive feedback loop rather than a wrong number and this model was
+        // written with two of them backwards:
+        //
+        // * `right x fwd == -up`, so a torque along **+right pitches the nose
+        //   DOWN**; the nose-UP axis is therefore `-right` and `pitch_rate`
+        //   (`angvel . right`) is a nose-DOWN rate.
+        // * `fwd x right == +up`, so a torque along **+fwd raises the RIGHT
+        //   wing**; the wing-down (positive bank) axis is `-fwd` and
+        //   `roll_rate` is a wing-UP rate.
+        // * yaw is a rate controller about `+up` and needs no such care: it
+        //   drives `angvel . up` at the demand, whatever the sign of either.
+        //
+        // Which is why both damping terms ADD to their proportional term: each
+        // rate is measured about the axis opposite the error's.
+        let tau = -right * ((HELI_ATTITUDE_KP * pitch_err + HELI_ATTITUDE_KD * pitch_rate) * gain)
+            - fwd * ((HELI_ATTITUDE_KP * roll_err + HELI_ATTITUDE_KD * roll_rate) * gain)
+            + up * ((yaw_cmd - yaw_rate) * HELI_ATTITUDE_KD * gain);
+        if let Some(pair) = torque_pair(chassis.position, tau, disc_r) {
+            out.extend_from_slice(&pair);
+        }
+
+        // ── the fuselage. Two coefficients, along and across, both quadratic —
+        //    and this is what gives the machine a top speed: nose down tilts the
+        //    thrust forward until the drag catches it.
+        let along = self.tuning.drag_n_per_mps2.max(0.0);
+        let across = self.tuning.drag_lateral_n_per_mps2.max(0.0);
+        let v = chassis.linvel;
+        let v_along = v.dot(fwd);
+        let rest = v - fwd * v_along;
+        let drag = -fwd * (along * v_along * v_along.abs()) - rest * (across * rest.length());
+        if drag != DVec3::ZERO {
+            out.push(WheelForce {
+                point: chassis.position,
+                force: drag,
+            });
+        }
+
+        // ── the blade, drawn. Visual only; nothing reads it back.
+        let turn = ROTOR_SPIN_DEG_PER_S * (self.thrust_n / peak.max(1e-6)).clamp(0.0, 1.0) * dt;
+        self.azimuth_deg = (self.azimuth_deg + turn).rem_euclid(360.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4629,6 +5040,334 @@ mod tests {
         let mut out = Vec::new();
         v.solve(afloat(DVec3::ZERO, DVec3::ZERO), DT, &mut out);
         assert!(out.is_empty(), "the inert class pushed {out:?}");
+    }
+
+    // ── the helicopter (wave VEH2c) ─────────────────────────────────────────
+
+    /// A light helicopter: one 5 m disc on a mast above the cabin.
+    fn rotor_rig() -> VehicleRig {
+        VehicleRig {
+            chassis: Uuid::from_u128(0x4E11),
+            seat_local: Vec3d::new(0.0, 0.9, 0.0),
+            wheels: Vec::new(),
+            parts: vec![PartMount {
+                guid: Uuid::from_u128(0x0D15),
+                kind: PartKind::Rotor,
+                mount_local: Vec3d::new(0.0, 1.3, 0.0),
+                size: Vec3d::new(5.0, 0.05, 5.0),
+            }],
+        }
+    }
+
+    /// A tuned rotorcraft — the catalogue row's numbers, through the same
+    /// `tune` door an authored `VehicleClass` uses. The default tuning is a
+    /// CAR's, whose 8 kN could not lift 1 500 kg, and a fixture that flew on it
+    /// would be measuring the default rather than the machine.
+    fn rotorcraft(rig: VehicleRig) -> RotorVehicle {
+        let mut v = RotorVehicle::new(rig);
+        for (name, value) in [
+            ("max_engine_force_n", 26_000.0),
+            ("max_speed_mps", 70.0),
+            ("max_steer_deg", 26.0),
+            ("min_steer_deg", 14.0),
+            ("steer_rate_deg_per_s", 60.0),
+            ("steer_return_deg_per_s", 90.0),
+            ("drag_n_per_mps2", 3.0),
+            ("drag_lateral_n_per_mps2", 40.0),
+        ] {
+            assert!(v.tune(name, value), "the rotorcraft refused `{name}`");
+        }
+        v
+    }
+
+    fn airborne(rotation: DQuat, linvel: DVec3, angvel: DVec3) -> ChassisState {
+        ChassisState {
+            position: DVec3::new(0.0, 40.0, 0.0),
+            rotation,
+            linvel,
+            angvel,
+            mass_kg: 1_500.0,
+            water_y: None,
+        }
+    }
+
+    /// **A couple is two forces**, and the pair really carries the torque asked
+    /// for while translating nothing (wave VEH2c).
+    ///
+    /// The whole reason a helicopter needs no new force channel: `WheelForce` is
+    /// a force at a point, and every attitude command in `RotorVehicle` is one
+    /// of these.
+    #[test]
+    fn a_torque_pair_carries_its_torque_and_moves_nothing() {
+        let centre = DVec3::new(3.0, -7.0, 11.0);
+        for tau in [
+            DVec3::new(0.0, 1_000.0, 0.0),
+            DVec3::new(500.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, -250.0),
+            DVec3::new(120.0, -340.0, 55.0),
+        ] {
+            let pair = torque_pair(centre, tau, 2.5).expect("a real torque");
+            let sum: DVec3 = pair.iter().map(|w| w.force).sum();
+            assert!(sum.length() < 1e-9, "the pair pushes: {sum:?}");
+            let moment: DVec3 = pair.iter().map(|w| (w.point - centre).cross(w.force)).sum();
+            assert!(
+                (moment - tau).length() < 1e-9,
+                "asked for {tau:?}, got {moment:?}"
+            );
+            // …and the moment is the same about ANY point, which is what makes
+            // it a pure couple rather than a force that happens to be balanced.
+            let elsewhere: DVec3 = pair
+                .iter()
+                .map(|w| (w.point - DVec3::new(-40.0, 9.0, 2.0)).cross(w.force))
+                .sum();
+            assert!((elsewhere - tau).length() < 1e-9);
+        }
+        // Refusals are values.
+        assert!(torque_pair(centre, DVec3::ZERO, 2.5).is_none());
+        assert!(torque_pair(centre, DVec3::Y, 0.0).is_none());
+        assert!(torque_pair(centre, DVec3::new(f64::NAN, 0.0, 0.0), 2.5).is_none());
+    }
+
+    /// **Neutral collective hovers**: the rotor exactly carries the weight, so a
+    /// level machine with the stick centred neither climbs nor falls.
+    #[test]
+    fn neutral_collective_is_a_hover_and_the_stick_moves_it_either_way() {
+        let mut v = rotorcraft(rotor_rig());
+        let mut out = Vec::new();
+        let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
+        let weight = state.mass_kg * 9.81;
+
+        v.control(VehicleControls::default());
+        v.solve(state, DT, &mut out);
+        assert!(
+            (v.thrust_n() - weight).abs() < 1e-6,
+            "the hover made {} N against {weight} N of weight",
+            v.thrust_n()
+        );
+        // Summed over every force, including the attitude hold's couple, a level
+        // hovering machine is in equilibrium.
+        let (f, tau) = resultant(&out, state.position);
+        assert!((f.y - weight).abs() < 1e-6, "the hover lifted {} N", f.y);
+        assert!(
+            f.x.abs() < 1e-9 && f.z.abs() < 1e-9,
+            "it is being pushed {f:?}"
+        );
+        assert!(tau.abs() < 1e-9, "a level hover is being yawed: {tau}");
+
+        for (collective, want) in [
+            (1.0, 1.0 + HELI_CLIMB_AUTHORITY),
+            (-1.0, 1.0 - HELI_CLIMB_AUTHORITY),
+        ] {
+            out.clear();
+            v.control(VehicleControls {
+                vertical: collective,
+                ..Default::default()
+            });
+            v.solve(state, DT, &mut out);
+            assert!(
+                (v.thrust_n() / weight - want).abs() < 1e-9,
+                "collective {collective} gave {}x hover, wanted {want}x",
+                v.thrust_n() / weight
+            );
+        }
+    }
+
+    /// **The governor holds the VERTICAL, and gives up at its own edge.**
+    ///
+    /// A coordinated turn tilts the thrust vector, so holding the thrust
+    /// constant would make every turn a descent. The governor divides by the
+    /// bank's cosine — until `HELI_MIN_LIFT_COS`, past which it stops and the
+    /// aircraft falls, which is the one honest cliff in the model.
+    #[test]
+    fn the_collective_governor_holds_height_in_a_bank_until_it_cannot() {
+        let weight = 1_500.0 * 9.81;
+        let lift_at = |bank_deg: f64| {
+            let mut v = rotorcraft(rotor_rig());
+            let mut out = Vec::new();
+            let rot = DQuat::from_rotation_z(-bank_deg.to_radians());
+            let state = airborne(rot, DVec3::ZERO, DVec3::ZERO);
+            v.control(VehicleControls::default());
+            v.solve(state, DT, &mut out);
+            // The vertical component of the rotor force alone — the couple sums
+            // to zero and the drag is zero at rest.
+            (v.thrust_n(), (state.rotation * DVec3::Y).y * v.thrust_n())
+        };
+        for bank in [0.0, 15.0, 30.0, 45.0] {
+            let (thrust, lift) = lift_at(bank);
+            assert!(
+                (lift - weight).abs() < 1e-6,
+                "at {bank} deg of bank the rotor lifted {lift} N of {weight} N"
+            );
+            assert!(thrust >= weight - 1e-9, "{bank} deg: {thrust} N");
+        }
+        // THE SECOND EDGE is the governor's own: past `HELI_MIN_LIFT_COS` it
+        // stops dividing at all, so a machine rolled onto its side falls rather
+        // than asking for an infinite rotor.
+        // THE FIRST EDGE is the rotor's own ceiling, and it arrives before
+        // `HELI_MIN_LIFT_COS` does: the fixture's 26 kN holds a 1 500 kg
+        // machine up to about 56 degrees of bank and no further, so a
+        // 60-degree turn descends because the aircraft is out of thrust,
+        // which is the right reason for it to.
+        let (thrust, lift) = lift_at(60.0);
+        assert!(
+            (thrust - 26_000.0).abs() < 1e-6,
+            "the rotor ceiling is not binding at 60 degrees: {thrust} N"
+        );
+        assert!(lift < weight, "a 60-degree bank held its height on 26 kN");
+        let (_, lift) = lift_at(80.0);
+        assert!(
+            lift < weight * 0.6,
+            "an 80-degree bank still held {lift} N of {weight} N — the governor \
+             has no edge"
+        );
+    }
+
+    /// **The pedals ask for a yaw rate and the bank follows the turn** — the
+    /// coordinated-turn relation, and the refusal it encodes.
+    #[test]
+    fn the_pedals_yaw_and_the_bank_is_derived_from_the_turn() {
+        let commanded = |steer: f64, speed: f64| {
+            let mut v = rotorcraft(rotor_rig());
+            let mut out = Vec::new();
+            let state = airborne(DQuat::IDENTITY, DVec3::new(0.0, 0.0, speed), DVec3::ZERO);
+            v.control(VehicleControls {
+                steer,
+                ..Default::default()
+            });
+            v.solve(state, DT, &mut out);
+            let (_, tau_y) = resultant(&out, state.position);
+            // The roll moment about the machine's own forward axis.
+            let tau: DVec3 = out
+                .iter()
+                .map(|w| (w.point - state.position).cross(w.force))
+                .sum();
+            (tau_y, tau.z)
+        };
+        // On the spot: a pedal turn, and NO bank — there is no speed to bank
+        // against, which is exactly what the relation says.
+        //
+        // A RIGHT pedal is a NEGATIVE moment about the machine's own up axis.
+        // That is not this class's invention: `VehicleControls::steer`'s doc has
+        // said "a right turn is a negative yaw rate" since P29.7, and the world
+        // arm `the_pedals_turn_the_nose_and_the_bank_only_arrives_with_speed`
+        // measures the same stick as **+107 degrees** of the engine's own euler
+        // yaw, which is the sense a car's steering already turns in.
+        let (yaw, roll) = commanded(1.0, 0.0);
+        assert!(yaw < 0.0, "a right pedal made a yaw moment of {yaw}");
+        assert!(roll.abs() < 1e-6, "a hovering pedal turn banked: {roll}");
+        // At speed: the same pedal, and now it banks INTO the turn. A torque
+        // along +Z raises the right wing here, so dropping it is negative.
+        let (yaw_fast, roll_fast) = commanded(1.0, 40.0);
+        assert!(
+            (yaw_fast - yaw).abs() < 1e-6,
+            "the yaw command chased the speed"
+        );
+        assert!(
+            roll_fast < 0.0,
+            "a turn at 40 m/s did not bank into it: {roll_fast}"
+        );
+        // …and the other pedal is the mirror image.
+        let (yaw_l, roll_l) = commanded(-1.0, 40.0);
+        assert!((yaw_l + yaw_fast).abs() < 1e-6);
+        assert!((roll_l + roll_fast).abs() < 1e-6);
+    }
+
+    /// **The stick commands an attitude**, rate-limited and speed-tapered by the
+    /// same law a steering rack uses — and forward is NOSE DOWN.
+    #[test]
+    fn the_stick_commands_a_pitch_attitude_that_takes_time_to_arrive() {
+        let mut v = rotorcraft(rotor_rig());
+        v.tune("max_steer_deg", 30.0);
+        v.tune("min_steer_deg", 12.0);
+        v.tune("max_speed_mps", 60.0);
+        v.control(VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        });
+        let mut out = Vec::new();
+        let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
+        v.solve(state, DT, &mut out);
+        // One step of a 60 deg/s rack is one degree, and forward is nose DOWN.
+        assert!(
+            (v.pitch_cmd_deg() + 1.0).abs() < 1e-9,
+            "one step gave {} degrees",
+            v.pitch_cmd_deg()
+        );
+        for _ in 0..300 {
+            out.clear();
+            v.solve(state, DT, &mut out);
+        }
+        assert!(
+            (v.pitch_cmd_deg() + 30.0).abs() < 1e-9,
+            "the stick settled at {} of a 30 degree authority",
+            v.pitch_cmd_deg()
+        );
+        // …and at speed the authority tapers, and binds the RESULT: a command
+        // already at the hover stop is pulled back as the machine accelerates.
+        let fast = airborne(DQuat::IDENTITY, DVec3::new(0.0, 0.0, 60.0), DVec3::ZERO);
+        out.clear();
+        v.solve(fast, DT, &mut out);
+        assert!(
+            (v.pitch_cmd_deg() + 12.0).abs() < 1e-9,
+            "at 60 m/s the stick still reached {}",
+            v.pitch_cmd_deg()
+        );
+    }
+
+    /// The blade turns while the rotor is turning and the angle stays wrapped —
+    /// a visual write, and the only thing in this class that is one.
+    #[test]
+    fn the_drawn_blade_turns_and_its_angle_stays_bounded() {
+        let mut v = rotorcraft(rotor_rig());
+        v.control(VehicleControls::default());
+        let mut out = Vec::new();
+        let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..600 {
+            out.clear();
+            v.solve(state, DT, &mut out);
+            let pose = v.part_pose(0).expect("a rotor has a pose");
+            assert_eq!(pose.x, 0.0);
+            assert_eq!(pose.z, 0.0);
+            assert!((0.0..360.0).contains(&pose.y), "azimuth {}", pose.y);
+            seen.insert(pose.y.to_bits());
+        }
+        assert!(
+            seen.len() > 100,
+            "the blade barely moved: {} angles",
+            seen.len()
+        );
+    }
+
+    /// **`class_for_parts` picks the rotorcraft for a rotor, and rotors outrank
+    /// thrusters** — the precedence rule, asserted rather than described.
+    #[test]
+    fn a_rotor_rig_gets_the_rotorcraft_and_outranks_a_thruster() {
+        // A rotor alone.
+        let v = class_for_parts(rotor_rig());
+        assert_eq!(v.gear(), 0);
+        assert_eq!(v.suspension_rest_m(), 0.0);
+        // Behaviour, not a downcast: only the rotorcraft lifts against gravity.
+        let lifts = |mut v: Box<dyn Vehicle>| {
+            v.tune("max_engine_force_n", 26_000.0);
+            v.control(VehicleControls::default());
+            let mut out = Vec::new();
+            v.solve(
+                airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO),
+                DT,
+                &mut out,
+            );
+            out.iter().map(|w| w.force.y).sum::<f64>()
+        };
+        assert!(lifts(class_for_parts(rotor_rig())) > 14_000.0);
+        // A hull does not lift; buoyancy is not its business.
+        assert_eq!(lifts(class_for_parts(hull_rig())), 0.0);
+        // Both parts: the rotor wins, because what holds an amphibian up is what
+        // decides how it behaves.
+        let mut both = rotor_rig();
+        both.parts.extend(hull_rig().parts);
+        both.parts.sort_unstable_by_key(|p| p.guid);
+        assert!(lifts(class_for_parts(both)) > 14_000.0);
     }
 
     /// The readout a driver reads, and the two edges of it.

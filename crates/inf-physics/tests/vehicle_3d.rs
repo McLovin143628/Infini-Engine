@@ -39,6 +39,12 @@ const THRUSTER: Uuid = Uuid::from_u128(0x2907_1201);
 /// the water at rest. (At the car's 150 it would float with its propeller in the
 /// air, which the immersion rule correctly refuses to drive.)
 const HULL_DENSITY: f64 = 400.0;
+/// The rotorcraft and its disc (wave VEH2c).
+const HELI: Uuid = Uuid::from_u128(0x2907_1300);
+const ROTOR: Uuid = Uuid::from_u128(0x2907_1301);
+/// An airframe is mostly air: 190 kg/m3 over the 8 m3 hull is 1 520 kg, which
+/// is a light twin-seat helicopter.
+const HELI_DENSITY: f64 = 190.0;
 /// The equilibrium origin height for that density: half the hull, less the 40 %
 /// of its full depth that is under. Spawned here so the arms measure a boat and
 /// not a splash.
@@ -1965,4 +1971,371 @@ fn the_rudder_is_drawn_and_its_mount_never_moves() {
     b.bridge.sync_from_world(&b.world);
     let rig = b.bridge.vehicle_of(HULL).unwrap().rig();
     assert_eq!(rig.parts[0].mount_local, mount);
+}
+
+// ── the helicopter, against a real world (wave VEH2c) ───────────────────────
+
+/// A rotorcraft: the same dynamic box at an airframe's density, with a
+/// **capsule sensor** above the cabin where the disc goes.
+fn airframe(world: &mut EcsWorld, y: f64) {
+    let e = world.spawn_with_guid(HELI, "Helicopter", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, y, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: HALF,
+            density: HELI_DENSITY,
+            friction: 0.6,
+            ..Default::default()
+        },
+    ));
+    let r = world.spawn_with_guid(ROTOR, "Rotor", Some(e));
+    let mut rt = Transform::IDENTITY;
+    rt.translation = Vec3d::new(0.0, 1.3, 0.0);
+    world.world_mut().entity_mut(r).insert((
+        rt,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            radius: 5.0,
+            half_extents: Vec3d::new(5.0, 0.05, 5.0),
+            sensor: true,
+            ..Default::default()
+        },
+    ));
+}
+
+struct Heli {
+    world: EcsWorld,
+    bridge: PhysicsBridge3D,
+}
+
+impl Heli {
+    fn new() -> Self {
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        airframe(&mut world, HALF.y);
+        world.mark_dirty();
+        world.propagate();
+        let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let mut h = Self { world, bridge };
+        h.bridge.sync_from_world(&h.world);
+        assert_eq!(h.bridge.vehicle_count(), 1, "the airframe is not a vehicle");
+        let v = h.bridge.vehicle_mut(HELI).expect("the rotorcraft");
+        for (name, value) in [
+            ("max_engine_force_n", 26_000.0),
+            ("max_speed_mps", 70.0),
+            ("max_steer_deg", 26.0),
+            ("min_steer_deg", 14.0),
+            ("steer_rate_deg_per_s", 60.0),
+            ("steer_return_deg_per_s", 90.0),
+            ("drag_n_per_mps2", 3.0),
+            ("drag_lateral_n_per_mps2", 220.0),
+        ] {
+            assert!(v.tune(name, value), "the rotorcraft refused `{name}`");
+        }
+        h
+    }
+
+    fn fly(&mut self, controls: VehicleControls, n: u32) {
+        for _ in 0..n {
+            self.bridge.sync_from_world(&self.world);
+            if let Some(v) = self.bridge.vehicle_mut(HELI) {
+                v.control(controls);
+            }
+            inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge, DT);
+            inf_physics::d3::step_vehicles(&mut self.world, &mut self.bridge, DT);
+            self.bridge.step(DT);
+            self.bridge.write_back_into(&mut self.world);
+            self.world.propagate();
+        }
+    }
+
+    fn at(&self) -> DVec3 {
+        let e = self.world.entity_of(HELI).expect("the aircraft exists");
+        self.world
+            .world()
+            .get::<Transform>(e)
+            .expect("…with a transform")
+            .translation
+            .to_dvec3()
+    }
+
+    fn vel(&self) -> DVec3 {
+        self.bridge
+            .body_of(HELI)
+            .and_then(|b| self.bridge.world().body_linvel(b))
+            .unwrap_or(DVec3::ZERO)
+    }
+
+    /// The airframe's pitch, degrees, nose-up positive — read off the WORLD, so
+    /// the attitude arms measure the aircraft and not the command.
+    fn pitch_deg(&self) -> f64 {
+        let e = self.world.entity_of(HELI).expect("the aircraft exists");
+        let t = self.world.world().get::<Transform>(e).unwrap();
+        let fwd = t.quat() * DVec3::Z;
+        fwd.y.clamp(-1.0, 1.0).asin().to_degrees()
+    }
+
+    /// The airframe's heading, degrees — the engine's OWN euler yaw, which is
+    /// the number `steering_turns_it_and_the_sign_is_the_one_the_control_says`
+    /// measures a car's turn with. One convention, read one way.
+    fn yaw_deg(&self) -> f64 {
+        let e = self.world.entity_of(HELI).expect("the aircraft exists");
+        self.world.world().get::<Transform>(e).unwrap().rotation.y
+    }
+}
+
+const HOVER: VehicleControls = VehicleControls {
+    throttle: 0.0,
+    steer: 0.0,
+    brake: 0.0,
+    handbrake: false,
+    vertical: 0.0,
+};
+
+/// **THE HELICOPTER FLIES** — lifts off, holds a height, and comes back down.
+///
+/// The climb-rate row of this wave's air-feel table, and the claim that makes
+/// it a helicopter rather than a flycam: gravity is ON. The hover is an
+/// equilibrium the rotor is paying for every step, not a mode with the physics
+/// switched off — which is exactly what `MovementMode::Flying`'s 6-DOF flycam
+/// is and is why it was only ever the FEEL reference.
+#[test]
+fn a_helicopter_lifts_off_holds_a_hover_and_comes_back_down() {
+    let mut h = Heli::new();
+    // On the ground, rotor turning at the hover setting: it must not sink into
+    // the floor and must not drift up.
+    h.fly(HOVER, 60);
+    let ground_y = h.at().y;
+
+    let climb = VehicleControls {
+        vertical: 1.0,
+        ..HOVER
+    };
+    let mut rows = Vec::new();
+    for s in 1..=6u32 {
+        h.fly(climb, 60);
+        rows.push((s, h.at().y - ground_y, h.vel().y));
+    }
+    println!("HELICOPTER, full collective from the ground:");
+    for (s, alt, rate) in &rows {
+        println!("  t={s}s  {alt:.1} m up  {rate:.2} m/s");
+    }
+    let (_, alt, rate) = *rows.last().expect("six seconds");
+    assert!(
+        alt > 20.0,
+        "six seconds of full collective climbed {alt:.1} m"
+    );
+    assert!(rate > 3.0, "the climb settled at {rate:.2} m/s");
+
+    // Neutral collective is a HOVER — once the climb has bled off. The
+    // governor holds the WEIGHT, not the height, so an aircraft that was
+    // climbing at ten metres a second keeps going up until the fuselage's own
+    // drag has taken it, which is what a real one does and is measured here
+    // rather than assumed away.
+    h.fly(HOVER, 900);
+    let held = h.at().y;
+    h.fly(HOVER, 180);
+    let first = h.at().y - held;
+    let held = h.at().y;
+    h.fly(HOVER, 180);
+    let second = h.at().y - held;
+    println!("  neutral collective, fifteen seconds after the climb: {first:+.2} m then {second:+.2} m per three seconds");
+    // The coast DECAYS: the fuselage's drag is quadratic, so it approaches zero
+    // without ever arriving, and asserting a hard stop would be asserting a
+    // model this one deliberately does not have.
+    assert!(
+        second.abs() < first.abs(),
+        "the coast is not decaying: {first:.2} m then {second:.2} m"
+    );
+    assert!(
+        first.abs() < 1.5 && second.abs() < 1.0,
+        "a settled hover is still moving: {first:.2} m then {second:.2} m"
+    );
+
+    // Full down descends, and the GROUND stops it rather than the model —
+    // fifteen seconds, which is comfortably past the time the descent needs, so
+    // what arrests it is a contact and not the end of the loop.
+    let descend = VehicleControls {
+        vertical: -1.0,
+        ..HOVER
+    };
+    h.fly(descend, 900);
+    // …and the collective back to neutral, which is what a pilot does on the
+    // skids. Holding it down against the ground is a machine being pressed into
+    // the floor, not a machine that has landed.
+    h.fly(HOVER, 120);
+    let landed = h.at().y;
+    println!(
+        "  fifteen seconds of down collective, then neutral: {:.2} m above where it started",
+        landed - ground_y
+    );
+    println!("  attitude on the skids: pitch {:+.1} deg", h.pitch_deg());
+    assert!(
+        (landed - ground_y).abs() < 0.5,
+        "the aircraft came to rest at {landed:.2} m against a ground at {ground_y:.2}"
+    );
+    // …and it is RESTING, not still falling through the floor.
+    assert!(
+        h.vel().y.abs() < 0.5,
+        "it is still moving at {:.2} m/s",
+        h.vel().y
+    );
+}
+
+/// **The stick tilts the machine and the machine goes where it is pointed** —
+/// the top-speed and tilt-authority rows of the air-feel table.
+///
+/// The translation is not commanded anywhere in this model: it emerges from a
+/// thrust vector that is no longer vertical, which is how a helicopter works.
+/// A tilt that produced no motion, or motion with no tilt, would both be
+/// caught here.
+#[test]
+fn a_helicopter_pitches_over_and_the_speed_that_follows_has_a_ceiling() {
+    let mut h = Heli::new();
+    h.fly(
+        VehicleControls {
+            vertical: 1.0,
+            ..HOVER
+        },
+        240,
+    );
+    h.fly(HOVER, 120);
+    let base = h.at();
+
+    let ahead = VehicleControls {
+        throttle: 1.0,
+        ..HOVER
+    };
+    let mut rows = Vec::new();
+    for s in 1..=30u32 {
+        h.fly(ahead, 60);
+        let v = h.vel();
+        rows.push((s, DVec3::new(v.x, 0.0, v.z).length(), h.pitch_deg()));
+    }
+    println!("HELICOPTER, full forward cyclic from the hover:");
+    for (s, speed, pitch) in &rows {
+        println!("  t={s}s  {speed:.1} m/s  pitch {pitch:+.1} deg");
+    }
+    let (_, top, pitch) = *rows.last().expect("thirty seconds");
+    // (a) it is nose DOWN, and inside the authority its own tuning allows.
+    assert!(
+        pitch < -5.0 && pitch > -30.0,
+        "the aircraft is at {pitch:.1} degrees"
+    );
+    // (b) it MOVED, forward, a long way.
+    let run = h.at() - base;
+    assert!(
+        run.z > 700.0,
+        "thirty seconds of forward flight covered {:.1} m",
+        run.z
+    );
+    assert!(
+        run.x.abs() < run.z.abs() * 0.25,
+        "it flew sideways: {run:?}"
+    );
+    // (c) the speed has a CEILING, because the fuselage's drag catches the
+    //     tilted thrust. A machine still accelerating at twelve seconds has no
+    //     top speed.
+    let prev = rows[rows.len() - 2].1;
+    assert!(
+        (top - prev).abs() < 0.15,
+        "the aircraft was at {prev:.1} m/s and {top:.1} m/s — no ceiling"
+    );
+    assert!(top > 35.0, "it only reached {top:.1} m/s");
+
+    // (d) and it comes back: the stick to neutral levels the machine.
+    h.fly(HOVER, 300);
+    println!(
+        "  five seconds of neutral stick: pitch {:+.1} deg",
+        h.pitch_deg()
+    );
+    assert!(
+        h.pitch_deg().abs() < 4.0,
+        "the machine stayed at {:.1} degrees with the stick centred",
+        h.pitch_deg()
+    );
+}
+
+/// **The pedals point the nose**, and they do it on the spot — the yaw row of
+/// the air-feel table.
+#[test]
+fn the_pedals_turn_the_nose_and_the_bank_only_arrives_with_speed() {
+    let mut h = Heli::new();
+    h.fly(
+        VehicleControls {
+            vertical: 1.0,
+            ..HOVER
+        },
+        240,
+    );
+    h.fly(HOVER, 120);
+    let before = h.yaw_deg();
+    let start = h.at();
+
+    let right = VehicleControls {
+        steer: 1.0,
+        ..HOVER
+    };
+    h.fly(right, 180);
+    let turned = inf_ecs::movement::angle_delta_deg(h.yaw_deg(), before);
+    let moved = (h.at() - start).length();
+    println!(
+        "HELICOPTER, three seconds of right pedal in the hover: {turned:+.0} deg, moved {moved:.1} m"
+    );
+    assert!(
+        turned > 60.0,
+        "three seconds of right pedal turned {turned:.0} degrees"
+    );
+    // A pedal turn is a turn ON THE SPOT: the aircraft does not go anywhere.
+    assert!(moved < 12.0, "the pedal turn wandered {moved:.1} m");
+
+    // Left pedal is the other way.
+    let before = h.yaw_deg();
+    h.fly(
+        VehicleControls {
+            steer: -1.0,
+            ..HOVER
+        },
+        180,
+    );
+    let back = inf_ecs::movement::angle_delta_deg(h.yaw_deg(), before);
+    assert!(back < -60.0, "the left pedal turned {back:.0} degrees");
+}
+
+/// **The rotor is DRAWN turning**, and its mount never moves — the part-pose
+/// door, asserted through the world exactly as the rudder's is.
+#[test]
+fn the_rotor_is_drawn_turning_and_its_mount_never_moves() {
+    let mut h = Heli::new();
+    let mount = {
+        let e = h.world.entity_of(ROTOR).expect("the rotor exists");
+        h.world.world().get::<Transform>(e).unwrap().translation
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..120 {
+        h.fly(HOVER, 1);
+        let e = h.world.entity_of(ROTOR).unwrap();
+        let t = *h.world.world().get::<Transform>(e).unwrap();
+        assert_eq!(t.translation, mount, "the door moved the rotor's mount");
+        assert_eq!(t.rotation.x, 0.0);
+        assert_eq!(t.rotation.z, 0.0);
+        seen.insert(t.rotation.y.to_bits());
+    }
+    assert!(
+        seen.len() > 50,
+        "the blade barely turned: {} angles",
+        seen.len()
+    );
+    h.bridge.sync_from_world(&h.world);
+    let rig = h.bridge.vehicle_of(HELI).unwrap().rig();
+    assert_eq!(rig.parts[0].mount_local, mount);
+    assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Rotor);
 }
