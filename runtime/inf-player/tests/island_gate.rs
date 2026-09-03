@@ -8785,7 +8785,7 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     let mut rows: Vec<Row> = Vec::new();
     for speed in SPEEDS {
         let mut sim = pack_sim(&pack);
-        let hero = hero_entity(&mut sim).expect("the island has a hero");
+        let hero = hero_entity(&sim).expect("the island has a hero");
         // Profiling ON, or `step_profile` is all zeroes by its own doc and the
         // budget below would be asserted against nothing (the VEN1b finding).
         sim.set_step_profiling(true);

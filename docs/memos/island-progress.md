@@ -28931,7 +28931,7 @@ delimiter is quoted**, so a doubled backslash inside one is not a remedy.
 |---|---|---|
 | battery blocks / passed / failed / ignored | 365 / 6 920 / 0 / 20 | **366 / 6 959 / 0 / 20** — `cargo test --workspace -j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`, exit 0, run at the head this row is written at. +1 binary (the wave's own `veh2c_harbour_gate`) and +39 passed over the EMS3 audit's row. The only panic in the log is `inf-hotreload`'s deliberate crash-isolation fixture. **Two earlier runs of the same tree read 366 / 6 958 / 1 / 20**, and the one failure is the club gate's wall-clock audio budget — see the note below the table |
 | goldens | 62 | **62, none added and none re-blessed** — `git status` over `crates/inf-render/tests/goldens` is empty and the diff touches none. This wave renders nothing |
-| rustdoc individual warnings (ceiling 450) | 409 | **409 ^warning lines**, exit 0, cold after `cargo clean --doc`. Thirty of them are per-crate summaries, so **379 individual** against a 450 ceiling — cross-checked against the sum of the summaries' own counts, which is 379 exactly. **None is in a file this wave touched**: no warning cites `inf-ecs/src/vehicle.rs`, `inf-physics/src/d3/`, `inf-editor-core/src/island.rs`, `inf-player/src/window.rs` or the two gates |
+| rustdoc individual warnings (ceiling 450) | 409 | **409 ^warning lines**, exit 0, cold after `cargo clean --doc`. Thirty of them are per-crate summaries, so **379 individual** against a 450 ceiling — cross-checked against the sum of the summaries' own counts, which is 379 exactly. **None is in a line this wave wrote.** *The row said "none is in a FILE this wave touched" and that is not right:* three warnings cite `inf-physics/src/d3/ecs.rs`, which the wave edited — at lines **664** and **2087**, and the wave's own hunks in that file start at 747, so all three are pre-existing and none is in an added line. Reproduced at the audit head: **409** again, 30 summaries and 379 individual, exit 0, and nothing citing `inf-ecs/src/vehicle.rs`, `inf-editor-core/src/island.rs`, `inf-player/src/window.rs`, the two gates or any line either the wave or the audit added |
 | `clippy --workspace --all-targets`, `-D warnings` | 0 | **0**, exit 0, run **LAST** per the rmeta law. Two findings on the way, both in this wave's own test code and both fixed rather than allowed: a `&mut RuntimeSim` handed to a function that takes a shared reference, and a `for` loop over a one-element array. Checked for vacuity — a `.clone()` on a `usize` inside the harbour gate's own new arm reds the run by name |
 | `cargo fmt` | clean | **clean** — per package. `cargo fmt --all --check` itself fails on this machine with *"The filename or extension is too long (os error 206)"*, which is a Windows command-line-length limit reached by the workspace's file list and not a formatting result; `cargo fmt --all` (write mode) and `cargo fmt -p <pkg> --check` both run, and every touched package is clean under the latter |
 | `Cargo.lock` / manifests / `deny.toml` | byte-identical | **byte-identical** — not one manifest is in the diff, and **no dependency of any kind was added**, so `cargo deny` was not required |
@@ -29094,6 +29094,24 @@ reader; it is no longer visible to a gate. The same is true of
 rather than anything this wave introduced. **The vehicle phase's 0.00110 /
 0.00123 ms against 0.5 is a printed figure on every run CI makes, not an
 assertion.**
+
+**THE AUDIT'S OWN CLOSING NUMBERS**, all at this head:
+**`AGGREGATE over 366 binaries: 6962 passed, 0 failed, 20 ignored`**, exit 0,
+`INF_GOLDEN_STRICT=1`, `-j 3 --no-fail-fast`, zero compiler warnings in the whole
+run, and the only panic in the log is `inf-hotreload`'s crash-isolation fixture —
+**+3 passed** over the wave's own row, which is exactly the three arms the audit
+added. **Goldens 62**, none added, none re-blessed, `git status` over them empty.
+**rustdoc 409** (30 summaries, 379 individual) against the 450 ceiling, cold after
+`cargo clean --doc`. **clippy 0**, exit 0, run LAST — and non-vacuous: it caught a
+`&mut RuntimeSim` handed to a function taking a shared reference in the audit's own
+rewritten streaming arm, which is the same finding the wave's own `e17af9b9` had
+fixed and the audit re-introduced by splicing. **`cargo fmt --all` reformatted
+nothing.** **CRLF 0** over the whole range. Manifests, `Cargo.lock` and `deny.toml`
+untouched. **scene v27, `ScenePayload` v12, `EXPECTED_LEVELS` 24.**
+
+The battery was run at `f996bcc5`; the only code change after it is that one
+borrow, in a test file, and `inf-player`'s `island_gate` was re-run whole at the
+audit head (26 passed) to cover it.
 
 **A note on the line citations in this section:** they were exact at
 `4c69d3b5` and the audit's own edits to `crates/inf-ecs/src/vehicle.rs` moved
