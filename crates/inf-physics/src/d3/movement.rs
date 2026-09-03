@@ -709,6 +709,17 @@ fn step_one(
                 inf_ecs::item::pick_up(world, guid, target);
                 None
             }
+            // EMS3. **The one place a wanted level can be walked away from.**
+            // Guarded by `is_wardrobe`, so a `Change` hit on something that is
+            // not one does nothing rather than dressing somebody out of a
+            // filing cabinet — the same shape `use_door`'s "a `Use` hit is a
+            // door if the world has one under that guid" already has.
+            Some((inf_ecs::interact::InteractVerb::Change, target)) => {
+                if inf_ecs::wardrobe::is_wardrobe(world, target) {
+                    inf_ecs::wardrobe::change_clothes(world, guid);
+                }
+                None
+            }
             Some((
                 inf_ecs::interact::InteractVerb::Grab | inf_ecs::interact::InteractVerb::Talk,
                 _,

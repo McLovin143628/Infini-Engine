@@ -122,6 +122,14 @@ pub fn candidates(
     // every chassis this adds is in it — which is the whole point. See
     // `carjack::candidates`.
     out.extend(super::carjack::candidates(world, bridge, feet));
+    // EMS3: the wardrobes. Excluded like the doors are, and banded and
+    // reach-filtered on its own side so a character standing in a street pays
+    // one `try_query` for the whole clause.
+    out.extend(
+        inf_ecs::wardrobe::candidates(world, &bridge.sim_band(world), feet)
+            .into_iter()
+            .filter(|c| !exclude.contains(&c.guid)),
+    );
     // One sorted walk, because the rule's tie-break is only deterministic over
     // one: a seat and an item at exactly the same distance must resolve the same
     // way in both hosts.

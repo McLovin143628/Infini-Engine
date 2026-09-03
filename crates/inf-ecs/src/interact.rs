@@ -72,6 +72,14 @@ pub enum InteractVerb {
     /// decline — the `match` in `inf_physics::d3::movement` is exhaustive over
     /// this enum on purpose.
     Carjack,
+    /// **Put on something else** (wave EMS3): a wardrobe.
+    ///
+    /// A verb of its own rather than a `Use` on a piece of furniture, for
+    /// [`Carjack`](Self::Carjack)'s reason exactly — the two differ in what the
+    /// player is TOLD, and *"Use wardrobe"* over the one object in the game that
+    /// drops a wanted level is a prompt that hides the mechanic. It is also what
+    /// makes the dispatch a compile error rather than a silent decline.
+    Change,
 }
 
 impl InteractVerb {
@@ -86,6 +94,10 @@ impl InteractVerb {
             // Not "Carjack": a prompt is a thing a player reads in a tenth of a
             // second, and the word for the gesture is what it looks like.
             InteractVerb::Carjack => "Pull out",
+            // The noun is the LABEL, which `d3::wardrobe` spells "clothes" — so
+            // the prompt reads "[E] Change clothes" rather than naming the
+            // cupboard, because what a player is choosing is the outfit.
+            InteractVerb::Change => "Change",
         }
     }
 }

@@ -315,6 +315,26 @@ pub enum ModuleShape {
     /// [`Glazing`](ModuleShape::Glazing) pane is drawn without a collider and a
     /// glazed *wall module* keeps one.
     Grille,
+    /// **A wardrobe** (wave EMS3): a [`Carcass`](ModuleShape::Carcass) with a
+    /// pair of full-height doors on it — two leaves standing proud of a recessed
+    /// carcass, with a four-centimetre seam down the middle.
+    ///
+    /// # It is its own family for an IDENTITY reason, not a silhouette one
+    ///
+    /// `shape_of` collapses `Cabinet`, `Locker`, `Wardrobe`, `Units`, `Shelf`,
+    /// `Rack`, `Counter`, `Basin` and `FrontDesk` onto one carcass, and a module
+    /// GUID is derived from the family's [`name`](ModuleShape::name) — so until
+    /// this wave every one of those nine drew under **one id**, and nothing
+    /// downstream could tell a wardrobe from a shop counter.
+    ///
+    /// Wave EMS3 needs to: `inf_physics::d3::wardrobe` offers an
+    /// `InteractVerb::Change` on a wardrobe and must not offer it on a filing
+    /// cabinet, and the only per-instance identity a placed module carries into
+    /// the world is `ScatteredInstance::mesh`. Splitting the family is what
+    /// gives it one. The doors are the honest consequence — having earned a mesh
+    /// of its own it should look like the thing it is — and they are the
+    /// smallest change that reads as a wardrobe rather than as a cupboard.
+    Wardrobe,
 }
 
 impl ModuleShape {
@@ -326,7 +346,7 @@ impl ModuleShape {
     /// end, and the seven venue families (wave VEN1a) and the institutions' one
     /// (wave EMS1) are appended for that reason rather than filed beside their
     /// nearest relatives.
-    pub const ALL: [ModuleShape; 20] = [
+    pub const ALL: [ModuleShape; 21] = [
         ModuleShape::Panel,
         ModuleShape::Glazing,
         ModuleShape::Column,
@@ -347,6 +367,7 @@ impl ModuleShape {
         ModuleShape::Sign,
         ModuleShape::Festoon,
         ModuleShape::Grille,
+        ModuleShape::Wardrobe,
     ];
 
     /// The stable name the GUID is derived from. **Never change one of these
@@ -374,6 +395,7 @@ impl ModuleShape {
             ModuleShape::Sign => "sign",
             ModuleShape::Festoon => "festoon",
             ModuleShape::Grille => "grille",
+            ModuleShape::Wardrobe => "wardrobe",
         }
     }
 
@@ -427,7 +449,11 @@ impl ModuleShape {
             | ModuleShape::Soft
             | ModuleShape::Planter
             | ModuleShape::Crate
-            | ModuleShape::Shutter => PcgSurface::DEFAULT,
+            | ModuleShape::Shutter
+            // EMS3's wardrobe is furniture, so it answers what furniture has
+            // always answered: splitting a family for an *identity* must not
+            // change what anything is made of.
+            | ModuleShape::Wardrobe => PcgSurface::DEFAULT,
             // Stage planks and benches: warm, worn wood with a little sheen, so
             // a red wash pools on it instead of going flat. The reference's
             // catwalk is the brightest surface in the room that is not a light.
@@ -583,6 +609,15 @@ impl ModuleShape {
                 m.push_box([0.0, 0.05, 0.0], [0.5, 0.45, 0.5]);
                 m.push_box([0.0, -0.45, 0.0], [0.42, 0.05, 0.42]);
                 m.push_box([0.0, 0.05, 0.46], [0.48, 0.03, 0.04]);
+            }
+            // The carcass, plus two full-height doors proud of its face with a
+            // seam between them and a handle on each. `+Z` is the front, so the
+            // leaves sit at `z = 0.46` and the handles just inside the seam.
+            ModuleShape::Wardrobe => {
+                m.push_box([0.0, 0.05, -0.04], [0.5, 0.45, 0.46]);
+                m.push_box([0.0, -0.45, 0.0], [0.42, 0.05, 0.42]);
+                m.push_box([-0.26, 0.05, 0.46], [0.24, 0.45, 0.04]);
+                m.push_box([0.26, 0.05, 0.46], [0.24, 0.45, 0.04]);
             }
             // A base, a back and two arms.
             ModuleShape::Soft => {
@@ -756,8 +791,16 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
         // Deliberately not `Bar` (which carries the venue's lit blue rim) and
         // not `Legged` (which has air under it, and a reception counter does
         // not).
-        "Cabinet" | "Locker" | "Wardrobe" | "Units" | "Shelf" | "Rack" | "Counter" | "Basin"
-        | "FrontDesk" => ModuleShape::Carcass,
+        "Cabinet" | "Locker" | "Units" | "Shelf" | "Rack" | "Counter" | "Basin" | "FrontDesk" => {
+            ModuleShape::Carcass
+        }
+        // **A wardrobe left the carcass family at wave EMS3**, and the reason is
+        // identity rather than shape: a placed module's only per-instance
+        // identity in the world is the mesh GUID its family derives, so nine
+        // names sharing one family meant a wardrobe and a shop counter were
+        // indistinguishable to anything downstream. `d3::wardrobe` has to tell
+        // them apart to offer a change of clothes at one and not the other.
+        "Wardrobe" => ModuleShape::Wardrobe,
         // A gurney and a bunk are a bed's silhouette at two sizes, which is the
         // `Mullion`/`Quoin` argument: one family, three names.
         "Sofa" | "Bed" | "Gurney" | "Bunk" => ModuleShape::Soft,

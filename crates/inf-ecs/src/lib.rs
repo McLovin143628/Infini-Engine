@@ -76,6 +76,10 @@ pub mod weapon;
 // VEN1b: the music a venue's own building implies -- an emitter entity per
 // main room, reconciled against the resident volumes.
 pub mod venue;
+// EMS3: the wardrobe — a grammar module becomes an interaction, on the PCG
+// doorway's pattern. The one place a player can change what they look like, and
+// therefore the one place a wanted level can be walked away from.
+pub mod wardrobe;
 // WPN1: who saw what. A seed for the EMS arc's dispatcher, written now because
 // the facts it needs live for one fixed step and are then gone.
 pub mod witness;
