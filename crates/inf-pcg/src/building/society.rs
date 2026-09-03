@@ -250,7 +250,7 @@ impl SlotPosture {
 /// is worked (or visited) between dusk and the small hours; a `Day` slot is
 /// everything the four-leg commute has always described.
 ///
-/// Derived from the ROOM, in [`shift_of`], and not from the role — because a
+/// Derived from the ROOM, in [`crews_of`], and not from the role — because a
 /// venue's back office is a day job in a building that opens at nine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotShift {
@@ -379,7 +379,8 @@ pub struct PcgSlot {
     /// plan, which is every slot in the twelve palettes that predate the
     /// venues; the other two arrive with [`station_slots`].
     pub posture: SlotPosture,
-    /// **When it is filled** (wave VEN1b) — [`shift_of`] of its own room.
+    /// **When it is filled** (wave VEN1b) — one of [`crews_of`]'s answers for
+    /// its own room, since EMS1 made that a list.
     pub shift: SlotShift,
     /// **A unit direction the body faces** (wave VEN1b), in the XZ plane, or
     /// `DVec3::ZERO` for a slot with no opinion — which is every slot derived

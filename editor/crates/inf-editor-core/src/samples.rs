@@ -4684,7 +4684,9 @@ pub fn phase19_biome_at(_x: f64, z: f64) -> u8 {
     }
 }
 
-/// The **entity** GUID of lot `i` (`0..7`, in [`ArchetypeId::ALL`] order).
+/// The **entity** GUID of lot `i` — one per archetype, in `ArchetypeId::ALL`
+/// order, so `0..ArchetypeId::ALL.len()` (seven when this was written, fourteen
+/// since wave EMS1).
 pub fn phase19_lot_guid(i: usize) -> Uuid {
     Uuid::from_u128(PHASE19_LOT_BASE + i as u128)
 }
