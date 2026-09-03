@@ -4472,7 +4472,7 @@ pub const HULL_DRAG_ARM_FRACTION: f64 = 0.6;
 /// | `steer_rate_deg_per_s` / `steer_return_deg_per_s` | how fast the wheel turns it |
 /// | `enter_time_s`, `enter_warp_start`, `enter_warp_end` | the seat warp, unchanged |
 ///
-/// The other fifty-two are accepted by [`tune`](Self::tune) — a catalogue row is
+/// The other **fifty-one** are accepted by [`tune`](Self::tune) — a catalogue row is
 /// one table and refusing half of it would leave an author's file half-read —
 /// and are not consulted. A gearbox on a boat is a thing that does not exist.
 #[derive(Clone, Debug)]
@@ -4882,16 +4882,37 @@ pub const ROTOR_SPIN_DEG_PER_S: f64 = 1_440.0;
 ///
 /// # Three refusals, stated rather than discovered
 ///
-/// * **The turn is coordinated and the pilot does not fly it.** Bank is derived
-///   from the yaw rate and the forward speed by the coordinated-turn relation,
-///   so this machine cannot be flown out of trim, cannot slip and cannot skid.
-///   That is a stability augmentation system, which every helicopter of this
-///   century has; it is also why there is no sideways strafe, and that is
-///   carried rather than hidden.
+/// * **The turn is coordinated and the pilot does not fly it** — up to a
+///   twentieth of the pedal, and no further. Bank is derived from the yaw rate
+///   and the forward speed by the coordinated-turn relation, so the pilot has
+///   no way to ASK for a skid; that is a stability augmentation system, which
+///   every helicopter of this century has, and it is also why there is no
+///   sideways strafe, which is carried rather than hidden.
+///
+///   **But the derived bank is then clamped by [`steer_limit_deg`], which is
+///   the PITCH stick's speed-tapered authority — a road car's steering rack —
+///   and that clamp knows nothing about the pedal.** The coordinated bank grows
+///   with the turn and the rack shrinks with speed, so they cross early:
+///   measured on the 26 kN fixture from the cruise, a 0.05 pedal holds its
+///   coordinated 18.4 deg exactly, a 0.10 pedal holds **20.9 deg of a turn
+///   wanting 32.1**, and a 0.25 pedal holds **24.2 of 51.0**. *Above a
+///   twentieth of a pedal this machine skids, and the refusal above was written
+///   without that sentence.*
+///   `a_turn_at_speed_saturates_the_bank_on_the_pitch_sticks_limit`
+///   (`inf-physics/tests/vehicle_3d.rs`) measures it; giving the bank a limit
+///   of its own, derived from the rotor's ceiling rather than borrowed from the
+///   pitch stick, is a flight-model change and is carried at that size.
 /// * **The collective is governed.** At neutral it holds the *vertical* part of
 ///   the thrust, so a coordinated turn does not sink. Past
 ///   [`HELI_MIN_LIFT_COS`] it gives up and the aircraft falls. There is no
 ///   autorotation and no engine failure: a governed collective cannot be lost.
+///
+///   **Neither of the governor's two edges is reachable from the stick.** The
+///   rotor's own ceiling (about 56 deg of bank on the fixture's 26 kN) and
+///   [`HELI_MIN_LIFT_COS`] (about 70 deg) both sit far above the 26 deg the
+///   rack allows at rest, so a pilot cannot fly to either; the two arms that
+///   measure them get there by rotating the chassis directly, which is a state
+///   a collision could produce and a turn cannot.
 /// * **The rotor disc is rigid with the mast.** A real cyclic tilts the disc
 ///   relative to the shaft and the fuselage follows it; here the thrust is along
 ///   the fuselage's own up and the attitude hold is what moves the fuselage.
@@ -4904,7 +4925,7 @@ pub const ROTOR_SPIN_DEG_PER_S: f64 = 1_440.0;
 /// | tunable | what it is on a helicopter |
 /// |---|---|
 /// | `max_engine_force_n` | the rotor's thrust ceiling, newtons |
-/// | `max_speed_mps` | the speed the tilt authority tapers to its minimum by |
+/// | `max_speed_mps` | the speed the tilt authority tapers to its minimum by — and **only** that: unlike a car's, this class's thrust does not taper with speed, so the field does not set a top speed here (the fuselage's drag does, at 38.7 m/s against the shipped row's 70) |
 /// | `max_steer_deg` / `min_steer_deg` | cyclic tilt at the hover / at that speed |
 /// | `steer_rate_deg_per_s` / `steer_return_deg_per_s` | how fast the stick moves the command |
 /// | `drag_n_per_mps2` | the fuselage's drag along its length |
@@ -5435,7 +5456,7 @@ mod tests {
             assert!(v.tune(name, 1.0), "the hull refused `{name}`");
         }
         assert!(!v.tune("hoist_speed", 1.0), "the hull invented a name");
-        // …and the seven it READS reach the model. Thrust is the clearest: with
+        // …and the eleven it READS reach the model. Thrust is the clearest: with
         // `max_engine_force_n` at zero a boat at full ahead makes no push.
         let mut v = HullVehicle::new(hull_rig());
         v.tune("max_engine_force_n", 0.0);
@@ -5701,6 +5722,42 @@ mod tests {
             "an 80-degree bank still held {lift} N of {weight} N — the governor \
              has no edge"
         );
+    }
+
+    /// **The rotorcraft reads the eleven it claims and ACCEPTS the other
+    /// fifty-one** — the hull's arm, for the class that did not have one.
+    ///
+    /// Written by wave VEH2c's audit. The mini-scout's whole ruling is that a
+    /// catalogue row is one table and a class that refused half of it would
+    /// leave an author's file half-read; that was armed for `HullVehicle` and
+    /// asserted only in prose for this one.
+    #[test]
+    fn the_rotorcraft_reads_the_names_it_claims_and_accepts_the_rest() {
+        let mut v = rotorcraft(rotor_rig());
+        for name in VehicleTuning::names() {
+            assert!(v.tune(name, 1.0), "the rotorcraft refused `{name}`");
+        }
+        assert!(
+            !v.tune("collective_pitch", 1.0),
+            "the rotorcraft invented a name"
+        );
+        // …and the one that matters most REACHES the model: with the rotor's
+        // ceiling at zero a machine at full collective makes no thrust at all,
+        // which is a tunable being read rather than merely accepted.
+        let mut v = rotorcraft(rotor_rig());
+        v.tune("max_engine_force_n", 0.0);
+        v.control(VehicleControls {
+            vertical: 1.0,
+            ..PILOT
+        });
+        let mut out = Vec::new();
+        v.solve(
+            airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO),
+            DT,
+            &mut out,
+        );
+        assert_eq!(v.thrust_n(), 0.0, "the rotor ceiling is not being read");
+        assert_eq!(resultant(&out, DVec3::ZERO).0, DVec3::ZERO);
     }
 
     /// **The pedals ask for a yaw rate and the bank follows the turn** — the

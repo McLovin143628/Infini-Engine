@@ -28209,15 +28209,39 @@ ways rather than two:
 | what the machine FEELS like | Ring-0 `pub const`s, the way `FLY_SPEED_MPS` and `ENTER_REACH_M` are |
 
 **Eleven of the sixty-two** are read by `HullVehicle` and eleven by
-`RotorVehicle`, and not one of them is an alias: `drag_lateral_n_per_mps2` on a
+`RotorVehicle` — counts the audit reproduced field by field — and *all but one*
+of them carries its own name's meaning (the exception is named two paragraphs
+down): `drag_lateral_n_per_mps2` on a
 boat is the **keel**, which is literally sideways drag; `max_steer_deg` and
 `min_steer_deg` on a helicopter are the cyclic's authority at the hover and at
 speed, which is literally "steering angle at a standstill and at
 `max_speed_mps`"; `enter_time_s` and its two warp clips are the seat
-choreography unchanged. Each class documents its own table at the type. The
-remaining **fifty-one** are **accepted** by `tune` and not consulted, because a
-catalogue row is one table and refusing half of it would leave an author's file
-half-read — which is why `install` counts what it took.
+choreography unchanged. Each class documents its own table at the type, and the
+audit checked both tables against the code: each lists exactly the eleven its
+class reads, with nothing listed that is not read and nothing read that is not
+listed. The remaining **fifty-one** are **accepted** by `tune` and not
+consulted, because a catalogue row is one table and refusing half of it would
+leave an author's file half-read — which is why `install` counts what it took.
+
+**THE ONE ALIAS, found by the audit and named here rather than left as an
+absolute.** `max_speed_mps` on the ROTORCRAFT is not what its own doc says it
+is. On a car the field is *"the speed at which the drive force reaches zero and
+therefore the vehicle's top speed on the flat"*; this class's thrust does not
+taper with speed at all, so the field sets no top speed here — it is read only
+through `steer_limit_deg`, as the speed the cyclic's authority tapers to its
+minimum by. The shipped chopper authors **70 m/s** and the machine's measured
+ceiling is **38.7**, so `min_steer_deg`'s 14° is the authority at a speed the
+aircraft cannot reach and the real authority at its ceiling is 19.4°. The
+type's own table was already honest about this; the sentence above said *"not
+one of them is an alias"* and one of them is.
+
+Two smaller notes on the same surface, both stated rather than fixed:
+`drag_lateral_n_per_mps2`'s doc calls itself **aerodynamic** and sizes itself
+against a car's side area (default 0.4), and the launch authors **6 000** for
+the same field because a keel works in a fluid eight hundred times denser —
+same dimension, same sign, four orders of magnitude, and a doc that was never
+widened to admit water. On the rotorcraft the same field is the fuselage's drag
+**sideways and vertically**, which its table says and the field's doc does not.
 
 Two new geometry keys were needed and were free: `buoyancy_density_kg_m3` (what
 a hull FLOATS at) and `buoyancy_linear_drag`. Neither is the collider's
@@ -28391,15 +28415,45 @@ yaw, which is the sense a car's steering already turns in.
 
 **THREE REFUSALS, stated rather than discovered later:**
 
-1. **The turn is coordinated and the pilot does not fly it.** Bank is derived
-   from the yaw rate and the forward speed, so this machine cannot slip or
-   skid — and cannot strafe. Carried.
+1. **The turn is coordinated and the pilot does not fly it** — *up to a
+   twentieth of the pedal, and the audit found the rest.* Bank is derived from
+   the yaw rate and the forward speed, so a pilot has no way to ASK for a skid,
+   and cannot strafe. **But the derived bank is then clamped by
+   `steer_limit_deg` — the PITCH stick's speed-tapered authority, which is a
+   road car's steering rack, and which knows nothing about the pedal.** The
+   coordinated bank grows with the turn; the rack shrinks with speed; they
+   cross, and on the shipped chopper's numbers (26° at rest tapering to 14° at
+   a `max_speed_mps` of 70) they cross at **2.8 m/s at full pedal**. Flown from
+   the cruise on the 26 kN fixture, one second of a held pedal after the
+   attitude settles:
+
+   | pedal | speed | yaw rate | bank held | a coordinated turn needs | the rack |
+   |---|---|---|---|---|---|
+   | 0.05 | 37.6 m/s | 4.9 °/s | **18.4°** | 18.1° | 19.6° |
+   | 0.10 | 35.7 m/s | 9.9 °/s | **20.9°** | 32.1° | 19.9° |
+   | 0.25 | 27.5 m/s | 25.2 °/s | **24.2°** | 51.0° | 21.3° |
+   | 1.00 | 4.4 m/s | 94.8 °/s | **29.2°** | 36.5° | 25.2° |
+
+   The first row is the model working — the machine holds its coordinated bank
+   to a third of a degree. **Every row below it is a skid**, and at a quarter
+   pedal the machine holds 24° of a turn that wants 51°.
+   `a_turn_at_speed_saturates_the_bank_on_the_pitch_sticks_limit` measures it,
+   and freeing the bank from the pitch rack reds it by name. Giving the bank a
+   limit of its own, derived from the rotor's ceiling, is a flight-model change
+   and is **carried** at that size (carried 19).
 2. **The collective is governed**: at neutral it holds the *vertical* part of
    the thrust, so a coordinated turn does not sink. It has **two** edges and
-   both are armed — the rotor's own ceiling arrives FIRST (26 kN holds a
-   1 500 kg machine to about 56° of bank and no further), and past
-   `HELI_MIN_LIFT_COS` the governor stops dividing rather than asking for an
-   infinite rotor. There is no autorotation and no engine failure.
+   both are armed — the rotor's own ceiling (26 kN holds a 1 500 kg machine to
+   about 56° of bank and no further), and past `HELI_MIN_LIFT_COS` the governor
+   stops dividing rather than asking for an infinite rotor. There is no
+   autorotation and no engine failure.
+
+   *The ledger said "the rotor's own ceiling arrives FIRST". It does not
+   arrive at all from the stick, and neither does the other:* both sit far
+   above the 26° the rack allows at rest, so a pilot cannot fly to either edge,
+   and the two arms that measure them get there by **rotating the chassis
+   directly** — a state a collision could produce and a turn cannot. Corrected
+   at the type as well as here.
 3. **The disc is rigid with the mast.** A real cyclic tilts the disc and the
    fuselage follows; here the fuselage is what moves. The difference is a few
    tenths of a second of lag at the first instant of a stick input, and buying
@@ -28721,10 +28775,11 @@ delimiter is quoted**, so a doubled backslash inside one is not a remedy.
 1. **No fixed wing.** Priced above and refused: what it shares with this wave
    is `torque_pair` and the part recogniser; what it needs is lift as a
    function of angle of attack, a stall, control surfaces and a runway.
-2. **The turn is coordinated and cannot be flown out of trim**, so the
-   helicopter cannot slip, skid or **strafe sideways**. One axis of a real
-   cyclic is missing and it is the one that lets a machine hold a hover in a
-   crosswind.
+2. **The turn is coordinated and cannot be flown out of trim by the pilot**, so
+   the helicopter cannot **strafe sideways**. One axis of a real cyclic is
+   missing and it is the one that lets a machine hold a hover in a crosswind.
+   *And it CAN skid, which the audit measured — see clause 2's refusal 1 and
+   carried 19; the words "cannot slip, skid" stood here and were wrong.*
 3. **The rotor disc is rigid with the mast.** A real cyclic tilts the disc and
    the fuselage follows it; here the fuselage is what the attitude hold moves,
    which costs a few tenths of a second of lag at the first instant of a stick
@@ -28798,6 +28853,30 @@ delimiter is quoted**, so a doubled backslash inside one is not a remedy.
     `craft_readout` is armed in Ring 0 and called from `window.rs`, which is
     the windowed player and a path CI cannot run — the same bound every line of
     that file carries.
+
+**Added by the audit:**
+
+19. **THE HELICOPTER'S COORDINATED BANK BORROWS THE PITCH STICK'S RACK, so
+    above a twentieth of a pedal it skids.** Measured in clause 2's corrected
+    refusal 1 and armed by
+    `a_turn_at_speed_saturates_the_bank_on_the_pitch_sticks_limit`. The fix is
+    a bank limit of the class's own, derived from the rotor's ceiling
+    (`acos(mg/T)`) rather than borrowed from `steer_limit_deg` — which needs a
+    portable inverse cosine this tree does not have, so the honest form is a
+    comparison in cosine space against `HELI_MIN_LIFT_COS`'s own units. It is a
+    flight-model change: it moves the pedal-turn row and every trace with a
+    turning helicopter in it, which is why the audit measured it and did not
+    take it.
+20. **The island drive gate's audio tally cannot see `SetPosition`.**
+    `island_gate.rs:6013` counts `Play`/`SetPitch`/`SetVolume` with a
+    catch-all, so the island's own two-host comparison would not notice a host
+    that stopped moving its emitters. The harbour gate's arm and the mirror
+    fence are what cover that seam today.
+21. **`engine_voice`'s own doc still says traffic is silent *"until the emitter
+    can follow the car"*.** The emitter follows it now and traffic is still
+    `engine_voice: false` (`d3/traffic.rs:309`). The decision may well be right
+    — seventeen looping sources is VEH2b's own carried item 5 — but the reason
+    on the record is stale.
 
 ### Counts
 

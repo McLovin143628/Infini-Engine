@@ -1320,7 +1320,10 @@ mod tests {
         // Only the launch floats, and it floats at a density of its own rather
         // than at the one it weighs.
         assert!(launch.buoyancy_density_kg_m3 > 0.0);
-        assert_eq!(chopper.buoyancy_density_kg_m3, 0.0, "a helicopter floats");
+        assert_eq!(
+            chopper.buoyancy_density_kg_m3, 0.0,
+            "a helicopter was given a density to float at"
+        );
         assert!(
             launch.buoyancy_linear_drag > 0.0 && launch.buoyancy_linear_drag < 1.0,
             "a hull's drag is {}",

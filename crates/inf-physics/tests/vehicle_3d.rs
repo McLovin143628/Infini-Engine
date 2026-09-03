@@ -2085,6 +2085,15 @@ impl Heli {
         fwd.y.clamp(-1.0, 1.0).asin().to_degrees()
     }
 
+    /// The airframe's BANK, degrees, right-wing-down positive — read off the
+    /// WORLD for the same reason `pitch_deg` is.
+    fn roll_deg(&self) -> f64 {
+        let e = self.world.entity_of(HELI).expect("the aircraft exists");
+        let t = self.world.world().get::<Transform>(e).unwrap();
+        let right = t.quat() * DVec3::X;
+        (-right.y).clamp(-1.0, 1.0).asin().to_degrees()
+    }
+
     /// The airframe's heading, degrees — the engine's OWN euler yaw, which is
     /// the number `steering_turns_it_and_the_sign_is_the_one_the_control_says`
     /// measures a car's turn with. One convention, read one way.
@@ -2341,4 +2350,157 @@ fn the_rotor_is_drawn_turning_and_its_mount_never_moves() {
     let rig = h.bridge.vehicle_of(HELI).unwrap().rig();
     assert_eq!(rig.parts[0].mount_local, mount);
     assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Rotor);
+}
+
+/// **A TURN AT SPEED IS A SKID, because the bank saturates on a CAR'S STEERING
+/// RACK** (written by wave VEH2c's audit).
+///
+/// `RotorVehicle`'s own doc refuses uncoordinated flight in as many words — the
+/// bank is *derived* from the yaw rate and the speed, "so this machine cannot
+/// slip or skid". **The derivation is right and the refusal is not**, because
+/// the derived bank is then clamped by `steer_limit_deg`, which is the PITCH
+/// stick's speed-tapered authority — a road car's steering rack:
+///
+/// ```text
+/// bank_cmd = (turn * forward_mps * HELI_BANK_PER_TURN_DEG).clamp(-limit, limit)
+/// ```
+///
+/// The coordinated bank GROWS with speed and with the pedal; `limit` SHRINKS
+/// with speed and knows nothing about the pedal. So they cross, and on this
+/// fixture's numbers — 26 deg of authority at rest tapering to 14 deg at
+/// `max_speed_mps` 70 — they cross at a **twentieth of the pedal's travel**.
+/// Measured, from the cruise, one second of a held pedal after the attitude has
+/// settled:
+///
+/// | pedal | speed | yaw rate | bank held | bank a coordinated turn needs | the rack |
+/// |---|---|---|---|---|---|
+/// | 0.05 | 37.6 m/s | 4.9 deg/s | **18.4 deg** | 18.1 deg | 19.6 deg |
+/// | 0.10 | 35.7 m/s | 9.9 deg/s | **20.9 deg** | 32.1 deg | 19.9 deg |
+/// | 0.25 | 27.5 m/s | 25.2 deg/s | **24.2 deg** | 51.0 deg | 21.3 deg |
+/// | 1.00 | 4.4 m/s | 94.8 deg/s | **29.2 deg** | 36.5 deg | 25.2 deg |
+///
+/// The first row is the model working: the machine holds the coordinated bank
+/// to a third of a degree, which is the relation doing exactly what its own doc
+/// says. Every row below it is a skid, and at a quarter pedal the machine is
+/// holding 24 degrees of a turn that wants 51.
+///
+/// **This arm measures it rather than fixing it**, so that the class's refusal
+/// and the ledger's *"the rotor's own ceiling arrives FIRST"* stop being prose.
+/// Both of the collective's documented edges — the rotor's ceiling at about
+/// 56 deg of bank on 26 kN, and the governor's own at `HELI_MIN_LIFT_COS` —
+/// are **unreachable from the stick**, because the rack binds first at 26 deg
+/// and below; the two arms that measure those edges get there by rotating the
+/// chassis directly rather than by flying there. Giving the bank a limit of its
+/// own, derived from the rotor's ceiling rather than borrowed from the pitch
+/// stick, is a flight-model change and is carried with that size.
+#[test]
+fn a_turn_at_speed_saturates_the_bank_on_the_pitch_sticks_limit() {
+    /// One turn, flown from cold: climb, accelerate to the ceiling, then hold
+    /// `steer` until the attitude settles and measure over one second.
+    ///
+    /// A fresh airframe per pedal position, because a machine that has already
+    /// been turning is not at its cruise speed and what would be measured is
+    /// the recovery.
+    fn turn_at(steer: f64) -> (f64, f64, f64, f64) {
+        let mut h = Heli::new();
+        h.fly(
+            VehicleControls {
+                vertical: 1.0,
+                ..HOVER
+            },
+            420,
+        );
+        let ahead = VehicleControls {
+            throttle: 1.0,
+            ..HOVER
+        };
+        h.fly(ahead, 1800);
+        let turning = VehicleControls {
+            throttle: 1.0,
+            steer,
+            ..HOVER
+        };
+        h.fly(turning, 180);
+        let yaw0 = h.yaw_deg();
+        h.fly(turning, 60);
+        let rate = inf_ecs::movement::angle_delta_deg(h.yaw_deg(), yaw0).abs();
+        let bank = h.roll_deg().abs();
+        let v = h.vel();
+        let speed = DVec3::new(v.x, 0.0, v.z).length();
+        // What a COORDINATED turn at this rate and this speed would need, from
+        // the relation `HELI_BANK_PER_TURN_DEG` is the linearisation of.
+        let coordinated = ((rate.to_radians() * speed) / 9.81).atan().to_degrees();
+        (speed, rate, bank, coordinated)
+    }
+
+    /// The bank the PITCH stick's rack allows at `speed`, through the same door
+    /// the class clamps with rather than a second spelling of the taper. The
+    /// three numbers are `Heli::new`'s own.
+    fn rack_at(speed: f64) -> f64 {
+        let t = inf_ecs::vehicle::VehicleTuning {
+            max_steer_deg: 26.0,
+            min_steer_deg: 14.0,
+            max_speed_mps: 70.0,
+            ..inf_ecs::vehicle::VehicleTuning::default()
+        };
+        inf_ecs::vehicle::steer_limit_deg(&t, speed)
+    }
+
+    println!("HELICOPTER, a held pedal from the cruise (26 kN, 1 520 kg fixture):");
+    println!("  pedal   speed   yaw rate      bank   coordinated   the rack");
+    let mut rows = Vec::new();
+    for steer in [0.05, 0.10, 0.25, 1.00] {
+        let (speed, rate, bank, coordinated) = turn_at(steer);
+        let rack = rack_at(speed);
+        println!(
+            "  {steer:5.2}  {speed:5.1} m/s  {rate:6.1} d/s  {bank:5.1} deg  {coordinated:8.1} deg \
+             {rack:8.1} deg"
+        );
+        rows.push((steer, speed, rate, bank, coordinated, rack));
+    }
+
+    // (a) THE CONTROL, and it is the first thing asserted: below the crossing
+    //     the model does exactly what it claims. A twentieth of a pedal at the
+    //     cruise holds the coordinated bank, so everything below is a statement
+    //     about the CLAMP and not about a relation that never worked.
+    let (_, speed, rate, bank, coordinated, rack) = rows[0];
+    assert!(
+        speed > 20.0,
+        "the gentlest turn was flown at {speed:.1} m/s, which is not a cruise"
+    );
+    assert!(
+        (bank - coordinated).abs() < 2.0,
+        "at a twentieth of a pedal ({rate:.1} deg/s at {speed:.1} m/s) the machine \
+         held {bank:.1} deg where the coordinated turn is {coordinated:.1} — the \
+         relation itself is wrong, which is a bigger finding than the clamp"
+    );
+    assert!(
+        bank < rack,
+        "even the gentlest turn is already on the rack ({bank:.1} of {rack:.1}), so \
+         this arm has no unsaturated control left"
+    );
+
+    // (b) AND ABOVE IT, EVERY TURN IS A SKID: the bank is the rack's, and it
+    //     falls short of what the turn the machine is actually flying needs.
+    for (steer, speed, rate, bank, coordinated, rack) in rows.into_iter().skip(1) {
+        assert!(
+            bank < rack * 1.3,
+            "at pedal {steer:.2} the bank reached {bank:.1} deg against a rack of \
+             {rack:.1} — this arm's whole subject is that clamp, and it is not \
+             clamping"
+        );
+        assert!(
+            coordinated - bank > 5.0,
+            "at pedal {steer:.2}, {rate:.1} deg/s at {speed:.1} m/s wants \
+             {coordinated:.1} deg of bank and the machine is holding {bank:.1} — if \
+             these have converged the saturation is gone and this arm should go \
+             with the carried item it exists for"
+        );
+        // …and the two edges the class documents stay out of reach of the stick.
+        assert!(
+            rack < 56.0,
+            "the rack allows {rack:.1} deg, which is past the rotor's own ceiling \
+             — the ledger's `the rotor's ceiling arrives first` would be true again"
+        );
+    }
 }
