@@ -1860,18 +1860,18 @@ fn a_boat_makes_way_reaches_a_top_speed_and_carries_its_way() {
 /// circle — the second half of this wave's boat-feel row.
 #[test]
 fn a_boat_turns_toward_its_helm_and_the_circle_is_measurable() {
-    /// One steady turn, sampled until the boat has been **all the way round**.
-    ///
-    /// **The sweep is the whole correction the VEH2c audit made here.** The
-    /// first cut sampled a fixed 240 steps and took the mean semi-axis of the
-    /// axis-aligned box the track swept. That identity — box semi-axis equals
-    /// radius — is only true for a **complete** circle, and 240 steps is
-    /// **49.9 degrees** of one: the box was the arc's chord and sagitta, and the
-    /// 10.6 m it reported was not a radius at all. Sampling to 360 degrees makes
-    /// the same arithmetic exact, and the answer is **37.25 m**.
-    ///
-    /// Returns the radius, the same radius derived independently as `v / omega`,
-    /// and the boat's displacement in X so the helm's own sense is checked.
+    // One steady turn, sampled until the boat has been ALL THE WAY ROUND.
+    //
+    // The sweep is the whole correction the VEH2c audit made here. The first cut
+    // sampled a fixed 240 steps and took the mean semi-axis of the axis-aligned
+    // box the track swept. That identity — box semi-axis equals radius — is only
+    // true for a COMPLETE circle, and 240 steps is 49.9 DEGREES of one: the box
+    // was the arc's chord and sagitta, and the 10.6 m it reported was not a
+    // radius at all. Sampling to 360 degrees makes the same arithmetic exact,
+    // and the answer is 37.25 m.
+    //
+    // Returns the radius, the same radius derived independently as `v / omega`,
+    // and the boat's displacement in X so the helm's own sense is checked.
     let radius = |steer: f64| -> (f64, f64, f64) {
         let mut b = Boat::new();
         b.drive(VehicleControls::default(), 180);
