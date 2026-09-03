@@ -3079,7 +3079,8 @@ fn walk_door(
         }
     }
     panic!(
-        "{}: no resident multi-storey block offers an exterior door on a storey          one of its street lines is level with",
+        "{}: no resident multi-storey block offers an exterior door on a storey \
+         one of its street lines is level with",
         plan.name
     )
 }
