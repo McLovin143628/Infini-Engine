@@ -152,7 +152,11 @@ fn build(world: &mut EcsWorld) {
             yaw_deg: 180.0,
             paint: Color::new(0.86, 0.87, 0.88, 1.0),
             clip: None,
-            engine_voice: false,
+            // The launch has a VOICE, because the arm below is about where that
+            // voice is. The helicopter deliberately does not: two looping
+            // spatial sources in one fixture would make "the emitter that
+            // moved" ambiguous.
+            engine_voice: true,
             livery: None,
         },
     );
@@ -748,6 +752,90 @@ fn a_liveried_helicopter_would_be_claimed_by_the_dispatcher() {
     assert!(
         inf_editor_core::vehicle::island_vehicle_livery("chopper").is_none(),
         "the island helicopter wears a livery: dispatch will drive it to a fire"
+    );
+}
+
+/// **(h) THE ENGINE FOLLOWS THE BOAT** (wave VEH2c) — VEH1a's carried item 5,
+/// carried again by VEH2a and a third time by VEH2b's silent traffic, closed.
+///
+/// An engine loop was `Play`ed at whatever position its vehicle happened to be
+/// in on the step it was first seen, and stayed there for the rest of the
+/// session: `SetPitch` and `SetVolume` were written every step and the
+/// POSITION never was. `AudioCommand::SetPosition` arrived at EMS2 for sirens,
+/// and this is the same command on the same queue.
+///
+/// Asserted on the command stream against the WORLD: the last position the
+/// stream carries is where the hull actually is, and the stream's own positions
+/// span the distance the boat covered. A `SetPosition` that shipped a constant
+/// would satisfy the first half of that and not the second.
+#[test]
+fn the_launchs_engine_is_heard_where_the_launch_is() {
+    use inf_audio::AudioCommand;
+
+    let s = script();
+    let hero_at = DVec3::new(MOORING.x, 1.25, MOORING.z + 2.2);
+    let mut world = EcsWorld::new();
+    build(&mut world);
+    place_hero(&mut world, hero_at);
+    let mut sim = RuntimeSim::with_gravity(world, Vec::new(), WorldGravity::EARTH, HZ);
+    for beat in &s {
+        let input = RuntimeInput::with_down(beat.down.iter().copied()).with_axes(beat.axes());
+        sim.step_once(input);
+    }
+    assert_eq!(
+        sim.dropped_audio_commands(),
+        0,
+        "the log is a tail, so the first command in it is not the first command"
+    );
+
+    let moves: Vec<DVec3> = sim
+        .audio_command_log()
+        .iter()
+        .filter_map(|c| match c {
+            AudioCommand::SetPosition { position, .. } => Some(*position),
+            _ => None,
+        })
+        .collect();
+    let plays = sim
+        .audio_command_log()
+        .iter()
+        .filter(|c| matches!(c, AudioCommand::Play(_)))
+        .count();
+    let hull = look(sim.world(), LAUNCH).1;
+    // Guarded rather than indexed: an empty stream is a claim this arm should
+    // report, not an index panic three lines before the assertion that says so.
+    let spread = match moves.first() {
+        Some(first) => moves
+            .iter()
+            .map(|p| (*p - *first).length())
+            .fold(0.0f64, f64::max),
+        None => 0.0,
+    };
+    println!(
+        "THE LAUNCH'S VOICE: {plays} Play(s), {} SetPosition(s) spanning {spread:.1} m; the last is {:.1} m from the hull",
+        moves.len(),
+        (moves.last().copied().unwrap_or(DVec3::ZERO) - hull).length()
+    );
+
+    // One voice, and it really is being repositioned.
+    assert_eq!(plays, 1, "the launch was given {plays} voices");
+    assert!(
+        moves.len() > s.len() / 2,
+        "only {} of {} steps moved the emitter",
+        moves.len(),
+        s.len()
+    );
+    // It is WHERE THE BOAT IS — the emitter's own transform, not a guess.
+    let last = *moves.last().expect("a last position");
+    assert!(
+        (last - hull).length() < 1e-6,
+        "the engine is at {last:?} and the hull is at {hull:?}"
+    );
+    // …and it MOVED, over the distance the boat covered. A `SetPosition` that
+    // shipped a constant would pass the two claims above and fail this one.
+    assert!(
+        spread > 40.0,
+        "the emitter spanned {spread:.1} m over a crossing of the bay"
     );
 }
 

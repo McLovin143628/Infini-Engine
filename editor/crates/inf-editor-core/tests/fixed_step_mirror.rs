@@ -177,6 +177,27 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
             "the loop is SetPitch/SetVolume over a P12.3 command that already \
              existed — the wave added no audio API",
         ),
+        // **THE EMITTER FOLLOWS ITS VEHICLE** (wave VEH2c). This clause used to
+        // be the opposite one: VEH1a FORBADE `SetPosition` here so that the
+        // carried item — *"a driving car's engine is spatialized where its
+        // `Play` was issued"* — could not be closed quietly, and it survived
+        // VEH2a and VEH2b unchanged, which is exactly what a tripwire is for.
+        //
+        // Wave VEH2c closes it, so the tripwire is INVERTED rather than
+        // deleted: the same line now insists the command is here. Deleting it
+        // would have left the seam unguarded in the other direction.
+        (
+            "AudioCommand::SetPosition",
+            "an engine loop that does not move is spatialized where its `Play` \
+             was issued and stays there for the session — VEH1a's carried item \
+             5, closed at VEH2c and guarded here so it cannot re-open",
+        ),
+        (
+            "src.spatial",
+            "only a SPATIAL source has a position to move, and its `Play` was \
+             issued without one — a `SetPosition` on a non-spatial emitter is a \
+             command about nothing",
+        ),
     ] {
         let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
@@ -184,16 +205,16 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
             "the engine loop no longer carries `{needle}`: {why}"
         );
     }
-    // …and it adds no COMMAND. `AudioCommand` is an enum the whole tree matches
-    // on exhaustively, and a new variant would be a new API in a wave whose
-    // audio clause is explicitly zero-new-API.
-    for forbidden in ["AudioCommand::SetPosition", "AudioCommand::Stop"] {
+    // …and it still adds no COMMAND KIND beyond the three P12.3 already had.
+    // `AudioCommand` is an enum the whole tree matches on exhaustively, and a
+    // new variant would be a new API. `Stop` in particular stays out: an engine
+    // loop this step never ends is one the despawn sweep owns.
+    for forbidden in ["AudioCommand::Stop"] {
         let n: String = forbidden.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
             !editor.contains(&n),
-            "the engine loop reaches for `{forbidden}` — see the wave's carried \
-             item: the emitter is spatialized where its `Play` was issued, and \
-             the missing command is a decision with its own arms, not a footnote"
+            "the engine loop reaches for `{forbidden}`, which is a lifetime \
+             decision and belongs to whoever despawns the vehicle"
         );
     }
 }

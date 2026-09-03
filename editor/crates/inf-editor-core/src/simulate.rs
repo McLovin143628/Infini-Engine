@@ -2385,6 +2385,22 @@ impl SimSession {
                 source: key,
                 volume: cue.volume,
             });
+            // …and THE EMITTER FOLLOWS THE VEHICLE (wave VEH2c). VEH1a's
+            // carried item 5, carried again by VEH2a and by VEH2b's silent
+            // traffic: an engine loop was `Play`ed at the position the car
+            // happened to be in on the step it was first seen, and stayed
+            // there. `AudioCommand::SetPosition` arrived at EMS2 for sirens and
+            // this is the same command on the same queue, one line down from
+            // the pitch that was already being written every step.
+            //
+            // Only for a SPATIAL source: a non-spatial one has no position to
+            // move and `Play` was issued without one.
+            if src.spatial {
+                cmds.push(AudioCommand::SetPosition {
+                    source: key,
+                    position: emitter_position(world, out.chassis),
+                });
+            }
         }
         // MIRROR-END vehicle_engine_audio
 

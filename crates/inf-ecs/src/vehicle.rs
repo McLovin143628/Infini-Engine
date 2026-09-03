@@ -1203,8 +1203,15 @@ const ROTORCRAFT_PARTS: &[BodyPart] = &[
 /// drawing would put it. The thrust acts at the hub and the mass acts at the
 /// origin, so that offset is a permanent **nose-up** couple — and the attitude
 /// hold is proportional, so it does not remove a steady one, it balances it at
-/// an error. Measured: **4.3 degrees** of standing nose-up trim, which flew the
-/// machine 30 m BACKWARDS during a seven-second climb and put it in the sea.
+/// an error.
+///
+/// What was MEASURED is the trajectory: the machine flew **33 m backwards in
+/// the seven and a half seconds of its climb** and went on out over the bay,
+/// where it descended into water a helicopter has no buoyancy for. The 4.3
+/// degrees of standing trim is DERIVED from the offset against the hold gains
+/// and the airframe inertia rather than read off a trace, and the two are not
+/// the same kind of claim. With the mast over the CG the climb is vertical to
+/// the centimetre, which is the measurement that closes it.
 ///
 /// Real helicopters put the mast over the CG for exactly this reason. The
 /// alternative — an integral term in the attitude hold — buys a trim the
@@ -5076,8 +5083,8 @@ impl Vehicle for RotorVehicle {
             // standing would be applied the instant somebody else climbed in.
             self.pitch_cmd_deg = 0.0;
             // …but the FUSELAGE is still a fuselage. An unmanned machine falls
-            // through air, not through vacuum, so the drag below still runs —
-            // which is why this is not a return.
+            // through air rather than through vacuum, so the drag runs HERE
+            // before the return rather than being skipped with everything else.
             self.fuselage_drag(chassis, fwd, out);
             return;
         }
