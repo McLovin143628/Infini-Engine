@@ -27285,9 +27285,18 @@ intensity is a **pin** taken when the unit goes hot and **given back** when it
 stops. The first cut multiplied the live value, and P21.4's law has a picture
 here: an ambulance that comes home with a black light on its roof.
 
-Measured over one 202 m response: 1 `Start`, **344** `Move`s against 343 expected
-at the cadence (a per-step emit would read 2 061), 1 `Stop`, emitter travelled
-197.2 m, bar released to exactly 3.0.
+Measured over one 202 m response: 1 `Start`, **360** `Move`s against 359 expected
+at the cadence (a per-step emit would read 2 159), 1 `Stop`, emitter travelled
+195.2 m, bar released to exactly 3.0.
+
+*(Those four numbers were first written from commit `eacb9bf6` and read 344 /
+343 / 2 061 / 197.2 m. The two commits after it — the following rule and the
+yield — changed how the ambulance drives, so its 202 m response grew from 2 061
+to 2 159 steps and the cadence count grew with it. The prose was ahead of the
+arms by two commits; the EMS2 audit re-ran `a_responding_unit_sounds_its_siren_
+and_gives_its_bar_back` at head and these are that run. The audit's own repairs
+are provably inert here — one incident, three idle units, no ambient draw before
+epoch 3 — so the drift is the wave's, not the audit's.)*
 
 ### 7. The yield: the cheaper design was measured and REFUSED
 
@@ -27597,6 +27606,15 @@ steps, asserts the ledger actually forgot the incident, and counts medical
 incidents **naming this patient**: with `treated` it is 1, without it 2. The
 repeat-ambulance loop is now measured rather than asserted.
 
+**AND THE PROSE WAS TWO COMMITS AHEAD OF THE ARMS.** The wave's own section 6
+reported the siren cadence as 344 `Move`s over a 2 061-step response with the
+emitter travelling 197.2 m. Those numbers were measured at `eacb9bf6`; the two
+commits after it (the following rule and the yield) changed how the ambulance
+drives, so at head the same arm reads **360 / 2 159 / 195.2 m**. Corrected in
+place, with the provenance, rather than silently overwritten — and the audit's
+own repairs are provably inert for that arm (one incident, three idle units, no
+ambient draw before epoch 3), so the drift belongs to the wave.
+
 ### Carried by the audit (beyond the wave's own nine)
 
 10. **`YIELD_CREEP_MPS` lifts the END-OF-ROAD clamp too.** The floor is a `max`
@@ -27608,7 +27626,7 @@ repeat-ambulance loop is now measured rather than asserted.
     instead of stopping on it. Written into `YIELD_CREEP_MPS`'s own doc; not
     fixed here, because guarding it moves the gate's byte trace for a metre of
     overshoot.
-10b. **`YIELD_BIAS_M` = 2.6 m is 1.2 m more kerb than this engine's street has.**
+11. **`YIELD_BIAS_M` = 2.6 m is 1.2 m more kerb than this engine's street has.**
     The number was chosen against one constraint — clear `CORRIDOR_HALF_M` = 2.5 —
     and the road it moves into was never measured. A forward lane's centre is
     1.75 m off the centreline (half of `DEFAULT_LANE_WIDTH_M` = 3.5), a car's
@@ -27622,11 +27640,11 @@ repeat-ambulance loop is now measured rather than asserted.
     and only 1.41 exists. Narrowing `CORRIDOR_HALF_M`, widening the street or
     giving the responder an overtake are all `d3::traffic` decisions. The table is
     on `YIELD_BIAS_M`'s own doc.
-11. **An answerable incident that no ROUTE reaches still holds the slot.** Fix 1
+12. **An answerable incident that no ROUTE reaches still holds the slot.** Fix 1
     closes "this service has no unit"; it does not close "`drive_path` answers
     `None`". That needs a per-incident refusal the ledger can show — a shape this
     audit did not invent on its own.
-12. **The audio ring's table stops at four hot units and the island parks 17.**
+13. **The audio ring's table stops at four hot units and the island parks 17.**
     Seventeen hot is 170 commands a second — **48 seconds** of an 8 192 ring
     against the gate's measured 250 s at 1.7 hot. It silences nothing
     (`audio_command_log` is diagnostic; the commands reach the engine through
@@ -27634,12 +27652,12 @@ repeat-ambulance loop is now measured rather than asserted.
     is the VEH2a loss wearing the diagnostic's hat. Written into
     `SIREN_POSITION_PERIOD`'s doc with the door (`dropped_audio_commands()`) that
     says so.
-13. **`treated` is keyed on a SUBJECT and an ambient collapse's subject is a
+14. **`treated` is keyed on a SUBJECT and an ambient collapse's subject is a
     BLOCK.** So a block whose ambient collapse has been attended can never draw
     another one, and a town's collapses retire block by block over a long
     session. A slope, not a floor, and EMS3's ambient casualty-with-a-person
     retires the question. Stated on the field.
-14. **A responding unit is carjackable.** `carjack::candidates` walks
+15. **A responding unit is carjackable.** `carjack::candidates` walks
     `bridge.vehicle_guids()` and any seated occupant, so a player at a cruiser's
     door ejects the crew mid-response. The exemption holds — the crew does *not*
     rout, which is clause 1 working — but `ensure_crew` re-seats it next step
@@ -27647,7 +27665,7 @@ repeat-ambulance loop is now measured rather than asserted.
     chassis. `mark_taken` is inert here because a unit is not a `TrafficRecord`.
     Not a determinism or law breach; a gameplay edge for the wave that gives
     stealing an emergency vehicle a meaning.
-15. **`RespondersRes` is exactly "a crew currently on a run", not "on duty".** The
+16. **`RespondersRes` is exactly "a crew currently on a run", not "on duty".** The
     honest boundary, since the type's name suggests more: a station's *staff* —
     EMS1's desk officers, the ward nurses — are never on it, so a shot at a
     police-station front desk routs everybody behind it. `ensure_crew` puts a
