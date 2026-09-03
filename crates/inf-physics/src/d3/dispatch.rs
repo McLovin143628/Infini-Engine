@@ -108,10 +108,20 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
     let Some(fleet) = world.world().get_resource::<FleetRes>().cloned() else {
         return DispatchStats::default();
     };
-    if fleet.units.is_empty() {
-        // **Absent costs nothing.** A level with no emergency vehicle in it
-        // never gets a `DispatchRes` at all, so `dispatch_state_bytes` stays
-        // empty and every trace committed before this wave is byte-identical.
+    // **Absent costs nothing.** A level with no emergency vehicle in it never
+    // gets a `DispatchRes` at all, so `dispatch_state_bytes` stays empty and
+    // every trace committed before this wave is byte-identical.
+    //
+    // **"Never had one" and "no longer has one" are different worlds** (EMS2
+    // audit), and the first cut returned on both. A fleet that goes empty after
+    // having units — every station in a cell that streamed out — left a live
+    // `DispatchRes` frozen mid-response: its `sirens` list never cleared, so the
+    // hosts' fenced audio blocks re-pushed the same `Move` **every step for the
+    // rest of the session** into a ring that evicts, and its crews were never
+    // retired. So the door is the RESOURCE and not the fleet: once a dispatcher
+    // exists, the step below runs and retires it properly — every run is dropped,
+    // every crew is parked, every siren gets its `Stop`.
+    if fleet.units.is_empty() && world.world().get_resource::<DispatchRes>().is_none() {
         return DispatchStats::default();
     }
     let mut res = world
@@ -121,6 +131,35 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
     let step = res.steps;
     // The runs follow the fleet: a unit the derivation dropped takes its run
     // with it, and a new one starts in station.
+    //
+    // **And its CREW goes with it** (EMS2 audit). A run is not only a row in a
+    // map: a unit that is out has a body in the world and a name on the duty
+    // roster, and both are put there by `ensure_crew` and taken away by `park`
+    // alone. Dropping the row silently left the person — standing in the road,
+    // `Driving` a chassis that is no longer in the fleet, and **exempt from the
+    // panic for the rest of the process**, because `RespondersRes` is only ever
+    // released at the station. That is reachable without anything going wrong:
+    // a cell whose station streams out, or a block that moves past
+    // `STATION_CLAIM_M`, re-derives a fleet that no longer holds the unit.
+    //
+    // So a dropped run is retired the way an arriving one is, through the same
+    // two doors, and only for units that had actually left their bay — a
+    // parked unit has no crew and `entity_of` answers `None` for it.
+    let dropped: Vec<Uuid> = res
+        .runs
+        .keys()
+        .filter(|g| !fleet.units.contains_key(*g))
+        .copied()
+        .collect();
+    for chassis in dropped {
+        park(
+            world,
+            bridge,
+            &mut res,
+            chassis,
+            dispatch::crew_guid(chassis),
+        );
+    }
     res.runs.retain(|g, _| fleet.units.contains_key(g));
     for guid in fleet.units.keys() {
         res.runs.entry(*guid).or_default();
@@ -366,7 +405,37 @@ fn body_at(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
 
 // ── 3. who goes ─────────────────────────────────────────────────────────────
 
-/// Send the nearest free unit of the right service to the oldest open incident.
+/// Send the nearest free unit of the right service to the oldest open incident
+/// **that some free unit could actually go to**.
+///
+/// # Both halves of that sentence are audit repairs, and the second is a
+/// deadlock
+///
+/// The first cut took the first pending incident in **guid order** — which is
+/// hash order, so it was neither the oldest nor anything a reader could predict
+/// — and took exactly [`ASSIGNS_PER_STEP`] of them *whether or not the attempt
+/// succeeded*. Put together those two make a **permanent starvation**: an
+/// incident nobody can ever answer sits at the front of that order for ever and
+/// consumes the step's one assignment every step, so every other incident in the
+/// table — with free units parked and waiting — is never even considered.
+///
+/// It is not a corner. `ambient_draw` produces a **fire** half the time, and
+/// `inf_editor_core::island::station_fleet` gives a settlement an appliance only
+/// if it has a `FireHall`: a town with a police station and no fire hall draws
+/// its first ambient fire within a couple of minutes and the dispatcher stops
+/// answering *anything* — including the crimes and collapses its own cruisers
+/// and ambulances are sitting idle for.
+///
+/// So the candidate list is filtered by **which services have a free unit right
+/// now**, which is `O(units)` and is the question a Dijkstra would otherwise be
+/// paid to answer, and it is ordered by `opened_step` with a guid tiebreak — the
+/// order this function's own doc claimed from the start. The cost bound is
+/// unchanged: at most [`ASSIGNS_PER_STEP`] route searches per step.
+///
+/// What is **not** closed, and is on the wave's carried list: an incident whose
+/// service *does* have a free unit but which no route reaches (`drive_path`
+/// answers `None`) still holds the slot. That needs a per-incident refusal the
+/// ledger can show, which is a shape this audit did not invent on its own.
 fn assign(
     world: &EcsWorld,
     fleet: &FleetRes,
@@ -374,13 +443,41 @@ fn assign(
     step: u64,
     stats: &mut DispatchStats,
 ) {
-    let pending: Vec<Uuid> = res
+    // Which services could take a call at all this step. `O(units)`, and it is
+    // taken before the carriageway so a town whose every unit is out pays for
+    // nothing.
+    let free: std::collections::BTreeSet<UnitKind> = fleet
+        .units
+        .iter()
+        .filter(|(chassis, _)| {
+            res.runs
+                .get(*chassis)
+                .is_some_and(|r| r.state == UnitState::InStation)
+        })
+        .map(|(_, unit)| unit.kind)
+        .collect();
+    // Oldest first, guid tiebreak — and only the ones somebody could go to.
+    let mut pending: Vec<(u64, Uuid)> = res
         .incidents
         .iter()
-        .filter(|(_, i)| i.state == IncidentState::Reported)
-        .map(|(g, _)| *g)
+        .filter(|(_, i)| i.state == IncidentState::Reported && free.contains(&i.kind.service()))
+        .map(|(g, i)| (i.opened_step, *g))
         .collect();
+    pending.sort_unstable();
+    let pending: Vec<Uuid> = pending.into_iter().map(|(_, g)| g).collect();
     if pending.is_empty() {
+        // Something may still be waiting — it is waiting on a *unit*, not on
+        // this function. Counted once (never once per waiting incident), so the
+        // magnitude of `unanswered` keeps meaning "steps on which nobody could
+        // be sent" rather than "incidents × steps".
+        if res
+            .incidents
+            .values()
+            .any(|i| i.state == IncidentState::Reported)
+        {
+            res.unanswered = res.unanswered.saturating_add(1);
+            stats.unanswered += 1;
+        }
         return;
     }
     // **The carriageway, once, and only when something is pending.** Building

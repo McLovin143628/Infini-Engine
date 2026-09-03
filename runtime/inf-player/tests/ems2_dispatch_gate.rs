@@ -87,7 +87,7 @@ const TRAFFIC_HOUR: f64 = 14.0;
 /// derived, the carriageway to settle and the traffic to be on the road.
 const WARMUP: u32 = 240;
 
-/// Steps run after them — two hundred seconds.
+/// Steps run after them — two hundred and fifty seconds.
 ///
 /// Long enough for the furthest of the three to drive out, work its scene and
 /// come home **through traffic**: the appliance's own round trip measured about
@@ -399,7 +399,7 @@ fn editor_run(with_fleet: bool) -> Run {
 
 /// Read the staged incidents' state **on every step**, not at the end.
 ///
-/// `INCIDENT_KEEP_STEPS` is 3 600 and this run is 12 000, so an incident that
+/// `INCIDENT_KEEP_STEPS` is 3 600 and this run is 15 000, so an incident that
 /// resolved early is *forgotten* long before the last step — which is the ledger
 /// doing exactly what it is for and which cost this gate a red run reading "the
 /// fire is not in the ledger at all". What a reader wants is the FURTHEST each
@@ -498,8 +498,8 @@ fn three_emergencies_bring_three_services_and_send_them_home() {
         run.assigned, run.arrived, run.resolved, run.returned, run.steered, run.hot_steps
     );
     // **AT LEAST three, not exactly three**, and the difference is the ambient
-    // feed doing its job: `AMBIENT_PERIOD` is 1 800 steps, so a 12 000-step run
-    // asks this town's nine blocks about six times each, and at
+    // feed doing its job: `AMBIENT_PERIOD` is 1 800 steps, so a 15 000-step run
+    // asks this town's nine blocks about eight times each, and at
     // `AMBIENT_CHANCE` a spontaneous fire or collapse somewhere in it is
     // *expected* rather than a fault. The three staged ones are pinned by guid
     // above, which is where the exactness belongs.

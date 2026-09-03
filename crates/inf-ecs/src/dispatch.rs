@@ -105,16 +105,35 @@ pub fn responders(world: &EcsWorld) -> Vec<Uuid> {
 pub fn clear_dispatch(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RespondersRes>();
     world.world_mut().remove_resource::<FleetRes>();
-    // **The puffs are DESPAWNED, not forgotten** — the VEN1b speaker's rule: a
-    // sprite this session spawned and left behind is a row in the author's
-    // Outliner that no Outliner row put there. Read before the resource goes,
-    // because the resource is the only list of them.
-    let puffs: Vec<Uuid> = world
+    // **The puffs and the CREWS are DESPAWNED, not forgotten** — the VEN1b
+    // speaker's rule: a body this session spawned and left behind is a row in
+    // the author's Outliner that no Outliner row put there. Read before the
+    // resource goes, because the resource is the only list of either.
+    //
+    // # The crew is on this list for the puff's reason exactly (EMS2 audit)
+    //
+    // A crew member is an [`crate::crowd::spawn_body`], which is deliberately
+    // **not** a population record — so `clear_crowd` walks
+    // `CrowdPopulationRes` and never sees it, and a session stopped while a
+    // unit was out left a person standing in the road that nothing on any
+    // clear-path could reach. The first cut of this door despawned the sprites
+    // and not the people, which is the same law applied to one of the two
+    // things this wave spawns.
+    //
+    // `crew_guid` is a pure function of the chassis and `entity_of` answers
+    // `None` for a unit that never left its bay, so the walk is over every run
+    // and costs nothing on a station at rest.
+    let (puffs, crews): (Vec<Uuid>, Vec<Uuid>) = world
         .world()
         .get_resource::<DispatchRes>()
-        .map(|d| d.puffs.keys().copied().collect())
+        .map(|d| {
+            (
+                d.puffs.keys().copied().collect(),
+                d.runs.keys().copied().map(crew_guid).collect(),
+            )
+        })
         .unwrap_or_default();
-    for guid in puffs {
+    for guid in puffs.into_iter().chain(crews) {
         if let Some(e) = world.entity_of(guid) {
             world.despawn(e);
         }
@@ -712,6 +731,22 @@ pub struct DispatchRes {
     /// Without it the loop is visible and was measured: the `Downed` latch is
     /// permanent, `INCIDENT_KEEP_STEPS` forgets the resolved incident after a
     /// minute, and the same body calls another ambulance — for ever.
+    /// (`a_paramedic_kneels_at_the_patient_and_stands_up_to_leave` runs past
+    /// `INCIDENT_KEEP_STEPS` to measure it, because inside that window the
+    /// incidents table's own guard is doing the work and this set is invisible.)
+    ///
+    /// # It is keyed on a SUBJECT, and an ambient collapse's subject is a BLOCK
+    ///
+    /// [`ambient_draw`] names the *block* as the casualty — there is no person
+    /// there to name — so a block whose ambient collapse has been attended is in
+    /// this set and can never draw another one. That is the right answer for the
+    /// `Downed` body it was designed for and a **quiet retirement** of the
+    /// ambient medical feed, block by block, over a long session: a town's
+    /// collapses become fires-only once every block has had one. Sixteen epochs
+    /// of a nine-block town is nowhere near it and the island is larger still,
+    /// but it is a slope rather than a floor and it is stated rather than left to
+    /// be met. EMS3 gives an ambient casualty a person, which retires the whole
+    /// question.
     pub treated: BTreeSet<Uuid>,
     /// **The smoke a fire is making**, puff guid to the step it was let go of.
     ///
@@ -1042,6 +1077,25 @@ pub fn puff_guid(incident: Uuid, step: u64) -> Uuid {
 /// And ten hertz is not a compromise on the *sound*: a unit at 12 m/s moves
 /// 1.2 m between updates, which is inside the ear's own localisation blur at
 /// any distance a siren is audible from.
+///
+/// # WHERE THIS RUNS OUT, said rather than left to be discovered (EMS2 audit)
+///
+/// The table above stops at four because a three-unit town does. The **island**
+/// parks **seventeen** (`inf_editor_core::island::station_fleet` over its
+/// settlements), and seventeen hot at once is 170 a second — **48 seconds** of
+/// ring. `ems2_dispatch_gate` measured 4 253 of 8 192 held with an average of
+/// 1.7 hot over 250 seconds, so the shipped arithmetic has about a factor of two
+/// in hand *at this fleet size* and none at the island's.
+///
+/// What that costs is worth being exact about, because it is smaller than it
+/// looks: `RuntimeSim::audio_command_log` is a **diagnostic** ring and the
+/// commands themselves go to the engine through `audio_cmds`, so an overflow
+/// silences nothing. What it breaks is a **gate**: a test that counts `Play`s
+/// off the front of that log is reading a tail, which is exactly the VEH2a loss
+/// this constant exists to not repeat — and `dropped_audio_commands()` is the
+/// door that says so. A wave that puts most of an island's fleet on the road at
+/// once raises `SIREN_POSITION_PERIOD` or the log's capacity; it does not
+/// discover this from a flaky count.
 pub const SIREN_POSITION_PERIOD: u64 = 6;
 
 /// The mixer bus a siren plays on.
@@ -1157,6 +1211,26 @@ pub const YIELD_CORRIDOR_M: f64 = 6.0;
 /// [`YIELD_BIAS_M`] is covered in under two seconds. It applies only while a
 /// siren is actually behind — the term is guarded on the same non-zero bias the
 /// steering term is — so nothing about an ordinary street changes.
+///
+/// # WHAT IT OVERRIDES, and which half of that is deliberate (EMS2 audit)
+///
+/// The floor is a `max` taken **after** `drive_intent` has already minimised the
+/// limit against the bend, the gap ahead and the end of the road, so for the
+/// second or so a siren is behind it, a yielding car ignores all four:
+///
+/// * the **gap** is the one this is *for* and it cannot be otherwise. The
+///   deadlock being closed is precisely a car stopped at `STANDING_GAP_M` behind
+///   the car in front of it: leave the gap clamp in and the creep is zero and the
+///   car is pinned in the lane, which is the stop-in-lane design §7 rejected.
+///   The 6 m of standing gap is the room it creeps into, and it leaves the
+///   corridor sideways before it closes it — measured on the gate, where no
+///   yielding car ever contacted the one in front;
+/// * the **end of the road** is the half that is *not* deliberate. A car asked
+///   to yield within a lookahead of its path's end creeps past it at 1.5 m/s
+///   instead of stopping on it. Bounded by how long a siren stays behind (a
+///   second or two, so a couple of metres) and by the traffic step re-planning
+///   the leg, and it is on the carried list rather than fixed here, because
+///   guarding it moves the gate's own byte trace for a metre of overshoot.
 pub const YIELD_CREEP_MPS: f64 = 1.5;
 
 /// **How far a yielding car pulls over**, metres, and the number is the whole
@@ -1171,6 +1245,34 @@ pub const YIELD_CREEP_MPS: f64 = 1.5;
 /// **That is why the pull-over was shipped and the stop-in-lane was not.** See
 /// `a_car_that_stops_in_lane_stops_the_ambulance_behind_it` for the
 /// measurement: the cheaper design costs zero fields and *deadlocks*.
+///
+/// # WHERE 2.6 m ACTUALLY PUTS THE CAR, measured off this engine's own street
+/// (EMS2 audit)
+///
+/// The number was chosen against one constraint — clear `CORRIDOR_HALF_M` — and
+/// the street it moves into was never measured against it. It is:
+///
+/// | thing                                    | metres from the centreline |
+/// |------------------------------------------|---------------------------:|
+/// | the forward lane's centre (half of `DEFAULT_LANE_WIDTH_M` = 3.5) | 1.75 |
+/// | that car's right flank (+ 0.92 half-width)                       | 2.67 |
+/// | the kerb-parked row (`KERB_PARK_OFFSET_M`)                       | 5.00 |
+/// | a parked car's left flank (− 0.92)                               | 4.08 |
+///
+/// So there is **1.41 m** of clear road between a lane car's flank and the
+/// parked row, and a 2.6 m bias asks for 2.6 — putting the yielding car's centre
+/// at 4.35 m and its flank at 5.27 m, about **1.2 m into the parked cars**. It
+/// does *not* go into the opposing lane: [`yield_bias_m`]'s sign is `right_of`'s
+/// and the oncoming lane is the other way. And [`YIELD_CREEP_MPS`] removes the
+/// gap clamp that would otherwise brake for what it is moving into, so the
+/// contact is at a walking pace and rapier resolves it.
+///
+/// The tension is real and has no cheap resolution: the bias **must** exceed
+/// 2.5 m to leave the responder's corridor at all, and only 1.41 m of kerb
+/// exists. Closing it means narrowing `CORRIDOR_HALF_M`, widening the street, or
+/// giving the responder an overtake — all of which are `inf_physics::d3::traffic`
+/// decisions rather than this constant's. It is on the wave's carried list, with
+/// this table, rather than discovered from a screenshot of a car in a hedge.
 pub const YIELD_BIAS_M: f64 = 2.6;
 
 /// **How far right this car should aim to let a siren past** — the whole yield

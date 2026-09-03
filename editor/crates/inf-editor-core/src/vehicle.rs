@@ -955,11 +955,16 @@ mod tests {
     /// or an appliance shortened below `APPLIANCE_HALF_LENGTH_M`, fails this arm
     /// instead of sending an ambulance to a house fire.
     ///
-    /// Falsifies four ways: the sweep must be non-empty, every fleet row must
-    /// declare a service, the recogniser must answer for every one of them, and
-    /// it must answer **more than one distinct thing** — a rule that returned
-    /// `Police` unconditionally would satisfy the cruiser and the van and is
-    /// caught by the last assertion.
+    /// Falsifies five ways: the sweep must be non-empty, every fleet row must
+    /// declare a service, the recogniser must answer for every one of them, it
+    /// must answer **more than one distinct thing** — a rule that returned
+    /// `Police` unconditionally would satisfy the cruiser and the van — and,
+    /// the half the first cut of this arm did not have, **it must answer `None`
+    /// for the five CIVILIAN rows**, built through the same door with no livery
+    /// and painted the ambulance's own white. Without that half a recogniser
+    /// that said "yes" to every chassis passes everything above, because the
+    /// sweep only ever shows it emergency vehicles — and the consequence is the
+    /// whole town's traffic inside `FleetRes`.
     #[test]
     fn every_livery_is_recognised_as_the_service_it_declares() {
         use inf_ecs::dispatch::UnitKind;
@@ -1028,6 +1033,68 @@ mod tests {
              service unconditionally would pass every assertion above",
             seen
         );
+
+        // ── THE NEGATIVE HALF (EMS2 audit) ──
+        //
+        // Everything above says a fleet row IS recognised. Nothing above says a
+        // civilian one is NOT — and a recogniser that answered `Police` for
+        // every chassis with a `Collider3D` on it would pass all of it, because
+        // the sweep only ever shows it emergency vehicles. That rule would put
+        // the whole of the island's parked and driving traffic into `FleetRes`,
+        // `MAX_UNITS` would fill with saloons, and a house fire would be
+        // answered by somebody's pickup.
+        //
+        // So the five civilian rows are built through the same door with
+        // `livery: None` — which is exactly how `catalogue_row` builds the
+        // traffic — and each must answer `None`. The discriminating channel is
+        // the bloomed `light_bar` child a livery's `extra` adds, so a civilian
+        // van is a van however it is painted.
+        let mut civilians = 0usize;
+        for id in ["sedan", "truck", "sports", "suv", "van"] {
+            let def = defs.get(id).unwrap_or_else(|| panic!("no `{id}` row"));
+            assert!(
+                island_vehicle_livery(id).is_none(),
+                "`{id}` is a civilian row and has grown a livery — this half of \
+                 the arm is then about an emergency vehicle"
+            );
+            let chassis = uuid::Uuid::from_u64_pair(0x0E52_0C1E, civilians as u64);
+            inf_ecs::vehicle::spawn_rig_at(
+                &mut world,
+                chassis,
+                def,
+                &inf_ecs::vehicle::RigSpawn {
+                    name: format!("civilian {id}"),
+                    // Deliberately WHITE, which is the ambulance's own body
+                    // colour: paint is not a channel and this is the arm that
+                    // says so.
+                    at: glam::DVec3::new(-100.0 - civilians as f64 * 20.0, 1.0, 0.0),
+                    yaw_deg: 0.0,
+                    paint: SERVICE_WHITE,
+                    clip: None,
+                    engine_voice: false,
+                    livery: None,
+                },
+                true,
+            );
+            let recognised = inf_ecs::dispatch::unit_kind_of(&world, chassis);
+            println!(
+                "EMS2 civilian `{id}` ({:?}, half-length {:.2} m, painted white): \
+                 recognised {:?}",
+                def.body,
+                def.half_extents.z,
+                recognised.map(|k| k.name()),
+            );
+            assert_eq!(
+                recognised,
+                None,
+                "a civilian `{id}` painted white was recognised as {:?} — the \
+                 dispatcher would own the town's traffic, `MAX_UNITS` would fill \
+                 with saloons and a fire would be answered by a pickup",
+                recognised.map(|k| k.name()),
+            );
+            civilians += 1;
+        }
+        assert_eq!(civilians, 5, "only {civilians} civilian row(s) swept");
     }
 
     #[test]

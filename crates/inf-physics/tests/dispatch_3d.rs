@@ -221,6 +221,14 @@ struct Town {
 
 impl Town {
     fn new() -> Self {
+        Self::with_fire_hall(true)
+    }
+
+    /// The same town, optionally **without an appliance** — a settlement with a
+    /// police station and a hospital and no fire hall, which is what
+    /// `station_fleet` builds for every archetype that is not a `FireHall` and
+    /// is therefore the ordinary case rather than a contrivance.
+    fn with_fire_hall(fire: bool) -> Self {
         let mut world = EcsWorld::new();
         blocks(&mut world, 3, 3);
         ground(&mut world);
@@ -239,13 +247,15 @@ impl Town {
             &CRUISER_LIVERY,
             Shape::Sedan,
         );
-        park_unit(
-            &mut world,
-            APPLIANCE,
-            DVec3::new(-46.0, 0.0, 26.0),
-            &ENGINE_LIVERY,
-            Shape::Appliance,
-        );
+        if fire {
+            park_unit(
+                &mut world,
+                APPLIANCE,
+                DVec3::new(-46.0, 0.0, 26.0),
+                &ENGINE_LIVERY,
+                Shape::Appliance,
+            );
+        }
         hero(&mut world, DVec3::new(50.0, 0.0, 50.0));
         world.mark_dirty();
         world.propagate();
@@ -397,9 +407,13 @@ fn a_collapse_brings_the_ambulance_and_sends_it_home_again() {
     let mut steered = 0usize;
     let mut hot = 0usize;
     // Stopped the step the unit is home, so the arms below read the world at the
-    // end of ONE run rather than in the middle of a second: the patient is still
-    // on the ground (this wave's carried item — see the ledger), so a town left
-    // running long enough calls another ambulance for the same body.
+    // end of ONE run rather than in the middle of a second. The patient is still
+    // on the ground — this wave's carried item, there being no stretcher — but it
+    // does **not** call another ambulance: `DispatchRes::treated` closes that
+    // loop, and `a_paramedic_kneels_at_the_patient_and_stands_up_to_leave` is
+    // where it is measured, past `INCIDENT_KEEP_STEPS` where the other guard has
+    // stopped helping. (This comment claimed the loop was open; it was written
+    // one commit before `treated` landed and outlived it — EMS2 audit.)
     for i in 0..6000 {
         let s = town.step();
         steered += s.steered;
@@ -783,7 +797,40 @@ fn a_fire_brings_the_appliance_smokes_and_leaves_nothing_behind() {
         "a hose is still being played on a fire that is out"
     );
 
-    // (6) …and the session leaves nothing behind.
+    // (6) …and the session leaves nothing behind — NEITHER of the two things
+    //     this wave spawns.
+    //
+    //     The crew half is an EMS2 audit repair. A crew member is an
+    //     `inf_ecs::crowd::spawn_body`, which is deliberately not a population
+    //     record — so `clear_crowd` walks `CrowdPopulationRes` and never sees
+    //     it, and `clear_dispatch`'s first cut despawned the sprites and left
+    //     the people. Stopped mid-response, that is a person standing in the
+    //     road of the author's document, which is the same sentence the puffs
+    //     are refused by.
+    inf_physics::d3::dispatch::report_incident(
+        &mut town.world,
+        inf_ecs::dispatch::IncidentKind::Fire {
+            building: Uuid::from_u128(0x0E52_2003),
+            intensity: 1.0,
+        },
+        DVec3::new(0.0, 0.0, 200.0),
+    )
+    .expect("a second fire, so a unit is OUT when the session is stopped");
+    let crew = dispatch::crew_guid(APPLIANCE);
+    let mut had_a_body = false;
+    for _ in 0..2000 {
+        town.step();
+        had_a_body |= town.world.entity_of(crew).is_some();
+        if had_a_body {
+            break;
+        }
+    }
+    assert!(
+        had_a_body,
+        "no crew body was ever built, so stopping the session below proves \
+         nothing about one"
+    );
+
     inf_ecs::dispatch::clear_dispatch(&mut town.world);
     let left = town
         .world
@@ -796,6 +843,16 @@ fn a_fire_brings_the_appliance_smokes_and_leaves_nothing_behind() {
         "{left} smoke sprite(s) survived `clear_dispatch` — a puff in the \
          author's document is a row in the Outliner that no Outliner row put \
          there"
+    );
+    assert!(
+        town.world.entity_of(crew).is_none(),
+        "a crew member survived `clear_dispatch` — the session was stopped \
+         while its unit was out, and the person it built is now a row in the \
+         author's Outliner that no Outliner row put there"
+    );
+    assert!(
+        !dispatch::is_responder(&town.world, crew),
+        "the duty roster survived the clear"
     );
 }
 
@@ -861,9 +918,472 @@ fn a_paramedic_kneels_at_the_patient_and_stands_up_to_leave() {
         "{opened} incident(s) were opened for one body — the `treated` set is \
          not stopping the second call"
     );
+
+    // ── AND PAST THE LEDGER'S OWN MEMORY (EMS2 audit) ──
+    //
+    // Everything above is satisfied by the *other* guard. `open_incidents`
+    // refuses a body that already has an open medical incident, and this run
+    // ends a few hundred steps after the resolve — deep inside
+    // `INCIDENT_KEEP_STEPS`, where that guard is still doing all the work. Delete
+    // `treated` entirely and every assertion above still passes.
+    //
+    // What `treated` is *for* is the window after the ledger forgets: the
+    // `Downed` latch is permanent, the resolved incident is retired at 3 600
+    // steps, and from then on the same body is indistinguishable from a fresh
+    // collapse. So the town is run past that, and what is counted is medical
+    // incidents **naming this patient** rather than everything the town opened
+    // (the nine blocks' own ambient draw is running the whole time and is not
+    // what this arm is about).
+    let mut ever: std::collections::BTreeSet<Uuid> = Default::default();
+    let mut forgotten = false;
+    for _ in 0..(dispatch::INCIDENT_KEEP_STEPS + 600) {
+        town.step();
+        let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+        let mine: Vec<Uuid> = res
+            .incidents
+            .iter()
+            .filter(|(_, i)| {
+                matches!(i.kind, inf_ecs::dispatch::IncidentKind::Medical { npc, .. } if npc == PATIENT)
+            })
+            .map(|(g, _)| *g)
+            .collect();
+        forgotten |= mine.is_empty();
+        ever.extend(mine);
+    }
+    println!(
+        "EMS2 treated: {} medical incident(s) ever named the patient over {} \
+         further steps; the ledger forgot it: {forgotten}",
+        ever.len(),
+        dispatch::INCIDENT_KEEP_STEPS + 600
+    );
+    assert!(
+        forgotten,
+        "the resolved incident was never retired from the ledger, so the run is \
+         still inside `INCIDENT_KEEP_STEPS` and the guard being measured is the \
+         incidents table rather than `treated`"
+    );
+    assert!(
+        inf_ecs::weapon::is_downed(&town.world, PATIENT),
+        "the patient is no longer downed, so the census has stopped offering it"
+    );
+    assert_eq!(
+        ever.len(),
+        1,
+        "{} medical incident(s) named one patient once the ledger had forgotten \
+         the first — the `Downed` latch is permanent, so without `treated` this \
+         body calls an ambulance every {} steps for ever",
+        ever.len(),
+        dispatch::INCIDENT_KEEP_STEPS
+    );
 }
 
-// ── (f) absent costs nothing ────────────────────────────────────────────────
+// ── (f) the two feeds nothing else drives ───────────────────────────────────
+
+/// **THE AMBIENT DRAW REACHES THE DISPATCHER** (EMS2 audit).
+///
+/// `inf_ecs::dispatch::ambient_draw` has a unit arm that says the *function* is
+/// sparse, reproducible and makes both kinds. Nothing said the **feed** works:
+/// that `open_incidents` walks the level's blocks, takes the draw on the epoch
+/// and mints an incident somebody is sent to. The whole branch could have been
+/// dead — an inverted `is_multiple_of`, a `blocks_of` that answered nothing, a
+/// walk that never reached `open` — and every other arm in this file and in
+/// `ems2_dispatch_gate` would still be green, because all of them stage their
+/// incidents through `report_incident`.
+///
+/// So this one stages **nothing**. The town is left alone and asserted to set
+/// itself on fire: the epoch is found from the pure function first, so the arm
+/// knows what it is waiting for and fails with a number rather than a timeout.
+#[test]
+fn the_ambient_draw_reaches_the_dispatcher_with_nothing_staged() {
+    // What the pure function says this town will do, and when. The block guids
+    // are `blocks`' own, and the dispatcher's epoch is `res.steps /
+    // AMBIENT_PERIOD` — its own clock, which starts at 0 on the first step it
+    // has a fleet.
+    let mut want: Option<(u64, Uuid, inf_ecs::dispatch::IncidentKind)> = None;
+    'search: for epoch in 0..16u64 {
+        for row in 0..3u64 {
+            for col in 0..3u64 {
+                let block = Uuid::from_u64_pair(0x0E52, (row << 32) | col);
+                if let Some(kind) = dispatch::ambient_draw(block, epoch) {
+                    want = Some((epoch, block, kind));
+                    break 'search;
+                }
+            }
+        }
+    }
+    let (epoch, block, kind) = want.expect(
+        "nine blocks over sixteen epochs drew nothing at all — `AMBIENT_CHANCE` \
+         has been trimmed to nothing or the draw is broken",
+    );
+    println!(
+        "EMS2 ambient feed: block {block} draws a {} at epoch {epoch} (step {})",
+        kind.name(),
+        epoch * dispatch::AMBIENT_PERIOD
+    );
+
+    let mut town = Town::new();
+    let mut opened_kind: Option<inf_ecs::dispatch::IncidentKind> = None;
+    let mut opened_at: Option<u64> = None;
+    // One step past the epoch's own step, because the draw is taken *during*
+    // that step and read out after it.
+    for _ in 0..=(epoch * dispatch::AMBIENT_PERIOD + 1) {
+        let s = town.step();
+        if s.opened > 0 && opened_at.is_none() {
+            let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+            opened_at = Some(res.steps);
+            opened_kind = res
+                .incidents
+                .values()
+                .find(|i| i.state != IncidentState::Resolved)
+                .map(|i| i.kind);
+        }
+    }
+    let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+    println!(
+        "  the town opened {} incident(s) by step {}, {} assigned; first was {:?}",
+        res.opened,
+        res.steps,
+        res.assigned,
+        opened_kind.map(|k| k.name())
+    );
+    assert!(
+        res.opened > 0,
+        "nothing was staged and the town opened nothing — the ambient feed's \
+         branch never reaches `open`, and every other arm in this wave stages \
+         through `report_incident` so none of them can see it"
+    );
+    // …and it is the draw's own answer, not something else: the kind the pure
+    // function named, at the block it named.
+    let named = res.incidents.values().any(|i| match (i.kind, kind) {
+        (
+            inf_ecs::dispatch::IncidentKind::Fire { building: a, .. },
+            inf_ecs::dispatch::IncidentKind::Fire { building: b, .. },
+        ) => a == b,
+        (
+            inf_ecs::dispatch::IncidentKind::Medical { npc: a, .. },
+            inf_ecs::dispatch::IncidentKind::Medical { npc: b, .. },
+        ) => a == b,
+        _ => false,
+    });
+    assert!(
+        named,
+        "the town opened something, but not the {} at block {block} the draw \
+         says it should have — the feed is reaching `open` with the wrong \
+         subject",
+        kind.name()
+    );
+    // …and somebody was actually sent to it, which is what makes an ambient
+    // incident a thing a player experiences rather than a row in a map.
+    assert!(
+        res.assigned > 0,
+        "the town opened an incident it never answered"
+    );
+}
+
+/// **A WITNESSED SHOT BECOMES A CRIME, A BURST BECOMES ONE CRIME, AND AN ACT IS
+/// READ ONCE** (EMS2 audit).
+///
+/// The third feed, and the one nothing in this wave drove: every crime this tree
+/// dispatches to in the gate and in the arms above is staged through
+/// `report_incident`, so `open_incidents`' witness branch — the `> seen_act_step`
+/// forward read, the `ActKind` → severity mapping, and the `CRIME_MERGE_M`
+/// dedupe — was carried entirely by inspection.
+///
+/// Three claims, and the second and third are the ones that cost a station:
+///
+/// 1. a `Shot` opens a `Crime` with **severity 1** and a `Killed` opens one with
+///    **2**;
+/// 2. a second act **inside `CRIME_MERGE_M`** of an open crime does not open a
+///    second one — a burst is one emergency, and a dispatcher that opened an
+///    incident per round would empty a station into one street corner;
+/// 3. the same act is never read twice, however many steps run past it — which
+///    is what `seen_act_step` is, and a broken forward read would mint a new
+///    crime scene *every step for ever*.
+#[test]
+fn a_witnessed_shot_is_a_crime_a_burst_is_one_and_an_act_is_read_once() {
+    use inf_ecs::witness::{ActKind, WitnessedAct};
+
+    let mut town = Town::new();
+    // Past the epoch-0 ambient draw, so what is counted below is this feed's.
+    town.steps(30);
+    let crimes = |t: &Town| -> Vec<(u8, DVec3)> {
+        dispatch::dispatch_of(&t.world)
+            .map(|r| {
+                r.incidents
+                    .values()
+                    .filter_map(|i| match i.kind {
+                        inf_ecs::dispatch::IncidentKind::Crime { severity } => {
+                            Some((severity, i.at))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        crimes(&town).is_empty(),
+        "the town started with a crime on it"
+    );
+
+    let act = |kind: ActKind, at: DVec3, step: u64| WitnessedAct {
+        kind,
+        actor: HERO,
+        at,
+        step,
+        observers: Vec::new(),
+        actor_look: 0,
+        actor_vehicle: None,
+    };
+    let corner = DVec3::new(150.0, 0.0, 50.0);
+
+    // (1) a shot.
+    inf_ecs::witness::record_act(&mut town.world, act(ActKind::Shot, corner, 100));
+    town.step();
+    let after_one = crimes(&town);
+    println!("EMS2 crime feed: after one shot {after_one:?}");
+    assert_eq!(
+        after_one.len(),
+        1,
+        "a witnessed shot opened {} crime(s)",
+        after_one.len()
+    );
+    assert_eq!(after_one[0].0, 1, "a `Shot` is severity 1");
+
+    // (2) the rest of the burst, eight metres along — one scene, not nine.
+    for (n, step) in (101..109u64).enumerate() {
+        inf_ecs::witness::record_act(
+            &mut town.world,
+            act(ActKind::Shot, corner + DVec3::X * (n as f64 + 1.0), step),
+        );
+    }
+    town.step();
+    let after_burst = crimes(&town);
+    println!("  after eight more rounds {} crime(s)", after_burst.len());
+    assert_eq!(
+        after_burst.len(),
+        1,
+        "a burst of nine rounds inside {} m opened {} crime scene(s) — a \
+         dispatcher that answers each round empties a station into one corner",
+        inf_physics::d3::dispatch::CRIME_MERGE_M,
+        after_burst.len()
+    );
+
+    // (3) a death, well outside the merge radius — a second scene, severity 2.
+    let across_town = corner + DVec3::X * 200.0;
+    inf_ecs::witness::record_act(&mut town.world, act(ActKind::Killed, across_town, 120));
+    town.step();
+    let after_kill = crimes(&town);
+    println!("  after a death 200 m away {} crime(s)", after_kill.len());
+    assert_eq!(
+        after_kill.len(),
+        2,
+        "a death 200 m from an open crime scene did not open its own"
+    );
+    assert!(
+        after_kill.iter().any(|(sev, _)| *sev == 2),
+        "a `Killed` did not map to severity 2: {after_kill:?}"
+    );
+
+    // (4) THE FORWARD READ. Nothing new is recorded and the log still holds all
+    //     ten acts; a `>=` where the code says `>`, or a `seen_act_step` that is
+    //     never written, mints a new crime scene on every one of these steps.
+    let before = crimes(&town).len();
+    town.steps(120);
+    let after = crimes(&town);
+    println!("  120 quiet steps later {} crime(s)", after.len());
+    assert!(
+        after.len() <= before,
+        "the log's ten acts were re-read: {before} crime(s) became {} over 120 \
+         quiet steps — `seen_act_step` is not advancing",
+        after.len()
+    );
+    assert!(
+        !inf_ecs::witness::witnessed(&town.world).is_empty(),
+        "the log emptied itself, so the forward read above is a claim about an \
+         empty ring"
+    );
+}
+
+/// **A STATION THAT STREAMS OUT MID-RESPONSE RETIRES ITS UNIT** (EMS2 audit).
+///
+/// The fleet is a derivation on the block stamp, so a cell that pages out takes
+/// its blocks *and* its vehicles and `sync_fleet` rebuilds an empty one. Two
+/// things were left behind by the first cut, and both outlive the session:
+///
+/// * the **crew** — a `spawn_body` that only `park` ever despawns, so the row
+///   was dropped from `runs` and the person was not. It stands in the road,
+///   `Driving` a chassis that no longer exists, and is on `RespondersRes` for
+///   ever, which makes it permanently exempt from the panic;
+/// * the **siren** — `step_dispatch` returned on an empty fleet *before* it
+///   reached `sound_and_light`, so `DispatchRes::sirens` froze holding a `Move`
+///   and both hosts' fenced audio blocks re-pushed it every step into a ring
+///   that evicts. That is the VEH2a loss with a stuck tap instead of a busy town.
+///
+/// Falsified from the world rather than from the counters: the body has to have
+/// existed and the roster has to have held it, or this arm is about a unit that
+/// never left its bay.
+#[test]
+fn a_station_that_streams_out_mid_response_retires_its_crew_and_its_siren() {
+    let mut town = Town::new();
+    town.steps(20);
+    collapse(&mut town.world, PATIENT, DVec3::new(150.0, 0.0, 50.0));
+    let crew = dispatch::crew_guid(AMBULANCE);
+    let mut out = false;
+    for _ in 0..3000 {
+        town.step();
+        if town.world.entity_of(crew).is_some() && dispatch::is_responder(&town.world, crew) {
+            out = true;
+            break;
+        }
+    }
+    assert!(
+        out,
+        "no crew was ever built and put on the roster, so streaming the station \
+         out below proves nothing"
+    );
+    let hot_before = inf_physics::d3::dispatch::running_hot(&town.world).len();
+    assert_eq!(hot_before, 1, "the ambulance is not running hot");
+
+    // The cell pages out: its blocks and its vehicles go together, which is what
+    // moves `block_stamp` and rebuilds the fleet.
+    let gone: Vec<Uuid> = town
+        .world
+        .world()
+        .iter_entities()
+        .filter(|e| e.get::<PcgVolume>().is_some())
+        .filter_map(|e| e.get::<inf_ecs::components::Guid>().map(|g| g.0))
+        .chain([AMBULANCE, CRUISER, APPLIANCE])
+        .collect();
+    for g in gone {
+        if let Some(e) = town.world.entity_of(g) {
+            town.world.despawn(e);
+        }
+    }
+    town.world.mark_dirty();
+    town.world.propagate();
+    town.steps(3);
+
+    let res = dispatch::dispatch_of(&town.world).expect("the dispatcher survives its own fleet");
+    println!(
+        "EMS2 stream-out: {} run(s), {} siren cue(s), crew present {}, on duty {}",
+        res.runs.len(),
+        res.sirens.len(),
+        town.world.entity_of(crew).is_some(),
+        dispatch::is_responder(&town.world, crew),
+    );
+    assert!(res.runs.is_empty(), "a run survived its own fleet");
+    assert!(
+        town.world.entity_of(crew).is_none(),
+        "the crew is still standing in a street whose blocks have been unloaded"
+    );
+    assert!(
+        !dispatch::is_responder(&town.world, crew),
+        "a crew whose unit no longer exists is still on the duty roster, and is \
+         therefore exempt from every panic for the rest of the process"
+    );
+    assert!(
+        res.sirens.is_empty(),
+        "{} siren cue(s) are still being drained by both hosts every step — a \
+         frozen `Move` re-pushed for ever is a ring that evicts",
+        res.sirens.len()
+    );
+    assert!(
+        inf_physics::d3::dispatch::running_hot(&town.world).is_empty(),
+        "a unit that no longer exists is still running hot"
+    );
+}
+
+/// **AN EMERGENCY NOBODY CAN ANSWER DOES NOT STOP THE ONES SOMEBODY CAN**
+/// (EMS2 audit) — the starvation this audit found, as a regression arm.
+///
+/// # What it is about
+///
+/// `assign` considers at most `ASSIGNS_PER_STEP` = **one** incident a step,
+/// because an assignment is a Dijkstra per candidate unit. The first cut took
+/// that one in **guid order** — content-hash order — and took it whether or not
+/// the attempt succeeded. An incident whose service has **no unit in the level
+/// at all** therefore sat at the front of that order for ever and consumed the
+/// slot every step, and nothing else was ever considered.
+///
+/// It is the ordinary case, not a corner: `station_fleet` gives an appliance
+/// only to a `FireHall`, `ambient_draw` produces a fire half the time, and a
+/// town with a police station and a hospital and no fire hall draws one within
+/// a couple of minutes.
+///
+/// The fixture is that town. A fire is staged that nobody can go to, and then a
+/// collapse that an ambulance is parked and idle for. **Both** halves are
+/// asserted: the fire is never answered (or the arm is about a town that has an
+/// appliance after all) and the collapse **is**.
+#[test]
+fn an_emergency_nobody_can_answer_does_not_stop_the_ones_somebody_can() {
+    let mut town = Town::with_fire_hall(false);
+    town.steps(20);
+    let fleet = town
+        .world
+        .world()
+        .get_resource::<inf_ecs::dispatch::FleetRes>()
+        .expect("a fleet")
+        .clone();
+    assert!(
+        !fleet
+            .units
+            .values()
+            .any(|u| u.kind == inf_ecs::dispatch::UnitKind::Fire),
+        "the fixture parked an appliance, so nothing here is unanswerable"
+    );
+
+    // The fire nobody can go to, first — so it is the incident an oldest-first
+    // rule reaches before the collapse, which is the whole point.
+    let fire = inf_physics::d3::dispatch::report_incident(
+        &mut town.world,
+        inf_ecs::dispatch::IncidentKind::Fire {
+            building: Uuid::from_u128(0x0E52_3001),
+            intensity: 1.0,
+        },
+        DVec3::new(200.0, 0.0, 0.0),
+    )
+    .expect("the staging door opened a fire");
+    town.steps(2);
+    collapse(&mut town.world, PATIENT, DVec3::new(150.0, 0.0, 50.0));
+
+    let mut answered = None;
+    for i in 0..4000 {
+        let s = town.step();
+        if s.resolved > 0 {
+            answered = Some(i);
+            break;
+        }
+    }
+    let res = dispatch::dispatch_of(&town.world).expect("a dispatcher");
+    let fire_state = res.incidents.get(&fire).map(|i| i.state);
+    println!(
+        "EMS2 starvation: the fire is {:?} after {} step(s); the collapse was \
+         resolved at {answered:?}; {} unanswered",
+        fire_state.map(|s| s.name()),
+        res.steps,
+        res.unanswered
+    );
+    assert_eq!(
+        fire_state,
+        Some(IncidentState::Reported),
+        "the fire was answered by a town with no appliance in it, so this arm \
+         is not about an unanswerable incident"
+    );
+    assert!(
+        res.unanswered > 0,
+        "a town holding an emergency it cannot answer reported zero unanswered \
+         steps — the diagnostic that says *why* nobody came is dead"
+    );
+    assert!(
+        answered.is_some(),
+        "an ambulance parked in its bay never went to a collapse, because a \
+         FIRE nobody could answer held the one assignment slot every step — \
+         this is the starvation, and it takes the whole dispatcher down with it"
+    );
+}
+
+// ── (g) absent costs nothing ────────────────────────────────────────────────
 
 /// **A TOWN WITH NO EMERGENCY VEHICLE IN IT HAS NO DISPATCHER.**
 ///

@@ -27486,3 +27486,179 @@ golden, `Cargo.lock` or `deny.toml` was touched.
    `dispatch_state_bytes` — both are functions of folded history, stated where
    they are declared, and the two-host gate compares 15 000 steps of the fold
    that *is* there.
+
+### EMS2 — the adversarial audit (2026-09-03)
+
+Battery green at the wave's head before anything was touched: **6 886 passed, 0
+failed, 20 ignored over 362 binaries**, `INF_GOLDEN_STRICT=1`, exit 0. Every
+table in the ledger above reproduces: the three response times to the
+centisecond, `6/4/4/4`, 63 traffic cars, 4 059 trace bytes, and the ring at
+`4 253 of 8 192, 0 dropped`. The `dispatch` phase measures **0.036–0.037 ms**
+against its 0.5 ms budget (the ledger's 0.0370 and the report's 0.0366 are the
+same row on two runs).
+
+**Four defects found and fixed, each mutation-verified.**
+
+**1. THE DISPATCHER DEADLOCKS ON AN EMERGENCY NOBODY CAN ANSWER** — the one that
+matters. `assign` considers `ASSIGNS_PER_STEP` = **one** incident a step, and it
+took that one in **guid order** — content-hash order, so neither the oldest nor
+anything a reader could predict — and consumed the slot *whether or not the
+attempt succeeded*. An incident whose service has no unit in the level therefore
+sat at the front of that order for ever and took the step's only assignment every
+step. Everything else in the table was never considered.
+
+It is the ordinary case rather than a corner: `station_fleet` gives an appliance
+only to a `FireHall`, `ambient_draw` produces a fire half the time, and a
+settlement with a police station and a hospital and no fire hall draws one within
+a couple of minutes and then stops answering *anything*.
+
+Measured, on a town with two idle units and no appliance:
+
+| `assign` rule                  | the collapse an ambulance was parked for |
+|--------------------------------|-----------------------------------------:|
+| guid order, slot consumed      | **never answered** in 4 000 steps (66 s) |
+| oldest-first, service-filtered | resolved at step 2 061                   |
+
+The fix is `O(units)` and pays for nothing: the candidate list is filtered by
+which services have a free unit *right now* — the question the Dijkstra would
+otherwise be paid to answer — and ordered by `opened_step` with a guid tiebreak,
+which is the order this function's own doc claimed from the start. The cost bound
+is unchanged at one route-search set per step.
+`an_emergency_nobody_can_answer_does_not_stop_the_ones_somebody_can` is the arm;
+restore the old rule and it reds on that sentence.
+
+**The gate is unmoved by it where it counts**: the three staged response times
+are still 45.55 / 53.15 / 115.15 s and PIE == shipping is still byte-identical
+over 15 000 steps at 4 059 bytes. What moved is the *ambient tail* — 37 528 to
+38 551 sticks, 14 820 to 15 000 hot steps, ring 51.9 % to 54.0 % — which is the
+fix answering ambient calls that used to be starved.
+
+**2. A DROPPED RUN ORPHANED ITS CREW, PERMANENTLY.** `step_dispatch` retained
+`res.runs` against the fleet, and a unit the derivation dropped — a station whose
+cell streams out, a block that moves past `STATION_CLAIM_M` — took its row and
+left its **person**: a body standing in the road, `Driving` a chassis no longer
+in the fleet, and **exempt from the panic for the rest of the process**, because
+`RespondersRes` is released at `park` alone. A dropped run is now retired through
+the same `park` an arriving one is.
+
+And the whole-fleet case was worse, because `step_dispatch` returned on an empty
+fleet **before** it reached `sound_and_light`: a cell that paged out every station
+left a live `DispatchRes` frozen mid-response with a `Move` still in its `sirens`
+list, and both hosts' fenced audio blocks re-pushed that same command **every step
+for the rest of the session** into a ring that evicts. "Never had a fleet" and "no
+longer has one" are different worlds; the early return is now keyed on the
+*resource* rather than on the fleet, so a dispatcher that exists is always stepped
+and always retires itself.
+`a_station_that_streams_out_mid_response_retires_its_crew_and_its_siren` unloads
+the blocks and the vehicles together — which is what moves `block_stamp` — and
+asserts the world: no run, no body, no roster entry, no cue, nothing running hot.
+
+**3. `clear_dispatch` DESPAWNED THE SPRITES AND LEFT THE PEOPLE.** The wave
+applied P21's law to the puffs and not to the crew — and a crew member is an
+`inf_ecs::crowd::spawn_body`, deliberately *not* a population record, so
+`clear_crowd` walks `CrowdPopulationRes` and never sees it either. A session
+stopped mid-response left a person in the author's document that nothing on any
+clear-path could reach. Now on the same list, for the same sentence.
+
+**4. THE LIVERY PIN HAD NO NEGATIVE HALF.**
+`every_livery_is_recognised_as_the_service_it_declares` only ever showed
+`unit_kind_of` emergency vehicles, so a recogniser that answered `Police` for
+every chassis with a collider passed all of it — and would have put the island's
+whole parked and driving traffic into `FleetRes`. The five civilian rows are now
+built through the same door with `livery: None`, painted the **ambulance's own
+white**, and each must answer `None`: sedan 2.20 m, truck 2.65, sports 2.25, suv
+2.45, van 3.00 — the last of which is *longer than the ambulance*, which is
+exactly why paint and length are not the channel and a bloomed `light_bar` is.
+
+**TWO FEEDS OF THREE WERE UNARMED END TO END.** The wave claims three incident
+feeds; the gate and every arm in `dispatch_3d` staged through `report_incident`,
+so only the `Downed` census was ever driven. The witness branch and the ambient
+branch could both have been dead — an inverted `is_multiple_of`, a `blocks_of`
+that answered nothing, a `> seen_act_step` that never advanced — with everything
+green. Two arms added:
+
+* `the_ambient_draw_reaches_the_dispatcher_with_nothing_staged` stages **nothing**
+  and asserts the town sets itself on fire. It reads the epoch off the pure
+  function first, so it fails with a number rather than a timeout: block
+  `...0200000002` draws a fire at **epoch 3** (step 5 400), and the town opens it
+  at 5 402 and sends somebody;
+* `a_witnessed_shot_is_a_crime_a_burst_is_one_and_an_act_is_read_once` drives the
+  witness log directly: `Shot` to severity **1**, `Killed` to **2**, nine rounds
+  inside `CRIME_MERGE_M` to **one** scene and not nine, a death 200 m away to its
+  own, and 120 quiet steps later still two — which is `seen_act_step` advancing
+  rather than the ring being re-read every step for ever.
+
+**AND ONE ARM WAS VACUOUS.** The `treated` half of
+`a_paramedic_kneels_at_the_patient_and_stands_up_to_leave` asserted `opened == 1`
+a few hundred steps after the resolve — deep inside `INCIDENT_KEEP_STEPS`, where
+the *incidents table's* own guard is doing all the work. Delete `treated`
+entirely and it still passed. It now runs `INCIDENT_KEEP_STEPS + 600` further
+steps, asserts the ledger actually forgot the incident, and counts medical
+incidents **naming this patient**: with `treated` it is 1, without it 2. The
+repeat-ambulance loop is now measured rather than asserted.
+
+### Carried by the audit (beyond the wave's own nine)
+
+10. **`YIELD_CREEP_MPS` lifts the END-OF-ROAD clamp too.** The floor is a `max`
+    after `drive_intent` has minimised against bend, gap and endstop. Overriding
+    the **gap** is the whole point and cannot be otherwise — leave it in and the
+    creep is zero and the car is pinned in the lane, which is the stop-in-lane
+    design section 7 rejected. Overriding the **endstop** is not: a car asked to
+    yield within a lookahead of its path's end creeps a metre or two past it
+    instead of stopping on it. Written into `YIELD_CREEP_MPS`'s own doc; not
+    fixed here, because guarding it moves the gate's byte trace for a metre of
+    overshoot.
+10b. **`YIELD_BIAS_M` = 2.6 m is 1.2 m more kerb than this engine's street has.**
+    The number was chosen against one constraint — clear `CORRIDOR_HALF_M` = 2.5 —
+    and the road it moves into was never measured. A forward lane's centre is
+    1.75 m off the centreline (half of `DEFAULT_LANE_WIDTH_M` = 3.5), a car's
+    right flank is 2.67, and `KERB_PARK_OFFSET_M` puts a parked car's left flank
+    at 4.08: **1.41 m of clear road** against a 2.6 m ask, so a yielding car ends
+    up about 1.2 m into the parked row — and `YIELD_CREEP_MPS` has removed the gap
+    clamp that would have braked for it. Not into the *opposing* lane
+    (`right_of`'s sign is the other way), and the contact is at a walking pace, so
+    it is deterministic and the gate is green either way. The tension has no cheap
+    resolution: the bias must exceed 2.5 to leave the responder's corridor at all,
+    and only 1.41 exists. Narrowing `CORRIDOR_HALF_M`, widening the street or
+    giving the responder an overtake are all `d3::traffic` decisions. The table is
+    on `YIELD_BIAS_M`'s own doc.
+11. **An answerable incident that no ROUTE reaches still holds the slot.** Fix 1
+    closes "this service has no unit"; it does not close "`drive_path` answers
+    `None`". That needs a per-incident refusal the ledger can show — a shape this
+    audit did not invent on its own.
+12. **The audio ring's table stops at four hot units and the island parks 17.**
+    Seventeen hot is 170 commands a second — **48 seconds** of an 8 192 ring
+    against the gate's measured 250 s at 1.7 hot. It silences nothing
+    (`audio_command_log` is diagnostic; the commands reach the engine through
+    `audio_cmds`) but it makes any gate that counts `Play`s read a *tail*, which
+    is the VEH2a loss wearing the diagnostic's hat. Written into
+    `SIREN_POSITION_PERIOD`'s doc with the door (`dropped_audio_commands()`) that
+    says so.
+13. **`treated` is keyed on a SUBJECT and an ambient collapse's subject is a
+    BLOCK.** So a block whose ambient collapse has been attended can never draw
+    another one, and a town's collapses retire block by block over a long
+    session. A slope, not a floor, and EMS3's ambient casualty-with-a-person
+    retires the question. Stated on the field.
+14. **A responding unit is carjackable.** `carjack::candidates` walks
+    `bridge.vehicle_guids()` and any seated occupant, so a player at a cruiser's
+    door ejects the crew mid-response. The exemption holds — the crew does *not*
+    rout, which is clause 1 working — but `ensure_crew` re-seats it next step
+    into the car the player is now driving, and two authorities steer one
+    chassis. `mark_taken` is inert here because a unit is not a `TrafficRecord`.
+    Not a determinism or law breach; a gameplay edge for the wave that gives
+    stealing an emergency vehicle a meaning.
+15. **`RespondersRes` is exactly "a crew currently on a run", not "on duty".** The
+    honest boundary, since the type's name suggests more: a station's *staff* —
+    EMS1's desk officers, the ward nurses — are never on it, so a shot at a
+    police-station front desk routs everybody behind it. `ensure_crew` puts a
+    crew on at `EnRoute`/`Returning` and `park` takes it off at the bay; nothing
+    else writes it.
+
+### Audit verification
+
+`cargo fmt --all --check` clean. Full battery `-j 3 --no-fail-fast
+INF_GOLDEN_STRICT=1` green after the repairs. `clippy --workspace --all-targets
+-D warnings` clean, run last. Goldens stay **62**, none added and none
+re-blessed; `EXPECTED_LEVELS` **24**; scene **v27** / `ScenePayload` **v12**; no
+`Cargo.toml`, `Cargo.lock`, `deny.toml`, committed `.inf_lvl` or golden touched;
+the whole audit diff is LF-clean.
