@@ -28268,19 +28268,19 @@ two are the whole space:
 That the space is *exhausted* is stated rather than hidden: a fourth part kind
 is not expressible without a fourth collider shape, and the day one is wanted
 the honest move is a new shape, not a second recogniser keyed off something
-else. `PartKind` (`inf-ecs/src/vehicle.rs:123`), `PartMount` (`:150`),
-`part_of` (`:221`).
+else. `PartKind` (`inf-ecs/src/vehicle.rs:127`), `PartMount` (`:154`),
+`part_of` (`:225`).
 
 **WHEELS WIN** is the whole of what the seam costs every level that already
 exists, which is nothing. A box or capsule sensor under a chassis *that has
 wheels* is an ordinary trigger, mirrored into rapier exactly as it was; only a
-wheel-less chassis looks for parts (`rig_of`, `:283`, and the same clause in
+wheel-less chassis looks for parts (`rig_of`, `:287`, and the same clause in
 the bridge at `inf-physics/src/d3/ecs.rs:982`). Measured in one arm from three
 sides: the same box gives a hull one **consumed** thruster and two bodies, and
 gives a car four wheels, zero parts, a **mirrored** collider and **three**
 bodies.
 
-**THE BOAT.** `HullVehicle` (`:4468`) is a screw, a rudder and a hull. What
+**THE BOAT.** `HullVehicle` (`:4489`) is a screw, a rudder and a hull. What
 makes it a boat rather than a car with a rudder is one line: *a screw pushes
 only while it is in the water*. The door samples the sea once per vehicle per
 step into `ChassisState::water_y`, from the same `WaterIndex` and the same sim
@@ -28428,7 +28428,7 @@ fence is what covers the seam there.
 
 ### Clause 2 — the helicopter
 
-`RotorVehicle` (`:4903`). **What the pilot commands is an ATTITUDE**, not a
+`RotorVehicle` (`:4945`). **What the pilot commands is an ATTITUDE**, not a
 velocity and not a torque: the stick's fore-and-aft is a pitch attitude, its
 sideways is a yaw rate, and `VehicleControls::vertical` — which has existed
 since P20 as *"vertical intent while swimming or flying"* — is the collective.
@@ -28439,7 +28439,7 @@ accelerates. **The translation is commanded nowhere.** It emerges, which is how
 a helicopter works and is why this needs no lift model and no aerofoil.
 
 **No new force channel.** `WheelForce` is a force at a point and a pure torque
-is two of them: `torque_pair` (`:4753`) returns the couple whose moment is
+is two of them: `torque_pair` (`:4774`) returns the couple whose moment is
 exactly the torque asked for and whose sum is exactly zero, with the arm chosen
 from the world axis the torque leans on least so two hosts pick the same one.
 Its arm checks the moment about two different points, because a couple that
@@ -28618,7 +28618,7 @@ touched the stick. The player's own look already has full pitch freedom, and
 freedom is what the clause asked for.
 
 **THE READOUT** is one door dispatched on the RIG'S OWN PARTS
-(`craft_readout`, `:2116`): a car reads a speedometer and a gear, a boat reads
+(`craft_readout`, `:2127`): a car reads a speedometer and a gear, a boat reads
 knots and a telegraph (`17.4 kn    AHEAD`), an aircraft reads a speed and a
 height (`139 km/h    ALT 42 m`). Choosing off the parts rather than off a kind
 field means the readout cannot disagree with the model driving the machine —
@@ -28657,7 +28657,7 @@ UNIFORMLY over `VehicleBody::ALL`, so a sixth family puts one at every sixth
 kerb slot in every town, and EMS1 left the remedy in a comment —
 *"`catalogue_row` gains a named CIVILIAN sub-list in the same commit"*.
 
-This is that commit. `VehicleBody::CIVILIAN` (`:1460`) is the five road cars,
+This is that commit. `VehicleBody::CIVILIAN` (`:1471`) is the five road cars,
 the draw reads it (`traffic.rs:2074`), and the size table stays exhaustive over
 `VehicleBody` so the NEXT family is a compile error rather than a boat on a
 pavement — which fired for real while this was written. Armed rather than
@@ -28738,7 +28738,7 @@ follow it"* was drafted as done, and the fence said otherwise.
 **1. AN UNMANNED HELICOPTER FLEW ITSELF AWAY.** A governed collective's NEUTRAL
 is a hover, so a machine reading its default controls as input carries its own
 weight. Measured: the parked helicopter travelled **476 m** and ended **12 m
-under the world** with nobody aboard. `VehicleControls::occupied` (`:2622`) is
+under the world** with nobody aboard. `VehicleControls::occupied` (`:2633`) is
 the fix, and it is a boolean rather than a zero on purpose — read the neutral
 as "hovering" and you cannot express "switched off". A stick at rest and no
 hand on it are different things.
@@ -29094,6 +29094,12 @@ reader; it is no longer visible to a gate. The same is true of
 rather than anything this wave introduced. **The vehicle phase's 0.00110 /
 0.00123 ms against 0.5 is a printed figure on every run CI makes, not an
 assertion.**
+
+**A note on the line citations in this section:** they were exact at
+`4c69d3b5` and the audit's own edits to `crates/inf-ecs/src/vehicle.rs` moved
+them by four to forty-two lines. They are re-pointed at the audit head; a
+citation is a thing that goes stale silently, which is the same hazard the
+missing arm in (a) was a worse instance of.
 
 **WHAT THE AUDIT DID NOT REACH.** The `veh2c_harbour_gate` fixture's craft come
 from the island's catalogue, but the gate runs in a hand-built harbour rather
