@@ -1015,6 +1015,14 @@ fn recognition_rides_the_dispatch_budget() {
     let mut looked = 0usize;
     let mut worst_files = 0usize;
     for _ in 0..1200 {
+        // **THE HERO STANDS IN FRONT OF THE OFFICER, EVERY STEP** (EMS3 audit).
+        // Without this the arm measured a `dispatch` row containing a
+        // recognition pass that cast **zero rays**: the cruiser's search takes
+        // it a hundred metres from a hero who never moves off the crime scene,
+        // the range gate rejects every pair before a ray is spent, and the
+        // ceiling assertion below was `0 <= 899 * 32`. A budget over the cheap
+        // half of a pass is not a budget for the pass.
+        apply(Beat::Checkpoint, false, &mut run, sim.world_mut());
         sim.step_once(RuntimeInput::default());
         let r = sim.dispatch_stats().recognition;
         rays += r.rays;
@@ -1030,6 +1038,9 @@ fn recognition_rides_the_dispatch_budget() {
     for _ in 0..rounds {
         let mut mean = inf_player::step_profile::StepProfile::default();
         for _ in 0..per_round {
+            // Still in front of the officer, so the profiled steps are the ones
+            // that cast rays rather than the ones that reject on range.
+            apply(Beat::Checkpoint, false, &mut run, sim.world_mut());
             sim.step_once(RuntimeInput::default());
             mean.accumulate(&sim.step_profile());
         }
@@ -1074,6 +1085,15 @@ EMS3 STEP TABLE ({} build), {:.4} ms total, MIN of {rounds} rounds of {per_round
     assert!(
         looked > 0,
         "no officer was ever on the beat — the ceiling is vacuous"
+    );
+    // …and the pass actually LOOKED. `rays > 0` is the third arming clause and
+    // the one the audit added: an officer on the beat and a file open still buy
+    // nothing if every pair fails the range gate, and a ceiling over zero rays
+    // is satisfied by a pass that measured nothing.
+    assert!(
+        rays > 0,
+        "not one recognition ray was cast in {looked} steps with an officer out \
+         — the budget row below contains no line-of-sight work at all"
     );
     assert!(
         rays <= looked * inf_physics::d3::crime::MAX_RECOGNITION_RAYS,
