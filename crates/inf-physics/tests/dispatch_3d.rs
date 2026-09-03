@@ -46,6 +46,8 @@ const AMBULANCE: Uuid = Uuid::from_u128(0x0E52_1003);
 const CRUISER: Uuid = Uuid::from_u128(0x0E52_1004);
 const PATIENT: Uuid = Uuid::from_u128(0x0E52_1005);
 const APPLIANCE: Uuid = Uuid::from_u128(0x0E52_1006);
+/// A second cruiser, so the severity ladder has more than one car to ask for.
+const CRUISER_B: Uuid = Uuid::from_u128(0x0E52_1007);
 
 /// A red beacon, EMS1's own `BEACON_RED` numbers — the emissive is over 1 or
 /// the HDR path never sees it, which is exactly what the recogniser keys on.
@@ -1202,6 +1204,122 @@ fn a_witnessed_shot_is_a_crime_a_burst_is_one_and_an_act_is_read_once() {
         !inf_ecs::witness::witnessed(&town.world).is_empty(),
         "the log emptied itself, so the forward read above is a claim about an \
          empty ring"
+    );
+}
+
+/// **A SERIOUS FILE PULLS A SECOND CAR AND A PETTY ONE DOES NOT** (wave EMS3
+/// audit) — the severity ladder, as a dispatcher and not as arithmetic.
+///
+/// # Nothing in the tree exercised this
+///
+/// EMS3 minted `Response::{MultiUnit, Swat}`, `wanted_units`, `units_on` and a
+/// new disjunct in `assign`'s pending filter, and its ledger claims *"until this
+/// line nothing in the engine could ever ask for three cars at once"*. At
+/// `dda8d836` a grep for `Swat`, `MultiUnit`, `wanted_units` or `units_on` over
+/// every test file in the repository returned **nothing**: the only coverage was
+/// `Response::for_heat`'s own table, which is a pure function, and the gate's
+/// single carjack, which is `Patrol`. The dispatcher half — the branch that
+/// re-pends an incident somebody is already at — ran in no test at all.
+///
+/// So: one town, two cruisers, and the same crime at two heats.
+///
+/// * a `Killed` (heat 3 → `MultiUnit`, `units() == 2`) gets **two** cars;
+/// * a `Carjack` (heat 1 → `Patrol`) gets **one**, which is the falsifier: if
+///   the pending filter simply stopped excluding answered incidents, both rows
+///   would read two.
+#[test]
+fn a_serious_file_pulls_a_second_car_and_a_petty_one_does_not() {
+    use inf_ecs::witness::{ActKind, WitnessedAct};
+
+    /// The most cars ever on one crime scene over `steps` fixed steps, and the
+    /// rung the file reached — one script, run at two severities.
+    fn most_cars_on_the_search(kind: ActKind, steps: usize) -> (usize, inf_ecs::crime::Response) {
+        let mut town = Town::new();
+        park_unit(
+            &mut town.world,
+            CRUISER_B,
+            DVec3::new(-46.0, 0.0, 38.0),
+            &CRUISER_LIVERY,
+            Shape::Sedan,
+        );
+        town.world.mark_dirty();
+        town.world.propagate();
+        town.bridge
+            .sync_from_world_sim(&town.world, &Default::default(), &Default::default());
+        // Past the epoch-0 ambient draw, and long enough for both cruisers to be
+        // derived into the fleet.
+        town.steps(30);
+        let police = dispatch::fleet_of(&town.world)
+            .map(|f| {
+                f.units
+                    .values()
+                    .filter(|u| u.kind == UnitKind::Police)
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            police, 2,
+            "the fixture derived {police} police unit(s) — a ladder that wants \
+             two cars cannot be measured against one"
+        );
+        // A witnessed crime, so a profile opens: `report_act` refuses one nobody
+        // saw, and the whole ladder hangs off `heat`.
+        inf_ecs::witness::record_act(
+            &mut town.world,
+            WitnessedAct {
+                kind,
+                actor: HERO,
+                at: DVec3::new(150.0, 0.0, 50.0),
+                step: 100,
+                observers: vec![PATIENT],
+                actor_look: 0,
+                actor_vehicle: None,
+            },
+        );
+        let mut most = 0usize;
+        let mut rung = inf_ecs::crime::Response::Cold;
+        for _ in 0..steps {
+            town.step();
+            let Some(res) = dispatch::dispatch_of(&town.world) else {
+                continue;
+            };
+            if let Some(p) = inf_ecs::crime::profile_of(&town.world, HERO) {
+                rung = rung.max(p.response());
+            }
+            for incident in res.searches.keys() {
+                let on = res
+                    .runs
+                    .values()
+                    .filter(|r| r.incident == Some(*incident))
+                    .count();
+                most = most.max(on);
+            }
+        }
+        (most, rung)
+    }
+
+    let (serious, serious_rung) = most_cars_on_the_search(ActKind::Killed, 600);
+    let (petty, petty_rung) = most_cars_on_the_search(ActKind::Carjack, 600);
+    println!(
+        "a {} file ({}) drew {serious} car(s); a {} file ({}) drew {petty}",
+        ActKind::Killed.name(),
+        serious_rung.name(),
+        ActKind::Carjack.name(),
+        petty_rung.name()
+    );
+    // ARMED: the two runs really did reach two different rungs, so what follows
+    // is about the ladder and not about two identical files.
+    assert_eq!(serious_rung, inf_ecs::crime::Response::MultiUnit);
+    assert_eq!(petty_rung, inf_ecs::crime::Response::Patrol);
+    assert_eq!(
+        serious, 2,
+        "a three-heat file brought {serious} car(s) — `Response::MultiUnit` \
+         means nothing and SWAT is still a parked van"
+    );
+    assert_eq!(
+        petty, 1,
+        "a one-heat file brought {petty} cars — the pending filter re-pends an \
+         incident that is already answered, whatever the ladder says"
     );
 }
 

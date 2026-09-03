@@ -656,7 +656,8 @@ fn a_homicide_is_filed_against_whoever_pulled_the_trigger() {
     assert_eq!(killed.len(), 1, "{} death act(s) recorded", killed.len());
     let act = &killed[0];
     println!(
-        "the death was recorded against {} (hero {HERO}, target {TARGET}),          look {} against the hero's {}",
+        "the death was recorded against {} (hero {HERO}, target {TARGET}), \
+         look {} against the hero's {}",
         act.actor,
         act.actor_look,
         inf_ecs::witness::look_digest(&rig.world, HERO)
