@@ -250,7 +250,7 @@ impl Response {
     /// One or two points is a car; three to five is a converging pair; six and
     /// over is everything. The thresholds are the ladder's *shape* rather than
     /// exact truths: the property that matters is that a single petty act
-    /// ([`ActKind::heat`] of one) can never reach the top rung, and that a
+    /// ([`crate::witness::ActKind::heat`] of one) can never reach the top rung, and that a
     /// killing plus anything else does.
     pub fn for_heat(heat: u32) -> Self {
         match heat {
@@ -396,7 +396,7 @@ pub fn match_score(profile: &Profile, seen: Description, now: u64) -> f64 {
 /// **One person's file**, built from what people saw.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
-    /// How wanted they are, in [`ActKind::heat`]'s units. Zero means the file is
+    /// How wanted they are, in [`crate::witness::ActKind::heat`]'s units. Zero means the file is
     /// open and nobody is looking.
     pub heat: u32,
     /// What the police have, one entry per channel — a later sighting through
@@ -547,18 +547,14 @@ pub fn report_act(world: &mut EcsWorld, act: &WitnessedAct, vehicle: Option<u64>
         .world_mut()
         .remove_resource::<CrimeRes>()
         .unwrap_or_default();
-    let opened_now = res.opened;
-    let file = res.profiles.entry(act.actor).or_insert_with(|| {
-        let _ = opened_now;
-        Profile {
-            heat: 0,
-            evidence: BTreeMap::new(),
-            opened_step: act.step,
-            sightings: 0,
-            decayed_step: act.step,
-            last_seen: act.at,
-            last_seen_step: act.step,
-        }
+    let file = res.profiles.entry(act.actor).or_insert_with(|| Profile {
+        heat: 0,
+        evidence: BTreeMap::new(),
+        opened_step: act.step,
+        sightings: 0,
+        decayed_step: act.step,
+        last_seen: act.at,
+        last_seen_step: act.step,
     });
     let fresh = file.heat == 0;
     file.heat = file.heat.saturating_add(act.kind.heat());

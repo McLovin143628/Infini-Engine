@@ -195,7 +195,7 @@ fn look(
     // Gathered before anything is written, so the write-back never overlaps a
     // read of the ledger, and in `Guid` order both ways: two hosts look in the
     // same order and therefore spend the ray budget on the same pairs.
-    let mut seen: Vec<(Uuid, DVec3, Description, f64)> = Vec::new();
+    let mut seen: Vec<(Uuid, DVec3, Description)> = Vec::new();
     for officer in &eyes {
         let Some(eye) = eye_of(world, *officer) else {
             continue;
@@ -240,14 +240,13 @@ fn look(
                 stats.unrecognised += 1;
                 continue;
             }
-            seen.push((*suspect, at, look, score));
+            seen.push((*suspect, at, look));
         }
     }
     // **`sight` is called HERE and nowhere else**, which is the applier's half
     // of the police-don't-cheat law: every write into a profile is downstream of
     // a range gate, a ray and a threshold, all three of which are above.
-    for (suspect, at, look, score) in seen {
-        let _ = score;
+    for (suspect, at, look) in seen {
         if crime::sight(world, suspect, at, look, step) {
             stats.recognised += 1;
         }

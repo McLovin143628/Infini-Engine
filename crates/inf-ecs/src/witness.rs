@@ -224,8 +224,10 @@ impl WitnessLog {
 ///
 /// So the producer states the fact and the witness pass observes it, through
 /// the same [`candidates_near`] + ray both other kinds of act go through.
-/// Drained every step; see [`WitnessLog::pending`] for why it is not in the
-/// trace.
+/// Drained every step, and deliberately **not** folded into
+/// [`witness_state_bytes`]: it is a within-step hand-off that never survives a
+/// step boundary, so folding it would put a value that is always zero into every
+/// committed hash.
 pub fn raise_act(world: &mut EcsWorld, kind: ActKind, actor: Uuid, at: DVec3) {
     if !at.is_finite() {
         return;

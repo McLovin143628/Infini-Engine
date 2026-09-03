@@ -876,10 +876,10 @@ fn pie_equals_shipping_over_both_traces() {
         for (i, (a, b)) in ship.trace.iter().zip(pie.trace.iter()).enumerate() {
             assert!(
                 a == b,
-                "swap={swap}: the two hosts diverged on step {i}.
-                   ship: {:?}
-  pie:  {:?}
-                   (profile / witness / dispatch / traffic, in bytes — the section                  whose length moved is the system that disagreed, and if the                  lengths match the disagreement is inside one of them)",
+                "swap={swap}: the two hosts diverged on step {i}. ship {:?} against \
+                 pie {:?} — profile / witness / dispatch / traffic, in bytes. The \
+                 section whose length moved is the system that disagreed; if the \
+                 lengths match, the disagreement is inside one of them.",
                 ship.sections[i],
                 pie.sections[i]
             );

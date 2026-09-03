@@ -27680,3 +27680,296 @@ INF_GOLDEN_STRICT=1` green after the repairs. `clippy --workspace --all-targets
 re-blessed; `EXPECTED_LEVELS` **24**; scene **v27** / `ScenePayload` **v12**; no
 `Cargo.toml`, `Cargo.lock`, `deny.toml`, committed `.inf_lvl` or golden touched;
 the whole audit diff is LF-clean.
+
+## Wave EMS3 — crimes and criminal profiles: what the police remember (2026-09-03)
+
+The last of the EMS arc's three waves, and the one the user's own design named:
+
+> *"There will be 'Criminal Profiles' that will be dynamically built through the
+> game. The police will remember the clothing that a user was wearing when
+> committing a crime or the vehicle they were driving — and the user will
+> realistically have to ditch their car and/or their clothes to evade the police
+> and drop their wanted level… Really dynamic, smart, and realistic NPCs."*
+
+Zero schema moves — scene stays **v27**, `ScenePayload` **v12**. The appearance
+channel, the profile ledger and the recognition pass are all Resources.
+Goldens stay **62**, none added and none re-blessed. `EXPECTED_LEVELS` unmoved at
+**24**. **No new step phase** (recognition rides `dispatch`), **no new budget
+constant** (it rides `DISPATCH_STEP_BUDGET_MS`, which is not raised), one new
+`InteractVerb`, two new `ActKind`s, one new `ModuleShape`, two new trace sections.
+
+### 1. THE HEADLINE: a description is what you wear, not who you are
+
+Wave WPN1 recorded a criminal description as
+`look_digest(actor) = agent_rand(actor, 0, SALT_LOOK)` — **the actor's guid,
+mixed** — and said so plainly in its own test name: *"two actors describe
+differently"*. That is a true sentence about an identity and a false one about a
+description, and the difference is the whole wave:
+
+* two people in the **same coat** had different numbers, so a witness could never
+  give a description that fitted somebody else — and the innocent-bystander case
+  the reference frames' own "they have your description" line is about could not
+  exist;
+* one person who **changed coats** kept theirs, so **no wardrobe in the world
+  could ever have defeated it**. The mandate's evasion route was unimplementable
+  while it stood.
+
+So the channel is a **value**: `crowd::Appearance` is the index of the palette
+swap a body is *drawn in* (`CROWD_LOOKS`, which both projectors already tint
+with), and `Appearance::digest` is a `mix64` over it **with no `Uuid` in scope at
+all**. Two people dressed alike collide *on purpose*.
+
+It is sparse and defaults to `derived_outfit(guid)` — the exact draw `agent_look`
+has made since NPC1b, and which `agent_look` itself now calls, so the default and
+the override are one expression and every level committed before this wave draws
+identical pixels. Both projectors moved to `agent_look_in(world, guid)` in the
+same commit as the `projector_mirror` fragment pin: a host left on the old door
+would have drawn a criminal in the coat they committed the crime in while the
+other drew the one they changed into.
+
+`ActKind` gains **`Carjack`** and **`Assault`** (append-only; the freeze-pin its
+own doc predicted arrived one wave later, because `profile_state_bytes` now folds
+`as_u8`). A carjack is raised from the `character move` phase through
+`witness::raise_act` and *observed* by the gameplay phase's own ray budget — a
+movement rule has no collision world to ask about sight lines, so there is still
+exactly one answer to "who saw it". An assault is the attack the gunshot filter
+drops (`!loud && on_flesh`): a fist makes no noise, so the only people who know
+about it are the ones who saw it.
+
+### 2. The ledger, and the fold pinned in the same commit
+
+`inf_ecs::crime` is a `Profile` per suspect: `heat`, an `Evidence` map keyed on
+`Channel::{Outfit, Vehicle}`, and a `last_seen`. Severity climbs
+`Cold → Patrol → MultiUnit → Swat` by `Response::for_heat`, and the HUD's stars
+come off `WANTED_STARS`.
+
+Two channels, and each has to be a thing the world *shows* and a player can
+*change* — a face would be neither, since this engine draws one mesh for a crowd.
+The **vehicle** description is read off the world (the chassis collider's
+half-extents and its paint, quantised to a decimetre and to sixteenths of a
+channel) rather than off `TrafficRecord`, on `dispatch::unit_kind_of`'s own
+ruling: a hero's car, a fleet vehicle and anything a Blueprint spawned have no
+traffic record, and a recogniser that answered `None` for them would have made
+*the one car a player actually drives* undescribable.
+
+`witness_state_bytes` and `profile_state_bytes` are folded **after the
+dispatcher** and `projector_mirror`'s `SECTIONS` went **11 → 13 in the same
+commit** — which is the whole of what the traffic section's two unpinned waves
+taught. Two sections rather than one because they fail for different reasons: an
+act's observer list is a line-of-sight ray, a profile is heat and evidence and a
+place. The observer list is folded **in full** rather than as a count — "two
+people saw it" and "two *different* people saw it" are the same number and
+different worlds.
+
+The `clear_*` twins gain `clear_appearance` and `clear_crime`. The gap the scout
+found — **nothing in the tree ever compared Simulate's entry and exit lists** —
+is closed by `simulate_forgets_on_exit_exactly_what_it_forgot_on_entry`, which
+reads both blocks through the compiler's eyes and diffs them as sets.
+Mutation-verified: deleting one exit call names it.
+
+### 3. TWO PRESCRIPTIONS MEASURED BACKWARDS, and the rule that replaced them
+
+Both are the "measure the prescription before landing it" law, met twice in one
+file.
+
+**(a) A clamped sum does not age.** The channel combine was written as
+`min(1, Σ w·f)`. Two fresh channels sum to **1.45**, so a two-channel match sat
+at a flat 1.0 for the first **31 %** of its freshness window — a description that
+visibly did not age for nineteen seconds and then fell off a step. It is now
+`1 − Π(1 − w·f)` — "the chance that at least one of these gives you away" —
+which is monotone in every channel, never exceeds one, and ages continuously with
+no clamp to hide behind. The arm prints `0.940 / 0.801 / 0.598 / 0.000` at
+0/25/50/100 % and asserts the ordering.
+
+**(b) The night constants did the opposite of what the doc claimed.** The doc
+said *"neither channel reaches the threshold on its own at night"*; the
+arithmetic said otherwise, in both directions. The measured table is now IN the
+doc, as the **range inside which a suspect is recognised**:
+
+| matching | daylight | night |
+|---|---|---|
+| outfit only | 16.7 m | 1.1 m |
+| vehicle only | 23.5 m | 12.5 m |
+| both | 25.1 m | 15.2 m |
+
+Which is the mandate's *"ditch the car **and/or** the clothes"* as a
+**consequence** rather than as a claim: changing your coat in daylight takes an
+officer from seeing you across a street to not seeing you at all, changing it at
+night is nearly total, and **the car is the one you cannot talk your way out of**
+— visible at twice the distance, and half of it survives the dark.
+
+### 4. THE POLICE DO NOT CHEAT, and it is structural rather than promised
+
+A wanted system is trivial to write and almost always wrong: read the player's
+transform, drive at it. Three things make that impossible here rather than merely
+unwise:
+
+* **`Profile::last_seen` is a private field.** Nothing outside `inf_ecs::crime`
+  can write it, and inside it exactly two functions do — `report_act` (somebody
+  watched a crime happen) and `sight` (an officer recognised somebody). A search
+  that converged on the player would need a third writer and there is nowhere to
+  put one.
+* **`match_score` takes no `Uuid` at all.** The identity is not in scope, so the
+  scorer cannot become a tracker by accident. The profile is *keyed* on a guid
+  and that key is a **case number**: nothing on the recognition path reads it.
+* **`sight` is called from exactly one place** in `d3::crime`, inside the branch
+  where the range gate passed, the ray came back clear and the score cleared
+  `RECOGNIZE_SCORE`.
+
+The falsifiable form is measured twice.
+`crime_3d::the_search_never_learns_a_position_nobody_saw`: with a wall in the way
+the suspect walks a hundred metres in the same coat past the same officer, 32
+rays are cast and **32 are blocked**, and the ledger still says (200, 200) while
+the suspect stands at (107, 0). And
+`ems3_crime_gate::the_police_search_converges_on_last_seen_and_never_on_the_player`:
+after a wardrobe swap the hero walks 300 m and the ledger does not move a
+millimetre — hero at **x = 389**, police believe **(52.5, 1.4, 0)**.
+
+Recognition rides WPN1's own **32 rays a step** by name rather than minting a
+bigger number, so the two "can A see B" passes together are bounded at 64. The
+channel half runs **first** and short-circuits: a suspect who changed their coat
+and left the car scores zero and never costs a ray, asserted as `rays == 0` at
+the same distance and hour as the recognition it follows.
+
+`DispatchRes::searches` links a crime scene to the file it is about (folded,
+because two hosts searching for different people diverge in a way no position can
+show), `re_anchor` moves the scene onto `last_seen`, and `wanted_units` is where
+**SWAT stops being a parked van**: until that line `state == Reported` retired an
+incident the moment one car was sent, so a five-star spree and a stolen bicycle
+both brought exactly one cruiser.
+
+### 5. A wardrobe you can actually open, and the family that had to split
+
+`inf-pcg` has placed a `Wardrobe` in **four** archetypes' bedrooms
+(`Apartment`, `House`, `Estate`, `Hotel` — the arc brief said eight; the count is
+four) since P19, and it has been furniture the whole time: a drawn instance and a
+solid collider with nothing to press. `InteractVerb::Change` makes it the one
+place a wanted level can be walked away from, on the PCG doorway's exact pattern
+— a synthetic guid out of the scene's guid space, a band filter before anything
+is allocated, and a candidate unioned into the **one** resolution site, so what
+the player is told and what the press does cannot come apart. The prompt reads
+`[E] Change clothes`.
+
+Finding it needed a family split. A placed module's only per-instance identity in
+the world is `ScatteredInstance::mesh`, which is its shape family's GUID — and
+`Cabinet`, `Locker`, `Wardrobe`, `Units`, `Shelf`, `Rack`, `Counter`, `Basin` and
+`FrontDesk` all resolved to one `ModuleShape::Carcass`. Keying on that would have
+offered a change of clothes at a shop counter, a reception desk and a bathroom
+basin in every building in the world. `ModuleShape::Wardrobe` is the 21st family;
+having earned a mesh it also gets a pair of doors, and the palette's own census
+caught two bad ones before either shipped (a vertex at 0.53, then a box the
+family did not fill).
+
+`inf-pcg` is a **dev**-dependency of `inf-physics` and no dependency of `inf-ecs`,
+so the module lives in Ring 0 with the GUID **mirrored** on `ScatteredSolid`'s own
+terms — and `wardrobe_3d` is the only place in the tree that can hold the mirror
+against the original, which is why it lives in `inf-physics`.
+
+The press **cycles** (`(outfit + 1) % 8`) rather than drawing: a draw can answer
+the outfit you are already wearing, and a press that does nothing reads as a
+broken control. A cycle always changes the description, which is the property the
+evasion route needs.
+
+### 6. The wanted HUD, and a corner nothing else draws in
+
+A **new screen anchor** — top-left — and the reason is the readout slot's own
+stated rule. VEH2b's drive readout and WPN1's ammo count share bottom-centre
+behind an `else` because a character cannot be at a wheel and pointing a rifle at
+once, and *"two readouts stacked in one place would be a HUD that draws over
+itself on the one frame both are true"*. A wanted rating is true **at the same
+time as either of them** — being chased while driving and being chased while
+shooting are the mechanic — so it cannot be a third tenant. The top-right is the
+toast stack's and it grows downward.
+
+A star is a raster: the draw list has a rect, a stroke and a run of text, so
+`STAR_SPANS` is an 11 × 9 grid of horizontal spans with **two-span rows for the
+legs**, which is the one feature that stops a five-pointed star reading as a
+diamond and which the gate asserts. It draws the **empty** slots too, because one
+star and one-of-five look identical otherwise. The decision is Ring 0
+(`crime::wanted_readout`, on `ammo_readout`'s terms).
+
+**LEDGER SENTENCE — stated rather than discovered: these stars will never appear
+in the editor's Simulate viewport.** `set_ui` has exactly one caller in the whole
+tree and it is in the player's frame; nothing under `editor/` builds a
+`UiDrawList` at all, so Simulate has no in-game HUD of any kind — no prompt, no
+readout, no reticle and now no rating. The wanted level is still fully simulated
+there and still visible in the ledger and in the trace; what is missing is the
+drawing. Embedded PIE and new-window PIE both run the player's host and do show
+it.
+
+### 7. The gate, and what its red run found
+
+`ems3_crime_gate` — seven arms over **one** fixture with **one boolean** between
+the two traces: carjack in outfit A, ditch the car, and either open the wardrobe
+or not.
+
+* **(a) the escape** — a patrol car on the road, the hero eight metres in front
+  of the officer in plain daylight in a different coat: **0 recognitions**, heat
+  1 → 0;
+* **(b) the failure** — the identical trace with the press skipped: **1 798
+  recognitions over 1 800 rays**, and the search's last-seen ends 60 m off the
+  crime scene. Without (b), (a) would be certifying a pass that never fires;
+* **(c) the table** at 8 m, printed and asserted;
+* **(d) PIE == shipping**, byte for byte, **2 400 steps × 2 traces**;
+* **(e) the law arm** (see §4);
+* **(f) the budget** — the `dispatch` row at **0.0061 ms** dev with recognition
+  in it, against a 0.5 ms ceiling this wave does not move;
+* **(g) the falsifier** — the same town with no crime files nothing, casts no
+  ray, folds no byte, draws no star, and **asserts the traffic clock is
+  advancing**, so no arm above is certified against a frozen counter.
+
+Arm (d) was **red**, and the reason is worth the wave. The fixture seeded its
+bystander in `build`, and a crowd population is a **resource** that
+`SimSession::enter_with_gravity` deliberately clears: the shipped player had a
+witness and the editor had an empty street, so the crime was filed on one host
+and not the other. It presented as a line-of-sight divergence and was not.
+
+What found it was the **per-section length diagnostic**: *"3 927 bytes against
+3 911"* is a number nobody can act on, and `[0, 98, 49, 3780]` against
+`[0, 82, 49, 3780]` is one `Uuid` of observer list with the system's name on it.
+The diagnostic stays in the arm.
+
+Also measured and stated: an act recorded at the chassis **origin** is a point
+*inside* the car and its sight ray grazes the roof, so the crime is raised beside
+the driver's door at chest height — which is where `carjack::door_point` puts one
+anyway.
+
+### Carried out of EMS3
+
+1. **A wardrobe changes a palette swap, not a garment.**
+   `cloth::step_cloth_simulation` re-seeds on an asset change and has waited for
+   a caller since P24 — but a caller needs **content**, a set of garment assets a
+   wardrobe could offer, and this engine has none. Binding `ClothSim::asset` to a
+   guid nothing resolves makes a coat **vanish** (rule 2 skips an unresolvable
+   garment; rule 4 rebuilds the store from the survivors), which is worse than
+   not offering it. Refused deliberately rather than faked.
+2. **The description space is eight.** One in eight civilians matches a
+   criminal's outfit channel exactly. That is realistic — it is *why* real police
+   also want the car — and it is why the vehicle channel outweighs the outfit,
+   but a town where the police stop the wrong man one time in eight is a design
+   decision somebody should get to make rather than inherit.
+3. **A level with no streets has no clock.** Every step in the crime feed is
+   `traffic::steps`, which lives on the traffic population, so a street-less
+   level stamps every act `0`, the feed's forward read never advances and the
+   whole wanted system is inert. It is EMS2's crime feed's bound met one wave
+   along; the fix is a Ring-0 sim clock, which is a wave of its own. The gate
+   asserts the clock moves so no arm can be certified against a frozen one.
+4. **A parked unit does not look at the street.** Only `EnRoute`/`OnScene`/
+   `Returning` police crews are observers, so standing outside a station with a
+   full description is safe. Deliberate — a bay full of cruisers that recognised
+   every passer-by would make the search pointless — but it is a rule a designer
+   should get to set.
+5. **Recognition has no memory of a NEAR miss.** A suspect at 17 m in daylight
+   scores 0.34 against a 0.35 threshold and the officer simply does not react;
+   there is no "thought he saw something" state and no partial escalation.
+6. **The wardrobe is only in four archetypes.** No `Wardrobe` module is declared
+   in the venue, the shop, the office or any of EMS1's institutions, so a player
+   in a nightclub district has nowhere to change.
+7. **The searches map is dropped when a file goes cold, and the incident is
+   not.** The scene finishes its own lifecycle where it stands, which is right,
+   but a unit already en route to it drives to a place nobody is looking any
+   more.
+8. **EMS2's carried item 15 is untouched and slightly worse.** A responding unit
+   is still carjackable; doing it now also puts an `ActKind::Carjack` on the
+   player's file with the *cruiser's* description in the vehicle channel, which
+   is arguably correct and definitely untested.
