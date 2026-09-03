@@ -8675,7 +8675,8 @@ fn a_nightclubs_dance_floor_fills_with_dancers() {
     let _ = proj;
 }
 
-/// **STREAMING AT SPEED — the plane-speed mandate's first number** (wave VEH2c).
+/// **STREAMING AT SPEED — the plane-speed mandate's first number** (wave VEH2c;
+/// the route and the arms rewritten by that wave's audit).
 ///
 /// The 2026-08-24 mandate asked for a photoreal island a player crosses at
 /// aircraft speed, and every wave since has streamed at a car's. This is the
@@ -8694,9 +8695,26 @@ fn a_nightclubs_dance_floor_fills_with_dancers() {
 /// simulation.
 ///
 /// So going faster cannot make the world wrong. It can only make the step
-/// **expensive**, and the question is how expensive. This arm walks one
-/// streaming source across the fixture island at four speeds and reports the
-/// blocking loads, the page churn and the mean fixed-step cost at each.
+/// **expensive**, and the question is how expensive.
+///
+/// # THE ROUTE IS FIXED GROUND, NOT A FIXED NUMBER OF STEPS
+///
+/// **This is the audit's correction and it inverts the headline.** The first cut
+/// of this arm walked every speed for the same *900 steps* along the same
+/// heading, which is 360 m at 24 m/s and 1 746 m at 110 m/s — and this island is
+/// 1 536 m square. Measured on that run: at 110 m/s the source had **zero**
+/// resident partition cells from step 231 onward and a terrain set frozen at its
+/// last eviction, so **669 of its 900 steps were stepping empty space**. The
+/// table said the step got *cheaper* with speed, and what it was reading is that
+/// a fast source leaves the island sooner. A source that has left the content is
+/// not a measurement of streaming; it is a measurement of nothing.
+///
+/// So the route is **the same ground at every speed** — the design's own player
+/// start (which is `Fixture Town`) to `Fixture Camp`, the fixture's two
+/// settlements, read off the recipe rather than typed here — and the *step
+/// count* is what varies. Every speed pages the same tiles and activates the
+/// same cells; the only difference is how many steps it has to do it in, which
+/// is exactly the question the mandate asked.
 ///
 /// The ratchet it is measured against is `STREAMED_STEP_BUDGET_MS`, which is the
 /// budget for a fixed step on a streamed world, and it is asserted at the speed
@@ -8711,19 +8729,46 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     /// 216 km/h, which is a fast light aircraft and above this wave's own
     /// helicopter (38.7 m/s measured).
     const SPEEDS: [f64; 4] = [24.0, 60.0, 80.0, 110.0];
-    /// Long enough for the residency to reach a steady state at every speed —
-    /// at 110 m/s this is 16.5 km and at 24 m/s it is 360 m, which is the distance
-    /// this file's own drive covers and is known to page.
-    const RUN: u64 = 900;
+
+    // THE ROUTE, from the recipe's own sites: the start (Fixture Town) to
+    // Fixture Camp. Both ends are settlements and everything between them is
+    // this island's ground, so a source on this line is over content for the
+    // whole of it — which arm (a) below measures rather than assumes.
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let camp = recipe
+        .sites
+        .iter()
+        .find(|s| s.name == "Fixture Camp")
+        .expect("the fixture has a camp");
+    let to = glam::DVec3::new(camp.x, from.y, camp.z);
+    let route_m = (to - from).length();
+    let dir = (to - from) / route_m;
+    // The island's own square, from the grid that authored it. A route leaving
+    // it is the defect this arm was rewritten to stop making.
+    let half = recipe.grid.half_extent_m();
+    for p in [from, to] {
+        assert!(
+            p.x.abs() <= half && p.z.abs() <= half,
+            "the route's ({:.1}, {:.1}) is outside the island's own {:.0} m square",
+            p.x,
+            p.z,
+            half * 2.0
+        );
+    }
 
     struct Row {
         speed: f64,
+        steps: u64,
         blocking: u64,
         activations: u64,
         loads: u64,
         churn: usize,
         mean_ms: f64,
         peak_cells: usize,
+        /// The floor of the terrain sim residency over the run — the number
+        /// that says whether the source stayed over ground at all.
+        min_pages: usize,
         /// Where the milliseconds went: the two streaming phases, and the
         /// vehicle phase, in that order.
         phases: (f64, f64, f64),
@@ -8740,7 +8785,7 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     let mut rows: Vec<Row> = Vec::new();
     for speed in SPEEDS {
         let mut sim = pack_sim(&pack);
-        let hero = hero_entity(&sim).expect("the island has a hero");
+        let hero = hero_entity(&mut sim).expect("the island has a hero");
         // Profiling ON, or `step_profile` is all zeroes by its own doc and the
         // budget below would be asserted against nothing (the VEN1b finding).
         sim.set_step_profiling(true);
@@ -8749,23 +8794,22 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         let base = sim.cell_streaming().stats();
         let base_t = sim.terrain_streaming().stats();
-        let (mut blocking0, mut acts0, mut loads0) =
-            (base.blocking_loads, base.activations, base_t.loads);
-        let _ = (&mut blocking0, &mut acts0, &mut loads0);
+        let (blocking0, acts0, loads0) = (base.blocking_loads, base.activations, base_t.loads);
 
         let step_m = speed / HZ;
+        // The SAME GROUND at every speed: as many steps as this speed needs to
+        // fly the route, and not one more.
+        let run = (route_m / step_m).ceil() as u64;
         let mut churn = 0usize;
         let mut peak = 0usize;
+        let mut min_pages = usize::MAX;
         let mut prev: std::collections::BTreeSet<(i32, i32)> =
             sim.cell_streaming().resident().collect();
         let mut wall = std::time::Duration::ZERO;
         let mut prof = inf_player::step_profile::StepProfile::default();
-        for step in 0..RUN {
-            let p = glam::DVec3::new(
-                from.x + step as f64 * step_m,
-                from.y,
-                from.z + step as f64 * step_m * 0.35,
-            );
+        for step in 0..run {
+            let along = (step as f64 * step_m).min(route_m);
+            let p = from + dir * along;
             set_hero(&mut sim, hero, p);
             let t0 = std::time::Instant::now();
             sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
@@ -8775,44 +8819,53 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
                 sim.cell_streaming().resident().collect();
             churn += now.symmetric_difference(&prev).count();
             peak = peak.max(now.len());
+            min_pages = min_pages.min(sim.terrain_streaming().stats().sim_resident_level0);
             prev = now;
         }
         let c = sim.cell_streaming().stats();
         let t = sim.terrain_streaming().stats();
         rows.push(Row {
             speed,
+            steps: run,
             blocking: c.blocking_loads - blocking0,
             activations: c.activations - acts0,
             loads: t.loads - loads0,
             churn,
-            mean_ms: wall.as_secs_f64() * 1000.0 / RUN as f64,
+            mean_ms: wall.as_secs_f64() * 1000.0 / run as f64,
             peak_cells: peak,
+            min_pages,
             // By NAME through `STEP_PHASE_NAMES`, which is the public face of a
             // `pub(crate)` index table — the idiom this file already uses for
             // the vehicle phase.
             phases: (
-                at(&prof, "cell stream") / RUN as f64,
-                at(&prof, "terrain stream") / RUN as f64,
-                at(&prof, "vehicle") / RUN as f64,
+                at(&prof, "cell stream") / run as f64,
+                at(&prof, "terrain stream") / run as f64,
+                at(&prof, "vehicle") / run as f64,
             ),
         });
     }
 
     println!(
-        "STREAMING AT SPEED ({RUN} steps at {HZ} Hz, the fixture island, \
-         cooked pack):"
+        "STREAMING AT SPEED (the fixture island's {route_m:.0} m town-to-camp route at {HZ} Hz, \
+         cooked pack — the SAME GROUND at every speed):"
     );
-    println!("   m/s   km/h  blocking  acts  pages  churn  peak   mean step  cell/terr/veh");
+    println!(
+        "   m/s   km/h   steps  blocking  acts  pages  churn  peak  min pg   mean step  \
+         cell/terr/veh"
+    );
     for r in &rows {
         println!(
-            "  {:5.0}  {:5.0}  {:8}  {:4}  {:5}  {:5}  {:4}  {:8.4} ms  {:.4}/{:.4}/{:.4}",
+            "  {:5.0}  {:5.0}  {:6}  {:8}  {:4}  {:5}  {:5}  {:4}  {:6}  {:8.4} ms  \
+             {:.4}/{:.4}/{:.4}",
             r.speed,
             r.speed * 3.6,
+            r.steps,
             r.blocking,
             r.activations,
             r.loads,
             r.churn,
             r.peak_cells,
+            r.min_pages,
             r.mean_ms,
             r.phases.0,
             r.phases.1,
@@ -8820,29 +8873,52 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
         );
     }
 
-    // (a) ANTI-VACUITY. The fast runs must really page, or every number below
-    //     is a reading of a world that never moved — the island gate's own
-    //     mutation-measured lesson, in the one arm whose whole subject is
-    //     streaming.
-    let fast = rows.iter().find(|r| r.speed >= 60.0).expect("a 60 m/s row");
-    assert!(
-        fast.churn > 0 && fast.loads > 0,
-        "60 m/s paged nothing: {} cell transitions, {} terrain loads",
-        fast.churn,
-        fast.loads
-    );
+    // (a) THE SOURCE STAYED OVER THE CONTENT, at every speed and at every step.
+    //     This is the arm the audit added and it is the one that matters: the
+    //     first cut of this measurement ran a fixed 900 steps and its fast rows
+    //     spent two thirds of the run off the island, where a step is cheap
+    //     because there is nothing in it. A terrain sim residency that ever
+    //     reaches zero is a source that has left the world.
+    for r in &rows {
+        assert!(
+            r.min_pages > 0,
+            "at {:.0} m/s the terrain sim residency fell to {} pages — the source \
+             left the island and the rest of this table is a reading of empty space",
+            r.speed,
+            r.min_pages
+        );
+        assert!(
+            r.churn > 0 && r.loads > 0,
+            "at {:.0} m/s the route paged nothing: {} cell transitions, {} terrain \
+             loads",
+            r.speed,
+            r.churn,
+            r.loads
+        );
+    }
 
-    // (b) GOING FASTER PAGES MORE, which is the claim that says the source is
-    //     driving the streamer at all. Over the same number of STEPS a faster
-    //     source covers more ground, so it must load more of it.
+    // (b) THE SAME GROUND PAGES THE SAME. Every speed flies one route, so the
+    //     tiles it needs are the same tiles and the pages it loads are the same
+    //     count — a streamer whose *work* grew with speed would be doing the
+    //     journey differently, and one whose work shrank would be skipping it.
+    //     This replaces the first cut's "faster loads more", which was true only
+    //     because a faster source covered more ground per step and stopped being
+    //     true the moment the ground was held fixed.
     let slow = &rows[0];
-    assert!(
-        fast.loads >= slow.loads,
-        "60 m/s loaded {} pages and 24 m/s loaded {} — the streamer is not \
-         following the source",
-        fast.loads,
-        slow.loads
-    );
+    for r in &rows {
+        assert_eq!(
+            r.loads, slow.loads,
+            "at {:.0} m/s the route loaded {} terrain pages against {} at 24 m/s \
+             over the same ground",
+            r.speed, r.loads, slow.loads
+        );
+        assert_eq!(
+            r.activations, slow.activations,
+            "at {:.0} m/s the route activated {} cells against {} at 24 m/s over \
+             the same ground",
+            r.speed, r.activations, slow.activations
+        );
+    }
 
     // (c) RESIDENCY DOES NOT RUN AWAY. The activation radius is a radius, not a
     //     history: a source at 110 m/s holds the same working set a source at
@@ -8864,8 +8940,9 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     //     asserted at 60 m/s against the ratchet for a streamed step — on a
     //     release build on a real machine, which is the condition every budget
     //     arm in this file already carries and the one this measurement needs
-    //     most: a dev build spends 24 ms a step on this fixture at a CAR's
+    //     most: a dev build spends 8 ms a step on this fixture at a CAR's
     //     speed, so a dev assertion here would be measuring rustc.
+    let fast = rows.iter().find(|r| r.speed >= 60.0).expect("a 60 m/s row");
     if cfg!(debug_assertions) {
         eprintln!("dev build: the streamed step is reported, not asserted");
         return;

@@ -28392,28 +28392,61 @@ yaw, which is the sense a car's steering already turns in.
 
 **STREAMING AT SPEED — the plane-speed mandate's first number.** Cell
 activation is SYNCHRONOUS and neither streamer clamps a SIM want, so going
-faster cannot make the world wrong; it can only make the step expensive. Over
-900 steps at 60 Hz on the fixture island's cooked pack, one streaming source:
+faster cannot make the world wrong; it can only make the step expensive.
 
-| m/s | km/h | blocking | acts | pages | churn | peak | mean step | cell / terrain / vehicle |
-|---|---|---|---|---|---|---|---|---|
-| 24 | 86 | **0** | 1 | 4 | 1 | 2 | 7.3419 ms | 0.0217 / 0.1360 / 0.0131 |
-| 60 | 216 | **0** | 1 | 7 | 3 | 2 | 4.0338 ms | 0.0140 / 0.0584 / 0.0055 |
-| 80 | 288 | **0** | 1 | 7 | 3 | 2 | 3.2708 ms | 0.0114 / 0.0436 / 0.0043 |
-| 110 | 396 | **0** | 1 | 7 | 3 | 2 | 2.5831 ms | 0.0098 / 0.0325 / 0.0033 |
+**CORRECTED BY THIS WAVE'S AUDIT — the first table measured a source that had
+left the island.** As written at `4c69d3b5` this arm walked every speed for the
+same **900 steps** along one heading, which is 360 m at 24 m/s and 1 746 m at
+110 m/s on an island that is **1 536 m square** (`[grid]`: 6 tiles x 128
+samples x 2 m). Measured at that head by instrumenting the arm: at 110 m/s the
+source held **zero resident partition cells from step 231 onward**, its terrain
+sim residency fell 20 to 12 pages and froze there, and the run ended at
+(1 228, 957) — **460 m outside the island in x**. So **669 of those 900 steps
+were stepping empty space**, and *"the step gets cheaper with speed"* was
+reading exactly that. The old row is retracted rather than re-tuned; the
+signature it carried — a cost that FALLS as a source is asked to do more — is
+what a table looks like when its source has run out of world.
 
-Three readings, and the first is the headline. **Zero blocking loads at every
-speed, up to 396 km/h**: the bounded prefetch stays ahead of a source moving at
-four times a car's speed. The two streaming phases cost **0.16 ms a step at a
-car's speed and 0.04 ms at 110 m/s** — they get *cheaper*, and so does the
-whole step (7.34 → 2.58 ms), for the honest reason: a fast source leaves the
-settlement behind, and what a step on this island costs is the crowd and the
-traffic near it. **Plane speed does not cost streaming. Content density
-costs.** Residency does not run away either — the working set peaks at 2 cells
-at every speed, because an activation radius is a radius and not a history.
+The arm now flies **the same ground at every speed** — the design's own player
+start (which is `Fixture Town`) to `Fixture Camp`, 1 089 m, both read off the
+recipe rather than typed into the test — and varies the **step count** instead.
+Measured at the audit head, dev build, 60 Hz, cooked pack:
 
-The bound: this is the **fixture** island, two settlements. It is a lower bound
-on the cost and an upper bound on nothing.
+| m/s | km/h | steps | blocking | acts | pages | churn | peak | min pages | mean step | cell / terrain / vehicle |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 24 | 86 | 2 722 | **0** | 2 | 19 | 4 | 2 | 16 | 5.4846 ms | 0.0216 / 0.0873 / 0.0162 |
+| 60 | 216 | 1 089 | **0** | 2 | 19 | 4 | 2 | 16 | 9.3745 ms | 0.0279 / 0.0746 / 0.0121 |
+| 80 | 288 | 817 | **0** | 2 | 19 | 4 | 2 | 16 | 7.5766 ms | 0.0339 / 0.0737 / 0.0124 |
+| 110 | 396 | 594 | **0** | 2 | 19 | 4 | 2 | 16 | 6.5260 ms | 0.0350 / 0.0732 / 0.0114 |
+
+**THE SAME GROUND PAGES THE SAME**, and that is an equality now rather than an
+inequality: 19 terrain pages, 2 cell activations and 4 cell transitions at
+every speed, asserted with `assert_eq!`. The first cut asserted only *"faster
+loads more"*, which was true because a faster source covered more ground per
+step and stopped being true the instant the ground was held fixed.
+
+**Zero blocking loads at every speed up to 396 km/h** survives, and is now a
+claim about a source that never left the content: `min pages` — the floor of
+the terrain sim residency over the whole run — is **16 at every speed**, and an
+arm reds if it ever reaches zero. What speed actually costs shows up in the
+cell phase, where the same work packed into fewer steps runs **0.0216 ms a step
+at 24 m/s and 0.0350 at 110 — 62 % dearer per step**, and still under four
+hundredths of a millisecond. **Plane speed does not cost streaming.**
+Residency does not run away either: the working set peaks at 2 cells at every
+speed, because an activation radius is a radius and not a history.
+
+**The scale the claim is made at, stated rather than implied:** two cell
+activations and nineteen terrain page loads over the route. The blocking
+counter is real and reachable — setting
+`CellStreamBudget::max_prefetch_per_sync` to 0 takes it from **0 to 2 at every
+speed**, which is the mutation that makes "zero" a measurement rather than a
+counter nobody can move.
+
+The bound: this is still the **fixture** island, two settlements, and the
+mean-step column is a dev build's wall clock which is not monotonic in speed
+(5.5 / 9.4 / 7.6 / 6.5 ms). It is a lower bound on the cost and an upper bound
+on nothing; the streaming claim rests on the profiled phases and the page
+counts, not on that column.
 
 **The camera origin-rebase carried item, watched and reported:** the shipped
 player still **never rebases**. `PlayerRenderHost` sets
