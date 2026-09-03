@@ -571,22 +571,20 @@ pub fn report_act(world: &mut EcsWorld, act: &WitnessedAct, vehicle: Option<u64>
             step: act.step,
         },
     );
-    match vehicle {
-        Some(digest) => {
-            file.evidence.insert(
-                Channel::Vehicle,
-                Evidence {
-                    channel: Channel::Vehicle,
-                    digest,
-                    step: act.step,
-                },
-            );
-        }
-        // **A crime on foot does not clear an earlier car.** The evidence stays
-        // and ages: "he did the first one in a red van" is still worth
-        // something, and letting a second crime erase it would make committing
-        // one the way to forget the other.
-        None => {}
+    // **A crime on foot does not CLEAR an earlier car**, which is why this is an
+    // `if let` and not an `insert`-or-`remove`: a `None` vehicle leaves whatever
+    // the channel held, and it ages out on its own. "He did the first one in a
+    // red van" is still worth something, and letting a second crime erase it
+    // would make committing one the way to forget the other.
+    if let Some(digest) = vehicle {
+        file.evidence.insert(
+            Channel::Vehicle,
+            Evidence {
+                channel: Channel::Vehicle,
+                digest,
+                step: act.step,
+            },
+        );
     }
     let heat = file.heat;
     if fresh {

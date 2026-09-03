@@ -124,10 +124,13 @@ pub fn step_recognition(
     bridge: &mut PhysicsBridge3D,
     step: u64,
 ) -> RecognitionStats {
-    let mut stats = RecognitionStats::default();
-    stats.filed = crime::file_new_acts(world);
+    let filed = crime::file_new_acts(world);
     let wanted = crime::wanted(world);
-    stats.files = wanted.len();
+    let mut stats = RecognitionStats {
+        filed,
+        files: wanted.len(),
+        ..RecognitionStats::default()
+    };
     if !wanted.is_empty() {
         look(world, bridge, &wanted, step, &mut stats);
     }
