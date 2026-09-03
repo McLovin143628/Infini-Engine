@@ -115,8 +115,12 @@ impl WheelMount {
 /// trigger volume parented to a car is mirrored into rapier exactly as it always
 /// was. What is exposed is the narrow case of a wheel-less dynamic body with a
 /// box or capsule sensor child, which is a shape nothing in this repository
-/// authors today (`the_islands_only_wheel_less_vehicles_are_the_ones_it_placed`
-/// measures it on the committed island).
+/// authors today — `the_islands_only_wheel_less_vehicles_are_the_ones_it_placed`
+/// (`inf-editor-core/tests/committed_level_sidecars.rs`) derives a rig for every
+/// entity of all **twenty-four** committed levels and measures it: **28 wheeled
+/// rigs, none of them carrying a part, and exactly two wheel-less craft, both
+/// the island's own.** *That arm was written by wave VEH2c's audit; at
+/// `4c69d3b5` this sentence cited a test that did not exist.*
 ///
 /// [`ColliderShape3DKind`]: crate::components::ColliderShape3DKind
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

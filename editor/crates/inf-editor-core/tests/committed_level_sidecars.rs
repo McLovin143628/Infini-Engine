@@ -232,3 +232,136 @@ fn the_delete_guard_sees_a_shipped_levels_bindings() {
          in its own folder, so nothing here exercised the guard"
     );
 }
+
+/// **THE SEAM'S REGRESSION SURFACE, MEASURED ON SHIPPED CONTENT** (wave VEH2c;
+/// written by that wave's audit, which found the citation and not the arm).
+///
+/// `inf_ecs::vehicle::part_of`'s own doc names this test by this name and says
+/// it "measures it on the committed island". At `4c69d3b5` it did not exist —
+/// the citation was the only thing that did, which is the one failure mode a
+/// cited gate has that no gate at all does not.
+///
+/// # What is actually at risk
+///
+/// Wave VEH2c opened the vehicle recogniser to a chassis with **no wheels**: a
+/// dynamic body whose child is a **box** or **capsule** sensor now derives a
+/// [`VehicleRig`](inf_ecs::vehicle::VehicleRig) where before it derived nothing.
+/// `WHEELS WIN` bounds that — a chassis that has wheels keeps its box children
+/// as ordinary triggers — but it bounds it only for **wheeled** bodies. A
+/// wheel-less dynamic body with a box sensor child that some level authored for
+/// another reason entirely would have become a vehicle on the day this wave
+/// landed, silently, and the only place that shows up is in shipped content.
+///
+/// So the claim is measured over **every committed level**, not over a fixture:
+/// the only wheel-less craft in this repository's content are the two the island
+/// recipe places, and every other rig in every other level is a wheeled one.
+#[test]
+fn the_islands_only_wheel_less_vehicles_are_the_ones_it_placed() {
+    let levels = committed_levels();
+    assert_eq!(
+        levels.len(),
+        EXPECTED_LEVELS,
+        "found {} committed levels, not {EXPECTED_LEVELS}",
+        levels.len()
+    );
+
+    // (level, chassis name, wheels, parts) for every rig in every committed level.
+    let mut wheeled: Vec<String> = Vec::new();
+    let mut craft: Vec<String> = Vec::new();
+    for path in &levels {
+        let doc = serialize::load(path).unwrap_or_else(|e| panic!("load {}: {e}", path.display()));
+        let world = doc.world();
+        // Every guid in the level, in the order the world walks them; `rig_of`
+        // answers `None` for everything that is not a chassis, which is the same
+        // door the physics bridge asks.
+        let guids: Vec<uuid::Uuid> = world
+            .world()
+            .iter_entities()
+            .filter_map(|e| e.get::<inf_ecs::Guid>().map(|g| g.0))
+            .collect();
+        let level = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        for guid in guids {
+            let Some(rig) = inf_ecs::vehicle::rig_of(world, guid) else {
+                continue;
+            };
+            let name = world
+                .entity_of(guid)
+                .and_then(|e| world.world().get::<inf_ecs::components::Name>(e))
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|| guid.to_string());
+            let row = format!(
+                "{level}: {name} — {} wheel(s), {} part(s)",
+                rig.wheels.len(),
+                rig.parts.len()
+            );
+            if rig.wheels.is_empty() {
+                craft.push(row);
+            } else {
+                // WHEELS WIN as a tripwire over shipped content, and named as
+                // one: no committed level authors a box or capsule sensor under
+                // a *wheeled* chassis today, so this clause cannot fail on the
+                // content as it stands. The rule's own mutation-verified arm is
+                // Ring 0's `wheels_win_so_an_existing_cars_trigger_child_stays_a_
+                // trigger`, which reds when `rig_of`'s `parts.clear()` is
+                // dropped; this one exists so the day a level does author that
+                // shape, it is caught in the content rather than in a fixture.
+                assert!(
+                    rig.parts.is_empty(),
+                    "a wheeled rig came back carrying parts, which is the one \
+                     thing `rig_of`'s compatibility rule forbids — {row}"
+                );
+                wheeled.push(row);
+            }
+        }
+    }
+
+    println!("WHEELED RIGS IN COMMITTED CONTENT ({}):", wheeled.len());
+    for r in &wheeled {
+        println!("  {r}");
+    }
+    println!("WHEEL-LESS CRAFT IN COMMITTED CONTENT ({}):", craft.len());
+    for r in &craft {
+        println!("  {r}");
+    }
+
+    // ANTI-VACUITY, and it is the first thing checked: a walk that found no rig
+    // at all would satisfy every claim below. The committed content really does
+    // ship wheeled vehicles, and this arm really does see them.
+    assert!(
+        wheeled.len() >= 4,
+        "only {} wheeled rig(s) in {EXPECTED_LEVELS} committed levels — this arm \
+         is looking at the wrong thing",
+        wheeled.len()
+    );
+
+    // THE CLAIM. Every wheel-less craft in shipped content belongs to the island,
+    // and the island's are the two its own recipe places.
+    let strays: Vec<&String> = craft
+        .iter()
+        .filter(|r| !r.starts_with("VancouverIsland.inf_lvl:"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "wave VEH2c's recogniser turned {} authored entity(s) OUTSIDE the island \
+         into vehicles — a level that shipped a box sensor under a wheel-less \
+         dynamic body for some other reason now has a boat in it:\n  {}",
+        strays.len(),
+        strays
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        craft.len(),
+        2,
+        "the island ships {} wheel-less craft, not the launch and the \
+         helicopter:\n  {}",
+        craft.len(),
+        craft.join("\n  ")
+    );
+}
