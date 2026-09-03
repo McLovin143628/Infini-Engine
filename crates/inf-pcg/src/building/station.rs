@@ -23,6 +23,7 @@
 //!   Stool     ──▶ Seat    ── a patron, sitting, facing the room
 //!   Bench     ──▶ Seat×n  ── patrons at the stage edge, facing the catwalk
 //!   BarRun    ──▶ Tend    ── the keeper, BEHIND the counter, facing out
+//!   FrontDesk ──▶ Tend    ── the receptionist, same rule, an institution's
 //!   Stage     ──▶ Perform ── the act, ON the deck, at the pole
 //!   (floor)   ──▶ Mingle  ── the dance floor, on a spaced lattice
 //!   (door)    ──▶ Guard   ── the bouncer, outside the entrance
@@ -223,13 +224,42 @@ pub struct SeatSpec {
     pub rise: f64,
 }
 
-/// **Whether a named module is a counter somebody works behind.**
+/// **Which rooms a named module is a counter somebody works behind IN**, or
+/// `None` for a module nobody stands behind.
 ///
-/// One module today. A function rather than a `==` so the answer is in one
-/// place when the second one arrives, exactly as
-/// [`seats_of`] is.
-pub fn tends_of(module: &str) -> bool {
-    module == "BarRun"
+/// Keyed on the module NAME for [`seats_of`]'s reason, and carrying its own room
+/// list for a reason wave EMS1 paid for: until it, the arm in
+/// [`assemble`](mod@super::assemble) read `tends_of(module) && is_social(room)`,
+/// and `is_social` is the **leisure** gate — the rule that a bench in a bar room
+/// seats a patron and a bench in a workshop is where you put your tools. A
+/// hospital's reception counter is not leisure, so gating it on `is_social`
+/// would have meant either no front desk or a waiting room that offers the town
+/// a night out.
+///
+/// A counter and the rooms it belongs in are one fact, so they are written in
+/// one place. The counter is the specific thing; the room list is what stops a
+/// palette that puts a bar run in its store room growing a keeper in it.
+///
+/// **Byte-stability**: `VENUE_FURNITURE` places `BarRun` in a `BarRoom` and
+/// nowhere else, so the answer for every level that predates EMS1 is exactly
+/// what `tends_of(m) && is_social(k)` was.
+pub fn tends_of(module: &str) -> Option<&'static [RoomType]> {
+    /// A venue's counter, in the room the counter runs along.
+    const BAR: &[RoomType] = &[RoomType::BarRoom];
+    /// **An institution's front desk** (wave EMS1) — the public room it faces,
+    /// and the lobby that room may instead be called on a plan that drew one.
+    const FRONT: &[RoomType] = &[RoomType::Waiting, RoomType::Lobby];
+    Some(match module {
+        "BarRun" => BAR,
+        "FrontDesk" => FRONT,
+        _ => return None,
+    })
+}
+
+/// **Whether a counter of this name is worked in a room of this kind** — the one
+/// question [`assemble`](mod@super::assemble) asks of [`tends_of`].
+pub fn is_tended(module: &str, kind: RoomType) -> bool {
+    tends_of(module).is_some_and(|ks| ks.contains(&kind))
 }
 
 /// **Whether a named module is a deck somebody performs on.**
@@ -258,9 +288,12 @@ pub fn performs_of(module: &str) -> bool {
 /// arrives.
 ///
 /// The three rooms are exactly the three
-/// [`shift_of`](super::society::shift_of) calls `Night`, and
-/// `the_social_rooms_are_the_night_rooms` is the arm that keeps the two lists
-/// from drifting apart.
+/// [`crews_of`](super::society::crews_of) works at **night and only at night**,
+/// and `the_social_rooms_are_the_night_rooms` is the arm that keeps the two
+/// lists from drifting apart. Wave EMS1's round-the-clock rooms are worked at
+/// night *as well as* by day and are not social — a ward is not a night out —
+/// which is why that arm compares against the whole crew list and not against
+/// "is night in it".
 pub fn is_social(kind: RoomType) -> bool {
     matches!(
         kind,
@@ -441,16 +474,97 @@ mod tests {
     /// three room types, in two modules, is exactly the shape of drift this
     /// tree has paid for before (`slots_of`'s two `== Retail` tests, VEN1a) —
     /// so the arm is the pin.
+    ///
+    /// **A night room is one worked at night AND NOT BY DAY** (wave EMS1). The
+    /// weaker reading — "night is in its crew list" — would have been satisfied
+    /// by a ward, and would have made a hospital a place the town goes for an
+    /// evening out: `is_social` gates the whole leisure derivation, so a ward
+    /// that answered `true` here would seat patients on a bed as a night out and
+    /// put a bouncer on the hospital's door. The pin is on the whole list.
     #[test]
     fn the_social_rooms_are_the_night_rooms() {
+        use super::super::society::{crews_of, SlotShift};
         for kind in RoomType::ALL {
+            let night_only = crews_of(kind) == [SlotShift::Night];
             assert_eq!(
                 is_social(kind),
-                super::super::society::shift_of(kind) == super::super::society::SlotShift::Night,
-                "{} is social {} and worked at night {}",
+                night_only,
+                "{} is social {} and worked only at night {night_only} (crews {:?})",
                 kind.name(),
                 is_social(kind),
-                super::super::society::shift_of(kind) == super::super::society::SlotShift::Night
+                crews_of(kind),
+            );
+        }
+    }
+
+    /// **A room worked by two crews is worked at both hours, and the ones that
+    /// are are named** (wave EMS1).
+    ///
+    /// Armed rather than swept: "some room has two crews" is satisfied by any
+    /// one of them, and the claim the institutions rest on is that these three
+    /// and no others never close. The complement is the falsifying half — a
+    /// consulting room and a waiting room are DAY rooms, which is what makes a
+    /// clinic a building that shuts.
+    #[test]
+    fn the_rooms_an_institution_never_closes_are_the_three_that_say_so() {
+        use super::super::society::{crews_of, SlotShift};
+        let round: Vec<&str> = RoomType::ALL
+            .into_iter()
+            .filter(|k| crews_of(*k).len() > 1)
+            .map(|k| k.name())
+            .collect();
+        assert_eq!(round, vec!["cell", "apparatusbay", "ward"]);
+        for k in [RoomType::Cell, RoomType::ApparatusBay, RoomType::Ward] {
+            assert_eq!(
+                crews_of(k),
+                [SlotShift::Day, SlotShift::Night],
+                "{}",
+                k.name()
+            );
+            assert!(!is_social(k), "{} is a night out", k.name());
+        }
+        for k in [RoomType::ExamRoom, RoomType::Waiting] {
+            assert_eq!(crews_of(k), [SlotShift::Day], "{} works nights", k.name());
+        }
+    }
+
+    /// **Every room type that predates the institutions is worked by exactly
+    /// one crew** (wave EMS1) — the byte-stability arm for the whole change.
+    ///
+    /// `crews.len() == 1` is what collapses `slots_of`'s index arithmetic back
+    /// to `k` and `station_slots`'s back to `i`, so a committed level is
+    /// byte-identical to its pre-EMS1 self. Written as a NAMED list rather than
+    /// as `ALL minus the five` so that a room type moved onto two crews by
+    /// accident fails here rather than silently re-indexing every slot in the
+    /// town.
+    #[test]
+    fn the_pre_ems1_rooms_are_worked_by_exactly_one_crew() {
+        use super::super::society::crews_of;
+        for kind in [
+            RoomType::Corridor,
+            RoomType::Stair,
+            RoomType::Lobby,
+            RoomType::Office,
+            RoomType::Meeting,
+            RoomType::Service,
+            RoomType::Living,
+            RoomType::Bedroom,
+            RoomType::Kitchen,
+            RoomType::Bath,
+            RoomType::Retail,
+            RoomType::Storage,
+            RoomType::Workshop,
+            RoomType::Guest,
+            RoomType::DanceFloor,
+            RoomType::BarRoom,
+            RoomType::Stage,
+        ] {
+            assert_eq!(
+                crews_of(kind).len(),
+                1,
+                "{} grew a second crew, so every slot index in every committed \
+                 level moved",
+                kind.name()
             );
         }
     }
@@ -482,7 +596,13 @@ mod tests {
             super::super::modules::shape_of("Desk"),
             "the test this table exists to defeat no longer applies"
         );
-        assert!(tends_of("BarRun") && !tends_of("Counter"));
+        // A counter is named AND roomed (wave EMS1): the shop's `Counter` is
+        // nobody's post, and a bar run in a store room is a bar run in storage.
+        assert!(is_tended("BarRun", RoomType::BarRoom));
+        assert!(!is_tended("BarRun", RoomType::Storage));
+        assert!(is_tended("FrontDesk", RoomType::Waiting));
+        assert!(!is_tended("FrontDesk", RoomType::Ward));
+        assert!(tends_of("Counter").is_none());
         assert!(performs_of("Stage") && performs_of("Catwalk") && !performs_of("Deck"));
         assert!(is_standing_room(RoomType::DanceFloor));
         assert!(!is_standing_room(RoomType::BarRoom) && !is_standing_room(RoomType::Bedroom));

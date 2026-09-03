@@ -21,14 +21,27 @@
 //! | [`RoomType::BarRoom`] | [`SlotRole::Work`] | one per [`BAR_M2_PER_KEEPER`] m² | a bar room is mostly in front of the counter |
 //! | [`RoomType::Stage`] | [`SlotRole::Work`] | **one a room** | one act on a stage, however big it is |
 //! | [`RoomType::BarRoom`], [`RoomType::DanceFloor`] | [`SlotRole::Errand`] | **one a room** | a venue is somewhere the town goes |
+//! | [`RoomType::Cell`] | [`SlotRole::Work`] | **one a room** | a block is watched from a desk at the end of it |
+//! | [`RoomType::ApparatusBay`] | [`SlotRole::Work`] | one per [`BAY_M2_PER_CREW`] m² | most of a bay is the appliance |
+//! | [`RoomType::Ward`] | [`SlotRole::Work`] | one per [`WARD_M2_PER_NURSE`] m² | most of a ward is beds, and the people in them are not staff |
+//! | [`RoomType::ExamRoom`] | [`SlotRole::Work`] | **one a room** | one clinician a consulting room, whatever its area |
+//! | [`RoomType::Waiting`] | [`SlotRole::Errand`] | **one a room** | an institution's public room is what the town walks into |
 //!
-//! The other nine room types hold nobody. A corridor, a stair, a lobby, a
+//! The other ten room types hold nobody. A corridor, a stair, a lobby, a
 //! service riser, a living room, a kitchen, a bath, a store room and a dance
-//! floor's *work* count are all places a person passes through rather than
-//! places a person *is* at an hour of the day, and this wave's schedule is
-//! about hours. (A dance floor is still an errand destination — nobody works
-//! one and everybody visits one, which is the case the two arms of
-//! [`slots_of`] disagreeing would lose entirely.)
+//! floor's or waiting room's *work* count are all places a person passes
+//! through rather than places a person *is* at an hour of the day, and this
+//! wave's schedule is about hours. (A dance floor is still an errand
+//! destination — nobody works one and everybody visits one, which is the case
+//! the two arms of [`slots_of`] disagreeing would lose entirely.)
+//!
+//! # And WHEN, which is a second question about the same room (wave EMS1)
+//!
+//! [`crews_of`] answers it, and it answers with a *set*: the three rooms an
+//! institution never closes — a cell block, an apparatus bay, a ward — hold
+//! their occupancy **twice**, once on a day watch and once on a night one. That
+//! is what makes a fire hall a building somebody is in at four in the morning
+//! without making it a building that opens when the bars do.
 //!
 //! # What the table means per archetype, and why it is not written per archetype
 //!
@@ -118,6 +131,23 @@ pub const RETAIL_M2_PER_WORKER: f64 = 30.0;
 /// long run of it. At `RETAIL_M2_PER_WORKER` a 120 m2 bar would be staffed by
 /// four, which is a shift and not a bar.
 pub const BAR_M2_PER_KEEPER: f64 = 45.0;
+
+/// Square metres of apparatus-bay floor one crew member takes (wave EMS1).
+///
+/// The most generous rate in this module, and for a reason nothing else here
+/// has: **most of a bay is the appliance**. A `ApparatusBay` is sized to park a
+/// 7 m engine with a walkway round it, so the floor a *person* occupies is the
+/// margin, not the room. Fifty-five metres is about one appliance's worth of
+/// bay, which is the unit a crew is actually counted in — four on an engine, and
+/// a two-appliance hall has eight.
+pub const BAY_M2_PER_CREW: f64 = 55.0;
+
+/// Square metres of ward floor one nurse takes (wave EMS1).
+///
+/// Between the office's twelve and the shop's thirty, and for the shop's
+/// reason: most of a ward is beds, and the people in them are not staff. Forty
+/// is about six beds, which is a nursing station's load on a shift.
+pub const WARD_M2_PER_NURSE: f64 = 40.0;
 
 /// The most people one room may hold, whatever its area.
 ///
@@ -241,17 +271,59 @@ impl SlotShift {
     }
 }
 
-/// **When a room of this kind is used** — the one place [`SlotShift`] is
-/// decided.
+/// **The crews a room of this kind is worked by** — the one place a slot's
+/// [`SlotShift`] is decided.
 ///
 /// A statement about the ROOM and not about the role, so a venue's back office
 /// and store room keep the working day the rest of the town keeps while its
-/// three public rooms move to the evening. One door, one exhaustive match: a
-/// fifteenth room type has to answer this question, in the same place it
+/// three public rooms move to the evening. One door, one exhaustive match: an
+/// eighteenth room type has to answer this question, in the same place it
 /// answers [`occupancy`].
-pub fn shift_of(kind: RoomType) -> SlotShift {
+///
+/// # Why a LIST, and why wave EMS1 needed one
+///
+/// Until the institutions arrived, every room was worked at one hour of the day
+/// and the rule was a bare `SlotShift`. An institution breaks that: a ward with
+/// nobody on it at four in the morning is not a ward, and a fire hall's bay is
+/// manned at ten in the morning *and* at ten at night — by **two crews**, not by
+/// one person working sixteen hours.
+///
+/// The two cheap answers were both lies. `Night` would have made a fire hall a
+/// building that opens when the bars do — measuring "staffed at 22:00" correctly
+/// for a reason that has nothing to do with fire halls, which is the exact shape
+/// of `street_face`'s bouncer-gated-on-the-neon-sign defect one module over.
+/// `Day` would have emptied three buildings overnight. So the rule answers the
+/// *set* of crews and [`slots_of`] mints the room's occupancy once per crew.
+///
+/// **[`PcgSlot::shift`] is still a `SlotShift`.** Nothing downstream of a slot
+/// learns a third word: `inf_ecs::society` still sorts a `Work` slot into
+/// `work` or `night_work` on one bit, and the two ECS mirrors
+/// (`commands/pcg.rs`, `level.rs`) keep their two-arm matches.
+///
+/// # Byte-stability
+///
+/// Every room type that predates EMS1 answers a **one-element** list, so
+/// `crews.len() == 1`, the slot-index arithmetic in [`slots_of`] collapses to
+/// what it was (`0 * n + k == k`), and the shift is the one element — which is
+/// the value `shift_of` returned. Every committed level is byte-identical, and
+/// `the_pre_ems1_rooms_are_worked_by_exactly_one_crew` is the arm that says so.
+pub fn crews_of(kind: RoomType) -> &'static [SlotShift] {
+    /// The working day — every room in the twelve palettes that predate the
+    /// venues.
+    const DAY: &[SlotShift] = &[SlotShift::Day];
+    /// The evening and the small hours — a venue's three public rooms.
+    const NIGHT: &[SlotShift] = &[SlotShift::Night];
+    /// **Both, day watch first** (wave EMS1). The order is the byte order of
+    /// the room's slots, and the day crew is first so the index a
+    /// nine-to-five town already knows about is still index zero.
+    const ROUND: &[SlotShift] = &[SlotShift::Day, SlotShift::Night];
     match kind {
-        RoomType::BarRoom | RoomType::DanceFloor | RoomType::Stage => SlotShift::Night,
+        RoomType::BarRoom | RoomType::DanceFloor | RoomType::Stage => NIGHT,
+        // **The rooms an institution never closes** (wave EMS1): the cell block
+        // is watched, the appliance is crewed, the ward is nursed. A clinic has
+        // none of the three, which is why a clinic shuts and a hospital does
+        // not — a consequence of this table rather than an entry in it.
+        RoomType::Cell | RoomType::ApparatusBay | RoomType::Ward => ROUND,
         RoomType::Bedroom
         | RoomType::Guest
         | RoomType::Office
@@ -265,7 +337,9 @@ pub fn shift_of(kind: RoomType) -> SlotShift {
         | RoomType::Living
         | RoomType::Kitchen
         | RoomType::Bath
-        | RoomType::Storage => SlotShift::Day,
+        | RoomType::Storage
+        | RoomType::ExamRoom
+        | RoomType::Waiting => DAY,
     }
 }
 
@@ -345,10 +419,25 @@ pub fn occupancy(kind: RoomType, area_m2: f64) -> (SlotRole, usize) {
         // and a 12 m2 one both hold a routine, and a per-area count would put
         // four dancers on one pole.
         RoomType::Stage => (SlotRole::Work, 1),
+        // **The watch on a cell block is ONE officer, however many cells**
+        // (wave EMS1) — the stage's argument exactly. A block is watched from a
+        // desk at the end of it, and a per-area count would put four officers
+        // in a corridor of empty cells. Round the clock, so
+        // [`crews_of`] makes it two: a day watch and a night watch.
+        RoomType::Cell => (SlotRole::Work, 1),
+        RoomType::ApparatusBay => (SlotRole::Work, per(BAY_M2_PER_CREW)),
+        RoomType::Ward => (SlotRole::Work, per(WARD_M2_PER_NURSE)),
+        // **One clinician a consulting room, whatever its area** — the stage's
+        // argument again. A 24 m2 exam room and a 12 m2 one both hold one
+        // doctor and one patient; a per-area count would put three doctors in
+        // the big one.
+        RoomType::ExamRoom => (SlotRole::Work, 1),
         // A dance floor is nobody's WORKPLACE. It is an errand destination and
         // gets its visit slot from `slots_of`, which is why it appears in the
-        // zero arm and is still somewhere a person can be sent.
-        RoomType::DanceFloor => (SlotRole::Home, 0),
+        // zero arm and is still somewhere a person can be sent. A waiting room
+        // is the same shape one wave later (EMS1): the desk that serves it is a
+        // `Tend` station in it, not an occupancy of it.
+        RoomType::DanceFloor | RoomType::Waiting => (SlotRole::Home, 0),
         RoomType::Corridor
         | RoomType::Stair
         | RoomType::Lobby
@@ -383,20 +472,27 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
             continue;
         }
         let node = super::room_node_id_in(salt, i);
-        let shift = shift_of(room.kind);
-        for k in 0..n {
-            out.push(PcgSlot {
-                role,
-                at,
-                room: i as u32,
-                building,
-                floor: room.floor,
-                index: k as u32,
-                node,
-                posture: SlotPosture::Stand,
-                shift,
-                face: DVec3::ZERO,
-            });
+        // **Once per crew** (wave EMS1). A room worked by one crew — which is
+        // every room in the twelve palettes that predate the venues and all
+        // three of a venue's own — emits exactly what it emitted before, at the
+        // same indices, with the same shift. A round-the-clock room emits its
+        // occupancy twice, day watch first.
+        let crews = crews_of(room.kind);
+        for (c, shift) in crews.iter().enumerate() {
+            for k in 0..n {
+                out.push(PcgSlot {
+                    role,
+                    at,
+                    room: i as u32,
+                    building,
+                    floor: room.floor,
+                    index: (c * n + k) as u32,
+                    node,
+                    posture: SlotPosture::Stand,
+                    shift: *shift,
+                    face: DVec3::ZERO,
+                });
+            }
         }
         // **A shop is one errand however many people staff it.** The visit slot
         // is emitted after the workers so a room's slots stay in role order, and
@@ -414,10 +510,14 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
                 room: i as u32,
                 building,
                 floor: room.floor,
-                index: n as u32,
+                // Past every crew's workers, so no two slots of one room
+                // collide. One crew is `n`, which is what it was.
+                index: (crews.len() * n) as u32,
                 node,
                 posture: SlotPosture::Stand,
-                shift,
+                // A visit is made when the room is open, and the room's first
+                // crew is when it opens.
+                shift: crews[0],
                 face: DVec3::ZERO,
             });
         }
@@ -443,10 +543,10 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
 ///
 /// | station | role | posture | shift |
 /// |---|---|---|---|
-/// | [`Seat`](super::station::StationUse::Seat) | `Leisure` | `Sit` | the room's |
-/// | [`Mingle`](super::station::StationUse::Mingle) | `Leisure` | `Dance` | the room's |
-/// | [`Tend`](super::station::StationUse::Tend) | `Work` | `Stand` | the room's |
-/// | [`Perform`](super::station::StationUse::Perform) | `Work` | `Dance` | the room's |
+/// | [`Seat`](super::station::StationUse::Seat) | `Leisure` | `Sit` | the room's crews |
+/// | [`Mingle`](super::station::StationUse::Mingle) | `Leisure` | `Dance` | the room's crews |
+/// | [`Tend`](super::station::StationUse::Tend) | `Work` | `Stand` | the room's crews |
+/// | [`Perform`](super::station::StationUse::Perform) | `Work` | `Dance` | the room's crews |
 /// | [`Guard`](super::station::StationUse::Guard) | `Work` | `Stand` | **`Night`** |
 /// | [`Music`](super::station::StationUse::Music) | — nobody stands here — |
 ///
@@ -455,8 +555,10 @@ pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
 /// the room its entrance wall belongs to is a lobby the day shift also uses.
 /// A venue's door is watched at night.
 ///
-/// **The `index` is the station's position in the list**, which is stable
-/// because the assembler's own emission order is (and is what
+/// **The `index` is the station's position in the list**, times its room's crew
+/// count (wave EMS1) — which is the station's own position for every room worked
+/// by one crew, i.e. every room in every palette that predates the institutions.
+/// It is stable because the assembler's own emission order is (and is what
 /// `inf_ecs::society::agent_guid` would hash if a station ever became a home).
 /// The node is the room's, like every other slot's, so a leg still routes
 /// room-to-room and the last few metres to the seat are the walk `leg()`
@@ -484,22 +586,30 @@ pub fn station_slots(
         let Some(room) = plan.rooms.get(st.room as usize) else {
             continue;
         };
-        let shift = match st.use_kind {
-            StationUse::Guard => SlotShift::Night,
-            _ => shift_of(room.kind),
+        // **A station is worked by its room's crews too** (wave EMS1), on the
+        // same argument [`slots_of`] takes: a counter in a room somebody is at
+        // every hour is a counter somebody is behind at every hour. The guard is
+        // the one row that does not read its room, and it keeps its own answer.
+        const GUARD: &[SlotShift] = &[SlotShift::Night];
+        let crews = match st.use_kind {
+            StationUse::Guard => GUARD,
+            _ => crews_of(room.kind),
         };
-        out.push(PcgSlot {
-            role,
-            at: st.at,
-            room: st.room,
-            building,
-            floor: st.floor,
-            index: i as u32,
-            node: super::room_node_id_in(salt, st.room as usize),
-            posture,
-            shift,
-            face: st.face,
-        });
+        for (c, shift) in crews.iter().enumerate() {
+            out.push(PcgSlot {
+                role,
+                at: st.at,
+                room: st.room,
+                building,
+                floor: st.floor,
+                // One crew is `i`, which is what it was.
+                index: (i * crews.len() + c) as u32,
+                node: super::room_node_id_in(salt, st.room as usize),
+                posture,
+                shift: *shift,
+                face: st.face,
+            });
+        }
     }
     out
 }

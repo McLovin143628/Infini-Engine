@@ -447,6 +447,30 @@ pub enum RoomType {
     /// **A venue's stage** (wave VEN1a) — a raised platform with a pole, and one
     /// act on it however big it is.
     Stage,
+    /// **A custody cell block** (wave EMS1) — the barred rooms and the officer
+    /// who watches them.
+    ///
+    /// The slot in it is the WATCH, not its occupant: this engine holds nobody,
+    /// and a room that minted a prisoner would be minting an agent with a home
+    /// it cannot leave. What the room is for is that somebody is on it at every
+    /// hour, which is what [`society::crews_of`] says of it.
+    Cell,
+    /// **An apparatus bay** (wave EMS1) — where an appliance is kept and the
+    /// crew that rides it waits. A fire hall's engine room, and a police
+    /// station's own garage.
+    ApparatusBay,
+    /// **A hospital ward** (wave EMS1) — beds, and the nurses on them, at every
+    /// hour.
+    Ward,
+    /// **A consulting room** (wave EMS1) — one clinician, one room, whatever
+    /// its area. The same argument [`Stage`](RoomType::Stage) makes: two doctors
+    /// in one consulting room is not a bigger clinic.
+    ExamRoom,
+    /// **A public waiting room** (wave EMS1) — where the town goes when it needs
+    /// one of these buildings. An errand destination with a `Work` count of
+    /// zero, exactly as a [`DanceFloor`](RoomType::DanceFloor) is: nobody works
+    /// a waiting room and everybody visits one.
+    Waiting,
 }
 
 impl RoomType {
@@ -457,23 +481,23 @@ impl RoomType {
     /// hand-written `vec!` at each call site is the exact shape
     /// `phase29_gate`'s `ALL_MODES` was minted to retire. Two rules now have to
     /// answer for *every* room type — [`is_errand_destination`](Self::is_errand_destination)
-    /// and [`society::shift_of`] — and both are exhaustive `match`es, so a
-    /// fifteenth variant fails to **compile** there.
+    /// and [`society::crews_of`] — and both are exhaustive `match`es, so an
+    /// eighteenth variant fails to **compile** there.
     ///
     /// # What guards THIS array (VEN1b audit)
     ///
-    /// Not the length. `[RoomType; 17]` is a number and not a census: adding a
+    /// Not the length. `[RoomType; 22]` is a number and not a census: adding a
     /// variant to the enum compiles fine against it, and the new room would
     /// simply be **absent from every sweep written over `ALL`** — including
     /// `the_social_rooms_are_the_night_rooms`, the arm that keeps
-    /// `station::is_social` and [`society::shift_of`] from drifting apart. (The
+    /// `station::is_social` and [`society::crews_of`] from drifting apart. (The
     /// first spelling of this doc claimed the compile error; it was wrong, and
     /// a sweep believed to be total is worse than one known to be partial.)
     ///
     /// The guard is `components.rs`'s own shape, one crate over: a **census of
     /// this module's source**, checked name for name against this array —
     /// `the_room_type_sweep_covers_every_variant`.
-    pub const ALL: [RoomType; 17] = [
+    pub const ALL: [RoomType; 22] = [
         RoomType::Corridor,
         RoomType::Stair,
         RoomType::Lobby,
@@ -491,6 +515,11 @@ impl RoomType {
         RoomType::DanceFloor,
         RoomType::BarRoom,
         RoomType::Stage,
+        RoomType::Cell,
+        RoomType::ApparatusBay,
+        RoomType::Ward,
+        RoomType::ExamRoom,
+        RoomType::Waiting,
     ];
 
     /// A stable short name for diagnostics and gate traces.
@@ -513,6 +542,11 @@ impl RoomType {
             RoomType::DanceFloor => "dancefloor",
             RoomType::BarRoom => "barroom",
             RoomType::Stage => "stage",
+            RoomType::Cell => "cell",
+            RoomType::ApparatusBay => "apparatusbay",
+            RoomType::Ward => "ward",
+            RoomType::ExamRoom => "examroom",
+            RoomType::Waiting => "waiting",
         }
     }
 
@@ -528,10 +562,14 @@ impl RoomType {
     /// A dance floor qualifies **with a `Work` count of zero**, which is the
     /// case the two arms disagreeing would lose entirely: nobody works a dance
     /// floor and everybody visits one.
+    ///
+    /// [`Waiting`](RoomType::Waiting) joins it at wave EMS1 on exactly that
+    /// argument: an institution's public room is the one part of it the town
+    /// walks into, and it holds no worker of its own.
     pub fn is_errand_destination(self) -> bool {
         matches!(
             self,
-            RoomType::Retail | RoomType::BarRoom | RoomType::DanceFloor
+            RoomType::Retail | RoomType::BarRoom | RoomType::DanceFloor | RoomType::Waiting
         )
     }
 }
@@ -1308,11 +1346,11 @@ mod tests {
     /// **[`RoomType::ALL`] really is every variant** (wave VEN1b audit).
     ///
     /// The array's own doc used to claim that a variant added to the enum
-    /// "fails to compile" here. It does not — `[RoomType; 17]` is a length, not
-    /// a census — so a fifteenth room type would have been silently absent from
-    /// every sweep written over `ALL`, and the first of those is
+    /// "fails to compile" here. It does not — `[RoomType; 22]` is a length, not
+    /// a census — so an eighteenth room type would have been silently absent
+    /// from every sweep written over `ALL`, and the first of those is
     /// `station::tests::the_social_rooms_are_the_night_rooms`, the arm that
-    /// keeps `station::is_social` and `society::shift_of` from drifting apart.
+    /// keeps `station::is_social` and `society::crews_of` from drifting apart.
     /// A sweep believed to be total and known to be partial is the vacuity this
     /// tree has a law about.
     ///
@@ -1346,7 +1384,7 @@ mod tests {
             .map(|v| v.to_ascii_lowercase())
             .collect();
         assert!(
-            declared.len() >= 17,
+            declared.len() >= 22,
             "the census read {} variants out of `pub enum RoomType` — it is not \
              reading what it thinks it is, and a census that finds nothing \
              covers everything: {declared:?}",

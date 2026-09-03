@@ -26,7 +26,7 @@
 //! onto its instance's extent at projection. Two consequences, both deliberate:
 //!
 //! * a module's mesh is a function of its *shape family* and nothing else, so
-//!   there are nineteen meshes rather than one per palette entry;
+//!   there are twenty meshes rather than one per palette entry;
 //! * every feature is **proportional** — a frame rail is a fraction of the
 //!   panel, never a fixed 40 mm — because the same mesh is stretched onto a
 //!   0.3 m mullion and a 12 m slab. A fixed-size chamfer would be invisible on
@@ -232,7 +232,7 @@ impl ModuleMesh {
     }
 }
 
-/// The nineteen shape families a palette module draws as.
+/// The twenty shape families a palette module draws as.
 ///
 /// A family and not a per-module mesh, because a palette entry's *dimensions*
 /// live on the instance now: an office mullion and a house quoin are the same
@@ -297,6 +297,24 @@ pub enum ModuleShape {
     /// a counter, and a per-bulb module would be forty instances where one will
     /// do.
     Festoon,
+    /// **A barred screen** (wave EMS1): a rectangular frame with three vertical
+    /// bars in it and air between them — a custody cell front.
+    ///
+    /// The one family in this table whose *point* is what it does not contain.
+    /// Every other shape is a silhouette with relief in it;
+    /// [`Panel`](ModuleShape::Panel) at a cell's dimensions is a wall, and a
+    /// wall is what a cell already has on three sides. What makes the fourth
+    /// side a cell is that you can see through it — so the bars are separate
+    /// boxes with gaps between them rather than a leaf with a groove in it, and
+    /// the family is its own rather than a `Panel` with a texture nobody has.
+    ///
+    /// It is still a **solid** to the assembler: the module's collider is the
+    /// whole opening, because a cell you can walk out of is a doorway. Seeing
+    /// through a thing and passing through it are different questions, and this
+    /// engine has already answered them separately once — a
+    /// [`Glazing`](ModuleShape::Glazing) pane is drawn without a collider and a
+    /// glazed *wall module* keeps one.
+    Grille,
 }
 
 impl ModuleShape {
@@ -305,9 +323,10 @@ impl ModuleShape {
     /// **Append-only.** The order is not a wire contract — every id is derived
     /// from [`name`](ModuleShape::name) and never from a position — but a table
     /// both hosts register is easier to read against a diff when it grows at the
-    /// end, and the seven venue families (wave VEN1a) are appended for that
-    /// reason rather than filed beside their nearest relatives.
-    pub const ALL: [ModuleShape; 19] = [
+    /// end, and the seven venue families (wave VEN1a) and the institutions' one
+    /// (wave EMS1) are appended for that reason rather than filed beside their
+    /// nearest relatives.
+    pub const ALL: [ModuleShape; 20] = [
         ModuleShape::Panel,
         ModuleShape::Glazing,
         ModuleShape::Column,
@@ -327,6 +346,7 @@ impl ModuleShape {
         ModuleShape::Screen,
         ModuleShape::Sign,
         ModuleShape::Festoon,
+        ModuleShape::Grille,
     ];
 
     /// The stable name the GUID is derived from. **Never change one of these
@@ -353,6 +373,7 @@ impl ModuleShape {
             ModuleShape::Screen => "screen",
             ModuleShape::Sign => "sign",
             ModuleShape::Festoon => "festoon",
+            ModuleShape::Grille => "grille",
         }
     }
 
@@ -470,6 +491,18 @@ impl ModuleShape {
                 pulse_hz: 0.27,
                 roughness: 0.4,
                 tint: Some([0.06, 0.06, 0.06, 1.0]),
+                ..PcgSurface::DEFAULT
+            },
+            // **Painted steel** (wave EMS1). Metal, because the whole reading of
+            // a barred front at interior light levels is the highlight running
+            // down each bar; a dielectric at 0.75 roughness is a row of grey
+            // sticks, which is `Pole`'s finding one wave over. Not a mirror
+            // either — a cell front is painted, not chromed — so it sits between
+            // the pole's 0.12 and the default's 0.75.
+            ModuleShape::Grille => PcgSurface {
+                metallic: 0.7,
+                roughness: 0.45,
+                tint: Some([0.30, 0.31, 0.33, 1.0]),
                 ..PcgSurface::DEFAULT
             },
         }
@@ -653,6 +686,25 @@ impl ModuleShape {
                     }
                 }
             }
+            // A head rail, a sill rail, two jambs and three bars between them —
+            // seven boxes, and six gaps you can see a cell through.
+            //
+            // The rails carry the full `x` half so the frame reads at the
+            // module's own thickness, exactly as `Glazing`'s frame does; the
+            // bars are set back to 0.35 so the frame stands proud of them and
+            // the front is a frame with bars in it rather than a slotted plate.
+            ModuleShape::Grille => {
+                for (cy, cz, hy, hz) in [(0.44, 0.0, 0.06, 0.5), (-0.44, 0.0, 0.06, 0.5)] {
+                    m.push_box([0.0, cy, cz], [0.5, hy, hz]);
+                }
+                for cz in [0.455f32, -0.455] {
+                    m.push_box([0.0, 0.0, cz], [0.5, 0.38, 0.045]);
+                }
+                for k in 0..3 {
+                    let z = -0.24 + 0.24 * k as f32;
+                    m.push_box([0.0, 0.0, z], [0.35, 0.38, 0.025]);
+                }
+            }
         }
         m
     }
@@ -697,10 +749,18 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
         "Lintel" | "Parapet" => ModuleShape::Course,
         // Furniture.
         "Desk" | "Table" | "Bench" => ModuleShape::Legged,
-        "Cabinet" | "Locker" | "Wardrobe" | "Units" | "Shelf" | "Rack" | "Counter" | "Basin" => {
-            ModuleShape::Carcass
-        }
-        "Sofa" | "Bed" => ModuleShape::Soft,
+        // A `FrontDesk` is a `Counter` under another name (wave EMS1) — a solid
+        // carcass a body stands behind — and it is a second NAME rather than a
+        // second use of the first because `station::tends_of` is keyed on the
+        // name: a shop's counter is nobody's post and a reception desk is.
+        // Deliberately not `Bar` (which carries the venue's lit blue rim) and
+        // not `Legged` (which has air under it, and a reception counter does
+        // not).
+        "Cabinet" | "Locker" | "Wardrobe" | "Units" | "Shelf" | "Rack" | "Counter" | "Basin"
+        | "FrontDesk" => ModuleShape::Carcass,
+        // A gurney and a bunk are a bed's silhouette at two sizes, which is the
+        // `Mullion`/`Quoin` argument: one family, three names.
+        "Sofa" | "Bed" | "Gurney" | "Bunk" => ModuleShape::Soft,
         "Plant" => ModuleShape::Planter,
         "Crate" => ModuleShape::Crate,
         "RollDoor" => ModuleShape::Shutter,
@@ -717,6 +777,8 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
         "Screen" => ModuleShape::Screen,
         "Neon" => ModuleShape::Sign,
         "Festoon" => ModuleShape::Festoon,
+        // ── the institutions (wave EMS1) ──
+        "Grille" => ModuleShape::Grille,
         _ => return None,
     })
 }
@@ -782,7 +844,7 @@ mod tests {
         }
     }
 
-    /// Twelve families, twelve distinct GUIDs, and none of them nil.
+    /// Every family mints a distinct GUID, and none of them is nil.
     #[test]
     fn the_family_guids_are_distinct() {
         let mut ids: Vec<Uuid> = ModuleShape::ALL.into_iter().map(module_mesh_guid).collect();
@@ -904,7 +966,10 @@ mod tests {
     #[test]
     fn the_older_families_are_exactly_the_constants_the_projectors_had() {
         for s in ModuleShape::ALL {
-            let venue = matches!(
+            // The seven venue families (VEN1a) and the institutions' one grille
+            // (EMS1) are the families that state a material. Everything else is
+            // what both projectors hard-coded.
+            let authored = matches!(
                 s,
                 ModuleShape::Stage
                     | ModuleShape::Pole
@@ -913,8 +978,9 @@ mod tests {
                     | ModuleShape::Screen
                     | ModuleShape::Sign
                     | ModuleShape::Festoon
+                    | ModuleShape::Grille
             );
-            if venue {
+            if authored {
                 continue;
             }
             assert_eq!(
@@ -1049,7 +1115,54 @@ mod tests {
         }
     }
 
-    /// The table is what a host registers: nineteen entries, distinct ids, real
+    /// **A grille is mostly hole, and that is the whole family** (wave EMS1).
+    ///
+    /// Every other arm in this module is satisfied by a solid box: the span
+    /// check, the winding check and the triangle bounds all pass on a `Panel`.
+    /// What separates a barred front from a wall is that a horizontal line
+    /// across the middle of it crosses **air** — so the arm samples that line
+    /// and counts how much of it is inside a box.
+    #[test]
+    fn a_grille_is_mostly_hole() {
+        let m = ModuleShape::Grille.mesh();
+        // Boxes are pushed as six four-vertex faces, so 24 positions a box.
+        let boxes = m.positions.len() / 24;
+        assert_eq!(boxes, 7, "a grille is a frame of four and three bars");
+        // Sample the mid-height line `y = 0` across the run (`z`), asking of
+        // each sample whether any bar or jamb covers it. Three bars of 0.05 and
+        // two jambs of 0.09 cover 0.33 of a 1.0 run, so two thirds of the line
+        // is air — which at a 1.2 m cell front is 60 mm bars on 290 mm centres.
+        const N: usize = 400;
+        let solid = |z: f32| {
+            [(-0.455f32, 0.045f32), (0.455, 0.045)]
+                .into_iter()
+                .chain((0..3).map(|k| (-0.24 + 0.24 * k as f32, 0.025)))
+                .any(|(c, h)| (z - c).abs() <= h)
+        };
+        let covered = (0..N)
+            .filter(|i| solid(-0.5 + *i as f32 / (N - 1) as f32))
+            .count();
+        let open = 1.0 - covered as f64 / N as f64;
+        println!("EMS1: a grille's mid-line is {:.1}% open", open * 100.0);
+        assert!(
+            open > 0.6,
+            "a grille only {:.0}% open is a wall with grooves in it",
+            open * 100.0
+        );
+        // …and it is not a hole either: a frame you can walk through is a
+        // doorway, and the family exists to be a cell front.
+        assert!(open < 0.9, "a grille {:.0}% open has no bars", open * 100.0);
+        // The bars are steel and they catch a highlight, or the family is a
+        // silhouette nobody can read at interior light levels.
+        let s = ModuleShape::Grille.surface();
+        assert!(
+            s.metallic > 0.5 && s.roughness < 0.6,
+            "the bars are plaster"
+        );
+        assert!(!s.emits(), "a cell front is lit, it is not a light");
+    }
+
+    /// The table is what a host registers: twenty entries, distinct ids, real
     /// meshes.
     #[test]
     fn the_table_is_the_families() {

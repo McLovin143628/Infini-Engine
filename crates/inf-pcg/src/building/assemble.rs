@@ -1412,7 +1412,7 @@ impl Ctx<'_> {
         // difference between a bar and a shelf: `normal` points into the room,
         // so the service side is `-normal`, half the counter's depth plus a
         // stride back from its centre. The body faces the run it is serving.
-        if super::station::tends_of(def.module) && super::station::is_social(room.kind) {
+        if super::station::is_tended(def.module, room.kind) {
             let back = p - normal * (half.z + super::station::KEEPER_STAND_M);
             out.stations.push(super::station::PcgStation {
                 use_kind: super::station::StationUse::Tend,
