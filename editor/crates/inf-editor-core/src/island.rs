@@ -833,6 +833,193 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         }
     }
 
+    // -- SEA AND AIR (wave VEH2c) ---------------------------------------------
+    //
+    // **The first two vehicles on this island that are not road vehicles**, and
+    // the whole of what they need from this generator is a PLACE. Both ride the
+    // same Path A the fleet above does -- the committed catalogue, spawned by
+    // `spawn_vehicle` -- and neither reads an elevation, which is the ban this
+    // module is held to (`the_settlement_generator_is_authored_from_committed_
+    // design_alone` forbids `inf_terrain::`).
+    //
+    // THE LAUNCH: at the harbour, which is the sea off the city called Harbour
+    // City. Its height needs no terrain at all -- a boat floats at the SURFACE,
+    // and the recipe states where that is (`[sea] level_m`). Its position is the
+    // committed coast ring's nearest vertex to the city, pushed seaward: the
+    // nearest shore point to a settlement is on the shore that settlement faces,
+    // so continuing away from the city goes out to sea rather than inland. That
+    // is one normalize and no elevation.
+    //
+    // THE HELICOPTER AND ITS PAD: at the same city's police station apron, on
+    // the emergency fleet's own door (`nearest_route_vertex` from the
+    // institution's block centre), far enough along the road to clear the
+    // cruisers parked there. The pad is a drawn slab and a static collider so a
+    // machine can stand on it and a player can walk onto it.
+    if let Some(plan) = plans.iter().find(|p| p.name == HARBOUR_CITY) {
+        let fleet = crate::vehicle::island_vehicles();
+        let sea_y = design.recipe.sea.level_m;
+
+        // -- the launch --------------------------------------------------------
+        if let Some(def) = fleet.get("launch") {
+            let mut best: Option<(f64, glam::DVec2)> = None;
+            for ring in &design.coast {
+                for v in ring {
+                    let d = (*v - plan.centre).length_squared();
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, *v));
+                    }
+                }
+            }
+            if let Some((_, shore)) = best {
+                let seaward = (shore - plan.centre).normalize_or_zero();
+                if seaward != glam::DVec2::ZERO {
+                    let at = shore + seaward * HARBOUR_OFFSHORE_M;
+                    // Bow toward the open sea, which is the way a boat is left
+                    // on a mooring. `patan2_64`, never `f64::atan2`: this yaw is
+                    // serialized into a committed level (the P14 law).
+                    let yaw_deg = inf_math::patan2_64(seaward.x, seaward.y).to_degrees();
+                    crate::vehicle::spawn_vehicle(
+                        &mut doc,
+                        derived(name, "island.launch"),
+                        def,
+                        crate::vehicle::VehicleSpawn {
+                            name: "Harbour Launch",
+                            at: DVec3::new(
+                                at.x,
+                                crate::vehicle::floating_origin_y(def, sea_y),
+                                at.y,
+                            ),
+                            yaw_deg,
+                            paint: inf_ecs::math::Color::new(0.86, 0.87, 0.88, 1.0),
+                            clip: None,
+                            livery: None,
+                            // The boat is the FIRST vehicle on this island whose
+                            // engine can follow it: `AudioCommand::SetPosition`
+                            // arrived at EMS2 and a moving emitter is real now,
+                            // which is VEH2a's carried item 5 closed for the
+                            // player's own craft. Traffic's mute ruling is about
+                            // seventeen parked cars and does not apply here.
+                            engine_voice: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        // -- the pad, and the machine on it ------------------------------------
+        let station = plan
+            .blocks
+            .iter()
+            .find(|b| b.archetype == inf_pcg::ArchetypeId::PoliceStation);
+        if let (Some(b), Some(def)) = (station, fleet.get("chopper")) {
+            if let Some((v, dir)) = inf_island::nearest_route_vertex(&design.routes, b.centre) {
+                let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
+                // The same apron the cruisers use, on the same side, and PAST
+                // them: `station_fleet` parks three, one pitch apart, starting
+                // one pitch along -- so a pad at `HELIPAD_SLOT` pitches clears
+                // the last of them by a whole pitch.
+                let perp = glam::DVec2::new(-dir.y, dir.x);
+                let side = if perp.dot(b.centre - glam::DVec2::new(v.x, v.z)) >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let apron = perp * (side * EMS_APRON_OFFSET_M);
+                let along = HELIPAD_SLOT as f64 * EMS_PARK_PITCH_M;
+                let at = DVec3::new(
+                    v.x + dir.x * along + apron.x,
+                    v.y,
+                    v.z + dir.y * along + apron.y,
+                );
+
+                // The pad: a drawn slab with a real collider, so it is something
+                // a machine stands on and a character can walk onto rather than
+                // a decal. Half a metre of it is buried, which is what stops a
+                // 12 cm lip being a kerb the hero trips over.
+                let pad = derived(name, "island.helipad");
+                doc.create_with_guid(pad, SpawnKind::Empty, "Helipad", None);
+                insert!(
+                    doc,
+                    pad,
+                    Transform {
+                        // The slab's CENTRE, so that `HELIPAD_LIP_M` of it stands
+                        // proud of the apron and `HELIPAD_BURY_M` is under it.
+                        translation: Vec3d::new(at.x, at.y - HELIPAD_BURY_M, at.z),
+                        rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+                        scale: Vec3d::ONE,
+                    },
+                );
+                insert!(
+                    doc,
+                    pad,
+                    inf_ecs::components::RigidBody3D {
+                        kind: inf_ecs::components::BodyKind3D::Static,
+                        ..Default::default()
+                    },
+                );
+                insert!(
+                    doc,
+                    pad,
+                    inf_ecs::components::Collider3D {
+                        shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
+                        half_extents: Vec3d::new(
+                            HELIPAD_RADIUS_M,
+                            HELIPAD_HALF_M,
+                            HELIPAD_RADIUS_M
+                        ),
+                        friction: 0.8,
+                        ..Default::default()
+                    },
+                );
+                insert!(
+                    doc,
+                    pad,
+                    inf_ecs::components::MeshRef {
+                        primitive: inf_ecs::components::Primitive::Cylinder,
+                        asset: None,
+                    },
+                );
+                insert!(
+                    doc,
+                    pad,
+                    inf_ecs::components::Material {
+                        base_color: inf_ecs::math::Color::new(0.13, 0.14, 0.15, 1.0),
+                        metallic: 0.0,
+                        roughness: 0.95,
+                        ..Default::default()
+                    },
+                );
+
+                crate::vehicle::spawn_vehicle(
+                    &mut doc,
+                    derived(name, "island.chopper"),
+                    def,
+                    crate::vehicle::VehicleSpawn {
+                        name: "Light Helicopter",
+                        at: DVec3::new(
+                            at.x,
+                            crate::vehicle::resting_origin_y(def, at.y + HELIPAD_LIP_M),
+                            at.z,
+                        ),
+                        yaw_deg,
+                        paint: inf_ecs::math::Color::new(0.22, 0.30, 0.42, 1.0),
+                        clip: None,
+                        // **No livery, and therefore no service** (wave VEH2c).
+                        // `dispatch::unit_kind_of` recognises a unit off a
+                        // bloomed `light_bar` child, and a helicopter wearing one
+                        // would be claimed by the dispatcher and sent to drive to
+                        // an incident on a road it has no wheels for. Making it a
+                        // police unit is a real change to `drive_intent`, not a
+                        // paint job, and it is priced in this wave's ledger
+                        // rather than taken by accident.
+                        livery: None,
+                        engine_voice: true,
+                    },
+                );
+            }
+        }
+    }
+
     // ── the hero ──────────────────────────────────────────────────────────────
     //
     // **It is the starter character** (SK1c). This used to be forty lines of
@@ -1030,6 +1217,43 @@ pub const EMS_PARK_PITCH_M: f64 = 11.0;
 /// appliance has over a saloon, so the widest thing in the catalogue still has
 /// its flank out of the lane.
 pub const EMS_APRON_OFFSET_M: f64 = 6.0;
+
+/// The city whose harbour the launch is moored in, and whose police station
+/// keeps the helicopter (wave VEH2c).
+///
+/// Named rather than indexed: the recipe's site order is the recipe's business
+/// and a wave that added a town would otherwise move the boat to a different
+/// island.
+pub const HARBOUR_CITY: &str = "Harbour City";
+
+/// How far seaward of the coast ring the launch is moored, metres.
+///
+/// Past the beach (`[sea] beach_width_m` is 32 m on the committed recipe) and
+/// onto the shelf, so the hull is over water deep enough to float in rather than
+/// resting on a slipway. Far enough to be honest, close enough to swim to.
+pub const HARBOUR_OFFSHORE_M: f64 = 70.0;
+
+/// Which of the station apron's slots the helipad takes.
+///
+/// `station_fleet(PoliceStation)` parks three vehicles at slots 1, 2 and 3, so
+/// the pad at slot 5 clears the last of them by a whole `EMS_PARK_PITCH_M` —
+/// which is what keeps a helicopter off the roof of a cruiser.
+pub const HELIPAD_SLOT: usize = 5;
+
+/// The pad's radius, metres — comfortably wider than the catalogue's 4.3 m disc.
+pub const HELIPAD_RADIUS_M: f64 = 7.0;
+
+/// The pad's half-thickness, metres.
+pub const HELIPAD_HALF_M: f64 = 0.30;
+
+/// How much of the pad is buried, metres.
+///
+/// Most of it: a slab standing 30 cm proud of an apron is a kerb a character
+/// trips over, and what is wanted is a surface with a lip.
+pub const HELIPAD_BURY_M: f64 = 0.18;
+
+/// The lip the machine's skids stand on, metres — the pad's own proud height.
+pub const HELIPAD_LIP_M: f64 = HELIPAD_HALF_M - HELIPAD_BURY_M;
 
 /// How many extra pitches a vehicle may step along its own apron to clear one
 /// its settlement has already parked (EMS1 audit).
@@ -1592,6 +1816,185 @@ mod tests {
     /// Run against both committed islands, because "the fixture is what CI
     /// exercises" is only true while the fixture and the shipped island are the
     /// same generator.
+    /// **THE HARBOUR HAS A BOAT AND THE STATION HAS A PAD** (wave VEH2c) — and
+    /// the boat is over water rather than on a beach.
+    ///
+    /// The claim that costs something is the last one. Nothing in this module
+    /// may read an elevation, so where the launch floats is derived from two
+    /// committed numbers — the coast ring and `[sea] level_m` — and the arm
+    /// checks the derivation against the design rather than against the
+    /// generator's own arithmetic: the mooring must be SEAWARD of the shore,
+    /// which is to say further from the city than the shore point is, and clear
+    /// of the beach the recipe declares.
+    #[test]
+    fn the_harbour_moors_a_launch_and_the_station_keeps_a_helicopter() {
+        for recipe in ISLAND_RECIPES {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: no {recipe} in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            let plans = crate::settlement::settlements(&d);
+            let Some(plan) = plans.iter().find(|p| p.name == HARBOUR_CITY) else {
+                println!("SKIP: {recipe} has no {HARBOUR_CITY}");
+                continue;
+            };
+            let fleet = crate::vehicle::island_vehicles();
+
+            // ── the launch ──────────────────────────────────────────────────
+            let guid = derived(name, "island.launch");
+            let rig = inf_ecs::vehicle::rig_of(doc.world(), guid)
+                .unwrap_or_else(|| panic!("{recipe}: no launch the recogniser finds"));
+            assert!(rig.wheels.is_empty(), "{recipe}: the launch has wheels");
+            assert_eq!(rig.parts.len(), 1, "{recipe}: the launch's screw");
+            assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Thruster);
+
+            let e = doc.entity_of(guid).expect("the launch's chassis");
+            let t = *doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::Transform>(e)
+                .expect("its transform");
+            // It FLOATS: a `Buoyancy` the water pass will find, at the density
+            // its own catalogue row authored rather than at the one it weighs.
+            let def = fleet.get("launch").expect("the launch row");
+            let b = doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::Buoyancy>(e)
+                .unwrap_or_else(|| panic!("{recipe}: the launch does not float"));
+            assert!(b.enabled);
+            assert_eq!(b.density_kg_m3, def.buoyancy_density_kg_m3);
+            assert_eq!(b.linear_drag, def.buoyancy_linear_drag);
+            // …at its equilibrium, so the level does not open with a splash.
+            assert!(
+                (t.translation.y - inf_ecs::vehicle::floating_origin_y(def, d.recipe.sea.level_m))
+                    .abs()
+                    < 1e-9,
+                "{recipe}: the launch floats at {} and the sea is at {}",
+                t.translation.y,
+                d.recipe.sea.level_m
+            );
+
+            // …and it is OUT TO SEA. Measured against the design's own coast
+            // ring: the mooring is further from the city than the shore is, by
+            // more than the beach the recipe declares.
+            let here = glam::DVec2::new(t.translation.x, t.translation.z);
+            let mut shore = f64::MAX;
+            let mut nearest = glam::DVec2::ZERO;
+            for ring in &d.coast {
+                for v in ring {
+                    let s = (*v - plan.centre).length();
+                    if s < shore {
+                        shore = s;
+                        nearest = *v;
+                    }
+                }
+            }
+            let out = (here - plan.centre).length();
+            println!(
+                "{recipe}: the launch is {out:.0} m from {HARBOUR_CITY} and the \
+                 shore is {shore:.0} m — {:.0} m of water",
+                out - shore
+            );
+            assert!(
+                out > shore + d.recipe.sea.beach_width_m,
+                "{recipe}: the launch is {out:.0} m out and the shore is \
+                 {shore:.0} m — it is on the beach"
+            );
+            // …and it really is seaward of the nearest shore point rather than
+            // merely further from the centre by going round the island.
+            assert!(
+                (here - nearest).length() < HARBOUR_OFFSHORE_M * 1.05,
+                "{recipe}: the launch is {:.0} m from its own shore point",
+                (here - nearest).length()
+            );
+
+            // ── the pad and the machine on it ───────────────────────────────
+            let Some(block) = plan
+                .blocks
+                .iter()
+                .find(|b| b.archetype == inf_pcg::ArchetypeId::PoliceStation)
+            else {
+                println!("SKIP: {recipe}'s {HARBOUR_CITY} has no police station");
+                continue;
+            };
+            let heli = derived(name, "island.chopper");
+            let rig = inf_ecs::vehicle::rig_of(doc.world(), heli)
+                .unwrap_or_else(|| panic!("{recipe}: no helicopter the recogniser finds"));
+            assert!(rig.wheels.is_empty(), "{recipe}: the helicopter has wheels");
+            assert_eq!(rig.parts.len(), 1);
+            assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Rotor);
+            assert!(
+                rig.parts[0].size.x > 4.0,
+                "{recipe}: a {} m disc",
+                rig.parts[0].size.x
+            );
+
+            let pad = derived(name, "island.helipad");
+            let pe = doc
+                .entity_of(pad)
+                .unwrap_or_else(|| panic!("{recipe}: no helipad"));
+            let pt = *doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::Transform>(pe)
+                .expect("the pad's transform");
+            assert!(
+                doc.world()
+                    .world()
+                    .get::<inf_ecs::components::Collider3D>(pe)
+                    .is_some_and(|c| !c.sensor),
+                "{recipe}: the pad is not something a machine can stand on"
+            );
+
+            let he = doc.entity_of(heli).expect("the helicopter's chassis");
+            let ht = *doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::Transform>(he)
+                .expect("its transform");
+            // The machine is ON the pad, and inside it.
+            let off = glam::DVec2::new(
+                ht.translation.x - pt.translation.x,
+                ht.translation.z - pt.translation.z,
+            );
+            assert!(
+                off.length() < 1e-9,
+                "{recipe}: the helicopter is {:.1} m off its own pad",
+                off.length()
+            );
+            // …and CLEAR of the cruisers on the same apron, which is what
+            // `HELIPAD_SLOT` buys: the disc is 4.3 m and the nearest parked
+            // vehicle must be further than that.
+            let (v, _) = inf_island::nearest_route_vertex(&d.routes, block.centre)
+                .expect("the station has a road");
+            let along = (glam::DVec2::new(ht.translation.x, ht.translation.z)
+                - glam::DVec2::new(v.x, v.z))
+            .length();
+            println!(
+                "{recipe}: the pad is {along:.1} m along the apron; the fleet \
+                 parks {} vehicle(s) at {EMS_PARK_PITCH_M} m pitch",
+                station_fleet(block.archetype).len()
+            );
+            assert!(
+                along
+                    > station_fleet(block.archetype).len() as f64 * EMS_PARK_PITCH_M
+                        + rig.parts[0].size.x,
+                "{recipe}: the disc overlaps the parked fleet"
+            );
+
+            // The pad is a surface with a LIP, not a kerb: what stands proud is
+            // a few centimetres, and the skids stand on that.
+            let proud = pt.translation.y + HELIPAD_HALF_M - v.y;
+            assert!(
+                (proud - HELIPAD_LIP_M).abs() < 1e-9,
+                "{recipe}: the pad stands {proud:.3} m proud of the apron"
+            );
+        }
+    }
+
     #[test]
     fn every_settlement_parks_a_car_on_the_circuit() {
         for recipe in ISLAND_RECIPES {

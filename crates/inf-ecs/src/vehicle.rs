@@ -2045,8 +2045,39 @@ pub fn despawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef) -> usi
 /// and the authoring one place a car the same way. "Wheel drop plus wheel
 /// radius" written out twice is two chances to write it once with the sign
 /// wrong.
+///
+/// # A craft with no wheels rests on its own hull (wave VEH2c)
+///
+/// A helicopter stands on its skids and a launch on a trailer, and neither has
+/// a wheel drop to measure from. The honest answer is the collider's own
+/// half-height, which is the same number `chassis_of` derives the seat from —
+/// so the two cannot disagree about how tall the machine is.
 pub fn resting_origin_y(def: &VehicleDef, ground_y: f64) -> f64 {
-    ground_y - def.wheel_drop_m + def.wheel_radius_m
+    if def.body.wheeled() {
+        ground_y - def.wheel_drop_m + def.wheel_radius_m
+    } else {
+        ground_y + def.half_extents.y
+    }
+}
+
+/// Where a hull's chassis origin goes so that it floats in **equilibrium** on a
+/// surface at `water_y` — the placement an author makes for a boat (wave VEH2c).
+///
+/// Archimedes, and nothing else: a hull of density `rho` in fluid of density
+/// `rho_f` floats with `rho / rho_f` of its depth under, so its origin sits
+/// `half_height * (1 - 2 * rho / rho_f)` above the surface. Spawning a boat
+/// anywhere else is spawning a splash, and the first seconds of every arm that
+/// followed would be measuring one.
+///
+/// A craft that does not float (`buoyancy_density_kg_m3 <= 0`) is placed with
+/// its hull ON the surface, which is what a box in a puddle does.
+pub fn floating_origin_y(def: &VehicleDef, water_y: f64) -> f64 {
+    let fluid = crate::components::Buoyancy::default().fluid_density_kg_m3;
+    let rho = def.buoyancy_density_kg_m3;
+    if !(rho > 0.0 && fluid > 0.0) {
+        return water_y + def.half_extents.y;
+    }
+    water_y + def.half_extents.y * (1.0 - 2.0 * (rho / fluid).clamp(0.0, 1.0))
 }
 
 /// **What a driver's own instruments say** — speed and gear, as one line.

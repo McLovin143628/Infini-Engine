@@ -182,16 +182,20 @@ pub fn spawn_vehicle(
     chassis
 }
 
-/// Where a vehicle's chassis origin goes if its wheels are to touch `ground`
-/// with the suspension at full extension — the placement an author makes.
+/// Where a vehicle's chassis origin goes if it is to rest on `ground` — the
+/// placement an author makes.
 ///
-/// One function because three callers want it (the island's spawner, the
-/// phase-29 course and any test that parks a car), and "wheel drop plus wheel
-/// radius" written out three times is three chances to write it once with the
-/// sign wrong.
-pub fn resting_origin_y(def: &VehicleDef, ground_y: f64) -> f64 {
-    ground_y - def.wheel_drop_m + def.wheel_radius_m
-}
+/// **A re-export, and it was a COPY** (wave VEH2c). Wave VEH2b lifted this rule
+/// into `inf_ecs::vehicle` so the runtime spawner and the authoring one place a
+/// car the same way, and left this function behind spelling it out a second
+/// time. The two agreed for exactly as long as the rule had one case: the day a
+/// wheel-less craft needed "the collider's own half-height" instead, the Ring-0
+/// door learned it and this one did not, and a helicopter would have been parked
+/// 1.1 m in the air on a wheel radius it does not have.
+///
+/// So it is now the same function. Two spellings of one rule is the defect this
+/// repository has paid for at five separate seams.
+pub use inf_ecs::vehicle::{floating_origin_y, resting_origin_y};
 
 /// **The island's fleet, as authored content** (island wave VEH1a).
 ///
