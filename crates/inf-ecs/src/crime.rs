@@ -33,6 +33,20 @@
 //!   `inf_physics::d3::crime`, because the ray is a physics primitive; it
 //!   multiplies this score and can only ever make it smaller.
 //!
+//! # …and the bound on the other side of that law (EMS3 audit)
+//!
+//! The applier walks `officers x wanted` and scores each suspect against **their
+//! own file**, so an officer never compares the people in front of them against
+//! the descriptions they are carrying. Nothing above is weakened by it — no
+//! `last_seen` can be written without a ray — but one sentence this module used
+//! to make is not yet true of the *world*: two people dressed alike collide in
+//! the **channel**, and the collision cannot yet reach an officer's eyes,
+//! because somebody with no file is never in a scored pair. The innocent
+//! bystander in the wrong coat is a property of the description and not yet a
+//! thing that happens on a street; `inf_physics::d3::crime::look` carries the
+//! cost argument and `crime_3d::an_innocent_in_the_same_coat_is_never_looked_at`
+//! pins it.
+//!
 //! `ems3_crime_gate::the_police_never_read_the_players_true_position` is the
 //! falsifiable form: the suspect walks a long way with no officer able to see
 //! them, and the ledger's `last_seen` does not move a millimetre.

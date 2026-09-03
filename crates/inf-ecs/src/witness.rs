@@ -170,8 +170,10 @@ pub struct WitnessedAct {
     ///
     /// It is now [`look_digest`], which is [`crate::crowd::Appearance::digest`]
     /// of what the actor has on: a value, not an identity. Two people dressed
-    /// alike collide **on purpose** (that is what a description costs somebody
-    /// innocent), and changing at a wardrobe changes the number.
+    /// alike collide **on purpose**, and changing at a wardrobe changes the
+    /// number. The collision is a property of the channel and not yet of a
+    /// street — see [`crate::crowd::Appearance`] and
+    /// `inf_physics::d3::crime::look` for who actually gets scored.
     pub actor_look: u64,
     /// **The vehicle the actor was in**, if any — the other half of a
     /// description, and the one the reference's wanted system keys on.
@@ -544,8 +546,11 @@ mod tests {
         use crate::crowd::{set_appearance, Appearance};
         let mut w = EcsWorld::new();
         // (1) TWO PEOPLE IN THE SAME CLOTHES DESCRIBE THE SAME. This is what an
-        //     identity hash can never do, and it is what makes an innocent
-        //     bystander in the wrong coat a thing that can happen.
+        //     identity hash can never do. It is what an innocent bystander in
+        //     the wrong coat would REST on; whether one can happen is a question
+        //     about the recognition pass rather than about the digest, and
+        //     `crime_3d::an_innocent_in_the_same_coat_is_never_looked_at` is
+        //     where that is measured.
         set_appearance(&mut w, guid(7), Appearance { outfit: 3 });
         set_appearance(&mut w, guid(8), Appearance { outfit: 3 });
         assert_eq!(

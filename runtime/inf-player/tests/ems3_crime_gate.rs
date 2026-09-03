@@ -655,7 +655,7 @@ fn the_hero_changes_at_a_wardrobe_and_walks_past_the_cruiser() {
     );
     println!(
         "  {} officer(s) on the beat, {} ray(s) cast ({} blocked), \
-         {} clear view(s) that were NOT a recognition, {} recognition(s)",
+         {} pair(s) considered and NOT recognised, {} recognition(s)",
         run.officers, run.rays.0, run.rays.1, run.unrecognised, run.recognised
     );
     // THE CRIME LANDED — armed, so nothing below is a statement about an empty
@@ -680,6 +680,12 @@ fn the_hero_changes_at_a_wardrobe_and_walks_past_the_cruiser() {
         run.officers > 0,
         "no officer ever left the station — the checkpoint was watched by nobody"
     );
+    // `unrecognised` counts a pair the pass CONSIDERED — it is only reached past
+    // the range gate, so this is the claim that the officer was within
+    // `RECOGNITION_RANGE_M` of the hero and scored them at zero. A swapped coat
+    // and a ditched car match on no channel, so the pass spends no ray at all
+    // and `rays` is legitimately zero here; the disjunction is what makes the
+    // arm true of both outcomes rather than of a fixture that never met.
     assert!(
         run.rays.0 > 0 || run.unrecognised > 0,
         "the recognition pass never considered the hero at all"

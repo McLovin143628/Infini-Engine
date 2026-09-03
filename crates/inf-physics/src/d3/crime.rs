@@ -94,8 +94,17 @@ pub struct RecognitionStats {
     /// is doing something": a pass that recognised everybody through every wall
     /// reads zero here.
     pub blocked: usize,
-    /// Pairs that had a clear view and **still** did not clear the threshold —
-    /// the number the whole evasion clause is about.
+    /// **Pairs the pass considered and did not recognise** — the number the
+    /// whole evasion clause is about.
+    ///
+    /// Two branches reach it, and the distinction matters when a gate prints it
+    /// (EMS3 audit — this doc used to say "had a clear view", which is true of
+    /// only one of them): a pair whose channels score **zero** is counted here
+    /// *before* a ray is spent, and so is a pair that got a clear view and
+    /// still fell under [`crime::RECOGNIZE_SCORE`]. A successful evasion reads
+    /// as the first, with [`RecognitionStats::rays`] at zero beside it, which is
+    /// the pass refusing to spend a ray on somebody who cannot be recognised
+    /// anyway.
     pub unrecognised: usize,
     /// Recognitions. `sight` was called exactly this many times.
     pub recognised: usize,
@@ -182,6 +191,30 @@ fn officers(world: &EcsWorld) -> Vec<Uuid> {
 }
 
 /// The look itself — the one place a score becomes a sighting.
+///
+/// # WHO IS SCORED, and the bound the wave's prose did not have (EMS3 audit)
+///
+/// The walk is `officers x wanted`, and each suspect is scored **against their
+/// own file**: the pass asks *"is the person this file is about still wearing
+/// what it says"*, not *"which of the people in front of this officer matches
+/// any file"*. [`crime::match_score`] still has no `Uuid` in it and
+/// [`crime::sight`] is still behind a range gate, a ray and a threshold — the
+/// police-don't-cheat law is untouched, because none of this can write a
+/// `last_seen` nobody saw.
+///
+/// What it does mean is that **an innocent look-alike is never scored at all**.
+/// The channel collides by design (there are eight outfits, so one civilian in
+/// eight wears a wanted man's coat) and the collision cannot yet reach an
+/// officer's eyes: somebody with no file is not in `wanted`, so no pair is
+/// formed, no ray is spent and `RecognitionStats::in_range` never counts them.
+/// `crime_3d::an_innocent_in_the_same_coat_is_never_looked_at` measures it, so
+/// the day a wave wants the wrong man stopped it fails a test instead of
+/// discovering a paragraph.
+///
+/// It is a **cost** bound rather than a design one, and worth stating as such:
+/// the honest version is `officers x candidates_near x files`, which multiplies
+/// this pass by the population of a street and is the reason it was not written
+/// that way.
 fn look(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,

@@ -645,9 +645,15 @@ pub fn agent_look(guid: Uuid) -> CrowdLook {
 ///
 /// So an appearance is a **value**, not an identity: the index of the palette
 /// swap the person is drawn in. Two people in the same swap describe
-/// identically (which is what "they have your description" costs somebody
-/// innocent), and one person who changes swap describes differently (which is
+/// identically, and one person who changes swap describes differently (which is
 /// what makes a wardrobe worth walking into).
+///
+/// The first half of that is a property of the **channel** and not yet of the
+/// world (EMS3 audit): the recognition pass scores every suspect against their
+/// own file and never scores somebody who has no file, so a civilian in a wanted
+/// man's coat collides here and is never looked at. See
+/// `inf_physics::d3::crime::look`, which carries the cost argument and the arm
+/// that pins it.
 ///
 /// # It defaults to the DERIVED draw, and that is what keeps the tree still
 ///

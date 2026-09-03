@@ -41,6 +41,8 @@ const SUSPECT: Uuid = Uuid::from_u128(0x0E53_0003);
 const WITNESS: Uuid = Uuid::from_u128(0x0E53_0004);
 const WALL: Uuid = Uuid::from_u128(0x0E53_0005);
 const GETAWAY: Uuid = Uuid::from_u128(0x0E53_0006);
+/// An innocent man in the same coat as the criminal.
+const TWIN: Uuid = Uuid::from_u128(0x0E53_0007);
 
 /// The outfit the crime is committed in, and the one it is changed into.
 const OUTFIT_A: u8 = 2;
@@ -191,6 +193,19 @@ impl Beat {
         assert_eq!(filed, 1, "the crime was not filed");
     }
 
+    /// Put somebody with no criminal record at `at`, wearing `outfit`.
+    fn bystander(&mut self, guid: Uuid, at: DVec3, outfit: u8) {
+        let e = self.world.spawn_with_guid(guid, "Bystander", None);
+        self.world
+            .world_mut()
+            .entity_mut(e)
+            .insert(Transform::from_translation(at));
+        set_appearance(&mut self.world, guid, Appearance { outfit });
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.sync();
+    }
+
     fn place(&mut self, guid: Uuid, at: DVec3) {
         let e = self.world.entity_of(guid).expect("in the world");
         if let Some(mut t) = self.world.world_mut().get_mut::<Transform>(e) {
@@ -295,6 +310,72 @@ fn changing_the_clothes_and_leaving_the_car_defeats_the_description() {
         Some(seen_at),
         "an unrecognised suspect moved the file"
     );
+}
+
+/// **AN INNOCENT MAN IN THE CRIMINAL'S COAT IS NEVER LOOKED AT** (wave EMS3
+/// audit) — the bound the wave's prose did not have.
+///
+/// # What three doc comments claimed
+///
+/// `crowd::Appearance`, `witness::actor_look` and the wave's ledger all said
+/// that two people dressed alike collide *"on purpose"* and that this is *"what
+/// a description costs somebody innocent"*; the carried list priced it at a
+/// one-in-eight false-positive rate. The channel does collide — that half is
+/// measured in `witness`' own arm — but the recognition pass walks
+/// `officers x wanted` and scores each suspect **against their own file**, so a
+/// person with no file is never in a scored pair at all. The cost of a
+/// description to an innocent man is, today, **zero**.
+///
+/// That is a legitimate cost bound (the honest walk is
+/// `officers x candidates_near x files`) and it is not a weakening of the
+/// police-don't-cheat law — nothing here can write a `last_seen` without a ray.
+/// It is written down as an arm so the day somebody implements the wrong man
+/// being stopped, a test fails instead of a paragraph being believed.
+#[test]
+fn an_innocent_in_the_same_coat_is_never_looked_at() {
+    let mut beat = Beat::new(8.0, 12.0);
+    beat.commit(10);
+    // The twin: no file, the criminal's exact outfit, standing two metres from
+    // the officer — nearer than the suspect and in the same clear daylight.
+    beat.bystander(TWIN, DVec3::new(2.0, 1.0, 0.0), OUTFIT_A);
+    assert_eq!(
+        inf_ecs::witness::look_digest(&beat.world, TWIN),
+        inf_ecs::witness::look_digest(&beat.world, SUSPECT),
+        "the fixture did not actually dress the two men alike"
+    );
+    let s = beat.look(11);
+    println!(
+        "one criminal at 8 m and one innocent twin at 2 m: {} file(s), \
+         {} pair(s) in range, {} ray(s), {} recognition(s)",
+        s.files, s.in_range, s.rays, s.recognised
+    );
+    // ONE pair, and it is the officer with the file's own subject. A pass that
+    // compared what it could see against what it was carrying would read two.
+    assert_eq!(s.files, 1);
+    assert_eq!(
+        s.in_range, 1,
+        "the pass formed {} pair(s) — it is scoring somebody who has no file",
+        s.in_range
+    );
+    assert_eq!(s.recognised, 1, "the criminal was missed");
+    // …and the ledger holds the CRIMINAL's place and not the twin's, which is
+    // what a false positive would have written.
+    assert_eq!(beat.last_seen(), Some(DVec3::new(8.0, 1.0, 0.0)));
+
+    // Now take the criminal out of range entirely and leave only the twin in
+    // front of the officer. Nobody is scored, nothing is looked at, and a man
+    // in a wanted coat walks past a policeman who has his description.
+    beat.place(SUSPECT, DVec3::new(300.0, 1.0, 0.0));
+    beat.sync();
+    let s = beat.look(12);
+    println!(
+        "  the criminal 300 m away, the twin still at 2 m: {} pair(s) in range, \
+         {} ray(s), {} recognition(s)",
+        s.in_range, s.rays, s.recognised
+    );
+    assert_eq!(s.in_range, 0, "somebody without a file was measured");
+    assert_eq!(s.rays, 0);
+    assert_eq!(s.recognised, 0);
 }
 
 /// **THE POLICE DO NOT CHEAT** — the wave's signature arm, at unit scale.
