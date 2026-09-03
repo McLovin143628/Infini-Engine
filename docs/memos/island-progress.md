@@ -28164,3 +28164,18 @@ restating: only `chr(92)` and a heredoc are remedies.
     characters between the two anchors. It works and has about 20 % of headroom;
     a fifteenth `clear_*` door with a long comment is what would silently
     truncate it.
+
+### EMS3 audit verification
+
+`cargo fmt --all --check` clean. Full battery `-j 3 --no-fail-fast
+INF_GOLDEN_STRICT=1` after the repairs: **AGGREGATE over 365 binaries: 6 920
+passed, 0 failed, 20 ignored**, exit 0 (365 rather than EMS2's 362 because the
+wave adds `crime_3d`, `wardrobe_3d` and `ems3_crime_gate`; the only panic in the
+log is `inf-hotreload`'s deliberate crash-isolation fixture). Rustdoc **409 of a
+450 ceiling** after `cargo clean --doc`, none of them in the wave's or the
+audit's files — the one warning in `inf-ecs` is `crowd.rs:2598`, a private-item
+link from `6385438c`, which predates the wave. `clippy --workspace --all-targets
+-D warnings` clean, run last. Goldens stay **62**, none added and none
+re-blessed; `EXPECTED_LEVELS` **24**; scene **v27** / `ScenePayload` **v12**; no
+`Cargo.toml`, `Cargo.lock`, `deny.toml`, committed `.inf_lvl` or golden in the
+diff; the whole diff is LF-clean.
