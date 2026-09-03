@@ -28179,3 +28179,600 @@ link from `6385438c`, which predates the wave. `clippy --workspace --all-targets
 re-blessed; `EXPECTED_LEVELS` **24**; scene **v27** / `ScenePayload` **v12**; no
 `Cargo.toml`, `Cargo.lock`, `deny.toml`, committed `.inf_lvl` or golden in the
 diff; the whole diff is LF-clean.
+
+## Wave VEH2c — sea and air (2026-09-03)
+
+Base `5c443b21`. The old VEH1b clauses 1–2, refreshed after the EMS arc: open
+the recogniser seam a wheel-less craft has been invisible to since P29.7, and
+put a boat and a helicopter through it.
+
+`inf_ecs::vehicle::Vehicle`'s own doc has said since the day it was written
+that *"a tank, a hovercraft and a boat can share one fixed-step door"*, and the
+trait really did support it — `step_one` casts one ray per wheel, so a rig with
+no wheels casts none, and `solve` is handed the chassis state either way. What
+did not support it was the **derivation**: `rig_of` returned `None` on
+`wheels.is_empty()` and `reconcile_vehicles` walked the wheels map. A boat was
+structurally invisible. `vehicle_count()` was zero and there was nothing to sit
+in.
+
+### THE MINI-SCOUT'S RULING: no schema window, and no aliasing that lies
+
+The brief asked which of three tuning surfaces the wave would take — TOML-only
+geometry keys, aliased land fields, or a v28 STOP-and-price. The answer is the
+first two **as a partition**, and the reason is that the question splits three
+ways rather than two:
+
+| what a craft needs | where it came from |
+|---|---|
+| per-class numbers a *car* also has | the sixty-two, **by the meaning their own names already carry** |
+| per-craft geometry | `VehicleDef`'s geometry keys — that type derives no `Serialize`, so they cost nothing |
+| what the machine FEELS like | Ring-0 `pub const`s, the way `FLY_SPEED_MPS` and `ENTER_REACH_M` are |
+
+**Eleven of the sixty-two** are read by `HullVehicle` and eleven by
+`RotorVehicle`, and not one of them is an alias: `drag_lateral_n_per_mps2` on a
+boat is the **keel**, which is literally sideways drag; `max_steer_deg` and
+`min_steer_deg` on a helicopter are the cyclic's authority at the hover and at
+speed, which is literally "steering angle at a standstill and at
+`max_speed_mps`"; `enter_time_s` and its two warp clips are the seat
+choreography unchanged. Each class documents its own table at the type. The
+remaining **fifty-one** are **accepted** by `tune` and not consulted, because a
+catalogue row is one table and refusing half of it would leave an author's file
+half-read — which is why `install` counts what it took.
+
+Two new geometry keys were needed and were free: `buoyancy_density_kg_m3` (what
+a hull FLOATS at) and `buoyancy_linear_drag`. Neither is the collider's
+`density_kg_m3`, which is what the craft WEIGHS — a boat is a light shell that
+floats high and one number cannot be both.
+
+**Scene stays v27. `ScenePayload` stays v12.** No manifest is in the diff.
+
+### Clause 1 — the recogniser seam, and the boat
+
+**THE SEAM OPENS ON THE COLLIDER SHAPE.** `wheel_of` has answered "is this a
+wheel" since P29.7 with one rule — a **sphere** sensor with no body of its own
+— derived rather than authored, costing no schema because a child's
+`Collider3D` is a component every level has been able to write since v1. The
+authored shape vocabulary is exactly three, the sphere is taken, so the other
+two are the whole space:
+
+| a sensor child with no body | part |
+|---|---|
+| sphere | a **wheel** (`wheel_of`, unchanged) |
+| box | a **thruster** — a hull's screw and its rudder |
+| capsule | a **rotor** — a rotorcraft's disc |
+
+That the space is *exhausted* is stated rather than hidden: a fourth part kind
+is not expressible without a fourth collider shape, and the day one is wanted
+the honest move is a new shape, not a second recogniser keyed off something
+else. `PartKind` (`inf-ecs/src/vehicle.rs:123`), `PartMount` (`:150`),
+`part_of` (`:221`).
+
+**WHEELS WIN** is the whole of what the seam costs every level that already
+exists, which is nothing. A box or capsule sensor under a chassis *that has
+wheels* is an ordinary trigger, mirrored into rapier exactly as it was; only a
+wheel-less chassis looks for parts (`rig_of`, `:283`, and the same clause in
+the bridge at `inf-physics/src/d3/ecs.rs:982`). Measured in one arm from three
+sides: the same box gives a hull one **consumed** thruster and two bodies, and
+gives a car four wheels, zero parts, a **mirrored** collider and **three**
+bodies.
+
+**THE BOAT.** `HullVehicle` (`:4468`) is a screw, a rudder and a hull. What
+makes it a boat rather than a car with a rudder is one line: *a screw pushes
+only while it is in the water*. The door samples the sea once per vehicle per
+step into `ChassisState::water_y`, from the same `WaterIndex` and the same sim
+clock the buoyancy pass reads at stage 8, and each thruster's own half-height
+is the band its bite fades over.
+
+**What holds it up is not here.** Buoyancy is P20.2's and stays P20.2's: the
+water pass does the Archimedes solve at stage 8 and the vehicle door at stage
+12 **adds** to it rather than resetting, which is exactly the `is_buoyant`
+interlock P20.2 wrote and P29.7 armed.
+
+**THE DRAUGHT BOUND DOES NOT BITE, and that is a measurement rather than an
+opinion.** `sample_geometry`'s doc carries a v1 bound — a hull's draught
+approximated by its AABB — and names the exact fix as belonging *"with whatever
+first needs floating debris"*. A boat was the obvious candidate. It is not one:
+the bound is on the `ConvexHull` and `Trimesh` branches, and a boat's chassis
+is a **`Box`**, whose branch states its own half-extent exactly. The
+waterplane-section fix stays where its own doc put it.
+
+**THE BOAT-FEEL ROW** (the launch fixture: a 4 m hull, 3 200 kg, 9 kN screw,
+60 Hz, dev build):
+
+| | |
+|---|---|
+| full ahead from rest | 2.42 m/s at 1 s, 5.60 at 3 s, 8.39 at 8 s |
+| settled | **8.93 m/s (17.4 kn)**, 116.7 m in 16 s |
+| throttle closed | 50.5 m carried in ten seconds, 2.63 m/s left |
+| steady turning circle | **10.6 m radius**, both helms to the digit — 2.6 hull lengths |
+| astern | `HULL_ASTERN_FRACTION` of ahead, exactly |
+| on dry land, full throttle, ten seconds | **0.00 m** |
+
+The rudder is a force at the **stern**, which is what makes it a moment: the
+screw's race turned sideways (`RUDDER_WASH_GAIN`, what steers a boat with no
+way on) plus the rudder's own lift from the hull's motion (`RUDDER_FLOW_GAIN`,
+what steers one that has closed the throttle). The keel is applied at **two**
+points on the buoyancy pass's own argument — every section of a hull resists
+moving sideways, so two separated points turn one coefficient into yaw damping.
+Collapsing them onto the centre of mass leaves the sway resistance untouched
+and the yaw damping at **zero**, which is a boat that spins for ever.
+
+**A FINDING WORTH THE LEDGER: a boat's top speed is set by
+`Buoyancy::linear_drag`, not by the class's `drag_n_per_mps2`.** P20.2's term
+is isotropic and linear, and its blunt-body default held this hull to **5.7
+knots**. Both are kept and the split is stated — the linear one is the viscous
+part, the quadratic one is wave-making — and a boat that wants speed authors
+the component, which is a scene field and costs nothing.
+
+**THE ENGINE NOW FOLLOWS THE VEHICLE, and it did not before this wave.** This
+was nearly written down as done and was not: the fence issued `Play` at
+whatever position a vehicle happened to be in on the step it was first seen,
+then `SetPitch` and `SetVolume` **every step and the POSITION never**. So an
+engine loop stayed where the car had been parked, for the whole session — VEH1a
+carried it, VEH2a carried it again, and VEH2b's silent traffic carried it a
+third time.
+
+`AudioCommand::SetPosition` arrived at EMS2 for sirens and is the same command
+on the same queue, so the fix is four lines in a fence that is character-
+identical across the two hosts. Armed against the WORLD rather than against the
+stream's own shape: over the boat leg the launch issues **one** `Play` and a
+`SetPosition` on every step it is stepped, the **last** of them is where the
+hull actually is to 1 µm, and the positions **span 40 m or more** of the
+crossing — a `SetPosition` that shipped a constant would satisfy the first two
+claims and fail the third.
+
+On the island **both craft carry a voice**. In the GATE'S fixture only the
+launch does, and deliberately: two looping spatial sources in one world would
+make *"the emitter that moved"* ambiguous. Traffic's mute ruling is about
+seventeen parked cars and is
+unchanged — what this unblocks is stated in VEH2b's own carried item 5, and
+taking it is that wave's business rather than this one's.
+
+### Clause 2 — the helicopter
+
+`RotorVehicle` (`:4903`). **What the pilot commands is an ATTITUDE**, not a
+velocity and not a torque: the stick's fore-and-aft is a pitch attitude, its
+sideways is a yaw rate, and `VehicleControls::vertical` — which has existed
+since P20 as *"vertical intent while swimming or flying"* — is the collective.
+An attitude hold drives the fuselage onto what the stick asked for; the rotor's
+thrust acts along the fuselage's own up axis at the hub, so a nose-down
+fuselage has a thrust vector that is no longer vertical and the machine
+accelerates. **The translation is commanded nowhere.** It emerges, which is how
+a helicopter works and is why this needs no lift model and no aerofoil.
+
+**No new force channel.** `WheelForce` is a force at a point and a pure torque
+is two of them: `torque_pair` (`:4753`) returns the couple whose moment is
+exactly the torque asked for and whose sum is exactly zero, with the arm chosen
+from the world axis the torque leans on least so two hosts pick the same one.
+Its arm checks the moment about two different points, because a couple that
+were only balanced about its own centre would not be one.
+
+**THE AXES ARE SPELLED OUT IN THE CODE**, because this model was written with
+two of them backwards and the symptom was not a wrong number, it was a positive
+feedback loop: the machine pitched to **+79 degrees in a third of a second**
+with a nose-DOWN command and then flew into the ground with a `NaN`.
+`right × fwd` is `-up`, so a torque along `+right` pitches the nose **down**
+and `angvel · right` is a nose-down RATE — which is why both damping terms
+**add** to their proportional term. Restoring the subtraction reds two world
+arms.
+
+The yaw sign is the engine's, not this class's. `VehicleControls::steer` has
+said since P29.7 that *"a right turn is a negative yaw rate — see the door,
+where the sign is applied once"*; this is that door for an aircraft, and the
+world arm measures a right pedal as **+107 degrees** of the engine's own euler
+yaw, which is the sense a car's steering already turns in.
+
+**THREE REFUSALS, stated rather than discovered later:**
+
+1. **The turn is coordinated and the pilot does not fly it.** Bank is derived
+   from the yaw rate and the forward speed, so this machine cannot slip or
+   skid — and cannot strafe. Carried.
+2. **The collective is governed**: at neutral it holds the *vertical* part of
+   the thrust, so a coordinated turn does not sink. It has **two** edges and
+   both are armed — the rotor's own ceiling arrives FIRST (26 kN holds a
+   1 500 kg machine to about 56° of bank and no further), and past
+   `HELI_MIN_LIFT_COS` the governor stops dividing rather than asking for an
+   infinite rotor. There is no autorotation and no engine failure.
+3. **The disc is rigid with the mast.** A real cyclic tilts the disc and the
+   fuselage follows; here the fuselage is what moves. The difference is a few
+   tenths of a second of lag at the first instant of a stick input, and buying
+   it needs a disc state with flapping dynamics. Carried, with its size named.
+
+**THE AIR-FEEL ROW** (the light-twin fixture: 1 520 kg, 5 m disc, 26 kN rotor,
+60 Hz, dev build):
+
+| | |
+|---|---|
+| climb, full collective | 2.97 m/s at 1 s, settling at **4.87 m/s** (960 ft/min); 24.5 m in six seconds |
+| hover, neutral | the governor holds WEIGHT, not height, so the climb coasts off quadratically: 1.16 m then 0.99 m per three seconds |
+| forward flight | −22.5° at 1 s; ceiling **38.7 m/s (139 km/h)** at −19.1°, thirty seconds |
+| stick centred | back to **−0.0°** |
+| pedal turn on the spot | **+107° in three seconds**, wandering 4.3 m |
+| descent and landing | fifteen seconds of down collective puts it back on the ground it left, to **0.00 m**, at rest |
+
+**STREAMING AT SPEED — the plane-speed mandate's first number.** Cell
+activation is SYNCHRONOUS and neither streamer clamps a SIM want, so going
+faster cannot make the world wrong; it can only make the step expensive. Over
+900 steps at 60 Hz on the fixture island's cooked pack, one streaming source:
+
+| m/s | km/h | blocking | acts | pages | churn | peak | mean step | cell / terrain / vehicle |
+|---|---|---|---|---|---|---|---|---|
+| 24 | 86 | **0** | 1 | 4 | 1 | 2 | 7.3419 ms | 0.0217 / 0.1360 / 0.0131 |
+| 60 | 216 | **0** | 1 | 7 | 3 | 2 | 4.0338 ms | 0.0140 / 0.0584 / 0.0055 |
+| 80 | 288 | **0** | 1 | 7 | 3 | 2 | 3.2708 ms | 0.0114 / 0.0436 / 0.0043 |
+| 110 | 396 | **0** | 1 | 7 | 3 | 2 | 2.5831 ms | 0.0098 / 0.0325 / 0.0033 |
+
+Three readings, and the first is the headline. **Zero blocking loads at every
+speed, up to 396 km/h**: the bounded prefetch stays ahead of a source moving at
+four times a car's speed. The two streaming phases cost **0.16 ms a step at a
+car's speed and 0.04 ms at 110 m/s** — they get *cheaper*, and so does the
+whole step (7.34 → 2.58 ms), for the honest reason: a fast source leaves the
+settlement behind, and what a step on this island costs is the crowd and the
+traffic near it. **Plane speed does not cost streaming. Content density
+costs.** Residency does not run away either — the working set peaks at 2 cells
+at every speed, because an activation radius is a radius and not a history.
+
+The bound: this is the **fixture** island, two settlements. It is a lower bound
+on the cost and an upper bound on nothing.
+
+**The camera origin-rebase carried item, watched and reported:** the shipped
+player still **never rebases**. `PlayerRenderHost` sets
+`FloatingOrigin::default()` and nothing in `runtime/inf-player/**` ever calls
+`maybe_rebase` — only the two editor viewport hosts do. Render-local `f32`
+error therefore grows with distance from the world origin on a 50 km² island,
+and an aircraft is the first thing fast enough to cross that distance in a
+minute. Unchanged by this wave and carried with its reason.
+
+**Fixed-wing: priced, refused.** The measurement did not invite it. A fixed
+wing needs lift as a function of angle of attack, a stall, a control surface
+model and a runway; what it would share with this wave is `torque_pair` and the
+part recogniser, which is the cheap third of it.
+
+### Clause 3 — the camera and the readout
+
+**THE CAMERA RULING IS REUSE**, and it is a ruling rather than an omission.
+`CameraTuning::settings_for` answers `self.driving.base` for
+`MovementMode::Driving` before it looks at a gait, and a character in a boat or
+a helicopter **is** in `MovementMode::Driving` — a seat is a seat. Measured
+over three hulls:
+
+| | arm | FOV |
+|---|---|---|
+| a 6.4 m launch | **6.760 m** | 72° |
+| a 4.8 m helicopter | **6.320 m** | 72° |
+| a 3 m car | 5.825 m | 72° |
+| walking | 3.000 m | 70° |
+
+…and the launch-to-helicopter difference matches `arm_per_length_m` to 0.05 m,
+so the arm really is being sized by the craft rather than merely being large.
+
+A `Flying` branch, priced: a second `CameraSettings` table, a `FlyingView` on
+`CameraInput` (a breaking change at about eight literals), a second early
+return, and the only genuinely new part — a camera pitch that followed the
+AIRCRAFT'S attitude rather than the player's look. That last one is why it is
+refused rather than deferred: this helicopter's attitude is a commanded thing
+that moves 25° in a second and returns to level on a centred stick, so a camera
+that followed it would roll the horizon around the player every time they
+touched the stick. The player's own look already has full pitch freedom, and
+freedom is what the clause asked for.
+
+**THE READOUT** is one door dispatched on the RIG'S OWN PARTS
+(`craft_readout`, `:2116`): a car reads a speedometer and a gear, a boat reads
+knots and a telegraph (`17.4 kn    AHEAD`), an aircraft reads a speed and a
+height (`139 km/h    ALT 42 m`). Choosing off the parts rather than off a kind
+field means the readout cannot disagree with the model driving the machine —
+they are chosen from the same facts. A car's line is asserted *byte-identical
+to `drive_readout`'s* by comparing the two functions rather than by repeating
+the string.
+
+### Clause 4 — the police helicopter, priced rather than painted
+
+`dispatch::unit_kind_of` reads a unit off the **world** — a bloomed
+`light_bar` child and its hue — because that is the only channel that survives
+being written to an `.inf_lvl` and opened by a player with no livery table. It
+knows nothing about wheels. Measured: a rotorcraft wearing the cruiser's own
+bar and colours is read as `Some("police")` while its rig is **zero wheels and
+one rotor**.
+
+So the moment the island's helicopter is painted, `sync_fleet` claims it and
+`step_dispatch` sends it to an incident through `drive_intent` — a controller
+that steers along **lane centrelines**, whose throttle and steer this class
+reads as a pitch attitude and a yaw rate. The machine would lift into a hover
+and tilt toward a road.
+
+**The refusal costs exactly one field**, and the arm asserts it where the
+decision lives: `island_vehicle_livery("chopper")` is `None`. What a real air
+unit needs is a flight controller — a target altitude, a climb to it, a track
+to a POINT rather than a lane, and an orbit on arrival — plus a rule keeping a
+rotorcraft out of `drive_intent`'s road population. That is a wave, not a paint
+job.
+
+### The content, and the kerb trap closed in the same commit
+
+`VehicleBody` gains `Launch` and `Rotorcraft`, the first families since P29.7
+that are not road cars. This repository has written the kerb trap down **twice**
+without ever springing it: `catalogue_row` draws a parked car's silhouette
+UNIFORMLY over `VehicleBody::ALL`, so a sixth family puts one at every sixth
+kerb slot in every town, and EMS1 left the remedy in a comment —
+*"`catalogue_row` gains a named CIVILIAN sub-list in the same commit"*.
+
+This is that commit. `VehicleBody::CIVILIAN` (`:1460`) is the five road cars,
+the draw reads it (`traffic.rs:2074`), and the size table stays exhaustive over
+`VehicleBody` so the NEXT family is a compile error rather than a boat on a
+pavement — which fired for real while this was written. Armed rather than
+asserted in prose: `no_kerb_in_any_town_ever_holds_a_boat_or_a_helicopter`
+draws **two thousand** kerb slots, checks every one against `CIVILIAN`, and
+guards its own vacuity by requiring all five families to be reached. Pointing
+the draw back at `ALL` reds it at kerb slot **2**, naming the launch.
+
+**Four existing arms caught four real defects**, which is the argument for
+having them: the chopper weighed **3.9 tonnes** (a car-body density over a much
+larger box — 95 kg/m³ gives the 1 970 kg a Robinson-class machine has), the
+boom and the fin reached **past the hull they are drawn on**, the launch's
+parts summed to **7.04 of a hull that must be under 7** (a boat's forefoot is
+narrower than its deck, which is what the topsides now sit on), and the launch
+is the **second row over 3.6 tonnes** — the exception list moves and is NAMED,
+because a bound widened without naming its exception stops catching the 5-tonne
+saloon it exists for.
+
+**On the island** (`island.rs:836`): the launch needs no ground at all, which is
+why it could be placed under this module's ban on reading an elevation. A boat
+floats at the SURFACE and the recipe states where that is; its position is the
+committed coast ring's nearest vertex to Harbour City, pushed seaward, because
+the nearest shore point to a settlement is on the shore that settlement faces.
+Measured on the built island: **720 m from the city against a shore at 650 m**,
+which is 70 m of water and clear of the 32 m beach the recipe declares. Its
+height is Archimedes and nothing else (`floating_origin_y`, `:2087`), so the
+level does not open with a splash.
+
+The helicopter and its pad go on the police station's apron at slot 5 —
+`station_fleet` parks three cruisers at slots 1–3, so a pad **55.3 m along**
+clears the last of them by more than the 4.3 m disc. The pad is a drawn slab
+with a real static collider, buried so what stands proud is a 12 cm lip and not
+a kerb the hero trips over.
+
+**A duplicate died on the way.** `resting_origin_y` existed twice — VEH2b
+lifted it into `inf_ecs::vehicle` and left the editor's copy spelling out the
+same rule. They agreed for exactly as long as the rule had one case: the day a
+wheel-less craft needed *"the collider's own half-height"*, the Ring-0 door
+learned it and the copy did not, and this wave would have parked a helicopter
+**1.1 m in the air** on a wheel radius it does not have. The editor's is now a
+`pub use`.
+
+### Clause 5 — THE GATE: harbour to air
+
+`runtime/inf-player/tests/veh2c_harbour_gate.rs`. The hero boards the launch on
+its mooring, takes it across the bay and back under helm, gets out; boards the
+helicopter on its pad, lifts off, flies a circuit and lands. Both craft come
+from the **island's own catalogue** — a gate that assembled its own boat would
+certify a boat this game does not ship.
+
+| | |
+|---|---|
+| the boat leg | 1 411 of 1 652 steps seated, **147.7 m** reached, afloat at the end (y = 0.24), and nearer the mooring than its furthest point — so the helm turned it |
+| the air leg | 2 221 of 2 311 steps seated, **42.5 m** of altitude, 45.7 m of circuit, back on the ground at y = 0.91 with **5 mm** of drift over the three seconds after it landed |
+| PIE == shipping | **both legs, step for step**, on the craft's pose to the millimetre and the driver's mode; the shipped host's own `state_bytes` fold checked to be a moving trace (1 623 of 1 652 distinct poses on the boat leg) |
+| the launch's voice | **one** `Play` and **1 652** `SetPosition`s, one a step, spanning **147.7 m** and ending where the hull is to a micrometre |
+| the vehicle phase | **0.00110 ms** a step over the boat leg and **0.00123 ms** over the air leg, with a boat and a helicopter in the world, against a 0.5 ms ceiling minted for 64 cars |
+
+**`VEHICLE_STEP_BUDGET_MS` does not move.** A hull solve is one thruster and
+three drags and a rotor solve is a governed collective and one torque couple;
+neither casts a ray, and both are cheaper than a car.
+
+**Two claims the gate deliberately does not make.** The leg between the craft
+is a WALK — driving a car to a place is `island_gate`'s subject and has been
+armed since VEH1a. And the helicopter lands on the GROUND rather than on the
+pad it left: a circuit flown on a fixed stick ends where the physics put it,
+about 30 m along the shore, and asserting a pad landing would be asserting a
+script somebody tuned until it hit one.
+
+### THE DEFECTS, and who found each one
+
+Three came out of the gate, one out of reading the fix for the first of them,
+one out of the harness, and one — the engine emitter above — out of writing
+this ledger and checking a sentence before publishing it. That last one is
+worth its own note: the claim *"the boat is the first vehicle whose engine can
+follow it"* was drafted as done, and the fence said otherwise.
+
+**1. AN UNMANNED HELICOPTER FLEW ITSELF AWAY.** A governed collective's NEUTRAL
+is a hover, so a machine reading its default controls as input carries its own
+weight. Measured: the parked helicopter travelled **476 m** and ended **12 m
+under the world** with nobody aboard. `VehicleControls::occupied` (`:2622`) is
+the fix, and it is a boolean rather than a zero on purpose — read the neutral
+as "hovering" and you cannot express "switched off". A stick at rest and no
+hand on it are different things.
+
+**2. INPUT WAS NOT PER STEP, and never had been.** `movement`, `traffic` and
+`dispatch` all command their vehicles through `VehicleControls` and **none of
+them ever cleared one**, so a vehicle whose driver got out kept the last
+command it was given for ever. In a car that is an abandoned throttle nobody
+noticed, because the only thing anybody had ever got out of was a car that was
+already stopping. The vehicle door now clears the controls after each solve
+(`d3/vehicle.rs:289`) — after `engine_state`, so the sound is still a function
+of the decision just taken — and every commander already runs before the phase.
+Armed: a pilot who steps out at **31.6 m** is on the ground **ten seconds
+later**, where before the machine kept climbing.
+
+**3. THE MAST WAS FORWARD OF THE CENTRE OF GRAVITY.** The first cut put the hub
+0.29 m ahead of the chassis origin, where a drawing would put it. Thrust acts
+at the hub and mass acts at the origin, so that is a permanent nose-up couple —
+and a **proportional** attitude hold does not remove a steady one, it balances
+it at an error.
+
+What was **measured** is the trajectory: the machine flew **33 m backwards in
+the seven and a half seconds of its climb** and went on until it was over the
+bay, where it descended into water a helicopter has no `Buoyancy` for. The
+**4.3°** of standing trim is *derived* from the offset against the hold's gains
+and the airframe's inertia, not read off a trace — the distinction matters and
+this repository has a law about it. Fixing the mast made the climb vertical to
+the centimetre, which is the measurement that closes it.
+
+Real helicopters put the mast over the CG for exactly this reason; the
+alternative is an integral term buying back a trim the airframe should not have
+needed. The climb is now vertical to the centimetre.
+
+**3b (found by reading the fix, not by an arm).** The early return that stops
+an unmanned machine hovering also skipped the FUSELAGE, so an abandoned
+helicopter fell with **no drag at all** — a machine nobody is flying is still a
+shape moving through air. `fuselage_drag` is its own function now because it
+belongs on both paths. The commanded pitch also goes back to centre with the
+pilot: a stick left standing would be applied the instant somebody else climbed
+in, which is the same class of defect as the controls that were never cleared.
+
+**4 (the harness).** The hero could not board the helicopter at a 2.6 m
+standoff, because the seat is the collider's TOP FACE and on a 1.8 m airframe
+on a pad that is **3.16 m** from the feet against a **3 m** reach — EMS1's
+carried *"the fire appliance's seat is 3.45 m up"* meeting an aircraft.
+`HERO_STANDOFF_M` is measured against `ENTER_REACH_M` rather than chosen.
+
+**Mutation-verified.** Restoring the forward mast reds the air leg by name.
+Dropping the `wheels.clear()` in `rig_of` reds the compatibility arm and
+nothing else; teaching `part_of` to claim the sphere reds the partition arm
+alone; collapsing the keel onto the centre of mass reds the yaw-damping arm;
+flipping the rudder's sign reds two; `RUDDER_FLOW_GAIN = 0` reds the
+coasting-helm arm; restoring the pitch damping's subtraction reds two world
+arms; removing the governor's division reds the bank arm; flipping the yaw
+command reds the pedal arms; making the aircraft branch of `craft_readout`
+unreachable reds the readout arm; pointing the kerb draw at `ALL` reds the kerb
+arm.
+
+**A TRIPWIRE CAUGHT THE ENGINE-EMITTER FIX ON ITS FIRST RUN, and was inverted
+rather than deleted.** `both_audio_steps_drive_the_engine_loop_the_same_way`
+has FORBIDDEN `AudioCommand::SetPosition` in that fence since VEH1a, precisely
+so the carried item could not be closed quietly — and it survived two waves
+unchanged, which is exactly what a tripwire is for. The clause now insists the
+command IS there, beside a second insisting on the `src.spatial` guard, because
+deleting it would have left the seam unguarded in the other direction.
+`AudioCommand::Stop` stays forbidden: ending a loop is a lifetime decision and
+belongs to whoever despawns the vehicle.
+
+**The `occupied` and per-step-input mutations did NOT red until arm (f)
+was written** — the gate's own journey never leaves a craft unmanned — which is
+the vacuity lesson met again and is why that arm exists.
+
+**FIVE EATEN BACKSLASH-CONTINUATIONS** were swept out of this wave's diff, and
+the root cause is worth the record because the P22 law's shorthand does not
+name it: **in this harness a bash heredoc eats a lone backslash even when the
+delimiter is quoted**, so a doubled backslash inside one is not a remedy.
+`chr(92)` or a written file are.
+
+### CARRIED
+
+1. **No fixed wing.** Priced above and refused: what it shares with this wave
+   is `torque_pair` and the part recogniser; what it needs is lift as a
+   function of angle of attack, a stall, control surfaces and a runway.
+2. **The turn is coordinated and cannot be flown out of trim**, so the
+   helicopter cannot slip, skid or **strafe sideways**. One axis of a real
+   cyclic is missing and it is the one that lets a machine hold a hover in a
+   crosswind.
+3. **The rotor disc is rigid with the mast.** A real cyclic tilts the disc and
+   the fuselage follows it; here the fuselage is what the attitude hold moves,
+   which costs a few tenths of a second of lag at the first instant of a stick
+   input.
+4. **A helicopter has no ground effect and no landing gear model.** It rests on
+   its chassis collider — the skids are drawn, not simulated — and the rotor's
+   downwash does nothing to the ground, the water or the grass under it.
+5. **A rotor's contact channel is empty.** The door fills a wheel's contact
+   from a ray and a thruster's from the water surface; a rotor gets neither, so
+   there is no height-above-ground in the model and ground effect has nowhere
+   to come from.
+6. **No wake, no spray, no rotor wash.** The boat leaves no mark on the water
+   it is crossing and the helicopter none on anything. `WaterBody` has the foam
+   channel `flow` already feeds; nothing writes it from a hull.
+7. **Ocean and lake flow are still zero** (P20.1's explicit decision), so a
+   boat is never carried by a current and a river's `flow` — which IS real —
+   reaches a hull only through the buoyancy pass's drag reference, never as a
+   force the helm has to fight.
+8. **The island's rivers are not boat routes.** `MAX_RIVER_BODIES` reaches of
+   the fifty the design found are `WaterBody::River` entities; nothing checks
+   whether a hull of the launch's beam fits between their banks, and nothing
+   places a craft on one.
+9. **No winch, no rope, no sling load** — the helicopter carries nothing and
+   nobody but its pilot. `VehicleRig::seat_local` is one `Vec3d` and
+   `SeatState` has no index (VEH2b's carried item 4), so there is no passenger
+   seat on any craft.
+10. **A police helicopter is priced, not built** (clause 4 above): the paint is
+    refused because `unit_kind_of` would claim it and `drive_intent` would send
+    it down a road. The flight controller it needs is named in that section.
+11. **The shipped player never rebases its render origin** (VEH2c watched it,
+    unchanged): `PlayerRenderHost` holds `FloatingOrigin::default()` and only
+    the editor's two viewport hosts call `maybe_rebase`. An aircraft is the
+    first thing fast enough to make the growing `f32` error visible in a
+    minute.
+12. **The streaming-at-speed table is the FIXTURE island's**, two settlements.
+    The real island's number needs a gate that cooks it, which is 43 seconds of
+    build inside a test.
+13. **A helicopter ditched at sea sinks through the seabed.** It carries no
+    `Buoyancy` — correctly, it is not a boat — and a sea has no floor, so a
+    machine put in the water leaves the world. Observed in this gate's own
+    first script and left as the honest outcome.
+14. **`ChassisState::water_y` is one sample per vehicle, not one per part.**
+    The error that buys is a wave's slope across the hull: on the island's sea
+    (0.6 m over 34 m) a 5 m boat spans 15 % of a wave and the slope term is
+    under 6 cm, smaller than the draught band a screw sits in. Stated at the
+    field.
+15. **A craft cannot CHANGE KIND while it is running.** `reconcile_vehicles`
+    keeps the class it built, so a chassis whose rotor an author deletes during
+    Simulate — leaving a thruster — keeps its `RotorVehicle` and goes on
+    hovering over a rig with no rotor in it. A car cannot reach this state (a
+    chassis that loses its wheels is dropped by the `retain`); only a wheel-less
+    craft can, and only by an edit made while the session runs. The fix is one
+    comparison of the rig's dominant part kind at the top of the reconcile.
+16. **The PIE comparison is at MILLIMETRE resolution.** `SimSession` has no
+    `state_bytes` (the shipped host owns the fold and PIE runs the shipped host
+    in a subprocess), so the two hosts are compared on the craft's pose
+    quantized to 1 mm and the driver's mode — `ems3_crime_gate`'s own
+    arrangement. A divergence smaller than a millimetre that never grew would
+    not be seen. What guards against the comparison being vacuous is separate:
+    1 623 of 1 652 distinct poses on the boat leg, and the shipping host's own
+    fold checked to be a moving trace.
+17. **A hull's half-height is read off the SEAT, which is the collider's top
+    face — so a chassis collider with a non-zero `y` offset would measure its
+    own immersion wrong** by exactly that offset. Every craft this wave ships
+    has a centred collider (`rig_nodes_at` writes no offset), so the number is
+    exact for all of them; it is a bound on a shape nothing authors yet rather
+    than an error in one that does. The same is true of `half_length`'s
+    fallback, which is a height standing in for a length and is unreachable
+    while `class_for_parts` requires a thruster to build a hull at all.
+18. **Nothing draws a boat's or an aircraft's instruments in the editor.**
+    `craft_readout` is armed in Ring 0 and called from `window.rs`, which is
+    the windowed player and a path CI cannot run — the same bound every line of
+    that file carries.
+
+### Counts
+
+| | last recorded (EMS3 audit) | **wave (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 365 / 6 920 / 0 / 20 | **366 / 6 959 / 0 / 20** — `cargo test --workspace -j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`, exit 0, run at the head this row is written at. +1 binary (the wave's own `veh2c_harbour_gate`) and +39 passed over the EMS3 audit's row. The only panic in the log is `inf-hotreload`'s deliberate crash-isolation fixture. **Two earlier runs of the same tree read 366 / 6 958 / 1 / 20**, and the one failure is the club gate's wall-clock audio budget — see the note below the table |
+| goldens | 62 | **62, none added and none re-blessed** — `git status` over `crates/inf-render/tests/goldens` is empty and the diff touches none. This wave renders nothing |
+| rustdoc individual warnings (ceiling 450) | 409 | **409 ^warning lines**, exit 0, cold after `cargo clean --doc`. Thirty of them are per-crate summaries, so **379 individual** against a 450 ceiling — cross-checked against the sum of the summaries' own counts, which is 379 exactly. **None is in a file this wave touched**: no warning cites `inf-ecs/src/vehicle.rs`, `inf-physics/src/d3/`, `inf-editor-core/src/island.rs`, `inf-player/src/window.rs` or the two gates |
+| `clippy --workspace --all-targets`, `-D warnings` | 0 | **0**, exit 0, run **LAST** per the rmeta law. Two findings on the way, both in this wave's own test code and both fixed rather than allowed: a `&mut RuntimeSim` handed to a function that takes a shared reference, and a `for` loop over a one-element array. Checked for vacuity — a `.clone()` on a `usize` inside the harbour gate's own new arm reds the run by name |
+| `cargo fmt` | clean | **clean** — per package. `cargo fmt --all --check` itself fails on this machine with *"The filename or extension is too long (os error 206)"*, which is a Windows command-line-length limit reached by the workspace's file list and not a formatting result; `cargo fmt --all` (write mode) and `cargo fmt -p <pkg> --check` both run, and every touched package is clean under the latter |
+| `Cargo.lock` / manifests / `deny.toml` | byte-identical | **byte-identical** — not one manifest is in the diff, and **no dependency of any kind was added**, so `cargo deny` was not required |
+| schemas | scene v27, `ScenePayload` v12 | **unmoved — scene v27, `ScenePayload` v12.** The mini-scout's whole job was to make this true, and it is why the tuning surface is eleven honest names per class plus two free geometry keys rather than a v28 window |
+| committed content | 24 levels | **24 levels; ONE moved.** `VancouverIsland.inf_lvl` 139 933 → 144 755 B and 534 → 550 entities, which is exactly what was added: the launch is a chassis, four body parts, a screw and its blade (7); the helicopter is a chassis, five parts, a rotor and its blade (8); the pad is 1. `EXPECTED_LEVELS` stays **24** |
+| CRLF | 0 | **0** over `git diff origin/main..HEAD` |
+| frontend | not run | **not run — `editor/studio/src/` is untouched.** The one piece of UI this wave adds is the craft readout, which is `runtime/inf-player/src/window.rs` |
+| the wave | — | **11 commits**, 17 files, **+5 590 / −111** lines; `#[test]` diff **+40 / −1**, and the one removal is a relocation rather than a deletion (`inf-ecs/src/vehicle.rs` goes 48 → 67 `#[test]`s) |
+
+**THE ONE ARM THAT WENT RED, and why it is not a regression.** Two full
+batteries of this tree failed `pie_equals_shipping_at_a_club_on_a_saturday_
+night` on `AUDIO_STEP_BUDGET_MS`, at 1.008 ms and then 1.084 ms against a
+ratchet of 1.0. Run **alone** on the same commit the same work reads **0.120 ms
+(shipping) and 0.122 ms (PIE)** — better than eight times inside the ratchet —
+and the shipping half of the two battery runs read 0.425 and 0.611 for work
+that did not change. A number with a 2.5x spread between two runs of one
+program is measuring the scheduler: under `-j 3` this binary's twenty-six tests
+run in parallel threads beside two other crates'.
+
+So the arm now reports rather than asserts on a dev build or on CI, which is
+the condition **every other budget arm in the same file already carried** and
+this one did not. The ratchet is unchanged at 1.0, every figure is still
+printed on every run, and the arm's ANTI-VACUITY checks stay unconditional —
+which is why the guard is on three expressions rather than an early return, an
+early return having skipped them too.
+
+That leaves this wave's own audio addition measured and stated: the engine
+emitter's `SetPosition` is one command and one transform read per spatial
+vehicle emitter per step, the club gate's ring still drops **0** commands, and
+the phase is 0.120 ms of a 1.0 ms budget when nothing else is running.
