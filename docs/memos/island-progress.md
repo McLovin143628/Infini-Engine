@@ -27912,8 +27912,9 @@ or not.
 * **(c) the table** at 8 m, printed and asserted;
 * **(d) PIE == shipping**, byte for byte, **2 400 steps × 2 traces**;
 * **(e) the law arm** (see §4);
-* **(f) the budget** — the `dispatch` row at **0.0061 ms** dev with recognition
-  in it, against a 0.5 ms ceiling this wave does not move;
+* **(f) the budget** — the `dispatch` row at **~0.006 ms** dev with recognition
+  in it, against a 0.5 ms ceiling this wave does not move, and armed (a ceiling
+  over zero work is satisfied by a pass that never ran);
 * **(g) the falsifier** — the same town with no crime files nothing, casts no
   ray, folds no byte, draws no star, and **asserts the traffic clock is
   advancing**, so no arm above is certified against a frozen counter.

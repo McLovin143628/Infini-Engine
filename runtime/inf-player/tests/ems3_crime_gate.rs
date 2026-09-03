@@ -1064,6 +1064,17 @@ EMS3 STEP TABLE ({} build), {:.4} ms total, MIN of {rounds} rounds of {per_round
          {worst_files} open file(s); the ceiling is {} rays a step",
         inf_physics::d3::crime::MAX_RECOGNITION_RAYS
     );
+    // **ARMED**, because a ceiling assertion over zero work is satisfied by a
+    // pass that never ran: the file has to exist and an officer has to have been
+    // out looking for the ceiling to be a claim about anything.
+    assert!(
+        worst_files > 0,
+        "no file was ever open — the ceiling is vacuous"
+    );
+    assert!(
+        looked > 0,
+        "no officer was ever on the beat — the ceiling is vacuous"
+    );
     assert!(
         rays <= looked * inf_physics::d3::crime::MAX_RECOGNITION_RAYS,
         "{rays} rays over {looked} steps is past the per-step ceiling"
