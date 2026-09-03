@@ -1366,6 +1366,27 @@ impl RuntimeSim {
         // with no emergency vehicle in it never gets a `DispatchRes` at all and
         // produces an empty vec, so every pre-EMS2 trace is byte-identical.
         out.extend_from_slice(&inf_ecs::dispatch::dispatch_state_bytes(&self.world));
+        // EMS3 appends what the street SAW and what the police REMEMBER, last,
+        // on the dispatcher's argument verbatim — and these two are the sections
+        // `inf_ecs::witness`' own doc has been waiting for since WPN1 wrote it
+        // with no reader (*"the day something reads it … folding it becomes the
+        // right call"*).
+        //
+        // They are two sections and not one because they diverge for different
+        // reasons and a reader wants to know which. An **act's observer list**
+        // is a line-of-sight ray, so two hosts that built different colliders
+        // disagree here first; a **profile** is heat, evidence and a last-seen
+        // position, so two hosts that recognised different people disagree
+        // there. Folding only the second would show a divergence many seconds
+        // after it happened, wearing a police car's route as its symptom.
+        //
+        // **The position is frozen**, exactly as the eleven above them are, and
+        // `projector_mirror`'s `SECTIONS` allowlist is extended in the SAME
+        // commit — which is the whole of what the traffic section's two unpinned
+        // waves taught. A level where nothing has happened and nobody is wanted
+        // produces two empty vecs, so every pre-EMS3 trace is byte-identical.
+        out.extend_from_slice(&inf_ecs::witness::witness_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::crime::profile_state_bytes(&self.world));
         out
     }
 

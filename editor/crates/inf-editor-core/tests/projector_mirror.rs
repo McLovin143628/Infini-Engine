@@ -2783,7 +2783,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 11] = [
+    const SECTIONS: [&str; 13] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2814,6 +2814,16 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // sent different ambulances to one fire would compare equal until one
         // of them happened to solve a chassis the other did not.
         "dispatch::dispatch_state_bytes",
+        // EMS3, pinned in the SAME commit that folded them. Two sections and not
+        // one, because they fail for different reasons: an ACT's observer list
+        // is a line-of-sight ray (so two hosts that built different colliders
+        // disagree here first), and a PROFILE is heat, evidence and a last-seen
+        // position (so two hosts that recognised different people disagree
+        // there). Neither is a transform anything else folds, and a wanted level
+        // that differed between PIE and shipping is the exact divergence a
+        // player experiences as "the police behaved differently in the editor".
+        "witness::witness_state_bytes",
+        "crime::profile_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()
@@ -2837,6 +2847,99 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
             SECTIONS[i + 1]
         );
     }
+}
+
+/// **EVERY RESOURCE SIMULATE WIPES ON THE WAY IN, IT WIPES ON THE WAY OUT** —
+/// the twin pin (wave EMS3).
+///
+/// # This gate did not exist and the wave that needed it found out
+///
+/// `SimSession::enter_with_gravity` and `SimSession::exit` each call a list of
+/// `clear_*` doors, and the two lists have to be the same list. Nothing checked
+/// that. A door added to `enter` and forgotten in `exit` leaves a **resource in
+/// the author's document**: run 1's wanted level, run 1's parked traffic, run
+/// 1's duty roster. It is the exact defect every one of those doors' own doc
+/// comments describes, and it was enforced only by whoever was editing at the
+/// time remembering to scroll four hundred lines down.
+///
+/// So the two blocks are read out of the source and compared as **sets**. Not as
+/// sequences: the order a session forgets things in has no meaning (they are
+/// independent resources), and pinning an order would fail a commit that merely
+/// tidied one. What has meaning is the *membership*, and a missing member is
+/// content in a level nobody authored.
+///
+/// It also asserts the list is not empty and holds the doors this wave depends
+/// on by name, so a future refactor that replaced twelve calls with one
+/// `clear_everything()` has to come back here and say so.
+#[test]
+fn simulate_forgets_on_exit_exactly_what_it_forgot_on_entry() {
+    let src = read("editor/crates/inf-editor-core/src/simulate.rs").replace("\r\n", "\n");
+    // The two blocks, each ending at the last `clear_*` call in it. `enter`
+    // continues into the bridge construction and `exit` ends the function, so
+    // both are bounded by finding their own calls rather than by a brace.
+    let block = |anchor: &str| -> std::collections::BTreeSet<String> {
+        let start = src
+            .find(anchor)
+            .unwrap_or_else(|| panic!("`{anchor}` is not in `simulate.rs`"));
+        let body = &src[start..];
+        // Far enough to hold the whole clear block and stop well before the next
+        // one: the two are hundreds of lines apart.
+        let window = &body[..body.len().min(6000)];
+        let mut out = std::collections::BTreeSet::new();
+        for line in window.lines() {
+            let line = line.trim();
+            // Through the compiler's eyes, exactly as `code_lines` does for the
+            // trace fold: a clear somebody commented out is a clear that does
+            // not run, and a pin that reads a comment is a pin on a comment.
+            if line.starts_with("//") {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("inf_ecs::") else {
+                continue;
+            };
+            let Some(call) = rest.split('(').next() else {
+                continue;
+            };
+            if call.contains("::clear_") {
+                out.insert(call.to_string());
+            }
+        }
+        out
+    };
+    let entered = block("pub fn enter_with_gravity(");
+    let exited = block("    pub fn exit(");
+    println!(
+        "Simulate clears {} resources on entry and {} on exit",
+        entered.len(),
+        exited.len()
+    );
+    assert!(
+        entered.len() >= 12,
+        "only {} `clear_*` doors were found on the way in — this gate is reading \
+         the wrong block, or the list moved",
+        entered.len()
+    );
+    for door in ["crowd::clear_crowd", "witness::clear_witness"] {
+        assert!(
+            entered.contains(door),
+            "`inf_ecs::{door}` is not in the entry block — either it moved or \
+             this gate is reading the wrong window"
+        );
+    }
+    let missing_on_exit: Vec<&String> = entered.difference(&exited).collect();
+    assert!(
+        missing_on_exit.is_empty(),
+        "Simulate clears {missing_on_exit:?} on the way IN and never on the way \
+         OUT — whatever those resources hold is left in the author's document \
+         when the session stops"
+    );
+    let missing_on_entry: Vec<&String> = exited.difference(&entered).collect();
+    assert!(
+        missing_on_entry.is_empty(),
+        "Simulate clears {missing_on_entry:?} on the way OUT and never on the way \
+         IN — run 2 of a session begins on run 1's state, and its trace will not \
+         match the shipped player's, which starts from nothing every time"
+    );
 }
 
 /// The two `project_cloth` projectors must be **byte-identical, doc block

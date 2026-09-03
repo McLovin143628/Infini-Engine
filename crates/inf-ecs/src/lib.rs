@@ -28,6 +28,11 @@ pub mod components;
 // NPC1a: the sim-LOD tier system — what a crowd NPC costs this step, decided in
 // ONE door both hosts call, keyed on `StreamingSource` distance and never on a
 // camera. `band`'s shape with a fourth rung.
+// EMS3: criminal profiles — what the police remember about somebody, built out
+// of channels the world shows and a player can change. The scorer that decides
+// whether the person in front of an officer is the one on file takes no `Uuid`
+// at all, which is the police-don't-cheat law in compile-checked form.
+pub mod crime;
 pub mod crowd;
 pub mod deform;
 // EMS2: the dispatcher — who is sent to what, and the named responder predicate
