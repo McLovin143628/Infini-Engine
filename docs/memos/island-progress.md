@@ -26906,7 +26906,11 @@ mutation-verified: deleting the fold line fails the arm by name.
 
 **And the weakness that verification exposed**, recorded rather than hidden: the
 pin is a substring search over the fn body, so a fold **commented out** still
-matches. That is true of all ten entries and is carried.
+matches. That is true of all ten entries and was carried — **and closed by
+the EMS1 audit**: both allowlists now read their fn body through `code_lines`,
+which drops whole-line `//` comments before the search. Mutation-verified in
+both directions: commenting out the traffic fold was green before and reds
+after. A `/* … */` block still defeats them and is what is carried now.
 
 `ems1_station_gate.rs`, five arms. The headline, on a town of four institutions
 and three apartment blocks (761 agents, 1 014 day jobs, 183 night jobs to 183
@@ -26914,16 +26918,24 @@ night workers):
 
 | institution | at 10:00 | at 22:00 |
 |---|---|---|
-| Police station | 160 | 30 |
-| Fire hall | 152 | 17 |
-| Hospital | 103 | 136 |
-| Clinic | 163 | **0** |
+| Police station | 147 | 30 |
+| Fire hall | 105 | 17 |
+| Hospital | 135 | 136 |
+| Clinic | 191 | **0** |
+
+*(The day column was first written down as 160 / 152 / 103 / 163 — a run taken
+before `FireHall.floors` closed at two later in the same wave, which changes what
+a hall's plan holds and therefore how the town's 578 day arrivals distribute
+across the four. The night column and the totals are unchanged. Re-measured at
+HEAD, three times, identical: the EMS1 audit.)*
 
 …plus the front desk and back office per archetype (one counter each, 2-14
-offices behind it), the fleet read out of the **committed** `.inf_lvl` (one light
-bar, blooming, on a rig), PIE == shipping byte for byte over 90 steps of crowd
-fold, and the budget: `crowd` 0.4728 ms for 761 agents against a 1.0 ms ceiling,
-`society` 0.0525 against 0.5. **No new budget constant is minted** — an
+offices behind it — **asserted** since the audit, not just printed), the fleet
+read out of the **committed** `.inf_lvl` (one light bar, blooming, on a rig),
+PIE == shipping byte for byte over 90 steps of crowd fold, and the budget:
+`crowd` 0.443 ms for 761 agents against a 1.0 ms ceiling, `society` 0.047
+against 0.5 (a dev-build report, not an assertion). **No new budget constant is
+minted** — an
 institution is a `PcgVolume` and its people are crowd agents, so a wave that
 added a row here would be a wave that added a step phase, and this one did not.
 
@@ -26996,7 +27008,9 @@ regenerate. The VEH2a precedent: bytes move, schema does not.
 * **A seat is the top face of the chassis collider**, so the appliance's driver
   sits 3.45 m up — outside a standing hero's 3 m reach. The fire engine is
   parked scenery until that rule or that height changes.
-* **The `SECTIONS` pin cannot see a commented-out fold** (above).
+* **The `SECTIONS` pin cannot see a `/* … */` fold.** The whole-line `//`
+  hole is closed (`code_lines`, EMS1 audit); a block comment is not, and
+  stripping from the first `//` on a line would cut one inside a string.
 * **`vehicle_grade.rs`'s `SPECS` table is still five rows.** The four emergency
   rows have no sprint/brake/top-speed measurement; the fleet test's six-axis
   uniqueness stands in for it.
@@ -27005,3 +27019,87 @@ regenerate. The VEH2a precedent: bytes move, schema does not.
 * **SWAT is a van and a crew, not a behaviour.** The tactical team is the
   `ApparatusBay` crew of a police station and the vehicle they ride; nothing
   distinguishes them from patrol until a dispatcher does.
+
+### The EMS1 audit (2026-09-02) — one shipped defect and four vacuities
+
+Full battery green at head before a line was touched (360 targets, 6 856 passed,
+0 failed, `INF_GOLDEN_STRICT=1`), so nothing below is a broken wave; it is what
+the wave's own claims did not measure.
+
+**THE PARKED FLEET, ACT THREE — and this one shipped.** The trilogy above fixed
+a vehicle parked *on a settlement's own car* and then a vehicle parked *in the
+lane*. Both were found within one station. The arm that found them,
+`every_station_parks_its_fleet_in_its_own_livery`, resets its position list per
+BLOCK — so it could never see two *stations* colliding, and the placement probes
+`nearest_route_vertex(b.centre)` per block, which two institution blocks of one
+city answer with vertices a few metres apart. Measured on the shipped island:
+
+```
+  Eastgate FireHall      vertex (2136.00, 1904.00)  dir (-0.1414, -0.9899)
+  Eastgate PoliceStation vertex (2140.00, 1916.00)  dir (-0.3162, -0.9487)
+
+  engine    at (2128.50, 111.39, 1893.96)  half (1.22, 1.55, 3.90)
+  cruiser 1 at (2127.35, 110.50, 1897.03)  half (0.95, 0.66, 2.32)
+                                    -> 3.40 m apart
+```
+
+Both are heading roughly `-Z`, so the 3.07 m between them is **longitudinal**
+against 6.22 m of half-lengths: a saloon three metres inside the tail of an
+8.85-tonne appliance, in the committed `VancouverIsland.inf_lvl`, from level
+load. It was invisible to every gate because the drive arms take the *nearest*
+civilian car to a hero who starts nowhere near Eastgate.
+
+Fixed with the rule the two earlier acts imply: **a settlement's institutions
+share one apron register**, and a vehicle whose spot is not clear of one already
+parked steps one more `EMS_PARK_PITCH_M` along its own apron (bounded by
+`EMS_PARK_MAX_SHUNT`, deterministic in block order then `k`, portable — a length
+against a constant). The spacing arm now runs over the whole settlement, which
+is what found it. `VancouverIsland.inf_lvl` regenerates (534 entities, 139 933
+bytes, schema still v27); the fixture does not move, because its one hall parks
+first and shunts nothing.
+
+**Three arms that could not fail, and one doc that outran its code:**
+
+* `a_grille_is_mostly_hole` sampled a closure holding a **copy** of `mesh()`'s
+  literals, so it measured the recipe rather than the family. Mutation-verified:
+  widening the bars from 0.025 to 0.16 — a grille 2% open, which is the wall the
+  family exists to deny — left it printing "67.0% open" and green, and no other
+  arm in the module would have caught it (they all pass on a solid box). The
+  boxes are now read out of the mesh's own positions, 24 to a box; the same
+  mutation reds it by name.
+* `every_institution_has_a_front_desk_and_an_office_behind_it` computed the
+  office count, printed it, and asserted only the desk. Half the arm's name was
+  a caption. Now asserted (8 / 2 / 4 / 14).
+* nothing checked that a livery names parts its row's body **has**.
+  `Livery::part` answers `None` for an unknown name and the caller keeps
+  `RigSpawn::paint`, so a mis-spelled panel is a silent no-op; the island gate
+  reads `livery.parts[0]` and nothing read `parts[1..]`. Mutation-verified:
+  renaming the cruiser's `"boot"` to `"trunk"` was green before and reds now,
+  naming the body's real part list. The same arm refuses a `Livery::extra` part
+  that collides with a body part, because both mint the same `body_part_guid`.
+* the crowd-sweep doc quoted `radii (40, 80, 160) -> 416.74 ms, tiers
+  [32, 50, 59, 111]` — a hand-picked band from an earlier run, where the arm
+  sweeps `DEFAULT_CROWD_RADII`. The finding itself reproduces (256.9 ms/step,
+  254.9 of it `character move`, 7.9 ms an agent, 22 853 colliders); the table
+  now names the band the code uses.
+
+**And the headline table's day column** was measured before `FireHall.floors`
+closed at two: 160 / 152 / 103 / 163 against 147 / 105 / 135 / 191 at head, same
+578 total, night column unchanged. Corrected above.
+
+Also corrected: the civic strip's call-site comment still argued the ring-0
+ruling `civic_min_ring` retired later in the same wave (the A14 restated-rule
+shape, one file over from the scar this wave fixed), and three docs called the
+next room type "the eighteenth" of twenty-two.
+
+**Verified, not found wanting:** no new `VehicleBody` (the kerb trap holds —
+`ALL` is five and `catalogue_row` draws over it, with `step_traffic` pinning
+`livery: None`); `rig_nodes_at` has exactly **one** body-part material site and
+an unliveried part is byte-identical through it; `PcgSlot::index` is read by
+exactly one caller (`agent_guid`) and only for `Home` slots, which no
+institution has and no room this wave touched — so the `crews_of` shape change
+cannot move a committed agent guid, and the ten pre-EMS1 zone documents are
+byte-identical on disk; `civic_min_ring == venue_min_ring` for all three site
+kinds; no budget constant anywhere in the range moved; goldens stay 62,
+`EXPECTED_LEVELS` stays 24, scene v27 / payload v12, and the whole range's diff
+is LF-clean.

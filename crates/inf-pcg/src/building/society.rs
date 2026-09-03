@@ -276,8 +276,8 @@ impl SlotShift {
 ///
 /// A statement about the ROOM and not about the role, so a venue's back office
 /// and store room keep the working day the rest of the town keeps while its
-/// three public rooms move to the evening. One door, one exhaustive match: an
-/// eighteenth room type has to answer this question, in the same place it
+/// three public rooms move to the evening. One door, one exhaustive match: a
+/// twenty-third room type has to answer this question, in the same place it
 /// answers [`occupancy`].
 ///
 /// # Why a LIST, and why wave EMS1 needed one

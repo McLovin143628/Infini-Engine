@@ -21,17 +21,20 @@
 //! where they all opened when the bars do. It takes both, and the falsifying
 //! subject is the **clinic**, which is asserted to be EMPTY at twenty-two.
 //!
-//! # The four arms
+//! # The five arms
 //!
 //! * **(a)** the derivation — the four institutions, a society, and the table
 //!   of who is where at each hour;
-//! * **(b)** the fleet — read out of the **committed** `.inf_lvl` rather than
+//! * **(b)** the front desk and the back office, per archetype — the mandate's
+//!   *"administrative workers at the front desk and behind the scenes"*, as two
+//!   counts off the plan rather than off the society;
+//! * **(c)** the fleet — read out of the **committed** `.inf_lvl` rather than
 //!   from the generator, because "the recipe would park an appliance" and "the
 //!   document has one in it" are different facts and the second is the one that
 //!   ships;
-//! * **(c)** PIE == shipping, byte for byte, over a settled town of
+//! * **(d)** PIE == shipping, byte for byte, over a settled town of
 //!   institutions;
-//! * **(d)** the budget table, against the ceilings that already exist. No new
+//! * **(e)** the budget table, against the ceilings that already exist. No new
 //!   budget constant is minted: an institution is a `PcgVolume` and its people
 //!   are crowd agents, and both already have a row and a ceiling.
 //!
@@ -269,7 +272,7 @@ fn staffed_at(world: &EcsWorld, hour: f64) -> BTreeMap<&'static str, Staffed> {
     out
 }
 
-// ── (a) the derivation ──────────────────────────────────────────────────────
+// ── (a) the derivation, and (b) the desk it is staffed at ───────────────────
 
 /// **THE HEADLINE.** Four institutions, one society, and the table of who is
 /// inside at ten and at twenty-two.
@@ -413,6 +416,19 @@ fn every_institution_has_a_front_desk_and_an_office_behind_it() {
              zero here is a waiting room the placer refused",
             arch.display
         );
+        // **AND THE BACK OFFICE, WHICH THIS ARM IS NAMED FOR** (EMS1 audit).
+        // The office count was computed, printed and never asserted, so half
+        // this arm's name was a caption: a palette that dropped every `Office`
+        // room from its table would have passed it, and "administrative workers
+        // behind the scenes" is the half of the mandate that room carries.
+        assert!(
+            offices > 0,
+            "{}: {} room(s) and not one office — the mandate's administrative \
+             staff work BEHIND the counter as well as at it, and an `Office` is \
+             the only room in the four palettes that holds them",
+            arch.display,
+            out.plan.rooms.len()
+        );
         assert!(
             work(inf_pcg::SlotShift::Day) > 0,
             "{}: nobody works it by day",
@@ -421,7 +437,7 @@ fn every_institution_has_a_front_desk_and_an_office_behind_it() {
     }
 }
 
-// ── (b) the fleet, out of the committed document ────────────────────────────
+// ── (c) the fleet, out of the committed document ────────────────────────────
 
 /// **THE FLEET IS IN THE COMMITTED LEVEL, WEARING ITS LIVERY.**
 ///
@@ -487,7 +503,7 @@ fn the_committed_level_holds_a_liveried_appliance() {
     assert_eq!(chassis, bars, "a light bar is floating off a car");
 }
 
-// ── (c) PIE == shipping ─────────────────────────────────────────────────────
+// ── (d) PIE == shipping ─────────────────────────────────────────────────────
 
 fn player_trace() -> Vec<Vec<u8>> {
     let mut world = EcsWorld::new();
@@ -551,7 +567,7 @@ fn pie_equals_shipping_over_a_town_of_institutions() {
     }
 }
 
-// ── (d) the budget ──────────────────────────────────────────────────────────
+// ── (e) the budget ──────────────────────────────────────────────────────────
 
 /// **WHAT A TOWN OF INSTITUTIONS COSTS**, per phase, against the ceilings that
 /// already exist.

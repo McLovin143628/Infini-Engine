@@ -2629,6 +2629,29 @@ fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
     }
 }
 
+/// **The lines of a fn body a COMPILER would see** — every whole-line `//`
+/// comment dropped (EMS1 audit).
+///
+/// The two allowlists below are substring searches over a function's source,
+/// and until this existed a fold **commented out** still satisfied its own pin:
+/// measured, by commenting out `traffic::traffic_state_bytes` — the very line
+/// wave EMS1 added to `SECTIONS` — and watching
+/// `every_trace_section_is_folded_in_its_frozen_order` go green on a player
+/// that no longer folds traffic at all. A pin that reads a line the compiler
+/// does not is a pin on a comment.
+///
+/// **Whole-line comments only**, and deliberately: stripping from the first
+/// `//` on every line would cut a `//` inside a string literal, and the defect
+/// on the record is a *statement* commented out rather than a fold hidden
+/// behind a trailing note. A `/* … */` block still defeats both arms and is
+/// carried, named here rather than discovered.
+fn code_lines(body: &str) -> String {
+    body.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// **Every pose writer runs, in a frozen order** (SK1a) — the twin of the trace
 /// law below, one level down.
 ///
@@ -2643,6 +2666,9 @@ fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
 /// An **allowlist over the whole sequence**, not a check that the new one is
 /// present: naming only the newest writer says nothing about the six that were
 /// already there, which is the mistake the I6 audit caught in the trace law.
+///
+/// It reads the body through [`code_lines`], because a substring search cannot
+/// tell a pass from a pass somebody commented out.
 #[test]
 fn every_pose_writer_runs_in_its_frozen_order() {
     let src = read("crates/inf-ecs/src/pose.rs").replace("\r\n", "\n");
@@ -2651,7 +2677,8 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         .expect("the fixed step's one pose door");
     let body = &src[start..];
     let end = body.find("\n/// The **foot joints**").expect("the fn ends");
-    let body = &body[..end];
+    let body = code_lines(&body[..end]);
+    let body = body.as_str();
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
     const WRITERS: [(&str, &str); 8] = [
@@ -2739,7 +2766,11 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         .expect("the player folds a trace");
     let body = &src[start..];
     let end = body.find("\n    }\n").expect("the fn ends");
-    let body = &body[..end];
+    // **Through [`code_lines`]**, because a substring search over raw source
+    // cannot tell a fold from a fold somebody commented out — measured, on this
+    // arm's own newest entry.
+    let body = code_lines(&body[..end]);
+    let body = body.as_str();
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.

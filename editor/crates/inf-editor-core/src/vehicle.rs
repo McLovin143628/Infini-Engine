@@ -880,6 +880,60 @@ mod tests {
     /// to differ in the things a driver feels: how fast, how heavy, which axle
     /// drives, how the engine makes its torque, how much grip, and how hard the
     /// aids intervene.
+    /// **EVERY PART A LIVERY NAMES IS A PART ITS ROW'S BODY HAS** (EMS1 audit).
+    ///
+    /// `Livery::part` answers `None` for a name the body does not carry, and the
+    /// caller keeps `RigSpawn::paint` — which is the right refusal at runtime and
+    /// a **silent no-op** in a table. A cruiser whose `"boot"` were spelled
+    /// `"trunk"` would still build, still spawn, still pass every arm in the
+    /// tree: the island gate checks `livery.parts[0]` and nothing checks
+    /// `parts[1..]`, so three of the cruiser's four panels could be painted a
+    /// colour nobody chose and the only symptom would be a screenshot.
+    ///
+    /// The falsifying half is the second assertion: a livery's OWN parts must
+    /// **not** collide with the body's, because `rig_nodes_at` mints both from
+    /// [`body_part_guid`](inf_ecs::vehicle::body_part_guid) — two parts of one
+    /// name are one guid, and the second would silently replace the first.
+    #[test]
+    fn every_livery_paints_parts_its_body_actually_has() {
+        let defs = island_vehicles();
+        let mut painted = 0usize;
+        for a in inf_pcg::ArchetypeId::ALL {
+            for id in crate::island::station_fleet(a) {
+                let def = defs.get(id).unwrap_or_else(|| panic!("no `{id}` row"));
+                let livery =
+                    island_vehicle_livery(id).unwrap_or_else(|| panic!("`{id}` has no livery"));
+                let have: Vec<&str> = def.body.parts().iter().map(|p| p.name).collect();
+                for (name, _) in livery.parts {
+                    assert!(
+                        have.contains(name),
+                        "the `{}` livery paints `{name}`, which a {:?} body does \
+                         not have — the override is looked up by NAME, so this \
+                         is a panel that silently keeps the vehicle's own paint \
+                         (have {have:?})",
+                        livery.name,
+                        def.body
+                    );
+                    painted += 1;
+                }
+                for (p, _) in livery.extra {
+                    assert!(
+                        !have.contains(&p.name),
+                        "the `{}` livery adds a part called `{}`, which the {:?} \
+                         body already has — both take their guid from \
+                         `body_part_guid`, so one would replace the other",
+                        livery.name,
+                        p.name,
+                        def.body
+                    );
+                }
+            }
+        }
+        // …and the sweep really walked some liveries, or it is a statement about
+        // an empty fleet table.
+        assert!(painted >= 16, "only {painted} liveried part(s) swept");
+    }
+
     #[test]
     fn the_island_catalogue_declares_a_fleet_and_no_two_rows_are_one_car() {
         let defs = island_vehicles();

@@ -481,8 +481,8 @@ impl RoomType {
     /// hand-written `vec!` at each call site is the exact shape
     /// `phase29_gate`'s `ALL_MODES` was minted to retire. Two rules now have to
     /// answer for *every* room type — [`is_errand_destination`](Self::is_errand_destination)
-    /// and [`society::crews_of`] — and both are exhaustive `match`es, so an
-    /// eighteenth variant fails to **compile** there.
+    /// and [`society::crews_of`] — and both are exhaustive `match`es, so a
+    /// twenty-third variant fails to **compile** there.
     ///
     /// # What guards THIS array (VEN1b audit)
     ///
@@ -1347,7 +1347,7 @@ mod tests {
     ///
     /// The array's own doc used to claim that a variant added to the enum
     /// "fails to compile" here. It does not — `[RoomType; 22]` is a length, not
-    /// a census — so an eighteenth room type would have been silently absent
+    /// a census — so a twenty-third room type would have been silently absent
     /// from every sweep written over `ALL`, and the first of those is
     /// `station::tests::the_social_rooms_are_the_night_rooms`, the arm that
     /// keeps `station::is_social` and `society::crews_of` from drifting apart.

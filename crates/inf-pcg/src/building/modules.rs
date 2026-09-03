@@ -1125,19 +1125,44 @@ mod tests {
     #[test]
     fn a_grille_is_mostly_hole() {
         let m = ModuleShape::Grille.mesh();
-        // Boxes are pushed as six four-vertex faces, so 24 positions a box.
-        let boxes = m.positions.len() / 24;
-        assert_eq!(boxes, 7, "a grille is a frame of four and three bars");
+        // **THE BOXES ARE READ OUT OF THE MESH** (EMS1 audit), because the first
+        // spelling of this arm sampled a closure holding a COPY of `mesh()`'s
+        // own literals — so it measured the recipe rather than the family.
+        // Mutation-verified: widening the bars from 0.025 to 0.16, which makes a
+        // grille **2% open** and a wall in every sense the family exists to
+        // deny, left this arm printing "67.0% open" and green. Every other arm
+        // in this module is satisfied by a solid box too, so nothing else would
+        // have caught it; the same mutation now reds this one by name.
+        //
+        // Boxes are pushed as six four-vertex faces, so 24 positions a box and
+        // the min/max over each run of 24 is that box's own extent.
+        let boxes: Vec<[[f32; 2]; 3]> = m
+            .positions
+            .chunks(24)
+            .map(|c| {
+                let mut lo = [f32::INFINITY; 3];
+                let mut hi = [f32::NEG_INFINITY; 3];
+                for p in c {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(p[a]);
+                        hi[a] = hi[a].max(p[a]);
+                    }
+                }
+                [[lo[0], hi[0]], [lo[1], hi[1]], [lo[2], hi[2]]]
+            })
+            .collect();
+        assert_eq!(boxes.len(), 7, "a grille is a frame of four and three bars");
         // Sample the mid-height line `y = 0` across the run (`z`), asking of
-        // each sample whether any bar or jamb covers it. Three bars of 0.05 and
-        // two jambs of 0.09 cover 0.33 of a 1.0 run, so two thirds of the line
-        // is air — which at a 1.2 m cell front is 60 mm bars on 290 mm centres.
+        // each sample whether any box the mesh actually holds covers it. The
+        // head and sill rails sit clear of `y = 0` and are excluded by the
+        // question rather than by a list; three bars of 0.05 and two jambs of
+        // 0.09 cover 0.33 of a 1.0 run, so two thirds of the line is air —
+        // which at a 1.2 m cell front is 60 mm bars on 290 mm centres.
         const N: usize = 400;
         let solid = |z: f32| {
-            [(-0.455f32, 0.045f32), (0.455, 0.045)]
-                .into_iter()
-                .chain((0..3).map(|k| (-0.24 + 0.24 * k as f32, 0.025)))
-                .any(|(c, h)| (z - c).abs() <= h)
+            boxes
+                .iter()
+                .any(|b| b[1][0] <= 0.0 && 0.0 <= b[1][1] && b[2][0] <= z && z <= b[2][1])
         };
         let covered = (0..N)
             .filter(|i| solid(-0.5 + *i as f32 / (N - 1) as f32))

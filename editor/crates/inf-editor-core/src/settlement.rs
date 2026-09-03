@@ -883,11 +883,12 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
     // so it cannot live in `zone_table` any more than `Industrial` or a
     // nightclub can.
     //
-    // Where: nearest the centre, from ring 0 -- and that is the one line that
-    // differs from the venues. A bar sits one ring out of a city's core because
-    // it cannot pay for the ground; a fire hall does not care what the ground
-    // costs, it cares how long the appliance takes to reach the far side of the
-    // city, and that is minimised at the crossroads.
+    // Where: nearest the centre, from `civic_min_ring` -- which is
+    // `venue_min_ring` exactly, one ring out of a city and ring 0 of a town.
+    // The rule is stated once, on that function, and NOT restated here: the
+    // first draft of this comment carried the ring-0-everywhere ruling that
+    // `civic_min_ring` itself retired later in the same wave, which is the A14
+    // restated-rule defect this file already carries a scar from (`walk_door`).
     //
     // **AFTER the venues, and that ordering is load-bearing.** Both strips take
     // the blocks nearest the centre, so evaluating civics first would shrink the
@@ -2372,9 +2373,19 @@ mod tests {
                 for n in &v {
                     kinds.insert(n.clone());
                 }
+                // **A LITERAL, NOT `CIVIC_SHARE`** (EMS1 audit). Written with
+                // the constant on both sides this was satisfied for *any* value
+                // of it — the guard could never see itself loosen. Measured:
+                // `CIVIC_SHARE = 1` left this arm green with a four-block
+                // settlement spending all four blocks on institutions. A
+                // quarter is the claim about the WORLD, so a quarter is what is
+                // written; if the rule is ever meant to change, this number
+                // changes with it, deliberately.
+                const MOST: usize = 4;
                 assert!(
-                    v.len() * CIVIC_SHARE <= plan.blocks.len().max(CIVIC_SHARE),
-                    "{}: {} institution(s) on {} blocks",
+                    v.len() * MOST <= plan.blocks.len().max(MOST),
+                    "{}: {} institution(s) on {} blocks — a settlement is mostly \
+                     the places people live and work in",
                     plan.name,
                     v.len(),
                     plan.blocks.len()

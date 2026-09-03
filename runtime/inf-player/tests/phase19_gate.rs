@@ -952,13 +952,22 @@ fn stepping_the_town_stays_cheap_with_its_collider_band() {
 ///   radii (0, 0, 0)        1.24 ms/step   tiers [0, 0, 0, 252]
 ///   radii (8, 16, 32)      1.27 ms/step   tiers [0, 0, 32, 220]
 ///   radii (20, 40, 80)     1.31 ms/step   tiers [0, 32, 50, 170]
-///   radii (40, 80, 160)  416.74 ms/step   tiers [32, 50, 59, 111]
+///   radii (32, 96, 512)  302.28 ms/step   tiers [32, 50, 170, 0]
+///                                         character move 300.21 ms
 /// ```
 ///
+/// **The fourth row is `DEFAULT_CROWD_RADII`, which is the band this arm
+/// actually sweeps** (EMS1 audit — the first write-up of this table quoted a
+/// hand-picked `(40, 80, 160)` from an earlier run, so the doc named a
+/// measurement the code does not make; re-measured at
+/// `(32, 96, 512)`: 256.9 ms/step of which 254.9 is `character move`, 7.9 ms an
+/// agent, on a quieter machine than the run above. The *shape* is what is
+/// asserted below, because the milliseconds are a fact about a laptop.)
+///
 /// The static band is free. Fifty `Near` agents and a hundred and seventy `Far`
-/// ones are free. **Thirty-two `Full` ones are 300 ms**, of which `character
-/// move` is 300 — about **9.5 ms per standing agent per step**, against a town
-/// whose whole physics sync and solve together are 1.5 ms.
+/// ones are free. **Thirty-two `Full` ones are 250–300 ms**, essentially all of
+/// it `character move` — about **8–9.3 ms per standing agent per step**, against
+/// a town whose whole physics sync and solve together are 1.5 ms.
 ///
 /// # Why this is asserted the way round it is
 ///

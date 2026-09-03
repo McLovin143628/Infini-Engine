@@ -714,10 +714,31 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     //
     // The probe is the INSTITUTION'S OWN BLOCK CENTRE, not the settlement's, so
     // a city's four institutions are four separate placements; the vehicles of
-    // one station are then spaced along the road by `EMS_PARK_PITCH_M`, centred
-    // on the vertex, so a two-car station does not stack two cars on one point.
+    // one station are then spaced along the road by `EMS_PARK_PITCH_M`, starting
+    // one pitch PAST the vertex (see below), so a two-car station does not stack
+    // two cars on one point and neither sits on the settlement's own car.
     let fleet_defs = crate::vehicle::island_vehicles();
     for plan in &plans {
+        // **ONE SETTLEMENT, ONE APRON REGISTER** (EMS1 audit) — the third act of
+        // the parked-fleet trilogy, one level up from the first two.
+        //
+        // The probe is per BLOCK, and two institution blocks of one city are
+        // near each other and near the same road: measured on the shipped
+        // island, **Eastgate's fire hall and police station probe route
+        // vertices 12.6 m apart with near-parallel directions**, and the
+        // appliance and the second cruiser came out **3.40 m apart** — an
+        // 8.85-tonne, 7.8 m hull with a saloon 3 m inside its tail, and 0.89 m
+        // of a 2.21 m vertical overlap as well. That is exactly the defect this
+        // wave already paid for twice, and it was invisible because the arm
+        // that catches it reset its list per station.
+        //
+        // So a settlement's institutions share one register, and a vehicle
+        // whose spot is not clear of one already parked **steps one more pitch
+        // along its own apron** until it is. Deterministic (block order, then
+        // `k`), portable (a length against a constant), and it moves nothing
+        // that was already clear — which is every station on the island except
+        // Eastgate's.
+        let mut parked: Vec<DVec3> = Vec::new();
         for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
             let fleet = station_fleet(b.archetype);
             if fleet.is_empty() {
@@ -757,14 +778,29 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 let Some(def) = fleet_defs.get(id).copied() else {
                     continue;
                 };
-                let along = (k + 1) as f64 * EMS_PARK_PITCH_M;
-                // Derived from `k`, never accumulated — the P17.4 exact-linear
-                // rule, which is what keeps two hosts agreeing about a metre.
-                let at = DVec3::new(
-                    v.x + dir.x * along + apron.x,
-                    crate::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
-                    v.z + dir.y * along + apron.y,
-                );
+                // Derived from the STEP, never accumulated — the P17.4
+                // exact-linear rule, which is what keeps two hosts agreeing
+                // about a metre. The step starts at `k + 1` and rises only to
+                // clear a vehicle this settlement has already parked.
+                let spot = |step: usize| {
+                    let along = step as f64 * EMS_PARK_PITCH_M;
+                    DVec3::new(
+                        v.x + dir.x * along + apron.x,
+                        crate::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
+                        v.z + dir.y * along + apron.y,
+                    )
+                };
+                let mut at = spot(k + 1);
+                for step in k + 2..k + 2 + EMS_PARK_MAX_SHUNT {
+                    if parked
+                        .iter()
+                        .all(|p| (*p - at).length() >= EMS_PARK_PITCH_M)
+                    {
+                        break;
+                    }
+                    at = spot(step);
+                }
+                parked.push(at);
                 let guid = derived(
                     name,
                     &format!("island.ems.{}.{}.{}.{k}.{id}", b.site, b.col, b.row),
@@ -994,6 +1030,17 @@ pub const EMS_PARK_PITCH_M: f64 = 11.0;
 /// appliance has over a saloon, so the widest thing in the catalogue still has
 /// its flank out of the lane.
 pub const EMS_APRON_OFFSET_M: f64 = 6.0;
+
+/// How many extra pitches a vehicle may step along its own apron to clear one
+/// its settlement has already parked (EMS1 audit).
+///
+/// A bound rather than a `while`, because a placement loop inside a level load
+/// must terminate whatever the road does. Sixteen is five times the largest
+/// fleet any one station keeps, and the arm
+/// `every_station_parks_its_fleet_in_its_own_livery` asserts the OUTCOME — so if
+/// a future island ever exhausts this, the gate says so rather than the level
+/// quietly shipping an overlap again.
+const EMS_PARK_MAX_SHUNT: usize = 16;
 
 /// Every committed island recipe, as repo-relative paths.
 ///
@@ -1415,12 +1462,12 @@ mod tests {
             let mut total = 0usize;
             let mut per_row: std::collections::BTreeMap<&str, usize> = Default::default();
             for plan in crate::settlement::settlements(&d) {
+                let mut at: Vec<(&'static str, glam::DVec3)> = Vec::new();
                 for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
                     let want = station_fleet(b.archetype);
                     if b.archetype == inf_pcg::ArchetypeId::Clinic {
                         assert!(want.is_empty(), "a clinic is not an emergency service");
                     }
-                    let mut at: Vec<glam::DVec3> = Vec::new();
                     for (k, id) in want.iter().enumerate() {
                         let guid = derived(
                             name,
@@ -1443,7 +1490,7 @@ mod tests {
                             .world()
                             .get::<inf_ecs::components::Transform>(e)
                             .expect("its transform");
-                        at.push(t.translation.to_dvec3());
+                        at.push((b.archetype.name(), t.translation.to_dvec3()));
 
                         // The apron is THIS block's, not the settlement's.
                         let (v, _) = inf_island::nearest_route_vertex(&d.routes, b.centre)
@@ -1491,15 +1538,29 @@ mod tests {
                         total += 1;
                         *per_row.entry(id).or_default() += 1;
                     }
-                    for i in 0..at.len() {
-                        for j in i + 1..at.len() {
-                            let g = (at[i] - at[j]).length();
-                            assert!(
-                                g >= EMS_PARK_PITCH_M - 1e-9,
-                                "{recipe}: two of {}'s vehicles are {g:.2} m apart",
-                                plan.name
-                            );
-                        }
+                }
+                // **ACROSS THE WHOLE SETTLEMENT, not within one station** (EMS1
+                // audit). The first spelling of this check reset its list per
+                // BLOCK, so it could only see two vehicles of one station
+                // stacked — and the placement's own probe is
+                // `nearest_route_vertex(b.centre)`, which two institution blocks
+                // of one city may perfectly well answer with the SAME vertex.
+                // That is the "car parked in a saloon" defect one level up: an
+                // engine and an ambulance materializing on one point, with the
+                // arm that exists to catch interpenetration looking at each of
+                // them alone. Measured on both committed recipes before the
+                // bound was written down.
+                for i in 0..at.len() {
+                    for j in i + 1..at.len() {
+                        let g = (at[i].1 - at[j].1).length();
+                        assert!(
+                            g >= EMS_PARK_PITCH_M - 1e-9,
+                            "{recipe}: {}'s {} and {} stand {g:.2} m apart — two \
+                             vehicles begin the level interpenetrating",
+                            plan.name,
+                            at[i].0,
+                            at[j].0
+                        );
                     }
                 }
             }
