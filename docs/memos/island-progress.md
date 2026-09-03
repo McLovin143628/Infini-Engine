@@ -28939,7 +28939,7 @@ delimiter is quoted**, so a doubled backslash inside one is not a remedy.
 | committed content | 24 levels | **24 levels; ONE moved.** `VancouverIsland.inf_lvl` 139 933 → 144 755 B and 534 → 550 entities, which is exactly what was added: the launch is a chassis, four body parts, a screw and its blade (7); the helicopter is a chassis, five parts, a rotor and its blade (8); the pad is 1. `EXPECTED_LEVELS` stays **24** |
 | CRLF | 0 | **0** over `git diff origin/main..HEAD` |
 | frontend | not run | **not run — `editor/studio/src/` is untouched.** The one piece of UI this wave adds is the craft readout, which is `runtime/inf-player/src/window.rs` |
-| the wave | — | **11 commits**, 17 files, **+5 590 / −111** lines; `#[test]` diff **+40 / −1**, and the one removal is a relocation rather than a deletion (`inf-ecs/src/vehicle.rs` goes 48 → 67 `#[test]`s) |
+| the wave | — | **14 commits**, 18 files, **+6 225 / −119** lines; `#[test]` diff **+40 / −1**, and the one removal is a relocation rather than a deletion (`inf-ecs/src/vehicle.rs` goes 48 → 67 `#[test]`s). *This row read "11 commits, 17 files, +5 590 / −111" and was written before the wave's last three commits landed; corrected by the audit, which adds five more on top* |
 
 **THE ONE ARM THAT WENT RED, and why it is not a regression.** Two full
 batteries of this tree failed `pie_equals_shipping_at_a_club_on_a_saturday_
@@ -28962,3 +28962,141 @@ That leaves this wave's own audio addition measured and stated: the engine
 emitter's `SetPosition` is one command and one transform read per spatial
 vehicle emitter per step, the club gate's ring still drops **0** commands, and
 the phase is 0.120 ms of a 1.0 ms budget when nothing else is running.
+
+### AUDIT (2026-09-03, adversarial, base `4c69d3b5`)
+
+Eight priorities, in order. Every correction above is made **in place** with the
+figure it replaced named; this section is the map of what was attacked, what
+held, and what the attack cost.
+
+| | subject | verdict |
+|---|---|---|
+| a | the recogniser seam, WHEELS WIN, the 23 unmoved levels | **HELD** — the claim was right and the arm it cited did not exist |
+| b | the tuning surface: 11/11/51, two free geometry keys | **PARTIAL** — counts right, one alias, three doc numbers wrong |
+| c | the boat table | **PARTIAL** — every row but the turning circle, which was not a radius |
+| d | the helicopter table, the mast, the per-step-input fix | **HELD** — all six rows reproduce; the pre-existing change moved nothing |
+| e | streaming at speed | **FAILED** — the fast rows measured a source that had left the island |
+| f | the kerb trap | **HELD** — reds at kerb slot 2, naming the launch |
+| g | the moving emitter and its tripwire | **PARTIAL** — the fence is byte-identical; the arm filtered no source |
+| h | the gate's arms and the island's bytes | **HELD** — 6 of 7 arms falsified under targeted mutation |
+
+**(a) THE SEAM.** `PartKind`'s doc bounded the whole regression surface by citing
+`the_islands_only_wheel_less_vehicles_are_the_ones_it_placed`, which **did not
+exist** — one grep hit, and it was the sentence citing it. Written, over all
+twenty-four committed levels: **28 wheeled rigs, every one of them 0 parts, and
+exactly 2 wheel-less craft, both the island's**. The twenty-three levels whose
+bytes did not move hold nothing the new recogniser can see. Mutation-verified
+four ways (closing the seam reds the new arm at 0 craft; `rig_of`'s
+`parts.clear()` reds Ring 0's own arm and nothing else — the ledger spelled that
+call `wheels.clear()`; the bridge's clause reds
+`a_wheel_less_hull_is_a_vehicle_and_its_thruster_is_consumed` alone; `part_of`
+claiming the sphere reds the partition arm alone).
+
+**(b) THE TUNING SURFACE.** 62 fields, 11 read by each class, 51 accepted — all
+reproduced field by field, and both classes' tables match the code exactly. Three
+corrections, above: the **one alias** (`max_speed_mps` on the rotorcraft), the
+`HullVehicle` doc's *"fifty-two"* against 51, and a test comment's *"the seven it
+READS"* against 11. `VehicleDef` derives `(Clone, Copy, Debug, PartialEq)` and
+nothing else — no `Serialize`, no `Reflect`, no serde attribute, no
+`impl Serialize` anywhere in the workspace, and its only container
+(`TrafficRecord`) is unserialized and excluded from `traffic_state_bytes`. The
+two new geometry keys are read at `spawn_rig` and at `floating_origin_y` and on
+no per-step path. **v27 / v12 / `EXPECTED_LEVELS` 24 all unmoved**, and
+`git diff` over those four files across the whole wave is empty.
+
+**(c) AND (d) THE TABLES.** Every boat row and every helicopter row reproduces at
+this head to the printed digit, except the turning circle — corrected above from
+10.6 m to **37.25 m**, with the reason (a 49.9-degree arc's bounding box) and a
+second, independent method agreeing. The dry-land row printed nothing and was
+bounded at half a metre; it prints now and is bounded at a centimetre, which a
+mutation shows was necessary.
+
+**THE MAST RULING HOLDS AND SAYS SO ITSELF**: the ledger already distinguishes
+the **measured** trajectory (33 m backwards in 7.5 s) from the **derived** 4.3°
+of standing trim, which is the distinction this tree has a law about.
+
+**THE PRE-EXISTING BEHAVIOUR CHANGE — "vehicle input was never per-step since
+P29.7" — MOVED NOTHING, and the audit measured that rather than assuming it.**
+Removing the clear (`d3/vehicle.rs:305`) and running the tree's vehicle surface:
+`inf-physics` **all green** (every binary), `island_gate` **26 passed**, and
+exactly **one** arm anywhere reds —
+`a_helicopter_nobody_is_flying_stays_where_it_was_left`, this wave's own. So no
+committed trace needed a re-bless because **nothing measured the old behaviour**,
+for cars or for anything else, before or after. That is the honest form of the
+claim: the fix is right and it is armed by one arm, which is a helicopter's.
+
+*A hazard the change opens, stated as inference rather than measurement:* the
+clear removes a latched **handbrake** as well as a latched throttle. Traffic
+re-applies one every step for a parked `Full`-tier car and dispatch's `handbrake`
+does the same for a stopped unit, but nothing re-applies one for a vehicle a
+PLAYER abandoned. On a grade that car now rolls where before it held whatever the
+driver last asked for. Unmeasured, and no arm in the tree covers it.
+
+**(e) STREAMING.** See the corrected section above. The old table's fast rows
+spent two thirds of their run off the island with zero resident cells; the arm
+now flies one fixed route at every speed and the headline inverts.
+
+**(f) THE KERB TRAP.** Mutation-verified: pointing the draw back at
+`VehicleBody::ALL` reds `no_kerb_in_any_town_ever_holds_a_boat_or_a_helicopter`
+at **kerb slot 2, naming the launch** — and reds
+`every_catalogue_row_sits_inside_its_own_travel` beside it, which the ledger's
+"reds it in one line" did not mention. The island's parked lattice is unchanged:
+see the byte census below, where every one of the 534 pre-existing entities is
+identical in name, parent and transform.
+
+**(g) THE EMITTER.** The two hosts' fenced spans are **byte-identical**
+(md5 `37b93867…`), chosen by the same counted `MIRROR-BEGIN` marker on both
+sides, so "character-identical" understates it. The tripwire is a source-text
+substring check: it catches a deleted command, a deleted `src.spatial` guard, a
+returning `Stop`, and any drift between the hosts — and it **cannot catch a
+frozen position**, which is what the world arm is for. That arm is corrected
+above.
+
+**(h) THE GATE AND THE BYTES.** **Six of the seven arms falsify under a targeted
+mutation**, each by name and mostly alone:
+
+| arm | the mutation that reds it |
+|---|---|
+| the boat leg | a sea a kilometre below the screw |
+| the air leg | `HELI_CLIMB_AUTHORITY = 0` |
+| PIE == shipping | the editor host stepping vehicles at `dt * 0.999` |
+| the launch's voice | a frozen `position`; also the sea mutation |
+| the unmanned rotorcraft | removing the per-step input clear |
+| the police-heli refusal | non-vacuous in both directions: it asserts a liveried rotorcraft IS claimed `Police` with 0 wheels, and that the island's own is unpainted |
+| the vehicle phase | **its budget half cannot fire on a dev build or on CI** — see below |
+
+**THE ISLAND'S BYTES ARE EXACTLY THE SIXTEEN NEW ENTITIES.** Measured by loading
+the pre-wave `.inf_lvl` beside the committed one and diffing the two worlds
+entity by entity on guid, name, parent and transform:
+
+    PRE 534 entities, POST 550 entities
+    ADDED (16)    Harbour Launch + hull/bow/topsides/wheelhouse/screw/screw Blade  = 7
+                  Light Helicopter + cabin/boom/fin/skid_left/skid_right/rotor/rotor Blade = 8
+                  Helipad = 1
+    REMOVED (0)
+    CHANGED (0)
+
+Nothing drifted. The bound on that comparison, stated: it reads name, parent and
+the full transform, not every component.
+
+**THE CLUB-GATE GUARD, AND WHAT IT ACTUALLY COSTS.** `4c2caa0b`'s guard is
+`let timed = !cfg!(debug_assertions) && std::env::var_os("CI").is_none();`. CI
+runs `cargo test --workspace` with no `--release`, so `debug_assertions` is
+already true there and the `CI` clause is belt beside braces. The consequence is
+worth naming plainly, because the commit message stops one sentence short of it:
+`AUDIO_STEP_BUDGET_MS` was the **one** timed arm in that file that bound on CI,
+and it now binds on **no automated run at all** — only on a local release build,
+which nothing in this repository's routine workflow performs. The ratchet is
+unchanged at 1.0 and the number is still printed, so a regression is visible to a
+reader; it is no longer visible to a gate. The same is true of
+`VEHICLE_STEP_BUDGET_MS` in the harbour gate and of every budget arm in
+`island_gate.rs`, which is the pre-existing pattern the guard was made to match
+rather than anything this wave introduced. **The vehicle phase's 0.00110 /
+0.00123 ms against 0.5 is a printed figure on every run CI makes, not an
+assertion.**
+
+**WHAT THE AUDIT DID NOT REACH.** The `veh2c_harbour_gate` fixture's craft come
+from the island's catalogue, but the gate runs in a hand-built harbour rather
+than on the island, so nothing certifies a boat or a helicopter *on the committed
+island* beyond its bytes being present. And the streaming table is still the
+fixture island's, which was already carried (12).
