@@ -584,3 +584,158 @@ fn a_driven_car_gets_the_drive_camera_and_sits_back_by_its_own_length() {
          of the chassis collider, or not reading it at all"
     );
 }
+
+/// Park a **wheel-less craft** beside the hero: the same dynamic box, with one
+/// mount instead of four wheels (wave VEH2c).
+fn park_a_craft(world: &mut EcsWorld, half_z: f64, rotor: bool) {
+    let e = world.spawn_with_guid(CAR, "Craft", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(2.5, 0.75 + 0.35, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(2.0, 0.5, half_z),
+            density: 150.0,
+            ..Default::default()
+        },
+        t,
+    ));
+    let m = world.spawn_with_guid(Uuid::from_u128(WHEEL + 9), "Mount", Some(e));
+    let mut mt = Transform::IDENTITY;
+    mt.translation = Vec3d::new(0.0, if rotor { 1.2 } else { -0.4 }, -half_z * 0.8);
+    let collider = if rotor {
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            radius: 4.0,
+            half_extents: Vec3d::new(4.0, 0.05, 4.0),
+            sensor: true,
+            ..Default::default()
+        }
+    } else {
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(0.25, 0.15, 0.25),
+            sensor: true,
+            ..Default::default()
+        }
+    };
+    world.world_mut().entity_mut(m).insert((mt, collider));
+    world.mark_dirty();
+    world.propagate();
+}
+
+/// **A BOAT AND A HELICOPTER GET THE DRIVE CAMERA, and it is the right size for
+/// each of them** (wave VEH2c) — the wave's camera ruling, measured.
+///
+/// The ruling is REUSE, and this is what makes it a ruling rather than an
+/// omission. `CameraTuning::settings_for` answers `self.driving.base` for
+/// `MovementMode::Driving` before it looks at a gait, and a character in a boat
+/// or a helicopter is in `MovementMode::Driving` — the seat is the seat. So both
+/// craft already get the block VEH2a minted, including the per-half-length arm
+/// that makes a 6.4 m launch sit further back than a 3 m saloon.
+///
+/// What a `Flying` branch would buy, priced: a second `CameraSettings` table, a
+/// `FlyingView` on `CameraInput` (a breaking change at ~8 literals), a second
+/// early return in `settings_for`, and — the only genuinely new part — a camera
+/// pitch that followed the AIRCRAFT'S pitch rather than the player's look. That
+/// last one is the reason it is refused: this helicopter's attitude is a
+/// commanded thing that moves 25 degrees in a second and returns to level on a
+/// centred stick, and a camera that followed it would pitch the horizon around
+/// the player every time they touched the stick. The player's own look already
+/// has full pitch freedom and it is the freedom that was asked for.
+#[test]
+fn a_boat_and_a_helicopter_get_the_drive_camera_at_their_own_size() {
+    let settled = |half_z: f64, rotor: Option<bool>| -> inf_ecs::camera::CameraSettings {
+        let mut sim = Sim::new(None);
+        match rotor {
+            Some(r) => park_a_craft(&mut sim.world, half_z, r),
+            None => park_a_car(&mut sim.world, half_z),
+        }
+        let idle = MovementIntent::default();
+        for _ in 0..60 {
+            sim.step(&idle);
+        }
+        sim.step(&MovementIntent {
+            interact: true,
+            ..Default::default()
+        });
+        for _ in 0..120 {
+            sim.step(&idle);
+        }
+        let mode = {
+            let e = sim.world.entity_of(HERO).unwrap();
+            sim.world.world().get::<CharacterMovement>(e).unwrap().mode
+        };
+        assert_eq!(
+            mode,
+            MovementMode::Driving,
+            "a seat is a seat: a craft's occupant is Driving"
+        );
+        sim.cam.settings
+    };
+
+    let walking = {
+        let mut sim = Sim::new(None);
+        park_a_craft(&mut sim.world, 3.2, false);
+        for _ in 0..90 {
+            sim.step(&MovementIntent::default());
+        }
+        sim.cam.settings
+    };
+    let boat = settled(3.2, Some(false));
+    let heli = settled(2.4, Some(true));
+    let car = settled(1.5, None);
+    println!(
+        "THE DRIVE CAMERA OVER THREE HULLS: a 6.4 m launch {:.3} m / {:.1}°, a \
+         4.8 m helicopter {:.3} m / {:.1}°, a 3 m car {:.3} m / {:.1}°, against \
+         a walking {:.3} m / {:.1}°",
+        boat.arm_length_m,
+        boat.fov_deg,
+        heli.arm_length_m,
+        heli.fov_deg,
+        car.arm_length_m,
+        car.fov_deg,
+        walking.arm_length_m,
+        walking.fov_deg
+    );
+
+    // (a) Both craft reach the DRIVE block, not the gait one.
+    for (what, s) in [("the launch", boat), ("the helicopter", heli)] {
+        assert!(
+            s.fov_deg > walking.fov_deg && s.arm_length_m > walking.arm_length_m,
+            "{what} got a {:.1}° / {:.2} m camera against a walking {:.1}° / \
+             {:.2} m — the Driving branch was never reached",
+            s.fov_deg,
+            s.arm_length_m,
+            walking.fov_deg,
+            walking.arm_length_m
+        );
+    }
+    // (b) …and the arm is sized to the CRAFT: the launch sits further back than
+    //     the helicopter, which sits further back than the car, by the same
+    //     per-half-length rule a car got at VEH2a.
+    assert!(
+        boat.arm_length_m > heli.arm_length_m && heli.arm_length_m > car.arm_length_m,
+        "the arms do not scale: launch {:.3}, helicopter {:.3}, car {:.3}",
+        boat.arm_length_m,
+        heli.arm_length_m,
+        car.arm_length_m
+    );
+    let per_m = {
+        let mut sim = Sim::new(None);
+        park_a_craft(&mut sim.world, 3.2, false);
+        sim.step(&MovementIntent::default());
+        sim.cam.tuning.driving.arm_per_length_m
+    };
+    assert!(
+        ((boat.arm_length_m - heli.arm_length_m) - (3.2 - 2.4) * per_m).abs() < 0.05,
+        "the difference is {:.3} m and the rule says {:.3}",
+        boat.arm_length_m - heli.arm_length_m,
+        (3.2 - 2.4) * per_m
+    );
+}

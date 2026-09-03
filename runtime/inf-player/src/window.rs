@@ -525,20 +525,48 @@ impl PlayerApp {
     /// It closes half of VEH2a's carried item 8: the gear is drawn now. The rev
     /// counter and the aids' intervention are still published and still read by
     /// nobody.
-    fn drive_readout(sim: &RuntimeSim) -> Option<String> {
-        let world = sim.world();
-        let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
-        let cm = world
-            .world()
-            .get::<inf_ecs::components::CharacterMovement>(entity)?;
-        if cm.mode != inf_ecs::components::MovementMode::Driving || !cm.runtime.seat.is_seated() {
-            return None;
-        }
-        let gear = sim.bridge3d().vehicle_of(cm.runtime.seat.vehicle)?.gear();
-        Some(inf_ecs::vehicle::drive_readout(
-            cm.runtime.velocity.to_dvec3().length(),
-            gear,
-        ))
+    /// **…and since wave VEH2c it is whatever the craft is.** The dispatch is
+    /// `inf_ecs::vehicle::craft_readout`, which chooses off the RIG'"'"'S OWN
+    /// PARTS — the same facts the class was chosen from — so a boat cannot be
+    /// handed a gearbox'"'"'s readout by a host that forgot which seat the player
+    /// is in. An aircraft'"'"'s height is the one number Ring 0 cannot supply and
+    /// this can.
+    fn drive_readout(sim: &mut RuntimeSim) -> Option<String> {
+        let subject = inf_ecs::movement::camera_subject(sim.world())?;
+        let (vehicle, speed) = {
+            let world = sim.world();
+            let entity = world.entity_of(subject)?;
+            let cm = world
+                .world()
+                .get::<inf_ecs::components::CharacterMovement>(entity)?;
+            if cm.mode != inf_ecs::components::MovementMode::Driving || !cm.runtime.seat.is_seated()
+            {
+                return None;
+            }
+            (
+                cm.runtime.seat.vehicle,
+                cm.runtime.velocity.to_dvec3().length(),
+            )
+        };
+        let (rig, gear, at, airborne) = {
+            let v = sim.bridge3d().vehicle_of(vehicle)?;
+            let rig = v.rig().clone();
+            let airborne = rig
+                .parts_of(inf_ecs::vehicle::PartKind::Rotor)
+                .next()
+                .is_some();
+            let at = sim.world().entity_of(vehicle).and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::Transform>(e)
+                    .map(|t| t.translation.to_dvec3())
+            })?;
+            (rig, v.gear(), at, airborne)
+        };
+        // The ground query is a `&mut` call on the sim (it may page a tile in),
+        // so it is made only for the one craft that draws a height.
+        let height = airborne.then(|| at.y - sim.terrain_height_at(at.x, at.z));
+        Some(inf_ecs::vehicle::craft_readout(&rig, speed, gear, height))
     }
 
     /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for
@@ -806,7 +834,7 @@ impl PlayerApp {
         // engine (`step_driving` parks the collider and `clear_edges` eats the
         // attack), and two readouts stacked in one place would be a HUD that
         // draws over itself on the one frame both are true.
-        if let Some(text) = Self::drive_readout(&self.sim) {
+        if let Some(text) = Self::drive_readout(&mut self.sim) {
             self.ui.readout(&text);
         } else if let Some(text) = Self::ammo_readout(&self.sim) {
             self.ui.readout(&text);

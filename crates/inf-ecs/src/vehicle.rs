@@ -2080,6 +2080,54 @@ pub fn floating_origin_y(def: &VehicleDef, water_y: f64) -> f64 {
     water_y + def.half_extents.y * (1.0 - 2.0 * (rho / fluid).clamp(0.0, 1.0))
 }
 
+/// Metres per second to knots — the unit a boat's speed is read in.
+///
+/// SI everywhere is this repository's rule and this does not break it: the
+/// number stored, stepped and asserted on is always m/s, and this conversion
+/// happens once, in a `format!`, at the boundary where a human reads it. It is
+/// `speed_limit_kmh`'s own precedent (VEH2b) with a different destination.
+pub const KNOTS_PER_MPS: f64 = 1.943_844_492_440_605;
+
+/// **What a CRAFT's own instruments say** (wave VEH2c) — the one door, chosen
+/// by what the rig is made of.
+///
+/// A car reads a speedometer and a gear, a boat reads knots and a telegraph, an
+/// aircraft reads a speed and a height. Dispatched on the rig's own parts rather
+/// than on a kind field: the parts are what the scene authored and what the
+/// class was chosen from, so a readout cannot disagree with the model driving
+/// the machine.
+///
+/// `height_m` is height above the ground, which only an aircraft draws and only
+/// a host can measure — `None` reads as a machine that does not know, and prints
+/// the speed alone rather than a lie.
+pub fn craft_readout(rig: &VehicleRig, speed_mps: f64, gear: i32, height_m: Option<f64>) -> String {
+    let speed = if speed_mps.is_finite() {
+        speed_mps.abs()
+    } else {
+        0.0
+    };
+    if rig.parts_of(PartKind::Rotor).next().is_some() {
+        let kmh = (speed * 3.6).round();
+        return match height_m.filter(|h| h.is_finite()) {
+            Some(h) => format!("{kmh:.0} km/h    ALT {:.0} m", h.max(0.0).round()),
+            None => format!("{kmh:.0} km/h"),
+        };
+    }
+    if rig.parts_of(PartKind::Thruster).next().is_some() {
+        let kn = speed * KNOTS_PER_MPS;
+        // A telegraph, not a gearbox — see `HullVehicle::gear`.
+        let telegraph = if gear > 0 {
+            "AHEAD"
+        } else if gear < 0 {
+            "ASTERN"
+        } else {
+            "STOP"
+        };
+        return format!("{kn:.1} kn    {telegraph}");
+    }
+    drive_readout(speed_mps, gear)
+}
+
 /// **What a driver's own instruments say** — speed and gear, as one line.
 ///
 /// The whole of wave VEH2b's HUD, and it is in Ring 0 rather than in the
@@ -5709,6 +5757,69 @@ mod tests {
         both.parts.extend(hull_rig().parts);
         both.parts.sort_unstable_by_key(|p| p.guid);
         assert!(lifts(class_for_parts(both)) > 14_000.0);
+    }
+
+    /// **Each craft reads its own instruments** (wave VEH2c) — and the
+    /// dispatch is the rig, not a kind field somebody has to keep in step.
+    #[test]
+    fn a_boat_reads_knots_and_an_aircraft_reads_a_height() {
+        let car = VehicleRig {
+            chassis: Uuid::from_u128(1),
+            seat_local: Vec3d::new(0.0, 0.5, 0.0),
+            wheels: vec![WheelMount {
+                guid: Uuid::from_u128(2),
+                mount_local: Vec3d::new(0.9, -0.5, 1.4),
+                radius_m: 0.35,
+            }],
+            parts: Vec::new(),
+        };
+        // A car is unchanged, to the character: `craft_readout` falls through to
+        // `drive_readout` and every VEH2b claim about it still holds.
+        assert_eq!(
+            craft_readout(&car, 27.777_777_8, 3, None),
+            drive_readout(27.777_777_8, 3)
+        );
+        assert_eq!(
+            craft_readout(&car, 27.777_777_8, 3, Some(400.0)),
+            "100 km/h    3"
+        );
+
+        // A boat reads KNOTS and a telegraph. 8.93 m/s is the launch's own
+        // measured top speed, and 17.4 knots is what a helmsman would say.
+        let boat = hull_rig();
+        assert_eq!(craft_readout(&boat, 8.93, 1, None), "17.4 kn    AHEAD");
+        assert_eq!(craft_readout(&boat, 2.0, -1, None), "3.9 kn    ASTERN");
+        assert_eq!(craft_readout(&boat, 0.0, 0, None), "0.0 kn    STOP");
+        // Backwards is a POSITIVE number beside ASTERN, exactly as a car's
+        // speedometer does not go below zero.
+        assert_eq!(craft_readout(&boat, -2.0, -1, None), "3.9 kn    ASTERN");
+
+        // An aircraft reads a speed and a HEIGHT, and a gear it does not have
+        // never appears.
+        let heli = rotor_rig();
+        assert_eq!(
+            craft_readout(&heli, 38.7, 0, Some(42.4)),
+            "139 km/h    ALT 42 m"
+        );
+        // Below the ground is zero rather than a negative altitude: a machine on
+        // a slope reads the honest thing.
+        assert_eq!(
+            craft_readout(&heli, 0.0, 0, Some(-3.0)),
+            "0 km/h    ALT 0 m"
+        );
+        // …and a host that cannot measure a height prints the speed alone
+        // rather than a lie.
+        assert_eq!(craft_readout(&heli, 38.7, 0, None), "139 km/h");
+        assert_eq!(craft_readout(&heli, 38.7, 0, Some(f64::NAN)), "139 km/h");
+        // Nonsense in, a readable line out — `drive_readout`'s own rule.
+        assert_eq!(
+            craft_readout(&heli, f64::NAN, 0, Some(10.0)),
+            "0 km/h    ALT 10 m"
+        );
+        assert_eq!(
+            craft_readout(&boat, f64::INFINITY, 1, None),
+            "0.0 kn    AHEAD"
+        );
     }
 
     /// The readout a driver reads, and the two edges of it.
