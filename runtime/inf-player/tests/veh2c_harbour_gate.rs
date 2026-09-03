@@ -651,6 +651,106 @@ fn a_helicopter_nobody_is_flying_stays_where_it_was_left() {
     );
 }
 
+/// **(g) THE POLICE HELICOPTER, PRICED** (wave VEH2c, clause 4).
+///
+/// The wave was told to take the smallest honest slice of an air unit or to
+/// carry it with numbers. This arm is the numbers, and it is why the machine on
+/// the island wears no livery.
+///
+/// `dispatch::unit_kind_of` reads a unit off the WORLD — a bloomed `light_bar`
+/// child and its hue — because that is the only channel that survives being
+/// written to an `.inf_lvl` and opened by a player with no livery table. It
+/// knows nothing about wheels. So a helicopter in police colours is a POLICE
+/// UNIT the moment it is painted, and `sync_fleet` will claim it, and
+/// `step_dispatch` will send it to an incident using `drive_intent` — a
+/// controller that steers along LANE CENTRELINES.
+///
+/// What that would produce is measured here rather than imagined: the machine
+/// is recognised, and the controls the dispatcher would hand it are the ones
+/// this class reads as a pitch attitude and a yaw rate. It would lift into a
+/// hover and tilt toward a road.
+///
+/// **So the paint is the whole of what is refused, and it costs one field.**
+/// What a real air unit needs is a flight controller — a target altitude, a
+/// climb to it, a track to a point rather than a lane, and an orbit when it
+/// arrives — plus a rule keeping it out of `drive_intent`'s road population.
+/// That is a wave, not a livery, and the ledger carries it as one.
+#[test]
+fn a_liveried_helicopter_would_be_claimed_by_the_dispatcher() {
+    use inf_ecs::vehicle::{Livery, PartPaint};
+
+    // The cruiser's own bar and colours, on a rotorcraft — the one change.
+    const AIR_BAR: inf_ecs::vehicle::BodyPart = inf_ecs::vehicle::BodyPart {
+        name: inf_ecs::dispatch::LIGHT_BAR_PART,
+        centre: Vec3d::new(0.0, 0.92, 0.30),
+        half: Vec3d::new(0.30, 0.06, 0.14),
+        primitive: inf_ecs::components::Primitive::Cube,
+    };
+    const AIR_LIVERY: Livery = Livery {
+        name: "air support",
+        parts: &[],
+        extra: &[(
+            AIR_BAR,
+            PartPaint {
+                base_color: Color::new(0.10, 0.16, 0.42, 1.0),
+                emissive: Color::new(0.10, 0.25, 1.0, 1.0),
+                emissive_intensity: 3.0,
+            },
+        )],
+        service: Some(inf_ecs::dispatch::UnitKind::Police),
+    };
+
+    let fleet = inf_editor_core::vehicle::island_vehicles();
+    let chopper = fleet.get("chopper").expect("the chopper row").to_owned();
+    let mut world = EcsWorld::new();
+    inf_ecs::vehicle::spawn_rig(
+        &mut world,
+        CHOPPER,
+        &chopper,
+        &inf_ecs::vehicle::RigSpawn {
+            name: "Air One".to_string(),
+            at: DVec3::new(0.0, 2.0, 0.0),
+            yaw_deg: 0.0,
+            paint: Color::new(0.9, 0.9, 0.9, 1.0),
+            clip: None,
+            engine_voice: false,
+            livery: Some(&AIR_LIVERY),
+        },
+    );
+    world.mark_dirty();
+    world.propagate();
+
+    let claimed = inf_ecs::dispatch::unit_kind_of(&world, CHOPPER);
+    println!(
+        "A LIVERIED HELICOPTER: dispatch reads it as {:?}; its rig is {} wheel(s), {} rotor(s)",
+        claimed.map(|k| k.name()),
+        inf_ecs::vehicle::rig_of(&world, CHOPPER)
+            .map(|r| r.wheels.len())
+            .unwrap_or(0),
+        inf_ecs::vehicle::rig_of(&world, CHOPPER)
+            .map(|r| r.parts.len())
+            .unwrap_or(0),
+    );
+    assert_eq!(
+        claimed,
+        Some(inf_ecs::dispatch::UnitKind::Police),
+        "the recogniser does not read a bar on an aircraft: the refusal this arm prices would be unnecessary"
+    );
+    // …and the thing it would be dispatched as has NO WHEELS, which is what
+    // makes the claim a defect rather than a feature.
+    let rig = inf_ecs::vehicle::rig_of(&world, CHOPPER).expect("a rig");
+    assert!(rig.wheels.is_empty());
+    assert_eq!(rig.parts.len(), 1);
+
+    // The island's own machine is deliberately NOT painted, so nothing claims
+    // it — asserted against the committed catalogue rather than against this
+    // fixture, which is where the decision actually lives.
+    assert!(
+        inf_editor_core::vehicle::island_vehicle_livery("chopper").is_none(),
+        "the island helicopter wears a livery: dispatch will drive it to a fire"
+    );
+}
+
 /// **(c) PIE == SHIPPING**, over both legs, step for step.
 #[test]
 fn pie_equals_shipping_from_the_harbour_to_the_air() {
