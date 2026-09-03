@@ -850,11 +850,36 @@ pub const ON_SCENE_M: f64 = 12.0;
 /// space along still arrives.
 pub const HOME_M: f64 = 8.0;
 
-/// How far from the incident a crew member stands, metres.
+/// How far from **its own vehicle** a crew member stands, metres, on the line
+/// toward the scene.
 ///
-/// Four. Near enough that a firefighter is at the fire and a paramedic is at the
-/// patient; far enough that the body is not inside the thing it is working on.
+/// # Beside the truck, not on top of the incident, and that is the honest rule
+///
+/// The first cut stood the crew `SCENE_STAND_M` from the *incident*, which is
+/// right for a patient lying in the road and wrong for the case the gate
+/// actually stages: a building fire is at a block's centre, the nearest
+/// carriageway node is forty metres away, and a crew placed at the fire would
+/// have **teleported through a wall** to get there.
+///
+/// So a crew member gets out of its vehicle and stands four metres from it,
+/// facing what it came for. Nobody walks into the building: this engine has no
+/// path from a road to a room a unit could follow, and pretending otherwise
+/// would be a body inside geometry. What reaches the fire is the hose
+/// (`extinguish_beams`), which is a line and does not care.
 pub const SCENE_STAND_M: f64 = 4.0;
+
+/// How much road a unit may have left and still count as **arrived**, metres.
+///
+/// Six. [`ON_SCENE_M`] answers "is the incident within reach of where I am",
+/// which is the right question for something in the street and the wrong one for
+/// something inside a building: a fire at a block's centre is forty metres from
+/// the nearest lane, and a unit that only ever tested the distance would sit at
+/// the end of its own route for ever with the fire still burning.
+///
+/// So a unit has arrived when it is near the thing **or** when it has run out of
+/// road. Six metres is [`crate::traffic::STANDING_GAP_M`] — one car — which is
+/// as close to the end of a lane as a vehicle that stops behind things can get.
+pub const PATH_END_M: f64 = 6.0;
 
 /// How much of a fire's intensity one appliance puts out per second.
 ///
@@ -1114,6 +1139,25 @@ pub const YIELD_RANGE_M: f64 = 60.0;
 /// behind this car in any sense that matters, and a rule with no lateral bound
 /// would have a whole junction pulling over for a unit crossing it.
 pub const YIELD_CORRIDOR_M: f64 = 6.0;
+
+/// **How fast a yielding car keeps rolling**, m/s, while it moves over.
+///
+/// # The half of the yield that a steering bias alone cannot do
+///
+/// `drive_intent` answers **"nothing and the handbrake"** below
+/// [`STOPPED_MPS`](crate::traffic::STOPPED_MPS) — which is right for a car
+/// waiting at a queue and is a deadlock for a car being asked to get out of the
+/// way, because a stationary car with the handbrake on cannot steer anywhere.
+/// Measured on this wave's own gate: a responding unit closed on a stopped queue,
+/// every car in it was told to pull over, none of them could, and three units sat
+/// in the same street for six thousand steps.
+///
+/// So a yielding car **creeps**: 1.5 m/s is a walking pace, which is what a car
+/// edging onto a kerb does, and it is enough that the 2.6 m of
+/// [`YIELD_BIAS_M`] is covered in under two seconds. It applies only while a
+/// siren is actually behind — the term is guarded on the same non-zero bias the
+/// steering term is — so nothing about an ordinary street changes.
+pub const YIELD_CREEP_MPS: f64 = 1.5;
 
 /// **How far a yielding car pulls over**, metres, and the number is the whole
 /// design.

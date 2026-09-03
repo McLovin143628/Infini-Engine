@@ -731,6 +731,16 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
         (2.0 * COMFORT_DECEL_MPS2 * to_end).sqrt()
     };
     let target = limit.min(bend).min(ahead_of_us).min(endstop);
+    // ── EMS2 the yield, second half. A car being asked to move over must keep
+    //    rolling, or the handbrake below pins it exactly where it is in the way.
+    //    Guarded on the same non-zero bias the wheel term is, so an ordinary
+    //    street produces the bits it always produced. See
+    //    `crate::dispatch::YIELD_CREEP_MPS` for the deadlock this closes.
+    let target = if view.lateral_bias_m != 0.0 && view.lateral_bias_m.is_finite() {
+        target.max(crate::dispatch::YIELD_CREEP_MPS)
+    } else {
+        target
+    };
 
     // ── 3. the pedal.
     let (fwd, handbrake) = if target <= STOPPED_MPS && v.abs() <= STOPPED_MPS {

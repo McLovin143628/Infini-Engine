@@ -464,6 +464,7 @@ fn run_units(
     stats: &mut DispatchStats,
 ) {
     let archetype = inf_ecs::society::level_archetype(world);
+    let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
     let chassis_list: Vec<Uuid> = res.runs.keys().copied().collect();
     for chassis in chassis_list {
         let Some(run) = res.runs.get(&chassis).cloned() else {
@@ -489,7 +490,16 @@ fn run_units(
                 };
                 let here = chassis_at(world, bridge, chassis).unwrap_or(unit.home);
                 let seated = ensure_crew(world, bridge, chassis, crew, &archetype, here);
-                if seated && steer(world, bridge, chassis, crew, &run) {
+                // ── the obstacles, LAZILY and ONCE — `step_traffic`'s own shape
+                //    and its reason: gathering them per unit would be
+                //    `O(units x world)`, and gathering them unconditionally
+                //    would walk a furnished town on every step of a level where
+                //    nothing is happening.
+                if obstacles.is_none() {
+                    obstacles = Some(obstacles_for_units(world, res));
+                }
+                let obs = obstacles.as_deref().unwrap_or(&[]);
+                if seated && steer(world, bridge, chassis, crew, &run, obs) {
                     stats.steered += 1;
                 }
                 let reach = if run.state == UnitState::EnRoute {
@@ -497,7 +507,15 @@ fn run_units(
                 } else {
                     dispatch::HOME_M
                 };
-                if (here - target).length() <= reach {
+                // **Near the thing, OR out of road.** See `PATH_END_M`: an
+                // incident inside a building is forty metres from the nearest
+                // lane, and a unit that only tested the distance would sit at
+                // the end of its own route for ever.
+                let out_of_road = run.path.as_ref().is_some_and(|p| {
+                    let left = p.length_m() - p.project(here).s_m;
+                    left.is_finite() && left <= dispatch::PATH_END_M
+                });
+                if (here - target).length() <= reach || out_of_road {
                     if run.state == UnitState::EnRoute {
                         arrive(
                             world,
@@ -524,6 +542,41 @@ fn run_units(
             }
         }
     }
+}
+
+/// **Everything a responding unit has to not drive into** — every solid body in
+/// the world **except the fleet still parked in its station**.
+///
+/// # Why the parked fleet is not an obstacle, and why that is a rule
+///
+/// `super::traffic::obstacles_of` answers every body with a position, which is
+/// exactly right for a car on a carriageway. A station's apron is not a
+/// carriageway: EMS1 parks a fleet nose-to-tail at `EMS_PARK_PITCH_M`, and the
+/// drive out of a bay runs **along** that row by construction — so a unit that
+/// applied the following rule to its own station would brake for the appliance
+/// parked eleven metres in front of it and never leave. Measured on this wave's
+/// own fixtures the moment the following rule was added: three units, three
+/// assignments, zero departures.
+///
+/// So a unit that is `InStation` is not in anybody's lane. Everything else
+/// still is — real traffic, the hero standing in the road, and **another unit
+/// that is under way**, which is the case that matters: two units converging on
+/// one junction queue for each other like anybody else.
+///
+/// `O(world)` and built at most once per fixed step, only on a step something is
+/// actually driving.
+fn obstacles_for_units(world: &EcsWorld, res: &DispatchRes) -> Vec<(Uuid, DVec3)> {
+    let parked: std::collections::BTreeSet<Uuid> = res
+        .runs
+        .iter()
+        .filter(|(_, r)| r.state == UnitState::InStation)
+        .map(|(g, _)| *g)
+        .collect();
+    let mut out = super::traffic::obstacles_of(world);
+    if !parked.is_empty() {
+        out.retain(|(g, _)| !parked.contains(g));
+    }
+    out
 }
 
 /// Where a unit's chassis is: the solver's body if the bridge has one, the
@@ -623,6 +676,7 @@ fn steer(
     chassis: Uuid,
     crew: Uuid,
     run: &UnitRun,
+    obstacles: &[(Uuid, DVec3)],
 ) -> bool {
     let Some(path) = run.path.as_ref() else {
         return false;
@@ -649,7 +703,19 @@ fn steer(
         speed_limit_mps: traffic::street_speed_mps() * RESPONSE_SPEED_FACTOR,
         // A unit under way never yields to itself.
         lateral_bias_m: 0.0,
-        gap_m: None,
+        // **A siren does not go through the car in front of it.** The same
+        // `gap_ahead` every other driver in this engine reads — and it is what
+        // makes the yield rule matter rather than decorate: a civilian that
+        // stays in the lane is an obstacle this unit brakes for and never passes
+        // (`drive_intent` has no overtake), and one that pulls 2.6 m over has
+        // left the corridor `gap_ahead` measures.
+        //
+        // Written as `None` in the first cut, which is a unit that ignores
+        // everything in front of it — and what that produced was not a unit that
+        // drove through traffic but one that drove INTO it and stopped there,
+        // permanently, half a mile short of a fire. Measured on this wave's own
+        // gate.
+        gap_m: super::traffic::gap_ahead(path, s_m, chassis, crew, obstacles),
         loops: false,
     };
     let intent = traffic::drive_intent(&view);
@@ -703,9 +769,10 @@ fn arrive(
         }
     }
     handbrake(bridge, chassis);
-    // The crew stands `SCENE_STAND_M` from the incident, on the line from the
-    // vehicle to it — which is where somebody who has just got out of that
-    // vehicle would be.
+    // The crew stands `SCENE_STAND_M` from ITS OWN VEHICLE, on the line toward
+    // the incident — which is where somebody who has just got out of that
+    // vehicle is. See `SCENE_STAND_M` for why it is not measured from the
+    // incident: a fire is inside a building and nobody walks in.
     let toward = at - here;
     let len = (toward.x * toward.x + toward.z * toward.z).sqrt();
     let dir = if len > 1.0e-6 {
@@ -713,7 +780,7 @@ fn arrive(
     } else {
         DVec3::Z
     };
-    let stand = at - dir * dispatch::SCENE_STAND_M;
+    let stand = here + dir * dispatch::SCENE_STAND_M;
     unseat_crew(world, bridge, crew, stand, dir);
     // ── what the crew DOES, once it is out. Written onto the body's own
     //    `CrowdAgent`, which is where `step_pose_evaluation` reads a posture

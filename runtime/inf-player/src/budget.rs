@@ -490,6 +490,56 @@ pub const VEHICLE_BUDGET_CARS: usize = 64;
 /// (VEH2b).
 pub const TRAFFIC_STEP_BUDGET_MS: f64 = 1.0;
 
+/// **What the `dispatch` phase may cost**, milliseconds (wave EMS2).
+///
+/// # Why a phase gets its own number, a fifth time
+///
+/// [`NPC_STEP_BUDGET_MS`]'s argument, then [`VEHICLE_STEP_BUDGET_MS`]'s, then
+/// [`TRAFFIC_STEP_BUDGET_MS`]'s, then [`AUDIO_STEP_BUDGET_MS`]'s: a whole-step
+/// total works while every phase is something the engine has always done, and
+/// stops working the moment a phase **grows**. `dispatch` is new in this wave,
+/// so it starts with a row and a ceiling rather than being discovered inside
+/// `CITY_STEP_BUDGET_MS` two waves later.
+///
+/// # What is in it
+///
+/// On almost every step: one `block_stamp` walk (which `society` and `traffic`
+/// already make in the two phases before it), one walk over the units to steer
+/// them through `inf_ecs::traffic::drive_intent`, the siren and light-bar cue
+/// lists, and the smoke's rise-and-fade over at most
+/// `inf_ecs::dispatch::MAX_PUFFS` sprites. All `O(units + puffs)`, both bounded
+/// by constants.
+///
+/// On the steps something is **assigned** it also pays for a carriageway graph
+/// and one `inf_nav` Dijkstra per candidate unit — which is why
+/// `inf_physics::d3::dispatch::ASSIGNS_PER_STEP` is **one**: a town that woke to
+/// four simultaneous emergencies spreads them over four steps rather than
+/// spiking one.
+///
+/// # Half a millisecond, and where the number comes from
+///
+/// [`VEHICLE_STEP_BUDGET_MS`]'s figure, because the two phases bound the same
+/// population the same way: `inf_ecs::dispatch::MAX_UNITS` is 64 and
+/// [`VEHICLE_BUDGET_CARS`] is 64, deliberately — a unit that is responding **is**
+/// a vehicle on four rays, and the phase that decides where it goes should cost
+/// less than the phase that integrates it. It is a twelfth of
+/// [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
+/// anything: a dispatch phase that grew to a visible share of a 6 ms step trips
+/// this first.
+///
+/// Measured by `ems2_dispatch_gate::the_dispatch_phase_costs_what_it_costs` on
+/// three units, three open incidents and a town of traffic — the table is
+/// printed on every run, in dev and in CI, and asserted on a real machine in
+/// release.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 0.5
+/// (EMS2).
+pub const DISPATCH_STEP_BUDGET_MS: f64 = 0.5;
+
 /// **What the `audio` phase may cost**, milliseconds (island wave VEN1b audit).
 ///
 /// # Why a phase gets its own number, a fourth time

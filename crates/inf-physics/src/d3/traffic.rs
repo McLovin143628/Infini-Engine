@@ -399,7 +399,7 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
 /// its lane. The visible consequence is stated rather than hidden — **a hero
 /// standing in the road stops the street**, which is a thing a player will do
 /// and a thing this rule answers honestly.
-fn obstacles_of(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
+pub(crate) fn obstacles_of(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
     let mut out: Vec<(Uuid, DVec3)> = Vec::new();
     for e in world.world().iter_entities() {
         let Some(g) = e.get::<inf_ecs::components::Guid>() else {
@@ -430,7 +430,7 @@ fn obstacles_of(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
 /// [`LOOK_AHEAD_M`] is in the way, and the nearest such is the gap. Parked cars
 /// are five metres off the lane and never qualify, which is what
 /// [`inf_ecs::traffic::KERB_PARK_OFFSET_M`] is sized for.
-fn gap_ahead(
+pub(crate) fn gap_ahead(
     path: &traffic::LanePath,
     s_m: f64,
     self_guid: Uuid,
