@@ -286,6 +286,24 @@ fn step_one(
 
     let forward_mps = state.linvel.dot(state.basis().0);
     let (revs, load) = bridge.vehicle_of(chassis)?.engine_state(forward_mps);
+    // ── 5. **INPUT IS PER STEP** (wave VEH2c). Every commander — the movement
+    //    door, traffic's controller, dispatch's — writes its `VehicleControls`
+    //    BEFORE this phase runs, so clearing them after the solve means a
+    //    vehicle nobody spoke to this step hears silence rather than whatever
+    //    it was last told.
+    //
+    //    It was not always so, and nothing noticed: a car whose driver got out
+    //    kept the last throttle it was given for ever, which is invisible in the
+    //    one thing anybody had ever got out of — a car that was already
+    //    stopping. It is very visible in a helicopter, whose neutral collective
+    //    is a hover (see `VehicleControls::occupied`).
+    //
+    //    After `engine_state`, which reads the controls this step was solved
+    //    with: the sound a vehicle makes is a function of the decision that was
+    //    just taken, which is P12's own doctrine.
+    if let Some(v) = bridge.vehicle_mut(chassis) {
+        v.control(inf_ecs::vehicle::VehicleControls::default());
+    }
     Some(VehicleOutcome {
         chassis,
         wheels_grounded: grounded,

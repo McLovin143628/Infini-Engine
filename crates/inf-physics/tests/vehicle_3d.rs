@@ -626,6 +626,7 @@ fn two_identical_rigs_drive_byte_for_byte() {
                 brake: 0.0,
                 handbrake: i % 121 == 0,
                 vertical: 0.0,
+                occupied: true,
             };
             rig.drive(controls, 1);
             let t = rig.chassis();
@@ -1774,6 +1775,7 @@ const AHEAD: VehicleControls = VehicleControls {
     brake: 0.0,
     handbrake: false,
     vertical: 0.0,
+    occupied: true,
 };
 
 /// **THE BOAT DRIVES** — and the table it prints is this wave's boat-feel row.
@@ -2098,6 +2100,7 @@ const HOVER: VehicleControls = VehicleControls {
     brake: 0.0,
     handbrake: false,
     vertical: 0.0,
+    occupied: true,
 };
 
 /// **THE HELICOPTER FLIES** — lifts off, holds a height, and comes back down.

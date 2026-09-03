@@ -1249,7 +1249,7 @@ mod tests {
             assert_eq!(
                 kg > 3_600.0,
                 id == "engine" || id == "launch",
-                "{id} weighs {kg} kg — only the fire appliance and the launch                  are over 3.6 t"
+                "{id} weighs {kg} kg: only the appliance and the launch are over 3.6 t"
             );
             // A craft with no wheels has none of the rest of this to say.
             if !def.body.wheeled() {

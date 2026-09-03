@@ -1087,7 +1087,7 @@ impl PhysicsBridge3D {
                         let took = class.install(v.as_mut());
                         let of = class.settings().len();
                         tracing::debug!(
-                            "inf-physics: wheel-less vehicle {chassis} installed its                              class ({took} of {of} tunables taken)"
+                            "inf-physics: wheel-less vehicle {chassis} took {took} of {of} tunables"
                         );
                     }
                     self.vehicles.insert(chassis, v);

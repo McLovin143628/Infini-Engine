@@ -1196,10 +1196,23 @@ const ROTORCRAFT_PARTS: &[BodyPart] = &[
 /// rather than with a second thrust, so a tail-rotor mount would be a marker the
 /// model does not read — and a part nothing reads is exactly the kind of
 /// decoration this table is not.
+///
+/// # THE MAST IS OVER THE CENTRE OF GRAVITY, and that is a measurement
+///
+/// The first cut put the hub 0.29 m forward of the chassis origin, where a
+/// drawing would put it. The thrust acts at the hub and the mass acts at the
+/// origin, so that offset is a permanent **nose-up** couple — and the attitude
+/// hold is proportional, so it does not remove a steady one, it balances it at
+/// an error. Measured: **4.3 degrees** of standing nose-up trim, which flew the
+/// machine 30 m BACKWARDS during a seven-second climb and put it in the sea.
+///
+/// Real helicopters put the mast over the CG for exactly this reason. The
+/// alternative — an integral term in the attitude hold — buys a trim the
+/// airframe should not have needed.
 const ROTORCRAFT_MOUNTS: &[MountPart] = &[MountPart {
     name: "rotor",
     kind: PartKind::Rotor,
-    centre: Vec3d::new(0.0, 1.22, 0.12),
+    centre: Vec3d::new(0.0, 1.22, 0.0),
     // Wider than the machine — see `MountPart`'s own note.
     half: Vec3d::new(3.60, 0.04, 3.60),
     primitive: crate::components::Primitive::Cylinder,
@@ -2584,6 +2597,29 @@ pub struct VehicleControls {
     /// A class that cannot climb ignores it, which is what
     /// [`RaycastVehicle`] and [`HullVehicle`] both do.
     pub vertical: f64,
+    /// **Whether anybody is commanding this vehicle at all** (wave VEH2c).
+    ///
+    /// `false` on [`Default`], and that is the whole point: the vehicle door
+    /// clears a vehicle's controls after every step, so a machine nobody spoke
+    /// to this step hears silence rather than whatever it was last told.
+    ///
+    /// # Why a boolean, when zero would do for a car
+    ///
+    /// Because zero does NOT do for a helicopter. A parked car with the throttle
+    /// at zero applies no force and sits still; a rotorcraft with the collective
+    /// at zero is in a HOVER, which is what the governed collective means — so an
+    /// unmanned machine would carry its own weight and drift off its pad for
+    /// ever. Read the neutral as "hovering" and you cannot express "switched
+    /// off"; the boolean is the difference between a stick at rest and no hand
+    /// on it.
+    ///
+    /// It also closes a defect that predates this wave and was invisible in a
+    /// car: `movement`, `traffic` and `dispatch` all command their vehicles
+    /// through this struct and none of them cleared it, so a vehicle whose
+    /// driver got out kept the last throttle it was given for ever. Nothing
+    /// noticed, because the only thing anybody had ever got out of was a car
+    /// that was already stopping.
+    pub occupied: bool,
 }
 
 impl VehicleControls {
@@ -2622,6 +2658,9 @@ impl VehicleControls {
             brake,
             handbrake,
             vertical: vertical.clamp(-1.0, 1.0),
+            // An intent is a person's, so a control built from one is commanded
+            // by definition. This is the only place that is true.
+            occupied: true,
         }
     }
 }
@@ -5001,6 +5040,18 @@ impl Vehicle for RotorVehicle {
         //    the thrust, so a coordinated turn does not sink; full up adds
         //    `HELI_CLIMB_AUTHORITY` of hover and full down takes it away. Past
         //    `HELI_MIN_LIFT_COS` of bank the governor gives up and it falls.
+        //
+        // **A machine nobody is flying has its rotor STOPPED**, and that is not
+        // a nicety: the governed collective's neutral is a HOVER, so an unmanned
+        // helicopter would carry its own weight and drift off its pad for ever.
+        // Measured before this line existed — the harbour gate's own air leg
+        // flew the parked machine 476 m and 12 m under the world with nobody
+        // aboard. `VehicleControls::occupied` is what a stick at rest and no
+        // hand on it differ by.
+        if !self.controls.occupied {
+            self.thrust_n = 0.0;
+            return;
+        }
         let lift_cos = up.y.max(HELI_MIN_LIFT_COS);
         let collective = self.controls.vertical.clamp(-1.0, 1.0);
         let hover = weight / lift_cos;
@@ -5469,6 +5520,18 @@ mod tests {
         v
     }
 
+    /// A hand on the stick, with everything at neutral (wave VEH2c). An
+    /// unmanned rotorcraft has its rotor STOPPED, which is a claim of its own
+    /// below, so every arm about how one FLIES has to say a pilot is aboard.
+    const PILOT: VehicleControls = VehicleControls {
+        throttle: 0.0,
+        steer: 0.0,
+        brake: 0.0,
+        handbrake: false,
+        vertical: 0.0,
+        occupied: true,
+    };
+
     fn airborne(rotation: DQuat, linvel: DVec3, angvel: DVec3) -> ChassisState {
         ChassisState {
             position: DVec3::new(0.0, 40.0, 0.0),
@@ -5526,7 +5589,7 @@ mod tests {
         let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
         let weight = state.mass_kg * 9.81;
 
-        v.control(VehicleControls::default());
+        v.control(PILOT);
         v.solve(state, DT, &mut out);
         assert!(
             (v.thrust_n() - weight).abs() < 1e-6,
@@ -5550,7 +5613,7 @@ mod tests {
             out.clear();
             v.control(VehicleControls {
                 vertical: collective,
-                ..Default::default()
+                ..PILOT
             });
             v.solve(state, DT, &mut out);
             assert!(
@@ -5575,7 +5638,7 @@ mod tests {
             let mut out = Vec::new();
             let rot = DQuat::from_rotation_z(-bank_deg.to_radians());
             let state = airborne(rot, DVec3::ZERO, DVec3::ZERO);
-            v.control(VehicleControls::default());
+            v.control(PILOT);
             v.solve(state, DT, &mut out);
             // The vertical component of the rotor force alone — the couple sums
             // to zero and the drag is zero at rest.
@@ -5619,10 +5682,7 @@ mod tests {
             let mut v = rotorcraft(rotor_rig());
             let mut out = Vec::new();
             let state = airborne(DQuat::IDENTITY, DVec3::new(0.0, 0.0, speed), DVec3::ZERO);
-            v.control(VehicleControls {
-                steer,
-                ..Default::default()
-            });
+            v.control(VehicleControls { steer, ..PILOT });
             v.solve(state, DT, &mut out);
             let (_, tau_y) = resultant(&out, state.position);
             // The roll moment about the machine's own forward axis.
@@ -5671,7 +5731,7 @@ mod tests {
         v.tune("max_speed_mps", 60.0);
         v.control(VehicleControls {
             throttle: 1.0,
-            ..Default::default()
+            ..PILOT
         });
         let mut out = Vec::new();
         let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
@@ -5708,7 +5768,7 @@ mod tests {
     #[test]
     fn the_drawn_blade_turns_and_its_angle_stays_bounded() {
         let mut v = rotorcraft(rotor_rig());
-        v.control(VehicleControls::default());
+        v.control(PILOT);
         let mut out = Vec::new();
         let state = airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO);
         let mut seen = std::collections::BTreeSet::new();
@@ -5739,7 +5799,7 @@ mod tests {
         // Behaviour, not a downcast: only the rotorcraft lifts against gravity.
         let lifts = |mut v: Box<dyn Vehicle>| {
             v.tune("max_engine_force_n", 26_000.0);
-            v.control(VehicleControls::default());
+            v.control(PILOT);
             let mut out = Vec::new();
             v.solve(
                 airborne(DQuat::IDENTITY, DVec3::ZERO, DVec3::ZERO),
@@ -6259,7 +6319,18 @@ mod tests {
     fn the_vertical_axis_reaches_the_controls_and_is_clamped() {
         let none = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, 0.0);
         assert_eq!(none.vertical, 0.0);
-        assert_eq!(none, VehicleControls::default());
+        // …and an intent's controls are COMMANDED, which the default is not: a
+        // stick at rest is not the same thing as no hand on it
+        // (`VehicleControls::occupied`).
+        assert!(none.occupied);
+        assert!(!VehicleControls::default().occupied);
+        assert_eq!(
+            none,
+            VehicleControls {
+                occupied: true,
+                ..Default::default()
+            }
+        );
         let up = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, 4.0);
         assert_eq!(up.vertical, 1.0, "a wild axis is clamped, not refused");
         let down = VehicleControls::from_intent(crate::math::Vec2d::ZERO, 0.0, false, -4.0);
