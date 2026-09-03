@@ -441,6 +441,21 @@ impl PlayerUi {
         );
     }
 
+    /// **Draw the wanted rating** (wave EMS3) — the top-left corner, and only
+    /// while somebody is looking for the camera's subject.
+    ///
+    /// A sibling of [`readout`](Self::readout) and [`reticle`](Self::reticle)
+    /// down to the menu guard: a HUD element and a world prompt are the same
+    /// thing to a draw list. What it does NOT share is the readout's *slot* —
+    /// see `inf_ui::view::wanted` for why a rating cannot live at bottom-centre
+    /// behind an `else` with the driver's instruments and the ammunition count.
+    pub fn wanted(&mut self, earned: u8, slots: u8) {
+        if self.menu.open {
+            return;
+        }
+        inf_ui::view::wanted(&mut self.list, earned, slots);
+    }
+
     /// **Draw the aiming reticle** (wave WPN1) — the centre of the screen, and
     /// only while the character is pointing a weapon.
     ///

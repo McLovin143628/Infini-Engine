@@ -500,6 +500,22 @@ pub fn heat_of(world: &EcsWorld, suspect: Uuid) -> u32 {
     profile_of(world, suspect).map(|p| p.heat).unwrap_or(0)
 }
 
+/// **HOW MANY STARS TO DRAW OVER THIS PERSON**, and how many slots to draw at
+/// all — the HUD's one Ring-0 door (wave EMS3).
+///
+/// `inf_ecs::vehicle::drive_readout` and `inf_ecs::weapon::ammo_readout`'s
+/// shape: the *decision* about what a player is told is sim state and lives in
+/// Ring 0, and the host's only job is to draw it. A host that computed
+/// `heat / 3` for itself would be a second opinion about the ladder, and the
+/// two would disagree the first time [`WANTED_STARS`] moved.
+///
+/// `None` for somebody nobody is looking for, which is what keeps the corner of
+/// the screen empty in every game that is not this one.
+pub fn wanted_readout(world: &EcsWorld, actor: Uuid) -> Option<(u8, u8)> {
+    let heat = heat_of(world, actor);
+    (heat > 0).then_some((stars(heat), WANTED_STARS.len() as u8))
+}
+
 /// **Forget every open file** — [`crate::dispatch::clear_dispatch`]'s twin, for
 /// its reason: an editor Simulate session must leave nothing behind in the
 /// author's document, and a wanted level is emphatically not something an author

@@ -565,6 +565,18 @@ impl PlayerApp {
             .then(|| inf_ecs::weapon::ammo_readout(s.magazine, s.reserve))
     }
 
+    /// **How wanted is the camera subject?** (wave EMS3) — the star row's
+    /// condition, and the whole of the host's share of it.
+    ///
+    /// One Ring-0 call, exactly as [`Self::ammo_readout`] is: the ladder, the
+    /// thresholds and the decision that a rating exists at all are sim state,
+    /// and a host that divided a heat by three for itself would be a second
+    /// opinion about `inf_ecs::crime::WANTED_STARS`.
+    fn wanted_readout(sim: &RuntimeSim) -> Option<(u8, u8)> {
+        let world = sim.world();
+        inf_ecs::crime::wanted_readout(world, inf_ecs::movement::camera_subject(world)?)
+    }
+
     /// **Is the camera subject pointing a weapon?** — the reticle's condition.
     ///
     /// Two halves, and both are needed: the aim mode (RMB), because a carried
@@ -798,6 +810,26 @@ impl PlayerApp {
             self.ui.readout(&text);
         } else if let Some(text) = Self::ammo_readout(&self.sim) {
             self.ui.readout(&text);
+        }
+        // EMS3: the wanted rating, top-left. A NEW anchor rather than a third
+        // tenant of the readout slot above, and the reason is that slot's own
+        // stated rule: the driver's instruments and the ammunition count share
+        // it behind an `else` because they cannot both be true, and a wanted
+        // rating is true AT THE SAME TIME as either of them — being chased while
+        // driving and being chased while shooting are the mechanic. Nothing else
+        // in this engine draws in the top-left.
+        //
+        // **LEDGER SENTENCE: these stars will never appear in the editor's
+        // Simulate viewport**, and that is a property of the architecture rather
+        // than an oversight. `set_ui` has exactly one caller in the tree and it
+        // is eleven lines below this one; nothing under `editor/` ever builds a
+        // `UiDrawList` at all, so Simulate has no in-game HUD of any kind — no
+        // prompt, no readout, no reticle and now no rating. A wanted level is
+        // still fully simulated there and is still visible in a trace and in the
+        // ledger; what is missing is the drawing. Embedded PIE and a new-window
+        // PIE both run this host and do show it.
+        if let Some((earned, slots)) = Self::wanted_readout(&self.sim) {
+            self.ui.wanted(earned, slots);
         }
         // …and the reticle, which is the aim's own half. Only while aiming: see
         // `inf_ui::view::reticle` for why a permanent crosshair would be a claim

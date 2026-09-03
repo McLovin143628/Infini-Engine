@@ -262,6 +262,102 @@ pub fn reticle(list: &mut UiDrawList, colour: Color) {
     }
 }
 
+/// **The wanted rating's own colour** — a warning, because that is what it is.
+///
+/// `palette::WARN` rather than a new entry: the palette's own note for it is
+/// *"a warning — a conflict, and a control with no consumer"*, and a wanted
+/// level is the same kind of statement about the world. An earned star is this
+/// at full alpha and an unearned one is this at a sixth of it, so the scale is
+/// always readable and the number always is too.
+pub const WANTED_DIM: f32 = 0.16;
+
+/// How wide one star is, in pixels at scale 1.
+const STAR_PX: f32 = 11.0;
+
+/// The gap between two of them, in pixels at scale 1.
+const STAR_GAP_PX: f32 = 4.0;
+
+/// How far the row sits from the top-left corner, in pixels at scale 1.
+const STAR_MARGIN_PX: f32 = 10.0;
+
+/// **A five-pointed star, in horizontal spans over an 11 x 9 grid.**
+///
+/// The draw list has exactly three primitives — a rect, a stroke and a run of
+/// text — so a star is a raster. Each entry is `(row, x0, x1)` in grid cells,
+/// and a row with two entries is the gap between the legs, which is the one
+/// feature that stops a five-pointed star reading as a diamond.
+const STAR_SPANS: [(u8, u8, u8); 11] = [
+    (0, 5, 6),
+    (1, 5, 6),
+    (2, 4, 7),
+    (3, 0, 11),
+    (4, 1, 10),
+    (5, 2, 9),
+    (6, 2, 9),
+    (7, 1, 5),
+    (7, 6, 10),
+    (8, 0, 4),
+    (8, 7, 11),
+];
+
+/// The grid the spans above are expressed in.
+const STAR_COLS: f32 = 11.0;
+const STAR_ROWS: f32 = 9.0;
+
+/// **DRAW THE WANTED RATING** (wave EMS3) — `earned` of `slots` stars, at the
+/// top-left of the viewport.
+///
+/// # A new anchor, and why it is not the readout slot
+///
+/// The readout slot at bottom-centre is already contested: `PlayerApp::frame`
+/// puts the driver's instruments and the ammunition count there behind an
+/// `else`, with a stated rule that *"two readouts stacked in one place would be
+/// a HUD that draws over itself on the one frame both are true"*. A wanted
+/// rating is true **at the same time as both of them** — the whole mechanic is
+/// being chased while driving, and being chased while shooting — so it cannot
+/// share that slot without breaking the rule that governs it.
+///
+/// The top-right is the toast stack's (`toasts` anchors there and grows
+/// downward), and putting a permanent element under a stack that can grow is
+/// the same collision one corner over. So: **top-left**, which nothing else in
+/// this engine draws in.
+///
+/// # It draws the empty slots too
+///
+/// An earned star is [`palette::WARN`] and an unearned one is the same colour at
+/// [`WANTED_DIM`] alpha, so the row is always five wide. A rating that only drew
+/// what was earned would make "one star" and "one star of five" look identical,
+/// and the second is the fact a player is deciding whether to run on.
+///
+/// Nothing is drawn at all when `slots` is zero, which is the honest answer for
+/// a game that has no wanted system in it.
+pub fn wanted(list: &mut UiDrawList, earned: u8, slots: u8) {
+    let vp = list.viewport;
+    if !vp.x.is_finite() || !vp.y.is_finite() || vp.x <= 0.0 || vp.y <= 0.0 || slots == 0 {
+        return;
+    }
+    let s = text_scale(vp.y);
+    let (w, gap, margin) = (STAR_PX * s, STAR_GAP_PX * s, STAR_MARGIN_PX * s);
+    let cell_x = w / STAR_COLS;
+    let cell_y = (STAR_PX * s * STAR_ROWS / STAR_COLS) / STAR_ROWS;
+    for i in 0..slots {
+        let lit = i < earned;
+        let mut colour = palette::WARN;
+        if !lit {
+            colour[3] = WANTED_DIM;
+        }
+        // Rounded to whole pixels, for the reticle's reason: an 11-cell raster
+        // whose cells land between texels is a star with one thick arm.
+        let x0 = (margin + f32::from(i) * (w + gap)).round();
+        let y0 = margin.round();
+        for (row, a, b) in STAR_SPANS {
+            let x = x0 + f32::from(a) * cell_x;
+            let y = y0 + f32::from(row) * cell_y;
+            list.rect(Rect::new(x, y, f32::from(b - a) * cell_x, cell_y), colour);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +558,95 @@ mod tests {
             let mut l = UiDrawList::new(bad);
             reticle(&mut l, palette::TEXT);
             assert!(l.is_empty(), "viewport {bad:?} drew a reticle");
+        }
+    }
+
+    /// **THE WANTED RATING IS ALWAYS FIVE SLOTS WIDE, IN THE TOP-LEFT**, and
+    /// the earned ones are the bright ones (wave EMS3).
+    ///
+    /// The three claims a lazier drawer would fail: it draws the *empty* slots
+    /// (so one star and one-of-five do not look identical), it draws them in
+    /// the corner nothing else in this engine draws in (so it cannot collide
+    /// with the toast stack or the readout slot), and the brightness order is
+    /// earned-then-dim rather than the reverse.
+    #[test]
+    fn the_wanted_rating_draws_five_slots_and_lights_the_earned_ones() {
+        for earned in 0..=5u8 {
+            let mut l = UiDrawList::new(vp());
+            wanted(&mut l, earned, 5);
+            let per_star = STAR_SPANS.len();
+            assert_eq!(
+                l.quads.len(),
+                per_star * 5,
+                "a {earned}-star rating did not draw five slots"
+            );
+            let lit = l
+                .quads
+                .iter()
+                .filter(|q| q.color[3] > WANTED_DIM + 1e-6)
+                .count();
+            assert_eq!(
+                lit,
+                per_star * usize::from(earned),
+                "{earned} stars lit {lit} of {} spans",
+                l.quads.len()
+            );
+            // The BRIGHT ones come first, left to right: a rating whose lit
+            // slots were on the right would read as a different number.
+            let mut lit_x: Vec<f32> = Vec::new();
+            let mut dim_x: Vec<f32> = Vec::new();
+            for q in &l.quads {
+                let x = q.position.x as f32;
+                if q.color[3] > WANTED_DIM + 1e-6 {
+                    lit_x.push(x);
+                } else {
+                    dim_x.push(x);
+                }
+                // TOP-LEFT, and well clear of the two corners that are taken:
+                // the toast stack anchors at `vp.x - w - PAD` and the readout
+                // sits at `vp.y`.
+                assert!(x < vp().x * 0.25, "a star drifted out of the top-left");
+                assert!((q.position.y as f32) < vp().y * 0.25);
+            }
+            if let (Some(l_max), Some(d_min)) = (
+                lit_x
+                    .iter()
+                    .cloned()
+                    .fold(None::<f32>, |a, b| Some(a.map_or(b, |a: f32| a.max(b)))),
+                dim_x
+                    .iter()
+                    .cloned()
+                    .fold(None::<f32>, |a, b| Some(a.map_or(b, |a: f32| a.min(b)))),
+            ) {
+                assert!(
+                    l_max < d_min,
+                    "an earned star was drawn to the right of an empty one"
+                );
+            }
+        }
+        // A star is a STAR and not a diamond: two rows have a gap in them, which
+        // is what the legs are.
+        let rows: Vec<u8> = STAR_SPANS.iter().map(|(r, _, _)| *r).collect();
+        let split = rows
+            .iter()
+            .filter(|r| rows.iter().filter(|o| o == r).count() > 1);
+        assert!(
+            split.count() >= 4,
+            "no row of the raster has two spans — the star lost its legs"
+        );
+        // Nothing at all with no slots, and nothing on a viewport that is not
+        // one — `reticle`'s own rule.
+        let mut l = UiDrawList::new(vp());
+        wanted(&mut l, 3, 0);
+        assert!(l.is_empty(), "a rating with no slots drew something");
+        for bad in [
+            Vec2::new(f32::NAN, 1080.0),
+            Vec2::new(1920.0, 0.0),
+            Vec2::new(-1.0, -1.0),
+        ] {
+            let mut l = UiDrawList::new(bad);
+            wanted(&mut l, 3, 5);
+            assert!(l.is_empty(), "viewport {bad:?} drew a rating");
         }
     }
 
