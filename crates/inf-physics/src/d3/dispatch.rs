@@ -140,8 +140,18 @@ pub fn step_dispatch(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64
 
     stats.incidents = res.incidents.len();
     stats.running_hot = res.runs.values().filter(|r| r.state.running_hot()).count();
+    // **Only when something actually moved**, which is `step_traffic`'s own rule
+    // and its reason: a level with a fleet parked in its bays and nothing
+    // happening must not bump the version every step and make both projectors
+    // rebuild a scene that did not change. A responding unit's chassis, its
+    // flashing bar and a rising smoke puff are all things the renderer has to
+    // see again; a station at rest is not.
+    let moved = stats.running_hot > 0 || !res.puffs.is_empty();
     res.steps += 1;
     world.world_mut().insert_resource(res);
+    if moved {
+        world.mark_dirty();
+    }
     stats
 }
 
@@ -517,16 +527,7 @@ fn run_units(
                 });
                 if (here - target).length() <= reach || out_of_road {
                     if run.state == UnitState::EnRoute {
-                        arrive(
-                            world,
-                            bridge,
-                            res,
-                            chassis,
-                            crew,
-                            Some(unit.kind),
-                            here,
-                            step,
-                        );
+                        arrive(world, bridge, res, chassis, Some(unit.kind), here, step);
                         stats.arrived += 1;
                     } else {
                         park(world, bridge, res, chassis, crew);
@@ -746,11 +747,14 @@ fn arrive(
     bridge: &mut PhysicsBridge3D,
     res: &mut DispatchRes,
     chassis: Uuid,
-    crew: Uuid,
     kind: Option<UnitKind>,
     here: DVec3,
     step: u64,
 ) {
+    // Derived rather than passed: `crew_guid` is a pure function of the chassis
+    // and a seventh argument that can be computed from the third is a parameter
+    // list nobody can hold.
+    let crew = dispatch::crew_guid(chassis);
     let at = res
         .runs
         .get(&chassis)

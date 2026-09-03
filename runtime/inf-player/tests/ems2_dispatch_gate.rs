@@ -286,7 +286,27 @@ struct Run {
     steered: usize,
     hot_steps: usize,
     /// The trace, step by step.
+    ///
+    /// **Three sections, not one.** `dispatch_state_bytes` alone proves the two
+    /// hosts made the same *decisions*, and this wave also changed how the
+    /// **traffic** steers (the yield's lateral bias and its creep) and spawns
+    /// **crowd** bodies (a unit's crew). A divergence in either of those is
+    /// invisible to the dispatch section — a civilian that pulled over on one
+    /// host and not the other leaves every incident, every unit state and every
+    /// route length identical — so all three are compared.
     trace: Vec<Vec<u8>>,
+}
+
+/// The three sections this gate compares, concatenated.
+///
+/// Not `RuntimeSim::state_bytes`, for `ems1_station_gate`'s reason: the editor
+/// host has no such method, so the two sides would be comparing two different
+/// functions. These are the Ring-0 folds both hosts read from the same world.
+fn trace_of(world: &EcsWorld) -> Vec<u8> {
+    let mut out = inf_ecs::dispatch::dispatch_state_bytes(world);
+    out.extend_from_slice(&inf_ecs::traffic::traffic_state_bytes(world));
+    out.extend_from_slice(&inf_ecs::crowd::crowd_state_bytes(world));
+    out
 }
 
 fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
@@ -329,8 +349,7 @@ fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
         run.returned += s.returned;
         run.steered += s.steered;
         run.hot_steps += usize::from(s.running_hot > 0);
-        run.trace
-            .push(inf_ecs::dispatch::dispatch_state_bytes(sim.world()));
+        run.trace.push(trace_of(sim.world()));
         observe(&mut run, sim.world(), &staged);
     }
     finish(&mut run, sim.world());
@@ -370,8 +389,7 @@ fn editor_run(with_fleet: bool) -> Run {
         run.returned += s.returned;
         run.steered += s.steered;
         run.hot_steps += usize::from(s.running_hot > 0);
-        run.trace
-            .push(inf_ecs::dispatch::dispatch_state_bytes(doc.world()));
+        run.trace.push(trace_of(doc.world()));
         observe(&mut run, doc.world(), &staged);
     }
     finish(&mut run, doc.world());
@@ -732,8 +750,8 @@ fn pie_equals_shipping_over_three_responses() {
         (pie.assigned, pie.arrived, pie.resolved, pie.returned)
     );
     println!(
-        "\nEMS2 PIE == shipping: {RUN} step(s) compared, {} bytes at the end, \
-         {} assignment(s) either way",
+        "\nEMS2 PIE == shipping: {RUN} step(s) of dispatch+traffic+crowd \
+         compared, {} bytes at the end, {} assignment(s) either way",
         last.len(),
         ship.assigned
     );
@@ -874,12 +892,17 @@ fn a_town_with_no_fleet_answers_nothing() {
         (run.assigned, run.arrived, run.resolved, run.returned),
         (0, 0, 0, 0)
     );
-    for t in &run.trace {
-        assert!(
-            t.is_empty(),
-            "the dispatch trace section is not empty on a fleetless town — \
-             every hash committed before this wave moves"
-        );
-    }
+    assert!(
+        inf_ecs::dispatch::dispatch_state_bytes(sim.world()).is_empty(),
+        "the dispatch trace section is not empty on a fleetless town — every \
+         hash committed before this wave moves"
+    );
+    // …and the town it is folded beside is not empty, or the line above is a
+    // statement about a world with nothing in it.
+    assert!(
+        !inf_ecs::traffic::traffic_state_bytes(sim.world()).is_empty(),
+        "the fleetless town has no traffic either, so the emptiness above says \
+         nothing"
+    );
     println!("\nEMS2 falsifier: no fleet, no dispatcher, {RUN} empty trace(s)");
 }

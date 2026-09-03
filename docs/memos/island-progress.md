@@ -27103,3 +27103,360 @@ byte-identical on disk; `civic_min_ring == venue_min_ring` for all three site
 kinds; no budget constant anywhere in the range moved; goldens stay 62,
 `EXPECTED_LEVELS` stays 24, scene v27 / payload v12, and the whole range's diff
 is LF-clean.
+## Wave EMS2 — dispatch and response: who is sent, how they drive, what they do (2026-09-03)
+
+The second of the EMS arc's three waves: **a town that answers its own
+emergencies.** EMS1 built the buildings, the vehicles and the people; this wave
+makes something happen, sends somebody, drives them there and brings them home.
+Crimes and criminal profiles are EMS3's.
+
+Zero schema moves — scene stays **v27**, `ScenePayload` **v12**. Incidents, units,
+the fleet edge, the duty roster and the smoke are all Resources or content-derived
+entities. Goldens stay **62**, none added and none re-blessed. `EXPECTED_LEVELS`
+unmoved at 24. One new step phase (`STEP_PHASES` 28 → 29), one new budget
+constant, one new `AudioCommand` variant, one new `Posture`, one new
+`SlotPosture` byte.
+
+### 1. The panic exemption, first, because everything else stands on it
+
+`step_panic` walks the **whole** population on the step a shot goes off,
+`crowd::flee_from` **clears the schedule** of everybody it reaches, and
+`PanickedRes` is never released. So one gunshot at an incident would have
+permanently routed the officers standing at it — schedule gone, latch set, post
+abandoned for the rest of the session, with the incident still open and nobody on
+the way. It was written before the dispatcher that needs it rather than bolted on
+after.
+
+The rule is a rule and not a filter: **a responder does not rout**, at the ONE
+flee door, so it holds for the crowd panic, the carjack and anything a later wave
+adds. `inf_ecs::dispatch::is_responder` is the named predicate;
+`PanicReport::exempt` is the count, merged rather than assigned (the WPN1 defect
+this counter would otherwise have repeated) and read at the struck-body reaction
+too.
+
+`an_officer_under_fire_does_not_rout` puts a responder and a bystander **side by
+side** at one shot: the bystander runs, the officer does not, the officer keeps
+its **schedule** (the half a `is_panicked` check cannot see), and `exempt` reads
+exactly one — delete the guard and `fled` becomes 2 while this reads 0. Then the
+roster is cleared and the same burst routs the ex-officer, which is what says
+this is a duty roster rather than an immunity somebody was born with.
+
+### 2. The fleet is now OWNED, and the edge is read out of the DOCUMENT
+
+EMS1's own audit put it plainly: *the fleet is parked, not owned*. Nothing linked
+a vehicle to an institution, so a dispatcher had nothing to send and nowhere to
+send it back to.
+
+The obvious edge — the recipe — is not available: EMS1's generator parks the
+fleet into an `.inf_lvl` under a guid salted on
+`island.ems.{site}.{col}.{row}.{k}.{id}`, and a shipped player opening that
+document has no `station_fleet`, no catalogue and no livery table. Nothing on a
+chassis says what it is either: `VehicleClass` is forty-seven suspension numbers
+and this wave may not move a schema.
+
+So `unit_kind_of` reads **what the livery left in the world**: a child entity
+named `light_bar` whose material is *bloomed* (over 1, which `PartPaint` requires
+or the HDR path never sees it), its hue (blue → police, red → the fire/medical
+pair), and for the red pair the chassis's own half-length. Two observable
+channels, three services, no ambiguity. `Livery::service` declares the same fact
+on the authoring side and `every_livery_is_recognised_as_the_service_it_declares`
+holds the two together over the **real four rows**, built through the **real**
+spawn door.
+
+**THE THRESHOLD WAS NEARLY WRONG.** `APPLIANCE_HALF_LENGTH_M` was written at 3.0
+from a remembered table. The arm printed what the island's rows actually build:
+
+| row       | body  | half-length | declares  |
+|-----------|-------|-------------|-----------|
+| cruiser   | Sedan | 2.32 m      | police    |
+| swat      | Van   | 2.80 m      | police    |
+| ambulance | Van   | **2.95 m**  | ambulance |
+| engine    | Truck | **3.90 m**  | fire      |
+
+Three metres left the ambulance **five centimetres** from being dispatched to
+house fires — one editorial tweak to a `.toml` row away from a silent misrouting
+nothing in this tree would have named. It is **3.4**, the middle of the measured
+gap, with 45 cm on each side.
+
+`sync_fleet` derives the vehicle → station edge on the **block stamp**
+(`sync_carriageway`'s shape), and `FleetRes` is kept **separate** from
+`DispatchRes` for `TrafficRecord`'s own reason — *a re-derivation is not a fresh
+start* — so a terrain cell paging in cannot reset a unit half-way to a fire.
+
+### 3. Incidents, and where they come from
+
+Typed, with lifecycles: `Fire { building, intensity }`, `Medical { npc, severity }`,
+`Crime { severity }`; `Reported → Assigned → OnScene → Resolved`, kept for
+`INCIDENT_KEEP_STEPS` and then forgotten. Content-addressed guids
+(`mix64` over kind + place + step) rather than a counter, so a host that refused
+one the other took does not renumber every later incident for ever — and the
+**intensity is deliberately not in the identity**, or a fire would become a new
+incident on every step of its own suppression.
+
+Three feeds and a staging door:
+
+* **crime** — WPN1's witness log, read forward by step and merged per scene
+  (`CRIME_MERGE_M` = the crowd's own `FLEE_M`), because a burst is one emergency
+  and a dispatcher that opened an incident per round would empty a station into
+  one street corner. This is the reader `inf_ecs::witness`' own doc named, one
+  wave early;
+* **medical** — the `Downed` latch read as a **census**, not an event.
+  `newly_dead` fires once and latches, which is right for a ragdoll handoff and
+  wrong for *"is there anybody who needs an ambulance"*: an ambulance that missed
+  that single step would never have come. `weapon::downed` is the same latch read
+  the other way round — one component apart, not two rules;
+* **ambient** — `agent_unit(block, step / AMBIENT_PERIOD, SALT_INCIDENT)` under
+  `AMBIENT_CHANCE`. Measured over 24 000 draws: **0.0190 against a declared
+  0.02**, 224 fires and 232 collapses, and reproducible. Deliberately no ambient
+  *crime*: a crime with no criminal is a siren with nothing behind it, and the
+  crimes this wave answers are ones somebody committed;
+* `report_incident` — the staging door, through the **same** `open` as the three
+  real feeds, so a staged incident is answered by exactly the dispatcher a real
+  one is.
+
+**Who goes** is the nearest free unit of the right service by
+`inf_nav::route(...).cost_m` — a *cost*, so an ambulance on the far side of a
+bridge is far away in the sense that matters — with a **guid tiebreak**, because
+a station parks two identical ambulances the same distance from one junction more
+often than not and `min_by` over a map answers whichever the iterator reached
+first. `route_costs` lives on the deciding side, so the applier decides nothing
+and `inf-physics` never names `inf-nav`.
+
+Unit states are **not** on `TrafficRecord` — that record is re-derived on block
+stamps — and the whole dispatcher is folded into `state_bytes` after the traffic
+with `projector_mirror`'s `SECTIONS` extended **in the same commit**, which is the
+whole of what VEH2b's two-wave pin gap taught.
+
+### 4. There is ONE driving rule and this is not a second one
+
+A responding unit is steered by `traffic::drive_intent` over a
+`traffic::drive_path`, written onto the crew's `CharacterMovement`, exactly as
+`steer_car` writes a commuter's. It then travels the same road every stick in
+this engine does — `from_intent`, `step_vehicles`, wheel forces. What a unit does
+differently is **one number**: `RESPONSE_SPEED_FACTOR` = 1.4 on the *limit* only,
+so the bend, the gap and the end of the road are unchanged.
+
+`dispatch` runs at phase **7**, immediately after `traffic`: a crew body built
+this step must be mirrored by the sync on this step, the driver's intent must
+reach `character move` six phases later, and the yield rule reads the dispatcher
+— so running it *before* the traffic would put every yield one step in the past.
+Fenced (`dispatch_step`), pinned character-identical **and ordered** on both
+hosts.
+
+### 5. The siren follows the car — and the ring was sized first
+
+`AudioCommand::SetPosition` is the command `RigSpawn::engine_voice`'s own doc
+names as the reason traffic is silent: *"no `AudioCommand::SetPosition`, so a
+driving car's engine is spatialized where its `Play` was issued"*.
+`AudioEngine::set_position` has existed and been unreachable since P12.3; it now
+has a drain arm.
+
+VEH2a already lost a `Play` off the front of an evicting log, so the arithmetic
+was written down before the code:
+
+| source                        | commands/s | ring-seconds at 8 192 |
+|-------------------------------|-----------:|----------------------:|
+| one authored engine voice     |        120 |                    68 |
+| one hot unit (period 6, 10 Hz)|         10 |                   819 |
+| four hot units                |         40 |                   205 |
+
+A siren is a **twelfth** of an engine voice. Ten hertz is 1.2 m of travel at
+12 m/s, inside the ear's own localisation blur at any distance a siren carries.
+The gate measured **4 253 of 8 192 held (51.9 %), 0 dropped** over 15 000 steps
+with six responses on the town.
+
+The decisions — which units, what it sounds like, when it starts and stops — are
+`SirenCue`s on the sim side; the hosts' new `siren_audio` fence is a `match` and
+three commands. The source guid is the **siren's**, not the chassis's: one key is
+one voice, and a siren on the chassis key would silence the engine under it
+(`a_siren_never_borrows_the_chassiss_own_source_key`). The clip is nil, so it is
+**silent until a project authors one** — `RigSpawn::clip`'s own sentence, and the
+command stream is the contract either way.
+
+### 6. The bar flashes, and the pin is given back
+
+Through `inf_render::pulse_emissive`, which had **two** callers before this wave
+and both were PCG scatter projectors — so this is a new *application path* and
+therefore a new mirrored pair (`light_bar_flash`, pinned character-identical).
+
+It writes the ECS `Material` rather than modulating a projector, because the bar
+is one entity and two projectors would have to agree about it. The authored
+intensity is a **pin** taken when the unit goes hot and **given back** when it
+stops. The first cut multiplied the live value, and P21.4's law has a picture
+here: an ambulance that comes home with a black light on its roof.
+
+Measured over one 202 m response: 1 `Start`, **344** `Move`s against 343 expected
+at the cadence (a per-step emit would read 2 061), 1 `Stop`, emitter travelled
+197.2 m, bar released to exactly 3.0.
+
+### 7. The yield: the cheaper design was measured and REFUSED
+
+The clause was to price two and ship the cheaper.
+
+* **stop in lane** — zero new fields: inject the responder as a phantom obstacle
+  in the civilian's own `gap_m` and let the existing stopping-distance rule halt
+  it. Cheapest by every measure of edits, and **wrong**: `drive_intent` "never
+  changes lane and never overtakes", so a civilian stopped in the lane stays
+  inside `CORRIDOR_HALF_M` for ever, `gap_ahead` keeps answering
+  `STANDING_GAP_M`, and the responder is held at **exactly zero** behind the
+  queue it created;
+* **pull over** — one `DriveView` field and one guarded term at the wheel step:
+  the civilian aims `YIELD_BIAS_M` = **2.6 m** right, which is more than the
+  **2.5 m** corridor half-width, so `gap_ahead` stops seeing it.
+
+| design       | responder's `target_mps` (limit 11.7) |
+|--------------|--------------------------------------:|
+| stop in lane |                             **0.000** |
+| pull over    |                            **11.700** |
+
+`a_car_that_stops_in_lane_stops_the_ambulance_behind_it` is that table as an arm
+and it also pins the 2.6 > 2.5 inequality: the day somebody trims the bias, the
+pull-over silently degenerates into the design this ruling rejected, and it fails
+there instead. The term is **guarded** on a non-zero bias so a level with no
+siren steers bit-identical controls (`x + 0.0` turns a `-0.0` into a `+0.0`, and
+a sign of zero reaching `move_input` is a trace byte).
+
+**And the yield has a second half the gate found.** `drive_intent` answers
+"nothing and the handbrake" below `STOPPED_MPS` — right for a car waiting at a
+queue and a deadlock for one being asked to move, because a stationary car with
+the handbrake on cannot steer anywhere. `YIELD_CREEP_MPS` = 1.5 m/s, on the same
+guard, covers the 2.6 m in under two seconds.
+
+### 8. On the scene
+
+* **`Posture::Kneel`** — one variant, one authored clip, one derived const.
+  `KNEEL_DROP_FRAC` = 0.55 of a femur, because a kneeling body has **one** shin
+  on the ground and one thigh still carrying it. Measured in model space rather
+  than asserted from the table: left ankle **0.421 m behind** its knee, right
+  ankle **0.031 m** off its knee, hips **0.928 → 0.662** on a **0.482 m** femur,
+  and the two shins half a femur apart — which is what tells a kneel from a
+  squat. `SlotPosture::Kneel` takes byte **3**, append-only; the `inf_pcg` mirror
+  deliberately stays at **three**, because no room plan produces one.
+* **Fire and smoke** are `Sprite` billboards, because there is no particle system
+  and this wave did not add one. Content-addressed on `(incident, step)`, bounded
+  at `MAX_PUFFS`, reaped by age — measured **11 alive at peak against 215 spawned**
+  over one fire, which is `PUFF_PERIOD`'s arithmetic. `clear_dispatch`
+  **despawns** them: a puff left in the author's document is a row in the Outliner
+  that no Outliner row put there (P21's law, VEN1b's sentence).
+* **The extinguish beam** is a `debug.line` — `draw_tracers`' own sentence one
+  wave along. **LEDGER**: it is a *shipped-host* overlay only, because
+  `draw_tracers` has one caller and no editor twin, so no beam appears in the
+  editor's Simulate viewport.
+* **The crew stands four metres from ITS OWN VEHICLE**, on the line toward the
+  scene, and not four metres from the incident. The first cut did the latter and
+  a building fire is at a block's centre forty metres from the nearest lane — a
+  crew placed there has **teleported through a wall**. Nobody walks into the
+  building; the hose is a line and does not care.
+* **A unit has arrived when it is near the thing OR out of road**
+  (`PATH_END_M`). `ON_SCENE_M` alone is the right question for something in the
+  street and the wrong one for something inside a building, and a unit that only
+  tested the distance sat at the end of its route for ever with the fire still
+  burning.
+* **The medical loop, closed,** with the honest sentence: `DispatchRes::treated`.
+  "Stabilized" does **not** mean carried anywhere — this engine has no stretcher,
+  no gurney animation and no ward bed a body can occupy — so the patient stays
+  where they fell and what changes is that the street has been attended. Without
+  it the loop was measured: the `Downed` latch is permanent, the resolved
+  incident is forgotten after a minute, and the same body calls another ambulance
+  **for ever**.
+
+### 9. The gate, and the three defects it found
+
+`ems2_dispatch_gate`, six arms, all green.
+
+| incident | unit      | state    | response  |
+|----------|-----------|----------|-----------|
+| fire     | fire      | resolved |  45.55 s  |
+| medical  | ambulance | resolved |  53.15 s  |
+| crime    | police    | resolved | 115.15 s  |
+
+6 assigned / 4 arrived / 4 resolved / 4 returned (the extras are the ambient feed
+doing its job); **37 528 sticks** over **14 820** hot steps, on a town with **63**
+traffic cars on it. PIE == shipping over **15 000 steps compared byte for byte**.
+The falsifier — the same town with no fleet — grows no dispatcher and 15 000 empty
+traces.
+
+Step table (dev, MIN of 3 × 240):
+
+| phase          |      ms | budget |
+|----------------|--------:|-------:|
+| physics3d sync | 0.0648  |      — |
+| traffic        | 0.0630  |    1.0 |
+| propagate      | 0.0542  |      — |
+| vehicle        | 0.0429  |    0.5 |
+| **dispatch**   | **0.0370** | **0.5** |
+| audio          | 0.0117  |    1.0 |
+
+`DISPATCH_STEP_BUDGET_MS` minted at **0.5** — `VEHICLE_STEP_BUDGET_MS`'s figure,
+because `MAX_UNITS` is 64 and `VEHICLE_BUDGET_CARS` is 64 for the same reason: a
+responding unit **is** a vehicle on four rays, and the phase that decides where it
+goes should cost less than the phase that integrates it.
+
+**THREE DEFECTS THE GATE FOUND, all fixed:**
+
+1. **a responding unit had no following rule.** `gap_m: None` reads as "ignores
+   traffic" and behaves as "drives *into* it and stops there", permanently, half a
+   mile short of a fire. Units now read the same `gap_ahead` everything else does
+   — which is what makes the yield rule *matter* rather than decorate;
+2. **a unit could not leave its own station.** EMS1 parks a fleet nose-to-tail at
+   `EMS_PARK_PITCH_M` and the exit runs along that row, so the new following rule
+   braked for the appliance eleven metres ahead: three assignments, **zero
+   departures**. An `InStation` unit is on its apron, not in anybody's lane;
+   everything else — real traffic, the hero in the road, and a unit that is
+   *under way* — still is;
+3. **a yielding car that had already stopped could not move over** — see §7.
+
+**AND ONE IT COULD NOT FIX, stated rather than hidden.** At **08:00** this town
+gridlocks. `drive_intent` never overtakes, and a commuter whose leg's clock
+expires while it is at `Full` tier stops **where its body is** — mid-lane,
+handbrake on, for the session. Measured: 23 driving commuters, and the appliance
+sat 6.6 m behind an abandoned civilian at (133.9, 48.3) for **5 600 steps** and
+never reached its fire. The gate runs at **14:00** — same town, same 63 cars, 10
+driving commuters — and `TRAFFIC_HOUR`'s own doc says why. **That is VEH2b's to
+fix.**
+
+### Laws this wave paid for
+
+* **A responder does not rout, and the rule lives at the door.** A rule in one
+  caller is a rule the next caller does not have.
+* **A latch read as an event answers once; a dispatcher needs a census.** The
+  same component, two doors, one component apart — not two rules.
+* **Size the ring before you fill it.** The command that VEH2a's loss was blamed
+  on was safe to add only once the arithmetic was on paper.
+* **A pin needs a release, and the leak has a picture.** A bar that came home
+  black.
+* **The cheaper design is not the shipped design until it is measured.** Zero
+  fields and a deadlock is dearer than one field.
+* **A gate must aim at the thing it names, and a fixture must be the thing it
+  names.** `RuntimeSim::new` derives 3D gravity from a 2D vector, so the default
+  fixture spelling gives a level with **no gravity in three dimensions** — where
+  a car never falls onto its springs, every wheel reports `wheels_grounded: 0`,
+  and a fully-steered unit looks exactly like a dispatcher that wrote no stick.
+  And there is **one** resting height (`resting_origin_y`); inventing a second
+  reproduced `size_the_suspension`'s own documented belly-drive at 0.078 m/s.
+
+### Carried to EMS3 and beyond
+
+1. **Rush hour gridlocks** (VEH2b): a commuter whose leg expires at `Full` tier
+   is abandoned mid-lane; `drive_intent` has no overtake, so one of them blocks a
+   carriageway for the session. The gate runs at 14:00 because of it.
+2. **A patient is never carried anywhere.** No stretcher, no gurney pose, no ward
+   bed; `treated` is what "stabilized" means today.
+3. **The fire appliance's seat is still 3.45 m up** (EMS1's carried item),
+   outside a hero's 3 m interact reach — a unit drives itself and a player cannot
+   drive it.
+4. **SWAT is still a crew and not a behaviour**: the van dispatches as police and
+   nothing escalates a crime to it. EMS3's severity ladder.
+5. **`vehicle_grade`'s `SPECS` is still 5 rows** — the four emergency rows have
+   no sprint/brake/top-speed measurement.
+6. **The extinguish beam is shipped-host only** (no editor Simulate twin), and
+   the siren's clip is nil until a project authors one.
+7. **A hospital's front desk is a `Day` post everywhere** (EMS1's carried item),
+   untouched by this wave.
+8. **One crew member per unit.** The perf wall is real (one `Full` crowd agent is
+   ~8–9 ms of character move on the island's own sweep), so a scene is a crew of
+   one, not a cordon.
+9. **`DispatchRes::siren_on` and `seen_act_step` are not folded** into
+   `dispatch_state_bytes` — both are functions of folded history, stated where
+   they are declared, and the two-host gate compares 15 000 steps of the fold
+   that *is* there.

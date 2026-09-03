@@ -350,9 +350,11 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     if hot.is_none() {
                         hot = Some(super::dispatch::running_hot(world));
                     }
-                    let obs = obstacles.as_deref().unwrap_or(&[]);
-                    let sirens = hot.as_deref().unwrap_or(&[]);
-                    steer_car(world, bridge, guid, rec, clock, leg, obs, sirens);
+                    let around = Around {
+                        obstacles: obstacles.as_deref().unwrap_or(&[]),
+                        hot: hot.as_deref().unwrap_or(&[]),
+                    };
+                    steer_car(world, bridge, guid, rec, clock, leg, around);
                 } else {
                     despawn_driver(world, bridge, guid);
                     if let Some(v) = bridge.vehicle_mut(guid) {
@@ -457,6 +459,21 @@ pub(crate) fn gap_ahead(
     best
 }
 
+/// **The two lists a driver's view is built against**, gathered once a step by
+/// the caller and handed down.
+///
+/// One struct rather than two parameters because both are the same kind of
+/// thing — *what else is near this car* — and because a function that took the
+/// world, the bridge, the record, the clock, the leg and both of them has more
+/// arguments than a reader can hold (and more than `clippy` allows).
+#[derive(Clone, Copy)]
+pub(crate) struct Around<'a> {
+    /// Every solid body with a position, in `Guid` order.
+    pub obstacles: &'a [(Uuid, DVec3)],
+    /// Every unit running with its lights and siren on.
+    pub hot: &'a [(Uuid, DVec3)],
+}
+
 /// **What one car's driver can see** — the `DriveView` both the steering and
 /// the instrument build, so an arm cannot measure a controller the engine does
 /// not run.
@@ -466,8 +483,7 @@ fn view_of<'a>(
     rec: &'a TrafficRecord,
     clock: CrowdClock,
     leg: inf_ecs::crowd::ActiveLeg,
-    obstacles: &[(Uuid, DVec3)],
-    hot: &[(Uuid, DVec3)],
+    around: Around<'_>,
 ) -> Option<DriveView<'a>> {
     let path = rec.active_path(clock, leg)?;
     let body = bridge.body_of(chassis)?;
@@ -481,7 +497,7 @@ fn view_of<'a>(
     // ── EMS2 the yield. The rule is `inf_ecs::dispatch`'s; what is here is the
     //    list, gathered once a step by the caller and handed down — the
     //    `obstacles` shape one system along.
-    let yield_bias = inf_ecs::dispatch::yield_bias_m(at, forward, hot);
+    let yield_bias = inf_ecs::dispatch::yield_bias_m(at, forward, around.hot);
     Some(DriveView {
         at,
         forward,
@@ -489,7 +505,7 @@ fn view_of<'a>(
         path,
         s_m,
         speed_limit_mps: traffic::street_speed_mps(),
-        gap_m: gap_ahead(path, s_m, chassis, driver, obstacles),
+        gap_m: gap_ahead(path, s_m, chassis, driver, around.obstacles),
         lateral_bias_m: yield_bias,
         loops: rec.circuit.is_some(),
     })
@@ -514,7 +530,11 @@ pub fn probe_intent(
     let leg = rec.leg_at(chassis, clock);
     let obstacles = obstacles_of(world);
     let hot = super::dispatch::running_hot(world);
-    let view = view_of(bridge, chassis, rec, clock, leg, &obstacles, &hot)?;
+    let around = Around {
+        obstacles: &obstacles,
+        hot: &hot,
+    };
+    let view = view_of(bridge, chassis, rec, clock, leg, around)?;
     Some(traffic::drive_intent(&view))
 }
 
@@ -532,11 +552,10 @@ fn steer_car(
     rec: &TrafficRecord,
     clock: CrowdClock,
     leg: inf_ecs::crowd::ActiveLeg,
-    obstacles: &[(Uuid, DVec3)],
-    hot: &[(Uuid, DVec3)],
+    around: Around<'_>,
 ) {
     let driver = traffic::driver_guid(chassis);
-    let Some(view) = view_of(bridge, chassis, rec, clock, leg, obstacles, hot) else {
+    let Some(view) = view_of(bridge, chassis, rec, clock, leg, around) else {
         return;
     };
     let intent = traffic::drive_intent(&view);

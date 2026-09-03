@@ -285,7 +285,7 @@ fn both_fixed_steps_flash_the_same_light_bar() {
     );
     assert!(
         editor.len() > 120,
-        "the flash fence is {} characters — an empty fence is equal to an empty          fence",
+        "the flash fence is {} characters — an empty fence is equal to an empty fence",
         editor.len()
     );
     for needle in [
@@ -341,7 +341,7 @@ fn both_fixed_steps_dispatch_the_same_way() {
     );
     assert!(
         editor.len() > 40,
-        "the dispatch fence is {} characters — an empty fence is equal to an          empty fence, and this arm would then be about nothing",
+        "the dispatch fence is {} characters — an empty fence is equal to an empty fence, and this arm would then be about nothing",
         editor.len()
     );
     for needle in ["step_dispatch(", "self.dispatch="] {
@@ -376,18 +376,18 @@ fn the_dispatch_step_sits_between_the_traffic_and_the_physics_sync_on_both_hosts
         let mover = only(&src, "inf_physics::d3::step_character_movement(", who);
         assert!(
             traffic < dispatch,
-            "{who}: the dispatcher runs BEFORE the traffic, so every yield is              one step in the past"
+            "{who}: the dispatcher runs BEFORE the traffic, so every yield is one step in the past"
         );
         assert!(
             dispatch < mover,
-            "{who}: the dispatcher runs AFTER the character step, so a              responding unit's stick is one step stale for the whole drive"
+            "{who}: the dispatcher runs AFTER the character step, so a responding unit's stick is one step stale for the whole drive"
         );
         let sync_at = src
             .rfind("sync_from_world_sim(")
             .unwrap_or_else(|| panic!("{who}: no 3D sync"));
         assert!(
             dispatch < sync_at,
-            "{who}: the dispatcher runs after the 3D sync, so a crew body it              builds is drawn a step before it is solid"
+            "{who}: the dispatcher runs after the 3D sync, so a crew body it builds is drawn a step before it is solid"
         );
     }
 }
