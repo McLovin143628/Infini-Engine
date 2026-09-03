@@ -284,8 +284,13 @@ fn open_incidents(
         // Linked only if the open actually minted one — `open` refuses past
         // `MAX_OPEN_INCIDENTS`, and a search pointing at an incident that was
         // never created would be a row that outlives its subject.
+        //
+        // **Not a nil actor** (wave EMS3 audit): a death with no attributable
+        // blow names nobody, and a search row pointing at `Uuid::nil()` is a
+        // scene that would re-anchor on whatever profile the ledger happened to
+        // hold for a guid that is not a person. The call still opens.
         let guid = dispatch::incident_guid(IncidentKind::Crime { severity }, at, step);
-        if res.incidents.contains_key(&guid) {
+        if !actor.is_nil() && res.incidents.contains_key(&guid) {
             res.searches.insert(guid, actor);
         }
     }

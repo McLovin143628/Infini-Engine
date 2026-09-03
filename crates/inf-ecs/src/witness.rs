@@ -130,7 +130,18 @@ impl ActKind {
 pub struct WitnessedAct {
     /// What happened.
     pub kind: ActKind,
-    /// Who did it.
+    /// **Who did it** — and it is *who did it*, not who it happened to.
+    ///
+    /// Stated twice because wave EMS3's audit found the difference costing a
+    /// wave: an [`ActKind::Killed`] act is raised off the list of bodies that
+    /// stopped working, so the obvious guid to hand is the **victim's** — and
+    /// [`crate::crime::report_act`] keys a criminal profile on this field. The
+    /// producer resolves the killer out of the same step's hits; see
+    /// `d3::gameplay::step_witness`.
+    ///
+    /// `Uuid::nil()` when the world genuinely cannot name anybody. A call is
+    /// still worth opening at the place it happened, and
+    /// [`crate::crime::report_act`] refuses to put it on a file.
     pub actor: Uuid,
     /// Where, world metres — the muzzle for a shot, the body for a death.
     pub at: DVec3,

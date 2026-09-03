@@ -1320,7 +1320,14 @@ fn step_witness(
     use inf_ecs::witness::{ActKind, WitnessedAct};
     // The acts, in the order they happened: a death outranks a shot, because a
     // dispatcher asked to name one thing about a street should name the body.
-    let mut acts: Vec<(ActKind, Uuid, DVec3)> = Vec::new();
+    // `(kind, actor, at, subject)` — and **`subject` is whose body the act's
+    // position is measured on**, which is not always the actor and is what the
+    // sight ray has to be allowed through (wave EMS3 audit). A death and a punch
+    // are both recorded AT the victim's chest, which is a point *inside* the
+    // victim's own capsule: without excluding it every ray to one of them stops
+    // a capsule-radius short of its target and the act is witnessed by nobody.
+    // `Uuid::nil()` when the position is not on a body.
+    let mut acts: Vec<(ActKind, Uuid, DVec3, Uuid)> = Vec::new();
     for guid in killed {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
@@ -1328,13 +1335,37 @@ fn step_witness(
         let Some(at) = strike_point(world, *guid) else {
             continue;
         };
-        acts.push((ActKind::Killed, *guid, at));
+        // **A KILLING IS FILED AGAINST THE KILLER** (wave EMS3 audit).
+        //
+        // `killed` is the list of bodies that stopped working, so the guid in
+        // hand is the **victim** — and `WitnessedAct::actor` is *who did it*.
+        // Nothing read the field for two waves; EMS3 made two things read it,
+        // and both read it as the culprit: `crime::report_act` opens a profile
+        // keyed on it and `d3::dispatch::open_incidents` files the search under
+        // it. Recording the dead man here opened a **three-heat file on the
+        // person who was murdered**, wearing the murdered man's description — a
+        // `MultiUnit` response sent after a corpse — and left the killer on the
+        // two heat their `Shot` earned.
+        //
+        // The blow that did it is in **this same step's** hits, because
+        // `weapon::damage_entity` is the only thing that sets `Health::dead` and
+        // `apply_hit` is its only per-step caller. A death nobody in this step's
+        // hits accounts for — the two hosts' scripted `damage_entity` door is
+        // the one that can produce it — is recorded with a **nil** actor: the
+        // call still opens a crime scene where the body is, and
+        // `crime::report_act` refuses to put it on anybody's file.
+        let killer = hits
+            .iter()
+            .find(|h| h.target == Some(*guid))
+            .map(|h| h.shooter)
+            .unwrap_or_else(Uuid::nil);
+        acts.push((ActKind::Killed, killer, at, *guid));
     }
     for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
         }
-        acts.push((ActKind::Shot, hit.shooter, hit.from));
+        acts.push((ActKind::Shot, hit.shooter, hit.from, hit.shooter));
     }
     // **THE QUIET CRIME** (wave EMS3) — a swing or a kick that landed on
     // somebody. `loud` is false for a fist by WPN1's own definition, so an
@@ -1350,7 +1381,12 @@ fn step_witness(
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
         }
-        acts.push((ActKind::Assault, hit.shooter, hit.to));
+        acts.push((
+            ActKind::Assault,
+            hit.shooter,
+            hit.to,
+            hit.target.unwrap_or_else(Uuid::nil),
+        ));
     }
     // **…and everything a phase earlier in this step raised** (wave EMS3) — the
     // carjack, applied in `character move` where there is no collision world to
@@ -1362,17 +1398,26 @@ fn step_witness(
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
         }
-        acts.push((kind, actor, at));
+        // A raised act names a PLACE and not a body — `carjack::door_point` is
+        // beside a car rather than inside anybody — so there is no third
+        // collider to let the ray through.
+        acts.push((kind, actor, at, Uuid::nil()));
     }
     if acts.is_empty() {
         return 0;
     }
     let mut recorded = 0u32;
-    for (kind, actor, at) in acts {
+    for (kind, actor, at, subject) in acts {
         let candidates = inf_ecs::witness::candidates_near(world, at, WITNESS_RADIUS_M);
         let mut observers: Vec<Uuid> = Vec::new();
         for (guid, feet) in candidates {
-            if guid == actor {
+            // **Nobody who died this step saw anything** (wave EMS3 audit). The
+            // actor exclusion used to cover the victim for free, because a death
+            // named the dead man as its own actor; now that it names the killer,
+            // a crowd agent shot in an empty alley would otherwise be the sole
+            // witness to its own murder — and one observer is all
+            // `crime::report_act` needs to open a file.
+            if guid == actor || killed.contains(&guid) {
                 continue;
             }
             let eye = feet + DVec3::Y * MUZZLE_HEIGHT_M;
@@ -1388,6 +1433,12 @@ fn step_witness(
                 }
                 if let Some(c) = bridge.collider_of(actor) {
                     exclude.insert(c);
+                }
+                // …and the body the act is ON — see the `acts` declaration.
+                if !subject.is_nil() {
+                    if let Some(c) = bridge.collider_of(subject) {
+                        exclude.insert(c);
+                    }
                 }
                 // Anything in the way at all: the ray is stopped short of the
                 // act, so the observer cannot see it. The tolerance is a

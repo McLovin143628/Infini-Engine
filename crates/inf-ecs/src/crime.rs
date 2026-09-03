@@ -538,9 +538,16 @@ pub fn clear_crime(world: &mut EcsWorld) {
 /// `last_seen` is the act's own position, which is legitimate for exactly that
 /// reason — somebody was standing there watching when it happened.
 ///
+/// **A NIL ACTOR FILES NOTHING** (wave EMS3 audit). `WitnessedAct::actor` is
+/// *who did it*, and the producer answers `Uuid::nil()` when the world cannot
+/// name anybody — a body that stopped working with no blow in the step's hits to
+/// account for it. The scene is still worth a call and
+/// `d3::dispatch::open_incidents` still opens one; what nobody may do is put an
+/// unattributable death on a person's file, and `Uuid::nil()` is a person.
+///
 /// Returns the heat the file now carries, or `None` if nothing was filed.
 pub fn report_act(world: &mut EcsWorld, act: &WitnessedAct, vehicle: Option<u64>) -> Option<u32> {
-    if act.observers.is_empty() || !act.at.is_finite() {
+    if act.observers.is_empty() || !act.at.is_finite() || act.actor.is_nil() {
         return None;
     }
     let mut res = world

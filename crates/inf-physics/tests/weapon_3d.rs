@@ -595,6 +595,122 @@ fn a_body_that_runs_out_of_joules_is_handed_to_the_ragdoll() {
     );
 }
 
+/// **A KILLING GOES ON THE KILLER'S FILE, NOT ON THE DEAD MAN'S** (wave EMS3
+/// audit).
+///
+/// # The defect this arm was written for
+///
+/// `step_witness` raises a death off `step_deaths`' list of bodies that stopped
+/// working, so the guid nearest to hand is the **victim's** — and
+/// `WitnessedAct::actor` is *who did it*. Nothing read the field for two waves;
+/// EMS3 made two things read it, and both read it as the culprit:
+/// `inf_ecs::crime::report_act` opens a profile keyed on it, and
+/// `d3::dispatch::open_incidents` files the search under it.
+///
+/// Measured at `dda8d836`: shooting a man dead in front of a witness recorded
+/// `Killed actor = TARGET` carrying **the target's** `actor_look`, so the police
+/// opened a **three-heat** file — `Response::MultiUnit`, two cars — on the
+/// person who had just been murdered, wearing his description, and left the
+/// shooter on the two heat his `Shot` earned. Every other arm in the tree passed.
+///
+/// So the three claims: the act names the shooter, it carries the *shooter's*
+/// description, and the ledger the wave is about opens its file on him and on
+/// nobody else.
+#[test]
+fn a_homicide_is_filed_against_whoever_pulled_the_trigger() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+    let mut rig = Rig::new();
+    spawn_target(&mut rig.world, 8.0, weapon::DEFAULT_VITALITY_J);
+    // A witness on the pavement — `report_act` refuses a crime nobody saw, so
+    // without one the whole arm would be a statement about an empty ledger.
+    let watcher = Uuid::from_u128(0x0E56_0001);
+    let mut records = std::collections::BTreeMap::new();
+    records.insert(
+        watcher,
+        CrowdRecord::standing(
+            CrowdArchetype::humanoid(None, None, None),
+            DVec3::new(4.0, 0.0, 6.0),
+        ),
+    );
+    assert_eq!(
+        inf_ecs::crowd::add_agents(&mut rig.world, records),
+        0,
+        "the bystander was refused"
+    );
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.arm("rifle");
+    rig.step(&idle());
+    let mut kills = 0u32;
+    for _ in 0..30 {
+        kills += rig.step(&hold_trigger_no_edge()).kills;
+    }
+    // ARMED: a body really stopped working, so nothing below is about a fixture
+    // in which nobody died.
+    assert_eq!(kills, 1, "the fixture never killed anybody");
+    let killed: Vec<inf_ecs::witness::WitnessedAct> = inf_ecs::witness::witnessed(&rig.world)
+        .iter()
+        .filter(|a| a.kind == inf_ecs::witness::ActKind::Killed)
+        .cloned()
+        .collect();
+    assert_eq!(killed.len(), 1, "{} death act(s) recorded", killed.len());
+    let act = &killed[0];
+    println!(
+        "the death was recorded against {} (hero {HERO}, target {TARGET}),          look {} against the hero's {}",
+        act.actor,
+        act.actor_look,
+        inf_ecs::witness::look_digest(&rig.world, HERO)
+    );
+    assert_eq!(
+        act.actor, HERO,
+        "the killing was filed against {} — the man who was shot",
+        act.actor
+    );
+    assert_eq!(
+        act.actor_look,
+        inf_ecs::witness::look_digest(&rig.world, HERO),
+        "the description on a homicide is not the killer's"
+    );
+    // …and a corpse is not a witness to its own murder: the exclusion used to
+    // come free from the victim being the actor.
+    assert!(
+        !act.observers.contains(&TARGET),
+        "the dead man was listed as an observer of his own death"
+    );
+    assert!(
+        act.observers.contains(&watcher),
+        "the bystander with a clear line saw nothing"
+    );
+    // **THE WORLD**: the ledger EMS3 is about opens the file on the shooter.
+    // `report_act` directly rather than `file_new_acts`, because this fixture
+    // has no traffic population and therefore no clock — the wave's own carried
+    // item 3, and the reason the feed's forward read cannot fire here.
+    assert_eq!(
+        inf_ecs::crime::report_act(&mut rig.world, act, None),
+        Some(inf_ecs::witness::ActKind::Killed.heat())
+    );
+    assert_eq!(
+        inf_ecs::crime::heat_of(&rig.world, HERO),
+        3,
+        "the shooter is not wanted for the killing"
+    );
+    assert_eq!(
+        inf_ecs::crime::heat_of(&rig.world, TARGET),
+        0,
+        "the police opened a file on the murdered man"
+    );
+    // A death nobody's blow accounts for names NOBODY, and nobody is not a file.
+    let orphan = inf_ecs::witness::WitnessedAct {
+        actor: Uuid::nil(),
+        ..act.clone()
+    };
+    assert_eq!(
+        inf_ecs::crime::report_act(&mut rig.world, &orphan, None),
+        None,
+        "an unattributable death opened a criminal file"
+    );
+}
+
 /// **A miss on flesh is energy owed to the P22 door**, and the gameplay step
 /// does not spend it — the host does, through its own wrapper.
 #[test]
@@ -1610,6 +1726,99 @@ fn an_authored_melee_weapon_swings_instead_of_casting() {
         r.hits[0].target, None,
         "a 2 m bat reached a body 3 m away — the reach is not being applied"
     );
+}
+
+/// **A BLOW IS SEEN BY SOMEBODY** (wave EMS3 audit) — the arm the quiet crime
+/// never had.
+///
+/// `ActKind::Assault` is recorded at `WeaponHit::to`, which for a swing is
+/// `strike_point` of the person hit — a point **inside their own capsule**. The
+/// witness pass excludes the observer's collider and the *actor's*, so every
+/// sight ray to an assault stopped a capsule-radius short of its target and came
+/// back blocked: measured at `dda8d836`, a punch thrown a metre and a half from
+/// a bystander with a clear line recorded **zero observers**, and
+/// `crime::report_act` refuses a crime nobody saw. The whole `Assault` channel
+/// was unreachable and no arm in the tree said so.
+///
+/// So: the body the act is measured ON is excluded too, and this is the
+/// falsifiable form — put the exclusion back and the observer list empties.
+#[test]
+fn a_punch_is_witnessed_by_the_bystander_who_can_see_it() {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord};
+    let mut rig = Rig::new();
+    spawn_bare_body(&mut rig.world, 1.6);
+    let watcher = Uuid::from_u128(0x0E56_0002);
+    let mut records = std::collections::BTreeMap::new();
+    records.insert(
+        watcher,
+        CrowdRecord::standing(
+            CrowdArchetype::humanoid(None, None, None),
+            // Off to one side with nothing between them and the blow.
+            DVec3::new(3.0, 0.0, 1.0),
+        ),
+    );
+    assert_eq!(
+        inf_ecs::crowd::add_agents(&mut rig.world, records),
+        0,
+        "the bystander was refused"
+    );
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    let mut def = WeaponDef::default();
+    for (name, value) in [
+        ("melee", 1.0),
+        ("damage_j", 900.0),
+        ("range_m", 2.0),
+        ("melee_arc_deg", 120.0),
+        ("rounds_per_minute", 60.0),
+    ] {
+        assert!(def.set(name, value), "the tuning door does not know {name}");
+    }
+    {
+        let defs = item::item_defs_mut(&mut rig.world);
+        assert!(defs.insert(ItemDef {
+            id: "bat".into(),
+            label: "Bat".into(),
+            stack_max: 1,
+            mass_kg: 1.1,
+            weapon: Some(def),
+        }));
+    }
+    rig.arm("bat");
+    rig.step(&idle());
+    let r = rig.step(&hold_trigger());
+    // ARMED: the swing landed on flesh, so what follows is about the witness
+    // pass and not about a punch that missed.
+    assert_eq!(r.swings, 1);
+    assert_eq!(r.hits[0].target, Some(TARGET));
+    assert!(r.hits[0].on_flesh);
+    assert!(!r.hits[0].loud, "a bat is not a gunshot");
+    let assaults: Vec<inf_ecs::witness::WitnessedAct> = inf_ecs::witness::witnessed(&rig.world)
+        .iter()
+        .filter(|a| a.kind == inf_ecs::witness::ActKind::Assault)
+        .cloned()
+        .collect();
+    assert_eq!(assaults.len(), 1, "the punch was not recorded at all");
+    let act = &assaults[0];
+    println!(
+        "a bat at 1.6 m: actor {}, {} observer(s) {:?}",
+        act.actor,
+        act.observers.len(),
+        act.observers
+    );
+    assert_eq!(act.actor, HERO, "the assault was filed against the victim");
+    assert!(
+        act.observers.contains(&watcher),
+        "the bystander with a clear line to the blow saw nothing — an assault \
+         cannot be reported, so the `Assault` channel is unreachable"
+    );
+    // …and it therefore reaches the ledger the wave is about.
+    assert_eq!(
+        inf_ecs::crime::report_act(&mut rig.world, act, None),
+        Some(inf_ecs::witness::ActKind::Assault.heat())
+    );
+    assert_eq!(inf_ecs::crime::heat_of(&rig.world, HERO), 1);
+    assert_eq!(inf_ecs::crime::heat_of(&rig.world, TARGET), 0);
 }
 
 /// **A GUNSHOT SCATTERS THE STREET AND A PUNCH DOES NOT** (wave WPN1).
