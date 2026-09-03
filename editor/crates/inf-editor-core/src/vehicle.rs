@@ -95,6 +95,9 @@ pub struct VehicleSpawn<'a> {
     /// *command stream* — which is what PIE == shipping compares — is the same
     /// either way.
     pub clip: Option<Uuid>,
+    /// **The livery** (wave EMS1), or `None` for a car painted one colour —
+    /// which is every civilian vehicle. See [`inf_ecs::vehicle::Livery`].
+    pub livery: Option<&'static inf_ecs::vehicle::Livery>,
 }
 
 /// **Author one vehicle**, returning its chassis `Guid`.
@@ -137,6 +140,7 @@ pub fn spawn_vehicle(
             // An authored car keeps its engine emitter: it is the one a player
             // drives, and VEH1a's loop is addressed to it.
             engine_voice: true,
+            livery: spawn.livery,
         },
     );
     for node in nodes {
@@ -479,7 +483,365 @@ steer_return_deg_per_s = 230.0
 abs_slip = 0.18
 traction_control_slip = 0.22
 stability_control = 0.7
+
+# -- the emergency fleet (wave EMS1) ---------------------------------------
+#
+# Four rows and NO new `VehicleBody`. That is not thrift, it is the kerb trap:
+# `inf_ecs::traffic::catalogue_row` draws a parked car's silhouette uniformly
+# over `VehicleBody::ALL`, so a sixth variant would have put an ambulance at
+# every sixth kerb slot on the island. The emergency fleet rides Path A only --
+# this catalogue, placed by the island recipe at its own station's bay -- and if
+# a body variant is ever added, `catalogue_row` gains a named CIVILIAN sub-list
+# in the same commit.
+#
+# The bodies they borrow are the honest ones: a cruiser IS a saloon, an
+# ambulance and a tactical van ARE box vans, and an appliance is a truck. What
+# tells them apart is the livery (`inf_ecs::vehicle::Livery`) and how they drive.
+
+[cruiser]
+label = \"Patrol Cruiser\"
+
+[cruiser.vehicle]
+body = \"sedan\"
+drivetrain = \"rwd\"
+# A saloon with the police package: wider track, bigger brakes, stiffer springs
+# and 280 kg of cage, radio and battery over the standard car.
+half_width_m = 0.95
+half_height_m = 0.66
+half_length_m = 2.32
+density_kg_m3 = 126.0
+wheel_radius_m = 0.36
+half_track_m = 0.86
+half_wheelbase_m = 1.5
+wheel_drop_m = -0.64
+peak_torque_nm = 330.0
+peak_torque_rpm = 4200.0
+redline_rpm = 6600.0
+idle_rpm = 780.0
+idle_torque_frac = 0.5
+redline_torque_frac = 0.8
+torque_curve_bias = 0.46
+final_drive = 3.6
+shift_up_rpm = 6200.0
+shift_down_rpm = 2400.0
+max_speed_mps = 41.0
+max_engine_force_n = 13000.0
+brake_force_n = 17000.0
+handbrake_force_n = 9500.0
+brake_bias = 0.64
+diff_lock_rear = 0.5
+lateral_grip = 1.34
+longitudinal_grip = 1.38
+wheel_inertia_kgm2 = 1.3
+stiffness_n_per_m = 26000.0
+damping_ns_per_m = 3900.0
+cog_height_m = -0.36
+# The aids are turned DOWN, below the saloon's and above the coupe's: a pursuit
+# car is driven by somebody trained to.
+abs_slip = 0.14
+traction_control_slip = 0.17
+stability_control = 0.3
+
+[ambulance]
+label = \"Ambulance\"
+
+[ambulance.vehicle]
+body = \"van\"
+drivetrain = \"rwd\"
+# A box van with a taller body and a lighter one: a patient compartment is
+# mostly air, so it is longer and roomier than the delivery van and weighs less
+# than one does loaded.
+half_width_m = 1.04
+half_height_m = 1.22
+half_length_m = 2.95
+density_kg_m3 = 96.0
+wheel_radius_m = 0.43
+half_track_m = 0.92
+half_wheelbase_m = 1.9
+wheel_drop_m = -1.04
+peak_torque_nm = 560.0
+peak_torque_rpm = 2100.0
+redline_rpm = 4000.0
+idle_rpm = 680.0
+idle_torque_frac = 0.74
+redline_torque_frac = 0.52
+torque_curve_bias = 0.78
+engine_brake_nm = 62.0
+final_drive = 4.3
+shift_up_rpm = 3500.0
+shift_down_rpm = 1350.0
+max_speed_mps = 36.0
+max_engine_force_n = 17000.0
+brake_force_n = 21000.0
+handbrake_force_n = 12000.0
+brake_bias = 0.65
+diff_lock_rear = 0.3
+lateral_grip = 1.0
+longitudinal_grip = 1.08
+wheel_inertia_kgm2 = 2.9
+rest_length_m = 0.58
+travel_m = 0.3
+stiffness_n_per_m = 38000.0
+damping_ns_per_m = 6200.0
+rolling_resistance = 0.018
+cog_height_m = -0.5
+drag_lateral_n_per_mps2 = 3.0
+max_steer_deg = 31.0
+min_steer_deg = 6.0
+steer_rate_deg_per_s = 165.0
+steer_return_deg_per_s = 245.0
+abs_slip = 0.17
+traction_control_slip = 0.21
+# High, and deliberately: there is somebody standing up in the back.
+stability_control = 0.66
+
+[swat]
+label = \"Tactical Van\"
+
+[swat.vehicle]
+body = \"van\"
+drivetrain = \"awd\"
+# The same body shorter and much heavier: armour is dense and it is all in the
+# walls, which is why this is the widest, stubbiest and least grippy van in the
+# catalogue and the only one with drive on all four wheels.
+half_width_m = 1.08
+half_height_m = 1.16
+half_length_m = 2.8
+density_kg_m3 = 122.0
+wheel_radius_m = 0.44
+half_track_m = 0.94
+half_wheelbase_m = 1.8
+wheel_drop_m = -1.0
+peak_torque_nm = 700.0
+peak_torque_rpm = 1800.0
+redline_rpm = 3600.0
+idle_rpm = 640.0
+idle_torque_frac = 0.8
+redline_torque_frac = 0.46
+torque_curve_bias = 0.86
+engine_brake_nm = 78.0
+final_drive = 4.9
+shift_up_rpm = 3100.0
+shift_down_rpm = 1200.0
+max_speed_mps = 30.0
+max_engine_force_n = 20000.0
+brake_force_n = 24000.0
+handbrake_force_n = 14000.0
+brake_bias = 0.6
+diff_lock_front = 0.35
+diff_lock_rear = 0.45
+lateral_grip = 0.9
+longitudinal_grip = 1.02
+wheel_inertia_kgm2 = 3.4
+rest_length_m = 0.6
+travel_m = 0.26
+stiffness_n_per_m = 48000.0
+damping_ns_per_m = 7600.0
+rolling_resistance = 0.022
+cog_height_m = -0.44
+drag_lateral_n_per_mps2 = 3.4
+max_steer_deg = 29.0
+min_steer_deg = 5.0
+steer_rate_deg_per_s = 140.0
+steer_return_deg_per_s = 215.0
+abs_slip = 0.19
+traction_control_slip = 0.24
+stability_control = 0.74
+
+[engine]
+label = \"Fire Appliance\"
+
+[engine.vehicle]
+body = \"truck\"
+drivetrain = \"rwd\"
+# 7.8 m long, 2.44 m wide, 3.1 m of body over 1.1 m tyres, 8.85 tonnes -- a
+# mid-size pumper, and the reason the fire hall's storey is 4.6 m.
+#
+# TWO AXLES, HONESTLY. `VehicleDef::wheel_mounts` derives four wheels from a
+# track and a wheelbase, and `WheelMount::steered` is a SIGN TEST on the mount's
+# own z -- so three axles is not one more table, it is a different rig, and the
+# island ledger already refused a bus on exactly that ground. This is a two-axle
+# appliance with a 5.2 m wheelbase, which is a real vehicle; it is not a
+# three-axle one pretending to be two.
+half_width_m = 1.22
+half_height_m = 1.55
+half_length_m = 3.9
+density_kg_m3 = 150.0
+wheel_radius_m = 0.55
+half_track_m = 1.15
+half_wheelbase_m = 2.6
+wheel_drop_m = -1.35
+peak_torque_nm = 1500.0
+peak_torque_rpm = 1400.0
+redline_rpm = 2600.0
+idle_rpm = 600.0
+idle_torque_frac = 0.85
+redline_torque_frac = 0.42
+torque_curve_bias = 0.9
+engine_brake_nm = 140.0
+final_drive = 5.4
+shift_up_rpm = 2300.0
+shift_down_rpm = 950.0
+max_speed_mps = 25.0
+max_engine_force_n = 34000.0
+brake_force_n = 46000.0
+handbrake_force_n = 26000.0
+brake_bias = 0.58
+diff_lock_rear = 0.55
+lateral_grip = 0.85
+longitudinal_grip = 1.05
+wheel_inertia_kgm2 = 6.5
+rest_length_m = 0.7
+travel_m = 0.24
+stiffness_n_per_m = 105000.0
+damping_ns_per_m = 16000.0
+rolling_resistance = 0.026
+cog_height_m = -0.6
+anti_roll_front_n_per_m = 34000.0
+anti_roll_rear_n_per_m = 26000.0
+drag_n_per_mps2 = 1.6
+drag_lateral_n_per_mps2 = 5.2
+max_steer_deg = 26.0
+min_steer_deg = 4.0
+steer_rate_deg_per_s = 110.0
+steer_return_deg_per_s = 170.0
+abs_slip = 0.2
+traction_control_slip = 0.26
+stability_control = 0.8
 ";
+
+// ── the emergency liveries (wave EMS1) ──────────────────────────────────────
+//
+// Beside the catalogue, because they are the same kind of thing: authoring
+// input, a code const, no schema and no asset kind. What the TOML says is how a
+// vehicle DRIVES; what these say is what it looks like, and the pair is what
+// makes a cruiser a cruiser rather than a saloon somebody painted.
+//
+// The three colours are the reference's, not invented: a Vancouver cruiser is
+// white over a deep navy, an ambulance is white with a dark sill, a tactical van
+// is unrelieved charcoal and an appliance is one red.
+
+use inf_ecs::math::Vec3d;
+use inf_ecs::vehicle::{BodyPart, Livery, PartPaint};
+
+/// Police navy — the lower body of a cruiser.
+const POLICE_BLUE: Color = Color::new(0.05, 0.10, 0.32, 1.0);
+/// The white a cruiser's upper body and an ambulance's box are painted.
+const SERVICE_WHITE: Color = Color::new(0.90, 0.91, 0.93, 1.0);
+/// The charcoal a tactical van is, and an ambulance's sill.
+const TACTICAL_GREY: Color = Color::new(0.10, 0.11, 0.12, 1.0);
+/// Appliance red.
+const FIRE_RED: Color = Color::new(0.55, 0.05, 0.05, 1.0);
+
+/// The blue half of a light bar, as an emitter.
+const BEACON_BLUE: PartPaint = PartPaint {
+    base_color: Color::new(0.06, 0.08, 0.14, 1.0),
+    emissive: Color::new(0.15, 0.35, 1.0, 1.0),
+    // **Above one, or it does not bloom**: the HDR path thresholds at a linear
+    // luminance of 1.0 and a `Color` cannot exceed it.
+    emissive_intensity: 3.0,
+};
+/// The red half.
+const BEACON_RED: PartPaint = PartPaint {
+    base_color: Color::new(0.14, 0.06, 0.06, 1.0),
+    emissive: Color::new(1.0, 0.16, 0.12, 1.0),
+    emissive_intensity: 3.0,
+};
+
+/// A roof light bar for the saloon body — flush across the greenhouse, standing
+/// 12% of a half-height proud of the hull, which on a cruiser is 8 cm.
+const SEDAN_BAR: BodyPart = BodyPart {
+    name: "light_bar",
+    centre: Vec3d::new(0.0, 1.06, -0.06),
+    half: Vec3d::new(0.6, 0.06, 0.18),
+    primitive: inf_ecs::components::Primitive::Cube,
+};
+
+/// A roof light bar for the van body.
+const VAN_BAR: BodyPart = BodyPart {
+    name: "light_bar",
+    centre: Vec3d::new(0.0, 1.06, -0.1),
+    half: Vec3d::new(0.55, 0.06, 0.3),
+    primitive: inf_ecs::components::Primitive::Cube,
+};
+
+/// A light bar over the truck body's cab, not over its bed.
+const TRUCK_BAR: BodyPart = BodyPart {
+    name: "light_bar",
+    centre: Vec3d::new(0.0, 1.06, 0.5),
+    half: Vec3d::new(0.6, 0.06, 0.16),
+    primitive: inf_ecs::components::Primitive::Cube,
+};
+
+/// **White over blue** — the cruiser.
+pub const CRUISER_LIVERY: Livery = Livery {
+    name: "cruiser",
+    parts: &[
+        // The lower body is the navy; everything above the waistline is white.
+        // That is the split the phrase "white over blue" names, and it falls out
+        // of the saloon's own four parts with nothing added.
+        ("lower", PartPaint::flat(POLICE_BLUE)),
+        ("cabin", PartPaint::flat(SERVICE_WHITE)),
+        ("bonnet", PartPaint::flat(SERVICE_WHITE)),
+        ("boot", PartPaint::flat(SERVICE_WHITE)),
+    ],
+    extra: &[(SEDAN_BAR, BEACON_BLUE)],
+};
+
+/// **White with a dark sill** — the ambulance.
+pub const AMBULANCE_LIVERY: Livery = Livery {
+    name: "ambulance",
+    parts: &[
+        ("chassis", PartPaint::flat(TACTICAL_GREY)),
+        ("cab", PartPaint::flat(SERVICE_WHITE)),
+        ("box", PartPaint::flat(SERVICE_WHITE)),
+        ("roof", PartPaint::flat(SERVICE_WHITE)),
+    ],
+    extra: &[(VAN_BAR, BEACON_RED)],
+};
+
+/// **Unrelieved charcoal** — the tactical van. The one livery whose point is
+/// that it does not read as anything at all until its bar is on.
+pub const SWAT_LIVERY: Livery = Livery {
+    name: "swat",
+    parts: &[
+        ("chassis", PartPaint::flat(TACTICAL_GREY)),
+        ("cab", PartPaint::flat(TACTICAL_GREY)),
+        ("box", PartPaint::flat(TACTICAL_GREY)),
+        ("roof", PartPaint::flat(TACTICAL_GREY)),
+    ],
+    extra: &[(VAN_BAR, BEACON_BLUE)],
+};
+
+/// **One red** — the appliance, with a dark deck because a pump bed is not
+/// painted bodywork.
+pub const ENGINE_LIVERY: Livery = Livery {
+    name: "engine",
+    parts: &[
+        ("lower", PartPaint::flat(FIRE_RED)),
+        ("cab", PartPaint::flat(FIRE_RED)),
+        ("bed", PartPaint::flat(TACTICAL_GREY)),
+        ("bed_left", PartPaint::flat(FIRE_RED)),
+        ("bed_right", PartPaint::flat(FIRE_RED)),
+        ("headboard", PartPaint::flat(FIRE_RED)),
+    ],
+    extra: &[(TRUCK_BAR, BEACON_RED)],
+};
+
+/// **The livery a catalogue row wears**, or `None` for a civilian one.
+///
+/// One door, keyed on the row id, because three readers ask it — the island's
+/// own spawner, the gate's arms and the fleet test — and a fourth spelling of
+/// `match id { "cruiser" => … }` is one that forgets the tactical van.
+pub fn island_vehicle_livery(id: &str) -> Option<&'static Livery> {
+    Some(match id {
+        "cruiser" => &CRUISER_LIVERY,
+        "ambulance" => &AMBULANCE_LIVERY,
+        "swat" => &SWAT_LIVERY,
+        "engine" => &ENGINE_LIVERY,
+        _ => return None,
+    })
+}
 
 /// The island's catalogue, parsed.
 ///
@@ -502,24 +864,32 @@ mod tests {
     use inf_ecs::math::Vec3d;
     use inf_ecs::vehicle::TYRE_ROLL_DEG;
 
-    /// **The catalogue is five rows and all of them are cars** — and no two of
-    /// them are the same car with two names.
+    /// **The catalogue is nine rows and all of them are road vehicles** — and no
+    /// two of them are the same car with two names.
     ///
     /// The last clause is the one worth having. A fleet whose rows differ only in
-    /// colour is a fleet of one, so this walks the *tuning* and requires the five
+    /// colour is a fleet of one, so this walks the *tuning* and requires the nine
     /// to differ in the things a driver feels: how fast, how heavy, which axle
     /// drives, how the engine makes its torque, how much grip, and how hard the
     /// aids intervene.
     #[test]
     fn the_island_catalogue_declares_a_fleet_and_no_two_rows_are_one_car() {
         let defs = island_vehicles();
-        assert_eq!(defs.0.len(), 5);
+        assert_eq!(defs.0.len(), 9);
         for (id, body) in [
             ("sedan", inf_ecs::vehicle::VehicleBody::Sedan),
             ("truck", inf_ecs::vehicle::VehicleBody::Truck),
             ("sports", inf_ecs::vehicle::VehicleBody::Sports),
             ("suv", inf_ecs::vehicle::VehicleBody::Suv),
             ("van", inf_ecs::vehicle::VehicleBody::Van),
+            // **The emergency fleet borrows its bodies** (wave EMS1) — the kerb
+            // trap. A sixth `VehicleBody` would have put an ambulance at every
+            // sixth kerb slot on the island, because `catalogue_row` draws
+            // uniformly over `VehicleBody::ALL`.
+            ("cruiser", inf_ecs::vehicle::VehicleBody::Sedan),
+            ("ambulance", inf_ecs::vehicle::VehicleBody::Van),
+            ("swat", inf_ecs::vehicle::VehicleBody::Van),
+            ("engine", inf_ecs::vehicle::VehicleBody::Truck),
         ] {
             assert_eq!(
                 defs.get(id).unwrap_or_else(|| panic!("no `{id}` row")).body,
@@ -542,9 +912,21 @@ mod tests {
                 def.half_extents.z > def.half_extents.x,
                 "{id} is wider than it is long"
             );
+            // **A road vehicle weighs between 900 kg and twelve tonnes, and
+            // exactly one row is over 3.6** (wave EMS1). The old ceiling was
+            // 3 600 kg and it was right about cars: a density typo is what it
+            // exists to catch, and 3 600 is a heavy van. A fire appliance is
+            // 8.85 tonnes and is also a road vehicle, so the ceiling moves and
+            // the EXCEPTION IS NAMED — otherwise the arm would stop catching a
+            // 5-tonne saloon, which is what a widened bound quietly buys.
             assert!(
-                (900.0..3600.0).contains(&kg),
+                (900.0..12_000.0).contains(&kg),
                 "{id} weighs {kg} kg, which is not a road vehicle"
+            );
+            assert_eq!(
+                kg > 3_600.0,
+                id == "engine",
+                "{id} weighs {kg} kg — only the fire appliance is over 3.6 t"
             );
             // Its wheels are under it, not beside it.
             for m in def.wheel_mounts() {
@@ -632,6 +1014,7 @@ mod tests {
                     yaw_deg: 35.0,
                     paint: Color::new(0.6, 0.1, 0.1, 1.0),
                     clip: None,
+                    livery: None,
                 },
             );
             doc.world_mut().propagate();
@@ -811,6 +1194,7 @@ mod tests {
             yaw_deg: 0.0,
             paint: Color::WHITE,
             clip: None,
+            livery: None,
         };
         let mut a = SceneDoc::new();
         spawn_vehicle(&mut a, chassis, &def, spawn);

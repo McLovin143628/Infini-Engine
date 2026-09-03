@@ -689,8 +689,78 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 yaw_deg,
                 paint: car_paint(plan.site),
                 clip: None,
+                livery: None,
             },
         );
+    }
+
+    // ── the emergency fleet ───────────────────────────────────────────────────
+    //
+    // **Parked on the apron at each institution's own street frontage** (wave
+    // EMS1), one row per entry of `station_fleet`.
+    //
+    // WHERE, honestly: not inside the bay. A station's `ApparatusBay` is a room
+    // of a building this generator does not build — the block is a `PcgVolume`
+    // and its buildings are derived at load — and the one thing that would place
+    // a car inside it is a ground height, which this crate is forbidden to read
+    // (`the_settlement_generator_is_authored_from_committed_design_alone` bans
+    // `inf_terrain::`). So the fleet goes where every other authored vehicle on
+    // this island goes: the nearest planned route vertex, which is the only
+    // place a committed number says what the ground is. That is the apron
+    // outside the doors, which is where an appliance stands anyway, and it is
+    // stated here rather than discovered by somebody looking for a fire engine
+    // in a garage.
+    //
+    // The probe is the INSTITUTION'S OWN BLOCK CENTRE, not the settlement's, so
+    // a city's four institutions are four separate placements; the vehicles of
+    // one station are then spaced along the road by `EMS_PARK_PITCH_M`, centred
+    // on the vertex, so a two-car station does not stack two cars on one point.
+    for plan in &plans {
+        for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
+            let fleet = station_fleet(b.archetype);
+            if fleet.is_empty() {
+                continue;
+            }
+            let Some((v, dir)) = inf_island::nearest_route_vertex(&design.routes, b.centre) else {
+                continue;
+            };
+            let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
+            // Centred on the vertex: one vehicle sits on it, two straddle it.
+            let span = (fleet.len() as f64 - 1.0) * 0.5 * EMS_PARK_PITCH_M;
+            for (k, id) in fleet.iter().enumerate() {
+                let Some(def) = crate::vehicle::island_vehicles().get(id).copied() else {
+                    continue;
+                };
+                let along = k as f64 * EMS_PARK_PITCH_M - span;
+                // Derived from `k`, never accumulated — the P17.4 exact-linear
+                // rule, which is what keeps two hosts agreeing about a metre.
+                let at = DVec3::new(
+                    v.x + dir.x * along,
+                    crate::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
+                    v.z + dir.y * along,
+                );
+                let guid = derived(
+                    name,
+                    &format!("island.ems.{}.{}.{}.{k}.{id}", b.site, b.col, b.row),
+                );
+                crate::vehicle::spawn_vehicle(
+                    &mut doc,
+                    guid,
+                    &def,
+                    crate::vehicle::VehicleSpawn {
+                        name: &format!("{} {}", plan.name, id),
+                        at,
+                        yaw_deg,
+                        // The livery paints every part it names, so the base
+                        // paint only reaches a part the table forgot — and a
+                        // white one would make that omission invisible.
+                        paint: inf_ecs::math::Color::new(0.35, 0.36, 0.38, 1.0),
+                        clip: None,
+                        livery: crate::vehicle::island_vehicle_livery(id),
+                    },
+                );
+            }
+        }
     }
 
     // ── the hero ──────────────────────────────────────────────────────────────
@@ -846,6 +916,35 @@ pub fn island_vehicle_id(kind: inf_island::SiteKind, index: usize) -> &'static s
         _ => "truck",
     }
 }
+
+/// **The fleet one institution keeps** (wave EMS1) — the catalogue rows parked
+/// at its own street frontage, in the order they are parked.
+///
+/// A function and not a `match` inline in the generator, for
+/// [`island_vehicle_id`]'s reason verbatim: the gate has to know which vehicle
+/// is whose, and a rule restated in a test is the A14 defect.
+///
+/// A **clinic keeps nothing**, and that is the falsifying entry: a table where
+/// every institution had a fleet would make "an institution has vehicles" a
+/// property of the word. A clinic has a car park and the surgery is not an
+/// emergency service.
+pub fn station_fleet(a: inf_pcg::ArchetypeId) -> &'static [&'static str] {
+    match a {
+        // Two patrol cars and the tactical van the mandate names.
+        inf_pcg::ArchetypeId::PoliceStation => &["cruiser", "cruiser", "swat"],
+        inf_pcg::ArchetypeId::FireHall => &["engine"],
+        inf_pcg::ArchetypeId::Hospital => &["ambulance", "ambulance"],
+        _ => &[],
+    }
+}
+
+/// Metres between two parked emergency vehicles along the apron.
+///
+/// A fire appliance is 7.8 m long, which is the longest thing this catalogue
+/// parks, so eleven metres is the vehicle plus a clear gap either side — enough
+/// that two of them at one station do not begin the level interpenetrating,
+/// which is a physics solve nobody authored.
+pub const EMS_PARK_PITCH_M: f64 = 11.0;
 
 /// Every committed island recipe, as repo-relative paths.
 ///
@@ -1234,6 +1333,141 @@ mod tests {
         }
         assert_eq!(sun_guid(a), sun_guid(a));
         assert_ne!(sun_guid(a), sun_guid("Other Island"));
+    }
+
+    /// **EVERY STATION HAS ITS FLEET, ON ITS OWN APRON, IN ITS OWN LIVERY**
+    /// (wave EMS1).
+    ///
+    /// Four claims, each of which a plausible-looking bug would break on its
+    /// own:
+    ///
+    /// * the vehicles exist and are rigs the recogniser finds — so "the island
+    ///   has an ambulance" is a measurement and not a table;
+    /// * they stand at **their own institution's** frontage rather than at the
+    ///   settlement's, which is what stops a city's four stations sharing one
+    ///   heap of cars;
+    /// * two vehicles of one station are at least a vehicle length apart, so a
+    ///   two-car station does not begin the level interpenetrating;
+    /// * and every one of them wears its livery — asserted on a **part's own
+    ///   material**, because a livery that reached the table and not the entity
+    ///   is exactly the failure a table-shaped test cannot see.
+    ///
+    /// The falsifying half is the clinic: it keeps nothing, and the arm says so.
+    #[test]
+    fn every_station_parks_its_fleet_in_its_own_livery() {
+        for recipe in ISLAND_RECIPES {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: no {recipe} in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            let fleet = crate::vehicle::island_vehicles();
+            let mut total = 0usize;
+            let mut per_row: std::collections::BTreeMap<&str, usize> = Default::default();
+            for plan in crate::settlement::settlements(&d) {
+                for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
+                    let want = station_fleet(b.archetype);
+                    if b.archetype == inf_pcg::ArchetypeId::Clinic {
+                        assert!(want.is_empty(), "a clinic is not an emergency service");
+                    }
+                    let mut at: Vec<glam::DVec3> = Vec::new();
+                    for (k, id) in want.iter().enumerate() {
+                        let guid = derived(
+                            name,
+                            &format!("island.ems.{}.{}.{}.{k}.{id}", b.site, b.col, b.row),
+                        );
+                        let rig =
+                            inf_ecs::vehicle::rig_of(doc.world(), guid).unwrap_or_else(|| {
+                                panic!(
+                                    "{recipe}: {} {} has no {id} at ({}, {})",
+                                    plan.name,
+                                    b.archetype.name(),
+                                    b.col,
+                                    b.row
+                                )
+                            });
+                        assert_eq!(rig.wheels.len(), 4, "{recipe}: {id}");
+                        let e = doc.entity_of(guid).expect("the chassis");
+                        let t = doc
+                            .world()
+                            .world()
+                            .get::<inf_ecs::components::Transform>(e)
+                            .expect("its transform");
+                        at.push(t.translation.to_dvec3());
+
+                        // The apron is THIS block's, not the settlement's.
+                        let (v, _) = inf_island::nearest_route_vertex(&d.routes, b.centre)
+                            .expect("the island has routes");
+                        let def = fleet.get(id).expect("the catalogue row");
+                        let want_y = crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M;
+                        assert!(
+                            (t.translation.y - want_y).abs() < 1e-9,
+                            "{recipe}: a {id} sits at {} against a resting {want_y}",
+                            t.translation.y
+                        );
+
+                        // THE LIVERY REACHED THE ENTITY. Checked on the part
+                        // the table names first, and on the light bar, which is
+                        // the part that only exists because of the livery.
+                        let livery = crate::vehicle::island_vehicle_livery(id)
+                            .unwrap_or_else(|| panic!("{id} has no livery"));
+                        let (pname, paint) = livery.parts[0];
+                        let pe = doc
+                            .entity_of(inf_ecs::vehicle::body_part_guid(guid, pname))
+                            .unwrap_or_else(|| panic!("{recipe}: no `{pname}` on a {id}"));
+                        let m = doc
+                            .world()
+                            .world()
+                            .get::<inf_ecs::components::Material>(pe)
+                            .expect("a drawn part has a material");
+                        assert_eq!(
+                            m.base_color, paint.base_color,
+                            "{recipe}: a {id}'s `{pname}` is not its livery's colour"
+                        );
+                        let be = doc
+                            .entity_of(inf_ecs::vehicle::body_part_guid(guid, "light_bar"))
+                            .unwrap_or_else(|| panic!("{recipe}: a {id} has no light bar"));
+                        let bm = doc
+                            .world()
+                            .world()
+                            .get::<inf_ecs::components::Material>(be)
+                            .expect("a light bar is drawn");
+                        let lin = bm.emissive_linear();
+                        assert!(
+                            lin[0].max(lin[1]).max(lin[2]) > 1.0,
+                            "{recipe}: a {id}'s light bar is {lin:?} and does not bloom"
+                        );
+
+                        total += 1;
+                        *per_row.entry(id).or_default() += 1;
+                    }
+                    for i in 0..at.len() {
+                        for j in i + 1..at.len() {
+                            let g = (at[i] - at[j]).length();
+                            assert!(
+                                g >= EMS_PARK_PITCH_M - 1e-9,
+                                "{recipe}: two of {}'s vehicles are {g:.2} m apart",
+                                plan.name
+                            );
+                        }
+                    }
+                }
+            }
+            println!("EMS1 fleet: {recipe} parks {total} -> {per_row:?}");
+            assert!(
+                total > 0,
+                "{recipe} parks no emergency vehicle at all, so every claim \
+                 above is about an empty list"
+            );
+            // The shipped island has all four rows on it; the four-block
+            // fixture has one fire hall and therefore one appliance.
+            if recipe == ISLAND_RECIPES[0] {
+                for id in ["cruiser", "ambulance", "swat", "engine"] {
+                    assert!(per_row.contains_key(id), "{recipe} parks no {id}");
+                }
+            }
+        }
     }
 
     /// **THE CIRCUIT HAS SOMETHING ON IT** (island wave VEH1a) — I7's open item

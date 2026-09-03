@@ -303,6 +303,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                         // `RigSpawn::engine_voice` for VEH2a's carried item 5,
                         // which is the whole reason.
                         engine_voice: false,
+                        // **Traffic is CIVILIAN** (wave EMS1). The emergency
+                        // fleet is authored content on Path A and never reaches
+                        // this door; a livery here would be a police cruiser at
+                        // a kerb slot, which is the trap the fleet borrows
+                        // civilian bodies to avoid.
+                        livery: None,
                     },
                     want == RigDetail::Full,
                 );

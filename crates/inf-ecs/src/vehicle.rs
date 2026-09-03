@@ -817,6 +817,89 @@ pub struct BodyPart {
     pub primitive: crate::components::Primitive,
 }
 
+/// **What one part of a vehicle is painted, when it is not painted the
+/// vehicle's own colour** (wave EMS1).
+///
+/// Three fields and not a whole [`Material`](crate::components::Material),
+/// because two of a material's eight are decisions this table has no business
+/// re-making: `metallic` and `roughness` are what a car's paint IS, and a livery
+/// that could set them would let a police cruiser be made of velvet. The other
+/// three are what a livery is: a colour, whether the part glows, and how much.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartPaint {
+    /// The part's own base colour, in place of `RigSpawn::paint`.
+    pub base_color: crate::math::Color,
+    /// Linear emissive colour. `emissive_intensity` scales it; a part that only
+    /// differs in paint carries black here and the material is unlit as usual.
+    pub emissive: crate::math::Color,
+    /// How bright that emission is — `Material::emissive_intensity`.
+    ///
+    /// **Above 1.0 or a light bar does not bloom**: the HDR path thresholds at
+    /// a linear luminance of 1.0, and the brightest colour a `Color` can carry
+    /// is exactly 1.0 (`Material::emissive_linear`'s own doc).
+    pub emissive_intensity: f32,
+}
+
+impl PartPaint {
+    /// A part that is only a different colour — no emission.
+    pub const fn flat(base_color: crate::math::Color) -> Self {
+        Self {
+            base_color,
+            emissive: crate::math::Color::new(0.0, 0.0, 0.0, 1.0),
+            emissive_intensity: 1.0,
+        }
+    }
+}
+
+/// **A vehicle's livery** (wave EMS1) — a per-part paint table, plus the parts
+/// the livery adds that the body itself does not have.
+///
+/// # Why the livery rides the SPAWN and not the parts table
+///
+/// The obvious place for a per-part override is [`BodyPart`] itself, and it is
+/// the wrong one: a `VehicleBody`'s parts table is shared by every catalogue row
+/// that names that body, and the emergency fleet **deliberately borrows civilian
+/// bodies** (the kerb trap — a sixth `VehicleBody` would put an ambulance at
+/// every sixth kerb slot, because `traffic::catalogue_row` draws uniformly over
+/// `VehicleBody::ALL`). A white-over-blue entry on `SEDAN_PARTS` would therefore
+/// have repainted **every saloon in the town** — the same defect the body
+/// variant was avoided to prevent, arriving through the other door.
+///
+/// So a livery is a property of the vehicle, it is looked up by the part's own
+/// NAME, and a part the table does not name keeps `RigSpawn::paint`. That also
+/// makes it additive: a body may gain a part and every livery still works.
+///
+/// # `extra` is what makes a light bar possible at all
+///
+/// A saloon has a lower body, a greenhouse, a bonnet and a boot; none of them is
+/// a roof bar, and adding one to `SEDAN_PARTS` would put a light bar on every
+/// taxi. The livery's own parts are appended after the body's, so they take
+/// their guids from [`body_part_guid`] like any other and `despawn_rig` takes
+/// them with the chassis (the hierarchy walk removes children whatever the
+/// recipe says).
+///
+/// **The bar is STATIC this wave.** A flashing one is a per-step write to the
+/// vehicle's `Material` from two fenced hosts, and that is wave EMS2's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Livery {
+    /// A stable short name for diagnostics and gate traces.
+    pub name: &'static str,
+    /// Per-part overrides, keyed on [`BodyPart::name`]. A part absent from this
+    /// list keeps the vehicle's own paint.
+    pub parts: &'static [(&'static str, PartPaint)],
+    /// Parts this livery adds — a light bar, a beacon — in fractions of the
+    /// chassis half-extents exactly as [`BodyPart`] is.
+    pub extra: &'static [(BodyPart, PartPaint)],
+}
+
+impl Livery {
+    /// The paint for a named part, or `None` for one this livery does not
+    /// re-colour.
+    pub fn part(&self, name: &str) -> Option<PartPaint> {
+        self.parts.iter().find(|(n, _)| *n == name).map(|(_, p)| *p)
+    }
+}
+
 /// The vehicle silhouettes this engine draws.
 ///
 /// **Axis-aligned boxes only, and that is a decision rather than a limit.**
@@ -1131,6 +1214,11 @@ pub struct RigSpawn {
     /// island's own drive gate caught, by losing the one `Play` it exists to
     /// count off the front of an evicting ring.
     pub engine_voice: bool,
+    /// **The livery this vehicle wears** (wave EMS1), or `None` for a car
+    /// painted one colour — which is every civilian vehicle and all of traffic.
+    ///
+    /// See [`Livery`] for why this rides the spawn rather than the parts table.
+    pub livery: Option<&'static Livery>,
 }
 
 /// **One entity of a vehicle rig, as a DESCRIPTION** — wave VEH2b.
@@ -1270,7 +1358,37 @@ pub fn rig_nodes_at(
         }),
     });
 
-    for part in def.body.parts() {
+    // **The body, and its livery** (wave EMS1). One loop over the family's own
+    // parts followed by the livery's own, because the livery's parts are parts:
+    // they take their guids from `body_part_guid` and their transform from the
+    // same three multiplications. A part the livery does not name keeps
+    // `spawn.paint`, which is every part of every civilian vehicle and all of
+    // traffic — so nothing that predates this wave moves a byte.
+    let body_parts = def.body.parts().iter().map(|p| {
+        let paint = spawn.livery.and_then(|l| l.part(p.name));
+        (*p, paint)
+    });
+    let livery_parts = spawn
+        .livery
+        .map(|l| l.extra)
+        .unwrap_or(&[])
+        .iter()
+        .map(|(p, paint)| (*p, Some(*paint)));
+    for (part, paint) in body_parts.chain(livery_parts) {
+        // Built from the unliveried material and then overwritten, so a part
+        // with no override is BYTE-IDENTICAL to what this loop wrote before the
+        // livery existed rather than merely equal to it by inspection.
+        let mut material = Material {
+            base_color: spawn.paint,
+            metallic: 0.35,
+            roughness: 0.42,
+            ..Default::default()
+        };
+        if let Some(p) = paint {
+            material.base_color = p.base_color;
+            material.emissive = p.emissive;
+            material.emissive_intensity = p.emissive_intensity;
+        }
         out.push(RigNode {
             guid: part_guid(part.name),
             name: part.name.to_string(),
@@ -1296,12 +1414,7 @@ pub fn rig_nodes_at(
                 primitive: part.primitive,
                 asset: None,
             }),
-            material: Some(Material {
-                base_color: spawn.paint,
-                metallic: 0.35,
-                roughness: 0.42,
-                ..Default::default()
-            }),
+            material: Some(material),
             class: None,
             audio: None,
         });
@@ -1442,6 +1555,10 @@ pub fn despawn_rig(world: &mut EcsWorld, chassis: Uuid, def: &VehicleDef) -> usi
         paint: crate::math::Color::WHITE,
         clip: None,
         engine_voice: false,
+        // A livery adds parts, and this list is only used to COUNT what was
+        // present: `EcsWorld::despawn` walks the hierarchy, so taking the
+        // chassis takes a light bar with it whatever the recipe says.
+        livery: None,
     };
     let nodes = rig_nodes(chassis, def, &spawn);
     let present = nodes
@@ -3592,6 +3709,7 @@ mod tests {
             paint: crate::math::Color::new(0.2, 0.4, 0.9, 1.0),
             clip: None,
             engine_voice: true,
+            livery: None,
         }
     }
 
@@ -3634,6 +3752,80 @@ mod tests {
         // …and the rig the vehicle door reads is derivable from what was built.
         let r = rig_of(&w, chassis).expect("a rig");
         assert_eq!(r.wheels.len(), 4);
+    }
+
+    /// **A livery repaints the parts it names, adds the ones it declares, and
+    /// leaves an unliveried car BYTE-IDENTICAL** (wave EMS1).
+    ///
+    /// Three claims, and the third is the one that costs something. The
+    /// override is a mutation of the material this loop already built, so "a
+    /// part with no override is what it was" is a statement about bytes rather
+    /// than a comparison of two literals somebody kept in step — and it is
+    /// asserted against a recipe built with `livery: None`, which is every
+    /// civilian vehicle and all of traffic.
+    #[test]
+    fn a_livery_repaints_named_parts_and_leaves_the_rest_exactly_as_they_were() {
+        const RED: crate::math::Color = crate::math::Color::new(0.6, 0.05, 0.05, 1.0);
+        const BAR: BodyPart = BodyPart {
+            name: "light_bar",
+            centre: Vec3d::new(0.0, 1.06, 0.0),
+            half: Vec3d::new(0.5, 0.06, 0.2),
+            primitive: crate::components::Primitive::Cube,
+        };
+        static LIVERY: Livery = Livery {
+            name: "test",
+            parts: &[("cabin", PartPaint::flat(RED))],
+            extra: &[(
+                BAR,
+                PartPaint {
+                    base_color: crate::math::Color::new(0.1, 0.1, 0.1, 1.0),
+                    emissive: crate::math::Color::new(0.2, 0.4, 1.0, 1.0),
+                    emissive_intensity: 3.0,
+                },
+            )],
+        };
+        let def = VehicleDef::default();
+        let chassis = Uuid::from_u128(0xE_5A1);
+        let plain = rig_nodes(chassis, &def, &spawn_of("Plain"));
+        let mut liveried_spawn = spawn_of("Plain");
+        liveried_spawn.livery = Some(&LIVERY);
+        let worn = rig_nodes(chassis, &def, &liveried_spawn);
+
+        // The livery adds exactly its own parts, and they sit after the body's.
+        assert_eq!(worn.len(), plain.len() + 1);
+        let bar = worn
+            .iter()
+            .find(|n| n.name == "light_bar")
+            .expect("the livery's own part is built");
+        assert_eq!(bar.parent, Some(chassis), "a light bar is on the car");
+        let m = bar.material.expect("a light bar is drawn");
+        assert!(
+            m.emissive_linear()[2] > 1.0,
+            "a light bar at {:?} x {} does not bloom — the HDR path thresholds \
+             at a linear luminance of 1.0",
+            m.emissive,
+            m.emissive_intensity
+        );
+
+        // The named part is repainted…
+        let cabin = worn.iter().find(|n| n.name == "cabin").expect("a cabin");
+        assert_eq!(cabin.material.expect("drawn").base_color, RED);
+        // …and every OTHER node is byte-identical to the unliveried recipe,
+        // which is the arm that says a civilian car did not move.
+        for p in &plain {
+            if p.name == "cabin" {
+                continue;
+            }
+            let w = worn
+                .iter()
+                .find(|n| n.guid == p.guid)
+                .unwrap_or_else(|| panic!("{} vanished under a livery", p.name));
+            assert_eq!(w, p, "{} moved under a livery", p.name);
+        }
+        // …and the plain recipe really did have something to repaint, or the
+        // sweep above is a statement about a car with no cabin.
+        assert!(plain.iter().any(|n| n.name == "cabin"));
+        assert!(!plain.iter().any(|n| n.name == "light_bar"));
     }
 
     /// Spawning twice is idempotent — a traffic car that materializes on a
