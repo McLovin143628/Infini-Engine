@@ -172,6 +172,12 @@ pub fn spawn_vehicle(
         if let Some(c) = node.audio {
             insert!(doc, node.guid, c);
         }
+        // Wave VEH2c: a hull's flotation, on the chassis only. `Buoyancy` is
+        // opt-in (scene v18) and a road car's recipe emits none, so every
+        // committed level's vehicles are byte-identical.
+        if let Some(c) = node.buoyancy {
+            insert!(doc, node.guid, c);
+        }
     }
     chassis
 }
@@ -716,6 +722,81 @@ steer_return_deg_per_s = 170.0
 abs_slip = 0.2
 traction_control_slip = 0.26
 stability_control = 0.8
+
+# ── SEA AND AIR (wave VEH2c) ─────────────────────────────────────────────────
+#
+# The first two rows in this catalogue with no wheels. Both are named by the
+# island recipe at a place rather than drawn at a kerb -- `VehicleBody::CIVILIAN`
+# is what the kerb draws from and neither family is in it, which is the kerb
+# trap closed rather than merely avoided.
+#
+# Most of the sixty-two mean nothing to either craft and are simply not written:
+# a boat has no gearbox and a helicopter has no tyres, and `HullVehicle` and
+# `RotorVehicle` each document exactly which names they read. Every key below is
+# one of those, or geometry.
+
+[launch]
+label = \"Harbour Launch\"
+
+[launch.vehicle]
+body = \"launch\"
+# A 6.4 m launch: 3.2 m of half-length, 1.15 m of half-beam. 400 kg/m3 over the
+# 17.0 m3 hull is 6.8 tonnes, which is a heavy displacement boat and is what
+# makes the turning circle a boat's rather than a jet-ski's.
+half_width_m = 1.15
+half_height_m = 0.58
+half_length_m = 3.2
+density_kg_m3 = 400.0
+# It floats with 40 % of its depth under -- a launch with freeboard, and a screw
+# that is IN the water at rest. `buoyancy_density_kg_m3` is what it FLOATS at
+# and `density_kg_m3` is what it WEIGHS; one number could not be both.
+buoyancy_density_kg_m3 = 400.0
+# A hull is shaped to go through water. P20.2's default is a blunt body's and
+# held this boat to 5.7 knots; this is the number that sets its top speed.
+buoyancy_linear_drag = 0.25
+# 14 kN of screw against a 6.8 tonne boat.
+max_engine_force_n = 14000.0
+max_speed_mps = 16.0
+drag_n_per_mps2 = 35.0
+# The KEEL. The largest force on a boat that is not gravity, and what stops it
+# sliding sideways out of its own turn.
+drag_lateral_n_per_mps2 = 6000.0
+max_steer_deg = 35.0
+min_steer_deg = 20.0
+steer_rate_deg_per_s = 90.0
+steer_return_deg_per_s = 120.0
+enter_time_s = 0.62
+
+[chopper]
+label = \"Light Helicopter\"
+
+[chopper.vehicle]
+body = \"rotorcraft\"
+# A light twin-seat machine: 4.8 m of fuselage, 2.4 m across, 1.8 m tall. An
+# airframe is mostly air -- 95 kg/m3 over its 20.7 m3 box is 1 970 kg, which is
+# a Robinson-class machine -- and `ROTORCRAFT_MOUNTS` puts a disc of
+# 3.6 x 1.2 = 4.3 m radius on the mast, a rotor about as wide as the machine is
+# long, which is what a helicopter is.
+half_width_m = 1.2
+half_height_m = 0.9
+half_length_m = 2.4
+density_kg_m3 = 95.0
+# 34 kN of rotor over 19.3 kN of weight: 1.76x hover, which is what makes the
+# governed collective's 35 % climb authority reachable at any bank the
+# aircraft can hold.
+max_engine_force_n = 34000.0
+max_speed_mps = 70.0
+# The cyclic's authority, tapering with speed exactly as a steering rack's does.
+max_steer_deg = 26.0
+min_steer_deg = 14.0
+steer_rate_deg_per_s = 60.0
+steer_return_deg_per_s = 90.0
+# The fuselage. `drag_n_per_mps2` sets the forward ceiling; the lateral figure
+# is what damps a climb and a sideslip, and it is far larger because a
+# helicopter presented broadside is a barn door.
+drag_n_per_mps2 = 2.2
+drag_lateral_n_per_mps2 = 260.0
+enter_time_s = 0.72
 ";
 
 // ── the emergency liveries (wave EMS1) ──────────────────────────────────────
@@ -1100,7 +1181,7 @@ mod tests {
     #[test]
     fn the_island_catalogue_declares_a_fleet_and_no_two_rows_are_one_car() {
         let defs = island_vehicles();
-        assert_eq!(defs.0.len(), 9);
+        assert_eq!(defs.0.len(), 11);
         for (id, body) in [
             ("sedan", inf_ecs::vehicle::VehicleBody::Sedan),
             ("truck", inf_ecs::vehicle::VehicleBody::Truck),
@@ -1115,6 +1196,14 @@ mod tests {
             ("ambulance", inf_ecs::vehicle::VehicleBody::Van),
             ("swat", inf_ecs::vehicle::VehicleBody::Van),
             ("engine", inf_ecs::vehicle::VehicleBody::Truck),
+            // **…and wave VEH2c's two do NOT borrow**, because there is no
+            // civilian silhouette a boat or a helicopter could honestly wear.
+            // They are the first new families since P29.7, and the remedy the
+            // note above left written down — a named `VehicleBody::CIVILIAN`
+            // sub-list for `catalogue_row` to draw from — lands in the same
+            // commit, which is what keeps the kerbs full of cars.
+            ("launch", inf_ecs::vehicle::VehicleBody::Launch),
+            ("chopper", inf_ecs::vehicle::VehicleBody::Rotorcraft),
         ] {
             assert_eq!(
                 defs.get(id).unwrap_or_else(|| panic!("no `{id}` row")).body,
@@ -1148,11 +1237,20 @@ mod tests {
                 (900.0..12_000.0).contains(&kg),
                 "{id} weighs {kg} kg, which is not a road vehicle"
             );
+            // …and wave VEH2c adds the second exception, also named: a 6.4 m
+            // displacement launch is 6.8 tonnes, which is what makes its
+            // turning circle a boat's. The rule and its exception list are the
+            // point — a widened bound with no named exception would stop
+            // catching the 5-tonne saloon this arm exists for.
             assert_eq!(
                 kg > 3_600.0,
-                id == "engine",
-                "{id} weighs {kg} kg — only the fire appliance is over 3.6 t"
+                id == "engine" || id == "launch",
+                "{id} weighs {kg} kg — only the fire appliance and the launch                  are over 3.6 t"
             );
+            // A craft with no wheels has none of the rest of this to say.
+            if !def.body.wheeled() {
+                continue;
+            }
             // Its wheels are under it, not beside it.
             for m in def.wheel_mounts() {
                 assert!(
@@ -1173,9 +1271,58 @@ mod tests {
         assert!(truck.class.max_speed_mps < sedan.class.max_speed_mps);
         assert!(truck.wheel_radius_m > sedan.wheel_radius_m);
 
-        // **No two rows agree about how they drive.** Six axes, each of which a
+        // **No two rows agree about how they DRIVE.** Six axes, each of which a
         // driver feels: a row set that collided on any of them would be a fleet
         // wearing five names.
+        //
+        // Over the WHEELED rows only (wave VEH2c). Four of the six are a
+        // powertrain and a tyre, and a boat has neither — both craft leave them
+        // at the Ring-0 default and would collide here for the honest reason
+        // that the question does not apply to them. What DOES apply is asserted
+        // separately below.
+        // **…and the two craft are two craft** (wave VEH2c), on the axes their
+        // own classes document reading. A launch and a helicopter that agreed
+        // about thrust, top speed and drag would be one machine with two
+        // silhouettes, which is the same defect the loop below catches for cars.
+        let launch = defs.get("launch").expect("a launch");
+        let chopper = defs.get("chopper").expect("a helicopter");
+        for (name, a, b) in [
+            (
+                "max_engine_force_n",
+                launch.class.max_engine_force_n,
+                chopper.class.max_engine_force_n,
+            ),
+            (
+                "max_speed_mps",
+                launch.class.max_speed_mps,
+                chopper.class.max_speed_mps,
+            ),
+            (
+                "drag_n_per_mps2",
+                launch.class.drag_n_per_mps2,
+                chopper.class.drag_n_per_mps2,
+            ),
+            (
+                "drag_lateral_n_per_mps2",
+                launch.class.drag_lateral_n_per_mps2,
+                chopper.class.drag_lateral_n_per_mps2,
+            ),
+        ] {
+            assert!(
+                a != b,
+                "`{name}`: the launch and the helicopter both read {a}"
+            );
+        }
+        // Only the launch floats, and it floats at a density of its own rather
+        // than at the one it weighs.
+        assert!(launch.buoyancy_density_kg_m3 > 0.0);
+        assert_eq!(chopper.buoyancy_density_kg_m3, 0.0, "a helicopter floats");
+        assert!(
+            launch.buoyancy_linear_drag > 0.0 && launch.buoyancy_linear_drag < 1.0,
+            "a hull's drag is {}",
+            launch.buoyancy_linear_drag
+        );
+
         type Axis = (&'static str, fn(&inf_ecs::vehicle::VehicleDef) -> f64);
         let axis: [Axis; 6] = [
             ("max_speed_mps", |d| d.class.max_speed_mps),
@@ -1188,8 +1335,12 @@ mod tests {
             }),
         ];
         for (name, read) in axis {
-            let mut seen: Vec<(String, f64)> =
-                defs.0.iter().map(|(k, d)| (k.clone(), read(d))).collect();
+            let mut seen: Vec<(String, f64)> = defs
+                .0
+                .iter()
+                .filter(|(_, d)| d.body.wheeled())
+                .map(|(k, d)| (k.clone(), read(d)))
+                .collect();
             seen.sort_by(|a, b| a.1.total_cmp(&b.1));
             for pair in seen.windows(2) {
                 assert!(
@@ -1246,18 +1397,36 @@ mod tests {
             doc.world_mut().propagate();
 
             let rig = inf_ecs::vehicle::rig_of(doc.world(), chassis)
-                .unwrap_or_else(|| panic!("{id}: the spawned car is not a rig"));
-            assert_eq!(rig.wheels.len(), 4, "{id}");
+                .unwrap_or_else(|| panic!("{id}: the spawned craft is not a rig"));
             assert_eq!(
                 rig.seat_local,
                 Vec3d::new(0.0, def.half_extents.y, 0.0),
                 "{id}: the seat is the top face of the chassis collider"
             );
-            assert_eq!(
-                rig.wheels.iter().filter(|w| w.steered()).count(),
-                2,
-                "{id}: the front pair steers"
-            );
+            // **A wheeled family is four wheels and no mounts; a mounted one is
+            // the mirror image** (wave VEH2c). Asserted over EVERY row of the
+            // catalogue in one loop, so a family that grew a mount and kept its
+            // wheels — which `rig_of`'s WHEELS-WIN rule would silently answer
+            // with a car — fails here rather than flying badly later.
+            if def.body.wheeled() {
+                assert_eq!(rig.wheels.len(), 4, "{id}");
+                assert!(rig.parts.is_empty(), "{id}: a car with mounts");
+                assert_eq!(
+                    rig.wheels.iter().filter(|w| w.steered()).count(),
+                    2,
+                    "{id}: the front pair steers"
+                );
+            } else {
+                assert!(rig.wheels.is_empty(), "{id}: a craft with wheels");
+                assert_eq!(
+                    rig.parts.len(),
+                    def.body.mounts().len(),
+                    "{id}: the mounts its family names"
+                );
+                for (part, mount) in rig.parts.iter().zip(def.body.mounts()) {
+                    assert_eq!(part.kind, mount.kind, "{id}: {}", mount.name);
+                }
+            }
 
             // Every drawn part is inside the hull it is drawn on, at its own
             // size — the defect this door exists to close.
@@ -1306,6 +1475,47 @@ mod tests {
                 drawn += 1;
             }
             assert!(drawn >= 4, "{id}: only {drawn} drawn parts");
+
+            // **A craft's mounts are the recognised colliders its family
+            // names**, and the drawn blade rides on the marker (wave VEH2c).
+            // Deliberately outside the "inside its own hull" sweep above: a
+            // screw hangs BELOW the hull and a rotor is three times wider than
+            // it, which is what those parts are.
+            for mount in def.body.mounts() {
+                let marker = inf_ecs::vehicle::body_part_guid(chassis, mount.name);
+                let e = world
+                    .entity_of(marker)
+                    .unwrap_or_else(|| panic!("{id}: no `{}` mount", mount.name));
+                let col = world
+                    .world()
+                    .get::<inf_ecs::components::Collider3D>(e)
+                    .unwrap_or_else(|| panic!("{id}: `{}` has no collider", mount.name));
+                assert!(col.sensor, "{id}/{}: a mount is a sensor", mount.name);
+                assert!(
+                    world
+                        .world()
+                        .get::<inf_ecs::components::RigidBody3D>(e)
+                        .is_none(),
+                    "{id}/{}: a mount has no body of its own",
+                    mount.name
+                );
+                assert_eq!(
+                    inf_ecs::vehicle::part_of(Some(col), None).map(|(k, _)| k),
+                    Some(mount.kind),
+                    "{id}/{}: the recogniser does not see the kind it declares",
+                    mount.name
+                );
+                let drawn =
+                    inf_ecs::vehicle::body_part_guid(chassis, &format!("{}_drawn", mount.name));
+                let d = world
+                    .world()
+                    .get::<Transform>(world.entity_of(drawn).expect("a blade"))
+                    .expect("its transform");
+                assert!(d.scale.x > 0.0 && d.scale.z > 0.0, "{id}: a flat blade");
+            }
+            if !def.body.wheeled() {
+                continue;
+            }
 
             // The tyres are cylinders laid on their sides, sized from the wheel.
             for i in 0..4 {

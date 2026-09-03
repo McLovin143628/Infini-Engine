@@ -2063,7 +2063,15 @@ pub fn heading_of_yaw(yaw_deg: f64) -> DVec3 {
 /// a pickup in three consecutive lanes).
 pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
     use crate::vehicle::VehicleBody;
-    let bodies = VehicleBody::ALL;
+    // **`CIVILIAN`, not `ALL`** — the kerb trap, sprung and closed in the same
+    // commit that could have sprung it (wave VEH2c). This draw is UNIFORM over
+    // whatever list it is handed, so the day `ALL` grew a launch and a
+    // helicopter was the day every sixth and seventh kerb slot in every town on
+    // the island would have held a boat. `VehicleBody::CIVILIAN`'s own doc
+    // carries the rest of the argument; the size table below stays exhaustive
+    // over `VehicleBody`, so that the NEXT family is a compile error here
+    // rather than a boat on a pavement.
+    let bodies = VehicleBody::CIVILIAN;
     let i = (crate::crowd::agent_unit(guid, 0, SALT_CLASS) * bodies.len() as f64) as usize;
     let body = bodies[i.min(bodies.len() - 1)];
     let mut def = crate::vehicle::VehicleDef {
@@ -2078,6 +2086,12 @@ pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
         VehicleBody::Suv => (2.35, 0.98, 0.88),
         VehicleBody::Truck => (2.70, 1.02, 0.85),
         VehicleBody::Van => (2.70, 1.00, 1.05),
+        // Unreachable from the draw above and deliberately still written:
+        // this match is the tripwire that makes a new family visible HERE,
+        // and an arm that answered with a wildcard would have let a launch
+        // through wearing a saloon's dimensions.
+        VehicleBody::Launch => (2.60, 1.05, 0.95),
+        VehicleBody::Rotorcraft => (2.40, 1.20, 1.00),
     };
     def.half_extents = crate::math::Vec3d::new(w, h, l);
     def.half_track_m = w - 0.12;
@@ -2949,9 +2963,13 @@ mod tests {
                 def.body
             );
         }
+        // `CIVILIAN`, not `ALL` (wave VEH2c): this arm's subject is what
+        // `catalogue_row` can produce, and a boat has no springs to check. The
+        // two craft answer `suspension_rest_m() == 0.0`, which is asserted
+        // where they are.
         assert_eq!(
             seen.len(),
-            crate::vehicle::VehicleBody::ALL.len(),
+            crate::vehicle::VehicleBody::CIVILIAN.len(),
             "the sweep only met {seen:?} — a silhouette this arm does not draw is a \
              silhouette nothing checks the springs of"
         );
@@ -2962,6 +2980,52 @@ mod tests {
     /// world-level test cannot answer is whether the fault is the world or the
     /// ROW: `catalogue_row` overrides four of a `VehicleDef`'s geometry fields,
     /// and a rig whose wheels the recogniser cannot tell apart, or whose gearbox
+    /// **NO KERB IN ANY TOWN EVER HOLDS A BOAT** — the kerb trap, armed
+    /// (wave VEH2c).
+    ///
+    /// The trap was written down twice in this repository before it could
+    /// spring: `catalogue_row` draws a parked car's silhouette UNIFORMLY over a
+    /// list, so the day `VehicleBody::ALL` grew a launch and a helicopter was
+    /// the day every sixth and seventh kerb slot on the island would have held
+    /// one. Wave EMS1 avoided it by borrowing bodies and left the remedy
+    /// written: a named CIVILIAN sub-list, in the same commit.
+    ///
+    /// This arm is what makes the remedy a fact rather than a comment. Pointing
+    /// the draw back at `ALL` reds it in one line with the offending family
+    /// named.
+    #[test]
+    fn no_kerb_in_any_town_ever_holds_a_boat_or_a_helicopter() {
+        use crate::vehicle::VehicleBody;
+        // The list itself: every civilian body is a road vehicle, and no craft
+        // is in it.
+        for b in VehicleBody::CIVILIAN {
+            assert!(b.wheeled(), "{:?} is in CIVILIAN and has mounts", b.name());
+        }
+        assert_eq!(
+            VehicleBody::ALL.len() - VehicleBody::CIVILIAN.len(),
+            2,
+            "a family was added to ALL without a decision about the kerb"
+        );
+
+        // …and the DRAW, over two thousand kerb slots, which is far more than
+        // the island has. A uniform draw over seven would put roughly 570 boats
+        // in here.
+        let mut seen = std::collections::BTreeSet::new();
+        for k in 0..2_000u64 {
+            let guid = Uuid::from_u64_pair(0x4B33, k);
+            let body = catalogue_row(guid).body;
+            assert!(
+                VehicleBody::CIVILIAN.contains(&body),
+                "kerb slot {k} drew a {}",
+                body.name()
+            );
+            seen.insert(body.name());
+        }
+        // Vacuity guard: the draw really does reach all five, so "every one was
+        // civilian" is not a statement about a constant.
+        assert_eq!(seen.len(), 5, "the draw only reached {seen:?}");
+    }
+
     /// hands out no ratio, is a car nothing can drive anywhere.
     #[test]
     fn every_catalogue_row_makes_torque_at_a_standstill() {

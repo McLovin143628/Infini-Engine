@@ -1078,6 +1078,133 @@ impl Livery {
     }
 }
 
+/// One **mount** of a vehicle's body — a thruster or a rotor — in the same
+/// fractions of the chassis half-extents [`BodyPart`] uses (wave VEH2c).
+///
+/// [`BodyPart`]'s sibling, and deliberately a separate table rather than a flag
+/// on that one: a body part is drawn and nothing else, and a mount is a
+/// *recognised* collider that the vehicle door reads. They differ in what they
+/// emit, not merely in what they look like.
+///
+/// # A fraction greater than one is expected here
+///
+/// A rotor is much wider than the fuselage it lifts — a light helicopter's disc
+/// is about as wide as the machine is long — so `half.x` on a
+/// [`PartKind::Rotor`] row is normally between two and four. That is the
+/// fraction convention doing its job rather than straining it: the disc stays
+/// proportional to the airframe across a whole family of sizes, which is the
+/// property `BodyPart`'s own doc exists to defend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MountPart {
+    /// The part's stable name. **The content key** — `body_part_guid` derives
+    /// the entity's `Guid` from it, exactly as a `BodyPart`'s does.
+    pub name: &'static str,
+    /// Which part this is, and therefore which collider shape recognises it.
+    pub kind: PartKind,
+    /// Centre, in fractions of the chassis half-extents.
+    pub centre: Vec3d,
+    /// Size, in fractions of the chassis half-extents. A thruster's box
+    /// half-extents; a rotor's `(radius, half-height, radius)`.
+    pub half: Vec3d,
+    /// What draws it, as a child of the marker — the tyre's own arrangement,
+    /// for the tyre's own reason: the vehicle door writes the marker's rotation
+    /// every step and leaves no slot to lay a primitive down in.
+    pub primitive: crate::components::Primitive,
+}
+
+/// The launch's drawn parts: a hull, a deck, a wheelhouse and a bow.
+const LAUNCH_PARTS: &[BodyPart] = &[
+    // The hull below the waterline, inset all round: a boat's forefoot is
+    // narrower than its deck, which is what the topsides above sit on.
+    BodyPart {
+        name: "hull",
+        centre: Vec3d::new(0.0, -0.42, 0.0),
+        half: Vec3d::new(0.88, 0.58, 0.92),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // The topsides — full beam and full length, and where the gunwale is.
+    BodyPart {
+        name: "topsides",
+        centre: Vec3d::new(0.0, 0.14, -0.05),
+        half: Vec3d::new(1.00, 0.22, 0.95),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // The wheelhouse, forward of amidships where a launch's is.
+    BodyPart {
+        name: "wheelhouse",
+        centre: Vec3d::new(0.0, 0.64, 0.18),
+        half: Vec3d::new(0.60, 0.36, 0.42),
+        primitive: crate::components::Primitive::Cube,
+    },
+    // The bow, narrower and higher — the flare that keeps water off the deck.
+    BodyPart {
+        name: "bow",
+        centre: Vec3d::new(0.0, 0.10, 0.82),
+        half: Vec3d::new(0.56, 0.36, 0.18),
+        primitive: crate::components::Primitive::Cube,
+    },
+];
+
+/// The launch's mounts: one screw, right aft and below the waterline.
+const LAUNCH_MOUNTS: &[MountPart] = &[MountPart {
+    name: "screw",
+    kind: PartKind::Thruster,
+    // Aft of the transom's inside face and under the hull, which is where a
+    // shaft comes out — and, crucially, deep enough to stay wetted at rest.
+    centre: Vec3d::new(0.0, -0.92, -0.86),
+    half: Vec3d::new(0.16, 0.16, 0.12),
+    primitive: crate::components::Primitive::Cylinder,
+}];
+
+/// The rotorcraft's drawn parts: a cabin, a tail boom, a fin and two skids.
+const ROTORCRAFT_PARTS: &[BodyPart] = &[
+    BodyPart {
+        name: "cabin",
+        centre: Vec3d::new(0.0, 0.02, 0.42),
+        half: Vec3d::new(1.00, 0.84, 0.58),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "boom",
+        centre: Vec3d::new(0.0, 0.30, -0.57),
+        half: Vec3d::new(0.20, 0.20, 0.43),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "fin",
+        centre: Vec3d::new(0.0, 0.60, -0.80),
+        half: Vec3d::new(0.07, 0.40, 0.14),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "skid_left",
+        centre: Vec3d::new(-0.62, -0.95, 0.05),
+        half: Vec3d::new(0.07, 0.05, 0.70),
+        primitive: crate::components::Primitive::Cube,
+    },
+    BodyPart {
+        name: "skid_right",
+        centre: Vec3d::new(0.62, -0.95, 0.05),
+        half: Vec3d::new(0.07, 0.05, 0.70),
+        primitive: crate::components::Primitive::Cube,
+    },
+];
+
+/// The rotorcraft's mounts: one main disc on the mast above the cabin.
+///
+/// A tail rotor is deliberately absent. [`RotorVehicle`] yaws with a torque
+/// rather than with a second thrust, so a tail-rotor mount would be a marker the
+/// model does not read — and a part nothing reads is exactly the kind of
+/// decoration this table is not.
+const ROTORCRAFT_MOUNTS: &[MountPart] = &[MountPart {
+    name: "rotor",
+    kind: PartKind::Rotor,
+    centre: Vec3d::new(0.0, 1.22, 0.12),
+    // Wider than the machine — see `MountPart`'s own note.
+    half: Vec3d::new(3.60, 0.04, 3.60),
+    primitive: crate::components::Primitive::Cylinder,
+}];
+
 /// The vehicle silhouettes this engine draws.
 ///
 /// **Axis-aligned boxes only, and that is a decision rather than a limit.**
@@ -1102,6 +1229,12 @@ pub enum VehicleBody {
     /// Box body over a low chassis with a stepped cab in front — the delivery
     /// van of `docs/reference_videos/frames/driving/0014`.
     Van,
+    /// **A motor launch** (wave VEH2c): a hull, a deck, a wheelhouse and a bow,
+    /// with one screw right aft. The first body in this table with no wheels.
+    Launch,
+    /// **A light helicopter** (wave VEH2c): a cabin, a tail boom, a fin, two
+    /// skids and a main disc on the mast.
+    Rotorcraft,
 }
 
 /// The sedan's parts. `+Z` is forward, `+Y` is up.
@@ -1287,7 +1420,31 @@ const VAN_PARTS: &[BodyPart] = &[
 
 impl VehicleBody {
     /// Every family, in the canonical order.
-    pub const ALL: [VehicleBody; 5] = [
+    pub const ALL: [VehicleBody; 7] = [
+        VehicleBody::Sedan,
+        VehicleBody::Truck,
+        VehicleBody::Sports,
+        VehicleBody::Suv,
+        VehicleBody::Van,
+        VehicleBody::Launch,
+        VehicleBody::Rotorcraft,
+    ];
+
+    /// **The bodies that belong at a kerb** — the named civilian sub-list
+    /// (wave VEH2c).
+    ///
+    /// THE KERB TRAP, and it is written down in this repository twice already:
+    /// `inf_ecs::traffic::catalogue_row` draws a parked car's silhouette
+    /// **uniformly over a list**, so a sixth family in that list puts one at
+    /// every sixth kerb slot in every town. Wave EMS1 avoided it by borrowing
+    /// civilian bodies for the emergency fleet and left the remedy written down
+    /// for the day a family really was new: *"if a body variant is ever added,
+    /// `catalogue_row` gains a named CIVILIAN sub-list in the same commit."*
+    ///
+    /// This is that commit and this is that list. A launch and a helicopter are
+    /// not cars, and a town whose kerbs held boats would be the exact defect the
+    /// note predicted.
+    pub const CIVILIAN: [VehicleBody; 5] = [
         VehicleBody::Sedan,
         VehicleBody::Truck,
         VehicleBody::Sports,
@@ -1303,6 +1460,34 @@ impl VehicleBody {
             VehicleBody::Sports => "sports",
             VehicleBody::Suv => "suv",
             VehicleBody::Van => "van",
+            VehicleBody::Launch => "launch",
+            VehicleBody::Rotorcraft => "rotorcraft",
+        }
+    }
+
+    /// Whether this family is drawn on **wheels** (wave VEH2c).
+    ///
+    /// Derived from the mounts rather than authored as a flag, so a family
+    /// cannot claim to be one thing and emit another: a body with mounts is a
+    /// craft the parts recogniser will find, and `rig_of`'s WHEELS-WIN rule
+    /// means the two can never both be true of one rig.
+    pub fn wheeled(self) -> bool {
+        self.mounts().is_empty()
+    }
+
+    /// This family's **mounts** — its thrusters and rotors (wave VEH2c).
+    ///
+    /// Empty for every road vehicle, which is every family that existed before
+    /// this wave, so nothing already committed changes by a byte.
+    pub fn mounts(self) -> &'static [MountPart] {
+        match self {
+            VehicleBody::Sedan
+            | VehicleBody::Truck
+            | VehicleBody::Sports
+            | VehicleBody::Suv
+            | VehicleBody::Van => &[],
+            VehicleBody::Launch => LAUNCH_MOUNTS,
+            VehicleBody::Rotorcraft => ROTORCRAFT_MOUNTS,
         }
     }
 
@@ -1322,6 +1507,8 @@ impl VehicleBody {
             VehicleBody::Sports => SPORTS_PARTS,
             VehicleBody::Suv => SUV_PARTS,
             VehicleBody::Van => VAN_PARTS,
+            VehicleBody::Launch => LAUNCH_PARTS,
+            VehicleBody::Rotorcraft => ROTORCRAFT_PARTS,
         }
     }
 }
@@ -1437,6 +1624,13 @@ pub struct RigNode {
     pub class: Option<crate::components::VehicleClass>,
     /// The engine loop's emitter, on the chassis only.
     pub audio: Option<crate::components::AudioSource>,
+    /// **Flotation**, on the chassis only (wave VEH2c) — what makes a hull a
+    /// boat rather than a box that sinks.
+    ///
+    /// On the recipe rather than left to the island's spawner, because a launch
+    /// that floats in one caller and sinks in another is two boats and this is
+    /// the one place a vehicle's entities are described.
+    pub buoyancy: Option<crate::components::Buoyancy>,
 }
 
 /// **Every entity one vehicle is made of, in creation order.**
@@ -1485,6 +1679,14 @@ pub fn rig_nodes_at(
         RigidBody3D, Transform,
     };
     let h = def.half_extents;
+    // **What "simulated" means, once** (wave VEH2c). A road car is simulated
+    // when it has wheels; a launch and a rotorcraft have none and are simulated
+    // whenever their family names mounts, because the parts recogniser will find
+    // them and the bridge will build a class over them. The `wheels` flag keeps
+    // its exact VEH2b meaning for every family that has wheels — a `Near` car
+    // built with `wheels = false` is still a kinematic box that cannot be
+    // stepped — and a mounted craft ignores it, having no wheels to drop.
+    let simulated = (wheels && def.body.wheeled()) || !def.body.mounts().is_empty();
     let part_guid = |part: &str| body_part_guid(chassis, part);
     let mut out: Vec<RigNode> = Vec::with_capacity(1 + def.body.parts().len() + 8);
 
@@ -1503,7 +1705,7 @@ pub fn rig_nodes_at(
             // the solver pushes nothing through. The two travel together with
             // the wheels for one reason: they are the same decision about
             // whether this car is being simulated.
-            kind: if wheels {
+            kind: if simulated {
                 BodyKind3D::Dynamic
             } else {
                 BodyKind3D::Kinematic
@@ -1523,7 +1725,7 @@ pub fn rig_nodes_at(
         // The tuning rides with the wheels: a body with no wheels is not a
         // vehicle, and a `VehicleClass` on one would be a class the bridge
         // installs on a rig that does not exist.
-        class: wheels.then_some(def.class),
+        class: simulated.then_some(def.class),
         audio: spawn.engine_voice.then(|| AudioSource {
             clip: spawn.clip,
             looping: true,
@@ -1533,6 +1735,15 @@ pub fn rig_nodes_at(
             // both starting one voice is two `Play`s for one source.
             autoplay: false,
             ..Default::default()
+        }),
+        // Flotation, if this family floats. `Buoyancy` is opt-in and scene-v18,
+        // so a road car emits none and nothing already committed moves.
+        buoyancy: (simulated && def.buoyancy_density_kg_m3 > 0.0).then(|| {
+            crate::components::Buoyancy {
+                density_kg_m3: def.buoyancy_density_kg_m3,
+                linear_drag: def.buoyancy_linear_drag.max(0.0),
+                ..Default::default()
+            }
         }),
     });
 
@@ -1595,10 +1806,81 @@ pub fn rig_nodes_at(
             material: Some(material),
             class: None,
             audio: None,
+            buoyancy: None,
         });
     }
 
-    if !wheels {
+    // ── the MOUNTS (wave VEH2c): a thruster or a rotor, each a sensor the
+    //    parts recogniser finds, each with a drawn child the way a wheel has a
+    //    tyre — and for the wheel's own reason, that the vehicle door writes the
+    //    marker's rotation every step and leaves no slot to lay a primitive
+    //    down in.
+    for mount in def.body.mounts() {
+        let marker = part_guid(mount.name);
+        let size = Vec3d::new(mount.half.x * h.x, mount.half.y * h.y, mount.half.z * h.z);
+        let collider = match mount.kind {
+            PartKind::Thruster => Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: size,
+                sensor: true,
+                ..Default::default()
+            },
+            PartKind::Rotor => Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                radius: size.x,
+                half_extents: Vec3d::new(size.x, size.y, size.z),
+                sensor: true,
+                ..Default::default()
+            },
+        };
+        out.push(RigNode {
+            guid: marker,
+            name: mount.name.to_string(),
+            parent: Some(chassis),
+            transform: Transform::from_translation(
+                Vec3d::new(
+                    mount.centre.x * h.x,
+                    mount.centre.y * h.y,
+                    mount.centre.z * h.z,
+                )
+                .to_dvec3(),
+            ),
+            body: None,
+            collider: Some(collider),
+            mesh: None,
+            material: None,
+            class: None,
+            audio: None,
+            buoyancy: None,
+        });
+        out.push(RigNode {
+            guid: part_guid(&format!("{}_drawn", mount.name)),
+            name: format!("{} Blade", mount.name),
+            parent: Some(marker),
+            transform: Transform {
+                translation: Vec3d::ZERO,
+                rotation: Vec3d::ZERO,
+                scale: Vec3d::new(2.0 * size.x, 2.0 * size.y, 2.0 * size.z),
+            },
+            body: None,
+            collider: None,
+            mesh: Some(MeshRef {
+                primitive: mount.primitive,
+                asset: None,
+            }),
+            material: Some(Material {
+                base_color: TYRE_COLOR,
+                metallic: 0.2,
+                roughness: 0.7,
+                ..Default::default()
+            }),
+            class: None,
+            audio: None,
+            buoyancy: None,
+        });
+    }
+
+    if !wheels || !def.body.wheeled() {
         return out;
     }
     let r = def.wheel_radius_m;
@@ -1623,6 +1905,7 @@ pub fn rig_nodes_at(
             material: None,
             class: None,
             audio: None,
+            buoyancy: None,
         });
         // The tyre is a child of the wheel because `step_vehicles` writes the
         // wheel's rotation every step as euler `(spin, steer, 0)` — there is no
@@ -1650,6 +1933,7 @@ pub fn rig_nodes_at(
             }),
             class: None,
             audio: None,
+            buoyancy: None,
         });
     }
     out
@@ -1706,6 +1990,9 @@ pub fn spawn_rig_at(
             em.insert(c);
         }
         if let Some(c) = node.audio {
+            em.insert(c);
+        }
+        if let Some(c) = node.buoyancy {
             em.insert(c);
         }
     }
@@ -1954,6 +2241,22 @@ pub struct VehicleDef {
     pub density_kg_m3: f64,
     /// Wheel radius, metres.
     pub wheel_radius_m: f64,
+    /// **How a hull floats**, kg/m3 — the density the water pass weighs this
+    /// craft's flotation by, or `0` for a vehicle that does not float
+    /// (wave VEH2c).
+    ///
+    /// A geometry key and therefore free: this type derives no `Serialize`, so
+    /// the field costs no schema anywhere. It is deliberately NOT the chassis
+    /// collider's own `density_kg_m3`, which is what the craft WEIGHS: a boat
+    /// is a light shell that floats high, and one number cannot be both.
+    pub buoyancy_density_kg_m3: f64,
+    /// The hull's linear drag through the water, per second — P20.2's own
+    /// coefficient, authored per craft (wave VEH2c).
+    ///
+    /// It is what actually sets a boat's top speed. `Buoyancy`'s default is a
+    /// blunt body's and held the launch fixture to 5.7 knots; a hull is shaped
+    /// to go through water, and this is where that is said.
+    pub buoyancy_linear_drag: f64,
     /// Half the track, metres — the wheel centres' `|x|` in the chassis frame.
     pub half_track_m: f64,
     /// Half the wheelbase, metres — the wheel centres' `|z|`.
@@ -1984,6 +2287,9 @@ impl Default for VehicleDef {
             half_track_m: 0.9,
             half_wheelbase_m: 1.4,
             wheel_drop_m: -0.75,
+            // A road car does not float: zero is the refusal, not a density.
+            buoyancy_density_kg_m3: 0.0,
+            buoyancy_linear_drag: 0.0,
             class: crate::components::VehicleClass::default(),
         }
     }
@@ -2010,6 +2316,8 @@ impl VehicleDef {
             "half_length_m" => &mut self.half_extents.z,
             "density_kg_m3" => &mut self.density_kg_m3,
             "wheel_radius_m" => &mut self.wheel_radius_m,
+            "buoyancy_density_kg_m3" => &mut self.buoyancy_density_kg_m3,
+            "buoyancy_linear_drag" => &mut self.buoyancy_linear_drag,
             "half_track_m" => &mut self.half_track_m,
             "half_wheelbase_m" => &mut self.half_wheelbase_m,
             "wheel_drop_m" => &mut self.wheel_drop_m,
@@ -2023,6 +2331,8 @@ impl VehicleDef {
     /// restated (the P29.6 A14 shape).
     pub fn geometry_names() -> &'static [&'static str] {
         &[
+            "buoyancy_density_kg_m3",
+            "buoyancy_linear_drag",
             "density_kg_m3",
             "half_height_m",
             "half_length_m",
