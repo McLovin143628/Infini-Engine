@@ -65,6 +65,9 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
     let pcg_ctx = built.pcg_context();
     let title = format!("Infini Engine (Web) — {}", built.label);
+    // Wave CERT1: see `android_main`. The web build clamps to the mobile ceiling
+    // too; this is what makes it clamp the AUTHOR's block.
+    let render = built.render;
     let mut sim = crate::sim_from_built(built);
     // P16.5 cell streaming works here too: the in-memory `PackReader` hands
     // `read_ref` a borrowed slice for the (uncompressed, streaming-class)
@@ -76,7 +79,7 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     // entry, so tiles are sub-sliced with no copy. The load batch takes the serial
     // path on wasm (no thread pool) and produces the identical result.
     crate::attach_terrain_streaming(&mut sim, &crate::TerrainContent::Pack(source));
-    crate::window::run_web(title, canvas, sim, crate::input::default_map())
+    crate::window::run_web(title, canvas, sim, crate::input::default_map(), render)
 }
 
 /// Resolve `<canvas id="{id}">` from the DOM.

@@ -1198,6 +1198,7 @@ pub fn run_pie(
     voxel_assets: Arc<VoxelRegistry>,
     skinned: Arc<SkinnedRegistry>,
     materials: Arc<crate::MaterialContent>,
+    render: inf_scene::RenderSettingsRecord,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -1205,8 +1206,19 @@ pub fn run_pie(
     // `MeshRef.asset` still renders as a placeholder cube in PIE until the payload
     // carries the vmesh index. A `SkeletalMesh` no longer does — see `skinned`
     // below and `ScenePayload::meshes` (v7).
-    // PIE also starts from the default render block (the streamed scene payload
-    // carries no settings yet — a documented follow-up mirroring the vmesh gap).
+    // **PIE starts from the LEVEL's own render block** (wave CERT1). It used to
+    // start from `RenderSettingsRecord::default()`, with a comment saying the
+    // payload carried no settings — and the payload carried them all along, in
+    // `level_bytes`, which `build_world_from_payload` has decoded into
+    // `BuiltWorld::render` since R-P4. The consequence was a Play button that
+    // previewed the island unlit while the shipped build of the same level
+    // rendered it lit: PIE != shipping on the one half of the frame that no
+    // `state_bytes` fold can see, and therefore the one half no determinism
+    // gate could ever have caught.
+    //
+    // It arrives through `PlayerApp::new` -> `PlayerRenderHost::new` ->
+    // `shipped_settings`, the SAME door the pack path takes, so the tier clamp
+    // and the adapter clamp apply identically on both.
     let mut app = PlayerApp::new(
         title,
         width,
@@ -1214,7 +1226,7 @@ pub fn run_pie(
         sim,
         map,
         Arc::new(VmeshRegistry::new()),
-        inf_scene::RenderSettingsRecord::default(),
+        render,
     );
     // P21.4: the payload's `.inf_voxel` bytes. Without them the windowed PIE
     // player binds no volumes, so `overlay_sim` has nothing to mirror the
@@ -1272,6 +1284,7 @@ pub fn run_android(
     title: String,
     sim: RuntimeSim,
     map: InputMap,
+    render: inf_scene::RenderSettingsRecord,
 ) -> Result<(), String> {
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoop::builder()
@@ -1288,7 +1301,8 @@ pub fn run_android(
         sim,
         map,
         Arc::new(VmeshRegistry::new()),
-        inf_scene::RenderSettingsRecord::default(),
+        // Wave CERT1: the LEVEL's block, not the default -- see `run_pie`.
+        render,
     );
     event_loop
         .run_app(&mut app)
@@ -1307,6 +1321,7 @@ pub fn run_web(
     canvas: web_sys::HtmlCanvasElement,
     sim: RuntimeSim,
     map: InputMap,
+    render: inf_scene::RenderSettingsRecord,
 ) -> Result<(), String> {
     use winit::platform::web::EventLoopExtWebSys;
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
@@ -1320,7 +1335,8 @@ pub fn run_web(
         sim,
         map,
         Arc::new(VmeshRegistry::new()),
-        inf_scene::RenderSettingsRecord::default(),
+        // Wave CERT1: the LEVEL's block, not the default -- see `run_pie`.
+        render,
     );
     app.canvas = Some(canvas);
     event_loop.spawn_app(app);

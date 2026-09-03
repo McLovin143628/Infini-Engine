@@ -1249,6 +1249,26 @@ pub struct PayloadSim {
     pub label: String,
     /// How many blueprint actors were bound, for the `Loaded` reply.
     pub actor_count: usize,
+    /// **The level's own render block** (wave CERT1), decoded from the same
+    /// `level_bytes` the world was built from.
+    ///
+    /// # The hole this closes
+    ///
+    /// `build_world_from_payload` has decoded this into `BuiltWorld::render`
+    /// since R-P4 and every PIE boot path then threw it away:
+    /// `window::run_pie` passed `RenderSettingsRecord::default()`, with a
+    /// comment saying the payload carried no settings. It carried them all
+    /// along — `level_bytes` **is** the live document's `.inf_lvl` payload and
+    /// the record sits inside its `RuntimeSettings`. The consequence was that
+    /// the editor's Play button previewed a level UNLIT while the shipped build
+    /// of the same level rendered it lit, which is the exact divergence
+    /// PIE == shipping exists to forbid, on the one half of the frame no
+    /// `state_bytes` fold can see.
+    ///
+    /// Carried here rather than appended to `ScenePayload` **because no schema
+    /// has to move for it**: the bytes were already in the envelope and already
+    /// decoded.
+    pub render: inf_scene::RenderSettingsRecord,
 }
 
 /// Build the **runnable sim** for a streamed [`ScenePayload`] — the one entry
@@ -1280,6 +1300,9 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     let mut built = build_world_from_payload(payload)?;
     let label = built.label.clone();
     let actor_count = built.actors.len();
+    // Captured before the world is consumed, exactly where `run_windowed`
+    // captures it on the pack path (`inf_player::run_windowed`'s `built.render`).
+    let render = built.render;
     // P16.5: a partitioned scene streams in PIE too — the payload carries the
     // entities inline, so the in-memory binning path produces the same cells the
     // cook would. Skipping it would run an empty world and quietly break
@@ -1327,6 +1350,7 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
         sim,
         label,
         actor_count,
+        render,
     })
 }
 

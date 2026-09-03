@@ -628,6 +628,55 @@ pub struct RenderSettingsRecord {
     pub grain_size: f32,
 }
 
+impl RenderSettingsRecord {
+    /// **The lit stack a 3D level ships with when it is meant to be LOOKED at**
+    /// (wave CERT1, CP-A1/CP-B5).
+    ///
+    /// # Why a named constructor and not a changed default
+    ///
+    /// The record is persisted POSITIONALLY inside `LevelSettings`, so every
+    /// already-committed `.inf_lvl` carries the values that were current when it
+    /// was written. Changing [`Default`] therefore relights **nothing that
+    /// exists** — it reaches only levels created afterwards, and it would break
+    /// the standing pin `apply_record(&default()) == RenderSettings::default()`
+    /// on both hosts. The measurement that settled the CP-A1 ruling is exactly
+    /// that: of the two routes the brief offered, "the default becomes lit" does
+    /// not reach the island at all.
+    ///
+    /// So the levels that mean to be lit AUTHOR it, their bytes move once with a
+    /// stated cause, and a level that means to be cheap keeps the default.
+    ///
+    /// # The six bits, and why these six
+    ///
+    /// `shadows`, `gi`, `bloom`, `ssao` and `taa` are the five
+    /// `runtime/inf-player/tests/fps_instrument.rs` already prices as "THE
+    /// STACK'S PRICE", so shipping exactly those five means the cost of this
+    /// decision is a number the repository has been measuring for four waves
+    /// rather than a new unknown. `flare` is the sixth because the parity
+    /// reference's daytime street frames are sun-glare frames and the pass
+    /// exists (VIS1b) — it is half-resolution and runs after bloom.
+    ///
+    /// **VSM is deliberately absent**: it has no field in this record, because
+    /// `VsmSettings::enabled` is a code default the tier applies over. It cannot
+    /// be authored, and a constructor that pretended otherwise would be a
+    /// promise the wire does not keep.
+    ///
+    /// **SSR is deliberately absent**: the wet-road specular the night frames
+    /// show is a real want and a real cost, and it is measured and routed rather
+    /// than switched on inside a certification.
+    pub fn lit_showcase() -> Self {
+        Self {
+            shadows_enabled: true,
+            gi_enabled: true,
+            bloom_enabled: true,
+            ssao_enabled: true,
+            taa: true,
+            flare_enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for RenderSettingsRecord {
     fn default() -> Self {
         Self {

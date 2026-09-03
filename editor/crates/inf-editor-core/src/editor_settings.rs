@@ -483,6 +483,7 @@ mod tests {
             rmb_click_travel_px: 7.0,
             rmb_click_ms: 300,
             gis_max_entities: 60_000,
+            boot_project: "C:/somewhere/island-build/project".into(),
             snap_3d: Snap3DDto {
                 translate: 0.25,
                 rotate_deg: 5.0,

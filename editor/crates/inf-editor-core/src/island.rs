@@ -122,6 +122,21 @@ fn hero_height_m() -> f64 {
 /// query. The rest keep their carved channels and are dry beds.
 pub const MAX_RIVER_BODIES: usize = 10;
 
+/// **How far the island's sun casts a shadow**, metres (wave CERT1, CP-B5).
+///
+/// `RenderSettingsRecord::default().shadows_max_distance` is 60 m, which on a
+/// settlement of 100 m city blocks (`settlement::CITY_BLOCK_M`) means the
+/// building on the far side of the street casts nothing at all. 250 m is two
+/// and a half blocks — the depth the parity reference's daytime street frames
+/// show shadow in.
+///
+/// Authored on THIS level rather than moved in the engine's default: a cascade
+/// range is a cost every level would otherwise pay, and a level with a 20 m
+/// ground plane has no use for it. Read by name by
+/// `runtime/inf-player/tests/lit_stack.rs`, so the day someone re-blesses the
+/// island without it the arm says which number went missing.
+pub const ISLAND_SHADOW_DISTANCE_M: f32 = 250.0;
+
 /// The partition cell an island streams in.
 ///
 /// `DEFAULT_CELL_SIZE_M` (256 m) over a 7 168 m world is 28 × 28 = 784 cells,
@@ -379,12 +394,28 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // world frame: +X east, +Y up, -Z north.
     doc.set_geo(design.anchor.clone());
 
+    // **THE LIT STACK, AUTHORED** (wave CERT1, CP-A1/CP-B5). This is the level
+    // the application boots on and the level the parity certification is
+    // written about, and a level that authors no render block ships with
+    // shadows, GI, VSM, TAA, SSAO and bloom ALL OFF. The showcase played unlit
+    // for every wave up to this one.
+    //
+    // `shadows_max_distance` is the ONE knob overridden beyond
+    // `lit_showcase()`: the record's default is 60 m, which on a street of
+    // 100 m blocks means the building across the road casts nothing. 250 m is
+    // two and a half city blocks — the depth the reference frames' daytime
+    // street shots actually show shadow in — and it is a per-level authored
+    // number, not an engine default, so no other level pays for it.
     doc.set_settings(LevelSettings {
         partition: PartitionSettings {
             enabled: true,
             cell_size_m: ISLAND_CELL_SIZE_M,
             activation_radius_m: ISLAND_ACTIVATION_M,
             prefetch_margin_m: ISLAND_PREFETCH_M,
+        },
+        render: crate::scene::serialize::RenderSettingsRecord {
+            shadows_max_distance: ISLAND_SHADOW_DISTANCE_M,
+            ..crate::scene::serialize::RenderSettingsRecord::lit_showcase()
         },
         ..LevelSettings::default()
     });

@@ -162,10 +162,20 @@ impl PlayerRenderHost {
     /// The GPU capability tier this host auto-picked from the adapter (P22.4).
     ///
     /// Exposed for exactly one caller — the window, which maps it onto the
-    /// session's debris budget. Every headless boot path (`run_headless`, the
-    /// `--pie` protocol loop, `scene_trace`) builds no host at all and therefore
-    /// never sees a tier, which is what keeps every determinism gate in this
-    /// repository comparing the *unclamped* engine defaults.
+    /// session's debris budget. A HEADLESS boot path (`run_headless`,
+    /// `scene_trace`, and the `--pie` protocol loop's `windowed == false`
+    /// branch) builds no host at all and therefore never sees a tier, which is
+    /// what keeps every determinism gate in this repository comparing the
+    /// *unclamped* engine defaults.
+    ///
+    /// **The `--pie` loop is not unconditionally headless, and this doc used to
+    /// say it was** (corrected, wave CERT1). `main.rs`'s protocol loop branches
+    /// on `payload.windowed`, and the windowed branch goes
+    /// `run_pie_window` → `window::run_pie` → `PlayerApp::new` → `build_host` →
+    /// `PlayerRenderHost::new` → `shipped_settings` → `detect_tier`. So embedded
+    /// and new-window PIE **do** build a host and **do** see a tier — the P22.4
+    /// law ("a preview must run what it previews") in the one sentence that had
+    /// gone stale against it.
     pub fn tier(&self) -> inf_render::RenderTier {
         self.tier
     }

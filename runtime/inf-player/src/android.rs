@@ -29,12 +29,19 @@ fn android_main(app: AndroidApp) {
     tracing::info!("inf-player(android): starting");
 
     let built = crate::demo::build();
+    // Wave CERT1: the level's own render block, captured before the world is
+    // consumed -- the same capture `run_windowed` and `run_pie_window` make.
+    // `clamp_mobile` inside `shipped_settings` still cuts it down to the mobile
+    // ceiling; what changes is that an author's block is what gets clamped
+    // rather than being discarded before the clamp ever sees it.
+    let render = built.render;
     let sim = crate::sim_from_built(built);
     if let Err(e) = crate::window::run_android(
         app,
         "Infini Engine".into(),
         sim,
         crate::input::default_map(),
+        render,
     ) {
         tracing::error!("inf-player(android): {e}");
     }

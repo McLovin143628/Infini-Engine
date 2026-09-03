@@ -542,6 +542,16 @@ pub fn hybrid_scene() -> SceneDoc {
     let mut doc = SceneDoc::new();
     doc.set_title("Hybrid 2.5D");
 
+    // **THE LIT STACK, AUTHORED** (wave CERT1, CP-A1). A level that authors no
+    // render block ships with shadows, GI, VSM, TAA, SSAO and bloom ALL OFF —
+    // `fps_instrument.rs` has documented that about this engine for four waves,
+    // and it meant the first thing anyone saw of it was unlit. A starter
+    // template that plays unlit is not a certified starter.
+    doc.set_settings(crate::scene::serialize::LevelSettings {
+        render: crate::scene::serialize::RenderSettingsRecord::lit_showcase(),
+        ..crate::scene::serialize::LevelSettings::default()
+    });
+
     // 3D ground plane.
     doc.create_with_guid(HYBRID_GROUND_GUID, SpawnKind::Empty, "Ground", None);
     insert!(
@@ -710,6 +720,16 @@ pub fn firstperson_scene() -> SceneDoc {
 
     let mut doc = SceneDoc::new();
     doc.set_title("First Person");
+
+    // **THE LIT STACK, AUTHORED** (wave CERT1, CP-A1). A level that authors no
+    // render block ships with shadows, GI, VSM, TAA, SSAO and bloom ALL OFF —
+    // `fps_instrument.rs` has documented that about this engine for four waves,
+    // and it meant the first thing anyone saw of it was unlit. A starter
+    // template that plays unlit is not a certified starter.
+    doc.set_settings(crate::scene::serialize::LevelSettings {
+        render: crate::scene::serialize::RenderSettingsRecord::lit_showcase(),
+        ..crate::scene::serialize::LevelSettings::default()
+    });
 
     // 3D ground plane.
     doc.create_with_guid(FP_GROUND_GUID, SpawnKind::Empty, "Ground", None);
@@ -918,6 +938,16 @@ pub fn blank3d_scene() -> SceneDoc {
 
     let mut doc = SceneDoc::new();
     doc.set_title("Blank 3D");
+
+    // **THE LIT STACK, AUTHORED** (wave CERT1, CP-A1). A level that authors no
+    // render block ships with shadows, GI, VSM, TAA, SSAO and bloom ALL OFF —
+    // `fps_instrument.rs` has documented that about this engine for four waves,
+    // and it meant the first thing anyone saw of it was unlit. A starter
+    // template that plays unlit is not a certified starter.
+    doc.set_settings(crate::scene::serialize::LevelSettings {
+        render: crate::scene::serialize::RenderSettingsRecord::lit_showcase(),
+        ..crate::scene::serialize::LevelSettings::default()
+    });
 
     // A 20 × 20 m ground plane at the origin.
     doc.create_with_guid(BLANK3D_GROUND_GUID, SpawnKind::Empty, "Ground", None);

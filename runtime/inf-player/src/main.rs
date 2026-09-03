@@ -324,6 +324,11 @@ fn handle_msg(
                     sim,
                     label: level,
                     actor_count,
+                    // A headless PIE session draws nothing, so it builds no
+                    // render host and the level's block has nowhere to go. The
+                    // WINDOWED branch above returned before this match and is
+                    // where it is used.
+                    render: _,
                 }) => {
                     *active = Active::Real {
                         sim: Box::new(sim),
@@ -412,6 +417,7 @@ fn run_pie_window(
         sim,
         label,
         actor_count,
+        render,
     } = match inf_player::sim_from_payload(&payload) {
         Ok(p) => p,
         Err(e) => {
@@ -456,6 +462,12 @@ fn run_pie_window(
         // payload half of the SAME lookup rule `PackLevelSource::material_content`
         // is the pack half of.
         std::sync::Arc::new(inf_player::materials_from_payload(&payload)),
+        // Wave CERT1: the level's own render block, decoded from the payload's
+        // `level_bytes` by `sim_from_payload`. This argument used to be
+        // `RenderSettingsRecord::default()` inside `run_pie` itself, which made
+        // the editor's Play button a DIFFERENT renderer from the shipped build
+        // of the same level.
+        render,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
