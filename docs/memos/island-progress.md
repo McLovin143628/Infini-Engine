@@ -28308,9 +28308,46 @@ waterplane-section fix stays where its own doc put it.
 | full ahead from rest | 2.42 m/s at 1 s, 5.60 at 3 s, 8.39 at 8 s |
 | settled | **8.93 m/s (17.4 kn)**, 116.7 m in 16 s |
 | throttle closed | 50.5 m carried in ten seconds, 2.63 m/s left |
-| steady turning circle | **10.6 m radius**, both helms to the digit — 2.6 hull lengths |
+| steady turning circle | **37.25 m radius**, both helms to four decimal places — 9.3 hull lengths. *The ledger said 10.6 m and 2.6 lengths at `4c69d3b5`; see the correction below* |
 | astern | `HULL_ASTERN_FRACTION` of ahead, exactly |
-| on dry land, full throttle, ten seconds | **0.00 m** |
+| on dry land, full throttle, ten seconds | **0.0000 m**, printed now and bounded at 1 cm rather than half a metre |
+
+**A CORRECTION FROM THE AUDIT: the turning circle was not a turning circle.**
+The arm took the mean semi-axis of the axis-aligned box its track swept, which
+equals the radius for a **complete** circle and for nothing else — and it sampled
+a fixed 240 steps, which on this hull is **49.9 degrees** of one. So the box was
+the arc's chord against its sagitta, and the 10.6 m was an artefact of the
+sampling window. Sampling until the boat has been all the way round makes the
+same arithmetic exact:
+
+| | swept | radius off the track | radius from `v / omega` |
+|---|---|---|---|
+| starboard helm | 360.2° in 1 732 steps | **37.25 m** | 37.25 m at 8.11 m/s over 12.5 °/s |
+| port helm | 360.2° in 1 732 steps | **37.25 m** | 37.25 m |
+
+Two methods that share no arithmetic, agreeing — which is what now says the
+track is a circle rather than a shape whose box happens to be square, and is
+asserted at 2 %. The helms agree to four decimal places, so the symmetry bound
+moves from **25 %** (2.65 m of slack on the old figure) to **1 %**. The launch's
+circle is **9.3 hull lengths**, not 2.6.
+
+`RUDDER_FLOW_GAIN`'s own doc carried the same 10.6 m and says the constant was
+*"sized once, against a measurement"* — so **the constant was sized against the
+wrong number**. Re-sizing it is a feel decision rather than a correction and is
+left alone, with the real circle stated at the constant.
+
+**AND THE DRY-LAND ROW, which nothing printed.** *"0.00 m"* was not recoverable
+from any test output: the arm printed nothing and its only bound was **half a
+metre**, down one axis. It prints now, horizontally, and the bound is 1 cm —
+which is not pedantry: making the screw bite in air (`None => 1.0` in the depth
+match) drives the hull **0.1226 m**, and the old half-metre tolerance would have
+called that green. Two further bounds are stated rather than fixed: the arm runs
+Ring 0's default tunables rather than the launch row's (8 kN, not 9), so it sits
+under a header it is not an instance of; and its world has **no water entity**,
+so it exercises the empty-index road (`water_y == None`) rather than the depth
+comparison. The depth comparison's own arm is Ring 0's
+`a_screw_out_of_the_water_pushes_nothing`, which lifts a hull above a real
+surface — the claim is honest, and its evidence is in two places.
 
 The rudder is a force at the **stern**, which is what makes it a moment: the
 screw's race turned sideways (`RUDDER_WASH_GAIN`, what steers a boat with no
@@ -28321,12 +28358,22 @@ moving sideways, so two separated points turn one coefficient into yaw damping.
 Collapsing them onto the centre of mass leaves the sway resistance untouched
 and the yaw damping at **zero**, which is a boat that spins for ever.
 
-**A FINDING WORTH THE LEDGER: a boat's top speed is set by
-`Buoyancy::linear_drag`, not by the class's `drag_n_per_mps2`.** P20.2's term
-is isotropic and linear, and its blunt-body default held this hull to **5.7
-knots**. Both are kept and the split is stated — the linear one is the viscous
-part, the quadratic one is wave-making — and a boat that wants speed authors
-the component, which is a scene field and costs nothing.
+**A FINDING WORTH THE LEDGER: a boat's top speed is set MOSTLY by
+`Buoyancy::linear_drag`, and the class's `drag_n_per_mps2` carries the rest.**
+P20.2's term is isotropic and linear, and its blunt-body default held this hull
+to **5.7 knots**. Both are kept and both ACT — the vehicle door only resets the
+force accumulator when the water pass does not own the body
+(`d3/vehicle.rs:224`), and on a boat it does, so stage 12's drag **adds** to
+stage 8's. The split is stated because it is a two-term model and not one term
+twice: the linear one is the viscous part, the quadratic one is wave-making, and
+a boat that wants speed authors the component, which is a scene field and costs
+nothing.
+
+*The audit closed the force balance at the printed 8.93 m/s and the sentence
+above used to read "not by the class's `drag_n_per_mps2`", which is too strong:*
+thrust 3 977 N against **2 858 N (72 %) from `linear_drag` and 1 116 N (28 %)
+from the class's quadratic** — a sum that closes to 0.1 % of the thrust. The
+dominance is real at 2.6 : 1; the exclusion was not.
 
 **THE ENGINE NOW FOLLOWS THE VEHICLE, and it did not before this wave.** This
 was nearly written down as done and was not: the fence issued `Play` at

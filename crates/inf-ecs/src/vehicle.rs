@@ -4418,8 +4418,18 @@ pub const RUDDER_WASH_GAIN: f64 = 0.35;
 /// ratio does not move with speed, which is why a boat's turning circle is
 /// roughly constant in hull lengths however fast it is going. It is also why
 /// this could be sized once, against a measurement: the launch fixture's steady
-/// circle is **10.6 m** for a 4 m hull — about two and a half lengths, and the
-/// same to the digit at either helm.
+/// circle is **37.25 m** for a 4 m hull — about nine and a third lengths, and
+/// the same to four decimal places at either helm.
+///
+/// *That figure was **10.6 m** here and in wave VEH2c's ledger, and it was not a
+/// radius.* The arm that produced it took the mean semi-axis of the box its
+/// track swept, which equals the radius only for a **complete** circle, and it
+/// sampled 240 steps — **49.9 degrees** of one, so the box was the arc's chord
+/// and sagitta. `a_boat_turns_toward_its_helm_and_the_circle_is_measurable` now
+/// samples to 360 degrees and cross-checks the answer against `v / omega`, which
+/// shares no arithmetic with it; the two agree at 37.25 m. **This constant was
+/// sized against the wrong number**, and re-sizing it is a feel decision rather
+/// than a correction, so it is left where it is with the real circle stated.
 pub const RUDDER_FLOW_GAIN: f64 = 0.006;
 
 /// Where a hull's lateral drag acts, as a fraction of the lever arm the rig

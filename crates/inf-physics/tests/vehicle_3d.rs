@@ -1767,6 +1767,13 @@ impl Boat {
             .map(|v| v.length())
             .unwrap_or(0.0)
     }
+
+    /// The hull's heading, degrees — the engine's own euler yaw, read off the
+    /// WORLD, which is the number `Heli::yaw_deg` reads for an aircraft.
+    fn yaw_deg(&self) -> f64 {
+        let e = self.world.entity_of(HULL).expect("the boat exists");
+        self.world.world().get::<Transform>(e).unwrap().rotation.y
+    }
 }
 
 const AHEAD: VehicleControls = VehicleControls {
@@ -1853,49 +1860,99 @@ fn a_boat_makes_way_reaches_a_top_speed_and_carries_its_way() {
 /// circle — the second half of this wave's boat-feel row.
 #[test]
 fn a_boat_turns_toward_its_helm_and_the_circle_is_measurable() {
-    let radius = |steer: f64| -> (f64, f64) {
+    /// One steady turn, sampled until the boat has been **all the way round**.
+    ///
+    /// **The sweep is the whole correction the VEH2c audit made here.** The
+    /// first cut sampled a fixed 240 steps and took the mean semi-axis of the
+    /// axis-aligned box the track swept. That identity — box semi-axis equals
+    /// radius — is only true for a **complete** circle, and 240 steps is
+    /// **49.9 degrees** of one: the box was the arc's chord and sagitta, and the
+    /// 10.6 m it reported was not a radius at all. Sampling to 360 degrees makes
+    /// the same arithmetic exact, and the answer is **37.25 m**.
+    ///
+    /// Returns the radius, the same radius derived independently as `v / omega`,
+    /// and the boat's displacement in X so the helm's own sense is checked.
+    let radius = |steer: f64| -> (f64, f64, f64) {
         let mut b = Boat::new();
         b.drive(VehicleControls::default(), 180);
         b.drive(AHEAD, 300);
         let entry = b.at();
         let turning = VehicleControls { steer, ..AHEAD };
-        // Long enough to be well into a steady turn.
+        // Long enough to be well into a steady turn before the first sample.
         b.drive(turning, 240);
         let mut minx = f64::MAX;
         let mut maxx = f64::MIN;
         let mut minz = f64::MAX;
         let mut maxz = f64::MIN;
-        for _ in 0..240 {
+        let mut swept = 0.0f64;
+        let mut prev_yaw = b.yaw_deg();
+        let mut steps = 0u32;
+        // A whole revolution, and a cap so a boat that stopped turning fails the
+        // assertion below rather than running for ever.
+        while swept < 360.0 && steps < 20_000 {
+            steps += 1;
             b.drive(turning, 1);
+            let y = b.yaw_deg();
+            swept += inf_ecs::movement::angle_delta_deg(y, prev_yaw).abs();
+            prev_yaw = y;
             let p = b.at();
             minx = minx.min(p.x);
             maxx = maxx.max(p.x);
             minz = minz.min(p.z);
             maxz = maxz.max(p.z);
         }
-        // The mean semi-axis of the arc the boat swept — a circle's diameter
-        // measured off the world rather than inferred from a yaw rate.
+        // The mean semi-axis of the circle the boat swept — measured off the
+        // world rather than inferred from a yaw rate — and then the SAME radius
+        // inferred from the yaw rate, which is the cross-check that says the
+        // box is a circle's box.
         let r = ((maxx - minx) + (maxz - minz)) / 4.0;
-        (r, b.at().x - entry.x)
+        let secs = f64::from(steps) / HZ;
+        let omega = swept.to_radians() / secs;
+        let r_kinematic = b.speed() / omega;
+        println!(
+            "  helm {steer:+.0}: r = {r:.2} m off the track, {r_kinematic:.2} m from \
+             {:.2} m/s over {:.1} deg/s ({swept:.1} deg in {steps} steps)",
+            b.speed(),
+            omega.to_degrees()
+        );
+        (r, r_kinematic, b.at().x - entry.x)
     };
-    let (r_stbd, dx_stbd) = radius(1.0);
-    let (r_port, dx_port) = radius(-1.0);
-    println!("BOAT turning circle: starboard r≈{r_stbd:.1} m, port r≈{r_port:.1} m");
+    println!("BOAT turning circle (the launch fixture, a 4 m hull):");
+    let (r_stbd, k_stbd, dx_stbd) = radius(1.0);
+    let (r_port, k_port, dx_port) = radius(-1.0);
+    println!(
+        "BOAT turning circle: starboard r = {r_stbd:.2} m, port r = {r_port:.2} m \
+         ({:.1} hull lengths)",
+        r_stbd / (2.0 * HALF.x)
+    );
 
+    // The sweep really closed, or the box is an arc's box and the number above
+    // is not a radius — which is exactly the defect this arm was rewritten for.
+    assert!(
+        r_stbd > 2.0 && r_stbd < 200.0,
+        "the turning circle is {r_stbd:.1} m — that is not a boat"
+    );
     // Starboard helm takes the boat to starboard (+X), port to port.
     assert!(dx_stbd > 5.0, "starboard helm went {dx_stbd:.1} m in X");
     assert!(dx_port < -5.0, "port helm went {dx_port:.1} m in X");
-    // The circle is a circle: bounded, and the two hands mirror each other.
+    // TWO INDEPENDENT MEASUREMENTS OF ONE RADIUS. The swept box and `v / omega`
+    // share no arithmetic, so agreeing to a percent is what says the track is a
+    // circle rather than a shape whose box happens to be square.
+    for (what, r, k) in [("starboard", r_stbd, k_stbd), ("port", r_port, k_port)] {
+        assert!(
+            (r - k).abs() < r * 0.02,
+            "the {what} track's box says {r:.2} m and its yaw rate says {k:.2} m — \
+             the boat is not going round in a circle"
+        );
+    }
+    // …and the two hands mirror each other. Measured at 37.2501 both ways at the
+    // audit head, so a per-cent bound is a real claim and the first cut's 25 %
+    // (2.65 m of slack on a 10.6 m figure) was not.
     assert!(
-        r_stbd > 2.0 && r_stbd < 60.0,
-        "the turning circle is {r_stbd:.1} m — that is not a boat"
-    );
-    assert!(
-        (r_stbd - r_port).abs() < r_stbd * 0.25,
-        "the boat turns better one way than the other: {r_stbd:.1} against {r_port:.1}"
+        (r_stbd - r_port).abs() < r_stbd * 0.01,
+        "the boat turns better one way than the other: {r_stbd:.2} against {r_port:.2}"
     );
 }
-
 /// **A boat on dry land is inert** — the falsifier for the whole immersion
 /// rule, asserted on the WORLD rather than on a force list.
 ///
@@ -1911,9 +1968,12 @@ fn a_boat_out_of_the_water_goes_nowhere() {
     let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
     bridge.sync_from_world(&world);
     assert_eq!(bridge.vehicle_count(), 1);
+    // HORIZONTALLY, not down one axis: a hull that drove off sideways would
+    // satisfy a `z`-only reading, which is what the first cut took.
     let start = {
         let e = world.entity_of(HULL).unwrap();
-        world.world().get::<Transform>(e).unwrap().translation.z
+        let t = world.world().get::<Transform>(e).unwrap().translation;
+        glam::DVec2::new(t.x, t.z)
     };
     for _ in 0..600 {
         bridge.sync_from_world(&world);
@@ -1928,12 +1988,19 @@ fn a_boat_out_of_the_water_goes_nowhere() {
     }
     let end = {
         let e = world.entity_of(HULL).unwrap();
-        world.world().get::<Transform>(e).unwrap().translation.z
+        let t = world.world().get::<Transform>(e).unwrap().translation;
+        glam::DVec2::new(t.x, t.z)
     };
+    // PRINTED, because the ledger quotes this number and nothing printed it:
+    // the row said "0.00 m" and the only bound was half a metre.
+    println!(
+        "BOAT on dry land, full throttle for ten seconds: {:.4} m",
+        (end - start).length()
+    );
     assert!(
-        (end - start).abs() < 0.5,
-        "a boat on a car park drove {} m at full throttle",
-        end - start
+        (end - start).length() < 0.01,
+        "a boat on a car park drove {:.4} m at full throttle",
+        (end - start).length()
     );
 }
 
