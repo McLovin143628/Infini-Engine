@@ -68,6 +68,7 @@ distance from the reference, and it is a CPU distance, not a GPU one.
 | the terrain | `cargo test -p inf-render --test terrain_continuity -- --nocapture` |
 | the frame | `cargo test --release -p inf-player --test fps_instrument -- --include-ignored --nocapture` |
 | the boot rule | `cargo test -p inf-project boot` |
+| …and that it resolves here | the `INF_CERT_ISLAND_PACK` run above prints it |
 
 Everything below is printed by one of those. Nothing here is arithmetic done by
 hand except where it says so.
@@ -108,6 +109,20 @@ by failing.
 Arms: 8 in `inf-project`, 2 in `inf-studio` (the pin lands; an unwritable
 settings directory is not an error), 3 in the frontend (asked on a cold launch,
 NOT asked with a project open, a null answer says nothing).
+
+**And it resolves on this machine, from the real executable's real directory** —
+the one place the claim "the application opens on the island" can be checked at
+all, because the eight arms above prove the WALK against a temp directory and
+nothing else can prove the walk finds anything here:
+
+```
+CP-C1 the showcase rung, from C:\...\infinity_engine	argetelease\deps:
+      C:\...\Infinity_Engine\island-build\project
+```
+
+Four ancestors up, inside a bound of eight. The editor's own settings file on
+this machine carries no `boot_project` key, so rung 2 skips and rung 3 is the one
+that answers — which is exactly the first-launch case the rung exists for.
 
 ### CP-C2 · Play, from a cold start, on the island — MEASURED, FIXED
 

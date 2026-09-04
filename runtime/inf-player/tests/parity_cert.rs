@@ -948,6 +948,28 @@ fn the_shipped_island_censused() {
     };
     let pack = PathBuf::from(dir);
 
+    // **CP-C1, ON THIS MACHINE.** `inf_project::boot`'s arms prove the WALK
+    // against a temp directory; this proves the walk finds the showcase from the
+    // real executable's real directory, which is the only place the claim "the
+    // application opens on the island" can be checked at all. It lives on the
+    // ignored arm because it is a statement about a machine that has run
+    // `inf island build`, which is the same condition the pack above needs.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    match exe_dir.as_deref().and_then(inf_project::find_showcase) {
+        Some(root) => println!(
+            "CP-C1 the showcase rung, from {}: {}",
+            exe_dir.as_deref().unwrap_or(Path::new("?")).display(),
+            root.display()
+        ),
+        None => println!(
+            "CP-C1 the showcase rung found nothing from {} — the editor would open \
+             its start screen here",
+            exe_dir.as_deref().unwrap_or(Path::new("?")).display()
+        ),
+    }
+
     let t0 = std::time::Instant::now();
     let mut sim = pack_sim(&pack);
     let open_ms = t0.elapsed().as_secs_f64() * 1000.0;
