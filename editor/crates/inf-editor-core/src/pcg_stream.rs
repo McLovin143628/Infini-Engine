@@ -574,7 +574,6 @@ mod tests {
             cell_size_m: 256.0,
             activation_radius_m: 300.0,
             prefetch_margin_m: 100.0,
-            ..PartitionSettings::default()
         };
         let r = PcgStreamRadii::from_partition(&p, 1.0);
         assert_eq!(r.activation_m, 300.0);
