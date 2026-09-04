@@ -55,7 +55,11 @@ bright pixel**. PAR3 and PAR4 are narrower than the brief assumed.
 The frame: the shipped 51.38 km² island at 1080p, with the record its own level
 now authors, is **p50 39.672 ms — 25.2 fps** on an RTX 4070 Ti, and **7.2 fps**
 with its town's own thousand-agent society at the rush hour. That is the honest
-distance from the reference, and it is a CPU distance, not a GPU one.
+distance from the reference, and it is a CPU distance, not a GPU one. *(Audit:
+re-run at head on the same machine that row reads **28.371 ms — 35.2 fps**, and
+the rush hour **6.7**. Every LIT island row reproduces to within a millisecond;
+the shipped one does not, so read this as **25–35 fps empty and 6.7–7.2 with the
+crowd**, and see the frame table for both columns.)*
 
 ---
 
@@ -338,6 +342,24 @@ smallest world that can tell three complementary bands apart:
 Shutter, Sign, Festoon and Grille are classified as **fabric, deliberately**: a
 roller shutter and a cell front are wall, and a sign plate and a string-light run
 are the two families whose whole purpose is to emit.
+
+**No hole and one pre-existing overlap** (audit, read off those three bands). The
+union `[0, 102.9) ∪ [96, 1000)` is `[0, 1000)`, so there is no distance at which
+a building draws nothing — 96.0 m included, where the fabric is still 6.9 m from
+its own end. That 6.9 m annulus is where fabric and shell draw **together**, and
+it is not this wave's: both of those bands are exactly what they were before
+CERT1, which only shortened the fit-out one. The change is complementary by
+construction — a fit-out bucket's draw distance is `min(draw, 64)` and no other
+bucket is touched — so a building at 50 m draws fit-out and fabric, at 70 m and
+95 m fabric alone, and at 97 m shell plus the last of the fabric.
+
+The band is **render-side only**: `is_fit_out_mesh` and `INTERIOR_LOD_M` appear
+in the two projectors and in tests, nowhere else (verified by grep), and
+`draw_distance` lives on `ScatterBatch`, which no `state_bytes` fold reads. The
+two projectors are byte-identical inside `MIRROR-BEGIN scatter_mesh_buckets`,
+which `editor/crates/inf-editor-core/tests/projector_mirror.rs` compares — so the
+one hazard the wave's own headline finding is about (a render rule that diverges
+between hosts where no determinism gate can see it) is fenced here.
 
 **The character is the remaining gap and it is routed, with its number.** The
 starter body is 1 498 triangles, one geometry tier at every distance. The crowd
@@ -668,7 +690,18 @@ give **≈ 5 000** at the porch-plus-street floor and **≈ 61 000** one-per-roo
 Against a frame ceiling of 16, that is **about 104× at the floor and 1 435× at
 the room.**
 
-**Three findings that shape PAR0/PAR1 more than the count does:**
+**Three findings that shape PAR0/PAR1 more than the count does.** All three are
+**source facts plus a deduction, not renders** (audit), and the distinction is
+worth stating because the third one is a claim about pixels: the audit re-checked
+each by grep at head — `ScatterBatch` has no blend field among its eleven
+(verified); `VsmSettings::default().enabled` is `false` (verified);
+`RenderLight`'s own doc says `cast_shadows` is "stored, never sampled" for point
+and spot (verified); and both projectors pin `cast_shadows: false` on every
+volume fixture, in a comment naming the reason (verified in
+`runtime/inf-player/src/render.rs` and `editor/crates/inf-viewport/src/host.rs`).
+What follows from those — that a fixture in a room lights through its walls —
+follows because the shading loop has no occlusion term at all, and **no arm in
+this repository renders it**.
 
 1. **A real interior light would look wrong today, and not because of the count.**
    Point and spot lights are unshadowed in every shipped configuration —
@@ -1035,6 +1068,16 @@ row is armed at the CPU-twin level precisely because the harness cannot see a
 one-texel line, and the fixes are asserted in degrees and metres rather than in
 pixels. Someone has to open the editor and fly it.
 
+**And the audit measured how far "the harness cannot see it" goes.** Forcing
+`morph_at` to return 1.0 — every terrain patch in every golden fully morphed onto
+the coarse lattice — reds **0 of 121 arms** under `INF_GOLDEN_STRICT=1`, and so
+does restoring the pre-CERT1 edge halving; the control, halving `ground_height`,
+reds **9**, including `golden_terrain_lod`, which is one of the arms that renders
+a morph band. So the harness sees this terrain and is blind to the whole morph
+rule, which means "62 goldens, none blessed" is a statement about the harness's
+resolution and not about the terrain. That is the strongest reason in this
+document for D-22.
+
 Also human-verified, and unchanged from the AAA certification: the right-click
 menu, the flycam's feel, the DPI matrix, macOS viewport input (which does not
 exist), and LSP/terminal/git runtime.
@@ -1046,7 +1089,7 @@ exist), and LSP/terminal/git runtime.
 | # | what | evidence |
 |---|---|---|
 | FN-1 | The application had no boot project at all | `inf_project::boot`, 8 + 2 + 3 arms |
-| FN-2 | Every committed level shipped unlit | 5 levels re-blessed; `lit_stack.rs` |
+| FN-2 | Every committed level shipped unlit | 5 committed `.inf_lvl` re-written (**not** a golden bless — 6 or 8 bytes each, length unchanged); `lit_stack.rs` |
 | FN-3 | **PIE, web and Android substituted a default render block for the level's own** | `PayloadSim::render`; a source gate on `window.rs` |
 | FN-4 | The terrain cracked by up to 3.8262 m along a guaranteed seam | 0.0000 m; `terrain_continuity.rs` |
 | FN-5 | The fragment normal lit a surface the vertex had moved away from | 10.586° → 0.000° |
