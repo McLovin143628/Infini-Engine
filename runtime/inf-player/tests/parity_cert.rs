@@ -812,6 +812,121 @@ fn a_grammar_building_draws_in_three_distance_bands() {
     );
 }
 
+/// **CP-C5 · THE TEXTURE LADDER, BY DISTANCE BAND.**
+///
+/// The certification's owner asked for three tiers on textures as well as on
+/// meshes. Textures have been virtual since P26 and their ladder is
+/// **continuous**, not three-runged — but "continuous" is a claim, and this is
+/// the census that turns it into a table: for each of the island's own textures,
+/// the mip level `justified_mip` justifies at a set of distances, through the
+/// SAME pure function the CPU floor, the GPU feedback shader and the visbuffer
+/// feedback all derive their level from.
+///
+/// No GPU: `inf-vt` is a GPU-free crate by design and the rule is a pure
+/// function of extent, screen pixels and mip count.
+#[test]
+fn the_texture_ladder_by_distance_band() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let pack = cook_fixture(tmp.path());
+    let reader = inf_asset::PackReader::open(&pack.join(inf_player::level::PACK_FILE))
+        .expect("the pack maps");
+
+    // A 1080p view at the fps instrument's own field of view, so the pixels this
+    // census counts are the pixels that instrument's frames have.
+    let view = inf_render::RenderView {
+        origin: inf_math::FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::ZERO,
+        forward: glam::Vec3::Z,
+        up: glam::Vec3::Y,
+        fov_y: 70f32.to_radians(),
+        near: 0.05,
+        width: 1920,
+        height: 1080,
+        ortho: None,
+    };
+    let scale = inf_render::vt_stream::projection_scale(&view);
+
+    // The ground materials the island's terrain layers bind: a 2 m patch of
+    // ground is the thing a walking player is looking at, so a 1 m radius is the
+    // footprint the level is asked about.
+    const BANDS_M: [f32; 6] = [1.0, 4.0, 16.0, 64.0, 256.0, 1024.0];
+    let mut extents: Vec<(String, u32, u32)> = Vec::new();
+    for e in reader.index() {
+        if e.kind != inf_asset::AssetKind::Texture {
+            continue;
+        }
+        let Ok(bytes) = reader.read_ref(e.guid) else {
+            continue;
+        };
+        let Ok(view) = inf_vt::TiledTextureView::new(bytes.as_ref()) else {
+            continue;
+        };
+        let d = view.vt_desc();
+        let Some(m0) = d.mips.first() else {
+            continue;
+        };
+        extents.push((e.guid.0.to_string(), m0.width.max(m0.height), d.mip_count()));
+    }
+    extents.sort();
+
+    println!("CP-C5 the texture ladder, 1080p / 70° fov, a 1 m-radius footprint:");
+    print!("  {:<38}{:>6}{:>5}", "texture", "extent", "mips");
+    for m in BANDS_M {
+        print!("{:>8.0} m", m);
+    }
+    println!();
+    for (id, extent, mips) in &extents {
+        print!("  {id:<38}{extent:>6}{mips:>5}");
+        for d in BANDS_M {
+            let px = inf_render::vt_stream::screen_diameter_px(
+                glam::Vec3::new(0.0, 0.0, d),
+                1.0,
+                glam::Vec3::ZERO,
+                scale,
+            );
+            print!(
+                "{:>10}",
+                inf_render::vt_stream::justified_mip(*extent, px, *mips)
+            );
+        }
+        println!();
+    }
+    println!(
+        "  the coarsest {} mip level(s) of every texture are resident unconditionally (VT_FLOOR_LEVELS); a tile is {}x{} with a {}-texel border",
+        inf_render::VT_FLOOR_LEVELS,
+        inf_vt::TILE_SIZE,
+        inf_vt::TILE_SIZE,
+        inf_vt::TILE_BORDER
+    );
+
+    assert!(
+        !extents.is_empty(),
+        "the island pack carries no virtual textures, so this census counted nothing"
+    );
+    // The ladder is CONTINUOUS, and the way to say so with an assertion is that
+    // it has more rungs than the three the owner asked for: over six decades of
+    // distance the justified level must actually move, and by more than two.
+    let (_, extent, mips) = &extents[0];
+    let level = |d: f32| {
+        let px = inf_render::vt_stream::screen_diameter_px(
+            glam::Vec3::new(0.0, 0.0, d),
+            1.0,
+            glam::Vec3::ZERO,
+            scale,
+        );
+        inf_render::vt_stream::justified_mip(*extent, px, *mips)
+    };
+    let near = level(BANDS_M[0]);
+    let far = level(BANDS_M[BANDS_M.len() - 1]);
+    assert!(
+        far > near + 2,
+        "the texture ladder moved only {} level(s) between {:.0} m and {:.0} m,          which is fewer rungs than the three the certification asks for",
+        far - near,
+        BANDS_M[0],
+        BANDS_M[BANDS_M.len() - 1]
+    );
+}
+
 // ── the shipped island, when it is on this machine ──────────────────────────
 
 /// **The same censuses over the SHIPPED 51.38 km² island.**

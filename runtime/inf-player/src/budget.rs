@@ -905,16 +905,27 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// The number that made it possible is the one nobody expected. Island wave I4
 /// measured the lighting stack at **p95 92.3-92.9 ms against 43.7-44.0**, and
 /// wave I4b at 38.1-41.8 against 15.8-19.5. At CERT1, on the same composed city
-/// at 1080p on the same RTX 4070 Ti, the stack costs
-/// **p95 16.862 ms lit against 16.733 ms as shipped — +0.129 ms** — and the lit
-/// frame is *cheaper on the GPU* (5.506 ms against 7.575, **-2.069 ms**),
-/// because the depth prepass only runs at all when SSAO or TAA asks for it and
-/// the scatter overdraw it kills is larger than everything the stack adds.
+/// at 1080p on the same RTX 4070 Ti, **over two runs**:
 ///
-/// So the "different renderer" this ceiling had to be re-minted for turned out
-/// to be within a seventh of a millisecond of the one it was minted on, and the
-/// honest consequence is a ceiling that covers both rather than a looser one
-/// that covers neither.
+/// | run | lit p95 | shipped p95 | delta | lit GPU | shipped GPU |
+/// |---|---|---|---|---|---|
+/// | whole suite | 16.862 | 16.733 | **+0.129** | 5.506 | 7.575 (**-2.069**) |
+/// | this arm alone | 20.499 | 14.209 | **+6.290** | 5.439 | 3.409 (**+2.029**) |
+///
+/// **Both are quoted because one of them alone would be a claim.** The lit
+/// frame's own GPU cost barely moved (5.506 / 5.439); what moved is the SHIPPED
+/// frame's (7.575 / 3.409), which is this file's own warning about device state
+/// paying out — a card that has been boosting through a six-arm suite is not the
+/// card that ran a single test, and the GPU columns are only comparable between
+/// runs whose CPU frames are comparable. The honest reading is that the stack
+/// costs somewhere between a seventh of a millisecond and six of them on this
+/// content, and that it is nowhere near I4's forty-eight.
+///
+/// So the "different renderer" this ceiling had to be re-minted for is close
+/// enough to the one it was minted on that a ceiling covering BOTH is tighter
+/// than the one that covered neither. **38.0 is 1.85x the worst lit p95
+/// observed** (20.499), which is the same order of headroom the constant has
+/// always carried.
 ///
 /// **The island is still reported and never asserted here**, and it is the
 /// number that keeps this constant honest rather than one that flatters it. On
