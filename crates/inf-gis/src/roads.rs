@@ -116,6 +116,47 @@ impl RoadKind {
         }
     }
 
+    /// **Whether this class is kerbed** — a street with a pavement — or open,
+    /// with a shoulder (wave ROAD1).
+    ///
+    /// It is the class and not a per-feature attribute because published road
+    /// layers do not carry one, and the class is the honest proxy: a motorway
+    /// has no footway by definition, and a street in a town has one whether or
+    /// not the survey said so.
+    ///
+    /// **The named limit**: this makes a rural arterial carry a pavement it does
+    /// not need. Distinguishing "through a settlement" from "between two" wants
+    /// a settlement mask the road layer has no field for, and `inf-gis` has no
+    /// business knowing where a city is. Carried, not smuggled.
+    pub const fn is_kerbed(self) -> bool {
+        matches!(self, RoadKind::Arterial | RoadKind::Residential)
+    }
+
+    /// **The sealed shoulder this class carries**, metres a side — what an open
+    /// road has where a street has a kerb (wave ROAD1).
+    ///
+    /// 2.5 m is the figure a rural highway is built to; a farm track's 0.75 m is
+    /// the gravel edge a passing place is made of. A kerbed class answers zero,
+    /// and [`is_kerbed`](RoadKind::is_kerbed) is the other half of the same
+    /// decision — no class has both.
+    pub const fn shoulder_m(self) -> f64 {
+        match self {
+            RoadKind::Highway => 2.5,
+            RoadKind::DirtTrack => 0.75,
+            _ => 0.0,
+        }
+    }
+
+    /// **Whether this class carries painted markings** (wave ROAD1).
+    ///
+    /// A highway and an arterial do; a residential street in the country the
+    /// island is in does **not** — a neighbourhood street is unmarked, and
+    /// painting a centre line down one would be a road that reads as a
+    /// through-route. A track, a footpath and a railway obviously carry none.
+    pub const fn is_marked(self) -> bool {
+        matches!(self, RoadKind::Highway | RoadKind::Arterial)
+    }
+
     /// Surface width in metres for a lane count.
     ///
     /// Lanes are [`LANE_WIDTH_M`] except for the two classes that are not
@@ -671,7 +712,7 @@ pub fn build_ribbon(
     lift_m: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> Result<RoadRibbon, crate::GisError> {
-    build_ribbon_across(spine, width_m, lift_m, 1, height_at)
+    build_ribbon_across(spine, width_m, lift_m, 1, 0.0, height_at)
 }
 
 /// [`build_ribbon`], with the cross-section split into `strips` quads.
@@ -696,6 +737,7 @@ pub fn build_ribbon_across(
     width_m: f64,
     lift_m: f64,
     strips: usize,
+    crown_fall: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> Result<RoadRibbon, crate::GisError> {
     let strips = strips.max(1);
@@ -737,101 +779,78 @@ pub fn build_ribbon_across(
         )));
     }
 
+    if !(crown_fall.is_finite() && crown_fall >= 0.0) {
+        return Err(crate::GisError::Geometry(format!(
+            "the carriageway's cross-fall ({crown_fall}) is not a non-negative              finite fraction"
+        )));
+    }
+
     let half = width_m * 0.5;
     let mut vertices = Vec::with_capacity(pts.len() * 2);
     let mut uvs = Vec::with_capacity(pts.len() * 2);
     let mut indices = Vec::with_capacity((pts.len() - 1) * 6);
-    let mut arc = 0.0f64;
+    // **One frame list, and every part of the road reads it** (wave ROAD1). The
+    // mitre used to be worked out inline here and nowhere else; a kerb that
+    // mitred differently from the carriageway it bounds opens a wedge at every
+    // bend, so the corner geometry is now computed once, by `cross_frames`, and
+    // the kerb, the pavement, the lines and the crossings all take it from
+    // there.
+    let frames = cross_frames(&pts);
+    let opts = SurfaceOptions {
+        lift_m,
+        crown_fall,
+        ..SurfaceOptions::default()
+    };
 
-    for i in 0..pts.len() {
-        if i > 0 {
-            arc += (pts[i].xz() - pts[i - 1].xz()).length();
-        }
-        // The cross-section direction is the average of the incoming and outgoing
-        // headings, so an interior corner miters rather than producing two
-        // overlapping quads with a gap between them.
-        let back_dir = if i > 0 {
-            (pts[i].xz() - pts[i - 1].xz()).normalize_or_zero()
-        } else {
-            glam::DVec2::ZERO
-        };
-        let fwd_dir = if i + 1 < pts.len() {
-            (pts[i + 1].xz() - pts[i].xz()).normalize_or_zero()
-        } else {
-            glam::DVec2::ZERO
-        };
-        let dir = {
-            let d = back_dir + fwd_dir;
-            if d.length_squared() > 1e-12 {
-                d.normalize()
-            } else if fwd_dir.length_squared() > 1e-12 {
-                fwd_dir
-            } else if back_dir.length_squared() > 1e-12 {
-                back_dir
-            } else {
-                glam::DVec2::X
-            }
-        };
-        // Perpendicular on the XZ plane. Rotating (x, z) by 90 degrees gives
-        // (-z, x); with +X east and +Z south that points to the road's left.
-        let perp = glam::DVec2::new(-dir.y, dir.x);
-        // **A mitre has to be SCALED, not just aimed.** Offsetting by `half`
-        // along the bisector is the mistake that looks right: the bisector is a
-        // unit vector, so the two cross-section vertices are always exactly
-        // `width_m` apart — and their distance from each *leg*'s centreline is
-        // `half · cos(θ/2)`, so the road PINCHES at every corner. Measured on a
-        // right-angle bend of a 10 m road: 7.07 m through the corner, a visible
-        // notch at every bend in every ribbon the importer produced. The
-        // correction is `1 / (bisector · leg)`, which is 1 on a straight run and
-        // √2 at a right angle.
-        let miter = {
-            let leg = if fwd_dir.length_squared() > 1e-12 {
-                fwd_dir
-            } else {
-                back_dir
-            };
-            let c = dir.dot(leg).abs();
-            // A hairpin has `c → 0` and would spike to infinity. Clipped rather
-            // than spiked, at the usual limit — a corner sharper than ~29° gets
-            // a blunt end instead of a spear, which is wrong by a little in a
-            // place no survey puts a road, rather than wrong by a lot.
-            if c > 1.0 / MITER_LIMIT {
-                1.0 / c
-            } else {
-                MITER_LIMIT
-            }
-        };
+    for (i, frame) in frames.iter().enumerate() {
         for k in 0..=strips {
             // `u` runs 0 (left kerb) to 1 (right kerb) across the carriageway.
-            let u = k as f64 / strips as f64;
-            let sign = u * 2.0 - 1.0;
-            let xz = pts[i].xz() + perp * (half * miter * sign);
+            let t = k as f64 / strips as f64;
+            let offset = (t * 2.0 - 1.0) * half;
+            let xz = frame.at(offset);
             // The terrain callback is somebody else's function reading somebody
             // else's heightfield; a query over a voxel hole or an unloaded tile
             // is exactly where a `Some(NaN)` comes from, and it would become a
-            // NaN vertex with healthy-looking bounds.
-            let ground = match height_at(xz.x, xz.y) {
-                Some(h) if h.is_finite() => h,
-                Some(h) => {
+            // NaN vertex with healthy-looking bounds. `carriageway_y` is the one
+            // door every part of a road takes its height from — including this
+            // one — so a crown authored here cannot disagree with the kerb
+            // sitting on it.
+            let ground_probe = height_at(xz.x, xz.y);
+            if let Some(h) = ground_probe {
+                if !h.is_finite() {
                     return Err(crate::GisError::NotFinite(format!(
-                        "the ground query under the road at ({}, {}) returned the \
-                         non-finite height {h}",
+                        "the ground query under the road at ({}, {}) returned the                          non-finite height {h}",
                         xz.x, xz.y
-                    )))
+                    )));
                 }
-                None => pts[i].y,
-            };
-            vertices.push(DVec3::new(xz.x, ground + lift_m, xz.y));
-            uvs.push([u as f32, (arc / width_m) as f32]);
+            }
+            let y = carriageway_y(frame, offset, half, &opts, height_at);
+            vertices.push(DVec3::new(xz.x, y, xz.y));
+            // **uv IS METRES** (wave ROAD1): `u` is the offset across the
+            // carriageway and `v` the arc along it, both in world metres, so a
+            // material's `uv_tiling_m` is the whole tiling rule and the road no
+            // longer tiles at its own width. Before this wave `v` was
+            // `arc / width_m` and `u` was 0..1, which made one uv unit 14.0 m on
+            // the island and the asphalt read three and a half times life size.
+            uvs.push([offset as f32, frame.arc as f32]);
         }
-        if i + 1 < pts.len() {
+        if i + 1 < frames.len() {
             let row = (strips + 1) as u32;
             let base = (i * (strips + 1)) as u32;
             for k in 0..strips as u32 {
                 let a = base + k;
                 // Wound so the surface faces up (+Y), matching the triangulator.
                 // Identical to the two-vertex form for `strips == 1`.
-                indices.extend_from_slice(&[a, a + 1, a + row + 1, a, a + row + 1, a + row]);
+                //
+                // **The order flipped in wave ROAD1 and the geometry did not**:
+                // the across parameter used to run to the road's LEFT (`u = 0`
+                // was its right edge), and `CrossFrame::at` runs to its RIGHT,
+                // because that is the sense `inf_nav::lane::right_of` uses and a
+                // kerb offset had to mean the same thing in both crates. Same
+                // triangles, mirrored index order, so the faces still point up —
+                // and `a_ribbon_conforms_to_the_ground_and_tiles_by_arc_length`
+                // is the arm that caught it pointing down.
+                indices.extend_from_slice(&[a, a + row, a + row + 1, a, a + row + 1, a + 1]);
             }
         }
     }
@@ -983,6 +1002,252 @@ fn pseudo_angle(d: glam::DVec2) -> f64 {
     }
 }
 
+// ── wave ROAD1: the road is more than its carriageway ───────────────────────
+
+/// **The kerb's height above the carriageway edge**, metres.
+///
+/// 150 mm is the standard upstand a highway authority specifies: high enough to
+/// stop a wheel and to hold a gutter's water, low enough that a person steps up
+/// it without thinking. Lower and it reads as a painted line from any distance;
+/// higher and it is a wall.
+pub const KERB_HEIGHT_M: f64 = 0.15;
+
+/// **The width of a kerb stone's top**, metres — the flat between the road's
+/// edge and the pavement's.
+pub const KERB_WIDTH_M: f64 = 0.30;
+
+/// **The pavement behind the kerb**, metres.
+///
+/// # One authority, two consumers (the ROAD1 one-door clause)
+///
+/// This is `inf_ecs::society::PAVEMENT_M` **by value**, and it has to be: that
+/// constant lays the eight nav nodes of a city block's pavement ring, and this
+/// lays the slab a person walks on. A crowd routed two metres out from a
+/// building line while the concrete it walks on is one and a half is a crowd
+/// walking beside its own pavement.
+///
+/// `inf-gis` cannot name `inf-ecs` (neither depends on the other, by design —
+/// see `inf-ecs`'s own manifest note), so the equality is pinned where a crate
+/// can see both: `the_kerb_geometry_and_the_nav_ring_are_one_pavement` in
+/// `crates/inf-island/tests/pavement_authority.rs`. Same arrangement as
+/// [`LANE_WIDTH_M`] and `inf_nav::lane::DEFAULT_LANE_WIDTH_M`, which are pinned
+/// one file over for the same reason.
+pub const PAVEMENT_M: f64 = 2.0;
+
+/// **The carriageway's cross-fall**, as a fraction — 2 %, the figure every
+/// highway manual specifies.
+///
+/// A road is not flat across: it is crowned so rain runs to the gutter rather
+/// than standing in the wheel tracks. On a 14 m carriageway 2 % is **140 mm**
+/// from crown to channel, which is the difference between a surface that reads
+/// as a road and one that reads as a painted strip of ground.
+///
+/// It is a `SurfaceOptions` field rather than a constant applied everywhere, and
+/// `0.0` — no crown, conform to the ground at every point — stays the default.
+/// See [`SurfaceOptions::crown_fall`] for why that matters.
+pub const DEFAULT_CROWN_FALL: f64 = 0.02;
+
+/// **A painted line's width**, metres. 100 mm is the standard lane marking.
+pub const LINE_WIDTH_M: f64 = 0.10;
+
+/// The gap between the two lines of a **double** centre line, metres.
+pub const DOUBLE_LINE_GAP_M: f64 = 0.10;
+
+/// How far a marking floats above the carriageway it is painted on, metres.
+///
+/// **Four millimetres, and the number is doing real work.** Thermoplastic road
+/// marking really is 3 mm proud, so this is not a z-fighting hack wearing a
+/// physical name — but it also has to beat the depth buffer at the distance a
+/// road is seen from, and 4 mm over a surface already lifted
+/// [`DEFAULT_ROAD_LIFT_M`] off the terrain is what reverse-Z resolves at a
+/// kilometre. Any smaller and the line dashes in and out as the camera moves.
+pub const MARKING_LIFT_M: f64 = 0.004;
+
+/// A dashed lane divider's painted length, metres.
+pub const DASH_M: f64 = 3.0;
+
+/// A dashed lane divider's gap, metres. 3 painted / 6 clear is the urban
+/// pattern; a motorway's is longer, and one pattern is honest at this scale.
+pub const DASH_GAP_M: f64 = 6.0;
+
+/// How far the edge line sits inside the carriageway's edge, metres.
+pub const EDGE_LINE_INSET_M: f64 = 0.20;
+
+/// A crosswalk bar's width across the road, metres (the "continental" ladder
+/// pattern every North American city paints).
+pub const CROSSWALK_BAR_M: f64 = 0.50;
+
+/// The gap between crosswalk bars, metres.
+pub const CROSSWALK_GAP_M: f64 = 0.50;
+
+/// How far a crosswalk's near edge sits from the junction node, metres.
+///
+/// Far enough out that the bars clear the fan that paves the intersection, close
+/// enough that it reads as that junction's crossing and not as a mid-block one.
+pub const CROSSWALK_SETBACK_M: f64 = 6.0;
+
+/// How far a crosswalk runs along the road, metres — the depth a person crosses
+/// through.
+pub const CROSSWALK_DEPTH_M: f64 = 3.0;
+
+/// **A road surface's material groups** — one mesh, and one entity, per group.
+///
+/// # Why this is an enum and not four fields
+///
+/// Because an `inf_ecs::Material` component binds **one** `.inf_mat`, so a road
+/// that wears asphalt, concrete, white paint and yellow paint is four entities
+/// however the geometry is stored. Naming the groups makes the split a fact
+/// about the road rather than a convention four call sites have to remember,
+/// and it is what lets one loop write all four meshes.
+///
+/// [`Carriageway`](RoadPart::Carriageway) is the surface [`RoadSurface::parts`]
+/// holds — one submesh per [`RoadKind`] — and the other three come out of
+/// [`RoadSurface::furniture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RoadPart {
+    /// The drivable surface and the junction fans that join it: asphalt.
+    Carriageway,
+    /// Kerb stones and the pavement slab behind them: concrete.
+    Kerb,
+    /// Edge lines, lane dashes and crosswalks: white paint.
+    MarkingWhite,
+    /// The centre line that separates opposing traffic: yellow paint.
+    MarkingYellow,
+}
+
+/// The furniture groups, in the frozen order the island writes their meshes in.
+pub const FURNITURE_PARTS: [RoadPart; 3] = [
+    RoadPart::Kerb,
+    RoadPart::MarkingWhite,
+    RoadPart::MarkingYellow,
+];
+
+impl RoadPart {
+    /// The stem an asset for this part is written under, and the submesh name.
+    pub const fn label(self) -> &'static str {
+        match self {
+            RoadPart::Carriageway => "carriageway",
+            RoadPart::Kerb => "kerb",
+            RoadPart::MarkingWhite => "marking white",
+            RoadPart::MarkingYellow => "marking yellow",
+        }
+    }
+}
+
+/// **One cross-section station along a road**: where the centreline is, which
+/// way is across it, how far along it is, and how much the corner mitre widens
+/// it.
+///
+/// # Why this is extracted rather than recomputed
+///
+/// [`build_ribbon_across`] worked the mitre out inline, and until this wave it
+/// was the only thing that needed it. Now the kerb, the pavement, the edge
+/// lines, the centre line and the lane dashes all have to sit at a stated offset
+/// from the same centreline **through the same corners** — and a kerb that
+/// mitred differently from the carriageway it bounds would open a wedge at every
+/// bend. One frame list, computed once, read by six builders.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrossFrame {
+    /// The spine position. `y` is the *authored* elevation, not the ground.
+    pub centre: DVec3,
+    /// Unit vector across the road, on the XZ plane, pointing to its **left**.
+    pub perp: glam::DVec2,
+    /// The mitre's widening factor — see [`build_ribbon_across`]'s note on why
+    /// a mitre must be scaled and not merely aimed. `1.0` on a straight run.
+    pub miter: f64,
+    /// Distance along the centreline from the segment's start, metres.
+    pub arc: f64,
+}
+
+impl CrossFrame {
+    /// The world XZ position `offset_m` to the road's **right** of the
+    /// centreline (negative is left), with the corner mitre applied.
+    #[inline]
+    pub fn at(&self, offset_m: f64) -> glam::DVec2 {
+        self.centre.xz() - self.perp * (offset_m * self.miter)
+    }
+}
+
+/// **The cross-section stations of a densified spine.**
+///
+/// The frames are a pure function of the positions: no ground query, no options.
+/// A spine with fewer than two distinct XZ positions yields an empty list rather
+/// than a frame whose perpendicular is a normalized zero.
+pub fn cross_frames(pts: &[DVec3]) -> Vec<CrossFrame> {
+    let mut out = Vec::with_capacity(pts.len());
+    let mut arc = 0.0f64;
+    for i in 0..pts.len() {
+        if i > 0 {
+            arc += (pts[i].xz() - pts[i - 1].xz()).length();
+        }
+        let back_dir = if i > 0 {
+            (pts[i].xz() - pts[i - 1].xz()).normalize_or_zero()
+        } else {
+            glam::DVec2::ZERO
+        };
+        let fwd_dir = if i + 1 < pts.len() {
+            (pts[i + 1].xz() - pts[i].xz()).normalize_or_zero()
+        } else {
+            glam::DVec2::ZERO
+        };
+        let dir = {
+            let d = back_dir + fwd_dir;
+            if d.length_squared() > 1e-12 {
+                d.normalize()
+            } else if fwd_dir.length_squared() > 1e-12 {
+                fwd_dir
+            } else if back_dir.length_squared() > 1e-12 {
+                back_dir
+            } else {
+                glam::DVec2::X
+            }
+        };
+        // Perpendicular on the XZ plane. Rotating (x, z) by 90 degrees gives
+        // (-z, x); with +X east and +Z south that points to the road's left.
+        let perp = glam::DVec2::new(-dir.y, dir.x);
+        let miter = {
+            let leg = if fwd_dir.length_squared() > 1e-12 {
+                fwd_dir
+            } else {
+                back_dir
+            };
+            let c = dir.dot(leg).abs();
+            if c > 1.0 / MITER_LIMIT {
+                1.0 / c
+            } else {
+                MITER_LIMIT
+            }
+        };
+        out.push(CrossFrame {
+            centre: pts[i],
+            perp,
+            miter,
+            arc,
+        });
+    }
+    out
+}
+
+/// A pavement's cross-fall back toward the kerb, as a fraction — 2 %, the same
+/// figure the carriageway's crown uses and for the same reason: water.
+pub const PAVEMENT_FALL: f64 = 0.02;
+
+/// A shoulder's cross-fall where the carriageway states none, as a fraction.
+/// 4 % is the usual figure — a shoulder falls harder than a running lane so it
+/// sheds the water the lane gave it.
+pub const SHOULDER_FALL: f64 = 0.04;
+
+/// The ceiling on dashes one segment may paint.
+///
+/// Not a tuning knob: it is the guard that stops a period that somehow came out
+/// zero from spinning over a county's worth of segments. 20 000 dashes at the
+/// 9 m period is 180 km, which is longer than any digitised segment.
+const MAX_DASHES_PER_SEGMENT: usize = 20_000;
+
+/// The ceiling on bars one crossing may paint — a 60 m carriageway's worth at
+/// the 1 m period, which is past every real road.
+const MAX_CROSSWALK_BARS: usize = 64;
+
 /// A drivable road surface: merged triangles per road class, plus the junction
 /// fans that close the holes between them.
 ///
@@ -994,6 +1259,19 @@ pub struct RoadSurface {
     /// The merged geometry, keyed by class. `BTreeMap`, so the submesh order in
     /// the asset is a function of the data.
     pub parts: BTreeMap<RoadKind, RoadRibbon>,
+    /// **Everything beside the carriageway** (wave ROAD1), keyed by the material
+    /// group it wears — kerbs and pavements in concrete, edge lines and lane
+    /// dashes and crossings in white, the centre line in yellow.
+    ///
+    /// It is a second map rather than more entries in [`parts`](Self::parts)
+    /// because the two are keyed by different things: `parts` is keyed by *road
+    /// class* and its whole map is one material, while this is keyed by
+    /// *material* and does not care what class a piece of kerb came from. A
+    /// single map would have to be keyed by a pair, and every consumer would
+    /// then have to know that half the key is ignored.
+    ///
+    /// Empty unless [`SurfaceOptions::furniture`] asked for it.
+    pub furniture: BTreeMap<RoadPart, RoadRibbon>,
     /// How many junctions got a fan.
     pub junctions_filled: usize,
     /// Junctions that could not be filled, and why.
@@ -1003,11 +1281,26 @@ pub struct RoadSurface {
 }
 
 impl RoadSurface {
+    /// Triangles in the **carriageway** — the drivable surface and its junction
+    /// fans. Deliberately not the furniture's: this number is what
+    /// [`surface_to_mesh`] produces, and several arms read it as that.
     pub fn triangle_count(&self) -> usize {
         self.parts.values().map(RoadRibbon::triangle_count).sum()
     }
+    /// Vertices in the **carriageway** — see [`triangle_count`](Self::triangle_count).
     pub fn vertex_count(&self) -> usize {
         self.parts.values().map(|r| r.vertices.len()).sum()
+    }
+    /// Triangles in the road furniture (wave ROAD1), all groups together.
+    pub fn furniture_triangle_count(&self) -> usize {
+        self.furniture
+            .values()
+            .map(RoadRibbon::triangle_count)
+            .sum()
+    }
+    /// Vertices in the road furniture (wave ROAD1), all groups together.
+    pub fn furniture_vertex_count(&self) -> usize {
+        self.furniture.values().map(|r| r.vertices.len()).sum()
     }
     pub fn is_empty(&self) -> bool {
         self.parts.values().all(|r| r.indices.is_empty())
@@ -1024,6 +1317,33 @@ pub struct SurfaceOptions {
     /// Fill junctions of degree 3 and above with a fan. A degree-2 node is a
     /// bend and the ribbon's own mitre already closes it.
     pub fill_junctions: bool,
+    /// **The carriageway's cross-fall**, as a fraction — see
+    /// [`DEFAULT_CROWN_FALL`] (wave ROAD1).
+    ///
+    /// # Zero is the default, and it is not a cop-out
+    ///
+    /// `0.0` means *conform*: the ground is sampled at every cross-section
+    /// point and the surface follows it, which is the pre-ROAD1 behaviour
+    /// byte for byte and the only honest thing an **importer** can do. A road
+    /// dropped onto somebody else's terrain has no right to a design surface;
+    /// grading it planar would leave its edges floating over the hillside it
+    /// crosses by exactly the terrain's own cross-slope.
+    ///
+    /// Above zero the section is **graded**: one ground sample, on the
+    /// centreline, and a plane rising to the crown. That is what a built road
+    /// is, and it is only truthful where the caller **owns the terrain and has
+    /// levelled a corridor under it** — which the island recipe does, at
+    /// `inf_island::terrain`'s corridor plateau, and which the editor's GIS
+    /// import wizard cannot. So the island states 2 % and the wizard states
+    /// nothing.
+    ///
+    /// It also buys the road-vs-drawn-terrain conformance the wave was called
+    /// for: a locally planar corridor decimates to itself, so the clipmap's LOD
+    /// morph moves the ground under a graded road by nothing.
+    pub crown_fall: f64,
+    /// Build kerbs, pavements, shoulders, markings and crossings beside the
+    /// carriageway (wave ROAD1). `false` reproduces the pre-ROAD1 surface.
+    pub furniture: bool,
 }
 
 impl Default for SurfaceOptions {
@@ -1032,6 +1352,12 @@ impl Default for SurfaceOptions {
             lift_m: DEFAULT_ROAD_LIFT_M,
             ground_step_m: DEFAULT_GROUND_STEP_M,
             fill_junctions: true,
+            // **Both default to the pre-ROAD1 road**, so every caller that has
+            // not thought about a design surface gets the conforming one it
+            // already had, and the two callers that have — the island's recipe
+            // and this crate's own arms — say so out loud.
+            crown_fall: 0.0,
+            furniture: false,
         }
     }
 }
@@ -1060,6 +1386,414 @@ fn append_ribbon(dst: &mut RoadRibbon, src: &RoadRibbon) {
     dst.vertices.extend_from_slice(&src.vertices);
     dst.uvs.extend_from_slice(&src.uvs);
     dst.indices.extend(src.indices.iter().map(|i| i + base));
+}
+
+/// One point of a road's cross-section: how far to the right of the centreline
+/// it is, and how high.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProfilePoint {
+    offset_m: f64,
+    y: f64,
+}
+
+/// **Emit a quad strip along a run of frames, through a cross-section profile.**
+///
+/// The profile's points are in **increasing offset order** on both sides of the
+/// road, which is the whole reason the left kerb is authored outside-in: the
+/// winding below is the carriageway's own, and a profile that ran the other way
+/// would face its triangles into the ground.
+///
+/// Consecutive points at the same offset make a **vertical** face — that is how
+/// a kerb's upstand and a pavement's outer skirt are built, and it is why this
+/// takes a profile rather than a left and a right offset.
+///
+/// `uv` is `(offset in metres, arc in metres)`, the same physical space the
+/// carriageway's is, so every part of a road tiles at one rate and a material's
+/// `uv_tiling_m` means the same thing on all of them.
+fn emit_profile_strip(
+    out: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    profile: &mut dyn FnMut(&CrossFrame) -> Vec<ProfilePoint>,
+) {
+    if frames.len() < 2 {
+        return;
+    }
+    let base = out.vertices.len() as u32;
+    let mut row_len = 0usize;
+    for (i, f) in frames.iter().enumerate() {
+        let pts = profile(f);
+        if i == 0 {
+            row_len = pts.len();
+            if row_len < 2 {
+                return;
+            }
+        } else if pts.len() != row_len {
+            // A profile whose point count varies along the run cannot be
+            // stripped. Refusing is right: the alternative is an index buffer
+            // that walks off a row.
+            return;
+        }
+        for p in &pts {
+            let xz = f.at(p.offset_m);
+            out.vertices.push(DVec3::new(xz.x, p.y, xz.y));
+            out.uvs.push([p.offset_m as f32, f.arc as f32]);
+        }
+    }
+    let row = row_len as u32;
+    for i in 0..(frames.len() as u32 - 1) {
+        for k in 0..(row - 1) {
+            let a = base + i * row + k;
+            // The carriageway's own winding — see `build_ribbon_across`. A
+            // profile in increasing-offset order therefore faces up, which is
+            // why the left kerb below is authored outside-in.
+            out.indices
+                .extend_from_slice(&[a, a + row, a + row + 1, a, a + row + 1, a + 1]);
+        }
+    }
+}
+
+/// The stations of `frames` whose arc lies in `[from, to]`, as a slice range.
+///
+/// Half-open at neither end: a crosswalk that lost its last station would be one
+/// bar short of the kerb it runs to.
+fn frames_between(frames: &[CrossFrame], from: f64, to: f64) -> &[CrossFrame] {
+    let lo = frames.partition_point(|f| f.arc < from);
+    let hi = frames.partition_point(|f| f.arc <= to);
+    let lo = lo.min(frames.len());
+    let hi = hi.min(frames.len());
+    if hi > lo {
+        &frames[lo..hi]
+    } else {
+        &[]
+    }
+}
+
+/// **The carriageway's finished surface height** at `offset_m` from the crown.
+///
+/// # The one function every part of a road takes its height from
+///
+/// The kerb sits on the channel, the markings sit on the wearing course, and the
+/// crosswalk sits on both — so all of them ask this, and none of them re-derives
+/// a crown. `crown_fall == 0.0` reproduces the pre-ROAD1 arithmetic exactly:
+/// the ground is sampled **at the point**, and the crown term is zero.
+///
+/// Above zero, the section is **graded**: the ground is sampled once, on the
+/// centreline, and the cross-section is a plane rising to the crown. That is
+/// what a built road is — cut and filled to a design surface — and it is only
+/// honest where the caller owns the terrain and has levelled a corridor under
+/// it. `SurfaceOptions::crown_fall`'s own note is the record of that condition.
+fn carriageway_y(
+    frame: &CrossFrame,
+    offset_m: f64,
+    half_m: f64,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> f64 {
+    let sample_at = if opts.crown_fall > 0.0 { 0.0 } else { offset_m };
+    let xz = frame.at(sample_at);
+    let ground = match height_at(xz.x, xz.y) {
+        Some(h) if h.is_finite() => h,
+        _ => frame.centre.y,
+    };
+    ground + opts.lift_m + opts.crown_fall * (half_m - offset_m.abs()).max(0.0)
+}
+
+/// The ground under a cross-section offset, falling back to the spine's own
+/// authored elevation where nothing answers.
+fn ground_at_offset(
+    frame: &CrossFrame,
+    offset_m: f64,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> f64 {
+    let xz = frame.at(offset_m);
+    match height_at(xz.x, xz.y) {
+        Some(h) if h.is_finite() => h,
+        _ => frame.centre.y,
+    }
+}
+
+/// **Kerb stones and the pavement slab behind them**, both sides.
+///
+/// The profile, outward from the channel: the kerb's 150 mm upstand, its 300 mm
+/// top, the [`PAVEMENT_M`] slab falling 2 % back toward the kerb the way a real
+/// footway drains, and a vertical skirt from the slab's back edge down to the
+/// ground — without which you see straight through a 190 mm cliff of nothing at
+/// every property line.
+fn build_kerbs(
+    out: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    half_m: f64,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    let back = half_m + KERB_WIDTH_M + PAVEMENT_M;
+    // The right-hand kerb: offsets increase outward, so the profile is already
+    // in the order `emit_profile_strip` winds.
+    emit_profile_strip(out, frames, &mut |f| {
+        let channel = carriageway_y(f, half_m, half_m, opts, height_at);
+        let top = channel + KERB_HEIGHT_M;
+        vec![
+            ProfilePoint {
+                offset_m: half_m,
+                y: channel,
+            },
+            ProfilePoint {
+                offset_m: half_m,
+                y: top,
+            },
+            ProfilePoint {
+                offset_m: half_m + KERB_WIDTH_M,
+                y: top,
+            },
+            ProfilePoint {
+                offset_m: back,
+                y: top + PAVEMENT_M * PAVEMENT_FALL,
+            },
+            ProfilePoint {
+                offset_m: back,
+                y: ground_at_offset(f, back, height_at),
+            },
+        ]
+    });
+    // The left-hand kerb, authored **outside-in** so its offsets also increase.
+    emit_profile_strip(out, frames, &mut |f| {
+        let channel = carriageway_y(f, -half_m, half_m, opts, height_at);
+        let top = channel + KERB_HEIGHT_M;
+        vec![
+            ProfilePoint {
+                offset_m: -back,
+                y: ground_at_offset(f, -back, height_at),
+            },
+            ProfilePoint {
+                offset_m: -back,
+                y: top + PAVEMENT_M * PAVEMENT_FALL,
+            },
+            ProfilePoint {
+                offset_m: -half_m - KERB_WIDTH_M,
+                y: top,
+            },
+            ProfilePoint {
+                offset_m: -half_m,
+                y: top,
+            },
+            ProfilePoint {
+                offset_m: -half_m,
+                y: channel,
+            },
+        ]
+    });
+}
+
+/// **A paved shoulder**, both sides — what an open road has where a street has a
+/// kerb.
+///
+/// It is drawn in the carriageway's own ribbon and therefore in asphalt, because
+/// that is what a sealed shoulder is; what separates it from a running lane is
+/// the solid white edge line, which [`build_markings`] paints at the
+/// carriageway's edge and not at the shoulder's.
+fn build_shoulders(
+    out: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    half_m: f64,
+    shoulder_m: f64,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    if shoulder_m <= 0.0 {
+        return;
+    }
+    for side in [1.0f64, -1.0] {
+        emit_profile_strip(out, frames, &mut |f| {
+            let edge = carriageway_y(f, side * half_m, half_m, opts, height_at);
+            // The shoulder continues the carriageway's cross-fall, so water that
+            // ran off the crown keeps running.
+            let outer = edge - shoulder_m * opts.crown_fall.max(SHOULDER_FALL);
+            let (a, b) = if side > 0.0 {
+                (
+                    ProfilePoint {
+                        offset_m: half_m,
+                        y: edge,
+                    },
+                    ProfilePoint {
+                        offset_m: half_m + shoulder_m,
+                        y: outer,
+                    },
+                )
+            } else {
+                (
+                    ProfilePoint {
+                        offset_m: -half_m - shoulder_m,
+                        y: outer,
+                    },
+                    ProfilePoint {
+                        offset_m: -half_m,
+                        y: edge,
+                    },
+                )
+            };
+            vec![a, b]
+        });
+    }
+}
+
+/// Paint one longitudinal line of `width_m` centred at `offset_m`, over the
+/// stations `frames`.
+fn paint_line(
+    out: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    offset_m: f64,
+    width_m: f64,
+    half_m: f64,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    let (a, b) = (offset_m - width_m * 0.5, offset_m + width_m * 0.5);
+    emit_profile_strip(out, frames, &mut |f| {
+        vec![
+            ProfilePoint {
+                offset_m: a,
+                y: carriageway_y(f, a, half_m, opts, height_at) + MARKING_LIFT_M,
+            },
+            ProfilePoint {
+                offset_m: b,
+                y: carriageway_y(f, b, half_m, opts, height_at) + MARKING_LIFT_M,
+            },
+        ]
+    });
+}
+
+/// Paint a **dashed** longitudinal line: [`DASH_M`] painted, [`DASH_GAP_M`]
+/// clear, on a lattice measured from the segment's own start.
+fn paint_dashes(
+    out: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    offset_m: f64,
+    half_m: f64,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    let period = DASH_M + DASH_GAP_M;
+    let total = frames.last().map(|f| f.arc).unwrap_or(0.0);
+    let mut start = 0.0f64;
+    // A guard on the count as well as on the arc: a period that somehow came out
+    // zero would spin here, and this runs over a county's worth of segments.
+    let mut guard = 0usize;
+    while start < total && guard < MAX_DASHES_PER_SEGMENT {
+        let run = frames_between(frames, start, (start + DASH_M).min(total));
+        if run.len() >= 2 {
+            paint_line(out, run, offset_m, LINE_WIDTH_M, half_m, opts, height_at);
+        }
+        start += period;
+        guard += 1;
+    }
+}
+
+/// **Every marking a road of this class carries**, split white from yellow.
+///
+/// | class | centre | lane dividers | edge lines |
+/// |---|---|---|---|
+/// | highway (4 lanes) | double **yellow** | white dashes at ±3.5 m | solid white |
+/// | arterial (2 lanes) | single **yellow** | — | solid white |
+/// | residential | — | — | — |
+/// | dirt track, path, rail | — | — | — |
+///
+/// **Yellow separates opposing traffic and white does not** — the North American
+/// convention, which is the one the island is in (British Columbia) and the one
+/// `frames/driving/0006` shows: a double yellow down the middle of a four-lane
+/// street and white at both edges. A residential street is deliberately
+/// **unmarked**, because a neighbourhood street in that country is.
+fn build_markings(
+    white: &mut RoadRibbon,
+    yellow: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    seg: &RoadSegment,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    if !seg.kind.is_marked() {
+        return;
+    }
+    let half = seg.width_m() * 0.5;
+    let lanes = seg.lane_count.max(1);
+
+    // ── the centre line ──────────────────────────────────────────────────────
+    if lanes >= 4 {
+        // Double solid yellow: two lines, a line's width apart.
+        let off = (DOUBLE_LINE_GAP_M + LINE_WIDTH_M) * 0.5;
+        for s in [-1.0f64, 1.0] {
+            paint_line(yellow, frames, s * off, LINE_WIDTH_M, half, opts, height_at);
+        }
+    } else if lanes >= 2 {
+        paint_line(yellow, frames, 0.0, LINE_WIDTH_M, half, opts, height_at);
+    }
+
+    // ── the lane dividers, dashed white ──────────────────────────────────────
+    // Lane `k` from the crown ends at `k · LANE_WIDTH_M`; the divider is that
+    // line, and the outermost one is the carriageway edge rather than a marking.
+    for k in 1..(lanes / 2) {
+        let off = f64::from(k) * LANE_WIDTH_M;
+        for s in [-1.0f64, 1.0] {
+            paint_dashes(white, frames, s * off, half, opts, height_at);
+        }
+    }
+
+    // ── the edge lines, solid white ──────────────────────────────────────────
+    let edge = half - EDGE_LINE_INSET_M;
+    if edge > LINE_WIDTH_M {
+        for s in [-1.0f64, 1.0] {
+            paint_line(white, frames, s * edge, LINE_WIDTH_M, half, opts, height_at);
+        }
+    }
+}
+
+/// **A pedestrian crossing across the carriageway**, in the continental ladder
+/// pattern: bars along the direction of travel, spaced across the road.
+///
+/// `from_start` says which end of the segment the junction is at, because a
+/// crossing belongs to a junction and sits [`CROSSWALK_SETBACK_M`] out from it —
+/// far enough to clear the fan that paves the intersection.
+fn build_crosswalk(
+    white: &mut RoadRibbon,
+    frames: &[CrossFrame],
+    seg: &RoadSegment,
+    from_start: bool,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    let total = frames.last().map(|f| f.arc).unwrap_or(0.0);
+    // A crossing needs room between the junction and the far end of the block.
+    if total < CROSSWALK_SETBACK_M + CROSSWALK_DEPTH_M {
+        return;
+    }
+    let (from, to) = if from_start {
+        (CROSSWALK_SETBACK_M, CROSSWALK_SETBACK_M + CROSSWALK_DEPTH_M)
+    } else {
+        (
+            total - CROSSWALK_SETBACK_M - CROSSWALK_DEPTH_M,
+            total - CROSSWALK_SETBACK_M,
+        )
+    };
+    let run = frames_between(frames, from, to);
+    if run.len() < 2 {
+        return;
+    }
+    let half = seg.width_m() * 0.5;
+    let period = CROSSWALK_BAR_M + CROSSWALK_GAP_M;
+    let mut off = -half + CROSSWALK_GAP_M * 0.5;
+    let mut guard = 0usize;
+    while off + CROSSWALK_BAR_M <= half && guard < MAX_CROSSWALK_BARS {
+        paint_line(
+            white,
+            run,
+            off + CROSSWALK_BAR_M * 0.5,
+            CROSSWALK_BAR_M,
+            half,
+            opts,
+            height_at,
+        );
+        off += period;
+        guard += 1;
+    }
 }
 
 /// **Build a whole road network's surface**: drape every segment on the ground,
@@ -1095,7 +1829,14 @@ pub fn build_surface(
         // The cross-section is subdivided at the same pitch as the spine — see
         // `build_ribbon_across` for the 49 mm this closes.
         let strips = cross_strips(s.width_m(), opts.ground_step_m);
-        match build_ribbon_across(&dense, s.width_m(), opts.lift_m, strips, height_at) {
+        match build_ribbon_across(
+            &dense,
+            s.width_m(),
+            opts.lift_m,
+            strips,
+            opts.crown_fall,
+            height_at,
+        ) {
             Ok(r) => {
                 let row = strips + 1;
                 if r.vertices.len() >= 2 * row {
@@ -1108,6 +1849,9 @@ pub fn build_surface(
                         .push((r.vertices[n - row], r.vertices[n - 1]));
                 }
                 append_ribbon(out.parts.entry(s.kind).or_default(), &r);
+                if opts.furniture {
+                    build_segment_furniture(&mut out, graph, s, &dense, opts, height_at);
+                }
             }
             Err(e) => out.skipped.push(format!(
                 "segment {} ({}) has no buildable surface: {e}",
@@ -1178,6 +1922,111 @@ pub struct MeshBuildReport {
 fn f32_quantisation(magnitude_m: f64) -> f64 {
     let m = magnitude_m.abs().max(1.0) as f32;
     (f32::from_bits(m.to_bits() + 1) - m) as f64
+}
+
+/// **Everything one segment carries beside its carriageway** (wave ROAD1).
+///
+/// The shoulder goes into the **carriageway's own** ribbon because a sealed
+/// shoulder is asphalt; the kerb, the pavement and the paint go into their own
+/// material groups. What separates a shoulder from a running lane is the edge
+/// line, not a material.
+fn build_segment_furniture(
+    out: &mut RoadSurface,
+    graph: &RoadGraph,
+    seg: &RoadSegment,
+    dense: &[DVec3],
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) {
+    let frames = cross_frames(dense);
+    if frames.len() < 2 {
+        return;
+    }
+    let half = seg.width_m() * 0.5;
+
+    if seg.kind.is_kerbed() {
+        build_kerbs(
+            out.furniture.entry(RoadPart::Kerb).or_default(),
+            &frames,
+            half,
+            opts,
+            height_at,
+        );
+    } else {
+        build_shoulders(
+            out.parts.entry(seg.kind).or_default(),
+            &frames,
+            half,
+            seg.kind.shoulder_m(),
+            opts,
+            height_at,
+        );
+    }
+
+    // The paint. Two ribbons because two colours, and two colours because
+    // `inf_ecs::Material` binds one `.inf_mat` — see `RoadPart`.
+    let mut white = std::mem::take(out.furniture.entry(RoadPart::MarkingWhite).or_default());
+    let mut yellow = std::mem::take(out.furniture.entry(RoadPart::MarkingYellow).or_default());
+    build_markings(&mut white, &mut yellow, &frames, seg, opts, height_at);
+
+    // **A crossing belongs to a JUNCTION, and it is painted from the leg.**
+    // Degree 3 is the same threshold `fill_junctions` uses: a degree-2 node is a
+    // bend in one road and nobody crosses a bend. A dead end gets none either —
+    // there is nothing on the far side to cross to.
+    if seg.kind.is_kerbed() {
+        for (node, from_start) in [(seg.start_node, true), (seg.end_node, false)] {
+            let crossable = graph
+                .intersections
+                .get(&node)
+                .is_some_and(|i| i.degree() >= 3);
+            if crossable {
+                build_crosswalk(&mut white, &frames, seg, from_start, opts, height_at);
+            }
+        }
+    }
+
+    if !white.indices.is_empty() {
+        *out.furniture.entry(RoadPart::MarkingWhite).or_default() = white;
+    }
+    if !yellow.indices.is_empty() {
+        *out.furniture.entry(RoadPart::MarkingYellow).or_default() = yellow;
+    }
+    // An entry that was created and stayed empty would become a zero-triangle
+    // submesh, which `surface_to_mesh` skips but `furniture_to_mesh` would
+    // otherwise turn into a mesh asset with no geometry in it.
+    out.furniture.retain(|_, r| !r.indices.is_empty());
+}
+
+/// **One furniture group as its own `MeshAsset`** (wave ROAD1) — `None` when
+/// this road has none of that part.
+///
+/// A separate function from [`surface_to_mesh`] rather than a fourth submesh in
+/// it, because a mesh's submeshes all draw with **one** `Material` component:
+/// four material groups is four assets and four entities however the geometry is
+/// stored. Positions are local to `origin`, the same f32-mantissa reason.
+pub fn furniture_to_mesh(
+    surface: &RoadSurface,
+    origin: DVec3,
+    part: RoadPart,
+) -> Result<Option<(inf_mesh::MeshAsset, MeshBuildReport)>, crate::GisError> {
+    if !origin.is_finite() {
+        return Err(crate::GisError::NotFinite(format!(
+            "the road mesh's local origin {origin:?} is not finite"
+        )));
+    }
+    let Some(ribbon) = surface.furniture.get(&part) else {
+        return Ok(None);
+    };
+    if ribbon.indices.is_empty() {
+        return Ok(None);
+    }
+    let mut report = MeshBuildReport::default();
+    let sub = ribbon_to_submesh(part.label(), ribbon, origin, 0, &mut report)?;
+    report.quantisation_m = f32_quantisation(report.max_offset_m);
+    Ok(Some((
+        inf_mesh::MeshAsset::new(vec![sub], vec![part.label().to_string()]),
+        report,
+    )))
 }
 
 /// **The road surface as a real `MeshAsset`** — the thing Wave G's ribbon
@@ -1445,6 +2294,15 @@ mod tests {
         l
     }
 
+    /// One classified road feature, for the wave-ROAD1 arms below.
+    fn road(pts: &[(f64, f64)], class: &str, name: &str) -> GeoFeature {
+        let mut f = GeoFeature::new(line(pts));
+        f.attributes.insert("name".into(), Attr::Text(name.into()));
+        f.attributes
+            .insert("road_type".into(), Attr::Text(class.into()));
+        f
+    }
+
     /// A synthetic hill with real curvature, so a chord across it is visibly
     /// wrong and a resampled ribbon is not. Portable (no trig): a quadratic
     /// bump, whose second derivative is a constant.
@@ -1694,6 +2552,10 @@ mod tests {
             arterial.width_m(),
             opts.lift_m,
             cross_strips(arterial.width_m(), opts.ground_step_m),
+            // Conforming, which is what this arm measures: a graded section
+            // would sit on one ground sample by design and its "error" would be
+            // the terrain's cross-slope rather than the builder's.
+            0.0,
             &mut h,
         )
         .expect("a ribbon builds");
@@ -2272,13 +3134,22 @@ mod tests {
                 "cross-section is {w} m wide, want 7"
             );
         }
-        // v tiles by arc length / width, so markings are a constant physical size.
-        assert_eq!(r.uvs[0], [0.0, 0.0]);
-        assert_eq!(r.uvs[1], [1.0, 0.0]);
+        // **uv IS METRES** (wave ROAD1): `u` is the offset across the
+        // carriageway, `v` the arc along it, both in world metres — so a
+        // material's `uv_tiling_m` is the whole tiling rule and the road no
+        // longer tiles at its own width. It used to be `(0..1, arc / width_m)`,
+        // which made one uv unit 14.0 m on the island and the committed asphalt
+        // read three and a half times life size (the ASSET0 audit's finding).
+        assert_eq!(
+            r.uvs[0],
+            [-3.5, 0.0],
+            "u is the offset in metres, left edge"
+        );
+        assert_eq!(r.uvs[1], [3.5, 0.0], "…and the right edge is +half");
         let last_v = r.uvs[r.uvs.len() - 1][1];
         assert!(
-            (last_v - (100.0 / 7.0) as f32).abs() < 1e-4,
-            "v at the far end is {last_v}, want 100/7"
+            (last_v - 100.0).abs() < 1e-4,
+            "v at the far end is {last_v} m, want the arc length 100"
         );
         // Faces point up.
         for t in r.indices.chunks_exact(3) {
@@ -2588,6 +3459,335 @@ mod tests {
         println!(
             "NPC1c roads: a {:.1} m closed loop is 1 node and 0 edges",
             seg.length_m()
+        );
+    }
+
+    /// **The road is more than its carriageway** (wave ROAD1, clause 1) — and
+    /// every part of it is measured in metres against the thing it models.
+    ///
+    /// A straight 200 m arterial on a plane, so every number below is a fact
+    /// about the builder and not about a terrain. What is asserted:
+    ///
+    /// * the kerb's upstand is [`KERB_HEIGHT_M`] above the **channel** (which is
+    ///   the carriageway's edge, not its crown, and on a cambered road those are
+    ///   different heights — reading the crown would report 150 mm and build 80);
+    /// * the pavement is [`PAVEMENT_M`] wide and behind the kerb, so a person
+    ///   walking the nav ring is walking on concrete;
+    /// * the crown is `crown_fall · half` above the channel;
+    /// * the paint sits above the surface it is painted on and nowhere else;
+    /// * the two colours are the two colours: yellow only down the middle.
+    #[test]
+    fn a_kerbed_road_carries_a_kerb_a_pavement_a_crown_and_its_paint() {
+        let graph = RoadGraph::from_layer(&layer(vec![road(
+            &[(0.0, 0.0), (200.0, 0.0)],
+            "arterial",
+            "Main",
+        )]));
+        let seg = graph.segments.values().next().expect("one segment");
+        let half = seg.width_m() * 0.5;
+        let opts = SurfaceOptions {
+            crown_fall: DEFAULT_CROWN_FALL,
+            furniture: true,
+            ..SurfaceOptions::default()
+        };
+        // A plane at y = 0, so the ground contributes nothing to any number.
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let surface = build_surface(&graph, &opts, &mut flat);
+
+        // ── the carriageway is CROWNED ───────────────────────────────────────
+        let road = surface
+            .parts
+            .get(&RoadKind::Arterial)
+            .expect("the arterial paved");
+        let crown = road
+            .vertices
+            .iter()
+            .map(|v| v.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let channel = road
+            .vertices
+            .iter()
+            .map(|v| v.y)
+            .fold(f64::INFINITY, f64::min);
+        let want_crown = opts.lift_m + DEFAULT_CROWN_FALL * half;
+        assert!(
+            (crown - want_crown).abs() < 1e-9 && (channel - opts.lift_m).abs() < 1e-9,
+            "the carriageway's crown is {crown} m and its channel {channel} m; \
+             want {want_crown} and {} — a road that is flat across is a painted \
+             strip of ground, and one whose EDGES are raised is a gutter down \
+             the middle",
+            opts.lift_m
+        );
+
+        // ── the kerb ────────────────────────────────────────────────────────
+        let kerb = surface
+            .furniture
+            .get(&RoadPart::Kerb)
+            .expect("a kerbed class builds a kerb");
+        assert!(
+            RoadKind::Arterial.is_kerbed() && !RoadKind::Highway.is_kerbed(),
+            "a street is kerbed and a motorway is not"
+        );
+        // The kerb's top is the channel plus the upstand — measured against the
+        // CHANNEL, because that is what a kerb is laid against.
+        let top = kerb
+            .vertices
+            .iter()
+            .map(|v| v.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let want_top = opts.lift_m + KERB_HEIGHT_M + PAVEMENT_M * PAVEMENT_FALL;
+        assert!(
+            (top - want_top).abs() < 1e-9,
+            "the pavement's back edge is at {top} m; want {want_top} — the \
+             kerb's {KERB_HEIGHT_M} m upstand over the channel plus the \
+             footway's own {PAVEMENT_FALL} cross-fall over {PAVEMENT_M} m"
+        );
+        // …and it reaches out exactly as far as the nav ring does.
+        let reach = kerb
+            .vertices
+            .iter()
+            .map(|v| v.z.abs())
+            .fold(0.0f64, f64::max);
+        let want_reach = half + KERB_WIDTH_M + PAVEMENT_M;
+        assert!(
+            (reach - want_reach).abs() < 1e-6,
+            "the pavement's back edge is {reach} m from the centreline; want \
+             {want_reach} — half the {} m carriageway, a {KERB_WIDTH_M} m kerb \
+             stone and {PAVEMENT_M} m of footway",
+            seg.width_m()
+        );
+        // The skirt closes the cliff: some vertex at the back edge is ON the
+        // ground, or you see through a 190 mm gap at every property line.
+        assert!(
+            kerb.vertices
+                .iter()
+                .any(|v| v.z.abs() > want_reach - 1e-6 && v.y.abs() < 1e-9),
+            "the pavement's outer edge does not reach the ground — the slab is \
+             a floating slice with nothing under it"
+        );
+
+        // ── the paint ───────────────────────────────────────────────────────
+        let yellow = surface
+            .furniture
+            .get(&RoadPart::MarkingYellow)
+            .expect("an arterial has a centre line");
+        let white = surface
+            .furniture
+            .get(&RoadPart::MarkingWhite)
+            .expect("…and edge lines");
+        // **Yellow is only ever down the middle.** It is what separates opposing
+        // traffic, and a yellow edge line would be a road that reads as a
+        // one-way carriageway.
+        let widest_yellow = yellow
+            .vertices
+            .iter()
+            .map(|v| v.z.abs())
+            .fold(0.0f64, f64::max);
+        // The island's arterials take `default_lanes` = 4 until the layer says
+        // otherwise, so the centre line here is a DOUBLE yellow: two lines a
+        // `DOUBLE_LINE_GAP_M` apart, reaching half that plus a line's width.
+        let centre_reach = (DOUBLE_LINE_GAP_M + 2.0 * LINE_WIDTH_M) * 0.5;
+        assert!(
+            widest_yellow <= centre_reach + 1e-9,
+            "yellow paint reaches {widest_yellow} m from the crown and the \
+             centre line is {centre_reach} m half-wide; yellow separates \
+             OPPOSING traffic and must never reach an edge"
+        );
+        // White is at the edges, inside the carriageway.
+        let widest_white = white
+            .vertices
+            .iter()
+            .map(|v| v.z.abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            (widest_white - (half - EDGE_LINE_INSET_M + LINE_WIDTH_M * 0.5)).abs() < 1e-6,
+            "the edge line's outer side is {widest_white} m out; want \
+             {} — inside the carriageway by {EDGE_LINE_INSET_M} m",
+            half - EDGE_LINE_INSET_M + LINE_WIDTH_M * 0.5
+        );
+        // Every painted vertex floats above the surface under it and by exactly
+        // the marking lift — paint that conformed would z-fight, and paint that
+        // ignored the crown would float at the crown and sink at the channel.
+        for r in [yellow, white] {
+            for v in &r.vertices {
+                let under = opts.lift_m + DEFAULT_CROWN_FALL * (half - v.z.abs()).max(0.0);
+                assert!(
+                    (v.y - (under + MARKING_LIFT_M)).abs() < 1e-9,
+                    "a marking at {} m across sits {} m up; the cambered surface \
+                     under it is at {under} m and the paint is {MARKING_LIFT_M} m \
+                     proud of it",
+                    v.z,
+                    v.y
+                );
+            }
+        }
+
+        // ── and a road that asks for none gets none ──────────────────────────
+        let bare = build_surface(&graph, &SurfaceOptions::default(), &mut flat);
+        assert!(
+            bare.furniture.is_empty() && bare.furniture_triangle_count() == 0,
+            "`SurfaceOptions::furniture` defaults to false, so every pre-ROAD1 \
+             caller builds the road it already had"
+        );
+        assert_eq!(
+            bare.parts
+                .get(&RoadKind::Arterial)
+                .map(|r| r.vertices.len()),
+            road.vertices.len().into(),
+            "…and the carriageway itself is the same mesh either way"
+        );
+    }
+
+    /// **An open road has a shoulder where a street has a kerb** (wave ROAD1),
+    /// and the shoulder is asphalt rather than a fourth material.
+    ///
+    /// The distinction is the class's, not an attribute's: a motorway has no
+    /// footway by definition. What separates the shoulder from a running lane is
+    /// the solid white edge line, which is painted at the **carriageway's** edge
+    /// and not at the shoulder's — measured here, because painting it at the
+    /// outer edge is the mistake that makes a hard shoulder look like a lane.
+    #[test]
+    fn an_open_road_gets_a_shoulder_and_a_street_gets_a_kerb() {
+        let graph = RoadGraph::from_layer(&layer(vec![road(
+            &[(0.0, 0.0), (200.0, 0.0)],
+            "highway",
+            "Trunk",
+        )]));
+        let seg = graph.segments.values().next().expect("one segment");
+        let half = seg.width_m() * 0.5;
+        let opts = SurfaceOptions {
+            crown_fall: DEFAULT_CROWN_FALL,
+            furniture: true,
+            ..SurfaceOptions::default()
+        };
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let surface = build_surface(&graph, &opts, &mut flat);
+
+        assert!(
+            !surface.furniture.contains_key(&RoadPart::Kerb),
+            "a motorway does not have a footway"
+        );
+        let road = surface.parts.get(&RoadKind::Highway).expect("paved");
+        let reach = road
+            .vertices
+            .iter()
+            .map(|v| v.z.abs())
+            .fold(0.0f64, f64::max);
+        let want = half + RoadKind::Highway.shoulder_m();
+        assert!(
+            (reach - want).abs() < 1e-6,
+            "the sealed surface reaches {reach} m; want {want} — half the \
+             carriageway plus a {} m shoulder, in the SAME ribbon because a \
+             sealed shoulder is asphalt",
+            RoadKind::Highway.shoulder_m()
+        );
+
+        // The edge line marks the carriageway, not the shoulder.
+        let white = surface
+            .furniture
+            .get(&RoadPart::MarkingWhite)
+            .expect("a highway is marked");
+        let widest = white
+            .vertices
+            .iter()
+            .map(|v| v.z.abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            widest < half,
+            "the edge line's outer side is {widest} m out and the carriageway's \
+             edge is {half} m — a line painted at the shoulder's edge makes the \
+             shoulder read as a running lane"
+        );
+        // Four lanes, so a DOUBLE yellow and one white lane divider each side.
+        assert_eq!(seg.lane_count, 4, "the class's default");
+        let yellow = surface
+            .furniture
+            .get(&RoadPart::MarkingYellow)
+            .expect("opposing traffic is separated in yellow");
+        let mut centres: Vec<f64> = yellow.vertices.iter().map(|v| v.z).collect();
+        centres.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let span = centres.last().unwrap() - centres.first().unwrap();
+        assert!(
+            (span - (DOUBLE_LINE_GAP_M + 2.0 * LINE_WIDTH_M)).abs() < 1e-9,
+            "the centre line spans {span} m; a double yellow is two \
+             {LINE_WIDTH_M} m lines {DOUBLE_LINE_GAP_M} m apart"
+        );
+        // The lane divider is dashed: painted 3 m in 9, so it is broken up into
+        // many disjoint runs rather than one strip.
+        let dashes = white.indices.len() / 6;
+        assert!(
+            dashes > 20,
+            "the white paint is {dashes} quads — a dashed divider over 200 m at \
+             a {DASH_M} m dash and a {DASH_GAP_M} m gap is many, and one long \
+             strip would be a solid line"
+        );
+    }
+
+    /// **A junction of three or more legs gets its crossings** (wave ROAD1) —
+    /// and a bend and a dead end do not.
+    ///
+    /// Degree 3 is the same threshold `fill_junctions` uses, for the same
+    /// reason: a degree-2 node is a bend in one road and nobody crosses a bend.
+    #[test]
+    fn a_real_junction_gets_a_crossing_and_a_bend_does_not() {
+        // A T: two arms meeting a through-route at one node.
+        let graph = RoadGraph::from_layer(&layer(vec![
+            road(&[(-200.0, 0.0), (0.0, 0.0)], "arterial", "West"),
+            road(&[(0.0, 0.0), (200.0, 0.0)], "arterial", "East"),
+            road(&[(0.0, 0.0), (0.0, 200.0)], "arterial", "South"),
+        ]));
+        let opts = SurfaceOptions {
+            crown_fall: DEFAULT_CROWN_FALL,
+            furniture: true,
+            ..SurfaceOptions::default()
+        };
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let crossed = build_surface(&graph, &opts, &mut flat);
+        let with_junction = crossed
+            .furniture
+            .get(&RoadPart::MarkingWhite)
+            .map(|r| r.triangle_count())
+            .unwrap_or(0);
+
+        // The control: the same three roads with the junction pulled apart, so
+        // no node has three legs. Same length of road, same edge lines, no
+        // crossings.
+        let apart = layer(vec![
+            road(&[(-200.0, -1000.0), (0.0, -1000.0)], "arterial", "West"),
+            road(&[(0.0, 1000.0), (200.0, 1000.0)], "arterial", "East"),
+            road(&[(900.0, 0.0), (900.0, 200.0)], "arterial", "South"),
+        ]);
+        let lone = build_surface(&RoadGraph::from_layer(&apart), &opts, &mut flat);
+        let without = lone
+            .furniture
+            .get(&RoadPart::MarkingWhite)
+            .map(|r| r.triangle_count())
+            .unwrap_or(0);
+
+        assert!(
+            with_junction > without,
+            "the T junction painted {with_junction} white triangles and three \
+             disjoint roads of the same length painted {without} — a crossing \
+             is what the difference is, and no difference means none was laid"
+        );
+        // And the bars really are at the junction: white paint within the
+        // setback band, across the carriageway, on all three legs.
+        let white = crossed
+            .furniture
+            .get(&RoadPart::MarkingWhite)
+            .expect("white paint");
+        let near_node = white
+            .vertices
+            .iter()
+            .filter(|v| {
+                let d = (v.x * v.x + v.z * v.z).sqrt();
+                d > CROSSWALK_SETBACK_M - 1.0 && d < CROSSWALK_SETBACK_M + CROSSWALK_DEPTH_M + 1.0
+            })
+            .count();
+        assert!(
+            near_node >= 3 * 4,
+            "only {near_node} painted vertices sit in the crossing band around \
+             the junction; three legs of bars is many more"
         );
     }
 }

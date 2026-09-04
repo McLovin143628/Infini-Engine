@@ -260,6 +260,18 @@ pub fn run_import(
                 lift_m: settings.road_lift_m,
                 ground_step_m: settings.road_ground_step_m,
                 fill_junctions: true,
+                // **The wizard conforms and builds no furniture** (wave ROAD1),
+                // and both are the honest answer for an IMPORT rather than a
+                // limitation. A road dropped onto somebody else's terrain has no
+                // right to a graded design surface — crowning it would leave its
+                // edges floating over the hillside by exactly the terrain's own
+                // cross-slope — and kerbs, pavements and paint are three more
+                // entities the wizard would have to place, name, undo and
+                // material-bind through a door it does not have. The island's
+                // recipe owns its terrain and states both; `SurfaceOptions`'s own
+                // field notes carry the reasoning.
+                crown_fall: 0.0,
+                furniture: false,
             },
             ..Default::default()
         };

@@ -95,9 +95,11 @@ pub use import::{
     ISLAND_MAX_ENTITIES,
 };
 pub use roads::{
-    build_all_ribbons, build_ribbon, build_surface, densify_spine, surface_to_mesh, Intersection,
-    MeshBuildReport, RoadGraph, RoadKind, RoadRibbon, RoadSegment, RoadSurface, SurfaceOptions,
-    DEFAULT_GROUND_STEP_M, DEFAULT_ROAD_LIFT_M, LANE_WIDTH_M,
+    build_all_ribbons, build_ribbon, build_surface, cross_frames, densify_spine, furniture_to_mesh,
+    surface_to_mesh, CrossFrame, Intersection, MeshBuildReport, RoadGraph, RoadKind, RoadPart,
+    RoadRibbon, RoadSegment, RoadSurface, SurfaceOptions, DEFAULT_CROWN_FALL,
+    DEFAULT_GROUND_STEP_M, DEFAULT_ROAD_LIFT_M, FURNITURE_PARTS, KERB_HEIGHT_M, KERB_WIDTH_M,
+    LANE_WIDTH_M, PAVEMENT_M,
 };
 pub use terrarium::{
     decode_elevation, decode_tile_png, decode_tile_rgb, encode_elevation, TerrariumTile,
