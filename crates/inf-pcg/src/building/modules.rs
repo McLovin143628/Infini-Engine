@@ -482,36 +482,6 @@ impl ModuleShape {
         }
     }
 
-    /// **What a module of this family is MADE of** (wave VEN1a): its authored
-    /// emission, its metal, its roughness and its tint.
-    ///
-    /// # Why here and not in the DSL
-    ///
-    /// The exact argument [`crate::grammar::ModuleDef::glow`] already makes and
-    /// which this wave only extends: *the DSL describes where a module goes, and
-    /// what a module is is the palette's business*. There is no `metallic`
-    /// keyword and there will not be one. A chrome pole is chrome in every
-    /// archetype by one rule, rather than by seven authored numbers that can
-    /// disagree — and a palette that adds a pole and forgets to say "chrome"
-    /// cannot exist, because saying "pole" is saying chrome.
-    ///
-    /// # Why the twelve older families answer the default
-    ///
-    /// [`PcgSurface::DEFAULT`] is exactly `metallic 0.0, roughness 0.75, tint
-    /// None, no emission` — the constants both projectors hard-coded for every
-    /// scattered instance from P18.5 until this wave. So every building the
-    /// engine has ever drawn draws byte-identically, and the venue families are
-    /// the only ones that move.
-    ///
-    /// # The tints, and where they come from
-    ///
-    /// The reference frames (`venues/0020`–`0060`): a wood catwalk and wood
-    /// benches, a chrome pole catching the stage wash as one vertical streak, a
-    /// glossy dark bar top with a blue rim, near-black walls, and neon in
-    /// saturated primaries. The **authored** tints here are the wood, the chrome
-    /// and the bar; the neon's *hue* is per-archetype and arrives through the
-    /// palette's own furniture table, because a strip club's sign is not a
-    /// cocktail bar's.
     /// **What part of a building this family IS** (wave ASSET0, clause 4).
     ///
     /// The archetype's surface set is keyed by this, so a shop's walls can be
@@ -544,6 +514,36 @@ impl ModuleShape {
         }
     }
 
+    /// **What a module of this family is MADE of** (wave VEN1a): its authored
+    /// emission, its metal, its roughness and its tint.
+    ///
+    /// # Why here and not in the DSL
+    ///
+    /// The exact argument [`crate::grammar::ModuleDef::glow`] already makes and
+    /// which this wave only extends: *the DSL describes where a module goes, and
+    /// what a module is is the palette's business*. There is no `metallic`
+    /// keyword and there will not be one. A chrome pole is chrome in every
+    /// archetype by one rule, rather than by seven authored numbers that can
+    /// disagree — and a palette that adds a pole and forgets to say "chrome"
+    /// cannot exist, because saying "pole" is saying chrome.
+    ///
+    /// # Why the twelve older families answer the default
+    ///
+    /// [`PcgSurface::DEFAULT`] is exactly `metallic 0.0, roughness 0.75, tint
+    /// None, no emission` — the constants both projectors hard-coded for every
+    /// scattered instance from P18.5 until this wave. So every building the
+    /// engine has ever drawn draws byte-identically, and the venue families are
+    /// the only ones that move.
+    ///
+    /// # The tints, and where they come from
+    ///
+    /// The reference frames (`venues/0020`–`0060`): a wood catwalk and wood
+    /// benches, a chrome pole catching the stage wash as one vertical streak, a
+    /// glossy dark bar top with a blue rim, near-black walls, and neon in
+    /// saturated primaries. The **authored** tints here are the wood, the chrome
+    /// and the bar; the neon's *hue* is per-archetype and arrives through the
+    /// palette's own furniture table, because a strip club's sign is not a
+    /// cocktail bar's.
     pub fn surface(self) -> PcgSurface {
         match self {
             // ── the twelve that predate the venue wave: unmoved ──

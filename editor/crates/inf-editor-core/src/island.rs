@@ -2168,8 +2168,6 @@ mod tests {
         }
     }
 
-    /// The fixture's level really is a level: it names the terrain, the biome
-    /// set, an ocean, the water the design found and a player-controlled hero.
     /// **THE STREET HAS A SURFACE** (wave ASSET0, clause 0).
     ///
     /// The EDIT1 audit measured the island's `Roads` mesh at
@@ -2252,6 +2250,8 @@ mod tests {
         }
     }
 
+    /// The fixture's level really is a level: it names the terrain, the biome
+    /// set, an ocean, the water the design found and a player-controlled hero.
     #[test]
     fn the_fixture_level_carries_the_island_it_describes() {
         let Some(d) = design("samples/island-fixture/island.toml") else {
