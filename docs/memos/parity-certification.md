@@ -956,8 +956,27 @@ reproducible number in this document.
 
 The island's frame is **CPU-bound**: crowd cleared, the pipelined estimate is
 21.065 ms of CPU against a 12.834 ms GPU frame. The fixed step alone is
-**7.664 ms/step** against a 6.0 ms ratchet, and the dearest CPU stages are the
-solver (3.295 ms) and the physics3d sync (3.035 ms). The dearest GPU pass is
+**7.664 ms/step** against a 6.0 ms ratchet (audit re-run: **7.545**), and the
+dearest CPU stages are the solver (3.295 ms) and the physics3d sync (3.035 ms).
+
+**Which of these numbers is a tripwire, plainly** (audit; the row did not say).
+**None of the island's are.** `the_island_at_shipping_resolution` prints its own
+sentence — *"Reported, never asserted: the ceilings in `inf_player::budget` are
+set from the composed city, and asserting them over a different world would
+re-pin a ratchet by accident"* — so 42.299 ms exceeding a 38.0 ms ceiling is by
+design and not a silent pass. The **fixed step is the same**: every island row
+prints "REPORTED, NOT ASSERTED — the 6 ms ratchet binds the ISOLATED step, which
+is `island_gate`'s furnish battery over the fixture and this file's own city
+arm", and that isolated step measures **2.947 ms** against the 6.0 and IS
+asserted. So 7.545 ms of island step is a fact about the island, over a ceiling
+that was never aimed at it, and the thing that would go red is the city's.
+
+The two ceilings that DO bite — `SHIPPING_FRAME_CEILING_MS` and its p99 twin —
+bite only on the composed city, only on a representative adapter, only outside
+CI, and only in `--release`; the lit configuration this wave folded in is
+measured **after** the adapter and CI early-returns, so a software rasterizer or
+a shared runner cannot reach the assertion at all. Verified by reading the
+control flow, at head. The dearest GPU pass is
 scatter, at 5.916 ms of 12.834.
 
 The island builds in **54.0 s** and cooks in **43.1 s**; the cooked pack is

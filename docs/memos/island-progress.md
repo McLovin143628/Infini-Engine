@@ -29509,6 +29509,21 @@ clean. CRLF sweep over the whole diff: **0**.
     furniture and lighting, PAR2 particles, PAR3 the froxel LUT and shadowed local
     in-scatter and the `voxel.wgsl` fog hole, PAR4 a veiling term around a non-sun
     source, PAR5 skin — behind the `SkinnedInstance` material handle.
+12. **(audit) A stated-purpose golden for a terrain seam and a morph band** —
+    memo row D-22. Forcing `morph_at` to 1.0 everywhere reds **0 of 121** arms
+    while halving `ground_height` reds **9**, so the harness sees this terrain and
+    cannot see the rule CP-C7 is about. Needs a capture at a resolution that can
+    resolve one texel, which is a new golden and a stated purpose, not a bless.
+13. **(audit) The mid LOD band's on-screen pop at 64 m is unmeasured** — memo row
+    D-23. `crates/inf-render/tests/structure_lod_pop.rs` is this repository's own
+    1080p instrument for a band swap and it was not aimed at the new band; the
+    band rests on an instance count (12.2 %) and an occlusion argument (the
+    envelope is opaque except at a doorway). Both are sound; neither is a pixel.
+14. **(audit) The shipped frame on this content is not reproducible to better
+    than about 1.6x between runs** — city p95 16.733 / 14.209 / 10.660, island
+    p50 39.672 / 28.371 — while every LIT row reproduces to a tenth of a
+    millisecond. Until that is understood, any delta taken against a shipped
+    baseline here is a claim about the run and not about the change.
 
 ### AUDIT (2026-09-03, adversarial, at `96361a09`)
 
