@@ -47,16 +47,44 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // Camera-only reprojection through the depth prepass.
+    //
+    // **No prepass depth here → no valid history** (audit FIX1). Reverse-Z
+    // clears this target to 0.0 = far, so `depth == 0.0` means "nothing this
+    // pass can see wrote a depth at this pixel": the sky, and — until VIS-C1b
+    // lands — every meshlet, every scattered instance, the water and the
+    // translucents, none of which contribute to the prepass.
+    //
+    // The branch below used to fall through with `hist_uv = in.uv`, which is an
+    // IDENTITY reprojection. That is right for a camera that has not moved and
+    // wrong for one that has, and the wrongness is not a small one: the pixel
+    // then takes 0.9 of a history holding what a DIFFERENT part of the world
+    // looked like, bounded only by the 3x3 neighbourhood clamp — which on the
+    // high-frequency content this describes is a wide box, so bright values
+    // dilate outward a little further every frame. That is the "washed out and
+    // heavily ghosted" frame the author reported: measured on the shipped
+    // island as a blown-out pixel fraction rising 0.048 -> 0.134 over two
+    // seconds of walking, and reproduced headlessly in
+    // `tests/taa_motion.rs` as a resolve that moves 4.3x further from its own
+    // source under a moving camera while the rigid-mesh control does not move
+    // at all.
+    //
+    // Refusing the history is the same rule this shader already applies one
+    // branch down for a reprojection that lands off-screen, and for the same
+    // reason: a pixel whose history cannot be located must take the frame it
+    // has. The cost is that those surfaces get no temporal AA, which is what
+    // VIS-C1b already says they do not get from SSAO or SSR either — the
+    // difference is that they are now merely un-antialiased instead of smeared.
     let depth = load_depth(in.uv);
+    if (depth <= 0.0) {
+        return vec4<f32>(current, 1.0);
+    }
     var hist_uv = in.uv;
-    if (depth > 0.0) {
-        let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-        let world = unproject(ndc, depth);
-        let pc = taa.prev_view_proj * vec4<f32>(world, 1.0);
-        if (pc.w > 0.0) {
-            let p = pc.xyz / pc.w;
-            hist_uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-        }
+    let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let world = unproject(ndc, depth);
+    let pc = taa.prev_view_proj * vec4<f32>(world, 1.0);
+    if (pc.w > 0.0) {
+        let p = pc.xyz / pc.w;
+        hist_uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     }
     // Off-screen reprojection → no valid history.
     if (hist_uv.x < 0.0 || hist_uv.x > 1.0 || hist_uv.y < 0.0 || hist_uv.y > 1.0) {
