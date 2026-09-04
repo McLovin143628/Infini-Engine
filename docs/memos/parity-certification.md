@@ -461,6 +461,46 @@ the arm that asserts at morph 0 — every golden's near ground — the interior 
 **bit-identical over 65 025 of 66 049 fragments** and only the **1-texel edge
 ring, 1.55 %, moves**.
 
+**And "the goldens bound this change" is now a measurement, not a threshold
+argument** (audit). The wave left open which of two things was true — that no
+golden covers a terrain morph band, or that the strict comparison is hiding the
+change. **Neither: a golden covers it and the harness is blind to the entire
+morph rule.** `golden_terrain_lod` draws 32 m tiles, whose `lod_thresholds` are
+48 / 96 / 192 m, so its ring-0 morph ramp is **[31.2, 48) m**, its camera sits
+6 m off the near end of a 192 m strip, and it asserts ≥ 2 rings — it renders that
+band in every frame. Three one-line mutations of `terrain.wgsl`, each run against
+all 121 arms under `INF_GOLDEN_STRICT=1` and then restored:
+
+| mutation | arms red |
+|---|---|
+| `morph_at` returns **1.0** — every patch fully morphed, everywhere | **0 of 121** |
+| the pre-CERT1 edge-gradient **halving** restored | **0 of 121** |
+| *(control)* `ground_height` returns **half** its sampled height | **9**, including `golden_terrain_lod` |
+
+The control is what makes the two zeros mean something: the harness sees this
+terrain and it cannot see the morph. **A stated-purpose golden aimed at a
+terrain seam and a morph band, captured at a resolution that can resolve one
+texel, is the honest close of this row** — it is priced below and it is not this
+wave's to bless.
+
+**The morph's own GPU cost, measured** (audit; the wave carried it unmeasured).
+Same island drive, same rounds, RTX 4070 Ti at 1080p, `terrain` pass only, with
+`morph_at` forced to `0.0` as the control:
+
+| island configuration | morph on | morph off | delta |
+|---|---|---|---|
+| as it ships | 3.168 | 2.945 | **+0.223 ms** |
+| LIT | 3.488 | 3.203 | +0.285 |
+| LIT + SSR | 3.434 | 3.215 | +0.219 |
+| LIT + visbuffer | 3.423 | 3.234 | +0.189 |
+| LIT, coarse clipmap | 3.528 | 3.290 | +0.238 |
+| LIT+VIS, crowd cleared | 3.498 | 3.289 | +0.209 |
+
+**+0.19 to +0.29 ms**, 6–8 % of the terrain pass and about 1.6 % of a 12.9 ms
+GPU frame — and that is the cost of the WHOLE morph, the pre-CERT1 vertex half
+included, so this wave's own increment is smaller still. The 16 → 80 texel loads
+are real and they are not what this frame is short of.
+
 ### CP-B2 · The streets are never empty — MEASURED
 
 Shipped island, 7 000 m of resident street, after the plan queues settle:
@@ -964,6 +1004,8 @@ exist), and LSP/terminal/git runtime.
 | D-19 | 14:00 and 21:00 are the same street | NPC | identical counts; the schedule has no evening |
 | D-20 | A crowd is a wall | NPC | 4.7 m in 10 s against 87.4 m on an empty street |
 | D-21 | No committed capture of the island's frame at any resolution | — | every golden is 320 × 180; strict compares at 64 × 36 |
+| D-22 | **A stated-purpose golden for a terrain seam and a morph band** | terrain | audit-measured: forcing `morph_at` to 1.0 everywhere reds **0 of 121** arms while halving `ground_height` reds **9** — the harness sees this terrain and cannot see the morph at all |
+| D-23 | **The mid LOD band's on-screen pop at 64 m is unmeasured** | LOD | `crates/inf-render/tests/structure_lod_pop.rs` is the repository's own 1080p instrument for exactly this and was not aimed at the new band; the band is justified by an instance-count saving (12.2 %) and an occlusion argument, neither of which is a pixel |
 
 ---
 

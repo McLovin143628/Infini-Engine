@@ -29283,7 +29283,14 @@ arms: `INF_GOLDEN_STRICT` downscales to 64 × 36 with a 6 % mean tolerance, so a
 one-texel line every 256 m is below its resolution by construction. What makes
 the result mean something is the arm asserting that at morph 0 the interior is
 **bit-identical over 65 025 of 66 049 fragments** and only the 1.55 % edge ring
-moves.
+moves. **The audit measured how weak the golden result is rather than arguing
+it**: `golden_terrain_lod` does render a ring-0 morph band ([31.2, 48) m on its
+32 m tiles), and forcing `morph_at` to 1.0 — every patch fully morphed,
+everywhere — reds **0 of 121 arms**, as does restoring the pre-CERT1 edge
+halving, while the control (half the sampled height) reds **9** including that
+same arm. The harness sees this terrain and is blind to the whole morph rule.
+**The morph's GPU cost, also measured by the audit** (carried item 8, closed):
+**+0.19 to +0.29 ms** of the island's `terrain` pass, 6-8 % of it.
 
 ### (4) A GRAMMAR BUILDING HAD TWO TIERS WHERE THE OWNER ASKED FOR THREE — CP-C3
 
@@ -29474,10 +29481,19 @@ clean. CRLF sweep over the whole diff: **0**.
    tile-edge normal is corrected in magnitude but not made continuous — the
    residual is 1.318° across a seam and full continuity needs an apron ring in the
    page upload, which is a `.inf_terrain` change.
-8. **The morph band costs the fragment 16 → 80 texel loads inside it**, unmeasured
-   on a GPU. Hoisting the coarse cell's four corners out of the four taps would cut
-   it to ~32 and is the named follow-up.
-9. **There is no committed capture of the island's own frame at any resolution.**
+8. ~~**The morph band costs the fragment 16 → 80 texel loads inside it**,
+   unmeasured on a GPU.~~ **CLOSED by the audit: +0.19 to +0.29 ms** of the
+   island's `terrain` pass at 1080p on an RTX 4070 Ti (3.168 → 2.945 ms as it
+   ships, with `morph_at` forced to 0.0 as the control), i.e. 6-8 % of that pass
+   and ~1.6 % of a 12.9 ms GPU frame — and that is the whole morph, the
+   pre-CERT1 vertex half included. Hoisting the coarse cell's four corners out of
+   the four taps would cut it to ~32 loads and is still the named follow-up, but
+   it is now known to be worth under a quarter of a millisecond.
+9. **There is no committed capture of the island's own frame at any resolution**,
+   and the audit measured what that costs: a golden that DOES render a terrain
+   morph band (`golden_terrain_lod`) stays green when the morph is forced to 1.0
+   everywhere, so the harness is blind to the whole rule at 64 × 36. A
+   stated-purpose golden at a resolution that can resolve one texel is the close.
    Every golden in this repository is 320 × 180 and `INF_GOLDEN_STRICT` compares at
    64 × 36 with a 6 % mean tolerance, which is why the terrain row is armed at the
    CPU-twin level and its fixes are asserted in degrees and metres rather than in

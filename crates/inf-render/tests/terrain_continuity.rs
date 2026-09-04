@@ -1311,6 +1311,31 @@ fn the_instance_slots_mean_the_same_thing_on_both_sides() {
 /// This arm supplies the bound the goldens cannot: over one ring-0 patch, how
 /// many fragments this wave changed and by how much, split by cause.
 ///
+/// # HOW WEAK, MEASURED (CERT1 audit)
+///
+/// "The goldens bound this change" was a claim about a threshold, and the audit
+/// turned it into a mutation. Three runs of `cargo test -p inf-render --test
+/// golden` under `INF_GOLDEN_STRICT=1`, at head, each with one line of
+/// `terrain.wgsl` changed and the file restored afterwards:
+///
+/// | mutation | golden arms red |
+/// |---|---|
+/// | `morph_at` returns **1.0** — every patch fully morphed to the coarse lattice, everywhere | **0 of 121** |
+/// | the edge gradient divided by a fixed `2 · texel · span` again — the pre-CERT1 **halving** restored | **0 of 121** |
+/// | *(control)* `ground_height` returns **half** the sampled height | **9**, `golden_terrain`, `golden_terrain_lod`, `golden_terrain_splat`, `golden_biomes`, `golden_ground_close` and four water arms |
+///
+/// So the answer is not "no golden covers a morph band". `golden_terrain_lod`
+/// renders 32 m tiles, whose `lod_thresholds` are 48 / 96 / 192 m, so its ring-0
+/// morph ramp is **[31.2, 48) m** and its camera sits 6 m off the near end of a
+/// 192 m strip — it draws that band in every frame, it asserts ≥ 2 rings, and it
+/// is one of the nine the control reds. **The harness sees the terrain and is
+/// blind to the whole morph rule**, not merely to this wave's edit of it: the
+/// most extreme mutation available to the morph moves nothing at 64 × 36 against
+/// a 6 % mean tolerance.
+///
+/// That is the honest standing of "121 green, none blessed" for anything this
+/// file measures, and it is why the numbers below are in degrees and metres.
+///
 /// **The vertex stage is byte-identical wherever the morph is zero** and that is
 /// not an approximation: the pre-CERT1 code evaluated `mix(h_fine, h_coarse, 0)`,
 /// which is `h_fine + (h_coarse − h_fine) · 0` — exactly `h_fine` in IEEE for any
@@ -1386,7 +1411,10 @@ fn what_this_wave_changed_in_a_frame() {
     println!("  inside a morph band: worst normal change {morph_worst:.3}°");
     println!(
         "  the golden harness compares at 64 × 36 with a 6 % mean / 35 % max \
-         tolerance, so it can see (b) and cannot see (a)."
+         tolerance, and the CERT1 audit MEASURED that it sees NEITHER (a) NOR \
+         (b): forcing `morph_at` to 1.0 everywhere reds 0 of 121 arms, while \
+         halving `ground_height` reds 9 — so the harness sees this terrain and \
+         is blind to the whole morph rule. See this arm's own doc."
     );
     assert!(morph_worst > 1.0, "the morph band did not change at all");
 }
