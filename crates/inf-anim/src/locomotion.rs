@@ -1757,4 +1757,88 @@ mod tests {
             .position(|j| j.name == name)
             .unwrap_or_else(|| panic!("the rig has no `{name}`"))
     }
+
+    /// **Multiplying by the identity is not the identity FUNCTION on signed
+    /// zero, and this is the arm that says so** (audit FIX1).
+    ///
+    /// `gait_clip` guards the arm-swing composition: a rig whose arms already
+    /// hang gets the bare `quat_x(...)` and never `swing * rest`. The wave that
+    /// wrote that guard measured its absence — the first cut moved
+    /// `samples/phase29-locomotion`'s two committed gait clips by exactly three
+    /// bytes — and then credited
+    /// [`a_rig_that_already_hangs_its_arms_gets_no_rest_rotation`] with pinning
+    /// it. **It does not.** That arm asserts `arm.rest == IDENTITY` and the
+    /// idle's track count; bypassing the guard leaves all seventeen locomotion
+    /// arms green, and every committed-content gate in the repository with them,
+    /// because nothing regenerates a committed `.inf_anim` and compares bytes.
+    ///
+    /// Three bytes is three SIGN BITS. A quaternion product computes
+    /// `x = w1·x2 + x1·w2 + y1·z2 − z1·y2`, and for `x1 = -0.0` against the
+    /// identity that is `0.0 + (-0.0) + 0.0 − 0.0 = +0.0`. So the fingerprint of
+    /// the guard is a **negative zero surviving into a committed clip**, and the
+    /// fingerprint of its absence is the same clip carrying `+0.0` there
+    /// instead — a difference `==` cannot see, which is why this reads
+    /// `to_bits`.
+    ///
+    /// The count is asserted rather than merely "> 0" so that a generator change
+    /// which quietly stops producing them has to come here and say so.
+    #[test]
+    fn a_hanging_rigs_arm_swing_keeps_its_negative_zeros_to_the_bit() {
+        /// Sign bits the canonical biped's **walk and run** carry between
+        /// them. Not the same number as the three bytes the wave measured moving
+        /// in `samples/phase29-locomotion` — that is a different rig with
+        /// different keys — and stated separately for exactly that reason: this
+        /// is the count on the rig this arm builds, measured at 144811d8.
+        const EXPECTED_NEGATIVE_ZEROS: usize = 6;
+
+        let rig = crate::template::build_template(
+            BodyPlan::BipedCanonical,
+            &crate::template::BodyParams::default(),
+        )
+        .expect("the canonical biped builds");
+        let roles = rig.role_index();
+        let arms = arms_of(BodyPlan::BipedCanonical, &rig.skeleton, &roles).expect("two arms");
+        // The premise: this rig is one whose arms already hang, so the guard is
+        // the branch it takes. Without this the count below could be explained
+        // by a rest rotation that happened to be harmless.
+        for arm in &arms {
+            assert_eq!(arm.rest, glam::Quat::IDENTITY, "this rig does not hang");
+        }
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default())
+            .expect("the locomotion set builds");
+
+        let mut negative_zeros = 0usize;
+        let mut keys = 0usize;
+        for clip in [&set.walk, &set.run] {
+            for track in &clip.tracks {
+                if !arms.iter().any(|a| a.upper == track.joint) {
+                    continue;
+                }
+                let Some(rot) = &track.rotation else { continue };
+                keys += rot.values.len();
+                for q in &rot.values {
+                    for v in q {
+                        // A negative zero: equal to zero, and not the all-clear
+                        // bit pattern. `*v == 0.0` is true for both.
+                        if *v == 0.0 && v.to_bits() != 0 {
+                            negative_zeros += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "FIX1 audit — the canonical biped's arm swing: {keys} keys over two gait \
+             clips, {negative_zeros} negative zero(s)"
+        );
+        assert!(keys > 0, "no arm rotation track was generated at all");
+        assert_eq!(
+            negative_zeros, EXPECTED_NEGATIVE_ZEROS,
+            "a rig whose arms already hang generated {negative_zeros} negative \
+             zero(s) where it generated {EXPECTED_NEGATIVE_ZEROS}. If this fell to \
+             zero, the arm swing is being composed with an identity rest rotation \
+             again and every committed clip of a hanging rig has moved by that \
+             many sign bits — see the guard in `gait_clip`."
+        );
+    }
 }
