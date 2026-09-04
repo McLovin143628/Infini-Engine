@@ -112,6 +112,21 @@ content = [
   "../ground/Ground_Soil_Normal.inf_tex.toml",
   "../ground/Ground_Soil_ORM.inf_tex",
   "../ground/Ground_Soil_ORM.inf_tex.toml",
+
+  # THE ROAD SURFACE (wave ASSET0, clause 0). The level binds this
+  # `.inf_mat` on its `Roads` entity, so a project built without it has the
+  # street the hero stands on bound to a material nothing can resolve --
+  # which is exactly the 0.8 debug grey this wave went to remove.
+  "../ground/Road_Asphalt.inf_mat",
+  "../ground/Road_Asphalt.inf_mat.toml",
+  "../ground/Road_Asphalt_Albedo.inf_tex",
+  "../ground/Road_Asphalt_Albedo.inf_tex.toml",
+  "../ground/Road_Asphalt_Detail.inf_tex",
+  "../ground/Road_Asphalt_Detail.inf_tex.toml",
+  "../ground/Road_Asphalt_Normal.inf_tex",
+  "../ground/Road_Asphalt_Normal.inf_tex.toml",
+  "../ground/Road_Asphalt_ORM.inf_tex",
+  "../ground/Road_Asphalt_ORM.inf_tex.toml",
   # THE SETTLEMENT ZONE LIBRARY (wave I8a). Every settlement block's
   # `PcgVolume.graph` names one of these seven GUIDs, so a project built without
   # them has a hundred and seventy blocks bound to documents nothing can

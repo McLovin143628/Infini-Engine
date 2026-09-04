@@ -5,6 +5,13 @@ first `.inf_tex` files this repository has ever committed. Before TER2a the
 whole virtual-texture stack had no content that reached it and the 51 km²
 island's ground was one flat colour.
 
+**Wave ASSET0 appended a sixth, `Road_Asphalt`** - not a splat layer
+but the same kind of object, and for the same reason one level up: the
+island's `Roads` entity carried a `MeshRef` and no `Material` at
+all, so the street the editor opens standing on drew
+`Material::default().base_color` - 0.8 linear, the engine's debug
+grey, in both hosts.
+
 Each set is a `.inf_mat` naming three or four `.inf_tex` v2 tiled
 containers: a 1 024² albedo, a 512² tangent-space normal, a 512² ORM, and —
 for grass and rock — a 512² high-frequency detail normal.
@@ -16,6 +23,7 @@ for grass and rock — a 512² high-frequency detail normal.
 | `Ground_ForestFloor` | 2.5 m | 2.44 mm | — |
 | `Ground_Sand` | 1.5 m | 1.46 mm | — |
 | `Ground_Soil` | 2.2 m | 2.15 mm | — |
+| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm |
 
 **Albedo and ORM are BC1; normals and detail maps are BC5** (wave
 IASSET2). Every map used to be BC1, including the normals, and that was a

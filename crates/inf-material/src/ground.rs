@@ -1,5 +1,7 @@
 //! **The engine's ground library** (wave TER2a, clause 3): five PBR ground sets,
-//! synthesised here and committed as engine sample content.
+//! synthesised here and committed as engine sample content — plus a sixth,
+//! `Road_Asphalt`, appended by wave ASSET0 for the surface the island's road
+//! mesh binds (see [`GroundKind::Asphalt`]).
 //!
 //! # Why this exists
 //!
@@ -44,7 +46,7 @@
 //! that was a measurement rather than a preference: `inf_render::build_vt_level`
 //! picked ONE atlas format for a whole level, and a level whose textures were
 //! **mixed** fell back to `Rgba8` — 73 984 B a page against BC1's 9 248, so a
-//! 24 MiB pool held **340** pages instead of 2 721. The seventeen textures here
+//! 24 MiB pool held **340** pages instead of 2 721. The twenty textures here
 //! need 51 pages of deterministic floor between them, which either pool fits;
 //! what the demotion cost was everything *after* the floor — 2 670 pages of
 //! camera-driven refinement against **289**, a 9.2× cut.
@@ -122,7 +124,7 @@ pub const GROUND_ALBEDO_EXTENT: u32 = 1024;
 /// more.
 pub const GROUND_MAP_EXTENT: u32 = 512;
 
-/// The five ground sets.
+/// The ground sets — five splat surfaces and one road surface.
 ///
 /// Four of them are what the island's four splat layers bind
 /// (`inf_island::splat`'s layer order: grass, rock, forest floor, sand); the
@@ -137,17 +139,28 @@ pub enum GroundKind {
     ForestFloor,
     Sand,
     Soil,
+    /// **The road surface** (wave ASSET0, clause 0). Not a splat layer — no
+    /// `TerrainLayer` binds it — but the same kind of object: a tiling PBR
+    /// surface set with an albedo, a normal, an ORM and a detail map, minted
+    /// out of the same generator and byte-locked by the same test.
+    ///
+    /// It is here rather than in a library of its own because the alternative
+    /// was 200 lines transcribing this module's ids, files, sidecars, README
+    /// and lock test for one more surface. `ALL` is APPENDED to, which the
+    /// GUID block was laid out for (`ground.rs`'s `GROUND_GUID_BASE`).
+    Asphalt,
 }
 
 impl GroundKind {
     /// Every kind, in a **frozen** order — it is the order the assets are
     /// written in and therefore the order their GUIDs are assigned in.
-    pub const ALL: [GroundKind; 5] = [
+    pub const ALL: [GroundKind; 6] = [
         GroundKind::Grass,
         GroundKind::Rock,
         GroundKind::ForestFloor,
         GroundKind::Sand,
         GroundKind::Soil,
+        GroundKind::Asphalt,
     ];
 
     /// The asset stem: `Ground_Grass`, `Ground_Rock`, …
@@ -158,6 +171,7 @@ impl GroundKind {
             GroundKind::ForestFloor => "Ground_ForestFloor",
             GroundKind::Sand => "Ground_Sand",
             GroundKind::Soil => "Ground_Soil",
+            GroundKind::Asphalt => "Road_Asphalt",
         }
     }
 
@@ -169,6 +183,7 @@ impl GroundKind {
             GroundKind::ForestFloor => "forest floor",
             GroundKind::Sand => "sand",
             GroundKind::Soil => "soil",
+            GroundKind::Asphalt => "asphalt",
         }
     }
 
@@ -181,6 +196,7 @@ impl GroundKind {
             GroundKind::ForestFloor => 0x7E12_0003,
             GroundKind::Sand => 0x7E12_0004,
             GroundKind::Soil => 0x7E12_0005,
+            GroundKind::Asphalt => 0x7E12_0006,
         }
     }
 
@@ -197,6 +213,7 @@ impl GroundKind {
             GroundKind::ForestFloor => 2.5,
             GroundKind::Sand => 1.5,
             GroundKind::Soil => 2.2,
+            GroundKind::Asphalt => 4.0,
         }
     }
 
@@ -211,22 +228,29 @@ impl GroundKind {
     /// time on: the ground you stand on and the cliff you look at. The other
     /// three would each cost another 259 KB of committed bytes for a surface
     /// that is usually further away, and the mechanism is proven by two
-    /// consumers as well as by five.
+    /// consumers as well as by five. **Asphalt joined them** (wave ASSET0): the
+    /// road is the one surface the player is guaranteed to stand on, and its
+    /// close-range signal is the sand fraction between the chips.
     pub const fn has_detail(self) -> bool {
-        matches!(self, GroundKind::Grass | GroundKind::Rock)
+        matches!(
+            self,
+            GroundKind::Grass | GroundKind::Rock | GroundKind::Asphalt
+        )
     }
 
     /// The `.inf_mat` `detail_scale_m` this set authors — **tiles per uv unit**,
     /// see the module note.
     ///
     /// `tex_scale_m / detail_scale` is the metres one detail tile covers:
-    /// 12.5 cm for grass at 2 m / 16, and 15 cm for rock at 3 m / 20. Both are
+    /// 12.5 cm for grass at 2 m / 16, 15 cm for rock at 3 m / 20 and 15.4 cm for
+    /// asphalt at 4 m / 26. All three are
     /// an order finer than the base tiling, which is what a detail map is for
     /// and what the default `0.5` gets exactly backwards.
     pub const fn detail_scale(self) -> f32 {
         match self {
             GroundKind::Grass => 16.0,
             GroundKind::Rock => 20.0,
+            GroundKind::Asphalt => 26.0,
             _ => 0.0,
         }
     }
@@ -241,6 +265,7 @@ impl GroundKind {
             GroundKind::ForestFloor => [0.072, 0.055, 0.034, 1.0],
             GroundKind::Sand => [0.310, 0.262, 0.186, 1.0],
             GroundKind::Soil => [0.078, 0.052, 0.032, 1.0],
+            GroundKind::Asphalt => [0.034, 0.033, 0.033, 1.0],
         }
     }
 
@@ -252,6 +277,7 @@ impl GroundKind {
             GroundKind::ForestFloor => 0.93,
             GroundKind::Sand => 0.88,
             GroundKind::Soil => 0.96,
+            GroundKind::Asphalt => 0.86,
         }
     }
 }
@@ -681,6 +707,51 @@ fn surface_at(kind: GroundKind, u: f64, v: f64) -> Surface {
                 ao: (1.0 - crack * 0.7).clamp(0.2, 1.0),
             }
         }
+        GroundKind::Asphalt => {
+            // A rolled wearing course: aggregate chips embedded in a bitumen
+            // binder, the air voids between them, a low-frequency patch tone
+            // where the surface has been repaired or worn, and sealed cracks.
+            //
+            // The CHIPS are the point. A road's scalar base colour is already
+            // a flat dark grey and the renderer falls back to exactly that
+            // while the pages stream, so a map whose only signal is "dark" adds
+            // nothing an author could see. What an eye reads as asphalt rather
+            // than as a grey plane is the speckle: pale stone against near
+            // black, at a density high enough that the tile does not read as a
+            // pattern.
+            let (f1, f2) = worley(u, v, 52, s ^ 0x91);
+            let chip = 1.0 - smooth((f1 * 3.0).clamp(0.0, 1.0));
+            // The rim of a chip sits proud of the binder and catches light, so
+            // the edge is scored separately from the face.
+            let rim = smooth(((f2 - f1) * 8.0).clamp(0.0, 1.0));
+            let voids = fbm(u, v, 120, 120, 3, s ^ 0x92);
+            let binder = fbm(u, v, 24, 24, 4, s ^ 0x93);
+            let patch = smooth((fbm(u, v, 3, 3, 3, s ^ 0x94) * 1.7 - 0.70).clamp(0.0, 1.0));
+            let (c1, c2) = worley(u, v, 6, s ^ 0x95);
+            let crack = 1.0 - smooth(((c2 - c1) * 22.0).clamp(0.0, 1.0));
+
+            let bitumen = [0.021, 0.020, 0.020];
+            let worn = [0.058, 0.057, 0.056];
+            let stone = [0.118, 0.114, 0.106];
+            let pale = [0.172, 0.166, 0.155];
+            let mut c = [0.0; 3];
+            for k in 0..3 {
+                let base = lerp(bitumen[k], worn[k], binder * 0.6 + voids * 0.4);
+                let aged = lerp(base, worn[k] * 1.3, patch * 0.7);
+                let grit = lerp(stone[k], pale[k], voids);
+                let chipped = lerp(aged, grit, chip * (1.0 - rim * 0.55));
+                c[k] = lerp(chipped, bitumen[k] * 0.5, crack * 0.9);
+            }
+            Surface {
+                albedo: c,
+                height: ((chip * 0.60 + voids * 0.25 + binder * 0.15) * (1.0 - crack * 0.9))
+                    .clamp(0.0, 1.0),
+                // Tyres polish the chips and cannot reach between them, which
+                // is why a wet road's highlights sit on the aggregate.
+                roughness: lerp(0.93, 0.62, chip * 0.8),
+                ao: (1.0 - crack * 0.6 - (1.0 - voids) * 0.15).clamp(0.25, 1.0),
+            }
+        }
     }
 }
 
@@ -706,6 +777,14 @@ fn detail_height(kind: GroundKind, u: f64, v: f64) -> f64 {
             let pit = 1.0 - smooth(((f2 - f1) * 6.0).clamp(0.0, 1.0));
             let grit = fbm(u, v, 110, 110, 2, s ^ 0x84);
             ((facet * 0.5 + grit * 0.5) * (1.0 - pit * 0.7)).clamp(0.0, 1.0)
+        }
+        GroundKind::Asphalt => {
+            // The grain a boot is standing on: the sand fraction between the
+            // chips and the open voids a rolled course leaves.
+            let (v1, v2) = worley(u, v, 34, s ^ 0x85);
+            let hole = 1.0 - smooth(((v2 - v1) * 5.0).clamp(0.0, 1.0));
+            let grit = fbm(u, v, 130, 130, 3, s ^ 0x86);
+            ((grit * 0.7 + v1.min(1.0) * 0.3) * (1.0 - hole * 0.6)).clamp(0.0, 1.0)
         }
         _ => fbm(u, v, 96, 96, 3, s),
     }
@@ -849,7 +928,7 @@ mod tests {
             assert!(g.orm.chunks_exact(4).all(|p| p[2] == 0), "metallic is set");
             assert!(g.albedo.chunks_exact(4).all(|p| p[3] == 255));
         }
-        assert_eq!(with_detail, 2, "the detail-map consumers moved");
+        assert_eq!(with_detail, 3, "the detail-map consumers moved");
     }
 
     /// **The maps tile.** A ground texture repeating every 1.5–3 m shows its own
@@ -929,12 +1008,16 @@ mod tests {
         );
     }
 
-    /// **The five sets are five surfaces.** A generator whose kinds differ only
+    /// **The sets are distinct surfaces.** A generator whose kinds differ only
     /// in a tint would pass every arm above and put one ground on the whole
     /// island; this measures that the mean colours are separated and that the
     /// height fields are not the same field.
+    ///
+    /// It is also what says the road is not one of the grounds: `Asphalt` joined
+    /// the set in wave ASSET0 and is the darkest thing in the library by a wide
+    /// margin, and this arm is where that stops being an intention.
     #[test]
-    fn the_five_kinds_are_five_distinct_grounds() {
+    fn the_kinds_are_distinct_grounds() {
         let means: Vec<[f64; 3]> = GroundKind::ALL
             .iter()
             .map(|k| {

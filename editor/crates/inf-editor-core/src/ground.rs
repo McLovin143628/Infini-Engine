@@ -1,5 +1,6 @@
 //! **The committed ground library** (wave TER2a, clause 3) — five PBR ground
-//! sets written into `samples/ground/` as engine content.
+//! sets written into `samples/ground/` as engine content, and since wave
+//! ASSET0 a sixth: `Road_Asphalt`, the surface the island's road mesh binds.
 //!
 //! # What this is for
 //!
@@ -38,9 +39,34 @@ pub const GROUND_FOLDER: &str = "ground";
 
 /// The base of the ground library's GUID block.
 ///
-/// Six ids per set (five used, one reserved) so a set's slots stay together and
-/// a sixth ground appends at `+ 6 · 5`. **Frozen** — see the module note.
+/// Six ids per set (five used, one reserved) so a set's slots stay together.
+/// **Frozen** — see the module note.
 const GROUND_GUID_BASE: u128 = 0x9E20_0000;
+
+/// How many sets the original block holds before [`COVER_GUID_BASE`] takes over.
+///
+/// [`GroundKind::ALL`] is `#[non_exhaustive]` in spirit — a set appends — and the
+/// comment above this line used to say a sixth ground appends at `+ 6 · 5`.
+/// **It does not, and wave ASSET0 found out by doing it.** `cover.rs` minted
+/// `COVER_GUID_BASE = 0x9E20_0000 + 5 * 6` — the very next id — for the three
+/// scatter meshes in the same folder, and those three are named by a committed
+/// `.inf_pcg`, so they cannot move. Appending asphalt at the stated place gave
+/// `Road_Asphalt.inf_mat` the same GUID as `Cover_GrassTuft.inf_mesh`, and the
+/// second registration would have silently replaced the first.
+///
+/// `the_three_kinds_are_three_of_everything` in `cover.rs` is the arm that said
+/// so, which is why it is written over `GroundKind::ALL` rather than over a
+/// literal five.
+const GROUND_ORIGINAL_SETS: u128 = 5;
+
+/// Where the ground block CONTINUES, past the cover library's three ids.
+///
+/// A second base rather than a moved first one: the five original sets are
+/// named by a committed `.inf_lvl`'s `TerrainLayer::material` and the three
+/// cover meshes by a committed `.inf_pcg`, so the only free direction is
+/// forward. Six ids per set here too, so a seventh set appends at `+ 6`.
+/// **Frozen** — the island's `Roads` entity names the first material in it.
+const GROUND_CONT_BASE: u128 = 0x9E21_0000;
 
 /// The four `.inf_tex` slots and the `.inf_mat` one ground set is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +86,11 @@ pub fn ground_ids(kind: GroundKind) -> GroundIds {
         .iter()
         .position(|k| *k == kind)
         .expect("every kind is in ALL") as u128;
-    let base = GROUND_GUID_BASE + slot * 6;
+    let base = if slot < GROUND_ORIGINAL_SETS {
+        GROUND_GUID_BASE + slot * 6
+    } else {
+        GROUND_CONT_BASE + (slot - GROUND_ORIGINAL_SETS) * 6
+    };
     GroundIds {
         material: Uuid::from_u128(base),
         albedo: Uuid::from_u128(base + 1),
@@ -226,6 +256,13 @@ const README: &str = concat!(
     "whole virtual-texture stack had no content that reached it and the 51 km²\n",
     "island's ground was one flat colour.\n",
     "\n",
+    "**Wave ASSET0 appended a sixth, `Road_Asphalt`** - not a splat layer\n",
+    "but the same kind of object, and for the same reason one level up: the\n",
+    "island's `Roads` entity carried a `MeshRef` and no `Material` at\n",
+    "all, so the street the editor opens standing on drew\n",
+    "`Material::default().base_color` - 0.8 linear, the engine's debug\n",
+    "grey, in both hosts.\n",
+    "\n",
     "Each set is a `.inf_mat` naming three or four `.inf_tex` v2 tiled\n",
     "containers: a 1 024² albedo, a 512² tangent-space normal, a 512² ORM, and —\n",
     "for grass and rock — a 512² high-frequency detail normal.\n",
@@ -237,6 +274,7 @@ const README: &str = concat!(
     "| `Ground_ForestFloor` | 2.5 m | 2.44 mm | — |\n",
     "| `Ground_Sand` | 1.5 m | 1.46 mm | — |\n",
     "| `Ground_Soil` | 2.2 m | 2.15 mm | — |\n",
+    "| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm |\n",
     "\n",
     "**Albedo and ORM are BC1; normals and detail maps are BC5** (wave\n",
     "IASSET2). Every map used to be BC1, including the normals, and that was a\n",
@@ -294,7 +332,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), n, "the ground library shares a GUID with itself");
-        assert_eq!(n, 5 * 4 + 2, "the library's asset count moved");
+        assert_eq!(n, 6 * 4 + 3, "the library's asset count moved");
     }
 
     /// The library builds, and every material's sidecar names exactly the
@@ -385,7 +423,7 @@ mod tests {
             // The sidecar's hash is of the bytes actually written.
             assert_eq!(f.sidecar.content_hash, ContentHash::of(&f.payload));
         }
-        assert_eq!(textures, 17, "the library's texture count moved");
+        assert_eq!(textures, 21, "the library's texture count moved");
         assert_eq!(
             formats.len(),
             2,

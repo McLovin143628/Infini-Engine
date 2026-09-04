@@ -523,6 +523,36 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             ..Default::default()
         },
     );
+    // **THE ROAD'S SURFACE** (wave ASSET0, clause 0). Until this line the
+    // `Roads` entity carried a `MeshRef` and nothing else, and the EDIT1 audit
+    // measured what that meant on the shipped editor: the street reads
+    // (238.9, 239.1, 238.0) lit and **(225.7, 225.7, 225.7) UNLIT** -- 0.8
+    // linear through the tonemap, which is `Material::default().base_color`,
+    // which is what the projection gives a mesh with no `Material` component at
+    // all. The brightest surface in the frame was the engine's debug grey, in
+    // BOTH hosts, and EDIT1 made the editor open standing on it.
+    //
+    // The scalars are carried as well as the `.inf_mat` id, and they are the
+    // material's own (`GroundKind::Asphalt::base_color` / `roughness`) rather
+    // than a second opinion: `Material::asset` says *these scalars came from
+    // that material*, and a host with no virtual textures -- or one whose pages
+    // have not arrived yet -- shades off exactly them. Two numbers that
+    // disagreed would be a road that changed colour as it streamed.
+    {
+        use inf_material::ground::GroundKind::Asphalt;
+        let c = Asphalt.base_color();
+        insert!(
+            doc,
+            roads,
+            inf_ecs::components::Material {
+                base_color: Color::new(c[0], c[1], c[2], c[3]),
+                roughness: Asphalt.roughness(),
+                metallic: 0.0,
+                asset: Some(crate::ground::ground_material_guid(Asphalt)),
+                ..Default::default()
+            },
+        );
+    }
     insert!(doc, roads, AlwaysLoaded);
 
     // ── the sea ───────────────────────────────────────────────────────────────
@@ -2140,6 +2170,88 @@ mod tests {
 
     /// The fixture's level really is a level: it names the terrain, the biome
     /// set, an ocean, the water the design found and a player-controlled hero.
+    /// **THE STREET HAS A SURFACE** (wave ASSET0, clause 0).
+    ///
+    /// The EDIT1 audit measured the island's `Roads` mesh at
+    /// (225.7, 225.7, 225.7) UNLIT on the shipped editor — 0.8 linear, which is
+    /// `Material::default().base_color`, which is what the projection hands a
+    /// `MeshRef` carrying no `Material` component at all. The brightest surface
+    /// in the frame was the engine's debug grey, in both hosts, and EDIT1 had
+    /// just made the editor open standing on it.
+    ///
+    /// This arm reads the WORLD rather than the source: it pulls the component
+    /// off the authored document, resolves the `.inf_mat` the component names
+    /// out of the committed library, and compares the two. Deleting the
+    /// `insert!` fails the first assertion; binding the wrong material fails the
+    /// GUID; letting the scalars drift from the asset fails the last pair, which
+    /// is the case that would show as a road changing colour as its pages
+    /// arrive.
+    ///
+    /// The `< 0.2` ceiling is the anti-vacuity clause and it is aimed at exactly
+    /// one number: `Material::default().base_color` is 0.8, so a road that
+    /// somehow ended up back on the default cannot pass this arm by carrying a
+    /// material id beside it.
+    #[test]
+    fn the_road_the_hero_stands_on_carries_a_material() {
+        for recipe in [
+            "samples/island/island.toml",
+            "samples/island-fixture/island.toml",
+        ] {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: {recipe} is not in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            let e = doc
+                .entity_of(roads_entity_guid(name))
+                .expect("the island draws a road");
+            let m = doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::Material>(e)
+                .copied()
+                .expect(
+                    "the `Roads` entity carries no Material -- the street is back on \
+                     Material::default()'s 0.8 debug grey (EDIT1 finding 2)",
+                );
+            let want =
+                crate::ground::ground_material_guid(inf_material::ground::GroundKind::Asphalt);
+            assert_eq!(m.asset, Some(want), "{recipe}: the road binds a material");
+
+            // …and the scalars are the material's own, so a host with no virtual
+            // textures shades the same surface the pages would have.
+            let lib = crate::ground::ground_library().expect("the ground library builds");
+            let f = lib
+                .iter()
+                .find(|f| f.name == "Road_Asphalt.inf_mat")
+                .expect("the library writes the asphalt material");
+            let mat: inf_material::material::MaterialAsset =
+                inf_asset::decode(&f.payload).expect("it decodes");
+            assert_eq!(f.sidecar.guid.0, want, "the library and the level disagree");
+            for (i, c) in [m.base_color.r, m.base_color.g, m.base_color.b]
+                .into_iter()
+                .enumerate()
+            {
+                assert!(
+                    (c - mat.base_color[i]).abs() < 1e-6,
+                    "{recipe}: channel {i} reads {c} and the .inf_mat says {}",
+                    mat.base_color[i]
+                );
+                assert!(
+                    c < 0.2,
+                    "{recipe}: a road at {c} linear is the debug grey, not asphalt"
+                );
+            }
+            assert!((m.roughness - mat.roughness).abs() < 1e-6);
+            println!(
+                "ROAD {recipe}: base_color ({:.3}, {:.3}, {:.3}) linear, roughness \
+                 {:.2}, .inf_mat {want}",
+                m.base_color.r, m.base_color.g, m.base_color.b, m.roughness
+            );
+        }
+    }
+
     #[test]
     fn the_fixture_level_carries_the_island_it_describes() {
         let Some(d) = design("samples/island-fixture/island.toml") else {
