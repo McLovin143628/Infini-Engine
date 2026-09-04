@@ -29127,10 +29127,9 @@ fixture island's, which was already carried (12).
 
 ## Wave CERT1 — the parity certification (2026-09-03)
 
-Base `f70d5fca`. Five commits, one per subject. **The scene schema does not move
-(v27), `ScenePayload` stays v12, `EXPECTED_LEVELS` stays 24, goldens stay 62
-files / 121 arms with none blessed, and `Cargo.toml` / `Cargo.lock` / `deny.toml`
-are untouched.** The full register is `docs/memos/parity-certification.md`; this
+Base `f70d5fca`. **The scene schema does not move (v27), `ScenePayload` stays
+v12, `EXPECTED_LEVELS` stays 24, goldens stay 62 files / 121 arms with none
+blessed, and `Cargo.toml` / `Cargo.lock` / `deny.toml` are untouched.** The full register is `docs/memos/parity-certification.md`; this
 block is the ledger's own summary and the carried list.
 
 The wave was asked to CERTIFY the showcase island against the GTA 6 reference
@@ -29215,8 +29214,9 @@ comments first, and that is load-bearing: the fix's own doc quotes the expressio
 it removed, which is exactly what a naive `contains` reports as the defect it
 just closed. It did, on the file's first run.
 
-**And the lit stack turned out to be nearly free.** Island wave I4 priced it at
-**+48.6 ms of p95**; at CERT1, over two runs on the same city and machine, it is
+**And the lit stack turned out to be nearly free.** Island wave I4's published
+pair is **p95 92.3-92.9 lit against 43.7-44.0**, about **+48.6 ms** by
+subtraction; at CERT1, over two runs on the same city and machine, it is
 **+0.129 ms and +6.290 ms** — and in the first of those the lit frame is
 2.069 ms *cheaper* on the GPU, because the depth prepass only runs when SSAO or
 TAA asks for it and the scatter overdraw it kills is larger than everything the
@@ -29402,6 +29402,32 @@ authors: **p50 39.672 / p95 42.299 / p99 43.188 ms — 25.2 fps**. Crowd cleared
 against a 12.834 ms GPU frame with the crowd cleared); the fixed step alone is
 7.664 ms against a 6.0 ms ratchet, and its two dearest phases are the solver
 (3.295 ms) and the physics3d sync (3.035 ms).
+
+### HOUSE GATES AT HEAD
+
+Battery **376 binaries / 7 013 passed / 0 failed / 21 ignored**, `cargo test`
+exit status 0 — and the arm delta reconciles EXACTLY: `git diff origin/main..HEAD`
+adds **52** `#[test]` and removes none, one of them `#[ignore]`d, against the
+base ledger's 6 962 / 20, i.e. **+51 passed and +1 ignored**. Two honest notes on
+that aggregate. The BINARY count is 376 against the base's 366 while this wave
+adds four test targets; the six-binary difference is unattributed and the base
+was not re-measured. And the aggregate was recomputed NUL-safely as well as read
+off the script, because a log carrying binary output truncates the script's own
+`awk` — an earlier, lock-contended run of this same battery reported **231**
+binaries for exactly that reason, and a reader who trusted it would have thought
+a third of the tree had stopped running.
+
+Goldens **62 files / 121 arms** green under `INF_GOLDEN_STRICT=1` with **none
+blessed**. Rustdoc **410 `^warning` lines − 30 summaries = 380 individual**
+against a ceiling of 450, cold after `cargo clean --doc`; every warning's
+file:line was matched against this wave's own hunks and **none is in code this
+wave wrote** (`inf-project`, which this wave gave a new module, generates zero).
+Clippy **0 errors, 0 warnings** with `-D warnings` at `CARGO_INCREMENTAL=0`, run
+LAST — it caught one `field_reassign_with_default` in this wave's own settings
+arm. `cargo fmt` clean over every workspace member (the `--all` form still fails
+with os error 206 on this machine, so each member is formatted by name).
+Frontend **86 files / 779 tests**, `tsc --noEmit` and `eslint --max-warnings 0`
+clean. CRLF sweep over the whole diff: **0**.
 
 ### CARRIED
 

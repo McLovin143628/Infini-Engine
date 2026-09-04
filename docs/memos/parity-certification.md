@@ -215,9 +215,10 @@ the building across the street casts nothing.
 
 Both are quoted because either alone is a claim. The lit frame's own GPU cost
 barely moved (5.506 / 5.439); what moved is the *shipped* frame's, which is the
-instrument's own warning about device state paying out. Against island wave I4's
-**+48.6 ms**, the stack is now somewhere between a seventh of a millisecond and
-six of them.
+instrument's own warning about device state paying out. Against island wave I4 —
+whose own published pair is **92.3–92.9 lit against 43.7–44.0**, so about
+**+48.6 ms** by subtraction — the stack is now somewhere between a seventh of a
+millisecond and six of them.
 
 **AND PIE WAS RENDERING A DIFFERENT LEVEL.** `window::run_pie` built its
 `PlayerApp` with `RenderSettingsRecord::default()` under a comment saying the
@@ -960,3 +961,31 @@ Scene schema **v27**, `ScenePayload` **v12**, `EXPECTED_LEVELS` **24**, goldens
 **62 files / 121 arms** with none blessed, `Cargo.toml` / `Cargo.lock` /
 `deny.toml` unmoved, no new dependency. Five committed `.inf_lvl` files changed
 content hash at an unchanged byte length, for the stated cause in CP-A1.
+
+---
+
+## The house gates
+
+Battery **376 binaries / 7 013 passed / 0 failed / 21 ignored**, exit status 0.
+The arm delta reconciles exactly: `git diff origin/main..HEAD` adds **52**
+`#[test]` and removes none, one `#[ignore]`d, against the base ledger's
+6 962 / 20 — **+51 passed, +1 ignored**. Two honest notes. The BINARY count is
+376 against a stated base of 366 while this wave adds four test targets, and the
+six-binary difference is unattributed because the base was not re-measured. And
+the aggregate was recomputed NUL-safely as well as read off the script: a log
+carrying binary output truncates the script's own `awk`, and an earlier,
+lock-contended run of this same battery reported **231** binaries for exactly
+that reason.
+
+Rustdoc **410 `^warning` lines − 30 summaries = 380 individual** against a
+ceiling of 450, cold after `cargo clean --doc`. Every warning's file:line was
+matched against this wave's own hunks and **none is in code this wave wrote**;
+`inf-project`, which gained a whole new module here, generates zero.
+
+Clippy **0 errors, 0 warnings** with `-D warnings` at `CARGO_INCREMENTAL=0`, run
+LAST. It caught one `field_reassign_with_default` in this wave's own settings arm.
+
+`cargo fmt` clean over every workspace member — the `--all` form still fails with
+os error 206 on this machine, so each member is formatted by name. Frontend
+**86 files / 779 tests**, `tsc --noEmit` and `eslint --max-warnings 0` clean.
+CRLF sweep over the whole diff: **0**.

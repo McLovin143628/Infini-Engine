@@ -345,9 +345,11 @@ mod tests {
         let cfg = tmp.path().join("config");
         std::fs::create_dir_all(&cfg).unwrap();
 
-        let mut before = EditorSettings::default();
-        before.theme_id = "a-theme-the-author-chose".to_string();
-        before.autosave_interval_s = 17.0;
+        let mut before = EditorSettings {
+            theme_id: "a-theme-the-author-chose".to_string(),
+            autosave_interval_s: 17.0,
+            ..EditorSettings::default()
+        };
         before
             .keybindings
             .insert("Ctrl+K".to_string(), "some.command".to_string());
