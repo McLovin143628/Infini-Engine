@@ -191,6 +191,9 @@ pub struct PlayerApp {
     grab_frames: u32,
     /// The keyboard grab landed and the ladder has stopped asking.
     keyboard_grabbed: bool,
+    /// The demo loop's hero log (wave FIX1) — inert unless `INF_PIE_HERO_LOG`
+    /// names a path. See [`crate::pie_drive::HeroLog`].
+    hero_log: crate::pie_drive::HeroLog,
     /// **The in-game UI session** (island wave I5): the settings dialog, the
     /// toasts and the interaction prompt. Present in the shipped player **and**
     /// in a windowed PIE preview, because a preview that could not open the menu
@@ -287,6 +290,7 @@ impl PlayerApp {
             focused: false,
             grab_frames: 0,
             keyboard_grabbed: false,
+            hero_log: crate::pie_drive::HeroLog::from_env(),
             vmeshes,
             scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
@@ -902,6 +906,12 @@ impl PlayerApp {
             }
         }
         self.set_pointer_capture(self.wanted_pointer_capture());
+        // …and the demo loop's own instrument, which is inert in every session
+        // that did not ask for it.
+        if self.pie.is_some() {
+            let frame = self.sim.steps();
+            self.hero_log.tick(&self.sim, frame, dt);
+        }
         self.ui.report_unconsumed(&self.input_state);
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.

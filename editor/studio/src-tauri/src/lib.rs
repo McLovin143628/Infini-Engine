@@ -79,6 +79,51 @@ pub fn run() {
             tracing::info!("Infini Engine starting");
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(debuggable_context())
         .expect("error while running Infini Engine");
+}
+
+/// **The environment variable that lets a script drive this editor** (wave FIX1).
+///
+/// Set it to a port and the WebView2 that hosts the shell listens for a Chrome
+/// DevTools Protocol client there, which is how `tools/demo` presses the Play
+/// button by NAME instead of by screen coordinate.
+pub const DEBUG_PORT_ENV: &str = "INF_WEBVIEW_DEBUG_PORT";
+
+/// The app context, with remote debugging switched on when [`DEBUG_PORT_ENV`]
+/// asks for it.
+///
+/// # Why it is here and not in an environment variable WebView2 already reads
+///
+/// It was tried first, and it does not work, which is worth writing down: WebView2
+/// reads `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` only when the embedder passes no
+/// arguments of its own, and Tauri always passes some
+/// (`--disable-features=msWebOOUI,…`). So the variable is silently ignored and a
+/// script waits for a debugger port that never opens. The one place the embedder's
+/// own string can be reached for a window declared in `tauri.conf.json` is the
+/// generated context, before `run` consumes it.
+///
+/// **Off unless asked for, and asked for by a whole port number.** A shipped
+/// editor that listened on a local port would be a shipped editor anything on the
+/// machine could drive.
+fn debuggable_context() -> tauri::Context {
+    let mut context = tauri::generate_context!();
+    let Some(port) = std::env::var(DEBUG_PORT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
+    else {
+        return context;
+    };
+    // Tauri's own default, kept: dropping it would change how the shell renders
+    // in the very session a script is watching, which is the opposite of what a
+    // demo instrument is for.
+    let args = format!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection          --remote-debugging-port={port}"
+    );
+    for window in &mut context.config_mut().app.windows {
+        window.additional_browser_args = Some(args.clone());
+    }
+    tracing::warn!("inf-studio: WebView2 remote debugging is ON, port {port}");
+    context
 }

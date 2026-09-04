@@ -408,3 +408,89 @@ pub fn world_probe(
         named: named.and_then(|g| actor_probe(sim, g)),
     }
 }
+
+/// **The env var that turns on the demo loop's hero log** (wave FIX1).
+pub const HERO_LOG_ENV: &str = "INF_PIE_HERO_LOG";
+
+/// How often a windowed PIE session appends a line, seconds.
+const HERO_LOG_PERIOD_S: f64 = 0.25;
+
+/// **Where the hero is, written down while a person is watching** (wave FIX1).
+///
+/// The demo loop's whole job is to end a wave with something the author can
+/// judge, and "the hero moved" is not a claim two screenshots can make on their
+/// own — a camera that drifts looks the same as a character that walks. A
+/// windowed PIE session appends `t,frame,x,y,z,mode,speed,camera_pull` here four
+/// times a second and the script prints the first and last lines beside its two
+/// frames.
+///
+/// **Only when the variable names a path**, and the file is opened once: a
+/// shipped player writes nothing, opens nothing and pays one `Option` check per
+/// frame. It is an instrument, not a feature, and it deliberately does not go
+/// through `tracing` — the `--pie` entry installs no subscriber, because one that
+/// teed to stdout would corrupt the protocol stream.
+#[derive(Default)]
+pub struct HeroLog {
+    file: Option<std::fs::File>,
+    accum: f64,
+}
+
+impl HeroLog {
+    /// Open the log named by [`HERO_LOG_ENV`], or an inert one.
+    pub fn from_env() -> Self {
+        let Ok(path) = std::env::var(HERO_LOG_ENV) else {
+            return Self::default();
+        };
+        if path.trim().is_empty() {
+            return Self::default();
+        }
+        match std::fs::File::create(&path) {
+            Ok(file) => Self {
+                file: Some(file),
+                accum: 0.0,
+            },
+            Err(e) => {
+                eprintln!("inf-player: cannot open the hero log at {path}: {e}");
+                Self::default()
+            }
+        }
+    }
+
+    /// Append a line if enough wall clock has passed. Inert when no path was set.
+    pub fn tick(&mut self, sim: &RuntimeSim, frame: u64, dt: f64) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        self.accum += dt;
+        if self.accum < HERO_LOG_PERIOD_S {
+            return;
+        }
+        self.accum = 0.0;
+        let probe = world_probe(sim, None, frame, None);
+        let line = match &probe.hero {
+            Some(h) => format!(
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4}\n",
+                sim.steps() as f64 / 60.0,
+                probe.frame,
+                h.position[0],
+                h.position[1],
+                h.position[2],
+                if h.movement_mode.is_empty() {
+                    "-"
+                } else {
+                    &h.movement_mode
+                },
+                h.speed,
+                probe.camera_pull_in_m
+            ),
+            None => format!(
+                "{:.3},{},,,,,no-hero,\n",
+                sim.steps() as f64 / 60.0,
+                probe.frame
+            ),
+        };
+        use std::io::Write as _;
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
+}
