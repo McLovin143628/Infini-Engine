@@ -54,7 +54,10 @@ pub struct FocusReport {
     pub before: isize,
     /// …and after.
     pub after: isize,
-    /// This call attached our input queue to the parent's thread.
+    /// This call attached our input queue to another thread's. The CHILD branch
+    /// keeps the attachment (and [`release_keyboard_focus`] undoes it); the
+    /// top-level branch drops it again immediately, because the foreground
+    /// window it moves is global state and does not need holding.
     pub attached: bool,
     /// `after == hwnd`: the keyboard is ours.
     pub landed: bool,
@@ -85,8 +88,9 @@ mod imp {
     use windows::Win32::System::Threading::AttachThreadInput;
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowLongPtrW,
-        GetWindowThreadProcessId, SetForegroundWindow, GUITHREADINFO, GWL_STYLE, WS_CHILD,
+        BringWindowToTop, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowLongPtrW,
+        GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, GUITHREADINFO, GWL_STYLE,
+        SW_SHOW, WS_CHILD,
     };
 
     use super::FocusReport;
@@ -177,10 +181,47 @@ mod imp {
                 }
             }
             // A top-level window: the standalone player, or "Play in New
-            // Window". Activation is ours to take and is the whole of it.
+            // Window". Activation is ours to take — but taking it needs the same
+            // attachment, for a different reason.
+            //
+            // **Measured, in the real editor.** A bare `SetForegroundWindow`
+            // does nothing here: Windows only grants the foreground to a process
+            // that already owns it, was recently the foreground, or received the
+            // last input — and the player is a child the editor spawned SECONDS
+            // before its window exists, so the one-shot right the spawn confers
+            // has expired by the time there is a window to give it to. "Play in
+            // New Window" therefore opened its window BEHIND a maximized editor,
+            // never received a `Focused(true)`, never captured the pointer and
+            // never saw a key: 0.000 m of hero movement over a 41-second
+            // session, against 12.191 m for the embedded one.
+            //
+            // Attaching to the foreground thread's input queue for the duration
+            // of the call is the documented way through, and the detach is
+            // immediate rather than recorded because the foreground window is
+            // GLOBAL state: once it has moved it stays moved, which is exactly
+            // the difference from the child case above (where the focus lives
+            // inside a queue and would go back the moment the queues split).
             None => {
-                let _ = unsafe { SetForegroundWindow(win) };
-                let _ = unsafe { SetFocus(Some(win)) };
+                let fg_tid = if r.foreground == 0 {
+                    0
+                } else {
+                    unsafe { GetWindowThreadProcessId(h(r.foreground), None) }
+                };
+                let my_tid = unsafe { GetWindowThreadProcessId(win, None) };
+                let attached = fg_tid != 0
+                    && my_tid != 0
+                    && fg_tid != my_tid
+                    && unsafe { AttachThreadInput(fg_tid, my_tid, true) }.as_bool();
+                r.attached = attached;
+                unsafe {
+                    let _ = ShowWindow(win, SW_SHOW);
+                    let _ = BringWindowToTop(win);
+                    let _ = SetForegroundWindow(win);
+                    let _ = SetFocus(Some(win));
+                }
+                if attached {
+                    let _ = unsafe { AttachThreadInput(fg_tid, my_tid, false) };
+                }
                 r.after = foreground_focus();
             }
         }

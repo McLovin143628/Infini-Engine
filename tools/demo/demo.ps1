@@ -9,6 +9,10 @@ param(
     [switch]$SkipBuild,
     [switch]$KeepOpen,
     [int]$Port = 9222,
+    # "embedded" reparents the player into the viewport hole; "window" is the
+    # roadmap-sanctioned Play in New Window. Both must move the hero, so both
+    # are drivable from here.
+    [ValidateSet("embedded", "window")][string]$PlayMode = "embedded",
     [int]$BootWaitS = 60,
     [int]$PieWaitS = 240,
     [int]$LoadSettleS = 20
@@ -34,6 +38,7 @@ function Say([string]$text) {
 }
 
 Say "repo    $repo"
+Say "mode    $PlayMode"
 Say "out     $OutDir"
 
 # ── 0. nothing of ours may be running ────────────────────────────────────────
@@ -120,7 +125,7 @@ Start-Sleep -Seconds 10
 $pressed = $false
 if (Get-Command node -ErrorAction SilentlyContinue) {
     Say "pressing Play over CDP"
-    & node (Join-Path $PSScriptRoot "play.mjs") $Port 8 2>&1 | ForEach-Object { Say "  cdp: $_" }
+    & node (Join-Path $PSScriptRoot "play.mjs") $Port 8 $PlayMode 2>&1 | ForEach-Object { Say "  cdp: $_" }
     if ($LASTEXITCODE -eq 0) { $pressed = $true } else { Say "  cdp failed (exit $LASTEXITCODE)" }
 } else {
     Say "node is not on the PATH"
@@ -128,6 +133,11 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
 if (-not $pressed) {
     # The fallback: the Play cluster's first button on a maximized 1080p window.
     Add-Type -AssemblyName System.Windows.Forms
+    if ($PlayMode -ne "embedded") {
+        Say "REFUSED: -PlayMode window needs the CDP path (there is no coordinate for a menu item)"
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        exit 6
+    }
     Say "pressing Play by coordinate (1220, 49)"
     $wshell = New-Object -ComObject wscript.shell
     $wshell.AppActivate($proc.Id) | Out-Null

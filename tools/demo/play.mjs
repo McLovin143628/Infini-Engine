@@ -6,7 +6,7 @@
 // `inf_studio_lib::debuggable_context` for why the environment variable WebView2
 // documents does not work here.
 //
-//   node tools/demo/play.mjs [port] [waitSeconds]
+//   node tools/demo/play.mjs [port] [waitSeconds] [embedded|window]
 //
 // Exit 0 = the button was found and clicked (the transport is then reported for
 // `waitSeconds`); exit 2 = no page target; exit 3 = no button. `demo.ps1` falls
@@ -14,6 +14,7 @@
 
 const port = Number(process.argv[2] ?? 9222);
 const waitS = Number(process.argv[3] ?? 20);
+const mode = (process.argv[4] ?? "embedded").toLowerCase();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function pageTarget() {
@@ -74,15 +75,34 @@ const CLUSTER = `(() => { const c = document.querySelector('[data-tour="play-clu
 console.log("title:", await evalJs("document.title"));
 console.log("cluster before:", await evalJs(CLUSTER));
 
-const clicked = await evalJs(
-  `(() => { const b = document.querySelector('[data-tour="play-cluster"] button'); if (!b) return ''; b.click(); return (b.getAttribute('aria-label') || b.title || b.innerText || 'button').trim(); })()`,
-);
+let clicked;
+if (mode === "window") {
+  // "Play in New Window" lives behind the cluster's own split-button dropdown,
+  // so it takes two clicks and a paint between them. Found by its LABEL rather
+  // than by position: the menu's contents differ between running and stopped.
+  const opened = await evalJs(
+    `(() => { const b = document.querySelector('[data-tour="play-cluster"] button[aria-label="Play options"]'); if (!b) return ''; b.click(); return 'opened'; })()`,
+  );
+  if (!opened) {
+    console.log("NO PLAY OPTIONS button in the play cluster");
+    ws.close();
+    process.exit(3);
+  }
+  await sleep(400);
+  clicked = await evalJs(
+    `(() => { const items = Array.from(document.querySelectorAll('[data-tour="play-cluster"] button')); const b = items.find((e) => /New Window/i.test(e.innerText || '')); if (!b) return ''; b.click(); return b.innerText.trim(); })()`,
+  );
+} else {
+  clicked = await evalJs(
+    `(() => { const b = document.querySelector('[data-tour="play-cluster"] button'); if (!b) return ''; b.click(); return (b.getAttribute('aria-label') || b.title || b.innerText || 'button').trim(); })()`,
+  );
+}
 if (!clicked) {
-  console.log("NO PLAY BUTTON in the play cluster");
+  console.log(`NO PLAY BUTTON for mode ${mode}`);
   ws.close();
   process.exit(3);
 }
-console.log(`clicked: ${clicked}`);
+console.log(`clicked (${mode}): ${clicked}`);
 
 // Report what the toolbar says while the player loads — a dialog here is the
 // "this level has no player-controlled character" question, and a script that
