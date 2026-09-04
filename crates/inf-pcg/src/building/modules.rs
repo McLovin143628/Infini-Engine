@@ -337,6 +337,20 @@ pub enum ModuleShape {
     Wardrobe,
 }
 
+/// Which entry of an archetype's surface set a [`ModuleShape`] takes (wave
+/// ASSET0, clause 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRole {
+    /// Walls, columns, shutters — the archetype's `wall`.
+    Wall,
+    /// Decks, treads, parapet courses — the archetype's `floor`.
+    Floor,
+    /// Tables, chairs, crates — the archetype's `furniture`.
+    Furniture,
+    /// The family states its own material and no archetype overrides it.
+    Stated,
+}
+
 impl ModuleShape {
     /// Every family, in the canonical order [`module_meshes`] emits.
     ///
@@ -498,6 +512,38 @@ impl ModuleShape {
     /// and the bar; the neon's *hue* is per-archetype and arrives through the
     /// palette's own furniture table, because a strip club's sign is not a
     /// cocktail bar's.
+    /// **What part of a building this family IS** (wave ASSET0, clause 4).
+    ///
+    /// The archetype's surface set is keyed by this, so a shop's walls can be
+    /// brick while an office's are cast concrete without either palette
+    /// restating what a wall panel is.
+    ///
+    /// [`SurfaceRole::Stated`] is the eight venue-and-institution families whose
+    /// material is a property of the FAMILY and not of the building it is in —
+    /// VEN1a's own rule, kept: "a chrome pole is chrome in every archetype,
+    /// rather than by seven authored numbers that can disagree". Those keep
+    /// [`ModuleShape::surface`] and the archetype set does not reach them.
+    pub const fn role(self) -> SurfaceRole {
+        match self {
+            // The building's skin: what an eye at street level actually reads.
+            ModuleShape::Panel | ModuleShape::Column | ModuleShape::Shutter => SurfaceRole::Wall,
+            // What is walked on, and the parapet course that caps the wall.
+            ModuleShape::Deck | ModuleShape::Tread | ModuleShape::Course => SurfaceRole::Floor,
+            // Glass answers its own family: a window is glass in a brick wall
+            // and glass in a concrete one.
+            ModuleShape::Glazing => SurfaceRole::Stated,
+            // Furniture is made of what furniture is made of. A shop's chair is
+            // not made of the shop.
+            ModuleShape::Legged
+            | ModuleShape::Carcass
+            | ModuleShape::Soft
+            | ModuleShape::Planter
+            | ModuleShape::Crate
+            | ModuleShape::Wardrobe => SurfaceRole::Furniture,
+            _ => SurfaceRole::Stated,
+        }
+    }
+
     pub fn surface(self) -> PcgSurface {
         match self {
             // ── the twelve that predate the venue wave: unmoved ──

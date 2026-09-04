@@ -50,6 +50,7 @@
 //! of room floor.
 
 use super::RoomType;
+use crate::scatter::PcgSurface;
 
 /// Which of the fourteen palettes a plan is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -333,6 +334,97 @@ pub struct FurnitureDef {
     pub emissive: Option<[f32; 3]>,
 }
 
+/// **What an archetype's structure is made of** (wave ASSET0, clause 4).
+///
+/// Three surfaces, keyed by
+/// [`ModuleShape::role`](super::modules::ModuleShape::role): the wall an eye at
+/// street level reads, the floor it walks on, and the furniture inside. A
+/// family that states its own material — the chrome pole, the glazed leaf, the
+/// glowing screen — is not in this table and keeps what VEN1a gave it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceSet {
+    pub wall: PcgSurface,
+    pub floor: PcgSurface,
+    pub furniture: PcgSurface,
+}
+
+// ── the measured surfaces ────────────────────────────────────────────────────
+//
+// **These numbers were measured, not chosen** (wave ASSET0). Each is the mean
+// linear albedo of the Megascans surface named beside it, read off the map the
+// UE bridge exported (`tools/ue-export/export.py`) at 8 192 square and averaged
+// over the whole tile. The albedo is the only thing that crossed: a colour is
+// not content, so this table carries no licence and the repository stays
+// clean — which is the "use the assets as references" half of the mandate,
+// spelled as arithmetic.
+//
+// What they REPLACE is `pcg_kind_color`, the placeholder palette both projectors
+// have used for every scattered instance since P18.5: a hash of the module's
+// kind index into a pastel ramp. That is the mint green and the pale tan on
+// every building in `AUDIT-DEMO/01-editor.png`, and it is why the user's word
+// for the buildings was "very low quality" — nothing in that frame is the
+// colour of a material, because no material was ever named.
+
+/// Cast-in-situ concrete — `MS_ConcreteV1/010_Cast_In_Situ_Concrete_2x2_M`,
+/// mean sRGB (145.0, 139.8, 129.6).
+const CONCRETE: PcgSurface = PcgSurface {
+    roughness: 0.82,
+    tint: Some([0.2830, 0.2613, 0.2217, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Concrete slabs — `MS_ConcreteV1/01_Concrete_Slabs_4x1_M`, mean sRGB
+/// (116.4, 101.8, 89.1). Darker and warmer than cast concrete; this is a
+/// pavement rather than a wall.
+const SLAB: PcgSurface = PcgSurface {
+    roughness: 0.86,
+    tint: Some([0.1759, 0.1322, 0.1002, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Red brick — `MS_BrickV1/010_Pattern_Brick_Floor_2x2_M`, mean sRGB
+/// (139.7, 93.6, 59.4).
+const BRICK: PcgSurface = PcgSurface {
+    roughness: 0.88,
+    tint: Some([0.2609, 0.1110, 0.0444, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Cement — `MS_CementV1/010_Cement_Curbs_sepxU`, mean sRGB
+/// (161.0, 154.8, 145.7). The palest surface in the set: a rendered or
+/// plastered face, and what an institution is.
+const CEMENT: PcgSurface = PcgSurface {
+    roughness: 0.80,
+    tint: Some([0.3564, 0.3266, 0.2863, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Asphalt — `MS_AsphaltEss/010_Asphalt_Road_2x2_M`, mean sRGB
+/// (110.2, 107.3, 100.5). A flat industrial roof and a yard.
+const ASPHALT: PcgSurface = PcgSurface {
+    roughness: 0.90,
+    tint: Some([0.1565, 0.1480, 0.1287, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Painted panel — `Downtown_West/T_awning_ab_albedo`, mean sRGB
+/// (108.3, 103.9, 102.4), the neutral grey of a shopfront's painted board.
+const PAINTED: PcgSurface = PcgSurface {
+    roughness: 0.55,
+    tint: Some([0.1508, 0.1381, 0.1339, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
+/// Furniture: warm worn timber, the same wood VEN1a measured for a stage. Its
+/// own constant rather than a reference to `modules::WOOD`, because that one is
+/// a *family*'s material and this one is a *set*'s, and folding them would make
+/// changing a bar top change every table in the engine.
+const TIMBER: PcgSurface = PcgSurface {
+    roughness: 0.62,
+    tint: Some([0.1580, 0.0980, 0.0480, 1.0]),
+    ..PcgSurface::DEFAULT
+};
+
 /// A complete building palette: the grammar, the plan parameters, the room table
 /// and the furniture sets.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -475,7 +567,52 @@ impl BuildingArchetype {
         // which is what keeps the assembler and `expand_span` from growing two
         // answers.
         g.stamp_module_meshes();
+        // …and the same argument one field wider (wave ASSET0, clause 4): the
+        // palette text declares no material either, and what a wall is MADE of
+        // is the archetype's business the way what a module is shaped like is
+        // the family's. Runs second because it reads the families the stamp
+        // above resolved.
+        g.stamp_module_surfaces(&self.surfaces());
         Ok(g)
+    }
+
+    /// **What this archetype is built out of** (wave ASSET0, clause 4).
+    ///
+    /// A method on the id rather than a fifteenth field on fourteen `&'static`
+    /// literals: a surface set is a *derivation* from what kind of building this
+    /// is, and every palette would otherwise have to restate that an office is
+    /// concrete. The mapping is the one a street reads — brick where people
+    /// live and shop, cast concrete where they work, cement on the institutions,
+    /// asphalt and slab where the work is industrial.
+    pub fn surfaces(&self) -> SurfaceSet {
+        let (wall, floor) = match self.id {
+            // Brick: the two archetypes a residential street is made of, and the
+            // shop under them.
+            ArchetypeId::Apartment | ArchetypeId::House | ArchetypeId::Shop => (BRICK, SLAB),
+            // An estate is brick with a rendered ground floor; one surface, so
+            // the brick wins and the pale is in the trim it does not have yet.
+            ArchetypeId::Estate => (BRICK, TIMBER),
+            // Cast concrete: where people work and sleep away from home.
+            ArchetypeId::Office | ArchetypeId::Hotel => (CONCRETE, SLAB),
+            // Industrial is the yard surface on both faces.
+            ArchetypeId::Industrial => (ASPHALT, SLAB),
+            // The institutions are rendered pale — a hospital, a clinic, a
+            // station and a fire hall all read as public buildings, which in
+            // this reference material means cement rather than brick.
+            ArchetypeId::Hospital
+            | ArchetypeId::Clinic
+            | ArchetypeId::PoliceStation
+            | ArchetypeId::FireHall => (CEMENT, SLAB),
+            // The venues keep a painted street face: their identity is the neon
+            // and the glazing, both of which state their own material, and a
+            // brick nightclub would read as a warehouse.
+            ArchetypeId::Bar | ArchetypeId::Nightclub | ArchetypeId::StripClub => (PAINTED, TIMBER),
+        };
+        SurfaceSet {
+            wall,
+            floor,
+            furniture: TIMBER,
+        }
     }
 
     /// The furniture set for `kind`, or an empty slice.
@@ -3126,5 +3263,114 @@ mod tests {
                 );
             }
         }
+    }
+    /// **EVERY ARCHETYPE'S WALLS ARE MADE OF SOMETHING** (wave ASSET0, clause 4).
+    ///
+    /// The user's word for the buildings was "very low quality", and the
+    /// measurement behind it is that nothing in `AUDIT-DEMO/01-editor.png` is
+    /// the colour of a material: `PcgSurface::DEFAULT` carries `tint: None`, so
+    /// both projectors fell back to `pcg_kind_color` — a hash of the module's
+    /// kind index into a pastel ramp. Mint green and pale tan, on every wall in
+    /// the engine.
+    ///
+    /// This arm reads the GRAMMAR the palette produces, not the table beside it,
+    /// because the stamp is where the two meet and a table nothing stamped would
+    /// pass a test of itself. Deleting the `stamp_module_surfaces` call fails
+    /// the first assertion for all fourteen.
+    #[test]
+    fn every_archetype_names_what_its_walls_and_floors_are_made_of() {
+        use crate::building::modules::{shape_of, SurfaceRole};
+        let mut walls = 0;
+        let mut floors = 0;
+        let mut stated = 0;
+        for id in ArchetypeId::ALL {
+            let a = archetype(id);
+            let g = a.grammar().expect("the palette parses");
+            let set = a.surfaces();
+            assert!(
+                set.wall.tint.is_some() && set.floor.tint.is_some(),
+                "{} has no authored wall or floor surface",
+                a.display
+            );
+            for m in g.modules() {
+                let Some(shape) = shape_of(&m.name) else {
+                    continue;
+                };
+                match shape.role() {
+                    SurfaceRole::Wall => {
+                        assert_eq!(
+                            m.surface, set.wall,
+                            "{}'s {} is not the archetype's wall",
+                            a.display, m.name
+                        );
+                        walls += 1;
+                    }
+                    SurfaceRole::Floor => {
+                        assert_eq!(m.surface, set.floor);
+                        floors += 1;
+                    }
+                    SurfaceRole::Furniture => assert_eq!(m.surface, set.furniture),
+                    // **VEN1a's rule, kept.** A chrome pole is chrome in every
+                    // archetype. If the stamp reached these, a strip club's
+                    // pole would be made of brick.
+                    SurfaceRole::Stated => {
+                        assert_eq!(
+                            m.surface,
+                            shape.surface(),
+                            "{}'s {} lost the material its FAMILY states",
+                            a.display,
+                            m.name
+                        );
+                        stated += 1;
+                    }
+                }
+            }
+        }
+        // Anti-vacuity: the loop really walked modules of all three kinds, and
+        // it walked enough of them to be about the engine rather than about one
+        // palette. A `shape_of` that stopped resolving would pass every
+        // assertion above by iterating nothing.
+        assert!(walls >= 14, "only {walls} wall modules over 14 archetypes");
+        assert!(floors >= 14, "only {floors} floor modules");
+        assert!(stated >= 14, "only {stated} family-stated modules");
+        println!(
+            "ASSET0 SURFACES: {walls} wall, {floors} floor and {stated} \
+             family-stated modules over {} archetypes",
+            ArchetypeId::ALL.len()
+        );
+    }
+
+    /// **The surfaces are DISTINCT, and the walls are not all one colour.**
+    ///
+    /// "Every archetype names a surface" is satisfied perfectly by giving all
+    /// fourteen the same grey, which would be the placeholder ramp with extra
+    /// steps. A street reads as a street because the shop is brick and the
+    /// office is concrete.
+    #[test]
+    fn the_surface_sets_are_more_than_one_colour() {
+        let tints: Vec<[f32; 4]> = ArchetypeId::ALL
+            .iter()
+            .map(|id| archetype(*id).surfaces().wall.tint.expect("a tint"))
+            .collect();
+        let mut distinct: Vec<[f32; 4]> = tints.clone();
+        distinct.dedup_by(|a, b| a == b);
+        distinct.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
+        distinct.dedup_by(|a, b| a == b);
+        assert!(
+            distinct.len() >= 4,
+            "fourteen archetypes share {} wall surfaces",
+            distinct.len()
+        );
+        // …and none of them is the debug grey or a pastel: every one of these is
+        // a measured mean of a photographed surface, and all of those are dark.
+        for t in &tints {
+            let luma = 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+            assert!(
+                luma < 0.40,
+                "a wall at {luma:.3} linear luma is brighter than any of the \
+                 measured surfaces (the palest, cement, is 0.330)"
+            );
+        }
+        println!("ASSET0 SURFACES: {} distinct wall surfaces", distinct.len());
     }
 }

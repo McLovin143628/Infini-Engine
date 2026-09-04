@@ -374,6 +374,41 @@ impl Grammar {
         }
     }
 
+    /// **Stamp an archetype's surface set over the structural families** (wave
+    /// ASSET0, clause 4).
+    ///
+    /// Runs after [`stamp_module_meshes`](Self::stamp_module_meshes) and only
+    /// over families whose [`role`](crate::building::modules::ModuleShape::role)
+    /// is not `Stated` — so the chrome pole, the glowing screen and the glazed
+    /// leaf keep the material their FAMILY states, exactly as VEN1a ruled, and
+    /// what moves is the wall, the floor and the furniture, which are the three
+    /// things an archetype is entitled to an opinion about.
+    ///
+    /// # Why a tint and not a `.inf_mat`
+    ///
+    /// Because a scattered instance cannot wear one. Measured in wave ASSET0:
+    /// `inf_render::ScatterBatch` carries `metallic`, `roughness`, `emissive`
+    /// and a per-instance tint and **no virtual-texture set at all**, and
+    /// `scatter_mesh.wgsl` names virtual pages only for shadows. Every building
+    /// module in this engine is a scattered instance, so a `.inf_mat` on a wall
+    /// would be a field with no path to a pixel. The tints below are what the
+    /// channel that EXISTS can carry, and the gap is the wave's headline carried
+    /// item.
+    pub fn stamp_module_surfaces(&mut self, set: &crate::building::palettes::SurfaceSet) {
+        use crate::building::modules::SurfaceRole;
+        for m in &mut self.modules {
+            let Some(shape) = crate::building::modules::shape_of(&m.name) else {
+                continue;
+            };
+            m.surface = match shape.role() {
+                SurfaceRole::Wall => set.wall,
+                SurfaceRole::Floor => set.floor,
+                SurfaceRole::Furniture => set.furniture,
+                SurfaceRole::Stated => continue,
+            };
+        }
+    }
+
     /// The rule for `symbol`, if it is a non-terminal.
     pub fn rule(&self, symbol: &str) -> Option<&Rule> {
         self.rule_index.get(symbol).map(|&i| &self.rules[i])
