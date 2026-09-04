@@ -904,10 +904,9 @@ impl PlayerApp {
         //    of frames after `resumed`, so the first attempt necessarily happens
         //    while we are still top-level and cannot land.
         self.grab_frames = self.grab_frames.saturating_add(1);
-        if !self.keyboard_grabbed && self.grab_frames <= GRAB_LADDER_FRAMES {
-            if self.grab_frames == 1 || self.grab_frames % GRAB_LADDER_EVERY == 0 {
-                self.grab_keyboard();
-            }
+        let due = self.grab_frames == 1 || self.grab_frames.is_multiple_of(GRAB_LADDER_EVERY);
+        if !self.keyboard_grabbed && self.grab_frames <= GRAB_LADDER_FRAMES && due {
+            self.grab_keyboard();
         }
         self.set_pointer_capture(self.wanted_pointer_capture());
         // …and the demo loop's own instrument, which is inert in every session
