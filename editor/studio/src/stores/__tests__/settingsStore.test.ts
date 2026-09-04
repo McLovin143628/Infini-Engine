@@ -140,6 +140,10 @@ describe("settingsStore", () => {
       rmb_click_ms: 250,
       // IB-14: `inf_gis::DEFAULT_MAX_ENTITIES`.
       gis_max_entities: 4096,
+      // CERT1: the boot project, empty meaning "not pinned". This arm is what
+      // caught the frontend default missing the field at all -- `toEqual` is a
+      // DEEP equality, so an added Rust field fails here as well as in tsc.
+      boot_project: "",
       snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
       foliage: {
         radius: 3,

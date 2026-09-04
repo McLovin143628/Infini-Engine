@@ -38,6 +38,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   rmb_click_ms: 250,
   // IB-14: the GIS vector-import entity cap, remembered per user.
   gis_max_entities: 4096,
+  // CERT1: the project the application opens with when it was launched with
+  // none. Empty is "not pinned", and it is a `string` rather than a nullable
+  // because the file is TOML and TOML has no `None` to write.
+  boot_project: "",
   snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
   foliage: {
     radius: 3,
