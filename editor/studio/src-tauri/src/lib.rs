@@ -118,9 +118,9 @@ fn debuggable_context() -> tauri::Context {
     // Tauri's own default, kept: dropping it would change how the shell renders
     // in the very session a script is watching, which is the opposite of what a
     // demo instrument is for.
-    let args = format!(
-        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection          --remote-debugging-port={port}"
-    );
+    const TAURI_DEFAULT_ARGS: &str =
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+    let args = format!("{TAURI_DEFAULT_ARGS} --remote-debugging-port={port}");
     for window in &mut context.config_mut().app.windows {
         window.additional_browser_args = Some(args.clone());
     }
