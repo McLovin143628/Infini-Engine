@@ -488,9 +488,11 @@ mod tests {
 
         // An author made the island the default, from Preferences.
         let island = tmp.path().join("island-build").join("project");
-        let mut chosen = EditorSettings::default();
-        chosen.boot_project = island.to_string_lossy().to_string();
-        chosen.boot_project_deliberate = true;
+        let chosen = EditorSettings {
+            boot_project: island.to_string_lossy().to_string(),
+            boot_project_deliberate: true,
+            ..EditorSettings::default()
+        };
         chosen.save(&cfg).unwrap();
 
         // …then opens a scratch project. `apply_open` pins on every open.
