@@ -650,8 +650,8 @@ pub fn import_texture_bytes(
 ///
 /// # Why this is here and not in the importer that wants it
 ///
-/// It halves through [`downsample_box`] — the *same* filter
-/// [`rgba_mip_chain`] uses — so a source clamped to `max_extent` is
+/// It halves through `downsample_box` — the *same* filter
+/// `rgba_mip_chain` uses — so a source clamped to `max_extent` is
 /// **bit-identical to the mip level of the unclamped import at that extent**.
 /// That is a property worth having and it is only true if there is one filter;
 /// a second box filter written beside the caller would agree today and drift
