@@ -313,6 +313,43 @@ fn a_manifest_becomes_a_textured_material_and_a_mesh() {
     );
     assert!(!orm.srgb, "an ORM is data, not a colour");
 
+    // …**and the channels are read, not assumed** (ASSET0 audit). Until this
+    // block the section titled "the ORM's channels really are O/R/M" asserted
+    // an EXTENT and a colour-space flag and never looked at a texel, so the one
+    // thing its own comment calls "the one place a channel order could be wrong
+    // and everything still work" was the one thing it did not check: swapping
+    // `pack_orm`'s first two arguments passed every assertion in this file.
+    //
+    // The fixture makes the three channels tell each other apart: occlusion is
+    // a {255, 180} checker (mean 217.5), roughness a {200, 90} one (mean 145),
+    // and there is no metallic map at all. The tolerance is BC1's — the checker
+    // is on 4-px blocks, so every block is a solid colour and 5:6:5 is the whole
+    // of the error.
+    let px = orm.level_rgba8(0).expect("the ORM's level 0 decodes");
+    let mean = |c: usize| -> f64 {
+        px.chunks_exact(4).map(|p| f64::from(p[c])).sum::<f64>() / (px.len() / 4) as f64
+    };
+    let (r, g, b) = (mean(0), mean(1), mean(2));
+    assert!(
+        (r - 217.5).abs() < 12.0,
+        "ORM red is {r:.1}, not the occlusion map's 217.5 -- O/R/M is not the \
+         packed order (roughness would read 145)"
+    );
+    assert!(
+        (g - 145.0).abs() < 12.0,
+        "ORM green is {g:.1}, not the roughness map's 145.0 -- glTF puts \
+         roughness in GREEN and every lit shader in this engine reads it there"
+    );
+    assert!(
+        b < 1.0,
+        "ORM blue is {b:.1}, not 0 -- the pack ships no metallic map, and a \
+         non-zero blue is every surface here turning into metal"
+    );
+    assert!(
+        px.chunks_exact(4).all(|p| p[2] == 0),
+        "some texel carries a metallic value the pack never shipped"
+    );
+
     // ── the mesh ─────────────────────────────────────────────────────────────
     assert_eq!(report.meshes.len(), 1);
     let (mkey, mesh_id, rungs, tris) = report.meshes[0].clone();
