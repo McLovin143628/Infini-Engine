@@ -166,12 +166,28 @@ pub fn lod_for_distance(dist: f64, thresholds: &[f64]) -> u32 {
     n.min(TERRAIN_LOD_COUNT - 1)
 }
 
-/// Morph factor (0 → use the fine grid, 1 → snapped to the coarser grid) for a
-/// tile at `dist` in LOD `lod`: ramps up over the last [`TERRAIN_MORPH_REGION`]
-/// of the band before the next threshold. The coarsest LOD never morphs (0).
-pub fn morph_factor(dist: f64, lod: u32, thresholds: &[f64]) -> f32 {
+/// The **distance band** `[start, end]` a ring-`lod` patch morphs over: the last
+/// [`TERRAIN_MORPH_REGION`] of the band before the next threshold. `None` for the
+/// coarsest ring, which has nothing coarser to morph toward.
+///
+/// # This is the whole rule, and it is the ONE copy of it (wave CERT1)
+///
+/// The band is the only part of the morph the GPU cannot derive for itself: the
+/// thresholds are a function of the terrain's level-0 tile span, and a patch does
+/// not carry its span-at-level-0. So the band rides the instance buffer
+/// ([`PatchRaw::params`]`.xy`) and `terrain.wgsl`'s `morph_at` evaluates the
+/// **same smoothstep over it** that [`morph_factor`] evaluates here — at the
+/// *vertex's own* horizontal distance rather than at the tile centre's.
+///
+/// That split is deliberate and it is the house's most-repeated law: the CPU owns
+/// the definition (this function), the GPU owns the evaluation point, and there
+/// is no second copy of the ramp geometry anywhere. `morph_factor` is kept as the
+/// CPU-side evaluation because it is the twin `tests/terrain_continuity.rs`
+/// asserts the shader's arithmetic against — not because anything in the frame
+/// path still reads a per-patch morph. Nothing does.
+pub fn morph_band(lod: u32, thresholds: &[f64]) -> Option<(f64, f64)> {
     if lod as usize >= thresholds.len() {
-        return 0.0; // coarsest level: nothing coarser to morph toward
+        return None; // coarsest level: nothing coarser to morph toward
     }
     let upper = thresholds[lod as usize];
     let lower = if lod == 0 {
@@ -179,7 +195,16 @@ pub fn morph_factor(dist: f64, lod: u32, thresholds: &[f64]) -> f32 {
     } else {
         thresholds[lod as usize - 1]
     };
-    let start = upper - TERRAIN_MORPH_REGION * (upper - lower);
+    Some((upper - TERRAIN_MORPH_REGION * (upper - lower), upper))
+}
+
+/// Morph factor (0 → use the fine grid, 1 → snapped to the coarser grid) at
+/// horizontal distance `dist` for a patch in ring `lod`: the smoothstep over
+/// [`morph_band`]. The coarsest LOD never morphs (0).
+pub fn morph_factor(dist: f64, lod: u32, thresholds: &[f64]) -> f32 {
+    let Some((start, upper)) = morph_band(lod, thresholds) else {
+        return 0.0;
+    };
     if dist <= start {
         0.0
     } else if dist >= upper {
@@ -193,13 +218,33 @@ pub fn morph_factor(dist: f64, lod: u32, thresholds: &[f64]) -> f32 {
 
 /// The **asset LOD a clipmap ring samples from** (P16.3b1).
 ///
-/// The two ladders are the same ladder. Ring `r` renders a patch with
+/// The two ladders have the same *shape*. Ring `r` renders a patch with
 /// `TERRAIN_BASE_CELLS >> r` grid cells across a tile, i.e. its mesh cell size
 /// doubles every ring; an asset LOD `n` page has `mps · 2ⁿ` metres per sample,
 /// i.e. its texel size doubles every level. Matching them one-for-one gives
-/// `ring r ↔ asset LOD r` — the outer rings read progressively coarser pyramid
-/// pages, and the number of height texels per patch cell stays constant across
-/// the whole clipmap.
+/// `ring r ↔ asset LOD r`, so the outer rings read progressively coarser pyramid
+/// pages and never need full-resolution residency.
+///
+/// # They do NOT change gear at the same distance (wave CERT1)
+///
+/// This doc used to close by claiming that the pairing keeps *"the number of
+/// height texels per patch cell constant across the whole clipmap"*. **It is not
+/// constant, and the claim is withdrawn.** What this function returns is a
+/// *want*; what a patch actually samples is the page the streamer's cut
+/// published, and the two ladders are anchored to different radii:
+///
+/// * the rings are at [`TERRAIN_LOD_SCALE`]` · 2^r` tile spans — 384 / 768 /
+///   1536 m on the island's 256 m tiles;
+/// * the cut refines a lod-`L` node inside `inf_terrain::RENDER_LOD0_RADIUS_TILES
+///   · 2^L · (1 − 0.15)` — 1088 / 2176 / 4352 m.
+///
+/// `tests/terrain_continuity::the_streamer_and_renderer_ladders_do_not_change_
+/// gear_together` prints the whole distance table off those constants. The
+/// texels-per-mesh-cell column reads **4, 8, 16, 8, 16, 8, 4** — a 4× spread, not
+/// a constant: the mesh coarsens three times before the first page does, then the
+/// page coarsens and the ratio falls back. The ring nearest a 16 is the one where
+/// a mesh cell spans sixteen surveyed metres, and it is the band a later wave
+/// should aim a ladder re-anchoring at.
 ///
 /// The result is clamped to `max_lod`, the coarsest level the projection actually
 /// carries: a level-0-only (inline, non-streamed) terrain has `max_lod == 0`, so
@@ -425,7 +470,19 @@ pub struct TerrainPatch {
     pub ring: u32,
     /// Grid-mesh density index: [`patch_mesh_lod(ring, key.lod)`](patch_mesh_lod).
     pub mesh_lod: u32,
-    /// LOD morph factor (0 = this ring's grid, 1 = snapped to the coarser grid).
+    /// LOD morph factor at the **tile centre** (0 = this ring's grid, 1 = snapped
+    /// to the coarser grid).
+    ///
+    /// **Diagnostic, not the frame path** (wave CERT1). The instance buffer
+    /// carries the ring's [`morph_band`] and the vertex shader evaluates the
+    /// morph at each vertex's own horizontal distance; a single number sampled at
+    /// the tile centre is exactly what cracked the seam between two same-ring
+    /// neighbours (`tests/terrain_continuity.rs` measured **3.83 m** on the
+    /// island's 256 m tiles, because the 134.4 m ring-0 ramp is narrower than the
+    /// 256 m centre-to-centre pitch, so one neighbour is always pinned at 0 while
+    /// the other is pinned at 1). Kept because it is what makes a patch list
+    /// readable in a test or a debugger, and because it is the same
+    /// [`morph_factor`] the shader's twin is asserted against.
     pub morph: f32,
 }
 
@@ -641,14 +698,23 @@ pub fn plan_tile_cache<T>(
 
 // ── GPU node ────────────────────────────────────────────────────────────────
 
-/// Per-patch instance data (matches `@location(1..=2)` in terrain.wgsl).
+/// Per-patch instance data (matches `@location(1..=3)` in terrain.wgsl).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PatchRaw {
     /// origin_local.xyz, world tile span.
     o_span: [f32; 4],
-    /// morph, cells-at-lod, resolution, skirt depth (m).
+    /// The ring's [`morph_band`] (`start`, `end`, in metres of horizontal camera
+    /// distance — `(0, 0)` for the coarsest ring, which never morphs), then
+    /// cells-at-lod and the height-texture resolution.
+    ///
+    /// **The band, not a morph factor** (wave CERT1). What used to ride here was
+    /// one `f32` evaluated at the tile centre, which is a different rule from the
+    /// one the CPU defines — see [`morph_band`] and [`TerrainPatch::morph`].
     params: [f32; 4],
+    /// Skirt depth (m). Its own attribute rather than a fourth `params` slot
+    /// because the band needs two of them.
+    skirt: f32,
 }
 
 /// A unit grid patch mesh (positions in `[0,1]²`, `z` = skirt flag) + indices for
@@ -1020,6 +1086,11 @@ impl TerrainNode {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 16,
                 shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 32,
+                shader_location: 3,
             },
         ];
 
@@ -1659,6 +1730,11 @@ impl TerrainNode {
         let mut raw: Vec<PatchRaw> = Vec::with_capacity(patches.iter().map(Vec::len).sum());
         for (terrain, patches) in terrains.iter().zip(&patches) {
             let res = terrain.tile_resolution.max(2) as f32;
+            // The ring thresholds are a function of the terrain's LEVEL-0 span,
+            // and a patch does not carry one — so the band is resolved here, off
+            // the same `lod_thresholds` call `assemble_patches` just made, and
+            // shipped per patch. One rule, two evaluation points (wave CERT1).
+            let thresholds = lod_thresholds(terrain.tile_span());
             for p in patches {
                 let tile = &terrain.tiles[p.tile];
                 // A coarse page covers 2^lod × the level-0 span; the skirt depth
@@ -1673,9 +1749,14 @@ impl TerrainNode {
                 // folded into the max, because deformation stacks on top of the
                 // relief instead of competing with it.
                 let skirt = (hmax - hmin).abs().max(span * 0.05).max(1.0) + deform_skirt;
+                // `(0, 0)` for the coarsest ring: `morph_at` reads a non-positive
+                // band width as "never morph", which is the same clause
+                // `morph_band` states by returning `None`.
+                let (b0, b1) = morph_band(p.ring, &thresholds).unwrap_or((0.0, 0.0));
                 raw.push(PatchRaw {
                     o_span: [o.x, o.y, o.z, span],
-                    params: [p.morph, cells_at_lod(p.mesh_lod) as f32, res, skirt],
+                    params: [b0 as f32, b1 as f32, cells_at_lod(p.mesh_lod) as f32, res],
+                    skirt,
                 });
             }
         }

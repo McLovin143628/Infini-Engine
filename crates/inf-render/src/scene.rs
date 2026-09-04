@@ -751,7 +751,48 @@ impl ScatterData {
 /// see the other's crate**: the shipped player links `inf-pcg` and the editor
 /// viewport does not (it hand-mirrors `pcg_kind_color` for exactly that reason),
 /// so a constant in `inf-pcg` would have to be duplicated.
+///
+/// *(Wave CERT1 correction: the viewport HAS linked `inf-pcg` since island wave
+/// I8b, for the module-mesh table. The sentence above is kept because the
+/// conclusion still holds — one constant in the crate both projections already
+/// name is better than two — but the premise is no longer true.)*
 pub const STRUCTURE_LOD_M: f64 = 96.0;
+
+/// **How far a grammar building draws its FIT-OUT**, metres — the mid rung of
+/// the three-band ladder (wave CERT1, CP-C3).
+///
+/// # The band it makes
+///
+/// A building used to draw in two tiers: everything it holds out to
+/// [`STRUCTURE_LOD_M`], then one shell box. The certification's owner asked for
+/// three — *"low poly far / medium mid-range / high poly close"* — and the
+/// third rung is here:
+///
+/// | band | metres | what draws |
+/// |---|---|---|
+/// | near | `[0, INTERIOR_LOD_M)` | the whole building, fit-out included |
+/// | mid | `[0, STRUCTURE_LOD_M + reach)` | its fabric only — walls, glazing, decks, signs, string lights |
+/// | far | `[STRUCTURE_LOD_M, draw)` | one oriented shell box |
+///
+/// The bands are complementary per BUCKET rather than per instance, which is
+/// what keeps the camera out of the projection: `push_scatter` already groups a
+/// volume's instances by the mesh GUID they draw, and a fit-out family's GUID is
+/// a fact about the content. Nothing is added to the instance stream, no schema
+/// moves, and a level with no grammar buildings in it changes not one batch.
+///
+/// # Why 64 m
+///
+/// It is `inf_ecs::band::DEFAULT_COLLIDER_NEAR_M` — the radius inside which a
+/// building has colliders at all. Past it you cannot be *inside* the building,
+/// so its furniture can only be seen through a door opening from outside; and
+/// the window between you and it is an opaque emissive box (CP-B10), so there is
+/// no second way in. Tying the two by value rather than by coincidence means the
+/// day the collider band moves, the question "can I be in this room" and the
+/// question "is this room furnished" still have one answer.
+///
+/// `inf-render` cannot name `inf-ecs` (Ring 0 render has no ECS edge), so the
+/// equality is asserted by the projector's own gate rather than by a `use`.
+pub const INTERIOR_LOD_M: f64 = 64.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScatterBatch {

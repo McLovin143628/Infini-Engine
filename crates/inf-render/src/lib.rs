@@ -150,7 +150,7 @@ pub use scene::{
     ScatterMemo, ScatterMeshes, ScatterSource, SkinnedInstance, SkinnedMeshData, SkinnedShadow,
     SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey,
     TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey, CLOTH_TINT,
-    DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE, MAX_SCATTER_MESH_TRIANGLES,
+    DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE, INTERIOR_LOD_M, MAX_SCATTER_MESH_TRIANGLES,
     STRUCTURE_LOD_M,
 };
 pub use scene::{

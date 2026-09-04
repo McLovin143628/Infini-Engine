@@ -74,16 +74,23 @@ struct VIn {
     @location(0) uv_skirt: vec3<f32>,
     // Instance (per patch): origin_local.xyz + world tile span.
     @location(1) o_span: vec4<f32>,
-    // Instance: morph, grid cells at this LOD, texture resolution, skirt depth (m).
+    // Instance: the ring's morph BAND (start, end — metres of horizontal camera
+    // distance), grid cells at this LOD, texture resolution. See `morph_at`.
     @location(2) params: vec4<f32>,
+    // Instance: skirt depth (m). Its own attribute because the band takes two of
+    // `params`' four slots.
+    @location(3) skirt_depth: f32,
 };
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world_local: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) @interpolate(flat) span_res: vec2<f32>, // span, resolution
-    @location(3) height: f32,                             // world height (offset)
+    // span, resolution, grid cells at this LOD
+    @location(2) @interpolate(flat) span_res_cells: vec3<f32>,
+    // The patch's render-local origin XZ + its morph band: everything
+    // `morphed_height` needs that the fragment cannot derive from `world_local`.
+    @location(3) @interpolate(flat) origin_band: vec4<f32>,
 };
 
 fn load_texel(ij: vec2<i32>, res: f32) -> f32 {
@@ -132,6 +139,122 @@ fn sample_height(uv: vec2<f32>, res: f32) -> f32 {
 // disagree about which samples are ground.
 fn ground_height(uv: vec2<f32>, res: f32, world_xz: vec2<f32>) -> f32 {
     return sample_height(uv, res) - deform_depth(world_xz);
+}
+
+// ── LOD MORPH (wave CERT1) ───────────────────────────────────────────────────
+//
+// **One rule, two evaluation points.** `passes::terrain::morph_band` owns the
+// geometry of the ramp — a ring's `[start, end]` band of horizontal camera
+// distance — and ships it per patch in `params.xy`; `morph_at` below is the same
+// smoothstep `passes::terrain::morph_factor` evaluates on the CPU. What the GPU
+// adds is the evaluation POINT: the vertex's own horizontal distance, not the
+// tile centre's.
+//
+// # Why per-vertex, as a number
+//
+// The morph factor used to be one `f32` per patch, computed from the distance to
+// the tile CENTRE. Along the shared edge of two same-ring neighbours the two
+// height textures agree sample for sample (the pyramid's shared-edge invariant),
+// so the morph was the only thing that could separate the two surfaces — and it
+// always did, maximally. On the island the ring-0 ramp is
+// `TERRAIN_MORPH_REGION · band width` = 134.4 m wide while adjacent tile centres
+// are 256 m apart, so two neighbours can never both be inside the ramp: one is
+// pinned at 0 and the other at 1. `tests/terrain_continuity.rs` measured the
+// resulting crack at **3.83 m** on a 60 m-relief field, and **0.0000 m** with the
+// rule below.
+//
+// The band is `(0, 0)` for the coarsest ring — a non-positive width is the same
+// clause `morph_band` states by returning `None`.
+fn morph_at(dist: f32, band: vec2<f32>) -> f32 {
+    let width = band.y - band.x;
+    if (width <= 0.0) {
+        return 0.0;
+    }
+    let t = clamp((dist - band.x) / width, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// The height of the **next-coarser grid** at `uv`: bilinear on the coarse
+// lattice, i.e. the CHORD the coarser mesh actually rasterizes between its own
+// vertices.
+//
+// # Why a chord and not `round(uv / step) * step` (wave CERT1)
+//
+// The previous target was a nearest-vertex SNAP, and WGSL's `round` is
+// ties-to-even, so consecutive odd vertices snapped in opposite directions:
+// index 1 → 0, index 3 → 4, index 5 → 4, index 7 → 8. At full morph the grid
+// therefore did not become the coarser grid at all — it became a staircase of
+// duplicated heights whose surviving segments span 4 m instead of 8, i.e. **twice
+// the local slope**. Two defects in one: the LOD transition never actually
+// converged on the mesh it was morphing toward (so the pop it exists to kill
+// survived it), and the morph band was a slope amplifier — the "jagged and sharp"
+// this wave was called for.
+//
+// Measured on the island's numbers, at the worst shared-edge vertex of a 60 m
+// relief field: the nearest-snap target sat **3.8262 m** off the fine surface
+// (`tests/terrain_continuity.rs`, the arm's BEFORE column — a whole 4 m fine cell,
+// because the snap jumps a vertex rather than splitting the difference between
+// two).
+//
+// The chord is also what makes the fragment's normal well-posed. A snapped target
+// is piecewise CONSTANT in `uv`, so the gradient of the morphed field goes to
+// zero at full morph and the far half of every ring would shade dead flat; the
+// chord's gradient is the coarse mesh's real slope, which is the surface the
+// geometry is being blended onto.
+//
+// Four `ground_height` taps, not four `textureLoad`s: the coarse lattice lands on
+// an exact texel only when `(res − 1)` divides the cell count, which the island's
+// 257/64 does and a 17/64 test fixture does not. One rule that holds for every
+// resolution beats a faster one that holds for the shipped one.
+fn coarse_height(uv: vec2<f32>, res: f32, origin_xz: vec2<f32>, span: f32,
+                 coarse_step: f32) -> f32 {
+    let g = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) / coarse_step;
+    let g0 = floor(g);
+    let f = g - g0;
+    let u00 = g0 * coarse_step;
+    let u10 = u00 + vec2<f32>(coarse_step, 0.0);
+    let u01 = u00 + vec2<f32>(0.0, coarse_step);
+    let u11 = u00 + vec2<f32>(coarse_step, coarse_step);
+    let h00 = ground_height(u00, res, origin_xz + u00 * span);
+    let h10 = ground_height(u10, res, origin_xz + u10 * span);
+    let h01 = ground_height(u01, res, origin_xz + u01 * span);
+    let h11 = ground_height(u11, res, origin_xz + u11 * span);
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+// **The ground the terrain pass draws.** Both stages call THIS and neither
+// computes the blend itself, so they cannot drift apart — the same construction,
+// and for the same stated reason, as `ground_height` wrapping `deform_depth`
+// above: *"the fragment's central-difference normal must see the same surface the
+// vertex stage moved"*.
+//
+// Before wave CERT1 they did drift: the vertex wrote `mix(h_fine, h_coarse,
+// morph)` and the fragment central-differenced the un-morphed `ground_height`, so
+// over the last 35 % of every band the geometry moved toward the coarser grid and
+// the shading kept lighting the finer one. `tests/terrain_continuity.rs` measured
+// the disagreement at **10.586°** of surface normal at full morph, rising
+// linearly with it (1.08° at morph 0.1, 5.35° at 0.5).
+//
+// `uv` is the patch coordinate and `origin_xz` the patch's render-local origin,
+// so the world point is derived HERE, once, rather than by each caller — the
+// fragment's `world_local.xz` and the vertex's `o_span.xz + uv * span` are the
+// same point and re-deriving either was a second place for the mapping to be
+// wrong.
+//
+// **The `m <= 0` early-out is `mix(a, b, 0) = a` spelled out**, not an
+// approximation: the 65 % of each band that does not morph pays exactly the four
+// texel loads it paid before this wave, which is also why the goldens' near
+// ground is untouched by the coarse path.
+fn morphed_height(uv: vec2<f32>, res: f32, origin_xz: vec2<f32>, span: f32,
+                  cells: f32, band: vec2<f32>) -> f32 {
+    let world_xz = origin_xz + uv * span;
+    let h_fine = ground_height(uv, res, world_xz);
+    let m = morph_at(length(world_xz - view.eye.xz), band);
+    if (m <= 0.0) {
+        return h_fine;
+    }
+    let h_coarse = coarse_height(uv, res, origin_xz, span, 2.0 / max(cells, 1.0));
+    return mix(h_fine, h_coarse, m);
 }
 
 // ── splat weights + procedural detail (P10.4) ────────────────────────────────
@@ -493,33 +616,26 @@ fn vs(in: VIn) -> VOut {
     let uv = in.uv_skirt.xy;
     let skirt = in.uv_skirt.z;
     let span = in.o_span.w;
-    let morph = in.params.x;
-    let cells = max(in.params.y, 1.0);
-    let res = in.params.z;
-    let skirt_depth = in.params.w;
+    let band = in.params.xy;
+    let cells = max(in.params.z, 1.0);
+    let res = in.params.w;
 
-    // LOD morph: blend the fine height toward the height at the next-coarser grid
-    // vertex (snap uv to every-other vertex of this LOD). morph 0 → fine, 1 → coarse.
-    let coarse_step = 2.0 / cells;
-    let coarse_uv = round(uv / coarse_step) * coarse_step;
-    // P22.1: both morph ends are read through `ground_height`, so a footprint
-    // survives the LOD blend instead of popping out of existence the moment a
-    // patch starts morphing toward its coarser grid.
-    let h_fine = ground_height(uv, res, in.o_span.xz + uv * span);
-    let h_coarse = ground_height(coarse_uv, res, in.o_span.xz + coarse_uv * span);
-    let h = mix(h_fine, h_coarse, morph);
+    // The LOD morph, the deformation field and the heightfield, in ONE call the
+    // fragment stage makes too (P22.1's construction, extended to the morph by
+    // wave CERT1 — see `morphed_height`).
+    let h = morphed_height(uv, res, in.o_span.xz, span, cells, band);
 
     // Render-local position: tile origin + planar offset + displaced height.
     var pos = in.o_span.xyz + vec3<f32>(uv.x * span, h, uv.y * span);
     // Skirt: drop the boundary ring straight down to seal cracks.
-    pos.y = pos.y - skirt * skirt_depth;
+    pos.y = pos.y - skirt * in.skirt_depth;
 
     var out: VOut;
     out.clip = view.view_proj * vec4<f32>(pos, 1.0);
     out.world_local = pos;
     out.uv = uv;
-    out.span_res = vec2<f32>(span, res);
-    out.height = h;
+    out.span_res_cells = vec3<f32>(span, res, cells);
+    out.origin_band = vec4<f32>(in.o_span.xz, band);
     return out;
 }
 
@@ -532,16 +648,18 @@ fn vs(in: VIn) -> VOut {
 // AO is a wall.
 @fragment
 fn fs_depth(in: VOut) {
-    if (is_holed(in.uv, max(in.span_res.y, 2.0))) {
+    if (is_holed(in.uv, max(in.span_res_cells.y, 2.0))) {
         discard;
     }
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let span = in.span_res.x;
-    let res = max(in.span_res.y, 2.0);
-    let world_step = span / (res - 1.0);   // world metres between texels
+    let span = in.span_res_cells.x;
+    let res = max(in.span_res_cells.y, 2.0);
+    let cells = max(in.span_res_cells.z, 1.0);
+    let origin_xz = in.origin_band.xy;
+    let band = in.origin_band.zw;
     let texel = 1.0 / (res - 1.0);
 
     // ── P21.2 HOLE DISCARD ─────────────────────────────────────────
@@ -563,22 +681,50 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Central-difference normal from the height texture (world-space gradient),
-    // through the SAME `ground_height` the vertex stage displaced with (P22.1) —
-    // so the shading follows the geometry into a footprint instead of lighting a
-    // dent as if it were flat. `uv + texel` is exactly `world_step` metres in x,
-    // which is why the neighbours' world positions come off `world_local`
-    // directly rather than being re-derived from the patch origin.
-    let hl = ground_height(in.uv - vec2<f32>(texel, 0.0), res,
-                           in.world_local.xz - vec2<f32>(world_step, 0.0));
-    let hr = ground_height(in.uv + vec2<f32>(texel, 0.0), res,
-                           in.world_local.xz + vec2<f32>(world_step, 0.0));
-    let hd = ground_height(in.uv - vec2<f32>(0.0, texel), res,
-                           in.world_local.xz - vec2<f32>(0.0, world_step));
-    let hu = ground_height(in.uv + vec2<f32>(0.0, texel), res,
-                           in.world_local.xz + vec2<f32>(0.0, world_step));
-    let dhdx = (hr - hl) / (2.0 * world_step);
-    let dhdz = (hu - hd) / (2.0 * world_step);
+    // Central-difference normal, through the SAME `morphed_height` the vertex
+    // stage displaced with — the heightfield, the P22.1 deformation and now the
+    // LOD morph, so the shading follows the geometry into a footprint AND through
+    // a morph band instead of lighting the un-morphed fine surface (wave CERT1;
+    // the disagreement was **10.586°** at full morph).
+    //
+    // ── THE TAP SPACING IS MEASURED, NOT ASSUMED (wave CERT1, defect E) ───────
+    //
+    // A patch binds ONLY its own page — there is no apron ring in the upload —
+    // and both `load_texel` and `sample_height` clamp. So a tap at `uv.x < texel`
+    // does not read the neighbour's `h[-1]`, it re-reads `h[0]`, and dividing that
+    // difference by `2 · world_step` measured **exactly half** the true gradient:
+    // a flattened, discontinuous shading line one texel wide down every tile edge,
+    // 1 m every 256 m at ring 0 across the whole 7.2 km island. Measured at
+    // **0.4998×** the analytic gradient, an **18.290°** step between a tile's edge
+    // column and the column one texel inside it.
+    //
+    // The fix is to clamp the tap uv HERE and divide by the distance the two taps
+    // are actually apart, which degrades a central difference into a correctly
+    // scaled one-sided difference exactly at the edge and is unchanged one texel
+    // in. Measured on the gate's 60 m-relief field: the edge column's |dh/dx|
+    // goes **0.4875× → 0.9751×** of the analytic gradient, and the step between
+    // that column and the one texel inside it goes **14.688° → 0.707°**.
+    //
+    // **Stated plainly: this removes the systematic HALVING, not the seam.** The
+    // two sides of an edge now estimate the slope with opposite one-sided
+    // differences, which disagree by the surface's curvature over one texel, so
+    // the CROSS-tile step rises from **0.871° to 1.318°** — the two sides used to
+    // agree with each other precisely because both were half the truth, which is a
+    // seam invisible to a cross-tile comparison and glaring in the frame. Trading
+    // a 14.688° flattened line for a 1.318° estimator difference is the whole of
+    // this fix, and it is a trade rather than a cure: full continuity needs the
+    // neighbour's texel, i.e. a one-sample APRON RING in the page upload — a
+    // `.inf_terrain` page-format change, and out of scope for this wave.
+    let ul = max(in.uv.x - texel, 0.0);
+    let ur = min(in.uv.x + texel, 1.0);
+    let vd = max(in.uv.y - texel, 0.0);
+    let vu = min(in.uv.y + texel, 1.0);
+    let hl = morphed_height(vec2<f32>(ul, in.uv.y), res, origin_xz, span, cells, band);
+    let hr = morphed_height(vec2<f32>(ur, in.uv.y), res, origin_xz, span, cells, band);
+    let hd = morphed_height(vec2<f32>(in.uv.x, vd), res, origin_xz, span, cells, band);
+    let hu = morphed_height(vec2<f32>(in.uv.x, vu), res, origin_xz, span, cells, band);
+    let dhdx = (hr - hl) / max((ur - ul) * span, 1e-6);
+    let dhdz = (hu - hd) / max((vu - vd) * span, 1e-6);
     let n = normalize(vec3<f32>(-dhdx, 1.0, -dhdz));
 
     // ── P10.4 SPLAT MATERIAL HOOK ──────────────────────────────────────────
