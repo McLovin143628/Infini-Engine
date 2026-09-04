@@ -31690,9 +31690,35 @@ classic `.inf_mesh` draw path, only `PrimMesh` primitives and vgeom".
    position now also sits in `samples/island/README.md`, where a user meets the
    commands, instead of only in this memo.
 
-The gate goes **6 arms → 8**. Closing numbers on the audited tree are in the
-verification block above, re-run and unchanged except where this section says
-otherwise.
+The gate goes **6 arms → 8**.
+
+**Closing numbers on the audited tree** (`6fac9176`, eight `audit(ASSET0)`
+commits on top of `e1d97f33`):
+
+* battery `-j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`: **376 binaries, 7 094
+  passed, 0 failed, 21 ignored, exit 0** — +2 over the wave's 7 092, which is
+  the two arms this audit added;
+* **goldens 62**, none added and none re-blessed (`git diff --name-only
+  c852711f..HEAD -- crates/inf-render/tests/goldens/` is empty after a strict
+  run);
+* `cargo doc --no-deps --workspace` after `cargo clean --doc`: **410** warnings
+  against a ceiling of 450 — the wave's number exactly, and the two in
+  `palettes.rs` predate `c852711f`;
+* `cargo clippy --workspace --all-targets -- -D warnings`, run last: **exit 0,
+  0 warnings**, and it re-checked all four crates this audit touched;
+* `cargo fmt` per package then `git diff --exit-code`: clean;
+* CRLF **0** at the blob level over the audit's own files; no manifest
+  (`Cargo.toml`, `Cargo.lock`, `deny.toml`) and no `editor/studio` file is in
+  the audit's diff, so the wave's dependency and frontend verdicts stand
+  unexamined-by-change;
+* **the demo loop, on the audited tree**: `HERO MOVED 61.685 m over 118
+  samples`, cursor hidden during play and SHOWING after, `still running: none`,
+  exit 0. The hero's own trace says it walked rather than fell — 73.4 m of path
+  over 31 s, net **-0.32 m** of height, 102 Grounded samples with a crouch and a
+  slide in them. Screenshots in `…/scratchpad/ASSET0-AUDIT-DEMO/`. The street
+  patch reads **(39.1, 39.3, 35.6)** and the left wall **(158.2, 133.1, 103.2)**
+  — the wave's frame to within 0.2 of a level, which is what says this audit
+  moved no pixels.
 
 ### CARRIED
 
