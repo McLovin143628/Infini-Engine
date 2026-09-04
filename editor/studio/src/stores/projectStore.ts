@@ -30,6 +30,19 @@ interface ProjectState {
   showStartScreen: boolean;
   /** Last error surfaced in the start screen. */
   error: string | null;
+  /**
+   * **Which rung of `inf_project::boot::resolve` will answer next launch**, as
+   * its own human phrase (CERT1 audit ruling), or `null` before anything has
+   * asked.
+   *
+   * Set on a cold launch by {@link bootDefault} and re-set by the two
+   * Preferences actions, so the row that offers those actions can say what it
+   * is changing rather than making the author restart to find out. It is not
+   * derived in TypeScript: the phrases come from `BootSource::phrase`, and a
+   * second copy of the rung ladder across a language boundary is the defect
+   * `inf_input::default_map` records against itself.
+   */
+  bootSource: string | null;
 
   refresh: () => Promise<void>;
   applyChanged: (info: ProjectInfoDto) => void;
@@ -40,6 +53,11 @@ interface ProjectState {
    * to the rung that answered, or null when the start screen should show.
    */
   bootDefault: () => Promise<string | null>;
+  /**
+   * Make the open project the deliberate default, or forget it (CERT1 audit
+   * ruling). Both refresh {@link bootSource} from the backend's answer.
+   */
+  setBootDefault: (deliberate: boolean) => Promise<void>;
 
   newProject: (name: string, template: string, parentDir: string) => Promise<void>;
   openProject: (root: string) => Promise<void>;
@@ -62,6 +80,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   ready: false,
   showStartScreen: false,
   error: null,
+  bootSource: null,
 
   refresh: async () => {
     try {
@@ -113,6 +132,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // WHICH rung chose it, because "your last project" and "the showcase the
       // engine found beside your checkout" are two different sentences for an
       // author who did not expect either.
+      set({ bootSource: boot.source });
       useShellStore
         .getState()
         .pushStatus(`Opened ${boot.project.name} — ${boot.source}.`, 8000);
@@ -120,6 +140,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     } catch (e) {
       console.error("project.bootDefault failed", e);
       return null;
+    }
+  },
+
+  setBootDefault: async (deliberate) => {
+    try {
+      // One store action for both directions, because they are one decision
+      // seen from two sides and the row that calls them has to end up in the
+      // same place either way: a phrase the BACKEND resolved.
+      const phrase = deliberate
+        ? await projectIpc.setDefault()
+        : await projectIpc.clearDefault();
+      set({ bootSource: phrase });
+      useShellStore.getState().pushStatus(`On the next launch: ${phrase}.`, 8000);
+    } catch (e) {
+      console.error("project.setBootDefault failed", e);
+      set({ error: String(e) });
     }
   },
 

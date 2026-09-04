@@ -329,6 +329,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         project::project_recent,
         project::project_boot_level,
         project::project_boot_default,
+        project::project_set_default,
+        project::project_clear_default,
         project::project_current,
         project::project_new,
         project::project_open,

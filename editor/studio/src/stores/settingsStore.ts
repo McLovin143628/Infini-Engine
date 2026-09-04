@@ -42,6 +42,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   // none. Empty is "not pinned", and it is a `string` rather than a nullable
   // because the file is TOML and TOML has no `None` to write.
   boot_project: "",
+  // CERT1 audit ruling: whether that pin was CHOSEN (rung 2, above the showcase
+  // island) or merely VISITED by opening the project (rung 4, below it). Written
+  // only by Preferences ▸ General; an ordinary open never sets it.
+  boot_project_deliberate: false,
   snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
   foliage: {
     radius: 3,

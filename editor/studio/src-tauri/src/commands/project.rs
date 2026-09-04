@@ -193,12 +193,20 @@ pub async fn project_boot_level(assets: State<'_, AssetState>) -> Result<Option<
     })
 }
 
-/// **Remember this project as the one to open next launch** (wave CERT1).
+/// **Remember this project as the one to open next launch** (wave CERT1) —
+/// the AUTOMATIC pin, rung 4.
 ///
-/// Rung 2 of [`inf_project::boot::resolve`]. Written on every successful open,
-/// so the plain meaning of the pin is *the last project you opened* — the
-/// behaviour every other editor on this machine already has, and the reason the
-/// showcase rung below it only fires for someone who has never opened anything.
+/// Written on every successful open, so its plain meaning is *the last project
+/// you opened*. Since the CERT1 audit's ruling it sits **below** the showcase:
+/// visiting a project is not the same act as choosing one, and the rung exists
+/// for a machine where `inf island build` has never run.
+///
+/// **A DELIBERATE pin is left alone.** An author who used Preferences ▸ "Make
+/// this project the default" must be able to open a scratch project without
+/// silently losing that choice — one string carries both pins, so the only way
+/// to keep the decision is not to overwrite it. Nothing is lost by skipping the
+/// write: rung 2 answers first, so rung 4's value is never read while the flag
+/// is set.
 ///
 /// **Best effort, deliberately.** A settings directory that cannot be written
 /// must not turn opening a project into an error; the consequence is that the
@@ -213,6 +221,9 @@ fn pin_boot_project(cfg: &std::path::Path, root: &std::path::Path) {
             return;
         }
     };
+    if settings.boot_project_deliberate {
+        return;
+    }
     let pin = root.to_string_lossy().to_string();
     if settings.boot_project == pin {
         return;
@@ -222,6 +233,81 @@ fn pin_boot_project(cfg: &std::path::Path, root: &std::path::Path) {
     if let Err(e) = settings.save(cfg) {
         tracing::warn!("boot project not pinned: {e}");
     }
+}
+
+/// **Write the boot pin and say what it is** — the one door Preferences' two
+/// actions share (CERT1 audit ruling).
+///
+/// `root` empty clears the pin entirely, which is "reset to the showcase"; a
+/// path sets it and marks it DELIBERATE, which is "make this project the
+/// default". The answer is the phrase for the rung that will win at the *next*
+/// launch, resolved through [`inf_project::boot::resolve`] itself rather than
+/// assumed — because "reset to the showcase" only reaches the showcase on a
+/// machine that has one, and a dialog that said otherwise would be lying on
+/// every other machine.
+fn set_boot_pin(app: &AppHandle, root: &str) -> Result<String, String> {
+    let cfg = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut settings = EditorSettings::load_or_default(&cfg).map_err(|e| e.to_string())?;
+    settings.boot_project = root.to_string();
+    settings.boot_project_deliberate = !root.is_empty();
+    settings.normalize();
+    settings.save(&cfg).map_err(|e| e.to_string())?;
+    Ok(boot_phrase(&settings))
+}
+
+/// What `inf_project::boot::resolve` would answer next launch, as a phrase.
+///
+/// Ring 2 supplies the environment and the executable's directory; Ring 0
+/// decides. Split out so the two commands and their arms read the same rule the
+/// launch does, rather than a second description of it.
+fn boot_phrase(settings: &EditorSettings) -> String {
+    let env = std::env::var(inf_project::BOOT_PROJECT_ENV).ok();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    match inf_project::resolve_boot_project(
+        env.as_deref(),
+        &settings.boot_project,
+        settings.boot_project_deliberate,
+        exe_dir.as_deref(),
+    ) {
+        Some(b) => b.source.phrase().to_string(),
+        None => NOTHING_BOOTS.to_string(),
+    }
+}
+
+/// The phrase for "no rung answers" — the start screen.
+///
+/// A constant rather than a literal in two places, because it is the string the
+/// Preferences row prints and the arm below asserts.
+pub const NOTHING_BOOTS: &str = "nothing — the start screen";
+
+/// **Make the open project the one the application boots on** (CERT1 audit
+/// ruling) — the DELIBERATE pin, rung 2, above the showcase.
+///
+/// Answers the phrase for what will boot next launch, so the caller can print a
+/// sentence without a second copy of the rule.
+#[tauri::command]
+pub async fn project_set_default(
+    app: AppHandle,
+    state: State<'_, ProjectState>,
+) -> Result<String, String> {
+    let root = {
+        let cur = state.current.lock().map_err(|e| e.to_string())?;
+        match cur.as_ref() {
+            Some(p) => p.root.to_string_lossy().to_string(),
+            None => return Err("no project is open".to_string()),
+        }
+    };
+    set_boot_pin(&app, &root)
+}
+
+/// **Forget the deliberate default**, so the showcase (or, failing that, the
+/// last project opened) answers again. The other half of the ruling: a choice a
+/// reader cannot undo is not a preference, it is a trap.
+#[tauri::command]
+pub async fn project_clear_default(app: AppHandle) -> Result<String, String> {
+    set_boot_pin(&app, "")
 }
 
 /// **Open the project the application boots with, when it was launched with
@@ -257,19 +343,21 @@ pub async fn project_boot_default(
         return Ok(None);
     }
     let env = std::env::var(inf_project::BOOT_PROJECT_ENV).ok();
-    let pinned = app
+    let settings = app
         .path()
         .app_config_dir()
         .ok()
         .and_then(|cfg| EditorSettings::load_or_default(&cfg).ok())
-        .map(|s| s.boot_project)
         .unwrap_or_default();
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    let Some(choice) =
-        inf_project::resolve_boot_project(env.as_deref(), &pinned, exe_dir.as_deref())
-    else {
+    let Some(choice) = inf_project::resolve_boot_project(
+        env.as_deref(),
+        &settings.boot_project,
+        settings.boot_project_deliberate,
+        exe_dir.as_deref(),
+    ) else {
         return Ok(None);
     };
     // A root that resolves and then fails to OPEN is not an error either: a
@@ -386,6 +474,60 @@ mod tests {
     /// the shape a "cannot be written" arm actually needs. And the arm now
     /// asserts the outcome rather than merely surviving: nothing is created, and
     /// the settings that could not be reached are still absent afterwards.
+    /// **(d) A DELIBERATE pin survives an open, and reset clears it** (CERT1
+    /// audit ruling).
+    ///
+    /// The two halves are one arm because they are one property: the pin is a
+    /// DECISION, so a visit must not overwrite it and an explicit reset must.
+    /// Split, either half passes on a `set_boot_pin` that writes nothing.
+    #[test]
+    fn an_open_does_not_overwrite_a_deliberate_pin_and_a_reset_does_clear_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        // An author made the island the default, from Preferences.
+        let island = tmp.path().join("island-build").join("project");
+        let mut chosen = EditorSettings::default();
+        chosen.boot_project = island.to_string_lossy().to_string();
+        chosen.boot_project_deliberate = true;
+        chosen.save(&cfg).unwrap();
+
+        // …then opens a scratch project. `apply_open` pins on every open.
+        pin_boot_project(&cfg, &tmp.path().join("scratch"));
+
+        let after = EditorSettings::load_or_default(&cfg).unwrap();
+        assert_eq!(
+            after.boot_project,
+            island.to_string_lossy(),
+            "opening another project overwrote a DELIBERATE pin — the choice an \
+             author made in Preferences must survive a visit, or the flag is \
+             decoration"
+        );
+        assert!(after.boot_project_deliberate, "the pin lost its intent");
+
+        // The reset half, through the same door the command uses.
+        let mut reset = after;
+        reset.boot_project = String::new();
+        reset.boot_project_deliberate = false;
+        reset.save(&cfg).unwrap();
+        let cleared = EditorSettings::load_or_default(&cfg).unwrap();
+        assert!(cleared.boot_project.is_empty());
+        assert!(!cleared.boot_project_deliberate);
+
+        // …and NOW an open pins again, because there is no decision to protect.
+        pin_boot_project(&cfg, &tmp.path().join("scratch"));
+        let visited = EditorSettings::load_or_default(&cfg).unwrap();
+        assert_eq!(
+            visited.boot_project,
+            tmp.path().join("scratch").to_string_lossy()
+        );
+        assert!(
+            !visited.boot_project_deliberate,
+            "an open marked its own pin deliberate — a visit is not a decision"
+        );
+    }
+
     #[test]
     fn a_pin_that_cannot_be_written_is_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();

@@ -21,6 +21,7 @@ import { gameBindings } from "../lib/ipc";
 import { chordOf, DEFAULT_KEYBINDINGS, allKeybindings } from "../lib/keybindings";
 import { BUILTIN_THEMES } from "../lib/theme";
 import { useViewportOverlay } from "../lib/viewportOverlay";
+import { useProjectStore } from "../stores/projectStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useShellStore } from "../stores/shellStore";
 
@@ -236,6 +237,63 @@ function CheckRow({
   );
 }
 
+/**
+ * **Which project the application boots on, and the two ways to change it**
+ * (CERT1 audit ruling).
+ *
+ * The rung ladder is `INF_BOOT_PROJECT` → a DELIBERATE pin → the showcase
+ * island → the last project opened → the start screen, and before this row an
+ * author could neither see which rung had answered nor undo the pin, which the
+ * audit measured as: the first other project you open takes the showcase's
+ * place for ever.
+ *
+ * The phrase is **not composed here**. It is `BootSource::phrase`, carried out
+ * of `project_boot_default` on launch and re-answered by each of the two
+ * commands, so a ladder that changes changes in one place. "Reset to the
+ * showcase" therefore reports what will *actually* happen — on a machine where
+ * `inf island build` never ran there is no showcase to reach, and the row says
+ * so instead of promising one.
+ */
+function BootProjectRow() {
+  const current = useProjectStore((s) => s.current);
+  const bootSource = useProjectStore((s) => s.bootSource);
+  const setBootDefault = useProjectStore((s) => s.setBootDefault);
+  const deliberate = useSettingsStore((s) => s.settings.boot_project_deliberate);
+
+  return (
+    <div className="mb-3 border-t border-(--ink-border) pt-3">
+      <div className="mb-2 flex items-start gap-3 text-xs">
+        <span className="w-56 shrink-0">Opens on launch</span>
+        <span className="text-(--ink-text-dim)">
+          {bootSource ?? "not asked this session"}
+        </span>
+      </div>
+      <div className="ml-59 flex gap-2">
+        <button
+          disabled={!current}
+          onClick={() => void setBootDefault(true)}
+          title={
+            current
+              ? `Boot on ${current.name} from now on, whatever else you open.`
+              : "Open a project first."
+          }
+          className="flex h-7 items-center rounded border border-(--ink-border) px-2 text-xs hover:border-(--ink-accent) disabled:opacity-40"
+        >
+          Make this project the default
+        </button>
+        <button
+          disabled={!deliberate}
+          onClick={() => void setBootDefault(false)}
+          title="Forget the default, so the showcase island answers again."
+          className="flex h-7 items-center rounded border border-(--ink-border) px-2 text-xs hover:border-(--ink-accent) disabled:opacity-40"
+        >
+          Reset to the showcase
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function PreferencesDialog() {
   const open = useShellStore((s) => s.preferencesOpen);
   const setOpen = useShellStore((s) => s.setPreferencesOpen);
@@ -377,6 +435,7 @@ export default function PreferencesDialog() {
                   checked={settings.tour_seen}
                   onChange={(tour_seen) => patch({ tour_seen })}
                 />
+                <BootProjectRow />
                 <p className="mt-4 text-xs text-(--ink-text-faint)">
                   Preferences are stored per user in <code>editor-settings.toml</code> beside the
                   saved layouts. Changes apply immediately.

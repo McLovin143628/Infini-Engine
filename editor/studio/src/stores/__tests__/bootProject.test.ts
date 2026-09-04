@@ -33,6 +33,8 @@ vi.mock("../../lib/ipc", () => ({
     current: vi.fn(() => Promise.resolve(null)),
     bootLevel: vi.fn(() => Promise.resolve<string | null>(null)),
     bootDefault: vi.fn(() => Promise.resolve(null)),
+    setDefault: vi.fn(() => Promise.resolve("the project you made the default")),
+    clearDefault: vi.fn(() => Promise.resolve("the showcase island")),
   },
 }));
 
@@ -70,7 +72,13 @@ const BOOT: ProjectBootDto = { project: ISLAND, source: "the showcase island" };
 beforeEach(() => {
   vi.mocked(projectIpc.current).mockResolvedValue(null);
   vi.mocked(projectIpc.bootDefault).mockResolvedValue(null);
-  useProjectStore.setState({ current: null, recent: [], templates: [], ready: false });
+  useProjectStore.setState({
+    current: null,
+    recent: [],
+    templates: [],
+    ready: false,
+    bootSource: null,
+  });
   useShellStore.setState({ statusMessage: null });
 });
 
@@ -114,4 +122,43 @@ it("no boot project leaves the start screen alone and says nothing", async () =>
   } finally {
     dispose();
   }
+});
+
+/**
+ * **The rung that answered reaches the author** (CERT1 audit ruling).
+ *
+ * The Preferences row shows `bootSource`, so a launch that resolves has to put
+ * the phrase there — not just in a status line that scrolls away. Before the
+ * ruling there was no row and no state, and the pin was invisible.
+ */
+it("a cold launch remembers WHICH rung answered, for the Preferences row", async () => {
+  vi.mocked(projectIpc.bootDefault).mockResolvedValue(BOOT);
+
+  const dispose = await initProjectSync();
+  try {
+    expect(useProjectStore.getState().bootSource).toBe("the showcase island");
+  } finally {
+    dispose();
+  }
+});
+
+/**
+ * **Both Preferences actions take their answer from the BACKEND.**
+ *
+ * The rung ladder lives in `inf_project::boot::resolve` and the phrases in
+ * `BootSource::phrase`; a store that composed either would be a second copy of
+ * the ladder across a language boundary. So the arm asserts the store shows
+ * what the command returned, and — the half that matters — that "reset" does
+ * not hard-code "the showcase island": on a machine without one the backend
+ * answers something else and the row must print that.
+ */
+it("making a project the default, and resetting, both report the backend's phrase", async () => {
+  await useProjectStore.getState().setBootDefault(true);
+  expect(projectIpc.setDefault).toHaveBeenCalledTimes(1);
+  expect(useProjectStore.getState().bootSource).toBe("the project you made the default");
+
+  vi.mocked(projectIpc.clearDefault).mockResolvedValue("nothing — the start screen");
+  await useProjectStore.getState().setBootDefault(false);
+  expect(projectIpc.clearDefault).toHaveBeenCalledTimes(1);
+  expect(useProjectStore.getState().bootSource).toBe("nothing — the start screen");
 });

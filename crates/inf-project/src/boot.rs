@@ -21,15 +21,39 @@
 //! 1. **[`BOOT_PROJECT_ENV`]** — an absolute project root in the environment.
 //!    The `INF_PLAYER_BIN` precedent: a machine-level override that a harness, a
 //!    packaging script or a developer can set without touching a settings file.
-//! 2. **The pin** — `EditorSettings::boot_project`, which the editor writes on
-//!    every successful project open. So *the last project you opened* is the one
-//!    that comes back, which is what every editor on this machine already does,
-//!    and an author who pins one deliberately outranks the showcase for ever.
+//! 2. **A DELIBERATE pin** — `EditorSettings::boot_project` with
+//!    `boot_project_deliberate` set: a project an author explicitly made the
+//!    default, from Preferences. An explicit choice outranks everything but the
+//!    environment, and nothing but another explicit choice takes it away.
 //! 3. **The showcase** — [`SHOWCASE_RELATIVE`], found by walking up from a start
 //!    directory (the running executable's). This is the rung that makes the
 //!    island the default *on a machine where it has been built*, with no
 //!    settings file and no click.
-//! 4. **Nothing.** The start screen, exactly as before.
+//! 4. **An AUTOMATIC pin** — the same field with the flag clear: the last
+//!    project opened, which the editor writes on every successful open. It sits
+//!    BELOW the showcase, which is the whole of the CERT1 audit's ruling.
+//! 5. **Nothing.** The start screen, exactly as before.
+//!
+//! # Why the automatic pin is below the showcase (CERT1 audit ruling)
+//!
+//! The first version of this module had one pin at rung 2, written by every
+//! open. The consequence, measured by the audit rather than argued: **the first
+//! time an author opened any other project, the showcase stopped being what the
+//! application booted on, for ever, and no UI showed or cleared it.** The owner's
+//! sentence is that the island *is* the default level, and "the last thing you
+//! opened is the default" is a different sentence.
+//!
+//! So the pin is split by INTENT rather than by value. A visit is a visit and
+//! ranks below the showcase; a decision is a decision and ranks above it. The
+//! automatic rung is kept, below, because it is what a machine with **no**
+//! showcase wants — there, rung 3 answers `None` and "reopen what I had" is
+//! still the right behaviour.
+//!
+//! One string and one flag rather than two strings, because the two pins are
+//! never both interesting: rung 2 answering means rung 4 is never read. The
+//! consequence is stated where it is caused — `pin_boot_project` leaves a
+//! DELIBERATE pin alone, so opening a scratch project cannot quietly overwrite
+//! the choice an author made in Preferences.
 //!
 //! # Why the showcase is DISCOVERED and never hard-coded
 //!
@@ -88,20 +112,29 @@ pub const SHOWCASE_SEARCH_DEPTH: usize = 8;
 pub enum BootSource {
     /// [`BOOT_PROJECT_ENV`] named it.
     Environment,
-    /// The editor's own `boot_project` pin — the last project opened, or one
-    /// set deliberately.
+    /// A **deliberate** pin — a project an author made the default from
+    /// Preferences. Rung 2, above the showcase.
     Pinned,
-    /// Discovered beside the checkout by [`find_showcase`].
+    /// Discovered beside the checkout by [`find_showcase`]. Rung 3.
     Showcase,
+    /// An **automatic** pin — the last project opened, written by every
+    /// successful open. Rung 4, BELOW the showcase (the CERT1 audit's ruling),
+    /// so it answers only on a machine where the showcase was never built.
+    LastOpened,
 }
 
 impl BootSource {
     /// A short human phrase for a status line.
+    ///
+    /// Each one has to finish the sentence *"opened Vancouver Island — …"*, and
+    /// the two pins have to read differently, because "you chose this" and
+    /// "this is where you were" are the two states this wave's ruling separated.
     pub fn phrase(self) -> &'static str {
         match self {
             BootSource::Environment => "from INF_BOOT_PROJECT",
-            BootSource::Pinned => "the last project you opened",
+            BootSource::Pinned => "the project you made the default",
             BootSource::Showcase => "the showcase island",
+            BootSource::LastOpened => "the last project you opened",
         }
     }
 }
@@ -154,6 +187,10 @@ pub fn find_showcase(start: &Path) -> Option<PathBuf> {
 ///   how a `String` carries "no pin" through TOML without a `None` the format
 ///   cannot write and without a `skip_serializing_if` this repository has been
 ///   bitten by three times.
+/// * `deliberate` — `EditorSettings::boot_project_deliberate`. `true` puts the
+///   pin at rung 2, **above** the showcase; `false` puts it at rung 4, below it.
+///   That one bit is the whole of the CERT1 audit's ruling: a project an author
+///   chose outranks the showcase, and a project they merely visited does not.
 /// * `start` — where to begin the showcase walk (the running executable's
 ///   directory). `None` skips that rung entirely, which is what a caller with no
 ///   executable path — a test, or a host that would rather not guess — wants.
@@ -161,24 +198,48 @@ pub fn find_showcase(start: &Path) -> Option<PathBuf> {
 /// A rung whose path does not hold an `inf.toml` is **skipped, not fatal**: a
 /// pin left behind by a project the author has since deleted must not stop the
 /// application booting, and it must not stop the showcase below it answering.
-pub fn resolve(env: Option<&str>, pinned: &str, start: Option<&Path>) -> Option<BootProject> {
-    for (candidate, source) in [
-        (env.unwrap_or("").trim(), BootSource::Environment),
-        (pinned.trim(), BootSource::Pinned),
-    ] {
+pub fn resolve(
+    env: Option<&str>,
+    pinned: &str,
+    deliberate: bool,
+    start: Option<&Path>,
+) -> Option<BootProject> {
+    // Each rung is one `answer` call and the ORDER of the calls is the rule, so
+    // the ruling reads as a sequence rather than hiding in a loop: the pin
+    // appears once, above or below the showcase, and never twice.
+    let pin = pinned.trim();
+    let env = env.unwrap_or("").trim();
+    let answer = |candidate: &str, source: BootSource| -> Option<BootProject> {
         if candidate.is_empty() {
-            continue;
+            return None;
         }
         let root = PathBuf::from(candidate);
-        if is_project_root(&root) {
-            return Some(BootProject { root, source });
+        is_project_root(&root).then_some(BootProject { root, source })
+    };
+
+    if let Some(found) = answer(env, BootSource::Environment) {
+        return Some(found);
+    }
+    if deliberate {
+        if let Some(found) = answer(pin, BootSource::Pinned) {
+            return Some(found);
         }
     }
-    let root = find_showcase(start?)?;
-    Some(BootProject {
-        root,
-        source: BootSource::Showcase,
-    })
+    if let Some(dir) = start {
+        if let Some(root) = find_showcase(dir) {
+            return Some(BootProject {
+                root,
+                source: BootSource::Showcase,
+            });
+        }
+    }
+    match deliberate {
+        // A deliberate pin has already been tried; trying it again as an
+        // automatic one would make the flag meaningless on a machine with no
+        // showcase, where both rungs would answer the same path.
+        true => None,
+        false => answer(pin, BootSource::LastOpened),
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +288,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("island-build").join("project")).unwrap();
 
         assert_eq!(find_showcase(&exe_dir), None);
-        assert_eq!(resolve(None, "", Some(&exe_dir)), None);
+        assert_eq!(resolve(None, "", false, Some(&exe_dir)), None);
     }
 
     #[test]
@@ -258,11 +319,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_environment_outranks_the_pin_and_the_pin_outranks_the_showcase() {
+    /// The four-rung world: an env project, a pinned project, an executable
+    /// four levels below a holder, and a showcase in that holder.
+    struct Rungs {
+        _tmp: tempfile::TempDir,
+        env: String,
+        env_root: PathBuf,
+        pin: String,
+        pin_root: PathBuf,
+        exe_dir: PathBuf,
+        showcase: PathBuf,
+    }
+
+    fn rungs() -> Rungs {
         let tmp = tempfile::tempdir().unwrap();
-        let from_env = project_at(&tmp.path().join("env"));
-        let pinned = project_at(&tmp.path().join("pinned"));
+        let env_root = project_at(&tmp.path().join("env"));
+        let pin_root = project_at(&tmp.path().join("pinned"));
         let exe_dir = tmp
             .path()
             .join("infinity_engine")
@@ -270,32 +342,137 @@ mod tests {
             .join("debug");
         std::fs::create_dir_all(&exe_dir).unwrap();
         let showcase = project_at(&tmp.path().join("island-build").join("project"));
+        Rungs {
+            env: env_root.to_string_lossy().to_string(),
+            env_root,
+            pin: pin_root.to_string_lossy().to_string(),
+            pin_root,
+            exe_dir,
+            showcase,
+            _tmp: tmp,
+        }
+    }
 
-        let env = from_env.to_string_lossy().to_string();
+    #[test]
+    fn the_environment_outranks_every_pin() {
+        let r = rungs();
+        for deliberate in [false, true] {
+            assert_eq!(
+                resolve(Some(&r.env), &r.pin, deliberate, Some(&r.exe_dir)),
+                Some(BootProject {
+                    root: r.env_root.clone(),
+                    source: BootSource::Environment
+                }),
+                "INF_BOOT_PROJECT stopped outranking a {} pin",
+                match deliberate {
+                    true => "deliberate",
+                    false => "automatic",
+                }
+            );
+        }
+    }
+
+    /// **(a) A DELIBERATE pin beats the showcase.** The author chose it.
+    #[test]
+    fn a_deliberate_pin_outranks_the_showcase() {
+        let r = rungs();
+        assert_eq!(
+            resolve(None, &r.pin, true, Some(&r.exe_dir)),
+            Some(BootProject {
+                root: r.pin_root.clone(),
+                source: BootSource::Pinned
+            }),
+            "a project the author made the default no longer wins — an explicit \
+             choice must outrank the showcase, or Preferences does nothing"
+        );
+    }
+
+    /// **(b) An AUTOMATIC pin does NOT beat the showcase**, and this is the whole
+    /// of the CERT1 audit's ruling. Before it there was one pin at rung 2 written
+    /// by every open, so the first other project an author opened took the
+    /// showcase's place for ever.
+    #[test]
+    fn an_automatic_pin_does_not_outrank_the_showcase() {
+        let r = rungs();
+        assert_eq!(
+            resolve(None, &r.pin, false, Some(&r.exe_dir)),
+            Some(BootProject {
+                root: r.showcase.clone(),
+                source: BootSource::Showcase
+            }),
+            "the last project opened took the showcase's place — that is the \
+             defect this rung order exists to close"
+        );
+    }
+
+    /// **(c) An AUTOMATIC pin still answers when there is no showcase.** The
+    /// rung is demoted, not deleted: on a machine where `inf island build` has
+    /// never run, "reopen what I had" is still what an author wants.
+    #[test]
+    fn an_automatic_pin_answers_when_no_showcase_was_ever_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pinned = project_at(&tmp.path().join("pinned"));
+        let exe_dir = tmp
+            .path()
+            .join("infinity_engine")
+            .join("target")
+            .join("debug");
+        std::fs::create_dir_all(&exe_dir).unwrap();
         let pin = pinned.to_string_lossy().to_string();
 
         assert_eq!(
-            resolve(Some(&env), &pin, Some(&exe_dir)),
-            Some(BootProject {
-                root: from_env,
-                source: BootSource::Environment
-            })
-        );
-        assert_eq!(
-            resolve(None, &pin, Some(&exe_dir)),
+            resolve(None, &pin, false, Some(&exe_dir)),
             Some(BootProject {
                 root: pinned,
-                source: BootSource::Pinned
-            })
+                source: BootSource::LastOpened
+            }),
+            "with no showcase to answer, the last project opened must still come \
+             back — demoting the rung must not delete it"
         );
+        // …and the two pins are distinguishable in the answer, because the status
+        // line has to say WHY.
+        assert_ne!(BootSource::LastOpened.phrase(), BootSource::Pinned.phrase());
+    }
+
+    #[test]
+    fn the_showcase_answers_when_nothing_is_pinned_at_all() {
+        let r = rungs();
         assert_eq!(
-            resolve(None, "", Some(&exe_dir)),
+            resolve(None, "", false, Some(&r.exe_dir)),
             Some(BootProject {
-                root: showcase,
+                root: r.showcase.clone(),
                 source: BootSource::Showcase
             })
         );
-        assert_eq!(resolve(None, "", None), None, "no start, no showcase rung");
+        assert_eq!(
+            resolve(None, "", false, None),
+            None,
+            "no start, no showcase rung"
+        );
+    }
+
+    /// A deliberate pin naming a project that no longer exists must not be
+    /// retried as an automatic one below the showcase: the flag would stop
+    /// meaning anything on a machine with no showcase, where both rungs would
+    /// answer the same path.
+    #[test]
+    fn a_deliberate_pin_is_not_retried_as_an_automatic_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe_dir = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let real = project_at(&tmp.path().join("still-here"));
+        let pin = real.to_string_lossy().to_string();
+
+        // No showcase anywhere: a deliberate pin answers at rung 2, and the same
+        // path as an automatic pin answers at rung 4 — with a different source.
+        assert_eq!(
+            resolve(None, &pin, true, Some(&exe_dir)).map(|b| b.source),
+            Some(BootSource::Pinned)
+        );
+        assert_eq!(
+            resolve(None, &pin, false, Some(&exe_dir)).map(|b| b.source),
+            Some(BootSource::LastOpened)
+        );
     }
 
     #[test]
@@ -310,14 +487,17 @@ mod tests {
         let showcase = project_at(&tmp.path().join("island-build").join("project"));
         let gone = tmp.path().join("deleted").to_string_lossy().to_string();
 
-        // Both upper rungs name nothing that exists; the showcase still answers.
-        assert_eq!(
-            resolve(Some(&gone), &gone, Some(&exe_dir)),
-            Some(BootProject {
-                root: showcase,
-                source: BootSource::Showcase
-            })
-        );
+        // Both upper rungs name nothing that exists; the showcase still answers,
+        // whichever kind of pin it was.
+        for deliberate in [false, true] {
+            assert_eq!(
+                resolve(Some(&gone), &gone, deliberate, Some(&exe_dir)),
+                Some(BootProject {
+                    root: showcase.clone(),
+                    source: BootSource::Showcase
+                })
+            );
+        }
     }
 
     #[test]
@@ -325,6 +505,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe_dir = tmp.path().join("a").join("b").join("c");
         std::fs::create_dir_all(&exe_dir).unwrap();
-        assert_eq!(resolve(Some("   "), "\t", Some(&exe_dir)), None);
+        for deliberate in [false, true] {
+            assert_eq!(resolve(Some("   "), "\t", deliberate, Some(&exe_dir)), None);
+        }
     }
 }

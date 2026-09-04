@@ -886,21 +886,19 @@ fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
         // backslash-continuation leaves behind, `cook`'s own source gate bans
         // the shape, and it cannot tell a deliberate indent from the defect --
         // correctly, since it has caught six real ones.
-        // The CERT1 audit's correction: the first line said flatly that the
-        // editor "opens this project on launch", and that is only true while
-        // nothing outranks it. Rung 2 is the `boot_project` pin, which every
-        // successful open writes -- so opening any other project takes this one's
-        // place until it is opened again. A message that a reader can find
-        // false the first time they use the editor teaches them not to read the
-        // next one.
+        // The CERT1 audit's correction, twice over. The first version said
+        // flatly that the editor "opens this project on launch", which the
+        // then-rung-2 pin -- written by every open -- falsified the first time
+        // an author opened anything else. The RULING moved that pin below the
+        // showcase and gave the deliberate one its own bit, so the sentence is
+        // true again with one exception, and the exception is now something an
+        // author did on purpose in Preferences rather than something that
+        // happened to them.
         println!(
-            "  {:<11}the editor opens this project on launch, unless you have",
+            "  {:<11}the editor opens this project on launch, unless another",
             "boot"
         );
-        println!(
-            "  {:<11}opened another project since (the last one opened wins)",
-            ""
-        );
+        println!("  {:<11}project was made the default in Preferences", "");
         println!(
             "  {:<11}set {}=<project root> to outrank both",
             "",

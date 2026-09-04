@@ -938,6 +938,20 @@ export const project = {
    */
   bootDefault: (): Promise<ProjectBootDto | null> =>
     invoke<ProjectBootDto | null>("project_boot_default"),
+  /**
+   * Make the OPEN project the one the application boots on (CERT1 audit
+   * ruling) — the deliberate pin, which outranks the showcase island and which
+   * an ordinary project open never overwrites. Resolves to the phrase for the
+   * rung that will answer at the next launch.
+   */
+  setDefault: (): Promise<string> => invoke<string>("project_set_default"),
+  /**
+   * Forget the deliberate default, so the showcase island (or, on a machine
+   * without one, the last project opened) answers again. Resolves to the phrase
+   * for what will boot next, resolved through the same rule the launch uses —
+   * "reset to the showcase" only reaches a showcase that exists.
+   */
+  clearDefault: (): Promise<string> => invoke<string>("project_clear_default"),
   close: (): Promise<void> => invoke("project_close"),
 };
 

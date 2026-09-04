@@ -245,12 +245,30 @@ pub struct EditorSettings {
     /// make an absent key and an empty key two different states for a reader to
     /// hold.
     ///
-    /// **Written by every successful project open**, so the plain meaning is
-    /// *the last project you opened*. Setting it by hand pins one deliberately,
-    /// and a pin that names a project the author has since deleted is skipped
+    /// **Written by every successful project open** *unless
+    /// [`boot_project_deliberate`](Self::boot_project_deliberate) is set, which
+    /// an open never overwrites.* So the plain meaning is *the last project you
+    /// opened*, or *the project you made the default*, and the flag below says
+    /// which. A pin that names a project the author has since deleted is skipped
     /// rather than fatal — `inf_project::boot` falls through to the showcase.
     #[serde(default)]
     pub boot_project: String,
+    /// **Whether [`boot_project`](Self::boot_project) was CHOSEN or merely
+    /// VISITED** (CERT1 audit ruling).
+    ///
+    /// `true` puts the pin at rung 2 of `inf_project::boot::resolve`, above the
+    /// showcase island; `false` puts it at rung 4, below it. That is the whole
+    /// of the ruling, and the reason it is a bit rather than a policy: the audit
+    /// measured that one pin at rung 2, written by every open, meant **the first
+    /// other project an author opened took the showcase's place for ever**, with
+    /// no UI to see or clear it. A visit is not a decision.
+    ///
+    /// Set only by Preferences ▸ General ▸ "Make this project the default", and
+    /// cleared only by "Reset to the showcase". `Default` is `false`, which is
+    /// what a settings file written before this field says too — so an existing
+    /// profile's pin is read as the visit it was.
+    #[serde(default)]
+    pub boot_project_deliberate: bool,
     /// 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
     #[serde(default = "default_snap_3d")]
     pub snap_3d: Snap3DDto,
@@ -293,6 +311,7 @@ impl Default for EditorSettings {
             rmb_click_ms: DEFAULT_RMB_CLICK_MS,
             gis_max_entities: default_gis_max_entities(),
             boot_project: String::new(),
+            boot_project_deliberate: false,
             snap_3d: default_snap_3d(),
             foliage: default_foliage(),
             keybindings: BTreeMap::new(),
@@ -484,6 +503,7 @@ mod tests {
             rmb_click_ms: 300,
             gis_max_entities: 60_000,
             boot_project: "C:/somewhere/island-build/project".into(),
+            boot_project_deliberate: true,
             snap_3d: Snap3DDto {
                 translate: 0.25,
                 rotate_deg: 5.0,

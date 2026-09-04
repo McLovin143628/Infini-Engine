@@ -144,6 +144,10 @@ describe("settingsStore", () => {
       // caught the frontend default missing the field at all -- `toEqual` is a
       // DEEP equality, so an added Rust field fails here as well as in tsc.
       boot_project: "",
+      // CERT1 audit ruling: chosen (rung 2, above the showcase) vs visited
+      // (rung 4, below it). `false` is what a settings file written before the
+      // field says too, so an existing profile's pin reads as the visit it was.
+      boot_project_deliberate: false,
       snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
       foliage: {
         radius: 3,
