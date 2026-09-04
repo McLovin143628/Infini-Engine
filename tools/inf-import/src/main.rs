@@ -48,7 +48,9 @@ fn print_help() {
          that stem, so a committed level picks it up without naming licensed\n\
          content: e.g. --bind Road_Asphalt=<the asphalt material's key>.\n\n\
          NOTHING THIS WRITES MAY BE COMMITTED. It goes into a project's Content,\n\
-         which for the island is outside this repository.",
+         which for the island is outside this repository -- and since the ASSET0\n\
+         audit that is a door rather than a sentence: an --into inside the engine\n\
+         checkout is REFUSED before the first texture is decoded.",
         env!("CARGO_PKG_VERSION")
     );
 }

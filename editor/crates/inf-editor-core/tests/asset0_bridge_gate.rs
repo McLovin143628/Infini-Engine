@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 
 use inf_asset::{AssetId, AssetKind};
 use inf_editor_core::assets::ue_import::{
-    import_manifest, ue_cm_to_world_m, ue_intensity_to_candela, UeImportOptions,
+    engine_checkout_above, import_manifest, ue_cm_to_world_m, ue_intensity_to_candela,
+    UeImportOptions,
 };
 use inf_editor_core::assets::AssetProject;
 use inf_material::ground::GroundKind;
@@ -569,4 +570,87 @@ fn a_newer_manifest_schema_is_refused_by_name() {
         err.contains("export.py"),
         "the refusal must name the remedy: {err}"
     );
+}
+
+/// **THE LICENCE LAW IS A DOOR, NOT A SENTENCE** (ASSET0 audit).
+///
+/// The wave's own rule — *nothing this bridge writes may enter this
+/// repository* — was three sentences of documentation and the author's care.
+/// Measured at the audit: `export.py` believed `INF_UE_OUT` and
+/// `import_manifest` believed its destination, so one mistyped path put
+/// hundreds of megabytes of Megascans-derived `.inf_tex` in the working tree of
+/// a PUBLIC repository, untracked and one `git add -A` from publication.
+///
+/// This arm builds a directory shaped like the engine's checkout — a `.git`
+/// beside `tools/ue-export/export.py`, which is the very script that produces
+/// the content the law is about — and asserts the import refuses it **before
+/// decoding anything**, then imports the same manifest into a sibling directory
+/// to prove the refusal discriminates rather than simply failing.
+///
+/// Un-fix mutation: delete the `engine_checkout_above` guard at the top of
+/// `import_manifest` and the first block fails on the `expect_err`.
+#[test]
+fn the_bridge_refuses_to_write_into_the_engine_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let staging_dir = dir.path().join("ue-staging");
+    std::fs::create_dir_all(&staging_dir).unwrap();
+    let manifest = staging(&staging_dir);
+
+    let checkout = dir.path().join("infinity_engine");
+    std::fs::create_dir_all(checkout.join("tools").join("ue-export")).unwrap();
+    std::fs::create_dir_all(checkout.join(".git")).unwrap();
+    std::fs::write(
+        checkout.join("tools").join("ue-export").join("export.py"),
+        b"# the marker this repository is recognised by\n",
+    )
+    .unwrap();
+
+    // ── inside the checkout: refused, and nothing written ────────────────────
+    let inside = checkout.join("samples").join("ground");
+    let mut project = AssetProject::open(&inside).expect("a project opens");
+    let err = import_manifest(&mut project, &manifest, &UeImportOptions::default())
+        .expect_err("an import into the engine checkout must be refused")
+        .to_string();
+    assert!(
+        err.contains("refusing to import into"),
+        "the refusal must say what it refused: {err}"
+    );
+    assert!(
+        err.contains("may enter this repository"),
+        "the refusal must say WHY, because the why is a licence: {err}"
+    );
+    let written = walk(&inside)
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("inf_tex") | Some("inf_mat") | Some("inf_mesh")
+            )
+        })
+        .count();
+    assert_eq!(
+        written, 0,
+        "the refusal must come BEFORE the first decode -- {written} assets \
+         reached a public repository's working tree"
+    );
+
+    // ── outside it: the same manifest imports ────────────────────────────────
+    let outside = dir.path().join("island-build").join("project").join("Content");
+    let mut project = AssetProject::open(&outside).expect("a project opens");
+    let report = import_manifest(&mut project, &manifest, &UeImportOptions::default())
+        .expect("outside the checkout the same manifest imports");
+    assert_eq!(report.materials.len(), 1, "the control must really import");
+
+    // …and the detector names the checkout rather than any directory with a
+    // `.git` in it: a user's own game repository is not this one.
+    let found = engine_checkout_above(&inside).expect("the checkout is found");
+    assert!(
+        found.ends_with("infinity_engine"),
+        "found {} rather than the checkout",
+        found.display()
+    );
+    assert!(
+        engine_checkout_above(&outside).is_none(),
+        "a sibling of the checkout is not inside it"
+    );
+    println!("ASSET0 GATE: the bridge refuses {}", inside.display());
 }

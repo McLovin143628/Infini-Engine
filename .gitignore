@@ -24,6 +24,13 @@ settings.local.*
 # in a source tree is not something to find out about from a push.
 island-build/
 samples/island/build/
+# …and the UE bridge's staging directory (wave ASSET0's audit), for a stronger
+# reason than size: `tools/ue-export/export.py` writes GIGABYTES of Marketplace,
+# Fab and Megascans PNG whose licence for use outside Unreal is unestablished,
+# and this repository is PUBLIC. Both doors now refuse a destination inside the
+# checkout outright (`engine_checkout_above`); this is the belt under that
+# brace, for a directory named by hand or left behind by an older tree.
+ue-staging/
 # …and the CI fixture's own. Its `[source] cache` is `tiles/` BESIDE the recipe,
 # so `inf island build`'s default output — `cache_dir()/../project` — resolves
 # INSIDE the tree for this one recipe. `island_gate` builds into a temp dir and

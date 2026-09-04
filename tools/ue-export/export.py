@@ -664,9 +664,39 @@ def add_blueprint(bp, pack):
 
 # ── the sweep ────────────────────────────────────────────────────────────────
 
+def engine_checkout_above(path):
+    """The Infini engine checkout `path` sits inside, or None.
+
+    A directory is the checkout when it holds BOTH a `.git` and this very
+    script -- the second marker on purpose, so a user's own game repository is
+    not mistaken for the engine's. Mirrors
+    `inf_editor_core::assets::ue_import::engine_checkout_above`, which guards
+    the import side of the same law.
+    """
+    p = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(p, ".git")) and os.path.isfile(
+                os.path.join(p, "tools", "ue-export", "export.py")):
+            return p
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
 def run():
     if not OUT:
         say("REFUSED: set INF_UE_OUT to an output directory outside the project")
+        return
+    # **THE LICENCE LAW, AS A DOOR** (ASSET0 audit). Everything below this line
+    # is Marketplace/Fab/Megascans content whose licence for use outside Unreal
+    # is unestablished, and the one place it may never land is the PUBLIC engine
+    # repository. `INF_UE_OUT` used to be believed rather than checked.
+    repo = engine_checkout_above(OUT)
+    if repo:
+        say("REFUSED: INF_UE_OUT=%s is inside the engine checkout at %s." % (OUT, repo))
+        say("         Nothing this script writes may enter that repository -- the "
+            "packs are licensed content. Choose a directory outside it.")
         return
     ensure(OUT)
     say("BEGIN mode=%s out=%s maxtex=%d" % (MODE, OUT, MAXTEX))

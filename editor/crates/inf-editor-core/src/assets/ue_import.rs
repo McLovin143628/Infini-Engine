@@ -56,6 +56,12 @@
 //! never committed) are the same asset identity with different texels, and the
 //! island level does not know or care which one it got. That is what makes the
 //! public repository buildable by anyone and this machine's build photoreal.
+//!
+//! # …and the law that arrangement rests on is enforced here
+//!
+//! [`import_manifest`] **refuses a destination inside the engine checkout**,
+//! before it decodes anything — see [`engine_checkout_above`]. The audit found
+//! the rule stated in three places and checked in none.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -144,6 +150,42 @@ pub struct UeFixture {
     pub range_m: f32,
     /// Candela. See [`ue_intensity_to_candela`].
     pub intensity: f32,
+}
+
+/// **The engine checkout `path` sits inside, if it sits inside one** (ASSET0
+/// audit).
+///
+/// A directory is this engine's checkout when it holds **both** a `.git` and
+/// `tools/ue-export/export.py` — the second marker on purpose, because it is
+/// the very script that produces the bytes this law is about, and a user's own
+/// game repository must not be mistaken for ours.
+///
+/// # Why a mechanism and not a sentence
+///
+/// The wave's licence law — *nothing derived from the reference project's
+/// marketplace, Fab or Megascans content may enter this repository* — was
+/// upheld by three sentences of documentation and the author's care.
+/// Measured at the audit: `export.py` takes its output directory from
+/// `INF_UE_OUT` and `inf-import` takes its destination from `--into`, and
+/// **neither refused a path inside the checkout**. A single mistyped
+/// destination puts 4.1 GB of Megascans PNGs, or 892 MB of `.inf_tex`
+/// converted from them, in the working tree of a PUBLIC repository, untracked
+/// and one `git add -A` from being published. A law with no door that can say
+/// no is a preference.
+pub fn engine_checkout_above(path: &Path) -> Option<PathBuf> {
+    let mut p: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    loop {
+        if p.join(".git").exists() && p.join("tools/ue-export/export.py").is_file() {
+            return Some(p);
+        }
+        if !p.pop() {
+            return None;
+        }
+    }
 }
 
 /// **UE centimetres, Z up, left handed → Infini metres, Y up, right handed.**
@@ -267,6 +309,22 @@ pub fn import_manifest(
     manifest_path: &Path,
     opts: &UeImportOptions,
 ) -> Result<UeImportReport> {
+    // **THE LICENCE LAW, AS A DOOR.** Before a single byte is decoded: this
+    // bridge's output is licensed content, and the one place it may never land
+    // is the public engine repository. See [`engine_checkout_above`].
+    if let Some(root) = engine_checkout_above(project.root()) {
+        return Err(AssetError::Import(format!(
+            "refusing to import into {} — it is inside the engine checkout at \
+             {}, and NOTHING this bridge writes may enter this repository. The \
+             reference project's packs are Marketplace/Fab/Megascans content \
+             whose licence for use outside Unreal is unestablished (see the \
+             ASSET0 licence table in docs/memos/island-progress.md). Point the \
+             destination at a project outside the checkout — the island's is \
+             ../island-build/project.",
+            project.root().display(),
+            root.display()
+        )));
+    }
     let raw = std::fs::read_to_string(manifest_path)?;
     let m: Manifest = serde_json::from_str(&raw)
         .map_err(|e| AssetError::Import(format!("{}: {e}", manifest_path.display())))?;
