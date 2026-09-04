@@ -81,6 +81,17 @@ pub struct PcgStreamState {
     /// would otherwise re-read and re-fail for every volume of every tick.
     lowered: Mutex<HashMap<Uuid, Option<Arc<LoweredPcg>>>>,
     terrain_paths: Mutex<Option<(Instant, HashMap<Uuid, std::path::PathBuf>)>>,
+    /// The document version the ground was last paged at.
+    ///
+    /// `page_for_pcg` pages the regions of EVERY `PcgVolume` and EVERY `Spline`
+    /// in the level, because that is what the shipped player pages and a grammar
+    /// pass reads heights along a spline that may leave its own volume's box —
+    /// narrowing it to the volumes a tick is about to evaluate would be a
+    /// different world, not a cheaper one. It is idempotent and the tiles stay
+    /// resident, so the cost is a scan after the first call; this remembers the
+    /// version so even that scan is not paid four times a second while a camera
+    /// crosses a city.
+    paged_version: Mutex<Option<u64>>,
     ticking: AtomicBool,
     /// The last status published, so a settled editor emits nothing.
     last_status: Mutex<Option<PcgStreamStatusDto>>,
@@ -106,6 +117,9 @@ impl PcgStreamState {
         }
         if let Ok(mut t) = self.terrain_paths.lock() {
             *t = None;
+        }
+        if let Ok(mut v) = self.paged_version.lock() {
+            *v = None;
         }
         if let Ok(mut s) = self.last_status.lock() {
             *s = None;
@@ -323,6 +337,7 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
     let mut evaluated: Vec<Uuid> = Vec::new();
     let mut released: Vec<Uuid> = Vec::new();
     let mut changed = false;
+    let mut paged_now = false;
     {
         let Ok(mut doc) = scene.doc.lock() else {
             return;
@@ -358,7 +373,25 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
         }
         if !programs.is_empty() {
             doc.world_mut().propagate();
-            page_for_pcg(&mut doc, &paths);
+            // Once per document version — see `paged_version`. The stamp is
+            // written AFTER this tick's own bump, at the bottom, or every tick
+            // would invalidate the stamp it had just written.
+            let want_page = state
+                .paged_version
+                .lock()
+                .map(|v| *v != Some(doc.version()))
+                .unwrap_or(true);
+            if want_page {
+                paged_now = true;
+                let t = Instant::now();
+                let tiles = page_for_pcg(&mut doc, &paths);
+                if tiles > 0 {
+                    tracing::info!(
+                        "inf-studio: pcg stream paged {tiles} terrain tile(s) in {:.1} ms",
+                        t.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            }
             for (guid, lowered) in &programs {
                 match evaluate_volume_into(&mut doc, *guid, lowered) {
                     Ok(_) => {
@@ -381,6 +414,14 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
             // version-gated and rebuilds the entire scene, so bumping per volume
             // would pay for that rebuild once per block.
             doc.bump_version_for_runtime();
+        }
+        // Stamped only when this tick actually paged: a tick that did nothing
+        // but RELEASE volumes has paged no ground, and stamping there would let
+        // the next tick that does have work skip the paging it needs.
+        if paged_now {
+            if let Ok(mut v) = state.paged_version.lock() {
+                *v = Some(doc.version());
+            }
         }
     }
     let spent = started.elapsed().as_secs_f64() * 1000.0;

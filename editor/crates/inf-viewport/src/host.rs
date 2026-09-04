@@ -58,7 +58,7 @@ use crate::SurfaceTarget;
 const STREAM_LOG_INTERVAL_FRAMES: u32 = 300;
 
 /// How far back the `Home` action stands from the player start, metres (wave
-/// EDIT1, clause 2).
+/// EDIT1, clause 2) — the **2D** and fallback path.
 ///
 /// `EditorCamera::focus_goal` reads its argument as the radius of a sphere to
 /// fit, so this is "frame a twenty-metre ball around the character": the pawn
@@ -66,6 +66,23 @@ const STREAM_LOG_INTERVAL_FRAMES: u32 = 300;
 /// The pawn's own radius would be under two metres and would put the author's
 /// nose against a shirt with no way to tell a harbour from a hillside.
 const PLAYER_START_FRAME_M: f64 = 20.0;
+
+/// Where the 3D camera actually stands for `Home`: eye height, metres.
+///
+/// **Not a framed sphere**, and the reason is a measured one. Framing a sphere
+/// puts the camera wherever its current pitch happens to point it, and on the
+/// showcase island — where the start stands 14 m from a settlement block — the
+/// first cut of this clause came to rest above a building and filled the lower
+/// half of the frame with a roof. What an author opening a level wants is the
+/// shot the GAME opens on: standing behind the character at head height,
+/// looking the way it faces, down the street it is standing in.
+const PLAYER_START_EYE_M: f64 = 1.75;
+/// How far behind the character that camera stands, metres — a third-person
+/// boom, not a shoulder.
+const PLAYER_START_BACK_M: f64 = 7.0;
+/// Its pitch, radians. Barely down: enough to put the character's feet and the
+/// road in the lower third without looking at the pavement.
+const PLAYER_START_PITCH: f32 = -0.12;
 
 /// Where the level's player-controlled character stands, in world metres.
 ///
@@ -79,16 +96,26 @@ const PLAYER_START_FRAME_M: f64 = 20.0;
 /// `inf_player::cell_stream::streaming_sources` reads a source's position in, and
 /// for the same reason: a pawn parented under a rig has no meaningful local
 /// translation, and a document that has not propagated yet has no global one.
-fn player_start_of(doc: &SceneDoc) -> Option<DVec3> {
+fn player_start_of(doc: &SceneDoc) -> Option<(DVec3, f32)> {
     let guid = inf_ecs::movement::camera_subject(doc.world())?;
     let entity = doc.world().entity_of(guid)?;
     let w = doc.world().world();
-    if let Some(g) = w.get::<GlobalTransform>(entity) {
-        let (_, _, t) = g.0.to_scale_rotation_translation();
-        return Some(t);
-    }
-    w.get::<EcsTransform>(entity)
-        .map(|t| t.translation.to_dvec3())
+    let (translation, rotation) = if let Some(g) = w.get::<GlobalTransform>(entity) {
+        let (_, r, t) = g.0.to_scale_rotation_translation();
+        (t, r)
+    } else {
+        let t = w.get::<EcsTransform>(entity)?;
+        (t.translation.to_dvec3(), t.quat())
+    };
+    // Which way it faces, as the editor camera's own yaw. `forward()` is
+    // `(sin y, 0, -cos y)` at zero pitch, so `-Z` is yaw zero and the inverse is
+    // `atan2(x, -z)`. A character with no meaningful facing (an identity
+    // rotation) gives yaw 0, which is -Z, which is where the default camera
+    // already looks — so the degenerate case is the old behaviour and not a
+    // surprise.
+    let f = rotation * glam::DVec3::NEG_Z;
+    let yaw = f64::atan2(f.x, -f.z) as f32;
+    Some((translation, yaw))
 }
 
 /// Map an ECS [`Primitive`] to the renderer's [`PrimMesh`] (R-P1).
@@ -283,8 +310,8 @@ pub struct EngineHost {
     /// content root is set, which makes inline terrain behaviour bit-identical to
     /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
-    /// Where the player starts, cached from the document at projection time
-    /// (wave EDIT1, clause 2).
+    /// Where the player starts and which way it faces (yaw, radians), cached
+    /// from the document at projection time (wave EDIT1, clause 2).
     ///
     /// Asked through `inf_ecs::movement::camera_subject` -- the runtime's own
     /// door, the same one `scene_player_pawn` asks and the same one the shipped
@@ -296,7 +323,7 @@ pub struct EngineHost {
     /// point it needs the answer. `None` on a level with no player-controlled
     /// character, which is a real level (a cinematic, a blockout) and not an
     /// error -- the same judgement `NoPawnPlayDialog` makes.
-    player_start: Option<DVec3>,
+    player_start: Option<(DVec3, f32)>,
     /// The loaded voxel volumes (P21.1) — the caves, tunnels and excavations that
     /// locally extend the heightfield. The Ring-1 store resolves a
     /// `VoxelVolume.asset` to a loose `.inf_voxel` under the content root and hands
@@ -4776,7 +4803,23 @@ impl EngineHost {
     /// vista puts the author's nose against a shirt. What an author opening a
     /// level wants to see is the character AND the street it stands in.
     pub fn player_start_focus(&self) -> Option<(DVec3, f64)> {
-        self.player_start.map(|p| (p, PLAYER_START_FRAME_M))
+        self.player_start.map(|(p, _)| (p, PLAYER_START_FRAME_M))
+    }
+
+    /// Where the 3D camera stands for `Home`: `(eye, yaw, pitch)` — behind the
+    /// character at head height, looking the way it faces.
+    ///
+    /// The shot the game opens on, rather than a framed bounding sphere; see
+    /// [`PLAYER_START_EYE_M`] for the roof that made the difference.
+    pub fn player_start_pose(&self) -> Option<(DVec3, f32, f32)> {
+        let (p, yaw) = self.player_start?;
+        let (sy, cy) = (yaw as f64).sin_cos();
+        let flat = DVec3::new(sy, 0.0, -cy);
+        Some((
+            p + DVec3::Y * PLAYER_START_EYE_M - flat * PLAYER_START_BACK_M,
+            yaw,
+            PLAYER_START_PITCH,
+        ))
     }
 
     /// If the cursor is over a gizmo handle, begin a drag and return true. The
@@ -7919,7 +7962,7 @@ impl EngineHost {
         // the level, not of a mode — and, like every other primitive in this
         // block, it is an editor-only debug line that is never projected, never
         // persisted and invisible in PIE.
-        if let Some(start) = self.player_start {
+        if let Some((start, _)) = self.player_start {
             const START_COLOR: [f32; 4] = [1.0, 0.78, 0.25, 1.0];
             const START_RADIUS_M: f64 = 0.45; // a character's own footprint
             const START_MAST_M: f64 = 1.8; // eye height, so it reads at street scale

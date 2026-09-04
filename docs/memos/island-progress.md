@@ -30310,3 +30310,541 @@ was measured on, for a claim that is a comment; it is audit carried 7.
    22:36 — and loads **1 actor**. Carried 5 above, now with the consequence
    named: no shipped-player frame of the island can be compared with a PIE frame
    until it is rebuilt, so CERT1's render half is still unmeasured on this content.
+
+## Wave EDIT1 — what you build is what you see (2026-09-04)
+
+Base `0432afbd`. **The scene schema does not move (v27), `ScenePayload` stays
+v12, `EXPECTED_LEVELS` stays 24, the editor-settings schema stays v1, and the
+golden count stays 62.** One golden is re-blessed, once, with a stated cause and
+its before/after; the other four GI goldens hold their images.
+
+The wave exists because the author opened the showcase island and reported two
+things in one sentence: *"the buildings only appear when the player presses play
+— which doesn't make sense because then how is the user supposed to build the
+game? Currently, the game just opens to a blank landscape with nothing else."*
+
+Both halves were true, and they were different defects. `01-editor.png` from the
+FIX1 demo is the evidence for the second: the editor opens with the camera at
+`EditorCamera::default`'s `(14, 9, 20)`, which on a 51 km² georeferenced island
+is half a metre under the open ocean, three kilometres from Harbour City, looking
+at water and a grid. The first is `PcgVolume::evaluated` — a `#[serde(skip)]`
+cache the shipped player fills on cell activation and the editor filled only when
+a person right-clicked one of a hundred and seventy-two blocks.
+
+### (0) THE FRAME — dynamic GI was π too strong, in two places
+
+Carried 1 of the FIX1 audit was a diagnosis without a cause: the island's Play
+frame is washed out, it is dynamic GI, `gi.intensity` 0.25 fixes it and
+`gi.extent` 400 m makes it worse, and *"the gather is several times too strong at
+the `gi_intensity: 1.0` the showcase authors — a missing normalization, or a
+value the level should not have"*. It is a missing normalization, and there were
+two of them.
+
+#### The instrument — the white furnace
+
+`crates/inf-render/tests/gi_normalisation.rs`. The oldest instrument in
+rendering: a Lambert surface of albedo 1 in an environment of uniform radiance
+`L`, lit by nothing else, must leave exactly `L` and become indistinguishable
+from the environment behind it. Rendered twice through the **same** post chain —
+once white and lit only by the probe field, once black and emitting `L` on its
+own — so the arm needs no calibration curve, no HDR readback and no tonemap
+inversion. An emissive ladder either side inverts the reading into a factor.
+
+| | face (of 255) | gather factor |
+|---|---|---|
+| GI-lit white Lambert, before | 204.000 | **3.2224** |
+| GI-lit white Lambert, after | 129.185 | **1.0110** |
+| emissive reference ×1.000 | 129.148 | — (the same post chain) |
+
+π is 3.14159. The residue either side is a term the arm deliberately leaves in: a
+dielectric's ambient specular, `amb · f0 · 0.5` at `f0 = 0.04`, is 2 % of the
+ambient on the white cube and ~0 on the black one.
+
+Two findings on the way, each recorded where it was made:
+
+* **An empty `scene.lights` is not "no light".** `mesh.wgsl` reads
+  `if (count == 0u)` and falls back to a hard-coded editor sun at radiance 3.0
+  "so unlit demo scenes still render". The furnace's first cut measured a sunlit
+  cube — 192 with GI *off*, where the hemispheric ambient alone predicts 87 — and
+  zeroing `scene.sun` changed nothing, because `SunParams` carries the direction
+  that fallback uses and never its magnitude. The furnace pushes one directional
+  light of intensity 0 instead.
+* **The only π arm in the repository could not see a π.**
+  `gi::tests::specular_reduces_to_the_retired_ambient_constant` says in its own
+  comment that *"a term with a bug in its π bookkeeping would get [the scale]
+  wrong by a factor"*. It would not have been caught there: both sides of its
+  comparison are the ambient term, so a π common to both cancels. It is a
+  *relative* test between two spellings of one quantity. Rewritten in the new
+  convention with that stated.
+
+#### Defect one: the consumer
+
+`gi_probes.wgsl` projects the gather with `4π/rays`, which is the textbook
+Monte-Carlo SH projection and is right — `sh_radiance_is_identity_on_a_uniform_
+field` already pinned it. `gi_irradiance` then convolves with the Ramamoorthi
+cosine lobe (`A₀ = π`, `A₁ = 2π/3`) and so returns **irradiance**, `E = π·L`. All
+six lit shaders then spend it as exit radiance:
+
+```wgsl
+    lo += amb * albedo * (1.0 - metallic) * ao;      // mesh.wgsl and five more
+```
+
+There is no `/π` on that line anywhere, while the same shader's DIRECT term two
+hundred lines above spells the Lambert BRDF out in full — `kd * albedo / PI`. So
+the ambient half of the engine ran π times the direct half per unit of incident
+radiance, and the function's own comment had written the obligation down —
+*"folds the Lambert 1/π into the caller"* — for a caller that never discharged
+it.
+
+Fixed in two constants: `A₀/π = 1`, `A₁/π = 2/3`, folded into the convolution
+rather than applied as a trailing divide, so the instruction count does not move.
+`gi_specular` drops the compensating `GI_PI` it carried only to match the old
+convention, because the split-sum form `L · (f0·a + b)` is already in
+exit-radiance units. The hemispheric constant this replaces at each call site has
+always been in those units too, so after the fold the two ambient sources finally
+mean the same thing.
+
+#### Defect two: the gather
+
+The furnace closed and the frame did not. Under the engine's **own** default sky
+— zenith 0.012–0.038 linear, which is dim — switching GI on still lifted a
+daylight street's p95 by 49 levels and clipped a tenth of it. A sky that dim
+cannot pay for that, so the term that was paying is the other one:
+
+```wgsl
+    radiance = v.albedo * gi.sun_color.rgb * vis + v.emissive;
+```
+
+What a probe ray must gather is the radiance **leaving** the surface it hit, and
+a Lambert surface under a light of radiance `S` leaves `albedo/π · S`. Without it
+this term is π times a lit wall — and on a sunlit street, where most rays hit a
+wall rather than the sky, it is the *dominant* half of the gather, not the miss
+term. Emissive is already a radiance and keeps its units, which is why the two
+emissive goldens do not move at all.
+
+#### The frame arm, and its control
+
+`dynamic_gi_lights_a_daylight_street_rather_than_washing_it_out`, on a fixture
+street (pale ground, two rows of blocks, one sun) under
+`RenderSettingsRecord::lit_showcase`'s own block — shadows, GI, bloom, SSAO, TAA,
+flare:
+
+| configuration | p95 | frac>240 | lift |
+|---|---|---|---|
+| GI off | 193.1 | 0.0000 | — |
+| GI on, `intensity` 1.0 (this tree) | 218.3 | **0.0000** | +25.1 / +0.0000 |
+| GI on, `intensity` π (as it shipped) | 242.6 | 0.1048 | +49.4 / +0.1048 |
+
+Both ceilings are read by name (`GI_P95_LIFT_CEILING`,
+`GI_CLIPPED_LIFT_CEILING`) and both are **lifts, not absolutes** — an absolute
+would have been measuring how bright the fixture's own sun is, which is a number
+a fixture author picks. The first cut used absolutes and failed on a tree the
+furnace says is correct.
+
+**The arm carries its own control.** Putting π back into the level's
+`gi_intensity` is exactly the arithmetic this wave removed, so the third row is
+the frame as it shipped in the same scene through the same post chain — and the
+arm asserts that row **fails**, because a ceiling the defect clears is measuring
+nothing.
+
+**What is not fixed, with its number.** The hit term still carries no `n·l`,
+because a voxel stores an albedo and no normal. That leaves every bounce an
+over-estimate by the average of a cosine over the lit hemisphere rather than by a
+factor of π — a modelling approximation of single-bounce voxel GI, not a unit
+error. It is why the p95 ceiling is 30 and not 20, said in the constant's own doc
+rather than hidden inside a number chosen to fit it. **Carried 1.**
+
+#### The goldens: 62, one re-blessed
+
+The five GI scenes carry the π in their authored `intensity` through one
+documented door (`GI_LAMBERT_PI` beside `gi_settings`; `golden_gi_bleed` stops
+spelling its block out inline). They pin GI's *behaviour* — a red bleed near a
+wall, an emissive bar lighting a floor with no analytic light, a reflection with
+a direction — at a chosen bounce strength, and a bounce strength is preserved
+across a unit change by scaling the multiplier.
+
+| golden | subject | mean diff |
+|---|---|---|
+| `gi_emissive` | an emissive bar (no π either side) | 0.000000 |
+| `gi_scatter_neon` | emissive instances | 0.000000 |
+| `gi_terrain` | a bounce off sunlit ground | 0.028975 |
+| `gi_bleed` | a bounce off a sunlit wall | 0.044445 |
+| `gi_specular` | that bounce, in a reflection | **0.072099** |
+
+The first four are inside the 0.06 mean tolerance and are **not** re-blessed.
+`gi_specular` is, once, at mean 0.072099 / max 0.242510. The cause is that EDIT1
+removed a π from **two** places — the consumer that every term rides and the hit
+radiance that only the sun-bounce term rides — so one multiplier on `intensity`
+restores the sky-miss term exactly and the sun-bounce term only partly. It is
+exact for a scene the sky dominates and approximate for one a lit wall does, and
+`gi_specular` is that bounce seen in a reflection. Every structural assertion it
+exists for passes on the new frame: grazing specular **210.9** against a flat
+**144.0**, near-wall red/green **1.367** against a far **1.091**, a smooth
+surface moving **0.1280** against a matte **0.0590**.
+
+121 golden tests green under `INF_GOLDEN_STRICT=1`.
+
+#### The white domes are not clouds
+
+The brief asked whether the white domes on the horizon of `OFF-gi/03-pie-b.png`
+are the P17 cloud slab's edge at low altitude. **They are not clouds at all**, and
+the measurement is one line: `SkyAtmosphere::clouds_enabled` defaults to `false`
+(`components.rs:5746`), the island authors `SkyAtmosphere::default()`
+(`island.rs:463`) and never overrides it, so the cloud pass does not run on that
+level. Enlarged, they are smooth, perfectly circular, light-grey **spheres**
+standing among the buildings at roughly building scale and evenly spaced — a
+`PrimMesh::Sphere` from a scatter or foliage palette, drawn where a real mesh was
+meant to be. That is a different defect from the one this clause was about, it is
+adjacent to the standing FIX1 carried item *"scatter_meshes empty in windowed
+PIE"*, and it is **carried 2** with the identification rather than guessed at.
+
+### (1) THE EDITOR CAMERA IS A STREAMING SOURCE
+
+#### Not cell streaming, and why
+
+`inf_player::cell_stream::CellStreaming` is Ring 2 inside a binary crate and the
+editor cannot link it — but it also would not help. Cell streaming decides which
+entities **exist**, and the editor is deliberately single-document: all 172 of
+the island's settlement blocks are already in the doc, already selectable,
+already saved. The only thing missing is the **evaluation**. `StreamingSource`'s
+own doc-comment sanctions this in advance: *"The editor viewport's free camera
+**is** a legitimate source while authoring — there is no simulation there to
+corrupt."*
+
+#### The policy — `inf_editor_core::pcg_stream` (Ring 1, so Linux CI tests it)
+
+The sibling of `terrain_stream`, and deliberately the same split: policy here,
+calling in the host. Eleven arms.
+
+* Distance is to the volume's **XZ box**, so an author standing in the middle of
+  a block is zero metres from it. To the centre would rank a large block the
+  camera is inside behind a small one across the street.
+* Order is nearest-first, **ties broken by GUID**. Two blocks of a grid city are
+  frequently equidistant to the metre, and an unstable order there would make the
+  document depend on `HashMap` iteration.
+* The radii come from the **level's own `PartitionSettings`** — the same numbers
+  `cell_stream::sync_sim` derives its activation and prefetch sets from — with
+  the runtime's `effective_*` guards mirrored, so a corrupt level cannot stream
+  differently in the two hosts. The editor preference **scales** both together
+  rather than replacing them.
+* `EDITOR_PCG_RELEASE_HYSTERESIS` (1.25) is why a camera nudged across the
+  boundary does not re-evaluate the same block for ever.
+* `EDITOR_PCG_MAX_EVALUATED` (256) is the memory bound, and it counts the volumes
+  **this tick is about to add** as well as the ones already there — a ceiling
+  that only looks at what is resident is blown past by the first tick in a dense
+  city. Releases farthest-first.
+* `EDITOR_PCG_STEP_BUDGET_MS` (8.0, half a 60 Hz frame) bounds how much work a
+  tick **starts**, not how long one volume takes. A grammar block costs tens of
+  milliseconds and cannot be preempted half-built, so a tick always evaluates at
+  least one volume — otherwise a level whose blocks are all dearer than the
+  budget makes no progress for ever — and stops once the clock is past the
+  ceiling.
+
+Two of the eleven arms caught the first cut: `keep` was sorted farthest-first and
+then `pop`ped, which releases the **nearest** volume.
+
+#### The fetch — `commands::pcg_stream` (Ring 2)
+
+A named `pcg-stream` thread on a 250 ms interval. Not `assets::spawn_tick`
+(which is under a source gate, and is the wrong concern); not the render thread
+(a grammar block would drop exactly as many frames as it costs).
+
+**The graphs are read off disk, and that is a finding.** `PcgState` is a *scratch*
+workspace: its documents are made by `pcg_create`, keyed `"pcg:{n}"`, never by
+asset GUID, and nothing in the tree ever loads a `.inf_pcg` into it —
+double-clicking one in the Content Drawer opens the panel and the panel makes a
+NEW graph. The island's fourteen zone documents are not in it and never could be.
+The resolver here is `pcg_evaluate_biomes`' own (`load_pcg_bytes` →
+`PcgAssetPayload::decode` → the authored graph re-lowered when there is one, else
+the stored mirror), memoized per GUID **including its failures**.
+
+#### One door
+
+`page_for_pcg` and `evaluate_volume_into` are factored out of `pcg_evaluate` and
+both callers go through them. That is not tidiness — it is what keeps
+`grammar_span_mirror`'s `page_terrains_for_pcg` count at two and
+`biome_binding_mirror`'s `compose_volume` / `set_population` counts at one, which
+are the gates that stop the editor's preview and the shipped build from becoming
+two different worlds.
+
+The lowered document is **cloned per volume** rather than seed-folded in place:
+the tick evaluates many volumes from one cached `Arc<LoweredPcg>`, so a fold
+applied in place would give the second block a different city than a session that
+visited it first, and would change a block every time the camera passed it again.
+`re_evaluating_a_block_from_the_same_cached_lowering_gives_the_same_block` is the
+arm.
+
+One version bump per tick, not per volume: the viewport's projection is
+version-gated and rebuilds the whole scene. A **release** writes an empty
+population *through* `set_population` rather than clearing the vectors, because
+that call is what stamps `structures_gen`, and the physics bridge and the
+sim→render fold both read the stamp.
+
+#### THE ARM
+
+`a_blocks_population_does_not_depend_on_which_blocks_were_evaluated_first`, over
+the **real committed zone documents** (`settlement::zone_payload` — the same
+fourteen the island's blocks name) through the editor's own door. A volume's
+population must be a pure function of its own graph, seed, extent and ground and
+**not** of which volumes the camera reached first; that is the property that lets
+a camera drive the evaluation at all, because the player evaluates a block when
+its cell activates and the editor when the author flies near it, and the two
+orders have nothing to do with each other.
+
+| block | instances | solids | digest |
+|---|---|---|---|
+| Office | 5054 | 4677 | `64378b2a54b36b5a` |
+| Shop | 1950 | 1801 | `b2542d2893b0ceff` |
+| Apartment | 6194 | 5811 | `c21c5456d6c178dc` |
+| House | 2302 | 2146 | `6e9cc24218adcca6` |
+
+— and the same four digests reached from the other end of the street. The digest
+is over position, rotation, scale, mesh GUID, kind and extent of every instance
+**and** over `ScatteredSolid`'s centre, half-extents and rotation, because
+`STRUCTURE_LOD_M` and `INTERIOR_LOD_M` band a structure by its own size. Not a
+count: a count is satisfied by any thousand buildings.
+
+#### The budget table
+
+| block | evaluation |
+|---|---|
+| Office | 5.3 ms |
+| Shop | 1.4 ms |
+| Apartment | 5.1 ms |
+| House | 1.5 ms |
+| **four blocks** | **13.4 ms — ~300 blocks/s** |
+
+So the 8 ms budget buys one dense block or five sparse ones per tick, and the
+tick runs four times a second. Memory is bounded by `EDITOR_PCG_MAX_EVALUATED`
+(256 volumes) rather than by the radius, and a released volume's population is
+dropped through the same door that made it.
+
+The fixture's own finding, kept in its comment: the first cut authored ONE 64 m
+terrain tile and measured 660 instances in the first block and **zero** in the
+other three. That is the height provider working exactly as IB-1 says — a volume
+off the edge of the terrain evaluates to nothing.
+
+#### The camera report
+
+`ViewportEvent::EyeMoved`, backend-to-backend like `SimLook`. It has to be an
+event: the `Cmd` channel is one-way and the camera is a `let mut` inside the
+render loop where nothing outside the thread can read it. Reported on **movement**
+(`EYE_REPORT_EPSILON_M` = 4 m, under a tenth of the narrowest thing the reader
+does with it), so a settled camera is silent and a flying one costs two events a
+second instead of sixty.
+
+### (2) THE EDITOR OPENS AT THE PLAYER START
+
+`player_start_of(doc)` asks `inf_ecs::movement::camera_subject` — the runtime's
+own door, the same one `scene_player_pawn` asks and the same one the shipped
+player re-resolves every step — so *where the editor opens* and *who the game
+follows* cannot become two answers. Cached at projection time because its two
+readers (the `Home` action, the per-frame gizmo) hold no document lock. `None` on
+a level with no player-controlled character, which is a real level and not an
+error — the same judgement `NoPawnPlayDialog` makes.
+
+Four doors, one implementation, on the `FocusSelection` precedent: the `Home`
+key, `Cmd::FrameStart` from the DOM, a toolbar button, and the
+`view.resetToStart` command.
+
+**The command latches**, and that is the load-bearing detail. Its loudest caller
+is the level-open path, which fires the moment the document is swapped in —
+before the viewport thread has projected it, when `player_start` is still the
+previous level's answer or none at all. Arming a countdown (`HOME_LATCH_FRAMES`,
+180 = three seconds) and framing on the first frame that *has* a start is the
+difference between "the editor opens on Harbour City" and "the editor opens
+wherever it happened to be, intermittently". `set_pose` and not `focus_goal`,
+because an open is a jump cut: interpolating from `(14, 9, 20)` to a point three
+kilometres away would be a second of the author watching the sea go past.
+
+`Action::Focus`'s fallback becomes the player start **before** the origin. On a
+georeferenced level the origin is a point in the sea some tens of kilometres from
+anything, so "F with nothing selected" was a way to lose the world.
+
+The start gizmo is a ring on the ground and a mast at eye height, drawn always —
+beside the spline polylines and for the same reason: it is a property of the
+level, not of a mode. Editor-only, never projected, never persisted, invisible in
+PIE.
+
+### (3) SELECTION AND EDITING ON STREAMED CONTENT
+
+A pick on a scatter batch already resolved to the owning volume
+(`host.rs:1951`, one `id_to_guid` row per batch). What it could not do was say
+anything about it: `PcgVolume::graph` is `#[reflect(ignore)]`, so a settlement
+block showed Extent, Seed and Draw Distance and no way at all to tell which of
+the island's fourteen zone documents grew the buildings standing in it. It gets
+the same escape hatch `Material.asset`, `MeshRef.asset` and `SkeletalMesh` use —
+`asset_row`, read-only, one helper so the rows cannot drift — plus an
+**Evaluated** row beside it, because the volume's content is a `#[serde(skip)]`
+cache the camera fills in and *"0 instances"* is the answer to "why is this block
+empty" with nowhere to read it.
+
+`write_prop` now **drops** a `PcgVolume`'s population when one of its own fields
+is written. Three of the four inputs to that cache — graph, seed, extent — are
+editable in Details, and the cache simply outlived them. Dropped rather than
+re-evaluated in place, because this is called from inside a numeric drag:
+re-evaluating here would run a five-millisecond city build on every frame of a
+slider, where the streamer's next tick does it once, off the thread that draws.
+`pcg_evaluate` remains the explicit door for a single volume, unchanged in
+behaviour.
+
+### (4) POPULATION OVERLAY — priced, not taken
+
+The society and traffic derivations live on `RuntimeSim`'s fixed step
+(`simulate.rs` / `runtime_sim.rs`), not on a pure "who is where at hour *h*"
+function the editor could call without one. Placing them statically means either
+standing a `RuntimeSim` up in the editor's projection path — which is Simulate,
+which already exists and already does it — or lifting the derivation into a pure
+Ring-0 function first. That is a wave's work and not a clause's, and this wave's
+budget went to the two clauses the user actually reported. **Carried 3**, with
+that as the shape of the work.
+
+### (5) THE STREAMING READOUT
+
+In the viewport **toolbar**, not over the 3D view, and the airspace rule is why:
+the viewport is a native child window, HTML can never draw over it, and an
+overlay there would have to blank the thing it annotates. The "Streamed terrain"
+badge has stood in exactly this spot since P16.4a for exactly this reason.
+
+`Loading world… n/m` while the editor is behind its own camera, `Streaming n/m`
+when it has caught up, `Streaming off` when the preference is off — and the whole
+instrument in its tooltip: volumes populated in radius and in the level, the last
+tick's volume count and its spend **against its budget**, the session totals, and
+the radii in metres. `pcg://stream` is emitted only when it changes, so a settled
+editor is silent; `pcg_stream_status` is the read for a panel that mounts after
+the last event.
+
+Two preferences (`pcg_stream`, `pcg_stream_radius_scale`), **on** and **1.0** by
+default: a fix that has to be switched on first leaves the reported defect where
+it was, and 1.0 is exactly the level's own activation + prefetch radii, so what
+an author sees is what a player standing there would have. No schema bump; every
+field carries a serde default and v1 reads them. Inserted before the first TABLE
+because `toml` refuses to emit a value after one, guarded in `normalize()`, and
+the range is pinned against the policy module's own clamp **from both sides**.
+
+### (6) THE DEMO LOOP — the real host
+
+`pwsh -NoProfile -File tools/demo/demo.ps1 -PlayMode embedded`, on this tree,
+built from cold: player 85 s, editor 3 min, shell up in 1 s.
+
+```
+[05:50:03] saved …\EDIT1-final\01-editor.png (1936x1048)
+[05:50:03]   cdp: clicked (embedded): Play in Editor (Shift+Alt+P)
+[05:50:11] player pid 10352 after 1 s
+[05:50:11] console windows named inf-player: none
+[05:50:36] HERO MOVED 12.628 m over 122 samples
+[05:50:39] still running: none
+[05:50:39] done
+```
+
+**`01-editor.png` is the wave.** The editor opens standing behind the character
+at head height, looking down a Harbour City street: two rows of buildings, a
+parked red truck, the start gizmo's ring at the character's feet, and the
+toolbar reading `Home` and `Loading world… 28/52`. Ten seconds after boot, 28 of
+the 52 volumes inside the radius have been evaluated and the rest arrive while
+the author watches. `EDIT1-editor-settled.png`, taken 50 s in, reads
+`Streaming 52/52`.
+
+Against the same frame from FIX1 — `01-editor.png` of `FINAL-AUDIT-embedded`,
+which is the editor at `EditorCamera::default`'s `(14, 9, 20)`: open ocean, the
+editor grid, a smear of distant land at the top of the frame, and no building
+anywhere. That is the picture the author reported, and it is the before.
+
+#### The Play frame, scored the way the FIX1 audit scored it
+
+Same crop (the viewport rectangle of `03-pie-b.png`), same metrics:
+
+| configuration | mean | p05 | p95 | frac>240 | frac>200 |
+|---|---|---|---|---|---|
+| as shipped (FIX1) | 154.47 | 90.6 | 246.6 | **0.130** | 0.204 |
+| GI off (the FIX1 probe) | 119.17 | 46.1 | 169.0 | 0.000 | 0.018 |
+| **EDIT1, this tree** | **119.39** | **14.8** | **186.6** | **0.000** | **0.025** |
+
+Nothing clips. The 5th percentile goes from 90.6 — *"with GI on, nothing in that
+frame is darker than 91/255. There are no blacks."* — to **14.8**, which is
+darker than the GI-off probe's own 46.1, because the shadows and the character
+are now genuinely dark rather than lifted. The mean lands within a quarter of a
+level of the GI-off frame while the p95 sits 17.6 levels above it: dynamic GI is
+now a bounce that shapes the frame instead of a wash that replaces it.
+
+The frame reads as a city street. Opaque buildings with legible window
+mullions, a dark blue parked truck, a dark character, a green verge, a beige
+road, a blue sky. The "semi-transparent buildings" of the FIX1 carried list were
+never transparency and are gone with the wash that made them.
+
+Screenshots: `EDIT1-final/01-editor.png` (the editor, before Play),
+`EDIT1-final/03-pie-b.png` (PIE), `EDIT1-editor-settled.png` (the editor at
+52/52).
+
+### LAWS this wave paid for
+
+* **A relative arm cannot see an absolute error.** The one π arm in the
+  repository compared the ambient term against itself, so the factor cancelled.
+  An absolute statement needs a *second* quantity — here the environment, through
+  the same post chain.
+* **A ceiling the defect clears is measuring nothing.** The frame arm carries the
+  pre-fix configuration as a row and asserts it fails.
+* **An absolute ceiling on a fixture measures the fixture.** The lit street's
+  first cut set ceilings on p95 and clipped fraction and failed on a correct
+  tree, because the street it invented is sunnier than the island. Lifts.
+* **An empty `lights` vector is not "no light"**, and `SunParams` carries the
+  fallback's direction, never its magnitude.
+* **A line-ending tool must know what a binary is.** The wave's own
+  CRLF-normaliser ran over a staged `.png` and "fixed" 116 lone LF bytes inside a
+  deflate stream. Caught by `git status`, restored, re-blessed, and the script
+  now refuses anything that is not a known text extension or that contains a NUL.
+* **A CRLF file needs CRLF anchors.** Half this repository's TSX is CRLF in the
+  working copy and half its Rust is LF; a multi-line anchor edit that carries the
+  wrong newline silently matches nothing (and, worse, *inserts* the wrong one).
+  Every scripted edit here detects the file's own ending first, and the diff was
+  swept for mixed endings before each commit.
+
+### CARRIED
+
+1. **The GI bounce has no cosine.** The gather's hit radiance is
+   `albedo/π · sun · visibility` with no `n·l`, because a voxel stores an albedo
+   and no normal — an over-estimate by the average of a cosine over the lit
+   hemisphere. It is why `GI_P95_LIFT_CEILING` is 30 and not 20. A normal per
+   voxel (or a cone-traced gather) is the fix and it is a lighting wave's work.
+2. **The white domes on the island's horizon are sphere primitives, not
+   clouds.** Clouds are disabled on that level (`SkyAtmosphere::default()`), so
+   the P17 hypothesis is refused. They are `PrimMesh::Sphere` at building scale,
+   evenly spaced behind the building rows — a scatter or foliage palette drawing
+   its placeholder where a real mesh was meant to be. Adjacent to the standing
+   FIX1 carried item *"scatter_meshes empty in windowed PIE"*.
+3. **The population overlay (clause 4) is priced, not built.** The society and
+   traffic derivations are on the fixed step; a static "who is where at hour *h*"
+   needs them lifted into a pure Ring-0 function first.
+4. **The per-volume evaluation should be hoisted into Ring 0.** The editor's
+   `evaluate_volume_into` and the player's `evaluate_pcg_volumes_in` do the same
+   arithmetic on the same Ring-0 primitives and are kept in step by *source*
+   gates (a character-for-character `population_of` fence and three occurrence
+   counts) rather than by being one function. `inf_pcg::evaluate_volume(document,
+   grammars, buildings, splines, provider, centre, extent, seed, entity)` would
+   retire all three gates and make the editor==player claim a compile-time fact.
+   Not taken here because it moves the player's code and the gates that pin it.
+5. **`page_for_pcg` pages every PCG region in the level, not the ones the tick is
+   about to evaluate.** `pcg_regions_of` is whole-world by design (both hosts
+   share it), so the first streaming tick on the island pages the ground under
+   all 172 blocks **and the bounding box of every road spline**. It is
+   idempotent and the tiles stay resident, and the tick now pays for it once per
+   document version rather than four times a second (`paged_version`) — but it
+   is memory the editor holds for blocks the camera never visits. Narrowing it
+   to the volumes a tick is about to evaluate is **not** the fix: a grammar pass
+   reads heights along a spline that may leave its own volume's box, which is
+   why the whole-world set exists in both hosts. The fix is a region set derived
+   from the volumes AND the splines they reference, which needs the reference to
+   be knowable before the evaluation runs.
+6. **The evaluation is not on `inf_core`'s job system**, which the brief asked
+   for. It runs on a dedicated `pcg-stream` thread — off the render thread and
+   off the Tauri async workers, which is the property that mattered — and
+   commits under the document lock. Parallelising *across* volumes with
+   `parallel_map_ref` needs the read half (evaluate: graph + provider + splines
+   → `VolumeOutput`) split from the write half (commit: `set_population`), and
+   the height provider made `Send + Sync`. It is the same refactor as carried 4
+   and lands with it: a Ring-0 `evaluate_volume` is exactly the pure function a
+   deterministic parallel map wants.
+7. **macOS accepts `Cmd::FrameStart` and does nothing with it.** That pump has no
+   frame at which to re-ask whether the document has projected, so rather than
+   fire once and probably miss, it is left with the rest of macOS viewport input
+   as the standing gap `host.rs` names.

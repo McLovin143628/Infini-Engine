@@ -1605,6 +1605,15 @@ fn thread_main(
                             DVec2::splat(radius),
                             vwf / vhf,
                         );
+                    } else if let Some((eye, yaw, pitch)) = host.player_start_pose() {
+                        // Interpolated here, unlike the level-open latch above:
+                        // pressing `Home` mid-session is a camera MOVE and the
+                        // author wants to see where they went.
+                        focus_goal = Some(crate::camera::CameraPose {
+                            pos: eye,
+                            yaw,
+                            pitch,
+                        });
                     } else {
                         focus_goal = Some(camera.focus_goal(center, radius));
                     }
@@ -1680,11 +1689,18 @@ fn thread_main(
                                 DVec2::splat(radius),
                                 vwf / vhf,
                             );
-                        } else {
+                        } else if let Some((eye, yaw, pitch)) = host.player_start_pose() {
                             // `set_pose`, not `focus_goal`: an open is a jump
                             // cut, not a camera move. Interpolating from
                             // `(14, 9, 20)` to a point 3 km away would be a
                             // second of the author watching the sea go past.
+                            camera.set_pose(crate::camera::CameraPose {
+                                pos: eye,
+                                yaw,
+                                pitch,
+                            });
+                            focus_goal = None;
+                        } else {
                             camera.set_pose(camera.focus_goal(center, radius));
                             focus_goal = None;
                         }
