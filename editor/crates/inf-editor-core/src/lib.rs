@@ -65,6 +65,10 @@ pub mod ipc;
 pub mod island;
 pub mod layouts;
 pub mod mods;
+/// Wave EDIT1: which PCG volumes the editor camera should have evaluated. The
+/// sibling of [`terrain_stream`] -- policy in Ring 1, calling in the host -- and
+/// the reason the editor draws the city the player draws.
+pub mod pcg_stream;
 /// The P25.3 finish pipeline: a dense photogrammetric reconstruction in, a
 /// standard textured `.inf_mesh` + `.inf_tex` + `.inf_mat` out. Ring 1 because
 /// it needs the modelling kernel's unwrapper and `AssetProject`'s writer.
