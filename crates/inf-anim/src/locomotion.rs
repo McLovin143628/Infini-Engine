@@ -1768,9 +1768,22 @@ mod tests {
     /// bytes — and then credited
     /// [`a_rig_that_already_hangs_its_arms_gets_no_rest_rotation`] with pinning
     /// it. **It does not.** That arm asserts `arm.rest == IDENTITY` and the
-    /// idle's track count; bypassing the guard leaves all seventeen locomotion
-    /// arms green, and every committed-content gate in the repository with them,
-    /// because nothing regenerates a committed `.inf_anim` and compares bytes.
+    /// idle's track count, and bypassing the guard leaves it — and all seventeen
+    /// locomotion arms — green.
+    ///
+    /// **The guard is not unguarded, and the first draft of this arm said it was.**
+    /// `inf_editor_core`'s `samples::tests::committed_sample_matches_generators`
+    /// regenerates every committed sample and compares bytes, and it DOES red on
+    /// the bypass — `committed phase29-locomotion Hero Walk.inf_anim drifted from
+    /// the generator`. Corrected here rather than quietly: measured at 6b458303,
+    /// where the first run filtered the wrong test names and read the silence as
+    /// an absence.
+    ///
+    /// What that lock cannot do is tell you WHY. It fails with two 36 KB byte
+    /// arrays and the word "drifted"; it is also a *consistency* gate, so a change
+    /// that moves the generator and re-blesses the bytes together passes it. This
+    /// arm is the other half: it fails at the mechanism, in the crate that owns
+    /// the guard, in one line.
     ///
     /// Three bytes is three SIGN BITS. A quaternion product computes
     /// `x = w1·x2 + x1·w2 + y1·z2 − z1·y2`, and for `x1 = -0.0` against the
