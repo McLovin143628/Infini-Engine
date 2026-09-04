@@ -116,8 +116,8 @@ all, because the eight arms above prove the WALK against a temp directory and
 nothing else can prove the walk finds anything here:
 
 ```
-CP-C1 the showcase rung, from C:\...\infinity_engine	argetelease\deps:
-      C:\...\Infinity_Engine\island-build\project
+CP-C1 the showcase rung, from C:/.../infinity_engine/target/release/deps:
+      C:/.../Infinity_Engine/island-build/project
 ```
 
 Four ancestors up, inside a bound of eight. The editor's own settings file on
