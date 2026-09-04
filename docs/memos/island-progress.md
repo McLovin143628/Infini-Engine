@@ -29375,8 +29375,10 @@ owner rejected in their own words. The archetype half of the census is a fact
 about the generator rather than about which blocks were resident: Eleven of fourteen
 archetypes hang no light at all, every light in the engine is on floor 0, and the
 wall is not sixteen but **four**: `VOLUME_LIGHT_CAP` truncates per city block, in
-the content layer, deleting about **92 of the 99 fixtures** a nightlife strip
-already builds. A lit settlement wants ≈1 670 lights at a defensible floor and
+the content layer, deleting **87 of the 99 fixtures** a nightlife strip already
+builds (audit correction: the block said 92; 99 built less 4 + 4 + 4 kept is 87,
+and the three per-block building counts behind the 99 are the memo's own
+estimate with no arm behind them). A lit settlement wants ≈1 670 lights at a defensible floor and
 ≈22 956 one-per-room, against a frame ceiling of 16 — **104× and 1 435×**.
 
 Three findings shape PAR0 more than the count does: a real interior light would
@@ -29507,3 +29509,48 @@ clean. CRLF sweep over the whole diff: **0**.
     furniture and lighting, PAR2 particles, PAR3 the froxel LUT and shadowed local
     in-scatter and the `voxel.wgsl` fog hole, PAR4 a veiling term around a non-sun
     source, PAR5 skin — behind the `SkinnedInstance` material handle.
+
+### AUDIT (2026-09-03, adversarial, at `96361a09`)
+
+Full index in `docs/memos/parity-certification.md`'s own **Audit** section;
+corrections are made in place in both files. The short form:
+
+**Eight numbers corrected.** The lit stack's price is a **spread** (+0.1 to
++10.2 ms), not "nearly free" — a third run of the same arm reads **+10.158 ms**
+and the SHIPPED baseline is the half that moves (16.733 / 14.209 / 10.660). The
+island's own shipped row reads **35.2 fps** on the re-run against the memo's
+**25.2**, while every LIT island row reproduces to within a millisecond, so "the
+island runs at 25 fps empty" is really a 25–35 fps range. CP-C1's "8 arms in
+`inf-project`" is **7** (the eighth is a pre-existing template arm the name
+filter catches). CP-B10's "about 92 of the 99 fixtures deleted" is **87**. The
+fps instrument printed "Reported, never asserted" three lines above the fold that
+asserts it. CP-C6 did not name the world its twenty arms run on (a hand-built
+fixture per row — not the island, not PIE, and for a stated reason).
+
+**Four things measured that the wave left unmeasured.** The morph's GPU cost,
+carried item 8, is **+0.19 to +0.29 ms** of the island's terrain pass. The
+goldens are **blind to the whole morph rule** — forcing `morph_at` to 1.0
+everywhere reds 0 of 121 arms while halving `ground_height` reds 9, and
+`golden_terrain_lod` does render a ring-0 morph band. The boot pin means
+**opening any other project changes what the application boots on, permanently,
+with no UI to see or clear it**. And a stray `island-build/project` holding any
+file named `inf.toml`, nearer the executable, **shadows the real showcase** and
+drops the launch to the start screen without retrying it.
+
+**One vacuity closed.** The **12.2 %** that justified the new LOD band was
+printed and never asserted: mutating `is_fit_out` to classify nothing made the
+census print `0.0 %` and pass. It now has a 5 % floor and reds under exactly that
+mutation.
+
+**Eleven mutations applied, run and restored**, all matching the wave's claimed
+red counts where it claimed them (A/D swap → 2, no-pause → 1, rung swap → 1,
+source gate → 1, WGSL twin pin → 1, committed lit bit → 1).
+
+**Held exactly**: every LOD, texture, terrain, control, light, street and corpus
+figure; the showcase rung on this machine; the five `.inf_lvl` diffs, which are
+**6 or 8 bytes inside a 74-byte window** — six bools in place plus 60.0 → 250.0 m
+on the two island levels, and nothing else.
+
+**Carried by the audit**: the mid band's on-screen pop at 64 m is unmeasured
+(D-23), and a stated-purpose terrain golden that can resolve a seam is priced
+(D-22).

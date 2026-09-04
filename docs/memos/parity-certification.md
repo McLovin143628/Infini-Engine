@@ -109,9 +109,42 @@ The bound is asserted from **both** sides: a start eight levels below the holder
 reaches, nine does not. The first version of that arm was off by one and said so
 by failing.
 
-Arms: 8 in `inf-project`, 2 in `inf-studio` (the pin lands; an unwritable
+Arms: **7** in `inf-project`, 2 in `inf-studio` (the pin lands; an unwritable
 settings directory is not an error), 3 in the frontend (asked on a cold launch,
-NOT asked with a project open, a null answer says nothing).
+NOT asked with a project open, a null answer says nothing) — **twelve**.
+*(Audit correction: this row said 8 + 2 + 3. `cargo test -p inf-project boot`
+answers "8 tests", and the eighth is `template::tests::
+every_template_scaffolds_a_boot_scene_under_content`, a pre-existing arm about
+template scaffolding that the name filter catches. `boot.rs` declares seven
+`#[test]`. A count taken from a filter is not a count of arms.)*
+
+**The rung order is mutation-verified**: swapping the environment and pin rungs
+in `resolve` reds `the_environment_outranks_the_pin_and_the_pin_outranks_the_showcase`
+and nothing else.
+
+**What the pin means for the owner's sentence, plainly** (audit). The owner asked
+for the island to be *the* default level. Rung 2 outranks rung 3 and every
+successful open writes it, so **the day the author opens any other project, that
+project is what the application boots on from then on** — the showcase rung never
+fires again while a pin resolves, the start screen does not appear to offer it,
+and there is no UI anywhere that shows, edits or clears `boot_project` (three
+hits in the frontend, all plumbing). Getting back to the island is opening it
+once more, from the recent list. That is the behaviour every other editor on this
+machine has and it is not what "the island IS the default" says; the wave chose
+it deliberately and this paragraph is here so the choice is visible rather than
+implied.
+
+**And the discovery rung has one measured bound.** `find_showcase` accepts any
+directory named `island-build/project` that holds a *file* called `inf.toml`;
+`is_project_root` does not parse it. Measured on this machine, with the ignored
+`parity_cert` arm as the instrument: a stray `<checkout>/island-build/project`
+with **no** manifest is correctly skipped and the real showcase one ancestor
+further out still answers; the same directory with a **garbage** `inf.toml` wins,
+and because the walk does not resume after a candidate that fails to *open*, the
+application falls all the way to the start screen without ever trying the real
+one. It takes a directory of that exact name nearer the executable to happen, and
+`island-build/` is gitignored at the checkout root precisely because one can
+appear there.
 
 **And it resolves on this machine, from the real executable's real directory** —
 the one place the claim "the application opens on the island" can be checked at
@@ -139,6 +172,11 @@ that answers — which is exactly the first-launch case the rung exists for.
 That is the headless twin of time-to-first-frame: it excludes the window and the
 GPU, which is the half a test on this machine can hold to a number. The other
 half is `fps_instrument.rs`'s and it is a frame rather than a boot.
+
+*(Audit re-run at head: fixture **58.7 + 278.9 = 337.6 ms**, shipped island
+**291.2 + 260.6 = 551.8 ms**. Both are wall clocks against a 5 000 ms budget and
+neither assertion is near it, so the drift is reportable and not a risk; the
+fixture's 249.9 → 337.6 is the wider of the two and it is a cold page cache.)*
 
 **The pawn comes to rest on the island.** GTA1's closing audit found every
 starter level giving its pawn a plane with nothing physical on it — 4.9868 m of
@@ -360,6 +398,19 @@ key code**, hands it to the shipped `PlayerUi` first (a key a dialog takes never
 reaches the game), folds it through the shipped `InputMap` and `InputState`,
 reduces it with `inf_player::input::held_actions`, and steps the shipped
 `RuntimeSim`. Nothing writes an action name, an intent field or a component.
+
+**Which world, plainly** (audit; the row did not say). The owner's sentence was
+*"in PIE on the island"*, and these arms run on a **hand-built fixture per row**,
+not on the island and not through a PIE session: a kinematic capsule with a
+`player_controlled` `CharacterMovement` on a floor, plus a lake, a pickup or two
+weapons where the row needs one. The file's own header gives the reason and it is
+a good one — `player_core_gate`'s committed phase-29 course has no water, no
+pickups and no weapons, and **no committed level carries a `CharacterMovement`**
+because autostep is opt-in by component presence — but a certification row must
+name its subject. What is certified is the shipped **key → `InputMap` →
+`InputState` → `held_actions` → `RuntimeSim`** path, over the smallest world each
+verb needs. The island's own pawn is exercised separately, by CP-C2, and the
+island's PIE-equals-shipping property by `island_gate`.
 
 | binding | asserted world quantity | measured |
 |---|---|---|
@@ -594,9 +645,14 @@ sort, no cull, no priority anywhere between the ECS and the uniform. But
 `VOLUME_LIGHT_CAP = 4` truncates *per city block*, in the content layer, before
 the renderer ever sees them. A city Bar block is 15 bars → 15 fixtures → **4
 kept**; a Nightclub block is 9 clubs × 4 → 36 → **4 kept**; a StripClub block 12
-× 4 → 48 → **4 kept**. **About 92 of the 99 fixtures a nightlife strip already
-builds are deleted before the frame.** Three blocks at the cap fit beside the
-sun; the fourth overflows.
+× 4 → 48 → **4 kept**. **87 of the 99 fixtures a nightlife strip already builds
+are deleted before the frame — 88 %.** Three blocks at the cap fit beside the
+sun; the fourth overflows. *(Audit correction: this line read "about 92 of the
+99". 99 built and 4 + 4 + 4 = 12 kept is 87 deleted, not 92 — the arithmetic did
+not follow from its own inputs. The three per-block building counts above are
+the memo's own estimate and appear nowhere else in the tree; the cap, the
+truncation and `MAX_LIGHTS` are read from source by
+`the_light_census_and_the_many_lights_number`.)*
 
 **The many-lights number**, and it is ARITHMETIC over measured content rather
 than a measurement of its own — the inputs are the island ledger's own per-
@@ -840,6 +896,31 @@ blue rim — the engine has the lights and none of the skin.
 | the island, LIT+VIS + 1 000 NPCs in a 320 m block | 54.922 | 79.940 | 83.699 | 18.2 |
 | **the island, LIT+VIS, its own society at the rush hour** | **138.701** | **153.814** | 169.246 | **7.2** |
 
+**The audit re-ran the whole table at head on the same machine**, and the two
+readings differ by configuration in a way worth recording, because the memo's
+headline is the pessimistic end of it:
+
+| scene / configuration | wave p50 / p95 | audit p50 / p95 |
+|---|---|---|
+| the composed city, shipped | 15.353 / 16.733 | **9.901 / 10.660** |
+| the composed city, LIT | 15.735 / 16.862 | 15.445 / **20.818** |
+| **the island, as its level now ships** | **39.672 / 42.299** (25.2 fps) | **28.371 / 29.991** (**35.2 fps**) |
+| the island, LIT (+VSM) | 34.237 / 37.671 | 34.270 / 37.360 |
+| the island, LIT + SSR | 34.659 / 36.775 | 33.745 / 36.087 |
+| the island, LIT + visbuffer | 37.023 / 60.045 | 33.454 / 36.465 |
+| the island, LIT, coarse clipmap | 33.990 / 36.188 | 34.046 / 44.280 |
+| the island, LIT+VIS, crowd cleared | 34.543 / 37.956 | 33.307 / 36.464 |
+| **the island, its own society at the rush hour** | 138.701 / 153.814 (7.2) | 148.532 / 250.345 (**6.7**) |
+
+**Every LIT island row reproduces to within a millisecond of p50; the SHIPPED
+row does not** (39.672 → 28.371), and neither does the city's shipped row
+(16.733 → 10.660 of p95). That is the same instability the stack's price table
+records, seen from the other side, and it means **"the island runs at 25 fps
+empty" should be read as "25–35 fps, and the honest figure is a range"**. The
+rush-hour row's p95 is worse on the re-run than the wave's (250.345 against
+153.814) while its p50 is close, so the crowd row's tail is the least
+reproducible number in this document.
+
 The island's frame is **CPU-bound**: crowd cleared, the pipelined estimate is
 21.065 ms of CPU against a 12.834 ms GPU frame. The fixed step alone is
 **7.664 ms/step** against a 6.0 ms ratchet, and the dearest CPU stages are the
@@ -1048,3 +1129,76 @@ LAST. It caught one `field_reassign_with_default` in this wave's own settings ar
 os error 206 on this machine, so each member is formatted by name. Frontend
 **86 files / 779 tests**, `tsc --noEmit` and `eslint --max-warnings 0` clean.
 CRLF sweep over the whole diff: **0**.
+
+---
+
+## Audit (2026-09-03, adversarial, at `96361a09`)
+
+Every number above was re-run at head on the same machine. What follows is what
+did not survive, what was measured that the wave left unmeasured, and what the
+wave's own arms do when they are broken on purpose. Corrections are made **in
+place** above, each marked; this section is the index.
+
+### Corrected in place
+
+| # | row | was | is |
+|---|---|---|---|
+| A-1 | CP-A1, `SHIPPING_FRAME_CEILING_MS`, ledger | the stack costs "between a seventh of a millisecond and six of them" | a **spread** of +0.1 to +10.2 ms; a third run reads **+10.158**, and the SHIPPED baseline is the unstable half (16.733 / 14.209 / 10.660) |
+| A-2 | `fps_instrument.rs`'s printed price line | "Reported, never asserted" | the price is; the lit **p95 and p99 are asserted**, three lines below the sentence that denied it |
+| A-3 | CP-C1 | "8 arms in `inf-project`" | **7** — `cargo test -p inf-project boot` catches an unrelated pre-existing template arm |
+| A-4 | CP-B10 | "about **92** of the 99 fixtures" deleted | **87** (99 built, 12 kept); the per-block counts behind the 99 are the memo's own estimate |
+| A-5 | CP-C7 | goldens "bound this change" | measured: the harness is **blind to the whole morph rule** (0 of 121 red at full morph, 9 red on the control) |
+| A-6 | CP-C6 | did not name its world | a hand-built fixture per row, not the island and not PIE — with the reason |
+| A-7 | the frame table | one column | two, and the island's shipped row is **25.2 → 35.2 fps** between runs |
+| A-8 | CP-C2 | 249.9 / 541.8 ms | re-run 337.6 / 551.8 ms, both far inside a 5 000 ms budget |
+
+### Measured here, unmeasured by the wave
+
+* **The morph's GPU cost** (carried item 8): **+0.19 to +0.29 ms** of the
+  island's `terrain` pass, 6–8 % of it.
+* **The boot pin's plain consequence**: opening any other project changes what
+  the application boots on, for ever, with no UI to see or clear it.
+* **The discovery rung's bound**: a nearer `island-build/project` holding any
+  file named `inf.toml` shadows the real showcase, and the walk does not resume
+  when that candidate fails to open — the start screen, silently.
+* **The 12.2 % was never asserted.** It is now, at a floor of 5 %.
+
+### Mutation record (each applied, run, restored)
+
+| mutation | expected | observed |
+|---|---|---|
+| swap the env and pin rungs in `boot::resolve` | 1 red | **1** (`the_environment_outranks_…`) |
+| clear the `bloom` bit in the committed `Blank.inf_lvl` | 1 red | **1**, naming the level and the bit |
+| name `RenderSettingsRecord::default()` in `run_pie` again | 1 red | **1**, the source gate, count 1 vs 0 |
+| `ModuleShape::is_fit_out` answers `false` for everything | ≥ 1 red | **1** before this audit (`a_grammar_building_draws_…`), **2** after (the census's new floor) |
+| `morph_at` returns `t` instead of the smoothstep | 1 red | **1**, the WGSL↔twin source pin |
+| the two strafe arms press each other's key | 2 red | **2** |
+| the dialog no longer pauses the sim | 1 red | **1** |
+| `morph_at` returns `1.0`, against the goldens | — | **0 of 121** — the finding |
+| `ground_height` halved, against the goldens (control) | — | **9 of 121** |
+| a stray `island-build/project` with no manifest, nearer the exe | skipped | skipped; the real showcase still answers |
+| …the same stray with a garbage `inf.toml` | skipped | **taken** — the bound above |
+
+### Held, reproduced exactly
+
+The LOD census (12.2 %, 1 274 of 10 428, Apartment 5.7 % → Bar 23.6 %, every
+archetype row); the three bands `[0, 64)` / `[0, 102.9)` / `[96, 1000)`; the
+texture ladder (0/2/4/6/8/10 and 0/1/3/5/7/9); all four terrain numbers
+(3.8262 → 0.0000 m, 10.586° → 0.000°, 14.688° → 0.707°, 0.4875× → 0.9751×) and
+all four priced ones (0.1748/0.5877, 4/8/16/8/16/8/4, 0.6359/2.1737, 0.2843);
+the 24-level corpus census and the five lit records; **all twenty control arms
+with their exact figures**; the pawn's 0.9883 m settle and its 4.9840 m control;
+the light census (1 / 4 / 0 / 0 / 22 989 / 2 122); the streets at all three hours
+(292 + 109 + 1 000 and 363 + 38 + 1 000, 20.01 per 100 m, **14:00 ≡ 21:00 to the
+unit**); the showcase rung resolving from the real executable's directory; the
+frontend's 86 files / 779 tests; and the five committed `.inf_lvl` diffs, which
+are **6 or 8 bytes each inside a 74-byte window** — six bools flipping in place
+and, on the two island levels, `0x42700000` → `0x437a0000`, i.e. 60.0 → 250.0 m.
+Nothing else in any of those files moved.
+
+### Not done, and named
+
+The mid band's **on-screen pop at 64 m** (D-23): `structure_lod_pop.rs` is this
+repository's own 1080p instrument for a band swap and it was not aimed at the new
+one. The band rests on an instance count and an occlusion argument. Both are
+sound and neither is a pixel.
