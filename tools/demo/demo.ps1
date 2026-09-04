@@ -194,6 +194,7 @@ public class InfInput {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
@@ -247,10 +248,23 @@ public class InfInput {
 #    the player's own rectangle when it has one.
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $target = New-Object InfInput+RECT
+#    "Has the player a window of its own" is THREE questions, not one, and the
+#    first version asked only the first. An EMBEDDED player still reports a
+#    `MainWindowHandle` -- a 16x16 stub at (0,0), which is what winit leaves
+#    behind once the editor has reparented the real one -- so a size test and a
+#    parent test go with it. Without them the driver took the new-window branch
+#    on an embedded session, raised a 16-pixel window, sent W to nothing and
+#    reported 0.000 m.
 $hasWindow = $false
 $player.Refresh()
 if ($player.MainWindowHandle -ne [IntPtr]::Zero) {
-    $hasWindow = [InfInput]::GetWindowRect($player.MainWindowHandle, [ref]$target)
+    $gotRect = [InfInput]::GetWindowRect($player.MainWindowHandle, [ref]$target)
+    $isTop = [InfInput]::GetParent($player.MainWindowHandle) -eq [IntPtr]::Zero
+    $wide = ($target.Right - $target.Left) -ge 200 -and ($target.Bottom - $target.Top) -ge 200
+    $hasWindow = $gotRect -and $isTop -and $wide
+    if (-not $hasWindow) {
+        Say ("the player's reported window is {0}x{1}, top-level={2} — treating it as embedded" -f ($target.Right - $target.Left), ($target.Bottom - $target.Top), $isTop)
+    }
 }
 Say ("foreground before the click: " + [InfInput]::Foreground() + " (editor pid $($proc.Id), player pid $($player.Id))")
 if ($hasWindow) {
