@@ -31770,3 +31770,377 @@ commits on top of `e1d97f33`):
     manifest re-decodes, re-clamps and re-encodes all 81 textures (43 s and
     892 MB). The engine's own `ImportCache` keys on source bytes and would serve
     most of it; the manifest path does not consult it.
+
+## Wave ROAD1 — the road is more than a strip of tarmac, and the streams stop breathing (2026-09-04)
+
+The user's words: *"the roads look really bad and the streams look really bad as
+well (i.e. they kind of fade in and out of the landscape)."*
+
+Two sentences, and each of them turned out to be a different defect wearing the
+same symptom. The road looked bad because there was no road — there was a
+carriageway, drawn as one flat quad-strip of asphalt tiled three and a half times
+life size, with grass growing up to its edge, no kerb, no footway, no crown and
+not one painted line. The streams faded because a river's shore band was measured
+against a terrain that MOVES: the clipmap morphs a vertex toward a bilinear on a
+lattice twice as coarse, so a channel narrower than that lattice is not there at
+distance, the water's depth column collapses, and the band sweeps across the
+whole surface. That is the sentence in the brief, and it is the sentence the
+instrument now reads as a number.
+
+### CLAUSE 2 FIRST — THE TILING DOOR, BECAUSE EVERYTHING ELSE NEEDED IT
+
+The ASSET0 audit had already measured the road reading 3.5× life size and named
+the missing field: `inf_gis`'s ribbon wrote `uv = (u across the carriageway,
+arc / width_m)`, so **one uv unit was the road's own width** — 14.0 m on this
+island, because the road layer carried no lane count and `default_lanes` gives an
+arterial four. `GroundKind::tex_scale_m` says 4 m and reached exactly one
+consumer, `TerrainLayer::tex_scale`, which asphalt is not.
+
+`.inf_mat` takes **schema v4**: `uv_tiling_m`, world metres per texture repeat,
+`0.0` meaning "the mesh's uv is already in tile units and is sampled as
+authored" — which is every material written before the bump. `DerivedMaterial`
+(`.inf_matd`) takes **v3** for the same pair, because the shipped player cannot
+read a `.inf_mat` at all and a rate that stopped at the authoring container would
+tile right in the editor and wrong in the game.
+
+Both are appended (bincode is positional), both default to no opinion, and both
+are **downgrade-blessed**: `a_v3_payload_is_refused_by_name_with_its_remedy`
+encodes through a frozen `MaterialAssetV3` shadow struct and watches the live
+decoder run off the end of the buffer, and
+`the_v4_wire_shape_is_pinned_against_an_independent_declaration` decodes a real
+v4 encoding through an independently-declared twin and asserts it consumed every
+byte.
+
+**It costs no instance byte to reach the GPU.** `orm` is a slot index and a slot
+index is 16 bits, so the third instance word's top half has been zero on every
+instance ever uploaded — the same free space Wave T's detail scale found in the
+first two. `uv_tiling_q8` rides there as unsigned 8.8, ceiling 255.996 m,
+saturating, converted in exactly one place (`DerivedMaterial::uv_tiling_q8`) so
+the editor and the player cannot round differently.
+
+The shader applies it in ONE function, `vt_surface`, before any slot is touched,
+and `vt_scale_uv` rescales the two screen derivatives with it — a uv moved
+without its gradients samples the right texel out of the wrong mip.
+`vis_feedback.wgsl` is standalone and cannot call it, so it spells the same
+arithmetic by hand and `the_feedback_pass_scales_uv_exactly_as_the_sampler_does`
+is the source gate over that mirror: same word (`.z`), same 256, same guarded
+reciprocal, derivatives scaled beside the uv on both sides.
+
+**Terrain strips it**, one `& 0xFFFF` in `MaterialRaw::from_terrain`. A terrain
+uv is already `world.xz / TerrainLayer::tex_scale`, so a layer bound to a mesh
+surface would divide twice and tile grass every four metres squared. Nothing in
+the tree binds one today, which is exactly why it needs an arm:
+`the_terrain_strips_a_materials_metres_per_repeat`, falsified by dropping the
+mask.
+
+And the ribbon's uv is now **metres** — `u` the offset across the carriageway,
+`v` the arc along it — so the material's rate is the whole tiling rule. The
+across parameter changed sense with it (it now runs to the road's RIGHT, the
+sense `inf_nav::lane::right_of` uses, so a kerb offset means one thing in both
+crates), and the index winding is mirrored to match. The conformance arm caught
+the faces pointing down, which is what that arm is for.
+
+| set | tiles every | bound to |
+|---|---|---|
+| `Ground_Grass` … `Ground_Soil` | 1.5–3.0 m | a splat layer, so `uv_tiling_m` is **0.0** and must be |
+| `Road_Asphalt` | 4.0 m | a MESH — the road, at last at the rate its own README states |
+| `Road_Concrete` | 2.0 m | a MESH — the kerb and the footway |
+
+`wet_roughness_floor` is appended in the same window and is **unread**: asphalt
+0.12, concrete 0.45, and PAR4 owns the pass that reads it. It is authored now
+because the alternative was a second schema window for one `f32`.
+
+### CLAUSE 1 — KERBS, PAVEMENTS, A CROWN, MARKINGS AND CROSSINGS
+
+CERT1's CP-B3 said it plainly: *"the pavement is never drawn either.
+`PAVEMENT_M = 2.0` is a nav ring of eight nodes; there is no kerb geometry, no
+pavement mesh and no road marking."* A source grep for `decal`, `crosswalk`,
+`zebra`, `lane marking` and `kerb_mesh` across `crates/`, `runtime/` and
+`editor/` found nothing at all.
+
+The cross-section, in metres against the thing it models:
+
+| piece | figure | why that number |
+|---|---|---|
+| kerb upstand | **0.15 m** | the standard a highway authority specifies — stops a wheel, holds a gutter, a person steps up it without thinking |
+| kerb top | **0.30 m** | one stone |
+| footway | **`PAVEMENT_M` = 2.0 m** | `inf_ecs::society::PAVEMENT_M` **by value** — the concrete under the ring a crowd already walks |
+| footway cross-fall | **2 %** back toward the kerb | a footway drains too |
+| carriageway crown | **2 %** = 140 mm on a 14 m road | every highway manual; the difference between a road and a painted strip of ground |
+| shoulder | **2.5 m** highway, **0.75 m** track | in the carriageway's own ribbon, because a sealed shoulder is asphalt |
+| line | **0.10 m**, 4 mm proud | thermoplastic really is 3 mm proud, and 4 mm is what reverse-Z resolves at a kilometre |
+| dash | **3 m** painted, **6 m** clear | the urban pattern |
+| crossing | **0.5 m** bars, 0.5 m gaps, 6 m back from the node | the continental ladder every North American city paints |
+
+**One authority, two consumers.** `inf_gis::PAVEMENT_M` is
+`inf_ecs::society::PAVEMENT_M` by value and the crates cannot name each other, so
+`the_kerb_geometry_and_the_nav_ring_are_one_pavement` pins the equality in
+`inf-editor-core`, which links both — the arrangement `LANE_WIDTH_M` and
+`inf_nav::lane::DEFAULT_LANE_WIDTH_M` already have. Until this wave nothing could
+disagree, because the pavement was nav nodes and no triangles.
+
+**Yellow means what it means.** Double yellow down the middle of a four-lane
+street, single yellow on a two-lane one, white dashes at the lane lines, solid
+white edge lines inset 200 mm, crossings at every junction of degree three or
+more — the same threshold `fill_junctions` uses, because a degree-2 node is a
+bend and nobody crosses a bend. A **residential street is deliberately
+unmarked**; in the country this island is in, it is.
+
+There is no decal system in this engine and this wave did not build one: a
+marking is a strip mesh, which costs no new subsystem and lands on the same
+`MeshVertex` (one uv set, so a second-UV atlas was never available without a mesh
+schema move).
+
+**One frame list, six builders.** `cross_frames` extracts the mitre
+`build_ribbon_across` used to work out inline, because a kerb that mitred
+differently from the carriageway it bounds opens a wedge at every bend.
+`carriageway_y` is the one door every part takes its height from, so a crown
+authored in the ribbon cannot disagree with the kerb sitting on it.
+
+**Four materials is four entities**, because an `inf_ecs::Material` binds one
+`.inf_mat`. `Roads` keeps its name and its GUID (a committed `.inf_lvl` names
+both); `Kerbs and pavements`, `Road markings` and `Road markings (yellow)` are
+new, with per-part salts on the same pattern. The two paint entities carry
+`Material::asset: None` — the scalars-only path, deliberately, because a 100 mm
+painted film is a constant colour and a texture of it would be 1.6 MB of one
+texel, twice. The colours are weathered (0.55 linear, not 1.0): a pure white line
+on a dark carriageway is what makes a screenshot look like a diagram.
+
+### THE LANES SCHEMA — THE LAYER STATES IT NOW
+
+`roads.geojson` carried a name and a class and nothing else, so every one of the
+island's eleven roads took `default_lanes` — four for the highway *and* four for
+every arterial, **14.0 m of carriageway for both**. A town connector as wide as
+the trunk route is wrong on its own, and it was also the number behind the 3.5×
+asphalt.
+
+`Route` gains `lanes`, `write_roads` emits it, `routes_of` reads it back through
+`inf_gis`'s own `ROAD_LANE_FIELDS` — hoisted to a constant for
+`ROAD_CLASS_FIELDS`'s reason: `RoadGraph::from_layer` probed five spellings
+inline and `routes_of`, which reads the same layer to plan a terrain corridor
+with, probed **none**.
+
+| class | lanes | carriageway | beside it |
+|---|---|---|---|
+| highway | 4 | 14.0 m | 2.5 m sealed shoulder each side |
+| arterial | **2** | **7.0 m** | kerb + 2.0 m footway each side |
+
+Two lanes is what a British Columbia secondary highway is; the trunk keeps four
+because it joins the island's two cities. The class defaults are **unchanged** —
+four is the right fallback for a city layer that says nothing, and what changed
+is that this layer says something. The committed layer moved by eleven lines, one
+`"lanes"` per feature, sorted ahead of `"name"` exactly where `serde_json`'s
+BTreeMap object puts it, so a future `inf island route` writes the same bytes;
+`the_committed_road_layer_states_the_lanes_its_design_states` is the fence over
+that drift.
+
+### THE CONFORMANCE MEASUREMENT — BOTH OPTIONS, AND WHY B
+
+The brief asked for both to be priced and the one with no float or sink at 1080p
+taken.
+
+**Option A — sample the morphed height for the ribbon at its LOD. Refused, and
+for a structural reason rather than a preference.** A road is a baked static mesh
+with one height per vertex and the morphed height is a function of the *camera*.
+A ribbon baked against the morph is right at exactly one distance and wrong at
+every other by the difference between two morph factors — so A is not "conform to
+the drawn terrain", it is "choose which distance to be wrong at". Making it real
+means drawing the road through the terrain's own vertex shader, which is a road
+that is no longer a mesh.
+
+**Option B — flatten the terrain to the road. Taken.** The corridor levelling was
+`w = 1 − smooth01(d / half)`: full at the centreline and tapering from there, so
+the ground under the road's own edge kept most of its cross-slope — on the
+island's 11.2 m corridor a 14 m carriageway's edge sat at `w = 0.32`, so **68 %
+of the terrain's natural cross-slope survived under a surface a road is graded
+flat across**. `CarvePlan::corridor_flat_m` is now a plateau at `w = 1` holding
+everything the road draws (`Route::built_half_width_m`), with the smoothstep
+easing from its edge over the batter — which is what cut and fill is.
+
+`road1_gate.rs` is the instrument, in `inf-player` because it is the one crate
+that links `inf-island` and `inf-render`. A CPU twin of the morph rule, over the
+island fixture's own build, at three distances chosen off the morph's own bands:
+**200 m** before any morph (the control), **330 m** half way through ring 0's at
+an 8 m coarse lattice, **700 m** half way through ring 1's at 16 m.
+
+```
+ROAD1 FLOAT | crown allowance 0.140 m, 3540 vertices, 1080p pixel = 0.214 m at 200 m
+ROAD1 FLOAT | dist | ring | morph |  1 px  | A conform: mean / p99 / max | B graded: sink / float / mean / p99
+ROAD1 FLOAT | 200m |  0   | 0.000 | 0.214m | 0.0000 / 0.0000 / 0.0000   | 0.0700 / 0.0000 / 0.0311 / 0.0700
+ROAD1 FLOAT | 330m |  0   | 0.645 | 0.353m | 0.0893 / 0.5982 / 0.8892   | 1.1264 / 1.3698 / 0.0699 / 0.7086
+ROAD1 FLOAT | 700m |  1   | 0.491 | 0.748m | 0.1687 / 1.1308 / 1.4573   | 1.0630 / 1.5429 / 0.1937 / 1.3431
+```
+
+**Read it as the gate does.** The road's mean offset from the ground the renderer
+draws is **0.15, 0.20 and 0.26 of a 1080p pixel** at the three distances — under
+the "zero at 1080p" criterion at every one. And the *degradation* under the morph
+is what compares the two options honestly, because a conforming ribbon sits
+exactly on the heightfield at morph zero by construction (0.0000 m) while a
+graded one is a crown above the ground it covers on purpose: **B degrades by
++0.0388 m and +0.1626 m against A's +0.0893 m and +0.1687 m.** Flattening the
+terrain to the road wins, and the gate asserts it wins rather than hoping.
+
+**Two findings the table also carries, and they are the interesting half.**
+
+*The graded height had to be clamped.* The plateau can only be levelled to the
+NEAREST route, and a grade-limited router builds **switchbacks** — two limbs of
+one road within a few metres of each other at different heights. There the
+plateau serves one limb and the other's graded height is the wrong side of a
+1.78 m step (measured, at (-378.3, 318.1) on the fixture, where the corridor
+wanted 145.751 m and the ribbon hung at 147.548 m). `carriageway_y` now clamps
+the graded height to within its own crown of the local ground, which makes
+"a road never sinks and never floats past its crown" a **bound** rather than a
+hope: 0.0700 m of sink and 0.0000 m of float before any morph, both under a
+0.214 m pixel.
+
+*A wide plateau makes a switchback worse, measured.* The maximum column of that
+table is the same switchback: the step the levelling leaves between limbs is a
+feature the decimation then smooths, so the worst 1 % of vertices is worse
+*because* the corridor was levelled (1.51 m against the conforming road's
+0.89 m at 330 m). Widening the plateau to one ring-1 coarse cell (16 m) was tried
+and is **worse still**, because it stacks more limbs onto one staircase. The
+plateau is therefore the road's own built half-width and no more, the gate reads
+the mean, and this paragraph is the finding rather than a percentile hiding it.
+
+Also refused for a stated reason: the mitre. `MITER_LIMIT` lets a cross-section
+reach four half-widths from the centreline at a hairpin, past any plateau, so
+`SurfaceOptions::graded_half_m` is where grading stops and conforming resumes —
+eased over half a plateau so the hand-off is not a crease.
+
+`BuildOptions::graded_roads` is the switch the control is built with, and its
+`Default` is now **hand-written**: a derived one made it `false`, so
+`BuildOptions::default()` — which is what `inf island build` and every gate in
+the tree use — quietly built the pre-ROAD1 island for one measurement. The tell
+was the control and the subject agreeing to four decimal places.
+
+### CLAUSE 3 — THE STREAMS
+
+Three defects, and the first is arithmetic.
+
+**The carve cut every reach to the widest stream's trench.**
+`carve_channels(&mut data, &channels, widest, 1.25)` used ONE half-width — the
+island's widest stream's full *width* — and ONE flat depth for every watercourse,
+while the `WaterBody` the level spawns tapers per reach at `0.7·w → w` and
+`0.7·d → d`. A 1.5 m creek was a 1.5 m ribbon down the middle of a 48 m trench,
+its surface sitting 1.25 m above a bed nothing had told it about. Each reach is
+now cut to its own profile: a parabolic bed `depth · (1 − t²)` inside the water's
+own half-width, a batter easing back to the terrain over one more half-width, and
+the carve still only ever cuts down — so a bank is what the ground already had,
+eased, rather than a levee this step invented.
+
+**A river's shore fade was a screen-space depth difference against a terrain that
+moves.** A river has always carried its own bed: `WaterFrame::depth_m` reaches
+the GPU in `tangent_depth.w` and is interpolated into `profile.x`, and **no
+fragment had ever read it**. The river's column is now that depth tapered by
+`1 − bank²` — the same parabola the carve cuts, pinned to it by a source gate on
+one side and by the carve's own arm sampling the heightfield against that curve
+at a quarter, a half and three quarters of the way to the bank on the other.
+
+It is `select`, not `max`, and the arm says why: `max` still lets the depth buffer
+win wherever it says more than the model, which on a reach whose bank is already
+below the water line is everywhere.
+
+```
+ROAD1 BAND | reach 1.50 m wide, 0.35 m deep, fade 0.12 m
+ROAD1 BAND | distance | morph | band edge, depth buffer | band edge, modelled
+ROAD1 BAND |   200 m  | 0.000 |         1.0000         |       0.8086
+ROAD1 BAND |   330 m  | 0.645 |         1.0000         |       0.8086
+ROAD1 BAND |   700 m  | 0.491 |         0.0000         |       0.8086
+ROAD1 BAND | travel over the three distances: 1.0000 -> 0.0000 of a half-width
+```
+
+**The band's outer edge travelled the entire half-width — the whole river going
+from opaque to invisible — and now travels nothing at all.** That is the user's
+sentence, closed, and the number is exactly zero because the band is no longer a
+fact about the terrain.
+
+What it costs is named: a hull, a jetty or a rock sitting IN a river no longer
+shortens the column beneath it, so the water tints as though its own bed were down
+there. Ocean and lake keep the depth buffer, which is what a screen-space
+difference is for — they meet arbitrary ground at an arbitrary line and have no
+modelled bed at all.
+
+**A 1.5 m creek at a kilometre is a third of a pixel.** The vertex stage floors a
+river's rasterised width at `MIN_RIVER_PIXELS` = 2, measured rather than guessed:
+project the centreline and a point one metre across it, and the gap between them
+in pixels is what a metre is worth here. A river already wider takes the `max`
+untouched, which is every river in every golden. The alternative — an impostor
+ribbon at distance — buys the same two pixels for a second draw path, a second
+material and a crossfade band.
+
+**The band is sized per reach.** With the modelled column, a shore band wider
+than the reach is deep leaves the whole creek half transparent: a 0.35 m stream
+against `default_shore_fade`'s 1.2 m reaches `smoothstep(0, 1.2, 0.35) = 0.20` on
+its own centreline. `shore_fade_m` is a third of the depth, clamped to
+`[0.12, 1.2]`.
+
+**The banks get the hydrology's own ground.** `stamp_splat` gains a fourth term
+on the SAME index and the same profiles the carve used, so the gravel's edge is
+the bank's edge rather than a second guess at where it is.
+
+**Flow: measured, and it reaches the shader FOAM ONLY.** The P19.1 erosion bake's
+`DataMapKind::Flow` → `flow_foam_gain` → `TerrainFlow::foam_gain_at` → both
+projectors → `FrameGpu.flow_extra.x` → `profile.z` → `water.wgsl:504` is wired end
+to end and is the only reader of it. The surface ripple *does* travel downstream —
+the river's wave wind is forced along its arc length — but at the deep-water
+dispersion speed `ω = √(g·k)` rather than at `river_flow_m_s`. That is a fidelity
+gap, not an absent feature, and it is carried below rather than closed here: the
+phase is CPU-reduced in the projector, so advecting it is a mirrored change to two
+hosts and moves `water_river.png`.
+
+**Waterfalls: priced, not taken.** `hydro::waterfalls_of` derives them and
+`StreamNetwork::waterfalls` carries them; nothing draws one. A waterfall is a
+second water *kind* (a vertical ribbon with its own foam and spray), which is a
+`WaterKind` enum value — freeze-pinned, append-only — plus a draw path plus a
+particle emitter. That is a wave, not a clause, and this wave's own schema budget
+went on `.inf_mat`.
+
+### CLAUSE 4 — WHAT THE INSTRUMENT IS AND IS NOT
+
+`road1_gate.rs`'s `morphed_height` reproduces the *rule* — fine height, coarse
+bilinear on a lattice twice the mesh cell, and `inf_render::morph_factor` itself
+for the blend — over `TerrainData` rather than over a GPU page. It is **not**
+bit-identical to the WGSL and does not need to be: what it certifies is the
+road's and the river's relationship to a moving ground, and the morph's own
+bit-level correctness is `inf-render`'s `terrain_continuity.rs`, which pins its
+twins against the WGSL by source gate. Stated so nobody reads a number here as a
+morph certification.
+
+### CARRIED
+
+1. **A rural arterial carries a footway it does not need.** `is_kerbed` is a
+   property of the road CLASS, because published layers carry no urban/rural flag
+   and `inf-gis` has no business knowing where a city is. A settlement mask is
+   the routed follow-up; the island's ten arterials are town connectors, so the
+   cost is a strip of concrete between settlements.
+2. **The kerb has no collider.** 150 mm, and the terrain's heightfield collider
+   answers under it, so a trimesh here would be a second surface a hand's breadth
+   above the first — the `Roads` entity's own IB-4 ruling, met again. The step a
+   pedestrian takes up a kerb is a step they take *through* it today.
+3. **A road crossing a stream still crosses it at grade.** The hydro carve cuts
+   after the corridor levelling and only ever cuts down, so a channel crossing a
+   road corridor cuts a notch in it. A bridge or a culvert needs the
+   bridge/tunnel attribute published layers rarely carry — the same named limit
+   `SNAP_TOLERANCE_M` already carries.
+4. **The switchback staircase**, above: 1 % of the fixture's road vertices sit on
+   a levelled step between two limbs of one road, and the corridor plateau made
+   them worse rather than better. The honest fix is a corridor whose plateau
+   narrows where limbs approach, which needs the levelling to know about more
+   than the nearest route.
+5. **Flow does not advect the surface**, above.
+6. **Waterfalls are derived and not drawn**, above.
+7. **`wet_roughness_floor` has no reader.** PAR4 owns it; it round-trips and is
+   inert, and the field's own doc says so.
+8. **Junction fillets are still the P-wave fan.** `fan_at` paves an intersection
+   with a fan of the highest-order class, and `inf_gis`'s own doc has said since
+   Wave G that the honest shape is *"a proper intersection mesh with kerb radii
+   per leg pair, which is a road-modelling project rather than an import"*. The
+   crossings this wave paints sit 6 m out from the node to clear it. Kerbs stop
+   at the fan rather than turning the corner.
+9. **The crossing is painted from the leg, not from the junction.** Two legs
+   meeting at an acute angle paint two ladders that can overlap. Nothing on this
+   island does; a T and a crossroads do not.
+10. **`Road_Concrete` has no detail map.** The pavement is walked on rather than
+    stared at, and the two surfaces the library details were chosen for that
+    distinction — but a kerb IS a surface a player stands beside at half a metre.
+11. **The gate's morph twin is not the WGSL**, above.
