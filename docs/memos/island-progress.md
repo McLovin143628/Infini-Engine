@@ -29124,3 +29124,336 @@ from the island's catalogue, but the gate runs in a hand-built harbour rather
 than on the island, so nothing certifies a boat or a helicopter *on the committed
 island* beyond its bytes being present. And the streaming table is still the
 fixture island's, which was already carried (12).
+
+## Wave CERT1 — the parity certification (2026-09-03)
+
+Base `f70d5fca`. Five commits, one per subject. **The scene schema does not move
+(v27), `ScenePayload` stays v12, `EXPECTED_LEVELS` stays 24, goldens stay 62
+files / 121 arms with none blessed, and `Cargo.toml` / `Cargo.lock` / `deny.toml`
+are untouched.** The full register is `docs/memos/parity-certification.md`; this
+block is the ledger's own summary and the carried list.
+
+The wave was asked to CERTIFY the showcase island against the GTA 6 reference
+frames and to fix everything the certification found that was not already routed
+to the PAR arc. It found six things that were true when it opened and are not
+true now, and it priced five that are not its to build.
+
+### (1) THE APPLICATION HAD NO ANSWER TO "WHICH PROJECT" — CP-C1
+
+`ProjectState::current` started `None` on every cold launch, nothing persisted
+what had been open, and the only project knowledge that survived a restart was a
+recent list the start screen renders as buttons a human presses. So the showcase
+this engine exists to show off took, at best, one launch and one click, and on a
+fresh profile a file dialog and a path the author had to know.
+
+`inf_project::boot::resolve` is the rule and it is a **pure function** of three
+arguments plus `Path::is_file`, so the whole ordering is unit-tested against a
+temp directory rather than against this machine: `INF_BOOT_PROJECT`, then the
+`boot_project` pin (which every successful open writes, so its plain meaning is
+*the last project you opened*), then **the showcase discovered by walking up at
+most `SHOWCASE_SEARCH_DEPTH = 8` ancestors of the running executable**, then
+nothing.
+
+**The showcase is discovered and never hard-coded**, because the island's heavy
+halves are gigabytes and live outside the repository by design: an absolute path
+compiled into the engine would be a statement about one person's disk, and a path
+relative to the executable is a statement about the layout `inf island build`
+itself produces. **On a machine where the island has never been built no rung
+resolves and the editor opens the start screen exactly as it always has** — and
+`a_showcase_that_was_never_built_is_not_found` is that sentence as an arm, which
+distinguishes an empty `island-build/project` directory from a real one because
+the rung tests for `inf.toml` and not for a folder. The bound is asserted from
+**both** sides; the first version was off by one and said so by failing.
+
+`pin_boot_project` is best-effort and logged rather than swallowed, and its arm
+asserts the half worth asserting: the pin lands and the theme, the autosave
+interval and the keybindings around it are untouched — it runs on every project
+open, and a round-trip through a default would wipe an author's settings the
+first time they opened anything.
+
+### (2) EVERY COMMITTED LEVEL SHIPPED UNLIT, AND PIE RENDERED A DIFFERENT ONE — CP-A1/CP-B5
+
+`fps_instrument.rs` has documented since island wave I4 that a level authoring no
+render block ships with shadows, GI, VSM, TAA, SSAO, bloom and the visbuffer all
+off. **No arm anywhere said which levels those were.** All twenty-four were,
+including the showcase.
+
+**The ruling is a measurement.** Of the two routes the brief offered, *"the
+default becomes lit for 3D levels"* **reaches nothing that exists** — the record
+is persisted POSITIONALLY inside `RuntimeSettings`, so every committed `.inf_lvl`
+carries the values current when it was written, moving `Default` relights only
+levels created afterwards, and it breaks the standing both-hosts pin
+`apply_record(&default()) == RenderSettings::default()`. So the levels author it:
+five committed levels move at an **unchanged byte length on every one**
+(144 755 / 21 316 / 1 651 / 1 595 / 2 150), because what moved is six bools and
+one f32 in place.
+
+`RenderSettingsRecord::lit_showcase()` is the one definition — shadows, GI,
+bloom, SSAO, TAA (exactly the five the fps instrument has priced as THE STACK'S
+PRICE for four waves) plus flare — and the island takes one knob beyond it,
+`ISLAND_SHADOW_DISTANCE_M = 250.0`, because on 100 m city blocks a 60 m cascade
+means the building across the street casts nothing. VSM is absent because it has
+no authorable field; SSR is absent because it is a real cost a certification
+should route rather than switch on.
+
+**AND THE PLAY BUTTON WAS RENDERING A DIFFERENT LEVEL.** `window::run_pie` built
+its `PlayerApp` with `RenderSettingsRecord::default()` under a comment saying the
+scene payload carried no settings. It carried them all along: `level_bytes` **is**
+the live document's `.inf_lvl`, and `build_world_from_payload` has decoded the
+record into `BuiltWorld::render` since R-P4 — `sim_from_payload` then dropped it
+on the floor. So the moment the island went lit, the editor's Play button would
+have previewed it unlit while the shipped build of the same file rendered it lit:
+**PIE ≠ shipping on the one half of the frame no `state_bytes` fold can see, and
+therefore the one half no determinism gate could ever have caught.** `run_web`
+and `run_android` had the identical substitution, which on those two targets
+discarded an author's block BEFORE `clamp_mobile` ever saw it. Closed with **no
+schema move** — the bytes were already in the envelope and already decoded.
+
+Four arms, each red for a different reason, including a SOURCE gate that
+`window.rs` names `RenderSettingsRecord::default()` zero times in code. It strips
+comments first, and that is load-bearing: the fix's own doc quotes the expression
+it removed, which is exactly what a naive `contains` reports as the defect it
+just closed. It did, on the file's first run.
+
+**And the lit stack turned out to be nearly free.** Island wave I4 priced it at
+**+48.6 ms of p95**; at CERT1, over two runs on the same city and machine, it is
+**+0.129 ms and +6.290 ms** — and in the first of those the lit frame is
+2.069 ms *cheaper* on the GPU, because the depth prepass only runs when SSAO or
+TAA asks for it and the scatter overdraw it kills is larger than everything the
+stack adds. Both numbers are in the constant's doc, because either alone is a
+claim: the lit frame's own GPU cost barely moved (5.506 / 5.439) and the SHIPPED
+frame's is what changed (7.575 / 3.409), which is the instrument's own warning
+about device state paying out.
+
+`SHIPPING_FRAME_CEILING_MS` is therefore **re-minted 40.0 → 38.0** (and its p99
+twin 48.0 → 46.0), and the instrument now **asserts it over the lit
+configuration as well** — the discharge of that constant's own standing clause,
+*"the day a shipped level turns the stack on, this ceiling is measuring a
+different renderer and has to be re-minted, not raised."*
+
+### (3) THE TERRAIN CRACKED, AND THE SHADING LIED ABOUT THE SURFACE — CP-C7
+
+Three defects, each measured before and after by a CPU twin of the WGSL:
+
+* **the morph factor was one number per 256 m patch**, derived from the tile's
+  CENTRE, so two neighbours took different morphs while their shared edge's fine
+  and coarse heights are identical. And on this island it is always the maximum:
+  the ramp is 0.35 of a band = 134.4 m in rings 0 and 1 while adjacent tile
+  centres are **256 m** apart, so one neighbour is pinned at 0 and the other at 1,
+  every time. **3.8262 m of crack → 0.0000 m**, with the morph now evaluated at
+  each VERTEX's own distance from one definition both sides share.
+* **the fragment normal ignored the morph** — the vertex wrote
+  `mix(h_fine, h_coarse, morph)` and the fragment read the un-morphed height, so
+  over the last 35 % of every band the geometry slid and the shading did not.
+  **10.586° → 0.000°**, both stages now calling one `morphed_height`. The file's
+  own deformation doc already stated the rule it was breaking.
+* **every tile edge carried a one-texel band of half-strength shading**, across
+  the whole 7.2 km island — a clamped central difference divided a ONE-sided
+  difference by TWO texels. **0.4875× → 0.9751× of the analytic gradient**, and
+  the visible step against the column one texel in **14.688° → 0.707°**. The
+  brief's framing of this one was wrong and the arm caught it: the two sides of a
+  seam did *not* disagree, they agreed at 0.871° because both were half the truth,
+  and the cross-seam residual therefore RISES to 1.318°.
+
+**A fourth defect nobody had named, and it is why the crack was so large.** The
+morph target was `round(uv/step)*step` — a nearest-vertex SNAP, and WGSL `round`
+is ties-to-even, so odd vertices snapped in alternating directions. At full morph
+the grid never became the coarser grid, so the pop the morph exists to kill
+survived it; and surviving segments spanned 4 m where the coarse mesh spans 8,
+i.e. **double the local slope** — literally the "jagged and sharp" the row was
+called for. It is now a bilinear on the coarse lattice. Fixing the fragment
+normal over a snapped target would have made it *dead flat* at full morph, so
+this had to be found before the next one could be fixed at all.
+
+Four more measured and routed: the height pyramid is point-decimated (RMS
+0.1748 / 0.5877 m against a tent at levels 1 / 2); the streamer's and renderer's
+ladders do not change gear together, so texels per mesh cell runs
+**4 / 8 / 16 / 8 / 16 / 8 / 4** and `ring_source_lod`'s claim that it stays
+constant is FALSE (**the doc is corrected and an arm asserts the claim is
+false**); the asset-LOD switch steps 0.6359 m at 1088 m and 2.1737 m at 2176 m;
+and ring 0's mesh is 4 m a vertex over 1 m data, max 0.2843 m off its own height
+field, 0.0720 m at 128 cells.
+
+**Goldens 121 arms green with none blessed** — and the honest reading is in the
+arms: `INF_GOLDEN_STRICT` downscales to 64 × 36 with a 6 % mean tolerance, so a
+one-texel line every 256 m is below its resolution by construction. What makes
+the result mean something is the arm asserting that at morph 0 the interior is
+**bit-identical over 65 025 of 66 049 fragments** and only the 1.55 % edge ring
+moves.
+
+### (4) A GRAMMAR BUILDING HAD TWO TIERS WHERE THE OWNER ASKED FOR THREE — CP-C3
+
+The ladder was censused per DRAW PATH, not per file, because four of the island's
+five meshes have no meshlet DAG and three of those four do not need one:
+vgeom is **continuous** (the road mesh, 5 levels, 9 898 → 858 tris), scatter has
+**3** bands, terrain has **4** rings with a morph, textures have **10–11** rungs
+— and grammar buildings had **two**, characters have **one**.
+
+**The prescription was measured before it was landed, and the first measurement
+said not to land it.** Over the fixture's resident set, fit-out is **1.0 %** of a
+building's instances — an artefact, because those blocks are Office, Apartment
+and Industrial zones and `settlement::furnishes` turns furniture off for all
+three. Re-aimed at the subject, one furnished build of each of the fourteen
+archetypes: **12.2 % overall** (1 274 of 10 428), from Apartment's 5.7 % to a
+**Bar's 23.6 %**. That is worth a band. The same law that nearly refused it is the
+one that found the right subject: measure the prescription, *and check what you
+measured it over*.
+
+`INTERIOR_LOD_M = 64.0` is `inf_ecs::band::DEFAULT_COLLIDER_NEAR_M` by value with
+an arm asserting the equality (`inf-render` cannot name `inf-ecs`), because past
+that radius you cannot be inside the building and the window between you and it
+is an opaque box. It costs **no new data, no schema and no second pass** —
+`push_scatter` has bucketed by mesh GUID since I8b — and `ModuleShape::is_fit_out`
+is an exhaustive match with no wildcard arm. Shutter, Sign, Festoon and Grille
+are classified as **fabric** deliberately: a roller shutter and a cell front are
+wall, and a sign plate and a string-light run are the two families whose whole
+purpose is to emit.
+
+Proven by the shipped projector on the smallest world that can tell three
+complementary bands apart: `[0, 64)` fit-out, `[0, 102.9)` fabric,
+`[96, 1000)` the shell box.
+
+### (5) THE CONTROLS, ONE ARM PER BINDING — CP-C6
+
+Twenty arms, each pressing a **literal key code** into the shipped `PlayerUi`,
+the shipped `InputMap`, the shipped `InputState` and the shipped `RuntimeSim`,
+and each asserting a world quantity: a signed velocity in the character's own aim
+frame, a `MovementMode` by name, a `Gait`, a `RotationMode`, an equipped item id,
+a magazine count, a bag count, a panel flag, or `sim.steps()` itself.
+
+The keys are literals and **not read from the binding table**, deliberately: an
+arm that asked the table which key is `move_x−` would press the swapped key after
+a swap and stay green. Falsification measured: swapping the strafe keys → 2 red;
+pressing `KeyD` in both → 2 red; raising the long-press threshold past every
+press → 2 red **with both click arms still green**, so the discrimination is
+real; the dialog not pausing the sim → 1 red; the character not
+`player_controlled` → **18 of 20 red**, the two survivors being `I` and `Tab`,
+correctly, because they are decisions about the session and not about the
+character.
+
+**Every binding in the owner's table reached its verb from a key. None had to be
+driven by action name; none was missing an implementation.** The gait default is
+`Run` at 3.750 m/s, read by name.
+
+### (6) THE CENSUSES, AND WHAT THEY SAY
+
+`runtime/inf-player/tests/parity_cert.rs` — 7 arms plus one `#[ignore]`d against
+the real pack on `block_codec_bakeoff`'s own env-var convention.
+
+**The pawn comes to rest on the island**: 0.9883 m of settle then **+0.00000 m in
+its last second**, against a control lifted 50 m that falls 4.9840 m in its
+first. The first draft asserted "it barely moves", measured the same 0.9883 m
+with the ground streamer OFF, and was therefore measuring gravity rather than
+ground. The property is REST.
+
+**A cold start**: fixture 249.9 ms; the shipped 51.38 km² island, in release,
+**285.7 ms to open and stream + 256.2 ms for the first fixed step = 541.8 ms**
+against a 5 000 ms load budget.
+
+**The streets are never empty at any hour**: 7 000 m of resident street,
+**20.01 bodies per 100 m** at 08:30, 14:00 and 21:00 alike — the density is
+constant because the population is capped, and what moves is the split,
+**2.87× as many cars driving at the rush hour**. 14:00 and 21:00 are identical,
+which is the honest limit of a schedule with no evening in it.
+
+**The light census is the one that should be read twice.** The island's entire
+resident world carries **one authored `Light`, zero real `PcgLight` fixtures
+across four blocks, and 2 122 glowing window panes** — which is exactly the
+substitution this wave's owner rejected in their own words. Eleven of fourteen
+archetypes hang no light at all, every light in the engine is on floor 0, and the
+wall is not sixteen but **four**: `VOLUME_LIGHT_CAP` truncates per city block, in
+the content layer, deleting about **92 of the 99 fixtures** a nightlife strip
+already builds. A lit settlement wants ≈1 670 lights at a defensible floor and
+≈22 956 one-per-room, against a frame ceiling of 16 — **104× and 1 435×**.
+
+Three findings shape PAR0 more than the count does: a real interior light would
+**leak through its own walls** (VSM off in every shipped configuration, every
+`PcgLight` pinned `cast_shadows: false`, and `RenderLight::cast_shadows`
+documented inert for point and spot); **window glass does not transmit** (a
+doorway is a genuine hole, but a window's pane is an opaque box on a
+`ScatterBatch` that has no blend-mode field at all); and there is **no night
+schedule** — a nightclub's stage rig burns at intensity 26.0 at 11 a.m.
+
+### AND TWO OF THE FIVE GAP AREAS WERE NOT GAPS
+
+This is the correction that matters most for the arc that follows. **Aerial
+perspective and analytic height fog already ship** and are applied to seven lit
+shaders; a depth-aware volumetric raymarch already exists in the cloud pass, and
+its limit is that its slab is an altitude band rather than a camera-fitted
+volume. **A four-term lens flare pass already ships**, and its ghosts, halo and
+streak already fire off any bright pixel — only the *veiling glare* is sun-locked,
+for four concrete reasons, of which the load-bearing one is that the pass binds
+no lights uniform at all. PAR3 and PAR4 are narrower than the brief assumed.
+
+The other three are total absences and were confirmed as such: **22 nouns of
+street furniture, 22 empty greps**; **no particle system**, stated five times in
+the tree's own source; **no subsurface term**, with a structural blocker in front
+of it — `SkinnedInstance` carries no material handle, so the character's own
+`.inf_mat` reaches the GPU through nothing.
+
+### THE FRAME
+
+The shipped island at 1080p on an RTX 4070 Ti, with the record its own level now
+authors: **p50 39.672 / p95 42.299 / p99 43.188 ms — 25.2 fps**. Crowd cleared,
+34.543 / 37.956. With the town's own thousand-agent society at the rush hour,
+**138.701 / 153.814 — 7.2 fps**. The frame is **CPU-bound** (21.065 ms of CPU
+against a 12.834 ms GPU frame with the crowd cleared); the fixed step alone is
+7.664 ms against a 6.0 ms ratchet, and its two dearest phases are the solver
+(3.295 ms) and the physics3d sync (3.035 ms).
+
+### CARRIED
+
+1. **The hero spawns about a metre above its own ground** — 0.9883 m on the
+   fixture, 0.9769 m on the shipped island. A settle rather than a plunge, and no
+   player would see it, but it is a metre nobody asked for.
+2. **14:00 and 21:00 are the same street.** The traffic draw has night- and
+   day-circuit bands, but the schedule that decides who is out does not
+   distinguish an afternoon from an evening on this measurement.
+3. **No single arm carjacks a real traffic driver and then reads the wanted
+   level.** The chain is certified in two halves that have never met: `island_gate`
+   drives a real carjack (four presses, victim 4.8 m from the seat, 631 digested
+   steps byte-identical on both hosts) and observes no heat; `ems3_crime_gate`
+   drives the whole profile/recognition/dispatch chain and raises its act by
+   calling `witness::raise_act` directly, because `try_carjack` needs a
+   `PhysicsBridge3D` the editor's `SimSession` does not expose. The ingredients for
+   the joined arm are all in `island_gate::rush_hour`.
+4. **There is no yank-door animation, and no carjack clip of any kind** — zero
+   hits in `inf-anim`, in any `.inf_sm`, in any clip table. The eject is a
+   one-frame transform write to a computed door point; the victim's only
+   "animation" is `FallControlled` and then an ordinary walk of `FLEE_M`, after
+   which it stands (it is given a route, not a schedule).
+5. **The character has one geometry tier at every distance** — 1 498 triangles —
+   and the crowd has no impostors, which is named in three places in the tree as
+   the future lever and implemented in none.
+6. **A far-band material path is REFUSED, not deferred.** The one
+   distance-dependent material term is `vt_apply_detail`'s ramp over the last two
+   mip levels, and its own header argues the case against a distance ramp: it needs
+   no camera, no uniform and no tuning, and it is correct under a magnifying zoom
+   as well as a walk. There is no parallax or POM anywhere in the tree to shed
+   either. The honest remainder there is not a band — it is that a material has no
+   shading-model switch at all.
+7. **Terrain: the height pyramid is point-decimated** (RMS 0.1748 / 0.5877 m
+   against a tent), **the two LOD ladders disagree** (4 / 8 / 16 / 8 / 16 / 8 / 4
+   texels per mesh cell), **the asset-LOD switch is un-morphed** (0.6359 m at
+   1088 m, 2.1737 m at 2176 m), **ring 0 is 4 m a vertex over 1 m data** (max
+   0.2843 m; 128 cells closes 75 % of it at ~22.6 % more terrain time), and the
+   tile-edge normal is corrected in magnitude but not made continuous — the
+   residual is 1.318° across a seam and full continuity needs an apron ring in the
+   page upload, which is a `.inf_terrain` change.
+8. **The morph band costs the fragment 16 → 80 texel loads inside it**, unmeasured
+   on a GPU. Hoisting the coarse cell's four corners out of the four taps would cut
+   it to ~32 and is the named follow-up.
+9. **There is no committed capture of the island's own frame at any resolution.**
+   Every golden in this repository is 320 × 180 and `INF_GOLDEN_STRICT` compares at
+   64 × 36 with a 6 % mean tolerance, which is why the terrain row is armed at the
+   CPU-twin level and its fixes are asserted in degrees and metres rather than in
+   pixels. Whether the island *looks* right at 1080p in motion is still a thing
+   someone has to open the editor and fly.
+10. **A crowd is still a wall** (VEH2b's carried item, unmoved): 4.7 m covered in
+    ten seconds at full throttle among eighty-one agents, against 87.4 m at
+    18.14 m/s on an empty street.
+11. **The five PAR rows**, priced and routed: PAR0 clustered light culling +
+    point/spot shadows + transmitting glass (which blocks PAR1), PAR1 street
+    furniture and lighting, PAR2 particles, PAR3 the froxel LUT and shadowed local
+    in-scatter and the `voxel.wgsl` fog hole, PAR4 a veiling term around a non-sun
+    source, PAR5 skin — behind the `SkinnedInstance` material handle.
