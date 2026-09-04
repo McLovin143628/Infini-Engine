@@ -29655,6 +29655,14 @@ they are routed by hit-test, and key messages do not because they are routed by
 focus.** That is the whole of "the movement does not work at all". No test in
 this tree could have found it, because no test in this tree opens a window.
 
+**CORRECTED BY THE AUDIT (2026-09-04) — read `THE AUDIT` -> A3 before this
+paragraph.** Every measured session, this wave's two included, reports
+`parent=0x0 ... attached=false`: the player's window is still top-level when it
+asks, so the `WS_CHILD` branch described below has never executed, and cutting
+`take_keyboard_focus` down to a pure measurement still moves the hero 12.691 m.
+The mechanism below is real Win32 behaviour; that it is what happened here is
+unproven.
+
 `win_host::take_keyboard_focus` is the fix and the instrument in one. It reads
 the **foreground thread's own focus record** (`GetGUIThreadInfo`, which is the
 ground truth for who receives the next keystroke — `GetFocus` answers only for
@@ -29731,7 +29739,9 @@ and not an angle because the rule has to be true of more than one rig: eight
 tenths is **72°** on the mannequin and **exactly 0** on `template.rs`'s canonical
 biped, whose arms already hang.
 
-**That last clause is not decoration.** The first cut wrote `swing * IDENTITY`
+**That last clause is not decoration** — though the arm this ledger credits with
+pinning it cannot fail on it, which the audit found and closed
+(`THE AUDIT` -> A5). The first cut wrote `swing * IDENTITY`
 unconditionally and moved `samples/phase29-locomotion`'s two gait clips by
 exactly three bytes — because a quaternion product turns `-0.0` (which `psin64`
 really does produce: a f64 sine of π underflows to a negative zero in f32) into
@@ -29992,7 +30002,12 @@ the grab ladder.
 1. **The frame is washed out and heavily ghosted.** Every PIE screenshot this
    wave took shows over-bright, semi-transparent buildings and visible temporal
    smearing behind the character. It is the loudest remaining thing an author
-   sees and it is a rendering wave's, not this one's.
+   sees and it is a rendering wave's, not this one's. **DIAGNOSED by the audit
+   (`THE AUDIT` -> A2): it is dynamic GI.** With `gi` off the blown-out fraction
+   goes 0.135 -> 0.000 and the black point returns from 91/255 to 47/255; with
+   `taa` off the frame is unchanged. The "semi-transparent buildings" are a
+   facade clipping to white, not translucency. Carried on as audit carried 1
+   with the full table and the `gi_intensity` figures.
 2. **A captured cursor makes the editor's Stop button unreachable** while PIE
    runs. The escapes are real (Tab opens the settings, which releases it;
    Escape ends the session) but neither is discoverable, and a PIE session
@@ -30035,3 +30050,232 @@ the grab ladder.
 11. **The demo's `-PlayMode window` cannot fall back to a coordinate click.**
    "Play in New Window" is a menu item, and a menu item has no fixed coordinate,
    so that mode refuses when node is not on the PATH instead of guessing.
+
+### THE AUDIT (2026-09-04, `4a2332e5..`)
+
+Adversarial pass over the sixteen commits above, on the real host. Six findings,
+each fixed and armed; three of the wave's own claims corrected in place below;
+one carried item promoted from a reading to a diagnosis with a number on it. The
+wave's measured tables **all reproduce exactly** — the pose deltas 2.975395 /
+2.852406, the camera's 3.2587 / 0.0000 / 0.5704 / −1.3500, the falsification's
+6.3895 against 0.0000, the clearances +14.142 and +11.314, the settle −0.9883 →
+−0.0117, the hand's 0.6990 down and 0.5079 in, the walk's 0.4320 against 0.0000,
+and the battery's 371 / 7 055 / 0 / 21.
+
+#### A1 — the T-pose arm passes on the T-pose (`253298e6`)
+
+**The one that matters.** Three of the author's four reports were closed with arms
+that fail when the fix is removed. The fourth was not.
+
+`the_hero_in_pie_is_posed_and_the_pose_follows_the_input` asserted 161 joints,
+`!pose_is_rest`, and a change in departure between idling and running greater than
+0.05. `pose_is_rest` is `pose_max_delta == 0.0`, and the pose the author saw was
+not exactly rest — it was rest with a 5.6 mm hip breath and a 2° chest pitch on
+it, which section (4) above says in so many words.
+
+Measured by reverting this wave **whole** — `crates/inf-anim/src/locomotion.rs`,
+`samples/starter-character/` and `samples/phase29-locomotion/` all at `dbc2383e`,
+i.e. the exact tree the author pressed Play on:
+
+```
+the_hero_in_pie_is_posed_and_the_pose_follows_the_input ... ok
+  idle delta 0.019934 (rest false), running delta 1.537899, 161 joints
+samples::tests::committed_sample_matches_generators     ... ok
+```
+
+Both green. The change-with-input assertion clears its 0.05 bound sixty times
+over, because a T-posed character still swings its **legs**. And the committed
+fixture lock is green because it asks whether the bytes match the generator, not
+whether the generator is right — a **consistency** gate, which cannot stand in for
+a correctness one.
+
+So the wave replaced *"every byte-count assertion about the pose store is green
+while a character stands in a T"* with *"every departure-is-nonzero assertion is
+green while a character stands in a T"*. The same law, one level up.
+
+Fixed with a floor on the **size** of the idle departure, which separates the two
+worlds by two orders of magnitude: this wave's idle **2.975395**, the floor
+**1.0**, the T-pose it replaced **0.019934**. Mutation-verified against the same
+whole-wave revert.
+
+#### A2 — the washed-out frame is dynamic GI, and TAA is a separate defect (`144811d8`, `2de9dca1`)
+
+Carried #1 was a reading. It is now a measurement. A temporary env hook in
+`shipped_settings` turned one post knob off at a time; each row is a full
+`tools/demo/demo.ps1` run on the shipped island, scored over the viewport
+rectangle of `03-pie-b.png`:
+
+| configuration | mean lum | p05 | p95 | frac>240 | frac>200 |
+|---|---|---|---|---|---|
+| **as shipped** | 156.25 | 91.5 | 246.6 | **0.135** | 0.211 |
+| TAA off | 156.67 | 92.2 | 246.6 | 0.134 | 0.212 |
+| SSAO off | 157.00 | 92.2 | 247.1 | 0.138 | 0.213 |
+| vgeom off | 156.59 | 92.2 | 246.6 | 0.135 | 0.213 |
+| bloom off | 154.27 | 91.2 | 244.7 | 0.106 | 0.205 |
+| flare off | 135.18 | 77.8 | 246.4 | 0.126 | 0.160 |
+| **GI off** | **120.07** | **47.3** | **169.7** | **0.000** | **0.018** |
+
+Turning TAA off changes nothing a person could see. Turning GI off removes every
+blown-out pixel and — the number that matters most — takes the 5th percentile from
+91.5 to 47.3: **with GI on, nothing in that frame is darker than 91/255.** There
+are no blacks. `scratchpad/OFF-gi/03-pie-b.png` is a clean, legible city street
+with opaque buildings, readable windows, a parked truck and real shadows.
+
+The "semi-transparent buildings" were never transparency. They are a facade whose
+albedo detail survives faintly on top of a near-white clipped base.
+
+**Magnitude, not wiring**, so it routes: `gi.intensity` 0.25 gives `frac>240`
+**0.000** at p05 72.1, while `gi.extent` 400 m (of 40) makes it **worse** (p05
+129.9). The gather is several times too strong at the `gi_intensity: 1.0` the
+showcase authors — a missing normalization, or a value the level should not have.
+Choosing between those, and picking the number, is a lighting wave's work on
+committed level bytes. **Audit carried 1.**
+
+On the way, a real TAA defect, fixed and armed. `taa.wgsl` fell through with
+`hist_uv = in.uv` — an identity reprojection — for every pixel the depth prepass
+does not cover, then blended 0.9 of a history it could not locate. Reproduced
+headlessly in `crates/inf-render/tests/taa_motion.rs` (new): a street driven at
+3.75 m/s for 180 frames, built twice, measuring how far the resolved frame is from
+the un-resolved one at the same pose.
+
+| | static | moving | growth |
+|---|---|---|---|
+| control, rigid meshes (write the prepass) | 0.0021 | 0.0016 | **×0.73** |
+| subject, meshlets (write nothing) | 0.0012 | 0.0051 | **×4.30** |
+| subject, after the fix | 0.0013 | 0.0015 | **×1.15** |
+
+Mutation-verified. It is **not** the island's wash, and this audit's first commit
+said it was; `2de9dca1` corrects that in the shader comment and the test's own
+header. Nothing here caught it because `taa_multiframe_stable` — the only other
+TAA arm — renders twelve frames from a `view` it never changes, and a static
+camera cannot exercise a reprojection.
+
+#### A3 — the keyboard fix is unfalsified, and its named branch has never run (`c803ee7c`)
+
+Section (2) attributes *"the movement does not work at all"* to an embedded PIE
+window being a `WS_CHILD` whose keys go to the WebView, and names
+`win_host::take_keyboard_focus`'s attach ladder as the fix. The brief's own rule is
+that the only honest mutation here is the demo loop's HERO MOVED number. It was
+run.
+
+* Removing `AttachThreadInput` from the child branch: the hero still moves
+  **11.816 m**.
+* Cutting `take_keyboard_focus` down to a **pure measurement** — no `SetFocus`, no
+  `AttachThreadInput`, no `SetForegroundWindow`, no Z-order pair, nothing — the
+  hero still moves **12.691 m** embedded and **12.128 m** in a new window.
+
+The instrument says why, and it has been saying it all along. Across **28 recorded
+sessions**, the wave's own two included, the focus line reads the same every time:
+
+```
+parent=0x0   fg=<our hwnd>   focus <our hwnd> -> <our hwnd>   attached=false   landed=true
+```
+
+`parent=0x0` means the player's window was still **top-level** when it asked — the
+editor had not reparented it yet. So the `WS_CHILD` branch that section (2) is
+entirely about has **never once executed** in a measured session, and the
+input-queue attachment has **never once been made**. The grab reports a keyboard
+it did not take.
+
+The code is left alone: a defensive path that does not fire on this machine may be
+what fires on another, and deleting it would trade a measured claim for an
+unmeasured one. What is fixed is the gate. `tools/demo/demo.ps1` printed
+`HERO MOVED` and exited **0** whatever the number was — including, by this
+ledger's own account, five of eight new-window runs at 0.000 m and an embedded run
+at 0.000 m. It now takes `-MinMetres` (default 5) and **exits 7** below it, and
+echoes the player's focus line beside the number. **Audit carried 2** is the
+question this leaves open: what actually changed between `dbc2383e` and here.
+
+#### A4 — protocol 3 opened a door into `step_once` and nothing armed its determinism (`ab27d754`)
+
+`EditorToPlayer::Input` is the first new way into `RuntimeSim::step_once` since
+P9.4. Twenty-five arms assert what an input frame *does*; none asserted it does the
+same thing twice. Determinism is this house's oldest law and PIE == shipping rests
+on it — a driven trace that is not reproducible cannot be compared with anything,
+so all twenty-five would have been measuring one roll of a die and would still have
+been green. (`controls_pie.rs` contains no occurrence of `determinis`, `twice`,
+`state_hash` or `byte-identical`; the nine pre-existing subprocess gates all drive
+the protocol-2 `Step` door.)
+
+`one_input_trace_drives_two_sessions_to_the_same_simulation` spawns **two** real
+subprocesses from one payload and drives both with the same 220-step trace — idle,
+run, sprint, strafe, jump, crouch, release — comparing the state hash of **every**
+step in order, then the hero's position and aim-frame velocity. Two processes
+rather than two runs in one, because process-local nondeterminism is shared and
+therefore invisible to a single-process arm. **Green**: 220 hashes, first
+`0xe79a9de2e1767da0`, last `0x7017c018befae980`, hero `(−2.369214, 0.920100,
+11.102710)` in both. The door is deterministic; the repository now says so.
+
+#### A5 — the signed-zero guard, and this audit's own correction (`6b458303`, `1912f30c`)
+
+Section (4) calls the identity guard in `gait_clip` "not decoration" and names
+`a_rig_that_already_hangs_its_arms_gets_no_rest_rotation` as its pin. **That arm
+cannot fail on it** — it asserts `arm.rest == IDENTITY` and an idle track count,
+and bypassing the guard leaves all seventeen locomotion arms green.
+
+The guard is not unguarded, and this audit's first draft said it was:
+`samples::tests::committed_sample_matches_generators` **does** red on the bypass
+(`committed phase29-locomotion Hero Walk.inf_anim drifted from the generator`).
+Corrected in place at `1912f30c`; the first reading filtered the wrong test names
+and took the silence for an absence. What that lock cannot do is say *why* — it
+fails with two 36 KB byte arrays — and it is a consistency gate, so it passes on
+any change that moves generator and bytes together.
+
+`a_hanging_rigs_arm_swing_keeps_its_negative_zeros_to_the_bit` reads `to_bits` over
+both gait clips of a rig whose arms already hang: **52 keys, 6 negative zeros**,
+falling to **0** with the guard bypassed. Six is the canonical biped's own
+walk+run and deliberately **not** the three bytes the wave measured in phase29's
+clips — a different rig with different keys.
+
+#### A6 — mutations run, and what they measured
+
+| mutation | claim | measured |
+|---|---|---|
+| the input frame carries no keys | "18+ red" | **22 of 26 red**, driven 6.3895 → 0.0000 m |
+| the committed fixture level back to its pre-wave byte | the settle ceiling reds | **131.799 → 130.811 = +0.9883 m**, reds against the 0.25 m ceiling |
+| the identity guard bypassed | the locomotion pin reds | it does **not**; the fixture lock does |
+| the whole wave reverted (generator + bytes) | the pose arm reds | it does **not** — A1 |
+| `AttachThreadInput` removed | the embedded hero stops | it does **not** — 11.816 m — A3 |
+| the whole keyboard grab removed | the hero stops | it does **not** — 12.691 / 12.128 m — A3 |
+
+`START_LIFT_M = 1.0` alone does **not** red `parity_cert`: that arm reads the
+committed fixture level, which the generator constant does not move. The arm that
+reds on the constant is `the_island_start_is_the_ground_the_design_committed`.
+Both halves are needed and both were run.
+
+#### Corrections in place
+
+* Section (2)'s account of the keyboard is **not supported on this host** — see
+  A3. Left standing as written with this pointer, because the mechanism it
+  describes is real Win32 behaviour; what is unproven is that it is what happened.
+* Section (4)'s "one of which is the rig-that-already-hangs pin" — that arm is not
+  a pin. See A5.
+* Carried 1 is diagnosed: dynamic GI, with the table in A2.
+* Committed content is exactly as stated and was byte-compared: **one byte** in
+  each island level (offsets 143745 and 20305), the three starter clips
+  (`Starter_Idle` +54 B; `Walk`/`Run` 333 bytes each at unchanged length),
+  `samples/phase29-locomotion` **untouched**.
+* Release `--headless` stdout survives the gated `windows_subsystem` — measured on
+  the release binary, `ran 5 frames` and `final-state-hash: 12c1a921…` on stdout.
+  CI never tests it (`.github/workflows/ci.yml:163` builds **debug**).
+
+#### AUDIT CARRIED
+
+1. **The frame is over-lit by dynamic GI.** `gi_intensity: 1.0` on the showcase
+   levels clips 13.5% of the frame and lifts the black point to 91/255; 0.25
+   clips nothing. Either the gather is missing a normalization or the level is
+   asking for four times what it wants. A lighting wave's, with the table in A2.
+2. **What actually fixed the movement is unknown.** Every part of the keyboard
+   grab can be removed and the hero still walks. The control that would answer it
+   is a `dbc2383e` player run through the same demo loop; it was not built.
+3. **The demo loop cannot see a session it did not drive.** It holds `W` for three
+   seconds; nothing presses any other key in the real host, so twenty-four of the
+   twenty-five control rows are proven only in the headless branch.
+4. **`ActorProbe` carries no per-joint pose data**, so A1's floor is on a scalar.
+   An arm that reads the hands' positions is better and needs a protocol field.
+5. **`.ps1` is not pinned `text eol=lf`** in `.gitattributes`; git warns on
+   checkout. Harmless today, and the same shape as P22's `.rs` law.
+6. **`../island-build/project/Build` is stale** — cooked 17:57, the level saved
+   22:36 — and loads **1 actor**. Carried 5 above, now with the consequence
+   named: no shipped-player frame of the island can be compared with a PIE frame
+   until it is rebuilt, so CERT1's render half is still unmeasured on this content.
