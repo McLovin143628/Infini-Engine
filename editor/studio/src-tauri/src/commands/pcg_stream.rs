@@ -482,6 +482,26 @@ mod tests {
     use inf_editor_core::settlement::zone_payload;
     use inf_pcg::building::ArchetypeId;
 
+    /// **The committed answer**, per block: `(digest, instances, solids)`.
+    ///
+    /// MIRROR: the same four rows are asserted on the SHIPPED PLAYER's side by
+    /// `runtime/inf-player/tests/editor_pcg_parity.rs`, which builds the same
+    /// fixture city in the player's own world types and evaluates it through
+    /// `evaluate_pcg_volumes_in`. Neither host can link the other -- this
+    /// evaluation lives in the Tauri crate and that one in the player -- so the
+    /// comparison is mediated by these numbers, and duplicating them is what
+    /// makes it a pin: a change to either host's evaluation turns exactly one of
+    /// the two tests red, and which one says which host moved.
+    ///
+    /// That is the clause-1 claim in full: the editor's blocks ARE the player's
+    /// blocks, position for position and extent for extent.
+    const EXPECTED: [(u64, usize, usize); 4] = [
+        (0x6437_8b2a_54b3_6b5a, 5054, 4677), // Office
+        (0xb254_2d28_93b0_ceff, 1950, 1801), // Shop
+        (0xc21c_5456_d6c1_78dc, 6194, 5811), // Apartment
+        (0x6e9c_c242_18ad_cca6, 2302, 2146), // House
+    ];
+
     /// Four of the archetypes Harbour City's own blocks are built from.
     const BLOCKS: [ArchetypeId; 4] = [
         ArchetypeId::Office,
@@ -635,9 +655,18 @@ mod tests {
             4.0 / (total / 1000.0)
         );
         assert!(
-            forward.iter().all(|(_, n, s)| *n > 0 || *s > 0),
+            forward.iter().all(|(_, n, s)| *n > 0 && *s > 0),
             "the committed zone documents placed nothing: {forward:?}"
         );
+        // **The two-host pin.** See `EXPECTED`.
+        for (i, a) in BLOCKS.iter().enumerate() {
+            assert_eq!(
+                forward[i],
+                EXPECTED[i],
+                "the editor's {} block is not the one the shipped player draws                  (see EXPECTED: the player's half asserts the same row)",
+                a.name()
+            );
+        }
 
         // The same four blocks, reached in the opposite order — a camera that
         // flew in from the other end of the street.
