@@ -1772,6 +1772,75 @@ mod shader_compose_tests {
         }
     }
 
+    /// **The feedback pass scales uv exactly as the sampler does** (wave ROAD1).
+    ///
+    /// `vt_sample.wgsl` divides uv and both screen derivatives by a material's
+    /// `uv_tiling_m` before it touches a slot, and `vis_feedback.wgsl` — which is
+    /// STANDALONE and therefore cannot call `vt_scale_uv` — has to do the same
+    /// arithmetic by hand or the streamer pages the tiles of a surface nobody
+    /// draws while the ones on screen stay missing. That is a mirror, and this is
+    /// its fence.
+    ///
+    /// It reads the SPELLINGS rather than running the shaders, because there is
+    /// no device on a CI leg to run them on. Three facts are pinned: both read
+    /// the top half of the **ORM** word (`.z`), both divide by 256, and both
+    /// take the reciprocal only under a positive test — a `select` whose
+    /// fallback is `1.0`. Getting the word wrong is the failure that would tile
+    /// a road at the detail map's rate and look like a texture bug.
+    ///
+    /// Falsification measured: changing `vt.z` to `vt.y` in either file, or the
+    /// 256.0 to 128.0, or dropping the positive guard, reds this.
+    #[test]
+    fn the_feedback_pass_scales_uv_exactly_as_the_sampler_does() {
+        let sampler = include_str!("../shaders/vt_sample.wgsl");
+        let feedback = include_str!("../shaders/vis_feedback.wgsl");
+
+        // The unpack: the ORM word's top half over 256, in both files.
+        assert!(
+            sampler.contains("f32(maps.z >> 16u) / 256.0"),
+            "vt_sample.wgsl no longer unpacks the tiling rate from the ORM word"
+        );
+        assert!(
+            feedback.contains("f32(inst.vt.z >> 16u) / 256.0"),
+            "vis_feedback.wgsl no longer unpacks the tiling rate from the ORM              word — it must read the SAME half of the SAME word as vt_sample.wgsl"
+        );
+        // The reciprocal, guarded, with 1.0 as the identity.
+        assert!(
+            sampler.contains("select(1.0, 1.0 / tiling, tiling > 0.0)"),
+            "vt_sample.wgsl no longer guards the reciprocal"
+        );
+        assert!(
+            feedback.contains("select(1.0, 1.0 / vis_tiling_m, vis_tiling_m > 0.0)"),
+            "vis_feedback.wgsl no longer guards the reciprocal the same way"
+        );
+        // And the derivatives travel with the uv on both sides — a rescale that
+        // moved the uv and not its gradients samples the right texel out of the
+        // wrong mip.
+        for (what, src, uv, dx, dy) in [
+            (
+                "vt_sample.wgsl",
+                sampler,
+                "uv * scale",
+                "ddx * scale",
+                "ddy * scale",
+            ),
+            (
+                "vis_feedback.wgsl",
+                feedback,
+                "raw_uv * vis_uv_scale",
+                "raw_ddx * vis_uv_scale",
+                "raw_ddy * vis_uv_scale",
+            ),
+        ] {
+            for needle in [uv, dx, dy] {
+                assert!(
+                    src.contains(needle),
+                    "{what} does not scale `{needle}` — the uv and its two                      derivatives must be rescaled together"
+                );
+            }
+        }
+    }
+
     /// Standalone (uncomposed) modules the passes compile as-is.
     #[test]
     fn standalone_shaders_validate() {

@@ -11352,6 +11352,12 @@ fn ground_vt_library(
             orm: Some(o),
             detail,
             detail_scale_q8: (kind.detail_scale() * 256.0) as u16,
+            // Wave ROAD1: the library's own rate, read from the library rather
+            // than spelled — and every one of the four splat kinds answers 0.0,
+            // because terrain has already divided world metres by its layer's
+            // `tex_scale`. So this frame is byte-identical to the pre-ROAD1 one
+            // BY THE LIBRARY'S OWN RULE rather than by a literal zero here.
+            uv_tiling_q8: inf_render::scene::uv_tiling_q8(kind.mesh_uv_tiling_m() as f32),
         });
         guid += 6;
     }

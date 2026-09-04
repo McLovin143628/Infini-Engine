@@ -1212,6 +1212,10 @@ impl MaterialContent {
                         // them field for field.
                         detail: rec.detail.map(|t| t.uuid().as_u128()),
                         detail_scale_q8: rec.detail_scale_q8(),
+                        // Wave ROAD1: metres per repeat, through the record's
+                        // own `uv_tiling_q8` for the reason the line above
+                        // states. The mirror test pins this field too.
+                        uv_tiling_q8: rec.uv_tiling_q8(),
                     },
                 )
             })

@@ -679,6 +679,11 @@ impl EditorRenderAssets {
                     // metres→8.8 conversion — see the note there.
                     detail: rec.detail.map(|t| t.uuid().as_u128()),
                     detail_scale_q8: rec.detail_scale_q8(),
+                    // Wave ROAD1's physical tiling rate, bound the same way and
+                    // for the same reason: `uv_tiling_q8` is on the RECORD, so
+                    // there is one metres->8.8 conversion in the tree and not
+                    // one per host.
+                    uv_tiling_q8: rec.uv_tiling_q8(),
                 },
             );
             for tex in rec.texture_dependencies() {

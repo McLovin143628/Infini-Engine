@@ -329,9 +329,29 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d_dx = ((dmu_du - l * su) * inv_d) * (2.0 / max(wh.x, 1.0));
     let d_dy = ((dmu_dv - l * sv) * inv_d) * (-2.0 / max(wh.y, 1.0));
 
-    let uv = uv3[0] * l.x + uv3[1] * l.y + uv3[2] * l.z;
-    let ddx = uv3[0] * d_dx.x + uv3[1] * d_dx.y + uv3[2] * d_dx.z;
-    let ddy = uv3[0] * d_dy.x + uv3[1] * d_dy.y + uv3[2] * d_dy.z;
+    let raw_uv = uv3[0] * l.x + uv3[1] * l.y + uv3[2] * l.z;
+    let raw_ddx = uv3[0] * d_dx.x + uv3[1] * d_dx.y + uv3[2] * d_dx.z;
+    let raw_ddy = uv3[0] * d_dy.x + uv3[1] * d_dy.y + uv3[2] * d_dy.z;
+
+    // **The physical tiling rate has to be applied HERE TOO** (wave ROAD1).
+    // `vt_surface` rescales uv and both derivatives by `1 / uv_tiling_m` before
+    // it touches a slot, so a feedback pass that marked the un-rescaled uv would
+    // page in the tiles of a surface nobody draws and leave the ones on screen
+    // missing.
+    //
+    // It is spelled out rather than calling `vt_sample.wgsl`'s `vt_scale_uv`,
+    // because this module is **standalone** — the table above says why, and it
+    // is the same reason the detail scale below is unpacked by hand rather than
+    // through `vt_detail_scale`. That makes this a MIRROR, and
+    // `the_feedback_pass_scales_uv_exactly_as_the_sampler_does` in
+    // `passes::shader_compose_tests` is the source gate that keeps
+    // the two spellings one rule: both are `>> 16u` of the ORM word over 256,
+    // and both take the reciprocal only when it is positive.
+    let vis_tiling_m = f32(inst.vt.z >> 16u) / 256.0;
+    let vis_uv_scale = select(1.0, 1.0 / vis_tiling_m, vis_tiling_m > 0.0);
+    let uv = raw_uv * vis_uv_scale;
+    let ddx = raw_ddx * vis_uv_scale;
+    let ddy = raw_ddy * vis_uv_scale;
 
     // **The detail map is marked too, at its own tiling** (Wave-T audit). It
     // rides the top half of the first two words — slot in x, 8.8 scale in y,

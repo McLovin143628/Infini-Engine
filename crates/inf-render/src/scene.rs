@@ -76,6 +76,47 @@ pub struct VtTextureSet {
     /// consumer that compares two sets (the projector's material diff among
     /// them).
     pub detail_scale_q8: u16,
+    /// **World metres per texture repeat**, as unsigned **8.8 fixed point**
+    /// (wave ROAD1). `0` = "the mesh's uv is already in tile units and is
+    /// sampled as authored", which is every instance written before ROAD1.
+    ///
+    /// It rides in the spare top half of the *third* instance word — `orm` is a
+    /// slot index and a slot index is 16 bits, the same free space Wave T's
+    /// detail scale found in the first two. So the physical tiling rate costs no
+    /// instance byte, no vertex attribute and no bind group either.
+    ///
+    /// Fixed point rather than an `f32` for Wave T's two reasons unchanged: the
+    /// GPU reads it out of sixteen bits, and this struct derives `Eq`, which the
+    /// projector's material diff needs.
+    ///
+    /// **It is a LENGTH, and the detail scale beside it is a RATE.** Larger here
+    /// means a *coarser* surface; larger there means a *finer* detail. The two
+    /// travel together and mean opposite things, which is exactly why each says
+    /// so on its own line.
+    pub uv_tiling_q8: u16,
+}
+
+/// **Encode a physical tiling rate as unsigned 8.8 fixed point** (wave ROAD1) —
+/// **metres per texture repeat**, `0` for "sample the uv as authored".
+///
+/// The renderer-side twin of `inf_asset::DerivedMaterial::uv_tiling_q8`, and the
+/// door a host with a bare `f32` in hand uses. Same saturation rule as
+/// [`detail_scale_q8`]: a non-finite or non-positive length is "no rate", a rate
+/// that rounds below one 1/256th is floored to one rather than silently becoming
+/// "no rate", and a nonsense 300 m saturates instead of wrapping to a plausible
+/// 44 m.
+#[inline]
+pub fn uv_tiling_q8(metres: f32) -> u16 {
+    // NaN spelled out, for `detail_scale_q8`'s reason: every ordering comparison
+    // a NaN takes part in is false, so `metres <= 0.0` alone lets one through.
+    if metres.is_nan() || metres <= 0.0 {
+        return 0;
+    }
+    let q = (metres * 256.0).round();
+    if q >= 65535.0 {
+        return u16::MAX;
+    }
+    (q as u16).max(1)
 }
 
 /// **Encode a detail tiling multiplier as unsigned 8.8 fixed point** (Wave T).
@@ -113,6 +154,7 @@ impl VtTextureSet {
         orm: 0,
         detail: 0,
         detail_scale_q8: 0,
+        uv_tiling_q8: 0,
     };
 
     /// Whether this instance samples any virtual texture at all.
@@ -145,7 +187,11 @@ impl VtTextureSet {
         [
             (self.albedo & M) | ((self.detail & M) << 16),
             (self.normal & M) | ((self.detail_scale_q8 as u32) << 16),
-            self.orm & M,
+            // ROAD1's tiling rate takes the third word's spare half, for the
+            // same reason and under the same mask: `orm` is a slot index and a
+            // slot index is 16 bits, so this half has been zero on every
+            // instance ever uploaded.
+            (self.orm & M) | ((self.uv_tiling_q8 as u32) << 16),
         ]
     }
 

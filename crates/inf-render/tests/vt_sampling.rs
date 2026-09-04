@@ -887,6 +887,7 @@ fn the_slot_routing_and_the_srgb_flag_reach_the_pixel() {
         orm: warm.albedo,
         detail: 0,
         detail_scale_q8: 0,
+        uv_tiling_q8: 0,
     };
     let (orm, _) = render_face(&gpu, Some(orm_pools), orm_set);
     assert_ne!(
@@ -1418,6 +1419,7 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
                     orm: None,
                     detail: None,
                     detail_scale_q8: 0,
+                    uv_tiling_q8: 0,
                 },
             );
         }
@@ -2860,6 +2862,7 @@ fn the_detail_lane_is_packed_and_gated_by_one_door() {
         orm: 11,
         detail: 5,
         detail_scale_q8: detail_scale_q8(4.0),
+        uv_tiling_q8: 0,
     };
     assert_eq!(
         set.slots(),
@@ -2925,6 +2928,80 @@ fn the_detail_lane_is_packed_and_gated_by_one_door() {
         maps.texture_guids().collect::<Vec<_>>(),
         vec![1, 2, 3, 4],
         "detail must be appended to the slot order, never inserted"
+    );
+}
+
+/// **The physical tiling rate's CPU half, end to end** (wave ROAD1) — the same
+/// chain the arm above pins for the detail lane, for the field that rides beside
+/// it: `tiling_every` -> `set_for_maps` -> `slots()` -> the ORM word's top half.
+///
+/// The three things a mutation could break and nothing else would notice:
+/// **which word** it rides in (getting it wrong tiles at the detail map's rate),
+/// **that a set with no rate is byte-identical** to every instance ever uploaded
+/// before this wave (which is what every unmoved golden rests on), and **that
+/// the rate rides whether or not a texture is warm** — because a road whose
+/// tiling depended on its albedo page having arrived would visibly re-tile as it
+/// streamed in.
+#[test]
+fn the_tiling_rate_is_packed_into_the_orm_word_and_rides_unconditionally() {
+    use inf_render::{uv_tiling_q8, VtMaterialMaps, VtTextureSet, VtTextures};
+
+    // 4 m per repeat is the committed asphalt's rate.
+    assert_eq!(uv_tiling_q8(4.0), 1024, "8.8 fixed point, exactly");
+    assert_eq!(f32::from(uv_tiling_q8(4.0)) / 256.0, 4.0);
+    assert_eq!(uv_tiling_q8(2.0), 512, "…and the concrete's");
+    // "No rate" and the saturating edges, exactly as the detail scale's.
+    assert_eq!(uv_tiling_q8(0.0), 0);
+    assert_eq!(uv_tiling_q8(-4.0), 0);
+    assert_eq!(uv_tiling_q8(f32::NAN), 0, "a NaN is not a tiny positive");
+    assert_eq!(uv_tiling_q8(1.0 / 4096.0), 1, "…and a tiny one is not zero");
+    assert_eq!(uv_tiling_q8(f32::INFINITY), u16::MAX);
+    assert_eq!(uv_tiling_q8(1e9), u16::MAX);
+
+    // THE WORD. Word 2's top half, word 0 and word 1 untouched.
+    let set = VtTextureSet {
+        albedo: 7,
+        normal: 9,
+        orm: 11,
+        detail: 0,
+        detail_scale_q8: 0,
+        uv_tiling_q8: uv_tiling_q8(4.0),
+    };
+    assert_eq!(
+        set.slots(),
+        [7, 9, 11 | (1024 << 16)],
+        "the tiling rate is a wire position — `vt_uv_tiling_m` reads word 2's          top half, and `vt_detail_scale` reads word 1's"
+    );
+    // A set with no rate is byte-for-byte the three words that shipped before
+    // ROAD1.
+    let plain = VtTextureSet {
+        uv_tiling_q8: 0,
+        ..set
+    };
+    assert_eq!(plain.slots(), [7, 9, 11]);
+
+    // …and unlike the detail scale, the registry's door lets the rate through
+    // even when no texture warms. `set_for_maps` on a registry that knows
+    // nothing keeps the rate and drops the (absent) slots.
+    let (lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 256));
+    let cold = lib.set_for_maps(&VtMaterialMaps::default().tiling_every(4.0));
+    assert_eq!(
+        (cold.albedo, cold.normal, cold.orm, cold.uv_tiling_q8),
+        (0, 0, 0, 1024),
+        "a material's metres-per-repeat must not depend on whether its pages          have arrived — a road that re-tiled as it streamed would be worse than          one that tiled wrongly"
+    );
+    // The rate names no texture, so it cannot move the registration order.
+    assert_eq!(
+        VtMaterialMaps::default()
+            .tiling_every(4.0)
+            .texture_guids()
+            .count(),
+        0,
+        "a tiling rate is not a texture and must not enter the residency order"
+    );
+    assert!(
+        VtMaterialMaps::default().tiling_every(4.0).is_empty(),
+        "a scalars-only surface that states a rate is still scalars-only"
     );
 }
 
@@ -3169,6 +3246,7 @@ fn the_registration_door_carries_the_upload_budget() {
                 orm: None,
                 detail: None,
                 detail_scale_q8: 0,
+                uv_tiling_q8: 0,
             },
         );
         let payload = bytes.clone();

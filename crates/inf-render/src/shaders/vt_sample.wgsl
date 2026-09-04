@@ -181,6 +181,45 @@ fn vt_detail_scale(maps: vec3<u32>) -> f32 {
     return f32(maps.y >> 16u) / 256.0;
 }
 
+/// **World metres per texture repeat** (wave ROAD1) — unsigned 8.8 fixed point
+/// in the top 16 bits of the *ORM* word, the last free half of the three.
+///
+/// `0.0` means "the mesh's uv is already in tile units", which is every
+/// instance written before ROAD1 and every material that states no rate. So the
+/// never-written state and the disabled state are the same state, exactly as
+/// they are for the detail scale above.
+///
+/// **The two are opposites and share a shape.** A detail scale is a RATE
+/// (`duv = uv * scale`, larger = finer); this is a LENGTH (`uv / metres`,
+/// larger = coarser). Reading one as the other tiles a road at 4 repeats a
+/// metre instead of one every four, which is the kind of mistake that looks
+/// like a texture bug in a different material.
+fn vt_uv_tiling_m(maps: vec3<u32>) -> f32 {
+    return f32(maps.z >> 16u) / 256.0;
+}
+
+/// **The uv this material actually samples at**, and its screen derivatives
+/// with it (wave ROAD1).
+///
+/// # One door, because the derivatives have to come too
+///
+/// `vt_lod` picks a mip from `ddx`/`ddy`, and the feedback pass marks the tile
+/// a uv lands in at the level those derivatives choose. A rescale applied to the
+/// uv and not to its derivatives samples the right texel from the wrong mip —
+/// a road that is sharp where it should be filtered and aliases where it should
+/// not — and a rescale applied in the sampler but not in the feedback pass pages
+/// in tiles nobody draws. Both stages call this, so neither can drift.
+///
+/// The identity is spelled as a `select` on the zero rather than as a branch,
+/// so an instance that states no rate runs the same instruction stream (and, at
+/// `scale == 1.0`, the byte-identical arithmetic) it ran before this wave.
+fn vt_scale_uv(maps: vec3<u32>, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>)
+    -> mat3x2<f32> {
+    let tiling = vt_uv_tiling_m(maps);
+    let scale = select(1.0, 1.0 / tiling, tiling > 0.0);
+    return mat3x2<f32>(uv * scale, ddx * scale, ddy * scale);
+}
+
 /// The exact sRGB→linear transfer function (IEC 61966-2-1), applied to the
 /// filtered result — see the header note on what that costs.
 fn vt_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -448,14 +487,22 @@ struct VtSurface {
 /// writes: occlusion in R, roughness in G, metallic in B.
 fn vt_surface(
     maps: vec3<u32>,
-    uv: vec2<f32>,
-    ddx: vec2<f32>,
-    ddy: vec2<f32>,
+    uv_in: vec2<f32>,
+    ddx_in: vec2<f32>,
+    ddy_in: vec2<f32>,
     albedo: vec3<f32>,
     alpha: f32,
     metallic: f32,
     roughness: f32,
 ) -> VtSurface {
+    // **THE PHYSICAL TILING RATE** (wave ROAD1), applied once, here, before any
+    // slot is touched — so the three base maps and the detail map on top of them
+    // all read one uv. A material that states no rate takes `scale == 1.0` and
+    // this is the identity.
+    let scaled = vt_scale_uv(maps, uv_in, ddx_in, ddy_in);
+    let uv = scaled[0];
+    let ddx = scaled[1];
+    let ddy = scaled[2];
     var out: VtSurface;
     out.albedo = albedo;
     out.alpha = alpha;

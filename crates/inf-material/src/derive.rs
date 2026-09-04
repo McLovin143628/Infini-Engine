@@ -75,6 +75,13 @@ pub fn derive_material(mat: &MaterialAsset) -> DerivedMaterial {
         // turns "inert" into the renderer's zero.
         detail: mat.detail_texture,
         detail_scale_m: mat.detail_scale_m,
+        // ROAD1: the tiling rate and the wet floor cross as a pair, and they
+        // cross RAW. `uv_tiling_q8`'s saturation and its "0 = no rate" encoding
+        // live on the derived record, one function, so the cook and the payload
+        // builder cannot round differently — the same arrangement the detail
+        // scale has above.
+        uv_tiling_m: mat.uv_tiling_m,
+        wet_roughness_floor: mat.wet_roughness_floor,
     }
 }
 
@@ -130,8 +137,13 @@ mod tests {
             alpha_cutoff: 0.375,
             detail_texture: Some(detail),
             detail_scale_m: 0.75,
+            uv_tiling_m: 4.0,
+            wet_roughness_floor: 0.18,
         };
         let d = derive_material(&mat);
+        assert_eq!(d.uv_tiling_m, 4.0);
+        assert_eq!(d.wet_roughness_floor, 0.18);
+        assert_eq!(d.uv_tiling_q8(), 1024, "4 m in 8.8 is 4 * 256");
         assert_eq!(d.albedo, Some(albedo));
         assert_eq!(d.normal, Some(normal));
         assert_eq!(d.orm, Some(orm));

@@ -160,21 +160,39 @@ pub enum GroundKind {
     /// are `highway`/`arterial` with no stated lane count, which
     /// `RoadKind::default_lanes` makes four lanes of 3.5 m. **Measured: the
     /// island tiles this set every 14.0 m**, a 13.7 mm texel and a 53.8 cm
-    /// detail tile — 3.5× the 4 m authored here. The 4 m stands as the rate the
-    /// surface was DESIGNED at, for the day `.inf_mat` grows a uv scale.
+    /// detail tile — 3.5× the 4 m authored here. **Wave ROAD1 closed it**: the
+    /// ribbon's uv is metres, `.inf_mat` v4 carries `uv_tiling_m`, and
+    /// [`mesh_uv_tiling_m`](GroundKind::mesh_uv_tiling_m) hands this number to
+    /// it. The 4 m is now the rate the road actually tiles at.
     Asphalt,
+    /// **Kerb stone and pavement slab** (wave ROAD1, clause 1). The second mesh
+    /// surface in the library, and the second consumer of
+    /// [`tex_scale_m`](GroundKind::tex_scale_m) through
+    /// [`mesh_uv_tiling_m`](GroundKind::mesh_uv_tiling_m).
+    ///
+    /// One set for both, because a kerb and the pavement behind it are poured
+    /// and laid out of the same material and read as one grey surface with the
+    /// same joint spacing — which the 2 m tile's 1 m slab grid gives both. Two
+    /// sets would be 1.6 MB of committed bytes to say the same thing twice.
+    ///
+    /// It carries **no detail map**: the pavement is walked on rather than
+    /// stood-still-and-stared-at, and the two surfaces the library details
+    /// (grass, and asphalt since ASSET0) were chosen for exactly that
+    /// distinction. Stated so the omission reads as a decision.
+    Concrete,
 }
 
 impl GroundKind {
     /// Every kind, in a **frozen** order — it is the order the assets are
     /// written in and therefore the order their GUIDs are assigned in.
-    pub const ALL: [GroundKind; 6] = [
+    pub const ALL: [GroundKind; 7] = [
         GroundKind::Grass,
         GroundKind::Rock,
         GroundKind::ForestFloor,
         GroundKind::Sand,
         GroundKind::Soil,
         GroundKind::Asphalt,
+        GroundKind::Concrete,
     ];
 
     /// The asset stem: `Ground_Grass`, `Ground_Rock`, …
@@ -186,6 +204,7 @@ impl GroundKind {
             GroundKind::Sand => "Ground_Sand",
             GroundKind::Soil => "Ground_Soil",
             GroundKind::Asphalt => "Road_Asphalt",
+            GroundKind::Concrete => "Road_Concrete",
         }
     }
 
@@ -198,6 +217,7 @@ impl GroundKind {
             GroundKind::Sand => "sand",
             GroundKind::Soil => "soil",
             GroundKind::Asphalt => "asphalt",
+            GroundKind::Concrete => "concrete",
         }
     }
 
@@ -211,6 +231,7 @@ impl GroundKind {
             GroundKind::Sand => 0x7E12_0004,
             GroundKind::Soil => 0x7E12_0005,
             GroundKind::Asphalt => 0x7E12_0006,
+            GroundKind::Concrete => 0x7E12_0007,
         }
     }
 
@@ -228,6 +249,7 @@ impl GroundKind {
             GroundKind::Sand => 1.5,
             GroundKind::Soil => 2.2,
             GroundKind::Asphalt => 4.0,
+            GroundKind::Concrete => 2.0,
         }
     }
 
@@ -280,6 +302,7 @@ impl GroundKind {
             GroundKind::Sand => [0.310, 0.262, 0.186, 1.0],
             GroundKind::Soil => [0.078, 0.052, 0.032, 1.0],
             GroundKind::Asphalt => [0.034, 0.033, 0.033, 1.0],
+            GroundKind::Concrete => [0.208, 0.203, 0.191, 1.0],
         }
     }
 
@@ -292,6 +315,49 @@ impl GroundKind {
             GroundKind::Sand => 0.88,
             GroundKind::Soil => 0.96,
             GroundKind::Asphalt => 0.86,
+            GroundKind::Concrete => 0.82,
+        }
+    }
+
+    /// **The `.inf_mat` `uv_tiling_m` this set authors** — metres per repeat on
+    /// a MESH, `0.0` for a set that is a terrain splat layer (wave ROAD1).
+    ///
+    /// # This is the consumer `tex_scale_m` did not have
+    ///
+    /// The ASSET0 audit's finding, quoted on [`Asphalt`](GroundKind::Asphalt):
+    /// `tex_scale_m` reached exactly one reader, `TerrainLayer::tex_scale`, and
+    /// asphalt is not a layer — it is a `.inf_mat` on a road mesh, which tiled
+    /// at whatever its author unwrapped (14.0 m, the road's own width). ROAD1
+    /// gave `.inf_mat` a metres-per-repeat field and the road ribbon a uv in
+    /// metres; this function is what hands the library's own authored rate to
+    /// it, so the number in the table above and the number on screen are one
+    /// number.
+    ///
+    /// **A splat layer answers `0.0` and must.** Terrain's uv is already
+    /// `world.xz / TerrainLayer::tex_scale`, so a rate on the material as well
+    /// would divide twice and tile grass every four metres squared. The split is
+    /// by *what binds the set*, not by taste, which is why it is a match and not
+    /// a flag.
+    pub const fn mesh_uv_tiling_m(self) -> f64 {
+        match self {
+            GroundKind::Asphalt | GroundKind::Concrete => self.tex_scale_m(),
+            _ => 0.0,
+        }
+    }
+
+    /// The `.inf_mat` `wet_roughness_floor` this set authors — how smooth it
+    /// goes in the rain, `0.0` = no opinion (wave ROAD1).
+    ///
+    /// **Unread today**, and the field's own doc says why it exists anyway.
+    /// Asphalt is the surface with an opinion: water fills the voids between the
+    /// polished aggregate and a wet carriageway becomes a near-mirror, which is
+    /// what `frames/steal-car/0028` shows. Concrete drains and stays matte, so
+    /// it states a floor much closer to its dry roughness. PAR4 owns the pass.
+    pub const fn wet_roughness_floor(self) -> f32 {
+        match self {
+            GroundKind::Asphalt => 0.12,
+            GroundKind::Concrete => 0.45,
+            _ => 0.0,
         }
     }
 }
@@ -474,6 +540,21 @@ fn ripple(u: f64, period: f64) -> f64 {
     let f = t - t.floor();
     smooth(1.0 - (f * 2.0 - 1.0).abs())
 }
+
+/// Slab joints per tile on [`GroundKind::Concrete`] — see its synthesis arm.
+///
+/// Two, over a 2 m tile, so one bay is **1 m square**: the size a pavement is
+/// actually cut at, and small enough that the tile's own repeat is not the
+/// largest feature in the picture.
+const JOINTS_PER_TILE: f64 = 2.0;
+
+/// Half a slab joint's width, in the units [`JOINTS_PER_TILE`]'s distance field
+/// answers in (1 = midway between two joints = 0.5 m at this tiling).
+///
+/// `0.03` is **15 mm**, which is what a jointing tool cuts. Quoted here rather
+/// than inline because the first draft threshold-ed a `ripple` instead and cut
+/// 23 cm without anything saying so.
+const JOINT_HALF_TILE: f64 = 0.03;
 
 #[inline]
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
@@ -764,6 +845,83 @@ fn surface_at(kind: GroundKind, u: f64, v: f64) -> Surface {
                 // is why a wet road's highlights sit on the aggregate.
                 roughness: lerp(0.93, 0.62, chip * 0.8),
                 ao: (1.0 - crack * 0.6 - (1.0 - voids) * 0.15).clamp(0.25, 1.0),
+            }
+        }
+        GroundKind::Concrete => {
+            // A poured pavement: slab joints on a 1 m grid, the fine sand-cement
+            // float finish between them, exposed aggregate where the surface has
+            // worn, and the staining a kerb collects at its edges.
+            //
+            // **The JOINTS are the point**, the way the chips are asphalt's. A
+            // pavement without them is a grey plane, and the thing that says
+            // "this is a laid surface and that is a rolled one" — standing at a
+            // kerb, in every one of the reference frames — is a straight dark
+            // line every metre or so. They are triangle waves rather than a
+            // modulus so the field stays tileable and trig-free.
+            //
+            // The tile is 2 m and the grid is 2×2, so one slab is 1 m square:
+            // the size a real pavement bay is cut at, and small enough that the
+            // 2 m repeat does not read as a repeat.
+            //
+            // The joint is written as a DISTANCE to the nearest line rather
+            // than as a `ripple` threshold, because the threshold form's width
+            // is a function of the smoothstep's curvature and the first draft of
+            // it cut a 23 cm trench: `ripple > 0.90` is `|2f−1| < 0.23`, which is
+            // a quarter of the slab. A distance is in the units the number is
+            // quoted in.
+            let joint_d = |t: f64| -> f64 {
+                // One period per metre at this set's 2 m tile: `t · JOINTS` runs
+                // one whole number per bay.
+                let f = t * JOINTS_PER_TILE;
+                let f = f - f.floor();
+                // 0 exactly on the line, 1 midway between two lines.
+                (f - 0.5).abs() * 2.0
+            };
+            // A 15 mm tooled groove — `JOINT_HALF_TILE` is that half-width
+            // expressed in the same units `joint_d` answers in. The two axes
+            // take a `min` of the distances (so a `max` of the grooves) and a
+            // crossing reads as one node rather than as a double-depth pit.
+            let groove =
+                1.0 - smooth((joint_d(u).min(joint_d(v)) / JOINT_HALF_TILE).clamp(0.0, 1.0));
+            // The float finish: fine sand-cement grain, plus the swirl a power
+            // trowel leaves, at two frequencies so it does not read as one hiss.
+            let fines = fbm(u, v, 96, 96, 3, s ^ 0xA1);
+            let swirl = fbm(u, v, 7, 11, 3, s ^ 0xA2);
+            // Exposed aggregate: worley pebbles that only surface where the
+            // finish has worn through, which is a low-frequency mask.
+            let (a1, _) = worley(u, v, 30, s ^ 0xA3);
+            let wear = smooth((fbm(u, v, 4, 4, 3, s ^ 0xA4) * 1.8 - 0.80).clamp(0.0, 1.0));
+            let aggregate = (1.0 - smooth((a1 * 3.4).clamp(0.0, 1.0))) * wear;
+            // Staining — rain runs, tyre rubber at a kerb, moss in a joint.
+            let stain = smooth((fbm(u, v, 3, 9, 4, s ^ 0xA5) * 1.6 - 0.62).clamp(0.0, 1.0));
+            // Hairline shrinkage cracks, far finer than asphalt's sealed ones.
+            let (c1, c2) = worley(u, v, 11, s ^ 0xA6);
+            let hair = 1.0 - smooth(((c2 - c1) * 34.0).clamp(0.0, 1.0));
+
+            let cement = [0.214, 0.209, 0.197];
+            let pale = [0.286, 0.281, 0.268];
+            let stone = [0.164, 0.158, 0.148];
+            let dirty = [0.121, 0.117, 0.108];
+            let mut c = [0.0; 3];
+            for k in 0..3 {
+                let base = lerp(cement[k], pale[k], fines * 0.55 + swirl * 0.45);
+                let worn = lerp(base, stone[k], aggregate * 0.8);
+                let soiled = lerp(worn, dirty[k], stain * 0.55 + groove * 0.5);
+                c[k] = lerp(soiled, dirty[k] * 0.8, hair * 0.7);
+            }
+            Surface {
+                albedo: c,
+                // The joints CUT: a groove is the one feature here with real
+                // relief, and it is what a grazing sun picks out on a pavement.
+                height: ((fines * 0.45 + swirl * 0.2 + aggregate * 0.35)
+                    * (1.0 - groove * 0.95)
+                    * (1.0 - hair * 0.5))
+                    .clamp(0.0, 1.0),
+                // Concrete is matte and gets matter where it is worn and dirty;
+                // a trowelled face is the smoothest part of it.
+                roughness: lerp(0.86, 0.72, swirl * 0.6 + fines * 0.4)
+                    + (stain * 0.06 + aggregate * 0.05),
+                ao: (1.0 - groove * 0.75 - hair * 0.3 - stain * 0.1).clamp(0.25, 1.0),
             }
         }
     }

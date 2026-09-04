@@ -124,6 +124,24 @@ pub struct DerivedMaterial {
     /// texture; the full note is on `MaterialAsset::detail_scale_m`, which this
     /// field is copied from unchanged.
     pub detail_scale_m: f32,
+    // ── schema v3 (wave ROAD1) — the physical tiling rate ─────────────────────
+    //
+    // APPENDED, same two reasons.
+    /// **World metres per texture repeat** on a mesh whose uv is authored in
+    /// metres; `0.0` = "the uv is already in tile units" (schema v3).
+    ///
+    /// The other half of `inf_material::MaterialAsset::uv_tiling_m`, and it had
+    /// to move for the same reason the detail slot did: the shipped player reads
+    /// `.inf_matd` and never a `.inf_mat`, so a rate that stopped at the
+    /// authoring container would tile correctly in the editor and wrongly in the
+    /// game — which is precisely the PIE-equals-shipping failure this record
+    /// exists to prevent.
+    pub uv_tiling_m: f32,
+    /// The roughness floor a wet-weather pass may drive this surface toward;
+    /// `0.0` = no opinion (schema v3). Carried, unread — see the authoring
+    /// field's note. It crosses now rather than in PAR4's own wave so that the
+    /// pack format moves once for the pair rather than twice for one each.
+    pub wet_roughness_floor: f32,
 }
 
 impl Default for DerivedMaterial {
@@ -141,6 +159,8 @@ impl Default for DerivedMaterial {
             alpha_cutoff: 0.5,
             detail: None,
             detail_scale_m: 0.0,
+            uv_tiling_m: 0.0,
+            wet_roughness_floor: 0.0,
         }
     }
 }
@@ -152,7 +172,8 @@ impl DerivedMaterial {
     /// |---|---|
     /// | v1 (P26.3b) | the original record |
     /// | **v2 (Wave G)** | `detail` + `detail_scale_m` |
-    pub const CURRENT_VERSION: u32 = 2;
+    /// | **v3 (wave ROAD1)** | `uv_tiling_m` + `wet_roughness_floor` |
+    pub const CURRENT_VERSION: u32 = 3;
 
     /// Every `.inf_tex` GUID this record references, in the fixed slot order
     /// albedo → normal → ORM → **detail**.
@@ -205,6 +226,28 @@ impl DerivedMaterial {
         // value, and wrapping it to 44 would be a nonsense value that looks
         // plausible.
         let q = (self.detail_scale_m * 256.0).round();
+        q.clamp(1.0, u16::MAX as f64 as f32) as u16
+    }
+
+    /// The tiling rate as the renderer's 8.8 fixed-point word — **metres per
+    /// repeat**, not tiles per uv unit (wave ROAD1).
+    ///
+    /// The one place the authored length becomes `uv_tiling_q8`, for exactly the
+    /// reason [`detail_scale_q8`](Self::detail_scale_q8) is: a conversion that
+    /// existed at both host boundaries is a conversion that can differ between
+    /// them, and a road that tiled at 4 m in the editor and 3.99 m in the player
+    /// would be a mirror break nothing would notice until somebody photographed
+    /// both.
+    ///
+    /// `0` is "no rate stated — use the mesh's uv as it was authored", which is
+    /// every material written before this bump. The ceiling is **255.996 m** and
+    /// values past it saturate rather than wrap, so a nonsense 300 m becomes the
+    /// largest sane rate rather than a plausible-looking 44 m.
+    pub fn uv_tiling_q8(&self) -> u16 {
+        if !self.uv_tiling_m.is_finite() || self.uv_tiling_m <= 0.0 {
+            return 0;
+        }
+        let q = (self.uv_tiling_m * 256.0).round();
         q.clamp(1.0, u16::MAX as f64 as f32) as u16
     }
 }

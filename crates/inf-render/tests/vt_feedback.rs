@@ -79,6 +79,7 @@ fn library(n: u32, budget_pages: u64) -> VtTextures {
             orm: None,
             detail: None,
             detail_scale_q8: 0,
+            uv_tiling_q8: 0,
         },
     );
     assert_eq!(

@@ -606,6 +606,12 @@ mod packing {
             orm: 3,
             detail: 0,
             detail_scale_q8: 0,
+            // Wave ROAD1 packs a metres-per-repeat into the ORM word's spare
+            // top half. A rate here would make `misc[3]` differ from `orm`, so
+            // the arm below asserts the plain slots at the no-rate value the
+            // classic tier has always carried; the packing itself is pinned by
+            // `scene`'s own `slots` arms.
+            uv_tiling_q8: 0,
         };
         let raw = pack_vgeom_instance(&origin, &instance(set));
         assert_eq!(

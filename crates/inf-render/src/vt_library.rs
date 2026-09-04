@@ -128,6 +128,15 @@ pub struct VtMaterialMaps {
     /// [`detail`](Self::detail) names a texture, so the two fields cannot
     /// disagree about whether the feature is on.
     pub detail_scale_q8: u16,
+    /// **World metres per texture repeat**, unsigned 8.8 fixed point
+    /// (`crate::scene::uv_tiling_q8`); `0` = the mesh's uv is sampled as it was
+    /// authored (wave ROAD1).
+    ///
+    /// Unlike the detail pair this one names no texture and cannot be
+    /// half-authored: it is a property of the *material's* relationship to the
+    /// uv, so it rides whether or not any slot is bound and a scalars-only
+    /// surface still reports [`is_empty`](Self::is_empty).
+    pub uv_tiling_q8: u16,
 }
 
 impl VtMaterialMaps {
@@ -160,6 +169,13 @@ impl VtMaterialMaps {
     pub fn with_detail(mut self, detail: u128, scale: f32) -> Self {
         self.detail = Some(detail);
         self.detail_scale_q8 = crate::scene::detail_scale_q8(scale);
+        self
+    }
+
+    /// This material tiling every `metres` of world — the door a host uses for
+    /// ROAD1's rate, so its fixed-point encoding lives in one place too.
+    pub fn tiling_every(mut self, metres: f32) -> Self {
+        self.uv_tiling_q8 = crate::scene::uv_tiling_q8(metres);
         self
     }
 }
@@ -402,6 +418,14 @@ impl VtTextures {
         } else {
             m.detail_scale_q8
         };
+        // **The tiling rate rides unconditionally**, and that is the difference
+        // from the line above. A detail scale beside slot 0 would be an instance
+        // word claiming "detail at 8x" over no texture; a metres-per-repeat with
+        // no texture bound is simply a rescale of a uv nothing samples, which is
+        // inert on its own and STAYS RIGHT the moment a slot warms in. Zeroing
+        // it here would make a road's tiling depend on whether its albedo page
+        // had arrived.
+        set.uv_tiling_q8 = m.uv_tiling_q8;
         set
     }
 

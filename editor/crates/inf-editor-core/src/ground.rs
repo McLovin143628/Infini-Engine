@@ -1,6 +1,7 @@
 //! **The committed ground library** (wave TER2a, clause 3) — five PBR ground
-//! sets written into `samples/ground/` as engine content, and since wave
-//! ASSET0 a sixth: `Road_Asphalt`, the surface the island's road mesh binds.
+//! sets written into `samples/ground/` as engine content, since wave ASSET0 a
+//! sixth (`Road_Asphalt`, the surface the island's road mesh binds) and since
+//! wave ROAD1 a seventh (`Road_Concrete`, its kerbs and pavements).
 //!
 //! # What this is for
 //!
@@ -64,8 +65,10 @@ const GROUND_ORIGINAL_SETS: u128 = 5;
 /// A second base rather than a moved first one: the five original sets are
 /// named by a committed `.inf_lvl`'s `TerrainLayer::material` and the three
 /// cover meshes by a committed `.inf_pcg`, so the only free direction is
-/// forward. Six ids per set here too, so a seventh set appends at `+ 6`.
-/// **Frozen** — the island's `Roads` entity names the first material in it.
+/// forward. Six ids per set here too, so an **eighth** set appends at `+ 12`
+/// (wave ROAD1 took `+ 6` for `Road_Concrete`).
+/// **Frozen** — the island's `Roads` entity names the first material in it and
+/// its `Kerbs` entity the second.
 const GROUND_CONT_BASE: u128 = 0x9E21_0000;
 
 /// The four `.inf_tex` slots and the `.inf_mat` one ground set is made of.
@@ -214,6 +217,13 @@ pub fn ground_library() -> Result<Vec<GroundFile>, String> {
             // Tiles per uv unit, NOT metres — see
             // `MaterialAsset::detail_scale_m`'s own note, which this wave wrote.
             detail_scale_m: kind.detail_scale(),
+            // **Metres per repeat** (wave ROAD1) — and this IS
+            // `tex_scale_m`, routed through `mesh_uv_tiling_m` so a splat layer
+            // answers 0.0 and a mesh surface answers the library's own rate. The
+            // ASSET0 audit's "`tex_scale_m` has no consumer" is closed here: the
+            // number in the README table is the number the road tiles at.
+            uv_tiling_m: kind.mesh_uv_tiling_m() as f32,
+            wet_roughness_floor: kind.wet_roughness_floor(),
         };
         let payload = inf_asset::encode(&mat).map_err(|e| format!("{stem}.inf_mat: {e}"))?;
         let mut sidecar = AssetSidecar::new(
@@ -263,33 +273,41 @@ const README: &str = concat!(
     "`Material::default().base_color` - 0.8 linear, the engine's debug\n",
     "grey, in both hosts.\n",
     "\n",
+    "**Wave ROAD1 appended a seventh, `Road_Concrete`** - the kerb stone and\n",
+    "the pavement slab behind it, which the same wave turned from a 2 m nav\n",
+    "ring into geometry. One set for both, because they are poured out of the\n",
+    "same material and read as one grey surface with one joint spacing.\n",
+    "\n",
     "Each set is a `.inf_mat` naming three or four `.inf_tex` v2 tiled\n",
     "containers: a 1 024² albedo, a 512² tangent-space normal, a 512² ORM, and —\n",
-    "for grass and rock — a 512² high-frequency detail normal.\n",
+    "for grass, rock and asphalt — a 512² high-frequency detail normal.\n",
     "\n",
-    "| set | tiles every | albedo texel | detail tile |\n",
-    "|---|---|---|---|\n",
-    "| `Ground_Grass` | 2.0 m | 1.95 mm | 12.5 cm |\n",
-    "| `Ground_Rock` | 3.0 m | 2.93 mm | 15.0 cm |\n",
-    "| `Ground_ForestFloor` | 2.5 m | 2.44 mm | — |\n",
-    "| `Ground_Sand` | 1.5 m | 1.46 mm | — |\n",
-    "| `Ground_Soil` | 2.2 m | 2.15 mm | — |\n",
-    "| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm |\n",
+    "| set | tiles every | albedo texel | detail tile | bound to |\n",
+    "|---|---|---|---|---|\n",
+    "| `Ground_Grass` | 2.0 m | 1.95 mm | 12.5 cm | a splat layer |\n",
+    "| `Ground_Rock` | 3.0 m | 2.93 mm | 15.0 cm | a splat layer |\n",
+    "| `Ground_ForestFloor` | 2.5 m | 2.44 mm | — | a splat layer |\n",
+    "| `Ground_Sand` | 1.5 m | 1.46 mm | — | a splat layer |\n",
+    "| `Ground_Soil` | 2.2 m | 2.15 mm | — | a splat layer |\n",
+    "| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm | a MESH |\n",
+    "| `Road_Concrete` | 2.0 m | 1.95 mm | — | a MESH |\n",
     "\n",
-    "**The road's row is what the set is AUTHORED for and not what the road\n",
-    "draws** (ASSET0 audit). `tex_scale_m` reaches exactly one consumer -\n",
-    "`TerrainLayer::tex_scale`, which is `uv = world.xz / tex_scale` - and\n",
-    "asphalt is not a terrain layer: it is a `.inf_mat` on a road MESH, and a\n",
-    "mesh tiles at whatever its author unwrapped. `inf_gis`'s road ribbon\n",
-    "writes `uv = (u across the carriageway, arc / width_m)`, so one uv unit\n",
-    "is the road's WIDTH in both axes. The island's eleven roads are one\n",
-    "`highway` and ten `arterial`, neither states a lane count, and\n",
-    "`RoadKind::default_lanes` gives both four at `LANE_WIDTH_M` 3.5 - so\n",
-    "every street on the island tiles this set every **14.0 m**: a 13.7 mm\n",
-    "texel and a 53.8 cm detail tile, 3.5x the row above. Correcting it needs\n",
-    "a uv-scale field on `.inf_mat`, which is an asset-format window with a\n",
-    "real consumer; until then the aggregate reads large and this says by how\n",
-    "much.\n",
+    "**Every row is now the rate the surface actually draws at, and until\n",
+    "wave ROAD1 the last two were not** (ASSET0 audit). `tex_scale_m` reached\n",
+    "exactly one consumer - `TerrainLayer::tex_scale`, which is\n",
+    "`uv = world.xz / tex_scale` - and asphalt is not a terrain layer: it is a\n",
+    "`.inf_mat` on a road MESH, and a mesh tiles at whatever its author\n",
+    "unwrapped. `inf_gis`'s road ribbon wrote `uv = (u across the\n",
+    "carriageway, arc / width_m)`, so one uv unit was the road's WIDTH in both\n",
+    "axes - 14.0 m on the island, a 13.7 mm texel and a 53.8 cm detail tile,\n",
+    "**3.5x** the row above.\n",
+    "\n",
+    "ROAD1 closed it from both ends: the ribbon's uv is now **metres**, and\n",
+    "`.inf_mat` v4 carries `uv_tiling_m` - metres per repeat - which\n",
+    "`GroundKind::mesh_uv_tiling_m` fills in from the very column above. A\n",
+    "splat layer answers `0.0` there and must, because terrain has already\n",
+    "divided by its layer's rate and a second divide would tile grass every\n",
+    "four metres squared.\n",
     "\n",
     "**Albedo and ORM are BC1; normals and detail maps are BC5** (wave\n",
     "IASSET2). Every map used to be BC1, including the normals, and that was a\n",
@@ -347,7 +365,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), n, "the ground library shares a GUID with itself");
-        assert_eq!(n, 6 * 4 + 3, "the library's asset count moved");
+        assert_eq!(n, 7 * 4 + 3, "the library's asset count moved");
     }
 
     /// The library builds, and every material's sidecar names exactly the
@@ -382,6 +400,31 @@ mod tests {
                 kind.has_detail(),
                 "{name}'s detail pair is half-authored"
             );
+            // **The tiling rate is the library's own** (wave ROAD1), and it
+            // crosses the derive door as the same number. A splat layer states
+            // none, because terrain has already divided by its layer's rate.
+            assert_eq!(
+                mat.uv_tiling_m,
+                kind.mesh_uv_tiling_m() as f32,
+                "{name} does not tile at the rate its library row states"
+            );
+            assert_eq!(derived.uv_tiling_m, mat.uv_tiling_m);
+            assert_eq!(derived.wet_roughness_floor, kind.wet_roughness_floor());
+            let mesh_bound = matches!(kind, GroundKind::Asphalt | GroundKind::Concrete);
+            assert_eq!(
+                mat.tiles_physically(),
+                mesh_bound,
+                "{name}: only a MESH surface states a metres-per-repeat"
+            );
+            if mesh_bound {
+                // 8.8 fixed point, and the round trip is exact for the rates
+                // this library authors (4.0 and 2.0 m are both whole 1/256ths).
+                assert_eq!(
+                    f64::from(derived.uv_tiling_q8()) / 256.0,
+                    kind.tex_scale_m(),
+                    "{name}'s rate does not survive the fixed-point encoding"
+                );
+            }
         }
     }
 
@@ -438,7 +481,7 @@ mod tests {
             // The sidecar's hash is of the bytes actually written.
             assert_eq!(f.sidecar.content_hash, ContentHash::of(&f.payload));
         }
-        assert_eq!(textures, 21, "the library's texture count moved");
+        assert_eq!(textures, 24, "the library's texture count moved");
         assert_eq!(
             formats.len(),
             2,

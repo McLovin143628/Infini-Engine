@@ -810,7 +810,16 @@ impl MaterialRaw {
             albedo[k] = layer.albedo;
             params[k] = [layer.roughness, layer.tex_scale.max(1e-3), 0.0, 0.0];
             let s = layer.vt.slots();
-            slots[k] = [s[0], s[1], s[2], 0];
+            // **The physical tiling rate is STRIPPED here** (wave ROAD1), and
+            // that is a rule rather than a tidy-up: `s[2]`'s top half carries a
+            // material's metres-per-repeat, `vt_surface` divides the uv by it,
+            // and a terrain's uv is ALREADY `world.xz / TerrainLayer::tex_scale`.
+            // A layer bound to a mesh surface — `Road_Asphalt`, say — would
+            // therefore divide twice and tile grass every four metres squared.
+            // Terrain's rate is its layer's, one door, and this mask is what
+            // says so; `the_terrain_strips_a_materials_metres_per_repeat` is the
+            // arm.
+            slots[k] = [s[0], s[1], s[2] & 0xFFFF, 0];
         }
         MaterialRaw {
             albedo,
@@ -1906,6 +1915,47 @@ impl RenderNode for TerrainNode {
 mod tests {
     use super::*;
     use glam::DVec3;
+
+    /// **The terrain strips a material's metres-per-repeat** (wave ROAD1).
+    ///
+    /// A `.inf_mat` may state a physical tiling rate, which `vt_surface`
+    /// implements by dividing the uv it is handed. Terrain's uv is *already*
+    /// `world.xz / TerrainLayer::tex_scale`, so a layer bound to a material that
+    /// states one would be divided twice — grass tiling every four metres
+    /// **squared**, which reads as a texture that has stopped tiling at all.
+    ///
+    /// The strip is one `& 0xFFFF` in `MaterialRaw::from_terrain` and nothing
+    /// else in the tree would notice it going missing, because no committed
+    /// terrain layer binds a mesh surface today. That is exactly why it needs an
+    /// arm: the day one does, this fails instead of the picture.
+    ///
+    /// Falsification: drop the mask and the second assertion reds.
+    #[test]
+    fn the_terrain_strips_a_materials_metres_per_repeat() {
+        let mut t = RenderTerrain::default();
+        let layer = &mut t.layers[0];
+        layer.vt = crate::VtTextureSet {
+            albedo: 7,
+            normal: 9,
+            orm: 11,
+            detail: 0,
+            detail_scale_q8: 0,
+            // 4 m per repeat — the committed asphalt's rate.
+            uv_tiling_q8: crate::uv_tiling_q8(4.0),
+        };
+        // The set itself carries the rate: this is what a mesh would upload.
+        assert_eq!(
+            layer.vt.slots()[2],
+            11 | (1024 << 16),
+            "a VtTextureSet must carry the rate — the strip belongs to terrain,              not to the packing"
+        );
+        let raw = MaterialRaw::from_terrain(&t);
+        assert_eq!(
+            raw.slots[0],
+            [7, 9, 11, 0],
+            "the terrain uploaded a metres-per-repeat, so its uv is divided              twice: once by TerrainLayer::tex_scale and once by the material"
+        );
+    }
 
     const RES: u32 = 16;
     const MPS: f64 = 1.0;
