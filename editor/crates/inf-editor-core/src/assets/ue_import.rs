@@ -520,8 +520,14 @@ fn import_material(
     // ordered by role name and two runs of one manifest write the same assets in
     // the same order — the GUID-stability property every import in this tree has.
     let mut planes: BTreeMap<MapKind, (Vec<u8>, u32, u32)> = BTreeMap::new();
+    // Roles the manifest states and this engine has nowhere to put. Collected
+    // and REPORTED rather than skipped in silence (ASSET0 audit): "the material
+    // imported" and "the material imported with half its maps" looked identical
+    // in the report, and one of the silent roles was clobbering the albedo.
+    let mut unplaced: Vec<&str> = Vec::new();
     for (role, key) in &mat.maps {
         let Some(kind) = role_to_kind(role) else {
+            unplaced.push(role.as_str());
             continue;
         };
         let Some(tex) = by_key.get(key.as_str()) else {
@@ -545,6 +551,16 @@ fn import_material(
         let (rgba, w, h) = inf_material::downscale_rgba8(rgba, w, h, opts.max_texture)
             .map_err(|e| AssetError::Import(format!("{}: {e}", path.display())))?;
         planes.insert(kind, (rgba, w, h));
+    }
+    if !unplaced.is_empty() {
+        report.advisories.push(format!(
+            "{}: the manifest names {} and this engine's `.inf_mat` has no slot \
+             for {} — not imported. The material keeps its scalar values for \
+             those channels.",
+            mat.key,
+            unplaced.join(", "),
+            if unplaced.len() == 1 { "it" } else { "them" }
+        ));
     }
 
     let name = short_name(&mat.key);
@@ -696,10 +712,32 @@ fn stem_kind(stem: &str) -> Option<inf_material::ground::GroundKind> {
 
 /// A manifest role name → the engine's [`MapKind`].
 ///
-/// The export script's own vocabulary, mapped once. `displacement` is
-/// deliberately absent: this engine has no displacement slot on `.inf_mat`, and
-/// importing a height map as a texture nothing samples would be 2 MB an asset
-/// for a channel no shader reads.
+/// **Exactly the five roles this engine has somewhere to put**, and nothing
+/// else: albedo and normal get their own slot, and occlusion/roughness/metallic
+/// are packed into the one ORM. A role absent from this table is reported by
+/// [`import_material`] rather than dropped in silence.
+///
+/// `displacement` is deliberately absent: this engine has no displacement slot
+/// on `.inf_mat`, and importing a height map as a texture nothing samples would
+/// be 2 MB an asset for a channel no shader reads.
+///
+/// # Two that were here and should not have been (ASSET0 audit)
+///
+/// `"emissive" => MapKind::Albedo` was a **silent clobber**. `planes` is keyed
+/// by `MapKind` and `mat.maps` is a `BTreeMap`, so on any material carrying both
+/// maps `"emissive"` sorts after `"albedo"` and *replaced* it — the material
+/// would have shipped its glow map as its base colour. Nothing in the reference
+/// project's thirty materials names an emissive map, so the defect was
+/// unreachable today and one export-list edit from being reached. There is no
+/// emissive texture slot on `.inf_mat`; the scalar `emissive` the manifest
+/// states is what crosses.
+///
+/// `"opacity" => MapKind::Opacity` was a **silent drop with a bill attached**:
+/// the plane was decoded and clamped — an 8 K source is 268 MB of RGBA — and
+/// then never read, because only Albedo, Normal and the ORM trio are consumed.
+/// The engine carries alpha in the base colour's own channel, so an opacity map
+/// would have to be composited into the albedo to mean anything; until it is,
+/// the honest answer is to say so and not pay for the decode.
 fn role_to_kind(role: &str) -> Option<MapKind> {
     Some(match role {
         "albedo" => MapKind::Albedo,
@@ -707,8 +745,6 @@ fn role_to_kind(role: &str) -> Option<MapKind> {
         "roughness" => MapKind::Roughness,
         "metallic" => MapKind::Metallic,
         "ao" => MapKind::Occlusion,
-        "opacity" => MapKind::Opacity,
-        "emissive" => MapKind::Albedo,
         _ => return None,
     })
 }

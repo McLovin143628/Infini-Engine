@@ -137,6 +137,22 @@ fn staging(dir: &Path) -> PathBuf {
         [255, 255, 255, 255],
         [180, 180, 180, 255],
     );
+    // **Two roles this engine has nowhere to put** (ASSET0 audit), at 64 square
+    // so the extent alone says which file reached a slot. `emissive` used to be
+    // mapped onto `MapKind::Albedo`, and `planes` is keyed by kind over a
+    // `BTreeMap` of role names, so it REPLACED the albedo it sorts after.
+    png(
+        &tex.join("Surf_Emissive.png"),
+        64,
+        [255, 80, 0, 255],
+        [200, 60, 0, 255],
+    );
+    png(
+        &tex.join("Surf_Opacity.png"),
+        64,
+        [255, 255, 255, 255],
+        [0, 0, 0, 255],
+    );
 
     for (lod, scale) in [(0, 1.0f32), (1, 0.9), (2, 0.8), (3, 0.7)] {
         quad_gltf(&meshes, &format!("Prop_LOD{lod}"), scale);
@@ -154,7 +170,11 @@ fn staging(dir: &Path) -> PathBuf {
             {"key": "t_rough", "file": "textures/Surf_Roughness.png", "map": "roughness",
              "width": 128, "height": 128, "srgb": false},
             {"key": "t_ao", "file": "textures/Surf_AO.png", "map": "ao",
-             "width": 128, "height": 128, "srgb": false}
+             "width": 128, "height": 128, "srgb": false},
+            {"key": "t_emissive", "file": "textures/Surf_Emissive.png", "map": "emissive",
+             "width": 64, "height": 64, "srgb": true},
+            {"key": "t_opacity", "file": "textures/Surf_Opacity.png", "map": "opacity",
+             "width": 64, "height": 64, "srgb": false}
         ],
         "materials": [{
             "key": "Fixture_Surface", "pack": "Fixture", "surface": true,
@@ -162,7 +182,8 @@ fn staging(dir: &Path) -> PathBuf {
             "emissive": [0.0, 0.0, 0.0], "opacity": 1.0, "blend": "opaque",
             "maps": {"albedo": "t_albedo", "normal": "t_normal",
                      "roughness": "t_rough", "ao": "t_ao",
-                     "displacement": "t_rough"}
+                     "displacement": "t_rough",
+                     "emissive": "t_emissive", "opacity": "t_opacity"}
         }],
         "meshes": [{
             "key": "Fixture_Prop", "pack": "Fixture", "nanite": false,
@@ -227,17 +248,49 @@ fn a_manifest_becomes_a_textured_material_and_a_mesh() {
          ORM, and packing one is the whole PBR remap"
     );
 
-    // **THREE textures, not five.** The manifest names five map roles and one
-    // of them (`displacement`) has no slot in this engine's `.inf_mat`, while
-    // roughness and occlusion are consumed INTO the ORM rather than written
-    // beside it. A count of five would mean two megabytes an asset of channels
-    // no shader samples.
+    // **THREE textures, not seven.** The manifest names seven map roles and
+    // three of them (`displacement`, `emissive`, `opacity`) have no slot in this
+    // engine's `.inf_mat`, while roughness and occlusion are consumed INTO the
+    // ORM rather than written beside it. A larger count would mean two megabytes
+    // an asset of channels no shader samples.
     assert_eq!(
         report.textures.len(),
         3,
         "expected albedo + normal + packed ORM, got {} textures",
         report.textures.len()
     );
+
+    // **AND THE ALBEDO IS THE ALBEDO** (ASSET0 audit). `emissive` was mapped
+    // onto `MapKind::Albedo`, and since `planes` is keyed by kind while
+    // `maps` is a `BTreeMap` of role names, "emissive" sorted after "albedo"
+    // and REPLACED it: the material would have shipped its glow map as its base
+    // colour and every count above would still read three. The fixture's
+    // emissive is 64 square and its albedo 512, so the extent is the witness.
+    let albedo = project
+        .load_texture(mat.base_color_texture.unwrap())
+        .expect("the albedo decodes");
+    assert_eq!(
+        (albedo.width, albedo.height),
+        (512, 512),
+        "the base colour is {}x{} -- a 64-square map reached the albedo slot, so \
+         a role with no slot of its own clobbered it",
+        albedo.width,
+        albedo.height
+    );
+
+    // …and the roles with nowhere to go are REPORTED, because "it imported" and
+    // "it imported with half its maps" read identically without this.
+    let unplaced = report
+        .advisories
+        .iter()
+        .find(|a| a.contains("has no slot"))
+        .unwrap_or_else(|| panic!("no advisory named the unplaced maps: {:?}", report.advisories));
+    for role in ["displacement", "emissive", "opacity"] {
+        assert!(
+            unplaced.contains(role),
+            "the advisory does not name {role}: {unplaced}"
+        );
+    }
     for id in &report.textures {
         assert_eq!(
             project.db().get(*id).map(|e| e.kind()),
