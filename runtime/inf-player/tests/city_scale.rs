@@ -529,7 +529,7 @@ fn the_structure_swap_sits_between_the_collider_band_and_the_mesh_band() {
     let lod = inf_render::STRUCTURE_LOD_M;
     let near = inf_ecs::band::DEFAULT_COLLIDER_NEAR_M;
     let s = inf_render::RenderSettings::default().scatter;
-    let (mesh_end, cull, _, impostors) = inf_render::passes::scatter::effective_bands(&s, 0.0);
+    let (mesh_end, cull, _, impostors) = inf_render::passes::scatter::effective_bands(&s, 0.0, 0.0);
     assert!(
         impostors,
         "the default configuration draws impostors, or the mesh band below is \

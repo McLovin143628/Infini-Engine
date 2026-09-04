@@ -253,16 +253,55 @@ const FLAG_OCCLUSION: u32 = 4;
 /// impostors off the mesh band is stretched to the cull distance, so the same
 /// `scatter_mesh.wgsl` weight formula gives it a dithered fade-out at the edge
 /// instead of a hard pop; there is no second code path for the no-impostor case.
+///
+/// # A FAR-LOD PROXY IS NEVER BILLBOARDED (the EDIT1 audit)
+///
+/// The showcase island's editor and PIE frames both carried a row of smooth
+/// white **domes** standing among Harbour City's buildings — evenly spaced,
+/// roughly half-buried, at building scale. Wave EDIT1 measured that they are not
+/// the P17 cloud slab (`clouds_enabled` is `false` on that level) and carried
+/// them as `PrimMesh::Sphere` "from a scatter or foliage palette". **Nothing in
+/// the island places a sphere primitive.** They are the per-building *shell* box
+/// — one oriented box standing in for ~1 500, banded `[STRUCTURE_LOD_M,
+/// draw_distance)` by `push_shells` — drawn past `mesh_distance_m` as a scatter
+/// IMPOSTOR: a screen-facing card of the box's *bounding-sphere* radius, shaded
+/// with a spherical normal so it reads as a solid ball (`vs_impostor`'s own
+/// comment: "the card shades as a blob"), and centred at the building's
+/// mid-height so its lower half is under the ground. For the 20 x 30 x 7.4 m
+/// building `tests/structure_lod_pop.rs` measures, that card is 36.8 m across
+/// and covers **9.2x** the box's silhouette — a ratio that file has printed
+/// since island wave I4.
+///
+/// The rule is that a batch with an **inner cut** does not enter the impostor
+/// band. [`crate::ScatterBatch::near_distance`] exists for exactly one purpose
+/// and its own doc says so — *"a level of detail is two batches whose bands are
+/// complementary: a building's parts inside the structure-LOD distance, its
+/// shell outside it"* — and `inf-player`'s island gate already reads
+/// `near_distance > 0.0` as "this is the shell batch". So the data already says
+/// "this is the coarse tier of an LOD pair", and replacing THAT with a card is
+/// approximating an approximation: the thing it stands in for is not drawn, so
+/// there is nothing left for the card to be cheaper than. It costs nothing to
+/// refuse — a shell is twelve triangles against a card's two, once per building
+/// — and the card is 9.2x the fill, so the refusal is not even a trade.
+///
+/// This is a different claim from the cross-fade `tests/structure_lod_pop.rs`
+/// refuses, and does not disturb it: that refusal is about the *parts to shell*
+/// swap measured as geometry, and it is re-taken on geometry numbers every wave.
+/// Armed by that file's `a_far_lod_shell_is_never_replaced_by_a_card`.
 pub fn effective_bands(
     settings: &crate::settings::ScatterSettings,
     draw_distance: f64,
+    near_distance: f64,
 ) -> (f32, f32, f32, bool) {
     let mut cull = settings.cull_distance_m.max(0.0);
     if draw_distance > 0.0 {
         cull = cull.min(draw_distance as f32);
     }
     let fade = settings.fade_band_m.max(0.0);
-    let impostors = settings.impostors;
+    // See the section above: an inner cut means "the far half of a complementary
+    // LOD pair", and a proxy for geometry that is not drawn has nothing to be a
+    // cheaper stand-in for.
+    let impostors = settings.impostors && near_distance <= 0.0;
     let mesh_end = if impostors {
         settings.mesh_distance_m.max(0.0).min(cull)
     } else {
@@ -1087,10 +1126,16 @@ pub fn pack_fallback(
         if purpose == PackPurpose::Casters && !b.casts_shadows {
             continue;
         }
-        let (mesh_end, cull, _, _) = effective_bands(settings, b.draw_distance);
+        let (mesh_end, cull, _, impostors) =
+            effective_bands(settings, b.draw_distance, b.near_distance);
         // Neither CPU consumer draws impostors, so the band ends where the mesh
-        // band does whenever impostors are notionally on.
-        let band = if settings.impostors { mesh_end } else { cull };
+        // band does whenever impostors are notionally on -- and `impostors` is
+        // the BATCH's answer rather than the settings', so a shell batch (which
+        // never billboards, see `effective_bands`) keeps its full band here too.
+        // Before the EDIT1 audit this read `settings.impostors` and a Medium-tier
+        // machine lost every building past `mesh_distance_m` while a High one
+        // drew a card there.
+        let band = if impostors { mesh_end } else { cull };
         if band <= 0.0 {
             continue;
         }
@@ -1478,7 +1523,7 @@ impl RenderNode for ScatterNode {
                 let anchor = frame.view.origin.to_render(b.anchor);
                 let radius = b.data.bounding_radius() * b.data.max_scale();
                 let (mesh_end, cull, fade, impostors) =
-                    effective_bands(&frame.settings.scatter, b.draw_distance);
+                    effective_bands(&frame.settings.scatter, b.draw_distance, b.near_distance);
                 // An authored mesh owns its whole pull buffer, so its range is
                 // the identity one; a built-in is a sub-range of the shared pack.
                 let range = match b.data.geometry.as_ref().filter(|x| !x.is_empty()) {
@@ -1838,22 +1883,22 @@ mod tests {
     #[test]
     fn bands_clamp_down_and_never_up() {
         let s = ScatterSettings::default();
-        let (mesh, cull, _, imp) = effective_bands(&s, 0.0);
+        let (mesh, cull, _, imp) = effective_bands(&s, 0.0, 0.0);
         assert_eq!(cull, s.cull_distance_m);
         assert_eq!(mesh, s.mesh_distance_m);
         assert!(imp);
 
         // An authored draw distance only ever pulls the cull IN.
-        let (_, near, _, _) = effective_bands(&s, 50.0);
+        let (_, near, _, _) = effective_bands(&s, 50.0, 0.0);
         assert_eq!(near, 50.0);
-        let (_, far, _, _) = effective_bands(&s, 10_000.0);
+        let (_, far, _, _) = effective_bands(&s, 10_000.0, 0.0);
         assert_eq!(
             far, s.cull_distance_m,
             "content must not extend the tier's band"
         );
 
         // The mesh band can never outrun the cull distance.
-        let (mesh_near, cull_near, _, _) = effective_bands(&s, 20.0);
+        let (mesh_near, cull_near, _, _) = effective_bands(&s, 20.0, 0.0);
         assert!(mesh_near <= cull_near);
 
         // With impostors off the mesh band IS the cull band, so the same weight
@@ -1862,7 +1907,7 @@ mod tests {
             impostors: false,
             ..s
         };
-        let (mesh_off, cull_off, _, imp_off) = effective_bands(&off, 0.0);
+        let (mesh_off, cull_off, _, imp_off) = effective_bands(&off, 0.0, 0.0);
         assert!(!imp_off);
         assert_eq!(mesh_off, cull_off);
     }
@@ -1924,7 +1969,7 @@ mod tests {
     #[test]
     fn the_structure_swap_happens_inside_the_scatter_mesh_band() {
         let s = crate::RenderSettings::default().scatter;
-        let (mesh_end, cull, _, impostors) = effective_bands(&s, 0.0);
+        let (mesh_end, cull, _, impostors) = effective_bands(&s, 0.0, 0.0);
         assert!(impostors, "the default configuration draws impostors");
         assert!(
             (crate::STRUCTURE_LOD_M as f32) <= mesh_end,
@@ -1934,6 +1979,35 @@ mod tests {
              through the annulus between the two. That is island wave I8b's \
              band-ordering defect; do not relax this assertion",
             crate::STRUCTURE_LOD_M
+        );
+    }
+
+    /// **A BATCH WITH AN INNER CUT NEVER BILLBOARDS** (the EDIT1 audit).
+    ///
+    /// The rule stated on [`effective_bands`], as the two rows it distinguishes.
+    /// The pixels are `tests/structure_lod_pop.rs`'s
+    /// `a_far_lod_shell_is_never_replaced_by_a_card`; this is the arithmetic, so
+    /// a machine with no GPU adapter still fails when the rule is removed.
+    #[test]
+    fn a_batch_with_an_inner_cut_is_drawn_rather_than_billboarded() {
+        let s = crate::RenderSettings::default().scatter;
+        // The ordinary batch: unchanged, and still billboards past the mesh band.
+        let (mesh_end, cull, _, imp) = effective_bands(&s, 0.0, 0.0);
+        assert!(
+            imp && mesh_end < cull,
+            "an ordinary scatter batch stopped drawing impostors ({mesh_end} m of a {cull} m cull) -- ground cover is what the impostor band is FOR, and this rule is only about far-LOD proxies"
+        );
+        // The shell batch: `push_shells` bands it `[STRUCTURE_LOD_M, draw)`.
+        let (shell_end, shell_cull, _, shell_imp) =
+            effective_bands(&s, 0.0, crate::STRUCTURE_LOD_M);
+        assert!(
+            !shell_imp,
+            "a batch with an inner cut is the far half of a complementary LOD pair, and it entered the impostor band -- that is the building-sized dome the EDIT1 audit found on the showcase island"
+        );
+        assert_eq!(
+            (shell_end, shell_cull),
+            (cull, cull),
+            "with impostors refused the mesh band must reach the cull distance, or the shell simply stops being drawn at {mesh_end} m"
         );
     }
 

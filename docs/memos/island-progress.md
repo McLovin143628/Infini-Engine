@@ -30503,11 +30503,15 @@ the measurement is one line: `SkyAtmosphere::clouds_enabled` defaults to `false`
 (`components.rs:5746`), the island authors `SkyAtmosphere::default()`
 (`island.rs:463`) and never overrides it, so the cloud pass does not run on that
 level. Enlarged, they are smooth, perfectly circular, light-grey **spheres**
-standing among the buildings at roughly building scale and evenly spaced — a
-`PrimMesh::Sphere` from a scatter or foliage palette, drawn where a real mesh was
-meant to be. That is a different defect from the one this clause was about, it is
-adjacent to the standing FIX1 carried item *"scatter_meshes empty in windowed
-PIE"*, and it is **carried 2** with the identification rather than guessed at.
+standing among the buildings at roughly building scale and evenly spaced.
+
+**CORRECTED BY THE AUDIT — the shape was right and the mechanism was not.** This
+wave read the shape off the screenshot and named a `PrimMesh::Sphere` "from a
+scatter or foliage palette", and carried it. Nothing in the island places a
+sphere primitive, and the scatter path's missing-mesh placeholder is a
+`PrimMesh::Cube`. They are the per-building **shell box** drawn as a scatter
+IMPOSTOR — a screen-facing card shaded with a spherical normal. Measured at
+`a5493b38` and fixed; see **THE AUDIT**, finding 1, at the end of this block.
 
 ### (1) THE EDITOR CAMERA IS A STREAMING SOURCE
 
@@ -30854,12 +30858,17 @@ the editor left to settle for fifty seconds, reading `Streaming 52/52`.
    and no normal — an over-estimate by the average of a cosine over the lit
    hemisphere. It is why `GI_P95_LIFT_CEILING` is 30 and not 20. A normal per
    voxel (or a cone-traced gather) is the fix and it is a lighting wave's work.
-2. **The white domes on the island's horizon are sphere primitives, not
-   clouds.** Clouds are disabled on that level (`SkyAtmosphere::default()`), so
-   the P17 hypothesis is refused. They are `PrimMesh::Sphere` at building scale,
-   evenly spaced behind the building rows — a scatter or foliage palette drawing
-   its placeholder where a real mesh was meant to be. Adjacent to the standing
-   FIX1 carried item *"scatter_meshes empty in windowed PIE"*.
+2. ~~**The white domes on the island's horizon are sphere primitives, not
+   clouds.**~~ **CLOSED BY THE AUDIT, and the identification was wrong.** The
+   refusal of the P17 cloud hypothesis stands (clouds are disabled on that
+   level). The rest does not: nothing in the island places a `PrimMesh::Sphere`,
+   and the scatter path's missing-mesh placeholder is a `PrimMesh::Cube`. The
+   domes are the per-building **shell box** — the far tier of the structure LOD —
+   drawn past `ScatterSettings::mesh_distance_m` as a scatter impostor card,
+   which `vs_impostor` shades with a *spherical normal* so that it reads as a
+   solid ball. Measured at `a5493b38`: 148 x 148 px of disc against the
+   building's own 88 x 33 px of geometry at 192 m. Fixed — see **THE AUDIT**,
+   finding 1.
 3. **The population overlay (clause 4) is priced, not built.** The society and
    traffic derivations are on the fixed step; a static "who is where at hour *h*"
    needs them lifted into a pure Ring-0 function first.
@@ -30896,3 +30905,86 @@ the editor left to settle for fifty seconds, reading `Streaming 52/52`.
    frame at which to re-ask whether the document has projected, so rather than
    fire once and probably miss, it is left with the rest of macOS viewport input
    as the standing gap `host.rs` names.
+
+### THE AUDIT (adversarial, 2026-09-04, on `a5493b38`)
+
+Every number below was re-measured on this machine at the wave's own HEAD before
+anything was changed. What reproduced is recorded as reproduced; what did not is
+named.
+
+**The battery reproduces exactly**: `AGGREGATE over 374 binaries: 7077 passed, 0
+failed, 21 ignored`, exit 0, no failing binaries — the wave's claim to the test.
+Goldens 62 with `gi_specular` the only one the wave's diff touches; CRLF 0 over
+the whole diff; manifests untouched; no committed `.inf_lvl` byte moved; scene
+v27, `ScenePayload` v12, `EXPECTED_LEVELS` 24, editor-settings v1; all thirteen
+commits carry both trailers.
+
+#### Finding 1 — THE WHITE DOMES ARE THE BUILDINGS (severity HIGH; fixed)
+
+The wave carried them as `PrimMesh::Sphere` "at building scale, from a scatter or
+foliage palette, drawn where a real mesh was meant to be". **There is no sphere.**
+The island level holds no actor with `Primitive::Sphere`; the settlement's zone
+documents are grammar- and building-driven and scatter nothing; `Cover_GrassTuft`,
+`Cover_Shrub` and `Cover_Rock` are the only meshes the pack carries and the
+tallest is 0.741 m; and the scatter path's missing-mesh placeholder is a
+`PrimMesh::Cube`, not a sphere, in both hosts.
+
+What draws a ball is the **impostor**. `push_shells` emits one oriented box per
+building — the far tier of the structure LOD — banded `[STRUCTURE_LOD_M,
+draw_distance)` = `[96 m, 1000 m)`. `ScatterSettings::mesh_distance_m` is 120 m,
+so from 120 m outward that box is replaced by a scatter impostor: a screen-facing
+card of the box's **bounding-sphere** radius, disc-discarded to a circle, and
+shaded with a *spherical* normal because `vs_impostor` says in its own comment
+that it wants "a blob of the right size rather than a flat sticker". Its centre is
+the building's mid-height, so the lower half is under the ground; its colour is
+`pcg_kind_color`'s debug palette, whose rock-grey `[0.62, 0.60, 0.55]` reads white
+when lit. One per lot on a street grid is an evenly spaced row of half-buried
+white balls, which is the picture.
+
+**Measured**, `tests/structure_lod_pop.rs`, the file's own 20 x 30 x 7.4 m
+building, 1920 x 1080, at `2 x STRUCTURE_LOD_M`:
+
+| | silhouette | pixels | ratio |
+|---|---|---|---|
+| shipped, at `a5493b38` | **148 x 148 px** | 17 160 | **5.91x** |
+| the same batch as geometry | 88 x 33 px | 2 903 | 1.00x |
+
+17 142 px differ, worst channel 155/255. A 148-wide by 148-high silhouette for a
+building three times wider than it is tall is not a building: it is a circle.
+
+**The fix is one condition.** `effective_bands` now answers `impostors = false`
+for a batch with an INNER cut. `ScatterBatch::near_distance` exists for exactly
+one purpose and its own doc says so — *"a level of detail is two batches whose
+bands are complementary: a building's parts inside the structure-LOD distance,
+its shell outside it"* — and `inf-player`'s island gate already reads
+`near_distance > 0.0` as "this is the shell batch", so the data already says "far
+half of an LOD pair" and no new field is needed. A proxy for geometry that is not
+drawn has nothing left to be a cheaper stand-in for, and it is not even a trade:
+a shell is one twelve-triangle box per building against a card's two, while the
+card covers 5.9x the fill. After: **88 x 33 px, 2 903 px, 1.00x, 0 px differ,
+worst 0/255** — the shipped configuration and the impostor-free one are now the
+same picture, to the pixel.
+
+Two arms, both mutation-verified: `passes::scatter::tests::a_batch_with_an_inner_
+cut_is_drawn_rather_than_billboarded` (the arithmetic, so a machine with no
+adapter still fails) and `tests/structure_lod_pop.rs`'s
+`a_far_lod_shell_is_never_replaced_by_a_card` (the pixels). **No golden moves**:
+121 golden tests green under `INF_GOLDEN_STRICT=1` with the rule in, because
+every golden's scatter batch goes through `ScatterBatch::lit` and carries no
+inner cut.
+
+**A second defect closed on the way, in the same line.** `pack_fallback` — the
+CPU raster on every tier below High, and the shadow-caster pack — read
+`settings.impostors` rather than the batch's answer, so it ended a shell batch's
+band at `mesh_distance_m` and drew nothing beyond it. A Medium-tier machine lost
+every building past 120 m while a High-tier one drew a card there. Both now read
+the same number.
+
+**What this does NOT change**, and the distinction is worth keeping: the
+`the_parts_to_shell_swap_measured_at_1080p` arms above still report the
+bounding-sphere card at 9.2x, and they should. Their fixture is an ordinary
+scatter batch with no inner cut — the file's own doc says it never calls
+`push_shells` — so it measures what an impostor is for *ground cover*, which is
+what the impostor band is for and which this rule deliberately leaves alone. The
+cross-fade refusal is untouched and is re-taken on its own geometry numbers
+(398 of 13 766 px, 2.9 %, worst 29/255).

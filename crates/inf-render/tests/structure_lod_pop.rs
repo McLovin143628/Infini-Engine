@@ -532,3 +532,112 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         "the SHIPPED parts->shell swap at {STRUCTURE_LOD_M} m moves {swap_pct:.1} % of the building's {imp_covered} px silhouette, against the 29.6 % island wave I8c's band re-order left it at and the 91.5 % it was at the 192 m swap. The swap has drifted back out past the scatter mesh band, or the mesh band has been narrowed under it"
     );
 }
+
+/// **A BUILDING IS NEVER A BALL** (the EDIT1 audit) — the shell batch as
+/// `push_shells` actually bands it, at the distance the author sees it.
+///
+/// # What the author reported, and what it was
+///
+/// The showcase island's editor and PIE frames both carry a row of smooth white
+/// **domes** standing among Harbour City's buildings: evenly spaced, roughly
+/// half-buried, at building scale. Wave EDIT1 measured that they are not the P17
+/// cloud slab (`clouds_enabled` is `false` on that level, so the cloud pass never
+/// runs) and carried them as `PrimMesh::Sphere` "from a scatter or foliage
+/// palette, drawn where a real mesh was meant to be".
+///
+/// **Nothing in the island places a sphere primitive**, and the scatter path's
+/// missing-mesh placeholder is a `PrimMesh::Cube`. The domes are the subject of
+/// this very file seen from the other side: the per-building **shell** box,
+/// banded `[STRUCTURE_LOD_M, draw_distance)`, drawn past `mesh_distance_m` as a
+/// scatter IMPOSTOR — a screen-facing card of the box's bounding-sphere radius,
+/// shaded with a spherical normal so that it reads as a solid ball
+/// (`vs_impostor`: "the card shades as a blob of the right size rather than as a
+/// flat sticker"), centred at the building's mid-height so its lower half is
+/// under the ground, and tinted from `pcg_kind_color`'s five-entry debug palette.
+/// The arms above have printed its size beside the geometry's since island wave
+/// I4; what nobody had done was band the fixture the way the engine bands it and
+/// look at the result.
+///
+/// # Why this is a defect where the cross-fade refusal is not
+///
+/// The refusal above is about the *parts to shell* swap and is re-taken on
+/// geometry numbers every wave. This is a different claim: a shell is ALREADY
+/// the coarse tier of a complementary LOD pair — one box standing in for the
+/// ~1 500 that are no longer drawn — so a card is not a cheaper stand-in for
+/// anything, it is an approximation of an approximation. And it is not even a
+/// trade: a shell is one twelve-triangle box per building against a card's two,
+/// while the card covers 9.2x the fill.
+///
+/// # THE ARM
+///
+/// At `2 x STRUCTURE_LOD_M`, well inside the impostor band, the SHIPPED
+/// configuration and the impostor-free one must draw the shell **identically** —
+/// the same box, to the pixel. Before the rule they differed by the whole disc.
+#[test]
+fn a_far_lod_shell_is_never_replaced_by_a_card() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP structure_lod_pop: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    let shoot = |s: &RenderScene, d: f64, impostors: bool| -> Vec<u8> {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        let mut settings = inf_render::RenderSettings::default();
+        settings.scatter.impostors = impostors;
+        r.set_settings(settings);
+        for _ in 0..3 {
+            r.render(&gpu, s, &view(d), &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        target.read_rgba(&gpu).expect("read back")
+    };
+
+    // The shell batch AS `push_shells` BANDS IT. `scene()` leaves
+    // `near_distance` at zero, which is an ordinary scatter batch and not the
+    // thing the island draws; the inner cut is what makes this the far half of a
+    // complementary pair, and `inf-player`'s island gate identifies the shell
+    // batch by exactly this field.
+    let mut far_lod = scene(vec![shell()]);
+    far_lod.scatter[0].near_distance = STRUCTURE_LOD_M;
+    far_lod.mark_dirty();
+
+    // Twice the swap distance: inside the impostor band by 72 m, which is where
+    // the author's domes stand.
+    let d = STRUCTURE_LOD_M * 2.0;
+    let empty = shoot(&scene(Vec::new()), d, true);
+    let shipped = shoot(&far_lod, d, true);
+    let geometry = shoot(&far_lod, d, false);
+
+    let (shipped_px, sw, sh) = silhouette(&shipped, &shipped, &empty);
+    let (geom_px, gw, gh) = silhouette(&geometry, &geometry, &empty);
+    let (differ, worst) = moved(&shipped, &geometry);
+    println!(
+        "EDIT1 audit - the far-LOD SHELL on {} ({:?}), {W}x{H}, at {d:.1} m:",
+        info.name, info.device_type
+    );
+    println!(
+        "  shipped   {sw:>4} x {sh:>4} px ({shipped_px:>6} px)
+  geometry  {gw:>4} x {gh:>4} px ({geom_px:>6} px)   ratio {:.2}x
+  {differ} px differ between them, worst channel {worst}/255",
+        shipped_px as f64 / geom_px.max(1) as f64,
+    );
+
+    // ANTI-VACUITY: the building is really on screen as geometry, so "they
+    // match" is not two empty frames matching.
+    assert!(
+        geom_px > 100,
+        "only {geom_px} px of shell at {d:.1} m as geometry - the comparison is between two skies"
+    );
+    // THE CLAIM. Identical, not merely similar: with the impostor band refused
+    // for this batch the two configurations write the same uniforms and run the
+    // same pipeline, and this file has already asserted the renderer is
+    // bit-deterministic across two fresh renderers.
+    assert_eq!(
+        (differ, worst),
+        (0, 0),
+        "at {d:.1} m the shipped configuration drew the shell as something other than its own geometry: {shipped_px} px against {geom_px} px ({:.1}x), {differ} px differing by up to {worst}/255. A shell is the FAR half of a complementary LOD pair and must be rasterized - see `effective_bands`. This is the building-sized white dome the EDIT1 audit found standing in Harbour City",
+        shipped_px as f64 / geom_px.max(1) as f64,
+    );
+}
