@@ -348,7 +348,7 @@ impl PieSession {
 
     /// The protocol version the running player reported at its handshake.
     ///
-    /// It always equals [`PIE_PROTOCOL_VERSION`] — [`Self::spawn_ready`] refuses
+    /// It always equals [`PIE_PROTOCOL_VERSION`] — `spawn_ready` refuses
     /// a session that does not — and it is kept so an arm can say that about the
     /// **running pair** rather than about one source tree.
     pub fn protocol(&self) -> u32 {

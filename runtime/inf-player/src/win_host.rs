@@ -5,7 +5,7 @@
 //!
 //! * *"a secondary powershell window is open the whole time"* — [`console`]
 //!   reports whether this process owns a console window at all, so the fix
-//!   ([`inf_editor_core::pie`]'s `CREATE_NO_WINDOW` plus this binary's
+//!   (`inf_editor_core::pie`'s `CREATE_NO_WINDOW` plus this binary's
 //!   `windows_subsystem` attribute) is **measured in the real host** off the
 //!   player's own stderr rather than asserted at the call site.
 //! * *"the movement does not work at all"* — [`take_keyboard_focus`] is both the

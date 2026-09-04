@@ -39,8 +39,6 @@ pub mod log;
 pub mod fracture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mods;
-/// Driving and reading a headless PIE session over protocol 3's input and probe
-/// frames (wave FIX1) — the door the `--pie` loop and every gate take.
 pub mod pie_drive;
 pub mod render;
 pub mod runtime_sim;
@@ -57,8 +55,6 @@ pub mod terrain_stream;
 pub mod ui;
 pub mod vmesh;
 pub mod voxel;
-/// The player's window as the OS sees it: its console (there must not be one)
-/// and its keyboard focus (wave FIX1). Cross-platform surface, Windows body.
 pub mod win_host;
 // The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so
 // the desktop build never names wasm-bindgen/web-sys.

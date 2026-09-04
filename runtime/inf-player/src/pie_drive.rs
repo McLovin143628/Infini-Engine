@@ -2,7 +2,7 @@
 //!
 //! Two doors, and they are the whole of what protocol 3 added:
 //!
-//! * [`PieInputHost`] turns an [`InputFrame`] into a stepped simulation. It is
+//! * [`PieInputHost`] turns an `InputFrame` into a stepped simulation. It is
 //!   the headless twin of `PlayerApp::frame`'s input half and it is spelled the
 //!   same way on purpose — the key-code diff, the dialog's first refusal, the
 //!   `apply_dt`, the panel edges read from the *resolved* state, the sim pause,

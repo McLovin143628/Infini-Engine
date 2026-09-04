@@ -25,7 +25,7 @@
 //! beside itself is a defect an author cannot explain away. `inf-studio`'s own
 //! `main.rs` has carried this attribute since Phase 1; the player never did, so
 //! the Play button spawned one every session — the second half of the same
-//! defect is [`inf_editor_core::pie`]'s `CREATE_NO_WINDOW`, which is what keeps a
+//! defect is `inf_editor_core::pie`'s `CREATE_NO_WINDOW`, which is what keeps a
 //! *debug* player spawned by the editor from allocating one too.
 //!
 //! **Gated on `debug_assertions`, exactly like the editor's**, because this
