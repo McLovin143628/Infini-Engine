@@ -911,21 +911,23 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// |---|---|---|---|---|---|
 /// | whole suite | 16.862 | 16.733 | **+0.129** | 5.506 | 7.575 (**-2.069**) |
 /// | this arm alone | 20.499 | 14.209 | **+6.290** | 5.439 | 3.409 (**+2.029**) |
+/// | **the CERT1 audit's re-run** | **20.818** | **10.660** | **+10.158** | 5.414 | 2.435 (**+2.979**) |
 ///
-/// **Both are quoted because one of them alone would be a claim.** The lit
-/// frame's own GPU cost barely moved (5.506 / 5.439); what moved is the SHIPPED
-/// frame's (7.575 / 3.409), which is this file's own warning about device state
-/// paying out — a card that has been boosting through a six-arm suite is not the
-/// card that ran a single test, and the GPU columns are only comparable between
-/// runs whose CPU frames are comparable. The honest reading is that the stack
-/// costs somewhere between a seventh of a millisecond and six of them on this
-/// content, and that it is nowhere near I4's forty-eight.
+/// **Three runs, three answers, and the wave's own conclusion from the first two
+/// was wrong** (CERT1 audit). It read "the stack costs somewhere between a
+/// seventh of a millisecond and six of them", and a third run of the same arm on
+/// the same machine, the same adapter and the same head measured **+10.158 ms**
+/// — outside that range by 60 %. What moves is the SHIPPED baseline, not the lit
+/// one: 16.733 / 14.209 / **10.660** against a lit 16.862 / 20.499 / 20.818. So
+/// this content's shipped frame is not reproducible here to better than about
+/// **1.6x between runs**, the delta is a SPREAD of roughly **+0.1 to +10.2 ms**
+/// rather than a number, and no sentence anywhere should quote one end of it.
+/// (It is still nowhere near I4's forty-eight.)
 ///
-/// So the "different renderer" this ceiling had to be re-minted for is close
-/// enough to the one it was minted on that a ceiling covering BOTH is tighter
-/// than the one that covered neither. **38.0 is 1.85x the worst lit p95
-/// observed** (20.499), which is the same order of headroom the constant has
-/// always carried.
+/// **The ceiling is therefore minted on the worst lit p95 ever recorded here and
+/// not on a delta.** That is 20.818, and **38.0 is 1.83x it** — the same order of
+/// headroom the constant has always carried, and the reason a ceiling covering
+/// BOTH configurations is tighter than the one that covered neither.
 ///
 /// **The island is still reported and never asserted here**, and it is the
 /// number that keeps this constant honest rather than one that flatters it. On
@@ -933,7 +935,12 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// the 51.38 km² one, with the record its own level now authors — measures
 /// **p50 39.672 / p95 42.299 / p99 43.188 ms, 25.2 fps**, and with its town's
 /// own thousand-agent society at the rush hour **p50 138.701 / p95 153.814 ms,
-/// 7.2 fps**. Those are over this ceiling and they are supposed to be: it is a
+/// 7.2 fps**. *(CERT1 audit, second run, same head and machine: **28.371 /
+/// 29.991 / 31.081, 35.2 fps** as it ships and **148.532 / 250.345, 6.7 fps** at
+/// the rush hour. The LIT rows reproduce to a tenth of a millisecond — 34.270 /
+/// 37.360 against 34.237 / 37.671 — and the SHIPPED row does not, which is the
+/// same instability the price table above records.)* Those are over this ceiling
+/// and they are supposed to be: it is a
 /// city's ratchet, asserting it over a different world would re-pin it by
 /// accident, and the island's own distance from sixty is a matter for the
 /// certification memo rather than for a tripwire.

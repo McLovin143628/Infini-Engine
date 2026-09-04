@@ -29214,16 +29214,20 @@ comments first, and that is load-bearing: the fix's own doc quotes the expressio
 it removed, which is exactly what a naive `contains` reports as the defect it
 just closed. It did, on the file's first run.
 
-**And the lit stack turned out to be nearly free.** Island wave I4's published
-pair is **p95 92.3-92.9 lit against 43.7-44.0**, about **+48.6 ms** by
-subtraction; at CERT1, over two runs on the same city and machine, it is
-**+0.129 ms and +6.290 ms** — and in the first of those the lit frame is
-2.069 ms *cheaper* on the GPU, because the depth prepass only runs when SSAO or
-TAA asks for it and the scatter overdraw it kills is larger than everything the
-stack adds. Both numbers are in the constant's doc, because either alone is a
-claim: the lit frame's own GPU cost barely moved (5.506 / 5.439) and the SHIPPED
-frame's is what changed (7.575 / 3.409), which is the instrument's own warning
-about device state paying out.
+**And the lit stack is far cheaper than I4 measured — but its price is a spread,
+not a number, and the wave's "nearly free" was wrong** (audit correction).
+Island wave I4's published pair is **p95 92.3-92.9 lit against 43.7-44.0**, about
+**+48.6 ms** by subtraction. CERT1 quoted two runs on the same city and machine,
+**+0.129 ms and +6.290 ms**, and concluded the stack was nearly free; the audit's
+third run of the same arm at the same head measured **+10.158 ms** (lit p95
+20.818 against a shipped 10.660), 60 % outside the published range. The lit
+column is steady across all three (16.862 / 20.499 / 20.818); the **shipped**
+column is what moves (16.733 / 14.209 / 10.660), so the shipped frame on this
+content is not reproducible here to better than about **1.6x** between runs, and
+the GPU comparison flips sign with it (-2.069 / +2.029 / +2.979 ms). All three
+runs agree on one thing only: it is nowhere near forty-eight. The ceiling is
+therefore minted on the **worst lit p95 recorded**, 20.818, and 38.0 is 1.83x
+it.
 
 `SHIPPING_FRAME_CEILING_MS` is therefore **re-minted 40.0 → 38.0** (and its p99
 twin 48.0 → 46.0), and the instrument now **asserts it over the lit

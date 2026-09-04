@@ -212,13 +212,20 @@ the building across the street casts nothing.
 |---|---|---|---|---|---|
 | whole suite | 16.862 | 16.733 | **+0.129 ms** | 5.506 | 7.575 (**−2.069**) |
 | this arm alone | 20.499 | 14.209 | **+6.290 ms** | 5.439 | 3.409 (**+2.029**) |
+| **the audit's re-run** | **20.818** | **10.660** | **+10.158 ms** | 5.414 | 2.435 (**+2.979**) |
 
-Both are quoted because either alone is a claim. The lit frame's own GPU cost
-barely moved (5.506 / 5.439); what moved is the *shipped* frame's, which is the
-instrument's own warning about device state paying out. Against island wave I4 —
-whose own published pair is **92.3–92.9 lit against 43.7–44.0**, so about
-**+48.6 ms** by subtraction — the stack is now somewhere between a seventh of a
-millisecond and six of them.
+Both were quoted because either alone is a claim — **and the conclusion drawn
+from the two of them was still wrong.** A third run of the same arm at the same
+head, on the same machine and the same adapter, measured **+10.158 ms**, which is
+60 % outside the range this row originally published ("somewhere between a
+seventh of a millisecond and six of them"). The lit column is stable (16.862 /
+20.499 / 20.818); the **shipped** column is what moves (16.733 / 14.209 /
+**10.660**), so this content's shipped frame is not reproducible on this machine
+to better than about **1.6×** between runs. The price is a **spread of roughly
++0.1 to +10.2 ms**, not a number, and the sentence "the lit stack turned out to
+be nearly free" does not survive it. Against island wave I4 — whose own published
+pair is **92.3–92.9 lit against 43.7–44.0**, so about **+48.6 ms** by subtraction
+— it is still far cheaper than it was, and that is all three runs agree on.
 
 **AND PIE WAS RENDERING A DIFFERENT LEVEL.** `window::run_pie` built its
 `PlayerApp` with `RenderSettingsRecord::default()` under a comment saying the
@@ -807,7 +814,12 @@ The island builds in **54.0 s** and cooks in **43.1 s**; the cooked pack is
 them over the **lit** configuration as well as the shipped one — which is the
 discharge of the constant's own standing clause, *"the day a shipped level turns
 the stack on, this ceiling is measuring a different renderer and has to be
-re-minted, not raised."*
+re-minted, not raised."* **The mint is on the worst lit p95 ever recorded here,
+20.818, and not on a delta** (audit): 38.0 is 1.83× it. The lit assertion is
+behind the same three gates the shipped one is — representative adapter,
+non-CI, `--release` — so no slow runner can red on it; verified by reading, and
+the assertion is unreachable on a software rasterizer because the lit
+measurement itself is taken after those two early returns.
 
 ### The content
 

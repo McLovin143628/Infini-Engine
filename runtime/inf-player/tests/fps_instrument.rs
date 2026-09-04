@@ -1369,11 +1369,22 @@ fn the_frame_at_shipping_resolution() {
     // CERT1 authored the stack into the showcase island and the three 3D starter
     // templates, so THIS is the shipped configuration for every level anybody is
     // meant to look at, and `SHIPPING_FRAME_CEILING_MS`'s own doc required the
-    // constant to be re-minted the day that happened. It was — down, 40.0 -> 38.0
-    // — on the measurement that made it possible: the stack costs
-    // **+0.129 ms of p95** on this content and is 2.069 ms CHEAPER on the GPU,
-    // because the depth prepass only runs when SSAO or TAA asks for it and the
-    // scatter overdraw it kills is larger than everything the stack adds.
+    // constant to be re-minted the day that happened. It was — down, 40.0 -> 38.0.
+    //
+    // **What the stack costs is a SPREAD and not a number**, and the CERT1 audit
+    // is why that sentence reads this way. The wave quoted two runs, +0.129 ms
+    // and +6.290 ms of p95, and concluded "somewhere between a seventh of a
+    // millisecond and six of them". A third run of this same arm on the same
+    // machine and the same adapter, at the same head, measured
+    // **p95 20.818 lit against 10.660 shipped: +10.158 ms**, with the lit GPU
+    // frame 5.414 ms against 2.435 (+2.979, i.e. DEARER, where the first run had
+    // it 2.069 ms cheaper). Three runs, three answers, and the shipped baseline
+    // is the half that moves: 16.733 / 14.209 / 10.660. So the honest reading is
+    // that this content's shipped frame is not reproducible to better than about
+    // 1.6x between runs, that the stack's price is bounded by the runs at
+    // roughly +0.1 to +10.2 ms, and that the ratchet below is minted on the
+    // WORST lit p95 anyone has recorded here (20.818) rather than on a delta.
+    // 38.0 is 1.83x that.
     //
     // **Behind the adapter and CI gates, on purpose.** It is 480 more frames of a
     // GI + VSM + TAA frame, which on a software rasterizer is minutes rather than
@@ -1499,10 +1510,11 @@ fn the_frame_at_shipping_resolution() {
             println!(
                 "{label} THE STACK'S PRICE, same resolution and same content: p95 \
              {:.3} ms lit against {base_p95:.3} ms as shipped ({:+.3} ms), GPU \
-             frame {:.3} ms against {base_gpu:.3} ms ({:+.3} ms). Reported, never \
-             asserted — every ceiling in this file is set from the shipped \
-             configuration, and this is what the shipped configuration is NOT \
-             paying for.",
+             frame {:.3} ms against {base_gpu:.3} ms ({:+.3} ms). The PRICE is \
+             reported and never asserted; the lit p95 and p99 themselves ARE \
+             asserted, against the same ceilings as the shipped configuration \
+             (wave CERT1 — this line said 'reported, never asserted' about the \
+             whole row while the fold three assertions below already covered it).",
                 r.p95,
                 r.p95 - base_p95,
                 m.gpu_frame_ms,
