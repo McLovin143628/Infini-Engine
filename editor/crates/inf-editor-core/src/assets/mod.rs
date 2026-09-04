@@ -715,6 +715,53 @@ impl AssetProject {
         )
     }
 
+    /// [`write_tiled_texture`](Self::write_tiled_texture), to an **exact path**
+    /// (wave ASSET0) — the tiled twin of
+    /// [`write_asset_at`](Self::write_asset_at).
+    ///
+    /// # Why a re-run needed one
+    ///
+    /// `write_tiled_texture` calls `unique_asset_path`, which is right for an
+    /// author importing a file twice on purpose and wrong for a tool that
+    /// re-runs over the same manifest: measured, the UE bridge's second run over
+    /// an unchanged export wrote **106 duplicate assets** — `X_1.inf_tex`
+    /// beside `X.inf_tex` — under fresh GUIDs, doubling the project's texture
+    /// bytes and leaving the first copy referenced by nothing. An importer whose
+    /// output is a pure function of its input should overwrite its own output.
+    ///
+    /// Keeps whatever id is registered at `path` when the kind matches, so a
+    /// re-import updates in place and every reference into it survives.
+    pub fn write_tiled_texture_at(
+        &mut self,
+        path: &Path,
+        image: &inf_material::TiledTextureImage,
+        source: Option<String>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
+        let bytes = image.as_bytes();
+        let hash = ContentHash::of(bytes);
+        let reuse = match self.db.get_by_path(path).map(|e| (e.id(), e.kind())) {
+            Some((id, kind)) if kind == inf_material::TiledTextureImage::KIND => Some(id),
+            Some((id, _)) => {
+                self.db.remove(id);
+                None
+            }
+            None => None,
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        inf_asset::write_atomically(path, bytes)?;
+        self.register_written_asset(
+            path.to_path_buf(),
+            inf_material::TiledTextureImage::KIND,
+            hash,
+            source,
+            import,
+            reuse,
+        )
+    }
+
     /// Rewrite an existing asset's payload (data-asset editors save through
     /// this), updating the content hash + dependency edges.
     ///

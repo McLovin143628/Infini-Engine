@@ -327,6 +327,93 @@ fn a_manifest_becomes_a_textured_material_and_a_mesh() {
     );
 }
 
+/// **A SECOND IMPORT OF THE SAME MANIFEST WRITES THE SAME ASSETS.**
+///
+/// An importer whose output is a pure function of its input has to overwrite its
+/// own output, and this one did not: `write_asset` and `write_tiled_texture` both
+/// call `unique_asset_path`, which is right for an author importing a file twice
+/// on purpose and wrong for a tool that re-runs. Measured on the real island
+/// project before the fix — **106 duplicate assets**, `X_1.inf_tex` beside
+/// `X.inf_tex` under fresh GUIDs, doubling the texture bytes and leaving the
+/// first copy referenced by nothing.
+///
+/// The assertion is on the IDS and on the file count, not on "it did not error",
+/// because the duplicating version did not error either. Un-fix mutation:
+/// swapping either writer back to its `unique_asset_path` door fails both.
+#[test]
+fn importing_one_manifest_twice_writes_one_set_of_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = staging(dir.path());
+    let content = dir.path().join("project").join("Content");
+
+    let count = |c: &Path| -> usize {
+        walk(c)
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("inf_tex") | Some("inf_mat") | Some("inf_mesh")
+                )
+            })
+            .count()
+    };
+
+    let mut project = AssetProject::open(&content).expect("a project opens");
+    let first = import_manifest(&mut project, &manifest, &UeImportOptions::default())
+        .expect("the first import");
+    let after_first = count(&content);
+    drop(project);
+
+    // A FRESH project over the same directory, which is what a second
+    // `inf-import` run is: the database is rebuilt by scanning what is there.
+    let mut project = AssetProject::open(&content).expect("it re-opens");
+    let second = import_manifest(&mut project, &manifest, &UeImportOptions::default())
+        .expect("the second import");
+    let after_second = count(&content);
+
+    assert_eq!(
+        after_first,
+        after_second,
+        "the second import wrote {} more assets than the first",
+        after_second as i64 - after_first as i64
+    );
+    assert_eq!(
+        first.materials, second.materials,
+        "a material's GUID moved between two imports of one manifest"
+    );
+    assert_eq!(
+        first.textures, second.textures,
+        "a texture's GUID moved between two imports of one manifest"
+    );
+    assert_eq!(
+        first.meshes.iter().map(|m| m.1).collect::<Vec<_>>(),
+        second.meshes.iter().map(|m| m.1).collect::<Vec<_>>(),
+        "a mesh's GUID moved -- the import cache did not serve the second run"
+    );
+    println!("ASSET0 GATE: two imports, {after_first} assets both times, same ids");
+}
+
+/// Every file under `dir`, recursively — the gate's own walk, because counting
+/// what an importer wrote is the only way to see a duplicate it did not report.
+fn walk(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out.into_iter()
+}
+
 /// **The clamp halves through the mip chain's own filter.**
 ///
 /// Not "it got smaller": the clamped import must be bit-identical to the

@@ -508,9 +508,12 @@ fn import_material(
         let settings: TextureImportSettings = kind.settings(false);
         let image = inf_material::build_tiled_texture(rgba, w, h, settings)
             .map_err(|e| AssetError::Import(format!("{}_{slot}: {e}", mat.key)))?;
-        let id = project.write_tiled_texture(
-            dest,
-            &format!("{name}_{slot}"),
+        // **A DETERMINISTIC PATH**, so a second run over an unchanged manifest
+        // overwrites its own output instead of writing `X_1.inf_tex` beside it.
+        // Measured before this line existed: the second import wrote 106
+        // duplicate assets and doubled the project's texture bytes.
+        let id = project.write_tiled_texture_at(
+            &dest.join(format!("{name}_{slot}.inf_tex")),
             &image,
             Some(mat.source_note()),
             None,
@@ -625,7 +628,8 @@ fn import_material(
             ));
             Ok(id)
         }
-        None => project.write_asset(dest, &name, &asset, Some(mat.source_note()), deps, None),
+        // …and the material likewise, for the same reason and by the same door.
+        None => project.write_asset_at(&dest.join(format!("{name}.inf_mat")), &asset, deps, None),
     }
 }
 
