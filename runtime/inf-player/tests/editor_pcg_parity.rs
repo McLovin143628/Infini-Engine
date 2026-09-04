@@ -23,6 +23,19 @@
 //! fourteen the island's 172 blocks name, reached here through the dev-only
 //! `inf-editor-core` dependency this crate already carries.
 //!
+//! # Mutation-verified, and which mutation
+//!
+//! Perturbing the player's `GrammarContext.seed_offset` by one takes Office from
+//! 5054 instances / 4677 solids to **6124 / 5662** with a different digest, and
+//! reds this file while the editor's half stays green — which is the pin doing
+//! exactly what it is for, including saying which host moved.
+//!
+//! The FIRST mutation tried was `rule.scatter.seed`, and it changed **nothing**.
+//! The settlement zone documents are grammar- and building-driven; they carry no
+//! scatter rule for that fold to reach, so a gate "verified" against it would
+//! have been verified against a code path this fixture never runs. Recorded here
+//! so the next person mutates the line that matters.
+//!
 //! # What the digest is over
 //!
 //! Every scattered instance's position, rotation, scale, mesh GUID, kind and

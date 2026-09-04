@@ -30598,7 +30598,26 @@ orders have nothing to do with each other.
 | Apartment | 6194 | 5811 | `c21c5456d6c178dc` |
 | House | 2302 | 2146 | `6e9cc24218adcca6` |
 
-— and the same four digests reached from the other end of the street. The digest
+— and the same four digests reached from the other end of the street.
+
+**And the SHIPPED PLAYER computes the same four**, in
+`runtime/inf-player/tests/editor_pcg_parity.rs`: the same fixture city built in
+the player's own world types, evaluated through `evaluate_pcg_volumes_in`,
+digested by the same function, asserted against the same committed rows. Neither
+host can link the other — this evaluation is in the Tauri crate and that one in
+the player — so the comparison is mediated by those constants, and duplicating
+them is what makes it a pin rather than a shared helper that could drift with
+both halves at once: a change to either host turns exactly one of the two tests
+red, and which one says which host moved.
+
+**Mutation-verified, and which mutation.** Perturbing the player's
+`GrammarContext.seed_offset` by one takes Office from 5054/4677 to **6124/5662**
+with a different digest, reds the player's half and leaves the editor's green.
+The FIRST mutation tried was `rule.scatter.seed`, and it changed **nothing**:
+the settlement zone documents are grammar- and building-driven and carry no
+scatter rule for that fold to reach, so a gate "verified" against it would have
+been verified against a code path the fixture never runs. Written into the test's
+own doc so the next person mutates the line that matters. The digest
 is over position, rotation, scale, mesh GUID, kind and extent of every instance
 **and** over `ScatteredSolid`'s centre, half-extents and rotation, because
 `STRUCTURE_LOD_M` and `INTERIOR_LOD_M` band a structure by its own size. Not a
