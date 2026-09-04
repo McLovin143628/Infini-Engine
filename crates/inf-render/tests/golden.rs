@@ -4152,9 +4152,28 @@ fn render_frames_with(
 /// by scaling the multiplier. So the argument below is still the pre-EDIT1
 /// number and the π rides here, once.
 ///
-/// That is deliberately stronger evidence than re-blessing would have been: if
-/// the fix were anything but a uniform scale, `× π` could not put these frames
-/// back inside tolerance, and four of them are outside it without this line.
+/// **Four of the five hold their images this way and one does not**, and that is
+/// worth reading rather than smoothing over. EDIT1 removed a π from TWO places:
+/// the consumer (`gi_irradiance`, which every term rides) and the gather's HIT
+/// radiance (`gi_probes.wgsl`, which only the sun-bounce term rides). One
+/// multiplier on `intensity` restores the sky-miss term exactly and the
+/// sun-bounce term only partly, so the compensation is exact for a scene the sky
+/// dominates and approximate for one a lit wall does:
+///
+/// | golden | subject | mean diff |
+/// |---|---|---|
+/// | `gi_emissive` | an emissive bar (no π either side) | 0.000000 |
+/// | `gi_scatter_neon` | emissive instances | 0.000000 |
+/// | `gi_terrain` | a bounce off sunlit ground | 0.028975 |
+/// | `gi_bleed` | a bounce off a sunlit wall | 0.044445 |
+/// | `gi_specular` | that bounce, in a reflection | **0.072099** |
+///
+/// The first four are inside the 0.06 mean tolerance and are NOT re-blessed. The
+/// fifth is re-blessed, once, with that cause — and every structural assertion it
+/// exists for still passes on the new frame (grazing specular 210.9 against a
+/// flat 144.0, near-wall red/green 1.367 against a far 1.091, a smooth surface
+/// moving 0.1280 against a matte 0.0590).
+///
 /// **The showcase island does not get this compensation** — it keeps
 /// `gi_intensity: 1.0`, and that is the whole point of the wave.
 const GI_LAMBERT_PI: f32 = std::f32::consts::PI;

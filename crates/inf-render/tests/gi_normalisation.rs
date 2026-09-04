@@ -302,3 +302,218 @@ fn the_furnace_is_a_statement_about_the_gather_and_not_about_the_ambient_fallbac
          the environment: {off:.3} vs {unit:.3}"
     );
 }
+
+// ── the lit street, and the ceiling the island's frame is judged by ──────────
+
+/// How far switching dynamic GI ON may lift a daylight street's 95th percentile
+/// luminance, in 8-bit levels.
+///
+/// **A LIFT and not an absolute**, and that is the whole design of this arm. The
+/// FIX1 audit's table is a pair of readings of one frame — p95 **246.6** with GI
+/// on against **169.7** with it off, `frac>240` **0.135** against **0.000** —
+/// and what it indicts is the DIFFERENCE. An absolute ceiling would instead be
+/// measuring how bright this fixture's own sun is, which is a number a fixture
+/// author picks and has nothing to do with the defect. The first cut of this
+/// file used absolutes and failed on a tree the furnace says is correct, because
+/// the street it invented is sunnier than the island.
+///
+/// Bounce light is real and it must be allowed to lift a frame. Measured on this
+/// street: **+25.1** with the units fixed, **+49.4** with the pre-EDIT1 ones.
+///
+/// Thirty and not twenty, and the reason is a term this wave did NOT fix: the
+/// gather's hit radiance carries no `n·l`, because a voxel stores an albedo and
+/// no normal. That makes every bounce an over-estimate by the average of a
+/// cosine over the lit hemisphere rather than by a factor of π — a modelling
+/// approximation of single-bounce voxel GI, not a unit error, and carried with
+/// its number rather than hidden inside a ceiling chosen to fit it.
+const GI_P95_LIFT_CEILING: f64 = 30.0;
+
+/// How much of the frame dynamic GI may push over 240 that was not there
+/// already. The audit measured **+0.135** of the whole frame; a fiftieth is a
+/// generous reading of "a bounce brightened some sunlit walls".
+///
+/// **This is the sharp one.** Measured on this street: **+0.0000** with the
+/// units fixed and **+0.1048** with the pre-EDIT1 ones. Bounce light is allowed
+/// to brighten a frame and is not allowed to destroy it, and the difference
+/// between those two readings is the difference between a lit street and the
+/// author's screenshot.
+const GI_CLIPPED_LIFT_CEILING: f64 = 0.02;
+
+const STREET_W: u32 = 320;
+const STREET_H: u32 = 180;
+
+/// The island's own render block, as `RenderSettingsRecord::lit_showcase`
+/// authors it and `apply_record` maps it: shadows, GI, bloom, SSAO, TAA and
+/// flare, with `gi_intensity` at the record default.
+///
+/// `gi_intensity` is `Option` so one function serves all three rows: `None` is
+/// the GI-off baseline, `Some(1.0)` is this tree, and `Some(π)` is the frame as
+/// it shipped — putting the factor back into the level value is exactly the
+/// arithmetic this wave took out of `gi_irradiance`.
+fn lit_showcase_settings(gi_intensity: Option<f32>) -> RenderSettings {
+    RenderSettings {
+        gi: GiSettings {
+            enabled: gi_intensity.is_some(),
+            intensity: gi_intensity.unwrap_or(1.0),
+            ..GiSettings::default()
+        },
+        shadows: inf_render::ShadowSettings {
+            enabled: true,
+            ..inf_render::ShadowSettings::default()
+        },
+        bloom: inf_render::BloomSettings {
+            enabled: true,
+            ..inf_render::BloomSettings::default()
+        },
+        ssao: inf_render::SsaoSettings {
+            enabled: true,
+            ..inf_render::SsaoSettings::default()
+        },
+        taa: true,
+        flare: inf_render::FlareSettings {
+            enabled: true,
+            ..inf_render::FlareSettings::default()
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// A daylight street: pale ground, two rows of pale blocks, one sun.
+///
+/// **A fixture, and the report says so.** It is not the showcase island — it has
+/// no atmosphere LUT, no meshlets, no virtual textures and no city. What it does
+/// have is the thing the FIX1 audit's table was about: a lot of unoccluded sky
+/// over a lot of pale albedo, which is the configuration in which an ambient
+/// term that is π times too strong stops being a look and becomes a wash. The
+/// real-host reading is the demo loop's own frame, scored in the ledger.
+fn lit_street() -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // **The engine's OWN sky**, left at `SkyParams::default()` and not authored
+    // brighter. The first cut of this fixture set the zenith to 0.35-0.85 linear
+    // radiance under a sun of intensity 3, and measured a 43-level lift on a
+    // tree the white furnace says is exactly normalised -- because a sky that
+    // bright IS a second sun, and a physically correct ambient term will spend
+    // it. That reading was the fixture's exposure, not the engine's units, and
+    // it is exactly the mistake an absolute ceiling would have enshrined.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(60.0, 1.0, 400.0),
+        [0.42, 0.46, 0.38, 1.0],
+        1,
+    ));
+    let mut id = 2;
+    for k in 0..24 {
+        let z = 70.0 - f64::from(k) * 14.0;
+        for side in [-7.0, 7.0] {
+            let mut b = MeshInstance::lit(
+                DVec3::new(side, 6.0, z),
+                Quat::IDENTITY,
+                Vec3::new(6.0, 14.0, 10.0),
+                [0.80, 0.82, 0.78, 1.0],
+                id,
+            );
+            b.roughness = 0.85;
+            scene.instances.push(b);
+            id += 1;
+        }
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.85, 0.4).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    scene
+}
+
+/// p95 luminance and the fraction over 240 — the two numbers the FIX1 audit
+/// scored `03-pie-b.png` with, so this table reads beside that one.
+fn frame_stats(rgba: &[u8]) -> (f64, f64) {
+    let mut lum: Vec<f64> = rgba
+        .chunks_exact(4)
+        .map(|p| 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]))
+        .collect();
+    let hot = lum.iter().filter(|l| **l > 240.0).count() as f64 / lum.len() as f64;
+    lum.sort_by(f64::total_cmp);
+    let p95 = lum[(lum.len() as f64 * 0.95) as usize];
+    (p95, hot)
+}
+
+fn street_shot(gpu: &GpuContext, gi_intensity: Option<f32>) -> (f64, f64) {
+    let scene = lit_street();
+    let target = HeadlessTarget::new(gpu, STREET_W, STREET_H);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(lit_showcase_settings(gi_intensity));
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 1.6, 60.0),
+        forward: Vec3::new(0.0, 0.0, -1.0),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: STREET_W,
+        height: STREET_H,
+        ortho: None,
+    };
+    let mut last = Vec::new();
+    // Eight frames: TAA is on, so the first few are a converging history.
+    for _ in 0..8 {
+        renderer.render(gpu, &scene, &view, &target.view, (STREET_W, STREET_H));
+        last = target.read_rgba(gpu).expect("readback");
+    }
+    frame_stats(&last)
+}
+
+/// **The frame arm** (wave EDIT1, clause 0): switching dynamic GI on must add
+/// bounce to a daylight street, not a wash — and the control is the value
+/// `gi_intensity = 1.0` used to mean.
+#[test]
+fn dynamic_gi_lights_a_daylight_street_rather_than_washing_it_out() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // The baseline: the same street with GI off. This is the audit's own second
+    // row, and it is what the lift is measured from.
+    let (p95_off, hot_off) = street_shot(&gpu, None);
+    let (p95_on, hot_on) = street_shot(&gpu, Some(1.0));
+    // The control: putting π back into the intensity is EXACTLY the arithmetic
+    // this wave removed from `gi_irradiance`, so this row IS the frame as it
+    // shipped — the same scene, the same post chain, the old units.
+    let (p95_old, hot_old) = street_shot(&gpu, Some(std::f32::consts::PI));
+    println!("EDIT1 clause 0 - the lit street under `lit_showcase`");
+    println!("  GI off                       p95 {p95_off:6.1}  frac>240 {hot_off:.4}");
+    println!(
+        "  GI on, intensity 1.0         p95 {p95_on:6.1}  frac>240 {hot_on:.4}  lift {:+.1} / {:+.4}",
+        p95_on - p95_off,
+        hot_on - hot_off
+    );
+    println!(
+        "  GI on, intensity pi  SHIPPED p95 {p95_old:6.1}  frac>240 {hot_old:.4}  lift {:+.1} / {:+.4}",
+        p95_old - p95_off,
+        hot_old - hot_off
+    );
+    assert!(
+        p95_on - p95_off <= GI_P95_LIFT_CEILING,
+        "GI lifted p95 by {:.1} levels, over the {GI_P95_LIFT_CEILING} ceiling",
+        p95_on - p95_off
+    );
+    assert!(
+        hot_on - hot_off <= GI_CLIPPED_LIFT_CEILING,
+        "GI pushed {:.4} more of the frame over 240, past {GI_CLIPPED_LIFT_CEILING}",
+        hot_on - hot_off
+    );
+    // ...and the control must FAIL the same ceilings, or they are not measuring
+    // anything. The falsification, inside the arm.
+    assert!(
+        p95_old - p95_off > GI_P95_LIFT_CEILING || hot_old - hot_off > GI_CLIPPED_LIFT_CEILING,
+        "the pre-EDIT1 normalisation cleared the ceilings too (p95 lift {:.1}, clipped lift {:.4}) - this arm cannot see the defect it was written for",
+        p95_old - p95_off,
+        hot_old - hot_off
+    );
+}

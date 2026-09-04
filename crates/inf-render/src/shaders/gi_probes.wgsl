@@ -182,7 +182,27 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Single bounce + injected emission. Emissive is added rather
                 // than multiplied by visibility: a light source does not need the
                 // sun's permission to glow.
-                radiance = v.albedo * gi.sun_color.rgb * vis + v.emissive;
+                //
+                // **The Lambert 1/π, here too** (wave EDIT1). What a probe ray
+                // gathers is the RADIANCE LEAVING the surface it hit, and a
+                // Lambert surface under a light of radiance `S` leaves
+                // `albedo/π · S`, which is what `shade_light` spells out as
+                // `kd * albedo / PI` two files away. Without the divide this
+                // term was π times a lit wall — and on a sunlit street, where
+                // most rays hit a wall rather than the sky, it is the DOMINANT
+                // half of the gather, not the miss term. Measured: with the
+                // consumer's π removed and this one still in, GI lifted a
+                // daylight street's p95 by 49 levels under the engine's own
+                // dim default sky, which is a number no sky that dim can pay
+                // for. Emissive is already a radiance and keeps its units.
+                //
+                // The cosine is still missing and stays missing: the voxel
+                // carries no normal, so `n·l` cannot be evaluated. That makes
+                // this an over-estimate by the average of a cosine over the lit
+                // hemisphere rather than by a factor of π, and it is a
+                // modelling approximation of single-bounce voxel GI rather than
+                // a unit error. Carried, with the number, in the ledger.
+                radiance = v.albedo * gi.sun_color.rgb * vis * (1.0 / PI) + v.emissive;
                 hit = true;
                 break;
             }
