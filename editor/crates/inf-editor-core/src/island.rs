@@ -93,10 +93,19 @@ fn car_paint(site: usize) -> inf_ecs::math::Color {
 
 /// How far above the ground a hero is spawned.
 ///
-/// A character placed exactly on the surface is one the first ground snap has to
-/// resolve out of the floor; a metre is clear of any rounding the design's own
-/// road profile carries and is a fall of 0.45 s at 9.81 m/s².
-pub const START_LIFT_M: f64 = 1.0;
+/// **Zero since wave FIX1**, and the metre it replaces is the whole of CERT1's
+/// D-18. The old value's reason was that "a character placed exactly on the
+/// surface is one the first ground snap has to resolve out of the floor" — which
+/// is true, and is a description of the ground snap doing its job on a frame
+/// nobody sees. What the lift bought instead was a fall the player watches:
+/// **0.9883 m** of settle measured on the fixture and **0.9769 m** on the shipped
+/// island, 0.45 s of it, every time the Play button is pressed.
+///
+/// It stays a named constant rather than becoming a literal `0.0` at the call
+/// site because it is still the one place the question is answered, and because
+/// `the_reported_start_is_the_one_the_level_spawns_at` pins its LINEARITY: a lift
+/// of `x` must raise the start by exactly `x` and move nothing else.
+pub const START_LIFT_M: f64 = 0.0;
 
 /// How tall the island's hero is, metres — **the starter character's own
 /// height**, not a number this file chose (SK1c).
@@ -2479,5 +2488,115 @@ mod tests {
         let p = island_cover_payload(7);
         assert!(p.graph_json.is_none(), "vegetation carries no grammar");
         assert_eq!(p.schema_version, inf_pcg::PcgAssetPayload::CURRENT_VERSION);
+    }
+    /// **The hero starts on the STREET, not inside a building** (wave FIX1).
+    ///
+    /// The author's demo showed a hero apparently standing in a wall, and the
+    /// brief asked for the start to be moved to the nearest clear kerb. **It is
+    /// already on the street and this arm is the measurement that says so** —
+    /// which is why nothing moves it. `player_start` puts the hero at the first
+    /// city site's exact centre, and `settlement::plan_site` lays its grid so
+    /// that block `col = 0` begins `half_street` metres from that centre: the
+    /// start stands in the middle of the crossroads, with a `setback_m` of lot
+    /// inset on top of the reserve before any wall can begin.
+    ///
+    /// What was missing was any arm at all. The grid ladder is a search over
+    /// pitches (`grid_for`), the site radius is authored, and nothing anywhere
+    /// asserted that the two leave the start clear — so a recipe edit that
+    /// shrank Harbour City would have put a building on the player, silently.
+    /// The bound is `half_street`, taken from the settlement's own plan rather
+    /// than restated, so it stays true when the ladder changes gear.
+    #[test]
+    fn the_island_start_stands_clear_of_every_settlement_block() {
+        for rel in crate::island::ISLAND_RECIPES {
+            let Some(d) = crate::island::committed_design(rel) else {
+                continue;
+            };
+            let start = d.start(0.0);
+            let at = glam::DVec2::new(start.x, start.z);
+            let plans = crate::settlement::settlements(&d);
+            assert!(!plans.is_empty(), "{rel} plans no settlements");
+            let mut nearest = f64::MAX;
+            let mut nearest_name = String::new();
+            let mut inside = 0usize;
+            let mut reserve = f64::MAX;
+            for plan in &plans {
+                // The reserve this settlement's own grid keeps: half a street.
+                reserve = reserve.min(plan.street_m * 0.5);
+                for b in &plan.blocks {
+                    // Signed distance to an axis-aligned rectangle: negative
+                    // inside, which is the number a "not inside a building"
+                    // claim needs.
+                    let d = (at - b.centre).abs() - b.half;
+                    let outside = d.max(glam::DVec2::ZERO).length();
+                    let sd = if d.x <= 0.0 && d.y <= 0.0 {
+                        d.x.max(d.y)
+                    } else {
+                        outside
+                    };
+                    if sd < nearest {
+                        nearest = sd;
+                        nearest_name =
+                            format!("{} {} {},{}", plan.name, b.archetype.name(), b.col, b.row);
+                    }
+                    if sd < 0.0 {
+                        inside += 1;
+                    }
+                }
+            }
+            println!(
+                "FIX1 start clearance — {rel}: start ({:.1}, {:.1}), nearest block `{nearest_name}` \
+                 at {nearest:+.3} m, {} blocks over {} settlements, street reserve {reserve:.1} m",
+                start.x,
+                start.z,
+                plans.iter().map(|p| p.blocks.len()).sum::<usize>(),
+                plans.len()
+            );
+            assert_eq!(
+                inside, 0,
+                "{rel} builds {inside} block(s) OVER the player start"
+            );
+            assert!(
+                nearest >= reserve - 1.0e-9,
+                "{rel}'s start is {nearest:.3} m from `{nearest_name}`, inside the \
+                 settlement's own {reserve:.1} m street reserve"
+            );
+        }
+    }
+
+    /// **The hero starts ON the ground, not a metre above it** (wave FIX1).
+    ///
+    /// [`START_LIFT_M`] was `1.0` and CERT1 measured its consequence twice: a
+    /// **0.9883 m** settle on the fixture and **0.9769 m** on the shipped island,
+    /// which is the lift and nothing else — the island spawned its hero a metre
+    /// in the air and let it fall. The lift's own doc gave the reason ("a
+    /// character placed exactly on the surface is one the first ground snap has
+    /// to resolve out of the floor"), and the ground snap is the thing that
+    /// exists to do exactly that: `CharacterController3D` resolves a penetration
+    /// on its first step, which is a frame nobody sees, where a metre of fall is
+    /// half a second everybody does.
+    ///
+    /// This arm is the value, pinned, plus the linearity the lift's one caller
+    /// depends on. The fall it prevents is measured by `parity_cert`'s
+    /// `the_islands_pawn_comes_to_rest_on_the_island`, over a real cooked island.
+    #[test]
+    fn the_island_start_is_the_ground_the_design_committed() {
+        assert_eq!(
+            crate::island::START_LIFT_M,
+            0.0,
+            "a hero lifted off its own ground falls in front of the player"
+        );
+        for rel in crate::island::ISLAND_RECIPES {
+            let Some(d) = crate::island::committed_design(rel) else {
+                continue;
+            };
+            let feet = d.start(crate::island::START_LIFT_M);
+            let ground = d.start(0.0);
+            assert_eq!(feet.y, ground.y, "{rel}: the start is off its own ground");
+            assert!(
+                feet.y > d.recipe.sea.level_m,
+                "{rel}: the hero starts under water"
+            );
+        }
     }
 }

@@ -192,10 +192,29 @@ fn settle(sim: &mut RuntimeSim, max_steps: usize) -> usize {
 /// body on nothing does not. The control is the same hero lifted 50 m, which
 /// must still be moving when the subject has stopped — without it, "it stopped"
 /// is a claim an arm with gravity switched off would also pass.
+///
+/// # The settle itself (wave FIX1)
+///
+/// The 0.9883 m was **`START_LIFT_M`, and nothing else**. This arm's third
+/// assertion used to bound the drop at 2 m, which is a bound the metre passed —
+/// so the arm recorded the defect and could not fail on it. FIX1 set the lift to
+/// zero, and the bound is now `SETTLE_CEILING_M`, tight enough that putting the
+/// metre back reds this arm. What remains inside it is the honest remainder the
+/// lift was hiding: the start's HEIGHT comes from the nearest committed road
+/// vertex, and the ground under the start comes from the built heightfield, so
+/// the two disagree by whatever the road profile rounded — `inf-island`'s own
+/// `the_reported_start_is_the_one_the_level_spawns_at` bounds that gap at 5 m and
+/// prints it as the START GAP.
 #[test]
 fn the_islands_pawn_comes_to_rest_on_the_island() {
     const SETTLE: usize = 300;
     const LIFT_M: f64 = 50.0;
+    /// How far the hero may settle before the spawn is a DROP (wave FIX1).
+    ///
+    /// A quarter of a metre: four times the ground snap's own working room and a
+    /// quarter of the metre this arm used to permit, so `START_LIFT_M` cannot go
+    /// back to 1.0 without this file saying so.
+    const SETTLE_CEILING_M: f64 = 0.25;
 
     let tmp = tempfile::tempdir().expect("a temp dir");
     let pack = cook_fixture(tmp.path());
@@ -246,8 +265,9 @@ fn the_islands_pawn_comes_to_rest_on_the_island() {
     // …and the settle is a SETTLE, not a plunge: the hero is spawned near its
     // ground rather than dropped onto it from a height a player would notice.
     assert!(
-        drop.abs() < 2.0,
-        "the hero fell {drop:.3} m before it stopped — it is spawned that far off its own ground"
+        drop.abs() < SETTLE_CEILING_M,
+        "the hero fell {drop:.3} m before it stopped — it is spawned that far off its own \
+         ground, against a {SETTLE_CEILING_M:.2} m ceiling"
     );
 }
 
