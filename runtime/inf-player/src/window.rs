@@ -824,8 +824,12 @@ impl PlayerApp {
         let report = crate::win_host::take_keyboard_focus(hwnd as isize);
         // Once, at the moment it lands, and once on the first attempt — enough
         // to diagnose a session from the Output Log and not a line a frame.
-        if report.landed || self.grab_frames == 0 {
+        if report.landed || self.grab_frames <= 1 {
             eprintln!("inf-player: keyboard focus {report}");
+            // …and into the demo loop's own log, because the editor's Output Log
+            // is behind the game's window and a scripted session has nowhere
+            // else to read it.
+            self.hero_log.note(&format!("keyboard focus {report}"));
         }
         if report.landed {
             self.keyboard_grabbed = true;
@@ -1336,11 +1340,21 @@ impl ApplicationHandler for PlayerApp {
                 // leave the rectangle.
                 self.focused = false;
                 self.set_pointer_capture(false);
+                // Who has it now? A session that quietly loses the keyboard is
+                // the defect this wave exists to close, so the demo loop's log
+                // records every handover rather than only the first grab.
+                let steps = self.sim.steps();
+                self.hero_log.note(&format!(
+                    "focus LOST at step {steps}; the foreground is now {}",
+                    crate::win_host::foreground_report()
+                ));
             }
             // FIX1: focus regained. The capture is not taken here — it is taken
             // by the one rule in `frame`, which also knows about the menu.
             WindowEvent::Focused(true) => {
                 self.focused = true;
+                let steps = self.sim.steps();
+                self.hero_log.note(&format!("focus GAINED at step {steps}"));
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}

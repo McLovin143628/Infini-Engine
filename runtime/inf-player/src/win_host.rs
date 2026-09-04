@@ -89,8 +89,9 @@ mod imp {
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowLongPtrW,
-        GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, GUITHREADINFO, GWL_STYLE,
-        SW_SHOW, WS_CHILD,
+        GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow, GUITHREADINFO,
+        GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SW_SHOW, WS_CHILD,
     };
 
     use super::FocusReport;
@@ -142,6 +143,22 @@ mod imp {
             return None;
         }
         unsafe { GetParent(hwnd) }.ok().filter(|p| !p.0.is_null())
+    }
+
+    /// The foreground window, its owning process and its focus.
+    pub fn foreground_report() -> String {
+        let fg = unsafe { GetForegroundWindow() };
+        let mut pid = 0u32;
+        let tid = if fg.0.is_null() {
+            0
+        } else {
+            unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) }
+        };
+        format!(
+            "hwnd={:#x} pid={pid} tid={tid} focus={:#x}",
+            i(fg),
+            foreground_focus()
+        )
     }
 
     pub fn take_keyboard_focus(hwnd: isize) -> FocusReport {
@@ -215,6 +232,21 @@ mod imp {
                 r.attached = attached;
                 unsafe {
                     let _ = ShowWindow(win, SW_SHOW);
+                    // **The Z-order, taken separately from the foreground.**
+                    //
+                    // `BringWindowToTop` and `SetForegroundWindow` are both
+                    // subject to the foreground LOCK, so on a run where the lock
+                    // is against us the window stays behind the editor and every
+                    // click a person aims at it lands on the editor instead —
+                    // measured twice at this head, 0.000 m of hero movement both
+                    // times, against 12.816 m on the run where the window came
+                    // up in front by itself. A topmost/not-topmost pair is not
+                    // subject to that lock: it raises the window and then gives
+                    // the always-on-top property straight back, which is what
+                    // makes this reliable rather than lucky.
+                    let raise = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+                    let _ = SetWindowPos(win, Some(HWND_TOPMOST), 0, 0, 0, 0, raise);
+                    let _ = SetWindowPos(win, Some(HWND_NOTOPMOST), 0, 0, 0, 0, raise);
                     let _ = BringWindowToTop(win);
                     let _ = SetForegroundWindow(win);
                     let _ = SetFocus(Some(win));
@@ -256,6 +288,10 @@ mod imp {
         }
     }
 
+    pub fn foreground_report() -> String {
+        "not windows".to_string()
+    }
+
     pub fn release_keyboard_focus() {}
 }
 
@@ -281,6 +317,13 @@ pub fn console_report() -> String {
 /// focus attaches nothing new and returns `landed: true`.
 pub fn take_keyboard_focus(hwnd: isize) -> FocusReport {
     imp::take_keyboard_focus(hwnd)
+}
+
+/// The foreground window, its owning process and its focus, as one line —
+/// logged on every focus handover so a session that quietly loses the keyboard
+/// says WHO took it rather than only that it happened.
+pub fn foreground_report() -> String {
+    imp::foreground_report()
 }
 
 /// Undo the input-queue attachment [`take_keyboard_focus`] made, if it made one.

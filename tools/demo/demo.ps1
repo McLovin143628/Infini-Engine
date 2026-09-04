@@ -191,6 +191,18 @@ public class InfInput {
   [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] p, int cb);
   [DllImport("user32.dll")] static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  // Which window the keyboard is going to, and who owns it.
+  public static string Foreground() {
+    IntPtr h = GetForegroundWindow();
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    return string.Format("hwnd=0x{0:x} pid={1}", h.ToInt64(), pid);
+  }
   const uint KEYEVENTF_SCANCODE = 0x0008, KEYEVENTF_KEYUP = 0x0002;
   static void Key(ushort scan, bool down) {
     INPUT[] i = new INPUT[1];
@@ -220,13 +232,50 @@ public class InfInput {
 }
 "@
 
-# A click into the middle of the viewport: the embedded player's window takes the
-# keyboard on a click even when the WebView had it (mouse messages are routed by
-# hit-test, key messages by focus — the whole of the FIX1 finding).
+# WHERE TO CLICK, and it is not a detail.
+#
+#    An EMBEDDED player is a `WS_CHILD` with no main window of its own, so the
+#    middle of the screen is the middle of the viewport hole and clicking there
+#    hands it the keyboard (mouse messages are routed by hit-test, key messages
+#    by focus -- the whole of the FIX1 finding).
+#
+#    A NEW-WINDOW player is a separate top-level window that does NOT cover the
+#    screen. Clicking the screen's centre there lands on the maximized EDITOR
+#    behind it, which takes the foreground back and leaves the game unfocused --
+#    measured, and it is why this wave's first new-window run reported 0.000 m
+#    with the editor's own Outliner showing `Selected 1`. So the click goes to
+#    the player's own rectangle when it has one.
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-[InfInput]::Click([int]($screen.Width / 2), [int]($screen.Height / 2))
+$target = New-Object InfInput+RECT
+$hasWindow = $false
+$player.Refresh()
+if ($player.MainWindowHandle -ne [IntPtr]::Zero) {
+    $hasWindow = [InfInput]::GetWindowRect($player.MainWindowHandle, [ref]$target)
+}
+Say ("foreground before the click: " + [InfInput]::Foreground() + " (editor pid $($proc.Id), player pid $($player.Id))")
+if ($hasWindow) {
+    $cx = [int](($target.Left + $target.Right) / 2)
+    $cy = [int](($target.Top + $target.Bottom) / 2)
+    # **NO CLICK.** A session with its own window already holds the keyboard --
+    # `take_keyboard_focus` takes it when the window is created and the line
+    # above says so -- and a synthetic click into it is not a no-op: measured
+    # over eight runs, five of them handed the foreground to the EDITOR on the
+    # click and the hero then moved 0.000 m, while the three that kept it moved
+    # 12.1-12.8 m. The click exists to give an EMBEDDED player the focus its
+    # reparented child window is denied; a top-level one needs raising, not
+    # clicking.
+    Say ("the player owns its own window [{0},{1} {2}x{3}]; raising it rather than clicking into it" -f $target.Left, $target.Top, ($target.Right - $target.Left), ($target.Bottom - $target.Top))
+    [InfInput]::ShowWindow($player.MainWindowHandle, 5) | Out-Null   # SW_SHOW
+    [InfInput]::SetForegroundWindow($player.MainWindowHandle) | Out-Null
+    [InfInput]::SetCursorPos($cx, $cy) | Out-Null
+    Start-Sleep -Milliseconds 400
+} else {
+    Say "clicking the viewport hole at the screen centre (the player has no window of its own)"
+    [InfInput]::Click([int]($screen.Width / 2), [int]($screen.Height / 2))
+}
 Start-Sleep -Milliseconds 800
 
+Say ("foreground after the click:  " + [InfInput]::Foreground())
 Say ("cursor while the game has the window: " + [InfInput]::CursorState())
 
 Say "holding W"

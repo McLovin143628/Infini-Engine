@@ -456,6 +456,26 @@ impl HeroLog {
         }
     }
 
+    /// **Write one diagnostic line into the same log**, immediately.
+    ///
+    /// The demo loop reads this file and the editor's Output Log is behind the
+    /// game's own window, so a session driven by a script has exactly one place
+    /// to say what the operating system told it. Used by the keyboard grab.
+    pub fn note(&mut self, text: &str) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        use std::io::Write as _;
+        let _ = file.write_all(
+            format!(
+                "# {text}
+"
+            )
+            .as_bytes(),
+        );
+        let _ = file.flush();
+    }
+
     /// Append a line if enough wall clock has passed. Inert when no path was set.
     pub fn tick(&mut self, sim: &RuntimeSim, frame: u64, dt: f64) {
         let Some(file) = self.file.as_mut() else {

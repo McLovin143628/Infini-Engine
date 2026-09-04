@@ -29599,3 +29599,357 @@ on the two island levels, and nothing else.
 **Carried by the audit**: the mid band's on-screen pop at 64 m is unmeasured
 (D-23), and a stated-purpose terrain golden that can resolve a seam is priced
 (D-22).
+## Wave FIX1 — the Play button plays (2026-09-03)
+
+Base `dbc2383e`. **The scene schema does not move (v27), `ScenePayload` stays
+v12, `EXPECTED_LEVELS` stays 24, and no golden is blessed.** What does move is
+`PIE_PROTOCOL_VERSION`, **2 → 3**, its first move since P9.4 — a separate
+constant from the content schemas by the envelope's own doctrine, with both ends
+and a version arm.
+
+The wave exists because the author pressed Play on the showcase island at a head
+whose battery read *7 019 passed, 0 failed* and reported four things: the cursor
+stays on the screen, a console window is open for the whole session, the movement
+does not work at all, and the character stands in a T-pose. Every one of them was
+true. Three of the four had **no arm anywhere in this repository that could have
+caught them**, and the fourth had an arm that recorded it and could not fail on
+it.
+
+### (1) THE CONSOLE WINDOW — two defects wearing one symptom
+
+`runtime/inf-player/src/main.rs` had no `windows_subsystem = "windows"` (the
+editor's own `main.rs` has carried one since Phase 1), **and**
+`inf_editor_core::pie` spawned it with a bare `Command::new`. The editor is a
+GUI-subsystem process and owns no console, so a console-subsystem child spawned
+from it makes Windows allocate a brand-new console **window** that lives for the
+whole session. Both are closed, because each is sufficient on its own: the
+attribute so a shipped game never opens one, `CREATE_NO_WINDOW` so a *debug*
+player spawned by the editor does not either. The stdio protocol is untouched —
+stdout still carries the PIE frames and stderr the Output Log's lines, both on
+pipes the editor owns, which is exactly why the child never needed a console.
+
+Measured rather than asserted at the call site. `inf_player::win_host::console`
+asks `GetConsoleWindow`, the `--pie` entry puts the answer on the ready line it
+already wrote, and `a_pie_player_is_spawned_with_no_console_window` reads it back
+off a **real subprocess spawned through `PieSession`**.
+
+**The falsification is a CONTROL and not a mutation, and that was measured.**
+Deleting `CREATE_NO_WINDOW` does *not* red the arm under a pseudoconsole (ConPTY,
+which is what a modern terminal gives `cargo test`): `GetConsoleWindow` is null
+for the harness and for a child that inherits it, so "none" is the answer either
+way and the arm would be blind. The control runs the other way — the same binary
+with `CREATE_NEW_CONSOLE`:
+
+| | |
+|---|---|
+| the spawn under test | `console none` |
+| the control | `console 0x1180320` |
+
+### (2) THE KEYBOARD — the finding, and why nothing could have caught it
+
+An embedded PIE window is a `WS_CHILD` of the editor's top-level window **owned
+by another process's thread**, and `inf-viewport` adopts it with `SW_SHOWNA` /
+`SWP_NOACTIVATE` — deliberately, so the editor's own activation does not move.
+The consequence nobody had measured: **mouse messages reach the player because
+they are routed by hit-test, and key messages do not because they are routed by
+focus.** That is the whole of "the movement does not work at all". No test in
+this tree could have found it, because no test in this tree opens a window.
+
+`win_host::take_keyboard_focus` is the fix and the instrument in one. It reads
+the **foreground thread's own focus record** (`GetGUIThreadInfo`, which is the
+ground truth for who receives the next keystroke — `GetFocus` answers only for
+the *calling* thread's queue and would report success for a focus nobody's keys
+reach), tries the cheap `SetFocus`, measures whether it landed, and only then
+attaches the input queues. Never unconditionally: **attachment is a boolean and
+not a refcount**, so an attach the system already made and a detach this module
+owns are the same detach. `release_keyboard_focus` undoes exactly what was done
+and nothing else, on Eject, on Stop and on the way out of the loop. Every grab
+logs `hwnd=… parent=… fg=… focus 0x… -> 0x… attached=… landed=…` to the Output
+Log.
+
+The ladder is **bounded** (600 frames, one attempt every 30) for two reasons: the
+editor does not reparent us until its monitor thread has seen the handle we
+report, tens of frames after `resumed`, so the first attempt necessarily happens
+while we are still top-level and cannot land; and a session the author
+deliberately clicked away from must not have its focus stolen back sixty times a
+second. After that only a click into our own window takes it, and **the click
+that takes it is consumed** rather than also firing a weapon.
+
+### (3) THE CURSOR — one rule, not five call sites
+
+Nothing in this crate had ever called `set_cursor_grab` or `set_cursor_visible`.
+`set_pointer_capture` takes the pointer (`Locked` first, `Confined` as the stated
+fallback — winit does not implement `Locked` on Windows, and this player reads
+raw *device* motion anyway) and hides it, and **one line decides who holds it**:
+focused AND not paused AND no dialog AND no inventory panel, read from the
+session rather than from the event that changed it. Every release the brief asked
+for falls out of that line, which is why Stop and Eject need no cursor code of
+their own — they end or unfocus the session.
+
+Measured in the real host, because a screenshot cannot answer this question:
+`CopyFromScreen` draws no cursor either way, so `tools/demo` asks
+`GetCursorInfo` instead.
+
+| | |
+|---|---|
+| while the game has the window | **hidden** |
+| two seconds in, W held | **hidden** |
+| after the session ended (the control) | **SHOWING** |
+
+### (4) THE T-POSE — the brief's hypothesis was wrong, and the finding is better
+
+The brief's hypothesis was a resolver failure — no `AnimPlayer`, no clip, or a
+clip that will not resolve. **The instrument says otherwise.** The machine
+resolves, all three clips ride the wire, `step_pose_evaluation` runs and a full
+161-joint pose is published every step. *The pose it published was the bind
+pose*, and this rig's bind pose is a T. Two mechanisms:
+
+* **`idle_clip` wrote exactly two tracks** — the pelvis's 5.6 mm breath and the
+  chest's 2° pitch — and `sample_clip` seeds every joint a clip does not animate
+  from its `local_bind`. `inf_anim::manny` binds the arms as four consecutive
+  pure `±X` offsets with **identity rotations**, because SK1a's law is that a
+  bind pose here carries no rotation. 159 of 161 joints were at bind.
+* **the walk's arm swing did nothing at all.** `quat_x(θ)` on the upper arm is a
+  rotation about that joint's local X, and on this rig the joint below it sits
+  **on** the X axis. It was a rotation about the arm's own length. `manny.rs`
+  says so two modules over: *"the elbows hinge about Y … a T-posed arm runs out
+  along ±X"*.
+
+| | before | after |
+|---|---|---|
+| the idle pose's left hand | `(−0.935, 1.435, 0)` | `(−0.427, 0.736, 0)` — **0.6990 m down, 0.5079 m in** |
+| its shoulder (the control) | — | **0.0000 m**: the arm came down because the ARM rotated |
+| the walk's hand sweep, one cycle | **0.0000 m** | **0.4320 m** |
+
+One derivation serves both clips. `arm_rest_rotation` reads each arm's own bind
+direction off the joint below it, builds the rotation onto straight down from a
+**dot and a cross in the XY plane**, and walks `ARM_REST_RATIO` of the way with
+`inf_math::pslerp` — no `atan2`, no `f32::sin_cos`, nothing from `std`'s
+transcendental table, because these values are written into a committed
+`.inf_anim` and the P14 law reaches further than serialization. A **fraction**
+and not an angle because the rule has to be true of more than one rig: eight
+tenths is **72°** on the mannequin and **exactly 0** on `template.rs`'s canonical
+biped, whose arms already hang.
+
+**That last clause is not decoration.** The first cut wrote `swing * IDENTITY`
+unconditionally and moved `samples/phase29-locomotion`'s two gait clips by
+exactly three bytes — because a quaternion product turns `-0.0` (which `psin64`
+really does produce: a f64 sine of π underflows to a negative zero in f32) into
+`+0.0`. **Multiplying by the identity is not the identity FUNCTION on signed
+zero.**
+
+### (5) PROTOCOL 3 — an input frame, and a world you can read
+
+The reason CP-C6 could not honour its owner's *"in PIE on the island"* was
+structural: **there was no way to press a key in a PIE session**. The editor could
+say *when* to step and the player answered with exactly one `u64`.
+
+```
+EditorToPlayer::Input(InputFrame)     held key CODES, mouse buttons, raw motion,
+                                      wheel, the frame's dt, how many steps
+EditorToPlayer::Probe { guid }    ->  PlayerToEditor::Probe(Box<WorldProbe>)
+```
+
+**Device level and not action level**, because the house's own certification law
+is that an arm presses a *literal key code* and lets the shipped table reduce it.
+`pie_drive::PieInputHost` runs `PlayerUi` → `InputMap` → `InputState` →
+`held_actions` → `step_once` in `PlayerApp::frame`'s own order — through
+`step_once` and **nowhere else**, because CP-C6's launch figures are exact to
+1e-6 (`tuning + GRAVITY.y·DT`: the verb writes the speed and the *same* step
+integrates one step of the fall), so an input applied on one side of the step
+boundary and read on the other would move every one of those numbers and the arms
+would still pass, wrongly.
+
+`WorldProbe` is typed: position, velocity, **velocity in the character's own aim
+frame** (the quantity that tells `A` from `D`, which a world position cannot),
+mode / gait / rotation mode by name, magazine, equipped id, bag, the camera's eye
+and how far its sweep pulled it in — and `pose_is_rest` / `pose_max_delta`, the
+T-pose question answered by the host that draws it. That one needed a read that
+did not exist (`RuntimeSim::skeleton_of`): a machine whose clips do not resolve
+publishes a full, correctly-sized pose that **is** the bind pose, so every "the
+pose store is N × 6 476 bytes" assertion in this tree is green while a character
+stands in a T.
+
+**The nine existing subprocess gates do not move.** `PieInputHost` is built by the
+FIRST input frame and not before — opening one reads the player's settings file
+and applies it to the sim, which is right for a driven session and wrong for a
+gate whose reference is `scene_trace`. A session that sends only `Step` runs byte
+for byte what it ran before. And `advance_and_report` now steps with whatever the
+last input frame resolved to, so a session that holds a key and then presses
+Resume no longer runs with its hands off the controls.
+
+**The version arm fired in the real host before any test did.** The first demo
+run built a fresh editor against a `target/release/inf-player.exe` from earlier
+the same day: the handshake refused it — *player speaks 2, editor speaks 3* — no
+player appeared, and the driver reported `NO PLAYER after 240 s`. `demo.ps1`
+now builds the player too, with the reason in a comment.
+
+### (6) THE CONTROLS, IN A REAL `--pie` SUBPROCESS
+
+`runtime/inf-player/tests/controls_pie.rs`, **25 arms**. Each builds a
+`ScenePayload` through the same `build_scene_payload` the Play button calls,
+spawns the **real `inf-player --pie` binary** through `PieSession`, presses a
+literal key code into an `InputFrame`, and asserts a **world quantity** read back
+over `Probe`.
+
+The world names itself in the file's header: a 120 m floor whose top face is
+`y = 0`, the **committed starter character** (its real 161-bone rig, its real body
+mesh, its real `Starter_Locomotion.inf_sm`, read out of
+`samples/starter-character/`), and per row a lake, a catalogue, two weapons, a
+pickup, a wall. The catalogue and the placements are authored through a
+**Blueprint class on the hero**, which is what `inf_ecs::item`'s own header says
+is the one authoring surface that reaches all three boot paths.
+
+| binding | asserted world quantity | measured |
+|---|---|---|
+| W | forward velocity in the aim frame | **+3.750 m/s**, lateral < 0.05 |
+| S | the same axis, opposite sign | **−3.750 m/s** |
+| A | sign of lateral velocity | **negative**, bounded off zero |
+| D | sign, and opposition with A | **positive**, and the two signs differ |
+| *(nothing)* | `Gait` by name + settled speed | **`Run` at 3.750 m/s** |
+| Shift | `Gait` + speed | **`Sprint` at 6.500 m/s** |
+| Ctrl | `Gait` + speed | **`Walk` at 1.650 m/s** |
+| C (click) | `MovementMode` over 30 steps | **`Crouch` on all 30** |
+| C (long) | `MovementMode`, against the click control | reaches **`Prone`**; the click never does |
+| C (click, sprinting) | `MovementMode` | reaches **`Slide`** |
+| C (long, sprinting) | vertical launch | **> +1 m/s** |
+| Space | launch, and the height gained | **> +3 m/s**, rises > 0.5 m |
+| Space (at water, sprinting) | launch components, wet vs dry | wet **forward > 1 m/s**; dry forward < 0.01 and higher |
+| E | bag count **and** the scene-entity count | bandage **0 → 1**, entities fall |
+| LMB | magazine, and the step's own shot counter | shots > 0, magazine falls |
+| R | magazine | full → spent → **full** |
+| RMB | `RotationMode` | → **`Aiming`** → back |
+| wheel | equipped id, moved **and back** | rifle → **pistol** → rifle |
+| I | panel flag | closed → **open** → closed |
+| Tab | `sim.steps()` itself | 30 frames = **30 steps**; 60 more with the dialog open = **0**; Tab closed it and it resumed |
+
+Plus the two the author actually reported. **The pose**: 161 joints published,
+`pose_is_rest` false, and the departure **changes** between idling (2.975395) and
+running (2.852406) — asserted on the pose's *content*, since every byte-count
+assertion about the pose store is green while a character stands in a T. **The
+camera** (clause 4b), with a 6 m wall two metres behind the hero:
+
+| | with the wall | the control, no wall |
+|---|---|---|
+| worst sweep pull-in | **3.2587 m** | **0.0000 m** |
+| eye's final z (wall face at −1.5) | **−1.3500** | −7.5327 |
+| steps with the eye past the wall | **0 of 90** | — |
+| final boom | 0.5704 m | 3.1002 m |
+| lowest eye height | 1.4641 m | 1.5401 m |
+
+**THE FALSIFICATION THE FILE RESTS ON.** The same payload driven with the
+protocol-2 `Step` door instead of `Input` moves the hero **0.0000 m** over 120
+steps where the driven one moves **6.3895 m**.
+
+### (7) THE HERO'S SPAWN — one real, one a correction
+
+**The metre was real and it is gone.** `START_LIFT_M` was 1.0 and CERT1 measured
+its consequence twice — 0.9883 m of settle on the fixture, 0.9769 m on the shipped
+island, which is the lift and nothing else. The lift's own doc argued that "a
+character placed exactly on the surface is one the first ground snap has to
+resolve out of the floor", and the ground snap is the thing that exists to do
+that, on a frame nobody sees.
+
+| | before | after |
+|---|---|---|
+| fixture, spawn → settle | 131.799 → 130.811, **−0.9883 m** | 130.799 → 130.811, **−0.0117 m** (a *rise*) |
+| `parity_cert`'s bound | `drop < 2.0` — which the metre passed | `SETTLE_CEILING_M = 0.25` |
+
+**The building was not real, and this is the measurement that says so.** The brief
+read the demo screenshot as a hero standing inside a grammar building and asked
+for the start to be moved to the nearest clear kerb. It is already on the street:
+`player_start` puts the hero at the first city site's exact centre and
+`settlement::plan_site` lays its grid so block `col = 0` begins `half_street`
+metres away — the start stands in the middle of the crossroads and the four
+ring-0 blocks are all diagonal from it.
+
+```
+samples/island          start (-1750.0, 2050.0), nearest block `Harbour City
+                        Shop -1,-1` at +14.142 m, 172 blocks over 7 settlements
+samples/island-fixture  start (-420.0, 380.0), nearest `Fixture Town Office
+                        -1,-1` at +11.314 m, 8 blocks over 2 settlements
+```
+
+So nothing moves the start. What was missing was **any arm at all**: the grid
+ladder is a *search* over pitches, the site radius is authored, and nothing
+asserted the two leave the start clear — a recipe edit that shrank Harbour City
+would have put a building on the player, silently.
+`the_island_start_stands_clear_of_every_settlement_block` asserts a signed
+distance to every block rectangle of every settlement against the settlement's
+**own** `street_m × 0.5`, read from the plan rather than restated.
+
+**Committed content, and every byte of it stated.** One byte in each island level
+— the hero's `Transform.translation.y`, `17.5628 → 16.5628` and
+`131.7994 → 130.7994` — at unchanged lengths, nothing else moved. Three
+`.inf_anim` clips: `Starter_Idle` 8 810 → 8 864 B (two held arm keys),
+`Starter_Walk` and `Starter_Run` at their exact byte lengths with only rotation
+values moved. `samples/phase29-locomotion` is **untouched**, which is the arm.
+
+### (8) THE DEMO LOOP, AND WHAT IT SAW
+
+`tools/demo/demo.ps1` builds the player *and* the editor (`npx tauri build
+--no-bundle` — not `cargo build --release -p inf-studio`, which produces an editor
+pointed at the dev URL), launches it **from its own directory** (the boot ladder
+discovers the showcase by walking up from the executable, so the working
+directory decides whether you get the island or the start screen), presses Play
+**by name** over the DevTools protocol, waits for the player, clicks into the
+viewport, holds `W`, and photographs twice two seconds apart.
+
+`INF_WEBVIEW_DEBUG_PORT` is read in `debuggable_context`, in the generated
+context, and **not** through the environment variable WebView2 documents — that
+one is read only when the embedder passes no arguments of its own, and Tauri
+always passes some, which is why the first attempt at this waited for a port that
+never opened. Off unless a whole port number asks for it.
+
+The run:
+
+```
+player pid 20884 after 1 s
+console windows named inf-player: none
+cursor while the game has the window: hidden
+cursor two seconds in: hidden
+hero first : t=0.033 (-1750.0000, 16.5832, 2050.0000) Grounded speed 0.0000
+hero last  : t=36.483 (-1750.0001, 16.5825, 2062.1906) Grounded speed 3.7500
+HERO MOVED 12.191 m over 140 samples
+cursor after the session ended: SHOWING
+still running: none
+```
+
+`Grounded` at t = 0.033 rather than `FallControlled` is the spawn fix; 3.7500 m/s
+is the `Run` gait exactly; 12.191 m is a character walking down a street with a
+key held. **Two screenshots cannot tell a character that walked from a camera that
+drifted, and that is why `hero.csv` exists.**
+
+### CARRIED
+
+1. **The frame is washed out and heavily ghosted.** Every PIE screenshot this
+   wave took shows over-bright, semi-transparent buildings and visible temporal
+   smearing behind the character. It is the loudest remaining thing an author
+   sees and it is a rendering wave's, not this one's.
+2. **A captured cursor makes the editor's Stop button unreachable** while PIE
+   runs. The escapes are real (Tab opens the settings, which releases it;
+   Escape ends the session) but neither is discoverable, and a PIE session
+   should say so on screen.
+3. **`ARM_REST_RATIO` is a stance, not a rig.** There is no elbow flex, no
+   shoulder correction and no per-archetype stance; a straight arm at 72° is
+   right for a mannequin and approximate for anything else. CHAR1's.
+4. **The camera's boom collapses to 0.57 m** against a wall two metres behind
+   the hero, which puts the eye inside the character. The near-fade of the
+   player mesh, the whisker probes and the asymmetric smoothing are CHAR1's;
+   this wave recorded the number for them.
+5. **The island build at `../island-build/project` is a COPY and goes stale.**
+   This wave refreshed the three clips and the level by hand (which is what
+   `write_content`'s `[content]` loop does) rather than rebuilding 549.9 MB of
+   terrain. `inf island build` before any island verification, still.
+6. **The windowed PIE path ignores `Input`** by document, so the twenty control
+   rows run through the headless branch. Driving a *windowed* session from a
+   script would need a second authority over one `InputState`, which is refused
+   for the reason PIE == shipping exists.
+7. **The demo's console check is weak.** It looks for a `conhost` window titled
+   `inf-player`; the authoritative measurement is the player's own
+   `console none` line, which `a_pie_player_is_spawned_with_no_console_window`
+   reads off a real subprocess.
+8. **`scatter_meshes` is still empty in a windowed PIE session** (wave TER2b's
+   open item, restated here because this wave's screenshots are the first place
+   anyone can see it): scattered ground cover draws its placeholder primitive
+   in PIE and its authored mesh in a cooked boot.
