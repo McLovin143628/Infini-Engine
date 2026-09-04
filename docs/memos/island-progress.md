@@ -30758,13 +30758,13 @@ the range is pinned against the policy module's own clamp **from both sides**.
 built from cold: player 85 s, editor 3 min, shell up in 1 s.
 
 ```
-[05:50:03] saved …\EDIT1-final\01-editor.png (1936x1048)
-[05:50:03]   cdp: clicked (embedded): Play in Editor (Shift+Alt+P)
-[05:50:11] player pid 10352 after 1 s
-[05:50:11] console windows named inf-player: none
-[05:50:36] HERO MOVED 12.628 m over 122 samples
-[05:50:39] still running: none
-[05:50:39] done
+[06:54:50] player pid 23572 after 1 s
+[06:54:50] console windows named inf-player: none
+[06:55:12] cursor while the game has the window: hidden
+[06:55:16] HERO MOVED 12.441 m over 120 samples
+[06:55:19] cursor after the session ended: SHOWING
+[06:55:19] still running: none
+[06:55:19] done
 ```
 
 **`01-editor.png` is the wave.** The editor opens standing behind the character
@@ -30788,10 +30788,10 @@ Same crop (the viewport rectangle of `03-pie-b.png`), same metrics:
 |---|---|---|---|---|---|
 | as shipped (FIX1) | 154.47 | 90.6 | 246.6 | **0.130** | 0.204 |
 | GI off (the FIX1 probe) | 119.17 | 46.1 | 169.0 | 0.000 | 0.018 |
-| **EDIT1, this tree** | **119.39** | **14.8** | **186.6** | **0.000** | **0.025** |
+| **EDIT1, this tree** | **119.86** | **20.1** | **186.7** | **0.000** | **0.025** |
 
 Nothing clips. The 5th percentile goes from 90.6 — *"with GI on, nothing in that
-frame is darker than 91/255. There are no blacks."* — to **14.8**, which is
+frame is darker than 91/255. There are no blacks."* — to **20.1**, which is
 darker than the GI-off probe's own 46.1, because the shadows and the character
 are now genuinely dark rather than lifted. The mean lands within a quarter of a
 level of the GI-off frame while the p95 sits 17.6 levels above it: dynamic GI is
@@ -30802,9 +30802,10 @@ mullions, a dark blue parked truck, a dark character, a green verge, a beige
 road, a blue sky. The "semi-transparent buildings" of the FIX1 carried list were
 never transparency and are gone with the wash that made them.
 
-Screenshots: `EDIT1-final/01-editor.png` (the editor, before Play),
-`EDIT1-final/03-pie-b.png` (PIE), `EDIT1-editor-settled.png` (the editor at
-52/52).
+Screenshots (the run on the FINAL tree, `EDIT1-DEMO/`): `01-editor.png` (the
+editor, before Play) and `03-pie-b.png` (PIE). The `EDIT1-final/` run quoted
+above is the same loop four commits earlier, and `EDIT1-editor-settled.png` is
+the editor left to settle for fifty seconds, reading `Streaming 52/52`.
 
 ### LAWS this wave paid for
 
