@@ -369,10 +369,38 @@ mod tests {
     /// A settings directory that cannot be written does not make opening a
     /// project fail — the pin is best-effort, and the consequence is one rung
     /// further down at the next launch.
+    ///
+    /// # The first version of this arm was worse than useless
+    ///
+    /// It passed a bare relative name, `this-directory-does-not-exist-cert1`,
+    /// on the assumption that a missing directory cannot be written to.
+    /// `EditorSettings::save` **creates** it — so the arm exercised the SUCCESS
+    /// path while claiming to exercise the failure one, and it created that
+    /// directory next to the running test's working directory, which is
+    /// `editor/studio/src-tauri`. It was committed to the repository before the
+    /// CRLF diff sweep noticed a file nobody had written.
+    ///
+    /// A path whose PARENT IS A FILE cannot be created on any platform, which is
+    /// the shape a "cannot be written" arm actually needs. And the arm now
+    /// asserts the outcome rather than merely surviving: nothing is created, and
+    /// the settings that could not be reached are still absent afterwards.
     #[test]
     fn a_pin_that_cannot_be_written_is_not_an_error() {
-        let missing = std::path::Path::new("this-directory-does-not-exist-cert1");
-        pin_boot_project(missing, std::path::Path::new("anywhere"));
-        // Reached: `pin_boot_project` returns `()` and must not panic.
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("a-file-not-a-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        let unwritable = blocker.join("config");
+
+        pin_boot_project(&unwritable, std::path::Path::new("anywhere"));
+
+        assert!(
+            !unwritable.exists(),
+            "the pin created a directory under a FILE, so this arm is not testing \
+             an unwritable path"
+        );
+        assert!(
+            blocker.is_file(),
+            "the blocker stopped being a file, so the path above became writable"
+        );
     }
 }
