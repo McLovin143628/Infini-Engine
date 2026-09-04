@@ -28,7 +28,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use inf_input::{InputEvent, InputMap, InputState};
 use inf_render::{create_instance, GpuContext, OrthoParams, RenderView};
@@ -40,6 +40,20 @@ use crate::runtime_sim::RuntimeSim;
 use crate::skinned::SkinnedRegistry;
 use crate::vmesh::VmeshRegistry;
 use crate::voxel::VoxelRegistry;
+
+/// **The bounded keyboard-grab ladder** (wave FIX1): how long after its window
+/// exists a PIE player keeps asking the OS for the keyboard, and how often.
+///
+/// It is a ladder rather than one call because an embedded session's window is
+/// not reparented into the editor until the editor's monitor thread has seen the
+/// handle we report — tens of frames later — so the first attempt necessarily
+/// happens while we are still a top-level window and cannot land. It is BOUNDED
+/// because a session the author deliberately clicked away from must not have its
+/// focus stolen back sixty times a second: after this many frames the only thing
+/// that takes the keyboard is a click into our own window.
+const GRAB_LADDER_FRAMES: u32 = 600;
+/// …and how often inside that window (every half second at 60 fps).
+const GRAB_LADDER_EVERY: u32 = 30;
 
 /// Play-in-editor control channel + report sink attached to a windowed player.
 /// Present only for the PIE window path; a standalone game leaves it `None`.
@@ -161,6 +175,22 @@ pub struct PlayerApp {
     pie: Option<PieLink>,
     /// PIE pause state (ignored when `pie` is `None`).
     paused: bool,
+    /// **Do we hold the pointer** — grabbed to the window and hidden (wave FIX1).
+    ///
+    /// The author's second sentence about pressing Play was "the cursor stays on
+    /// the screen". A game that does not take the pointer is a game whose look
+    /// control stops at the edge of the monitor and whose desktop cursor sits in
+    /// the middle of the frame. Owned here rather than asked of winit every
+    /// frame because `set_cursor_grab` is a system call and the answer only
+    /// changes when the menu does.
+    pointer_captured: bool,
+    /// Winit's own view of whether our window has OS focus.
+    focused: bool,
+    /// Frames since the window existed, used ONLY by the bounded keyboard-grab
+    /// ladder below.
+    grab_frames: u32,
+    /// The keyboard grab landed and the ladder has stopped asking.
+    keyboard_grabbed: bool,
     /// **The in-game UI session** (island wave I5): the settings dialog, the
     /// toasts and the interaction prompt. Present in the shipped player **and**
     /// in a windowed PIE preview, because a preview that could not open the menu
@@ -253,6 +283,10 @@ impl PlayerApp {
             stats_accum: 0.0,
             debug_cells: false,
             paused: false,
+            pointer_captured: false,
+            focused: false,
+            grab_frames: 0,
+            keyboard_grabbed: false,
             vmeshes,
             scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
@@ -300,13 +334,49 @@ impl PlayerApp {
                 }
                 Ok(EditorToPlayer::Eject) => {
                     let _ = write_msg(&mut pie.out, &PlayerToEditor::Ejected);
+                    // FIX1: "release input possession" now releases input. The
+                    // keyboard attachment goes back to the editor and the
+                    // pointer comes back on the next frame through the one rule
+                    // in `wanted_pointer_capture` — dropping `focused` is what
+                    // tells it, rather than a second cursor call site here.
+                    crate::win_host::release_keyboard_focus();
+                    self.keyboard_grabbed = false;
+                    self.grab_frames = GRAB_LADDER_FRAMES;
+                    self.focused = false;
                 }
                 Ok(EditorToPlayer::Stop) => {
                     let _ = write_msg(&mut pie.out, &PlayerToEditor::Stopped);
+                    // FIX1: give the pointer and the keyboard back before the
+                    // window goes away. A process that exits while holding an
+                    // input-queue attachment leaves the editor's own input
+                    // processing tied to a thread that no longer exists.
+                    self.set_pointer_capture(false);
+                    crate::win_host::release_keyboard_focus();
                     return true;
                 }
                 Ok(EditorToPlayer::InjectPanic) => {
                     panic!("deliberate PIE panic (injected by editor)");
+                }
+                // **A windowed session ignores an input frame** (wave FIX1),
+                // and the protocol says so at the variant. This host has a real
+                // keyboard and a real `PlayerUi`; a second authority writing the
+                // same `InputState` would make a driven trace and a played one
+                // two different simulations, which is the divergence PIE ==
+                // shipping exists to forbid. The headless branch in `main.rs` is
+                // where a frame is consumed.
+                Ok(EditorToPlayer::Input(_)) => {}
+                // …but a probe is answered here, because the windowed session is
+                // the one a person is looking at and "where is the hero, now, in
+                // the thing on my screen" is the question the demo loop asks.
+                Ok(EditorToPlayer::Probe { guid }) => {
+                    let named = guid.map(uuid::Uuid::from_bytes);
+                    let probe = crate::pie_drive::world_probe(
+                        &self.sim,
+                        Some(&self.ui),
+                        self.sim.steps(),
+                        named,
+                    );
+                    let _ = write_msg(&mut pie.out, &PlayerToEditor::Probe(Box::new(probe)));
                 }
                 // Already loaded; ignore a second content frame.
                 Ok(EditorToPlayer::Load(_)) | Ok(EditorToPlayer::LoadScene(_)) => {}
@@ -676,6 +746,88 @@ impl PlayerApp {
     }
 
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
+    /// **Take or release the pointer** (wave FIX1).
+    ///
+    /// `Locked` first, `Confined` as the fallback, in that order and for a
+    /// stated reason: `Locked` pins the pointer and reports nothing but motion,
+    /// which is what a look control wants, and winit does not implement it on
+    /// Windows — where it returns `NotSupported` rather than silently doing
+    /// nothing. `Confined` keeps the pointer inside our client rect, which is
+    /// the half that matters for an EMBEDDED session (the pointer cannot wander
+    /// onto the editor's chrome mid-fight), and this player already reads raw
+    /// **device** motion rather than the window cursor's, so the clipped-at-the-
+    /// edge failure `Locked` exists to prevent cannot happen here either way.
+    ///
+    /// Hiding is unconditional and is the visible half of the author's report.
+    fn set_pointer_capture(&mut self, on: bool) {
+        if self.pointer_captured == on {
+            return;
+        }
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let window = live.window.clone();
+        if on {
+            if window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                if let Err(e) = window.set_cursor_grab(CursorGrabMode::Confined) {
+                    tracing::debug!("inf-player: cursor grab unavailable: {e}");
+                }
+            }
+        } else {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+        }
+        window.set_cursor_visible(!on);
+        self.pointer_captured = on;
+    }
+
+    /// **Who should own the pointer this frame.**
+    ///
+    /// One rule, read from the session rather than from the event that changed
+    /// it: the game holds the pointer whenever it is the thing the player is
+    /// looking at — not while a dialog is up (Tab, and the inventory panel),
+    /// not while a PIE session is paused, and not while the window is
+    /// unfocused. Every release the brief asks for is a consequence of this one
+    /// line rather than a separate call site, which is why Stop and Eject need
+    /// no cursor code of their own: they end or unfocus the session.
+    fn wanted_pointer_capture(&self) -> bool {
+        self.focused && !self.paused && !self.ui.menu.open && !self.ui.inventory.open
+    }
+
+    /// **Take the keyboard**, and log what the OS said the first time (FIX1).
+    ///
+    /// Only for a PIE session, and the reason is that the two cases are
+    /// genuinely different: a standalone game's window is top-level and winit's
+    /// own creation already focuses it, while an EMBEDDED PIE window is a
+    /// `WS_CHILD` of the editor — adopted with `SW_SHOWNA` / `SWP_NOACTIVATE`,
+    /// deliberately, so the editor's own activation does not move — and the
+    /// WebView keeps the keyboard. Mouse messages reach us because they are
+    /// routed by hit-test; key messages do not because they are routed by focus.
+    /// That is the whole of "the movement does not work at all".
+    ///
+    /// See [`crate::win_host::take_keyboard_focus`] for what it does and how it
+    /// measures whether it worked.
+    fn grab_keyboard(&mut self) {
+        if self.keyboard_grabbed || self.pie.is_none() {
+            return;
+        }
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let hwnd = window_handle_i64(&live.window);
+        if hwnd == 0 {
+            return;
+        }
+        let report = crate::win_host::take_keyboard_focus(hwnd as isize);
+        // Once, at the moment it lands, and once on the first attempt — enough
+        // to diagnose a session from the Output Log and not a line a frame.
+        if report.landed || self.grab_frames == 0 {
+            eprintln!("inf-player: keyboard focus {report}");
+        }
+        if report.landed {
+            self.keyboard_grabbed = true;
+        }
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // **The window-handle re-attempt** (round-2 finding B7). `resumed`
         // runs its body once per process, so a failed report there had nothing
@@ -734,6 +886,22 @@ impl PlayerApp {
         //    SIM rather than on this host — see `inf_ui::menu`'s ruling and
         //    `RuntimeSim::set_sim_paused`.
         self.sim.set_sim_paused(self.ui.pauses_sim());
+        // ── the pointer and the keyboard (wave FIX1) ──
+        //
+        //    HERE, after the menu and inventory edges have been read, because
+        //    the rule is a function of the session's state and this is the first
+        //    line at which that state is this frame's. The keyboard ladder is
+        //    bounded — an embedded session's window is not reparented into the
+        //    editor until the monitor thread has seen our handle, which is tens
+        //    of frames after `resumed`, so the first attempt necessarily happens
+        //    while we are still top-level and cannot land.
+        self.grab_frames = self.grab_frames.saturating_add(1);
+        if !self.keyboard_grabbed && self.grab_frames <= GRAB_LADDER_FRAMES {
+            if self.grab_frames == 1 || self.grab_frames % GRAB_LADDER_EVERY == 0 {
+                self.grab_keyboard();
+            }
+        }
+        self.set_pointer_capture(self.wanted_pointer_capture());
         self.ui.report_unconsumed(&self.input_state);
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.
@@ -1081,6 +1249,18 @@ impl ApplicationHandler for PlayerApp {
                             return;
                         }
                     }
+                    // FIX1: **a click into the viewport takes the keyboard**,
+                    // and the click that takes it does not also fire a weapon.
+                    // Mouse messages reach an embedded PIE window by hit-test
+                    // even when the WebView holds the focus, so this is the one
+                    // event that is guaranteed to arrive in the state the grab
+                    // exists to leave.
+                    if pressed && !self.focused {
+                        self.focused = true;
+                        self.keyboard_grabbed = false;
+                        self.grab_keyboard();
+                        return;
+                    }
                     if let Some(live) = self.live.as_mut() {
                         live.pending
                             .push(InputEvent::MouseButton { button, pressed });
@@ -1140,6 +1320,17 @@ impl ApplicationHandler for PlayerApp {
                 if let Some(live) = self.live.as_mut() {
                     live.pending.clear();
                 }
+                // FIX1: and give the pointer back. A hidden, grabbed cursor on
+                // an unfocused window is the worst state this player can be in
+                // — the author cannot see where they are clicking and cannot
+                // leave the rectangle.
+                self.focused = false;
+                self.set_pointer_capture(false);
+            }
+            // FIX1: focus regained. The capture is not taken here — it is taken
+            // by the one rule in `frame`, which also knows about the menu.
+            WindowEvent::Focused(true) => {
+                self.focused = true;
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
@@ -1267,9 +1458,14 @@ pub fn run_pie(
         hwnd_reported: false,
         hwnd_attempts: 0,
     });
-    event_loop
+    let out = event_loop
         .run_app(&mut app)
-        .map_err(|e| format!("run_app: {e}"))
+        .map_err(|e| format!("run_app: {e}"));
+    // FIX1: whatever ended the loop — the close button, Escape, a Stop, an error
+    // — the input-queue attachment is this process's to undo. See
+    // `win_host::release_keyboard_focus` for why it can only ever undo its own.
+    crate::win_host::release_keyboard_focus();
+    out
 }
 
 /// Run the player on Android (P14.1): build the winit event loop from the
