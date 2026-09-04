@@ -1,0 +1,732 @@
+"""THE UNREAL -> INFINI EXPORT SIDE OF THE BRIDGE (wave ASSET0, clause 1).
+
+Read-only. This script never writes into the Unreal project: it opens it
+headless, walks the packs named in `PACKS` below, and writes glTF, PNG and one
+`manifest.json` into an output directory OUTSIDE it. `inf import --manifest`
+is the other side.
+
+    "C:/Program Files/Epic Games/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" \
+        "<project>.uproject" -run=pythonscript -script=tools/ue-export/export.py \
+        -unattended -nop4 -nosplash -stdout -FullStdOutLogOutput -NoShaderCompile \
+        -EnablePlugins=GLTFExporter
+
+`-EnablePlugins=GLTFExporter` is not optional and is the reason this works at
+all: the glTF exporter ships with the engine (Engine/Plugins/Enterprise) and is
+DISABLED in a default project, and enabling it on the command line is what let
+this bridge be built without editing somebody's `.uproject`. Measured: the
+plugin mounts, `unreal.GLTFExportOptions` appears, and the project is untouched.
+
+Configuration is by environment variable, because `-run=pythonscript` has no
+argv to give a script:
+
+    INF_UE_OUT     the output directory                (required)
+    INF_UE_MODE    "plan" (census only) or "export"    (default "export")
+    INF_UE_PACKS   comma-separated pack names to do    (default: all of PACKS)
+    INF_UE_MAXTEX  skip textures wider than this       (default 8192)
+
+Every line it prints is prefixed `UEX:` so the interesting half of a 30 MB
+Unreal log is one `grep`.
+
+# One glTF per LOD, and why
+
+`UGLTFExportOptions` has `default_level_of_detail` and no "export every LOD":
+the exporter writes ONE mesh per file. So a mesh that ships four rungs is
+exported four times under four names and the manifest binds them into one
+ladder. That is not a workaround for a missing feature -- it is the shape the
+importer wants anyway, because `.inf_mesh` stores a rung as a whole mesh.
+
+# The UE LOD census this was written against
+
+93 meshes sampled across these packs: 60 ship ONE LOD (Downtown_West props and
+buildings, the modular set, furniture), 21 ship four (Megascans curbs at about
+8:1, vehicles), 12 ship six or seven (Fab foliage, down to an eight-triangle
+card). So the ladder is real content for a fifth of what is here and has to be
+GENERATED for the rest, which is `inf import`'s half.
+
+# LICENSING
+
+`PACKS` records what is known about each pack's licence and says "unknown" when
+nothing is known -- there is no licence file anywhere under the project's
+`Content`, so every claim here would otherwise be a guess. Nothing this script
+writes may enter the engine repository; see `docs/memos/island-progress.md`.
+"""
+
+import datetime
+import json
+import os
+import re
+import traceback
+
+import unreal
+
+
+def say(*a):
+    print("UEX:", *a)
+
+
+# ── what to export ───────────────────────────────────────────────────────────
+#
+# A pack is a name, a licence note, and a list of SELECTORS. A selector is
+# either an exact `/Game/...` object path or a `prefix` + `classes` + `limit`
+# sweep. Exact paths where the choice matters (which asphalt is THE road),
+# sweeps where it does not (every awning).
+#
+# `surface` marks a selector whose materials are tiling SURFACES rather than a
+# mesh's own skin -- the importer binds those to terrain layers, road ribbons
+# and grammar walls, and it needs to be told which is which because a Megascans
+# material instance looks identical either way.
+
+PACKS = [
+    {
+        "name": "MS_AsphaltEss",
+        "license": "unknown - Quixel/Megascans via Fab. Megascans content "
+                   "bundled with Unreal is licensed for use IN Unreal Engine "
+                   "projects; conversion for shipping elsewhere is NOT "
+                   "established. Verify on the Fab page before shipping.",
+        "select": [
+            {"prefix": "/Game/MS_AsphaltEss", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)asphalt", "limit": 3, "surface": True},
+        ],
+    },
+    {
+        "name": "MS_CityCurbs",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_CityCurbs", "classes": ["StaticMesh"],
+             "match": r"(?i)curb.*_LOD0$", "limit": 2},
+        ],
+    },
+    {
+        "name": "MS_BrickV1",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_BrickV1", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)brick", "limit": 2, "surface": True},
+        ],
+    },
+    {
+        "name": "MS_ConcreteV1",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_ConcreteV1", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)concrete", "limit": 2, "surface": True},
+        ],
+    },
+    {
+        "name": "MS_CementV1",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_CementV1", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)(cement|concrete)", "limit": 2, "surface": True},
+        ],
+    },
+    {
+        "name": "Downtown_West",
+        "license": "unknown - Unreal Marketplace / Fab pack in this project. "
+                   "Verify on its Fab page before shipping.",
+        "select": [
+            {"prefix": "/Game/Downtown_West/Assets/props/props_light_post",
+             "classes": ["StaticMesh"], "limit": 4},
+            # The Blueprints, for their LIGHTS -- see `add_blueprint`. The
+            # meshes they reference are pulled in as a side effect, which is
+            # why this selector sits after the mesh one and not instead of it.
+            {"prefix": "/Game/Downtown_West/Assets/props/props_light_post",
+             "classes": ["Blueprint"], "limit": 2},
+            {"prefix": "/Game/Downtown_West/Assets/awnings",
+             "classes": ["StaticMesh"], "limit": 3},
+            {"prefix": "/Game/Downtown_West/Assets/building_a",
+             "classes": ["StaticMesh"], "match": r"(?i)(window|door|pillar)",
+             "limit": 4},
+        ],
+    },
+    {
+        "name": "AdvancedRealisticGlass",
+        "license": "unknown - Unreal Marketplace / Fab pack in this project. "
+                   "Verify on its Fab page before shipping.",
+        # PARAMETERS ONLY. The glass master is a node graph this engine has no
+        # importer for; what crosses the bridge is the numbers an author set on
+        # its instances, which is what a PBR opacity/roughness/IOR block needs.
+        "select": [
+            {"prefix": "/Game/AdvancedRealisticGlass/Materials",
+             "classes": ["MaterialInstanceConstant"], "match": r"(?i)clean",
+             "limit": 2, "no_textures": True},
+        ],
+    },
+]
+
+OUT = os.environ.get("INF_UE_OUT", "")
+MODE = os.environ.get("INF_UE_MODE", "export")
+ONLY = [p for p in os.environ.get("INF_UE_PACKS", "").split(",") if p]
+MAXTEX = int(os.environ.get("INF_UE_MAXTEX", "8192"))
+
+# ── the map-kind classifier ──────────────────────────────────────────────────
+#
+# A texture's ROLE, not its format. Two sources of truth, in this order:
+#
+#   1. the material parameter it is bound to. Every Megascans instance in this
+#      project parents `Standard_MasterMaterial` and names its slots `albedo`,
+#      `normal`, `roughness`, `displacement` -- measured, not assumed.
+#   2. the texture's own `compression_settings` and `srgb`, which UE sets at
+#      import and which cannot lie about a normal map (`TC_Normalmap`).
+#
+# The asset NAME is the last resort, because a name is a convention and the
+# packs here use four of them.
+
+PARAM_KIND = {
+    "albedo": "albedo", "basecolor": "albedo", "base color": "albedo",
+    "diffuse": "albedo", "color": "albedo", "colour": "albedo",
+    "normal": "normal", "normalmap": "normal",
+    "roughness": "roughness", "rough": "roughness",
+    "metallic": "metallic", "metalness": "metallic",
+    "specular": "specular",
+    "ao": "ao", "occlusion": "ao", "ambientocclusion": "ao",
+    "orm": "orm", "arm": "orm", "packed": "orm",
+    "opacity": "opacity", "alpha": "opacity", "mask": "opacity",
+    "emissive": "emissive", "emission": "emissive",
+    "displacement": "displacement", "height": "displacement",
+}
+
+NAME_KIND = [
+    (r"(?i)(_n$|_normal|normallod|_nrm)", "normal"),
+    (r"(?i)(_orm$|_arm$|_packed)", "orm"),
+    (r"(?i)(_r$|_rough)", "roughness"),
+    (r"(?i)(_m$|_metal)", "metallic"),
+    (r"(?i)(_ao$|occlusion)", "ao"),
+    (r"(?i)(_o$|_opacity|_alpha|_mask)", "opacity"),
+    (r"(?i)(_e$|_emissive|_emission)", "emissive"),
+    (r"(?i)(_d$|_disp|_height)", "displacement"),
+    (r"(?i)(_bc$|_albedo|_basecolor|_diffuse|_col)", "albedo"),
+]
+
+
+def kind_of_texture(tex, param_name):
+    p = (param_name or "").strip().lower().replace("_", "").replace(" ", "")
+    if p in PARAM_KIND:
+        return PARAM_KIND[p]
+    for key, kind in PARAM_KIND.items():
+        if key.replace(" ", "") in p:
+            return kind
+    try:
+        cs = str(tex.get_editor_property("compression_settings"))
+        if "NORMALMAP" in cs.upper():
+            return "normal"
+    except Exception:
+        pass
+    name = tex.get_name()
+    for pat, kind in NAME_KIND:
+        if re.search(pat, name):
+            return kind
+    try:
+        if bool(tex.get_editor_property("srgb")):
+            return "albedo"
+    except Exception:
+        pass
+    return "unknown"
+
+
+# ── collectors ───────────────────────────────────────────────────────────────
+
+REG = unreal.AssetRegistryHelpers.get_asset_registry()
+TEXTURES = {}    # object path -> record
+MATERIALS = {}   # object path -> record
+MESHES = {}      # object path -> record
+ERRORS = []
+
+
+def key_of(path):
+    """A manifest key: the object path with the separators a filename allows."""
+    return path.replace("/Game/", "").replace("/", "_").replace(".", "_")
+
+
+def rel(*parts):
+    return "/".join(parts)
+
+
+def ensure(d):
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+
+
+def export_task(obj, filename, exporter=None, options=None):
+    task = unreal.AssetExportTask()
+    task.set_editor_property("object", obj)
+    task.set_editor_property("filename", filename)
+    task.set_editor_property("automated", True)
+    task.set_editor_property("prompt", False)
+    task.set_editor_property("replace_identical", True)
+    if exporter is not None:
+        task.set_editor_property("exporter", exporter)
+    if options is not None:
+        task.set_editor_property("options", options)
+    return bool(unreal.Exporter.run_asset_export_task(task))
+
+
+def add_texture(tex, param_name, pack):
+    """Record a texture and (in export mode) write its PNG."""
+    path = tex.get_path_name()
+    if path in TEXTURES:
+        # A texture reached through two materials keeps the FIRST role it was
+        # given: the parameter that named it is better evidence than the second
+        # parameter that named it, and a slot collision would otherwise flip
+        # the kind depending on iteration order -- which is exactly the kind of
+        # nondeterminism a manifest must not carry.
+        return TEXTURES[path]["key"]
+    w = tex.blueprint_get_size_x()
+    h = tex.blueprint_get_size_y()
+    kind = kind_of_texture(tex, param_name)
+    try:
+        srgb = bool(tex.get_editor_property("srgb"))
+    except Exception:
+        srgb = kind in ("albedo", "emissive")
+    k = key_of(path)
+    rec = {
+        "key": k, "source": path, "pack": pack, "map": kind,
+        "width": w, "height": h, "srgb": srgb, "param": param_name,
+        "file": None,
+    }
+    TEXTURES[path] = rec
+    if max(w, h) > MAXTEX:
+        rec["skipped"] = "%dx%d exceeds INF_UE_MAXTEX %d" % (w, h, MAXTEX)
+        say("  tex SKIP %s (%dx%d > %d)" % (tex.get_name(), w, h, MAXTEX))
+        return k
+    if MODE == "export":
+        name = rel("textures", k + ".png")
+        dst = os.path.join(OUT, name.replace("/", os.sep))
+        ensure(os.path.dirname(dst))
+        # An 8K PNG is about 90 seconds of encode and this project has forty of
+        # them, so a re-run that only wants the meshes must not pay for the
+        # textures again. Keyed on the file being there and non-empty, which is
+        # the same "the product still exists" test the engine's own import cache
+        # uses -- and the output directory is ours, so nothing else writes here.
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            rec["file"] = name
+            rec["bytes"] = os.path.getsize(dst)
+            rec["reused"] = True
+            say("  tex %-9s %5dx%-5d srgb=%-5s %s (already exported)" %
+                (kind, w, h, srgb, tex.get_name()))
+            return k
+        ok = export_task(tex, dst, unreal.TextureExporterPNG())
+        if ok and os.path.isfile(dst):
+            rec["file"] = name
+            rec["bytes"] = os.path.getsize(dst)
+        else:
+            rec["skipped"] = "the PNG exporter refused it"
+            ERRORS.append("texture %s did not export" % path)
+    say("  tex %-9s %5dx%-5d srgb=%-5s %s" % (kind, w, h, srgb, tex.get_name()))
+    return k
+
+
+def add_material(mat, pack, surface=False, no_textures=False):
+    path = mat.get_path_name()
+    if path in MATERIALS:
+        return MATERIALS[path]["key"]
+    rec = {
+        "key": key_of(path), "source": path, "pack": pack, "surface": surface,
+        "parent": None, "maps": {}, "scalars": {}, "vectors": {},
+        "base_color": [1.0, 1.0, 1.0, 1.0], "metallic": 0.0, "roughness": 1.0,
+        "emissive": [0.0, 0.0, 0.0], "opacity": 1.0, "blend": "opaque",
+        "two_sided": False,
+    }
+    MATERIALS[path] = rec
+
+    try:
+        parent = mat.get_editor_property("parent")
+        if parent:
+            rec["parent"] = parent.get_path_name()
+    except Exception:
+        pass
+
+    if isinstance(mat, unreal.MaterialInstanceConstant):
+        try:
+            for p in mat.get_editor_property("scalar_parameter_values"):
+                n = str(p.get_editor_property("parameter_info").get_editor_property("name"))
+                rec["scalars"][n] = float(p.get_editor_property("parameter_value"))
+        except Exception as e:
+            ERRORS.append("scalars on %s: %s" % (path, e))
+        try:
+            for p in mat.get_editor_property("vector_parameter_values"):
+                n = str(p.get_editor_property("parameter_info").get_editor_property("name"))
+                v = p.get_editor_property("parameter_value")
+                rec["vectors"][n] = [float(v.r), float(v.g), float(v.b), float(v.a)]
+        except Exception as e:
+            ERRORS.append("vectors on %s: %s" % (path, e))
+        if not no_textures:
+            try:
+                for p in mat.get_editor_property("texture_parameter_values"):
+                    n = str(p.get_editor_property("parameter_info").get_editor_property("name"))
+                    t = p.get_editor_property("parameter_value")
+                    if t is None:
+                        continue
+                    k = add_texture(t, n, pack)
+                    kind = TEXTURES[t.get_path_name()]["map"]
+                    # First writer wins for the same reason `add_texture` keeps
+                    # the first role: two slots claiming "albedo" is an authoring
+                    # accident and picking by iteration order is not a decision.
+                    rec["maps"].setdefault(kind, k)
+            except Exception as e:
+                ERRORS.append("textures on %s: %s" % (path, e))
+
+    # The scalar block a PBR importer actually needs, pulled out of the
+    # parameter soup by NAME. Everything is kept in `scalars`/`vectors` as well,
+    # so a parameter this table does not know about is still on the far side.
+    def sca(*names):
+        for n in names:
+            for have, v in rec["scalars"].items():
+                if have.strip().lower().replace(" ", "") == n:
+                    return v
+        return None
+
+    def vec(*names):
+        for n in names:
+            for have, v in rec["vectors"].items():
+                if have.strip().lower().replace(" ", "") == n:
+                    return v
+        return None
+
+    v = vec("basecolor", "color", "colour", "albedo", "tint", "basecolour")
+    if v:
+        rec["base_color"] = v
+    for name, field in (("metallic", "metallic"), ("roughness", "roughness"),
+                        ("opacity", "opacity")):
+        s = sca(name)
+        if s is not None:
+            rec[field] = s
+    v = vec("emissive", "emissivecolor", "emission")
+    if v:
+        rec["emissive"] = v[:3]
+    if rec["opacity"] < 1.0 or "opacity" in rec["maps"]:
+        rec["blend"] = "blend"
+    try:
+        bm = str(mat.get_base_material().get_editor_property("blend_mode"))
+        if "MASKED" in bm.upper():
+            rec["blend"] = "masked"
+        elif "TRANSLUCENT" in bm.upper():
+            rec["blend"] = "blend"
+    except Exception:
+        pass
+    say(" mat %-6s %-40s maps=%s" % ("surf" if surface else "skin",
+                                     mat.get_name(),
+                                     ",".join(sorted(rec["maps"]))))
+    return rec["key"]
+
+
+def socket_list(sm):
+    """A mesh's sockets, in UE centimetres.
+
+    `StaticMesh.sockets` is a PROTECTED editor property and refuses
+    `get_editor_property` (measured). A transient component answers instead,
+    which is the same list read through the blueprint API the engine does
+    expose. The manifest carries the raw UE numbers and the importer converts,
+    so there is one conversion in the bridge rather than one on each side.
+    """
+    out = []
+    try:
+        comp = unreal.StaticMeshComponent()
+        comp.set_static_mesh(sm)
+        for n in comp.get_all_socket_names():
+            t = comp.get_socket_transform(n, unreal.RelativeTransformSpace.RTS_COMPONENT)
+            loc = t.translation
+            rot = t.rotation.rotator()
+            out.append({
+                "name": str(n),
+                "location_cm": [float(loc.x), float(loc.y), float(loc.z)],
+                "rotation_deg": [float(rot.roll), float(rot.pitch), float(rot.yaw)],
+            })
+    except Exception as e:
+        ERRORS.append("sockets on %s: %s" % (sm.get_path_name(), e))
+    return out
+
+
+def add_mesh(sm, pack):
+    path = sm.get_path_name()
+    if path in MESHES:
+        return MESHES[path]["key"]
+    k = key_of(path)
+    nlods = sm.get_num_lods()
+    try:
+        nanite = bool(sm.get_editor_property("nanite_settings").enabled)
+    except Exception:
+        nanite = False
+    bb = sm.get_bounding_box()
+    rec = {
+        "key": k, "source": path, "pack": pack, "nanite": nanite,
+        "lods": [], "material_slots": [], "sockets": socket_list(sm),
+        "bounds_cm": {
+            "min": [float(bb.min.x), float(bb.min.y), float(bb.min.z)],
+            "max": [float(bb.max.x), float(bb.max.y), float(bb.max.z)],
+        },
+        "collision_primitives": 0,
+    }
+    MESHES[path] = rec
+    try:
+        bodysetup = sm.get_editor_property("body_setup")
+        if bodysetup:
+            ag = bodysetup.get_editor_property("agg_geom")
+            rec["collision_primitives"] = (
+                len(ag.get_editor_property("box_elems"))
+                + len(ag.get_editor_property("sphere_elems"))
+                + len(ag.get_editor_property("convex_elems"))
+                + len(ag.get_editor_property("sphyl_elems")))
+    except Exception:
+        pass
+
+    # The material SLOTS, in slot order -- the order `.inf_mesh`'s
+    # `material_slots` is indexed by, so it has to be the order UE reports and
+    # not the order a set iterates.
+    try:
+        for slot in sm.get_editor_property("static_materials"):
+            mi = slot.get_editor_property("material_interface")
+            if mi is None:
+                rec["material_slots"].append(None)
+                continue
+            rec["material_slots"].append(add_material(mi, pack))
+    except Exception as e:
+        ERRORS.append("slots on %s: %s" % (path, e))
+
+    # The AUTHORED screen sizes, one per source model. This is the number the
+    # importer turns into a ladder threshold, and it is the only place a pack's
+    # own opinion about when a rung takes over survives -- everything else about
+    # a LOD (its triangles, its file) is a consequence.
+    # The AUTHORED screen sizes -- a pack's own opinion about when a rung takes
+    # over, and the only thing about a LOD that is a DECISION rather than a
+    # consequence. The triangle counts are deliberately not taken here: the
+    # importer counts them off the glTF it actually reads, which is the number
+    # that describes the rung this bridge produced.
+    #
+    # `StaticMesh.source_models` is not an exposed property and
+    # `get_editor_subsystem(StaticMeshEditorSubsystem)` returns **None** in a
+    # commandlet -- both measured. `EditorStaticMeshLibrary` is deprecated and
+    # still answers, so it is tried, and a `-1` here means "the importer
+    # chooses", which it is able to do.
+    screen = {}
+    try:
+        sizes = unreal.EditorStaticMeshLibrary.get_lod_screen_sizes(sm)
+        for i, v in enumerate(sizes):
+            screen[i] = float(v)
+    except Exception as e:
+        ERRORS.append("screen sizes on %s: %s" % (path, e))
+
+    for lod in range(nlods):
+        entry = {"level": lod, "file": None}
+        entry["screen_size"] = screen.get(lod, -1.0)
+        if MODE == "export":
+            name = rel("meshes", "%s_LOD%d.gltf" % (k, lod))
+            dst = os.path.join(OUT, name.replace("/", os.sep))
+            ensure(os.path.dirname(dst))
+            opts = unreal.GLTFExportOptions()
+            opts.set_editor_property("default_level_of_detail", lod)
+            # Geometry only. Baking UE's material graphs into glTF textures
+            # would produce a second, worse copy of maps this manifest already
+            # carries at source resolution, and `bake_material_inputs` is the
+            # switch that does it.
+            #
+            # It is an **enum** in 5.8, not a bool, and passing `False` raises
+            # "Failed to convert type 'bool' to property 'BakeMaterialInputs'"
+            # -- which the exporter reports as a failed TASK, so the run
+            # exported 79 textures and zero meshes before this was measured.
+            try:
+                opts.set_editor_property("bake_material_inputs",
+                                         unreal.GLTFMaterialBakeMode.DISABLED)
+            except Exception as e:
+                ERRORS.append("bake_material_inputs: %s" % e)
+            opts.set_editor_property("export_vertex_colors", True)
+            opts.set_editor_property("export_lights", False)
+            opts.set_editor_property("export_cameras", False)
+            try:
+                # `unreal.GLTFExporter` is ABSTRACT and instantiating it
+                # fails the task (measured). The concrete per-asset
+                # exporter is not exposed to Python, so the exporter is
+                # left unset and UE picks one by the FILENAME EXTENSION --
+                # which is why `dst` ends in `.gltf` and must keep doing so.
+                ok = export_task(sm, dst, None, opts)
+            except Exception as e:
+                ok = False
+                ERRORS.append("gltf %s LOD%d: %s" % (path, lod, e))
+            if ok and os.path.isfile(dst):
+                entry["file"] = name
+                entry["bytes"] = os.path.getsize(dst)
+            else:
+                ERRORS.append("gltf %s LOD%d did not write" % (path, lod))
+        rec["lods"].append(entry)
+    say("mesh %-46s lods=%d nanite=%-5s slots=%d sockets=%d ss=%s" %
+        (sm.get_name(), nlods, nanite, len(rec["material_slots"]),
+         len(rec["sockets"]),
+         ",".join("%.3f" % e["screen_size"] for e in rec["lods"])))
+    return k
+
+
+FIXTURES = {}   # blueprint object path -> record
+
+
+def add_blueprint(bp, pack):
+    """A prop Blueprint's LIGHTS and the mesh they hang off -- a FIXTURE.
+
+    This is the socket clause, and it is not on the sockets. `SM_lightpost_*`
+    reports zero of them (measured); what carries the lamp in Downtown_West is
+    `BP_lightpost_a`, a Blueprint whose construction script parents a
+    `PointLightComponent` to a `StaticMeshComponent` at a relative offset. So
+    the thing worth crossing the bridge is the Blueprint's component tree, and
+    a "socket" in this manifest is *where a light sits relative to a mesh*.
+
+    `SimpleConstructionScript` is a protected property, so the subobject
+    subsystem answers instead. It is an EDITOR subsystem and this runs in a
+    commandlet with the editor loaded, which is the arrangement
+    `-run=pythonscript` gives.
+    """
+    path = bp.get_path_name()
+    if path in FIXTURES:
+        return FIXTURES[path]["key"]
+    rec = {"key": key_of(path), "source": path, "pack": pack,
+           "lights": [], "meshes": []}
+    FIXTURES[path] = rec
+    try:
+        sub = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+        handles = sub.k2_gather_subobject_data_for_blueprint(bp)
+        # HANDLE -> DATA -> OBJECT. `get_object` takes the DATA and refuses a
+        # handle ("Failed to convert parameter 'data'", measured), and the
+        # gather returns each component TWICE, so the names are deduplicated --
+        # a fixture with two of the same lamp would otherwise be a fact about
+        # the walk rather than about the prop.
+        seen = set()
+        for h in handles:
+            d = unreal.SubobjectDataBlueprintFunctionLibrary.get_data(h)
+            obj = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(d)
+            if obj is None or obj.get_name() in seen:
+                continue
+            seen.add(obj.get_name())
+            if isinstance(obj, unreal.LightComponent):
+                t = obj.get_relative_transform()
+                loc, rot = t.translation, t.rotation.rotator()
+                light = {
+                    "name": obj.get_name(),
+                    "kind": ("spot" if isinstance(obj, unreal.SpotLightComponent)
+                             else "point"),
+                    "location_cm": [float(loc.x), float(loc.y), float(loc.z)],
+                    "rotation_deg": [float(rot.roll), float(rot.pitch),
+                                     float(rot.yaw)],
+                }
+                for prop, out in (("intensity", "intensity"),
+                                  ("attenuation_radius", "radius_cm"),
+                                  ("outer_cone_angle", "outer_cone_deg"),
+                                  ("inner_cone_angle", "inner_cone_deg")):
+                    try:
+                        light[out] = float(obj.get_editor_property(prop))
+                    except Exception:
+                        pass
+                try:
+                    c = obj.get_editor_property("light_color")
+                    light["color_srgb8"] = [int(c.r), int(c.g), int(c.b)]
+                except Exception:
+                    pass
+                rec["lights"].append(light)
+            elif isinstance(obj, unreal.StaticMeshComponent):
+                sm = obj.get_editor_property("static_mesh")
+                if sm is None:
+                    continue
+                t = obj.get_relative_transform()
+                loc = t.translation
+                rec["meshes"].append({
+                    "mesh": add_mesh(sm, pack),
+                    "component": obj.get_name(),
+                    "location_cm": [float(loc.x), float(loc.y), float(loc.z)],
+                })
+    except Exception as e:
+        ERRORS.append("blueprint %s: %s" % (path, e))
+        say("  ! blueprint %s: %s" % (bp.get_name(), e))
+    say("  bp %-40s lights=%d meshes=%d" %
+        (bp.get_name(), len(rec["lights"]), len(rec["meshes"])))
+    return rec["key"]
+
+
+# ── the sweep ────────────────────────────────────────────────────────────────
+
+def run():
+    if not OUT:
+        say("REFUSED: set INF_UE_OUT to an output directory outside the project")
+        return
+    ensure(OUT)
+    say("BEGIN mode=%s out=%s maxtex=%d" % (MODE, OUT, MAXTEX))
+    t0 = datetime.datetime.now(datetime.timezone.utc)
+    packs = []
+    for pack in PACKS:
+        if ONLY and pack["name"] not in ONLY:
+            continue
+        say("PACK %s" % pack["name"])
+        packs.append({"name": pack["name"], "license": pack["license"],
+                      "selectors": []})
+        for sel in pack["select"]:
+            wanted = set(sel.get("classes", ["StaticMesh"]))
+            pat = sel.get("match")
+            limit = sel.get("limit", 8)
+            hits = []
+            for a in REG.get_assets_by_path(sel["prefix"], recursive=True):
+                cls = str(a.asset_class_path.asset_name)
+                if cls not in wanted:
+                    continue
+                name = str(a.asset_name)
+                if pat and not re.search(pat, name):
+                    continue
+                hits.append((name, str(a.package_name), cls))
+            # Sorted, then truncated. An asset registry's order is a function of
+            # a scan and this manifest has to be the same manifest twice.
+            hits.sort()
+            hits = hits[:limit]
+            packs[-1]["selectors"].append({
+                "prefix": sel["prefix"], "match": pat, "limit": limit,
+                "chosen": [h[1] for h in hits],
+            })
+            for name, pkg, cls in hits:
+                try:
+                    obj = unreal.load_asset(pkg)
+                    if obj is None:
+                        ERRORS.append("could not load %s" % pkg)
+                        continue
+                    if cls == "StaticMesh":
+                        add_mesh(obj, pack["name"])
+                    elif cls == "Blueprint":
+                        add_blueprint(obj, pack["name"])
+                    else:
+                        add_material(obj, pack["name"],
+                                     surface=sel.get("surface", False),
+                                     no_textures=sel.get("no_textures", False))
+                except Exception as e:
+                    ERRORS.append("%s: %s" % (pkg, e))
+                    say("  ! %s: %s" % (pkg, e))
+                    traceback.print_exc()
+
+    t1 = datetime.datetime.now(datetime.timezone.utc)
+    manifest = {
+        "schema_version": 1,
+        "generator": "tools/ue-export/export.py",
+        "engine": unreal.SystemLibrary.get_engine_version(),
+        "project": unreal.Paths.get_project_file_path(),
+        "exported_utc": t0.isoformat(),
+        "seconds": (t1 - t0).total_seconds(),
+        "mode": MODE,
+        "units": "meshes are glTF (metres, Y up, right handed) as UE's exporter "
+                 "writes them; socket transforms are RAW UE centimetres in UE's "
+                 "own frame and the importer converts them",
+        "packs": packs,
+        "meshes": sorted(MESHES.values(), key=lambda r: r["key"]),
+        "materials": sorted(MATERIALS.values(), key=lambda r: r["key"]),
+        "fixtures": sorted(FIXTURES.values(), key=lambda r: r["key"]),
+        "textures": sorted(TEXTURES.values(), key=lambda r: r["key"]),
+        "errors": ERRORS,
+    }
+    path = os.path.join(OUT, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    tex_bytes = sum(t.get("bytes", 0) for t in TEXTURES.values())
+    say("WROTE %s" % path)
+    say("TOTALS meshes=%d lods=%d materials=%d textures=%d fixtures=%d "
+        "lights=%d texture_MB=%.1f errors=%d seconds=%.1f" % (
+            len(MESHES), sum(len(m["lods"]) for m in MESHES.values()),
+            len(MATERIALS), len(TEXTURES), len(FIXTURES),
+            sum(len(f["lights"]) for f in FIXTURES.values()),
+            tex_bytes / 1048576.0, len(ERRORS), (t1 - t0).total_seconds()))
+    for e in ERRORS:
+        say("ERROR %s" % e)
+    say("END")
+
+
+run()
