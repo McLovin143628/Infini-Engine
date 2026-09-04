@@ -30484,6 +30484,17 @@ surface moving **0.1280** against a matte **0.0590**.
 
 121 golden tests green under `INF_GOLDEN_STRICT=1`.
 
+**And the golden-CONTENT digest moves with it, in three places.** P26's
+`the_golden_set_is_pinned_and_additive` (and its P27 and P28 twins) fold every
+golden's name and bytes into one hash, so a re-blessed frame fails a gate the
+render harness's own tolerance cannot see — which is exactly what it is for, and
+it caught this wave. `GOLDEN_SET_DIGEST` goes
+`26faf4da53ff1e002cfa469528ff8253` → `1a03e55866b2b76958573b4050651d98` in all
+three, in the same commit, with the cause written beside the constant. The gate's
+own wording is the standard it is held to: *"Changing an existing frame is
+allowed ONLY in a commit whose stated purpose is to change the look, with the
+difference described — never as a side effect of something else."*
+
 #### The white domes are not clouds
 
 The brief asked whether the white domes on the horizon of `OFF-gi/03-pie-b.png`
@@ -30823,6 +30834,12 @@ Screenshots: `EDIT1-final/01-editor.png` (the editor, before Play),
   the gate's own doc records what that costs (the SCRIPT1b audit found two real
   defects hiding inside an allowlisted function), so a wave that adds itself to
   it is buying a blind spot rather than a pass.
+* **A re-bless is three gates, not one.** The render harness compares a golden
+  within a perceptual tolerance; P26's content digest compares its BYTES, from
+  another crate, folded across the whole set — so "inside tolerance" and
+  "unchanged" are different claims and the second one has its own gate in three
+  files. A wave that re-blesses learns this from a red battery unless it goes
+  looking first.
 * **A CRLF file needs CRLF anchors.** Half this repository's TSX is CRLF in the
   working copy and half its Rust is LF; a multi-line anchor edit that carries the
   wrong newline silently matches nothing (and, worse, *inserts* the wrong one).

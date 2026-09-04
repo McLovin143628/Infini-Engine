@@ -2560,7 +2560,15 @@ fn the_golden_set_is_pinned_and_additive() {
     /// was 40, which is a frame lit by daylight with some neon in it.
     ///
     /// `GOLDENS` moves 60 -> 62.
-    const GOLDEN_SET_DIGEST: &str = "26faf4da53ff1e002cfa469528ff8253";
+    // Wave EDIT1 moved this ONCE, with a stated purpose and a described
+    // difference: `gi_specular.png` was re-blessed when the GI ambient stopped
+    // being irradiance spent as radiance. The other 61 frames are byte-identical
+    // -- four of the five GI goldens hold their images through the
+    // `GI_LAMBERT_PI` compensation in `golden.rs`, and `gi_specular` is the one
+    // a single multiplier cannot hold because EDIT1 removed a pi from two
+    // places and its subject rides both. Mean 0.072099, max 0.242510; every
+    // structural assertion it exists for passes on the new frame.
+    const GOLDEN_SET_DIGEST: &str = "1a03e55866b2b76958573b4050651d98";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
