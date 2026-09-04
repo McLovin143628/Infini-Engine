@@ -29901,25 +29901,25 @@ one is read only when the embedder passes no arguments of its own, and Tauri
 always passes some, which is why the first attempt at this waited for a port that
 never opened. Off unless a whole port number asks for it.
 
-**Both modes, back to back at the final head:**
+**Both modes, back to back, on binaries built from this wave’s final commit:**
 
 ```
-embedded   player pid 21104 after 1 s
+embedded   player pid 13700 after 1 s
            console windows named inf-player: none
            the player's reported window is 16x16, top-level=True — treating it as embedded
            clicking the viewport hole at the screen centre
            cursor while the game has the window: hidden
            cursor two seconds in: hidden
            hero first : t=0.033 (-1750.0000, 16.5832, 2050.0000) Grounded speed 0.0000
-           hero last  : t=36.600 (-1750.0001, 16.5825, 2062.6281) Grounded speed 3.7500
-           HERO MOVED 12.628 m over 141 samples
+           hero last  : t=36.517 (-1750.0001, 16.5825, 2062.7531) Grounded speed 3.7500
+           HERO MOVED 12.753 m over 140 samples
            cursor after the session ended: SHOWING
 
-window     player pid 2828 after 1 s
+window     player pid 25764 after 1 s
            console windows named inf-player: none
-           the player owns its own window [234,234 1296x759]; raising it
-           hero last  : t=36.800 (-1750.0001, 16.5826, 2062.0656) Grounded speed 3.7500
-           HERO MOVED 12.066 m over 142 samples
+           the player owns its own window [156,156 1296x759]; raising it
+           hero last  : t=37.050 (-1750.0001, 16.5825, 2062.6906) Grounded speed 3.7500
+           HERO MOVED 12.691 m over 143 samples
 ```
 
 `Grounded` at t = 0.033 rather than `FallControlled` is the spawn fix; 3.7500 m/s
@@ -29959,6 +29959,33 @@ are both subject to the foreground LOCK and that pair is not. And the driver's
 embedded player reports a `MainWindowHandle` too — a **16×16 stub at (0,0)**,
 which is what winit leaves behind once the editor has reparented the real window
 — so a rect, a null parent and a 200 px floor go with it.
+
+### THE HOUSE GATES
+
+| gate | base `dbc2383e` | this tree |
+|---|---|---|
+| battery, `-j 3`, `INF_GOLDEN_STRICT=1` | 370 / 7 019 / 0 / 21, exit 0 | **371 / 7 055 / 0 / 21**, exit 0 |
+| goldens | 62 files, none blessed | **62**, none blessed, none in `git status` |
+| rustdoc after `cargo clean --doc` | 410 `^warning` = 380 + 30 summaries | **410 = 380 + 30**, ceiling 450, and the per-warning **diff against the baseline log is EMPTY** |
+| clippy `--workspace --all-targets -- -D warnings`, LAST | 0 / 0 | **0 errors, 0 warnings**, exit 0 |
+| `cargo fmt` per member (`--all` is os error 206 here) | clean | **clean** |
+| frontend | 86 files / 781 tests | **86 / 781**, `tsc --noEmit` + `eslint --max-warnings 0` clean |
+| CRLF over the whole diff | 0 | **0** |
+| schema | v27 / payload v12 / `EXPECTED_LEVELS` 24 | **unmoved**; `PIE_PROTOCOL_VERSION` 2 -> 3 with both ends and a version arm |
+| manifests | -- | one: `inf-player`'s existing `windows` dependency gains three FEATURES. `Cargo.lock` and `deny.toml` untouched |
+
+The battery is **+1 binary** (`controls_pie`) and **+36 arms**, which reconciles
+exactly: 25 in `controls_pie`, 3 in `win_host`, 3 in `locomotion`, 2 in
+`inf-runtime`'s `pie`, 2 in `island`, 1 in `pie`. The only panic in the log is the
+one the house expects, `inf-hotreload`'s crash-isolation fixture.
+
+**Two of the house's own gates caught this wave writing a defect**, which is worth
+recording because it is what they are for: the cook's advisory source gate found
+an eaten backslash-continuation in a Rust string literal (a scripted edit whose
+Python source held the backslash inside a non-raw triple-quoted string -- P22's
+law, met again), and clippy found `collapsible_if` + `manual_is_multiple_of` in
+the grab ladder.
+
 
 ### CARRIED
 
