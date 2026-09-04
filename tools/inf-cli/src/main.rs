@@ -31,6 +31,23 @@ fn main() -> ExitCode {
         Some("pack") => cmd_pack(&args[1..]),
         Some("gis") => cmd_gis(&args[1..]),
         Some("island") => cmd_island(&args[1..]),
+        // **`inf import` is a different binary, and it says so** (wave
+        // ASSET0). The importer is `inf_editor_core::assets::import` --
+        // the one door, the same call the Content Drawer makes -- and
+        // linking it here would drag wgpu, the thumbnailer and the whole
+        // editor core into a binary this crate's own manifest keeps
+        // deliberately Ring-0-only. A refusal that names the remedy beats
+        // an "unknown command" for a verb the wave's documentation uses.
+        Some("import") => {
+            eprintln!(
+                "`inf import` lives in its own binary, because importing links the \
+                 editor core (and wgpu) and this one deliberately does not.\n\n  \
+                 cargo run -p inf-import --release -- --manifest <manifest.json> \
+                 --into <project>\n\n\
+                 or `inf-import --help` if it is already built."
+            );
+            ExitCode::FAILURE
+        }
         Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -57,6 +74,7 @@ fn print_help() {
              inf gis plan <file> [--kind <kind>] [--crs <spec>] [--max <n>] \
              [--min-length <m>] [--project <dir> | --level <file.inf_lvl> | \
              --anchor <crs>,<easting>,<northing>[,<height>]]\n  \
+             inf-import --manifest <manifest.json> --into <dir>   (separate binary)\n  \
              inf island plan  --recipe <island.toml>\n  \
              inf island fetch --recipe <island.toml> [--jobs <n>]\n  \
              inf island build --recipe <island.toml> [--out <dir>] [--offline] \

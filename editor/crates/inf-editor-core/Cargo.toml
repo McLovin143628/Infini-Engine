@@ -95,6 +95,12 @@ csv = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# ASSET0: the bridge gate WRITES its own PNGs, because the bridge's real
+# input is licensed content that may not enter this repository and a fixture
+# that cannot be regenerated is a fixture nobody can change. `image` is
+# already the workspace pin `inf-material` decodes through -- this is a new
+# dev-dependency edge, not a new dependency.
+image = { workspace = true }
 # Wave-G audit: the terrain import queue's georeferencing arm needs a real
 # GeoTIFF, and a PNG carries no georeference to test against. A dev-dependency,
 # so nothing this crate ships links a TIFF encoder — the decoder it reads lives

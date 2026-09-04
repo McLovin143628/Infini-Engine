@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod sprite_sheet;
 pub mod table_import;
 pub mod terrain_import;
+pub mod ue_import;
 pub mod vmesh;
 
 use std::path::{Path, PathBuf};
@@ -400,6 +401,77 @@ impl AssetProject {
             path: path.to_path_buf(),
             name,
             // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
+        });
+        self.bump();
+        Ok(id)
+    }
+
+    /// [`write_asset_at`](Self::write_asset_at), with the **GUID supplied**
+    /// (wave ASSET0).
+    ///
+    /// The door for a producer whose asset IDENTITY is decided elsewhere and
+    /// whose bytes are decided here — which is what the UE bridge's rebind is:
+    /// a Megascans surface written at the GUID a committed level already names
+    /// (`assets::ue_import`, and see its module note for why that is the only
+    /// arrangement that keeps licensed content out of this repository while the
+    /// island still wears it).
+    ///
+    /// `write_asset_at` keeps whatever id is registered at the path and mints a
+    /// fresh one when there is nothing there, which is right for an editor
+    /// re-saving its own document and **wrong** here in exactly one case: the
+    /// first import into a project whose `Content` has not been built yet. That
+    /// run would mint an id no level names, write it, and report success.
+    ///
+    /// An asset of a DIFFERENT kind at this path is evicted, as in
+    /// `write_asset_at`; an asset of the same kind under a different id is
+    /// evicted too, because the caller's id is the one the world is written
+    /// against.
+    pub fn write_asset_at_with_id<T: AssetPayload>(
+        &mut self,
+        path: &Path,
+        payload: &T,
+        id: AssetId,
+        dependencies: Vec<AssetId>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
+        match self.db.get_by_path(path).map(|e| (e.id(), e.kind())) {
+            Some((have, kind)) if kind == T::KIND && have == id => {
+                self.rewrite_payload_with_import(id, payload, dependencies, import)?;
+                return Ok(id);
+            }
+            Some((have, _)) => {
+                self.db.remove(have);
+            }
+            None => {}
+        }
+        // …and an asset with this id registered somewhere ELSE goes too: two
+        // entries claiming one GUID is the state `AssetDb` cannot represent, and
+        // the one this call is creating is the one the caller asked for.
+        if let Some(other) = self.db.get(id).map(|e| e.path.clone()) {
+            if other != path {
+                self.db.remove(id);
+            }
+        }
+        let bytes = inf_asset::encode(payload)?;
+        let hash = ContentHash::of(&bytes);
+        inf_asset::write_atomically(path, &bytes)?;
+        let mut sidecar = AssetSidecar::new(id, T::KIND, hash);
+        sidecar.dependencies = dependencies;
+        sidecar.import = import;
+        if let Err(e) = sidecar.save(path) {
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Asset")
+            .to_string();
+        self.db.insert(AssetEntry {
+            sidecar,
+            path: path.to_path_buf(),
+            name,
             sidecar_unreadable: false,
         });
         self.bump();

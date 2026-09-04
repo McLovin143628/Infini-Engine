@@ -107,3 +107,11 @@
 # (git normalizes to LF on check-IN regardless), it fixes what checkout writes.
 *.ts text eol=lf
 *.tsx text eol=lf
+
+# Python joins the list at wave ASSET0 with `tools/ue-export/export.py`, the
+# first .py this repository has held. Indentation IS the syntax, the harness
+# that edits these files has already eaten a line continuation once (the P22
+# law), and a script whose line endings are a property of whose machine
+# checked it out is one more thing to rule out when it misbehaves inside
+# another engine's embedded interpreter. Same fix, same reason.
+*.py text eol=lf

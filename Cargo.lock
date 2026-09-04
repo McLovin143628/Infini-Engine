@@ -3194,6 +3194,7 @@ dependencies = [
  "bytemuck",
  "csv",
  "glam 0.33.2",
+ "image",
  "inf-anim",
  "inf-asset",
  "inf-audio",
@@ -3294,6 +3295,15 @@ version = "0.1.0"
 dependencies = [
  "inf-hotreload",
  "serde",
+]
+
+[[package]]
+name = "inf-import"
+version = "0.1.0"
+dependencies = [
+ "inf-asset",
+ "inf-editor-core",
+ "tempfile",
 ]
 
 [[package]]

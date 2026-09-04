@@ -1,0 +1,27 @@
+[package]
+name = "inf-import"
+description = "Infini Engine headless importer: the Unreal bridge's Infini side."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "inf-import"
+path = "src/main.rs"
+
+[dependencies]
+# **Why this is not a subcommand of `inf`.** `tools/inf-cli`'s manifest says, in
+# its own words, that it links Ring-0 crates "and NOTHING else … without the CLI
+# linking an editor crate (and its wgpu), which is the same reason `inf-project`
+# exists". The importer IS the editor's importer — the wave's own one-door rule
+# — so putting it behind `inf import` would drag wgpu, the thumbnailer and the
+# whole editor core into a binary three other subcommands keep deliberately
+# small. It gets its own binary instead; `inf --help` names it.
+inf-editor-core = { workspace = true }
+inf-asset = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

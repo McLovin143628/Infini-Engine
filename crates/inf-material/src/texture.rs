@@ -644,6 +644,57 @@ pub fn import_texture_bytes(
     texture_from_rgba8(rgba, w, h, settings)
 }
 
+/// **Shrink an RGBA8 source to a ceiling on its longest side** (wave ASSET0).
+///
+/// Returns the image unchanged when it already fits, or when `max_extent` is 0.
+///
+/// # Why this is here and not in the importer that wants it
+///
+/// It halves through [`downsample_box`] — the *same* filter
+/// [`rgba_mip_chain`] uses — so a source clamped to `max_extent` is
+/// **bit-identical to the mip level of the unclamped import at that extent**.
+/// That is a property worth having and it is only true if there is one filter;
+/// a second box filter written beside the caller would agree today and drift
+/// the first time either is touched. The arm below is what says so.
+///
+/// # What it is for
+///
+/// The UE bridge exports Megascans surfaces at their source resolution, which
+/// in this project is **8 192 square** for most of them: 268 MB of RGBA per map
+/// and about a hundred megabytes of PNG. A 4 m asphalt tile at 8K is 0.49 mm a
+/// texel — under a millimetre, which is past what the ground library itself
+/// spends and past what a road seen from standing height resolves. The clamp is
+/// where an author says how much of that to keep, and it happens **before** the
+/// mip chain and the BC encode, so it is also where most of the import's time
+/// goes away.
+pub fn downscale_rgba8(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    max_extent: u32,
+) -> Result<(Vec<u8>, u32, u32), MaterialError> {
+    if width == 0 || height == 0 {
+        return Err(MaterialError::Image("zero-sized texture".into()));
+    }
+    if rgba.len() < width as usize * height as usize * 4 {
+        return Err(MaterialError::Image("truncated pixel buffer".into()));
+    }
+    if max_extent == 0 || width.max(height) <= max_extent {
+        return Ok((rgba, width, height));
+    }
+    let (mut w, mut h, mut px) = (width, height, rgba);
+    // Halve until the LONGER side fits. A non-square source keeps its aspect —
+    // the 8192x2048 concrete slab in this project is one, and squashing it to a
+    // square would be a different surface.
+    while w.max(h) > max_extent && (w > 1 || h > 1) {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        px = downsample_box(&px, w, h, nw, nh);
+        w = nw;
+        h = nh;
+    }
+    Ok((px, w, h))
+}
+
 /// Decode an encoded image (PNG/JPEG/TGA/BMP/HDR/EXR) to `(rgba8, width,
 /// height)`.
 ///

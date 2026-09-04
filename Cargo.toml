@@ -49,6 +49,7 @@ members = [
     "runtime/inf-player",
     "runtime/inf-packager",
     "tools/inf-cli",
+    "tools/inf-import",
 ]
 # The sample mods build to wasm32-unknown-unknown as standalone cdylib packages
 # (a native cdylib build would fail to link the wasm-only host imports), so they
