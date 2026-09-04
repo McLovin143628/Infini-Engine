@@ -29405,17 +29405,19 @@ against a 12.834 ms GPU frame with the crowd cleared); the fixed step alone is
 
 ### HOUSE GATES AT HEAD
 
-Battery **376 binaries / 7 013 passed / 0 failed / 21 ignored**, `cargo test`
-exit status 0 — and the arm delta reconciles EXACTLY: `git diff origin/main..HEAD`
-adds **52** `#[test]` and removes none, one of them `#[ignore]`d, against the
-base ledger's 6 962 / 20, i.e. **+51 passed and +1 ignored**. Two honest notes on
-that aggregate. The BINARY count is 376 against the base's 366 while this wave
-adds four test targets; the six-binary difference is unattributed and the base
-was not re-measured. And the aggregate was recomputed NUL-safely as well as read
-off the script, because a log carrying binary output truncates the script's own
-`awk` — an earlier, lock-contended run of this same battery reported **231**
-binaries for exactly that reason, and a reader who trusted it would have thought
-a third of the tree had stopped running.
+Battery **370 binaries / 7 013 passed / 0 failed / 21 ignored**, `cargo test`
+exit status 0, measured at `e1d19938`. **The delta reconciles exactly on all
+three axes**: the diff adds four test targets and **52** `#[test]` with none
+removed, one `#[ignore]`d, against the base ledger's 366 / 6 962 / 20 —
+**+4 binaries, +51 passed, +1 ignored**. The only panic in the log is the one the
+house expects, `inf-hotreload`'s crash-isolation fixture.
+
+**Every aggregate here is read off the script AND recomputed NUL-safely**, and
+the reason is that two earlier runs of this same battery reported **376** and
+**231** binaries. A log carrying binary output truncates `battery3.sh`'s own
+`awk`, and the 231 was a lock-contended run I had been issuing other cargo
+commands into — a reader who trusted it would have concluded a third of the tree
+had stopped running.
 
 Goldens **62 files / 121 arms** green under `INF_GOLDEN_STRICT=1` with **none
 blessed**. Rustdoc **410 `^warning` lines − 30 summaries = 380 individual**

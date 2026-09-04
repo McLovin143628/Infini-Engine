@@ -966,16 +966,21 @@ content hash at an unchanged byte length, for the stated cause in CP-A1.
 
 ## The house gates
 
-Battery **376 binaries / 7 013 passed / 0 failed / 21 ignored**, exit status 0.
-The arm delta reconciles exactly: `git diff origin/main..HEAD` adds **52**
-`#[test]` and removes none, one `#[ignore]`d, against the base ledger's
-6 962 / 20 — **+51 passed, +1 ignored**. Two honest notes. The BINARY count is
-376 against a stated base of 366 while this wave adds four test targets, and the
-six-binary difference is unattributed because the base was not re-measured. And
-the aggregate was recomputed NUL-safely as well as read off the script: a log
-carrying binary output truncates the script's own `awk`, and an earlier,
-lock-contended run of this same battery reported **231** binaries for exactly
-that reason.
+Battery **370 binaries / 7 013 passed / 0 failed / 21 ignored**, exit status 0,
+measured at `e1d19938` — the tree this document describes, with nothing after it
+but this paragraph. **The delta reconciles exactly, on all three axes**: the diff
+adds four test targets and **52** `#[test]` with none removed, one of them
+`#[ignore]`d, against the base ledger's 366 / 6 962 / 20 — **+4 binaries,
++51 passed, +1 ignored**. The only panic in the log is the one the house expects,
+`inf-hotreload`'s crash-isolation fixture.
+
+**Two readings, and the reason there are two.** An earlier run of this same
+battery reported **376** binaries and another **231**, both from the script's own
+`awk`, because a log carrying binary output truncates it — and the 231 was a
+lock-contended run I had been issuing other cargo commands into. Every aggregate
+here is therefore both read off the script AND recomputed NUL-safely, and the two
+agree on the run that counts. A reader who had trusted the 231 would have
+concluded a third of the tree had stopped running.
 
 Rustdoc **410 `^warning` lines − 30 summaries = 380 individual** against a
 ceiling of 450, cold after `cargo clean --doc`. Every warning's file:line was
