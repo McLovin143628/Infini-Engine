@@ -65,9 +65,15 @@ pub mod ipc;
 pub mod island;
 pub mod layouts;
 pub mod mods;
-/// Wave EDIT1: which PCG volumes the editor camera should have evaluated. The
-/// sibling of [`terrain_stream`] -- policy in Ring 1, calling in the host -- and
-/// the reason the editor draws the city the player draws.
+// Wave EDIT1: which PCG volumes the editor camera should have evaluated. The
+// sibling of `terrain_stream` -- policy in Ring 1, calling in the host -- and
+// the reason the editor draws the city the player draws.
+//
+// `//` and not `///`, for the reason `blueprint_source` states above and the
+// rustdoc sweep proved on this wave: an OUTER doc comment here is merged with
+// the module's own `//!` header and the whole thing is then resolved in THIS
+// file's scope, where `EDITOR_PCG_STEP_BUDGET_MS` and `PcgStreamStats` are not.
+// Two links dangled; the docs live in `pcg_stream.rs`.
 pub mod pcg_stream;
 /// The P25.3 finish pipeline: a dense photogrammetric reconstruction in, a
 /// standard textured `.inf_mesh` + `.inf_tex` + `.inf_mat` out. Ring 1 because
