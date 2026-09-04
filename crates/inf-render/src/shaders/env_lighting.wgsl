@@ -13,7 +13,6 @@
 // so the off-path instruction stream is identical.
 
 const SHADOW_RES: f32 = 2048.0; // must equal crate::csm::SHADOW_RESOLUTION
-const GI_PI: f32 = 3.14159265359;
 
 struct ShadowData {
     cascade_vp: array<mat4x4<f32>, 3>,
@@ -198,14 +197,55 @@ fn gi_fetch_sh(world_pos: vec3<f32>) -> mat4x3<f32> {
     return mat4x3<f32>(c0, c1, c2, c3);
 }
 
-// Trilinearly probe-interpolated L1-SH irradiance at `world_pos` for normal `n`.
-// The caller only invokes this when GI is enabled, so it needn't re-check the flag.
+// The probe field's contribution to a Lambert surface's **exit radiance** at
+// `world_pos` with normal `n`. The caller only invokes this when GI is enabled,
+// so it needn't re-check the flag.
+//
+// # The Lambert 1/π, and where it went (wave EDIT1)
+//
+// Cosine-lobe convolution of an L1 set is Ramamoorthi's `A₀ = π`, `A₁ = 2π/3`,
+// and it yields IRRADIANCE — on a uniform field of radiance `L`, exactly `π·L`.
+// A Lambert surface then leaves `(ρ/π)·E = ρ·L`, which is why every lit pass's
+// *direct* term spells the BRDF out as `kd * albedo / PI`.
+//
+// The ambient term does not, and never did:
+//
+// ```wgsl
+//     lo += amb * albedo * (1.0 - metallic) * ao;    // mesh.wgsl and five more
+// ```
+//
+// There is no `/π` on that line in any of the six lit shaders, and this
+// function's own retired comment had written the obligation down — *"folds the
+// Lambert 1/π into the caller"* — for a caller that never discharged it. So the
+// ambient half of the engine ran **π times** the direct half per unit of
+// incident radiance, `gi_intensity = 1.0` meant "π× a normalised gather", and
+// the showcase island's daylight street clipped 13.5 % of its pixels to white
+// with nothing in the frame darker than 91/255 (the FIX1 audit's table).
+//
+// The 1/π is folded into the two convolution constants rather than applied as a
+// trailing divide, so this is the same instruction count it always was:
+//
+// ```text
+//     A₀/π = 1                A₁/π = 2/3
+// ```
+//
+// The hemispheric constant this replaces (`mix(0.03…, 0.10…)` at each call site)
+// has always been in exit-radiance units — it is multiplied by albedo with no
+// π either — so after this fold the two ambient sources finally mean the same
+// thing, and switching GI on changes a surface's *shape* rather than its scale.
+//
+// Measured by `tests/gi_normalisation.rs` (the white furnace): before, a white
+// Lambert cube in a uniform environment returned **3.22×** the environment's own
+// radiance; after, 1.0. The five GI goldens hold their images by carrying `π` in
+// their authored `intensity`, which is itself the proof that the change is
+// exactly a scale and touches nothing else.
 fn gi_irradiance(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let c = gi_fetch_sh(world_pos);
     let b = sh_basis(n);
-    // Cosine-lobe convolution (Ramamoorthi): A0 = π, A1 = 2π/3.
-    let a0 = GI_PI;
-    let a1 = 2.0943951;
+    // Cosine-lobe convolution (Ramamoorthi) with the Lambert 1/π folded in:
+    // A0/π = 1, A1/π = 2/3.
+    let a0 = 1.0;
+    let a1 = 0.66666667;
     let e = a0 * c[0] * b.x + a1 * (c[1] * b.y + c[2] * b.z + c[3] * b.w);
     return max(e, vec3<f32>(0.0)) * gi.params.y;
 }
@@ -427,13 +467,17 @@ fn gi_specular(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, f0:
     let lobe = clamp(1.0 - rough, 0.0, 1.0);
     let radiance = gi_sh_radiance(c, r, lobe) * gi.params.y;
     let ab = gi_env_brdf_ab(rough, clamp(dot(n, v), 0.0, 1.0));
-    // `GI_PI` matches the convention of `gi_irradiance`, which folds the Lambert
-    // 1/π into the caller (`E = π·L` on a uniform field) — so the two terms are in
-    // the same units, and the retired `ambient × f0 × 0.5` is recovered exactly
-    // when `f0·a + b ≈ f0 × 0.5`, which is what the split-sum BRDF gives for a
-    // fully rough, face-on surface (`env_brdf_ab(1, 1) ≈ (0.45, 0)`). Pinned by
+    // **No π here either, since wave EDIT1.** This term carried a `GI_PI` whose
+    // only job was to match `gi_irradiance`'s π·L convention — the comment said
+    // so — and the split-sum form `L_prefiltered · (f0·a + b)` is in exit-radiance
+    // units on its own. With the diffuse half now honest, multiplying here would
+    // put the same factor back on the specular half alone. The retired
+    // `ambient × f0 × 0.5` is still recovered exactly, because `ambient` at this
+    // call site is `gi_irradiance`'s output and moved by the same π: what the
+    // split-sum BRDF gives a fully rough, face-on surface is
+    // `env_brdf_ab(1, 1) ≈ (0.45, 0)` against the retired 0.5. Pinned by
     // `gi::tests::specular_reduces_to_the_retired_ambient_constant`.
-    return radiance * GI_PI * (f0 * ab.x + vec3<f32>(ab.y));
+    return radiance * (f0 * ab.x + vec3<f32>(ab.y));
 }
 
 // The full ambient specular for a lit pass. Written once here so every lit shader

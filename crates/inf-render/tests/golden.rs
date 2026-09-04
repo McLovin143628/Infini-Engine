@@ -4027,16 +4027,10 @@ fn golden_gi_bleed() {
     // the lower two thirds (near-wall floor above, far floor below).
     let view = look_view(DVec3::new(0.0, 4.5, 7.0), DVec3::new(0.0, 0.0, -1.5));
 
-    let gi_on = RenderSettings {
-        gi: GiSettings {
-            enabled: true,
-            extent: 40.0,
-            rays: 48,
-            intensity: 2.5,
-            ..GiSettings::default()
-        },
-        ..RenderSettings::default()
-    };
+    // Through `gi_settings` like every other GI scene in this file — it was the
+    // one that spelled its block out inline, which meant EDIT1's π would have had
+    // to be written twice. Same extent, rays and bounce as before.
+    let gi_on = gi_settings(40.0, 48, 2.5);
 
     let img = check_golden_with(&gpu, "gi_bleed", &scene, &view, gi_on);
 
@@ -4139,13 +4133,39 @@ fn render_frames_with(
 }
 
 /// GI settings with the P18.4 defaults and an explicit extent/rays/intensity.
-fn gi_settings(extent: f32, rays: u32, intensity: f32) -> RenderSettings {
+/// The factor every GI scene in this file carries in its authored `intensity`
+/// since **wave EDIT1**, and why the images below did not move when the engine's
+/// ambient normalisation did.
+///
+/// `gi_irradiance` used to return **irradiance** — `π·L` on a uniform field —
+/// which the lit passes then spent as if it were exit radiance, so the ambient
+/// half of the engine ran π times the direct half (`crates/inf-render/tests/
+/// gi_normalisation.rs` measures it: a white Lambert cube in a uniform
+/// environment returned **3.22×** that environment's own radiance). EDIT1 folds
+/// the Lambert `1/π` into the convolution constants, so `gi.intensity` now
+/// multiplies a quantity that is π times smaller.
+///
+/// These scenes exist to pin GI's *behaviour* — the red bleed near a wall, an
+/// emissive bar lighting a floor with no analytic light, a reflection that has a
+/// direction. Every one of them was authored to show that behaviour at a chosen
+/// **bounce strength**, and a bounce strength is preserved across a unit change
+/// by scaling the multiplier. So the argument below is still the pre-EDIT1
+/// number and the π rides here, once.
+///
+/// That is deliberately stronger evidence than re-blessing would have been: if
+/// the fix were anything but a uniform scale, `× π` could not put these frames
+/// back inside tolerance, and four of them are outside it without this line.
+/// **The showcase island does not get this compensation** — it keeps
+/// `gi_intensity: 1.0`, and that is the whole point of the wave.
+const GI_LAMBERT_PI: f32 = std::f32::consts::PI;
+
+fn gi_settings(extent: f32, rays: u32, bounce: f32) -> RenderSettings {
     RenderSettings {
         gi: GiSettings {
             enabled: true,
             extent,
             rays,
-            intensity,
+            intensity: bounce * GI_LAMBERT_PI,
             ..GiSettings::default()
         },
         ..RenderSettings::default()

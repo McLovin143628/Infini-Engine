@@ -1136,23 +1136,35 @@ mod tests {
     /// `ambient × f0 × 0.5` it replaced. Turning GI specular on therefore adds
     /// **directionality**, not energy — which is why it can default to on without
     /// re-exposing every GI scene.
+    /// # What this test could not see, and what does (wave EDIT1)
+    ///
+    /// The comment below used to say "a term with a bug in its π bookkeeping
+    /// would get [the scale] wrong by a factor". It would not have been caught
+    /// here, and there was one. Both sides of this comparison are the AMBIENT
+    /// term — the retired constant is `gi_irradiance × f0 × 0.5` and the new one
+    /// is the split-sum form of the same field — so a π common to both cancels,
+    /// and the arm reads the same whether the ambient half of the engine is in
+    /// exit-radiance units or π times them. It is a *relative* test between two
+    /// spellings of one quantity, and it was the only π arm there was.
+    ///
+    /// The absolute statement needs a second quantity to compare against, and
+    /// `crates/inf-render/tests/gi_normalisation.rs` supplies it: the environment
+    /// itself, rendered through the same post chain. That arm measured **3.22**.
     #[test]
     fn specular_reduces_to_the_retired_ambient_constant() {
         let l = 0.8f32; // uniform radiance
         let f0 = 0.06f32;
-        // What the lit shaders used to add: `gi_irradiance(n) * f0 * 0.5`, and on a
-        // uniform field `gi_irradiance` is `π · L` (its A0 = π cosine convolution
-        // with a zero linear band).
-        let retired = std::f32::consts::PI * l * f0 * 0.5;
-        // What `gi_specular` adds: `sh_radiance(…, lobe = 1 − rough) · π ·
+        // What the lit shaders used to add: `gi_irradiance(n) * f0 * 0.5`, and
+        // since EDIT1 `gi_irradiance` is exactly `L` on a uniform field (its
+        // A0 = 1 cosine-with-Lambert convolution against a zero linear band).
+        let retired = l * f0 * 0.5;
+        // What `gi_specular` adds: `sh_radiance(…, lobe = 1 − rough) ·
         // (f0·a + b)`, and on a uniform field `sh_radiance` is exactly `L`.
         let (a, b) = env_brdf_ab(1.0, 1.0);
-        let now = l * std::f32::consts::PI * (f0 * a + b);
+        let now = l * (f0 * a + b);
         // Within a quarter: the split-sum BRDF's rough/face-on response is ≈ 0.45,
         // where the retired constant simply said 0.5 — a systematic ~10–20 %
         // (f0-dependent, since the additive `b` matters more for a dielectric).
-        // The point is the SCALE, which is what a term with a bug in its π
-        // bookkeeping would get wrong by a factor, not by a fifth.
         assert!(
             (now - retired).abs() < 0.25 * retired,
             "the rough/uniform limit drifted from the retired constant: \
@@ -1165,8 +1177,8 @@ mod tests {
         // A metal (high f0) tracks it more closely still, because the additive
         // grazing term is a smaller share of the response.
         let f0m = 0.9f32;
-        let retired_m = std::f32::consts::PI * l * f0m * 0.5;
-        let now_m = l * std::f32::consts::PI * (f0m * a + b);
+        let retired_m = l * f0m * 0.5;
+        let now_m = l * (f0m * a + b);
         assert!((now_m - retired_m).abs() < 0.15 * retired_m);
     }
 
