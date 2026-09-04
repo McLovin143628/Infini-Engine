@@ -38,11 +38,13 @@ no poles, no cables, no hydrants, no signs, no awnings, no billboards and no
 traffic signals** anywhere in the engine — twenty-two nouns, twenty-two empty
 greps. There is **no particle system**. There is no subsurface term, so a face
 under a red stage wash is Lambert. And the lighting is the one that surprised
-me: the island's entire resident world is lit by **one directional light and
-zero real fixtures**, against **2 122 glowing window panes** — which is exactly
-the substitution the owner rejected in their own words ("I don't like the
-glowing window panes"). Eleven of fourteen building archetypes hang no light at
-all.
+me: a settled island world — the CI-scale fixture, which is the same generator
+and the same archetypes — is lit by **one authored directional light and ZERO
+real fixtures across its four resident blocks**, against **2 122 glowing window
+panes**, which is exactly the substitution the owner rejected in their own words
+("I don't like the glowing window panes"). **Eleven of the fourteen building
+archetypes hang no light at all**, and that half is a fact about the generator
+rather than about a fixture's resident set.
 
 Two of the five gap areas turned out not to be gaps, and that correction matters
 more than any of the confirmations: **aerial perspective and analytic height fog
@@ -515,7 +517,11 @@ The owner's ruling is that a glowing window pane is not illumination: *"We shoul
 have actual lights in this game and game engine."* The census says how far that
 is from true.
 
-**The island's resident world, counted by the arm:**
+**A settled island world, counted by the arm** — the CI-scale fixture, because
+the shipped island's terrain is 549.9 MB and is not committed; the generator, the
+archetypes and the zoning are the same, and the archetype half of the census
+below is a fact about the generator and not about which blocks happened to be
+resident:
 
 | | |
 |---|---|
@@ -544,13 +550,19 @@ kept**; a Nightclub block is 9 clubs × 4 → 36 → **4 kept**; a StripClub blo
 builds are deleted before the frame.** Three blocks at the cap fit beside the
 sun; the fourth overflows.
 
-**The many-lights number.** Harbour City is 750 buildings over 20.88 km of
-street, ~22 956 interior rooms, 329 residents of which ≥66 % are home at 21:00.
-A defensible *minimum* for one lit settlement — a porch light per building, a
-fixture per occupied room, a street lamp every 30 m — is **≈ 1 670 lights**;
-one-per-room is **22 956**. Island-wide, 1 814 buildings and 60.88 km of street
+**The many-lights number**, and it is ARITHMETIC over measured content rather
+than a measurement of its own — the inputs are the island ledger's own per-
+settlement table (172 blocks, **60.88 km** of street, Harbour City 52 blocks /
+20.88 km) and the archetypes' own room counts, and the derivation is stated so a
+reader can disagree with it. Harbour City is ~750 buildings and ~22 956 interior
+rooms, with 329 residents of whom ≥66 % are home at 21:00 by the society clock. A
+defensible *minimum* for one lit settlement — a porch light per building, a
+fixture per occupied room, a street lamp every 30 m (the spacing is the only
+number here with no source, because no lamp exists) — is **≈ 1 670 lights**;
+one-per-room is **22 956**. Island-wide, ~1 814 buildings and 60.88 km of street
 give **≈ 5 000** at the porch-plus-street floor and **≈ 61 000** one-per-room.
-Against a ceiling of 16, that is **104× at the floor and 1 435× at the room.**
+Against a frame ceiling of 16, that is **about 104× at the floor and 1 435× at
+the room.**
 
 **Three findings that shape PAR0/PAR1 more than the count does:**
 
@@ -598,7 +610,8 @@ needs an instrument that does not exist yet.
 
 ### CP-B3 · Street furniture and street lighting — MEASURED, ZERO, PRICED
 
-Twenty-two nouns, twenty-two empty greps across `crates/`, `runtime/`, `editor/`:
+Twenty-two nouns and six adjacent ones, twenty-eight empty greps across
+`crates/`, `runtime/`, `editor/`:
 `hydrant`, `awning`, `billboard`, `streetlight`, `street_light`,
 `traffic_signal`, `lamppost`, `utility_pole`, `power_line`, `overhead_line`,
 `manhole`, `bus_stop`, `parking_meter`, `mailbox`, `litter_bin`, `trash_can`, and

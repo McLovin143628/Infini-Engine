@@ -29356,10 +29356,12 @@ constant because the population is capped, and what moves is the split,
 **2.87× as many cars driving at the rush hour**. 14:00 and 21:00 are identical,
 which is the honest limit of a schedule with no evening in it.
 
-**The light census is the one that should be read twice.** The island's entire
-resident world carries **one authored `Light`, zero real `PcgLight` fixtures
-across four blocks, and 2 122 glowing window panes** — which is exactly the
-substitution this wave's owner rejected in their own words. Eleven of fourteen
+**The light census is the one that should be read twice.** A settled island world
+— the CI-scale fixture, same generator and same archetypes — carries **one
+authored `Light`, ZERO real `PcgLight` fixtures across its four resident blocks,
+and 2 122 glowing window panes**, which is exactly the substitution this wave's
+owner rejected in their own words. The archetype half of the census is a fact
+about the generator rather than about which blocks were resident: Eleven of fourteen
 archetypes hang no light at all, every light in the engine is on floor 0, and the
 wall is not sixteen but **four**: `VOLUME_LIGHT_CAP` truncates per city block, in
 the content layer, deleting about **92 of the 99 fixtures** a nightlife strip
