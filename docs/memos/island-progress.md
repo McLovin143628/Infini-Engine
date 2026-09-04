@@ -30259,6 +30259,34 @@ Both halves are needed and both were run.
   the release binary, `ran 5 frames` and `final-state-hash: 12c1a921…` on stdout.
   CI never tests it (`.github/workflows/ci.yml:163` builds **debug**).
 
+#### A7 — the new-window cursor IS hidden; the demo's reading is what is wrong
+
+Carried 9 above says the cursor's hidden half is "unconfirmed in NEW-WINDOW mode"
+and was "not chased". Chased, with a temporary note in `set_pointer_capture`
+written into the same hero log the focus line uses. **Both modes do the same
+thing and it succeeds:**
+
+```
+embedded  # pointer capture -> true: Locked ok; visible=false
+window    # pointer capture -> true: Locked ok; visible=false
+```
+
+One transition per session in each. So the player takes the pointer and hides it
+in a new window exactly as it does embedded, and `GetCursorInfo` reporting
+`SHOWING` there is a defect in the **driver's measurement**, not in the game. The
+difference between the two driver paths is the click: the embedded run sends a
+real `mouse_event` into the viewport, the new-window run only calls
+`SetCursorPos`, and the global `CURSOR_SHOWING` flag is not re-evaluated for a
+window nothing has clicked. Carried 9 is therefore **closed**, and what remains of
+it belongs to carried 7 — the demo's cursor check is weak.
+
+**A second thing that line settles.** `set_pointer_capture`'s doc says `Locked`
+"winit does not implement on Windows — where it returns `NotSupported`", which is
+why `Confined` is there as the stated fallback. Measured: `Locked ok`, in both
+modes, on this winit. The fallback has never run here. The comment is left as
+written because correcting it would move a source file the workspace battery above
+was measured on, for a claim that is a comment; it is audit carried 7.
+
 #### AUDIT CARRIED
 
 1. **The frame is over-lit by dynamic GI.** `gi_intensity: 1.0` on the showcase
@@ -30275,7 +30303,10 @@ Both halves are needed and both were run.
    An arm that reads the hands' positions is better and needs a protocol field.
 5. **`.ps1` is not pinned `text eol=lf`** in `.gitattributes`; git warns on
    checkout. Harmless today, and the same shape as P22's `.rs` law.
-6. **`../island-build/project/Build` is stale** — cooked 17:57, the level saved
+6. **`set_pointer_capture`'s `Locked`/`Confined` comment is wrong on this host** —
+   `Locked` succeeds and the documented fallback never fires. A comment fix, held
+   back only so the battery's tree and this tree are the same bytes. See A7.
+7. **`../island-build/project/Build` is stale** — cooked 17:57, the level saved
    22:36 — and loads **1 actor**. Carried 5 above, now with the consequence
    named: no shipped-player frame of the island can be compared with a PIE frame
    until it is rebuilt, so CERT1's render half is still unmeasured on this content.
