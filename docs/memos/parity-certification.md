@@ -226,6 +226,15 @@ The ~1 m of settle is real and it is the honest remainder: **the island spawns
 its hero about a metre above its own ground**. It is a settle rather than a
 plunge, no player would see it, and it is carried.
 
+***CLOSED by wave FIX1 (2026-09-03).*** It was `START_LIFT_M = 1.0` and nothing
+else — the whole of the settle, on both worlds. The lift is now **0.0**, the
+fixture spawns at y 130.799 and settles at 130.811 (a **−0.0117 m** *rise*: the
+ground snap lifting the capsule 1.2 cm out of its own ground on step one, which
+is the frame nobody sees that the lift's own doc was arguing about), and this
+row's third assertion — which bounded the drop at 2 m and therefore passed on
+the metre it was recording — is now `SETTLE_CEILING_M = 0.25`. One byte moves in
+each committed island level: the hero's `Transform.translation.y`.
+
 **And Play now renders what ships** — see CP-A1.
 
 ### CP-A1 / CP-B5 · The lit stack — MEASURED, RULED, FIXED
@@ -458,6 +467,21 @@ name its subject. What is certified is the shipped **key → `InputMap` →
 `InputState` → `held_actions` → `RuntimeSim`** path, over the smallest world each
 verb needs. The island's own pawn is exercised separately, by CP-C2, and the
 island's PIE-equals-shipping property by `island_gate`.
+
+***CLOSED by wave FIX1 (2026-09-03).*** The reason this row could not honour the
+owner's sentence was structural rather than lazy — **there was no way to press a
+key in a PIE session**. `EditorToPlayer` could say *when* to step and the player
+answered with exactly one `u64`. `PIE_PROTOCOL_VERSION` is now **3**: an `Input`
+frame carrying held **key codes** (device level, so the shipped table still
+decides what they mean) and a typed `WorldProbe` readback. The twenty rows are
+re-run in `runtime/inf-player/tests/controls_pie.rs` through the **real
+`inf-player --pie` subprocess**, on a payload built by the same
+`build_scene_payload` the Play button calls, carrying the committed starter
+character. Falsification, measured: the same payload driven with the protocol-2
+`Step` door instead of `Input` moves the hero **0.0000 m** over 120 steps where
+the driven one moves **6.3895 m**. The world is a purpose-built document rather
+than the island itself, and it says so in its own header — the island's pawn is
+still CP-C2's and its PIE-equals-shipping property still `island_gate`'s.
 
 | binding | asserted world quantity | measured |
 |---|---|---|
@@ -1235,7 +1259,7 @@ place** above, each marked; this section is the index.
 | A-3 | CP-C1 | "8 arms in `inf-project`" | **7** — `cargo test -p inf-project boot` catches an unrelated pre-existing template arm |
 | A-4 | CP-B10 | "about **92** of the 99 fixtures" deleted | **87** (99 built, 12 kept); the per-block counts behind the 99 are the memo's own estimate |
 | A-5 | CP-C7 | goldens "bound this change" | measured: the harness is **blind to the whole morph rule** (0 of 121 red at full morph, 9 red on the control) |
-| A-6 | CP-C6 | did not name its world | a hand-built fixture per row, not the island and not PIE — with the reason |
+| A-6 | CP-C6 | did not name its world | a hand-built fixture per row, not the island and not PIE — with the reason. **Closed by wave FIX1**: protocol 3 carries an input frame, and the twenty rows now run through the real `--pie` subprocess (`controls_pie.rs`) |
 | A-7 | the frame table | one column | two, and the island's shipped row is **25.2 → 35.2 fps** between runs |
 | A-8 | CP-C2 | 249.9 / 541.8 ms | re-run 337.6 / 551.8 ms, both far inside a 5 000 ms budget |
 | A-9 | `inf island build`'s own output | "the editor opens this project on launch" | "…unless you have opened another project since" — the pin can take it away, and a message an author can falsify on their first day is worse than none |

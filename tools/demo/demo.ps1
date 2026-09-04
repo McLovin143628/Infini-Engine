@@ -51,6 +51,18 @@ if ($running) {
 
 # ── 1. build ─────────────────────────────────────────────────────────────────
 if (-not $SkipBuild) {
+    # THE PLAYER FIRST, and it is not optional: `npx tauri build` builds the
+    # EDITOR. `find_player_bin` looks for `inf-player.exe` beside the editor it
+    # is running from, so a demo that built only the editor would press Play on
+    # whatever player happened to be in `target/release` -- which on a dev
+    # machine is the one from the wave before last, and which is exactly the
+    # trap this comment exists to keep the next person out of.
+    Say "building: cargo build --release -p inf-player"
+    & cargo build --release -p inf-player 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Say "PLAYER BUILD FAILED (exit $LASTEXITCODE) — see $log"
+        exit 3
+    }
     Say "building: npx tauri build --no-bundle"
     Push-Location (Join-Path $repo "editor\studio")
     # `cargo build --release -p inf-studio` is NOT the same thing and produces an
@@ -69,7 +81,13 @@ if (-not (Test-Path $exe)) {
     Say "REFUSED: no editor at $exe"
     exit 3
 }
+$playerExe = Join-Path $release "inf-player.exe"
+if (-not (Test-Path $playerExe)) {
+    Say ("REFUSED: no player at $playerExe - build it with: cargo build --release -p inf-player")
+    exit 3
+}
 Say ("editor  {0} ({1:N1} MB, built {2})" -f $exe, ((Get-Item $exe).Length / 1MB), (Get-Item $exe).LastWriteTime)
+Say ("player  {0} ({1:N1} MB, built {2})" -f $playerExe, ((Get-Item $playerExe).Length / 1MB), (Get-Item $playerExe).LastWriteTime)
 
 # ── 2. launch, from the executable's OWN directory ───────────────────────────
 #
@@ -178,6 +196,17 @@ public class InfInput {
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
     mouse_event(0x0004, 0, 0, 0, IntPtr.Zero);
   }
+  // A screenshot CANNOT answer "is the cursor hidden" -- `CopyFromScreen` does
+  // not draw one either way -- so the author's second sentence needs the OS's
+  // own answer. CURSOR_SHOWING is 0x1.
+  [StructLayout(LayoutKind.Sequential)] struct CURSORINFO { public int cbSize, flags; public IntPtr hCursor; public int x, y; }
+  [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO pci);
+  public static string CursorState() {
+    CURSORINFO ci = new CURSORINFO();
+    ci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+    if (!GetCursorInfo(ref ci)) return "unknown";
+    return ((ci.flags & 0x1) != 0) ? "SHOWING" : "hidden";
+  }
 }
 "@
 
@@ -188,12 +217,15 @@ $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 [InfInput]::Click([int]($screen.Width / 2), [int]($screen.Height / 2))
 Start-Sleep -Milliseconds 800
 
+Say ("cursor while the game has the window: " + [InfInput]::CursorState())
+
 Say "holding W"
 [InfInput]::Down(0x11)   # scancode: W
 Start-Sleep -Milliseconds 900
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "02-pie-a.png") | ForEach-Object { Say $_ }
 Start-Sleep -Seconds 2
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "03-pie-b.png") | ForEach-Object { Say $_ }
+Say ("cursor two seconds in: " + [InfInput]::CursorState())
 [InfInput]::Up(0x11)
 Say "released W"
 
@@ -227,6 +259,9 @@ if ($KeepOpen) {
     Start-Sleep -Seconds 2
     Get-Process -Name "inf-player" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
+    # The control for the two readings above: a cursor that is hidden here as
+    # well is a cursor this script cannot see, not one the game took.
+    Say ("cursor after the session ended: " + [InfInput]::CursorState())
     Say ("still running: " + $(if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -in @("inf-studio", "inf-player") }) { "YES" } else { "none" }))
 }
 Say "done — $OutDir"
