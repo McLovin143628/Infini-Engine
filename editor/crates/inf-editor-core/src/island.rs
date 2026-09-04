@@ -260,9 +260,87 @@ pub fn sun_guid(name: &str) -> Uuid {
 pub fn terrain_entity_guid(name: &str) -> Uuid {
     derived(name, "island.terrain.entity")
 }
+/// The Outliner label one road-furniture entity carries (wave ROAD1).
+fn road_part_label(part: inf_gis::RoadPart) -> &'static str {
+    match part {
+        inf_gis::RoadPart::Carriageway => "Roads",
+        inf_gis::RoadPart::Kerb => "Kerbs and pavements",
+        inf_gis::RoadPart::MarkingWhite => "Road markings",
+        inf_gis::RoadPart::MarkingYellow => "Road markings (yellow)",
+    }
+}
+
+/// **The surface one road-furniture group wears** (wave ROAD1).
+///
+/// # The kerb binds a `.inf_mat` and the paint does not, and that is a decision
+///
+/// Concrete is a *surface*: a person stands on it at a metre and its joints,
+/// its float finish and its exposed aggregate are what say "laid" rather than
+/// "rolled". So it is a real synthesised set (`GroundKind::Concrete`), bound by
+/// GUID, tiling every 2 m through the same `uv_tiling_m` the asphalt uses.
+///
+/// Road paint is **not** a surface. It is a flat, near-lambertian film 100 mm
+/// wide, and every texel of a map of it would be the same texel — so the paint
+/// entities carry `Material::asset: None`, which `Material`'s own doc calls
+/// "the scalars are the whole material, the permanent no-texture path". That is
+/// 1.6 MB of committed bytes not spent, twice, on two constant colours.
+///
+/// The colours are **linear** and they are weathered rather than fresh: road
+/// marking that has been driven over reads about 0.55 linear, not 1.0, and a
+/// pure white line on a dark carriageway is the thing that makes a screenshot
+/// look like a diagram. Roughness 0.55 — thermoplastic is smoother than the
+/// aggregate around it, which is why a wet road's lines flare first.
+fn road_part_material(part: inf_gis::RoadPart) -> inf_ecs::components::Material {
+    use inf_ecs::math::Color;
+    match part {
+        inf_gis::RoadPart::Kerb | inf_gis::RoadPart::Carriageway => {
+            let kind = if matches!(part, inf_gis::RoadPart::Kerb) {
+                inf_material::ground::GroundKind::Concrete
+            } else {
+                inf_material::ground::GroundKind::Asphalt
+            };
+            let c = kind.base_color();
+            inf_ecs::components::Material {
+                base_color: Color::new(c[0], c[1], c[2], c[3]),
+                roughness: kind.roughness(),
+                metallic: 0.0,
+                asset: Some(crate::ground::ground_material_guid(kind)),
+                ..Default::default()
+            }
+        }
+        inf_gis::RoadPart::MarkingWhite => inf_ecs::components::Material {
+            base_color: Color::new(0.55, 0.55, 0.53, 1.0),
+            roughness: 0.55,
+            metallic: 0.0,
+            ..Default::default()
+        },
+        inf_gis::RoadPart::MarkingYellow => inf_ecs::components::Material {
+            base_color: Color::new(0.46, 0.31, 0.035, 1.0),
+            roughness: 0.55,
+            metallic: 0.0,
+            ..Default::default()
+        },
+    }
+}
+
 /// The island's road-surface entity.
 pub fn roads_entity_guid(name: &str) -> Uuid {
     derived(name, "island.roads.entity")
+}
+/// **One road-furniture entity** (wave ROAD1) — the kerbs and pavements, the
+/// white paint or the yellow.
+///
+/// Three entities beside the carriageway, and not one, because an
+/// `inf_ecs::Material` component binds **one** `.inf_mat`: a road that wears
+/// asphalt, concrete, white paint and yellow paint is four entities however the
+/// geometry is stored. Salted per part on `roads_entity_guid`'s own pattern.
+pub fn road_part_entity_guid(name: &str, part: inf_gis::RoadPart) -> Uuid {
+    match part {
+        inf_gis::RoadPart::Carriageway => roads_entity_guid(name),
+        inf_gis::RoadPart::Kerb => derived(name, "island.roads.kerb.entity"),
+        inf_gis::RoadPart::MarkingWhite => derived(name, "island.roads.marking.white.entity"),
+        inf_gis::RoadPart::MarkingYellow => derived(name, "island.roads.marking.yellow.entity"),
+    }
 }
 /// The ocean.
 pub fn ocean_guid(name: &str) -> Uuid {
@@ -554,6 +632,34 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         );
     }
     insert!(doc, roads, AlwaysLoaded);
+
+    // ── the kerbs, the pavements and the paint ────────────────────────────────
+    //
+    // **CERT1's CP-B3, closed** (wave ROAD1): *"the pavement is never drawn
+    // either — `PAVEMENT_M = 2.0` is a nav ring of eight nodes; there is no kerb
+    // geometry, no pavement mesh and no road marking."* Three entities, because
+    // a `Material` binds one `.inf_mat` and a road wears four surfaces.
+    //
+    // No collider, for the `Roads` entity's own reason and one more: a kerb is
+    // 150 mm and the terrain's heightfield collider answers under it, so a
+    // trimesh here would be a second surface a hand's breadth above the first.
+    // The step a pedestrian takes up a kerb is a step they take through it
+    // today, and that is the honest limit — carried, not smuggled.
+    for part in inf_gis::FURNITURE_PARTS {
+        let g = road_part_entity_guid(name, part);
+        doc.create_with_guid(g, SpawnKind::Empty, road_part_label(part), None);
+        insert!(doc, g, Transform::IDENTITY);
+        insert!(
+            doc,
+            g,
+            MeshRef {
+                asset: Some(inf_island::road_part_mesh_guid(name, part)),
+                ..Default::default()
+            },
+        );
+        insert!(doc, g, road_part_material(part));
+        insert!(doc, g, AlwaysLoaded);
+    }
 
     // ── the sea ───────────────────────────────────────────────────────────────
     //
@@ -1568,6 +1674,13 @@ mod tests {
             "nearest_route_vertex",
             "read_design", // the one door onto the committed layers
             "road_mesh_guid",
+            // Wave ROAD1's three road-furniture meshes. Same shape as
+            // `road_mesh_guid` and the same reason it is allowed: a name-derived
+            // GUID, a pure function of the recipe's own `name`, which opens no
+            // tile and reads no elevation. `road_part_mesh_guid` on the
+            // carriageway IS `road_mesh_guid`, so the committed level's existing
+            // binding is unmoved.
+            "road_part_mesh_guid",
             "slug",
             "terrain_guid",
         ];
@@ -2246,6 +2359,108 @@ mod tests {
                 "ROAD {recipe}: base_color ({:.3}, {:.3}, {:.3}) linear, roughness \
                  {:.2}, .inf_mat {want}",
                 m.base_color.r, m.base_color.g, m.base_color.b, m.roughness
+            );
+
+            // ── the kerbs, the pavements and the paint (wave ROAD1) ──────────
+            //
+            // CERT1's CP-B3 measured that none of these existed. This is the
+            // arm that keeps them existing: three entities, each with its own
+            // mesh binding and its own surface, and the two paint entities
+            // deliberately naming **no** `.inf_mat` — a 100 mm film is scalars,
+            // and a texture of it would be 1.6 MB of one colour.
+            for part in inf_gis::FURNITURE_PARTS {
+                let g = road_part_entity_guid(name, part);
+                let e = doc
+                    .entity_of(g)
+                    .unwrap_or_else(|| panic!("{recipe}: no {} entity", part.label()));
+                let mr = doc
+                    .world()
+                    .world()
+                    .get::<inf_ecs::components::MeshRef>(e)
+                    .copied()
+                    .unwrap_or_else(|| panic!("{recipe}: {} draws nothing", part.label()));
+                assert_eq!(
+                    mr.asset,
+                    Some(inf_island::road_part_mesh_guid(name, part)),
+                    "{recipe}: {} is bound to the wrong mesh",
+                    part.label()
+                );
+                let pm = doc
+                    .world()
+                    .world()
+                    .get::<inf_ecs::components::Material>(e)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{recipe}: {} carries no Material, so it draws the 0.8 \
+                             debug grey the road itself was on before ASSET0",
+                            part.label()
+                        )
+                    });
+                match part {
+                    inf_gis::RoadPart::Kerb => assert_eq!(
+                        pm.asset,
+                        Some(crate::ground::ground_material_guid(
+                            inf_material::ground::GroundKind::Concrete
+                        )),
+                        "{recipe}: the kerb binds the concrete set"
+                    ),
+                    _ => assert_eq!(
+                        pm.asset, None,
+                        "{recipe}: road paint is the scalars-only path on purpose \
+                         (see `road_part_material`)"
+                    ),
+                }
+                // Every furniture entity is `AlwaysLoaded`, like the road: a
+                // kerb that streamed out while the carriageway stayed would be
+                // a street that lost its edges at distance.
+                assert!(
+                    doc.world()
+                        .world()
+                        .get::<inf_ecs::components::AlwaysLoaded>(e)
+                        .is_some(),
+                    "{recipe}: {} is not AlwaysLoaded",
+                    part.label()
+                );
+                println!(
+                    "ROAD {recipe}: {} -> mesh {:?}, material {:?}, base ({:.2}, {:.2}, {:.2})",
+                    part.label(),
+                    mr.asset.map(|a| a.to_string()),
+                    pm.asset.map(|a| a.to_string()),
+                    pm.base_color.r,
+                    pm.base_color.g,
+                    pm.base_color.b
+                );
+            }
+            // Yellow really is yellow and white really is white — the one thing
+            // a GUID comparison cannot say, and the whole reason a driver knows
+            // which side of the line to be on.
+            let paint = |part| {
+                doc.world()
+                    .world()
+                    .get::<inf_ecs::components::Material>(
+                        doc.entity_of(road_part_entity_guid(name, part)).unwrap(),
+                    )
+                    .copied()
+                    .unwrap()
+                    .base_color
+            };
+            let w = paint(inf_gis::RoadPart::MarkingWhite);
+            let y = paint(inf_gis::RoadPart::MarkingYellow);
+            assert!(
+                (w.r - w.b).abs() < 0.05 && w.r > 0.3,
+                "{recipe}: the white line reads ({:.2}, {:.2}, {:.2})",
+                w.r,
+                w.g,
+                w.b
+            );
+            assert!(
+                y.r > y.g && y.g > y.b * 3.0,
+                "{recipe}: the centre line reads ({:.2}, {:.2}, {:.2}) and yellow is \
+                 what separates OPPOSING traffic",
+                y.r,
+                y.g,
+                y.b
             );
         }
     }

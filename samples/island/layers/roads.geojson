@@ -953,6 +953,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 4,
         "name": "Harbour City - Eastgate",
         "road_type": "highway"
       },
@@ -1510,6 +1511,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Cedar Cove - Harbour City",
         "road_type": "arterial"
       },
@@ -1982,6 +1984,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Millbrook - Harbour City",
         "road_type": "arterial"
       },
@@ -2339,6 +2342,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Fernhill - Eastgate",
         "road_type": "arterial"
       },
@@ -2586,6 +2590,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Alder Bay - Eastgate",
         "road_type": "arterial"
       },
@@ -3373,6 +3378,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Stonewater - Harbour City",
         "road_type": "arterial"
       },
@@ -4075,6 +4081,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Cedar Cove - Millbrook",
         "road_type": "arterial"
       },
@@ -4552,6 +4559,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Millbrook - Fernhill",
         "road_type": "arterial"
       },
@@ -5159,6 +5167,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Fernhill - Alder Bay",
         "road_type": "arterial"
       },
@@ -6656,6 +6665,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Alder Bay - Stonewater",
         "road_type": "arterial"
       },
@@ -7523,6 +7533,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Stonewater - Cedar Cove",
         "road_type": "arterial"
       },

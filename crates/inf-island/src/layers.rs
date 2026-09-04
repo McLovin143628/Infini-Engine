@@ -106,7 +106,14 @@ pub fn write_roads(
                 .collect();
             json!({
                 "type": "Feature",
-                "properties": { "name": r.name, "road_type": r.class },
+                // **`lanes` is written** (wave ROAD1). The reader has probed for
+                // it since VEH2b and found none on any island feature, so every
+                // road took `RoadKind::default_lanes` — four for a highway and
+                // four for an arterial alike, 14.0 m of carriageway for both.
+                // The design states it now. `serde_json`'s object is a BTreeMap,
+                // so the key sorts ahead of `name`, and the committed layer is
+                // written in exactly that order.
+                "properties": { "lanes": r.lanes, "name": r.name, "road_type": r.class },
                 "geometry": { "type": "LineString", "coordinates": coords },
             })
         })
@@ -346,15 +353,26 @@ pub fn routes_of(layer: &inf_gis::GeoLayer) -> Vec<Route> {
                 inf_gis::GeoGeometry::Polyline { points, .. } => points.clone(),
                 _ => return None,
             };
+            let class = f
+                .attr_text(&["road_type", "class"])
+                .unwrap_or("residential")
+                .to_string();
             Some(Route {
                 name: f
                     .attr_text(&["name"])
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("Route {i}")),
-                class: f
-                    .attr_text(&["road_type", "class"])
-                    .unwrap_or("residential")
-                    .to_string(),
+                // **Read through `inf_gis`'s own spellings, and defaulted
+                // through its own table** (wave ROAD1) — the one-door rule this
+                // module already follows for the class. A layer written before
+                // the field existed still reads, at the class's default, which
+                // is exactly what it built before.
+                lanes: f
+                    .attr_number(&inf_gis::roads::ROAD_LANE_FIELDS)
+                    .filter(|v| *v >= 1.0 && *v <= 24.0)
+                    .map(|v| v as u32)
+                    .unwrap_or_else(|| inf_gis::RoadKind::classify(&class).default_lanes()),
+                class,
                 points: pts,
             })
         })
@@ -405,6 +423,7 @@ mod tests {
             Route {
                 name: "Harbour - Summit".into(),
                 class: "highway".into(),
+                lanes: 2,
                 points: vec![
                     DVec3::new(-1_200.5, 12.25, 800.75),
                     DVec3::new(0.0, 140.5, 0.0),
@@ -414,6 +433,7 @@ mod tests {
             Route {
                 name: "Spur".into(),
                 class: "arterial".into(),
+                lanes: 2,
                 points: vec![DVec3::new(0.0, 140.5, 0.0), DVec3::new(500.0, 90.0, 500.0)],
             },
         ];

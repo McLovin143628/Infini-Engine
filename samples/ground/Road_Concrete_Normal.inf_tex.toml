@@ -1,0 +1,9 @@
+schema_version = 1
+guid = "00000000-0000-0000-0000-00009e210008"
+kind = "texture"
+content_hash = "24497501ab9a29ababc8fa8177795f11"
+dependencies = []
+tags = [
+    "concrete",
+    "ground",
+]

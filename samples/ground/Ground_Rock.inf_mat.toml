@@ -1,7 +1,7 @@
 schema_version = 1
 guid = "00000000-0000-0000-0000-00009e200006"
 kind = "material"
-content_hash = "aa4c5a4c6799393c89979a84ddebb8be"
+content_hash = "98dba9a961422b7f9e1a2a2326d772a1"
 dependencies = [
     "00000000-0000-0000-0000-00009e200007",
     "00000000-0000-0000-0000-00009e200008",

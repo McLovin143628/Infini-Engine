@@ -113,7 +113,7 @@ pub struct IslandBuild {
     pub plan: TilePlan,
     pub terrain: inf_terrain::TerrainData,
     pub asset: Option<inf_terrain::TerrainAsset>,
-    pub mesh: Option<inf_mesh::MeshAsset>,
+    pub mesh: Option<crate::roads::RoadMeshes>,
     pub network: StreamNetwork,
     pub routes: Vec<Route>,
     pub biomes: BiomeClassification,
@@ -413,7 +413,21 @@ pub fn build_island(
     } else {
         Vec::new()
     };
-    let corridor_half = recipe.roads.shoulder_mult * inf_gis::LANE_WIDTH_M * 2.0;
+    // **The plateau holds everything the road DRAWS** (wave ROAD1), and the
+    // batter eases from its edge out. `built_half_width_m` is the road's own
+    // answer — carriageway plus whichever of a sealed shoulder or a
+    // kerb-and-pavement its class carries — taken over the routes actually
+    // committed rather than assumed, so an island with no roads yet levels
+    // nothing and one with a four-lane trunk levels for a four-lane trunk.
+    let corridor_flat = committed_routes
+        .iter()
+        .map(|r| r.built_half_width_m())
+        .fold(0.0f64, f64::max);
+    // The batter keeps the width it always had; the plateau is added OUTSIDE it,
+    // so a corridor is now `flat + batter` rather than a bowl of `batter`. On the
+    // island that is 9.5 m of plateau (the highway's 7 m half plus its 2.5 m
+    // shoulder) and 11.2 m of batter either side.
+    let corridor_half = corridor_flat + recipe.roads.shoulder_mult * inf_gis::LANE_WIDTH_M * 2.0;
     let corridor = corridor_index(&committed_routes, corridor_half);
 
     let pads: Vec<(DVec2, f64, f64)> = recipe
@@ -441,6 +455,7 @@ pub fn build_island(
         pads,
         corridor: corridor.as_ref(),
         corridor_half_m: corridor_half,
+        corridor_flat_m: corridor_flat,
     };
     let (mut data, st) = terrain::sample_terrain(recipe, &mosaic, &lattice, &carve);
     say(
@@ -970,17 +985,41 @@ pub fn write_content(build: &IslandBuild, content: &Path) -> Result<Vec<String>,
         written.push(p.display().to_string());
     }
     if let Some(m) = &build.mesh {
-        let p = content.join(format!("{}Roads.inf_mesh", slug(&build.recipe.name)));
-        let bytes = inf_asset::encode(m).map_err(|e| IslandError::Io(e.to_string()))?;
-        std::fs::write(&p, &bytes)?;
-        inf_asset::AssetSidecar::new(
-            inf_asset::AssetId(road_mesh_guid(&build.recipe.name)),
-            inf_asset::AssetKind::Mesh,
-            inf_asset::ContentHash::of(&bytes),
-        )
-        .save(&p)
-        .map_err(|e| IslandError::Io(e.to_string()))?;
-        written.push(p.display().to_string());
+        // **One writer, four meshes** (wave ROAD1). The carriageway keeps the
+        // name and the GUID it has always had — a committed `.inf_lvl` names
+        // both — and each furniture group gets its own beside it, because an
+        // `inf_ecs::Material` binds ONE `.inf_mat` and a road wears four.
+        let mut write = |stem: String, guid: uuid::Uuid, asset: &inf_mesh::MeshAsset| {
+            let p = content.join(stem);
+            let bytes = inf_asset::encode(asset).map_err(|e| IslandError::Io(e.to_string()))?;
+            std::fs::write(&p, &bytes)?;
+            inf_asset::AssetSidecar::new(
+                inf_asset::AssetId(guid),
+                inf_asset::AssetKind::Mesh,
+                inf_asset::ContentHash::of(&bytes),
+            )
+            .save(&p)
+            .map_err(|e| IslandError::Io(e.to_string()))?;
+            Ok::<_, IslandError>(p.display().to_string())
+        };
+        if let Some((asset, _)) = &m.carriageway {
+            written.push(write(
+                format!("{}Roads.inf_mesh", slug(&build.recipe.name)),
+                road_mesh_guid(&build.recipe.name),
+                asset,
+            )?);
+        }
+        for (part, asset) in &m.furniture {
+            written.push(write(
+                format!(
+                    "{}{}.inf_mesh",
+                    slug(&build.recipe.name),
+                    road_part_stem(*part)
+                ),
+                road_part_mesh_guid(&build.recipe.name, *part),
+                asset,
+            )?);
+        }
     }
     let p = content.join(format!("{}.inf_biomes", slug(&build.recipe.name)));
     let bytes = inf_asset::encode(&build.biome_set).map_err(|e| IslandError::Io(e.to_string()))?;
@@ -1112,9 +1151,40 @@ pub fn terrain_guid(name: &str) -> uuid::Uuid {
     derived_guid(name, "island.terrain")
 }
 
-/// The road mesh asset id.
+/// The road mesh asset id — the **carriageway's**, unchanged since IB-4 because
+/// a committed `.inf_lvl` names it.
 pub fn road_mesh_guid(name: &str) -> uuid::Uuid {
     derived_guid(name, "island.roads")
+}
+
+/// The file-name suffix one road-furniture mesh is written under (wave ROAD1).
+///
+/// Frozen with the GUID below: a committed `.inf_lvl` names the GUID and a
+/// cooked pack names the file, so a stem that moved would leave the island's
+/// kerbs bound to nothing.
+pub fn road_part_stem(part: inf_gis::RoadPart) -> &'static str {
+    match part {
+        inf_gis::RoadPart::Carriageway => "Roads",
+        inf_gis::RoadPart::Kerb => "Kerbs",
+        inf_gis::RoadPart::MarkingWhite => "RoadMarkings",
+        inf_gis::RoadPart::MarkingYellow => "RoadMarkingsYellow",
+    }
+}
+
+/// One road-furniture mesh's asset id (wave ROAD1).
+///
+/// Derived from the island's name and a **per-part salt**, on
+/// `road_mesh_guid`'s own pattern, so the four ids are a pure function of the
+/// recipe and the level generator can name them without the build having run.
+/// The carriageway keeps `island.roads` rather than taking a new salt, because
+/// the committed level already names that id.
+pub fn road_part_mesh_guid(name: &str, part: inf_gis::RoadPart) -> uuid::Uuid {
+    match part {
+        inf_gis::RoadPart::Carriageway => road_mesh_guid(name),
+        inf_gis::RoadPart::Kerb => derived_guid(name, "island.roads.kerb"),
+        inf_gis::RoadPart::MarkingWhite => derived_guid(name, "island.roads.marking.white"),
+        inf_gis::RoadPart::MarkingYellow => derived_guid(name, "island.roads.marking.yellow"),
+    }
 }
 
 /// The `.inf_biomes` asset id.

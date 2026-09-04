@@ -12,33 +12,41 @@ all, so the street the editor opens standing on drew
 `Material::default().base_color` - 0.8 linear, the engine's debug
 grey, in both hosts.
 
+**Wave ROAD1 appended a seventh, `Road_Concrete`** - the kerb stone and
+the pavement slab behind it, which the same wave turned from a 2 m nav
+ring into geometry. One set for both, because they are poured out of the
+same material and read as one grey surface with one joint spacing.
+
 Each set is a `.inf_mat` naming three or four `.inf_tex` v2 tiled
 containers: a 1 024² albedo, a 512² tangent-space normal, a 512² ORM, and —
-for grass and rock — a 512² high-frequency detail normal.
+for grass, rock and asphalt — a 512² high-frequency detail normal.
 
-| set | tiles every | albedo texel | detail tile |
-|---|---|---|---|
-| `Ground_Grass` | 2.0 m | 1.95 mm | 12.5 cm |
-| `Ground_Rock` | 3.0 m | 2.93 mm | 15.0 cm |
-| `Ground_ForestFloor` | 2.5 m | 2.44 mm | — |
-| `Ground_Sand` | 1.5 m | 1.46 mm | — |
-| `Ground_Soil` | 2.2 m | 2.15 mm | — |
-| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm |
+| set | tiles every | albedo texel | detail tile | bound to |
+|---|---|---|---|---|
+| `Ground_Grass` | 2.0 m | 1.95 mm | 12.5 cm | a splat layer |
+| `Ground_Rock` | 3.0 m | 2.93 mm | 15.0 cm | a splat layer |
+| `Ground_ForestFloor` | 2.5 m | 2.44 mm | — | a splat layer |
+| `Ground_Sand` | 1.5 m | 1.46 mm | — | a splat layer |
+| `Ground_Soil` | 2.2 m | 2.15 mm | — | a splat layer |
+| `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm | a MESH |
+| `Road_Concrete` | 2.0 m | 1.95 mm | — | a MESH |
 
-**The road's row is what the set is AUTHORED for and not what the road
-draws** (ASSET0 audit). `tex_scale_m` reaches exactly one consumer -
-`TerrainLayer::tex_scale`, which is `uv = world.xz / tex_scale` - and
-asphalt is not a terrain layer: it is a `.inf_mat` on a road MESH, and a
-mesh tiles at whatever its author unwrapped. `inf_gis`'s road ribbon
-writes `uv = (u across the carriageway, arc / width_m)`, so one uv unit
-is the road's WIDTH in both axes. The island's eleven roads are one
-`highway` and ten `arterial`, neither states a lane count, and
-`RoadKind::default_lanes` gives both four at `LANE_WIDTH_M` 3.5 - so
-every street on the island tiles this set every **14.0 m**: a 13.7 mm
-texel and a 53.8 cm detail tile, 3.5x the row above. Correcting it needs
-a uv-scale field on `.inf_mat`, which is an asset-format window with a
-real consumer; until then the aggregate reads large and this says by how
-much.
+**Every row is now the rate the surface actually draws at, and until
+wave ROAD1 the last two were not** (ASSET0 audit). `tex_scale_m` reached
+exactly one consumer - `TerrainLayer::tex_scale`, which is
+`uv = world.xz / tex_scale` - and asphalt is not a terrain layer: it is a
+`.inf_mat` on a road MESH, and a mesh tiles at whatever its author
+unwrapped. `inf_gis`'s road ribbon wrote `uv = (u across the
+carriageway, arc / width_m)`, so one uv unit was the road's WIDTH in both
+axes - 14.0 m on the island, a 13.7 mm texel and a 53.8 cm detail tile,
+**3.5x** the row above.
+
+ROAD1 closed it from both ends: the ribbon's uv is now **metres**, and
+`.inf_mat` v4 carries `uv_tiling_m` - metres per repeat - which
+`GroundKind::mesh_uv_tiling_m` fills in from the very column above. A
+splat layer answers `0.0` there and must, because terrain has already
+divided by its layer's rate and a second divide would tile grass every
+four metres squared.
 
 **Albedo and ORM are BC1; normals and detail maps are BC5** (wave
 IASSET2). Every map used to be BC1, including the normals, and that was a

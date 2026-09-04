@@ -127,6 +127,17 @@ content = [
   "../ground/Road_Asphalt_Normal.inf_tex.toml",
   "../ground/Road_Asphalt_ORM.inf_tex",
   "../ground/Road_Asphalt_ORM.inf_tex.toml",
+
+  # The kerb and the pavement (wave ROAD1) — the fixture binds them for the
+  # same reason the island does: its level names this `.inf_mat`.
+  "../ground/Road_Concrete.inf_mat",
+  "../ground/Road_Concrete.inf_mat.toml",
+  "../ground/Road_Concrete_Albedo.inf_tex",
+  "../ground/Road_Concrete_Albedo.inf_tex.toml",
+  "../ground/Road_Concrete_Normal.inf_tex",
+  "../ground/Road_Concrete_Normal.inf_tex.toml",
+  "../ground/Road_Concrete_ORM.inf_tex",
+  "../ground/Road_Concrete_ORM.inf_tex.toml",
   # THE SETTLEMENT ZONE LIBRARY (wave I8a). Every settlement block's
   # `PcgVolume.graph` names one of these seven GUIDs, so a project built without
   # them has a hundred and seventy blocks bound to documents nothing can

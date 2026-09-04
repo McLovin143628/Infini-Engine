@@ -1,8 +1,8 @@
 schema_version = 27
 guid = "ccfc3211-3792-6471-9e48-b3e960b261e0"
 title = "Island Fixture"
-entity_count = 66
-content_hash = "44c1b0463ff8c92d"
+entity_count = 69
+content_hash = "b7a2b372af4b6b0f"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a2",
@@ -12,13 +12,17 @@ dependencies = [
     "00000000-0000-0000-0000-00009e20000c",
     "00000000-0000-0000-0000-00009e200012",
     "00000000-0000-0000-0000-00009e210000",
+    "00000000-0000-0000-0000-00009e210006",
     "07b6e426-cc31-13d9-afd1-c5da6250f4b1",
     "0e982054-7c78-d1d3-9340-e6890efb1cca",
+    "15449f8a-f0d2-f34a-19f3-cdfcf5e425ed",
     "1afaaf91-82c4-25b0-f255-f75111e7fe89",
+    "53af172d-972e-e9fb-0365-e16a3922c723",
     "60dfa86c-f956-8450-851f-d3bdce6e629f",
     "8c847a87-3c6a-58c8-bd0f-b9f975c0bc05",
     "9f43cea8-e684-25a3-fb07-15a03738d46e",
     "c1bc54b4-0fc7-2266-9f6d-9c460bbc4834",
+    "d9ad7c3b-7903-2a94-0ce2-55554facfbe7",
     "ea00b8d1-b167-f970-e377-de1cbb4be2ef",
     "fd82c026-c5f9-6697-d895-ed32f75fa483",
 ]

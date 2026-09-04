@@ -44,8 +44,43 @@ pub struct Route {
     pub name: String,
     /// `"highway"`, `"arterial"`, … — an `inf_gis::RoadKind` label.
     pub class: String,
+    /// **How many traffic lanes this link carries** (wave ROAD1, the road-layer
+    /// schema move).
+    ///
+    /// # The layer used to say nothing, and the default was 14 metres of it
+    ///
+    /// `roads.geojson` carried a name and a class and nothing else, so every
+    /// road on the island took `RoadKind::default_lanes` — four for a highway
+    /// *and* four for an arterial, which at `LANE_WIDTH_M` is **14.0 m for both**.
+    /// A town connector as wide as a trunk route is wrong on its own, and it was
+    /// also the number that made the committed asphalt read 3.5x life size,
+    /// because the ribbon's uv unit was the road's width (the ASSET0 audit).
+    ///
+    /// It is written into the layer rather than inferred at read time so the
+    /// *design* records it: `inf_gis::RoadGraph::from_layer` has probed
+    /// `lanes`/`nlanes`/`num_lanes`/`through_lanes` since VEH2b and found none
+    /// on any island feature. Now it finds one.
+    pub lanes: u32,
     /// World XZ + the ground height the route was planned at.
     pub points: Vec<DVec3>,
+}
+
+impl Route {
+    /// The `inf_gis::RoadKind` this route's class text names.
+    pub fn kind(&self) -> inf_gis::RoadKind {
+        inf_gis::RoadKind::classify(&self.class)
+    }
+
+    /// **The half-width of everything this route DRAWS** — carriageway, plus
+    /// whichever of a sealed shoulder or a kerb-and-pavement its class carries
+    /// (wave ROAD1).
+    ///
+    /// This is what the terrain's corridor plateau has to be levelled to: the
+    /// road is graded and planar across, so ground that is not planar under all
+    /// of it puts a kerb in the air or a pavement in a hillside.
+    pub fn built_half_width_m(&self) -> f64 {
+        inf_gis::roads::built_half_width_m(self.kind(), self.lanes)
+    }
 }
 
 impl Route {
@@ -468,6 +503,38 @@ pub fn nearest_route_vertex(routes: &[Route], p: DVec2) -> Option<(DVec3, DVec2)
 /// cities are joined by a highway; every town is joined to the nearest city by
 /// an arterial; and the towns are strung together into a circuit** so a drive
 /// that leaves one settlement arrives at another rather than at a dead end.
+/// **How many lanes each of the island's road classes carries** (wave ROAD1).
+///
+/// # The design states it, because the default said one thing about two roads
+///
+/// `inf_gis::RoadKind::default_lanes` gives a highway four and an arterial
+/// **four**, which at `LANE_WIDTH_M` is 14.0 m of carriageway for both — so the
+/// island's one trunk route and its ten town connectors were the same width, and
+/// a road wide enough for four lanes of traffic ran between Alder Bay and
+/// Stonewater. That default is right as a *fallback* for a layer that says
+/// nothing (a four-lane arterial is the commoner case in a city), and it is
+/// wrong for this island, which is rural.
+///
+/// | class | lanes | carriageway | and beside it |
+/// |---|---|---|---|
+/// | highway | 4 | 14.0 m | a 2.5 m sealed shoulder each side |
+/// | arterial | 2 | 7.0 m | a kerb and a 2.0 m pavement each side |
+///
+/// Two lanes is what a British Columbia secondary highway is: one each way, a
+/// solid yellow line between them, white at the edges. The trunk keeps four
+/// because it joins the island's two cities and is the one road a four-lane
+/// section is honest on.
+///
+/// Anything else the planner ever links takes the class's own default, which is
+/// the right answer for a class this table has no opinion about.
+pub fn island_lanes(class: &str) -> u32 {
+    match class {
+        "highway" => 4,
+        "arterial" => 2,
+        other => inf_gis::RoadKind::classify(other).default_lanes(),
+    }
+}
+
 pub fn plan_network(
     recipe: &IslandRecipe,
     heights: &CoarseHeights,
@@ -498,6 +565,7 @@ pub fn plan_network(
         Ok(Route {
             name: format!("{} - {}", a.name, b.name),
             class: class.to_string(),
+            lanes: island_lanes(class),
             points: pts,
         })
     };
@@ -593,23 +661,53 @@ pub fn grade_audit(
     a
 }
 
+/// **Everything the road step draws**: the carriageway, and one mesh per
+/// furniture group beside it (wave ROAD1).
+#[derive(Clone, Debug, Default)]
+pub struct RoadMeshes {
+    /// The drivable surface and its junction fans — asphalt.
+    pub carriageway: Option<(inf_mesh::MeshAsset, inf_gis::MeshBuildReport)>,
+    /// Kerbs and pavements, white paint and yellow paint, keyed by the material
+    /// group each wears. A `BTreeMap`, so the write order is the data's.
+    pub furniture: std::collections::BTreeMap<inf_gis::RoadPart, inf_mesh::MeshAsset>,
+}
+
 /// Build the road surface mesh through `inf-gis`'s own door.
 ///
 /// `RoadGraph::from_layer` → `build_surface` → `surface_to_mesh`, which is the
 /// path IB-4 proved at 3 758 vertices and 0.000000 m of deviation from
 /// `ground + lift`. Nothing here re-derives a ribbon; the island is a *caller*.
+///
+/// # The island grades its roads, and the wizard does not (wave ROAD1)
+///
+/// `crown_fall` and `furniture` are both stated here rather than defaulted,
+/// because the island **owns its terrain**: `terrain::sample_terrain` levels a
+/// flat plateau under every road corridor before this runs, so a graded,
+/// crowned, planar carriageway sits on ground that is planar under it. An
+/// importer dropping roads onto somebody else's heightfield has neither
+/// guarantee — see `inf_gis::SurfaceOptions::crown_fall`.
 pub fn build_mesh(
     layer: &inf_gis::GeoLayer,
     ground_step_m: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
-) -> Result<(inf_mesh::MeshAsset, inf_gis::MeshBuildReport, RoadReport), IslandError> {
+) -> Result<(RoadMeshes, inf_gis::MeshBuildReport, RoadReport), IslandError> {
     let graph = inf_gis::RoadGraph::from_layer(layer);
     let opts = inf_gis::SurfaceOptions {
         ground_step_m,
+        crown_fall: inf_gis::DEFAULT_CROWN_FALL,
+        furniture: true,
         ..Default::default()
     };
     let surface = inf_gis::build_surface(&graph, &opts, height_at);
     let (mesh, report) = inf_gis::surface_to_mesh(&surface, DVec3::ZERO)?;
+    let mut meshes = RoadMeshes::default();
+    for part in inf_gis::FURNITURE_PARTS {
+        if let Some((m, _)) = inf_gis::furniture_to_mesh(&surface, DVec3::ZERO, part)? {
+            meshes.furniture.insert(part, m);
+        }
+    }
+    meshes.carriageway = Some((mesh, report));
+    let mesh = meshes;
 
     let mut by_class: std::collections::BTreeMap<String, f64> = Default::default();
     for s in graph.segments.values() {
@@ -699,6 +797,7 @@ mod tests {
         let r = Route {
             name: "x".into(),
             class: "highway".into(),
+            lanes: 2,
             points: pts,
         };
         let len = r.length_m();
@@ -778,6 +877,7 @@ mod tests {
             Route {
                 name: "cut".into(),
                 class: "highway".into(),
+                lanes: 2,
                 points: out,
             }
         };
@@ -938,6 +1038,7 @@ mod tests {
         let r = Route {
             name: "x".into(),
             class: "highway".into(),
+            lanes: 2,
             points: vec![DVec3::new(0.0, 0.0, 0.0), DVec3::new(100.0, 0.0, 0.0)],
         };
         let a = grade_audit(std::slice::from_ref(&r), 0.08, 10.0, |p| {
@@ -990,7 +1091,31 @@ mod tests {
         let mut ground = |x: f64, z: f64| Some((x + z) * 0.01);
         let (mesh, report, rr) = build_mesh(&layer, 2.0, &mut ground).expect("the door builds");
         assert!(report.vertices > 0 && report.triangles > 0);
-        assert!(!mesh.submeshes.is_empty());
+        let (carriageway, _) = mesh.carriageway.as_ref().expect("the road paved");
+        assert!(!carriageway.submeshes.is_empty());
+        // **The island's roads carry their furniture** (wave ROAD1). Two of the
+        // four legs are arterials, so there are kerbs; all four are marked, so
+        // there is paint of both colours; and the whole point of `build_mesh`
+        // stating `furniture: true` is that this is not empty.
+        let mut parts: Vec<&str> = mesh
+            .furniture
+            .keys()
+            .map(|p| inf_gis::RoadPart::label(*p))
+            .collect();
+        parts.sort_unstable();
+        assert_eq!(
+            parts,
+            vec!["kerb", "marking white", "marking yellow"],
+            "an island road is a carriageway, a kerb, and paint in two colours"
+        );
+        for (part, m) in &mesh.furniture {
+            assert!(
+                m.triangle_count() > 0,
+                "{} was written with no geometry in it",
+                part.label()
+            );
+            assert!(m.validate().is_ok(), "{} is not a valid mesh", part.label());
+        }
         assert_eq!(rr.segments, 4);
         assert_eq!(rr.junctions, 1, "four legs meet at one crossing");
         let classes: Vec<&str> = rr.km_by_class.iter().map(|(k, _)| k.as_str()).collect();

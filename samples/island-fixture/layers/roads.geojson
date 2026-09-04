@@ -278,6 +278,7 @@
         "type": "LineString"
       },
       "properties": {
+        "lanes": 2,
         "name": "Fixture Camp - Fixture Town",
         "road_type": "arterial"
       },

@@ -382,13 +382,7 @@ impl RoadGraph {
                 }
             };
             let lane_count = f
-                .attr_number(&[
-                    "lane_count",
-                    "lanes",
-                    "nlanes",
-                    "num_lanes",
-                    "through_lanes",
-                ])
+                .attr_number(&ROAD_LANE_FIELDS)
                 .filter(|v| *v >= 1.0 && *v <= 24.0)
                 .map(|v| v as u32)
                 .unwrap_or_else(|| kind.default_lanes());
@@ -898,6 +892,23 @@ pub fn build_all_ribbons(
     (out, skipped)
 }
 
+/// **The attribute spellings a lane count may be stored under**, most specific
+/// first.
+///
+/// Hoisted to a constant in wave ROAD1 for the reason [`ROAD_CLASS_FIELDS`] was:
+/// two readers of one fact have to read it through one door. `RoadGraph::from_
+/// layer` probed this list inline, and `inf_island::layers::routes_of` — which
+/// reads the same committed layer to plan a terrain corridor with — probed
+/// nothing at all, so a layer stating `nlanes` would have built a four-lane road
+/// through a two-lane corridor.
+pub const ROAD_LANE_FIELDS: [&str; 5] = [
+    "lane_count",
+    "lanes",
+    "nlanes",
+    "num_lanes",
+    "through_lanes",
+];
+
 /// The attribute spellings a road class may be stored under, most specific
 /// first.
 ///
@@ -1029,7 +1040,7 @@ pub const KERB_WIDTH_M: f64 = 0.30;
 /// `inf-gis` cannot name `inf-ecs` (neither depends on the other, by design —
 /// see `inf-ecs`'s own manifest note), so the equality is pinned where a crate
 /// can see both: `the_kerb_geometry_and_the_nav_ring_are_one_pavement` in
-/// `crates/inf-island/tests/pavement_authority.rs`. Same arrangement as
+/// `editor/crates/inf-editor-core/tests/road_authority.rs`. Same arrangement as
 /// [`LANE_WIDTH_M`] and `inf_nav::lane::DEFAULT_LANE_WIDTH_M`, which are pinned
 /// one file over for the same reason.
 pub const PAVEMENT_M: f64 = 2.0;
@@ -1089,6 +1100,25 @@ pub const CROSSWALK_SETBACK_M: f64 = 6.0;
 /// How far a crosswalk runs along the road, metres — the depth a person crosses
 /// through.
 pub const CROSSWALK_DEPTH_M: f64 = 3.0;
+
+/// **The half-width of everything a road of this class draws**, metres — the
+/// carriageway, plus whichever of a sealed shoulder or a kerb-and-pavement it
+/// carries (wave ROAD1).
+///
+/// No class carries both: [`RoadKind::is_kerbed`] and
+/// [`RoadKind::shoulder_m`] are the two halves of one decision. This is the
+/// number a terrain has to be levelled flat to under a **graded** road — see
+/// [`SurfaceOptions::crown_fall`] — because a planar carriageway over ground
+/// that is not planar under all of it puts a kerb in the air at one end of the
+/// section and a pavement in a hillside at the other.
+pub fn built_half_width_m(kind: RoadKind, lanes: u32) -> f64 {
+    let half = kind.width_m(lanes) * 0.5;
+    if kind.is_kerbed() {
+        half + KERB_WIDTH_M + PAVEMENT_M
+    } else {
+        half + kind.shoulder_m()
+    }
+}
 
 /// **A road surface's material groups** — one mesh, and one entity, per group.
 ///

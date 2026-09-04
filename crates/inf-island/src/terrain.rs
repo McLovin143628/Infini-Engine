@@ -149,8 +149,33 @@ pub struct CarvePlan<'a> {
     pub pads: Vec<(DVec2, f64, f64)>,
     /// The road corridor, if the design has one yet.
     pub corridor: Option<&'a SegmentIndex>,
-    /// Half the levelled corridor's width, metres.
+    /// Half the levelled corridor's width, metres — where the easing reaches
+    /// zero and the terrain is its own again.
     pub corridor_half_m: f64,
+    /// **Half the corridor's FLAT plateau**, metres (wave ROAD1).
+    ///
+    /// # The easing used to start at the centreline, and the road sat in a bowl
+    ///
+    /// The levelling was `w = 1 − smooth01(d / half)`: full at the centreline and
+    /// tapering from there, so the ground under the road's own edge was only
+    /// partly eased toward the design height. On the island's 11.2 m corridor a
+    /// 14 m carriageway's edge sat at `w = 0.32` — sixty-eight per cent of the
+    /// terrain's natural cross-slope survived under a surface a road is graded
+    /// flat across.
+    ///
+    /// Everything the road *draws* now sits on a plateau at exactly the route's
+    /// height (`w = 1`), and the smoothstep eases from the plateau's edge out to
+    /// [`corridor_half_m`](Self::corridor_half_m) — which is what a cut-and-fill
+    /// batter is.
+    ///
+    /// **And it is what makes the road conform to the terrain the renderer
+    /// DRAWS.** The clipmap morphs a vertex toward a bilinear on a lattice twice
+    /// as coarse, and a locally planar surface decimates to itself: on a plateau,
+    /// the coarse height equals the fine height, so `mix(h_fine, h_coarse, m)` is
+    /// the same number at every morph factor and the ground under the road stops
+    /// moving with the camera. `road1_gate`'s three-distance table is the
+    /// measurement.
+    pub corridor_flat_m: f64,
 }
 
 /// What the sample walk found.
@@ -282,7 +307,22 @@ pub fn sample_terrain(
                 if plan.corridor_half_m > 0.0 {
                     if let Some(n) = idx.nearest(p) {
                         if n.distance_m < plan.corridor_half_m {
-                            let w = 1.0 - smooth01(n.distance_m / plan.corridor_half_m);
+                            // **A plateau, then a batter** (wave ROAD1). Inside
+                            // the flat the ground IS the route's design height;
+                            // outside it the smoothstep eases back to the
+                            // terrain's own over what is left of the corridor.
+                            // See `CarvePlan::corridor_flat_m`.
+                            let flat = plan.corridor_flat_m.min(plan.corridor_half_m);
+                            let w = if n.distance_m <= flat {
+                                1.0
+                            } else {
+                                let span = plan.corridor_half_m - flat;
+                                if span > 0.0 {
+                                    1.0 - smooth01((n.distance_m - flat) / span)
+                                } else {
+                                    0.0
+                                }
+                            };
                             let before = h;
                             h = h + (n.height_m - h) * w;
                             if (h - before).abs() > 1e-9 {
@@ -631,6 +671,7 @@ mod tests {
             pads: vec![(DVec2::ZERO, 120.0, 480.0)],
             corridor: None,
             corridor_half_m: 0.0,
+            corridor_flat_m: 0.0,
         };
         let (data, st) = sample_terrain(&r, &mosaic, &lattice, &carve);
 
