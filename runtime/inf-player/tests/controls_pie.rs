@@ -941,6 +941,38 @@ fn the_hero_in_pie_is_posed_and_the_pose_follows_the_input() {
         "after 40 steps the hero is drawn in its REST pose (delta {})",
         idle.pose_max_delta
     );
+    // **…and "not exactly rest" is not the claim** (audit FIX1).
+    //
+    // `pose_is_rest` is `pose_max_delta == 0.0`, and the T-pose the author
+    // reported was NOT exactly rest: it was rest with a 5.6 mm hip breath and a
+    // 2 degree chest pitch on it. Measured by reverting this wave whole — the
+    // generator AND the committed clips, i.e. the tree the author pressed Play
+    // on — this arm's three original assertions ALL pass on it:
+    //
+    //     idle delta 0.019934 (rest false), running delta 1.537899, 161 joints
+    //
+    // so `!pose_is_rest` is green, and so is the change-with-input assertion
+    // below, whose 1.518 clears its 0.05 bound sixty times over. The committed
+    // fixture lock (`samples::tests::committed_sample_matches_generators`) is
+    // green on that tree too, because it asks whether the bytes match the
+    // generator and not whether the generator is right.
+    //
+    // The bound is therefore on the SIZE of the departure. A rig whose arms have
+    // been brought 72 degrees down from a T is a long way from its bind pose; a
+    // rig standing in one with a breath on it is not, and the two do not overlap:
+    /// The idle pose's largest per-joint departure from bind, below which the
+    /// hero is standing in its bind pose with a breath on it. **1.0** sits
+    /// between the two measured worlds with room on both sides: this wave's idle
+    /// reads **2.975395** and the T-pose it replaced read **0.019934**.
+    const IDLE_DEPARTURE_FLOOR: f64 = 1.0;
+    assert!(
+        idle.pose_max_delta > IDLE_DEPARTURE_FLOOR,
+        "the idling hero's pose departs from its bind pose by only {:.6}, against \
+         a {IDLE_DEPARTURE_FLOOR:.1} floor — that is a bind pose with a breath on \
+         it, which on this rig is a T-POSE. See `inf_anim::locomotion`'s \
+         `ARM_REST_RATIO`.",
+        idle.pose_max_delta
+    );
 
     // …and it CHANGES with input: a running character is not an idling one.
     pie.hold(&["KeyW"], 90);
