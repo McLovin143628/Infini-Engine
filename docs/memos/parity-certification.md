@@ -1306,12 +1306,12 @@ sound and neither is a pixel.
 
 | gate | wave | audit |
 |---|---|---|
-| battery, `-j 3`, `INF_GOLDEN_STRICT=1` | 370 / 7 013 / 0 / 21, exit 0 | **identical**, and recomputed NUL-safely to the same three numbers |
+| battery, `-j 3`, `INF_GOLDEN_STRICT=1` | 370 / 7 013 / 0 / 21, exit 0 | **370 / 7 019 / 0 / 21**, exit 0, recomputed NUL-safely to the same three numbers — identical before the §5 ruling, and **+6** after it (5 arms in `inf-project`, 1 in `inf-studio`; no new test target, so the binary count does not move) |
 | goldens | 62 files, 121 arms, none blessed | 62 files, 121 arms, **none blessed**, none in `git status` |
-| rustdoc after `cargo clean --doc` | 410 `^warning` = 380 + 30 summaries | **410 = 380 + 30**, ceiling 450, none in wave- or audit-touched files |
-| clippy `--workspace --all-targets -- -D warnings`, LAST | 0 / 0 | **0 errors, 0 warnings**, exit 0 |
+| rustdoc after `cargo clean --doc` | 410 `^warning` = 380 + 30 summaries | **410 = 380 + 30**, ceiling 450; the per-crate summary lines are **identical** before and after the ruling, and `inf-project` — which gained a whole rung ladder and five arms — still generates **zero** |
+| clippy `--workspace --all-targets -- -D warnings`, LAST | 0 / 0 | **0 errors, 0 warnings**, exit 0 — after one fix: the ruling's new settings fixture attracted `field_reassign_with_default`, the same lint in the same file the wave hit at `e1d19938` |
 | `cargo fmt` | clean per member (`--all` is os error 206 here) | **clean over all 48 members**; `--all` still fails the same way |
-| frontend | 86 files / 779 tests, tsc + eslint clean | **86 / 779**, `tsc --noEmit` and `eslint --max-warnings 0` clean |
+| frontend | 86 files / 779 tests, tsc + eslint clean | **86 / 781** (+2 from the ruling's arms), `tsc --noEmit` and `eslint --max-warnings 0` clean |
 | CRLF over the whole diff | 0 | **0** |
 | schema | v27 / payload v12 / `EXPECTED_LEVELS` 24 | **unmoved**; `Cargo.toml`, `Cargo.lock`, `deny.toml` untouched |
 | committed `.inf_lvl` | five, byte length unchanged | five, and the diffs are **6 or 8 bytes each inside one 74-byte window** — the render record and nothing else |
