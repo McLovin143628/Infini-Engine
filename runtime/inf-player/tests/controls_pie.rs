@@ -1032,3 +1032,101 @@ fn the_pie_camera_pulls_in_rather_than_entering_the_wall() {
         "the camera collapsed onto the hero with nothing in the way: {open_boom:.4} m"
     );
 }
+
+// ── the determinism of the door this wave opened ────────────────────────────
+
+/// **Two driven sessions, one input trace, the same simulation** (audit FIX1).
+///
+/// Protocol 3 opened a second way into `RuntimeSim::step_once` — the first since
+/// P9.4 — and the wave armed what an input frame *does* without arming that it
+/// does the same thing twice. Determinism is the house's oldest law and the
+/// PIE == shipping doctrine rests on it: a driven trace that is not reproducible
+/// cannot be compared with anything, so every control arm above would be
+/// measuring one roll of a die.
+///
+/// The assertion is on the **state hash the player reports for each step**, in
+/// order and to the bit, over a trace that exercises the parts most likely to
+/// carry state across a frame: a gait change, a strafe, a jump, a mode change and
+/// a release. Two real subprocesses, spawned from one payload, so a divergence in
+/// process-local state (a hash-map iteration order, a clock read, an
+/// uninitialised accumulator) is visible where a single-process arm would share
+/// it and see nothing.
+#[test]
+fn one_input_trace_drives_two_sessions_to_the_same_simulation() {
+    isolate_settings();
+    /// The trace, as (held keys, how many steps).
+    const TRACE: [(&[&str], u32); 7] = [
+        (&[], 30),
+        (&["KeyW"], 40),
+        (&["KeyW", "Shift"], 40),
+        (&["KeyW", "KeyA"], 30),
+        (&["KeyW", "Space"], 20),
+        (&["KeyW", "KeyC"], 30),
+        (&[], 30),
+    ];
+
+    let run = || -> (Vec<u64>, [f64; 3], [f64; 2]) {
+        let mut pie = Pie::open(Fixture::default());
+        let mut hashes = Vec::new();
+        for (keys, frames) in TRACE {
+            for _ in 0..frames {
+                pie.session
+                    .input(InputFrame::held(keys.iter().copied(), DT))
+                    .expect("the input frame lands");
+                let ev = pie
+                    .session
+                    .wait_for(Duration::from_secs(10), |e| {
+                        matches!(e, inf_runtime::pie::PlayerToEditor::Frame { .. })
+                    })
+                    .expect("the player reports the frame it stepped");
+                if let inf_runtime::pie::PlayerToEditor::Frame { state_hash, .. } = ev {
+                    hashes.push(state_hash);
+                }
+            }
+        }
+        let hero = pie.hero();
+        (hashes.clone(), hero.position, hero.local_velocity)
+    };
+
+    let (a_hashes, a_pos, a_vel) = run();
+    let (b_hashes, b_pos, b_vel) = run();
+
+    let steps: u32 = TRACE.iter().map(|(_, n)| n).sum();
+    println!(
+        "FIX1 audit determinism — {steps} driven steps, {} hashes; \
+         first {:#018x} last {:#018x}; hero ({:.6}, {:.6}, {:.6})",
+        a_hashes.len(),
+        a_hashes.first().copied().unwrap_or_default(),
+        a_hashes.last().copied().unwrap_or_default(),
+        a_pos[0],
+        a_pos[1],
+        a_pos[2]
+    );
+    assert_eq!(
+        a_hashes.len(),
+        steps as usize,
+        "one Frame per driven step is the protocol's own shape"
+    );
+    // The hashes are the ordered claim; naming the first divergence is what makes
+    // a failure diagnosable rather than a wall of u64s.
+    let split = a_hashes
+        .iter()
+        .zip(&b_hashes)
+        .position(|(x, y)| x != y)
+        .unwrap_or(a_hashes.len());
+    assert_eq!(
+        split,
+        a_hashes.len(),
+        "two sessions driven by the same trace diverged at step {split}: \
+         {:#018x} vs {:#018x}",
+        a_hashes[split],
+        b_hashes[split]
+    );
+    assert_eq!(a_hashes, b_hashes, "the driven state hashes differ");
+    // …and the world the hashes summarise, read through the other door.
+    assert_eq!(
+        a_pos, b_pos,
+        "the hero landed somewhere else the second time"
+    );
+    assert_eq!(a_vel, b_vel, "the hero's aim-frame velocity differs");
+}
