@@ -193,8 +193,8 @@ fn fit(
 /// two morph factors — so option A is not "conform to the drawn terrain", it is
 /// "choose which distance to be wrong at". Making it real would mean drawing the
 /// road through the terrain's own vertex shader, which is a road that is no
-/// longer a mesh. The number this arm reports at `A_FLOAT_CEILING_M` is what
-/// option A leaves on the table.
+/// longer a mesh. What the table's `A conform` columns report is therefore what
+/// option A leaves on the table rather than what it would fix.
 ///
 /// **B — flatten the terrain to the road.** Taken. `CarvePlan::corridor_flat_m`
 /// levels a plateau at the route's own design height under everything the road
@@ -441,10 +441,9 @@ fn a_rivers_shore_band_does_not_breathe_with_the_terrains_lod() {
     );
     println!("ROAD1 BAND | distance | morph | band edge, depth buffer | band edge, modelled |");
 
+    // The morph the distance implies is applied inside `morphed_height`, which
+    // is where the terrain is read; this closure only walks laterally.
     let edge_of = |modelled_on: bool, d: f64| -> f64 {
-        let lod = inf_render::lod_for_distance(d, &thresholds);
-        let m = f64::from(inf_render::morph_factor(d, lod, &thresholds));
-        let _ = m;
         let mut outer = 0.0f64;
         for k in 0..=SAMPLES {
             let t = k as f64 / SAMPLES as f64;

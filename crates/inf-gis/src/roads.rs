@@ -2077,16 +2077,11 @@ fn build_segment_furniture(
     // footway, or plus shoulder. A kerb that conformed while the carriageway it
     // bounds was graded would ride up and down the terrain's cross-slope beside
     // a channel that does not.
-    let owned;
-    let opts = if opts.crown_fall > 0.0 {
-        owned = SurfaceOptions {
-            graded_half_m: built_half_width_m(seg.kind, seg.lane_count),
-            ..*opts
-        };
-        &owned
-    } else {
-        opts
+    let owned = SurfaceOptions {
+        graded_half_m: built_half_width_m(seg.kind, seg.lane_count),
+        ..*opts
     };
+    let opts = if opts.crown_fall > 0.0 { &owned } else { opts };
 
     if seg.kind.is_kerbed() {
         build_kerbs(

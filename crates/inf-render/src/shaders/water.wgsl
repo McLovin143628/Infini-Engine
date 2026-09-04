@@ -486,9 +486,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // the vertex stage, and until this line **no fragment ever read it**. The
     // modelled column is that depth tapered to zero at the bank — a parabola,
     // which is the section `inf_island::hydro::carve_channels` now cuts — and
-    // the drawn column is the larger of the two. So the water is opaque over its
-    // own bed however coarse the terrain under it has become, and it still fades
-    // exactly at its own edge, where the taper reaches zero.
+    // for a river it IS the drawn column, not a floor under it (see the note
+    // below the arithmetic). So the water is opaque over its own bed however
+    // coarse the terrain under it has become, and it still fades exactly at its
+    // own edge, where the taper reaches zero.
     //
     // Ocean and lake are untouched: they meet arbitrary ground at an arbitrary
     // line, which is precisely the case a screen-space difference is for.

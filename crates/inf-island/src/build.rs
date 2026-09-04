@@ -782,15 +782,35 @@ pub fn build_island(
         say(
             BuildStep::Roads,
             format!(
-                "{:.2} km over {} segments and {} junctions; mesh {} vertices / {} \
-                 triangles, quantisation {:.4} m; worst grade {:.3} against {:.3}, \
-                 {} over",
+                "{:.2} km over {} segments and {} junctions; carriageway {} \
+                 vertices / {} triangles, quantisation {:.4} m; furniture {}; \
+                 worst grade {:.3} against {:.3}, {} over",
                 rr.total_km,
                 rr.segments,
                 rr.junctions,
                 mr.vertices,
                 mr.triangles,
                 mr.quantisation_m,
+                // **What the kerbs, the pavements and the paint cost**
+                // (wave ROAD1). One line per material group, because they
+                // are one entity and one draw each and the only honest
+                // budget for road furniture is what it adds to the frame.
+                if m.furniture.is_empty() {
+                    "none".to_string()
+                } else {
+                    m.furniture
+                        .iter()
+                        .map(|(part, a)| {
+                            format!(
+                                "{} {} v / {} t",
+                                part.label(),
+                                a.vertex_count(),
+                                a.triangle_count()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
                 audit.worst,
                 audit.ceiling,
                 audit.over.len()
