@@ -621,6 +621,20 @@ fn the_lod_ladder_census() {
         format!("{share:.1} % of a furnished building's instances ({fit_out_total} of {all})"),
     );
     assert!(all > 0, "no archetype assembled anything");
+    // **THE NUMBER THIS CENSUS EXISTS FOR, ASSERTED** (CERT1 audit). It was
+    // printed and nothing held it: mutating `ModuleShape::is_fit_out` to answer
+    // `false` for every family makes this row print `0.0 % (0 of 10428)` and the
+    // arm stayed GREEN, which is a census that would watch the classification it
+    // measures stop existing and say so only to a reader. 12.2 % is what the mid
+    // band was landed on, and a floor of 5 % is well under it and well over the
+    // 1.0 % artefact the first (mis-aimed) measurement produced — so this fires
+    // for a classifier that has stopped classifying, and not for content drift.
+    assert!(
+        share > 5.0,
+        "the fit-out share is {share:.1} % ({fit_out_total} of {all}) — the mid \
+         LOD band was landed on 12.2 %, and below 5 % either `is_fit_out` has \
+         stopped classifying or `settlement::furnishes` has stopped furnishing"
+    );
 
     // The assertion the census exists to make: the island's real meshes are
     // NOT all on a three-tier ladder, and the grammar buildings — which are most
