@@ -60,13 +60,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // then takes 0.9 of a history holding what a DIFFERENT part of the world
     // looked like, bounded only by the 3x3 neighbourhood clamp — which on the
     // high-frequency content this describes is a wide box, so bright values
-    // dilate outward a little further every frame. That is the "washed out and
-    // heavily ghosted" frame the author reported: measured on the shipped
-    // island as a blown-out pixel fraction rising 0.048 -> 0.134 over two
-    // seconds of walking, and reproduced headlessly in
+    // dilate outward a little further every frame. Reproduced headlessly in
     // `tests/taa_motion.rs` as a resolve that moves 4.3x further from its own
     // source under a moving camera while the rigid-mesh control does not move
     // at all.
+    //
+    // **It is NOT the washed-out island frame**, and the first version of this
+    // comment said it was. Measured on the real host afterwards: with `taa`
+    // forced off in `shipped_settings`, the showcase island's PIE frame is
+    // unchanged (blown-out fraction 0.135 vs 0.134). That frame is dynamic GI —
+    // turning `gi` off takes it to 0.000 — and is routed as such. This branch is
+    // a defect on its own evidence and fixes a defect only that evidence
+    // describes.
     //
     // Refusing the history is the same rule this shader already applies one
     // branch down for a reprojection that lands off-screen, and for the same

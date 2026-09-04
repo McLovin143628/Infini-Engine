@@ -5,9 +5,16 @@
 //! and the current frame hold the same content, so the reprojection cannot be
 //! wrong and the arm converges whatever the reprojection does. **A moving camera
 //! is the only condition under which TAA's reprojection is exercised at all**,
-//! and nothing here moved one, which is why the frame the author reported —
-//! *"washed out and heavily ghosted"* — had no gate anywhere that could have
-//! caught it.
+//! and nothing here moved one.
+//!
+//! # What this is NOT
+//!
+//! It is not the author's washed-out island frame. That was this audit's first
+//! reading and the real host refused it: with `taa` forced off in
+//! `shipped_settings` the showcase island's PIE frame is unchanged (blown-out
+//! fraction 0.135 against 0.134), while forcing `gi` off takes it to 0.000. The
+//! island's wash is dynamic GI and is routed as such. What follows is a
+//! different defect, found on the way, and it stands on its own measurements.
 //!
 //! # The measure
 //!
