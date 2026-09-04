@@ -129,8 +129,17 @@ pub struct UeFixture {
     pub mesh: Option<String>,
     /// Offset from the prop's origin, **metres**, in `+X east, +Y up, -Z north`.
     pub offset_m: [f64; 3],
-    /// Linear colour.
-    pub color: [f32; 3],
+    /// The lamp's colour, **as UE stores it: 8-bit sRGB**.
+    ///
+    /// Not converted. The transfer function is a `powf`, and this crate's
+    /// `portable_math_law` gate refuses one — correctly, because the engine
+    /// already has exactly one sRGB decode (`inf_material::ground`'s sqrt
+    /// ladder, transcendental-free so committed texels are byte-identical on
+    /// every platform) and a second approximation here would be a second
+    /// answer to one question. A bridge carries the source value; the
+    /// conversion belongs where a `Light` is authored from it, next to
+    /// whatever door that authoring path already uses.
+    pub color_srgb8: [u8; 3],
     /// Range in metres (UE's attenuation radius).
     pub range_m: f32,
     /// Candela. See [`ue_intensity_to_candela`].
@@ -367,7 +376,7 @@ pub fn import_manifest(
                 name: f.key.clone(),
                 mesh: f.meshes.first().map(|fm| fm.mesh.clone()),
                 offset_m: ue_cm_to_world_m(l.location_cm),
-                color: srgb8_to_linear(l.color_srgb8),
+                color_srgb8: l.color_srgb8,
                 range_m: l.radius_cm / 100.0,
                 intensity: ue_intensity_to_candela(l.intensity),
             });
@@ -376,19 +385,6 @@ pub fn import_manifest(
 
     report.bytes = written_bytes(project, &report);
     Ok(report)
-}
-
-/// sRGB8 → linear, the same transfer the engine uses everywhere else.
-fn srgb8_to_linear(c: [u8; 3]) -> [f32; 3] {
-    let f = |v: u8| {
-        let s = f32::from(v) / 255.0;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    [f(c[0]), f(c[1]), f(c[2])]
 }
 
 /// The rung census, into the mesh's sidecar `import` table.

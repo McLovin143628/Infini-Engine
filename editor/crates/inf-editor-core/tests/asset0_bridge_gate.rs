@@ -307,14 +307,12 @@ fn a_manifest_becomes_a_textured_material_and_a_mesh() {
     );
     assert!((f.range_m - 15.0).abs() < 1e-6);
     assert_eq!(f.mesh.as_deref(), Some("Fixture_Prop"));
-    // The colour crossed the sRGB transfer: 224/255 is 0.878 encoded and 0.745
-    // linear, and a bridge that forgot would light the street too warm.
-    assert!((f.color[0] - 1.0).abs() < 1e-6);
-    assert!(
-        f.color[1] > 0.73 && f.color[1] < 0.76,
-        "green {}",
-        f.color[1]
-    );
+    // The colour crosses UNCONVERTED, as 8-bit sRGB. See
+    // `UeFixture::color_srgb8` for why: the transfer function is a `powf`
+    // and this crate's portable-math gate refuses one, so the bridge carries
+    // the source value and the conversion happens where a `Light` is
+    // authored from it.
+    assert_eq!(f.color_srgb8, [255, 224, 160]);
 
     println!(
         "ASSET0 GATE: {} materials, {} textures, {} meshes ({} tris), {} fixtures, {} bytes",

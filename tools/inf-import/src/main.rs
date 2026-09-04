@@ -135,8 +135,14 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     for f in &report.fixtures {
         println!(
-            "inf-import: fixture  {} at ({:.2}, {:.2}, {:.2}) m, {:.0} cd, {:.1} m range",
-            f.name, f.offset_m[0], f.offset_m[1], f.offset_m[2], f.intensity, f.range_m
+            "inf-import: fixture  {} at ({:.2}, {:.2}, {:.2}) m, {:.0} cd, {:.1} m range, sRGB8 {:?}",
+            f.name,
+            f.offset_m[0],
+            f.offset_m[1],
+            f.offset_m[2],
+            f.intensity,
+            f.range_m,
+            f.color_srgb8
         );
     }
     println!(

@@ -1885,6 +1885,23 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
         );
     }
 
+    // 1a. **AND THE ROAD** (wave ASSET0, clause 0). It is not a terrain layer —
+    //     it is a `MeshRef` with a `Material` on it — so it reaches the pack by
+    //     the OTHER edge of the same closure, and naming it here is what stops
+    //     the count above being satisfied by a sixth ground set.
+    {
+        let want = inf_editor_core::ground::ground_material_guid(
+            inf_material::ground::GroundKind::Asphalt,
+        );
+        let content = source.material_content();
+        assert!(
+            content.materials.contains_key(&want),
+            "the cooked island carries no asphalt material — the street is back \
+             on Material::default()'s 0.8 debug grey (EDIT1 finding 2)"
+        );
+        println!("ISLAND GROUND: the road binds {want}");
+    }
+
     // 1b. **AND THE LEVEL ITSELF CARRIES NONE OF IT** — the finding this arm
     //     exists to keep found. A cooked partitioned level ships **zero
     //     entities**; they are all in the derived `.inf_part`. So the walk that
@@ -1918,19 +1935,25 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //    `.inf_mat`, derived a `.inf_matd` for it, and followed THAT to the
     //    `.inf_tex` containers.
     let content = source.material_content();
+    // **FIVE since wave ASSET0, and the fifth is the road.** Four come from
+    // `Terrain.layers[*].material` and the fifth from the `Roads` entity's
+    // `Material.asset` — the same closure, a different edge, and the reason the
+    // street stopped shading off `Material::default()`'s 0.8 debug grey. A drop
+    // back to four is that binding lost.
     assert_eq!(
         content.materials.len(),
-        4,
-        "the pack carries {} derived ground records, not four — the cook's \
-         closure did not follow `Terrain.layers[*].material`",
+        5,
+        "the pack carries {} derived material records, not five — the cook's \
+         closure did not follow `Terrain.layers[*].material` or the road's \
+         `Material.asset`",
         content.materials.len()
     );
-    // Fourteen: four albedo + four normal + four ORM + two detail (grass and
-    // rock are the only sets that ship one).
+    // Eighteen: five albedo + five normal + five ORM + three detail (grass,
+    // rock and asphalt are the sets that ship one).
     assert_eq!(
         content.textures.len(),
-        14,
-        "the pack carries {} ground textures, not fourteen",
+        18,
+        "the pack carries {} surface textures, not eighteen",
         content.textures.len()
     );
 
@@ -1938,19 +1961,19 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //    content, and the deterministic floor it admits — the numbers the frame
     //    instrument's "N virtual textures" line reports.
     let mats = content.vt_materials();
-    assert_eq!(mats.len(), 4, "the host's material map is not the pack's");
+    assert_eq!(mats.len(), 5, "the host's material map is not the pack's");
     let order = inf_render::registration_order(&mats);
     assert_eq!(
         order.len(),
-        14,
-        "the registration order names {} textures, not fourteen — `want_floor` \
+        18,
+        "the registration order names {} textures, not eighteen — `want_floor` \
          is a pure function of this sequence, so it is the thing two hosts have \
          to agree about",
         order.len()
     );
     println!(
-        "ISLAND GROUND: 4 layers -> 4 materials -> {} textures; registration \
-         order {:?}",
+        "ISLAND GROUND: 4 layers + 1 road -> 5 materials -> {} textures; \
+         registration order {:?}",
         content.textures.len(),
         order
             .iter()
