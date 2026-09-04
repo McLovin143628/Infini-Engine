@@ -1215,6 +1215,11 @@ place** above, each marked; this section is the index.
 | A-6 | CP-C6 | did not name its world | a hand-built fixture per row, not the island and not PIE — with the reason |
 | A-7 | the frame table | one column | two, and the island's shipped row is **25.2 → 35.2 fps** between runs |
 | A-8 | CP-C2 | 249.9 / 541.8 ms | re-run 337.6 / 551.8 ms, both far inside a 5 000 ms budget |
+| A-9 | `inf island build`'s own output | "the editor opens this project on launch" | "…unless you have opened another project since" — the pin can take it away, and a message an author can falsify on their first day is worse than none |
+| A-10 | CP-B9's numbers | quoted 42.299 vs a 38.0 ceiling and 7.664 vs a 6.0 ratchet, silently | says which is a tripwire: **none of the island's are**, both arms print so, and the 6.0 binds the isolated step the city measures at 2.947 |
+| A-11 | CP-C3 | three bands, no statement about their edges | no hole (their union is `[0, 1000)`); one **pre-existing** 6.9 m fabric/shell overlap; render-side only; fenced by `projector_mirror` |
+| A-12 | CP-B10's three findings | presented as findings | **source facts plus a deduction** — each re-verified by grep, and "a room light leaks through its walls" is rendered by no arm |
+| A-13 | FN-2's evidence | "5 levels re-blessed" | re-written, with the byte count — "bless" means a golden here, and the law two lines up is that none was |
 
 ### Measured here, unmeasured by the wave
 
@@ -1266,3 +1271,27 @@ The mid band's **on-screen pop at 64 m** (D-23): `structure_lod_pop.rs` is this
 repository's own 1080p instrument for a band swap and it was not aimed at the new
 one. The band rests on an instance count and an occlusion argument. Both are
 sound and neither is a pixel.
+
+### The house gates, re-run by the audit at its own head
+
+| gate | wave | audit |
+|---|---|---|
+| battery, `-j 3`, `INF_GOLDEN_STRICT=1` | 370 / 7 013 / 0 / 21, exit 0 | **identical**, and recomputed NUL-safely to the same three numbers |
+| goldens | 62 files, 121 arms, none blessed | 62 files, 121 arms, **none blessed**, none in `git status` |
+| rustdoc after `cargo clean --doc` | 410 `^warning` = 380 + 30 summaries | **410 = 380 + 30**, ceiling 450, none in wave- or audit-touched files |
+| clippy `--workspace --all-targets -- -D warnings`, LAST | 0 / 0 | **0 errors, 0 warnings**, exit 0 |
+| `cargo fmt` | clean per member (`--all` is os error 206 here) | **clean over all 48 members**; `--all` still fails the same way |
+| frontend | 86 files / 779 tests, tsc + eslint clean | **86 / 779**, `tsc --noEmit` and `eslint --max-warnings 0` clean |
+| CRLF over the whole diff | 0 | **0** |
+| schema | v27 / payload v12 / `EXPECTED_LEVELS` 24 | **unmoved**; `Cargo.toml`, `Cargo.lock`, `deny.toml` untouched |
+| committed `.inf_lvl` | five, byte length unchanged | five, and the diffs are **6 or 8 bytes each inside one 74-byte window** — the render record and nothing else |
+
+The only panic in the battery log is the one the house expects,
+`inf-hotreload`'s crash-isolation fixture.
+
+**The shipped island's pack** at `<parent>/island-build/project/Build` is
+249 125 340 B and was cooked after the lit commit; its manifest's `root_level` is
+the island's own GUID. The audit could not decode the level entry out of the pack
+directly (it is compressed), and the evidence that the shipped island is lit is
+the frame instrument's instead: the ISLAND SHIPPED row voxelizes 341 GI
+candidates and rasters a shadow map, which an unlit record does not do.
