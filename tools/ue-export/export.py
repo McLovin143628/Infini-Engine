@@ -507,10 +507,6 @@ def add_mesh(sm, pack):
     except Exception as e:
         ERRORS.append("slots on %s: %s" % (path, e))
 
-    # The AUTHORED screen sizes, one per source model. This is the number the
-    # importer turns into a ladder threshold, and it is the only place a pack's
-    # own opinion about when a rung takes over survives -- everything else about
-    # a LOD (its triangles, its file) is a consequence.
     # The AUTHORED screen sizes -- a pack's own opinion about when a rung takes
     # over, and the only thing about a LOD that is a DECISION rather than a
     # consequence. The triangle counts are deliberately not taken here: the
@@ -522,6 +518,12 @@ def add_mesh(sm, pack):
     # commandlet -- both measured. `EditorStaticMeshLibrary` is deprecated and
     # still answers, so it is tried, and a `-1` here means "the importer
     # chooses", which it is able to do.
+    #
+    # **MEASURED AT THE ASSET0 AUDIT: it is -1 for every rung this project
+    # ships** -- 18 of 18 across nine packs, and 8 of 8 on a fresh re-export of
+    # MS_CityCurbs. So the sidecar census the LOD ruling defers to carries rung
+    # COUNTS and no thresholds, and the importer says so rather than leaving a
+    # column of sentinels to be discovered by whoever tries to use it.
     screen = {}
     try:
         sizes = unreal.EditorStaticMeshLibrary.get_lod_screen_sizes(sm)

@@ -284,7 +284,12 @@ fn a_manifest_becomes_a_textured_material_and_a_mesh() {
         .advisories
         .iter()
         .find(|a| a.contains("has no slot"))
-        .unwrap_or_else(|| panic!("no advisory named the unplaced maps: {:?}", report.advisories));
+        .unwrap_or_else(|| {
+            panic!(
+                "no advisory named the unplaced maps: {:?}",
+                report.advisories
+            )
+        });
     for role in ["displacement", "emissive", "opacity"] {
         assert!(
             unplaced.contains(role),
@@ -724,7 +729,11 @@ fn the_bridge_refuses_to_write_into_the_engine_checkout() {
     );
 
     // ── outside it: the same manifest imports ────────────────────────────────
-    let outside = dir.path().join("island-build").join("project").join("Content");
+    let outside = dir
+        .path()
+        .join("island-build")
+        .join("project")
+        .join("Content");
     let mut project = AssetProject::open(&outside).expect("a project opens");
     let report = import_manifest(&mut project, &manifest, &UeImportOptions::default())
         .expect("outside the checkout the same manifest imports");
@@ -743,4 +752,96 @@ fn the_bridge_refuses_to_write_into_the_engine_checkout() {
         "a sibling of the checkout is not inside it"
     );
     println!("ASSET0 GATE: the bridge refuses {}", inside.display());
+}
+
+/// **THE RUNG CENSUS SAYS WHAT IT DOES NOT KNOW** (ASSET0 audit).
+///
+/// The wave's LOD ruling — store no authored ladder, record the pack's rungs in
+/// each mesh's sidecar for the wave that seeds the meshlet DAG from them —
+/// rests on the census being worth inheriting. Measured on the real export:
+/// `screen_size` is UE's auto-compute sentinel `-1` for **18 of 18 rungs across
+/// nine packs**, so `ue_lod_screen_sizes` is a column of `-1.0` and the census
+/// holds counts and slots and no thresholds. The gate asserted `ue_lod_rungs`
+/// and never looked at the sizes, so nothing could tell.
+///
+/// Both directions, on one fixture and a copy of it with the sizes struck out:
+/// the values reach the sidecar when the pack states them, and the import says
+/// so when it does not.
+#[test]
+fn the_lod_census_records_screen_sizes_and_reports_when_a_pack_states_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = staging(dir.path());
+    let content = dir.path().join("project").join("Content");
+    let mut project = AssetProject::open(&content).expect("a project opens");
+    let report = import_manifest(&mut project, &manifest, &UeImportOptions::default())
+        .expect("the manifest imports");
+
+    // ── the pack states them: they reach the sidecar, all four ───────────────
+    let (_, mesh_id, _, _) = report.meshes[0].clone();
+    let path = project.db().get(mesh_id).expect("registered").path.clone();
+    let side = inf_asset::AssetSidecar::load(&path).expect("a sidecar");
+    let sizes: Vec<f64> = side
+        .import
+        .as_ref()
+        .and_then(|t| t.get("ue_lod_screen_sizes"))
+        .and_then(toml::Value::as_array)
+        .expect("the census records screen sizes")
+        .iter()
+        .filter_map(toml::Value::as_float)
+        .collect();
+    // Compared with a tolerance rather than by equality: the manifest's f32
+    // widens to f64 on the way into the TOML, so 0.1 is recorded as
+    // 0.10000000149011612. Real, harmless — an imported sidecar is local, not
+    // committed content — and worth writing down rather than rounding away.
+    assert_eq!(sizes.len(), 4, "the census dropped a rung");
+    for (got, want) in sizes.iter().zip([1.0, 0.5, 0.25, 0.1]) {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "the fixture's authored thresholds did not survive into the sidecar: \
+             {sizes:?}"
+        );
+    }
+    assert!(
+        !report
+            .advisories
+            .iter()
+            .any(|a| a.contains("no LOD screen sizes")),
+        "a pack that states its thresholds must not be reported as stating none"
+    );
+
+    // ── the pack states none: the import says so, with the count ─────────────
+    let dir2 = tempfile::tempdir().unwrap();
+    let manifest2 = staging(dir2.path());
+    let text = std::fs::read_to_string(&manifest2).unwrap();
+    let struck = text
+        .replace("\"screen_size\": 1.0", "\"screen_size\": -1.0")
+        .replace("\"screen_size\": 0.5", "\"screen_size\": -1.0")
+        .replace("\"screen_size\": 0.25", "\"screen_size\": -1.0")
+        .replace("\"screen_size\": 0.1", "\"screen_size\": -1.0");
+    assert_ne!(
+        struck, text,
+        "the fixture states screen sizes to strike out"
+    );
+    std::fs::write(&manifest2, struck).unwrap();
+
+    let content2 = dir2.path().join("project").join("Content");
+    let mut project2 = AssetProject::open(&content2).expect("a project opens");
+    let report2 = import_manifest(&mut project2, &manifest2, &UeImportOptions::default())
+        .expect("it imports");
+    let said = report2
+        .advisories
+        .iter()
+        .find(|a| a.contains("no LOD screen sizes"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a census of sentinels was not reported: {:?}",
+                report2.advisories
+            )
+        });
+    assert!(
+        said.contains("1 of 1"),
+        "the advisory must carry the count, so 18 of 18 reads differently from \
+         1 of 18: {said}"
+    );
+    println!("ASSET0 GATE: {said}");
 }

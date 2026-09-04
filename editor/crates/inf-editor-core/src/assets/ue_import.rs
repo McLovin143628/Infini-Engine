@@ -441,6 +441,30 @@ pub fn import_manifest(
         }
     }
 
+    // **WHAT THE RUNG CENSUS ACTUALLY CAPTURED** (ASSET0 audit). The LOD ruling
+    // — store no authored ladder, record the pack's rungs in the sidecar for the
+    // wave that seeds the meshlet DAG from them — rests on that census being
+    // worth inheriting. Measured on this project: `screen_size` is UE's
+    // auto-compute sentinel `-1` for **18 of 18 rungs across nine packs**, so
+    // what the sidecars hold is rung counts and material slots, and no
+    // thresholds at all. Said once per import, with the count, rather than left
+    // as a column of `-1.0` for whoever tries to use it.
+    let (auto, laddered) = m
+        .meshes
+        .iter()
+        .filter(|x| wanted(&x.pack) && x.lods.len() > 1)
+        .fold((0usize, 0usize), |(a, n), x| {
+            let all_auto = x.lods.iter().all(|l| l.screen_size < 0.0);
+            (a + usize::from(all_auto), n + 1)
+        });
+    if auto > 0 {
+        report.advisories.push(format!(
+            "{auto} of {laddered} multi-rung meshes state no LOD screen sizes — \
+             UE reports its auto-compute sentinel (-1), so the sidecar census is \
+             rung counts and material slots with no thresholds in it"
+        ));
+    }
+
     report.bytes = written_bytes(project, &report);
     Ok(report)
 }
