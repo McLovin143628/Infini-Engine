@@ -204,7 +204,7 @@ fn the_whole_committed_corpus_is_censused_lit_or_not() {
     assert_eq!(
         levels.len(),
         EXPECTED_LEVELS,
-        "the committed level count moved; `committed_level_sidecars::EXPECTED_LEVELS`          is the other half of this claim and they must move together"
+        "the committed level count moved; `committed_level_sidecars::EXPECTED_LEVELS` is the other half of this claim and they must move together"
     );
     // The five this wave ruled lit, and NOBODY ELSE. A future bless that lights
     // a sixth by accident is as much a defect as one that darkens the island.
