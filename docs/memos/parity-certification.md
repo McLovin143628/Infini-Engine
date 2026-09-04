@@ -107,7 +107,9 @@ temp directory rather than against this machine:
 machine where `inf island build` has never run, no rung resolves and the editor
 opens the start screen exactly as it always has** — and `inf island build` now
 prints, beside the project it wrote, that the editor will open it and what the
-override is.
+override is. *(Audit: that message said flatly "the editor opens this project on
+launch", which the pin below makes false the first time an author opens anything
+else. It now names the pin in the same breath.)*
 
 The bound is asserted from **both** sides: a start eight levels below the holder
 reaches, nine does not. The first version of that arm was off by one and said so
