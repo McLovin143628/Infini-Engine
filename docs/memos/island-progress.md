@@ -31618,6 +31618,82 @@ the run.
   in `…/Infinity_Engine/ue-staging` and the 892 MB of imports in
   `…/island-build/project/Content`, both outside the tree.
 
+### AUDIT (2026-09-04, adversarial, over `c852711f..e1d97f33`)
+
+Every number above re-measured. **The headline claims hold.** The battery
+reproduces exactly at `e1d97f33` — **376 binaries, 7 092 passed, 0 failed, 21
+ignored, exit 0** — goldens are 62 with none changed in the range, CRLF is 0 at
+the blob level on every text file (the only CR bytes are 4 651 inside the four
+`Road_Asphalt_*.inf_tex` and 93 inside the two `.inf_lvl`, exactly as recorded),
+all nine commits carry both trailers, and `git ls-files` holds no `.uasset`, no
+staging path and no imported byte.
+
+**Reproduced independently:**
+
+| claim | how it was re-measured | verdict |
+|---|---|---|
+| the street, before → after | a 250×160 patch chosen by the auditor on the same two frames: (238.7, 238.9, 237.8) range 237..240 sd 0.58 → **(39.1, 39.3, 35.6)** range 23..53 sd 3.04 | reproduced |
+| the verge beside it | (238.9, 239.1, 237.9) → (40.0, 40.2, 37.0) | reproduced |
+| the walls lose their green | left (180.0, 192.4, 158.5) → (158.0, 132.9, 103.0); right (200.2, 205.6, 172.1) → (161.8, 156.9, 146.4) | reproduced |
+| PIE agrees, and the grass does not move | building (65.6, 80.6, 58.1) → (56.6, 56.7, 51.0); ground under the hero (71.1, 95.4, 32.4) → (71.0, 95.3, 32.4); sky unchanged to 0.1 | reproduced |
+| the export | the manifest holds 9 packs, 30 materials, 95 textures, 12 meshes, **18 rungs**, 2 fixtures, **4 lights**, 0 errors, 89.7 s | reproduced |
+| the curbs' 8:1 ladder | a fresh headless re-export of MS_CityCurbs alone: 198 772 / 101 512 / 51 256 / 26 084 bytes, **byte-identical**, 8 glTF for 8 rungs — one file per LOD | reproduced |
+| the import | 30 materials, 81 textures, 12 meshes, 4 fixtures, 892.1 MB, 44.5 s (43.2 claimed) | reproduced |
+| **idempotence, on the real project** | 448 files / 175 assets / 1 568 954 650 B before a second run and **identically after**, 0 `X_1` duplicates | reproduced |
+| the seven palette means | re-measured off the staging PNGs with PIL: every one within **0.1 of a level**, and each `tint` is its sRGB→linear to four places | reproduced |
+| the wall census | `48 wall, 70 floor and 56 family-stated modules over 14 archetypes`, `5 distinct wall surfaces` | reproduced |
+| the road binds asphalt in both recipes | `base_color (0.034, 0.033, 0.033) linear, roughness 0.86, .inf_mat …9e210000` | reproduced |
+| the GUID-block defect | reverting the continuation reds `cover::the_three_kinds_are_three_of_everything` | reproduced |
+| the lock diff | `Cargo.lock` adds **one** `[[package]]`, `inf-import`, whose only edges are `inf-editor-core`, `inf-asset`, `tempfile`; the sole other change is `image` on `inf-editor-core`'s (dev) edge list. `deny.toml` untouched | reproduced |
+
+**Could not measure:** the curb's drawn triangle count at three distances,
+because no Downtown_West prop is placed on the island (carried 14) — there is
+nothing in either host to count. The LOD ruling itself is corroborated by code
+the wave did not write: `assets::vmesh`'s own note says "`RenderScene` has no
+classic `.inf_mesh` draw path, only `PrimMesh` primitives and vgeom".
+
+**Seven findings, all fixed here.**
+
+1. **The licence law was three sentences and no door** (HIGH). `export.py`
+   believed `INF_UE_OUT` and `import_manifest` believed its destination, so one
+   mistyped path put 4.1 GB of Megascans PNG — or 892 MB of `.inf_tex` made from
+   it — in the working tree of a PUBLIC repository. `engine_checkout_above` now
+   refuses a destination inside the checkout on both sides, before the first
+   decode; `.gitignore` gains `ue-staging/`; armed and mutation-verified.
+2. **Two doc comments changed owner** (MED). `ModuleShape::role` and the road
+   arm were each inserted between an existing item and the comment describing
+   it, so VEN1a's thirty-line note became `role`'s rustdoc and `surface` was left
+   undocumented. Both items moved above the comment they adopted.
+3. **`emissive` was mapped onto the albedo slot** (MED). `planes` is keyed by
+   `MapKind` over a `BTreeMap` of role names, so a material with both maps would
+   have shipped its glow map as its base colour with every count unchanged.
+   Unreachable in this export (0 of 30 materials) and one `PACKS` edit from
+   being reached. `opacity` was decoded — 268 MB of RGBA for an 8 K source — and
+   then dropped unread. Both roles are now declined and *reported*.
+4. **The arm titled "the ORM's channels really are O/R/M" never read a channel**
+   (MED). It asserted an extent and a colour-space flag; the two mutations its
+   own doc promised would break it did not exist. It now decodes level 0 and
+   asserts R 217.5 / G 145.0 / B 0 to BC1's tolerance.
+5. **The rung census records a column of sentinels** (MED). `ue_lod_screen_sizes`
+   is `-1` on **18 of 18** rungs, so the census the LOD ruling defers to holds
+   counts and slots and no thresholds. The import now says so with the count.
+6. **The road never tiles at the 4 m its library row states** (MED). One uv unit
+   is the road's WIDTH, and the island's roads are four-lane at 3.5 m: **14.0 m**,
+   not the 4–7 m carried 15 claimed. So the committed asphalt reads 3.5× life
+   size and the imported one 7×, not "about twice". Corrected in the README, on
+   `GroundKind::Asphalt`, and in carried 15.
+7. **Four ledger numbers drifted** (LOW). `MS_CityCurbs` crossed 2 materials not
+   1 (the second is `/Engine`'s `WorldGridMaterial`), `Downtown_West` 13 not 12,
+   the palette provenance named Megascans for a Downtown_West awning texture and
+   "8 192-square" for a 8 192 × 2 048 tile, and `export.py` still advertised `inf
+   import --manifest` after the wave ruled it is its own binary. The licence
+   position now also sits in `samples/island/README.md`, where a user meets the
+   commands, instead of only in this memo.
+
+The gate goes **6 arms → 8**. Closing numbers on the audited tree are in the
+verification block above, re-run and unchanged except where this section says
+otherwise.
+
 ### CARRIED
 
 11. **The meshlet DAG is not seeded from a pack's authored LOD rungs.** The
