@@ -67,6 +67,7 @@ distance from the reference, and it is a CPU distance, not a GPU one.
 | what a level draws | `cargo test -p inf-player --test lit_stack -- --nocapture` |
 | the terrain | `cargo test -p inf-render --test terrain_continuity -- --nocapture` |
 | the frame | `cargo test --release -p inf-player --test fps_instrument -- --include-ignored --nocapture` |
+| the whole level corpus | in the `lit_stack` run above |
 | the boot rule | `cargo test -p inf-project boot` |
 | …and that it resolves here | the `INF_CERT_ISLAND_PACK` run above prints it |
 
@@ -162,7 +163,23 @@ plunge, no player would see it, and it is carried.
 
 `fps_instrument.rs` has documented since island wave I4 that a level authoring no
 render block ships with shadows, GI, VSM, TAA, SSAO, bloom and the visbuffer all
-off. **No arm anywhere said WHICH levels those were.** All twenty-four were.
+off. **No arm anywhere said WHICH levels those were.** All twenty-four were, and
+that is a census rather than a recollection — the arm walks every committed
+`.inf_lvl` in `samples/*` and `templates/*` and prints the table:
+
+```
+CP-A1 the committed corpus: 24 levels, 5 authoring a render block, 19 at the default
+  LIT     samples/island/VancouverIsland.inf_lvl
+  LIT     samples/island-fixture/IslandFixture.inf_lvl
+  LIT     templates/blank-3d/Blank.inf_lvl
+  LIT     templates/first-person/FirstPerson.inf_lvl
+  LIT     templates/hybrid-2.5d/Hybrid.inf_lvl
+  default …the other nineteen
+```
+
+It asserts the count against `EXPECTED_LEVELS` and asserts that **exactly** the
+five this wave ruled are lit — a future bless that lights a sixth by accident is
+as much a defect as one that darkens the island.
 
 **The ruling, and it is a measurement.** The brief offered two routes:
 

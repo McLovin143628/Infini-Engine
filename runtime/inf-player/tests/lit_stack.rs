@@ -46,6 +46,12 @@ use std::path::PathBuf;
 
 use inf_scene::{RenderSettingsRecord, RuntimeLevel};
 
+/// How many `.inf_lvl` files this repository commits — the same number
+/// `editor/crates/inf-editor-core/tests/committed_level_sidecars.rs` pins as
+/// `EXPECTED_LEVELS`, restated here because the census below is only a census if
+/// it walked all of them.
+const EXPECTED_LEVELS: usize = 24;
+
 /// The repo root, from this crate's manifest directory.
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -125,6 +131,96 @@ fn every_showcase_level_ships_the_lit_stack() {
          building across a 100 m street still casts nothing",
         RenderSettingsRecord::default().shadows_max_distance
     );
+}
+
+/// Every committed `.inf_lvl`, in the two directories `committed_level_sidecars`
+/// enumerates — `samples/*` and `templates/*`, one level deep, sorted.
+fn committed_levels() -> Vec<PathBuf> {
+    let root = repo();
+    let mut out = Vec::new();
+    for dir in ["samples", "templates"] {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        let mut subs: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        subs.sort();
+        for sub in subs {
+            let Ok(files) = std::fs::read_dir(&sub) else {
+                continue;
+            };
+            let mut levels: Vec<PathBuf> = files
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "inf_lvl"))
+                .collect();
+            levels.sort();
+            out.extend(levels);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// **THE CENSUS THE CERTIFICATION'S OPENING SENTENCE RESTS ON.**
+///
+/// The memo says every committed level shipped `RenderSettingsRecord::default()`
+/// before this wave and that five of them do not now. That is a claim about
+/// twenty-four files, and the two arms above check eight — so this one walks all
+/// of them and prints the table, because prose is never ahead of its arms and
+/// the verdict's first paragraph is the prose most likely to be quoted.
+#[test]
+fn the_whole_committed_corpus_is_censused_lit_or_not() {
+    let levels = committed_levels();
+    let mut lit = Vec::new();
+    let mut plain = Vec::new();
+    for path in &levels {
+        let rel = path
+            .strip_prefix(repo())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let bytes = std::fs::read(path).expect("a committed level reads");
+        let r = RuntimeLevel::decode(&bytes)
+            .unwrap_or_else(|e| panic!("decode {rel}: {e}"))
+            .settings
+            .render;
+        match r == RenderSettingsRecord::default() {
+            true => plain.push(rel),
+            false => lit.push(rel),
+        }
+    }
+    println!(
+        "CP-A1 the committed corpus: {} levels, {} authoring a render block, {} at the default",
+        levels.len(),
+        lit.len(),
+        plain.len()
+    );
+    for rel in &lit {
+        println!("  LIT     {rel}");
+    }
+    for rel in &plain {
+        println!("  default {rel}");
+    }
+
+    assert_eq!(
+        levels.len(),
+        EXPECTED_LEVELS,
+        "the committed level count moved; `committed_level_sidecars::EXPECTED_LEVELS`          is the other half of this claim and they must move together"
+    );
+    // The five this wave ruled lit, and NOBODY ELSE. A future bless that lights
+    // a sixth by accident is as much a defect as one that darkens the island.
+    assert_eq!(
+        lit.len(),
+        LIT_LEVELS.len(),
+        "{} committed levels author a render block, not the {} this wave ruled: {lit:?}",
+        lit.len(),
+        LIT_LEVELS.len()
+    );
+    for rel in LIT_LEVELS {
+        assert!(
+            lit.iter().any(|l| l == rel),
+            "{rel} was ruled lit and does not author a block"
+        );
+    }
 }
 
 #[test]
