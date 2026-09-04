@@ -2,8 +2,10 @@
 
 Read-only. This script never writes into the Unreal project: it opens it
 headless, walks the packs named in `PACKS` below, and writes glTF, PNG and one
-`manifest.json` into an output directory OUTSIDE it. `inf import --manifest`
-is the other side.
+`manifest.json` into an output directory OUTSIDE it -- and outside the engine
+checkout, which it REFUSES rather than assumes (see `engine_checkout_above`).
+`inf-import --manifest` is the other side; it is its own binary, not a
+subcommand of `inf`, and it refuses the same destinations.
 
     "C:/Program Files/Epic Games/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" \
         "<project>.uproject" -run=pythonscript -script=tools/ue-export/export.py \

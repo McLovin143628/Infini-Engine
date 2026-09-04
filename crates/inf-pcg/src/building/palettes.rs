@@ -351,12 +351,20 @@ pub struct SurfaceSet {
 // ── the measured surfaces ────────────────────────────────────────────────────
 //
 // **These numbers were measured, not chosen** (wave ASSET0). Each is the mean
-// linear albedo of the Megascans surface named beside it, read off the map the
-// UE bridge exported (`tools/ue-export/export.py`) at 8 192 square and averaged
-// over the whole tile. The albedo is the only thing that crossed: a colour is
-// not content, so this table carries no licence and the repository stays
-// clean — which is the "use the assets as references" half of the mandate,
+// **8-bit sRGB** of the albedo named beside it, over the whole tile, read off
+// the map the UE bridge exported (`tools/ue-export/export.py`); the `tint` is
+// that mean converted to linear. The albedo is the only thing that crossed: a
+// colour is not content, so this table carries no licence and the repository
+// stays clean — which is the "use the assets as references" half of the mandate,
 // spelled as arithmetic.
+//
+// Three things the first write-up of this said that the audit corrected, none of
+// them a number: the mean is taken over the **encoded** bytes and converted after
+// (not over linear values, which is a different number); the tiles are not all
+// 8 192 square (the concrete slab is 8 192 × 2 048); and `PAINTED` is not a
+// Megascans map at all — it is a Downtown_West awning texture at 4 096², as its
+// own doc line below has always said. Independently re-measured at the audit,
+// all six reproduce to within 0.1 of a level.
 //
 // What they REPLACE is `pcg_kind_color`, the placeholder palette both projectors
 // have used for every scattered instance since P18.5: a hash of the module's

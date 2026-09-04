@@ -31351,13 +31351,13 @@ row below is what is known, and "unknown" where nothing is.
 | pack | what crossed | licence, as recorded |
 |---|---|---|
 | `MS_AsphaltEss` | 3 surface materials, 12 maps | **unknown** — Quixel/Megascans via Fab. Megascans content bundled with Unreal is licensed for use IN Unreal Engine projects; conversion for shipping elsewhere is **not established**. Verify on the Fab page before shipping. |
-| `MS_CityCurbs` | 2 meshes (4 rungs each), 1 material | unknown — as above |
+| `MS_CityCurbs` | 2 meshes (4 rungs each), **2** materials | unknown — as above. *(Audit: the count was 1. The second is `/Engine/EngineMaterials/WorldGridMaterial`, a slot the pack leaves on the engine default — engine content, not Quixel's, and recorded under this pack's licence because the export attributes a material to the pack that references it.)* |
 | `MS_BrickV1` | 2 surface materials | unknown — as above |
 | `MS_ConcreteV1` | 2 surface materials | unknown — as above |
 | `MS_CementV1` | 2 surface materials | unknown — as above |
 | `MS_MountainSl` | 2 rock surfaces | unknown — as above |
 | `MS_MossEss` | 2 moss surfaces | unknown — as above |
-| `Downtown_West` | 10 meshes, 12 materials, 2 light fixtures | **unknown** — Marketplace/Fab pack in this project. Verify on its Fab page before shipping. |
+| `Downtown_West` | 10 meshes, **13** materials *(audit: the count was 12)*, 2 light fixtures | **unknown** — Marketplace/Fab pack in this project. Verify on its Fab page before shipping. |
 | `AdvancedRealisticGlass` | 2 materials, parameters only | **unknown** — as above |
 
 **Nothing in this table is in this repository.** The exports live in a staging
@@ -31451,13 +31451,25 @@ because no material was ever named.**
 
 Fourteen archetypes gain a `SurfaceSet` — wall, floor, furniture — stamped over
 the structural families by `Grammar::stamp_module_surfaces`, beside the mesh
-stamp and for the same stated reason. **Seven surfaces, every one the mean linear
-albedo of a Megascans map measured over its whole 8 192-square tile**: concrete
-(145.0, 139.8, 129.6), slab (116.4, 101.8, 89.1), brick (139.7, 93.6, 59.4),
-cement (161.0, 154.8, 145.7), asphalt (110.2, 107.3, 100.5), painted (108.3,
-103.9, 102.4) and timber. A colour is not content, so this table carries no
-licence — it is the *"or use the assets as references"* half of the mandate,
-spelled as arithmetic.
+stamp and for the same stated reason. **Seven surfaces, six of them the mean
+8-bit sRGB of an exported albedo over its whole tile**: concrete (145.0, 139.8,
+129.6), slab (116.4, 101.8, 89.1), brick (139.7, 93.6, 59.4), cement (161.0,
+154.8, 145.7), asphalt (110.2, 107.3, 100.5), painted (108.3, 103.9, 102.4) —
+and timber, which is VEN1a's authored wood and is measured from nothing. A colour
+is not content, so this table carries no licence — it is the *"or use the assets
+as references"* half of the mandate, spelled as arithmetic.
+
+*(Audit, re-measured independently off the staging PNGs with PIL: all six
+reproduce to within 0.1 of a level — 145.0/139.8/129.6, 116.3/101.7/89.0,
+139.7/93.6/59.4, 161.0/154.7/145.7, 110.2/107.3/100.4, 108.3/103.9/102.4 — and
+each `PcgSurface::tint` is the sRGB→linear of the row beside it to four places.
+Two corrections to the sentence, not the numbers: **`painted` is not Megascans**,
+it is `Downtown_West/T_awning_ab_albedo` at 4 096² — as `palettes.rs` says
+correctly and this line did not — and **not every tile is 8 192 square**: the
+concrete slab is 8 192 × 2 048. "Mean linear albedo" is also the wrong name for
+the arithmetic: the mean is taken over the sRGB-ENCODED bytes and converted
+afterwards, which is what the tints are, and is not the same number as the mean
+of the linear values.)*
 
 Brick where people live and shop, cast concrete where they work, cement on the
 four institutions, asphalt on industry, painted on the three venues. Measured by

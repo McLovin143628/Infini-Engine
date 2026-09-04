@@ -119,6 +119,17 @@ machine has. Nothing imported is ever committed; see
 arrangement, and `docs/memos/island-progress.md`'s ASSET0 ledger for the licence
 table.
 
+> **Before you run it, the licence position, in one paragraph.** There is no
+> licence file anywhere under the reference project's `Content`, so every pack
+> the bridge touches is recorded as **unknown**. Megascans content bundled with
+> Unreal is licensed for use *in Unreal Engine projects*; that it may be
+> converted and **shipped in a game built on another engine is not
+> established**, and the same is true of the Marketplace/Fab packs. So what
+> comes across the bridge is safe to look at on your own machine and is **not
+> cleared to ship** — check each pack's Fab page before it goes anywhere. Both
+> ends of the bridge refuse a destination inside this checkout outright, and
+> `ue-staging/` is in `.gitignore`, because this repository is public.
+
 **The order matters and there is only one that works:**
 
 ```
