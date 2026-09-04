@@ -1362,9 +1362,18 @@ fn the_frame_at_shipping_resolution() {
     // `VsmSettings::default().enabled` is a *code* default the tier applies over —
     // so it is set beside the record and named as such.
     //
-    // **Reported, never asserted, and never folded into `worst_p95`.** The
-    // ratchets are set from the shipped configuration; a second configuration
-    // asserted against them would be a ceiling for a frame nobody has ratcheted.
+    // **ASSERTED SINCE WAVE CERT1, and folded into `worst_p95`.** It used to be
+    // reported and never folded, on the ground that "the ratchets are set from
+    // the shipped configuration; a second configuration asserted against them
+    // would be a ceiling for a frame nobody has ratcheted". That ground is gone:
+    // CERT1 authored the stack into the showcase island and the three 3D starter
+    // templates, so THIS is the shipped configuration for every level anybody is
+    // meant to look at, and `SHIPPING_FRAME_CEILING_MS`'s own doc required the
+    // constant to be re-minted the day that happened. It was — down, 40.0 -> 38.0
+    // — on the measurement that made it possible: the stack costs
+    // **+0.129 ms of p95** on this content and is 2.069 ms CHEAPER on the GPU,
+    // because the depth prepass only runs when SSAO or TAA asks for it and the
+    // scatter overdraw it kills is larger than everything the stack adds.
     //
     // **Behind the adapter and CI gates, on purpose.** It is 480 more frames of a
     // GI + VSM + TAA frame, which on a software rasterizer is minutes rather than
@@ -1538,6 +1547,13 @@ fn the_frame_at_shipping_resolution() {
                 vsm.casters,
                 vsm.draws
             );
+            // …and the ceiling covers this frame too (wave CERT1). Folded here
+            // rather than asserted separately so there is ONE ratchet and one
+            // failure message: whichever configuration is worse is the one the
+            // number below is about. The dev-profile gate is still downstream,
+            // so the full battery keeps reporting and asserting nothing.
+            worst_p95 = worst_p95.max(r.p95);
+            worst_p99 = worst_p99.max(r.p99);
         }
     }
 

@@ -405,6 +405,69 @@ impl ModuleShape {
         self == ModuleShape::Glazing
     }
 
+    /// **Whether this family is FIT-OUT rather than fabric** (wave CERT1,
+    /// CP-C3) — the classification the grammar building's MID LOD band is made
+    /// of.
+    ///
+    /// # What the split is
+    ///
+    /// A building's parts were one band: everything it holds, drawn out to
+    /// `STRUCTURE_LOD_M` and then replaced wholesale by one shell box. That is
+    /// two tiers, and the certification's owner asked for three. The only
+    /// classification already present in the instance stream is the family —
+    /// the assembler stamps [`module_mesh_guid`] onto every instance and the
+    /// projector already buckets on exactly that GUID — so the mid tier costs no
+    /// new data, no schema and no second pass: it is a shorter draw distance on
+    /// the buckets that answer `true` here.
+    ///
+    /// # Where the line is drawn, and why it is not "interior"
+    ///
+    /// **Fabric** is the envelope and everything bolted to it that a viewer
+    /// outside can see: [`Panel`](Self::Panel), [`Glazing`](Self::Glazing),
+    /// [`Column`](Self::Column), [`Deck`](Self::Deck), [`Tread`](Self::Tread),
+    /// [`Course`](Self::Course), and — deliberately — [`Shutter`](Self::Shutter),
+    /// [`Sign`](Self::Sign), [`Festoon`](Self::Festoon) and
+    /// [`Grille`](Self::Grille). The last four are *not* interior: a roller
+    /// shutter and a cell front are wall, and a sign plate and a string-light
+    /// run are the two families whose whole purpose is to EMIT. Dropping an
+    /// emitter at forty metres is the defect this wave's own owner named in the
+    /// other direction ("we should have actual lights"), so an emissive family
+    /// stays in the far band whatever else it is.
+    ///
+    /// **Fit-out** is everything a room contains: the eleven below. A viewer
+    /// past the band can only see them through a door opening, because the
+    /// window pane between them is an opaque box (CP-B10) — and past
+    /// `STRUCTURE_LOD_M` the shell has replaced the whole building anyway.
+    ///
+    /// Exhaustive, with no wildcard arm, for [`shape_of`]'s reason: a family
+    /// added and not classified must fail to compile rather than silently
+    /// choose a band.
+    pub fn is_fit_out(self) -> bool {
+        match self {
+            ModuleShape::Panel
+            | ModuleShape::Glazing
+            | ModuleShape::Column
+            | ModuleShape::Deck
+            | ModuleShape::Tread
+            | ModuleShape::Course
+            | ModuleShape::Shutter
+            | ModuleShape::Sign
+            | ModuleShape::Festoon
+            | ModuleShape::Grille => false,
+            ModuleShape::Legged
+            | ModuleShape::Carcass
+            | ModuleShape::Soft
+            | ModuleShape::Planter
+            | ModuleShape::Crate
+            | ModuleShape::Stage
+            | ModuleShape::Pole
+            | ModuleShape::Bar
+            | ModuleShape::Stool
+            | ModuleShape::Screen
+            | ModuleShape::Wardrobe => true,
+        }
+    }
+
     /// **What a module of this family is MADE of** (wave VEN1a): its authored
     /// emission, its metal, its roughness and its tint.
     ///
@@ -830,6 +893,22 @@ pub fn shape_of(module: &str) -> Option<ModuleShape> {
 /// classified shape.
 pub fn module_guid_for(module: &str) -> Option<Uuid> {
     shape_of(module).map(module_mesh_guid)
+}
+
+/// **Is this mesh GUID a fit-out module's?** (wave CERT1, CP-C3.)
+///
+/// The projector's door onto [`ModuleShape::is_fit_out`]. It takes a GUID
+/// because that is what a scattered instance carries — the family itself does
+/// not survive evaluation — and it answers `false` for everything that is not a
+/// module at all (a grass tuft, a rock, an authored `.inf_mesh`), so ground
+/// cover keeps the band its own content gave it.
+///
+/// A linear scan over twenty-one entries, called once per BATCH and not once
+/// per instance: the projector buckets first and asks afterwards.
+pub fn is_fit_out_mesh(guid: Uuid) -> bool {
+    ModuleShape::ALL
+        .into_iter()
+        .any(|s| s.is_fit_out() && module_mesh_guid(s) == guid)
 }
 
 /// **The whole table**, in [`ModuleShape::ALL`] order — what a host registers so

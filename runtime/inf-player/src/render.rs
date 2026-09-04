@@ -1499,6 +1499,27 @@ fn push_scatter(
             });
     }
     for ((key, glow_bits, surface), bucket) in buckets {
+        // **THE MID BAND** (wave CERT1, CP-C3). A building used to draw in two
+        // tiers: everything it holds out to `STRUCTURE_LOD_M`, then one shell
+        // box. The third rung is here, and it costs no new data: the bucket key
+        // is already the mesh GUID, and a FIT-OUT family's GUID is a fact about
+        // the content, so a chair stops drawing at `INTERIOR_LOD_M` while the
+        // wall behind it keeps the band it had. A bucket that is not a module at
+        // all -- ground cover, an authored `.inf_mesh` -- answers `false` and is
+        // untouched, so no level without grammar buildings changes one batch.
+        //
+        // `draw_distance == 0.0` is "no limit", so it is a MATCH and not a
+        // `min`: `0.0.min(64.0)` is zero, which would cull the fit-out of every
+        // volume that never set a distance.
+        let bucket_draw = match key.map(uuid::Uuid::from_u128) {
+            Some(g) if inf_pcg::building::modules::is_fit_out_mesh(g) => {
+                match draw_distance > 0.0 {
+                    true => draw_distance.min(inf_render::INTERIOR_LOD_M),
+                    false => inf_render::INTERIOR_LOD_M,
+                }
+            }
+            _ => draw_distance,
+        };
         let data = ScatterData::build_with_geometry(
             PrimMesh::Cube,
             key.and_then(|k| meshes.get(&k)).cloned(),
@@ -1530,7 +1551,7 @@ fn push_scatter(
                 glow[2] + authored[2],
             ],
             id,
-            draw_distance,
+            draw_distance: bucket_draw,
             near_distance,
             casts_shadows,
         });

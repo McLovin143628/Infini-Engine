@@ -888,18 +888,44 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// regression that matters moves these by an order of magnitude and trips them; a
 /// 20 % drift does not, and is not what CI is for."*
 ///
-/// # What the measured frame does NOT contain
+/// # RE-MINTED FOR A LIT RENDERER (wave CERT1)
 ///
-/// **Shadows, GI, VSM, TAA, SSAO, bloom and the visbuffer are all off** in it —
-/// the shipped defaults for a level that authors no render block. That is a fact
-/// about the engine's defaults rather than about the harness, and it is stated
-/// here because a ceiling is quoted long after the run that minted it: the same
-/// content at 1080p with the authorable half of that stack turned on measures
-/// **p95 92.3-92.9 ms against 43.7-44.0** (GPU frame 35.8-36.1 against 17.3-19.4)
-/// over two runs. This
-/// constant does not cover that frame and was never measured over it. The day a
-/// shipped level turns the stack on, this ceiling is measuring a different
-/// renderer and has to be re-minted, not raised.
+/// This paragraph used to end *"the day a shipped level turns the stack on, this
+/// ceiling is measuring a different renderer and has to be re-minted, not
+/// raised."* **That day was wave CERT1**, which authored shadows, GI, bloom,
+/// SSAO, TAA and flare into the showcase island and the three 3D starter
+/// templates. So the ceiling is discharged as the paragraph required:
+///
+/// * the instrument now **asserts this constant on the LIT configuration too**,
+///   not only on the shipped one — the same run, the same content, the same
+///   percentile, behind the same adapter/CI/profile exemptions;
+/// * and it is **ratcheted down**, 40.0 -> 38.0, on the measurement that made
+///   the re-mint possible.
+///
+/// The number that made it possible is the one nobody expected. Island wave I4
+/// measured the lighting stack at **p95 92.3-92.9 ms against 43.7-44.0**, and
+/// wave I4b at 38.1-41.8 against 15.8-19.5. At CERT1, on the same composed city
+/// at 1080p on the same RTX 4070 Ti, the stack costs
+/// **p95 16.862 ms lit against 16.733 ms as shipped — +0.129 ms** — and the lit
+/// frame is *cheaper on the GPU* (5.506 ms against 7.575, **-2.069 ms**),
+/// because the depth prepass only runs at all when SSAO or TAA asks for it and
+/// the scatter overdraw it kills is larger than everything the stack adds.
+///
+/// So the "different renderer" this ceiling had to be re-minted for turned out
+/// to be within a seventh of a millisecond of the one it was minted on, and the
+/// honest consequence is a ceiling that covers both rather than a looser one
+/// that covers neither.
+///
+/// **The island is still reported and never asserted here**, and it is the
+/// number that keeps this constant honest rather than one that flatters it. On
+/// the same machine, the same run and the same resolution, the shipped island —
+/// the 51.38 km² one, with the record its own level now authors — measures
+/// **p50 39.672 / p95 42.299 / p99 43.188 ms, 25.2 fps**, and with its town's
+/// own thousand-agent society at the rush hour **p50 138.701 / p95 153.814 ms,
+/// 7.2 fps**. Those are over this ceiling and they are supposed to be: it is a
+/// city's ratchet, asserting it over a different world would re-pin it by
+/// accident, and the island's own distance from sixty is a matter for the
+/// certification memo rather than for a tripwire.
 ///
 /// # Where it is asserted
 ///
@@ -917,13 +943,13 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// walk down toward [`SHIPPING_FRAME_BUDGET_MS`] as the frame's named costs are
 /// paid off; the instrument prints the distance so the next step is always
 /// visible.
-pub const SHIPPING_FRAME_CEILING_MS: f64 = 40.0;
+pub const SHIPPING_FRAME_CEILING_MS: f64 = 38.0;
 
 /// The 99th-percentile twin of [`SHIPPING_FRAME_CEILING_MS`], asserted on exactly
 /// the same terms by the same test.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 48.0;
+pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 
 /// The message every budget assertion fails with — the ratchet rule, at the point
 /// where somebody is most tempted to break it.
