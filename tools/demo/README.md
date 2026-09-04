@@ -70,3 +70,42 @@ The driver refuses to build while an `inf-studio` or `inf-player` is running —
 the island's pack is memory-mapped and a build that tries to replace a running
 executable fails as a sharing violation, which surfaces as `LNK1104` and looks
 like a disk problem. Close the editor first, or pass `-SkipBuild`.
+
+## It is a gate, not a screenshot service (audit FIX1)
+
+`demo.ps1` **exits non-zero (7)** when the hero moved less than `-MinMetres`
+(default **5 m**), when the player wrote no positions, or when there is no
+`hero.csv` at all. The first version printed `HERO MOVED` and exited 0 whatever
+the number was — including the runs the wave later found had moved **0.000 m**,
+which were caught by a person reading a log rather than by the gate whose whole
+purpose is to catch them.
+
+Five metres is the bound because a held `W` buys twelve in the seconds this
+script allows, and because a settle, a slide or a camera drift is centimetres.
+
+It also echoes the player's own `keyboard focus …` line beside the number, so a
+session that moved is read next to the reason it could:
+
+```
+player: keyboard focus hwnd=0x250406 parent=0x0 fg=0x250406 focus 0x250406 ->
+        0x250406 attached=false landed=true
+```
+
+`parent=0x0` there means the player's window was still **top-level** when it
+asked — the editor had not reparented it yet — so the embedded child branch of
+`win_host::take_keyboard_focus` did not run. In 28 recorded sessions across two
+machines' worth of runs it has never run, and `attached` has never once been
+`true`. Read that line before believing a story about which branch made a
+session work.
+
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | the hero moved, the frames are in `-OutDir` |
+| 2 | an `inf-studio` or `inf-player` was already running |
+| 3 | a build failed, or there is no editor/player to run |
+| 4 | the editor exited while we waited |
+| 5 | no `inf-player` appeared within `-PieWaitS` |
+| 6 | `-PlayMode window` without node on the PATH (a menu item has no coordinate) |
+| 7 | **Play did not play**: the hero moved less than `-MinMetres` |

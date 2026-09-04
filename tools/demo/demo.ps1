@@ -15,7 +15,14 @@ param(
     [ValidateSet("embedded", "window")][string]$PlayMode = "embedded",
     [int]$BootWaitS = 60,
     [int]$PieWaitS = 240,
-    [int]$LoadSettleS = 20
+    [int]$LoadSettleS = 20,
+    # **The floor that makes this a GATE and not a report** (audit FIX1). The
+    # wave that wrote this script printed HERO MOVED and exited 0 whatever the
+    # number was -- including the runs it later found had moved 0.000 m, which
+    # were noticed by a person reading the log. Twelve metres is what a held W
+    # buys in the seconds this script allows; five is clear of a settle, a slide
+    # or a camera drift and far below anything a walking character does.
+    [double]$MinMetres = 5.0
 )
 
 $ErrorActionPreference = "Continue"
@@ -36,6 +43,8 @@ function Say([string]$text) {
     Write-Output $line
     Add-Content -Path $log -Value $line
 }
+
+$failed = $false
 
 Say "repo    $repo"
 Say "mode    $PlayMode"
@@ -313,11 +322,22 @@ if (Test-Path $heroCsv) {
         Say ("hero first : t={0} ({1}, {2}, {3}) {4} speed {5}" -f $a[0], $a[2], $a[3], $a[4], $a[5], $a[6])
         Say ("hero last  : t={0} ({1}, {2}, {3}) {4} speed {5}" -f $b[0], $b[2], $b[3], $b[4], $b[5], $b[6])
         Say ("HERO MOVED {0:N3} m over {1} samples" -f $d, $rows.Count)
+        if ($d -lt $MinMetres) {
+            Say ("PLAY DID NOT PLAY: the hero moved {0:N3} m against a {1:N1} m floor" -f $d, $MinMetres)
+            $failed = $true
+        }
     } else {
         Say "hero.csv has $($rows.Count) row(s) — the player wrote no positions"
+        $failed = $true
+    }
+    # What the player said about the keyboard, echoed where the number is, so a
+    # session that moved is read beside the reason it could.
+    foreach ($line in (Get-Content $heroCsv | Where-Object { $_ -match "^# keyboard focus" })) {
+        Say ("player: " + $line.Substring(2))
     }
 } else {
     Say "no hero.csv at $heroCsv"
+    $failed = $true
 }
 
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
@@ -336,5 +356,12 @@ if ($KeepOpen) {
     # well is a cursor this script cannot see, not one the game took.
     Say ("cursor after the session ended: " + [InfInput]::CursorState())
     Say ("still running: " + $(if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -in @("inf-studio", "inf-player") }) { "YES" } else { "none" }))
+}
+if ($failed) {
+    # **Non-zero, and that is the point** (audit FIX1). A demo loop that always
+    # exits 0 is a screenshot service. This one is the last gate before a wave
+    # is called done, so it fails the way a gate fails.
+    Say "done (FAILED) — $OutDir"
+    exit 7
 }
 Say "done — $OutDir"
