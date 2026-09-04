@@ -115,6 +115,15 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
+    # Wave FIX1, `src/win_host.rs`. `GetConsoleWindow` is how the player MEASURES
+    # the console-window defect instead of asserting the fix at the call site;
+    # `SetFocus` + `AttachThreadInput` are how an embedded PIE window takes the
+    # keyboard off the editor's WebView. Three feature flags on a dependency this
+    # crate already declares — no new crate, and the pin is untouched. (`AttachThreadInput`
+    # lives under `Win32_System_Threading`, not beside `SetFocus`.)
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 # Sandboxed WASM mods (P14.5) — native only; the browser (wasm32) player loads no

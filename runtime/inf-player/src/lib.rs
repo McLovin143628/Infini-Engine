@@ -54,6 +54,9 @@ pub mod terrain_stream;
 pub mod ui;
 pub mod vmesh;
 pub mod voxel;
+/// The player's window as the OS sees it: its console (there must not be one)
+/// and its keyboard focus (wave FIX1). Cross-platform surface, Windows body.
+pub mod win_host;
 // The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so
 // the desktop build never names wasm-bindgen/web-sys.
 #[cfg(target_arch = "wasm32")]

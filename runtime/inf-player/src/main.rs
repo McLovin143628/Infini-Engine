@@ -18,6 +18,23 @@
 //! `--pie` and `--embed-probe` are handled here (not via [`inf_player::run`])
 //! because they own process stdio / native windows: installing the tracing
 //! subscriber that tees logs to stdout would corrupt the PIE protocol stream.
+//!
+//! # No console window (wave FIX1)
+//!
+//! A **shipped** player is a game, and a game that opens a black console window
+//! beside itself is a defect an author cannot explain away. `inf-studio`'s own
+//! `main.rs` has carried this attribute since Phase 1; the player never did, so
+//! the Play button spawned one every session — the second half of the same
+//! defect is [`inf_editor_core::pie`]'s `CREATE_NO_WINDOW`, which is what keeps a
+//! *debug* player spawned by the editor from allocating one too.
+//!
+//! **Gated on `debug_assertions`, exactly like the editor's**, because this
+//! binary is also the CLI: `--headless --run-frames N` prints the determinism
+//! hash to stdout and CI reads it, and CI builds debug. The two `println!` calls
+//! in this crate are both on that headless path (`lib.rs`), so the windowed and
+//! `--pie` paths — the only ones a release build reaches without an inherited
+//! stdout — write nothing to stdout that could fail.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 
@@ -126,7 +143,14 @@ fn run_pie(tick_hz: u32) -> ExitCode {
     {
         return ExitCode::FAILURE;
     }
-    eprintln!("inf-player: PIE session ready (tick-hz {tick_hz})");
+    // The console measurement rides the line the session already wrote, so the
+    // editor's real-host arm can read it back off a real subprocess's stderr
+    // without a protocol frame. `none` is the shipped answer; see
+    // `inf_player::win_host` and `inf_editor_core::pie::player_command`.
+    eprintln!(
+        "inf-player: PIE session ready (tick-hz {tick_hz}, console {})",
+        inf_player::win_host::console_report()
+    );
 
     let mut active = Active::None;
     let mut paused = false;

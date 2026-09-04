@@ -484,3 +484,87 @@ fn foreign_process_window_can_be_reparented() {
         assert!(status.success(), "probe exit: {status:?}");
     }
 }
+
+/// **The console window, measured on a real subprocess** (wave FIX1).
+///
+/// The author's report was *"a secondary powershell window is open the whole
+/// time"*. The editor is a GUI-subsystem process and owns no console, so a
+/// CONSOLE-subsystem child spawned from it makes Windows allocate a brand-new
+/// console **window** that lives for the whole session. `player_command`'s
+/// `CREATE_NO_WINDOW` is the fix and this is its measurement: the player reports
+/// `GetConsoleWindow()` on its own ready line, and the arm reads that back off
+/// the pipe the editor already captures — through `PieSession`, i.e. through the
+/// same door the Play button takes.
+///
+/// **Falsification, and the reason it is a CONTROL and not a mutation.** Simply
+/// deleting `CREATE_NO_WINDOW` does *not* red this arm on every host, and that
+/// was measured rather than assumed: under a **pseudoconsole** (ConPTY, which is
+/// what a modern terminal gives a `cargo test`) `GetConsoleWindow()` is null for
+/// the harness *and* for a child that inherits it, so "none" would be the answer
+/// either way and the arm would be blind. The control that makes it sighted is
+/// the other direction — the same binary spawned with `CREATE_NEW_CONSOLE`, which
+/// is guaranteed a console of its own. If the instrument can see *that* one, then
+/// `none` on the real spawn is a measurement. On a host where even the control
+/// reports none (a headless session that allocates no console window at all) the
+/// arm says so and keeps only its fixed half.
+#[test]
+fn a_pie_player_is_spawned_with_no_console_window() {
+    let session = spawn_session();
+    // The ready line is written before the first frame, so by the time a frame
+    // has arrived it is certainly in the capture.
+    session
+        .wait_for(Duration::from_secs(5), |e| {
+            matches!(e, PlayerToEditor::Frame { .. })
+        })
+        .expect("a frame, so the ready line is certainly written");
+    let lines = session.stderr_lines();
+    let ready_line = lines
+        .iter()
+        .find(|l| l.contains("PIE session ready"))
+        .unwrap_or_else(|| panic!("no ready line in {lines:?}"));
+    println!(
+        "FIX1 console: this test process = {}, the spawned player says: {ready_line}",
+        inf_player::win_host::console_report()
+    );
+    assert!(
+        ready_line.contains("console none"),
+        "the PIE player was spawned with a console window: {ready_line}"
+    );
+    let _ = session.stop(Duration::from_secs(5));
+
+    // ── the control: the same binary, deliberately given a console ──
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        /// `CREATE_NEW_CONSOLE` (winbase.h) — the opposite of the flag under test.
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let mut child = Command::new(player_bin())
+            .arg("--pie")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the control player spawns");
+        let err = child.stderr.take().expect("stderr piped");
+        let control = std::io::BufRead::lines(std::io::BufReader::new(err))
+            .map_while(Result::ok)
+            .find(|l| l.contains("PIE session ready"))
+            .unwrap_or_default();
+        let _ = child.kill();
+        let _ = child.wait();
+        println!("FIX1 console control (CREATE_NEW_CONSOLE): {control}");
+        if control.contains("console none") {
+            println!(
+                "FIX1 console control SKIPPED: this host allocates no console window even for \
+                 CREATE_NEW_CONSOLE, so only the fixed half above is asserted"
+            );
+        } else {
+            assert!(
+                control.contains("console 0x"),
+                "the control did not report a console handle: {control}"
+            );
+        }
+    }
+}

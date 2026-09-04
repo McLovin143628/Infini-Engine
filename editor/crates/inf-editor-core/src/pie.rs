@@ -139,12 +139,53 @@ impl StderrCapture {
     }
 }
 
+/// `CreateProcess`'s `CREATE_NO_WINDOW` (winbase.h).
+///
+/// Named here rather than pulled from a Win32 binding because this crate is
+/// Ring 1 and deliberately links no `windows` crate; the value is a frozen part
+/// of the Windows ABI.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// **The one door that builds the player's command line** (wave FIX1).
+///
+/// The editor is a GUI-subsystem process, so it owns no console. Spawning a
+/// CONSOLE-subsystem child from it makes Windows allocate a brand-new console
+/// *window* for that child, and it lives for the whole session — the black
+/// window the author sees beside their game every time they press Play.
+/// `CREATE_NO_WINDOW` says "give this child a console it can write to, but do
+/// not draw one", which is exactly right here: the player's stdout carries the
+/// PIE protocol and its stderr carries the log lines the Output Log shows, and
+/// **both are pipes this process owns**, so the child never needed a console of
+/// its own at all.
+///
+/// It is the twin of `inf-player`'s own `windows_subsystem = "windows"` and not
+/// a duplicate of it: that attribute is a property of the *shipped binary* (and
+/// is gated on `debug_assertions`, because the same binary is the CLI), while
+/// this flag is a property of *this spawn* — it is what keeps a debug player,
+/// which a dev checkout's editor is as likely to find as a release one, from
+/// opening one anyway.
+///
+/// Verified in the real host rather than at the call site: the player reports
+/// `console=none` on its `PIE session ready` stderr line, and
+/// `a_pie_player_is_spawned_with_no_console` reads that back off a real
+/// subprocess.
+fn player_command(player_bin: &Path) -> Command {
+    let mut cmd = Command::new(player_bin);
+    cmd.arg("--pie");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 impl PieSession {
     /// Spawn `player_bin --pie`, wire the reader threads, and complete the
     /// version-checked `Ready` handshake (no content sent yet).
     fn spawn_ready(player_bin: &Path) -> Result<Self, PieError> {
-        let mut child = Command::new(player_bin)
-            .arg("--pie")
+        let mut child = player_command(player_bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
