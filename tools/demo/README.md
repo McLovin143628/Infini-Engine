@@ -28,6 +28,7 @@ Useful switches:
 | `-OutDir <path>` | where the PNGs and the CSV go (default: a timestamped folder under the system temp dir) |
 | `-KeepOpen` | leave the editor running at the end |
 | `-Port <n>` | the WebView2 debug port (default 9222) |
+| `-PlayMode window` | drive "Play in New Window" instead of the embedded viewport. Needs the CDP path — a menu item has no coordinate to fall back to |
 
 ## What it produces
 
@@ -42,6 +43,13 @@ demo.log          every step the driver took, with timings
 and it prints the hero's first and last position and the distance between them.
 **That distance is the point.** Two screenshots cannot tell a character that
 walked from a camera that drifted; the CSV can.
+
+`hero.csv` also carries the player's own `#` notes — its keyboard-focus report
+and every focus handover, with the window and process that took it. That is not
+decoration: the editor's Output Log is behind the game's window, so a scripted
+session has nowhere else to read the player's stderr, and this file is how wave
+FIX1 found out that its own synthetic click was what pushed the new-window
+session out of the foreground.
 
 ## How it presses Play
 

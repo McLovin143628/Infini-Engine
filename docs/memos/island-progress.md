@@ -29901,24 +29901,64 @@ one is read only when the embedder passes no arguments of its own, and Tauri
 always passes some, which is why the first attempt at this waited for a port that
 never opened. Off unless a whole port number asks for it.
 
-The run:
+**Both modes, back to back at the final head:**
 
 ```
-player pid 20884 after 1 s
-console windows named inf-player: none
-cursor while the game has the window: hidden
-cursor two seconds in: hidden
-hero first : t=0.033 (-1750.0000, 16.5832, 2050.0000) Grounded speed 0.0000
-hero last  : t=36.483 (-1750.0001, 16.5825, 2062.1906) Grounded speed 3.7500
-HERO MOVED 12.191 m over 140 samples
-cursor after the session ended: SHOWING
-still running: none
+embedded   player pid 21104 after 1 s
+           console windows named inf-player: none
+           the player's reported window is 16x16, top-level=True — treating it as embedded
+           clicking the viewport hole at the screen centre
+           cursor while the game has the window: hidden
+           cursor two seconds in: hidden
+           hero first : t=0.033 (-1750.0000, 16.5832, 2050.0000) Grounded speed 0.0000
+           hero last  : t=36.600 (-1750.0001, 16.5825, 2062.6281) Grounded speed 3.7500
+           HERO MOVED 12.628 m over 141 samples
+           cursor after the session ended: SHOWING
+
+window     player pid 2828 after 1 s
+           console windows named inf-player: none
+           the player owns its own window [234,234 1296x759]; raising it
+           hero last  : t=36.800 (-1750.0001, 16.5826, 2062.0656) Grounded speed 3.7500
+           HERO MOVED 12.066 m over 142 samples
 ```
 
 `Grounded` at t = 0.033 rather than `FallControlled` is the spawn fix; 3.7500 m/s
-is the `Run` gait exactly; 12.191 m is a character walking down a street with a
-key held. **Two screenshots cannot tell a character that walked from a camera that
-drifted, and that is why `hero.csv` exists.**
+is the `Run` gait exactly; twelve metres is a character walking down a street with
+a key held. **Two screenshots cannot tell a character that walked from a camera
+that drifted, and that is why `hero.csv` exists.**
+
+**The new-window mode took four more cycles than the embedded one, and the
+instrument is why it took only four.** `HeroLog::note` puts the player's focus
+report and every focus HANDOVER into that same CSV — the editor's Output Log is
+behind the game's own window, so a scripted session has nowhere else to read the
+player's stderr — and the trace read:
+
+```
+# focus GAINED at step 0
+# keyboard focus hwnd=0x210316 parent=0x0 fg=0x210316 focus 0x210316 -> 0x210316
+  attached=false landed=true
+# focus LOST at step 1770; the foreground is now hwnd=0xfc02f4 pid=25860 …
+# focus GAINED at step 2042
+```
+
+Step 1770 is 29.5 s, which is exactly when the driver clicked. So the window took
+the foreground and the keyboard at step 0 and held them for the whole load — 8
+runs of 8 — and **what lost them was the driver's own synthetic click**: five of
+eight handed the foreground to the editor and the hero then moved 0.000 m, while
+the three that did not moved 12.1–12.8 m. The answer was to stop clicking. A
+click into the viewport is how an EMBEDDED player gets a keyboard its reparented
+child window is otherwise denied; a session with its own top-level window already
+has one. **3 of 3 after the change** (12.378 / 11.878 / 12.566 m), against 3 of 8
+before.
+
+Two real fixes came out of chasing it. `take_keyboard_focus`'s top-level branch
+raises its own Z-order with a `HWND_TOPMOST` / `HWND_NOTOPMOST` pair before
+asking for the foreground, because `BringWindowToTop` and `SetForegroundWindow`
+are both subject to the foreground LOCK and that pair is not. And the driver's
+"has the player a window of its own" is three questions rather than one: an
+embedded player reports a `MainWindowHandle` too — a **16×16 stub at (0,0)**,
+which is what winit leaves behind once the editor has reparented the real window
+— so a rect, a null parent and a 200 px floor go with it.
 
 ### CARRIED
 
@@ -29953,3 +29993,18 @@ drifted, and that is why `hero.csv` exists.**
    open item, restated here because this wave's screenshots are the first place
    anyone can see it): scattered ground cover draws its placeholder primitive
    in PIE and its authored mesh in a cooked boot.
+9. **The cursor's hidden half is unconfirmed in the NEW-WINDOW mode.**
+   `GetCursorInfo` reads `hidden` on every embedded run and `SHOWING` on every
+   new-window one, on sessions whose hero moves twelve metres — so the keyboard
+   is certainly the game's there and the pointer's visible state is not
+   measured. The likely cause is that the flag is global and answers for the
+   window under the pointer, and the driver moves the pointer without clicking;
+   it was not chased.
+10. **Nothing re-asserts focus after a deliberate hand-back.** The grab ladder
+   stops once it lands and only a click into the player's own window takes the
+   keyboard again — correct for an author who clicked away on purpose, and a
+   dead end for an embedded session whose window is behind something. The
+   Output Log now says which window has it, which is the half that was missing.
+11. **The demo's `-PlayMode window` cannot fall back to a coordinate click.**
+   "Play in New Window" is a menu item, and a menu item has no fixed coordinate,
+   so that mode refuses when node is not on the PATH instead of guessing.
