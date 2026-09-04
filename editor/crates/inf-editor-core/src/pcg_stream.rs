@@ -272,6 +272,42 @@ pub fn plan(
     }
 }
 
+/// **Should this tick start another volume?** — how
+/// [`EDITOR_PCG_STEP_BUDGET_MS`] is actually spent.
+///
+/// `started` is how many volumes the tick has already begun, `spent_ms` the wall
+/// time it has spent since it took the document lock, `budget_ms` the ceiling.
+///
+/// # Why this is a function and not three lines in the tick
+///
+/// It was three lines in the tick (the audit found them there). The budget is
+/// the one number in this module a *person* feels — it is what stops a grammar
+/// block from freezing the editor while the author drags a slider — and the only
+/// test near it printed a cost table and declined to assert, on the stated
+/// grounds that *"what `EDITOR_PCG_STEP_BUDGET_MS` promises is a bound on what a
+/// TICK starts, which `plan`'s own arms cover"*. [`plan`] does not take a budget
+/// and has no such arm. So the promise was kept by code in Ring 2, inside a
+/// function that takes a Tauri `AppHandle`, and nothing anywhere could fail if
+/// it stopped being kept. The rule is here now, where the constant is, and the
+/// three arms below are what "read by name" means.
+///
+/// # The two halves, and the second one is not an optimisation
+///
+/// * **Never before the first.** A dense grammar block costs tens of
+///   milliseconds and cannot be preempted half-built, so a tick that consulted
+///   the clock before starting anything would make *no progress for ever* on a
+///   level whose blocks all cost more than the budget. It would not stall the
+///   editor — it would stall the world, silently, while the readout said
+///   `Loading world…` and counted nothing.
+/// * **After that, the clock decides.** The budget bounds what a tick *starts*,
+///   never how long one volume takes; a tick that starts a 40 ms block at 7.9 ms
+///   runs 47.9 ms and that is the honest ceiling. Over a 250 ms tick interval
+///   that is still under a fifth of the interval.
+#[inline]
+pub fn start_another(started: usize, spent_ms: f64, budget_ms: f64) -> bool {
+    started == 0 || spent_ms < budget_ms
+}
+
 /// What the "Streaming" overlay reads (clause 5) and what the throttled
 /// `tracing` line prints.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -625,6 +661,70 @@ mod tests {
         s.set_budget_ms(4.0);
         assert_eq!(s.budget_ms(), 4.0);
         assert_eq!(s.stats().budget_ms, 4.0);
+    }
+
+    /// **A TICK ALWAYS STARTS ONE**, however dear it is. Without this a level
+    /// whose blocks all cost more than the budget makes no progress at all, and
+    /// the readout says `Loading world...` for ever while nothing loads.
+    #[test]
+    fn a_tick_starts_one_volume_however_far_over_the_budget_it_is() {
+        assert!(start_another(0, 0.0, EDITOR_PCG_STEP_BUDGET_MS));
+        assert!(
+            start_another(0, 4_000.0, EDITOR_PCG_STEP_BUDGET_MS),
+            "a tick that has started nothing must start something even after four seconds -- otherwise a level of dear blocks never loads"
+        );
+    }
+
+    /// ...and stops once the clock is past the ceiling, which is read BY NAME.
+    #[test]
+    fn a_tick_stops_starting_work_once_the_budget_is_spent() {
+        assert!(start_another(
+            1,
+            EDITOR_PCG_STEP_BUDGET_MS - 0.1,
+            EDITOR_PCG_STEP_BUDGET_MS
+        ));
+        assert!(!start_another(
+            1,
+            EDITOR_PCG_STEP_BUDGET_MS,
+            EDITOR_PCG_STEP_BUDGET_MS
+        ));
+        assert!(!start_another(
+            7,
+            EDITOR_PCG_STEP_BUDGET_MS + 1.0,
+            EDITOR_PCG_STEP_BUDGET_MS
+        ));
+    }
+
+    /// **A BUDGET SMALLER THAN ONE BLOCK SPLITS THE WORK; IT DOES NOT STALL.**
+    ///
+    /// The tick's own loop, run against a cost model rather than a GPU: four
+    /// blocks at the measured cost of Harbour City's dearest, under a budget a
+    /// twentieth of one of them. Every tick must do exactly one, and four ticks
+    /// must finish the four -- the property that makes the budget a
+    /// *responsiveness* knob rather than a work limit.
+    #[test]
+    fn a_budget_smaller_than_one_block_splits_the_work_rather_than_stalling() {
+        const COST_MS: f64 = 5.0;
+        const BUDGET_MS: f64 = 0.25;
+        let mut left = 4usize;
+        let mut ticks = 0usize;
+        while left > 0 {
+            ticks += 1;
+            let mut started = 0usize;
+            let mut spent = 0.0f64;
+            // The shape of `commands::pcg_stream`'s evaluation loop.
+            while left > 0 && start_another(started, spent, BUDGET_MS) {
+                started += 1;
+                spent += COST_MS;
+                left -= 1;
+            }
+            assert_eq!(
+                started, 1,
+                "tick {ticks} started {started} volumes on a {BUDGET_MS} ms budget where one costs {COST_MS} ms"
+            );
+            assert!(ticks <= 4, "the work did not finish in four ticks");
+        }
+        assert_eq!(ticks, 4);
     }
 
     #[test]

@@ -30653,6 +30653,30 @@ tick runs four times a second. Memory is bounded by `EDITOR_PCG_MAX_EVALUATED`
 (256 volumes) rather than by the radius, and a released volume's population is
 dropped through the same door that made it.
 
+**THAT TABLE IS THE FIXTURE'S, AND HARBOUR CITY IS FORTY TIMES DEARER** (the
+audit). Re-measured at `a5493b38` the fixture reads Office 4.5 / Shop 1.3 /
+Apartment 4.7 / House 1.4 ms — 11.9 ms for four, 337 blocks/s, the same shape
+within run-to-run spread. But the fixture is four 28 m blocks over nine flat
+64 m terrain tiles, and the *island's* own blocks, measured off the shipped
+editor's own readout on the real level, cost **12.2 to 311.8 ms each**:
+
+```
+inf-studio: pcg: 0/52 populated in radius …, last tick 1 vol / 311.82 ms of 8.00
+inf-studio: pcg: 1/52 populated in radius …, last tick 1 vol /  40.10 ms of 8.00
+inf-studio: pcg: 2/52 populated in radius …, last tick 1 vol / 198.41 ms of 8.00
+                                          … 52 ticks, alternating ~170 ms / ~16 ms …
+inf-studio: pcg: 51/52 populated in radius …, last tick 1 vol / 16.11 ms of 8.00
+```
+
+Every tick evaluates exactly ONE volume and every one of them overruns the
+budget — the readout prints `of 8.00` beside a number that is 2x to 39x it.
+Harbour City's 52 in-radius volumes settle in **18.5 s**, or **2.8 blocks/s**,
+against the table's 337. Nothing here is wrong with the *rule* (the budget bounds
+what a tick STARTS, and one is the floor); what is wrong is reading the fixture's
+milliseconds as the editor's. **Carried 8**, with the consequence: the tick holds
+the document lock for the whole of that, so the viewport blocks for up to 312 ms
+on the first tick and ~170 ms on every other one while a city streams in.
+
 The fixture's own finding, kept in its comment: the first cut authored ONE 64 m
 terrain tile and measured 660 instances in the first block and **zero** in the
 other three. That is the height provider working exactly as IB-1 says — a volume
@@ -30906,6 +30930,27 @@ the editor left to settle for fifty seconds, reading `Streaming 52/52`.
    fire once and probably miss, it is left with the rest of macOS viewport input
    as the standing gap `host.rs` names.
 
+*(8 and 9 are the audit's, and they are routings rather than opinions — the
+measurement for each is in **THE AUDIT** below.)*
+
+8. **A streaming tick holds the document lock for up to 312 ms on the island.**
+   The 8 ms budget bounds what a tick *starts* and a tick must always start one,
+   so on content whose blocks cost 12-312 ms the budget is structurally
+   unreachable: every tick evaluates exactly one volume and overruns. Harbour
+   City settles in 18.5 s at 2.8 blocks/s, and the viewport blocks for the whole
+   of each evaluation because `evaluate_volume_into` runs under `doc.lock()`. The
+   fix is not a smaller budget — it is splitting the READ half (graph + provider
+   + splines -> `VolumeOutput`) from the WRITE half (`set_population`) so the
+   evaluation runs off the lock, which is exactly the Ring-0 hoist of carried 4
+   and the job-system move of carried 6. All three are one refactor.
+9. **The island's roads carry no material.** `Roads` gets a `MeshRef` and no
+   `Material`, so the largest surface in Harbour City draws at the engine's
+   default `base_color` 0.8 and is the brightest thing in the frame -- the "white
+   ground" the author saw. It needs one asphalt `.inf_mat` beside the four
+   `Ground_*` surfaces the pack already carries, bound to that entity. It is
+   content: the edit moves `samples/island/VancouverIsland.inf_lvl`, which is
+   committed and byte-locked.
+
 ### THE AUDIT (adversarial, 2026-09-04, on `a5493b38`)
 
 Every number below was re-measured on this machine at the wave's own HEAD before
@@ -30988,3 +31033,80 @@ scatter batch with no inner cut — the file's own doc says it never calls
 what the impostor band is for and which this rule deliberately leaves alone. The
 cross-fade refusal is untouched and is re-taken on its own geometry numbers
 (398 of 13 766 px, 2.9 %, worst 29/255).
+
+#### Finding 2 — THE WHITE GROUND IS THE ROAD, AND IT HAS NO MATERIAL (severity HIGH; ROUTED, content)
+
+In `EDIT1-DEMO/01-editor.png` the ground the truck and the hero stand on is pure
+white: mean **(238.9, 239.1, 238.0)** over a 140 x 100 px patch with a total
+spread of one level — flat, untextured, and the brightest surface in the frame.
+The wave did not name it. Measured on the shipped editor, on the island, in four
+view modes at one camera:
+
+| view mode | the near ground | the street 200 m on |
+|---|---|---|
+| Lit | (238.9, 239.1, 238.0) | (124.6, 143.0, 90.6) |
+| **Unlit** | **(225.7, 225.7, 225.7)** | (83.2, 105.7, 49.3) |
+| Wireframe | (225.7, 225.7, 225.7) | (83.5, 105.9, 49.3) |
+| Biomes | (225.7, 225.7, 225.7) | (156.6, 156.3, 161.0) |
+| VT Residency | (68.6, 68.6, 77.1) | (73.7, 96.9, 39.3) |
+
+Four things fall out of that table and together they name the object:
+
+* **Unlit is still white**, so it is ALBEDO — not GI, not exposure, not the
+  tonemap. Clause 0 is not implicated.
+* **Biomes does not touch it** while it recolours the street beyond, so it is
+  **not the terrain**: `terrain.wgsl` is the only shader that honours the biome
+  overlay.
+* **VT Residency paints it (0.06, 0.06, 0.07) linear**, which is `vt_heat`'s
+  "no virtual texture bound at all" colour — and `vt_heat` is called by
+  `mesh.wgsl`, `skinned_mesh.wgsl`, `vgeom_mesh.wgsl` and `vis_resolve.wgsl`, and
+  by no terrain path. So it is a **mesh**.
+* 225.7/255 is `0.8` linear through the tonemap, and `0.8` is
+  `inf_ecs::components::Material::default`'s `base_color` — what the projection
+  gives a `MeshRef` with **no `Material` component** (`host.rs:2347`, mirrored at
+  `render.rs:2369`).
+
+It is the island's `Roads` static mesh. `island.rs:520-525` creates it, gives it
+a `MeshRef` naming `road_mesh_guid` — and no `Material`, no `.inf_mat`, no
+texture. Its sidecar says so from the other side:
+`VancouverIslandRoads.inf_mesh.toml` carries `dependencies = []` while every
+ground material in the same pack carries four. Selecting `Roads` in the Outliner
+outlines exactly that surface.
+
+**This is not an editor/player divergence.** Both hosts draw it the same 0.8
+grey; the road is visible as the same pale strip in the PIE frame. What changed
+is that EDIT1 made the editor open *standing on it*, which is why it is suddenly
+the whole lower half of the frame.
+
+**Routed, not fixed, and the number is the reason.** The repair is one `Material`
+on one entity in `island.rs` — and `samples/island/VancouverIsland.inf_lvl` is a
+**committed, byte-locked** sample (`committed_level_sidecars.rs`,
+`EXPECTED_LEVELS` 24), so that edit moves committed level bytes, which this audit
+is forbidden to do and which belongs to the wave that owns the content. What it
+needs, precisely: an asphalt `.inf_mat` beside the four `Ground_*` surfaces the
+pack already carries — albedo, normal and ORM, at the roughness of a road — bound
+to the `Roads` entity. ASSET0's Megascans road surface is the natural source;
+`Ground_Rock` (mean (85.9, 81.7, 76.1), already committed, already virtual-
+textured) is a one-line interim that would take the street from 239 to about 85
+today. **Carried 9.**
+
+#### Finding 3 — THE 8 MS BUDGET WAS SPENT BY CODE NO TEST COULD REACH (severity MED; fixed)
+
+Priority (e) asks whether `EDITOR_PCG_STEP_BUDGET_MS` is *read by name by an arm*.
+It was not. The constant is armed for **clamping**
+(`the_preference_is_clamped_rather_than_trusted`), and the rule that actually
+spends it was three lines inside `commands::pcg_stream`'s tick — a Ring-2
+function taking a Tauri `AppHandle` — where nothing could reach it. The one test
+beside it printed a cost table and declined to assert, on the stated grounds that
+*"what `EDITOR_PCG_STEP_BUDGET_MS` promises is a bound on what a TICK starts,
+which `plan`'s own arms cover"*. **`plan` does not take a budget and has no such
+arm.** The citation was to a test that does not exist, which is the same class as
+this wave's own finding that the repository's only pi arm could not see a pi.
+
+Fixed by moving the rule to `inf_editor_core::pcg_stream::start_another`, beside
+the constant, with three arms: a tick starts one volume however far over the
+budget it is (without which a level of dear blocks never loads at all); it stops
+once the clock is past the ceiling; and — the brief's own mutation, as an arm —
+**a budget a twentieth of one block splits the work rather than stalling**, four
+blocks in four ticks. The tick counts volumes STARTED rather than volumes that
+succeeded, so a block that fails to evaluate cannot buy the tick an extra one.

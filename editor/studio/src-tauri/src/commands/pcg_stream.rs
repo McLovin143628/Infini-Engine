@@ -392,20 +392,29 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
                     );
                 }
             }
+            // **The budget is a ceiling on STARTING work**, and the rule is
+            // `inf_editor_core::pcg_stream::start_another` rather than three
+            // lines here — the audit's finding: the number a person feels was
+            // spent by code in Ring 2 that no test could reach, under a comment
+            // citing arms that did not exist. It counts volumes STARTED and not
+            // volumes that succeeded, so a block that fails to evaluate cannot
+            // buy the tick an extra one.
+            let mut attempted = 0usize;
             for (guid, lowered) in &programs {
+                if !inf_editor_core::pcg_stream::start_another(
+                    attempted,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    budget_ms,
+                ) {
+                    break;
+                }
+                attempted += 1;
                 match evaluate_volume_into(&mut doc, *guid, lowered) {
                     Ok(_) => {
                         evaluated.push(*guid);
                         changed = true;
                     }
                     Err(e) => tracing::warn!("pcg stream: {guid} did not evaluate: {e}"),
-                }
-                // **The budget is a ceiling on STARTING work.** The check is
-                // after the first volume, never before it, so a level whose
-                // blocks all cost more than the budget still finishes — one a
-                // tick — instead of making no progress for ever.
-                if started.elapsed().as_secs_f64() * 1000.0 >= budget_ms {
-                    break;
                 }
             }
         }
@@ -631,11 +640,19 @@ mod tests {
     fn a_blocks_population_does_not_depend_on_which_blocks_were_evaluated_first() {
         let (mut a, ga, pa) = city(&[0, 1, 2, 3]);
         // **The budget table** (wave EDIT1, clause 1's deliverable). Printed
-        // rather than asserted: an absolute millisecond ceiling would be a
-        // machine gate, and what `EDITOR_PCG_STEP_BUDGET_MS` promises is a bound
-        // on what a TICK starts, which `plan`'s own arms cover. What this
-        // records is the shape of the cost — how much of a block the editor buys
-        // for eight milliseconds.
+        // rather than asserted, because an absolute millisecond ceiling here
+        // would be a machine gate. What this records is the shape of the cost --
+        // how much of a block the editor buys for eight milliseconds.
+        //
+        // The first draft of this comment justified not asserting by saying the
+        // budget's promise is "a bound on what a TICK starts, which `plan`'s own
+        // arms cover". The audit read `plan`: it does not take a budget and has
+        // no such arm, and the rule was three lines in this file's own tick
+        // where nothing could reach it. It is
+        // `inf_editor_core::pcg_stream::start_another` now, with three arms of
+        // its own -- including the one that runs this loop's shape against a
+        // cost model and proves a budget a twentieth of a block SPLITS the work
+        // rather than stalling.
         let mut cost = Vec::new();
         for (g, p) in ga.iter().zip(pa.iter()) {
             let t = std::time::Instant::now();
