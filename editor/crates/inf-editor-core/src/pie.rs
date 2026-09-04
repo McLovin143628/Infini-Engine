@@ -15,8 +15,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use inf_runtime::pie::{
-    read_msg, write_msg, EditorToPlayer, PlayerToEditor, ScenePayload, ViewportRectMsg,
-    PIE_PROTOCOL_VERSION,
+    read_msg, write_msg, EditorToPlayer, InputFrame, PlayerToEditor, ScenePayload, ViewportRectMsg,
+    WorldProbe, PIE_PROTOCOL_VERSION,
 };
 use inf_runtime::CookedSnapshot;
 
@@ -53,6 +53,10 @@ pub struct PieSession {
     stdin: ChildStdin,
     events: Receiver<PlayerToEditor>,
     stderr_lines: Arc<Mutex<StderrCapture>>,
+    /// The protocol version the player reported at its handshake. Always
+    /// [`PIE_PROTOCOL_VERSION`] (a mismatch is refused before the session
+    /// exists); kept so an arm can assert the RUNNING pair agrees.
+    protocol: u32,
     /// Signalled once by the stderr reader when it reaches **EOF** — i.e. when
     /// every byte the player ever wrote is in `stderr_lines`.
     ///
@@ -221,17 +225,19 @@ impl PieSession {
             let _ = eof_tx.send(());
         });
 
-        let session = PieSession {
+        let mut session = PieSession {
             child,
             stdin,
             events,
             stderr_lines,
             stderr_eof,
             stderr_drained: false,
+            protocol: 0,
         };
 
         match session.next_event(Duration::from_secs(10)) {
             Some(PlayerToEditor::Ready { protocol }) if protocol == PIE_PROTOCOL_VERSION => {
+                session.protocol = protocol;
                 Ok(session)
             }
             Some(PlayerToEditor::Ready { protocol }) => Err(PieError::Protocol(format!(
@@ -307,6 +313,46 @@ impl PieSession {
     /// player keeps running.
     pub fn eject(&mut self) -> Result<(), PieError> {
         self.send(&EditorToPlayer::Eject)
+    }
+
+    /// **Drive the session with one frame of device input** (wave FIX1).
+    ///
+    /// The player applies it through the shipped binding table and steps
+    /// `frame.steps` times, then reports one `Frame`. A **windowed** session
+    /// ignores it — it has a real keyboard — which is stated on the wire variant
+    /// and repeated here because this is the method a caller reaches for.
+    pub fn input(&mut self, frame: InputFrame) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::Input(frame))
+    }
+
+    /// **Ask what the world looks like now** (wave FIX1) and wait for the answer.
+    ///
+    /// `guid` also reports that actor; the player-controlled hero is reported
+    /// whenever the level has one. Every other event that arrives while waiting
+    /// is consumed, exactly as [`Self::wait_for`] consumes them.
+    pub fn probe(
+        &mut self,
+        guid: Option<uuid::Uuid>,
+        timeout: Duration,
+    ) -> Result<WorldProbe, PieError> {
+        self.send(&EditorToPlayer::Probe {
+            guid: guid.map(|g| *g.as_bytes()),
+        })?;
+        match self.wait_for(timeout, |e| matches!(e, PlayerToEditor::Probe(_))) {
+            Some(PlayerToEditor::Probe(p)) => Ok(*p),
+            _ => Err(PieError::Protocol(
+                "the player did not answer a probe".into(),
+            )),
+        }
+    }
+
+    /// The protocol version the running player reported at its handshake.
+    ///
+    /// It always equals [`PIE_PROTOCOL_VERSION`] — [`Self::spawn_ready`] refuses
+    /// a session that does not — and it is kept so an arm can say that about the
+    /// **running pair** rather than about one source tree.
+    pub fn protocol(&self) -> u32 {
+        self.protocol
     }
 
     /// Forward a viewport rect change to an embedded player (physical pixels).

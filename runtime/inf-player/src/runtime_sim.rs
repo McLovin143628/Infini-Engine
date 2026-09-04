@@ -666,6 +666,17 @@ impl RuntimeSim {
         self.skeletons = skeletons;
     }
 
+    /// One resolvable skeleton, by guid (wave FIX1).
+    ///
+    /// A read, for the one question that cannot be asked without the BIND pose:
+    /// **is the pose this character is drawn in the rest pose**. A machine whose
+    /// clips do not resolve publishes a full, correctly-sized pose that IS the
+    /// bind pose, so every byte-count assertion about the pose store stays green
+    /// while the character stands in a T. See `pie_drive::actor_probe`.
+    pub fn skeleton_of(&self, guid: Uuid) -> Option<&inf_anim::SkeletonAsset> {
+        self.skeletons.get(&guid)
+    }
+
     /// Seed the resolvable `.inf_anim` clips a state machine's states play
     /// (P24.1) — the runtime mirror of `SimSession::set_pose_clips`.
     pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {

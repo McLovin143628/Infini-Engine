@@ -43,7 +43,26 @@ use crate::snapshot::CookedSnapshot;
 /// Protocol version, checked at handshake. Bumped to 2 in P9.4 (the real
 /// [`ScenePayload`] content handoff + Step/Eject/SetViewport control frames +
 /// Window/State reports on top of the Spike D v1 surface).
-pub const PIE_PROTOCOL_VERSION: u32 = 2;
+///
+/// **3 in wave FIX1**, and it is the first move this constant has made since
+/// P9.4. Two additions, both about the same missing half — until now the editor
+/// could tell a PIE session *when* to step and could read back exactly one
+/// `u64` per step:
+///
+/// * [`EditorToPlayer::Input`] carries one frame of **device** input (held key
+///   codes, mouse buttons, motion, wheel) rather than resolved actions, so the
+///   player runs the SHIPPED `InputMap` -> `InputState` -> `held_actions`
+///   reduction over it. A wire that carried action names would let a gate press
+///   a key the binding table does not have.
+/// * [`EditorToPlayer::Probe`] / [`PlayerToEditor::Probe`] answer "what does the
+///   world look like now" with a typed [`WorldProbe`], because a state hash can
+///   say *that* something changed and never *what*.
+///
+/// The version is checked at the handshake by the editor
+/// (`inf_editor_core::pie`'s `spawn_ready`) and by the arm
+/// `the_real_player_speaks_this_editors_protocol_version`, which is what makes
+/// this number a fact about the running pair rather than about one source tree.
+pub const PIE_PROTOCOL_VERSION: u32 = 3;
 
 /// Frame-header magic (little-endian `b"PIE\0"`).
 pub const PIE_FRAME_MAGIC: u32 = 0x0050_4945;
@@ -631,6 +650,159 @@ impl ScenePayload {
     }
 }
 
+/// **One frame of device input for a PIE session** (wave FIX1).
+///
+/// Deliberately *device* level and not action level. The engine's own
+/// certification law for a control is that an arm presses a **literal key code**
+/// and lets the shipped binding table reduce it — an arm that asked the table
+/// which key means "strafe left" would press the swapped key after a swap and
+/// stay green. So this frame carries what a keyboard and a mouse produce, and
+/// the player runs the same `InputMap` -> `InputState` -> `held_actions` path a
+/// windowed session runs.
+///
+/// Every field is a **level**, not an edge: `keys` is what is held *this* frame
+/// and the player derives press/release by diffing against the last one, exactly
+/// as `PlayerApp::frame` derives them from winit events. That makes a trace a
+/// list of states rather than a list of transitions, which is the form a test
+/// can write down and a reader can check.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InputFrame {
+    /// Physical key codes held this frame, spelled as
+    /// `inf_player::input::keycode_to_code` spells them (`"KeyW"`, `"Space"`,
+    /// `"Shift"`, `"Control"`, `"Tab"`, ...).
+    pub keys: Vec<String>,
+    /// Mouse buttons held this frame: `0` Left, `1` Right, `2` Middle, `3` Back,
+    /// `4` Forward — the order of `inf_input::MouseButton`.
+    pub buttons: Vec<u8>,
+    /// Raw pointer motion for this frame, in device counts (x, y). The same
+    /// quantity `DeviceEvent::MouseMotion` reports, and for the same reason: a
+    /// window-cursor delta stops at the edge of the screen.
+    pub motion: [f32; 2],
+    /// Wheel notches this frame (x, y).
+    pub wheel: [f32; 2],
+    /// The seconds this frame covers. It is on the wire rather than assumed
+    /// because it is the divisor that turns a delta axis into a rate, so a trace
+    /// that did not carry it would resolve differently at a different tick rate.
+    pub dt: f64,
+    /// Advance the simulation this many fixed steps after applying the frame.
+    /// `1` is the ordinary case; `0` applies the input without stepping, which
+    /// is how a trace sets up a held key before the step that reads it.
+    pub steps: u32,
+}
+
+impl InputFrame {
+    /// A frame holding `keys` for one fixed step at `dt`.
+    pub fn held<I, S>(keys: I, dt: f64) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            dt,
+            steps: 1,
+            ..Default::default()
+        }
+    }
+
+    /// The same, with mouse buttons held.
+    pub fn with_buttons(mut self, buttons: impl IntoIterator<Item = u8>) -> Self {
+        self.buttons = buttons.into_iter().collect();
+        self
+    }
+
+    /// The same, with pointer motion in device counts.
+    pub fn with_motion(mut self, x: f32, y: f32) -> Self {
+        self.motion = [x, y];
+        self
+    }
+
+    /// The same, with wheel notches.
+    pub fn with_wheel(mut self, x: f32, y: f32) -> Self {
+        self.wheel = [x, y];
+        self
+    }
+}
+
+/// **What one actor looks like right now** — the typed half of a [`WorldProbe`].
+///
+/// Every field is a quantity a control certification asserts, read off the
+/// shipped components rather than derived from the fold: a state hash can say
+/// that something changed and never what, and "the hero moved" is not a claim a
+/// `u64` can carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActorProbe {
+    /// The actor's stable scene GUID.
+    pub guid: [u8; 16],
+    /// Its `Name`, for a human reading a failure.
+    pub name: String,
+    /// World position, metres.
+    pub position: [f64; 3],
+    /// World velocity, m/s.
+    pub velocity: [f64; 3],
+    /// Velocity in the character's own **aim frame**: `[right, forward]` m/s.
+    /// This is the quantity that tells `A` from `D`, and a world position is
+    /// not.
+    pub local_velocity: [f64; 2],
+    /// Planar speed, m/s.
+    pub speed: f64,
+    /// Vertical speed, m/s (`+` up).
+    pub vertical_speed: f64,
+    /// Is the character standing on something.
+    pub grounded: bool,
+    /// `MovementMode` by name (`"Walk"`, `"Crouch"`, `"Slide"`, `"FallFree"`, ...).
+    pub movement_mode: String,
+    /// `Gait` by name (`"Walk"`, `"Run"`, `"Sprint"`).
+    pub gait: String,
+    /// `RotationMode` by name.
+    pub rotation_mode: String,
+    /// The aim yaw the local frame is measured in, degrees.
+    pub aim_yaw_deg: f64,
+    /// Rounds in the equipped weapon's magazine.
+    pub magazine: u32,
+    /// The equipped item id, or empty.
+    pub equipped: String,
+    /// The bag, as `(item id, count)`.
+    pub bag: Vec<(String, u32)>,
+    /// **Is the drawn pose the skeleton's REST pose** — the T-pose question,
+    /// answered by the host that would draw it.
+    pub pose_is_rest: bool,
+    /// How many joints that pose covers (`0` when nothing published one).
+    pub pose_joints: u32,
+    /// The largest per-joint departure from the bind pose, as a plain scalar
+    /// (local translation metres plus quaternion component distance). Exactly
+    /// `0` is the rest pose.
+    pub pose_max_delta: f64,
+}
+
+/// **What the whole session looks like right now** (wave FIX1).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorldProbe {
+    /// Fixed steps the sim has advanced.
+    pub steps: u64,
+    /// Frames this PIE session has reported.
+    pub frame: u64,
+    /// Shots fired on the most recent step.
+    pub shots: u32,
+    /// The in-game settings dialog is open.
+    pub menu_open: bool,
+    /// The inventory panel is open.
+    pub inventory_open: bool,
+    /// The eye the shipped camera resolved this step, world space.
+    pub camera_eye: [f64; 3],
+    /// The point it looks at.
+    pub camera_focus: [f64; 3],
+    /// How far the collision sweep pulled the camera in from its boom, metres.
+    /// `0` means nothing was in the way.
+    pub camera_pull_in_m: f64,
+    /// Entities in the world.
+    pub entities: u32,
+    /// The player-controlled character, when the level has one.
+    pub hero: Option<ActorProbe>,
+    /// A named actor the request asked about, when it asked about one.
+    pub named: Option<ActorProbe>,
+}
+
 /// A viewport rectangle forwarded to an embedded player (physical pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewportRectMsg {
@@ -670,6 +842,21 @@ pub enum EditorToPlayer {
     Eject,
     /// Forward a viewport rect change to an embedded player.
     SetViewport(ViewportRectMsg),
+    /// **Drive the session with one frame of device input** (wave FIX1, protocol
+    /// 3). Applied through the shipped input reduction and then through
+    /// `RuntimeSim::step_once` — the same door and the same step boundary a
+    /// windowed session takes, which is what keeps a driven trace comparable
+    /// with an in-process one to the bit.
+    ///
+    /// A **windowed** session ignores it, deliberately and by document: it has a
+    /// real keyboard and a real `PlayerUi`, and two authorities writing one
+    /// `InputState` is a divergence rather than a feature.
+    Input(InputFrame),
+    /// **Ask what the world looks like now.** `Some(guid)` also reports that
+    /// actor; the hero is reported whenever the level has one.
+    Probe {
+        guid: Option<[u8; 16]>,
+    },
     /// Test/QA hook: make the player panic on its main loop — the
     /// crash-isolation drill.
     InjectPanic,
@@ -711,6 +898,11 @@ pub enum PlayerToEditor {
     Resumed,
     Stopped,
     Ejected,
+    /// The answer to [`EditorToPlayer::Probe`] (wave FIX1, protocol 3).
+    ///
+    /// **Boxed** for the same reason `LoadScene` is: every `PlayerToEditor` value
+    /// costs the largest variant, and `Frame` is sent sixty times a second.
+    Probe(Box<WorldProbe>),
     /// A recoverable error the editor surfaces (a fatal one is a process exit).
     Error {
         message: String,
@@ -813,6 +1005,20 @@ mod tests {
                 height: 240,
             }),
             EditorToPlayer::Stop,
+            // Wave FIX1, protocol 3. Every field non-default and every one a
+            // different value, so a field swap in the struct cannot round-trip.
+            EditorToPlayer::Input(InputFrame {
+                keys: vec!["KeyW".into(), "Shift".into()],
+                buttons: vec![0, 1],
+                motion: [12.5, -3.25],
+                wheel: [0.0, 1.5],
+                dt: 1.0 / 60.0,
+                steps: 2,
+            }),
+            EditorToPlayer::Probe { guid: None },
+            EditorToPlayer::Probe {
+                guid: Some(*Uuid::from_u128(0xFEED).as_bytes()),
+            },
             EditorToPlayer::InjectPanic,
         ];
         let mut wire = Vec::new();
@@ -847,6 +1053,38 @@ mod tests {
                 last_error: None,
             }),
             PlayerToEditor::Ejected,
+            PlayerToEditor::Probe(Box::new(WorldProbe {
+                steps: 42,
+                frame: 41,
+                shots: 6,
+                menu_open: true,
+                inventory_open: false,
+                camera_eye: [1.0, 2.0, 3.0],
+                camera_focus: [4.0, 5.0, 6.0],
+                camera_pull_in_m: 0.75,
+                entities: 550,
+                hero: Some(ActorProbe {
+                    guid: *Uuid::from_u128(0xBEEF).as_bytes(),
+                    name: "Hero".into(),
+                    position: [7.0, 8.0, 9.0],
+                    velocity: [0.5, -0.25, 3.75],
+                    local_velocity: [-3.75, 1.25],
+                    speed: 3.78,
+                    vertical_speed: -0.25,
+                    grounded: true,
+                    movement_mode: "Crouch".into(),
+                    gait: "Sprint".into(),
+                    rotation_mode: "Aiming".into(),
+                    aim_yaw_deg: 33.5,
+                    magazine: 24,
+                    equipped: "rifle".into(),
+                    bag: vec![("bandage".into(), 1), ("pistol".into(), 2)],
+                    pose_is_rest: false,
+                    pose_joints: 161,
+                    pose_max_delta: 0.125,
+                }),
+                named: None,
+            })),
             PlayerToEditor::Error {
                 message: "oops".into(),
             },
@@ -1197,5 +1435,57 @@ mod tests {
         write_msg(&mut wire, &EditorToPlayer::LoadScene(Box::new(ok)))
             .expect("a normal frame writes");
         assert!(!wire.is_empty());
+    }
+    /// **The protocol version moved, and it moved for these two frames** (FIX1).
+    ///
+    /// A version constant nobody asserts is a number that drifts. This arm pins
+    /// the value, states the reason beside it, and — the half that makes it a
+    /// gate rather than a restatement — checks that the two frames the bump
+    /// exists for are on the wire and survive a round trip. Deleting either
+    /// variant stops this file compiling; leaving the constant at 2 while adding
+    /// them reds the first assertion, which is exactly the skew a handshake is
+    /// there to refuse.
+    ///
+    /// The other half of the claim cannot be made here: that the *running*
+    /// player agrees. `pie.rs`'s `the_real_player_speaks_this_editors_protocol_
+    /// version` spawns the real binary and reads its handshake.
+    #[test]
+    fn the_protocol_version_moved_with_the_input_and_probe_frames() {
+        assert_eq!(
+            PIE_PROTOCOL_VERSION, 3,
+            "wave FIX1 added Input + Probe; a peer built before it must be refused"
+        );
+        let frame = InputFrame::held(["KeyW"], 1.0 / 60.0)
+            .with_buttons([1])
+            .with_motion(4.0, 0.0)
+            .with_wheel(0.0, -1.0);
+        assert_eq!(frame.keys, vec!["KeyW".to_string()]);
+        assert_eq!(
+            frame.steps, 1,
+            "the ordinary frame advances exactly one step"
+        );
+        let mut wire = Vec::new();
+        write_msg(&mut wire, &EditorToPlayer::Input(frame.clone())).unwrap();
+        write_msg(&mut wire, &EditorToPlayer::Probe { guid: None }).unwrap();
+        let mut cursor = std::io::Cursor::new(wire);
+        let a: EditorToPlayer = read_msg(&mut cursor).unwrap();
+        let b: EditorToPlayer = read_msg(&mut cursor).unwrap();
+        assert_eq!(a, EditorToPlayer::Input(frame));
+        assert_eq!(b, EditorToPlayer::Probe { guid: None });
+    }
+
+    /// A probe of a world with no hero is a real answer, not an error — the
+    /// shape a level with nothing player-controlled produces.
+    #[test]
+    fn a_probe_with_no_hero_round_trips() {
+        let probe = WorldProbe {
+            steps: 9,
+            entities: 3,
+            ..Default::default()
+        };
+        let mut wire = Vec::new();
+        write_msg(&mut wire, &PlayerToEditor::Probe(Box::new(probe.clone()))).unwrap();
+        let got: PlayerToEditor = read_msg(&mut std::io::Cursor::new(wire)).unwrap();
+        assert_eq!(got, PlayerToEditor::Probe(Box::new(probe)));
     }
 }

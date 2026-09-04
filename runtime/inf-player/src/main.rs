@@ -79,6 +79,18 @@ enum Active {
     Real {
         sim: Box<inf_player::runtime_sim::RuntimeSim>,
         frame: u64,
+        /// **The input host, made by the FIRST input frame and not before**
+        /// (wave FIX1).
+        ///
+        /// Lazily, and that is the whole design. `PieInputHost::open` reads the
+        /// player's own settings file and applies it to the sim — which is right
+        /// for a session somebody is driving and wrong for the nine existing
+        /// subprocess gates, whose reference is `scene_trace` and which have
+        /// never had a `PlayerUi`. A session that sends only `Step` therefore
+        /// runs byte for byte what it ran before this wave; a session that sends
+        /// an `Input` frame gets the shipped input path, and its in-process twin
+        /// opens the same door.
+        input: Option<Box<inf_player::pie_drive::PieInputHost>>,
     },
 }
 
@@ -282,8 +294,16 @@ fn advance_and_report(active: &mut Active, stdout: &mut impl std::io::Write) -> 
                 actors: world.actor_states(),
             }
         }
-        Active::Real { sim, frame } => {
-            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        Active::Real { sim, frame, input } => {
+            // FIX1: whatever the last input frame resolved to, or nothing when
+            // no frame has ever arrived. `RuntimeInput::default()` used to be
+            // written here unconditionally, which meant a session that held a
+            // key and then pressed Resume ran with its hands off the controls.
+            let held = input
+                .as_ref()
+                .map(|h| h.held())
+                .unwrap_or_else(inf_player::runtime_sim::RuntimeInput::default);
+            sim.step_once(held);
             *frame += 1;
             PlayerToEditor::Frame {
                 frame: *frame,
@@ -357,6 +377,7 @@ fn handle_msg(
                     *active = Active::Real {
                         sim: Box::new(sim),
                         frame: 0,
+                        input: None,
                     };
                     // Real headless PIE is step-driven (deterministic) until
                     // Resumed — so the trace gate reads exactly N frames.
@@ -392,6 +413,51 @@ fn handle_msg(
             eprintln!("inf-player: eject — input possession released");
             PlayerToEditor::Ejected
         }
+        // ── wave FIX1, protocol 3 ──
+        EditorToPlayer::Input(input_frame) => {
+            let Active::Real { sim, frame, input } = active else {
+                // A toy world has no binding table and no character; saying so
+                // is better than pretending the frame landed.
+                return reply(
+                    stdout,
+                    PlayerToEditor::Error {
+                        message: "an input frame needs a real scene (LoadScene first)".into(),
+                    },
+                );
+            };
+            let host = input.get_or_insert_with(|| {
+                Box::new(inf_player::pie_drive::PieInputHost::open(
+                    inf_player::ui::settings_dir(),
+                    inf_player::input::default_map(),
+                    sim,
+                ))
+            });
+            let steps = host.apply(sim, &input_frame);
+            *frame += u64::from(steps);
+            // ONE `Frame` per applied input frame, carrying the hash after its
+            // last step. A trace that wants a hash per step sends `steps: 1`,
+            // which is the ordinary case and the one every gate uses.
+            PlayerToEditor::Frame {
+                frame: *frame,
+                state_hash: inf_player::step_state_hash(sim),
+                actors: Vec::new(),
+            }
+        }
+        EditorToPlayer::Probe { guid } => {
+            let named = guid.map(uuid::Uuid::from_bytes);
+            let probe = match active {
+                Active::Real { sim, frame, input } => inf_player::pie_drive::world_probe(
+                    sim,
+                    input.as_deref().map(|h| h.ui()),
+                    *frame,
+                    named,
+                ),
+                // Nothing real is loaded: an empty probe is the honest answer and
+                // it is distinguishable from a loaded one by `entities == 0`.
+                _ => inf_runtime::pie::WorldProbe::default(),
+            };
+            PlayerToEditor::Probe(Box::new(probe))
+        }
         EditorToPlayer::SetViewport(_rect) => {
             // Headless PIE has no window; the embedded/windowed path applies the
             // rect. Ack silently by reporting current state.
@@ -406,6 +472,16 @@ fn handle_msg(
         }
     };
     if write_msg(stdout, &reply).is_err() {
+        return Control::Exit(ExitCode::SUCCESS);
+    }
+    Control::Continue
+}
+
+/// Write one reply and keep going (or stop, if the editor closed stdout). The
+/// early-return shape `handle_msg`'s FIX1 arms need, since the function's own
+/// tail already writes `reply`.
+fn reply(stdout: &mut impl std::io::Write, msg: PlayerToEditor) -> Control {
+    if write_msg(stdout, &msg).is_err() {
         return Control::Exit(ExitCode::SUCCESS);
     }
     Control::Continue
