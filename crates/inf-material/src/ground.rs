@@ -148,6 +148,20 @@ pub enum GroundKind {
     /// was 200 lines transcribing this module's ids, files, sidecars, README
     /// and lock test for one more surface. `ALL` is APPENDED to, which the
     /// GUID block was laid out for (`ground.rs`'s `GROUND_GUID_BASE`).
+    ///
+    /// # Its [`tex_scale_m`](Self::tex_scale_m) has no consumer (ASSET0 audit)
+    ///
+    /// The other five kinds are what a `TerrainLayer` binds, and
+    /// `TerrainLayer::tex_scale` is the *only* reader of that number
+    /// (`inf_editor_core::island`, one call). Asphalt is not a layer — it is a
+    /// `.inf_mat` on a road MESH — and a mesh tiles at whatever its author
+    /// unwrapped. `inf_gis`'s ribbon writes `uv = (u across the carriageway,
+    /// arc / width_m)`, so one uv unit is the road's WIDTH; the island's roads
+    /// are `highway`/`arterial` with no stated lane count, which
+    /// `RoadKind::default_lanes` makes four lanes of 3.5 m. **Measured: the
+    /// island tiles this set every 14.0 m**, a 13.7 mm texel and a 53.8 cm
+    /// detail tile — 3.5× the 4 m authored here. The 4 m stands as the rate the
+    /// surface was DESIGNED at, for the day `.inf_mat` grows a uv scale.
     Asphalt,
 }
 

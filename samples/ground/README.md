@@ -25,6 +25,21 @@ for grass and rock — a 512² high-frequency detail normal.
 | `Ground_Soil` | 2.2 m | 2.15 mm | — |
 | `Road_Asphalt` | 4.0 m | 3.91 mm | 15.4 cm |
 
+**The road's row is what the set is AUTHORED for and not what the road
+draws** (ASSET0 audit). `tex_scale_m` reaches exactly one consumer -
+`TerrainLayer::tex_scale`, which is `uv = world.xz / tex_scale` - and
+asphalt is not a terrain layer: it is a `.inf_mat` on a road MESH, and a
+mesh tiles at whatever its author unwrapped. `inf_gis`'s road ribbon
+writes `uv = (u across the carriageway, arc / width_m)`, so one uv unit
+is the road's WIDTH in both axes. The island's eleven roads are one
+`highway` and ten `arterial`, neither states a lane count, and
+`RoadKind::default_lanes` gives both four at `LANE_WIDTH_M` 3.5 - so
+every street on the island tiles this set every **14.0 m**: a 13.7 mm
+texel and a 53.8 cm detail tile, 3.5x the row above. Correcting it needs
+a uv-scale field on `.inf_mat`, which is an asset-format window with a
+real consumer; until then the aggregate reads large and this says by how
+much.
+
 **Albedo and ORM are BC1; normals and detail maps are BC5** (wave
 IASSET2). Every map used to be BC1, including the normals, and that was a
 limitation rather than a choice: one atlas held one format, so a MIXED set

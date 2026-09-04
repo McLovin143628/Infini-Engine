@@ -31634,11 +31634,24 @@ the run.
     what the ground library is: a generated, licence-free placeholder with a
     frozen GUID that the bridge overwrites locally. That is the next wave's
     first job, and the assets are already in the project waiting for it.
-15. **A Megascans surface's own tiling rate does not cross the bridge.** The
-    asphalt is authored as a 2 x 2 m tile and the road ribbon's uv repeats once
-    per road width (4-7 m), so the aggregate reads about twice life size.
-    `.inf_mat` has no uv-scale field; adding one is an asset-format window with a
-    real consumer, unlike the LOD ladder.
+15. **No surface's tiling rate crosses the bridge, and the road width was
+    measured wrong.** *(Corrected by the audit; the original read "the road
+    ribbon's uv repeats once per road width (4-7 m), so the aggregate reads
+    about twice life size".)* Measured: `inf_gis::roads` writes
+    `uvs.push([u, arc / width_m])` — one uv unit is the road's **width** in
+    both axes — and `width_m = LANE_WIDTH_M * lanes` with `LANE_WIDTH_M` 3.5.
+    `samples/island/layers/roads.geojson` holds 11 features, one `highway` and
+    ten `arterial`, and **not one states a lane count**, so
+    `RoadKind::default_lanes` gives every road four lanes: **14.0 m**, not
+    4–7 m. So the imported 2 m Megascans asphalt reads **7× life size** and the
+    committed synthesised one — authored at 4 m, which the original carried item
+    did not mention at all — reads **3.5×**, with its detail map at 53.8 cm
+    rather than the 15.4 cm the ground README states. `GroundKind::tex_scale_m`
+    has exactly one reader, `TerrainLayer::tex_scale`, and asphalt is not a
+    terrain layer, so for this kind the number is authoring intent with no
+    consumer; both the README and the kind's own doc now say so. `.inf_mat` has
+    no uv-scale field; adding one is an asset-format window with a real
+    consumer, unlike the LOD ladder.
 16. **The import is not incremental.** Re-running `inf-import` over an unchanged
     manifest re-decodes, re-clamps and re-encodes all 81 textures (43 s and
     892 MB). The engine's own `ImportCache` keys on source bytes and would serve
