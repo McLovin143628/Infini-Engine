@@ -31253,3 +31253,393 @@ picture.
     at 60 Hz and 0.75 s at 240 Hz, and what it waits for is a document load. A
     deadline is the fix; it is three lines in a message pump with no harness, so
     it is routed rather than made unarmed.
+
+## Wave ASSET0 — the Unreal bridge, and the street the hero stands on (2026-09-04)
+
+The user's words: *"the textures and materials look really bad right now. We need
+to import some from MegaScans from the Unreal Engine reference content assets"*,
+*"you are allowed to import and convert the UE assets found in this project … to
+iassets and ipacks for our game engine and game. Or use the assets as
+references"*, and the buildings are *"very low quality"*.
+
+Three things had to be true at once. The imported content is licensed and may
+never enter a public repository. The island's committed level is byte-locked and
+names its materials by GUID. And a clone of this repository has to build and run.
+Everything below is the shape those three constraints force.
+
+### CLAUSE 0 — THE ROAD HAD NO MATERIAL, AND NOW IT HAS ONE
+
+The EDIT1 audit measured it and routed it: the island's `Roads` entity carried a
+`MeshRef` and nothing else, so the projection handed it
+`Material::default().base_color` — 0.8 linear, the engine's debug grey — in
+**both** hosts. Re-measured here on the audit's own frame, over a 250 x 160 px
+patch of street: **mean (238.9, 239.3, 238.0), range 237..240**. Flat to one
+level, and the brightest surface in the picture.
+
+`Road_Asphalt` is a sixth set appended to the engine's ground library rather than
+a library of its own, because the alternative was two hundred lines transcribing
+that module's ids, files, sidecars, README and byte lock for one surface. A
+rolled wearing course: aggregate chips in a bitumen binder, the air voids between
+them, a repair patch tone, sealed cracks. Synthesised by the same
+transcendental-free integer generator as the five before it, so it is byte-locked
+on every CI leg and carries no licence. **Mean sRGB (58.8, 58.0, 57.4), luma sd
+9.73 over 22..103**; 4 m tile, 3.91 mm a texel, with a detail map at 15.4 cm
+because the road is the one surface the player is guaranteed to stand on.
+
+**The GUID block did not append where it said it would.** `ground.rs` promised
+"a sixth ground appends at `+ 6 * 5`" and `cover.rs` had already minted
+`COVER_GUID_BASE = 0x9E20_0000 + 5 * 6` — the very next id — for three scatter
+meshes a committed `.inf_pcg` names. Following the comment gave
+`Road_Asphalt.inf_mat` the same GUID as `Cover_GrassTuft.inf_mesh`, and the
+second registration would have silently replaced the first. `cover.rs`'s
+`the_three_kinds_are_three_of_everything` is the arm that caught it, and the
+reason it could is that it is written over `GroundKind::ALL` rather than over a
+literal five. The block now continues at `GROUND_CONT_BASE = 0x9E21_0000`.
+
+Committed `.inf_lvl` bytes moved for the stated cause: `VancouverIsland.inf_lvl`
+144 755 → 144 822 B and `IslandFixture.inf_lvl`, each gaining one `Material`
+component and one dependency, `00000000-0000-0000-0000-00009e210000`. Schema
+untouched — `.inf_lvl` v27, `ScenePayload` v12, `.inf_mat` v3, `.inf_tex` v2,
+`EXPECTED_LEVELS` 24, goldens 62.
+
+### CLAUSE 1 — THE EXPORT SIDE
+
+`tools/ue-export/export.py`, read-only, headless, and it never writes into the
+Unreal project. `-EnablePlugins=GLTFExporter` is what makes it possible without
+editing somebody's `.uproject`: the exporter ships with the engine under
+Plugins/Enterprise and is disabled in a default project.
+
+Four things the API is not, each measured rather than assumed:
+
+* `UGLTFExportOptions` has `default_level_of_detail` and no "export every LOD",
+  so a four-rung mesh is exported four times under four names.
+* `bake_material_inputs` is an **enum** in 5.8, not a bool. Passing `False` fails
+  the export TASK, and the first full run wrote 79 textures and **zero meshes**,
+  reporting it only in a per-asset error list.
+* `unreal.GLTFExporter` is **abstract**. Instantiating it fails every task; the
+  exporter is left unset and UE picks by filename extension.
+* `StaticMesh.sockets` is protected and refuses `get_editor_property` — and the
+  light posts have none anyway. What carries the lamp is `BP_lightpost_a`, whose
+  construction script parents two `PointLightComponent`s to the mesh. So a
+  "socket" in this manifest is a FIXTURE, read through `SubobjectDataSubsystem`
+  (handle → data → object; `get_object` refuses a handle, and the gather returns
+  every component twice).
+
+**THE RUN**, on nine packs: **30 materials, 95 textures, 12 meshes, 18 LOD rungs,
+2 fixtures, 4 lights, 0 errors**, 4 177.9 MB of PNG, **89.7 s** (173.4 s for the
+first full texture pass; an already-exported PNG is not re-encoded, and an 8K
+texture is about ninety seconds of it). Manifest:
+`C:\Users\fishi\Desktop\Infinity_Engine\ue-staging\manifest.json` — outside this
+repository, and it stays there.
+
+What the packs turned out to be, measured rather than assumed: **MS_AsphaltEss
+ships no static meshes at all** — 146 textures and 36 material instances, a
+surface pack — while **MS_CityCurbs ships a real 8:1 ladder** (198 772 / 101 512
+/ 51 256 / 26 084 bytes of geometry across four rungs). Every Megascans instance
+here parents `Standard_MasterMaterial` and names `albedo`, `normal`,
+`roughness`, `displacement`; **there is no ORM anywhere**. And `MS_PristineGr`,
+which was in the pack list on the strength of its name, is **Pristine GRANITE**
+(Baltic Brown, Juparana Brown, French Cream) — so there is no photographed grass
+and no sand in this project at all, and two of the island's four ground layers
+stay synthesised. That is stated rather than papered over with a moss.
+
+#### THE LICENCE TABLE
+
+There is **no licence file anywhere** under the Unreal project's `Content`. Every
+row below is what is known, and "unknown" where nothing is.
+
+| pack | what crossed | licence, as recorded |
+|---|---|---|
+| `MS_AsphaltEss` | 3 surface materials, 12 maps | **unknown** — Quixel/Megascans via Fab. Megascans content bundled with Unreal is licensed for use IN Unreal Engine projects; conversion for shipping elsewhere is **not established**. Verify on the Fab page before shipping. |
+| `MS_CityCurbs` | 2 meshes (4 rungs each), 1 material | unknown — as above |
+| `MS_BrickV1` | 2 surface materials | unknown — as above |
+| `MS_ConcreteV1` | 2 surface materials | unknown — as above |
+| `MS_CementV1` | 2 surface materials | unknown — as above |
+| `MS_MountainSl` | 2 rock surfaces | unknown — as above |
+| `MS_MossEss` | 2 moss surfaces | unknown — as above |
+| `Downtown_West` | 10 meshes, 12 materials, 2 light fixtures | **unknown** — Marketplace/Fab pack in this project. Verify on its Fab page before shipping. |
+| `AdvancedRealisticGlass` | 2 materials, parameters only | **unknown** — as above |
+
+**Nothing in this table is in this repository.** The exports live in a staging
+directory and the imports in the island's build project, both outside the tree;
+`git status --porcelain --untracked-files=all` is empty and the diff contains no
+`Content/UE`. What CI proves the door on is a fixture the gate WRITES.
+
+### CLAUSE 2 — THE IMPORT SIDE
+
+`inf_editor_core::assets::ue_import`, with `tools/inf-import` as its headless
+front end. Meshes go through `import_file` — the one door, the same call the
+Content Drawer's drag-and-drop makes.
+
+**The PBR remap is not a pass-through.** These packs ship a separate roughness
+and (sometimes) an AO, and this engine's `.inf_mat` has one
+`metallic_roughness_texture` in glTF channel order, so the import PACKS one:
+occlusion → R, roughness → G, metallic → B, with 255/255/0 for a map the pack
+does not ship. `inf_material::pack_orm` has existed since Wave T with **no
+caller at all**; this is its first. (Its sibling `plan_map_set` still has
+none, deliberately: it recovers a map's role from a FILENAME, and the
+manifest states every role outright.) The ORM
+takes the smallest extent of its inputs, because packing a 128 roughness into a
+512 grid reads past the end of it.
+
+**The clamp is the mip chain.** `inf_material::downscale_rgba8` halves through
+`downsample_box`, the filter `rgba_mip_chain` already uses, so `--max-texture` is
+a choice about which mip is level 0 rather than a second private resampler — and
+the gate asserts the two agree **byte for byte** rather than asserting "it got
+smaller". It matters: these surfaces export at 8 192 square, 268 MB of RGBA a
+map.
+
+**THE RUN**, into the island's build project at `--max-texture 2048`:
+**30 materials, 81 textures, 12 meshes, 4 fixtures, 892.1 MB, 43.2 s**. Meshes
+imported: three awnings (5 278 / 8 272 / 11 082 tris), four cafe pillars (4 780
+– 20 306), two light posts and a planter (3 348 – 15 548), two Megascans curbs
+(5 651 / 5 018, four source rungs each). All twelve are over the cook's 2 048
+`min_triangles`, so all twelve get a real `.inf_vmesh` in a shipped build.
+
+`inf import` **is not a subcommand**, and says so. `tools/inf-cli`'s own manifest
+keeps it Ring-0-only "without the CLI linking an editor crate (and its wgpu)";
+the importer is the editor's importer, so `inf import` prints the
+`cargo run -p inf-import` line and exits non-zero.
+
+#### THE LOD LADDER IS NOT ADDED, AND THAT IS A RULING
+
+Measured: **no `.inf_mesh` reaches a draw path in either host.** A `MeshRef`
+draws through a derived `.inf_vmesh` whose LOD is a continuous meshlet cut, or
+through `classic_vgeom`, whose discrete levels are derived from that same DAG —
+and below `[vgeom] min_triangles` it draws a placeholder cube. So an authored
+discrete ladder in the payload would be a third LOD mechanism with no consumer,
+and a format window for storage nothing reads cannot be gated on anything but
+its own bytes.
+
+What the packs ship is **recorded** instead, in each mesh's sidecar `import`
+table — `ue_lod_rungs`, `ue_lod_screen_sizes`, `ue_material_slots` — sidecar
+only, no payload move, no schema window. The wave that seeds the meshlet DAG's
+coarse levels from a pack's own rungs will need exactly that, and the curbs'
+measured 8:1 ladder is worth seeding from. **Carried 11.**
+
+### CLAUSE 3 / 5 — WHAT THE ISLAND WEARS NOW
+
+The rebind is the arrangement that makes it possible: an imported material is
+written **at the GUID the committed ground library assigns a stem**, into the
+local project only. `samples/ground/Road_Asphalt.inf_mat` (synthesised,
+committed, licence-free) and `<project>/Content/Road_Asphalt.inf_mat`
+(Megascans, local, never committed) are one asset identity with different texels,
+and the committed `.inf_lvl` does not know which one it got. Three landed:
+
+| the level names | now carries | measured mean albedo |
+|---|---|---|
+| `Road_Asphalt` `…9e210000` | `MS_AsphaltEss/010_Asphalt_Road_2x2_M` | sRGB (110.2, 107.3, 100.5) |
+| `Ground_Rock` `…9e200006` | `MS_MountainSl/01_Rock_Sandstone_pkxu2` | 8 192², 4 maps |
+| `Ground_ForestFloor` `…9e20000c` | `MS_MossEss/01_Nordic_Moss_2x2_M` | 8 192², 4 maps |
+
+`Ground_Grass` and `Ground_Sand` stay synthesised, because this project has
+neither photographed grass nor sand — see clause 1.
+
+**The order is load-bearing and there is only one that works**: `island build`
+copies the recipe's `[content]` into the project on *every* run, so an import
+that ran first is overwritten by the next build. Build, then import, then cook.
+It is in `samples/island/README.md` now, with the commands.
+
+### CLAUSE 4 — THE PALETTES SAY WHAT A BUILDING IS MADE OF
+
+`PcgSurface::DEFAULT` carries `tint: None`, which both projectors read as "use
+`pcg_kind_color`" — a hash of the module's kind index into a pastel ramp, in use
+for every scattered instance since P18.5. That is the mint green and the pale tan
+on every building in `AUDIT-DEMO/01-editor.png`, and it is the whole of what
+"very low quality" meant: **nothing in that frame is the colour of a material,
+because no material was ever named.**
+
+Fourteen archetypes gain a `SurfaceSet` — wall, floor, furniture — stamped over
+the structural families by `Grammar::stamp_module_surfaces`, beside the mesh
+stamp and for the same stated reason. **Seven surfaces, every one the mean linear
+albedo of a Megascans map measured over its whole 8 192-square tile**: concrete
+(145.0, 139.8, 129.6), slab (116.4, 101.8, 89.1), brick (139.7, 93.6, 59.4),
+cement (161.0, 154.8, 145.7), asphalt (110.2, 107.3, 100.5), painted (108.3,
+103.9, 102.4) and timber. A colour is not content, so this table carries no
+licence — it is the *"or use the assets as references"* half of the mandate,
+spelled as arithmetic.
+
+Brick where people live and shop, cast concrete where they work, cement on the
+four institutions, asphalt on industry, painted on the three venues. Measured by
+the arms: **48 wall, 70 floor and 56 family-stated modules over 14 archetypes,
+5 distinct wall surfaces**, every wall under 0.40 linear luma. VEN1a's rule is
+kept and armed — `ModuleShape::role` returns `Stated` for the eight families
+whose material is a property of the family, so a strip club's pole is not made
+of brick.
+
+#### AND THE GAP IT COULD NOT CLOSE
+
+A wall gets a **tint**, not a `.inf_mat`, because a scattered instance cannot
+wear one. Measured: `inf_render::ScatterBatch` carries `metallic`, `roughness`,
+`emissive` and a per-instance tint and **no virtual-texture set at all**, and
+`scatter_mesh.wgsl` names virtual pages only for shadows. **Every building module
+in this engine is a scattered instance.** So the imported brick and concrete
+reach the buildings as their measured colour and their measured roughness and
+not as their texels — a large improvement over a pastel hash, and not a
+photograph. Giving the scatter path a virtual-texture set is the next wave's
+headline. **Carried 12.**
+
+### THE GATE
+
+`asset0_bridge_gate.rs`, **six arms**, on a fixture the file **writes**: a glTF
+quad at four scales, four PNGs at three extents, a material naming them by role,
+and a Blueprint fixture with a light. Measured: 1 material, **3 textures** (not
+five - displacement has no slot in this engine and roughness/occlusion are
+consumed into the ORM), 1 mesh of 2 triangles, 1 fixture, 1 075 894 bytes. The
+mesh's width says LOD 0 was the rung imported. The light lands at
+**(1.00, 5.50, -2.00) m** from UE's (100, 200, 550) cm - a lamp head five and a
+half metres up, where the other axis order puts a lamp lying in the road - at
+**597 cd**, because 7 500 is LUMENS and reading it as candela is a 4-pi-times
+floodlight.
+
+### FOUR THINGS THIS WAVE'S OWN GATES CAUGHT
+
+Recorded because each one was a working, plausible, silent wrong answer.
+
+1. **The GUID block did not append where its comment said.** `Road_Asphalt`
+   landed on `Cover_GrassTuft`'s id and the second registration would have
+   replaced the first. Caught by
+   `cover::the_three_kinds_are_three_of_everything`, which is written over
+   `GroundKind::ALL` rather than over a literal five.
+
+2. **A second import wrote a second copy of everything.** Measured on the real
+   island project: **106 duplicate assets**, `X_1.inf_tex` beside `X.inf_tex`
+   under fresh GUIDs, doubling the texture bytes and orphaning the first copy.
+   `write_asset` and `write_tiled_texture` both go through `unique_asset_path`,
+   which is right for an author importing a file twice on purpose and wrong for
+   a tool whose output is a pure function of a manifest.
+   `write_tiled_texture_at` is the new door - the tiled twin of the
+   `write_asset_at` the graph editors already had - and
+   `importing_one_manifest_twice_writes_one_set_of_assets` is the arm.
+   Mutation-verified, and it asserts the IDS and the file COUNT rather than "it
+   did not error", because the duplicating version did not error either.
+
+3. **A `powf` in Ring 1.** The fixture's sRGB-to-linear colour conversion was
+   refused by `portable_math_law` **by exact line**. Correctly: this engine has
+   exactly one sRGB decode - `inf_material::ground`'s transcendental-free sqrt
+   ladder, which is what makes a committed texel byte-identical on every
+   platform - and a second approximation is a second answer one careless call
+   away from committed content. The conversion is deleted rather than ported:
+   `UeFixture` carries `color_srgb8` and the bridge carries the source value.
+
+4. **The road showed up as a fifth derived material record** where
+   `island_gate` expected four, because it reaches the pack through the other
+   edge of the same closure. The counts move to **5 materials and 18 textures**,
+   with the asphalt GUID now named outright, so a drop back to four reads as the
+   street returning to the debug grey rather than as a number nobody can place.
+
+### THE DEMO LOOP, ON THE FINAL TREE
+
+Rebuilt and re-cooked first, in the one order that works: `inf island build`
+49.4 s → `inf-import` 43.2 s → `inf cook` 42.5 s (`content.ipack`
+**321 962 124 B**, 58 assets, 16 textures, 6 materials). Then `tools/demo/demo.ps1`,
+embedded mode: **HERO MOVED 11.878 m over 118 samples**, console windows named
+inf-player `none`, cursor hidden during play and SHOWING after, `still running:
+none`, exit 0.
+
+**THE FRAME.** `ASSET0-FINAL/01-editor.png` against `AUDIT-DEMO/01-editor.png`,
+the same camera, the same 250 x 160 px patch of street:
+
+| patch | before | after |
+|---|---|---|
+| **the street** | **(238.9, 239.3, 238.0)**, range 237..240, luma sd **0.49** | **(39.8, 40.3, 36.2)**, range 23..53, luma sd **2.68** |
+| the street under the truck | (237.9, 237.6, 237.1), sd 0.40 | (37.2, 36.2, 34.6), sd 3.29 |
+| a left-hand wall | (178.7, 190.6, 158.3) — mint | (150.3, 129.3, 102.6) — **brick** |
+| a right-hand wall | (168.6, 174.9, 144.1) — pale green | (126.0, 125.0, 117.1) — **concrete** |
+| the verge beside the road | (238.4, 238.6, 237.9) | (40.0, 39.9, 37.9) |
+
+The street fell **199 levels** and its variation rose **5.5×**: a flat white
+card became a textured surface. The two wall patches lost their green cast
+entirely, and their variation rose with it — luma sd **21.2 → 49.3** on the left
+wall and **17.7 → 27.0** on the right.
+
+**Both hosts agree.** `ASSET0-FINAL/03-pie-b.png` against the audit's: the same
+left building goes (93.1, 109.8, 83.7) → **(73.9, 74.6, 65.5)** in the *shipped
+player*, so the pastel is gone from PIE as well as from the editor. The ground
+under the hero in that frame is unchanged — (71.0, 95.5, 32.7) → (70.7, 95.2,
+32.5) — and it should be: that is `Ground_Grass`, and there is no photographed
+grass in the reference project to replace it with.
+
+Screenshots:
+`…/scratchpad/ASSET0-FINAL/01-editor.png`, `02-pie-a.png`, `03-pie-b.png`
+(the tree at `c9b833a9`). An earlier run of the same loop two commits back is
+in `…/scratchpad/ASSET0-DEMO/` and reads the same numbers to the tenth of a
+level, which is what says the frame is a property of the content rather than of
+the run.
+
+### VERIFICATION
+
+* `cargo fmt` per package, then `git diff --exit-code`: clean. (`cargo fmt --all`
+  fails on this machine with os error 206 — the command line is too long — which
+  is a known local limit, not a formatting result.)
+* **The battery**, `-j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`:
+  **376 binaries, 7 092 passed, 0 failed, 21 ignored, exit 0**. Baseline at `c852711f` was 374 binaries / 7 083 passed /
+  0 failed / 21 ignored.
+* **Goldens 62**, unchanged — no golden was added and none was re-blessed. The
+  road's colour is not a golden's subject; the frame that proves it is the demo
+  loop's, which is the one the user judges.
+* `cargo doc --no-deps --workspace`: **410** warnings (ceiling 450,
+  baseline 410); none in the files this wave touched.
+* `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0, zero warnings**, run LAST.
+* `editor/studio` **did not move** — no `.ts`, `.tsx` or frontend asset is in the
+  diff — so its 86 files / 781 tests are the run before this one's.
+* **CRLF 0**, measured as CR BYTES at the blob level over every file in
+  `c852711f..HEAD` (`git cat-file blob | tr -cd '\r' | wc -c`). The only CR bytes
+  in the diff are inside `-text` payloads: 4 651 across the four new
+  `Road_Asphalt_*.inf_tex` and 93 across the two `.inf_lvl`, which are compressed
+  blocks and bincode. Recorded this way because `grep -c $'\r'` on this machine
+  reports every line of every `.rs` file as CRLF and the blobs contain **zero**
+  CR — the same measurement trap EDIT1 wrote down, met again.
+* Manifests: `Cargo.toml` gains `tools/inf-import` as a member;
+  `inf-editor-core` gains **`image` as a DEV-dependency** (already the workspace
+  pin `inf-material` decodes through — a new edge, not a new dependency);
+  `inf-import` depends on `inf-editor-core` + `inf-asset` and nothing else.
+* Schema constants: `.inf_lvl` **v27**, `ScenePayload` **v12**, `.inf_mat` v3,
+  `.inf_tex` v2, `MeshAsset` v2 (**not** moved — see the ladder ruling),
+  `EXPECTED_LEVELS` **24**.
+* Committed `.inf_lvl` bytes moved for the stated cause and no other:
+  `VancouverIsland.inf_lvl` and `IslandFixture.inf_lvl`, one `Material` and one
+  dependency each.
+* **No imported content is in this repository.** `git status --porcelain
+  --untracked-files=all` empty; the diff contains no `Content/UE`, no `.png`
+  from the staging directory and no Megascans byte. The 4.1 GB of exports live
+  in `…/Infinity_Engine/ue-staging` and the 892 MB of imports in
+  `…/island-build/project/Content`, both outside the tree.
+
+### CARRIED
+
+11. **The meshlet DAG is not seeded from a pack's authored LOD rungs.** The
+    Megascans curbs ship a measured 8:1 ladder (198 772 → 26 084 bytes over four
+    rungs) and the import keeps only LOD 0, because `build_vgeom` decimates from
+    the finest level and there is no seam to hand it better coarse geometry. The
+    census is in every imported mesh's sidecar waiting for the wave that adds
+    one.
+12. **A scattered instance cannot wear a `.inf_mat`.** `ScatterBatch` has no
+    virtual-texture set and `scatter_mesh.wgsl` samples none, so every building
+    module in the engine gets its material as a colour and a roughness rather
+    than as texels. This is the single largest remaining gap between the frame
+    above and a photograph, and closing it is a renderer wave.
+13. **`Ground_Grass` and `Ground_Sand` are still synthesised**, because the
+    reference project has no photographed grass and no sand. `MS_PristineGr` is
+    Pristine GRANITE. The two layers that could be replaced were.
+14. **Nothing from Downtown_West is PLACED on the island yet, and there is an
+    architectural reason as well as a time one.** Ten props imported cleanly —
+    three awnings, four cafe pillars, two light posts, a planter, all over the
+    cook's 2 048-triangle threshold, so all would draw real geometry in a
+    shipped build — and two light FIXTURES crossed with their positions and
+    their 597 cd. But the rebind works for MATERIALS because the committed
+    ground library already assigns them stable GUIDs, and there is no committed
+    placeholder MESH for a lamp post to be written at. A committed level cannot
+    name a minted id for licensed content. So placing an imported prop needs
+    what the ground library is: a generated, licence-free placeholder with a
+    frozen GUID that the bridge overwrites locally. That is the next wave's
+    first job, and the assets are already in the project waiting for it.
+15. **A Megascans surface's own tiling rate does not cross the bridge.** The
+    asphalt is authored as a 2 x 2 m tile and the road ribbon's uv repeats once
+    per road width (4-7 m), so the aggregate reads about twice life size.
+    `.inf_mat` has no uv-scale field; adding one is an asset-format window with a
+    real consumer, unlike the LOD ladder.
+16. **The import is not incremental.** Re-running `inf-import` over an unchanged
+    manifest re-decodes, re-clamps and re-encodes all 81 textures (43 s and
+    892 MB). The engine's own `ImportCache` keys on source bytes and would serve
+    most of it; the manifest path does not consult it.
