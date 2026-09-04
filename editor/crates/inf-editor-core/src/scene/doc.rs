@@ -4044,6 +4044,98 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
 mod tests {
     use super::*;
 
+    /// **AN EDITED PCG VOLUME IS A STALE PCG VOLUME** (wave EDIT1, clause 3 --
+    /// the arm the audit found missing).
+    ///
+    /// The commit that added `invalidate_pcg_population` is *titled* for this
+    /// behaviour ("an edit makes it stale") and nothing asserted it: the three
+    /// arms it shipped are clause 1's, in another crate, about a different door.
+    /// So a `write_prop` that stopped dropping the cache -- or a type-path
+    /// constant that drifted from `PcgVolume`'s -- would have left an author
+    /// looking at the old block after widening it, with a green battery.
+    ///
+    /// **Both halves, because one of them is not the claim.** "It drops the
+    /// population" is satisfied perfectly by a `write_prop` that drops every
+    /// volume's population on every write anywhere in the document, which would
+    /// make an unrelated slider re-build a city four times a second. The control
+    /// is a write to a DIFFERENT component on the SAME entity.
+    #[test]
+    fn editing_a_pcg_volume_drops_the_population_it_no_longer_describes() {
+        use inf_ecs::components::{PcgVolume, ScatteredInstance, ScatteredSurface};
+
+        let populate = |doc: &mut SceneDoc, g: Uuid| {
+            let e = doc.world.entity_of(g).expect("entity");
+            let one = ScatteredInstance {
+                position: DVec3::ZERO,
+                rotation: glam::DQuat::IDENTITY,
+                scale: 1.0,
+                kind: 0,
+                mesh: None,
+                extent: None,
+                glow: 0.0,
+                surface: ScatteredSurface::DEFAULT,
+            };
+            let w = doc.world.world_mut();
+            let mut vol = w.get_mut::<PcgVolume>(e).expect("volume");
+            vol.set_population(
+                vec![one],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                inf_nav::NavGraph::default(),
+                Vec::new(),
+                Vec::new(),
+            );
+        };
+
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Empty, "Block", None);
+        {
+            let e = doc.world.entity_of(g).expect("entity");
+            doc.world.world_mut().entity_mut(e).insert(PcgVolume {
+                seed: 7,
+                ..PcgVolume::default()
+            });
+        }
+        populate(&mut doc, g);
+        assert_eq!(
+            doc.pcg_population_of(g),
+            Some((1, 0)),
+            "the fixture did not put a population there, so nothing below is measuring a drop"
+        );
+
+        // THE CLAIM: one of the volume's own fields is written, and the cache
+        // that was derived from it goes.
+        assert!(doc.write_prop(
+            g,
+            "inf_ecs::components::PcgVolume",
+            "seed",
+            &PropValue::Number(9.0)
+        ));
+        assert_eq!(
+            doc.pcg_population_of(g),
+            Some((0, 0)),
+            "editing a volume's seed left the population it no longer describes in place -- an author who re-seeds a block keeps looking at the old block"
+        );
+
+        // THE CONTROL: a write to another component on the same entity must
+        // leave it alone.
+        populate(&mut doc, g);
+        assert_eq!(doc.pcg_population_of(g), Some((1, 0)));
+        assert!(doc.write_prop(
+            g,
+            "inf_ecs::components::Transform",
+            "translation",
+            &PropValue::Vec3([1.0, 0.0, 0.0])
+        ));
+        assert_eq!(
+            doc.pcg_population_of(g),
+            Some((1, 0)),
+            "moving the entity dropped its population -- the invalidation is not keyed on the volume's own type path, so every slider in the Details panel rebuilds a city"
+        );
+    }
+
     #[test]
     fn create_rename_reparent_delete() {
         let mut doc = SceneDoc::new();

@@ -31110,3 +31110,25 @@ once the clock is past the ceiling; and — the brief's own mutation, as an arm 
 **a budget a twentieth of one block splits the work rather than stalling**, four
 blocks in four ticks. The tick counts volumes STARTED rather than volumes that
 succeeded, so a block that fails to evaluate cannot buy the tick an extra one.
+
+#### Finding 4 — CLAUSE 3's OWN HEADLINE HAD NO ARM (severity MED; fixed)
+
+`feat(EDIT1): a scattered block says which zone grew it, **and an edit makes it
+stale**` adds `SceneDoc::invalidate_pcg_population` — 55 lines of behaviour and
+reasoning — and ships three arms, all of which are **clause 1's**, in another
+crate, about another door (`evaluate_volume_into`). Nothing anywhere asserts the
+behaviour the commit is titled for. A `write_prop` that stopped dropping the
+cache, or a `PCG_VOLUME_TYPE_PATH` constant that drifted from `PcgVolume`'s own,
+would have left an author looking at the old block after widening it — with a
+green battery, because clause 3 is exactly the kind of claim a battery cannot
+see.
+
+`scene::doc::tests::editing_a_pcg_volume_drops_the_population_it_no_longer_
+describes`, with **both halves**: writing the volume's own `seed` drops its
+population, and writing `Transform::translation` on the *same entity* leaves it
+alone. The second is not decoration. "It drops the population" is satisfied
+perfectly by a `write_prop` that drops every volume's population on every write
+anywhere in the document, which would make an unrelated slider rebuild a city
+four times a second — and the invalidation is a string comparison against a
+hand-written type path, which is precisely the thing that drifts silently.
+Mutation-verified in both directions.
