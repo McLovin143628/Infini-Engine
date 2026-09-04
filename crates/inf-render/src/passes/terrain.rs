@@ -1947,13 +1947,15 @@ mod tests {
         assert_eq!(
             layer.vt.slots()[2],
             11 | (1024 << 16),
-            "a VtTextureSet must carry the rate — the strip belongs to terrain,              not to the packing"
+            "a VtTextureSet must carry the rate — the strip belongs to terrain, not to the \
+             packing"
         );
         let raw = MaterialRaw::from_terrain(&t);
         assert_eq!(
             raw.slots[0],
             [7, 9, 11, 0],
-            "the terrain uploaded a metres-per-repeat, so its uv is divided              twice: once by TerrainLayer::tex_scale and once by the material"
+            "the terrain uploaded a metres-per-repeat, so its uv is divided twice: once by \
+             TerrainLayer::tex_scale and once by the material"
         );
     }
 

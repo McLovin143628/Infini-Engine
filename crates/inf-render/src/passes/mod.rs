@@ -1802,7 +1802,8 @@ mod shader_compose_tests {
         );
         assert!(
             feedback.contains("f32(inst.vt.z >> 16u) / 256.0"),
-            "vis_feedback.wgsl no longer unpacks the tiling rate from the ORM              word — it must read the SAME half of the SAME word as vt_sample.wgsl"
+            "vis_feedback.wgsl no longer unpacks the tiling rate from the ORM word — it must \
+             read the SAME half of the SAME word as vt_sample.wgsl"
         );
         // The reciprocal, guarded, with 1.0 as the identity.
         assert!(
@@ -1835,7 +1836,8 @@ mod shader_compose_tests {
             for needle in [uv, dx, dy] {
                 assert!(
                     src.contains(needle),
-                    "{what} does not scale `{needle}` — the uv and its two                      derivatives must be rescaled together"
+                    "{what} does not scale `{needle}` — the uv and its two derivatives must be \
+                     rescaled together"
                 );
             }
         }
@@ -1866,21 +1868,28 @@ mod shader_compose_tests {
         let src = include_str!("../shaders/water.wgsl");
         assert!(
             src.contains("let bank_taper = 1.0 - in.profile.y * in.profile.y;"),
-            "water.wgsl no longer tapers a river's modelled depth as `1 − bank²`              — that is the parabola `carve_channels` cuts the bed to"
+            "water.wgsl no longer tapers a river's modelled depth as `1 − bank²` — that is the \
+             parabola `carve_channels` cuts the bed to"
         );
         assert!(
             src.contains("column = select(column, modelled, is_river);"),
-            "water.wgsl no longer takes a river's column from its own modelled              bed. `max(column, modelled)` is NOT good enough and this arm says              the difference: `max` still lets the depth buffer win wherever it              says more than the model, which on a reach whose bank is already              below the water line is everywhere — and the band then travels with              the terrain exactly as before over that stretch (measured: 1.00 ->              1.00 -> 0.81 of a half-width under `max`, a flat 0.81 under this)"
+            "water.wgsl no longer takes a river's column from its own modelled bed. \
+             `max(column, modelled)` is NOT good enough and this arm says the difference: \
+             `max` still lets the depth buffer win wherever it says more than the model, which \
+             on a reach whose bank is already below the water line is everywhere — and the \
+             band then travels with the terrain exactly as before over that stretch (measured: \
+             1.00 -> 1.00 -> 0.81 of a half-width under `max`, a flat 0.81 under this)"
         );
         assert!(
             src.contains("water.dims.x == WATER_RIVER"),
-            "the modelled column must be a RIVER's — an ocean and a lake meet              arbitrary ground at an arbitrary line, which is the case a              screen-space difference is for"
+            "the modelled column must be a RIVER's — an ocean and a lake meet arbitrary ground \
+             at an arbitrary line, which is the case a screen-space difference is for"
         );
         // …and the screen-space width floor, the other half of clause 3.
         assert!(
-            src.contains("MIN_RIVER_PIXELS / px_per_m")
-                && src.contains("draw_width = max(width, "),
-            "water.wgsl no longer floors a river's rasterised width; a 1.5 m              creek at a kilometre is a third of a pixel and rasterises to a              dotted flicker"
+            src.contains("MIN_RIVER_PIXELS / px_per_m") && src.contains("draw_width = max(width, "),
+            "water.wgsl no longer floors a river's rasterised width; a 1.5 m creek at a \
+             kilometre is a third of a pixel and rasterises to a dotted flicker"
         );
     }
 

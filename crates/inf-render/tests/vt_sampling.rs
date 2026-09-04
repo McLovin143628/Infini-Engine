@@ -2970,7 +2970,8 @@ fn the_tiling_rate_is_packed_into_the_orm_word_and_rides_unconditionally() {
     assert_eq!(
         set.slots(),
         [7, 9, 11 | (1024 << 16)],
-        "the tiling rate is a wire position — `vt_uv_tiling_m` reads word 2's          top half, and `vt_detail_scale` reads word 1's"
+        "the tiling rate is a wire position — `vt_uv_tiling_m` reads word 2's top half, and \
+         `vt_detail_scale` reads word 1's"
     );
     // A set with no rate is byte-for-byte the three words that shipped before
     // ROAD1.
@@ -2988,7 +2989,8 @@ fn the_tiling_rate_is_packed_into_the_orm_word_and_rides_unconditionally() {
     assert_eq!(
         (cold.albedo, cold.normal, cold.orm, cold.uv_tiling_q8),
         (0, 0, 0, 1024),
-        "a material's metres-per-repeat must not depend on whether its pages          have arrived — a road that re-tiled as it streamed would be worse than          one that tiled wrongly"
+        "a material's metres-per-repeat must not depend on whether its pages have arrived — a \
+         road that re-tiled as it streamed would be worse than one that tiled wrongly"
     );
     // The rate names no texture, so it cannot move the registration order.
     assert_eq!(

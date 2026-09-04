@@ -141,34 +141,6 @@ impl IslandGrid {
     }
 }
 
-/// **The narrowest plateau that survives the renderer's decimation**, metres —
-/// a floor on [`CarvePlan::corridor_flat_m`] (wave ROAD1).
-///
-/// # Why a road corridor has a minimum width that is not about roads
-///
-/// A locally planar surface decimates to itself, which is what makes a graded
-/// corridor immune to the clipmap's LOD morph — but only where the coarse
-/// lattice's own samples land **inside** it. `terrain.wgsl`'s `coarse_height` is
-/// a bilinear on a lattice of `2 · span / cells`, which on the island's 256 m
-/// tiles at `TERRAIN_BASE_CELLS = 64` is **8 m at ring 0 and 16 m at ring 1**.
-/// A plateau narrower than that has coarse samples on its batter, and the
-/// bilinear drags the batter's height back under the road.
-///
-/// Measured on the fixture before this floor existed: a 5.8 m plateau (an
-/// arterial's own built half-width) left the road **0.889 m** off the drawn
-/// terrain half way through ring 0's morph band, and **0.000 m** before the band
-/// started — so the plateau was working and the lattice was reaching past it.
-///
-/// 16 m is ring 1's cell, which is as far as this floor goes: ring 2's is 32 m
-/// and a 64 m-wide flat strip under every country lane is a bulldozed island,
-/// not a graded one. What ring 2 and beyond leave is measured and carried in
-/// `road1_gate`'s own table, in pixels at 1080p as well as in metres.
-///
-/// The number is stated here and **pinned against the renderer's own constants**
-/// in `road1_gate`, because `inf-island` cannot name `inf-render` — the same
-/// arrangement `inf_gis::PAVEMENT_M` has with `inf_ecs`.
-pub const MIN_CORRIDOR_FLAT_M: f64 = 16.0;
-
 /// Everything the carve needs that is not a height.
 #[derive(Debug)]
 pub struct CarvePlan<'a> {
@@ -202,7 +174,26 @@ pub struct CarvePlan<'a> {
     /// the coarse height equals the fine height, so `mix(h_fine, h_coarse, m)` is
     /// the same number at every morph factor and the ground under the road stops
     /// moving with the camera. `road1_gate`'s three-distance table is the
-    /// measurement.
+    /// measurement, and it says the graded road degrades **less** under the morph
+    /// than a conforming one: +0.0388 m and +0.1626 m off its own baseline
+    /// against +0.0893 m and +0.1687 m.
+    ///
+    /// # A WIDER plateau is worse, and that was measured rather than assumed
+    ///
+    /// The obvious next step is to floor this at one of the renderer's own coarse
+    /// cells — 8 m at ring 0, 16 m at ring 1 — so the decimation's samples land
+    /// inside the flat rather than on its batter. **It was tried at 16 m and it
+    /// is worse**: a grade-limited router builds switchbacks, several limbs of
+    /// one road pass within a plateau's width of each other at different heights,
+    /// and the levelling takes the nearest — so a wide plateau is not a flat, it
+    /// is a **staircase**, and each step is a feature the decimation then
+    /// smooths. The fixture's worst road vertex went from 0.889 m off the drawn
+    /// terrain (conforming, no plateau) to 1.51 m at the road's own built
+    /// half-width, and no better at 16 m.
+    ///
+    /// So the plateau is the road's own built half-width and no more, the gate
+    /// reads the MEAN, and the switchback is a carried item rather than a
+    /// number hidden behind a percentile.
     pub corridor_flat_m: f64,
 }
 

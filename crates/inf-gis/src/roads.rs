@@ -775,7 +775,7 @@ pub fn build_ribbon_across(
 
     if !(crown_fall.is_finite() && crown_fall >= 0.0) {
         return Err(crate::GisError::Geometry(format!(
-            "the carriageway's cross-fall ({crown_fall}) is not a non-negative              finite fraction"
+            "the carriageway's cross-fall ({crown_fall}) is not a non-negative finite fraction"
         )));
     }
 
@@ -818,7 +818,8 @@ pub fn build_ribbon_across(
             if let Some(h) = ground_probe {
                 if !h.is_finite() {
                     return Err(crate::GisError::NotFinite(format!(
-                        "the ground query under the road at ({}, {}) returned the                          non-finite height {h}",
+                        "the ground query under the road at ({}, {}) returned the non-finite \
+                         height {h}",
                         xz.x, xz.y
                     )));
                 }
@@ -1465,9 +1466,20 @@ struct ProfilePoint {
 /// a kerb's upstand and a pavement's outer skirt are built, and it is why this
 /// takes a profile rather than a left and a right offset.
 ///
-/// `uv` is `(offset in metres, arc in metres)`, the same physical space the
-/// carriageway's is, so every part of a road tiles at one rate and a material's
-/// `uv_tiling_m` means the same thing on all of them.
+/// `uv` is `(distance ALONG the cross-section in metres, arc in metres)`, in
+/// the same physical space the carriageway's is, so every part of a road tiles
+/// at one rate and a material's `uv_tiling_m` means the same thing on all of
+/// them.
+///
+/// # It is the cross-section's arc length, not the offset, and a kerb is why
+///
+/// A horizontal run has `u == offset` and the two are the same number — which
+/// is what makes the kerb's uv continuous with the carriageway's beside it. A
+/// **vertical** face does not: the kerb's 150 mm upstand and the pavement's
+/// outer skirt have the same offset at both ends, so a uv taken from the offset
+/// alone is *constant across the face* and the texture stretches one texel over
+/// the whole of it. Measured as a defect before it was one: the kerb face is
+/// 150 mm of a 2 m concrete tile and would have drawn as a smear.
 fn emit_profile_strip(
     out: &mut RoadRibbon,
     frames: &[CrossFrame],
@@ -1491,10 +1503,18 @@ fn emit_profile_strip(
             // that walks off a row.
             return;
         }
-        for p in &pts {
+        // The cross-section's own arc length, anchored on its first point so a
+        // horizontal profile's `u` IS its offset — see the note above.
+        let mut u = pts[0].offset_m;
+        for (k, p) in pts.iter().enumerate() {
+            if k > 0 {
+                let d_off = p.offset_m - pts[k - 1].offset_m;
+                let d_y = p.y - pts[k - 1].y;
+                u += (d_off * d_off + d_y * d_y).sqrt();
+            }
             let xz = f.at(p.offset_m);
             out.vertices.push(DVec3::new(xz.x, p.y, xz.y));
-            out.uvs.push([p.offset_m as f32, f.arc as f32]);
+            out.uvs.push([u as f32, f.arc as f32]);
         }
     }
     let row = row_len as u32;

@@ -458,11 +458,6 @@ pub fn build_island(
             .iter()
             .map(|r| r.built_half_width_m())
             .fold(0.0f64, f64::max)
-            // …and at least one of the RENDERER's coarse cells wide, or the
-            // clipmap's decimation reaches past the plateau and drags the
-            // batter's height back under the road. See
-            // `terrain::MIN_CORRIDOR_FLAT_M`, which carries the measurement.
-            .max(0.0)
     } else {
         // The control: no plateau, so the levelling eases from the centreline
         // out exactly as it did before ROAD1.
