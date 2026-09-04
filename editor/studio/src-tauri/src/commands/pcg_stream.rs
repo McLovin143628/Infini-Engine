@@ -663,7 +663,7 @@ mod tests {
             assert_eq!(
                 forward[i],
                 EXPECTED[i],
-                "the editor's {} block is not the one the shipped player draws                  (see EXPECTED: the player's half asserts the same row)",
+                "the editor's {} block is not the one the shipped player draws (see EXPECTED)",
                 a.name()
             );
         }

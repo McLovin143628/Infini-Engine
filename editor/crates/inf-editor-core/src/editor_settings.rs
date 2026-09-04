@@ -562,7 +562,7 @@ mod tests {
         assert!(
             (lo - f64::from(PCG_STREAM_RADIUS_SCALE_RANGE.0)).abs() < 1.0e-6
                 && (hi - f64::from(PCG_STREAM_RADIUS_SCALE_RANGE.1)).abs() < 1.0e-6,
-            "the preference range must be the streamer's own range:              preference {PCG_STREAM_RADIUS_SCALE_RANGE:?}, streamer ({lo}, {hi})"
+            "the preference range is not the streamer's: {PCG_STREAM_RADIUS_SCALE_RANGE:?} vs ({lo}, {hi})"
         );
     }
 

@@ -30812,6 +30812,17 @@ Screenshots: `EDIT1-final/01-editor.png` (the editor, before Play),
   CRLF-normaliser ran over a staged `.png` and "fixed" 116 lone LF bytes inside a
   deflate stream. Caught by `git status`, restored, re-blessed, and the script
   now refuses anything that is not a known text extension or that contains a NUL.
+* **The eaten-continuation sweep is real, and it caught this wave.**
+  `inf_packager`'s `no_string_literal_in_the_workspace_carries_an_eaten_
+  continuation` found four hits at the end of the wave: **two genuine** eaten
+  `\`-continuations, written from a Python `\\` inside a heredoc exactly as the
+  law says happens, and **two false ones** — table columns aligned with runs of
+  spaces inside a `println!`. Both kinds are fixed rather than allowlisted:
+  the messages are reflowed onto one line, and the table is aligned with `{:<N}`
+  width specifiers instead of padding. The allowlist is keyed on a FUNCTION and
+  the gate's own doc records what that costs (the SCRIPT1b audit found two real
+  defects hiding inside an allowlisted function), so a wave that adds itself to
+  it is buying a blind spot rather than a pass.
 * **A CRLF file needs CRLF anchors.** Half this repository's TSX is CRLF in the
   working copy and half its Rust is LF; a multi-line anchor edit that carries the
   wrong newline silently matches nothing (and, worse, *inserts* the wrong one).

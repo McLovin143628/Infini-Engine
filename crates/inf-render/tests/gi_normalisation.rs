@@ -487,16 +487,27 @@ fn dynamic_gi_lights_a_daylight_street_rather_than_washing_it_out() {
     // shipped — the same scene, the same post chain, the old units.
     let (p95_old, hot_old) = street_shot(&gpu, Some(std::f32::consts::PI));
     println!("EDIT1 clause 0 - the lit street under `lit_showcase`");
-    println!("  GI off                       p95 {p95_off:6.1}  frac>240 {hot_off:.4}");
-    println!(
-        "  GI on, intensity 1.0         p95 {p95_on:6.1}  frac>240 {hot_on:.4}  lift {:+.1} / {:+.4}",
-        p95_on - p95_off,
-        hot_on - hot_off
+    // Aligned with width specifiers rather than runs of spaces inside the
+    // literal: `inf_packager`'s eaten-continuation sweep reads such a run as the
+    // defect it usually is, and it is right to — see this wave's ledger.
+    let row = |label: &str, p95: f64, hot: f64, base: Option<(f64, f64)>| {
+        let lift = base.map_or(String::new(), |(bp, bh)| {
+            format!("  lift {:+.1} / {:+.4}", p95 - bp, hot - bh)
+        });
+        println!("  {label:<30} p95 {p95:6.1}  frac>240 {hot:.4}{lift}");
+    };
+    row("GI off", p95_off, hot_off, None);
+    row(
+        "GI on, intensity 1.0",
+        p95_on,
+        hot_on,
+        Some((p95_off, hot_off)),
     );
-    println!(
-        "  GI on, intensity pi  SHIPPED p95 {p95_old:6.1}  frac>240 {hot_old:.4}  lift {:+.1} / {:+.4}",
-        p95_old - p95_off,
-        hot_old - hot_off
+    row(
+        "GI on, intensity pi  SHIPPED",
+        p95_old,
+        hot_old,
+        Some((p95_off, hot_off)),
     );
     assert!(
         p95_on - p95_off <= GI_P95_LIFT_CEILING,
