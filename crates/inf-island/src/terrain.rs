@@ -141,6 +141,34 @@ impl IslandGrid {
     }
 }
 
+/// **The narrowest plateau that survives the renderer's decimation**, metres —
+/// a floor on [`CarvePlan::corridor_flat_m`] (wave ROAD1).
+///
+/// # Why a road corridor has a minimum width that is not about roads
+///
+/// A locally planar surface decimates to itself, which is what makes a graded
+/// corridor immune to the clipmap's LOD morph — but only where the coarse
+/// lattice's own samples land **inside** it. `terrain.wgsl`'s `coarse_height` is
+/// a bilinear on a lattice of `2 · span / cells`, which on the island's 256 m
+/// tiles at `TERRAIN_BASE_CELLS = 64` is **8 m at ring 0 and 16 m at ring 1**.
+/// A plateau narrower than that has coarse samples on its batter, and the
+/// bilinear drags the batter's height back under the road.
+///
+/// Measured on the fixture before this floor existed: a 5.8 m plateau (an
+/// arterial's own built half-width) left the road **0.889 m** off the drawn
+/// terrain half way through ring 0's morph band, and **0.000 m** before the band
+/// started — so the plateau was working and the lattice was reaching past it.
+///
+/// 16 m is ring 1's cell, which is as far as this floor goes: ring 2's is 32 m
+/// and a 64 m-wide flat strip under every country lane is a bulldozed island,
+/// not a graded one. What ring 2 and beyond leave is measured and carried in
+/// `road1_gate`'s own table, in pixels at 1080p as well as in metres.
+///
+/// The number is stated here and **pinned against the renderer's own constants**
+/// in `road1_gate`, because `inf-island` cannot name `inf-render` — the same
+/// arrangement `inf_gis::PAVEMENT_M` has with `inf_ecs`.
+pub const MIN_CORRIDOR_FLAT_M: f64 = 16.0;
+
 /// Everything the carve needs that is not a height.
 #[derive(Debug)]
 pub struct CarvePlan<'a> {

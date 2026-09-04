@@ -116,7 +116,7 @@ pub use inf_gis::RoadGraph;
 /// wheels are actually cast into, since roads carry no colliders — has to read
 /// the builder's own number rather than restate it, and it cannot name
 /// `inf-gis` to do so.
-pub use inf_gis::roads::DEFAULT_ROAD_LIFT_M;
+pub use inf_gis::roads::{DEFAULT_CROWN_FALL, DEFAULT_ROAD_LIFT_M};
 pub use shape::{
     carve_sample, flatten_sample, smooth01, Coastline, Field, SegmentIndex, ShapeStats, Vertex3,
 };

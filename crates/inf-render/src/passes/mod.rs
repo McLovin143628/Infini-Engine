@@ -1841,6 +1841,49 @@ mod shader_compose_tests {
         }
     }
 
+    /// **The water shader models the section the terrain is carved to**
+    /// (wave ROAD1, clause 3).
+    ///
+    /// `inf_island::hydro::carve_channels` cuts a river's bed as
+    /// `depth · (1 − t²)`, `t` being the fraction of the way to the water's own
+    /// edge, and `water.wgsl` takes the larger of the depth buffer's column and
+    /// that same parabola in the ribbon's own bank fraction. If the two curves
+    /// disagreed the water would be opaque where the bed had risen to meet it,
+    /// or transparent over its own channel — and neither would look like a bug
+    /// in a carve.
+    ///
+    /// The numeric half of the fence is `a_channel_carve_puts_the_bed_under_the_
+    /// ground_it_was_found_on`, one crate over, which samples the carved
+    /// heightfield against the parabola at a quarter, a half and three quarters
+    /// of the way to the bank. This is the half that says the shader still
+    /// spells it — a source gate, because there is no adapter on a CI leg to
+    /// render it on.
+    ///
+    /// Falsification: change the taper to `1 − bank` or drop the `max` and this
+    /// reds.
+    #[test]
+    fn the_water_shader_models_the_bed_the_carve_cuts() {
+        let src = include_str!("../shaders/water.wgsl");
+        assert!(
+            src.contains("let bank_taper = 1.0 - in.profile.y * in.profile.y;"),
+            "water.wgsl no longer tapers a river's modelled depth as `1 − bank²`              — that is the parabola `carve_channels` cuts the bed to"
+        );
+        assert!(
+            src.contains("column = select(column, modelled, is_river);"),
+            "water.wgsl no longer takes a river's column from its own modelled              bed. `max(column, modelled)` is NOT good enough and this arm says              the difference: `max` still lets the depth buffer win wherever it              says more than the model, which on a reach whose bank is already              below the water line is everywhere — and the band then travels with              the terrain exactly as before over that stretch (measured: 1.00 ->              1.00 -> 0.81 of a half-width under `max`, a flat 0.81 under this)"
+        );
+        assert!(
+            src.contains("water.dims.x == WATER_RIVER"),
+            "the modelled column must be a RIVER's — an ocean and a lake meet              arbitrary ground at an arbitrary line, which is the case a              screen-space difference is for"
+        );
+        // …and the screen-space width floor, the other half of clause 3.
+        assert!(
+            src.contains("MIN_RIVER_PIXELS / px_per_m")
+                && src.contains("draw_width = max(width, "),
+            "water.wgsl no longer floors a river's rasterised width; a 1.5 m              creek at a kilometre is a third of a pixel and rasterises to a              dotted flicker"
+        );
+    }
+
     /// Standalone (uncomposed) modules the passes compile as-is.
     #[test]
     fn standalone_shaders_validate() {

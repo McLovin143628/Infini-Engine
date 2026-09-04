@@ -724,6 +724,20 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 river_width_end_m: w,
                 river_depth_start_m: (d * 0.7).max(0.3),
                 river_depth_end_m: d,
+                // **The shore band is sized to THIS reach** (wave ROAD1,
+                // clause 3), and it has to be, now that a river's drawn column
+                // is its own modelled bed: `water.wgsl` takes the larger of the
+                // depth buffer and `depth · (1 − bank²)`, so a band wider than
+                // the reach is deep would leave the whole creek half
+                // transparent — a 0.35 m stream against the 1.2 m default
+                // reaches `smoothstep(0, 1.2, 0.35) = 0.20` **on its own
+                // centreline**.
+                //
+                // A third of the depth puts the band in the outer third of the
+                // ribbon, which is where a bank is, and the clamp keeps it a
+                // band rather than a hard edge on a trickle or a smear on the
+                // deepest reach.
+                shore_fade_m: (d * 0.35).clamp(0.12, 1.2),
                 ..WaterBody::river(w, d, 0.5 + 2.0 * s.grade().clamp(0.0, 0.5))
             },
         );

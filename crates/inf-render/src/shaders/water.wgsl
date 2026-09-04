@@ -29,6 +29,19 @@ const WATER_OCEAN: u32 = 0u;
 const WATER_LAKE: u32 = 1u;
 const WATER_RIVER: u32 = 2u;
 
+/// **The narrowest a river may rasterise**, in pixels (wave ROAD1, clause 3).
+///
+/// Two, because one is the width at which a band and a gap alternate along a
+/// line and the ribbon reads as a dotted flicker; two always covers a pixel
+/// centre. It is a floor and not a scale: a river already wider than this takes
+/// the `max` and is not touched, which is every river in every golden and every
+/// river a player is looking at.
+///
+/// The alternative — an impostor ribbon at distance — buys the same two pixels
+/// for a second draw path, a second material and a crossfade band. This is one
+/// `max` in the vertex stage.
+const MIN_RIVER_PIXELS: f32 = 2.0;
+
 // Water's index of refraction is 1.333, so the normal-incidence Fresnel
 // reflectance is ((1.333−1)/(1.333+1))² ≈ 0.02. Not a taste constant.
 const WATER_F0: f32 = 0.02;
@@ -205,11 +218,32 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
         let right = normalize(mix(a.right_s.xyz, b.right_s.xyz, t));
         let tangent = normalize(mix(a.tangent_depth.xyz, b.tangent_depth.xyz, t));
         let s = mix(a.right_s.w, b.right_s.w, t);
-        let lateral = (v - 0.5) * width;
+        // **A river never collapses below a two-pixel band** (wave ROAD1,
+        // clause 3). A creek is 1.5 m wide and the island has 33 km of them; at
+        // a kilometre that is a third of a pixel, so the ribbon rasterises to a
+        // dotted line that flickers as the camera moves — the "fade in and out"
+        // this wave was called for, in its second form.
+        //
+        // The widening is in SCREEN space and is measured rather than guessed:
+        // project the centreline and a point one metre across it, and the
+        // distance between them in pixels is what a metre is worth here. A river
+        // already wider than the floor takes `max` and is untouched, which is
+        // every river in every golden — see `MIN_RIVER_PIXELS`.
+        let c0 = view.view_proj * vec4<f32>(center, 1.0);
+        let c1 = view.view_proj * vec4<f32>(center + right, 1.0);
+        var draw_width = width;
+        if (c0.w > 1e-4 && c1.w > 1e-4) {
+            let px_per_m = abs(c1.x / c1.w - c0.x / c0.w)
+                * 0.5 * view.grid_axis_viewport.z;
+            if (px_per_m > 1e-6) {
+                draw_width = max(width, MIN_RIVER_PIXELS / px_per_m);
+            }
+        }
+        let lateral = (v - 0.5) * draw_width;
         base = center + right * lateral;
         param = vec2<f32>(s, lateral);
         depth_m = mix(a.tangent_depth.w, b.tangent_depth.w, t);
-        bank = select(0.0, abs(lateral) / (0.5 * width), width > 0.0);
+        bank = select(0.0, abs(lateral) / (0.5 * draw_width), draw_width > 0.0);
         // Interpolated exactly like the width and the depth: the gain is a
         // per-frame property of the ribbon, not a per-body constant.
         flow_gain = max(mix(a.flow_extra.x, b.flow_extra.x, t), 1.0);
@@ -437,6 +471,47 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         column = max(length(hit - in.world), 0.0);
         has_floor = true;
     }
+
+    // **A RIVER'S COLUMN IS A FACT ABOUT THE RIVER** (wave ROAD1, clause 3).
+    //
+    // The column above is the distance to whatever the depth buffer drew, and
+    // the terrain the depth buffer draws MOVES: the clipmap morphs a vertex
+    // toward a bilinear on a lattice twice as coarse, so a channel narrower than
+    // that lattice is simply not there at distance. The measured consequence is
+    // the one this wave was called for — the stream's whole surface fading out
+    // and back as the camera moves, because its shore band swept across it.
+    //
+    // A river carries its own bed profile and always has: `WaterFrame::depth_m`
+    // reaches the GPU in `tangent_depth.w`, is interpolated into `profile.x` by
+    // the vertex stage, and until this line **no fragment ever read it**. The
+    // modelled column is that depth tapered to zero at the bank — a parabola,
+    // which is the section `inf_island::hydro::carve_channels` now cuts — and
+    // the drawn column is the larger of the two. So the water is opaque over its
+    // own bed however coarse the terrain under it has become, and it still fades
+    // exactly at its own edge, where the taper reaches zero.
+    //
+    // Ocean and lake are untouched: they meet arbitrary ground at an arbitrary
+    // line, which is precisely the case a screen-space difference is for.
+    let bank_taper = 1.0 - in.profile.y * in.profile.y;
+    let is_river = water.dims.x == WATER_RIVER;
+    let modelled = select(0.0, max(in.profile.x, 0.0) * bank_taper, is_river);
+    // **A river takes the modelled bed and nothing else**, and that is stronger
+    // than `max` on purpose. `max` still lets the depth buffer decide wherever
+    // it happens to say MORE than the model — which on a reach whose bank is
+    // already below the water line is everywhere, and the band then travels with
+    // the terrain exactly as before over that stretch. Measured on the fixture:
+    // the band's outer edge went 1.00 -> 1.00 -> 0.81 of a half-width over the
+    // three morph distances under `max`, and is a flat 0.81 under this.
+    //
+    // What it costs is named: a hull, a jetty or a rock sitting IN a river no
+    // longer shortens the column beneath it, so the water tints as though its
+    // own bed were down there. That is a fidelity loss on floating objects
+    // against a river that stops disappearing, and the trade is stated rather
+    // than discovered. Ocean and lake keep the depth buffer, which is what a
+    // screen-space difference is for — they meet arbitrary ground at an
+    // arbitrary line and have no modelled bed at all.
+    column = select(column, modelled, is_river);
+    has_floor = has_floor || is_river;
 
     // Shore blend: the surface fades out where the ground comes up to meet it.
     // A screen-space depth difference, so it works against terrain, a jetty and

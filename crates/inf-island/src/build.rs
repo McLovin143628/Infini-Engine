@@ -47,7 +47,14 @@ pub struct StepLog {
 }
 
 /// How a build is asked for.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// **`Default` is hand-written since wave ROAD1**, and that is not tidying:
+/// `graded_roads` defaults to **true**, and a derived `Default` would have made
+/// it false — so `BuildOptions::default()`, which is what `inf island build`
+/// and every gate in the tree use, would have quietly built the pre-ROAD1
+/// island. It did, for one measurement, and the tell was the control and the
+/// subject agreeing to four decimal places.
+#[derive(Clone, Debug, PartialEq)]
 pub struct BuildOptions {
     /// Re-derive the streams and lakes and **overwrite** the committed layers.
     ///
@@ -73,6 +80,32 @@ pub struct BuildOptions {
     /// planned them again, and audited a road whose corridor had never been cut.
     /// Measured on the fixture: **15.28 % over the ceiling instead of 0 %.**
     pub dry_run: bool,
+    /// **Grade the roads onto a levelled corridor plateau** (wave ROAD1).
+    ///
+    /// On by default, and it is what the island ships: the carve levels a flat
+    /// plateau under everything a road draws, and the carriageway is built
+    /// planar-with-a-crown on top of it — which is what a built road is, and
+    /// what makes the ground under it survive the clipmap's LOD morph unmoved.
+    ///
+    /// **Off is the pre-ROAD1 island**: no plateau (the levelling eases straight
+    /// from the centreline), no crown, and a ribbon that conforms to the ground
+    /// at every point of its cross-section. It exists so `road1_gate` can build
+    /// the control it compares against rather than asserting that a small number
+    /// is small — a switch with one caller, and that caller is the measurement.
+    pub graded_roads: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            rederive_layers: false,
+            replan_roads: false,
+            dry_run: false,
+            // **True**, and see the type's own note for why this impl is
+            // written out rather than derived.
+            graded_roads: true,
+        }
+    }
 }
 
 impl BuildOptions {
@@ -101,6 +134,7 @@ impl BuildOptions {
             rederive_layers: false,
             replan_roads: true,
             dry_run: true,
+            graded_roads: true,
         }
     }
 }
@@ -419,10 +453,21 @@ pub fn build_island(
     // kerb-and-pavement its class carries — taken over the routes actually
     // committed rather than assumed, so an island with no roads yet levels
     // nothing and one with a four-lane trunk levels for a four-lane trunk.
-    let corridor_flat = committed_routes
-        .iter()
-        .map(|r| r.built_half_width_m())
-        .fold(0.0f64, f64::max);
+    let corridor_flat = if opts.graded_roads {
+        committed_routes
+            .iter()
+            .map(|r| r.built_half_width_m())
+            .fold(0.0f64, f64::max)
+            // …and at least one of the RENDERER's coarse cells wide, or the
+            // clipmap's decimation reaches past the plateau and drags the
+            // batter's height back under the road. See
+            // `terrain::MIN_CORRIDOR_FLAT_M`, which carries the measurement.
+            .max(0.0)
+    } else {
+        // The control: no plateau, so the levelling eases from the centreline
+        // out exactly as it did before ROAD1.
+        0.0
+    };
     // The batter keeps the width it always had; the plateau is added OUTSIDE it,
     // so a corridor is now `flat + batter` rather than a bowl of `batter`. On the
     // island that is 9.5 m of plateau (the highway's 7 m half plus its 2.5 m
@@ -537,11 +582,28 @@ pub fn build_island(
         .iter()
         .map(|s| s.width_m())
         .fold(2.0f64, f64::max);
-    // The CARVE's index, at the bed's own width. The DETAIL step excludes the
-    // same beds five steps later but needs an index that answers past them — see
-    // the note there, and `detail::fade_reach_m`.
-    let channels = hydro::channel_index(&network.streams, widest);
-    let cut = hydro::carve_channels(&mut data, &channels, widest, 1.25);
+    // **Each reach to its own profile** (wave ROAD1, clause 3). The index still
+    // answers out to the widest channel's batter, because one index has to serve
+    // every reach; what changed is that the CUT is per-owner, so a 1.5 m creek
+    // gets a 1.5 m channel instead of a slot down the middle of the widest
+    // stream's trench. The DETAIL step excludes the same beds five steps later
+    // but needs an index that answers past them — see the note there, and
+    // `detail::fade_reach_m`.
+    let profiles = hydro::channel_profiles(&network.streams);
+    let reach = widest * 0.5 * (1.0 + hydro::CHANNEL_BANK_MULT);
+    let channels = hydro::channel_index(&network.streams, reach);
+    let cut = hydro::carve_channels(
+        &mut data,
+        &channels,
+        &profiles,
+        // A reach with no profile cannot happen — `channel_profiles` is built
+        // from the same slice the index is — so the fallback is the narrowest
+        // real channel rather than a number that would look plausible.
+        hydro::ChannelProfile {
+            half_width_m: 0.75,
+            depth_m: 0.35,
+        },
+    );
     say(
         BuildStep::Hydrology,
         format!(
@@ -606,10 +668,24 @@ pub fn build_island(
         let p = coarse.position(i, j);
         classifier.at(p, f64::from(coarse.at(i, j)), coarse.slope_deg(i, j))
     });
+    // **The banks get the hydrology's own ground** (wave ROAD1, clause 3): the
+    // gravel a watercourse lays either side of itself, on the SAME index and the
+    // same profiles the carve cut with, so the material's edge is the bank's
+    // edge rather than a second guess at where it is.
+    let bank_fallback = hydro::ChannelProfile {
+        half_width_m: 0.75,
+        depth_m: 0.35,
+    };
+    let banks = crate::splat::ChannelBanks {
+        index: &channels,
+        profiles: &profiles,
+        fallback: bank_fallback,
+    };
     let splat = crate::splat::stamp_splat(
         &mut data,
         &splat_field,
         crate::splat::SplatRules::of(recipe),
+        Some(&banks),
     );
     if splat.sum_violations > 0 {
         // The splat invariant is a contract, not a tolerance: a weight that does
@@ -701,7 +777,13 @@ pub fn build_island(
             inf_gis::GeoLayer::new("roads", inf_gis::LayerKind::Roads, &anchor.crs)
         };
         let mut ground = |x: f64, z: f64| data.height_at(DVec2::new(x, z));
-        let (m, mr, rr) = roads::build_mesh(&layer, recipe.grid.meters_per_sample, &mut ground)?;
+        let (m, mr, rr) = roads::build_mesh(
+            &layer,
+            recipe.grid.meters_per_sample,
+            opts.graded_roads,
+            corridor_flat,
+            &mut ground,
+        )?;
         say(
             BuildStep::Roads,
             format!(
@@ -989,7 +1071,7 @@ pub fn write_content(build: &IslandBuild, content: &Path) -> Result<Vec<String>,
         // name and the GUID it has always had — a committed `.inf_lvl` names
         // both — and each furniture group gets its own beside it, because an
         // `inf_ecs::Material` binds ONE `.inf_mat` and a road wears four.
-        let mut write = |stem: String, guid: uuid::Uuid, asset: &inf_mesh::MeshAsset| {
+        let write = |stem: String, guid: uuid::Uuid, asset: &inf_mesh::MeshAsset| {
             let p = content.join(stem);
             let bytes = inf_asset::encode(asset).map_err(|e| IslandError::Io(e.to_string()))?;
             std::fs::write(&p, &bytes)?;

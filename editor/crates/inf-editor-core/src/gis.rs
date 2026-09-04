@@ -271,6 +271,7 @@ pub fn run_import(
                 // recipe owns its terrain and states both; `SurfaceOptions`'s own
                 // field notes carry the reasoning.
                 crown_fall: 0.0,
+                graded_half_m: 0.0,
                 furniture: false,
             },
             ..Default::default()

@@ -85,6 +85,40 @@ pub const ALPINE_RAMP_M: f64 = 70.0;
 /// One coarse cell's four layer weights, before any per-sample term.
 type Mix = [f64; SPLAT_LAYERS];
 
+/// **Where a watercourse lays its own ground** (wave ROAD1, clause 3).
+///
+/// The same index and the same profiles `hydro::carve_channels` cuts with, so
+/// the gravel and the section are one decision rather than two that happen to
+/// line up. `at` answers 1 inside the water's own half-width and eases to 0
+/// across the batter — the curve the carve's bank uses, so the material's edge
+/// is the bank's edge.
+pub struct ChannelBanks<'a> {
+    pub index: &'a crate::shape::SegmentIndex,
+    pub profiles: &'a [crate::hydro::ChannelProfile],
+    /// The profile a reach with no entry takes — see `carve_channels`.
+    pub fallback: crate::hydro::ChannelProfile,
+}
+
+impl ChannelBanks<'_> {
+    /// How much of this sample is channel bank, in `[0, 1]`.
+    pub fn at(&self, p: DVec2) -> f64 {
+        let Some(n) = self.index.nearest(p) else {
+            return 0.0;
+        };
+        let prof = self.profiles.get(n.owner).copied().unwrap_or(self.fallback);
+        let half = prof.half_width_m.max(1e-3);
+        let outer = half * (1.0 + crate::hydro::CHANNEL_BANK_MULT);
+        if n.distance_m <= half {
+            1.0
+        } else if n.distance_m >= outer {
+            0.0
+        } else {
+            let b = (n.distance_m - half) / (outer - half);
+            1.0 - b * b * (3.0 - 2.0 * b)
+        }
+    }
+}
+
 /// What a biome's ground is made of.
 ///
 /// Every row sums to 1. The rows are the island's own design decision and the
@@ -231,6 +265,9 @@ pub struct SplatStats {
     /// Weights that did not sum to 255. **Asserted zero**; a non-zero reading is
     /// a defect in [`quantize_255`], not a tolerance.
     pub sum_violations: u64,
+    /// Samples the channel-bank rule pushed at least half way to sand (wave
+    /// ROAD1). Zero when the caller passed no banks.
+    pub bank_samples: u64,
 }
 
 impl SplatStats {
@@ -396,7 +433,12 @@ pub(crate) fn slope_deg_at(
 /// `TerrainData` this walked, so a coarse LOD page still shades off layer 0's
 /// colour. That is the existing bound, restated because this is the wave that
 /// makes it visible.
-pub fn stamp_splat(data: &mut TerrainData, field: &SplatField, rules: SplatRules) -> SplatStats {
+pub fn stamp_splat(
+    data: &mut TerrainData,
+    field: &SplatField,
+    rules: SplatRules,
+    banks: Option<&ChannelBanks<'_>>,
+) -> SplatStats {
     let res = data.tile_resolution();
     let mps = data.meters_per_sample();
     let n = (res * res) as usize;
@@ -448,6 +490,27 @@ pub fn stamp_splat(data: &mut TerrainData, field: &SplatField, rules: SplatRules
                     let above = height - rules.sea_level_m;
                     let sand_t = (1.0 - ramp(sand_lo, sand_hi, above)) * (1.0 - rock_t);
                     toward(&mut w, LAYER_SAND, sand_t);
+
+                    // 4. THE CHANNEL BANK (wave ROAD1, clause 3) — the gravel a
+                    //    watercourse lays either side of itself. Sand, because
+                    //    that is the layer this island binds for loose granular
+                    //    ground, and it is what a creek bed and its bars read as
+                    //    against the grass they cut through.
+                    //
+                    //    Full inside the water's own half-width and easing out
+                    //    over the batter, on the SAME geometry the carve cuts —
+                    //    so the material and the section are one decision. Gated
+                    //    on the slope term like the alpine one: a stream in a
+                    //    rock gorge keeps its rock.
+                    if let Some(b) = banks {
+                        let bank_t = b.at(p) * (1.0 - rock_t);
+                        if bank_t > 0.0 {
+                            toward(&mut w, LAYER_SAND, bank_t);
+                            if bank_t >= 0.5 {
+                                st.bank_samples += 1;
+                            }
+                        }
+                    }
 
                     let q = quantize_255(w);
                     let sum: u32 = q.iter().map(|&v| u32::from(v)).sum();
@@ -636,7 +699,7 @@ mod tests {
             rock_deg: 36.0,
             alpine_m: 620.0,
         };
-        let st = stamp_splat(&mut data, &field, rules);
+        let st = stamp_splat(&mut data, &field, rules, None);
         assert_eq!(st.samples, u64::from(res * res));
         assert_eq!(st.sum_violations, 0, "the invariant broke");
         let tile = data.get_tile((0, 0)).expect("the tile");
@@ -692,7 +755,7 @@ mod tests {
             rock_deg: 36.0,
             alpine_m: 620.0,
         };
-        stamp_splat(&mut data, &field, rules);
+        stamp_splat(&mut data, &field, rules, None);
         let a = data.get_tile((0, 0)).expect("tile a");
         let b = data.get_tile((1, 0)).expect("tile b");
         for j in 0..res {
@@ -735,7 +798,7 @@ mod tests {
             rock_deg: 36.0,
             alpine_m: 620.0,
         };
-        stamp_splat(&mut data, &field, rules);
+        stamp_splat(&mut data, &field, rules, None);
         let tile = data.get_tile((0, 0)).expect("the tile");
         let sand_at = |i: u32| tile.weight_sample(res, i, 32)[LAYER_SAND];
         assert!(
@@ -796,6 +859,7 @@ mod tests {
                     rock_deg: 36.0,
                     alpine_m: 620.0,
                 },
+                None,
             );
             let w: Vec<[u8; 4]> = data.get_tile((0, 0)).expect("tile").weights().to_vec();
             (st, w)

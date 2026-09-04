@@ -116,9 +116,9 @@ pub use gpu::{create_instance, GpuContext};
 pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
 pub use passes::composite::BlitMode;
 pub use passes::terrain::{
-    assemble_patches, cells_at_lod, lod_for_distance, lod_thresholds, morph_factor, patch_mesh_lod,
-    plan_tile_cache, ring_source_lod, superseded, CachedTile, TerrainPatch, TileCacheKey,
-    TileCachePlan, TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
+    assemble_patches, cells_at_lod, lod_for_distance, lod_thresholds, morph_band, morph_factor,
+    patch_mesh_lod, plan_tile_cache, ring_source_lod, superseded, CachedTile, TerrainPatch,
+    TileCacheKey, TileCachePlan, TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
 // The P21.1 voxel-surface cache gate — the pure planner the volumetric-terrain
 // pass drives its per-chunk uploads/evictions from, exported like `plan_tile_cache`

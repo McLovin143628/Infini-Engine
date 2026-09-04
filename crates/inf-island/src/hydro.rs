@@ -528,25 +528,82 @@ fn lakes_of(flow: &FlowField, p: &HydroParams) -> Vec<Lake> {
     out
 }
 
-/// Carve a channel for each stream into the terrain.
+/// **The channel one reach wants cut for it** (wave ROAD1, clause 3).
 ///
-/// # Why the ground has to move
+/// One per [`Stream`], indexed the way [`SegmentIndex::nearest`]'s `owner` is,
+/// so a sample can be cut to the profile of the reach it is actually near
+/// rather than to one number shared by every watercourse on the island.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChannelProfile {
+    /// Half the water surface's width, metres — where the bed meets the bank
+    /// and the water's own edge is.
+    pub half_width_m: f64,
+    /// How far the bed sits below the water surface at the centreline, metres.
+    pub depth_m: f64,
+}
+
+/// The profile each reach wants, in `streams` order.
 ///
-/// A `WaterBody::River` is a surface over a spline. P20's own bed advisory calls
-/// a river whose bed climbs *"a basin, not a river"* and refuses to pretend
-/// otherwise — and a derived stream laid on unmodified ground is exactly that:
-/// the ground under a D8 channel is the ground the channel was found on, which
-/// is a surface, not a trench. Cutting a shallow V under each reach is what makes
-/// the water sit **in** the island instead of on it.
+/// Straight off [`Stream::width_m`] and [`Stream::depth_m`] — the same two
+/// numbers the `WaterBody` the level spawns is built from, which is the whole
+/// point: before this wave the carve used **one** half-width (the widest stream
+/// on the island) and **one** depth (1.25 m) for every reach, while the water
+/// ribbon tapered per reach. A 1.5 m creek was therefore drawn as a 1.5 m ribbon
+/// down the middle of a 48 m trench.
+pub fn channel_profiles(streams: &[Stream]) -> Vec<ChannelProfile> {
+    streams
+        .iter()
+        .map(|s| ChannelProfile {
+            half_width_m: s.width_m() * 0.5,
+            depth_m: s.depth_m(),
+        })
+        .collect()
+}
+
+/// How far past the water's edge a bank batter runs, as a multiple of the
+/// half-width.
+///
+/// A natural channel is not a slot: the bed rises to the water line and the bank
+/// keeps rising past it. One half-width of batter is a 1:1 side slope at the
+/// depths this island's streams have, which is what an incised creek in glacial
+/// till looks like — and it is also what gives the shore fade somewhere to
+/// happen when the water is a little higher than the bed says.
+pub const CHANNEL_BANK_MULT: f64 = 1.0;
+
+/// Carve a channel for each stream into the terrain, **each to its own
+/// profile**.
+///
+/// # The section, and why it is a parabola inside a batter
+///
+/// Within the water's own half-width the bed drops to `depth_m` on the
+/// centreline and rises to **zero at the edge**, as `depth · (1 − t²)`. That
+/// matters twice: it is the section a stream actually cuts, and it is the
+/// section `water.wgsl`'s modelled column assumes — the shader tapers the
+/// river's depth by `1 − bank²` and takes the larger of that and the depth
+/// buffer, so the water is opaque over its own bed at any LOD and fades exactly
+/// where the bed reaches the bank. The two are one curve, written twice because
+/// one is a heightfield and the other is a fragment shader; `the_carved_bed_-
+/// and_the_drawn_water_agree_on_one_section` is the fence.
+///
+/// Past the edge a **batter** runs out over [`CHANNEL_BANK_MULT`] half-widths,
+/// easing from the water line back to the terrain's own height, so a channel has
+/// banks rather than walls.
+///
+/// # It only ever cuts down (unchanged)
+///
+/// `if bed < h` — a carve lowers ground and never raises it, so a reach crossing
+/// a hollow leaves the hollow alone rather than building a levee across it. The
+/// bank is therefore what the terrain already had, eased; the carve does not
+/// invent one.
 ///
 /// Returns how many samples moved.
 pub fn carve_channels(
     data: &mut inf_terrain::TerrainData,
     index: &crate::shape::SegmentIndex,
-    half_width_m: f64,
-    depth_m: f64,
+    profiles: &[ChannelProfile],
+    fallback: ChannelProfile,
 ) -> u64 {
-    if index.is_empty() || half_width_m <= 0.0 || depth_m <= 0.0 {
+    if index.is_empty() {
         return 0;
     }
     let res = data.tile_resolution();
@@ -562,13 +619,33 @@ pub fn carve_channels(
             for i in 0..res {
                 let p = DVec2::new(origin.x + f64::from(i) * mps, origin.y + f64::from(j) * mps);
                 let Some(n) = index.nearest(p) else { continue };
-                if n.distance_m >= half_width_m {
+                let prof = profiles.get(n.owner).copied().unwrap_or(fallback);
+                let half = prof.half_width_m.max(1e-3);
+                let outer = half * (1.0 + CHANNEL_BANK_MULT);
+                if n.distance_m >= outer {
                     continue;
                 }
-                // A V: full depth on the centreline, meeting the bank at zero.
-                let t = n.distance_m / half_width_m;
-                let cut = depth_m * (1.0 - t);
-                let bed = n.height_m - cut;
+                let t = n.distance_m / half;
+                let cut = if t <= 1.0 {
+                    // The bed: a parabola, full depth on the centreline, zero at
+                    // the water's own edge.
+                    prof.depth_m * (1.0 - t * t)
+                } else {
+                    // The batter: past the edge the cut is zero and what remains
+                    // is the ease back onto the terrain's own height, which
+                    // `bed < h` applies below.
+                    0.0
+                };
+                let bed = if t <= 1.0 {
+                    n.height_m - cut
+                } else {
+                    // Ease the BANK from the water line back to the terrain over
+                    // the batter, so the channel has a lip rather than a wall.
+                    let b = ((n.distance_m - half) / (outer - half)).clamp(0.0, 1.0);
+                    let w = 1.0 - b * b * (3.0 - 2.0 * b);
+                    let h = tile.world_height(res, i, j);
+                    h + (n.height_m - h) * w
+                };
                 let h = tile.world_height(res, i, j);
                 if bed < h {
                     tile.set_sample(res, i, j, (bed - tile.origin.y) as f32);
@@ -900,34 +977,134 @@ mod tests {
         assert!(!net2.streams.is_empty(), "…but it still has streams");
     }
 
+    /// **A carve cuts each reach its own channel, and the section the water
+    /// shader assumes** (wave ROAD1, clause 3).
+    ///
+    /// Two reaches on one plane, one four times the other's catchment and
+    /// therefore twice its width. Before this wave both were cut at the *widest*
+    /// stream's half-width and a flat 1.25 m, so the creek was a 3 m ribbon down
+    /// the middle of a 24 m trench and its water sat 1.25 m over a bed nothing
+    /// had told it about.
     #[test]
     fn a_channel_carve_puts_the_bed_under_the_ground_it_was_found_on() {
-        let mut data = inf_terrain::TerrainData::new(65, 1.0);
+        let mut data = inf_terrain::TerrainData::new(129, 1.0);
         data.author_tile((0, 0), |_, _| 100.0);
-        let s = Stream {
+        let reach = |catchment: f64, z: f64| Stream {
             points: vec![
-                glam::DVec3::new(4.0, 100.0, 8.0),
-                glam::DVec3::new(60.0, 100.0, 8.0),
+                glam::DVec3::new(4.0, 100.0, z),
+                glam::DVec3::new(120.0, 100.0, z),
             ],
-            catchment_m2: 2.0e6,
-            length_m: 56.0,
+            catchment_m2: catchment,
+            length_m: 116.0,
             fall_m: 0.0,
         };
-        let idx = channel_index(std::slice::from_ref(&s), 6.0);
-        let moved = carve_channels(&mut data, &idx, 6.0, 2.0);
+        // 4x the catchment is 2x the width: `width_m` is `2·sqrt(ratio)`.
+        let big = reach(64.0 * DEFAULT_STREAM_CATCHMENT_M2, 30.0);
+        let small = reach(16.0 * DEFAULT_STREAM_CATCHMENT_M2, 90.0);
+        assert!(
+            (big.width_m() - 2.0 * small.width_m()).abs() < 1e-9,
+            "the fixture's two reaches are {} m and {} m — they must differ, or \
+             a per-reach carve cannot be told from the one it replaced",
+            big.width_m(),
+            small.width_m()
+        );
+        let streams = vec![big, small];
+        let profiles = channel_profiles(&streams);
+        let widest = streams.iter().map(Stream::width_m).fold(2.0f64, f64::max);
+        let idx = channel_index(&streams, widest * 0.5 * (1.0 + CHANNEL_BANK_MULT));
+        let moved = carve_channels(
+            &mut data,
+            &idx,
+            &profiles,
+            ChannelProfile {
+                half_width_m: 0.75,
+                depth_m: 0.35,
+            },
+        );
         assert!(moved > 0, "the carve moved nothing");
-        // On the centreline the bed is the full depth down.
-        let on = data.height_at(DVec2::new(30.0, 8.0)).unwrap();
-        assert!((on - 98.0).abs() < 0.05, "the bed is at {on} m, want 98");
-        // At the bank it meets the ground.
-        let bank = data.height_at(DVec2::new(30.0, 14.0)).unwrap();
-        assert!((bank - 100.0).abs() < 0.05, "the bank is at {bank} m");
-        // Away from the stream nothing moved.
-        assert_eq!(data.height_at(DVec2::new(30.0, 40.0)).unwrap(), 100.0);
+
+        for (k, (s, prof)) in streams.iter().zip(&profiles).enumerate() {
+            let z = s.points[0].z;
+            // On the centreline the bed is the full depth down — **this** reach's
+            // depth, not the island's one number.
+            let on = data.height_at(DVec2::new(60.0, z)).unwrap();
+            assert!(
+                (on - (100.0 - prof.depth_m)).abs() < 0.05,
+                "reach {k}'s bed is at {on} m and its own depth is {} m",
+                prof.depth_m
+            );
+            // **The section is the one the shader models.** `water.wgsl` tapers
+            // a river's depth by `1 − bank²` and takes the larger of that and
+            // the depth buffer; if the two curves disagreed the water would be
+            // opaque where the bed had risen to meet it, or transparent over its
+            // own channel. Sampled at a quarter, a half and three quarters of the
+            // way to the bank.
+            for f in [0.25f64, 0.5, 0.75] {
+                let d = f * prof.half_width_m;
+                let want = 100.0 - prof.depth_m * (1.0 - f * f);
+                let got = data.height_at(DVec2::new(60.0, z + d)).unwrap();
+                assert!(
+                    (got - want).abs() < 0.06,
+                    "reach {k} at {f} of the way to its bank is {got} m and the \
+                     parabola `depth·(1 − t²)` the shader assumes wants {want}"
+                );
+            }
+            // At the water's own edge the bed has reached the bank.
+            let edge = data
+                .height_at(DVec2::new(60.0, z + prof.half_width_m))
+                .unwrap();
+            assert!(
+                (edge - 100.0).abs() < 0.06,
+                "reach {k}'s bed at its own edge is {edge} m, and the water's \
+                 edge is where the bed meets the bank"
+            );
+        }
+
+        // **And the narrow reach did not get the wide one's trench.** The point
+        // of the whole change: measured at the small stream's own half-width
+        // plus its batter, the ground is untouched.
+        let small_outer = profiles[1].half_width_m * (1.0 + CHANNEL_BANK_MULT);
+        let beyond = data
+            .height_at(DVec2::new(60.0, 90.0 + small_outer + 1.0))
+            .unwrap();
+        assert!(
+            (beyond - 100.0).abs() < 1e-6,
+            "{beyond} m: the creek cut ground {} m from its centreline, which is \
+             past its own bank — that is the widest-stream trench this wave \
+             removed",
+            small_outer + 1.0
+        );
+
         // A carve never RAISES ground: an empty index and a zero depth are no-ops.
-        assert_eq!(carve_channels(&mut data, &idx, 6.0, 0.0), 0);
+        let flat = vec![
+            ChannelProfile {
+                half_width_m: 6.0,
+                depth_m: 0.0,
+            };
+            2
+        ];
         assert_eq!(
-            carve_channels(&mut data, &channel_index(&[], 6.0), 6.0, 2.0),
+            carve_channels(
+                &mut data,
+                &idx,
+                &flat,
+                ChannelProfile {
+                    half_width_m: 6.0,
+                    depth_m: 0.0
+                }
+            ),
+            0
+        );
+        assert_eq!(
+            carve_channels(
+                &mut data,
+                &channel_index(&[], 6.0),
+                &[],
+                ChannelProfile {
+                    half_width_m: 6.0,
+                    depth_m: 2.0
+                }
+            ),
             0
         );
         assert!(lakes_by_id(&[]).is_empty());

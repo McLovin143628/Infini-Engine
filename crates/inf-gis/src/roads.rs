@@ -793,6 +793,11 @@ pub fn build_ribbon_across(
     let opts = SurfaceOptions {
         lift_m,
         crown_fall,
+        // The plateau this builder was told about — `build_ribbon_across` takes
+        // the cross-fall as an argument and not the whole options block, so a
+        // direct caller grades over a plateau exactly as wide as its
+        // carriageway. `build_surface` passes its own.
+        graded_half_m: if crown_fall > 0.0 { half } else { 0.0 },
         ..SurfaceOptions::default()
     };
 
@@ -1371,6 +1376,28 @@ pub struct SurfaceOptions {
     /// for: a locally planar corridor decimates to itself, so the clipmap's LOD
     /// morph moves the ground under a graded road by nothing.
     pub crown_fall: f64,
+    /// **How far from the centreline the caller has levelled a plateau**,
+    /// metres — the half-width over which grading is legal (wave ROAD1).
+    ///
+    /// # The corner that made this a field
+    ///
+    /// A graded section takes ONE ground sample, on the centreline, and that is
+    /// only truthful where the ground under the whole section is planar. It is,
+    /// inside the corridor plateau — and a **mitred corner is not inside it**:
+    /// `MITER_LIMIT` lets a cross-section reach four half-widths from the
+    /// centreline at a hairpin, which on the island's own fixture put ribbon
+    /// vertices **14 m out** and floating **1.56 m** over the batter they landed
+    /// on. Measured; it is what `road1_gate`'s first run reported.
+    ///
+    /// So past this distance the section **conforms** again, eased in over half
+    /// a plateau so the transition is not a crease. `0.0` — the default — means
+    /// "no plateau", and with `crown_fall` at zero beside it that is the
+    /// pre-ROAD1 conforming road exactly.
+    ///
+    /// It is the *same number* the terrain was levelled with, and it has to be:
+    /// two answers to "how wide is the flat" is a road graded over ground that
+    /// is not.
+    pub graded_half_m: f64,
     /// Build kerbs, pavements, shoulders, markings and crossings beside the
     /// carriageway (wave ROAD1). `false` reproduces the pre-ROAD1 surface.
     pub furniture: bool,
@@ -1387,6 +1414,7 @@ impl Default for SurfaceOptions {
             // already had, and the two callers that have — the island's recipe
             // and this crate's own arms — say so out loud.
             crown_fall: 0.0,
+            graded_half_m: 0.0,
             furniture: false,
         }
     }
@@ -1519,13 +1547,64 @@ fn carriageway_y(
     opts: &SurfaceOptions,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> f64 {
-    let sample_at = if opts.crown_fall > 0.0 { 0.0 } else { offset_m };
-    let xz = frame.at(sample_at);
-    let ground = match height_at(xz.x, xz.y) {
-        Some(h) if h.is_finite() => h,
-        _ => frame.centre.y,
+    // **The distance from the centreline is the MITRED one**, not the offset:
+    // at a corner the cross-section is scaled out by up to `MITER_LIMIT`, and it
+    // is the real distance that decides whether this vertex is still over the
+    // plateau. Reading the offset instead is what put a hairpin's rim 14 m out
+    // and 1.56 m in the air.
+    let lateral = (offset_m * frame.miter).abs();
+    // How much this vertex conforms rather than grades: 0 over the plateau,
+    // 1 past it, eased over half a plateau so the hand-off is not a crease.
+    let conform = if opts.crown_fall > 0.0 && opts.graded_half_m > 0.0 {
+        let ease = opts.graded_half_m * GRADED_EASE;
+        smooth01(((lateral - opts.graded_half_m) / ease.max(1e-9)).clamp(0.0, 1.0))
+    } else {
+        // No plateau: the pre-ROAD1 road, which conforms at every point.
+        1.0
+    };
+    let mut ground_at = |off: f64| -> f64 {
+        let xz = frame.at(off);
+        match height_at(xz.x, xz.y) {
+            Some(h) if h.is_finite() => h,
+            _ => frame.centre.y,
+        }
+    };
+    let local = ground_at(offset_m);
+    let ground = if conform >= 1.0 {
+        local
+    } else {
+        let graded = ground_at(0.0);
+        let blended = graded + (local - graded) * conform;
+        // **A graded section may not leave the ground it covers by more than
+        // its own crown**, and this clamp is what makes that a bound rather
+        // than a hope.
+        //
+        // The plateau is levelled to the NEAREST route, and a grade-limited
+        // router builds switchbacks — two limbs of one road passing within a
+        // few metres of each other at different heights. There the plateau can
+        // only serve one of them, and the other's graded height is the wrong
+        // side of a 1.78 m step (measured, on the island fixture, at
+        // (-378.3, 318.1)). Unclamped, that limb's carriageway hangs in the air.
+        //
+        // Clamped, the worst a road can do is sit its own crown above the
+        // ground or the same distance below it, and where the plateau IS flat —
+        // every straight and every gentle bend, which is nearly all of it — the
+        // clamp is inactive and the section is exactly planar.
+        let slack = opts.crown_fall * half_m;
+        blended.clamp(local - slack, local + slack)
     };
     ground + opts.lift_m + opts.crown_fall * (half_m - offset_m.abs()).max(0.0)
+}
+
+/// How far past [`SurfaceOptions::graded_half_m`] a section eases from graded
+/// back to conforming, as a fraction of the plateau's own half-width.
+const GRADED_EASE: f64 = 0.5;
+
+/// The smoothstep this module eases with — `t·t·(3 − 2t)`, trig-free.
+#[inline]
+fn smooth01(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The ground under a cross-section offset, falling back to the spine's own
@@ -1973,6 +2052,21 @@ fn build_segment_furniture(
         return;
     }
     let half = seg.width_m() * 0.5;
+    // **The furniture grades over the same plateau the road does**, and that
+    // plateau is this class's own built half-width — carriageway plus kerb and
+    // footway, or plus shoulder. A kerb that conformed while the carriageway it
+    // bounds was graded would ride up and down the terrain's cross-slope beside
+    // a channel that does not.
+    let owned;
+    let opts = if opts.crown_fall > 0.0 {
+        owned = SurfaceOptions {
+            graded_half_m: built_half_width_m(seg.kind, seg.lane_count),
+            ..*opts
+        };
+        &owned
+    } else {
+        opts
+    };
 
     if seg.kind.is_kerbed() {
         build_kerbs(

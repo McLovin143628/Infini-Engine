@@ -842,6 +842,12 @@ fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
         rederive_layers: false,
         replan_roads: false,
         dry_run: a.dry_run,
+        // The shipped island grades its roads onto a levelled corridor
+        // plateau (wave ROAD1). The off state exists for `road1_gate`'s
+        // control and has no command-line switch, deliberately: it builds an
+        // island whose roads float over their own ground at distance, which is
+        // the defect the wave removed rather than a mode anybody wants.
+        graded_roads: true,
     };
     let build = match inf_island::build_island(&recipe, &opts) {
         Ok(b) => b,

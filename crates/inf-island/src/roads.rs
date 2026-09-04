@@ -689,12 +689,22 @@ pub struct RoadMeshes {
 pub fn build_mesh(
     layer: &inf_gis::GeoLayer,
     ground_step_m: f64,
+    graded: bool,
+    graded_half_m: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> Result<(RoadMeshes, inf_gis::MeshBuildReport, RoadReport), IslandError> {
     let graph = inf_gis::RoadGraph::from_layer(layer);
     let opts = inf_gis::SurfaceOptions {
         ground_step_m,
-        crown_fall: inf_gis::DEFAULT_CROWN_FALL,
+        crown_fall: if graded {
+            inf_gis::DEFAULT_CROWN_FALL
+        } else {
+            0.0
+        },
+        // The SAME plateau the terrain was levelled to — see
+        // `SurfaceOptions::graded_half_m`. Two answers to "how wide is the flat"
+        // is a road graded over ground that is not.
+        graded_half_m: if graded { graded_half_m } else { 0.0 },
         furniture: true,
         ..Default::default()
     };
@@ -1089,7 +1099,19 @@ mod tests {
         ));
 
         let mut ground = |x: f64, z: f64| Some((x + z) * 0.01);
-        let (mesh, report, rr) = build_mesh(&layer, 2.0, &mut ground).expect("the door builds");
+        // Graded, over the widest built half-width the fixture's classes ask
+        // for — the same number `build_island` passes, and the fixture's ground
+        // is a plane so a plateau and a conform agree on it anyway.
+        let graded_half = layer
+            .features
+            .iter()
+            .map(|f| {
+                let k = inf_gis::roads::kind_of(f);
+                inf_gis::roads::built_half_width_m(k, k.default_lanes())
+            })
+            .fold(0.0f64, f64::max);
+        let (mesh, report, rr) =
+            build_mesh(&layer, 2.0, true, graded_half, &mut ground).expect("the door builds");
         assert!(report.vertices > 0 && report.triangles > 0);
         let (carriageway, _) = mesh.carriageway.as_ref().expect("the road paved");
         assert!(!carriageway.submeshes.is_empty());
