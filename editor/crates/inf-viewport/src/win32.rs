@@ -48,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_VISIBLE,
 };
 
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 
 use crate::camera::{
     BiomeSettings, Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace,
@@ -61,6 +61,25 @@ use inf_editor_core::ipc::{
     GizmoModeDto, ViewModeDto, ViewportActivateDto, ViewportContextMenuDto, ViewportToolStatusDto,
 };
 use inf_render::{GizmoMode, ViewMode};
+
+/// How many frames a latched `Cmd::FrameStart` waits for the document it was
+/// sent about to be projected (wave EDIT1, clause 2).
+///
+/// Three seconds at 60 fps. A level open is the caller, and what it is waiting
+/// on is the loader's own propagate plus one projection — normally the very next
+/// frame. The number is generous because the failure it guards is "the editor
+/// opened somewhere random" and the cost of being generous is that a level with
+/// no pawn takes three seconds to stop trying, which nothing can observe.
+const HOME_LATCH_FRAMES: u32 = 180;
+
+/// How far the editor camera must move before Ring 2 is told, in world metres
+/// (wave EDIT1, clause 1).
+///
+/// Four metres is under a tenth of the narrowest thing the reader does with it —
+/// the PCG streamer's release hysteresis is a quarter of a 512 m radius — so the
+/// quantisation can never change which volumes are wanted, while a camera flying
+/// at the default 8 m/s reports twice a second instead of sixty times.
+const EYE_REPORT_EPSILON_M: f64 = 4.0;
 
 /// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2). Kept next to the
 /// reverse map so the two stay in lockstep.
@@ -171,6 +190,11 @@ enum Cmd {
     /// Frame the current selection (the `F` key's action, reached from the
     /// context menu / command palette, which cannot press a native key).
     FocusSelection,
+    /// Frame the level's player start (wave EDIT1, clause 2) — the `Home` key's
+    /// action, reached from the View menu and, once per level, from the open
+    /// path itself. That last caller is why this is a *latched* command rather
+    /// than a straight one: see `pending_home` in the loop.
+    FrameStart,
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). The renderer clamps Wireframe→Unlit if unsupported.
     SetViewMode(ViewMode),
@@ -340,6 +364,17 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::FocusSelection);
     }
 
+    /// Frame the level's player start (wave EDIT1, clause 2).
+    ///
+    /// Sent by the View menu, and by the level-open path so that opening a
+    /// project puts the camera where the game begins rather than at
+    /// `EditorCamera::default`'s `(14, 9, 20)` — which on a 51 km² island is
+    /// half a metre under the open ocean, and which is what the author who
+    /// reported this wave was looking at.
+    pub fn frame_player_start(&self) {
+        let _ = self.tx.send(Cmd::FrameStart);
+    }
+
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). Takes the IPC DTO so Ring 2 needn't name the renderer enum.
     pub fn set_view_mode(&self, mode: ViewModeDto) {
@@ -459,6 +494,9 @@ enum Capture {
 #[derive(Debug, Clone, Copy)]
 enum Action {
     Focus,
+    /// Frame the level's player start (wave EDIT1, clause 2) — the `Home` key,
+    /// the View menu's "Reset View", and the one-shot the level-open path fires.
+    Home,
     StoreBookmark(usize),
     RecallBookmark(usize),
     SetGizmo(GizmoMode),
@@ -617,6 +655,14 @@ fn on_key_down(vk: u32) {
     // F focuses the selection (no modifiers).
     if vk == 0x46 && !ctrl && !alt && !shift {
         INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
+        return;
+    }
+
+    // Home frames the player start (wave EDIT1, clause 2). VK_HOME, no
+    // modifiers: it is not a camera key while flying (the flycam is WASD/QE), so
+    // it needs no capture guard.
+    if vk == 0x24 && !ctrl && !alt && !shift {
+        INPUT.with(|s| s.borrow_mut().actions.push(Action::Home));
         return;
     }
 
@@ -1276,6 +1322,13 @@ fn thread_main(
     let mut bookmarks = Bookmarks::default();
     // Active smooth-focus goal, cleared once the camera settles.
     let mut focus_goal = None;
+    // Wave EDIT1, clause 2: frames remaining to wait for a projected player
+    // start after a `Cmd::FrameStart`. See the command's doc for why it latches.
+    let mut pending_home: u32 = 0;
+    // Wave EDIT1, clause 1: the last camera position Ring 2 was told about.
+    // `None` until the first rendered frame, so the first report is
+    // unconditional and a session that never moves still streams.
+    let mut last_reported_eye: Option<DVec3> = None;
     let mut last_frame = Instant::now();
 
     // Embedded PIE (P9.4): the adopted foreign player window + the latest hole
@@ -1385,6 +1438,18 @@ fn thread_main(
                     // The SAME queue the F key pushes onto, so the two paths
                     // cannot drift: one focus implementation, two doors.
                     INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
+                }
+                Ok(Cmd::FrameStart) => {
+                    // **Latched, not immediate**, and this is the whole reason
+                    // the command exists as its own variant. Its loudest caller
+                    // is the level-open path, which sends it the moment the
+                    // document is swapped in -- before this thread has projected
+                    // it, so `host.player_start` is still the previous level's
+                    // answer or none at all. Arming a countdown and framing on
+                    // the first frame that HAS a start is the difference between
+                    // "the editor opens on Harbour City" and "the editor opens
+                    // wherever it happened to be, intermittently".
+                    pending_home = HOME_LATCH_FRAMES;
                 }
                 Ok(Cmd::SetInteraction(s)) => {
                     // The thresholds are read by `wnd_proc`, which cannot see
@@ -1526,10 +1591,35 @@ fn thread_main(
                     // (two-way sync, Wave 2).
                     sink(ViewportEvent::GizmoModeChanged(from_gizmo_mode(mode)));
                 }
+                Action::Home => {
+                    // The player start, the selection, then the origin. Not the
+                    // other way round: `Home` is "take me to where the game
+                    // begins", and a level with a pawn always has that answer.
+                    let (center, radius) = host
+                        .player_start_focus()
+                        .or_else(|| host.selection_focus())
+                        .unwrap_or((glam::DVec3::ZERO, 4.0));
+                    if two_d {
+                        camera_2d.frame(
+                            DVec2::new(center.x, center.y),
+                            DVec2::splat(radius),
+                            vwf / vhf,
+                        );
+                    } else {
+                        focus_goal = Some(camera.focus_goal(center, radius));
+                    }
+                    pending_home = 0;
+                }
                 Action::Focus => {
-                    // Frame the selection, or the world origin if none.
-                    let (center, radius) =
-                        host.selection_focus().unwrap_or((glam::DVec3::ZERO, 4.0));
+                    // Frame the selection, then the PLAYER START, then the world
+                    // origin. The origin used to be the only fallback, which on a
+                    // georeferenced level is a point in the sea some tens of
+                    // kilometres from anything -- "F with nothing selected" was a
+                    // way to lose the world (wave EDIT1).
+                    let (center, radius) = host
+                        .selection_focus()
+                        .or_else(|| host.player_start_focus())
+                        .unwrap_or((glam::DVec3::ZERO, 4.0));
                     if two_d {
                         // Frame the selection's XY bounds instantly.
                         camera_2d.frame(
@@ -1575,6 +1665,34 @@ fn thread_main(
             let mut world_changed = false;
             if let Ok(mut doc) = scene.lock() {
                 host.sync_from_doc(&doc);
+
+                // **The latched Home**, resolved here because this is the first
+                // point after a projection where `has_player_start` is an answer
+                // about the document that was just opened. Fires once and
+                // disarms; if the level simply has no pawn the countdown runs
+                // out and the camera is left exactly where it was, which is the
+                // honest behaviour for "frame a thing that does not exist".
+                if pending_home > 0 {
+                    if let Some((center, radius)) = host.player_start_focus() {
+                        if two_d {
+                            camera_2d.frame(
+                                DVec2::new(center.x, center.y),
+                                DVec2::splat(radius),
+                                vwf / vhf,
+                            );
+                        } else {
+                            // `set_pose`, not `focus_goal`: an open is a jump
+                            // cut, not a camera move. Interpolating from
+                            // `(14, 9, 20)` to a point 3 km away would be a
+                            // second of the author watching the sea go past.
+                            camera.set_pose(camera.focus_goal(center, radius));
+                            focus_goal = None;
+                        }
+                        pending_home = 0;
+                    } else {
+                        pending_home -= 1;
+                    }
+                }
 
                 // The render view for the ACTIVE mode drives picking + gizmo rays.
                 let interact_view = if two_d {
@@ -2072,6 +2190,21 @@ fn thread_main(
         let mut presented = false;
         if should_render {
             let eye = if two_d { camera_2d.eye() } else { camera.pos };
+            // **The camera as a streaming source** (wave EDIT1, clause 1). Ring
+            // 2's PCG tick needs to know where the author is looking, and this is
+            // the only place in the process that knows: the `Cmd` channel is
+            // one-way and `camera` is a `let mut` in this loop. Reported on
+            // MOVEMENT rather than per frame -- a settled camera is silent, and a
+            // flying one costs one event per four metres travelled instead of
+            // sixty a second saying the same thing.
+            if last_reported_eye.is_none_or(|p: DVec3| p.distance(eye) > EYE_REPORT_EPSILON_M) {
+                last_reported_eye = Some(eye);
+                sink(ViewportEvent::EyeMoved {
+                    x: eye.x,
+                    y: eye.y,
+                    z: eye.z,
+                });
+            }
             host.origin.maybe_rebase(eye);
             let render_view = if two_d {
                 host.view_2d(&camera_2d)

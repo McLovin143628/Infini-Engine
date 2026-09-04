@@ -840,6 +840,154 @@ pub async fn pcg_save(
     .map_err(|e| format!("asset write task failed to run: {e}"))?
 }
 
+/// **Page the ground before asking about it** (island phase, IB-1) — and the ONE
+/// call site of [`page_terrains_for_pcg`] in this file.
+///
+/// An asset-backed terrain carries no inline tiles, so without this the height
+/// provider takes its `None` arm — a flat `Some(0.0)` — and the editor previews a
+/// scatter at sea level that the shipped build also places at sea level. The two
+/// hosts agree, on the wrong world.
+///
+/// It exists as its own function because wave EDIT1 gave the paging a second
+/// caller (`super::pcg_stream`'s tick), and `grammar_span_mirror` pins the
+/// occurrence count of `page_terrains_for_pcg` in this file at two — the
+/// declaration and one call. One door keeps that true *and* keeps the two
+/// callers paging the same regions.
+pub(super) fn page_for_pcg(
+    doc: &mut inf_editor_core::scene::SceneDoc,
+    terrain_paths: &std::collections::HashMap<Uuid, std::path::PathBuf>,
+) -> usize {
+    page_terrains_for_pcg(doc.world_mut(), terrain_paths)
+}
+
+/// **Evaluate ONE volume into its own population cache** — the editor's single
+/// evaluation door, and the ONE call site of `inf_pcg::compose_volume` and
+/// `PcgVolume::set_population` in this file.
+///
+/// Returns how many scattered instances were placed. Does NOT bump the document
+/// version: a caller evaluating several volumes in one tick bumps once at the
+/// end, because every bump costs the viewport a whole re-projection.
+///
+/// The two callers are the explicit `pcg_evaluate` command (a person asked, one
+/// volume) and wave EDIT1's camera-driven tick (the editor is catching up with
+/// its own camera, several volumes). They must not be two evaluations: an
+/// author's preview and the same author's shipped build are the same content or
+/// the editor is lying. `biome_binding_mirror` pins the compose/set_population
+/// counts at one per host for exactly that reason.
+pub(super) fn evaluate_volume_into(
+    doc: &mut inf_editor_core::scene::SceneDoc,
+    guid: Uuid,
+    lowered: &inf_pcg::graph::LoweredPcg,
+) -> Result<u32, String> {
+    let e = doc
+        .entity_of(guid)
+        .ok_or("target entity no longer exists")?;
+
+    // Ensure the volume exists.
+    {
+        let w = doc.world_mut().world_mut();
+        if w.get::<PcgVolume>(e).is_none() {
+            w.entity_mut(e).insert(PcgVolume::default());
+        }
+    }
+
+    // Read owned params (region center + extent + seed).
+    let (center, extent, seed) = {
+        let w = doc.world().world();
+        let vol = w.get::<PcgVolume>(e).ok_or("volume vanished")?;
+        let center = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.translation())
+            .or_else(|| w.get::<Transform>(e).map(|t| t.translation.to_dvec3()))
+            .unwrap_or(DVec3::ZERO);
+        (center, vol.extent, vol.seed)
+    };
+
+    // Clone the first non-empty terrain (data + world origin) for the height
+    // provider. `None` ⇒ a flat y = 0 plane.
+    let terrain: Option<(inf_ecs::TerrainData, DVec3)> =
+        doc.order().iter().copied().find_map(|g| {
+            let te = doc.entity_of(g)?;
+            let w = doc.world().world();
+            let t = w.get::<Terrain>(te)?;
+            if t.data.is_empty() {
+                return None;
+            }
+            let origin = w
+                .get::<GlobalTransform>(te)
+                .map(|gt| gt.translation())
+                .unwrap_or(DVec3::ZERO);
+            Some((t.data.clone(), origin))
+        });
+
+    // Fold the volume seed into every rule so distinct volumes differ. The
+    // lowered document is CLONED per volume rather than folded in place: the
+    // streaming tick evaluates many volumes from one cached lowering, and a fold
+    // that accumulated would give the second block a different city than a
+    // session that visited it first.
+    let mut document = lowered.document.clone();
+    for layer in &mut document.layers {
+        for rule in &mut layer.rules {
+            rule.scatter.seed = rule.scatter.seed.wrapping_add(seed as u64);
+        }
+    }
+
+    let region = Region::from_xz(
+        center.x - extent.x,
+        center.z - extent.y,
+        center.x + extent.x,
+        center.z + extent.y,
+    );
+    let provider: Box<dyn HeightProvider> = match terrain {
+        Some((data, o)) => Box::new(FnHeight::new(move |x, z| {
+            data.height_at(DVec2::new(x - o.x, z - o.z))
+                .map(|h| h + o.y)
+        })),
+        None => Box::new(FnHeight::new(|_, _| Some(0.0))),
+    };
+
+    let instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
+    // P19.4/P19.5: the graph's grammar and building passes run on the same
+    // volume, against the same height provider, and append after the scatter
+    // — grammars first, then buildings, a fixed order, so the cache is a
+    // pure function of the content. Everything downstream of the resolved
+    // spans is `inf_pcg::evaluate_grammars` / `inf_pcg::evaluate_buildings`,
+    // shared verbatim with the player's load-time pass; this layer owns only
+    // the fetch.
+    let splines = collect_spline_paths(doc.world());
+    let cx = inf_pcg::GrammarContext {
+        entity: Some(guid),
+        center,
+        extent: DVec2::new(extent.x, extent.y),
+        seed_offset: seed as u64,
+    };
+    let mut generated =
+        inf_pcg::evaluate_grammars(&lowered.grammars, &splines, provider.as_ref(), &cx);
+    generated.extend(inf_pcg::evaluate_buildings(
+        &lowered.buildings,
+        &splines,
+        provider.as_ref(),
+        &cx,
+    ));
+    // The join is `inf_pcg::compose_volume`, the same door the shipped
+    // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
+    // load-bearing (a `StructureGroup` carries index ranges into these very
+    // lists), so it is stated once in Ring 0 rather than twice here.
+    let (baked, solid, groups, doorways, residents, interior, lights, emitters) =
+        population_of(inf_pcg::compose_volume(instances, generated));
+    let placed = baked.len() as u32;
+
+    {
+        let w = doc.world_mut().world_mut();
+        if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
+            vol.set_population(
+                baked, solid, groups, doorways, residents, interior, lights, emitters,
+            );
+        }
+    }
+    Ok(placed)
+}
+
 /// Lower the PCG graph and evaluate it over the scene terrain into the target
 /// `PcgVolume`'s instance cache, then bump the scene so the viewport re-projects.
 ///
@@ -858,18 +1006,17 @@ pub async fn pcg_evaluate(
     scene: State<'_, SceneState>,
     assets: State<'_, AssetState>,
 ) -> Result<PcgEvaluateResult, String> {
-    // Lower under the store lock.
+    // Lower under the store lock. The WHOLE `LoweredPcg` travels, not its three
+    // halves: `evaluate_volume_into` is the one door the auto-streamer also goes
+    // through (wave EDIT1), and a door that takes the pieces apart is a door two
+    // callers can reassemble differently.
     let masks = AssetMasks(&assets);
-    let (mut document, grammars, buildings, issues, ok) = state.with(|s| {
+    let (lowered, issues, ok) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
         let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
-        Ok((
-            lowered.document,
-            lowered.grammars,
-            lowered.buildings,
-            issue_dtos(&lowered.issues),
-            lowered.ok,
-        ))
+        let issues = issue_dtos(&lowered.issues);
+        let ok = lowered.ok;
+        Ok((lowered, issues, ok))
     })?;
 
     if !ok {
@@ -908,12 +1055,7 @@ pub async fn pcg_evaluate(
         let entity = entity_arg;
         let mut doc = doc_handle.lock().map_err(|e| e.to_string())?;
         doc.world_mut().propagate();
-        // **Page the ground before asking about it** (island phase, IB-1). An
-        // asset-backed terrain carries no inline tiles, so without this the
-        // provider below took its `None` arm — a flat `Some(0.0)` — and the
-        // editor previewed a scatter at sea level that the shipped build also
-        // placed at sea level. The two hosts agreed, on the wrong world.
-        page_terrains_for_pcg(doc.world_mut(), &terrain_paths);
+        page_for_pcg(&mut doc, &terrain_paths);
 
         // Resolve the target entity GUID.
         let guid = match &entity {
@@ -931,106 +1073,7 @@ pub async fn pcg_evaluate(
                 })
                 .ok_or("select an entity to scatter into (or add a PCG Volume)")?,
         };
-        let e = doc
-            .entity_of(guid)
-            .ok_or("target entity no longer exists")?;
-
-        // Ensure the volume exists.
-        {
-            let w = doc.world_mut().world_mut();
-            if w.get::<PcgVolume>(e).is_none() {
-                w.entity_mut(e).insert(PcgVolume::default());
-            }
-        }
-
-        // Read owned params (region center + extent + seed).
-        let (center, extent, seed) = {
-            let w = doc.world().world();
-            let vol = w.get::<PcgVolume>(e).ok_or("volume vanished")?;
-            let center = w
-                .get::<GlobalTransform>(e)
-                .map(|g| g.translation())
-                .or_else(|| w.get::<Transform>(e).map(|t| t.translation.to_dvec3()))
-                .unwrap_or(DVec3::ZERO);
-            (center, vol.extent, vol.seed)
-        };
-
-        // Clone the first non-empty terrain (data + world origin) for the height
-        // provider. `None` ⇒ a flat y = 0 plane.
-        let terrain: Option<(inf_ecs::TerrainData, DVec3)> =
-            doc.order().iter().copied().find_map(|g| {
-                let te = doc.entity_of(g)?;
-                let w = doc.world().world();
-                let t = w.get::<Terrain>(te)?;
-                if t.data.is_empty() {
-                    return None;
-                }
-                let origin = w
-                    .get::<GlobalTransform>(te)
-                    .map(|gt| gt.translation())
-                    .unwrap_or(DVec3::ZERO);
-                Some((t.data.clone(), origin))
-            });
-
-        // Fold the volume seed into every rule so distinct volumes differ.
-        for layer in &mut document.layers {
-            for rule in &mut layer.rules {
-                rule.scatter.seed = rule.scatter.seed.wrapping_add(seed as u64);
-            }
-        }
-
-        let region = Region::from_xz(
-            center.x - extent.x,
-            center.z - extent.y,
-            center.x + extent.x,
-            center.z + extent.y,
-        );
-        let provider: Box<dyn HeightProvider> = match terrain {
-            Some((data, o)) => Box::new(FnHeight::new(move |x, z| {
-                data.height_at(DVec2::new(x - o.x, z - o.z))
-                    .map(|h| h + o.y)
-            })),
-            None => Box::new(FnHeight::new(|_, _| Some(0.0))),
-        };
-
-        let instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
-        // P19.4/P19.5: the graph's grammar and building passes run on the same
-        // volume, against the same height provider, and append after the scatter
-        // — grammars first, then buildings, a fixed order, so the cache is a
-        // pure function of the content. Everything downstream of the resolved
-        // spans is `inf_pcg::evaluate_grammars` / `inf_pcg::evaluate_buildings`,
-        // shared verbatim with the player's load-time pass; this layer owns only
-        // the fetch.
-        let splines = collect_spline_paths(doc.world());
-        let cx = inf_pcg::GrammarContext {
-            entity: Some(guid),
-            center,
-            extent: DVec2::new(extent.x, extent.y),
-            seed_offset: seed as u64,
-        };
-        let mut generated = inf_pcg::evaluate_grammars(&grammars, &splines, provider.as_ref(), &cx);
-        generated.extend(inf_pcg::evaluate_buildings(
-            &buildings,
-            &splines,
-            provider.as_ref(),
-            &cx,
-        ));
-        // The join is `inf_pcg::compose_volume`, the same door the shipped
-        // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
-        // load-bearing (a `StructureGroup` carries index ranges into these very
-        // lists), so it is stated once in Ring 0 rather than twice here.
-        let (baked, solid, groups, doorways, residents, interior, lights, emitters) =
-            population_of(inf_pcg::compose_volume(instances, generated));
-        let placed = baked.len() as u32;
-
-        {
-            let w = doc.world_mut().world_mut();
-            if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
-                vol.set_population(
-                    baked, solid, groups, doorways, residents, interior, lights, emitters,
-                );
-            }
-        }
+        let placed = evaluate_volume_into(&mut doc, guid, &lowered)?;
         doc.bump_version_for_runtime();
         Ok::<(Uuid, u32), String>((guid, placed))
     })

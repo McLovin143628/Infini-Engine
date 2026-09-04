@@ -99,6 +99,7 @@ import type { SaveResultDto } from "../bindings/SaveResultDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SeqInterpDto } from "../bindings/SeqInterpDto";
 import type { SequenceDto } from "../bindings/SequenceDto";
+import type { PcgStreamStatusDto } from "../bindings/PcgStreamStatusDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
@@ -267,6 +268,23 @@ export const viewport = {
    * consumed by the native child window.
    */
   focus: (viewport?: string): Promise<void> => invoke("viewport_focus", { viewport }),
+  /**
+   * **Frame the level's player start** (wave EDIT1, clause 2) — what the `Home`
+   * key does natively, and what a level open fires so the editor opens where the
+   * game begins instead of at the camera's `(14, 9, 20)` default.
+   *
+   * Omitting `viewport` targets EVERY viewport, unlike `focus`: the caller that
+   * matters is a level open, and every open viewport is looking at the level
+   * that was just replaced.
+   */
+  frameStart: (viewport?: string): Promise<void> =>
+    invoke("viewport_frame_start", { viewport }),
+  /**
+   * **What the editor camera's PCG streaming is doing** (wave EDIT1, clause 5).
+   * The `pcg://stream` event carries the same shape; this is the read a panel
+   * does when it mounts after the last one was emitted.
+   */
+  pcgStreamStatus: (): Promise<PcgStreamStatusDto> => invoke("pcg_stream_status"),
   /** Push the 2D-mode grid/pixel snapping configuration to the viewport. */
   setSnap2d: (snap: Snap2DDto, viewport?: string): Promise<void> =>
     invoke("viewport_set_snap2d", { snap, viewport }),

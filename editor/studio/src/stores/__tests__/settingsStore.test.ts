@@ -140,6 +140,9 @@ describe("settingsStore", () => {
       rmb_click_ms: 250,
       // IB-14: `inf_gis::DEFAULT_MAX_ENTITIES`.
       gis_max_entities: 4096,
+      // Wave EDIT1, clause 1: streaming ON at exactly the player's own radii.
+      pcg_stream: true,
+      pcg_stream_radius_scale: 1,
       // CERT1: the boot project, empty meaning "not pinned". This arm is what
       // caught the frontend default missing the field at all -- `toEqual` is a
       // DEEP equality, so an added Rust field fails here as well as in tsc.

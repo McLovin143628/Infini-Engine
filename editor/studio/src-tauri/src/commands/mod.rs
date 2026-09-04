@@ -25,6 +25,9 @@ mod package;
 // L7.H6: the one path-confinement rule every filesystem door goes through.
 mod paths;
 mod pcg;
+// Wave EDIT1, clause 1: the camera-driven PCG evaluation tick — the reason the
+// editor shows the city the player shows.
+mod pcg_stream;
 // P25.4 the capture wizard: photographs to a standard asset.
 mod photogrammetry;
 mod pie;
@@ -53,6 +56,7 @@ pub use graph::GraphState;
 pub use lsp::LspState;
 pub use material::MaterialState;
 pub use pcg::PcgState;
+pub use pcg_stream::{init_pcg_stream_on_boot, PcgStreamState};
 pub use photogrammetry::PhotogrammetryState;
 pub use pie::PieState;
 pub use project::ProjectState;
@@ -226,6 +230,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_snap3d,
         viewport::viewport_set_interaction,
         viewport::viewport_focus,
+        viewport::viewport_frame_start,
+        pcg_stream::pcg_stream_status,
         viewport::viewport_set_view_mode,
         scene::scene_snapshot,
         scene::scene_details,

@@ -46,6 +46,12 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   // island) or merely VISITED by opening the project (rung 4, below it). Written
   // only by Preferences ▸ General; an ordinary open never sets it.
   boot_project_deliberate: false,
+  // Wave EDIT1, clause 1: the editor camera evaluates the PCG volumes it comes
+  // near, at exactly the player's own activation/prefetch radii. ON, because the
+  // defect the wave exists for is an editor that shows empty ground where the
+  // player shows a city.
+  pcg_stream: true,
+  pcg_stream_radius_scale: 1,
   snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
   foliage: {
     radius: 3,

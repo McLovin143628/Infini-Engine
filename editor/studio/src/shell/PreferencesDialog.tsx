@@ -519,6 +519,29 @@ export default function PreferencesDialog() {
                   onChange={(rmb_click_ms) => patch({ rmb_click_ms: Math.round(rmb_click_ms) })}
                 />
 
+                {/* **Wave EDIT1, clause 1.** The editor camera evaluates the
+                    PCG volumes it comes near, so the viewport shows the city the
+                    player will see instead of the empty boxes it used to. The
+                    scale multiplies the LEVEL's own activation/prefetch radii,
+                    so 1.0 is exactly what a player standing there would have
+                    loaded; the bounds are `pcg_stream`'s own, not the dialog's
+                    (the Wave E audit A2 rule). */}
+                <div className="mt-4 mb-2 text-xs text-(--ink-text-dim)">World streaming</div>
+                <CheckRow
+                  label="Evaluate PCG volumes near the camera"
+                  checked={settings.pcg_stream}
+                  onChange={(pcg_stream) => patch({ pcg_stream })}
+                />
+                <NumberRow
+                  label="Streaming radius"
+                  hint="(× the level's own)"
+                  value={settings.pcg_stream_radius_scale}
+                  min={0.1}
+                  max={8}
+                  step={0.1}
+                  onChange={(pcg_stream_radius_scale) => patch({ pcg_stream_radius_scale })}
+                />
+
                 <div className="mt-4 mb-2 text-xs text-(--ink-text-dim)">Gizmo snap (3D)</div>
                 <CheckRow
                   label="Snap always on (otherwise Shift-gated)"

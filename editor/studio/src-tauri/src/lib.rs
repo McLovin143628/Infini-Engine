@@ -61,6 +61,7 @@ pub fn run() {
         .manage(commands::DccState::default())
         .manage(commands::SkelState::default())
         .manage(commands::PcgState::default())
+        .manage(commands::PcgStreamState::default())
         .manage(commands::SmEditorState::default())
         .manage(commands::ErosionState::default())
         .manage(commands::SequencerState::default())
@@ -76,6 +77,9 @@ pub fn run() {
             }
             commands::recover_scene_on_boot(app.handle());
             commands::init_assets_on_boot(app.handle());
+            // Wave EDIT1, clause 1. After the asset system, because its first
+            // useful tick needs a content root to resolve zone documents from.
+            commands::init_pcg_stream_on_boot(app.handle());
             tracing::info!("Infini Engine starting");
             Ok(())
         })

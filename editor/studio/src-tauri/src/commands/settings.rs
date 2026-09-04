@@ -109,7 +109,12 @@ fn project_anim_blend(project: &super::project::ProjectState) -> String {
 /// never silently wipes a user's theme and keybindings.
 #[tauri::command]
 pub async fn editor_settings_get(app: tauri::AppHandle) -> Result<EditorSettings, String> {
-    EditorSettings::load_or_default(&config_dir(&app)?)
+    let s = EditorSettings::load_or_default(&config_dir(&app)?)?;
+    // Wave EDIT1, clause 1. The BOOT door as well as the change door: the
+    // frontend's settings store calls this once on startup, and the streaming
+    // tick has to know what the file says before the author touches anything.
+    super::pcg_stream::apply_settings(&app, s.pcg_stream, s.pcg_stream_radius_scale);
+    Ok(s)
 }
 
 /// Persist the app-level editor preferences; returns the NORMALIZED values.
@@ -128,6 +133,10 @@ pub async fn editor_settings_set(
     s.migrate()?;
     s.normalize();
     s.save(&dir)?;
+    // The NORMALIZED values, like everything else the frontend applies from this
+    // reply — a clamped radius must reach the streamer as the clamp, not as what
+    // was typed (wave EDIT1, clause 1).
+    super::pcg_stream::apply_settings(&app, s.pcg_stream, s.pcg_stream_radius_scale);
     Ok(s)
 }
 

@@ -234,6 +234,13 @@ impl ViewportState {
         self.with(target, |h| h.clear_streams());
     }
 
+    /// Frame the level's player start (wave EDIT1, clause 2) — pushed beside
+    /// `clear_streams` when the open document is replaced, so opening a project
+    /// puts the camera where the game begins.
+    pub fn frame_start(&self, target: Target) {
+        self.with(target, |h| h.frame_player_start());
+    }
+
     /// Push a terrain entity's biome **overlay palette** (linear RGBA, indexed by
     /// biome id). An EMPTY palette clears the entry, which is what an unbound
     /// terrain must send — otherwise the Biomes view mode would keep tinting
@@ -394,6 +401,14 @@ fn event_sink(app: tauri::AppHandle, id: String) -> inf_viewport::ViewportEventS
             }
         }
         // **A double-click on an object** (Wave E) — "open this".
+        ViewportEvent::EyeMoved { x, y, z } => {
+            // Backend-to-backend, like `SimLook`: the webview never sees the
+            // camera. Ring 2's PCG streaming tick is the only reader, and it is
+            // what makes the editor camera a streaming source (wave EDIT1).
+            if let Some(state) = app.try_state::<super::PcgStreamState>() {
+                state.set_eye(glam::DVec3::new(x, y, z));
+            }
+        }
         ViewportEvent::ObjectActivated(activate) => {
             if let Err(e) = app.emit("viewport://activate", stamp_activate(activate, &id)) {
                 tracing::warn!("viewport://activate emit failed: {e}");
@@ -956,6 +971,24 @@ pub async fn viewport_focus(
     state: tauri::State<'_, ViewportState>,
 ) -> Result<(), String> {
     state.with(Target::from_arg(viewport), |h| h.focus_selection());
+    Ok(())
+}
+
+/// **Frame the level's player start** (wave EDIT1, clause 2) — the `Home` key,
+/// reachable from the DOM and from the level-open path.
+///
+/// `Target::All` is the default here and `Target::Primary` is not, unlike
+/// `viewport_focus`: the caller that matters is a level open, and every open
+/// viewport is looking at the level that was just replaced.
+#[tauri::command]
+pub async fn viewport_frame_start(
+    viewport: Option<String>,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    state.with(
+        viewport.map_or(Target::All, |v| Target::from_arg(Some(v))),
+        |h| h.frame_player_start(),
+    );
     Ok(())
 }
 

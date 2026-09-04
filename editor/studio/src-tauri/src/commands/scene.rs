@@ -1300,6 +1300,17 @@ pub async fn scene_open(
     // Primary-only clear would leak a second viewport's whole payload.
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
         viewport.clear_streams(crate::commands::Target::All);
+        // **And point the camera at the game** (wave EDIT1, clause 2). Latched
+        // in the viewport thread, so it fires on the first frame that has
+        // projected this document rather than against the one it replaced.
+        viewport.frame_start(crate::commands::Target::All);
+    }
+    // The streamer's owned set and its lowered-graph cache are keyed on the OLD
+    // document too (wave EDIT1, clause 1) — same reason as the terrain streams
+    // above, and a level whose blocks are already populated must not inherit a
+    // claim that this streamer put them there.
+    if let Some(pcg) = app.try_state::<crate::commands::PcgStreamState>() {
+        pcg.clear();
     }
     // The opened file becomes the current level (a later plain Save overwrites it).
     *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
@@ -1415,6 +1426,13 @@ pub async fn scene_new(
     // Primary-only clear would leak a second viewport's whole payload.
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
         viewport.clear_streams(crate::commands::Target::All);
+        // Wave EDIT1, clause 2. A brand-new scene has no pawn, so the latch runs
+        // out and the camera is left where it was — which is the right answer
+        // for "frame a thing that does not exist".
+        viewport.frame_start(crate::commands::Target::All);
+    }
+    if let Some(pcg) = app.try_state::<crate::commands::PcgStreamState>() {
+        pcg.clear();
     }
     // A brand-new scene is untitled — forget any current-level path.
     *state.current_level_path.lock().map_err(|e| e.to_string())? = None;

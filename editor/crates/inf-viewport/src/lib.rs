@@ -91,6 +91,19 @@ pub enum ViewportEvent {
     /// it on `viewport://activate`; the frontend routes it through the same
     /// resolver the Outliner's double-click uses.
     ObjectActivated(inf_editor_core::ipc::ViewportActivateDto),
+    /// **Where the editor camera is** (wave EDIT1, clause 1), in world metres.
+    ///
+    /// Backend-to-backend like [`Self::SimLook`]: it never reaches the webview.
+    /// Ring 2 keeps the latest value and its PCG streaming tick uses it as the
+    /// streaming source, which is what makes the editor camera a streaming
+    /// source at all — and it has to be an event because the `Cmd` channel is
+    /// one-way and the camera lives on the render thread, in a `let mut` inside
+    /// the loop, where nothing outside can read it.
+    ///
+    /// **Emitted on MOVEMENT, not per frame.** A settled camera sends nothing;
+    /// see `EYE_REPORT_EPSILON_M` for the threshold and why it is metres of the
+    /// world rather than a frame count.
+    EyeMoved { x: f64, y: f64, z: f64 },
 }
 
 /// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render
@@ -218,6 +231,8 @@ impl ViewportHandle {
     pub fn set_interaction(&self, _settings: camera::InteractionSettings) {}
     /// Wave E: nothing to frame.
     pub fn focus_selection(&self) {}
+    /// Wave EDIT1: nothing to frame, and no camera to frame it with.
+    pub fn frame_player_start(&self) {}
     pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
     pub fn set_content_root(&self, _root: Option<std::path::PathBuf>) {}
     pub fn refresh_asset_index(&self) {}

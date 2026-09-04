@@ -66,6 +66,24 @@ pub const RMB_CLICK_TRAVEL_RANGE_PX: (f32, f32) = (0.0, 64.0);
 pub const DEFAULT_RMB_CLICK_MS: u32 = 250;
 /// Right-button time-threshold bounds, milliseconds.
 pub const RMB_CLICK_MS_RANGE: (u32, u32) = (16, 2000);
+/// Wave EDIT1, clause 1: whether the editor camera evaluates the PCG volumes it
+/// approaches. **On by default** — the defect the wave exists for is that the
+/// editor showed empty ground where the player showed a city, and a fix that has
+/// to be switched on first leaves that exactly where it was.
+pub const DEFAULT_PCG_STREAM: bool = true;
+/// How much wider than the PLAYER's own activation/prefetch radii the editor
+/// camera streams. `1.0` is exactly the player's, which is the honest default:
+/// what an author sees is then what a player standing there would see.
+pub const DEFAULT_PCG_STREAM_RADIUS_SCALE: f32 = 1.0;
+/// Bounds on that scale.
+///
+/// **These are `inf_editor_core::pcg_stream`'s own bounds**, repeated here for
+/// the reason [`FLY_SPEED_RANGE_MPS`] states above and pinned from the other
+/// side by that module's `the_preference_is_clamped_rather_than_trusted`: a file
+/// allowed to hold 1 000 would show 1 000 in Preferences and stream at 8. A
+/// tenth streams the block you are standing in and nothing else; eight is four
+/// kilometres of city, which is past what the memory ceiling holds anyway.
+pub const PCG_STREAM_RADIUS_SCALE_RANGE: (f32, f32) = (0.1, 8.0);
 
 fn default_theme_id() -> String {
     DEFAULT_THEME_ID.to_string()
@@ -90,6 +108,12 @@ fn default_rmb_ms() -> u32 {
 }
 fn default_gis_max_entities() -> u32 {
     inf_gis::DEFAULT_MAX_ENTITIES as u32
+}
+fn default_pcg_stream() -> bool {
+    DEFAULT_PCG_STREAM
+}
+fn default_pcg_stream_radius_scale() -> f32 {
+    DEFAULT_PCG_STREAM_RADIUS_SCALE
 }
 fn default_snap_3d() -> Snap3DDto {
     Snap3DDto {
@@ -269,6 +293,17 @@ pub struct EditorSettings {
     /// profile's pin is read as the visit it was.
     #[serde(default)]
     pub boot_project_deliberate: bool,
+    /// Wave EDIT1, clause 1: the editor camera evaluates the PCG volumes it
+    /// comes near, so the viewport shows the city the player will see.
+    ///
+    /// **Last of the scalars, and that is a rule and not a habit**: the struct's
+    /// own note says every scalar comes before every table, because `toml`
+    /// refuses to emit a value after one.
+    #[serde(default = "default_pcg_stream")]
+    pub pcg_stream: bool,
+    /// How much wider than the player's radii it looks (`1.0` = the player's).
+    #[serde(default = "default_pcg_stream_radius_scale")]
+    pub pcg_stream_radius_scale: f32,
     /// 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
     #[serde(default = "default_snap_3d")]
     pub snap_3d: Snap3DDto,
@@ -312,6 +347,8 @@ impl Default for EditorSettings {
             gis_max_entities: default_gis_max_entities(),
             boot_project: String::new(),
             boot_project_deliberate: false,
+            pcg_stream: DEFAULT_PCG_STREAM,
+            pcg_stream_radius_scale: DEFAULT_PCG_STREAM_RADIUS_SCALE,
             snap_3d: default_snap_3d(),
             foliage: default_foliage(),
             keybindings: BTreeMap::new(),
@@ -431,6 +468,12 @@ impl EditorSettings {
             .gis_max_entities
             .clamp(1, inf_gis::ISLAND_MAX_ENTITIES as u32);
 
+        self.pcg_stream_radius_scale = guard_f32(
+            self.pcg_stream_radius_scale,
+            PCG_STREAM_RADIUS_SCALE_RANGE,
+            DEFAULT_PCG_STREAM_RADIUS_SCALE,
+        );
+
         // Snap steps divide, so zero and NaN are both fatal downstream.
         let d = default_snap_3d();
         self.snap_3d.translate = guard_f32(self.snap_3d.translate, (1e-4, 1e6), d.translate);
@@ -478,6 +521,49 @@ mod tests {
         assert_eq!(s.rmb_click_ms, 250);
         assert!(!s.tour_seen);
         assert!(s.keybindings.is_empty());
+        // Wave EDIT1: ON, and at exactly the player's radii. A default of `false`
+        // here would leave the reported defect (the editor showing empty ground
+        // where the player shows a city) in place for everyone who never opens
+        // Preferences, which is everyone.
+        assert!(s.pcg_stream);
+        assert_eq!(s.pcg_stream_radius_scale, 1.0);
+    }
+
+    /// The guard, on the door. A settings file is a text file a human can edit,
+    /// and `pcg_stream_radius_scale` multiplies a radius the streamer then plans
+    /// a whole city against.
+    #[test]
+    fn the_streaming_radius_scale_is_guarded_like_every_other_scalar() {
+        let mut s = EditorSettings {
+            pcg_stream_radius_scale: f32::NAN,
+            ..EditorSettings::default()
+        };
+        s.normalize();
+        assert_eq!(s.pcg_stream_radius_scale, DEFAULT_PCG_STREAM_RADIUS_SCALE);
+        s.pcg_stream_radius_scale = 0.0;
+        s.normalize();
+        assert_eq!(
+            s.pcg_stream_radius_scale, PCG_STREAM_RADIUS_SCALE_RANGE.0,
+            "zero would stream nothing while claiming to be on"
+        );
+        s.pcg_stream_radius_scale = 1_000.0;
+        s.normalize();
+        assert_eq!(s.pcg_stream_radius_scale, PCG_STREAM_RADIUS_SCALE_RANGE.1);
+        // ...and the range is the one the policy module itself clamps to, so
+        // Preferences cannot show a number the streamer will not honour.
+        // Compared with a tolerance because the preference is `f32` (it is a
+        // wire field) and the policy is `f64`: `0.1f32 as f64` is
+        // 0.100000001490…, which is the widening and not a disagreement.
+        let mut st = crate::pcg_stream::EditorPcgStreams::new();
+        st.set_radius_scale(-1.0e9);
+        let lo = st.radius_scale();
+        st.set_radius_scale(1.0e9);
+        let hi = st.radius_scale();
+        assert!(
+            (lo - f64::from(PCG_STREAM_RADIUS_SCALE_RANGE.0)).abs() < 1.0e-6
+                && (hi - f64::from(PCG_STREAM_RADIUS_SCALE_RANGE.1)).abs() < 1.0e-6,
+            "the preference range must be the streamer's own range:              preference {PCG_STREAM_RADIUS_SCALE_RANGE:?}, streamer ({lo}, {hi})"
+        );
     }
 
     #[test]
@@ -504,6 +590,11 @@ mod tests {
             gis_max_entities: 60_000,
             boot_project: "C:/somewhere/island-build/project".into(),
             boot_project_deliberate: true,
+            // Both off the default, so the round trip proves the file carries
+            // them rather than re-deriving them: `pcg_stream` false against a
+            // `true` default, and a scale inside its range but not at 1.0.
+            pcg_stream: false,
+            pcg_stream_radius_scale: 2.5,
             snap_3d: Snap3DDto {
                 translate: 0.25,
                 rotate_deg: 5.0,

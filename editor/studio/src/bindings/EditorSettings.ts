@@ -100,6 +100,19 @@ boot_project: string,
  */
 boot_project_deliberate: boolean, 
 /**
+ * Wave EDIT1, clause 1: the editor camera evaluates the PCG volumes it
+ * comes near, so the viewport shows the city the player will see.
+ *
+ * **Last of the scalars, and that is a rule and not a habit**: the struct's
+ * own note says every scalar comes before every table, because `toml`
+ * refuses to emit a value after one.
+ */
+pcg_stream: boolean, 
+/**
+ * How much wider than the player's radii it looks (`1.0` = the player's).
+ */
+pcg_stream_radius_scale: number, 
+/**
  * 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
  */
 snap_3d: Snap3DDto, 

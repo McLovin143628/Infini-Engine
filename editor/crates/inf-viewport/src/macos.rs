@@ -91,6 +91,8 @@ enum Cmd {
     SetInteraction(InteractionSettings),
     /// Frame the current selection (the `F` key's action, from a DOM caller).
     FocusSelection,
+    /// Frame the level's player start (wave EDIT1, clause 2).
+    FrameStart,
     SetViewMode(ViewMode),
     /// Point terrain streaming at a project's content root (P16.4a).
     SetContentRoot(Option<std::path::PathBuf>),
@@ -246,6 +248,11 @@ impl ViewportHandle {
     /// Frame the current selection — the `F` key's action, from a DOM caller.
     pub fn focus_selection(&self) {
         let _ = self.tx.send(Cmd::FocusSelection);
+    }
+
+    /// Frame the level's player start (wave EDIT1, clause 2).
+    pub fn frame_player_start(&self) {
+        let _ = self.tx.send(Cmd::FrameStart);
     }
 
     /// Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). macOS input
@@ -463,6 +470,13 @@ fn thread_main(
                 Ok(Cmd::FocusSelection) => {
                     // No focus animation on this platform yet (no input pump to
                     // advance it); accepted so the two pumps stay mirrored.
+                }
+                Ok(Cmd::FrameStart) => {
+                    // Same: accepted and inert. A jump cut needs no pump, but it
+                    // does need the projection to have happened, and this pump
+                    // has no frame at which to re-ask -- so rather than fire it
+                    // once and probably miss, it is left with the rest of macOS
+                    // input as the standing gap `host.rs` names.
                 }
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),

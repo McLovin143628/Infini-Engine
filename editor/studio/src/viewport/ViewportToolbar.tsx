@@ -6,7 +6,7 @@
  * each change to the native viewport over typed IPC.
  */
 import { linearToCssHex } from "../lib/biomeColor";
-import { terrain } from "../lib/ipc";
+import { terrain, viewport } from "../lib/ipc";
 import { useViewportStore } from "../stores/viewportStore";
 import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
@@ -147,6 +147,8 @@ export default function ViewportToolbar() {
   const toolMode = useViewportStore((s) => s.toolMode);
   const setToolMode = useViewportStore((s) => s.setToolMode);
   const terrainStreamed = useViewportStore((s) => s.terrainStreamed);
+  // Wave EDIT1, clauses 1 and 5.
+  const pcgStream = useViewportStore((s) => s.pcgStream);
   const terrainEditable = useViewportStore((s) => s.terrainEditable);
   const terrainUnsavedEdits = useViewportStore((s) => s.terrainUnsavedEdits);
   const viewMode = useViewportStore((s) => s.viewMode);
@@ -238,6 +240,21 @@ export default function ViewportToolbar() {
               </button>
             ))}
           </div>
+          {/* **Reset View to Player Start** (wave EDIT1, clause 2). The `Home`
+              key does this natively, but it is swallowed by whichever window has
+              focus -- so the DOM needs a door of its own, the same reason
+              `view.focusSelection` has one. */}
+          <div className="h-4 w-px bg-(--ink-border)" />
+          <button
+            type="button"
+            title="Frame the level's player start - where Play begins (Home)"
+            className="flex h-6 items-center rounded px-2 text-(--ink-text-dim) hover:text-(--ink-text)"
+            onClick={() => {
+              void viewport.frameStart().catch(() => {});
+            }}
+          >
+            Home
+          </button>
           <div className="h-4 w-px bg-(--ink-border)" />
           <div
             className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
@@ -291,6 +308,42 @@ export default function ViewportToolbar() {
                 : terrainEditable
                   ? "Streamed terrain"
                   : "Streamed terrain (read-only)"}
+            </span>
+          )}
+          {/* **The Streaming readout** (wave EDIT1, clause 5), and the "Loading
+              world…" indicator (clause 1).
+
+              It lives in the TOOLBAR and not over the 3D view because of the
+              airspace rule: the viewport is a native child window and HTML can
+              never draw over it, so an overlay there would have to blank the
+              thing it is annotating. The "Streamed terrain" badge beside it has
+              stood in exactly this spot since P16.4a for exactly this reason. */}
+          {pcgStream && pcgStream.volumes > 0 && (
+            <span
+              className={`rounded px-2 py-0.5 ${
+                pcgStream.loading
+                  ? "bg-(--ink-bg-0) text-(--ink-warning)"
+                  : "bg-(--ink-bg-0) text-(--ink-text-faint)"
+              }`}
+              title={
+                pcgStream.enabled
+                  ? `Camera streaming: ${pcgStream.in_radius_populated} of ` +
+                    `${pcgStream.in_radius} volumes evaluated within ` +
+                    `${Math.round(pcgStream.prefetch_m)} m (${pcgStream.populated} of ` +
+                    `${pcgStream.volumes} in the level). Last tick ` +
+                    `${pcgStream.last_tick_evaluated} volume(s) in ` +
+                    `${pcgStream.last_tick_ms.toFixed(1)} ms of a ` +
+                    `${pcgStream.budget_ms.toFixed(1)} ms budget; ` +
+                    `${pcgStream.evaluated_total} evaluated and ` +
+                    `${pcgStream.released_total} released this session.`
+                  : "Camera streaming is off — PCG volumes are evaluated only when you ask (Preferences ▸ Viewport)."
+              }
+            >
+              {!pcgStream.enabled
+                ? "Streaming off"
+                : pcgStream.loading
+                  ? `Loading world… ${pcgStream.in_radius_populated}/${pcgStream.in_radius}`
+                  : `Streaming ${pcgStream.in_radius_populated}/${pcgStream.in_radius}`}
             </span>
           )}
           {toolMode === "Sculpt" && <SculptControls />}

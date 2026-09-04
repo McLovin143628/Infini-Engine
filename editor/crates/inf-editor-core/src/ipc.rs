@@ -459,6 +459,47 @@ pub struct ImportEventDto {
     pub advisories: Vec<String>,
 }
 
+/// **What the editor camera's PCG streaming is doing** (`pcg://stream`, wave
+/// EDIT1, clauses 1 and 5).
+///
+/// The instrument, and the "Loading world…" indicator's source. Every count is
+/// of *volumes carrying a graph* — a `PcgVolume` with none has nothing to
+/// evaluate, so counting it would give the indicator a denominator it can never
+/// reach.
+///
+/// Emitted only when it changes (a settled editor is silent), and readable on
+/// demand through `pcg_stream_status` for a panel that mounts after the last
+/// event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct PcgStreamStatusDto {
+    /// Whether the camera is streaming at all (the editor preference).
+    pub enabled: bool,
+    /// The editor is behind its own camera — some volume inside the radius has
+    /// no population yet.
+    pub loading: bool,
+    /// Volumes in the level that name a graph.
+    pub volumes: u32,
+    /// Of those, how many are inside the prefetch radius.
+    pub in_radius: u32,
+    /// Of those, how many hold a population — the indicator's numerator.
+    pub in_radius_populated: u32,
+    /// How many hold a population anywhere in the level.
+    pub populated: u32,
+    /// Volumes evaluated by the last tick that did any work.
+    pub last_tick_evaluated: u32,
+    /// Wall milliseconds that tick spent evaluating…
+    pub last_tick_ms: f64,
+    /// …against this ceiling (`EDITOR_PCG_STEP_BUDGET_MS`). Both, because a
+    /// spend without its budget beside it is a number nobody can read.
+    pub budget_ms: f64,
+    pub evaluated_total: u64,
+    pub released_total: u64,
+    /// The radii in force, metres — the level's own partition block, scaled by
+    /// the editor preference.
+    pub activation_m: f64,
+    pub prefetch_m: f64,
+}
+
 /// The viewport's tool-state notice (`viewport://tool-status`, P16.4).
 ///
 /// One channel for every half of the status seam, because they change for the

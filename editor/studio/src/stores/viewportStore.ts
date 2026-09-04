@@ -22,6 +22,7 @@ import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
 import type { RiverReportDto } from "../bindings/RiverReportDto";
+import type { PcgStreamStatusDto } from "../bindings/PcgStreamStatusDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
@@ -72,6 +73,13 @@ interface ViewportUiState {
 
   /** Active tool: pick/gizmo (`Select`) or terrain sculpt (`Sculpt`). (P10.2b) */
   toolMode: ToolModeDto;
+  /**
+   * **What the editor camera's PCG streaming is doing** (wave EDIT1, clauses 1
+   * and 5). Read-only, pushed on `pcg://stream`, `null` until the first event —
+   * which is also the state of a session whose level has no PCG volumes at all,
+   * and the toolbar shows nothing in either case.
+   */
+  pcgStream: PcgStreamStatusDto | null;
   /**
    * The terrain the viewport is drawing streams from a `.inf_terrain` (P16.4a).
    * Read-only, pushed on `viewport://tool-status`.
@@ -451,6 +459,7 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   pixelsPerUnit: 100,
   viewMode: "Lit",
   toolMode: "Select",
+  pcgStream: null,
   terrainStreamed: false,
   terrainEditable: false,
   terrainUnsavedEdits: false,
@@ -804,6 +813,15 @@ export function registerViewportCommands(): void {
       category: "View",
       shortcut: "F",
     },
+    // Wave EDIT1, clause 2. `Home` is consumed by the native child window when
+    // the viewport has focus, so this door exists for the same reason
+    // `view.focusSelection` does -- and it is what File ▸ Open fires by itself.
+    {
+      id: "view.resetToStart",
+      title: "Reset View to Player Start",
+      category: "View",
+      shortcut: "Home",
+    },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
     { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
@@ -813,6 +831,11 @@ export function registerViewportCommands(): void {
   if (getCommand("view.focusSelection")) {
     setCommandHandler("view.focusSelection", () => {
       void viewport.focus().catch(() => {});
+    });
+  }
+  if (getCommand("view.resetToStart")) {
+    setCommandHandler("view.resetToStart", () => {
+      void viewport.frameStart().catch(() => {});
     });
   }
   if (getCommand("view.toggle2D")) {
@@ -972,6 +995,14 @@ export function initViewportSync(): () => void {
         });
       }
       if (status.message) useShellStore.getState().pushStatus(status.message, 6000);
+    }),
+  );
+  // The camera's PCG streaming (wave EDIT1). Not viewport-filtered: the streamer
+  // is one per application, not one per window — it follows whichever camera
+  // moved last, and every viewport is looking at the same document.
+  track(
+    listenTo("pcg://stream", (status) => {
+      useViewportStore.setState({ pcgStream: status });
     }),
   );
   return () => {

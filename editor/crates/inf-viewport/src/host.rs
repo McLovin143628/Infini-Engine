@@ -57,6 +57,40 @@ use crate::SurfaceTarget;
 /// reaches it because the counter only ticks when the cut actually changed.
 const STREAM_LOG_INTERVAL_FRAMES: u32 = 300;
 
+/// How far back the `Home` action stands from the player start, metres (wave
+/// EDIT1, clause 2).
+///
+/// `EditorCamera::focus_goal` reads its argument as the radius of a sphere to
+/// fit, so this is "frame a twenty-metre ball around the character": the pawn
+/// plus the street it stands in plus the fronts of the buildings either side.
+/// The pawn's own radius would be under two metres and would put the author's
+/// nose against a shirt with no way to tell a harbour from a hillside.
+const PLAYER_START_FRAME_M: f64 = 20.0;
+
+/// Where the level's player-controlled character stands, in world metres.
+///
+/// **One door with the runtime.** `inf_ecs::movement::camera_subject` is what
+/// the shipped player re-resolves every step to decide who the camera follows,
+/// and what `scene_player_pawn` already asks before offering to Play. Asking it
+/// here is what keeps "where the editor opens" and "who the game follows" from
+/// becoming two answers that drift.
+///
+/// `GlobalTransform` first, the local `Transform` second — the same order
+/// `inf_player::cell_stream::streaming_sources` reads a source's position in, and
+/// for the same reason: a pawn parented under a rig has no meaningful local
+/// translation, and a document that has not propagated yet has no global one.
+fn player_start_of(doc: &SceneDoc) -> Option<DVec3> {
+    let guid = inf_ecs::movement::camera_subject(doc.world())?;
+    let entity = doc.world().entity_of(guid)?;
+    let w = doc.world().world();
+    if let Some(g) = w.get::<GlobalTransform>(entity) {
+        let (_, _, t) = g.0.to_scale_rotation_translation();
+        return Some(t);
+    }
+    w.get::<EcsTransform>(entity)
+        .map(|t| t.translation.to_dvec3())
+}
+
 /// Map an ECS [`Primitive`] to the renderer's [`PrimMesh`] (R-P1).
 ///
 /// MIRROR: keep identical to `inf_player::render::prim_mesh` (the player's
@@ -249,6 +283,20 @@ pub struct EngineHost {
     /// content root is set, which makes inline terrain behaviour bit-identical to
     /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
+    /// Where the player starts, cached from the document at projection time
+    /// (wave EDIT1, clause 2).
+    ///
+    /// Asked through `inf_ecs::movement::camera_subject` -- the runtime's own
+    /// door, the same one `scene_player_pawn` asks and the same one the shipped
+    /// player re-resolves every step -- so "where the editor opens" and "who the
+    /// game follows" cannot become two different answers.
+    ///
+    /// Cached rather than asked on demand because the two readers are the `Home`
+    /// action and the per-frame gizmo, and neither holds the document lock at the
+    /// point it needs the answer. `None` on a level with no player-controlled
+    /// character, which is a real level (a cinematic, a blockout) and not an
+    /// error -- the same judgement `NoPawnPlayDialog` makes.
+    player_start: Option<DVec3>,
     /// The loaded voxel volumes (P21.1) — the caves, tunnels and excavations that
     /// locally extend the heightfield. The Ring-1 store resolves a
     /// `VoxelVolume.asset` to a loose `.inf_voxel` under the content root and hands
@@ -1035,6 +1083,7 @@ impl EngineHost {
             terrain_guid: None,
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
+            player_start: None,
             voxel_volumes: inf_editor_core::voxel_store::shared_volumes(),
             debris_cache: inf_render::DebrisCache::default(),
             fractures: inf_editor_core::simulate::shared_fractures(),
@@ -1537,6 +1586,10 @@ impl EngineHost {
         // the very world `SimSession::fixed_step` presses footprints into — so the
         // editor draws what it simulates, with no Ring-2 fold in between.
         project_deform(&mut self.scene, inf_ecs::deform::deform_field(doc.world()));
+        // Where the player starts (wave EDIT1, clause 2). Refreshed with every
+        // projection because a level open, an undone delete and a dragged pawn
+        // all move it, and all three bump the version this walk is gated on.
+        self.player_start = player_start_of(doc);
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -4715,6 +4768,17 @@ impl EngineHost {
         Some((center, radius))
     }
 
+    /// Where the player starts and how wide a frame it wants — the `Home`
+    /// action's target (wave EDIT1, clause 2).
+    ///
+    /// The radius is [`PLAYER_START_FRAME_M`] and not the pawn's own size: a
+    /// character is under two metres, and framing two metres from a mountain
+    /// vista puts the author's nose against a shirt. What an author opening a
+    /// level wants to see is the character AND the street it stands in.
+    pub fn player_start_focus(&self) -> Option<(DVec3, f64)> {
+        self.player_start.map(|p| (p, PLAYER_START_FRAME_M))
+    }
+
     /// If the cursor is over a gizmo handle, begin a drag and return true. The
     /// handle set is constrained to the sprite plane in 2D (ortho `view`).
     pub fn try_begin_gizmo(&mut self, view: &RenderView, px: u32, py: u32) -> bool {
@@ -7846,6 +7910,38 @@ impl EngineHost {
         for (guid, vd) in &self.volume_outlines {
             let selected = self.selected_guids.contains(guid);
             draw_volume_outline(&mut self.scene.debug, &self.origin, vd, selected);
+        }
+
+        // **The player start** (wave EDIT1, clause 2): a ring on the ground with
+        // a mast and a forward tick, so an author can see at a glance where Play
+        // will put them without selecting anything. Drawn ALWAYS, like the
+        // splines above and unlike the tool previews below — it is a property of
+        // the level, not of a mode — and, like every other primitive in this
+        // block, it is an editor-only debug line that is never projected, never
+        // persisted and invisible in PIE.
+        if let Some(start) = self.player_start {
+            const START_COLOR: [f32; 4] = [1.0, 0.78, 0.25, 1.0];
+            const START_RADIUS_M: f64 = 0.45; // a character's own footprint
+            const START_MAST_M: f64 = 1.8; // eye height, so it reads at street scale
+            const START_SEGMENTS: usize = 24;
+            let mut prev: Option<DVec3> = None;
+            for i in 0..=START_SEGMENTS {
+                let a = i as f64 / START_SEGMENTS as f64 * std::f64::consts::TAU;
+                let p = start + DVec3::new(a.cos() * START_RADIUS_M, 0.0, a.sin() * START_RADIUS_M);
+                if let Some(q) = prev {
+                    self.scene.debug.line(
+                        self.origin.to_render(q),
+                        self.origin.to_render(p),
+                        START_COLOR,
+                    );
+                }
+                prev = Some(p);
+            }
+            self.scene.debug.line(
+                self.origin.to_render(start),
+                self.origin.to_render(start + DVec3::Y * START_MAST_M),
+                START_COLOR,
+            );
         }
 
         // Spline polylines (E-P5) draw ALWAYS in a neutral cyan; a selected

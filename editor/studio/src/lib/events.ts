@@ -21,6 +21,7 @@ import type { ViewportGizmoDto } from "../bindings/ViewportGizmoDto";
 import type { ViewportKey } from "../bindings/ViewportKey";
 import type { ViewportActivateDto } from "../bindings/ViewportActivateDto";
 import type { ViewportContextMenuDto } from "../bindings/ViewportContextMenuDto";
+import type { PcgStreamStatusDto } from "../bindings/PcgStreamStatusDto";
 import type { ViewportToolStatusDto } from "../bindings/ViewportToolStatusDto";
 
 export type { UnlistenFn };
@@ -80,6 +81,13 @@ export interface EventPayloads {
    * in the document yet).
    */
   "viewport://tool-status": ViewportToolStatusDto;
+  /**
+   * **What the editor camera's PCG streaming is doing** (wave EDIT1, clauses 1
+   * and 5): how many volumes are inside the radius, how many have been
+   * evaluated, and what the last tick spent against its budget. Emitted only
+   * when it changes, so a settled editor is silent.
+   */
+  "pcg://stream": PcgStreamStatusDto;
   /**
    * **A right-click in the native 3D view** (Wave E) — the shell renders its own
    * menu at the point. The viewport is a child window and swallows pointer

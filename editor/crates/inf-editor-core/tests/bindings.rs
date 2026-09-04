@@ -22,18 +22,18 @@ use inf_editor_core::ipc::{
     ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto,
     GeneratedSourceDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto,
     LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
-    PackageResultDto, PartitionSettingsDto, PhotoEntryDto, ProjectBootDto, ProjectInfoDto,
-    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
-    RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode,
-    SceneSnapshot, ScriptDiagnosticDto, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
-    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto,
-    SkelDocDto, SkelJointDto, SkelSocketDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto,
-    SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto,
-    TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
-    TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
-    VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto,
-    WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    PackageResultDto, PartitionSettingsDto, PcgStreamStatusDto, PhotoEntryDto, ProjectBootDto,
+    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
+    RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto,
+    SceneDelta, SceneNode, SceneSnapshot, ScriptDiagnosticDto, SculptFalloffDto, SculptOpDto,
+    SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
+    SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto, SkelSocketDto, SkyAtmosphereDto,
+    Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto,
+    SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto,
+    TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto,
+    ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect,
+    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto,
+    WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -132,6 +132,7 @@ fn export_bindings() {
     DeleteResult::export_all(&cfg).expect("export DeleteResult");
     ImportEventDto::export_all(&cfg).expect("export ImportEventDto");
     ViewportToolStatusDto::export_all(&cfg).expect("export ViewportToolStatusDto");
+    PcgStreamStatusDto::export_all(&cfg).expect("export PcgStreamStatusDto");
     ViewportGizmoDto::export_all(&cfg).expect("export ViewportGizmoDto");
     SaveResultDto::export_all(&cfg).expect("export SaveResultDto");
     HeightmapProbeDto::export_all(&cfg).expect("export HeightmapProbeDto");
