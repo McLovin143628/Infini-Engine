@@ -134,6 +134,13 @@ pub struct SceneDoc {
 /// document per open/new; `u64` at one per nanosecond is 584 years).
 static NEXT_DOC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// The reflect type path of [`inf_ecs::components::PcgVolume`], spelled the way
+/// `scene::details` spells the four asset-reference components it names.
+///
+/// A `const` rather than `type_path_for::<PcgVolume>()` because it is compared
+/// once per reflected field write, which is once per frame of a numeric drag.
+const PCG_VOLUME_TYPE_PATH: &str = "inf_ecs::components::PcgVolume";
+
 impl Default for SceneDoc {
     fn default() -> Self {
         Self::new()
@@ -506,8 +513,53 @@ impl SceneDoc {
             // `effective_visible`. This is the Details panel's write and every
             // frame of a numeric drag in it.
             self.touch_subtree(guid);
+            self.invalidate_pcg_population(guid, type_path);
         }
         ok
+    }
+
+    /// **An edited PCG volume is a stale PCG volume** (wave EDIT1, clause 3).
+    ///
+    /// `PcgVolume::evaluated` is a `#[serde(skip)]` cache derived from the
+    /// graph, the seed, the extent and the ground. Three of those four are
+    /// editable in the Details panel, and before this the cache simply outlived
+    /// them: an author who widened a block's extent kept looking at the old
+    /// block until they right-clicked Evaluate. Dropping the population is what
+    /// makes the camera streamer (or the explicit command) put the new one
+    /// there — the P10 node-editor loop, on a component instead of a graph.
+    ///
+    /// Dropped rather than re-evaluated in place, because this is called from
+    /// inside a numeric drag: re-evaluating here would run a five-millisecond
+    /// city build on every frame of a slider, where the streamer's next tick
+    /// does it once, off the thread that draws.
+    ///
+    /// The write goes through `set_population` for the reason the streamer's
+    /// release does: that call is what stamps `structures_gen`, and the physics
+    /// bridge and the sim→render fold both read the stamp.
+    fn invalidate_pcg_population(&mut self, guid: Uuid, type_path: &str) {
+        if type_path != PCG_VOLUME_TYPE_PATH {
+            return;
+        }
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        let w = self.world.world_mut();
+        let Some(mut vol) = w.get_mut::<inf_ecs::components::PcgVolume>(e) else {
+            return;
+        };
+        if vol.evaluated.is_empty() && vol.structures.is_empty() {
+            return;
+        }
+        vol.set_population(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            inf_nav::NavGraph::default(),
+            Vec::new(),
+            Vec::new(),
+        );
     }
 
     /// Write one component field for LIVE PREVIEW (the sequencer scrub, P11.4):
@@ -840,6 +892,33 @@ impl SceneDoc {
     pub fn mesh_asset_of(&self, guid: Uuid) -> Option<Uuid> {
         let e = self.world.entity_of(guid)?;
         self.world.world().get::<MeshRef>(e).and_then(|m| m.asset)
+    }
+
+    /// Read an entity's `PcgVolume.graph` — which `.inf_pcg` document scatters
+    /// into it (wave EDIT1, clause 3).
+    ///
+    /// The field is `#[reflect(ignore)]`, so before this the Details panel
+    /// showed a settlement block's Extent, Seed and Draw Distance and no way at
+    /// all to tell which of the island's fourteen zone documents grew the
+    /// buildings standing in it. The same escape hatch `Material.asset` and
+    /// `MeshRef.asset` use, for the same reason.
+    pub fn pcg_graph_of(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world
+            .world()
+            .get::<inf_ecs::components::PcgVolume>(e)
+            .and_then(|v| v.graph)
+    }
+
+    /// How many scattered instances and structural solids a `PcgVolume`
+    /// currently holds — the Details panel's read-only "has this been evaluated"
+    /// row (wave EDIT1, clause 3). `None` when the entity carries no volume.
+    pub fn pcg_population_of(&self, guid: Uuid) -> Option<(usize, usize)> {
+        let e = self.world.entity_of(guid)?;
+        self.world
+            .world()
+            .get::<inf_ecs::components::PcgVolume>(e)
+            .map(|v| (v.evaluated.len(), v.structures.len()))
     }
 
     /// The built-in primitive an entity's [`MeshRef`] draws, if it has one.

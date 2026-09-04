@@ -27,6 +27,9 @@ const SKELETAL_MESH_TYPE_PATH: &str = "inf_ecs::components::SkeletalMesh";
 /// The path is spelled like a component path so the frontend's section keying
 /// (and any future collapse-state persistence) treats it like every other one.
 const ACTOR_CLASS_TYPE_PATH: &str = "inf_ecs::components::ActorClass";
+/// Wave EDIT1, clause 3. MIRROR of `scene::doc`'s own constant — it compares the
+/// same string on the write side, where an edit drops the stale population.
+const PCG_VOLUME_TYPE_PATH: &str = "inf_ecs::components::PcgVolume";
 /// The synthetic row key for `MeshRef::asset`.
 const MESH_ASSET_FIELD: &str = "asset";
 
@@ -180,6 +183,45 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
             sel,
             |g| doc.skeletal_mesh_of(g).and_then(|(_, s)| s),
         ));
+    }
+
+    // **The PCG volume's own two facts** (wave EDIT1, clause 3). `graph` is
+    // `#[reflect(ignore)]` like the three above, so a settlement block showed
+    // Extent, Seed and Draw Distance and no way at all to tell which of the
+    // island's fourteen zone documents grew the buildings standing in it. The
+    // population count rides beside it because the volume's content is a
+    // `#[serde(skip)]` cache the camera fills in: "0 instances" is the answer to
+    // "why is this block empty", and there was nowhere to read it.
+    if let Some(vol) = components
+        .iter_mut()
+        .find(|c| c.type_path == PCG_VOLUME_TYPE_PATH)
+    {
+        vol.fields.push(asset_row(
+            "graph",
+            "Zone Graph",
+            "pcg",
+            doc.pcg_graph_of(primary),
+            sel,
+            |g| doc.pcg_graph_of(g),
+        ));
+        // Read-only for the reason the asset rows are: `population` names no
+        // reflected field, so `edit_set_prop` finds nothing to write and the
+        // edit is a no-op. Text rather than a new variant, on the same rule —
+        // a variant would advertise a write path that does not exist.
+        let pop = doc.pcg_population_of(primary);
+        vol.fields.push(PropFieldDto {
+            name: "population".into(),
+            label: "Evaluated".into(),
+            value: PropValueDto::Text {
+                value: match pop {
+                    Some((0, 0)) => "not yet — fly closer, or right-click ▸ Evaluate".to_string(),
+                    Some((i, s)) => format!("{i} instances, {s} structures"),
+                    None => String::new(),
+                },
+            },
+            same: sel.iter().skip(1).all(|g| doc.pcg_population_of(*g) == pop),
+            range: None,
+        });
     }
 
     // `ActorClass` is not reflected AT ALL, so unlike the three above there is no

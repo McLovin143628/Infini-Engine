@@ -430,3 +430,221 @@ pub async fn pcg_stream_status(
         .unwrap_or(false);
     Ok(state.status(loading))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inf_ecs::components::Terrain;
+    use inf_ecs::{Vec2d, Vec3d};
+    use inf_editor_core::ipc::SpawnKind;
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::settlement::zone_payload;
+    use inf_pcg::building::ArchetypeId;
+
+    /// Four of the archetypes Harbour City's own blocks are built from.
+    const BLOCKS: [ArchetypeId; 4] = [
+        ArchetypeId::Office,
+        ArchetypeId::Shop,
+        ArchetypeId::Apartment,
+        ArchetypeId::House,
+    ];
+
+    /// A digest of exactly what the clause-1 arm is about: the instances a
+    /// volume was populated with, **and the inputs the draw-side LOD ladder
+    /// reads off them**.
+    ///
+    /// Not a count. A count is satisfied by any thousand buildings; what has to
+    /// match is which mesh stands where, facing which way, how big — and
+    /// `ScatteredSolid`'s extent, because `STRUCTURE_LOD_M` and `INTERIOR_LOD_M`
+    /// band a structure by its own size.
+    fn digest(doc: &SceneDoc, guid: Uuid) -> (u64, usize, usize) {
+        let e = doc.entity_of(guid).expect("volume entity");
+        let vol = doc
+            .world()
+            .world()
+            .get::<PcgVolume>(e)
+            .expect("volume component");
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |x: f64| {
+            h ^= x.to_bits();
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        };
+        for i in &vol.evaluated {
+            mix(i.position.x);
+            mix(i.position.y);
+            mix(i.position.z);
+            mix(i.rotation.x);
+            mix(i.rotation.y);
+            mix(i.rotation.z);
+            mix(i.scale);
+            mix(i.mesh.map_or(0.0, |m| m.as_u128() as f64));
+            mix(f64::from(i.kind));
+            if let Some(e) = i.extent {
+                for x in e {
+                    mix(f64::from(x));
+                }
+            }
+        }
+        for s in &vol.structures {
+            mix(s.center.x);
+            mix(s.center.y);
+            mix(s.center.z);
+            mix(s.half_extents.x);
+            mix(s.half_extents.y);
+            mix(s.half_extents.z);
+            mix(s.rotation.x);
+            mix(s.rotation.y);
+            mix(s.rotation.z);
+            mix(s.rotation.w);
+        }
+        (h, vol.evaluated.len(), vol.structures.len())
+    }
+
+    /// A document shaped like a corner of Harbour City: a flat terrain and one
+    /// `PcgVolume` per block, each bound to a REAL committed zone document and
+    /// carrying its own seed.
+    fn city(order: &[usize]) -> (SceneDoc, Vec<Uuid>, Vec<Arc<LoweredPcg>>) {
+        let mut doc = SceneDoc::new();
+        // A flat inline terrain, so the height provider takes its terrain arm
+        // rather than the flat-`Some(0.0)` fallback — the IB-1 distinction.
+        let ground = Uuid::from_u128(0x6100);
+        doc.create_with_guid(ground, SpawnKind::Empty, "Ground", None);
+        {
+            let e = doc.entity_of(ground).unwrap();
+            let w = doc.world_mut().world_mut();
+            // A flat, non-empty inline terrain: `evaluate_volume_into` picks
+            // the first NON-EMPTY `Terrain`, and an empty one sends the height
+            // provider down its flat-`Some(0.0)` fallback arm instead (IB-1).
+            // Nine tiles, because the blocks below stand up to 120 m apart and
+            // a volume off the edge of the terrain evaluates to NOTHING — the
+            // first cut of this fixture authored one 64 m tile and measured
+            // 660 instances in the first block and zero in the other three,
+            // which is the height provider working exactly as IB-1 says.
+            let mut data = inf_ecs::TerrainData::new(64, 1.0);
+            for ty in -1..=1 {
+                for tx in -1..=1 {
+                    data.author_tile((tx, ty), |_, _| 0.0);
+                }
+            }
+            w.entity_mut(e).insert(Terrain {
+                data,
+                ..Terrain::default()
+            });
+        }
+        let registry = pcg_registry();
+        let (mut guids, mut programs) = (Vec::new(), Vec::new());
+        for &k in order {
+            let a = BLOCKS[k];
+            let guid = Uuid::from_u128(0x7000 + k as u128);
+            doc.create_with_guid(guid, SpawnKind::Empty, a.name(), None);
+            let e = doc.entity_of(guid).unwrap();
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(inf_ecs::Transform {
+                translation: Vec3d::new(60.0 * (k % 2) as f64, 0.0, 60.0 * (k / 2) as f64),
+                rotation: Vec3d::ZERO,
+                scale: Vec3d::ONE,
+            });
+            w.entity_mut(e).insert(PcgVolume {
+                extent: Vec2d::new(28.0, 28.0),
+                seed: 1_000 + k as u32,
+                ..PcgVolume::default()
+            });
+            let payload = zone_payload(a).expect("the committed zone document");
+            let graph = payload.graph().expect("the authored graph");
+            let lowered = lower_graph_with(&graph, &registry, &inf_pcg::graph::NoMasks);
+            assert!(lowered.ok, "{} did not lower", a.name());
+            guids.push(guid);
+            programs.push(Arc::new(lowered));
+        }
+        doc.world_mut().propagate();
+        (doc, guids, programs)
+    }
+
+    /// **THE CLAUSE-1 ARM.** A volume's population is a pure function of its own
+    /// graph, seed, extent and ground — *not* of which volumes the camera
+    /// reached first. That is the property that lets a camera drive the
+    /// evaluation at all: the shipped player evaluates a block when its cell
+    /// activates, the editor when the author flies near it, and the two orders
+    /// have nothing to do with each other.
+    #[test]
+    fn a_blocks_population_does_not_depend_on_which_blocks_were_evaluated_first() {
+        let (mut a, ga, pa) = city(&[0, 1, 2, 3]);
+        // **The budget table** (wave EDIT1, clause 1's deliverable). Printed
+        // rather than asserted: an absolute millisecond ceiling would be a
+        // machine gate, and what `EDITOR_PCG_STEP_BUDGET_MS` promises is a bound
+        // on what a TICK starts, which `plan`'s own arms cover. What this
+        // records is the shape of the cost — how much of a block the editor buys
+        // for eight milliseconds.
+        let mut cost = Vec::new();
+        for (g, p) in ga.iter().zip(pa.iter()) {
+            let t = std::time::Instant::now();
+            evaluate_volume_into(&mut a, *g, p).expect("evaluate");
+            cost.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let forward: Vec<(u64, usize, usize)> = ga.iter().map(|g| digest(&a, *g)).collect();
+        let total: f64 = cost.iter().sum();
+        println!(
+            "EDIT1 clause 1 — cost per block: {} | {:.1} ms for four, {:.1} blocks/s",
+            cost.iter()
+                .zip(BLOCKS.iter())
+                .map(|(ms, a)| format!("{} {ms:.1} ms", a.name()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            total,
+            4.0 / (total / 1000.0)
+        );
+        assert!(
+            forward.iter().all(|(_, n, s)| *n > 0 || *s > 0),
+            "the committed zone documents placed nothing: {forward:?}"
+        );
+
+        // The same four blocks, reached in the opposite order — a camera that
+        // flew in from the other end of the street.
+        let (mut b, gb, pb) = city(&[3, 2, 1, 0]);
+        for (g, p) in gb.iter().zip(pb.iter()) {
+            evaluate_volume_into(&mut b, *g, p).expect("evaluate");
+        }
+        for (i, guid) in ga.iter().enumerate() {
+            let back = digest(&b, *guid);
+            assert_eq!(
+                forward[i],
+                back,
+                "block {i} ({}) differs by the order it was reached in",
+                BLOCKS[i].name()
+            );
+        }
+        println!(
+            "EDIT1 clause 1 — order independence: {}",
+            forward
+                .iter()
+                .zip(BLOCKS.iter())
+                .map(|((h, n, s), a)| format!("{} {n} inst / {s} solid / {h:016x}", a.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    /// **The seed fold must not accumulate**, and this is the arm that says so.
+    ///
+    /// `evaluate_volume_into` folds the volume's seed into every rule of the
+    /// lowered document. The streaming tick evaluates many volumes from ONE
+    /// cached lowering, so folding in place would give the second block a
+    /// different city than a session that visited it first — and would make a
+    /// block change every time the camera passed it again. Cloning the document
+    /// per volume is the fix; re-evaluating the same volume is how it is caught.
+    #[test]
+    fn re_evaluating_a_block_from_the_same_cached_lowering_gives_the_same_block() {
+        let (mut doc, guids, programs) = city(&[0, 1]);
+        evaluate_volume_into(&mut doc, guids[0], &programs[0]).expect("first");
+        let first = digest(&doc, guids[0]);
+        // Somebody else's block in between, from its own program...
+        evaluate_volume_into(&mut doc, guids[1], &programs[1]).expect("neighbour");
+        // ...and then back, through the SAME `Arc<LoweredPcg>` the cache holds.
+        evaluate_volume_into(&mut doc, guids[0], &programs[0]).expect("again");
+        let again = digest(&doc, guids[0]);
+        assert_eq!(
+            first, again,
+            "the cached lowering accumulated a seed fold: {first:?} then {again:?}"
+        );
+    }
+}
