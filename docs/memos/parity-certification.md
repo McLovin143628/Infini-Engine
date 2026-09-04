@@ -115,30 +115,53 @@ The bound is asserted from **both** sides: a start eight levels below the holder
 reaches, nine does not. The first version of that arm was off by one and said so
 by failing.
 
-Arms: **7** in `inf-project`, 2 in `inf-studio` (the pin lands; an unwritable
-settings directory is not an error), 3 in the frontend (asked on a cold launch,
-NOT asked with a project open, a null answer says nothing) — **twelve**.
-*(Audit correction: this row said 8 + 2 + 3. `cargo test -p inf-project boot`
-answers "8 tests", and the eighth is `template::tests::
-every_template_scaffolds_a_boot_scene_under_content`, a pre-existing arm about
-template scaffolding that the name filter catches. `boot.rs` declares seven
-`#[test]`. A count taken from a filter is not a count of arms.)*
+**THE LADDER HAS FIVE RUNGS, NOT FOUR** (the audit's §5 ruling, taken). The wave
+shipped one pin at rung 2, written by every successful open, and the audit
+measured what that means for the owner's sentence: **the day the author opened
+any other project, that project became what the application booted on, for ever**
+— the showcase rung never fired again while a pin resolved, the start screen did
+not appear to offer it, and no UI anywhere showed, edited or cleared
+`boot_project`. "The last thing you opened is the default" is a different
+sentence from "the island *is* the default".
 
-**The rung order is mutation-verified**: swapping the environment and pin rungs
-in `resolve` reds `the_environment_outranks_the_pin_and_the_pin_outranks_the_showcase`
-and nothing else.
+So the pin is **split by intent rather than by value**:
 
-**What the pin means for the owner's sentence, plainly** (audit). The owner asked
-for the island to be *the* default level. Rung 2 outranks rung 3 and every
-successful open writes it, so **the day the author opens any other project, that
-project is what the application boots on from then on** — the showcase rung never
-fires again while a pin resolves, the start screen does not appear to offer it,
-and there is no UI anywhere that shows, edits or clears `boot_project` (three
-hits in the frontend, all plumbing). Getting back to the island is opening it
-once more, from the recent list. That is the behaviour every other editor on this
-machine has and it is not what "the island IS the default" says; the wave chose
-it deliberately and this paragraph is here so the choice is visible rather than
-implied.
+1. `INF_BOOT_PROJECT`;
+2. a **DELIBERATE** pin — `boot_project` with `boot_project_deliberate` set,
+   written only by Preferences ▸ "Make this project the default";
+3. **the showcase**;
+4. an **AUTOMATIC** pin — the same field with the flag clear, the last project
+   opened;
+5. the start screen.
+
+A visit ranks below the showcase; a decision ranks above it. Rung 4 is **demoted,
+not deleted**, because a machine where `inf island build` never ran still wants
+"reopen what I had" — there rung 3 answers nothing and rung 4 is the whole
+behaviour. One string plus one flag rather than two strings, because rung 2
+answering means rung 4 is never read; the consequence is stated where it is
+caused, in `pin_boot_project`, which **leaves a deliberate pin alone** so opening
+a scratch project cannot quietly overwrite an author's choice.
+
+**And the choice is now visible and reversible.** Preferences ▸ General prints
+which rung will answer next launch and offers "Make this project the default" and
+"Reset to the showcase". The phrase is `BootSource::phrase` carried out of the
+backend and never composed in TypeScript, so "reset to the showcase" reports what
+will *actually* happen — on a machine without one it says the start screen.
+
+Arms: **12** in `inf-project` (was 7), **3** in `inf-studio`, **5** in the
+frontend — **twenty**. *(Audit correction to the original row, which said "8 in
+`inf-project`": `cargo test -p inf-project boot` answers "8 tests" and the eighth
+is `template::tests::every_template_scaffolds_a_boot_scene_under_content`, a
+pre-existing arm the name filter catches. A count taken from a filter is not a
+count of arms.)*
+
+**Mutation-verified, four ways.** Restoring the pre-ruling ladder — the pin back
+at rung 2 whatever its intent — reds **3** (`an_automatic_pin_does_not_outrank_…`,
+`an_automatic_pin_answers_when_no_showcase_…`, `a_deliberate_pin_is_not_retried_…`)
+and leaves nine green, which is the shape a demotion should have. Deleting rung 2
+reds **2**. Letting an open overwrite a deliberate pin reds **1**, naming the
+choice it destroyed. Letting the store compose the reset phrase instead of
+reading the backend's reds **1** in the frontend.
 
 **And the discovery rung has one measured bound.** `find_showcase` accepts any
 directory named `island-build/project` that holds a *file* called `inf.toml`;
@@ -1220,13 +1243,16 @@ place** above, each marked; this section is the index.
 | A-11 | CP-C3 | three bands, no statement about their edges | no hole (their union is `[0, 1000)`); one **pre-existing** 6.9 m fabric/shell overlap; render-side only; fenced by `projector_mirror` |
 | A-12 | CP-B10's three findings | presented as findings | **source facts plus a deduction** — each re-verified by grep, and "a room light leaks through its walls" is rendered by no arm |
 | A-13 | FN-2's evidence | "5 levels re-blessed" | re-written, with the byte count — "bless" means a golden here, and the law two lines up is that none was |
+| A-14 | **the boot ladder itself** (the §5 RULING, taken) | one pin at rung 2, written by every open | **five rungs**: env, a DELIBERATE pin, the showcase, an AUTOMATIC pin, the start screen — plus a Preferences row that shows which answered and can undo it |
 
 ### Measured here, unmeasured by the wave
 
 * **The morph's GPU cost** (carried item 8): **+0.19 to +0.29 ms** of the
   island's `terrain` pass, 6–8 % of it.
-* **The boot pin's plain consequence**: opening any other project changes what
-  the application boots on, for ever, with no UI to see or clear it.
+* **The boot pin's plain consequence**: opening any other project changed what
+  the application booted on, for ever, with no UI to see or clear it. **CLOSED by
+  the ruling** — the automatic pin now sits below the showcase and the deliberate
+  one is a separate bit an author sets on purpose.
 * **The discovery rung's bound**: a nearer `island-build/project` holding any
   file named `inf.toml` shadows the real showcase, and the walk does not resume
   when that candidate fails to open — the start screen, silently.
@@ -1247,6 +1273,10 @@ place** above, each marked; this section is the index.
 | `ground_height` halved, against the goldens (control) | — | **9 of 121** |
 | a stray `island-build/project` with no manifest, nearer the exe | skipped | skipped; the real showcase still answers |
 | …the same stray with a garbage `inf.toml` | skipped | **taken** — the bound above |
+| the pre-ruling ladder restored (the pin back at rung 2) | ≥ 1 red | **3** of 12 |
+| rung 2 deleted (a deliberate pin cannot answer) | 1 red | **2** |
+| an open overwrites a deliberate pin | 1 red | **1**, naming the choice destroyed |
+| the store composes "reset to the showcase" itself | 1 red | **1**, in the frontend |
 
 ### Held, reproduced exactly
 

@@ -29546,11 +29546,41 @@ fixture per row — not the island, not PIE, and for a stated reason).
 carried item 8, is **+0.19 to +0.29 ms** of the island's terrain pass. The
 goldens are **blind to the whole morph rule** — forcing `morph_at` to 1.0
 everywhere reds 0 of 121 arms while halving `ground_height` reds 9, and
-`golden_terrain_lod` does render a ring-0 morph band. The boot pin means
-**opening any other project changes what the application boots on, permanently,
-with no UI to see or clear it**. And a stray `island-build/project` holding any
-file named `inf.toml`, nearer the executable, **shadows the real showcase** and
-drops the launch to the start screen without retrying it.
+`golden_terrain_lod` does render a ring-0 morph band. The boot pin meant
+**opening any other project changed what the application booted on, permanently,
+with no UI to see or clear it** — RULED and CLOSED, see below. And a stray
+`island-build/project` holding any file named `inf.toml`, nearer the executable,
+**shadows the real showcase** and drops the launch to the start screen without
+retrying it.
+
+### THE RULING, AND WHAT IT CHANGED
+
+The orchestrator ruled on the audit's one open question: **the island is THE
+default, so an automatic "last opened" pin must not silently outrank the
+showcase.** The ladder is now five rungs — `INF_BOOT_PROJECT`, a **DELIBERATE**
+pin, **the showcase**, an **AUTOMATIC** pin, the start screen — and the pin is
+split by INTENT rather than by value: a visit ranks below the showcase, a
+decision above it. Rung 4 is demoted, not deleted, because a machine where
+`inf island build` never ran still wants "reopen what I had".
+
+`EditorSettings::boot_project_deliberate` is the one bit, `#[serde(default)]`
+false so an existing profile's pin reads as the visit it was, and
+`pin_boot_project` **leaves a deliberate pin alone** — one string carries both,
+so the only way an author's choice survives opening a scratch project is not to
+overwrite it. Preferences ▸ General gains one row: which rung will answer next
+launch, "Make this project the default", and "Reset to the showcase". The phrase
+is `BootSource::phrase` carried out of the backend and never composed in
+TypeScript, so "reset to the showcase" reports what will *actually* happen — on a
+machine without one, the start screen.
+
+Arms **12 + 3 + 5 = 20** (was 7 + 2 + 3), and the ruling's four are each
+mutation-verified: restoring the pre-ruling ladder reds **3** of 12 and leaves
+nine green; deleting rung 2 reds **2**; letting an open overwrite a deliberate
+pin reds **1**, naming the choice it destroyed; letting the store compose the
+reset phrase reds **1** in the frontend. `inf island build` can now print the
+truthful sentence — the editor opens this project unless another was made the
+default in Preferences — because the exception is finally something an author did
+on purpose.
 
 **One vacuity closed.** The **12.2 %** that justified the new LOD band was
 printed and never asserted: mutating `is_fit_out` to classify nothing made the
