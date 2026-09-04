@@ -287,7 +287,7 @@ pub fn build_locomotion(
 
     let knee_limit = knee_flex_ceiling(rig, &legs);
 
-    let idle = idle_clip(gait, hips, chest, hips_bind, hip_height_m);
+    let idle = idle_clip(gait, hips, chest, hips_bind, hip_height_m, &arms);
     let walk = gait_clip(
         "walk",
         gait,
@@ -411,6 +411,10 @@ struct Leg {
 struct Arm {
     upper: u16,
     side: usize,
+    /// **The rotation that brings this arm to its resting stance**, in the
+    /// upper arm's own local frame (wave FIX1). Identity for a rig whose arms
+    /// already hang.
+    rest: glam::Quat,
 }
 
 fn plan_label(plan: BodyPlan) -> &'static str {
@@ -547,6 +551,29 @@ fn leg_by_role(roles: &RoleIndex, side: BoneSide) -> Option<(u16, u16, u16)> {
     ))
 }
 
+/// **How far toward straight down an arm's resting stance brings it**, as a
+/// fraction of the way from that arm's own bind direction (wave FIX1).
+///
+/// A fraction rather than an angle because the rule has to be true of more than
+/// one rig. `inf_anim::manny`'s 161-bone mannequin binds its arms as a **T-pose**
+/// — four consecutive pure `±X` offsets with identity rotations, because SK1a's
+/// law is that a bind pose here carries no rotation — while
+/// [`crate::template`]'s canonical biped binds them hanging along `−Y`. Eight
+/// tenths of the way down is **72°** on the first and **0°** on the second, which
+/// is exactly right in both cases: a relaxed stance with the arms 18° out from
+/// vertical, and a rig that was already relaxed left alone to the bit.
+///
+/// # Why this constant exists at all
+///
+/// Before it, `idle_clip` wrote **two** tracks — the pelvis's breath and the
+/// chest's pitch — and `sample_clip` seeds every joint the clip does not animate
+/// from its `local_bind`. So an idling mannequin drew 159 of its 161 joints at
+/// bind, and bind is a T. The author's report was *"the character is in T-Pose
+/// position and will not move"*, and the half about the T-pose was not a
+/// resolver failure at all: the machine resolved, the clip resolved, the pose was
+/// published, and the pose it published was a T with a 5.6 mm hip bob on it.
+const ARM_REST_RATIO: f32 = 0.8;
+
 /// Resolve the biped's two arms. Every other plan has none, and asking for them
 /// would be a refusal on a rig that is exactly right.
 fn arms_of(
@@ -563,9 +590,68 @@ fn arms_of(
             Some(j) => j,
             None => joint(skeleton, &format!("upper_arm_{tag}"), plan)?,
         };
-        out.push(Arm { upper, side });
+        let rest = arm_rest_rotation(
+            skeleton,
+            upper,
+            roles.first(BoneRoleKind::LowerArm, side_of(side)),
+        );
+        out.push(Arm { upper, side, rest });
     }
     Ok(out)
+}
+
+/// **The resting rotation for one arm**, derived from the rig rather than
+/// tabulated (wave FIX1).
+///
+/// The arm's own direction is the bind translation of the joint below it, read in
+/// the upper arm's local frame — `lowerarm_l` at `(−0.3822, 0, 0)` on the
+/// mannequin, `(0, −0.3822, 0)` on the canonical biped. The rotation that takes
+/// that direction to straight down is built from a **dot and a cross in the XY
+/// plane** and then walked `ARM_REST_RATIO` of the way along with
+/// [`inf_math::pslerp`] — no `atan2`, no `f32::sin_cos`, nothing from `std`'s
+/// transcendental table, because this value is written into a committed
+/// `.inf_anim` and the P14 law reaches further than serialization.
+///
+/// Identity — exactly, bit for bit — when the arm already hangs, when the joint
+/// below it cannot be found, and when the arm points along `Z` (where "down" is
+/// not a rotation about `Z` at all and guessing one would be worse than nothing).
+fn arm_rest_rotation(skeleton: &Skeleton, upper: u16, lower: Option<u16>) -> glam::Quat {
+    let Some(lower) = lower.or_else(|| first_child_of(skeleton, upper)) else {
+        return glam::Quat::IDENTITY;
+    };
+    let d = skeleton.joints()[lower as usize].local_bind.translation;
+    let (dx, dy) = (f64::from(d[0]), f64::from(d[1]));
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0e-6 {
+        return glam::Quat::IDENTITY;
+    }
+    let (ax, ay) = (dx / len, dy / len);
+    // The rotation about +Z taking `a` to (0, −1): cos = a·t, sin = a × t.
+    let cos = -ay;
+    let sin = -ax;
+    // Half angle from the full angle's cosine, without a transcendental. `cos`
+    // is in [−1, 1] by construction, so both radicands are non-negative.
+    let half_cos = ((1.0 + cos) * 0.5).max(0.0).sqrt();
+    let half_sin = if half_cos > 1.0e-9 {
+        sin / (2.0 * half_cos)
+    } else {
+        // A half turn: the arm points straight UP. `sin` is 0 here, so the sign
+        // is a free choice and +1 is the one that keeps the rotation continuous
+        // with the near cases.
+        1.0
+    };
+    let full = glam::Quat::from_xyzw(0.0, 0.0, half_sin as f32, half_cos as f32).normalize();
+    inf_math::pslerp(glam::Quat::IDENTITY, full, ARM_REST_RATIO)
+}
+
+/// The first joint whose parent is `parent`, in index order — the fallback for a
+/// rig with no role table.
+fn first_child_of(skeleton: &Skeleton, parent: u16) -> Option<u16> {
+    skeleton
+        .joints()
+        .iter()
+        .position(|j| j.parent == Some(parent))
+        .map(|i| i as u16)
 }
 
 /// The largest knee flex this rig's own limits permit, in **degrees**, or `None`
@@ -635,14 +721,21 @@ fn cycle_times(period: f64, n: u32) -> Vec<f32> {
         .collect()
 }
 
-/// The idle clip: a breath. The hips rise and fall once per cycle and the chest
-/// pitches with them.
+/// The idle clip: a breath, **and the arms at rest** (wave FIX1).
+///
+/// The arms are the half this clip did not have and had to. `sample_clip` seeds
+/// every joint a clip does not animate from its `local_bind`, so on a rig whose
+/// bind pose is a T (`inf_anim::manny`'s, which is the one every generated
+/// character in this engine uses) an idling character stood with its arms
+/// straight out at shoulder height for the whole four-second loop. See
+/// [`ARM_REST_RATIO`].
 fn idle_clip(
     gait: &GaitParams,
     hips: u16,
     chest: u16,
     hips_bind: [f32; 3],
     hip_height_m: f64,
+    arms: &[Arm],
 ) -> AnimClip {
     let n = gait.keys_per_cycle;
     let times = cycle_times(gait.idle_period_s, n);
@@ -677,7 +770,24 @@ fn idle_clip(
         Interpolation::Linear,
     ));
 
-    AnimClip::new("idle", vec![hip_track, chest_track])
+    let mut tracks = vec![hip_track, chest_track];
+    // One key per arm, held: a rest stance is a constant, and a constant written
+    // as one key is what the interpolator wants.
+    for arm in arms {
+        if arm.rest == glam::Quat::IDENTITY {
+            // A rig whose arms already hang gets no track at all, so its
+            // committed clips do not move by a byte.
+            continue;
+        }
+        let mut track = JointTrack::new(arm.upper);
+        track.rotation = Some(QuatTrack::new(
+            vec![0.0],
+            vec![arm.rest.to_array()],
+            Interpolation::Step,
+        ));
+        tracks.push(track);
+    }
+    AnimClip::new("idle", tracks)
 }
 
 /// One gait cycle: hips bobbing twice, every leg swinging on its own phase, and
@@ -778,7 +888,36 @@ fn gait_clip(
             (0..=n)
                 .map(|i| {
                     let u = i as f64 / n as f64 + leg.phase;
-                    quat_x(arm_swing * psin64(TAU * u))
+                    // **The swing about the PARENT's X, applied to an arm that
+                    // has already been brought down** (wave FIX1).
+                    //
+                    // The order is the whole of the fix. `quat_x` alone was a
+                    // rotation about the joint's local X, and on the mannequin
+                    // the arm below it sits ON that axis — so the swing rotated
+                    // the arm about its own length and the hand did not move at
+                    // all. The rig's own file says as much two modules over:
+                    // "the elbows hinge about Y ... a T-posed arm runs out along
+                    // ±X". Composed this way the arm hangs first and the swing is
+                    // then a fore-aft rotation of a vertical limb, which is what
+                    // a walk is; on a rig whose arms already hang `rest` is
+                    // identity and this is the expression it replaces, exactly.
+                    let swing = quat_x(arm_swing * psin64(TAU * u));
+                    if arm.rest == glam::Quat::IDENTITY {
+                        // **Not `q * IDENTITY`, and the difference is three
+                        // bytes of committed content.** A quaternion product
+                        // computes `x = w1·x2 + x1·w2 + y1·z2 − z1·y2`, and for
+                        // `x1 = -0.0` (which `psin64` really does produce here:
+                        // a f64 sine of π underflows to a NEGATIVE zero in f32)
+                        // that is `0.0 + (-0.0) + 0.0 − 0.0 = +0.0`. Multiplying
+                        // by the identity is not the identity FUNCTION on signed
+                        // zero, and `samples/phase29-locomotion`'s two committed
+                        // gait clips moved by exactly three sign bits before this
+                        // guard was here. A rig whose arms already hang must come
+                        // out of this generator byte for byte as it went in.
+                        swing
+                    } else {
+                        (glam::Quat::from_array(swing) * arm.rest).to_array()
+                    }
                 })
                 .collect(),
             Interpolation::Linear,
@@ -1445,5 +1584,177 @@ mod tests {
 
         // The idle clip is not a gait and carries no plants.
         assert!(set.idle.markers.is_empty());
+    }
+    /// **A generated idle no longer stands in a T-pose** (wave FIX1).
+    ///
+    /// The author pressed Play and reported *"the character is in T-Pose position
+    /// and will not move"*. Half of that sentence was about input; this is the
+    /// other half, and it was **not** a resolver failure — the machine resolved,
+    /// the clip resolved and a full 161-joint pose was published. The pose was a
+    /// T with a 5.6 mm hip bob on it, because `idle_clip` wrote two tracks and
+    /// `sample_clip` seeds every other joint from its `local_bind`, and this
+    /// rig's bind pose IS the T (`manny.rs`: identity rotation on all 161).
+    ///
+    /// Measured on the WRIST's world height under the idle pose, against the same
+    /// wrist in the bind pose. The control is the shoulder, which must not move:
+    /// an arm brought down by moving the whole body would pass a wrist test.
+    #[test]
+    fn a_generated_idle_stands_with_its_arms_down() {
+        let rig = crate::manny::build_manny(&crate::template::BodyParams::default())
+            .expect("the mannequin builds");
+        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default())
+            .expect("the locomotion set builds");
+        let skeleton = &rig.skeleton;
+        let hand = joint_named(skeleton, "hand_l");
+        let shoulder = joint_named(skeleton, "upperarm_l");
+
+        let bind = crate::pose::global_transforms(skeleton, &crate::pose::Pose::rest(skeleton));
+        let idle = crate::pose::global_transforms(
+            skeleton,
+            &crate::pose::sample_clip(skeleton, &set.idle, 0.0, true),
+        );
+        let p = |m: &[glam::Mat4], j: usize| m[j].w_axis.truncate();
+        let bind_hand = p(&bind, hand);
+        let idle_hand = p(&idle, hand);
+        let drop_m = f64::from(bind_hand.y - idle_hand.y);
+        let inward_m = f64::from(bind_hand.x.abs() - idle_hand.x.abs());
+        println!(
+            "FIX1 idle arms: hand {:?} -> {:?} (drops {drop_m:.4} m, comes in {inward_m:.4} m); \
+             shoulder {:?} -> {:?}",
+            bind_hand,
+            idle_hand,
+            p(&bind, shoulder),
+            p(&idle, shoulder)
+        );
+        assert!(
+            drop_m > 0.4,
+            "the idle pose's hand is still up at shoulder height: it dropped {drop_m:.4} m"
+        );
+        assert!(
+            inward_m > 0.4,
+            "the idle pose's arm is still out sideways: it came in {inward_m:.4} m"
+        );
+        // The control: the arm came down because the ARM rotated, not because the
+        // body moved. The shoulder's own displacement is the breath and nothing
+        // more.
+        let shoulder_moved = (p(&bind, shoulder) - p(&idle, shoulder)).length();
+        assert!(
+            f64::from(shoulder_moved) < 0.02,
+            "the shoulder moved {shoulder_moved:.4} m, so the wrist test is measuring the body"
+        );
+    }
+
+    /// **A generated walk's arm swing MOVES the arm** (wave FIX1).
+    ///
+    /// It did not. `gait_clip` wrote `quat_x(θ)` onto the upper arm — a rotation
+    /// about that joint's local X — and on the mannequin the joint below it sits
+    /// ON the X axis, so the rotation was about the arm's own length and the hand
+    /// stayed exactly where it was. The file that binds the rig says so two
+    /// modules over: *"the elbows hinge about Y ... a T-posed arm runs out along
+    /// ±X"*.
+    ///
+    /// The **control is the defect itself**: the same clip's swing applied without
+    /// the rest stance, which is the expression this wave replaced. It must move
+    /// the hand by ~nothing, or the arm above proves nothing.
+    #[test]
+    fn a_generated_walk_swings_the_arm_where_the_old_rotation_twisted_it() {
+        let rig = crate::manny::build_manny(&crate::template::BodyParams::default())
+            .expect("the mannequin builds");
+        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default())
+            .expect("the locomotion set builds");
+        let skeleton = &rig.skeleton;
+        let hand = joint_named(skeleton, "hand_l");
+        let upper = joint_named(skeleton, "upperarm_l") as u16;
+
+        // The shipped clip, sampled across one cycle.
+        let span = |clip: &AnimClip| {
+            let mut lo = glam::Vec3::splat(f32::MAX);
+            let mut hi = glam::Vec3::splat(f32::MIN);
+            for i in 0..=24 {
+                let t = clip.duration * (i as f32 / 24.0);
+                let m = crate::pose::global_transforms(
+                    skeleton,
+                    &crate::pose::sample_clip(skeleton, clip, t, true),
+                );
+                let p = m[hand].w_axis.truncate();
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            (hi - lo).length()
+        };
+        let swung = f64::from(span(&set.walk));
+
+        // The control: the pre-FIX1 expression, on the same rig and the same
+        // angles — the swing alone, about the joint's own local X.
+        let gait = GaitParams::default();
+        let arm_swing = gait.arm_swing_deg.to_radians();
+        let n = gait.keys_per_cycle;
+        let times = cycle_times(1.0 / gait.walk_cadence_hz, n);
+        let mut old = JointTrack::new(upper);
+        old.rotation = Some(QuatTrack::new(
+            times,
+            (0..=n)
+                .map(|i| quat_x(arm_swing * psin64(TAU * (i as f64 / n as f64))))
+                .collect(),
+            Interpolation::Linear,
+        ));
+        let mut control = AnimClip::new("control", vec![old]);
+        control.duration = (1.0 / gait.walk_cadence_hz) as f32;
+        let twisted = f64::from(span(&control));
+
+        println!(
+            "FIX1 walk arm: the hand sweeps {swung:.4} m; the pre-FIX1 rotation swept {twisted:.4} m"
+        );
+        assert!(
+            twisted < 1.0e-4,
+            "the control moved the hand {twisted:.4} m, so it is not the defect this arm names"
+        );
+        assert!(
+            swung > 0.15,
+            "the walk's arm swing moves the hand only {swung:.4} m"
+        );
+    }
+
+    /// **A rig whose arms already hang is untouched, to the bit** (wave FIX1).
+    ///
+    /// [`ARM_REST_RATIO`] is a fraction of each arm's OWN bind direction, so the
+    /// canonical biped — whose arms bind along `−Y` — gets identity, no idle
+    /// track, and a walk clip whose arm rotations are the expression they always
+    /// were. Without this the change would have re-blessed content it has no
+    /// business touching.
+    #[test]
+    fn a_rig_that_already_hangs_its_arms_gets_no_rest_rotation() {
+        let rig = crate::template::build_template(
+            BodyPlan::BipedCanonical,
+            &crate::template::BodyParams::default(),
+        )
+        .expect("the canonical biped builds");
+        let roles = rig.role_index();
+        let arms = arms_of(BodyPlan::BipedCanonical, &rig.skeleton, &roles).expect("two arms");
+        assert_eq!(arms.len(), 2);
+        for arm in &arms {
+            assert_eq!(
+                arm.rest,
+                glam::Quat::IDENTITY,
+                "a downward-binding arm was given a rest rotation"
+            );
+        }
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default())
+            .expect("the locomotion set builds");
+        assert_eq!(
+            set.idle.tracks.len(),
+            2,
+            "the canonical biped's idle grew a track it does not need"
+        );
+    }
+
+    /// The joint index of a bone by name — the arms above address the rig by the
+    /// names its own table uses.
+    fn joint_named(skeleton: &Skeleton, name: &str) -> usize {
+        skeleton
+            .joints()
+            .iter()
+            .position(|j| j.name == name)
+            .unwrap_or_else(|| panic!("the rig has no `{name}`"))
     }
 }
