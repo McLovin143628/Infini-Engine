@@ -31132,3 +31132,124 @@ anywhere in the document, which would make an unrelated slider rebuild a city
 four times a second — and the invalidation is a string comparison against a
 hand-written type path, which is precisely the thing that drifts silently.
 Mutation-verified in both directions.
+
+#### Finding 5 — THE HOME LATCH IS A FRAME COUNT GUARDING A WALL-CLOCK EVENT (severity LOW; ROUTED)
+
+`HOME_LATCH_FRAMES = 180`, documented as *"three seconds at 60 fps"*, is what
+stands between "the editor opens on Harbour City" and "the editor opens wherever
+it happened to be, intermittently" — the wave's own words, and its headline
+behaviour. What it counts is **viewport frames**, and the viewport's surface is
+`wgpu::PresentMode::AutoVsync` (`surface.rs:42`), so the latch's wall-clock
+length is *the display's refresh rate*:
+
+| display | 180 frames |
+|---|---|
+| 60 Hz (this machine, measured) | **3.0 s** |
+| 144 Hz | 1.25 s |
+| 240 Hz | 0.75 s |
+
+What has to happen inside that window is a document load, which is measured in
+seconds and not in frames: on this machine the island's open completes in about
+200 ms warm (`project opened: Vancouver Island` to the first projection in the
+editor's own log), so the margin here is fifteen-fold and every run in this audit
+landed on Harbour City. On a 240 Hz panel with a cold disk it is a quarter of
+that, and the failure is silent — the camera simply stays at
+`EditorCamera::default`, which is the reported defect.
+
+**Routed rather than fixed, and the reason is the house rule and not the size.**
+The change is `pending_home: u32` to a `std::time::Instant` deadline — three
+lines — but it lives in the win32 message pump, which has no test harness in this
+repository, so it would be an unarmed change to the one loop where an unarmed
+change is hardest to notice. The wave's own doc already states the 60 fps
+assumption; what it does not say is that the assumption is the *user's monitor*.
+**Carried 10.**
+
+### THE AUDIT'S VERDICTS, a to h
+
+| | claim | verdict |
+|---|---|---|
+| a | the GI fix is physics, not a knob | **HELD** |
+| b | the island frame | **PARTIAL** — the domes are fixed, the white ground is named and routed |
+| c | the editor==player arm | **HELD**, and strengthened: the arm is two-sided |
+| d | one door | **HELD** |
+| e | budget and responsiveness | **FAILED as claimed** — the budget had no arm and the table is the fixture's; both closed |
+| f | Home / start | **HELD**, with a bound the wave did not state |
+| g | editing on streamed content | **PARTIAL** — the behaviour is right, the arm was missing; now written |
+| h | hygiene | **HELD** |
+
+**(a) is physics.** The Ramamoorthi convolution yields irradiance (`A0 = pi`,
+`A1 = 2pi/3`, `A2 = pi/4`); a Lambert surface leaves `(rho/pi)*E`; so the end
+state `A0/pi = 1, A1/pi = 2/3` is the *definition* of exit radiance and not a
+tuned number, and on a uniform field of radiance `L` it gives exactly
+`albedo * L` — which is the furnace, and the furnace closes at **1.0110**
+(129.185 against the emissive reference's 129.148), reproduced here to the digit.
+Both consumers are consistent: `gi_probes.wgsl`'s hit term is now
+`albedo/pi * sun * vis`, which is the same `kd * albedo / PI` all six lit shaders
+spell for the direct half, and the miss term is a sky *radiance* that needs no
+divide. The frame arm reproduces exactly (193.1 / 218.3 / 242.6, lifts +25.1 and
++49.4, clipped 0.0000 and 0.1048) and its control row is genuinely asserted to
+fail. `GI_LAMBERT_PI` is a **fixture** constant, not a shipped one, and it is not
+a blindfold: setting it to 1.0 turns **four of the five GI goldens red**
+(gi_scatter_neon 0.1491, gi_emissive 0.1562, gi_specular 0.1425, gi_bleed 0.1119;
+`gi_terrain` alone survives, because terrain's direct term is its own non-PBR
+Blinn model and dominates that frame). The one re-bless is honest: the before and
+after frames are the same composition, the same red wall over the same floor,
+with the bounce a little different — exactly what "one multiplier restores the
+sky term exactly and the bounce term only partly" predicts.
+
+**(c) is two-sided, which the wave did not show.** It mutation-verified the
+PLAYER's half (`GrammarContext.seed_offset` +1 -> player red, editor green). The
+audit ran the other direction: perturbing the EDITOR's own `seed_offset` in
+`commands::pcg`'s evaluation door turns the **editor** twin red — *"the editor's
+Office block is not the one the shipped player draws"* — and leaves
+`editor_pcg_parity` green. Both directions now have a measurement, and the pin
+says which host moved either way. The recorded vacuous mutation is also **true**:
+adding 7 to `rule.scatter.seed` changes nothing on the settlement's zone
+documents, both arms stay green, and the sentence in the test is right to warn
+the next person off it.
+
+**(f) reproduced.** The editor opens standing behind the pawn at head height
+looking down a Harbour City street, with the start gizmo's ring at the
+character's feet; `Home` is in the toolbar; the demo's `01-editor.png` is the
+picture.
+
+### THE AUDIT'S VERIFICATION
+
+* `cargo fmt` over all **48** workspace packages (`cargo fmt --all` still dies
+  with os error 206 here), `git status` clean.
+* **Battery: `AGGREGATE over 374 binaries: 7083 passed, 0 failed, 21 ignored`,
+  exit 0, FAILING BINARIES `(none)`** under `INF_GOLDEN_STRICT=1` at `-j 3
+  --no-fail-fast`. The wave's own 7077 reproduced exactly beforehand, at HEAD,
+  before anything was changed; the six added are this audit's arms.
+* **Goldens 62**, exactly one file changed across the whole range
+  (`gi_specular.png`), none in `git status`. 121 golden tests green under strict
+  with the far-LOD rule in.
+* **rustdoc 410** after `cargo clean --doc` (ceiling 450, the wave's own 410) —
+  none added; the one warning in a file this audit touched
+  (`pack_fallback`'s private doc link, `scatter.rs:1082`) is in the wave's log
+  too.
+* **clippy `--workspace --all-targets -D warnings`: exit 0, 0 warnings** — run LAST.
+* Frontend **86 files / 781 tests**, typecheck and lint clean.
+* **CRLF 0, measured at the BLOB and not through `git diff`.** Every file in
+  `0432afbd..HEAD` was read out of git and counted: three of them
+  (`env_lighting.wgsl`, `lib/events.ts`, `ViewportToolbar.tsx`) are CRLF *in the
+  working copy* at every revision including the base, and **LF in git at all
+  three**, so nothing new was introduced. Recorded because `git diff | grep -c` on
+  this machine returned 0 and then 4848 for the *same* range an hour apart: the
+  grep is measuring the checkout, not the commit.
+* Manifests untouched; **no committed `.inf_lvl` byte moved**; scene v27,
+  `ScenePayload` v12, `EXPECTED_LEVELS` 24, editor-settings v1.
+* **The demo loop, on the final tree**: `HERO MOVED 12.748 m over 120 samples`,
+  console windows named inf-player `none`, cursor hidden during play and SHOWING
+  after, `still running: none`, exit 0. `AUDIT-DEMO/01-editor.png` is the editor
+  before Play — a Harbour City street, buildings both sides, the red truck, the
+  start gizmo, `Loading world... 27/52` — **and no domes**: where the wave's frame
+  had a row of white balls there are now grey building shells and a green
+  mountain behind them.
+
+### CARRIED, ADDED BY THE AUDIT
+
+10. **The Home latch counts frames, not time.** 180 vsync-limited frames is 3.0 s
+    at 60 Hz and 0.75 s at 240 Hz, and what it waits for is a document load. A
+    deadline is the fix; it is three lines in a message pump with no harness, so
+    it is routed rather than made unarmed.

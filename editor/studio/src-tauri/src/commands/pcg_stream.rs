@@ -399,16 +399,17 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
             // citing arms that did not exist. It counts volumes STARTED and not
             // volumes that succeeded, so a block that fails to evaluate cannot
             // buy the tick an extra one.
-            let mut attempted = 0usize;
-            for (guid, lowered) in &programs {
+            // `enumerate` rather than a hand-kept counter: the index IS the
+            // number already started, since the check is the first thing in the
+            // body and nothing skips.
+            for (started_count, (guid, lowered)) in programs.iter().enumerate() {
                 if !inf_editor_core::pcg_stream::start_another(
-                    attempted,
+                    started_count,
                     started.elapsed().as_secs_f64() * 1000.0,
                     budget_ms,
                 ) {
                     break;
                 }
-                attempted += 1;
                 match evaluate_volume_into(&mut doc, *guid, lowered) {
                     Ok(_) => {
                         evaluated.push(*guid);
