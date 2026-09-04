@@ -1641,6 +1641,26 @@ fn ground_at_offset(
     }
 }
 
+/// **The foot of the pavement's outer skirt**, never above the slab it hangs
+/// from.
+///
+/// The skirt exists to close the 190 mm cliff between a footway and the ground
+/// behind it, and it does that by dropping a vertical face to the terrain. Where
+/// the road is in a **cutting** the terrain behind the footway is *higher* than
+/// the slab, and an unguarded skirt turns inside out: the face rises above the
+/// pavement and its triangles wind the other way, so it draws as a black wall
+/// standing on the footway. Clamped, it degenerates to zero height instead —
+/// which is the right answer, because a cut slope already covers what the skirt
+/// was there to hide.
+fn skirt_foot(
+    frame: &CrossFrame,
+    offset_m: f64,
+    slab_y: f64,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> f64 {
+    ground_at_offset(frame, offset_m, height_at).min(slab_y)
+}
+
 /// **Kerb stones and the pavement slab behind them**, both sides.
 ///
 /// The profile, outward from the channel: the kerb's 150 mm upstand, its 300 mm
@@ -1680,7 +1700,7 @@ fn build_kerbs(
             },
             ProfilePoint {
                 offset_m: back,
-                y: ground_at_offset(f, back, height_at),
+                y: skirt_foot(f, back, top + PAVEMENT_M * PAVEMENT_FALL, height_at),
             },
         ]
     });
@@ -1691,7 +1711,7 @@ fn build_kerbs(
         vec![
             ProfilePoint {
                 offset_m: -back,
-                y: ground_at_offset(f, -back, height_at),
+                y: skirt_foot(f, -back, top + PAVEMENT_M * PAVEMENT_FALL, height_at),
             },
             ProfilePoint {
                 offset_m: -back,
