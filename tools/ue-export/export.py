@@ -121,6 +121,30 @@ PACKS = [
         ],
     },
     {
+        # THE GROUND (wave ASSET0, clause 5) -- the 51 km2 the player actually
+        # stands on. Two of the island's four `TerrainLayer`s can be replaced
+        # from these packs and two cannot: there is **no photographed grass and
+        # no sand anywhere in this project**. `MS_PristineGr` sounds like the
+        # first and is Pristine GRANITE (measured: Baltic Brown, Juparana Brown,
+        # French Cream), so it is not in this list. Grass and sand stay
+        # synthesised, and that is stated in the wave ledger rather than papered
+        # over with a moss.
+        "name": "MS_MountainSl",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_MountainSl", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)(rock|cliff|slope|scree)", "limit": 2, "surface": True},
+        ],
+    },
+    {
+        "name": "MS_MossEss",
+        "license": "unknown - Quixel/Megascans via Fab. See MS_AsphaltEss.",
+        "select": [
+            {"prefix": "/Game/MS_MossEss", "classes": ["MaterialInstanceConstant"],
+             "match": r"(?i)(moss|forest|floor|litter|ground)", "limit": 2, "surface": True},
+        ],
+    },
+    {
         "name": "Downtown_West",
         "license": "unknown - Unreal Marketplace / Fab pack in this project. "
                    "Verify on its Fab page before shipping.",

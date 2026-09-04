@@ -24,8 +24,15 @@
 //! does not ship. Downtown_West ships a real AO and a real metallic; the
 //! Megascans surfaces ship neither, and both import correctly.
 //!
-//! [`inf_material::plan_map_set`] and [`inf_material::pack_orm`] have existed
-//! since Wave T with **no caller at all**. This is their first.
+//! [`inf_material::pack_orm`] has existed since Wave T with **no caller at
+//! all**. This is its first.
+//!
+//! Its sibling [`inf_material::plan_map_set`] still has none, and deliberately:
+//! it recovers a map's role from a FILENAME, which is the right door for a
+//! folder of loose Megascans files dragged into the Content Drawer and the wrong
+//! one here — the manifest states every role explicitly, so planning by name
+//! would be guessing at something already known. Said rather than left as an
+//! absence, because "the planner has no caller" is a fact somebody will check.
 //!
 //! # The clamp
 //!
@@ -536,11 +543,10 @@ fn import_material(
             .fold((u32::MAX, u32::MAX), |(aw, ah), (w, h)| {
                 (aw.min(w), ah.min(h))
             });
-        let plane = |k: MapKind, project: &mut AssetProject| -> Result<Option<Vec<u8>>> {
+        let plane = |k: MapKind| -> Result<Option<Vec<u8>>> {
             let Some((px, w, h)) = planes.get(&k) else {
                 return Ok(None);
             };
-            let _ = project;
             if (*w, *h) == (ew, eh) {
                 return Ok(Some(px.clone()));
             }
@@ -548,9 +554,9 @@ fn import_material(
                 .map_err(|e| AssetError::Import(format!("{}: {e}", mat.key)))?;
             Ok(Some(px))
         };
-        let o = plane(MapKind::Occlusion, project)?;
-        let r = plane(MapKind::Roughness, project)?;
-        let mt = plane(MapKind::Metallic, project)?;
+        let o = plane(MapKind::Occlusion)?;
+        let r = plane(MapKind::Roughness)?;
+        let mt = plane(MapKind::Metallic)?;
         match inf_material::pack_orm(o.as_deref(), r.as_deref(), mt.as_deref(), ew, eh) {
             Some(px) => Some(write(
                 MapKind::Roughness,
