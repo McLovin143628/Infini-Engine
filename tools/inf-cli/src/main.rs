@@ -881,9 +881,18 @@ fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
         // place a reader learns that building the island is what makes the
         // application open on it — and the only place to learn the override on
         // a machine whose layout the walk cannot reach.
+        // The indent is a WIDTH SPECIFIER and not spaces in the literal: a run
+        // of six or more spaces inside a string is what an eaten
+        // backslash-continuation leaves behind, `cook`'s own source gate bans
+        // the shape, and it cannot tell a deliberate indent from the defect --
+        // correctly, since it has caught six real ones.
         println!(
-            "             the editor opens this project on launch once it is built here; 
-                          set {}=<project root> to point it somewhere else",
+            "  {:<11}the editor opens this project on launch once it is built here",
+            "boot"
+        );
+        println!(
+            "  {:<11}set {}=<project root> to point it somewhere else",
+            "",
             inf_project::BOOT_PROJECT_ENV
         );
     }

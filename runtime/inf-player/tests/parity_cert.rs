@@ -670,7 +670,7 @@ fn a_grammar_building_draws_in_three_distance_bands() {
     assert!(
         !inf_pcg::building::modules::is_fit_out_mesh(fabric)
             && inf_pcg::building::modules::is_fit_out_mesh(fit_out),
-        "the two families this arm bands apart are not on opposite sides of the          classification, so nothing below is a test of the band"
+        "the two families this arm bands apart are not on opposite sides of the classification, so nothing below is a test of the band"
     );
 
     let at = |x: f64| DVec3::new(x, 0.0, 0.0);
@@ -800,7 +800,7 @@ fn a_grammar_building_draws_in_three_distance_bands() {
     const {
         assert!(
             inf_render::INTERIOR_LOD_M < inf_render::STRUCTURE_LOD_M,
-            "the mid rung is not inside the far one, so there are three names              and two bands"
+            "the mid rung is not inside the far one, so there are three names and two bands"
         );
     }
     // The tie `INTERIOR_LOD_M`'s own doc claims. `inf-render` cannot name
@@ -920,7 +920,7 @@ fn the_texture_ladder_by_distance_band() {
     let far = level(BANDS_M[BANDS_M.len() - 1]);
     assert!(
         far > near + 2,
-        "the texture ladder moved only {} level(s) between {:.0} m and {:.0} m,          which is fewer rungs than the three the certification asks for",
+        "the texture ladder moved only {} level(s) between {:.0} m and {:.0} m, which is fewer rungs than the three the certification asks for",
         far - near,
         BANDS_M[0],
         BANDS_M[BANDS_M.len() - 1]
