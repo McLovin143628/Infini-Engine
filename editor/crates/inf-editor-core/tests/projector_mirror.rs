@@ -425,11 +425,14 @@ fn the_vgeom_instance_projection_matches_field_for_field() {
 
 /// The surrounding *rules* — not just the literal — must exist on both sides:
 /// resolution through the derived id, per-frame asset dedup, the paged source
-/// handed to the scene rather than a decoded DAG, and the primitive fallback.
+/// handed to the scene rather than a decoded DAG, the primitive fallback, and
+/// (wave FIX2) the arm that draws NOTHING for a bound mesh whose DAG is missing.
 ///
 /// Without this a projector could satisfy the field comparison while listing the
 /// asset twice, or while never falling back to the primitive at all (which would
-/// make an unresolvable `MeshRef` invisible instead of a placeholder).
+/// make a primitive-only `MeshRef` invisible), or while keeping the placeholder
+/// cube on one host after the other deleted it — which is the preview and the
+/// build disagreeing about a box, in the file that exists to stop exactly that.
 #[test]
 fn both_projectors_keep_the_real_geometry_rules() {
     for (label, path, fragments) in [
@@ -446,9 +449,14 @@ fn both_projectors_keep_the_real_geometry_rules() {
                 "VgeomAsset::new(",
                 // The scene carries the PAGED source (P18.2), not a decoded DAG.
                 "loaded.source",
-                // …and an unresolved / primitive-only MeshRef still draws its
-                // built-in primitive kind rather than vanishing.
+                // …and a primitive-only MeshRef still draws its built-in
+                // primitive kind rather than vanishing.
                 "prim_mesh(mesh_ref.primitive)",
+                // …while a BOUND one whose DAG is missing draws nothing at all
+                // (wave FIX2). The two arms are one decision and they must be the
+                // same decision on both sides: a placeholder kept on one host is
+                // a box in the preview and a hole in the build, or the reverse.
+                "mesh_ref.asset.is_some()",
             ],
         ),
         (
@@ -462,6 +470,7 @@ fn both_projectors_keep_the_real_geometry_rules() {
                 "VgeomAsset::new(",
                 "source",
                 "prim_mesh(mesh_ref.primitive)",
+                "mesh_ref.asset.is_some()",
             ],
         ),
     ] {

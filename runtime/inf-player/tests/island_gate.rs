@@ -1357,6 +1357,270 @@ fn the_cooked_island_carries_every_half_the_recipe_builds() {
     assert_eq!(asset.origin().z, anchor.origin_northing_m);
 }
 
+/// **PIE == SHIPPING ON THE RENDER HALF** (wave FIX2): the two hosts resolve the
+/// SAME meshlet DAG for every rigid `MeshRef.asset` in the island, in the same
+/// order.
+///
+/// # What this could not see before, and why the gate needed it
+///
+/// `pie_equals_shipping_on_an_island_drive` compares SIMULATION state, and every
+/// gap this wave closed is at the frame: a windowed PIE session stepped the
+/// island exactly like the shipped build and drew the roads as placeholder cubes
+/// at the world origin, 2.7 km from the spawn, because `run_pie` handed the
+/// renderer an empty `VmeshRegistry`. No fold could ever have caught it. This
+/// arm reads what the renderer was actually given.
+///
+/// # Why the comparison is over the level's refs and not over the two registries
+///
+/// The full sets are deliberately different and it would be wrong to assert
+/// otherwise: a cooked pack indexes every mesh it virtualized (the cook's
+/// `[vgeom] min_triangles` is 2048), while a payload names exactly the DAGs the
+/// level's rigid `MeshRef.asset`s resolve to. Both sets are printed for the
+/// record and the payload's must be contained in the pack's — the containment is
+/// the honest claim — but the *equality* that matters is per mesh: for every
+/// mesh the level draws, do the two hosts resolve the same asset id, or does one
+/// of them resolve nothing?
+///
+/// # The sweep runs before the cook, on purpose
+///
+/// That is the ROAD1b shape: the editor derives a `.inf_vmesh` beside every mesh
+/// it draws, at exactly `derived_vmesh_id` of the mesh, and the cook's collision
+/// guard used to ask the PROJECT rather than the closure and threw away the DAG
+/// it had just built. The cooked island then carried no virtualized geometry at
+/// all and the shipped build drew cubes too. Sweeping first puts those files
+/// where they were when that happened, so this arm reds if the guard regresses.
+#[test]
+fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+
+    // ── the EDITOR's derived DAGs, through its own sweep ────────────────────
+    let mut project =
+        inf_editor_core::assets::AssetProject::open(&proj).expect("the project opens");
+    let derived = inf_editor_core::assets::vmesh::sweep(&mut project);
+    println!("SWEEP: {} derived .inf_vmesh", derived.len());
+    assert!(
+        !derived.is_empty(),
+        "the sweep derived nothing, so both columns below would be empty and agree"
+    );
+
+    // ── the level's rigid mesh refs, in document order, deduplicated ────────
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let doc = inf_editor_core::scene::serialize::load(&content.join(format!("{slug}.inf_lvl")))
+        .expect("the island level loads");
+    let mut refs: Vec<Uuid> = Vec::new();
+    for &guid in doc.order() {
+        let Some(e) = doc.world().entity_of(guid) else {
+            continue;
+        };
+        if let Some(mesh) = doc
+            .world()
+            .world()
+            .get::<inf_ecs::components::MeshRef>(e)
+            .and_then(|m| m.asset)
+        {
+            if !refs.contains(&mesh) {
+                refs.push(mesh);
+            }
+        }
+    }
+    println!("MESH REFS: {} — {refs:?}", refs.len());
+    // The exact expected count, taken from the fixture, asserted BEFORE anything
+    // is compared — the P21.4 rule. Two hosts that both draw nothing agree.
+    assert_eq!(
+        refs.len(),
+        4,
+        "the island's rigid mesh refs are the four road layers; this fixture has \
+         {} and the comparison below would be measuring the wrong thing",
+        refs.len()
+    );
+
+    // ── the PIE host's registry, built the way `inf-player --pie` builds it ──
+    //
+    // The PCG, biome-set, mesh and byte resolvers are REAL (read off the sidecars,
+    // the way the editor's asset database answers), because the scatter half of
+    // this arm needs the graphs and the meshes their kinds name — the payload
+    // carries a level's scatter meshes in `meshes` since FIX2, and a table built
+    // from `|_| None` would be empty on both sides and agree.
+    let assets = content_assets(&content);
+    let read_asset = |g: Uuid| assets.get(&g).map(|p| std::fs::read(p).expect("an asset"));
+    let payload = inf_editor_core::pie::build_scene_payload(
+        &doc,
+        |_| None,
+        read_asset,
+        |_| None,
+        read_asset,
+        |_| None,
+        |_| None,
+        read_asset,
+        read_asset,
+        |g| match inf_editor_core::assets::vmesh::derived_vmesh(&project, inf_asset::AssetId(g)) {
+            inf_editor_core::assets::vmesh::DerivedVmesh::Current(p) => {
+                Some(inf_editor_core::pie::VmeshRef::Path(p))
+            }
+            inf_editor_core::assets::vmesh::DerivedVmesh::Stale(_) => {
+                Some(inf_editor_core::pie::VmeshRef::Stale)
+            }
+            inf_editor_core::assets::vmesh::DerivedVmesh::Absent => None,
+        },
+        HZ as u32,
+        false,
+    )
+    .expect("the payload builds");
+    assert_eq!(
+        payload.vmesh_paths.len(),
+        refs.len(),
+        "the payload names {} DAGs for {} rigid mesh refs",
+        payload.vmesh_paths.len(),
+        refs.len()
+    );
+    let pie = inf_player::vmeshes_from_payload(&payload);
+
+    // ── the SHIPPED host's registry, off the cooked pack ────────────────────
+    let out = tmp.path().join("out");
+    inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default())
+        .expect("the island cooks");
+    let reader = std::sync::Arc::new(
+        inf_asset::PackReader::open(&out.join(inf_player::level::PACK_FILE))
+            .expect("the pack opens"),
+    );
+    let reader_for_scatter = reader.clone();
+    let ship = inf_player::vmesh::VmeshRegistry::from_pack(reader).expect("the DAGs index");
+
+    println!(
+        "REGISTRIES: pie {} — {:?}",
+        pie.len(),
+        pie.registered_guids()
+    );
+    println!(
+        "            ship {} — {:?}",
+        ship.len(),
+        ship.registered_guids()
+    );
+    for g in pie.registered_guids() {
+        assert!(
+            ship.contains(g),
+            "the PIE host indexed DAG {g}, which the cooked pack does not carry"
+        );
+    }
+
+    // ── and the SCATTER table, the fifth store of the same class ────────────
+    //
+    // Wave TER2b closed "a scattered instance draws its authored mesh" for the
+    // cooked and dev-dir boots and left `run_pie` assigning no table at all, so a
+    // windowed PIE session drew ground cover as placeholder primitives while the
+    // shipped build drew props. Both tables are now built through
+    // `finish_scatter_meshes`, so the twelve building-module families cannot be
+    // added on one path and not the other — which is what a bare `from_payload`
+    // vs `from_pack` comparison would have missed.
+    let pie_scatter = inf_player::scatter_meshes_from_payload(&payload);
+    let ship_scatter = {
+        let mut t = inf_player::scatter_mesh::from_pack(&reader_for_scatter);
+        inf_player::scatter_mesh::add_building_modules(&mut t);
+        t
+    };
+    let keys = |t: &inf_render::ScatterMeshes| {
+        let mut k: Vec<u128> = t.keys().copied().collect();
+        k.sort();
+        k
+    };
+    println!(
+        "SCATTER: pie {} / ship {}",
+        pie_scatter.len(),
+        ship_scatter.len()
+    );
+    assert!(
+        pie_scatter.len() > 12,
+        "the PIE scatter table is {} entries — the twelve building modules and \
+         nothing authored, so the comparison below would only be testing a Ring-0 \
+         default",
+        pie_scatter.len()
+    );
+    assert_eq!(
+        keys(&pie_scatter),
+        keys(&ship_scatter),
+        "the two hosts scatter different meshes"
+    );
+
+    // ── THE COMPARISON ─────────────────────────────────────────────────────
+    let column = |reg: &inf_player::vmesh::VmeshRegistry| -> Vec<Option<u128>> {
+        refs.iter()
+            .map(|m| reg.resolve(*m).map(|(id, _)| id))
+            .collect()
+    };
+    let (a, b) = (column(&pie), column(&ship));
+    assert_eq!(
+        a, b,
+        "the two hosts resolve different geometry for the meshes this level \
+         draws — PIE {a:?} vs shipping {b:?}"
+    );
+    assert!(
+        a.iter().all(|x| x.is_some()),
+        "both hosts resolve NOTHING for at least one road mesh, and two hosts \
+         drawing nothing agree perfectly: {a:?}"
+    );
+
+    // ── AND THE FRAME, not only the registry ────────────────────────────────
+    //
+    // Everything above is about which DAGs a host indexed. This is what the
+    // renderer is actually handed, projected through `project_scene_full` — the
+    // function the windowed player calls — with the real registry and with an
+    // empty one, which is precisely the registry `run_pie` built for itself
+    // before this wave.
+    //
+    // Two facts, and each falsifies a different half of FIX2:
+    //
+    //  * with the payload's registry the roads reach the scene as **vgeom**
+    //    instances, and with an empty one they reach it as nothing. Drop
+    //    `with_vmesh_paths` and the first count goes to zero.
+    //  * the two projections push the SAME number of primitive instances. That
+    //    is the placeholder cube being gone: before FIX2 the empty registry
+    //    produced four extra `MeshInstance`s — 1 m boxes at `Transform::IDENTITY`,
+    //    2.7 km from the spawn — and restoring that branch reds this line.
+    let sim = inf_player::sim_from_payload(&payload).expect("the payload builds a world");
+    let project = |reg: &inf_player::vmesh::VmeshRegistry| {
+        let mut scene = inf_render::RenderScene::default();
+        inf_player::render::project_scene_full(
+            &mut scene,
+            &sim.sim,
+            1.0,
+            reg,
+            &inf_player::skinned::SkinnedRegistry::new(),
+            &inf_voxel::VoxelVolumes::new(),
+            &mut inf_render::DebrisCache::default(),
+            None,
+            &inf_render::ScatterMeshes::new(),
+        );
+        (scene.vgeom_instances.len(), scene.instances.len())
+    };
+    let (drawn, prims) = project(&pie);
+    let (none_drawn, prims_empty) = project(&inf_player::vmesh::VmeshRegistry::new());
+    println!("FRAME: vgeom {drawn} / prims {prims} — empty registry: vgeom {none_drawn} / prims {prims_empty}");
+    assert_eq!(
+        drawn,
+        refs.len(),
+        "the payload's registry put {drawn} vgeom instances in the frame for {} \
+         rigid mesh refs",
+        refs.len()
+    );
+    assert_eq!(
+        none_drawn, 0,
+        "an EMPTY registry still drew vgeom, so the comparison above is not \
+         measuring the registry"
+    );
+    assert_eq!(
+        prims,
+        prims_empty,
+        "a mesh whose DAG is missing drew {} placeholder primitives — the cube \
+         FIX2 deleted is back, and a shipped build that cannot find a mesh is \
+         claiming a 1 m box stands where the author put a road",
+        prims_empty - prims
+    );
+}
+
 /// The level carries its geo-anchor through the cook, so the sky knows where on
 /// Earth it is.
 #[test]

@@ -1303,10 +1303,57 @@ mod tests {
         assert_ne!(after.source.meshlet_count(), before.source.meshlet_count());
     }
 
-    /// Deleting the mesh asset degrades the entity to its placeholder rather than
-    /// rendering stale geometry or panicking.
+    /// **A DAG derived from bytes the mesh no longer holds is NOT drawn** (wave
+    /// FIX2, carried 38).
+    ///
+    /// The re-import arm above re-derives before it looks; this one does not,
+    /// which is the state every session is in between an import landing and the
+    /// meshlet sweep reaching that mesh — about two and a half minutes on the
+    /// island, and the reason the ROAD1b audit's proof frame showed the previous
+    /// build's roads. `open_vgeom` used to read the payload and ask nothing, so
+    /// the viewport drew it with complete confidence.
+    ///
+    /// Non-vacuous by construction: the same store resolves the mesh happily one
+    /// line earlier, so this is the staleness being refused and not the fixture
+    /// failing to resolve at all.
     #[test]
-    fn deleting_a_mesh_degrades_to_the_placeholder() {
+    fn a_stale_derived_vmesh_is_refused_rather_than_drawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut proj = AssetProject::open(&root).unwrap();
+        let d = proj.content_dir("Meshes").unwrap();
+        let mesh_id = proj
+            .write_asset(&d, "Grid", &grid_mesh(8), None, vec![], None)
+            .unwrap();
+        vmesh::ensure_vmesh(&mut proj, mesh_id).unwrap();
+
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        assert!(
+            store.resolve_vgeom(mesh_id.uuid()).is_some(),
+            "the fixture does not resolve even when current"
+        );
+
+        // The mesh moves; nothing re-derives. Same GUID, same files, new bytes.
+        proj.rewrite_payload(mesh_id, &grid_mesh(14), vec![])
+            .unwrap();
+        store.refresh_index();
+        assert!(
+            store.resolve_vgeom(mesh_id.uuid()).is_none(),
+            "the viewport drew a DAG built from bytes this mesh no longer holds"
+        );
+
+        // …and the sweep returns it, so a session is not stuck in the refusal.
+        assert!(vmesh::ensure_vmesh(&mut proj, mesh_id).unwrap().rebuilt());
+        store.refresh_index();
+        assert!(store.resolve_vgeom(mesh_id.uuid()).is_some());
+    }
+
+    /// Deleting the mesh asset stops it resolving — no stale geometry, no panic,
+    /// and since wave FIX2 no placeholder box either: a bound `MeshRef` whose DAG
+    /// is gone draws nothing.
+    #[test]
+    fn deleting_a_mesh_stops_it_resolving() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let mut proj = AssetProject::open(&root).unwrap();

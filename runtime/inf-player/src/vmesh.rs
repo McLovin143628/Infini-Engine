@@ -330,6 +330,62 @@ mod tests {
         assert!(reg.pick(Uuid::from_u128(0xBEEF), true).is_none());
     }
 
+    /// **The PIE door indexes what the payload names, under the guid it names**
+    /// (wave FIX2).
+    ///
+    /// The whole of `from_paths`' contract in one arm: a file the payload names
+    /// is opened and keyed under the *carried* guid — which is the DERIVED id, so
+    /// `resolve` on the MESH id finds it — and a file the payload names that is
+    /// not there is skipped rather than taking the level down.
+    ///
+    /// Non-vacuous: the registry answers `None` for this mesh before the payload
+    /// is read, so the assertion below is the path route working and not a
+    /// registry that was already full.
+    #[test]
+    fn a_payload_path_is_indexed_under_the_guid_the_payload_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mesh_id = Uuid::from_u128(0xF1_2201_0002);
+        let vmesh_id = derived_vmesh_id(mesh_id);
+
+        // A real v2 paged image, through the same writer the editor and the cook
+        // both use — an invented byte string would only prove the error path.
+        let payload =
+            inf_vgeom::build_vgeom_asset(&empty_vmesh(), &inf_vgeom::ClusterTextureSet::none())
+                .expect("the image writes")
+                .into_bytes();
+        let file = dir.path().join("Roads.inf_vmesh");
+        std::fs::write(&file, &payload).expect("the payload writes");
+
+        assert!(
+            VmeshRegistry::new().resolve(mesh_id).is_none(),
+            "the fixture resolves before anything is loaded"
+        );
+
+        let reg = VmeshRegistry::from_paths(&[(vmesh_id, file.to_string_lossy().to_string())]);
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.registered_guids(), vec![vmesh_id]);
+        let (id, _) = reg
+            .resolve(mesh_id)
+            .expect("the MESH id resolves through the derived one");
+        assert_eq!(id, vmesh_id.as_u128());
+
+        // A named file that is not there is skipped, not fatal — the `from_pack`
+        // rule — and the entity that named it reaches the stated miss instead.
+        let missing = dir.path().join("Gone.inf_vmesh");
+        let reg = VmeshRegistry::from_paths(&[
+            (vmesh_id, file.to_string_lossy().to_string()),
+            (
+                Uuid::from_u128(0xDEAD),
+                missing.to_string_lossy().to_string(),
+            ),
+        ]);
+        assert_eq!(
+            reg.len(),
+            1,
+            "an unreadable entry took the whole level down"
+        );
+    }
+
     fn empty_vmesh() -> VgeomMesh {
         VgeomMesh {
             schema_version: VgeomMesh::CURRENT_VERSION,

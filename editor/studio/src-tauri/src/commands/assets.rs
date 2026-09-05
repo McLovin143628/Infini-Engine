@@ -387,6 +387,11 @@ impl AssetState {
                 | inf_asset::AssetKind::Hair
                 | inf_asset::AssetKind::Material
                 | inf_asset::AssetKind::Texture
+                // Wave FIX2: `.inf_audio` joins the set, for the reason the four
+                // above are one loader — it is the same act, and an
+                // `AudioSource.clip` the payload could not read is a venue that
+                // plays in the build and is silent in Play.
+                | inf_asset::AssetKind::Audio
         ) {
             return None;
         }

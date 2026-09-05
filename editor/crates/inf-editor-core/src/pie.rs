@@ -1197,6 +1197,42 @@ where
         }
     }
 
+    // ── FIX2: the clips a level SOUNDS ──────────────────────────────────────
+    //
+    // `ScenePayload` v13(b). Every `AudioSource.clip` ref resolved to its
+    // `.inf_audio` bytes, through the same `resolve_bytes` door the garments and
+    // materials take — it is the same act, read this asset's committed bytes.
+    //
+    // **Why this survived nine rungs.** The P12 doctrine makes the emitted audio
+    // command stream a pure function of SIM STATE, so a PIE session with no clips
+    // issues byte-identical commands to a cooked build: every determinism trace,
+    // every `pie_equals_shipping` fold and the whole parity certification compared
+    // equal while the preview was silent and the build was not. There was nothing
+    // for a gate to see, and there is nothing to hear.
+    //
+    // Keyed by ASSET and deduplicated: a venue with four speakers playing one loop
+    // carries it once.
+    let mut audio: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_audio: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(clip) = world
+            .world()
+            .get::<inf_ecs::components::AudioSource>(e)
+            .and_then(|a| a.clip)
+        else {
+            continue;
+        };
+        if !seen_audio.insert(clip) {
+            continue;
+        }
+        if let Some(bytes) = resolve_bytes(clip) {
+            audio.push((clip, bytes));
+        }
+    }
+
     // Referenced materials (P26.3b · scene v22 · `ScenePayload` v8): every
     // `Material.asset` binding resolved to its `.inf_mat` bytes and **derived**
     // through the one door, plus the `.inf_tex` containers the derived records
@@ -1357,6 +1393,7 @@ where
             .with_terrains(terrains)
             .with_terrain_paths(terrain_paths)
             .with_vmesh_paths(vmesh_paths)
+            .with_audio_clips(audio)
             .with_fractures(fractures)
             .with_meshes(meshes)
             .with_garments(cloths, hairs)
@@ -1753,6 +1790,144 @@ mod tests {
             small < 64 * 1024,
             "the path route's frame is {small} B; it should be a level and a \
              filename"
+        );
+    }
+
+    /// **A rigid mesh's derived DAG rides as a path, keyed by the DERIVED id**
+    /// (wave FIX2, `ScenePayload` v13) — and an absent one is survivable while a
+    /// stale one refuses Play. All three, because each is a different decision
+    /// and the first cut of this walk got the middle one wrong in both directions
+    /// at once.
+    ///
+    /// The keying assertion is not decoration: `VmeshRegistry` looks a mesh's
+    /// geometry up by *computing* `derived_vmesh_id`, so a payload keyed by the
+    /// MESH id would ship four correct file paths that the player indexes under
+    /// four ids nothing ever asks for — a session that carries the roads and
+    /// draws none of them, with nothing anywhere reporting a problem.
+    #[test]
+    fn a_rigid_mesh_rides_as_a_derived_vmesh_path_and_a_stale_one_refuses_play() {
+        const MESH: Uuid = Uuid::from_u128(0xF1_2201_0001);
+
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Roads", None);
+        {
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world
+                .world_mut()
+                .entity_mut(id)
+                .insert(inf_ecs::components::MeshRef {
+                    asset: Some(MESH),
+                    ..Default::default()
+                });
+            world.mark_dirty();
+        }
+
+        let build = |vmesh: Option<VmeshRef>| {
+            build_scene_payload(
+                &doc,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |g| (g == MESH).then(|| vmesh.clone()).flatten(),
+                60,
+                false,
+            )
+        };
+
+        // (a) CURRENT — a path, under the DERIVED id and not the mesh's.
+        let path = std::path::PathBuf::from("/island/Content/Roads.inf_vmesh");
+        let payload = build(Some(VmeshRef::Path(path.clone()))).expect("payload builds");
+        assert_eq!(
+            payload.vmesh_paths,
+            vec![(
+                inf_vgeom::derived_vmesh_id(inf_asset::AssetId(MESH)).uuid(),
+                path.to_string_lossy().to_string()
+            )],
+            "the DAG did not ride as a path under its derived id"
+        );
+        assert_ne!(
+            payload.vmesh_paths[0].0, MESH,
+            "the DAG is keyed by the MESH id — the player computes the derived one \
+             and would find nothing, silently"
+        );
+
+        // (b) ABSENT — no entry, and Play still starts. A cooked pack has no DAG
+        // either below `[vgeom] min_triangles`, so refusing here would refuse a
+        // level the shipped build runs.
+        let payload = build(None).expect("an absent DAG must not refuse Play");
+        assert!(payload.vmesh_paths.is_empty());
+
+        // (c) STALE — refused, naming the mesh and the remedy.
+        let err = build(Some(VmeshRef::Stale)).expect_err("a stale DAG must refuse Play");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&MESH.to_string()),
+            "the mesh is not named: {msg}"
+        );
+        assert!(
+            msg.contains("sweep"),
+            "the refusal does not name the remedy: {msg}"
+        );
+    }
+
+    /// **The clips a level sounds cross the wire** (wave FIX2, `ScenePayload`
+    /// v13(b)).
+    ///
+    /// Nine rungs of this envelope carried a level's caves, ground, garments and
+    /// surfaces and never its audio, and no gate could see it: the P12 doctrine
+    /// makes the emitted command stream a pure function of sim state, so a PIE
+    /// session with no clips issues byte-identical commands to a cooked build.
+    /// Every parity fold compared equal while the preview was silent.
+    ///
+    /// Deduplicated by clip, because a venue with four speakers playing one loop
+    /// must carry it once — asserted with two sources on one clip, which is what
+    /// the island's venue is.
+    #[test]
+    fn the_clips_a_level_sounds_ride_the_wire_once_each() {
+        const CLIP: Uuid = Uuid::from_u128(0xF1_2301_0001);
+
+        let mut doc = SceneDoc::new();
+        for name in ["Speaker L", "Speaker R"] {
+            let e = doc.create(SpawnKind::Empty, name, None);
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world
+                .world_mut()
+                .entity_mut(id)
+                .insert(inf_ecs::components::AudioSource {
+                    clip: Some(CLIP),
+                    ..Default::default()
+                });
+        }
+        doc.world_mut().mark_dirty();
+
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |g| (g == CLIP).then(|| b"AUDIO".to_vec()),
+            |_| None,
+            60,
+            false,
+        )
+        .expect("payload builds");
+
+        assert_eq!(
+            payload.audio,
+            vec![(CLIP, b"AUDIO".to_vec())],
+            "two speakers on one loop carried it {} time(s)",
+            payload.audio.len()
         );
     }
 

@@ -995,6 +995,35 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
         .with_anim_assets(skeletons, clips, machines)
         .with_cloth_assets(cloths)
         .with_hair_assets(hairs)
+        // Wave FIX2 (`ScenePayload` v13): the `.inf_audio` clips an
+        // `AudioSource.clip` names. This function called eight of these doors and
+        // not this one, so a windowed PIE session issued exactly the commands the
+        // shipped build issues and resolved none of them — the island's venue
+        // plays its loop in a cooked build and was silent in Play. Invisible to
+        // every gate: the P12 doctrine makes the command stream a pure function of
+        // sim state, so the two hosts' streams compared equal the whole time.
+        //
+        // Decoded through the same `inf_audio::AudioAsset` door
+        // `load_audio_assets_from_dir` uses, and seeded through the same builder,
+        // so all three boots have one rule. A clip that will not decode is
+        // reported and skipped — that entity is silent rather than the level
+        // failing to load, which is what the dev-dir loader does with the same
+        // bytes.
+        .with_audio(
+            payload
+                .audio
+                .iter()
+                .filter_map(
+                    |(g, b)| match inf_asset::decode::<inf_audio::AudioAsset>(b) {
+                        Ok(a) => Some((*g, a)),
+                        Err(e) => {
+                            tracing::error!("inf-player: PIE audio clip {g} did not decode: {e}");
+                            None
+                        }
+                    },
+                )
+                .collect(),
+        )
         .with_terrain_resolver(std::sync::Arc::new(move |g| {
             // The path first: a terrain that rode as a path has no bytes here, and
             // a terrain that rode as bytes has no path. Both, for one guid, would

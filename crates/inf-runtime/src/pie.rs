@@ -221,8 +221,13 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   protocol whose limits follow the author's content is not a protocol. What
 ///   moved is what the frame has to hold.
 ///
-/// * **v13** — wave FIX2, and the second rung to carry a PATH:
-///   [`vmesh_paths`](ScenePayload::vmesh_paths).
+/// * **v13** — wave FIX2, carrying **two** things, because the wave's own
+///   placeholder census found the second while the first was still unpushed (the
+///   v11 precedent: extending an unpushed bump is not a second bump, and a v13.5
+///   would be a version no build ever spoke).
+///
+///   **(a) [`vmesh_paths`](ScenePayload::vmesh_paths)** — the derived meshlet
+///   DAGs, and the second rung to carry a PATH.
 ///
 ///   This envelope has carried a level's characters, caves, ground, garments and
 ///   surfaces for eight rungs and never carried the one thing a **rigid** mesh
@@ -238,6 +243,19 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   walk Play back into [`MAX_FRAME_LEN`] the moment a fifth arrived. There is
 ///   deliberately **no** bytes twin here, unlike `terrains`/`terrain_paths` — see
 ///   the field's own doc for why the asset kind cannot want one.
+///
+///   **(b) [`audio`](ScenePayload::audio)** — the `.inf_audio` clips an
+///   `AudioSource.clip` names, and the last asset kind the shipped player
+///   resolved that this envelope did not carry.
+///
+///   Found by FIX2's own census rather than by a bug report, which is the only
+///   reason it is here: the wave was told to grep the player for every place PIE
+///   substitutes nothing for something, and `build_world_from_payload` called
+///   eight `InfSceneWorldBuilder` doors and not `with_audio`. So a windowed PIE
+///   session issued exactly the same audio COMMANDS as the shipped build — the
+///   P12 doctrine makes the command stream a pure function of sim state, so every
+///   parity gate compared equal — and resolved none of them. The island's venue
+///   plays music in a cooked build and is silent in Play.
 pub const SCENE_PAYLOAD_VERSION: u32 = 13;
 
 /// Upper bound on a single frame; anything larger means a desynced or
@@ -519,6 +537,28 @@ pub struct ScenePayload {
     /// exact expected count taken from the fixture before it compares anything.
     #[serde(default)]
     pub vmesh_paths: Vec<(Uuid, String)>,
+    /// Referenced audio clips: `(asset guid, .inf_audio bincode bytes)` — keyed by
+    /// a level's `AudioSource.clip` refs (v13, wave FIX2).
+    ///
+    /// **The last asset kind the shipped player resolved that this envelope did
+    /// not carry**, and the reason it survived nine rungs is worth writing down:
+    /// the P12 audio doctrine makes the emitted command stream a pure function of
+    /// SIM STATE, so a PIE session with no clips at all issues byte-identical
+    /// commands to a cooked build and every determinism and parity gate in the
+    /// tree compares equal. The divergence is entirely at the speaker. The
+    /// island's venue plays its loop in a shipped build and is silent in Play.
+    ///
+    /// Carried, not computed, and keyed by the ASSET rather than by anything
+    /// derived: a `.inf_audio` is authored, the player decodes it through the same
+    /// `inf_audio::AudioAsset` door `load_audio_assets_from_dir` uses, and there
+    /// is one seeding rule (`InfSceneWorldBuilder::with_audio`) for all three
+    /// boots.
+    ///
+    /// Empty on a level with no `AudioSource` — **which is also what a caller that
+    /// does not resolve them produces**, the P21.4 hazard, and the reason the
+    /// payload arm asserts an exact expected count.
+    #[serde(default)]
+    pub audio: Vec<(Uuid, Vec<u8>)>,
 }
 
 impl ScenePayload {
@@ -555,6 +595,7 @@ impl ScenePayload {
             blend_mode: 0,
             terrain_paths: Vec::new(),
             vmesh_paths: Vec::new(),
+            audio: Vec::new(),
         }
     }
 
@@ -637,6 +678,14 @@ impl ScenePayload {
     /// has. See [`vmesh_paths`](Self::vmesh_paths) for why there is no bytes twin.
     pub fn with_vmesh_paths(mut self, paths: Vec<(Uuid, String)>) -> Self {
         self.vmesh_paths = paths;
+        self
+    }
+
+    /// Attach the referenced `.inf_audio` payloads (`(asset guid, bytes)`) a
+    /// level's `AudioSource.clip` refs name (v13, wave FIX2). Builder-style,
+    /// exactly like [`with_pcgs`](Self::with_pcgs).
+    pub fn with_audio_clips(mut self, audio: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.audio = audio;
         self
     }
 
@@ -1247,6 +1296,8 @@ mod tests {
             Uuid::from_u128(0xF1_22_01),
             "/z".repeat(57), // 114 bytes: unique among the tail
         )])
+        // v13(b) — non-empty, and a length no other tail field uses.
+        .with_audio_clips(vec![(Uuid::from_u128(0xF1_23_01), vec![0x55; 136])])
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -1283,7 +1334,7 @@ mod tests {
     }
 
     /// **The WHOLE wire order is pinned, every field of it** (P24.1 audit M5;
-    /// twenty-two of them since v13).
+    /// twenty-three of them since v13).
     ///
     /// The stale-reader test below models a *pre-v5* build and therefore stops at
     /// `windowed` — correctly, that is its whole point. But it left the four tail
@@ -1337,6 +1388,9 @@ mod tests {
             // same reason — it is swappable with `terrain_paths` and with every
             // byte field above unless the lengths differ.
             vmesh_paths: Vec<(Uuid, String)>,
+            // v13: the audio clips. A byte field like every one above it, and
+            // pinned by a length none of them uses.
+            audio: Vec<(Uuid, Vec<u8>)>,
         }
 
         let want = payload_with_assets();
@@ -1351,6 +1405,7 @@ mod tests {
             &want.hairs,
             &want.materials,
             &want.textures,
+            &want.audio,
         ]
         .iter()
         .map(|v| v[0].1.len())
@@ -1376,11 +1431,11 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 22-field order decodes the wire");
+                .expect("the canonical 23-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned 22-field order does not account \
+            "the encoding carries bytes the pinned 23-field order does not account \
              for — a field was added to `ScenePayload` without extending this pin"
         );
 
@@ -1427,6 +1482,7 @@ mod tests {
             wire.vmesh_paths, want.vmesh_paths,
             "`vmesh_paths` is not wire field 22"
         );
+        assert_eq!(wire.audio, want.audio, "`audio` is not wire field 23");
         // ANTI-VACUITY for the one-byte field: the fixture must not carry the
         // DEFAULT, or a pin that read a stray zero from anywhere would pass.
         assert_ne!(want.blend_mode, 0, "the fixture blend mode is the default");

@@ -687,6 +687,56 @@ mod tests {
         );
     }
 
+    /// **The Play gate's source of truth, both ways** (wave FIX2).
+    ///
+    /// `derived_vmesh` is what the PIE payload builder's ninth resolver asks, and
+    /// its three answers are three different decisions: a path rides the wire, a
+    /// stale DAG refuses Play, an absent one is survivable because a cooked pack
+    /// has none either below the cook's threshold.
+    ///
+    /// The stale arm is the one carried 38 is about, and it is reached the way a
+    /// session reaches it: rewrite the mesh under the same GUID — a re-import, a
+    /// DCC save, an `inf island build` — and do NOT re-derive. Before this wave
+    /// the only thing in the tree that knew the difference was `plan_vmesh`, and
+    /// nothing on the Play path or in the viewport asked it.
+    #[test]
+    fn a_stale_derived_vmesh_is_told_apart_from_a_current_one_and_from_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut proj, mesh_id) = project_with_mesh(dir.path(), &grid_mesh(8));
+
+        // (a) ABSENT — nothing has derived anything yet.
+        assert_eq!(derived_vmesh(&proj, mesh_id), DerivedVmesh::Absent);
+
+        // (b) CURRENT — the sweep has run.
+        let vmesh_id = ensure_vmesh(&mut proj, mesh_id).unwrap().asset().unwrap();
+        let path = proj.db().get(vmesh_id).unwrap().path.clone();
+        assert_eq!(
+            derived_vmesh(&proj, mesh_id),
+            DerivedVmesh::Current(path.clone())
+        );
+
+        // (c) STALE — the mesh moved and the DAG did not. Same GUID, same file,
+        // different bytes: exactly what a re-import leaves behind.
+        proj.rewrite_payload(mesh_id, &grid_mesh(14), vec![])
+            .unwrap();
+        assert_eq!(derived_vmesh(&proj, mesh_id), DerivedVmesh::Stale(path));
+        // …and the planner agrees, which is the property `derived_is_current`
+        // exists to make structural: the viewport refuses exactly what the sweep
+        // would rebuild.
+        assert!(
+            plan_vmesh(&proj, mesh_id, &mut BTreeSet::new()).is_some(),
+            "the planner and the Play gate disagree about what stale means"
+        );
+
+        // …and re-deriving returns it to current, so this is a state a session
+        // leaves rather than one it is stuck in.
+        ensure_vmesh(&mut proj, mesh_id).unwrap();
+        assert!(matches!(
+            derived_vmesh(&proj, mesh_id),
+            DerivedVmesh::Current(_)
+        ));
+    }
+
     /// Deleting the mesh takes its derived artifact with it — otherwise the
     /// viewport, which resolves by computing the id, keeps drawing geometry for an
     /// asset that is gone.
