@@ -22,8 +22,8 @@
 //!
 //! # The band, and what it costs
 //!
-//! Slabs are chunked at [`KERB_SLAB_M`] and tiered through the same
-//! [`SimBand`] every other derived collider goes through, so a street a
+//! Slabs are chunked at [`KERB_SLAB_M`](crate::d3::kerb::KERB_SLAB_M) and tiered through the same
+//! `SimBand` every other derived collider goes through, so a street a
 //! kilometre away describes nothing. That is what keeps this inside the step
 //! budget: the island's 35 km of street would be ~2 200 boxes described at once
 //! and the band admits the couple of dozen within
@@ -317,7 +317,8 @@ pub struct KerbColliderAudit {
     /// Slabs the band tiered out.
     pub culled: u32,
     /// Slabs refused because they would lie across another street's
-    /// carriageway — see [`crosses_another_carriageway`].
+    /// carriageway — see `crosses_another_carriageway`, named in prose because
+    /// it is private and a public doc that links to one is a rustdoc warning.
     pub crossed: u32,
 }
 
