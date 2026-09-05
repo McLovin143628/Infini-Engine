@@ -208,7 +208,6 @@ fn fit(
 /// comparison and not an assertion that a small number is small.
 #[test]
 fn the_road_sits_on_the_terrain_the_renderer_draws() {
-    /// The 99th percentile may not exceed this many pixels at 1080p. **One**:
     /// **The road as a whole** may not sit more than this many pixels off the
     /// ground the renderer draws, at 1080p. **One**: the brief's criterion is
     /// "zero float or sink at 1080p", and a displacement under a pixel is one
@@ -223,8 +222,18 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
     /// worse *because* the corridor was levelled. That is a real finding and it
     /// is carried in the ledger rather than hidden by a percentile: 1 % of this
     /// fixture's road vertices are in it, and the other 99 % are the road.
+    ///
+    /// **And the percentile is named because it does not pass** (audit ROAD1).
+    /// The variable this ceiling is compared against was called `worst_mean_px`
+    /// and was fed the MEAN, which is the trace of the moment the statistic was
+    /// switched — the doc above it kept a first line that began "The 99th
+    /// percentile may not exceed…" until that audit deleted it. Measured at
+    /// the same run the table prints: the graded road's p99 is **2.01 px at
+    /// 330 m** and **1.80 px at 700 m**, both over this ceiling, and both
+    /// *worse* than the conforming control's 1.69 and 1.51. Option B wins on the
+    /// mean and loses on the tail, the tail is the switchback, and that sentence
+    /// is now in the ledger rather than in a variable name nobody read.
     const MEAN_PIXELS: f64 = 1.0;
-    /// How much worse the graded road's mean offset may be than the conforming
     /// How much of the morph's own displacement the graded road may take, as a
     /// multiple of what the conforming one takes.
     ///
@@ -284,7 +293,7 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
         "ROAD1 FLOAT | dist | ring | morph | px | A conform: mean / p99 / max | \
          B graded: sink / float / mean / p99 |"
     );
-    let mut worst_p99_px = 0.0f64;
+    let mut worst_mean_px = 0.0f64;
     // Each option's own morph-zero fit, filled in on the first distance (which
     // `DISTANCES_M` documents as the control) and subtracted from the rest.
     let (mut a0, mut b0) = (0.0f64, 0.0f64);
@@ -322,7 +331,7 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
             b.p99,
             b.n
         );
-        worst_p99_px = worst_p99_px.max(b.mean / px);
+        worst_mean_px = worst_mean_px.max(b.mean / px);
         if m <= 0.0 {
             a0 = a.mean;
             b0 = b.mean;
@@ -339,8 +348,8 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
         }
     }
     assert!(
-        worst_p99_px <= MEAN_PIXELS,
-        "the road sits {worst_p99_px:.2} pixels off the terrain the renderer \
+        worst_mean_px <= MEAN_PIXELS,
+        "the road sits {worst_mean_px:.2} pixels off the terrain the renderer \
          draws, on average, at 1080p — against a {MEAN_PIXELS} pixel ceiling"
     );
     // The morph-free control on the same subject: before any band starts, a
