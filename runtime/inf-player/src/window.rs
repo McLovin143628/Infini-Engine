@@ -1592,32 +1592,53 @@ mod tests {
     ///
     /// Rust does not warn on an unused function parameter, so `run_pie` can take
     /// a store and drop it in silence. This is what refuses that.
+    #[test]
+    fn a_pie_session_installs_every_store_it_is_handed() {
+        every_store_is_installed_by("run_pie");
+    }
+
+    /// **And the SHIPPED windowed boot, which is the same function twice** (FIX2
+    /// audit).
+    ///
+    /// [`run`] and [`run_pie`] take the identical five stores and install them in
+    /// the identical five lines; the only difference is the PIE control channel.
+    /// The pin above read `run_pie` alone, so the twin that a cooked `--pack`
+    /// boot actually goes through was unfenced — measured: deleting `run`'s
+    /// `app.scatter_meshes = scatter_meshes;` left the whole workspace green,
+    /// which is precisely the silence TER2b's open item lived in for a wave.
+    /// A store dropped from the shipped door is worse than one dropped from PIE,
+    /// not better: nothing downstream compares a shipped frame to anything.
+    #[test]
+    fn the_shipped_windowed_boot_installs_every_store_it_is_handed() {
+        every_store_is_installed_by("run");
+    }
+
+    /// The one check both windowed doors get, against `window.rs`' own source.
+    ///
+    /// **Every needle reads CODE, not prose**, and both directions need it. The
+    /// comments in these functions quote the defects they replaced — *"there was
+    /// no `app.scatter_meshes = ...` line here at all"* and *"this argument used
+    /// to be `Arc::new(VmeshRegistry::new())`"* — so a raw `contains` over the
+    /// body is satisfied by the explanation of the fix and defeated by it in
+    /// turn. Measured, both ways: with the checks reading the body, replacing the
+    /// scatter assignment with a discard left the arm GREEN and the fixed
+    /// `PlayerApp::new` call failed it. That is the phantom-guard hazard
+    /// `projector_mirror` documents, met from both sides inside one function. No
+    /// string literal in either function contains `//`.
     ///
     /// Line endings are normalized first: `core.autocrlf = true` checks `.rs` out
     /// CRLF on Windows, and the P22 law is that a source-reading test says so
     /// rather than discovering it.
-    #[test]
-    fn a_pie_session_installs_every_store_it_is_handed() {
+    fn every_store_is_installed_by(func: &str) {
         let src = include_str!("window.rs").replace("\r\n", "\n");
         let start = src
-            .find("\npub fn run_pie(")
-            .expect("`run_pie` no longer exists under that name");
+            .find(&format!("\npub fn {func}("))
+            .unwrap_or_else(|| panic!("`{func}` no longer exists under that name"));
         let rest = &src[start + 1..];
         let end = rest
             .find("\n}\n")
-            .expect("`run_pie` does not terminate at column 0");
+            .unwrap_or_else(|| panic!("`{func}` does not terminate at column 0"));
         let body = &rest[..end];
-        // **Every needle below reads CODE, not prose**, and both directions need
-        // it. The comments in this function quote the defects they replaced —
-        // *"there was no `app.scatter_meshes = ...` line here at all"* and
-        // *"this argument used to be `Arc::new(VmeshRegistry::new())`"* — so a
-        // raw `contains` over the body is satisfied by the explanation of the fix
-        // and defeated by it in turn. Measured, both ways: with the checks
-        // reading the body, replacing the scatter assignment with a discard left
-        // this arm GREEN and the fixed `PlayerApp::new` call failed it. That is
-        // the phantom-guard hazard `projector_mirror` documents, met from both
-        // sides inside one function. No string literal in `run_pie` contains
-        // `//`.
         let code: String = body
             .lines()
             .map(|l| l.split("//").next().unwrap_or(""))
@@ -1640,25 +1661,25 @@ mod tests {
         ] {
             assert!(
                 code.contains(store),
-                "`run_pie` no longer installs `{store}` — the store is still a \
+                "`{func}` no longer installs `{store}` — the store is still a \
                  parameter (Rust does not warn on an unused one) and a windowed \
-                 PIE session would run with the empty default, so {symptom} while \
+                 session would run with the empty default, so {symptom} while \
                  the cooked build draws the authored content"
             );
         }
         // The fifth is not an assignment: the vmesh registry goes into
         // `PlayerApp::new` itself, which is what makes it the only one of the five
         // that cannot be forgotten. Pinned anyway, because the thing that must not
-        // come back is `run_pie` building an empty registry of its own.
+        // come back is a windowed door building an empty registry of its own.
         assert!(
             code.contains("map, vmeshes, render)"),
-            "`run_pie` no longer hands `PlayerApp::new` the vmesh registry it was \
+            "`{func}` no longer hands `PlayerApp::new` the vmesh registry it was \
              given — if it builds one here instead, every rigid `MeshRef.asset` in \
              the level resolves to nothing and draws no geometry at all"
         );
         assert!(
             !code.contains("VmeshRegistry::new()"),
-            "`run_pie` builds an EMPTY `VmeshRegistry` again — that line is the \
+            "`{func}` builds an EMPTY `VmeshRegistry` again — that line is the \
              whole of wave FIX2's headline defect: the editor drew a paved street \
              and Play drew bare earth"
         );
