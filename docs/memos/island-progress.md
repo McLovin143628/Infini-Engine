@@ -32443,3 +32443,403 @@ unpaved, and pricing that is a settlement-paving wave, not a clause.
     11.2 m of batter either side is a 41 m scar for a 12–19 m road, splatted as
     bare ground, and it reads as one in the PIE frames. Whether the batter should
     carry vegetation or a narrower splat is a landscape question nobody has put.
+
+## Wave ROAD1b — the street the player spawns on (2026-09-04)
+
+The ROAD1 audit's headline, in its own words: *"the street the player actually
+spawns on is bare graded earth, because this island has two road networks and
+this wave paved the one nobody drives on"*. Its evidence was the demo loop's own
+PIE frame — the hero running down a wide strip of bare graded earth between two
+rows of buildings, with a dark asphalt ribbon visible off to one side.
+
+This wave paves the other network, gives its kerbs a collider, turns the mitre
+into a bevel, makes the footway clip cut instead of drop, narrows the corridor
+scar, and prices what all of it costs.
+
+### CLAUSE 1 — ONE DERIVATION, TWO CALLERS
+
+`inf_ecs::traffic::streets_of` was the only way to ask where a settlement's
+streets are, and it answers over an `EcsWorld`. Its body is now
+`streets_of_blocks(&[BlockRect])` (`crates/inf-ecs/src/traffic.rs:382`, the type
+at `:348`) — the block rectangles in, the centrelines out — and `streets_of` is
+that over a world's `PcgVolume`s while
+`inf_editor_core::island::island_streets` (`editor/crates/inf-editor-core/src/island.rs:1521`)
+is that over the island's **authored** blocks. Not a mirror and not a pin
+between two derivations: the same call.
+
+**It had to be the authored blocks, and that is a finding rather than a
+convenience.** `volume_sites` answers volumes that offer a *resident*, which a
+`PcgVolume` only does once it has been evaluated — so `streets_of` over a
+running level reads the blocks a host has **populated**, and under cell
+streaming the editor and the shipped player do not have the same set. A street
+derived there would appear, move and vanish as blocks paged in, and the two
+hosts would disagree about where the player is standing. The plan is the same on
+both, and `streets_of`'s own doc now says so.
+
+The paving goes through ROAD1's door and nothing else. The spans are written as
+a **road layer** — `samples/island/layers/streets.geojson`, derived and
+committed beside the design exactly as `streams.geojson` and `lakes.geojson`
+are, by `inf_island::layers::write_streets` (`crates/inf-island/src/layers.rs:167`,
+the `StreetSpan` at `:144`) from `island_street_spans`
+(`island.rs:1538`) — and the island build reads them into the **same**
+`GeoLayer` as `roads.geojson` (`crates/inf-island/src/build.rs`, the road step).
+`RoadGraph::from_layer` → `build_surface` then gives a settlement street the
+carriageway, the kerbs, the 2 m footway, the crown, the yellow centre line, the
+white edges and the crossings the GIS arterials already had.
+
+**One graph is the load-bearing part.** An arterial that ends at a settlement's
+centre snaps into the grid it arrives on, so the junction is fanned by
+`fill_junctions` and its crossings are painted by the same degree-3 rule. Two
+graphs would have been two ribbons at one height, which is a z-fight rather than
+a T.
+
+**Spans and not whole lines**, for the same reason: `from_layer` makes a node at
+a feature's *ends*, so a street written from one side of a town to the other
+crosses ten others and meets none of them. The split points are
+`carriageway_graph`'s nodes — the graph the traffic sim routes on — so a paved
+span and a driven edge are the same piece of street by construction.
+
+| | before | after |
+|---|---|---|
+| the island's road network | 33.74 km, 11 segments | **68.70 km, 355 segments** (344 of them street spans) |
+| junctions | 34 | **150** |
+| the streets a settlement implies | 58 lines, drawn by nothing | 58 lines → **344 spans, 34.96 km, 143 junctions of degree 3+** |
+| the fixture | 8 blocks, 4 streets, unpaved | 4 streets → **8 spans, 0.54 km** |
+
+**THE CROSS-SECTION.** A street's reserve runs block edge to block edge and the
+crowd's pavement ring is `PAVEMENT_M` *inside* the frontage, so the carriageway
+is what is left: `street_carriageway_half_m` (`traffic.rs:153`) is
+`gap/2 − PAVEMENT_M − KERB_WIDTH_M`, rounded to whole lanes by `street_lanes`
+(`:170`) because a road layer states lanes and `RoadKind::width_m` multiplies
+them, and `street_kerb_offset_m` (`:192`) is what comes back out — the kerb the
+paving actually draws.
+
+```
+ROAD1b KERB | 16.0 m reserve: 3 lanes, carriageway half 5.250 m (wanted 5.700), kerb 5.250..5.550, footway 5.550..7.550, crowd ring 6.000
+ROAD1b KERB | 20.0 m reserve: 4 lanes, carriageway half 7.000 m (wanted 7.700), kerb 7.000..7.300, footway 7.300..9.300, crowd ring 8.000
+ROAD1b KERB | 32.0 m reserve: 8 lanes, carriageway half 14.000 m (wanted 13.700), kerb 14.000..14.300, footway 14.300..16.300, crowd ring 14.000
+```
+
+The ring is on the concrete on every reserve the derivation admits, and
+`a_settlement_streets_footway_is_under_the_ring_the_crowd_walks` asserts it —
+which is CERT1's CP-B3 closed for the network a crowd actually walks on rather
+than for the one it does not.
+
+### THE PARKED CARS ARE NOT MOVED, AND THAT IS MEASURED TOO
+
+`KERB_PARK_OFFSET_M` is 5.0 m on every street and was derived against a
+carriageway no settlement street ever had. Against the kerb this wave draws:
+
+```
+ROAD1b PARK | 16.0 m reserve: kerb face 5.250 m; the shipped lattice parks at 5.000 (flank 5.900, +0.650 m from the kerb); the kerb's own answer is 4.350
+ROAD1b PARK | 20.0 m reserve: kerb face 7.000 m; the shipped lattice parks at 5.000 (flank 5.900, -1.100 m from the kerb); the kerb's own answer is 6.100
+```
+
+So a car parks 0.650 m **onto the footway** on a town street and 1.100 m **out
+into the road** on a city one. `kerb_park_offset_m` (`traffic.rs:232`) is the
+number that puts the flank on the kerb, and `kerb_slots` does not read it.
+
+**Because wiring it in deadlocks the emergency service, measured.** It turns
+`inf-physics`'s `dispatch_3d` red on three arms, and the middle one is not a
+re-sample: with the row 1.1 m further out on a 20 m street the ambulance in
+`a_collapse_brings_the_ambulance_and_sends_it_home_again` arrives at step 1 799,
+resolves at 2 159, and then **never goes home in 30 000 steps** — five hundred
+seconds of simulation against a test budget of 6 000. A stuck vehicle, not a
+slow one.
+
+It also moves `traffic_3d`'s two sampled arms, and *that* half is noise. Swept
+by moving the offset alone, the steered hand-off jump reads **0.144 m at 5.0,
+1.385 m at 5.2, 0.000 m at 6.0 and 1.041 m at 6.8** — a quantity that swings
+tenfold on a 20 cm change somewhere else is a sample, and the arm's `jump < 1.0`
+was fitting it. That threshold is under the half-lane the rephase projects
+across, so it was never a bound; it is now `DEFAULT_LANE_WIDTH_M/2 + two steps
+of driving`, which is the geometry the hand-off can actually move through.
+
+The gap is pinned in both directions by
+`the_parked_car_lattice_is_not_yet_on_the_kerb_the_paving_draws`, so it cannot
+drift silently, and the move is carried rather than traded for an ambulance that
+does not come back.
+
+### CLAUSE 2 — THE FOOTWAY IS SOLID
+
+The ROAD1 audit measured what a footway with no collider costs, over the
+fixture's 5 344 walkable footway triangles: the concrete is drawn **p50
+0.1775 m, area-weighted mean 0.1915 m above the ground an agent stands on**, so
+an agent does not float over the slab — it walks shin-deep *inside* it — and a
+car crosses a kerb as though it were paint (carried 19).
+
+`inf_physics::d3::kerb` is the **sixth** derived collider source, on the shape
+the other five have: a box strip per street per side, chunked at `KERB_SLAB_M`
+(32 m, `kerb.rs:65`), stamped by `(TrafficRes::stamp, band.stamp())` so a
+settled level re-offers what it has, tiered through the same `SimBand` so a
+street a kilometre away describes nothing, and identified by a content-derived
+guid keyed on the street's **place** rather than its index —
+`parked_car_guid`'s rule, and for its reason.
+
+A box and not a heightfield patch because a footway is a flat slab with one step
+at its inner edge, which *is* a cuboid — and because the box gives the kerb
+**face** for free: the slab's inner wall is the 150 mm upstand, and
+`CharacterMovement::step_height_m` (0.45 m, UE's MaxStepHeight) autosteps it
+without anything here asking.
+
+```
+ROAD1b KERB WALK | 128 step(s) on the carriageway (feet 0.0201 m), 11 on the footway (feet 0.1701 m); kerb at 7.000 m, slab to 9.300 m; walked 7.97 m across
+ROAD1b KERB COST | 19 slab(s) described, 9 culled, over 2 street(s); settled at 19 described
+```
+
+A rise of exactly **0.1500 m**, and eleven more steps after the climb — so the
+upstand is being climbed and not walked into. **Mutation-verified**: describe no
+slabs and the rise reads **−0.0000 m**, which is the pre-ROAD1b number the audit
+named.
+
+Worth recording separately: the **parity** arm stays green under that mutation
+and the walk arm does not. Two hosts that agree are not two hosts that are
+right, which is P24's law met again — and it is why this file carries both.
+
+The cost has a ceiling read by name: `FOOTWAY_SLABS_CEILING` = 40, against 19
+described. Unbanded, the island's 35 km of street would be about 2 200 boxes.
+
+### CLAUSE 3 — THE MITRE, THE CLIP AND THE SCAR
+
+**The mitre is a bevel now.** `MITER_LIMIT` bounds `half / cos(θ/2)` as a
+*multiple of the offset*, so the spike it admits grows with whatever is being
+offset: at the ratio's own ceiling the carriageway's 3.5 m edge reaches 14 m and
+the footway's 5.8 m outer edge reaches **23.2 m**, from the same corner on the
+same road. A ratio cannot say "a join may be cut, but not by more than this much
+ground".
+
+`MITER_LIMIT_M` (`crates/inf-gis/src/roads.rs:141`) is that sentence: 2.5 m of
+widening, and `CrossFrame::at` pulls the station back to `offset + 2.5 m` when
+the mitre asks for more. No vertex is added and no profile row changes length,
+so the strip stays one strip — what the pulled-back station leaves is the
+chamfer the two legs' outer edges now meet at, which is a bevel drawn without a
+topology change. That is why it lands as a fix rather than as the wave the audit
+priced it at.
+
+Two and a half metres because **a right angle must still mitre exactly**: it is
+the sharpest turn a road takes as a corner rather than a curve, it is every city
+block, and a cap that cut one would notch every street corner this engine
+builds. A right angle asks for 2.403 m at an arterial's 5.800 m built
+half-width. Both halves are asserted, so the number cannot be lowered without a
+red test naming the corner it broke.
+
+| | before | after |
+|---|---|---|
+| a hairpin's footway, from its own centreline | **23.200 m** (4.000 × the built half-width) | **8.300 m** (`built_half_width + MITER_LIMIT_M`, asserted as an equality) |
+| a right-angle corner's mitre | √2 | √2, untouched at every offset the section uses |
+
+`carriageway_y` reads `miter_at` too, and that is the point of extracting it:
+the height has to be decided at the distance `at` actually places the vertex.
+
+**The clip cuts.** It tested one point — the triangle's centroid — and dropped
+the whole triangle when it was covered, so the edge it left was ragged to within
+one triangle (carried 17). Now the three *corners* are tested and the answer is
+a case split: three covered is a drop, none covered is a keep, one or two
+covered is a **cut** — `edge_crossing` (`roads.rs:2299`) bisects the two edges
+the boundary crosses and the triangle is retriangulated to the clear side. One
+covered corner leaves a quad, two leave a triangle, so the pass adds at most one
+triangle per cut: the growth is bounded by the *length* of the boundary, not the
+area behind it, which is why this needed no subdivision.
+
+The bisection is on the boolean the drop test already asked — the union of every
+carriageway triangle, sampled through the same five-point cross — so the cut
+lands where the old boundary was rather than near it. Ten halvings
+(`CLIP_BISECTIONS`, `roads.rs:2283`) resolve it to 1/1024 of an edge, about 2 mm
+on the longest edge a footway strip has, under the 4 mm a marking stands proud
+of the asphalt.
+
+| | drop rule | cut |
+|---|---|---|
+| the footway's edge across its own 2 m slab | wanders **0.4000 m** | **0.0000 m** |
+| vertices invented at the boundary | 0 | 88 |
+| the island's footway triangles removed | 26 095 dropped whole | **115 592 cut** |
+
+**Both first drafts of that arm were vacuous**, which is the part worth
+recording. The lattice arm tested `x || z` off the whole-metre station, which
+*every* footway vertex satisfies — its across offset is 3.5, 3.8 or 5.8 m — and
+it passed unchanged under the mutation it was written for; a cut vertex is the
+one with **both** coordinates fractional. And the straight-edge arm measured
+`crossing_pair`, whose Elm sits at x = 100 so its carriageway edge lands at
+x = 93, a whole-metre station where the strip's triangle boundaries already are:
+the drop rule leaves a straight edge there too. Elm moves 40 cm in the new
+fixture so the edge falls mid-station, which is the only place the two rules
+differ.
+
+**The corridor is not a scar.** `shoulder_mult`'s doc said "a multiple of the
+road's own half width" and the arithmetic has always read
+`shoulder_mult × LANE_WIDTH_M × 2` — a fixed 7 m unit. Corrected rather than
+made true: the fixed unit is the right one, because a batter's width is about
+the ground's slope and not about how many lanes are on the plateau. 1.6 of it,
+outside a 9.5 m plateau, is 20.7 m of half-corridor — **41.4 m of levelled bare
+ground around a road 19 m wide at its widest** (carried 23).
+
+0.5 is one lane of batter: 13.0 m of half-corridor, a **26.0 m** scar, the
+road's own width and a stated shoulder. `smooth01` still eases it, so the join
+to the hillside keeps a matched gradient.
+
+And the settlement streets **join the corridor**, which is what makes that
+affordable and closes a seam at the same time: `build_ribbon_across` samples the
+ground at every cross-section point of the carriageway while `carriageway_y`
+samples it once on the centreline for the kerb, so on ground that is not planar
+the asphalt's edge and the channel it drains into part company by up to a crown.
+Levelled, they agree by construction. They join the corridor and **not** the
+grade audit: a street on a settlement pad has no gradient to fail, and 344 flat
+spans would bury the two real over-grade stretches the report exists to name.
+
+| | before | after |
+|---|---|---|
+| corridor half-width | 20.7 m (**41.4 m** scar) | 13.0 m (**26.0 m** scar) |
+| samples the carve levelled | 1 179 961 | **758 503** (−35.7 %) |
+| road length inside the corridor | 33.74 km | 68.70 km (**2.04×**) |
+
+### CLAUSE 4 — WHAT THE ROADS COST
+
+**The brief's premise was wrong and the measurement says so.** It said the fps
+instrument's island scene is "TWO entities (a Terrain + a Hero)". It is not:
+`island_frame_scene` opens with `city_scene()`, so the synthetic fixture holds
+**104 entities** — a sun, a streaming source, one hundred `PcgVolume` blocks and
+a `Streets` mesh of 213 941 real vertices — and the *island* arm,
+`the_island_at_shipping_resolution`, cooks the real 51 km² island, which has
+carried the four road meshes since ROAD1. What was true is that **nothing
+asserted anything about them** (carried 18).
+
+`ROAD_TRIANGLES_CEILING` (`runtime/inf-player/src/budget.rs:1004`) is the
+ceiling, read by name where the island is built:
+
+```
+ISLAND ROADS: carriageway 828672 v / 1489058 t
+ISLAND ROADS:                   kerb 614392 v / 934787 t
+ISLAND ROADS:          marking white 393060 v / 362540 t
+ISLAND ROADS:         marking yellow 201402 v / 200242 t
+ISLAND ROADS: 2986627 triangles over 4 draw(s), against a ceiling of 3250000
+```
+
+**2 986 627 triangles against ROAD1's 1 235 637** — 2.42×, for 2.04× the road
+length. It is a **content** bound and not a frame cost: every one of these
+meshes clears `inf-packager`'s `vgeom.min_triangles` (2 048) and is cooked to a
+meshlet DAG, so what reaches the raster is what the DAG's cut decides. It bounds
+what the cook carries, what the pack holds and what the streamer pages.
+
+And the DAG earns it — except where it cannot:
+
+```
+ROAD1b LOD | carriageway: 8928 source triangles -> 8928 drawn underfoot, 1052 at 2 km (8.5x fewer)
+ROAD1b LOD | kerb: 14754 source triangles -> 14754 drawn underfoot, 2646 at 2 km (5.6x fewer)
+ROAD1b LOD | marking white: 4076 source triangles -> 4076 drawn underfoot, 4076 at 2 km (1.0x fewer)
+ROAD1b LOD | marking yellow: 1958 source triangles -> 1958 drawn underfoot, 1958 at 2 km (1.0x fewer)
+```
+
+**The paint does not simplify at all**, and it is a structural reason rather
+than a tuning one: a marking mesh is thousands of *disconnected* strips — a
+dash, a crosswalk bar, a 100 mm edge line — and a simplifier collapses edges
+*within* a connected component. There is nothing to collapse, so the DAG comes
+out one level deep and two kilometres of distance draws every triangle four
+metres of it does. On the shipped island that is **562 782 triangles of paint
+that never coarsen**. It is asserted as an equality, so the day somebody gives
+the paint a LOD the arm says the carried item is stale.
+
+**And the frame it costs, measured on this machine at both revisions rather
+than quoted from an older ledger.** Both runs cook the island themselves, so
+each row is against its own content; the LIT row is the comparable one, because
+SHIPPED runs first in each pass and pays the warm-up (which is why its "before"
+reads *slower* than its own LIT).
+
+| ISLAND 1080p, RTX 4070 Ti, release | before (`fd15bd8a`) | after |
+|---|---|---|
+| **LIT p50 / p95 / p99** | **34.512 / 40.679 / 45.346 ms** | **37.666 / 46.140 / 50.945 ms** |
+| LIT GPU frame | 12.836 ms | 13.974 ms |
+| LIT `vsm-raster` | 0.855 ms | **1.900 ms** |
+| LIT `terrain` | 3.773 ms | 3.532 ms |
+| LIT+SSR p50 | 34.423 ms | 37.698 ms |
+| LIT+VIS p50 | 34.492 ms | 38.583 ms |
+| content, vgeom draws | 4 | 4 |
+| ISLAND COOK | **24.0 s** | **166.4 s** |
+
+**+3.154 ms of p50 for 2.42× the road triangles**, and the GPU half of it is
++1.138 ms of which **+1.045 ms is the shadow raster** — the roads are casters,
+and doubling the road network is what a shadow map notices. The terrain pass
+came down 0.241 ms, which is the narrower corridor: less flattened ground is
+less of the clipmap's own cost.
+
+**The cook is the price nobody would have guessed**: 24.0 s → 166.4 s, seven
+times, because `derive_vmesh` builds a meshlet DAG over three million triangles
+instead of one and a quarter. It is a build-time cost and not a frame cost, and
+it is exactly what `ROAD_TRIANGLES_CEILING` bounds.
+
+### CLAUSE 5 — THE WATER, MEASURED AND ROUTED
+
+The sparkle clause was "take if cheap, else route with the number". It is
+routed, and here are the numbers.
+
+**The water IS lit by the sun, and barely.** `water.wgsl:554-563` is one
+GGX-ish lobe about the reflected direction — `D · N·L`, with no Smith G, no
+Fresnel on the specular, and, load-bearing, **no sun radiance term at all**: the
+glint is multiplied by `sky`, the *reflection* colour, and then by a hard
+`0.15`. So its colour is the sky's and its magnitude is 15 % of a term that is
+already missing its geometry factor. There is also no `sun_y` fade, so a sun
+below the horizon still puts a highlight on the water where `N·L > 0`.
+
+**Flow reaches foam and nothing else**, confirmed rather than quoted: there is
+exactly one read of `level_flow.y` in the shader (`water.wgsl:580`) and it is
+`flow_foam`, plus the `bank_foam` derived from it. It touches neither
+`water_displace`, `water_normal` nor `water_crest`. The ripple travels at the
+deep-water phase speed `√(g/k)` — 2.5 m/s for the 4 m river preset — regardless
+of `river_flow_m_s`.
+
+**Why it is not cheap.** `water.wgsl:10-15` states the design: *"Each wave's
+phase arrives ALREADY REDUCED … computed in f64 on the CPU"*. Time is not on the
+GPU. An advection offset `−flow · t` along the arc parameter therefore cannot be
+formed in the shader; it needs either a new uniform lane (`flow_extra.yzw` are
+free) or the offset folded into every wave's reduced phase on the CPU — and the
+second advects every wave uniformly regardless of its own direction, which is
+not what a river does. That is a design decision about how time reaches the
+water, not an edit, and it belongs with the pass that also owns
+`wet_roughness_floor` (PAR4, unread since ROAD1).
+
+`road1b_a_rivers_contrast_against_its_bank_at_200m`
+(`crates/inf-render/tests/golden.rs`) is the instrument the routing hands over:
+it renders the river scene from an eye exactly 200 m from a reach, finds the
+river's pixels by differencing against the same frame with the water removed,
+and reports their mean luminance against the mean of the pixels immediately
+beside them, plus the ratio of the brightest river pixel to the river's own mean
+— which is what "sparkle" means as a number. It reads:
+
+```
+ROAD1b RIVER | at 200 m: 622 river px (mean 144.8/255), 194 bank px (mean 149.7/255); contrast 0.968x, brightest river px 206.7 = 1.43x its own mean
+```
+
+**0.968×.** At two hundred metres the river is *darker than the ground beside
+it*, by three per cent, and its brightest pixel is 1.43× its own mean. "A dark
+line in gravel" is not a figure of speech; it is 144.8 against 149.7.
+
+### CARRIED
+
+24. **The parked-car lattice is not on the kerb the paving draws** — 0.650 m
+    onto the footway on a 16 m street, 1.100 m into the road on a 20 m one.
+    `kerb_park_offset_m` is the fix and it deadlocks the EMS return (above);
+    the wave that takes it has to answer why a unit cannot come home to a kerb
+    1.1 m further out.
+25. **Road paint never coarsens.** 562 782 triangles of disconnected marking
+    strips draw in full at two kilometres. A decal system, a merged strip per
+    line, or an impostor band are the three answers and none of them is this
+    wave.
+26. **The water is lit by the sky, not the sun** — the glint's colour is the
+    reflection and its magnitude is 0.15 of a lobe with no geometry term, and a
+    sun below the horizon still lights it. Routed to PAR3/PAR4 with the
+    contrast instrument.
+27. **Flow still reaches foam only**, and the reason is structural: time is not
+    on the GPU. ROAD1's carried 5, re-measured and re-routed with the lane it
+    would need.
+28. **A settlement street is graded to the corridor plateau, which is 9.5 m
+    wide because a HIGHWAY is.** A 16 m street's own built half-width is
+    5.550 m, so 3.95 m either side of it is levelled for a road that is not
+    there. One plateau width for a whole island is `CarvePlan::corridor_flat_m`'s
+    shape, not a value.
+29. **The street layer is 150 KB of committed JSON** — 344 spans, one feature
+    each. It is derived and byte-locked like `streams.geojson`, so it is a
+    generated file in a source tree by the same argument; a bigger island makes
+    it bigger.
+30. **A street span's reserve is found by nearest-perpendicular**, not carried
+    through the graph, so two settlement grids whose lines coincide on one axis
+    within a metre would take each other's lane count. No island produces one;
+    the derivation's merged intervals cannot.
