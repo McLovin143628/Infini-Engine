@@ -175,7 +175,8 @@ pub fn lod_for_distance(dist: f64, thresholds: &[f64]) -> u32 {
 /// The band is the only part of the morph the GPU cannot derive for itself: the
 /// thresholds are a function of the terrain's level-0 tile span, and a patch does
 /// not carry its span-at-level-0. So the band rides the instance buffer
-/// ([`PatchRaw::params`]`.xy`) and `terrain.wgsl`'s `morph_at` evaluates the
+/// (`PatchRaw::params.xy` — private, so it is named rather than linked) and
+/// `terrain.wgsl`'s `morph_at` evaluates the
 /// **same smoothstep over it** that [`morph_factor`] evaluates here — at the
 /// *vertex's own* horizontal distance rather than at the tile centre's.
 ///

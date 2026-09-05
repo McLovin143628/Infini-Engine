@@ -121,7 +121,7 @@ pub struct MaterialAsset {
     /// the island, because the road layer carried no lane count and
     /// `RoadKind::default_lanes` gives an arterial four. The committed asphalt
     /// set is authored at 2 m and quotes 4 m
-    /// ([`inf_material::ground::GroundKind::tex_scale_m`]), so the street tiled
+    /// ([`crate::ground::GroundKind::tex_scale_m`]), so the street tiled
     /// every 14 m: aggregate the size of paving slabs. The ASSET0 audit measured
     /// it and named the missing field; this is that field.
     ///

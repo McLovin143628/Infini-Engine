@@ -530,7 +530,8 @@ fn lakes_of(flow: &FlowField, p: &HydroParams) -> Vec<Lake> {
 
 /// **The channel one reach wants cut for it** (wave ROAD1, clause 3).
 ///
-/// One per [`Stream`], indexed the way [`SegmentIndex::nearest`]'s `owner` is,
+/// One per [`Stream`], indexed the way
+/// [`crate::shape::SegmentIndex::nearest`]'s `owner` is,
 /// so a sample can be cut to the profile of the reach it is actually near
 /// rather than to one number shared by every watercourse on the island.
 #[derive(Clone, Copy, Debug, PartialEq)]
