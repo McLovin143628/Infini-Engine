@@ -1935,25 +1935,33 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //    `.inf_mat`, derived a `.inf_matd` for it, and followed THAT to the
     //    `.inf_tex` containers.
     let content = source.material_content();
-    // **FIVE since wave ASSET0, and the fifth is the road.** Four come from
-    // `Terrain.layers[*].material` and the fifth from the `Roads` entity's
-    // `Material.asset` — the same closure, a different edge, and the reason the
-    // street stopped shading off `Material::default()`'s 0.8 debug grey. A drop
-    // back to four is that binding lost.
+    // **SIX since wave ROAD1, and the sixth is the KERB.** Four come from
+    // `Terrain.layers[*].material`, the fifth from the `Roads` entity's
+    // `Material.asset` (ASSET0 — the reason the street stopped shading off
+    // `Material::default()`'s 0.8 debug grey) and the sixth from the `Kerbs and
+    // pavements` entity's. A drop back to five is the kerb's binding lost, and a
+    // drop to four is the road's.
+    //
+    // **The two MARKING entities add none, and that is the design rather than an
+    // omission**: road paint is a 100 mm constant-colour film, so they carry
+    // `Material::asset: None` — the scalars-only path — and a texture of one
+    // would be 1.6 MB of a single texel. So the closure grows by exactly one
+    // material for three new entities.
     assert_eq!(
         content.materials.len(),
-        5,
-        "the pack carries {} derived material records, not five — the cook's \
-         closure did not follow `Terrain.layers[*].material` or the road's \
-         `Material.asset`",
+        6,
+        "the pack carries {} derived material records, not six — the cook's \
+         closure did not follow `Terrain.layers[*].material`, the road's \
+         `Material.asset` or the kerb's",
         content.materials.len()
     );
-    // Eighteen: five albedo + five normal + five ORM + three detail (grass,
-    // rock and asphalt are the sets that ship one).
+    // Twenty-one: six albedo + six normal + six ORM + three detail (grass, rock
+    // and asphalt are the sets that ship one; the concrete deliberately does
+    // not — a pavement is walked on rather than stared at).
     assert_eq!(
         content.textures.len(),
-        18,
-        "the pack carries {} surface textures, not eighteen",
+        21,
+        "the pack carries {} surface textures, not twenty-one",
         content.textures.len()
     );
 
@@ -1961,18 +1969,18 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //    content, and the deterministic floor it admits — the numbers the frame
     //    instrument's "N virtual textures" line reports.
     let mats = content.vt_materials();
-    assert_eq!(mats.len(), 5, "the host's material map is not the pack's");
+    assert_eq!(mats.len(), 6, "the host's material map is not the pack's");
     let order = inf_render::registration_order(&mats);
     assert_eq!(
         order.len(),
-        18,
-        "the registration order names {} textures, not eighteen — `want_floor` \
+        21,
+        "the registration order names {} textures, not twenty-one — `want_floor` \
          is a pure function of this sequence, so it is the thing two hosts have \
          to agree about",
         order.len()
     );
     println!(
-        "ISLAND GROUND: 4 layers + 1 road -> 5 materials -> {} textures; \
+        "ISLAND GROUND: 4 layers + 1 road + 1 kerb -> 6 materials -> {} textures; \
          registration order {:?}",
         content.textures.len(),
         order
