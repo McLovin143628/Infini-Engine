@@ -1115,21 +1115,6 @@ pub fn unpairable_cluster_texture_advisory(
     )
 }
 
-/// Which meshes to fracture, and the parameters to fracture them with.
-///
-/// **Why this runs before the parallel stage.** [`cook_one`] is a pure function
-/// of *one asset's* bytes, which is what lets the cook fan out and still be
-/// byte-identical. "Is this mesh destructible" is not a fact about the mesh: it
-/// lives in a *level*, on some other entity, in some other asset. So the plan is
-/// built serially first — one extra decode per level, which is cheap beside the
-/// re-encode the level cook already does — and handed to the closure as read-only
-/// data.
-///
-/// Returns advisories for the two hazards visible here: a `Destructible` with no
-/// mesh to break, and two `Destructible`s asking for different fractures of the
-/// same mesh (only one `.inf_fracture` can exist per mesh, because its id is a
-/// function of the mesh's). Deduplicated + sorted, like every other advisory
-/// here, so the report stays deterministic.
 /// **Every mesh some level in this closure draws as rigid geometry** (wave FIX2)
 /// — the `MeshRef.asset` bindings, over the level bytes about to be cooked.
 ///
@@ -1164,6 +1149,21 @@ fn drawn_meshes(inputs: &[CookInput]) -> BTreeSet<AssetId> {
     out
 }
 
+/// Which meshes to fracture, and the parameters to fracture them with.
+///
+/// **Why this runs before the parallel stage.** [`cook_one`] is a pure function
+/// of *one asset's* bytes, which is what lets the cook fan out and still be
+/// byte-identical. "Is this mesh destructible" is not a fact about the mesh: it
+/// lives in a *level*, on some other entity, in some other asset. So the plan is
+/// built serially first — one extra decode per level, which is cheap beside the
+/// re-encode the level cook already does — and handed to the closure as read-only
+/// data.
+///
+/// Returns advisories for the two hazards visible here: a `Destructible` with no
+/// mesh to break, and two `Destructible`s asking for different fractures of the
+/// same mesh (only one `.inf_fracture` can exist per mesh, because its id is a
+/// function of the mesh's). Deduplicated + sorted, like every other advisory
+/// here, so the report stays deterministic.
 fn plan_fractures(inputs: &[CookInput]) -> (BTreeMap<AssetId, FractureRequest>, Vec<String>) {
     let mut plan: BTreeMap<AssetId, FractureRequest> = BTreeMap::new();
     let mut notes: BTreeSet<String> = BTreeSet::new();
