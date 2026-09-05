@@ -546,6 +546,17 @@ fn run_pie_window(
         inf_player::input::default_map(),
         rx,
         Box::new(stdout),
+        // Wave FIX2 (`ScenePayload` v13): the derived meshlet DAGs the payload
+        // names by PATH — what a rigid `MeshRef.asset` is drawn from. Same shape,
+        // same reason as every line below it, and the last of the class: without
+        // it `run_pie` built an empty `VmeshRegistry` of its own and the island's
+        // four road meshes drew placeholder cubes at the world origin while the
+        // editor drew a paved street.
+        std::sync::Arc::new(inf_player::vmeshes_from_payload(&payload)),
+        // Wave FIX2 / TER2b's open item: the authored meshes a level's scatter
+        // kinds name, taken out of the same `meshes` vector the skinned store
+        // reads — a *use* of a payload field, not a bump.
+        std::sync::Arc::new(inf_player::scatter_meshes_from_payload(&payload)),
         std::sync::Arc::new(inf_player::voxel::VoxelRegistry::from_payload(
             &payload.voxels,
         )),

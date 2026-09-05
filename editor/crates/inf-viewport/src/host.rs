@@ -2611,6 +2611,18 @@ impl EngineHost {
                 }
                 // A broken destructible has already pushed its chunks.
                 None if fractured => {}
+                // **Wave FIX2: a bound mesh with no DAG draws NOTHING.**
+                //
+                // It used to draw `prim_mesh(mesh_ref.primitive)` — a 1 m cube for
+                // `MeshRef::default()`. `resolve_vgeom` misses when the derived
+                // `.inf_vmesh` is absent OR (since FIX2) STALE, and a viewport
+                // that answers "stale" with a box is a viewport that photographs
+                // something that is not in the project. `open_vgeom` states which
+                // and names the remedy.
+                //
+                // Both hosts: `inf_player::render::project_scene` has the
+                // identical arm.
+                None if mesh_ref.asset.is_some() => {}
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 None => self.scene.instances.push(MeshInstance {

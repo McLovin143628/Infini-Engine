@@ -188,6 +188,53 @@ pub fn from_dir(dir: &Path) -> ScatterMeshes {
     out
 }
 
+/// The **PIE payload** twin of [`from_pack`] (wave FIX2): the scatter kinds a
+/// payload's `.inf_pcg` documents name, loaded from the `.inf_mesh` bytes the
+/// same payload carries.
+///
+/// **Demand-shaped, exactly like [`from_pack`]**, and that is the whole reason
+/// this function reads two vectors instead of one. `ScenePayload::meshes` is a
+/// general bag of `.inf_mesh` bytes — a character's body is in there too — and
+/// uploading every entry to a storage buffer would cost megabytes to draw
+/// nothing (the module's own opening rule). So the graphs decide: decode each
+/// carried `.inf_pcg`, take the GUIDs its kinds name, and take exactly those
+/// meshes.
+///
+/// Deterministic: the wanted set is sorted and deduplicated before anything is
+/// loaded, so a payload whose graphs arrive in a different order produces the
+/// same table with the same duplicate winner.
+///
+/// A graph that does not decode, and a kind whose mesh the payload does not
+/// carry, are each skipped with a warning and their instances draw the scatter
+/// path's own placeholder primitive — the `from_pack` rule, and not the
+/// `MeshRef.asset` one: a scattered instance has no authored transform of its
+/// own to make a wrong claim about.
+pub fn from_payload(pcgs: &[(Uuid, Vec<u8>)], meshes: &[(Uuid, Vec<u8>)]) -> ScatterMeshes {
+    let mut wanted: Vec<Uuid> = Vec::new();
+    for (guid, bytes) in pcgs {
+        match inf_asset::decode::<inf_pcg::PcgAssetPayload>(bytes) {
+            Ok(p) => wanted.extend(kind_meshes(&p)),
+            Err(e) => tracing::warn!("inf-player: .inf_pcg {guid} does not decode: {e}"),
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+    let by_guid: HashMap<Uuid, &[u8]> = meshes.iter().map(|(g, b)| (*g, b.as_slice())).collect();
+    let mut out: ScatterMeshes = HashMap::new();
+    for id in wanted {
+        let Some(bytes) = by_guid.get(&id) else {
+            tracing::warn!(
+                "inf-player: a scatter kind names mesh {id} and the PIE payload carries none"
+            );
+            continue;
+        };
+        if let Some(g) = geometry_from_bytes(id, bytes) {
+            out.insert(id.as_u128(), g);
+        }
+    }
+    out
+}
+
 /// **Register the building module meshes** (island wave I8b) — the twelve shape
 /// families every palette module draws.
 ///

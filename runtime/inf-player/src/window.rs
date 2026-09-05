@@ -1395,11 +1395,14 @@ pub fn run(
 /// but wired to a PIE control channel (Pause/Resume/Step/Stop/Eject/SetViewport)
 /// and a report sink (`Window` handle for reparenting, `Paused`/`Resumed`/…).
 /// Blocks until Stop or the window closes.
-// Nine parameters trips clippy's arity lint. Bundling them would hide the two
-// that matter — `voxel_assets` was ADDED here in P21.4 because a windowed PIE
-// session was binding no volumes and drawing no caves, and `skinned` in P24.1
-// because it was drawing every character as a placeholder cube. A struct is
-// exactly where a field like that goes back to being easy to forget to fill.
+// Thirteen parameters trips clippy's arity lint. Bundling them would hide the
+// ones that matter, and every one of them was added because it was MISSING:
+// `voxel_assets` in P21.4 (a windowed PIE session bound no volumes and drew no
+// caves), `skinned` in P24.1 (every character drew as a placeholder cube),
+// `materials` in P26.4 (every surface previewed untextured), and `vmeshes` +
+// `scatter_meshes` in FIX2 (every rigid mesh and every scattered instance drew
+// a placeholder). A struct is exactly where a field like that goes back to being
+// easy to forget to fill.
 #[allow(clippy::too_many_arguments)]
 pub fn run_pie(
     title: String,
@@ -1409,6 +1412,8 @@ pub fn run_pie(
     map: InputMap,
     control: Receiver<EditorToPlayer>,
     out: Box<dyn Write>,
+    vmeshes: Arc<VmeshRegistry>,
+    scatter_meshes: Arc<inf_render::ScatterMeshes>,
     voxel_assets: Arc<VoxelRegistry>,
     skinned: Arc<SkinnedRegistry>,
     materials: Arc<crate::MaterialContent>,
@@ -1416,10 +1421,6 @@ pub fn run_pie(
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    // PIE streams no vmesh assets yet (a documented follow-up); a *rigid*
-    // `MeshRef.asset` still renders as a placeholder cube in PIE until the payload
-    // carries the vmesh index. A `SkeletalMesh` no longer does — see `skinned`
-    // below and `ScenePayload::meshes` (v7).
     // **PIE starts from the LEVEL's own render block** (wave CERT1). It used to
     // start from `RenderSettingsRecord::default()`, with a comment saying the
     // payload carried no settings — and the payload carried them all along, in
@@ -1433,15 +1434,22 @@ pub fn run_pie(
     // It arrives through `PlayerApp::new` -> `PlayerRenderHost::new` ->
     // `shipped_settings`, the SAME door the pack path takes, so the tier clamp
     // and the adapter clamp apply identically on both.
-    let mut app = PlayerApp::new(
-        title,
-        width,
-        height,
-        sim,
-        map,
-        Arc::new(VmeshRegistry::new()),
-        render,
-    );
+    // Wave FIX2 (`ScenePayload` v13): the derived `.inf_vmesh` DAGs the payload
+    // names by path. This argument used to be `Arc::new(VmeshRegistry::new())` —
+    // an EMPTY registry, written inside this function with a comment calling it a
+    // documented follow-up — so every rigid `MeshRef.asset` in a windowed PIE
+    // session resolved to nothing and drew a placeholder cube. On the island that
+    // was the carriageway, the kerbs and both paint layers: the editor drew a
+    // paved street and Play drew bare graded earth. Passed IN rather than built
+    // here, like the three stores below it and for the same reason.
+    let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
+    // Wave TER2b's open item, and the fourth of this class (P21.4 voxels, P24.1
+    // skeletal, P26.4 materials): the authored meshes a level's scatter kinds
+    // name. There was no `app.scatter_meshes = ...` line here at all, so
+    // `PlayerApp::new`'s empty table stood and every scattered instance in a
+    // windowed PIE session drew the placeholder primitive while a cooked boot,
+    // which fills the table in `run_windowed`, drew the authored ground cover.
+    app.scatter_meshes = scatter_meshes;
     // P21.4: the payload's `.inf_voxel` bytes. Without them the windowed PIE
     // player binds no volumes, so `overlay_sim` has nothing to mirror the
     // Blueprint's carves *into* and an embedded session draws no caves at all —
@@ -1461,20 +1469,14 @@ pub fn run_pie(
     // it — the identical class P21.4 closed for voxel volumes and P24.1 for
     // skeletal meshes, and passed in for the identical reason.
     app.materials = materials;
-    // **AND THE FOURTH OF THE CLASS IS STILL OPEN** (wave TER2b). There is no
-    // `app.scatter_meshes = …` line here, so `PlayerApp::new`'s empty table
-    // stands and every scattered instance in a windowed PIE session draws the
-    // placeholder cube — while a cooked boot, which fills the table in
-    // `run_windowed`, draws the authored ground cover. That is the identical
-    // shape as the three lines above, and it is stated here rather than only in
-    // a memo because this is where the previous three were closed and where a
-    // reader looks to find out which are.
-    //
-    // **The fix needs no schema move**: `ScenePayload::meshes` is already a
-    // general `Vec<(Uuid, Vec<u8>)>` of `.inf_mesh` bytes that only
-    // `SkeletalMesh.mesh` fills today, so adding a level's scatter kinds to it
-    // is a *use* of a field, not a bump. `pie_equals_shipping_on_an_island_drive`
-    // cannot see this: it compares SIMULATION state, and the gap is at the frame.
+    // **THE CLASS IS CLOSED** (wave FIX2). Five stores reach a windowed PIE
+    // session and all five are now passed in: the vmesh registry and the scatter
+    // table above, and the voxel, skeletal and material stores here. Each of the
+    // five was, at some point, a session that stepped exactly like the shipped
+    // build and drew something else — and none of them could be seen by
+    // `pie_equals_shipping_on_an_island_drive`, which compares SIMULATION state
+    // while every one of these gaps is at the frame. The render half has its own
+    // gate now (`island_gate`'s registry arm).
     app.pie = Some(PieLink {
         control,
         out,

@@ -625,10 +625,47 @@ fn load_voxel_assets(args: &Args) -> voxel::VoxelRegistry {
 /// an empty table is precisely "every scattered instance draws its placeholder",
 /// which is what the engine did before this wave.
 fn load_scatter_meshes(args: &Args) -> inf_render::ScatterMeshes {
-    let mut table = scanned_scatter_meshes(args);
-    // I8b: and the twelve building module families, which name no file.
+    finish_scatter_meshes(scanned_scatter_meshes(args))
+}
+
+/// The half of a scatter table that is **not** read from anywhere (I8b): the
+/// twelve building module families, which name no file and are a function of
+/// their own names.
+///
+/// Factored out at wave FIX2 so the PIE path completes its table the same way
+/// the shipped one does. Before it, `run_pie` assigned no table at all; a door
+/// that adds the modules on one path and not the other would have been the same
+/// defect one layer down, and harder to see.
+fn finish_scatter_meshes(mut table: inf_render::ScatterMeshes) -> inf_render::ScatterMeshes {
     scatter_mesh::add_building_modules(&mut table);
     table
+}
+
+/// The **PIE** scatter table (wave FIX2): the authored meshes a payload's scatter
+/// kinds name, plus the building modules — the [`load_scatter_meshes`] twin, and
+/// the same completion rule.
+///
+/// Wave TER2b closed "scattered content draws its authored mesh" for the cooked
+/// and dev-dir boots and left `run_pie` assigning nothing, so every scattered
+/// instance in a windowed PIE session drew the placeholder primitive while a
+/// cooked boot drew the ground cover. This is that line.
+pub fn scatter_meshes_from_payload(
+    payload: &inf_runtime::pie::ScenePayload,
+) -> inf_render::ScatterMeshes {
+    finish_scatter_meshes(scatter_mesh::from_payload(&payload.pcgs, &payload.meshes))
+}
+
+/// The **PIE** meshlet-DAG registry (wave FIX2, `ScenePayload` v13): the derived
+/// `.inf_vmesh` files the payload names by path, indexed exactly as a `--level`
+/// dev boot indexes the ones beside its level.
+///
+/// The rigid half of what [`load_render_assets`] does for the other two boots.
+/// Without it the windowed PIE player was handed an EMPTY registry and every
+/// `MeshRef.asset` in the level drew a placeholder cube — the island's four road
+/// meshes among them, which is why Play showed bare earth where the editor showed
+/// a paved street.
+pub fn vmeshes_from_payload(payload: &inf_runtime::pie::ScenePayload) -> vmesh::VmeshRegistry {
+    vmesh::VmeshRegistry::from_paths(&payload.vmesh_paths)
 }
 
 /// The half of [`load_scatter_meshes`] that comes off disk.

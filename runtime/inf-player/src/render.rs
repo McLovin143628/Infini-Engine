@@ -1301,6 +1301,20 @@ pub fn project_scene_full(
                     emissive,
                     id: next_id,
                 });
+            } else if mesh_ref.asset.is_some() {
+                // **Wave FIX2: a bound mesh with no DAG draws NOTHING.**
+                //
+                // It used to draw `prim_mesh(mesh_ref.primitive)` — a 1 m cube for
+                // `MeshRef::default()` — which is a claim about the world no
+                // author made, and on the island it hid four missing streets
+                // behind four boxes at the origin 2.7 km from the spawn. The
+                // registry states the miss once per asset
+                // (`VmeshRegistry::report_missing`), which is the Output Log line
+                // this branch replaced the box with.
+                //
+                // Both hosts, not just PIE: the editor viewport's projector has
+                // the identical arm, because a placeholder deleted on one side
+                // only is a new way for a preview and a build to differ.
             } else {
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
