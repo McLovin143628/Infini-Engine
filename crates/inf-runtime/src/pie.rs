@@ -220,7 +220,25 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   thing standing between a desynced pipe and a 4 GiB allocation, and a
 ///   protocol whose limits follow the author's content is not a protocol. What
 ///   moved is what the frame has to hold.
-pub const SCENE_PAYLOAD_VERSION: u32 = 12;
+///
+/// * **v13** — wave FIX2, and the second rung to carry a PATH:
+///   [`vmesh_paths`](ScenePayload::vmesh_paths).
+///
+///   This envelope has carried a level's characters, caves, ground, garments and
+///   surfaces for eight rungs and never carried the one thing a **rigid** mesh
+///   needs in order to be drawn at all. `RenderScene` has exactly one door for
+///   real non-primitive geometry — a meshlet DAG — so every `MeshRef.asset` in a
+///   windowed PIE session fell through to the placeholder primitive: the editor
+///   drew a paved street and Play drew bare earth, for as long as PIE has
+///   existed. This field is what ends that.
+///
+///   A **path** and not bytes, for [`terrain_paths`](ScenePayload::terrain_paths)'
+///   reason and for a sharper one. The island's four road DAGs are 107.7 MB
+///   together and the largest single one is 49.4 MB, so the bytes route would
+///   walk Play back into [`MAX_FRAME_LEN`] the moment a fifth arrived. There is
+///   deliberately **no** bytes twin here, unlike `terrains`/`terrain_paths` — see
+///   the field's own doc for why the asset kind cannot want one.
+pub const SCENE_PAYLOAD_VERSION: u32 = 13;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -460,6 +478,47 @@ pub struct ScenePayload {
     /// the path, and `attach_terrain_streaming` sees one merged source either way.
     #[serde(default)]
     pub terrain_paths: Vec<(Uuid, String)>,
+    /// Referenced **derived meshlet DAGs by path** (v13, wave FIX2): `(derived
+    /// `.inf_vmesh` asset guid, absolute path)` — what a rigid `MeshRef.asset`
+    /// is drawn from.
+    ///
+    /// **Keyed by the DERIVED id, not by the mesh's**, exactly like
+    /// [`fractures`](Self::fractures) and [`materials`](Self::materials) and for
+    /// the same reason: it is the id a cooked pack stores the DAG under and the
+    /// id `inf_player::vmesh::VmeshRegistry` keys by, so the player looks a mesh's
+    /// geometry up the same way on both paths and there is one lookup rule rather
+    /// than two.
+    ///
+    /// **The gap this closes.** A `RenderScene` has exactly one door for real
+    /// non-primitive geometry — the vgeom (meshlet) path — and the windowed PIE
+    /// player was handed an EMPTY registry, so every `MeshRef.asset` resolved to
+    /// nothing and drew its placeholder primitive. On the island that was the
+    /// carriageway, the kerbs and both paint layers: the editor showed a paved
+    /// street and Play showed bare graded earth. The identical class P21.4 closed
+    /// for voxel volumes, P24.1 for skeletal meshes and P26.4 for materials,
+    /// arriving last for the oldest asset kind of them all.
+    ///
+    /// **A path, and no bytes twin.** `terrain_paths` has one because a caller may
+    /// have a terrain that exists only in memory; a `.inf_vmesh` is *derived*, so a
+    /// caller that has no file has no DAG either and the honest payload is an
+    /// absent entry rather than an invented one. The sizes make the choice
+    /// stronger, not weaker: the island's four road DAGs are 107.7 MB together
+    /// against a [`MAX_FRAME_LEN`] of 268 435 456 B, so the bytes route would put
+    /// Play back where wave GTA1 found it.
+    ///
+    /// **What it costs, stated rather than discovered later** — the same sentence
+    /// `terrain_paths` carries, because it is the same promise: a file named here
+    /// is read *later*, so a DAG rebuilt between the payload being built and the
+    /// player opening it previews the newer bytes. Bounded by process startup, and
+    /// the alternative is a hundred megabytes through a pipe on every press of
+    /// Play.
+    ///
+    /// Empty on a level with no rigid `MeshRef.asset` — **which is also what a
+    /// caller that does not resolve them produces**, the P21.4 "two empty maps
+    /// agreeing" hazard, and the reason `island_gate`'s registry arm asserts an
+    /// exact expected count taken from the fixture before it compares anything.
+    #[serde(default)]
+    pub vmesh_paths: Vec<(Uuid, String)>,
 }
 
 impl ScenePayload {
@@ -495,6 +554,7 @@ impl ScenePayload {
             // session means until something calls `set_blend_mode`.
             blend_mode: 0,
             terrain_paths: Vec::new(),
+            vmesh_paths: Vec::new(),
         }
     }
 
@@ -569,6 +629,14 @@ impl ScenePayload {
     /// in this envelope and only for this kind.
     pub fn with_terrain_paths(mut self, paths: Vec<(Uuid, String)>) -> Self {
         self.terrain_paths = paths;
+        self
+    }
+
+    /// Attach the referenced **derived** `.inf_vmesh` paths (`(derived vmesh
+    /// guid, absolute path)`) — the v13 route, and the only route this asset kind
+    /// has. See [`vmesh_paths`](Self::vmesh_paths) for why there is no bytes twin.
+    pub fn with_vmesh_paths(mut self, paths: Vec<(Uuid, String)>) -> Self {
+        self.vmesh_paths = paths;
         self
     }
 
@@ -1172,6 +1240,13 @@ mod tests {
             Uuid::from_u128(0x6A_11_01),
             "/x".repeat(43), // 86 bytes: unique among the tail
         )])
+        // v13 — non-empty, and its string a length no field above uses. Same
+        // reasoning as v12's: a `String` and a `Vec<u8>` are the same shape on
+        // this wire, so only the length tells two of them apart.
+        .with_vmesh_paths(vec![(
+            Uuid::from_u128(0xF1_22_01),
+            "/z".repeat(57), // 114 bytes: unique among the tail
+        )])
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -1208,7 +1283,7 @@ mod tests {
     }
 
     /// **The WHOLE wire order is pinned, every field of it** (P24.1 audit M5;
-    /// twenty-one of them since v12).
+    /// twenty-two of them since v13).
     ///
     /// The stale-reader test below models a *pre-v5* build and therefore stops at
     /// `windowed` — correctly, that is its whole point. But it left the four tail
@@ -1258,6 +1333,10 @@ mod tests {
             // this wire, so this one is pinned by the length of its content like
             // every byte field above it.
             terrain_paths: Vec<(Uuid, String)>,
+            // v13: the derived meshlet-DAG paths, pinned the same way and for the
+            // same reason — it is swappable with `terrain_paths` and with every
+            // byte field above unless the lengths differ.
+            vmesh_paths: Vec<(Uuid, String)>,
         }
 
         let want = payload_with_assets();
@@ -1276,12 +1355,13 @@ mod tests {
         .iter()
         .map(|v| v[0].1.len())
         .collect();
-        // v12's `String` field belongs in the same uniqueness check: bincode
-        // encodes it exactly like a `Vec<u8>`, so it is swappable with any of
-        // them.
+        // v12's and v13's `String` fields belong in the same uniqueness check:
+        // bincode encodes them exactly like a `Vec<u8>`, so each is swappable
+        // with any of them and with the other.
         let tail_lens: Vec<usize> = tail_lens
             .into_iter()
             .chain(std::iter::once(want.terrain_paths[0].1.len()))
+            .chain(std::iter::once(want.vmesh_paths[0].1.len()))
             .collect();
         let mut uniq = tail_lens.clone();
         uniq.sort_unstable();
@@ -1296,11 +1376,11 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 21-field order decodes the wire");
+                .expect("the canonical 22-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned 21-field order does not account \
+            "the encoding carries bytes the pinned 22-field order does not account \
              for — a field was added to `ScenePayload` without extending this pin"
         );
 
@@ -1342,6 +1422,10 @@ mod tests {
         assert_eq!(
             wire.terrain_paths, want.terrain_paths,
             "`terrain_paths` is not wire field 21"
+        );
+        assert_eq!(
+            wire.vmesh_paths, want.vmesh_paths,
+            "`vmesh_paths` is not wire field 22"
         );
         // ANTI-VACUITY for the one-byte field: the fixture must not carry the
         // DEFAULT, or a pin that read a stray zero from anywhere would pass.

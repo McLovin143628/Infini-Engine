@@ -22,7 +22,7 @@
 //!   the Details panel and have no writer), so it would be
 //!   `RuntimeEntityGen::inventory: Option<Inventory>` at the record's tail,
 //!   scene **v26**, its editor mirror, a frozen `EntityRecordV25`, a committed
-//!   downgrade fixture, and `SCENE_PAYLOAD_VERSION` **12** by the envelope's own
+//!   downgrade fixture, and `SCENE_PAYLOAD_VERSION` **13** by the envelope's own
 //!   doctrine.
 //!
 //! I6 does not need the second, so I6 does not take it. What content authors
