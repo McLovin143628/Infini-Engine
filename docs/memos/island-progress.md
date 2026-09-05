@@ -32364,6 +32364,34 @@ and **3.45 m** for the yellow, which on a 3.5 m half-width is a single 0.10 m
 line centred on the crown, the arterial's two lanes taking the single yellow the
 design table specifies. **Held.**
 
+#### The street the player spawns on is not one of the roads this wave paved
+
+`ROAD1-AUDIT-DEMO/03-pie-b.png` — the demo loop's own PIE frame, the shipped
+path — has the hero running down a wide strip of **bare graded earth** between
+two rows of buildings, with a dark asphalt ribbon visible off to one side. The
+wave's own `ROAD1-DEMO/03-pie-b.png` shows the same thing.
+
+The reason is structural and it was already half-visible in the traffic finding
+above. This island has **two** road networks and they are not the same object:
+
+| | who builds it | who draws it | who drives on it |
+|---|---|---|---|
+| the eleven GIS routes | `roads.geojson` → `RoadGraph::from_layer` → `build_surface` | **this wave** — carriageway, kerbs, pavements, markings | nobody: `lane_network()` has no caller |
+| a settlement's streets | `inf_editor_core::settlement` → `inf_ecs::traffic::Street` | **nothing at all** | the traffic sim, the parked-car lattice, the crowd, the EMS yield |
+
+`build_surface` has exactly three callers in the tree — the island's road step,
+the editor's GIS import wizard and the phase30-city sample — and `settlement.rs`
+names neither `inf_gis` nor a road mesh anywhere. So the gaps between a
+settlement's blocks are terrain, and where a GIS arterial happens to run through
+a settlement (which is what `10-street.png` shows) the street is paved and where
+one does not, it is not.
+
+That is not a defect this wave introduced and it is not one it claimed to close —
+its brief was the island's roads and it paved the island's roads. It is recorded
+here because it is the honest answer to "do the roads look right now" from inside
+the game rather than from the editor: the road a player *walks on* is still
+unpaved, and pricing that is a settlement-paving wave, not a clause.
+
 #### CARRIED BY THE AUDIT
 
 16. **A mitred corner still spikes four half-widths** — 23.200 m of kerb from an
@@ -32395,3 +32423,11 @@ design table specifies. **Held.**
 21. **`clip_kerbs_to_open_ground` is O(furniture × bucket)** over a `BTreeMap`
     grid rebuilt per build. It costs about a second on the 34 km island inside a
     96-second build and has no incremental path, which is fine until a county.
+22. **A settlement's own streets are unpaved**, above. The traffic sim, the
+    parked-car lattice and the crowd all run on `inf_ecs::traffic::Street`s that
+    nothing draws, and the eleven roads this wave paved carry no traffic. Two
+    networks, neither of them whole.
+23. **The corridor is wider than the road it holds.** 9.5 m of plateau plus
+    11.2 m of batter either side is a 41 m scar for a 12–19 m road, splatted as
+    bare ground, and it reads as one in the PIE frames. Whether the batter should
+    carry vegetation or a narrower splat is a landscape question nobody has put.
