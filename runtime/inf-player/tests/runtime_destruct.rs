@@ -562,7 +562,33 @@ fn the_render_swap_draws_a_mesh_or_its_chunks_and_never_both() {
     use inf_player::render::project_scene_with_skinned;
 
     let mut sim = sim(true, true);
-    let vmeshes = inf_player::vmesh::VmeshRegistry::new();
+    // **The wall needs a resolvable DAG, and that is wave FIX2 rather than a
+    // convenience.** This registry used to be empty and the intact wall was
+    // counted as the primitive `MeshInstance` it fell back to — the placeholder
+    // cube. FIX2 deleted that fallback (a 1 m box at an entity's transform is a
+    // claim about the world no author made), so an empty registry now draws an
+    // intact destructible as NOTHING and this arm would read "neither" on every
+    // step before the break. The subject is the swap, so the fixture has to be a
+    // world where the intact half is drawable at all: one DAG, under the derived
+    // id, exactly as a cooked pack or a PIE payload would supply it.
+    let mut vmeshes = inf_player::vmesh::VmeshRegistry::new();
+    vmeshes
+        .insert_mesh(
+            inf_player::vmesh::derived_vmesh_id(Uuid::from_u128(MESH_GUID)),
+            &inf_vgeom::VgeomMesh {
+                schema_version: inf_vgeom::VgeomMesh::CURRENT_VERSION,
+                vertices: Vec::new(),
+                meshlets: Vec::new(),
+                meshlet_vertices: Vec::new(),
+                meshlet_triangles: Vec::new(),
+                groups: Vec::new(),
+                levels: Vec::new(),
+                center: [0.0; 3],
+                radius: 0.0,
+                meshlet_materials: Vec::new(),
+            },
+        )
+        .expect("the wall's DAG indexes");
     let skinned = inf_player::skinned::SkinnedRegistry::new();
     let voxels = inf_voxel::VoxelVolumes::default();
     let mut scene = inf_render::RenderScene::default();
@@ -577,9 +603,11 @@ fn the_render_swap_draws_a_mesh_or_its_chunks_and_never_both() {
             .iter()
             .filter(|c| c.entity == inf_render::terrain_id_from_guid(WALL_GUID))
             .count();
-        // The wall has no vgeom asset resolvable here, so an intact one falls back
-        // to a primitive `MeshInstance` — which is exactly what must stop.
-        let meshes = scene.instances.len();
+        // An intact wall is drawn through the vgeom path, which is the ONLY door
+        // `RenderScene` has for real non-primitive geometry. Both lists are
+        // counted, so this arm still fails if the swap ever leaves a primitive
+        // behind as well.
+        let meshes = scene.instances.len() + scene.vgeom_instances.len();
         seen.push((meshes, chunks));
         assert!(
             (meshes > 0) != (chunks > 0),

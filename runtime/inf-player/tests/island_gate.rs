@@ -1490,13 +1490,14 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
     let reader_for_scatter = reader.clone();
     let ship = inf_player::vmesh::VmeshRegistry::from_pack(reader).expect("the DAGs index");
 
+    // One `println!` and not two: a literal beginning with a run of spaces (to
+    // align a second line under the first) is indistinguishable from a `\`
+    // continuation the harness ate, and `inf-packager`'s workspace-wide source
+    // gate refuses them all rather than trying to tell the two apart.
     println!(
-        "REGISTRIES: pie {} — {:?}",
+        "REGISTRIES: pie {} — {:?} / ship {} — {:?}",
         pie.len(),
-        pie.registered_guids()
-    );
-    println!(
-        "            ship {} — {:?}",
+        pie.registered_guids(),
         ship.len(),
         ship.registered_guids()
     );
