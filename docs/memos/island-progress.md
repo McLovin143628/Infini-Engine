@@ -32144,3 +32144,204 @@ morph certification.
     stared at, and the two surfaces the library details were chosen for that
     distinction — but a kerb IS a surface a player stands beside at half a metre.
 11. **The gate's morph twin is not the WGSL**, above.
+12. **`Focus Selection` cannot frame a river.** It reads the entity's
+    `Transform`, which for a watercourse is the identity, so framing one lands
+    on the world origin — which is why this wave measured the shore band and
+    could not photograph it. *(Closed by the audit, `f1f994f7`.)*
+13. **`default_blend_is_opaque_v3` asserts v4 and keeps its v3 name.**
+    *(Closed by the audit, `4aedfe5f`.)*
+14. **`wet_roughness_floor` is authored and unread** — the same item as 7 above,
+    which the wave's own report numbered differently. PAR4 owns the pass.
+15. **The asphalt's chips are too coarse close up.** ~7.7 cm of aggregate at the
+    correct 4 m tiling: the right rate, the wrong texel frequency, and it is the
+    texture rather than the door that has to move.
+
+*(12, 13 and 15 were in the wave's own report and not in this list; the audit
+added them here, where they are durable.)*
+
+### AUDIT (2026-09-04, adversarial, `50d1d538..`)
+
+The wave's claims were reproduced at `bbc2d1d9` before anything was changed.
+Both tables come back to four decimal places from the same instrument; the
+committed layer's diff is exactly eleven added `"lanes"` lines and no deletions;
+every `.inf_mat` is exactly `+8` bytes; and every arm the wave named was
+mutation-verified red — `.inf_mat`'s dispatch, its v3 downgrade-bless and its
+wire pin, the feedback-pass mirror, the terrain strip, the water shader's
+`select`, `carriageway_y`'s clamp (which reproduces the switchback at
+**1.6363 m of float + the 0.140 m crown = 1.78 m**), the pavement/nav-ring
+equality and the committed-lanes fence. What follows is what did not hold.
+
+#### The frame the wave delivered has a plank of concrete lying across the road
+
+`ROAD1-DEMO/11-River3.png` — the wave's own street capture — shows a grey slab
+running diagonally over the carriageway at the junction, floating above the
+asphalt and ending in mid-air. It is the kerb-and-pavement mesh.
+
+`build_segment_furniture` lays a kerb and 2 m of concrete beside **its own**
+segment and cannot see any other, so two roads that pass within
+`built_half_width + half` each lay a footway over the other's asphalt — and so
+does **one** road that folds back on itself, which a grade-limited router does at
+every switchback. Nothing clipped it, and a footway is drawn 190 mm above the
+carriageway.
+
+| subject | footway on a carriageway, before | after | worst |
+|---|---|---|---|
+| island | **19 754.6 m² of 170 901.7 m² (11.56 %)** | **0.0 m²** | within 0.02 m of a 7 m road's own crown |
+| fixture | **969.5 m² of 8 247.6 m² (11.75 %)** | **0.0 m²** | all of it in the switchback at (-400, 300) |
+
+Only 459.9 m² of the island's was within 30 m of a route end, so it is not a
+junction artefact; the largest clusters are at (-1100, -550) and (-950, -850).
+`clip_kerbs_to_open_ground` (`50d1d538`) drops it at the end of `build_surface`
+against a 4 m grid of every carriageway triangle, and the island's kerb mesh goes
+**300 330 v / 480 368 t → 285 877 v / 454 273 t** (−16 008.3 m², 9.37 %).
+Markings are deliberately untouched — a marking's job is to lie on a
+carriageway. The arm is `a_footway_is_never_drawn_on_a_carriageway`, four claims,
+each mutation-verified independently.
+
+**Two roads on one piece of ground is still a routing fact** and nothing here
+fixes it: what changed is that the overlap is now drawn as road rather than as
+concrete. `RoadSurface::kerbs_clipped` reports the amount and `inf island build`
+prints it, so the number is readable rather than hidden in a builder.
+
+#### The mitre limit caps the ratio and still spikes four half-widths
+
+`MITER_LIMIT`'s doc said a corner past 29° is "clipped rather than spiked". That
+is what a stroker does; this clamps the **ratio** at 4 and `CrossFrame::at` still
+multiplies the offset by it. Measured on the island: the kerb mesh reaches
+**23.200 m from the centreline** = 4.000 × an arterial's 5.800 m built
+half-width, **4 156.5 m² of footway (2.43 %)** past its own route's built
+half-width, worst **+17.400 m at (-1057.7, 98.4, -453.7)** — a 17 m tongue of
+concrete pointing into open ground at a switchback. It is a **different** defect
+from the one above and neither fix touches the other: a spike points away from
+every road, so no carriageway contains it (cross-tabulated: 0.0 m² of the
+over-carriageway footway was also past the built half-width). The doc now says
+what the code does; a real bevel join changes a corner's topology and moves a
+committed `.inf_mesh`, so it is carried (`8db0b439`).
+
+#### The stream-band arm's ceiling could not be exceeded
+
+`ta <= CEILING` was unfalsifiable. The modelled column is `depth · (1 − t²)` and
+has no terrain term, so its travel is exactly `0.0000` for every fixture, depth,
+fade and morph. **Measured, not reasoned**: replacing the parabola with
+`depth · 100 · (1 − t)` — neither the carve's section nor the shader's — moved
+the printed edge from 0.8086 to 0.9961, left the travel at 0.0000 and kept the
+test green.
+
+The arm now reads three rules, and the middle one is the rule the wave rejected:
+
+```
+ROAD1 BAND | distance | morph | depth buffer |  max   | modelled |
+ROAD1 BAND |   200 m  | 0.000 |    1.0000    | 1.0000 |  0.8086  |
+ROAD1 BAND |   330 m  | 0.645 |    1.0000    | 1.0000 |  0.8086  |
+ROAD1 BAND |   700 m  | 0.491 |    0.0000    | 0.8086 |  0.8086  |
+ROAD1 BAND | travel: depth buffer 1.0000, max 0.1914, modelled 0.0000
+```
+
+`max` still breathes by 0.1914 of a half-width, which reproduces from the
+instrument the 1.00 → 1.00 → 0.81 that `water.wgsl`'s own comment quotes, and
+makes the `select` load-bearing here rather than only in the source gate. Three
+docs also said `water.wgsl` "takes the larger of" the depth buffer and the
+model — the source gate's doc, its falsification note ("drop the `max`") and
+`inf_editor_core::island`'s comment — all corrected (`6fac40ad`).
+
+#### The float arm's ceiling is named for a percentile it is not fed
+
+`MEAN_PIXELS` is compared against a variable called `worst_p99_px` that holds
+`b.mean`, and its doc carried two stacked first lines, the first beginning "The
+99th percentile may not exceed…". The percentile **does not pass**: at 0.353 m
+and 0.748 m per pixel, B's p99 is **2.01 px at 330 m** and **1.80 px at 700 m**,
+both over the ceiling and both *worse* than the conforming control's 1.69 and
+1.51. Option B wins on the mean and loses on the tail; the tail is the
+switchback. Renamed and the numbers written down (`da31274a`). No threshold
+moved.
+
+#### The `.inf_matd` downgrade path was never armed on v2 bytes
+
+Carried item 7 rested on Wave G's precedent. The question is whether a v2 payload
+exists that a decoder must handle, and one does: a `.inf_matd` is never committed
+(`git ls-files` finds none, and none is loose on disk) but it **is** written into
+every cooked pack, and a pack cooked before the bump stays there —
+`island-build/project/Build/content.ipack` is one. A frozen `DerivedMaterialV2`
+and `a_v2_record_is_refused_by_name_with_the_cook_remedy` now watch the live
+decoder run off the end of a two-`f32`-short buffer and answer `SchemaTooOld`
+naming "re-cook the project" and *not* "re-import". Carried 7 and 13 closed
+(`4aedfe5f`).
+
+#### Focus Selection could not frame a river, and now can
+
+Carried 12, closed (`f1f994f7`). `selection_center`/`selection_focus` walked
+`scene.selected`, a list of **render-instance ids**, and a river is an entity
+whose geometry is entirely in its `Spline`: identity `Transform`, no `MeshRef`,
+no instance. Both now also walk the document's own selection and take a curve's
+bounding box through `curve_focus` — half the diagonal, 4 m floor — which is the
+door this audit's river capture is taken through.
+
+#### What the lane change costs traffic: nothing, and that is the finding
+
+`inf_gis::RoadGraph::lane_network()` has **no caller outside `inf-gis`'s own
+tests**, and `kerb_slots`, `YIELD_BIAS_M` and the rush-hour sim all read
+settlement `Street`s (the gaps between city blocks), not the GIS road layer. So
+14.0 m → 7.0 m on the island's arterials is a **drawing** change with no traffic
+or EMS consequence — because nothing drives on the island's roads at all today.
+Re-run and quoted: `city_scale` 12/0, `ems1_station_gate` 5/0,
+`ems2_dispatch_gate` 6/0, `ems3_crime_gate` 7/0, `veh2c_harbour_gate` 7/0.
+
+#### A pedestrian walks 190 mm below the pavement, measured
+
+Carried 2 said a pedestrian steps *through* the kerb. Measured over the fixture's
+5 344 walkable footway triangles against the terrain heightfield that actually
+carries a collider: the concrete is drawn **p50 0.1775 m, area-weighted mean
+0.1915 m** above the ground an agent stands on (min −2.693 m, p99 0.5698 m, max
+2.2957 m at the batters). That is 0.15 m of kerb plus the footway's 2 % fall — so
+an agent does not float above the slab, it walks shin-deep *inside* it, and a car
+crosses the kerb as though it were paint. CHAR1/PERF1 take a footway collider or
+a nav ring lifted to the slab.
+
+#### The four road meshes are not priced against any frame budget
+
+The house law asks for the kerb's triangles in the fps instrument's LIT island
+row. They are not there and cannot be: `fps_instrument`'s "island frame" is a
+**synthetic fixture** — a spline road with a grammar fence, painted biomes, lamps
+and lots — which has never carried a built road mesh, a kerb or a marking. So
+454 273 kerb triangles + 142 236 white + 77 682 yellow + 561 446 carriageway
+= 1 235 637 triangles across four always-loaded draws are unmeasured. Carried.
+
+#### Corrections to this ledger's own numbers
+
+* The CARRIED list below had **eleven** entries and the wave's report had
+  fifteen; four existed only in a scratchpad file. Added as 12–15.
+* Every furniture figure the wave quoted was measured before the footway clip.
+  At `50d1d538` and after, the island's kerb mesh is **285 877 v / 454 273 t**
+  (measured at 50d1d538; at bbc2d1d9 it read 300 330 v / 480 368 t). The
+  carriageway, both marking meshes, the 553 entities, the `+686 B` per level and
+  the whole FLOAT table are unchanged.
+
+#### CARRIED BY THE AUDIT
+
+16. **A mitred corner still spikes four half-widths** — 23.200 m of kerb from an
+    arterial's centreline, 4 156.5 m² (2.43 %) of the island's footway past its
+    own route's built half-width, worst +17.400 m. The remedy is a bevel join,
+    which changes a corner's topology and moves a committed `.inf_mesh`.
+17. **The footway clip drops triangles rather than cutting them**, so the edge it
+    leaves is ragged to within one triangle (~1 m along, 2 m across) and the
+    boundary is a centroid test with a 100 mm inset. A polygon clip would leave a
+    straight edge; nothing on the island is looked at closely enough for the
+    difference to show, and this is the record that it was not measured.
+18. **The road furniture is unpriced.** 1 235 637 triangles across four
+    always-loaded draws (carriageway 561 446, kerb 454 273, white 142 236,
+    yellow 77 682) and no frame-budget instrument sees any of them:
+    `fps_instrument`'s island row is a synthetic fixture with a spline road and
+    no road mesh. Pricing them means either putting the built island in that
+    instrument or building a second one.
+19. **A pedestrian walks 190 mm inside the pavement** (p50 0.1775 m,
+    area-weighted mean 0.1915 m over the fixture's walkable footway) and a car
+    crosses a kerb as though it were paint. The wave carried the fact; the audit
+    carries the number, and the fix is a footway collider or a nav ring lifted
+    onto the slab.
+20. **The `select` that stops the band breathing costs the depth buffer.** A
+    hull, a jetty or a rock IN a river no longer shortens the column beneath it.
+    The wave stated the trade; nothing measures what it looks like, because
+    nothing on this island floats in a river yet.
+21. **`clip_kerbs_to_open_ground` is O(furniture × bucket)** over a `BTreeMap`
+    grid rebuilt per build. It costs about a second on the 34 km island inside a
+    96-second build and has no incremental path, which is fine until a county.
