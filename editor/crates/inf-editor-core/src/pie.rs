@@ -1885,17 +1885,60 @@ mod tests {
     /// session with no clips issues byte-identical commands to a cooked build.
     /// Every parity fold compared equal while the preview was silent.
     ///
-    /// Deduplicated by clip, because a venue with four speakers playing one loop
-    /// must carry it once — asserted with two sources on one clip, which is what
-    /// the island's venue is.
+    /// Counted on **committed content**, not on a fixture built to pass: the
+    /// physics playground carries two authored `AudioSource`s — one
+    /// autoplay-looping on the spinner, one on the sensor plate — naming two
+    /// stable clip GUIDs that `cook::asset_deps`' `level → audio` edge ships into
+    /// the pack. Those are exactly the clips a PIE session did not have, so the
+    /// count is taken from the sample rather than invented (the P21.4 rule).
+    ///
+    /// And deduplication is asserted separately, because a venue with four
+    /// speakers on one loop must carry it once.
     #[test]
     fn the_clips_a_level_sounds_ride_the_wire_once_each() {
-        const CLIP: Uuid = Uuid::from_u128(0xF1_2301_0001);
+        let doc = crate::samples::physics_playground_scene();
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |g| Some(format!("AUDIO:{g}").into_bytes()),
+            |_| None,
+            60,
+            false,
+        )
+        .expect("payload builds");
 
-        let mut doc = SceneDoc::new();
+        let carried: Vec<Uuid> = payload.audio.iter().map(|(g, _)| *g).collect();
+        assert_eq!(
+            carried.len(),
+            2,
+            "the playground's two authored AudioSources carried {} clip(s): {carried:?}",
+            carried.len()
+        );
+        for want in [
+            crate::samples::PLAYGROUND_SPINNER_CLIP_GUID,
+            crate::samples::PLAYGROUND_SENSOR_CLIP_GUID,
+        ] {
+            assert!(
+                payload
+                    .audio
+                    .iter()
+                    .any(|(g, b)| *g == want && *b == format!("AUDIO:{want}").into_bytes()),
+                "the payload does not carry {want}'s bytes: {carried:?}"
+            );
+        }
+
+        // …once each, however many sources name one clip.
+        const CLIP: Uuid = Uuid::from_u128(0xF1_2301_0001);
+        let mut two = SceneDoc::new();
         for name in ["Speaker L", "Speaker R"] {
-            let e = doc.create(SpawnKind::Empty, name, None);
-            let world = doc.world_mut();
+            let e = two.create(SpawnKind::Empty, name, None);
+            let world = two.world_mut();
             let id = world.entity_of(e).expect("the entity exists");
             world
                 .world_mut()
@@ -1905,10 +1948,9 @@ mod tests {
                     ..Default::default()
                 });
         }
-        doc.world_mut().mark_dirty();
-
+        two.world_mut().mark_dirty();
         let payload = build_scene_payload(
-            &doc,
+            &two,
             |_| None,
             |_| None,
             |_| None,
@@ -1922,7 +1964,6 @@ mod tests {
             false,
         )
         .expect("payload builds");
-
         assert_eq!(
             payload.audio,
             vec![(CLIP, b"AUDIO".to_vec())],

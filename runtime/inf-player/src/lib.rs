@@ -998,10 +998,12 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
         // Wave FIX2 (`ScenePayload` v13): the `.inf_audio` clips an
         // `AudioSource.clip` names. This function called eight of these doors and
         // not this one, so a windowed PIE session issued exactly the commands the
-        // shipped build issues and resolved none of them — the island's venue
-        // plays its loop in a cooked build and was silent in Play. Invisible to
-        // every gate: the P12 doctrine makes the command stream a pure function of
-        // sim state, so the two hosts' streams compared equal the whole time.
+        // shipped build issues and resolved none of them. Invisible to every
+        // gate: the P12 doctrine makes the command stream a pure function of sim
+        // state, so the two hosts' streams compared equal the whole time.
+        // Measured on the physics playground, which carries two authored
+        // `AudioSource`s the cook's `level -> audio` edge ships: the cooked build
+        // played both and the preview played neither.
         //
         // Decoded through the same `inf_audio::AudioAsset` door
         // `load_audio_assets_from_dir` uses, and seeded through the same builder,

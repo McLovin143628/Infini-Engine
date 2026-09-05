@@ -254,8 +254,13 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   eight `InfSceneWorldBuilder` doors and not `with_audio`. So a windowed PIE
 ///   session issued exactly the same audio COMMANDS as the shipped build — the
 ///   P12 doctrine makes the command stream a pure function of sim state, so every
-///   parity gate compared equal — and resolved none of them. The island's venue
-///   plays music in a cooked build and is silent in Play.
+///   parity gate compared equal — and resolved none of them.
+///
+///   Measured on committed content: the physics playground carries two authored
+///   `AudioSource`s whose clips `cook::asset_deps`' `level → audio` edge ships
+///   into the pack, so a cooked build played both and the preview played neither.
+///   (The island's venue is a **different** defect and this field does not close
+///   it — see the field's own doc.)
 pub const SCENE_PAYLOAD_VERSION: u32 = 13;
 
 /// Upper bound on a single frame; anything larger means a desynced or
@@ -545,8 +550,22 @@ pub struct ScenePayload {
     /// the P12 audio doctrine makes the emitted command stream a pure function of
     /// SIM STATE, so a PIE session with no clips at all issues byte-identical
     /// commands to a cooked build and every determinism and parity gate in the
-    /// tree compares equal. The divergence is entirely at the speaker. The
-    /// island's venue plays its loop in a shipped build and is silent in Play.
+    /// tree compares equal. The divergence is entirely at the speaker, and it is
+    /// measured on committed content: the physics playground's two authored
+    /// `AudioSource`s name two clips the cook's `level → audio` edge ships, so the
+    /// cooked build played both and the preview played neither.
+    ///
+    /// **What this does NOT close, stated because the first draft of this comment
+    /// claimed it did.** The island's venue music never reaches *either* host. Its
+    /// emitters are spawned at run time by `inf_ecs::venue::sync_venue_emitters`
+    /// from a fixed engine GUID, so no document entity carries an `AudioSource`
+    /// naming it — and the cook's closure follows the same `AudioSource.clip` edge
+    /// off level entities that this field's collector does. Measured: the cooked
+    /// island's pack has no `audio` kind in it at all. Both hosts are therefore
+    /// silent and PIE == shipping holds, which is exactly why no gate saw it. A
+    /// runtime-spawned emitter naming a constant is an asset edge no closure
+    /// walks, and closing it needs a rule about engine-owned assets rather than a
+    /// wire field.
     ///
     /// Carried, not computed, and keyed by the ASSET rather than by anything
     /// derived: a `.inf_audio` is authored, the player decodes it through the same
