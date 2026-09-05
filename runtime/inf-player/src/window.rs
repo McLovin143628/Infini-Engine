@@ -1571,6 +1571,94 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::mpsc::channel;
 
+    /// **Every render store a windowed PIE session is handed is actually
+    /// installed** (wave FIX2).
+    ///
+    /// A source pin, because the property is *an assignment happening* inside a
+    /// function no test can run: `run_pie` blocks in a winit event loop and needs
+    /// a GPU and a display, so it is compile-checked in CI and human-verified
+    /// live. Nothing else in the tree can see whether the value it was handed
+    /// reached the app.
+    ///
+    /// This is not a hypothetical shape. FIVE stores reach a PIE session and FOUR
+    /// of them arrived one wave at a time, each because a session had been
+    /// stepping the world exactly like the shipped build and drawing something
+    /// else: voxel volumes in P21.4 (no caves), skeletal meshes in P24.1 (every
+    /// character a placeholder cube), materials in P26.4 (every surface
+    /// untextured), and in FIX2 both the meshlet DAGs (every rigid mesh a
+    /// placeholder cube) and the scatter table — which had NO assignment here at
+    /// all for a whole wave, stated in a comment in this file, because
+    /// `PlayerApp::new`'s empty default is a table and not a compile error.
+    ///
+    /// Rust does not warn on an unused function parameter, so `run_pie` can take
+    /// a store and drop it in silence. This is what refuses that.
+    ///
+    /// Line endings are normalized first: `core.autocrlf = true` checks `.rs` out
+    /// CRLF on Windows, and the P22 law is that a source-reading test says so
+    /// rather than discovering it.
+    #[test]
+    fn a_pie_session_installs_every_store_it_is_handed() {
+        let src = include_str!("window.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\npub fn run_pie(")
+            .expect("`run_pie` no longer exists under that name");
+        let rest = &src[start + 1..];
+        let end = rest
+            .find("\n}\n")
+            .expect("`run_pie` does not terminate at column 0");
+        let body = &rest[..end];
+        for (store, symptom) in [
+            (
+                "app.scatter_meshes = ",
+                "every scattered instance draws its placeholder",
+            ),
+            ("app.voxel_assets = ", "the session draws no caves"),
+            (
+                "app.skinned = ",
+                "every character draws as a placeholder cube",
+            ),
+            (
+                "app.materials = ",
+                "every bound surface previews untextured",
+            ),
+        ] {
+            assert!(
+                body.contains(store),
+                "`run_pie` no longer installs `{store}` — the store is still a \
+                 parameter (Rust does not warn on an unused one) and a windowed \
+                 PIE session would run with the empty default, so {symptom} while \
+                 the cooked build draws the authored content"
+            );
+        }
+        // The fifth is not an assignment: the vmesh registry goes into
+        // `PlayerApp::new` itself, which is what makes it the only one of the five
+        // that cannot be forgotten. Pinned anyway, because the thing that must not
+        // come back is `run_pie` building an empty registry of its own.
+        assert!(
+            body.contains("map, vmeshes, render)"),
+            "`run_pie` no longer hands `PlayerApp::new` the vmesh registry it was \
+             given — if it builds one here instead, every rigid `MeshRef.asset` in \
+             the level resolves to nothing and draws no geometry at all"
+        );
+        // …and the negative check reads CODE, not prose. The comment above that
+        // line quotes the defect it replaced — `Arc::new(VmeshRegistry::new())` —
+        // so a raw `contains` would fail on the explanation of the fix. That is
+        // the phantom-guard hazard `projector_mirror` documents, met from the
+        // other side: a needle a doc comment can satisfy (or defeat) is not a
+        // guard. No string literal in this function contains `//`.
+        let code: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("VmeshRegistry::new()"),
+            "`run_pie` builds an EMPTY `VmeshRegistry` again — that line is the \
+             whole of wave FIX2's headline defect: the editor drew a paved street \
+             and Play drew bare earth"
+        );
+    }
+
     /// A writer that fails the first write of each of its first `fail_for`
     /// messages, then succeeds — the shape of an editor that has not yet
     /// drained its end of our stdout.
