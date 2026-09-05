@@ -33084,11 +33084,16 @@ showed a cube too**.
 #### THE DEMO LOOP, re-run — and the proof frame was showing LESS than the wave built
 
 `tools/demo/demo.ps1 -SkipBuild`, on this audit's tree, editor built through
-`npx tauri build --no-bundle`, nothing else running:
-**HERO MOVED 12.128 m** over 120 samples, no process left behind.
+`npx tauri build --no-bundle` (`cargo build -p inf-studio` is not the same
+thing and boots the dev URL — the script says so and this audit proved it),
+nothing else running. Run once mid-audit (**HERO MOVED 12.128 m**, 120
+samples) and again on the finished tree with every release binary rebuilt:
+**HERO MOVED 11.941 m** over 119 samples, no process left behind either time.
 
-* editor: `…/scratchpad/AUDIT-ROAD1b-DEMO/01-editor.png`
-* PIE: `02-pie-a.png`, `03-pie-b.png`; trace `hero.csv`, `demo.log`
+* editor, final: `…/scratchpad/AUDIT-ROAD1b-FINAL/01-editor.png`
+* PIE, final: `AUDIT-ROAD1b-FINAL/02-pie-a.png`, `03-pie-b.png`
+* editor, mid-audit: `…/scratchpad/AUDIT-ROAD1b-DEMO/01-editor.png`
+* each run carries its own `hero.csv` and `demo.log`
 
 **The wave's own proof frame under-showed it, and that is a finding about the
 evidence.** `RenderAssets::open_vgeom` (`render_assets.rs:394`) *reads* a
