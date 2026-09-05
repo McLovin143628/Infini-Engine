@@ -121,6 +121,15 @@ pub fn street_speed_mps() -> f64 {
 /// nothing here knew a street had a kerb at all.
 pub const KERB_WIDTH_M: f64 = 0.30;
 
+/// **A kerb's upstand, metres** — pinned by value to `inf_gis::KERB_HEIGHT_M`,
+/// the height the footway is actually drawn at (wave ROAD1b).
+///
+/// The standard a highway authority specifies: it stops a wheel, holds a
+/// gutter, and a person steps up it without thinking. It is stated here because
+/// `inf_physics` builds the **collider** that makes that step real and cannot
+/// name `inf-gis`; `road_authority` asserts the equality.
+pub const KERB_HEIGHT_M: f64 = 0.15;
+
 /// **How wide a settlement street's carriageway is**, half-width in metres, for
 /// a street recovered from a `gap_m` reserve (wave ROAD1b).
 ///

@@ -254,7 +254,11 @@ beach_rise_m = 6.0
 layer = "layers/roads.geojson"
 max_grade = 0.08
 grade_step_m = 20.0
-shoulder_mult = 1.6
+# Wave ROAD1b: one lane of batter outside the plateau. It was 1.6 -- 11.2 m --
+# which with the plateau made a 41.4 m levelled scar around a road 19 m wide at
+# its widest, and the ROAD1 audit's carried 23 is that it reads as one in every
+# PIE frame. 26.0 m now: the road's own width and a stated shoulder.
+shoulder_mult = 0.5
 
 # ─── the water ────────────────────────────────────────────────────────────────
 # The island's largest catchment is 2.4 km2 — it is an island, so nothing drains

@@ -303,8 +303,36 @@ pub struct RoadSpec {
     /// How far apart the grade audit samples along a centreline.
     #[serde(default = "default_grade_step")]
     pub grade_step_m: f64,
-    /// The corridor either side of a centreline the ground is levelled across,
-    /// as a multiple of the road's own half width. `0` leaves the ground alone.
+    /// **The BATTER either side of the levelled plateau**, as a multiple of a
+    /// two-lane carriageway (`2 × inf_gis::LANE_WIDTH_M` = 7.0 m). `0` leaves
+    /// the ground alone.
+    ///
+    /// # It is not "a multiple of the road's own half width", and never was
+    ///
+    /// That is what this doc said until wave ROAD1b and the arithmetic has
+    /// always read `shoulder_mult × LANE_WIDTH_M × 2` — a fixed 7 m unit that
+    /// has nothing to do with the road being levelled for. Corrected rather
+    /// than made true, because the fixed unit is the right one: the batter's
+    /// job is to ease a design height back to the hillside, and how far that
+    /// takes has to do with the ground's slope, not with how many lanes are on
+    /// the plateau.
+    ///
+    /// # The corridor is `plateau + batter`, and 1.6 made it a scar
+    ///
+    /// Wave ROAD1 put the plateau (`CarvePlan::corridor_flat_m`,
+    /// `Route::built_half_width_m` — 9.5 m on this island) INSIDE this, so the
+    /// levelled corridor became `9.5 + 1.6 × 7.0 = 20.7` m of half-width:
+    /// **41.4 m of bare, flattened ground for a road that is 19 m wide at its
+    /// widest**, and the ROAD1 audit's carried 23 is that it reads as one in
+    /// every PIE frame.
+    ///
+    /// **0.5 is one lane of batter (3.5 m)**, which takes the corridor to
+    /// `9.5 + 3.5 = 13.0` m — a **26.0 m** scar around a 19 m road, the road's
+    /// own width and a stated shoulder. The batter is three times steeper for
+    /// the same fill, which is what a real cut-and-fill batter is: `smooth01`
+    /// still eases it, so the join to the hillside keeps a matched gradient and
+    /// gains no crease, and `road1_gate`'s float table measures whether the
+    /// road still sits on the ground the renderer draws.
     #[serde(default = "default_road_shoulder")]
     pub shoulder_mult: f64,
 }
@@ -319,7 +347,9 @@ fn default_streets_layer() -> String {
 }
 
 fn default_road_shoulder() -> f64 {
-    1.6
+    // One lane of batter (wave ROAD1b) — see `RoadSpec::shoulder_mult` for the
+    // 41.4 m scar the previous 1.6 left around a 19 m road.
+    0.5
 }
 
 /// The biome classifier's design.

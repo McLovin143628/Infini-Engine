@@ -39,6 +39,8 @@ pub mod fracture;
 pub mod gameplay;
 pub mod interact;
 mod joint;
+/// Wave ROAD1b: the footway a settlement's streets are drawn with, as colliders.
+pub mod kerb;
 pub mod movement;
 mod query;
 // P29.4 the ragdoll bridge: the physics half of the anim<->physics handoff.

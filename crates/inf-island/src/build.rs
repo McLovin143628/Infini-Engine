@@ -800,14 +800,14 @@ pub fn build_island(
         say(
             BuildStep::Roads,
             format!(
-                "{:.2} km over {} segments ({} of them settlement street spans) \
-                 and {} junctions; carriageway {} \
+                "{:.2} km over {} segments, {} of them settlement street spans, \
+                 over {} junctions; carriageway {} \
                  vertices / {} triangles, quantisation {:.4} m; furniture {}; \
                  {} footway triangles clipped off the carriageway; \
                  worst grade {:.3} against {:.3}, {} over",
                 rr.total_km,
-                street_spans,
                 rr.segments,
+                street_spans,
                 rr.junctions,
                 mr.vertices,
                 mr.triangles,

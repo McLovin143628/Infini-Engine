@@ -52,6 +52,30 @@ fn the_kerb_geometry_and_the_nav_ring_are_one_pavement() {
         inf_gis::LANE_WIDTH_M,
         inf_ecs::traffic::DEFAULT_LANE_WIDTH_M
     );
+    // **The kerb stone itself** (wave ROAD1b). `inf-gis` draws it and
+    // `inf-physics` builds the COLLIDER that makes it a step, through
+    // `inf_ecs::traffic`'s copy — so a kerb 150 mm tall in the mesh and 200 mm
+    // in the box is a character standing 50 mm inside its own pavement, which
+    // is the defect this wave closed wearing a different hat.
+    assert_eq!(
+        inf_gis::KERB_HEIGHT_M,
+        inf_ecs::traffic::KERB_HEIGHT_M,
+        "the kerb `inf-gis` draws is {} m and the one `inf-physics` collides          with is {} m",
+        inf_gis::KERB_HEIGHT_M,
+        inf_ecs::traffic::KERB_HEIGHT_M
+    );
+    assert_eq!(
+        inf_gis::KERB_WIDTH_M,
+        inf_ecs::traffic::KERB_WIDTH_M,
+        "the kerb stone's width has two answers"
+    );
+    // …and a sanity band on both, so an edit that made the upstand 1.5 m fails
+    // here as well as at the equality.
+    assert!(
+        (0.05..=0.30).contains(&inf_gis::KERB_HEIGHT_M),
+        "{} m is not a kerb",
+        inf_gis::KERB_HEIGHT_M
+    );
 }
 
 /// **The committed road layer states the lane counts the design states.**

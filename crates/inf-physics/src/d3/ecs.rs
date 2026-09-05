@@ -245,6 +245,13 @@ pub struct PhysicsBridge3D {
     /// sync — the audit counter the budget test reads. Zero on a steady-state
     /// step is the whole point of [`terrain_stamps`](Self::terrain_stamps).
     terrain_audit: TerrainColliderAudit,
+    /// Wave ROAD1b: the footway slabs' stamp, `(TrafficRes::stamp, band)`, and
+    /// the guids it admitted — the same retain-versus-rebuild pair
+    /// `structure_stamps`/`structure_admitted` are, for a derivation that is one
+    /// resource rather than one per volume.
+    kerb_stamp: Option<(u64, u64)>,
+    kerb_admitted: Vec<Uuid>,
+    kerb_audit: super::kerb::KerbColliderAudit,
     /// Per-destructible-actor change stamp (P22.3): `entity →
     /// `[`FractureState::generation`](super::fracture::FractureState::generation).
     /// The same pattern a fourth time, keyed by ACTOR rather than by chunk —
@@ -390,6 +397,9 @@ impl PhysicsBridge3D {
             voxel_stamps: BTreeMap::new(),
             terrain_stamps: BTreeMap::new(),
             terrain_audit: TerrainColliderAudit::default(),
+            kerb_stamp: None,
+            kerb_admitted: Vec::new(),
+            kerb_audit: super::kerb::KerbColliderAudit::default(),
             fracture_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
             collider_map_dirty: true,
@@ -933,6 +943,19 @@ impl PhysicsBridge3D {
         self.gather_terrain(world, &mut snaps, &mut retained);
         // P22.3: the sim's fracture chunks, on the same rule a fourth time.
         self.gather_fracture(fractures, &mut snaps, &mut retained);
+        // ROAD1b: the footways beside a settlement's streets, on the same rule
+        // a sixth time. Before this the road builder drew a 150 mm kerb and 2 m
+        // of concrete and gave neither a collider, so an agent walked
+        // shin-deep INSIDE the slab (p50 0.1775 m, measured over the island
+        // fixture by the ROAD1 audit) and a car crossed a kerb as paint.
+        self.kerb_audit = super::kerb::gather_kerbs(
+            world,
+            &band,
+            &mut self.kerb_stamp,
+            &mut self.kerb_admitted,
+            &mut snaps,
+            &mut retained,
+        );
         // I6: the doors' swinging leaves, on the same rule a fifth time —
         // banded like the walls they sit in, because a door a kilometre away is
         // not a thing a character can walk into. `step_doors` owns the pose from
@@ -1645,6 +1668,18 @@ impl PhysicsBridge3D {
     /// produce.
     pub fn terrain_collider_audit(&self) -> TerrainColliderAudit {
         self.terrain_audit
+    }
+
+    /// **What the last footway-slab pass described** (wave ROAD1b) — the budget
+    /// instrument for the kerb colliders, on
+    /// [`terrain_collider_audit`](Self::terrain_collider_audit)'s shape.
+    ///
+    /// `described` is how many static boxes the settlement's footways are
+    /// costing the step right now; `culled` is what the band kept out. A gate
+    /// reads both, because "the footway is solid" and "the footway is affordable"
+    /// are two claims and only one of them is about geometry.
+    pub fn kerb_collider_audit(&self) -> super::kerb::KerbColliderAudit {
+        self.kerb_audit
     }
 
     /// How many terrain tiles currently hold a collider stamp — the bounded-ledger
