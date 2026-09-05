@@ -32316,12 +32316,62 @@ and lots — which has never carried a built road mesh, a kerb or a marking. So
   carriageway, both marking meshes, the 553 entities, the `+686 B` per level and
   the whole FLOAT table are unchanged.
 
+#### The wider plateau is not worse, measured
+
+The ledger above says a 16 m plateau "was tried and is **worse still**, because it
+stacks more limbs onto one staircase". Reproduced by forcing
+`corridor_flat = max(built_half_width, 16.0)` — which widens the terrain plateau
+AND `SurfaceOptions::graded_half_m` together, so the carriageway the FLOAT table
+measures is graded over the same 16 m the ground is levelled to:
+
+```
+                     9.5 m plateau (shipped)          16 m plateau
+  dist   sink   float   mean    p99      sink   float   mean    p99
+  200 m  0.0700 0.0000  0.0311  0.0700   0.0700 0.0000  0.0311  0.0700
+  330 m  1.1264 1.3698  0.0699  0.7086   1.2158 1.3742  0.0650  0.7098
+  700 m  1.0630 1.5429  0.1937  1.3431   1.3323 1.3186  0.1668  1.0845
+```
+
+On the statistic the gate reads — the mean — 16 m is **better** at both morph
+distances (0.0650 and 0.1668 against 0.0699 and 0.1937). On the p99 it is level
+at 330 m and clearly better at 700 m (1.0845 against 1.3431). It is worse on
+exactly one column, the worst-case **sink**, and by a tenth of a metre at 330 m
+and a quarter at 700 m.
+
+So "worse still" is true of one number and false of three. What a wider plateau
+really costs is not conformance at all: 16 m of levelling either side is 32 m of
+flattened valley floor under every road on the island, which is a **landscape**
+price the FLOAT table cannot see and this table should not be read as pricing.
+The plateau stays at the road's own built half-width for that reason, stated
+correctly.
+
+#### The uv is metres, measured against the mesh rather than the source
+
+The wave's claim that the ribbon's uv is now in metres — so the material's
+`uv_tiling_m` is the whole tiling rule — reads on the built fixture as **1.0015
+metres of world per uv unit at the median** (p01 0.8630, p90 1.0043) over 5 656
+carriageway edges. `Road_Asphalt` states 4.0 m per repeat, so the asphalt tiles
+every 4.0 m and not the 14 m its width used to impose. **Held.**
+
+The tail is the mitre again: p99 **1.9147** and max **8.0713** metres per uv
+unit, so the wearing course is stretched up to eight times at a hairpin —
+exactly where the geometry spikes. Carried with the spike it belongs to.
+
+The paint lands where the constants say. Over the fixture's marking meshes, the
+commonest lateral positions inside the carriageway edge are **0.15 m and 0.25 m**
+for the white edge line — a 0.10 m line centred on `EDGE_LINE_INSET_M` = 0.20 —
+and **3.45 m** for the yellow, which on a 3.5 m half-width is a single 0.10 m
+line centred on the crown, the arterial's two lanes taking the single yellow the
+design table specifies. **Held.**
+
 #### CARRIED BY THE AUDIT
 
 16. **A mitred corner still spikes four half-widths** — 23.200 m of kerb from an
     arterial's centreline, 4 156.5 m² (2.43 %) of the island's footway past its
-    own route's built half-width, worst +17.400 m. The remedy is a bevel join,
-    which changes a corner's topology and moves a committed `.inf_mesh`.
+    own route's built half-width, worst +17.400 m, and the wearing course
+    stretched with it to **8.07 metres of world per uv unit** against a median of
+    1.0015. The remedy is a bevel join, which changes a corner's topology and
+    moves a committed `.inf_mesh`.
 17. **The footway clip drops triangles rather than cutting them**, so the edge it
     leaves is ragged to within one triangle (~1 m along, 2 m across) and the
     boundary is a centroid test with a 100 mm inset. A polygon clip would leave a

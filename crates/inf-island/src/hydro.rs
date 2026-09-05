@@ -1035,8 +1035,10 @@ mod tests {
                 prof.depth_m
             );
             // **The section is the one the shader models.** `water.wgsl` tapers
-            // a river's depth by `1 − bank²` and takes the larger of that and
-            // the depth buffer; if the two curves disagreed the water would be
+            // a river's depth by `1 − bank²` and takes a river's column FROM
+            // that and not from the depth buffer at all (`select`, not `max` —
+            // audit ROAD1 corrected four docs that said "the larger of");
+            // if the two curves disagreed the water would be
             // opaque where the bed had risen to meet it, or transparent over its
             // own channel. Sampled at a quarter, a half and three quarters of the
             // way to the bank.
