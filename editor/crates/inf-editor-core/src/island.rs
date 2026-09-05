@@ -726,8 +726,10 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 river_depth_end_m: d,
                 // **The shore band is sized to THIS reach** (wave ROAD1,
                 // clause 3), and it has to be, now that a river's drawn column
-                // is its own modelled bed: `water.wgsl` takes the larger of the
-                // depth buffer and `depth · (1 − bank²)`, so a band wider than
+                // is its own modelled bed: `water.wgsl` takes a river's column
+                // FROM `depth · (1 − bank²)` and not from the depth buffer at
+                // all (`select`, not `max` — the arm one crate over says why),
+                // so a band wider than
                 // the reach is deep would leave the whole creek half
                 // transparent — a 0.35 m stream against the 1.2 m default
                 // reaches `smoothstep(0, 1.2, 0.35) = 0.20` **on its own

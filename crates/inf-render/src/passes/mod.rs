@@ -1848,8 +1848,9 @@ mod shader_compose_tests {
     ///
     /// `inf_island::hydro::carve_channels` cuts a river's bed as
     /// `depth · (1 − t²)`, `t` being the fraction of the way to the water's own
-    /// edge, and `water.wgsl` takes the larger of the depth buffer's column and
-    /// that same parabola in the ribbon's own bank fraction. If the two curves
+    /// edge, and `water.wgsl` takes a river's column **from** that same parabola
+    /// in the ribbon's own bank fraction — `select`, not `max`, which is the
+    /// distinction the second assertion below spells out. If the two curves
     /// disagreed the water would be opaque where the bed had risen to meet it,
     /// or transparent over its own channel — and neither would look like a bug
     /// in a carve.
@@ -1861,8 +1862,11 @@ mod shader_compose_tests {
     /// spells it — a source gate, because there is no adapter on a CI leg to
     /// render it on.
     ///
-    /// Falsification: change the taper to `1 − bank` or drop the `max` and this
-    /// reds.
+    /// Falsification, measured (audit ROAD1): changing the taper to `1 − bank`
+    /// reds the first assertion, and rewriting the `select` as
+    /// `max(column, modelled)` — the version this wave rejected — reds the
+    /// second. The doc said "drop the `max`" until that audit, which named the
+    /// wrong operator for the rule it guards.
     #[test]
     fn the_water_shader_models_the_bed_the_carve_cuts() {
         let src = include_str!("../shaders/water.wgsl");

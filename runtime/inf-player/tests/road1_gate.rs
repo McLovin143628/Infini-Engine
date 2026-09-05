@@ -373,6 +373,21 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
     );
 }
 
+/// **The three column rules the band arm reads** (audit ROAD1).
+///
+/// One `match` rather than a `bool`, because the arm now measures the rule the
+/// wave rejected as well as the one it took — see
+/// [`a_rivers_shore_band_does_not_breathe_with_the_terrains_lod`].
+#[derive(Clone, Copy)]
+enum BandRule {
+    /// The pre-ROAD1 rule: the column the depth buffer draws, and nothing else.
+    DepthBuffer,
+    /// `max(depth buffer, modelled)` — what a relaxed `select` would compute.
+    Max,
+    /// `water.wgsl`'s rule: the river's own modelled bed, and nothing else.
+    Modelled,
+}
+
 /// **THE STREAM BAND ARM** — how much a river's shore band moves across the
 /// morph range, which is what "fading in and out of the landscape" is.
 ///
@@ -387,22 +402,47 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
 /// A number near zero means the band is a property of the river; a large one
 /// means it is a property of where the camera is standing, which is the defect.
 ///
-/// # Before and after, in one run
+/// # THREE rules in one run, and why the third column exists (audit ROAD1)
 ///
-/// `column_before` is the pre-ROAD1 rule — the depth buffer alone, which is the
-/// carved bed as the renderer draws it at that morph. `column_after` is what
-/// `water.wgsl` computes now: the larger of that and the river's own modelled
-/// bed, `depth · (1 − bank²)`, which no morph can move because it is not a fact
-/// about the terrain at all.
+/// [`BandRule::DepthBuffer`] is the pre-ROAD1 rule — the depth buffer alone,
+/// which is the carved bed as the renderer draws it at that morph.
+/// [`BandRule::Modelled`] is what `water.wgsl` computes now: the river's own bed
+/// `depth · (1 − bank²)` and *nothing else* — `select`, not `max`.
+///
+/// The two columns alone made this arm **unfalsifiable**, and the audit measured
+/// it: `Modelled`'s column has no terrain term in it, so its travel is exactly
+/// `0.0000` for every fixture, depth, fade and morph that could ever be handed
+/// to it. Replacing the parabola with a completely different curve
+/// (`depth · 100 · (1 − t)`) moved the edge from 0.8086 to 0.9961 and left the
+/// travel at 0.0000 and the assertion green. A ceiling that cannot be exceeded
+/// is not a gate.
+///
+/// So the arm measures the rule the wave **rejected** as well:
+/// [`BandRule::Max`], `max(depth buffer, modelled)`, is what `water.wgsl` would
+/// compute if the `select` were relaxed, and it is the column that has to keep
+/// moving. That makes the `select` load-bearing *here* rather than only in the
+/// source gate — `inf_render::passes::…::the_water_shader_models_the_bed_the_
+/// carve_cuts`, which is still where the shader's own spelling is pinned, and
+/// still the only thing that can catch an edit to the WGSL.
 #[test]
 fn a_rivers_shore_band_does_not_breathe_with_the_terrains_lod() {
     /// How far the band's edge may travel over the whole morph range, as a
     /// fraction of the reach's half-width. **2 %** of a half-width on a 4 m
     /// creek is 4 cm — under one pixel at any distance the band is visible from.
+    ///
+    /// Read the assertion honestly: under `BandRule::Modelled` this is zero by
+    /// construction, and the claim the run actually certifies is the `Max`
+    /// floor below beside the source gate on the shader.
     const CEILING: f64 = 0.02;
     /// The anti-vacuity floor on the control: if the old rule's band did not
     /// move either, the fixture's channel is too coarse to demonstrate anything.
     const CONTROL_FLOOR: f64 = 0.10;
+    /// **The floor on the rejected rule** (audit ROAD1) — `max` must still
+    /// breathe, or `select` is buying nothing and the wave's own reason for
+    /// preferring it is wrong. The shader's note quotes 1.00 → 1.00 → 0.81 of a
+    /// half-width under `max`; a fifth of a half-width is well inside that and
+    /// well outside anything a stationary band does.
+    const MAX_RULE_FLOOR: f64 = 0.10;
     /// Lateral samples across the half-width.
     const SAMPLES: usize = 256;
 
@@ -448,25 +488,30 @@ fn a_rivers_shore_band_does_not_breathe_with_the_terrains_lod() {
         mid.x,
         mid.z
     );
-    println!("ROAD1 BAND | distance | morph | band edge, depth buffer | band edge, modelled |");
+    println!(
+        "ROAD1 BAND | distance | morph | band edge, depth buffer | band edge, \
+         max | band edge, modelled |"
+    );
 
     // The morph the distance implies is applied inside `morphed_height`, which
     // is where the terrain is read; this closure only walks laterally.
-    let edge_of = |modelled_on: bool, d: f64| -> f64 {
+    let edge_of = |rule: BandRule, d: f64| -> f64 {
         let mut outer = 0.0f64;
         for k in 0..=SAMPLES {
             let t = k as f64 / SAMPLES as f64;
             let lateral = t * half;
             let p = DVec2::new(mid.x, mid.z) + dir * lateral;
             let bed = morphed_height(&build.terrain, p, d, span, &thresholds).unwrap_or(level);
-            let column = if modelled_on {
-                // What `water.wgsl` computes now: the river's own bed, tapered
-                // to the bank. No terrain in it at all, which is the point.
-                depth * (1.0 - t * t)
-            } else {
-                // The pre-ROAD1 rule: the depth buffer alone, which is the
-                // carved bed as the renderer draws it at this morph.
-                (level - bed).max(0.0)
+            // The pre-ROAD1 column: the depth buffer alone, which is the carved
+            // bed as the renderer draws it at this morph.
+            let drawn = (level - bed).max(0.0);
+            // The river's own bed, tapered to the bank. No terrain in it at all,
+            // which is exactly why it cannot travel.
+            let modelled = depth * (1.0 - t * t);
+            let column = match rule {
+                BandRule::DepthBuffer => drawn,
+                BandRule::Max => drawn.max(modelled),
+                BandRule::Modelled => modelled,
             };
             let a = (column / fade).clamp(0.0, 1.0);
             let alpha = a * a * (3.0 - 2.0 * a);
@@ -480,26 +525,38 @@ fn a_rivers_shore_band_does_not_breathe_with_the_terrains_lod() {
     };
 
     let mut before: Vec<f64> = Vec::new();
+    let mut maxed: Vec<f64> = Vec::new();
     let mut after: Vec<f64> = Vec::new();
     for d in DISTANCES_M {
         let lod = inf_render::lod_for_distance(d, &thresholds);
         let m = inf_render::morph_factor(d, lod, &thresholds);
-        let b = edge_of(false, d);
-        let a = edge_of(true, d);
-        println!("ROAD1 BAND | {d:.0} m | {m:.3} | {b:.4} | {a:.4} |");
+        let b = edge_of(BandRule::DepthBuffer, d);
+        let x = edge_of(BandRule::Max, d);
+        let a = edge_of(BandRule::Modelled, d);
+        println!("ROAD1 BAND | {d:.0} m | {m:.3} | {b:.4} | {x:.4} | {a:.4} |");
         before.push(b);
+        maxed.push(x);
         after.push(a);
     }
     let travel = |v: &[f64]| {
         v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
     };
-    let (tb, ta) = (travel(&before), travel(&after));
-    println!("ROAD1 BAND | travel over the three distances: {tb:.4} -> {ta:.4} of a half-width");
+    let (tb, tx, ta) = (travel(&before), travel(&maxed), travel(&after));
+    println!(
+        "ROAD1 BAND | travel over the three distances: depth buffer {tb:.4}, \
+         max {tx:.4}, modelled {ta:.4} of a half-width"
+    );
     assert!(
         tb >= CONTROL_FLOOR,
         "the depth-buffer band moved only {tb:.4} of a half-width across the \
          morph range — the fixture's channel is too coarse for this arm to \
          demonstrate anything, so the {ta:.4} beside it means nothing"
+    );
+    assert!(
+        tx >= MAX_RULE_FLOOR,
+        "`max(depth buffer, modelled)` moved only {tx:.4} of a half-width, so \
+         the `select` in water.wgsl is buying nothing this fixture can see and \
+         the {ta:.4} beside it is a tautology rather than a result"
     );
     assert!(
         ta <= CEILING,
