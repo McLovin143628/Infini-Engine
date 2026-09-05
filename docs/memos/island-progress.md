@@ -32502,9 +32502,18 @@ span and a driven edge are the same piece of street by construction.
 | | before | after |
 |---|---|---|
 | the island's road network | 33.74 km, 11 segments | **68.70 km, 355 segments** (344 of them street spans) |
-| junctions | 34 | **150** |
+| junctions | 7 | **150** |
 | the streets a settlement implies | 58 lines, drawn by nothing | 58 lines → **344 spans, 34.96 km, 143 junctions of degree 3+** |
 | the fixture | 8 blocks, 4 streets, unpaved | 4 streets → **8 spans, 0.54 km** |
+
+> **Audit ROAD1b, corrected in place.** The "before" cell read **34**. The
+> island's GIS network has had **7** junctions in every record since wave I7
+> ("11 links and 7 junctions", and again in the I7 reachability table), and
+> `build_island`'s own road line reads 7 when the street layer is moved aside
+> and the island is rebuilt at `6109ab50`: *"33.74 km over 11 segments, 0 of
+> them settlement street spans, over 7 junctions"*. Nothing in this wave
+> changed how `rr.junctions` is counted, so 34 was never a measurement of this
+> row. The "after" 150 reproduces exactly.
 
 **THE CROSS-SECTION.** A street's reserve runs block edge to block edge and the
 crowd's pavement ring is `PAVEMENT_M` *inside* the frontage, so the carriageway
@@ -32583,14 +32592,23 @@ at its inner edge, which *is* a cuboid — and because the box gives the kerb
 without anything here asking.
 
 ```
-ROAD1b KERB WALK | 128 step(s) on the carriageway (feet 0.0201 m), 11 on the footway (feet 0.1701 m); kerb at 7.000 m, slab to 9.300 m; walked 7.97 m across
-ROAD1b KERB COST | 19 slab(s) described, 9 culled, over 2 street(s); settled at 19 described
+ROAD1b KERB WALK | 121 step(s) on the carriageway (feet 0.0201 m), 19 on the footway (feet 0.1701 m); kerb at 7.000 m, slab to 9.300 m; walked 8.38 m across
+ROAD1b KERB COST | 15 slab(s) described, 9 culled by the band, 4 refused across another carriageway, over 2 street(s); settled at 15 described
 ```
 
-A rise of exactly **0.1500 m**, and eleven more steps after the climb — so the
+A rise of exactly **0.1500 m**, and nineteen more steps after the climb — so the
 upstand is being climbed and not walked into. **Mutation-verified**: describe no
-slabs and the rise reads **−0.0000 m**, which is the pre-ROAD1b number the audit
+slabs and the rise reads **0.0000 m**, which is the pre-ROAD1b number the audit
 named.
+
+> **Audit ROAD1b, corrected in place.** That block was quoted from a run made
+> *before* `912462a3` taught the collider to stop at a junction, and the wave's
+> own prose two paragraphs down already disagreed with it (15 described, 4
+> refused). It read `128 / 11 / 7.97 m` and `19 slab(s) described, 9 culled`.
+> Re-measured at `6109ab50`: **121 / 19 / 8.38 m** and **15 described, 9 culled,
+> 4 refused**. The claims it is quoted to support — a rise of exactly 0.1500 m,
+> a ceiling of 40 against 15, four slabs refused across a carriageway — all
+> hold; the transcript did not.
 
 Worth recording separately: the **parity** arm stays green under that mutation
 and the walk arm does not. Two hosts that agree are not two hosts that are
