@@ -316,6 +316,9 @@ pub struct KerbColliderAudit {
     pub streets: u32,
     /// Slabs the band tiered out.
     pub culled: u32,
+    /// Slabs refused because the terrain under them has not paged in — a
+    /// footway with no ground is a wall, not a kerb.
+    pub groundless: u32,
     /// Slabs refused because they would lie across another street's
     /// carriageway — see `crosses_another_carriageway`, named in prose because
     /// it is private and a public doc that links to one is a rustdoc warning.
@@ -353,6 +356,7 @@ pub(crate) fn gather_kerbs(
             streets: res.streets.len() as u32,
             culled: 0,
             crossed: 0,
+            groundless: 0,
         };
     }
     let terrains = terrains_of(world);
@@ -369,7 +373,23 @@ pub(crate) fn gather_kerbs(
                 let Some((probe, _)) = slab_box(street, side, chunk, 0.0) else {
                     continue;
                 };
-                let ground = ground_at(&terrains, DVec2::new(probe.x, probe.z)).unwrap_or(street.y);
+                // **No ground, no footway** (wave ROAD1b). The fallback used to
+                // be `street.y` — a MEDIAN over the doorway sills of the blocks
+                // that bound the street, which `streets_of`'s own doc calls a
+                // first guess and which has been measured forty-five metres out
+                // (`SETTLE_UP_M`'s note). A slab placed on that guess is not a
+                // kerb, it is a wall at whatever height the guess happened to be,
+                // and a character controller does not autostep a wall.
+                //
+                // Measured in the demo loop, which is where it showed: with the
+                // fallback the hero walked 7.6 m from its spawn on Harbour City's
+                // main street, stopped dead against a slab whose terrain had not
+                // paged in, and the run reported HERO MOVED 1.106 m against a
+                // 5.0 m floor. With the collider off entirely it read 18.733 m.
+                let Some(ground) = ground_at(&terrains, DVec2::new(probe.x, probe.z)) else {
+                    audit.groundless += 1;
+                    continue;
+                };
                 let Some((centre, half)) = slab_box(street, side, chunk, ground) else {
                     continue;
                 };

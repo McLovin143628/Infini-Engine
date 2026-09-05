@@ -75,21 +75,25 @@ fn start_xz() -> DVec2 {
 }
 
 fn spawn_world(world: &mut EcsWorld) {
-    // The ground: one big static box at y = 0, so "the ground" is a number this
-    // file can state rather than a heightfield it has to sample.
+    // **The ground is a real heightfield**, flat at y = 0, and not the static
+    // box the first draft used. `inf_physics::d3::kerb` refuses a slab whose
+    // terrain does not answer — a footway with no ground under it is a wall at
+    // whatever `Street::y`'s doorway median happened to guess, which is the
+    // defect the demo loop found — so a fixture with no `Terrain` would
+    // describe nothing and pass its cost arm vacuously. Nine tiles at 512 m
+    // cover the whole town with room.
     let e = world.spawn_with_guid(GROUND, "Ground", None);
-    let mut t = Transform::IDENTITY;
-    t.translation = Vec3d::new(PITCH * 0.5, -0.5, PITCH * 0.5);
+    let mut data = inf_ecs::TerrainData::new(129, 4.0);
+    for ty in -1..=1 {
+        for tx in -1..=1 {
+            data.author_tile((tx, ty), |_, _| 0.0);
+        }
+    }
     world.world_mut().entity_mut(e).insert((
-        t,
-        RigidBody3D {
-            kind: BodyKind3D::Static,
-            ..Default::default()
-        },
-        Collider3D {
-            shape_kind: ColliderShape3DKind::Box,
-            half_extents: Vec3d::new(300.0, 0.5, 300.0),
-            ..Default::default()
+        Transform::IDENTITY,
+        inf_ecs::components::Terrain {
+            data,
+            ..inf_ecs::components::Terrain::default()
         },
     ));
 
