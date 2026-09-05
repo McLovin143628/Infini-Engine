@@ -251,12 +251,27 @@ impl VmeshRegistry {
     /// placeholder cube, in the editor viewport, in PIE and in the shipped build
     /// alike. That is a claim about the world no author made, and on the island
     /// it hid four missing streets behind four boxes 2.7 km from the spawn. The
-    /// draw is gone; this is what replaced it, and it is stated at the ONE seam
-    /// both hosts resolve through so neither can be the quiet one.
+    /// draw is gone; this is what replaced it.
+    ///
+    /// **This is the PLAYER's seam, not a shared one** (FIX2 audit corrects the
+    /// sentence that stood here). The editor viewport does not reach this
+    /// function at all: `inf_viewport::EngineHost` resolves through
+    /// `EditorRenderAssets::resolve_vgeom` → `open_vgeom`, which warns for a
+    /// STALE derivation and returns `None` in silence for an ABSENT one. So a
+    /// mesh with no DAG draws nothing on both hosts and only one of them says so.
+    ///
+    /// That asymmetry is defensible and is the reason it is written down rather
+    /// than closed: in the editor an absent DAG is TRANSIENT — the project-open
+    /// sweep derives one from a single triangle for every mesh in the project, so
+    /// a line per mesh would fire for the whole content root every session and
+    /// stop being read. In a player it is terminal: nothing is going to derive
+    /// one, and the frame is missing geometry until the project is re-cooked.
     ///
     /// `error!` and not `warn!`: a level that names geometry the runtime cannot
     /// find is a broken build, not a tuning note. Once per mesh per session —
-    /// this runs inside a per-frame projection over every entity.
+    /// this runs inside a per-frame projection over every entity, and the
+    /// once-ness is measured: 300 projections over two missing meshes emit two
+    /// lines (FIX2 audit).
     fn report_missing(&self, mesh_id: Uuid, vmesh_id: Uuid) {
         let Ok(mut seen) = self.missing.lock() else {
             return;

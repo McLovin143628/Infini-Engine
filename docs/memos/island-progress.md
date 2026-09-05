@@ -33256,10 +33256,10 @@ and both routes were measured at head on the shipped island's four road DAGs:
 Release binaries, this machine, the shipped island's own content:
 
     ROUTE A (carry the path): 4 DAGs, 102.7 MB read, indexed in 198.9 ms
-    ROUTE B  VancouverIslandRoads:               828 672 verts, 1 489 058 tris ->  47.1 MB in 103 649 ms
-    ROUTE B  VancouverIslandKerbs:               614 392 verts,   934 787 tris ->  31.2 MB in  33 179 ms
-    ROUTE B  VancouverIslandRoadMarkings:        393 060 verts,   362 540 tris ->  16.1 MB in   8 324 ms
-    ROUTE B  VancouverIslandRoadMarkingsYellow:  201 402 verts,   200 242 tris ->   8.3 MB in     750 ms
+    ROUTE B  VancouverIslandRoads:               828 672 verts, 1 489 058 tris ->  47.1 MiB in 103 649 ms
+    ROUTE B  VancouverIslandKerbs:               614 392 verts,   934 787 tris ->  31.2 MiB in  33 179 ms
+    ROUTE B  VancouverIslandRoadMarkings:        393 060 verts,   362 540 tris ->  16.1 MiB in   8 324 ms
+    ROUTE B  VancouverIslandRoadMarkingsYellow:  201 402 verts,   200 242 tris ->   8.3 MiB in     750 ms
     ROUTE B TOTAL: 145 902 ms          A / B = 0.00136
 
 The path route is what shipped. The alternative the brief asked to be priced —
@@ -33294,8 +33294,16 @@ about the world no author made, and on this island it hid four missing streets b
 four boxes nobody was standing near. A **primitive-only** `MeshRef` is untouched —
 that is authored content and still draws its Sphere/Plane/Cylinder/Cone. What
 replaced the box is a line in the Output Log: `VmeshRegistry::resolve` reports each
-missing mesh once per session at `error!` level, naming both causes, at the one seam
-both hosts resolve through so neither can be the quiet one.
+missing mesh once per session at `error!` level, naming both causes. **The AUDIT
+corrected the rest of this sentence**, which said "at the one seam both hosts
+resolve through so neither can be the quiet one": the editor viewport never reaches
+`VmeshRegistry::resolve` — it goes through `EditorRenderAssets::resolve_vgeom` →
+`open_vgeom`, which warns for a STALE derivation and returns `None` in silence for
+an ABSENT one. Both hosts draw nothing; one of them says so. The asymmetry is
+defensible (in the editor an absent DAG is transient — the sweep derives one from a
+single triangle — while in a player it is terminal) and it is now written down at
+`report_missing` instead of being claimed away. The once-per-session half IS
+measured: 300 projections over two missing meshes emit two lines.
 
 ### CLAUSE 2 — PIE == SHIPPING ON THE RENDER HALF
 
@@ -33409,10 +33417,16 @@ CLOSED by this wave:
    **Counted on committed content, after a first draft that named the wrong
    sample.** Three comments in this wave asserted "the island's venue plays its
    loop in a shipped build and is silent in Play". Measured, the cooked island's
-   pack has no `audio` kind in it **at all**: `{"anim_clip": 3, "biome_set": 1,
-   "blueprint": 1, "derived_material": 7, "level": 1, "material": 7, "mesh": 8,
-   "meshlet_mesh": 4, "partition": 1, "pcg": 7, "skeleton": 1, "state_machine": 1,
-   "terrain": 1, "texture": 21}`. So the first half of that sentence is false, and
+   pack has no `audio` kind in it **at all**. The map quoted here was the **CI
+   island fixture's** (`pcg: 7`) and the sentence it stood under is about the
+   SHOWCASE island's venue, so the audit re-measured the one being talked about.
+   `inf cook --project island-build/project` at head, 352 028 412 B, 72 assets:
+   `{"anim_clip": 3, "biome_set": 1, "blueprint": 1, "derived_material": 7,
+   "level": 1, "material": 7, "mesh": 8, "meshlet_mesh": 4, "partition": 1,
+   "pcg": 15, "skeleton": 1, "state_machine": 1, "terrain": 1, "texture": 21}` —
+   **no `audio`**, and `Venue_Music.inf_audio` really is in that project's Content.
+   The conclusion holds on the island it names; the evidence had been taken off a
+   different island. So the first half of that sentence is false, and
    the reason is a larger finding than the one it stood in for — carried 43. What
    the field really closes is the **physics playground**, which carries two
    authored `AudioSource`s naming two stable clip GUIDs that `cook::asset_deps`'
@@ -33478,7 +33492,7 @@ one. `screenshot.ps1` is pure ASCII and is unaffected. Carried 44.
 | scene schema | **v27, unmoved** (`inf_scene::SCHEMA_VERSION`) |
 | `SCENE_PAYLOAD_VERSION` | **12 → 13**, append-only, two fields on one rung, ladder + wire pin extended, `check_version` untouched |
 | `EXPECTED_LEVELS` | 24 |
-| CRLF, at the byte level (`git show HEAD:<file>`, Python `count(b'\r')`) | **0 across all 52 changed files** |
+| CRLF, at the byte level (`git show HEAD:<file>`, Python `count(b'\r')`) | **0 across all 54 changed files** (the wave changed 54; the audit re-counted) |
 | manifests | `Cargo.toml`, `Cargo.lock`, `deny.toml`, `package.json` — **untouched**; zero new deps |
 | committed bytes | none moved: no golden, no sample, no `.inf_lvl`, no committed layer |
 | `editor/studio` frontend | **not touched** — the two Ring-2 changes are Rust (`commands/assets.rs`, `commands/pie.rs`) and are covered by clippy and the battery; no `.ts`/`.tsx` moved, so `tsc`/`eslint`/`vitest` have nothing to say |
@@ -33576,3 +33590,170 @@ line of code exists.
     drift reds there — which is the stronger fence, but the walk belongs in
     `inf-pcg` (Ring 0) beside the document it walks, and putting it there would
     make the fence unnecessary.
+
+### Audit (2026-09-05, adversarial, from `6f098d43`)
+
+Sent to break the wave's claims and to put a number on the hero. Every headline
+number reproduced; four sentences did not, and three of those were sentences
+about the tree rather than about the world.
+
+**THE FRAME HOLDS.** `island_gate::both_hosts_resolve_the_same_dag_for_every_
+mesh_the_island_draws`, re-run at head, verbatim:
+
+    MESH REFS: 4
+    REGISTRIES: pie 4 / ship 4 — the same four guids, in the same order
+    SCATTER:    pie 24 / ship 24
+    FRAME:      vgeom 4 / prims 9 — empty registry: vgeom 0 / prims 9
+
+and it falsifies, three ways, each mutation red and restored: dropping
+`with_vmesh_paths` gives "the payload names 0 DAGs for 4 rigid mesh refs";
+restoring the placeholder cube gives **prims 13** against 9 — the ledger's own
+predicted number — *and* reds `projector_mirror`; dropping the cook's drawn-mesh
+threshold override gives **pie 4 / ship 3**, the divergence the wave says the gate
+found. Clause 3's two arms red under their own mutations, and the store pin reds
+under both of its. A v12 payload against a v13 build is refused by name
+(`a_version_mismatch_is_refused_loudly` walks V−1 and V+1); the wire-order pin
+reds when the two v13 fields are swapped.
+
+**THE ROUTES, re-measured on the same content** (release, `island-build/project`):
+
+| | ledger | audit |
+|---|---|---|
+| A — 4 road DAGs, bytes | 102.7 MiB | 107 705 904 B = **102.7 MiB = 107.7 MB**, exact |
+| A — index time | 198.9 ms | **330.3 ms cold, 153.2 / 153.0 ms warm** — 6.6 % / 3.1 % of the 5 000 ms budget |
+| B — the yellow paint | 201 402 verts, 200 242 tris, 750 ms | **same counts**, 8.3 MiB, **812 ms** (809 build + 4 pack) |
+| the missing-DAG line | once per asset per session | **2 lines over 300 projections × 2 missing meshes** |
+
+**THE COOK RULE COST THIS ISLAND NOTHING, measured rather than assumed.**
+`drawn_meshes` virtualizes every drawn mesh whatever its size, and the question a
+quadratic DAG builder makes worth asking is what that costs a real project.
+`inf cook --project island-build/project` at head: **352 028 412 B, 72 assets,
+`meshlet_mesh 4`, 2 min 51.7 s** — byte-for-byte the pack the ROAD1b audit cooked
+at `7325c77e` (352 028 412 B, 2 min 44.8 s), because all four road layers were
+already over the threshold and the island's four sub-threshold meshes
+(`Starter_Body` and the three ground covers) are drawn by nothing rigid. Those
+four still draw the advisory, now in the FIX2 wording. The rule is free *here*;
+it is not free in general, and its price is one `build_vgeom` per newly-drawn
+small mesh — 812 ms for a 200 k-triangle one, at an exponent of 1.95.
+
+**AND THE OTHER HALF OF THE SAME TRADE, priced.** Clause 1 chose PATHS for the
+DAGs to keep 107.7 MB out of `MAX_FRAME_LEN`, and in the same wave put scatter
+kind meshes into `ScenePayload::meshes` as BYTES. On this island that is
+**24 012 B** (three ground covers; the twelve building modules name no file), so
+the two decisions do not conflict here. They would in a project whose scatter
+kinds name dense meshes, and nothing measures that today. Carried **48**.
+
+**THE NEAR-BLACK HERO IS NOT A PIE DEFECT.** ASSET0 carried it as "a lighting /
+material difference between hosts on the skinned path; measure, route". Measured
+on identical content — hero body luminance:
+
+| host | frame | hero |
+|---|---|---|
+| editor viewport | `FIX2-DEMO/01-editor.png` | **232** |
+| PIE | `FIX2-DEMO/03-pie-b.png` | **1.8** |
+| shipped `inf-player --pack`, island cooked at head | `AUDIT-FIX2/shipHEAD-t{10,25,45}.png` | **1.7 / 1.8 / 2.0** |
+
+**PIE == shipping to within 0.2 of 255; the editor is the outlier.** It is not
+the skinned path and not a missing material handle: in the same shipped frame the
+hero's sunlit rim reads 166 and a building's shaded wall reads 8.5, so what
+collapses is the ambient / indirect term on *every* surface facing away from the
+sun, character or not. Fraction of viewport pixels below luminance 8 — editor
+**0.13 %**, PIE **5.5 %**, shipped **28.9 %**. (A shipped run on the *pre-road*
+pack put the same hero at 55–65, which is what made the first reading look like a
+host difference: a scene with no asphalt in it is a different scene.) The CERT1
+law holds on the render half; this is a lighting wave's and CHAR1's, not FIX2's.
+Carried **46**.
+
+**WHAT DID NOT HOLD.**
+
+1. **`plan_fractures` lost its doc comment** to `drawn_meshes`, inserted between
+   the block and the item it documented, so `drawn_meshes` opens by describing
+   fracture planning and `plan_fractures` has no documentation at all. No rustdoc
+   warning could see it — both are private. Fixed at `f1b0cd4f`, a pure move.
+2. **The store pin read one of two identical windowed doors.** `run` — the
+   SHIPPED windowed boot — takes and installs the same five stores with nothing
+   watching: deleting its `app.scatter_meshes = scatter_meshes;` left the whole
+   `inf-player` lib suite green (86/86). Fixed at `05174dd1`; both doors now share
+   one checker and each reds alone.
+3. **`VmeshRegistry::from_dir` had no arm anywhere in the tree**, so clause 1's
+   "one door" was fenced from the `from_paths` side only — breaking the shared
+   `open_file` reddened exactly one arm in the workspace. Fixed at `24a450b7`; the
+   same break now reds both.
+4. **"the ONE seam both hosts resolve through so neither can be the quiet one" is
+   false.** The editor viewport never reaches `VmeshRegistry::resolve`; it goes
+   through `EditorRenderAssets::resolve_vgeom` → `open_vgeom`, which warns for a
+   STALE derivation and is silent for an ABSENT one. Corrected in place above and
+   at `report_missing`, with the asymmetry's reason written down rather than
+   claimed away.
+5. **The audio correction's own evidence came off the wrong island** — the kind
+   map quoted `pcg: 7`, which is the CI fixture's, under a sentence about the
+   SHOWCASE island's venue. Re-measured above on the island being talked about:
+   the conclusion (no `audio` kind, both hosts silent, `Venue_Music.inf_audio`
+   really in that project's Content and reached by no closure) holds.
+6. **CRLF was checked over 54 files and reported as 52**, and route B's sizes are
+   MiB under an MB label. Both corrected in place.
+
+**WHAT HELD, checked rather than taken:** 13/13 commits carry both trailers; CRLF
+**0 bytes** across all 54 files (`git show HEAD:<f>`, `count(b'\r')`); goldens
+**62**; scene **v27**, `SCENE_PAYLOAD_VERSION` **13**, `EXPECTED_LEVELS` **24**;
+`Cargo.toml` / `Cargo.lock` / `deny.toml` / `package.json` untouched and no
+committed content byte in the range; the census is 9 `InfSceneWorldBuilder` doors
+on the pack path and 8 on the payload path, differing by exactly
+`with_partition_pack`; `pie_start`'s stale refusal really does reach the author,
+as a 12-second status toast (`pieStore.startAnyway` →
+`pushStatus("Play could not start: …")`) carrying the mesh list and the sweep
+remedy — which is what carried 42's "fails visibly" means; and carried 44
+reproduces to the token — Windows PowerShell 5.1's parser gives
+`275: Unexpected token 'treating'` on `demo.ps1` and runs nothing.
+
+**And two things confirmed in a RUNNING shipped build rather than in a test.**
+`inf-player --pack` on the pre-road pack logs **four** `has no derived meshlet
+DAG … DRAWS NOTHING` lines — one per road mesh, once each, for the whole session
+— and on the pack cooked at head it logs **none**: `report_missing` is not a unit
+fixture, it is what an author sees, and the deletion of the cube is visible as
+its absence. The same log carries `audio clip did not resolve … clip=
+00000000-0000-0000-5645-4e3100000001`, which is `VENUE_MUSIC_CLIP`: carried 43 is
+not an inference from a kind table, the shipped build really does spawn that
+emitter and really is silent. (It also carries a second unresolved clip on the
+NIL guid, which nothing in this wave explains — carried 49.)
+
+Battery after the audit's fixes: **379 binaries, 7137 passed, 0 failed, 21
+ignored** — the wave's 7135 plus this audit's two arms, each attributed. rustdoc
+**409**, the baseline exactly; clippy `-D warnings` **0**; goldens **62**, none
+touched; CRLF **0** over all 54 files of the extended range.
+
+**The demo loop, re-run on the audited tree** (`pwsh -File tools/demo/demo.ps1`,
+everything rebuilt from it): **HERO MOVED 12.816 m**, exit 0, `still running:
+none`. The PIE frame is the same street the wave photographed — asphalt, double
+yellow under the hero's feet, white edge lines both sides, kerbs and pavements,
+the parked car on the carriageway. `…/scratchpad/AUDIT-FIX2-DEMO/01-editor.png`,
+`02-pie-a.png`, `03-pie-b.png`. The hero box's 25th-percentile luminance is
+**2.0** in both that run's PIE frame and the wave's, against **70.8** in the
+editor frame beside it: the street reproduced and so did the light.
+
+46. **Every shaded surface in the RUNTIME is near-black, and in the editor
+    viewport it is not.** Measured above: the same hero is 232 in the editor and
+    1.8 in both PIE and a shipped `--pack` boot of the same island; a shaded
+    building wall is 8.5 in the shipped frame; 28.9 % of a shipped frame is below
+    luminance 8 against 0.13 % of an editor frame. PIE == shipping, so this is not
+    a preview-vs-build divergence and no gate in this repository is wrong; it is
+    the editor and the runtime lighting the same world differently, which is the
+    same sentence as this wave's from the other side — *when I press Play, do I see
+    what I built?* The answer is now "yes, the street"; it is still "not the light".
+47. **A store dropped from a windowed door is pinned; a store built wrong by its
+    CALLER is not.** The pin proves the five assignments exist in `run` and
+    `run_pie`; nothing checks that `main.rs` handed them the right tables.
+    `island_gate`'s registry arm covers that for the payload path and nothing
+    covers it for `--pack`.
+48. **The wire cost of a scatter kind's mesh is unmeasured.** Clause 1 refused to
+    put 107.7 MB of DAG on the wire and clause 1's own scatter half puts `.inf_mesh`
+    BYTES on it. 24 012 B on this island, unbounded in principle, and
+    `island_gate`'s ship column re-implements `finish_scatter_meshes` (which is
+    private) rather than calling it, so a third completion step would be added on
+    one path and not seen.
+49. **A shipped island boot issues an audio command for the NIL guid.** Beside the
+    venue's, `inf-player --pack` logs `audio clip did not resolve … clip=
+    00000000-0000-0000-0000-000000000000` on every boot of this island. Nothing in
+    FIX2 caused it and nothing in FIX2 explains it; it is the same class as 43
+    (a command issued for an asset no closure walks) with an id that cannot name
+    anything at all.
