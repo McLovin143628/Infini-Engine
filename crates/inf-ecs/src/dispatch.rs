@@ -2,7 +2,7 @@
 //! to something is allowed to do.
 //!
 //! The deciding half. Everything here is a pure function of sim state over
-//! resources: no schema moves (scene v27 / `ScenePayload` v12 stand), nothing is
+//! resources: no schema moves (scene v27 / `ScenePayload` v13 stand), nothing is
 //! ever written to a file, and the applying half — the routes, the bodies, the
 //! sirens — lives in `inf_physics::d3::dispatch` behind this crate's own split
 //! (`inf_ecs::vehicle` decides and `inf_physics::d3::vehicle` applies; the same

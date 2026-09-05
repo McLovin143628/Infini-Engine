@@ -21,7 +21,7 @@
 //! # It is a RESOURCE, and since wave EMS3 it IS in the trace
 //!
 //! [`crate::item::ItemDefs`]' shape exactly: derived at run time, nothing can
-//! save it, and **no schema moves** — scene v27 and `ScenePayload` v12 stand.
+//! save it, and **no schema moves** — scene v27 and `ScenePayload` v13 stand.
 //!
 //! WPN1 deliberately kept it **out** of `state_bytes`, and wrote the condition
 //! for putting it in: *"The day something reads it — EMS3's dispatcher —

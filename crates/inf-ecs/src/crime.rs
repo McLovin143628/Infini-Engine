@@ -54,7 +54,7 @@
 //! # It is a RESOURCE
 //!
 //! [`crate::dispatch::DispatchRes`]' shape exactly: derived at run time, nothing
-//! can save it, and **no schema moves** — scene v27 and `ScenePayload` v12
+//! can save it, and **no schema moves** — scene v27 and `ScenePayload` v13
 //! stand. A wanted level is not something an author writes into a level, and
 //! [`clear_crime`] is its Simulate twin.
 

@@ -705,7 +705,7 @@ pub fn derived_outfit(guid: Uuid) -> u8 {
 /// **Who is wearing what** (wave EMS3) — the appearance channel, per guid.
 ///
 /// [`crate::item::ItemDefs`]' shape, a fourth time: derived at run time, nothing
-/// can save it, and **no schema moves** — scene v27 and `ScenePayload` v12
+/// can save it, and **no schema moves** — scene v27 and `ScenePayload` v13
 /// stand. A body's clothes are not a component for [`PanickedRes`]' reason
 /// exactly: a `Dormant` crowd agent has no entity at all and is still a person
 /// wearing something, and a marker component would have been silently absent on
