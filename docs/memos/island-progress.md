@@ -32937,7 +32937,250 @@ does not. Carried, and it is the reason this wave's proof frame is the editor's.
     Until the payload carries a vmesh index, the Play button shows a placeholder
     cube where the editor and the shipped player both show a street, and no
     frame taken through PIE can answer "do the roads look right".
+    > **Audit ROAD1b:** "the shipped player" was not true when this was written.
+    > A cook of `island-build/project` was dropping the vmesh for all four road
+    > meshes on an id collision with the editor's own derivation, so the
+    > *shipped* build drew four cubes as well. Fixed at `7325c77e`; the rest of
+    > the item stands, and the census PIE needs is **four** `MeshRef.asset`
+    > entities plus the unassigned `app.scatter_meshes`.
 33. **A footway is refused where the terrain has not paged in.** That is the
     right answer for a surface nothing can place, and it means a player who
     outruns the streamer walks through a kerb for as long as it takes the tile
     to arrive. The alternative is a wall, measured at 1.106 m of hero.
+
+### AUDIT — wave ROAD1b (2026-09-05, adversarial, at `6109ab50`)
+
+Every number below was re-measured on this machine at the wave's own head, with
+the wave's own binaries. Where a wave number is quoted it is because it
+reproduced; where it did not, both numbers are given.
+
+**The battery reproduces exactly**: `AGGREGATE over 379 binaries: 7127 passed,
+0 failed, 21 ignored`, one expected panic (inf-hotreload's crash-isolation
+fixture). Goldens 62, none changed. CRLF **0 bytes** over all 26 changed files
+at blob level, the two `streets.geojson` included. Manifests untouched. Scene
+**v27**, `ScenePayload` **v12**, `EXPECTED_LEVELS` **24** unmoved.
+
+#### The verdicts
+
+| | claim | verdict |
+|---|---|---|
+| a | the proof frame, and PIE draws cubes | **HELD** — and the census is **4** |
+| b | one derivation, two callers | **HELD**, mutation-verified |
+| c | the footway is a solid 150 mm step in both hosts | **HELD**, mutation-verified; one falsification overstated |
+| d | `KERB_PARK_OFFSET_M` is off the kerb, and wiring it deadlocks EMS | **HELD** |
+| e | the mitre, the clip and the scar | **HELD**, mutation-verified, arms not vacuous |
+| f | the roads are priced; the cook is 24 s → 166 s | **HELD** on the numbers, **PARTIAL** on the diagnosis |
+| g | the water is measured and routed | **HELD** |
+| h | hygiene | **HELD**, with two ledger numbers corrected above |
+
+#### What reproduced, verbatim
+
+```
+ROAD1b KERB  | 16.0 m: 3 lanes, kerb 5.250..5.550, footway 5.550..7.550, ring 6.000
+ROAD1b KERB  | 20.0 m: 4 lanes, kerb 7.000..7.300, footway 7.300..9.300, ring 8.000
+ROAD1b KERB  | 32.0 m: 8 lanes, kerb 14.000..14.300, footway 14.300..16.300, ring 14.000
+ROAD1b PARK  | 16.0 m: +0.650 m onto the footway; the kerb's own answer is 4.350
+ROAD1b PARK  | 20.0 m: -1.100 m into the road; the kerb's own answer is 6.100
+ROAD1b GRID  | island: 344 spans, 34.96 km, 143 junctions of degree 3+
+ROAD1b GRID  | fixture: 8 spans, 0.54 km, 2 junctions of degree 3+
+ROAD1b WALK  | 121 carriageway steps at 0.0201 m, 19 footway steps at 0.1701 m
+ROAD1b COST  | 15 described, 9 culled, 4 refused; ceiling 40
+ROAD1b CUT   | 6032 triangles, 88 vertices off the lattice, edge ragged 0.0000 m
+ROAD1b LOD   | carriageway 8.5x, kerb 5.6x, white 1.0x, yellow 1.0x
+```
+
+Island build at head, one command, 57.5 s: **68.70 km over 355 segments, 344 of
+them street spans, over 150 junctions**; carriageway 828 672 v / 1 489 058 t,
+kerb 614 392 / 934 787, white 393 060 / 362 540, yellow 201 402 / 200 242 =
+**2 986 627 triangles**; **115 592** footway triangles clipped; **758 503**
+corridor samples. Every figure the wave printed.
+
+**The mutations.** Move `streets_of_blocks`' centreline 0.75 m and four things
+red at once: two `inf-ecs` traffic arms, the committed-layer fence, the samples
+byte lock, and the kerb walk. Describe no footway slab and the rise reads
+**0.0000 m** while `both_hosts_walk_the_same_kerb_byte_for_byte` stays **green**
+— the wave recorded that and it is exactly right. `FOOTWAY_SLABS_CEILING` 40 →
+10 reds at 15. `MITER_LIMIT_M` 2.5 → 3.5 reds the hairpin equality. Restore the
+centroid drop rule and the cut's two arms red at **0.4000 m of wander and 0
+invented vertices**, against 0.0000 and 88 — the final arms are not vacuous.
+
+#### THE COOK, diagnosed
+
+The 24.0 s → 166.4 s reproduces, and it is **content, not a regression**: the
+same release binary cooks the same project in **24.6 s** with
+`samples/island/layers/streets.geojson` moved aside and **170.2 s** with it
+present. Nothing in the packager changed this wave.
+
+| cook (release `inf`, this machine) | road triangles | wall | net of base |
+|---|---|---|---|
+| no road meshes at all | 0 | **5.3 s** | — |
+| yellow paint alone | 200 242 | 7.5 s | 2.2 s |
+| white paint alone | 362 540 | 16.0 s | 10.7 s |
+| kerbs alone | 934 787 | 42.5 s | 37.2 s |
+| carriageway alone | 1 489 058 | 114.6 s | 109.3 s |
+| GIS network only (pre-paving) | 1 242 346 | **24.6 s** | 19.3 s |
+| the shipped island | 2 986 627 | **170.2 s** | 164.9 s |
+
+**`build_vgeom` is quadratic in one mesh's triangle count.** Over those four
+meshes, which span 7.4x in size, the fitted exponent is **1.95**: the unit cost
+runs 11.0, 29.5, 39.8 and 73.4 microseconds per thousand triangles as the mesh
+grows. 2.40x the triangles bought 8.5x the DAG time, which is what a square
+does. The four solo costs sum to 159.4 s against 164.9 s for all four
+concurrently, so the cook's per-asset parallelism buys **nothing** — the inner
+group-simplify already saturates the pool.
+
+The wave's own explanation ("`derive_vmesh` builds a DAG over three million
+triangles instead of one and a quarter") is the fact, not the reason: linear in
+triangles would have been 58 s. **Read from the code** rather than measured:
+`inf_vgeom::build::simplify_group` hands meshopt a `VertexDataAdapter` over the
+**whole mesh's** vertex buffer and a whole-buffer lock array for **every group**
+at every level, and meshopt sizes its per-vertex tables (remap, wedges,
+quadrics) by that count — so each of the G groups pays O(V) instead of O(V/G),
+and G grows with the mesh. `build_group_job` also allocates one
+`vec![false; vertex_count]` per group and holds them all live before the
+parallel map. Compacting a group's soup to its own vertex range is the fix and
+it is a wave, not an audit edit: it moves every `.inf_vmesh` byte and has to be
+mutation-verified against the DAG-equality gates. **Carried 34.**
+
+The paving's honest price, stated per the unit the brief asked for:
+**(170.2 − 24.6) / 344 = 0.42 s of cook per settlement street span.**
+
+The wave's "before" 24.0 s and this audit's 24.6 s are the same measurement to
+within a run; the "after" 166.4 s was taken with the collision below present,
+which discards the DAGs after building them, so it is 4.6 s light.
+
+#### WHAT PLAY DRAWS — the census FIX2 needs
+
+**Four.** Exactly four entities in the shipped island level carry a
+`MeshRef.asset`: `Roads`, `Kerbs and pavements`, `Road markings` and `Road
+markings (yellow)`, created at `island.rs:599` and in the
+`inf_gis::FURNITURE_PARTS` loop at `:655`. Every one has
+`Transform::IDENTITY` and `MeshRef::default()`'s primitive, which is
+`Primitive::Cube`. Nothing else in the level carries one — the helipads carry
+`MeshRef { primitive: Cylinder, asset: None }`, which is correct by design.
+
+`run_pie` (`window.rs:1419`) hands `PlayerApp::new` an
+`Arc::new(VmeshRegistry::new())` — empty — so all four resolve to nothing and
+fall through `render.rs:1304` to `prim_mesh(mesh_ref.primitive)`. That is why
+the PIE frame shows **bare earth and no cube**: four 1 m cubes at the world
+origin, 2.7 km from the spawn.
+
+**And the fifth member of the class is still open beside them**, stated in the
+tree at `window.rs:1467`: `run_pie` never assigns `app.scatter_meshes`, so
+every scattered instance in a windowed PIE session draws its placeholder while
+a cooked boot draws the authored cover. FIX2's brief is those two lines, not
+one.
+
+**The shipped half was worse, and is now fixed** (`7325c77e`). Cooking
+`island-build/project` emitted four `derived id ... collides` warnings and
+wrote a pack with **no `meshlet_mesh` entry at all** — 244 304 828 bytes
+against 352 028 412 with the loose derivations moved aside. The editor derives
+a `.inf_vmesh` beside every mesh it draws at exactly `derived_vmesh_id` of the
+mesh, so the cook's `db.contains` guard was true by construction and threw away
+the DAG it had just spent minutes building. Carried 32 says "the editor and the
+shipped player both show a street"; until that commit **the shipped player
+showed a cube too**.
+
+#### THE DEMO LOOP, re-run — and the proof frame was showing LESS than the wave built
+
+`tools/demo/demo.ps1 -SkipBuild`, on this audit's tree, editor built through
+`npx tauri build --no-bundle`, nothing else running:
+**HERO MOVED 12.128 m** over 120 samples, no process left behind.
+
+* editor: `…/scratchpad/AUDIT-ROAD1b-DEMO/01-editor.png`
+* PIE: `02-pie-a.png`, `03-pie-b.png`; trace `hero.csv`, `demo.log`
+
+**The wave's own proof frame under-showed it, and that is a finding about the
+evidence.** `RenderAssets::open_vgeom` (`render_assets.rs:394`) *reads* a
+`.inf_vmesh` off disk and neither derives one nor checks the sidecar's
+`source_mesh_hash` against the mesh beside it. Nothing derives one for a mesh
+`inf island build` wrote directly into `Content` either — `ensure_vmesh` runs on
+glTF import, a DCC save, a capture and a photogrammetry finish, and nowhere
+else. What closes the gap is `submit_vmesh_sweep`, queued once on project open
+and **measured at about two and a half minutes** on this island; `demo.ps1`
+photographs the editor **ten seconds** after the debug port opens.
+
+So the wave's `ROAD1b-DEMO3/01-editor.png` was drawn from the `.inf_vmesh` set
+that happened to be on disk, and two of the four were the *pre-paving* build.
+Measured by re-deriving them at head and comparing bytes:
+
+| road vmesh | at the wave's demo | freshly derived | |
+|---|---|---|---|
+| `VancouverIslandRoads` (carriageway) | 18 126 400 | **49 389 216** | stale |
+| `VancouverIslandRoadMarkings` (white) | 6 021 744 | **16 919 856** | stale |
+| `VancouverIslandKerbs` | 32 670 112 | 32 670 112 | current |
+| `VancouverIslandRoadMarkingsYellow` | 8 726 720 | 8 726 720 | current |
+
+The frame the wave offered as proof therefore had the settlement streets'
+**kerbs, pavements and double yellow** but not their **carriageway or white
+paint**. With all four current, the same camera shows a full-width asphalt
+street running to the horizon, white edge lines down both sides, the double
+yellow, and painted crossings on all four arms of the junction the arterial
+makes with the grid. The wave's claim is not only true, it was underexposed.
+
+**Carried 38**: the editor draws a stale `.inf_vmesh` silently, and a frame
+taken in the first minutes of a session photographs the previous build. A demo
+that means to photograph geometry has to wait for the sweep.
+
+PIE, at "Streaming 52/52", shows what the census predicts: buildings, a car and
+the hero (in bind pose — CHAR1) on **bare graded earth**, with no road surface
+and no visible cube, because the four cubes are 1 m boxes at the world origin
+2.7 km away.
+
+#### Findings
+
+1. **HIGH — a cooked island carried no road geometry.** Above; fixed at
+   `7325c77e`, mutation-verified. Pre-existing since P18.3, not this wave's.
+2. **MED — the ledger quoted a kerb run two commits stale**, and a junction
+   count (34) the island has never had (7). Corrected in place above at
+   `ccf88cae`.
+3. **MED — one falsification is overstated.** `kerb_walk`'s doc and this
+   ledger say that without `crosses_another_carriageway` "`ems2_dispatch_gate`
+   loses two arms". At head it does **not**: drop the guard alone and EMS2 is
+   6/6 green, and only `the_footway_costs_a_bounded_number_of_boxes` reds, on
+   its `crossed > 0` count. Drop the guard **and** restore the pre-`502c0406`
+   `street.y` ground fallback and exactly the two named arms red
+   (`three_emergencies_bring_three_services_and_send_them_home`,
+   `every_responding_unit_sounds_a_siren_and_returns_its_bar`). Two fixes, one
+   symptom, each masking the other's falsification: today the junction guard's
+   only live fence is a count. **Carried 35.**
+4. **MED — `ROAD_TRIANGLES_CEILING` is asserted only inside an `#[ignore]`d
+   arm.** It is read by name in `cook_island`, which is called only from
+   `the_island_at_shipping_resolution`, which CI never runs and the battery
+   never runs. The ceiling is real and the number under it is real; nothing
+   automatic will ever tell anyone it was crossed. **Carried 36.**
+5. **LOW — the committed-layer fence is geometry-blind.**
+   `the_committed_street_layer_is_the_street_grid_the_traffic_sim_derives`
+   compares span **count** and per-span **lane count**, zipped in sort order,
+   and never compares a coordinate. It reddened under the centreline mutation
+   only because moving the lines reordered the sort and mispaired the zip. The
+   byte lock is the real fence. **Carried 37.**
+6. **LOW — a correctness bound was widened 2.03x in a wave that did not need
+   it.** `traffic_3d`'s hand-off arm went from `jump < 1.0` to
+   `jump < DEFAULT_LANE_WIDTH_M/2 + street_speed_mps()*DT*2` = **2.03 m**, on a
+   sweep of a constant (`kerb_park_offset_m`) the wave then did not land. The
+   new bound is derived where the old one was fitted, which is the better
+   number; recorded because the measured jump at head is **0.144 m** and
+   neither bound is close to binding.
+7. **LOW — `MITER_LIMIT_M`'s own doc named a metre the code never used.**
+   Fixed at `bdfb1a1e`.
+
+**Which settlements have no footway collider, named.** All five towns, because
+all five are 16 m: **Cedar Cove, Millbrook, Fernhill, Alder Bay, Stonewater**,
+24 spans each — **120 of the island's 344 street spans, 34.9 %**. Harbour City
+and Eastgate are 20 m and keep theirs, 112 spans each, and Harbour City is
+where the hero spawns.
+
+#### Carried, added by this audit
+
+34. **The meshlet DAG builder is quadratic in a mesh's size.** Measured
+    exponent 1.95 over four meshes spanning 7.4x; the mechanism is a whole-mesh
+    vertex adapter and lock array handed to meshopt once per group. Cook time
+    therefore grows as the square of the biggest mesh, and the next settlement
+    costs more than the last. The fix is to compact each group to its own
+    vertex range.
+35. **The junction guard's only live falsification is a count.** Finding 3.
+36. **`ROAD_TRIANGLES_CEILING` never runs in CI.** Finding 4.
+37. **The committed street layer's fence does not compare geometry.**
+    Finding 5.
+38. **The editor draws a stale `.inf_vmesh` without saying so.** Above.
