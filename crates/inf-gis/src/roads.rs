@@ -129,8 +129,13 @@ pub const MITER_LIMIT: f64 = 4.0;
 ///
 /// # What it does to the corner
 ///
-/// [`CrossFrame::at`] pulls the station's outer point back to `offset + 1 m`
-/// when the mitre asks for more. The strip stays one strip — no vertex is added
+/// [`CrossFrame::at`] pulls the station's outer point back to
+/// `offset + MITER_LIMIT_M` when the mitre asks for more — 2.5 m, the number
+/// this constant *is*, and not the "1 m" an earlier draft of this paragraph
+/// said (audit ROAD1b: it disagreed with [`CrossFrame::miter_at`]'s
+/// `1.0 + MITER_LIMIT_M / lateral`, with the equality the hairpin arm asserts
+/// at `5.800 + 2.500 = 8.300`, and with the sentence four lines above it).
+/// The strip stays one strip — no vertex is added
 /// and no row changes length, so `emit_profile_strip`'s winding is untouched —
 /// and what the pulled-back station leaves is a **cut corner**: the two legs'
 /// outer edges no longer meet at the mitre point, they meet at a chamfer. That
