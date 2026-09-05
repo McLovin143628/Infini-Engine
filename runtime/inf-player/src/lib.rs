@@ -642,7 +642,7 @@ fn finish_scatter_meshes(mut table: inf_render::ScatterMeshes) -> inf_render::Sc
 }
 
 /// The **PIE** scatter table (wave FIX2): the authored meshes a payload's scatter
-/// kinds name, plus the building modules — the [`load_scatter_meshes`] twin, and
+/// kinds name, plus the building modules — the `load_scatter_meshes` twin, and
 /// the same completion rule.
 ///
 /// Wave TER2b closed "scattered content draws its authored mesh" for the cooked
@@ -659,7 +659,7 @@ pub fn scatter_meshes_from_payload(
 /// `.inf_vmesh` files the payload names by path, indexed exactly as a `--level`
 /// dev boot indexes the ones beside its level.
 ///
-/// The rigid half of what [`load_render_assets`] does for the other two boots.
+/// The rigid half of what `load_render_assets` does for the other two boots.
 /// Without it the windowed PIE player was handed an EMPTY registry and every
 /// `MeshRef.asset` in the level drew a placeholder cube — the island's four road
 /// meshes among them, which is why Play showed bare earth where the editor showed

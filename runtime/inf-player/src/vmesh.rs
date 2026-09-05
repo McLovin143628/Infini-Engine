@@ -122,8 +122,8 @@ impl VmeshRegistry {
     ///
     /// An entry that fails to index is **skipped with a warning** rather than
     /// failing the load: one bad asset must not take a level down, and the entity
-    /// referencing it reaches the same stated miss ([`report_missing`](Self::report_missing))
-    /// an un-cooked mesh does.
+    /// referencing it reaches the same stated miss (`report_missing`) an un-cooked
+    /// mesh does.
     pub fn from_pack(reader: Arc<PackReader>) -> Result<Self, String> {
         let mut out = Self::new();
         let guids: Vec<AssetId> = reader
@@ -233,8 +233,7 @@ impl VmeshRegistry {
     /// the classic discrete-LOD fallback (Medium/Low) — so the scene content is the
     /// same either way and this resolver is enabled-agnostic. `None` when the mesh
     /// has no derived vmesh (an un-cooked / non-dense mesh), which since wave FIX2
-    /// means the entity draws NOTHING and says so once — see
-    /// [`report_missing`](Self::report_missing).
+    /// means the entity draws NOTHING and says so once — see `report_missing`.
     pub fn resolve(&self, mesh_id: Uuid) -> Option<(u128, Arc<VgeomSource>)> {
         let vmesh_id = derived_vmesh_id(mesh_id);
         match self.meshes.get(&vmesh_id) {
