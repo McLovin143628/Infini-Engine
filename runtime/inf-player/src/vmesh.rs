@@ -385,6 +385,66 @@ mod tests {
         );
     }
 
+    /// **The dev-directory door indexes what is beside the level, under the guid
+    /// its SIDECAR names** (FIX2 audit).
+    ///
+    /// [`VmeshRegistry::from_dir`] is what a `--level` boot builds its registry
+    /// from, and it had no arm anywhere in the tree — measured: breaking the
+    /// `open_file` the two loose-file doors share reddened
+    /// `a_payload_path_is_indexed_under_the_guid_the_payload_names` and **nothing
+    /// else in the whole workspace**. So wave FIX2's "one door" was fenced from
+    /// the `from_paths` side only, and the shipped side of the same rewrite was
+    /// asserted by reading it.
+    ///
+    /// Three facts, and each is a different way the door has been wrong before:
+    /// the guid comes off the SIDECAR (not off the filename or the payload), a
+    /// `.inf_vmesh` with no readable sidecar is skipped rather than fatal, and
+    /// `resolve` finds the entry from the MESH id — the derived-id rule
+    /// `from_paths` also obeys, which is what makes them one lookup rule.
+    #[test]
+    fn a_dev_directory_is_indexed_under_the_guid_each_sidecar_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload =
+            inf_vgeom::build_vgeom_asset(&empty_vmesh(), &inf_vgeom::ClusterTextureSet::none())
+                .expect("the image writes")
+                .into_bytes();
+
+        let mut want: Vec<Uuid> = Vec::new();
+        for (stem, mesh) in [
+            ("Roads", Uuid::from_u128(0xF1_2202_0001)),
+            ("Kerbs", Uuid::from_u128(0xF1_2202_0002)),
+        ] {
+            let vmesh_id = derived_vmesh_id(mesh);
+            let file = dir.path().join(format!("{stem}.inf_vmesh"));
+            std::fs::write(&file, &payload).expect("the payload writes");
+            inf_asset::AssetSidecar::new(
+                inf_asset::AssetId(vmesh_id),
+                inf_asset::AssetKind::MeshletMesh,
+                inf_asset::ContentHash(0),
+            )
+            .save(&file)
+            .expect("the sidecar writes");
+            want.push(vmesh_id);
+        }
+        // …and one with no sidecar at all, which must be skipped and must not
+        // take the other two down with it.
+        std::fs::write(dir.path().join("Orphan.inf_vmesh"), &payload).expect("writes");
+
+        let reg = VmeshRegistry::from_dir(dir.path());
+        assert_eq!(reg.len(), 2, "a sidecar-less file took the directory down");
+        want.sort();
+        assert_eq!(reg.registered_guids(), want, "keyed by something else");
+        for mesh in [
+            Uuid::from_u128(0xF1_2202_0001),
+            Uuid::from_u128(0xF1_2202_0002),
+        ] {
+            let (id, _) = reg
+                .resolve(mesh)
+                .expect("the MESH id resolves through the derived one");
+            assert_eq!(id, derived_vmesh_id(mesh).as_u128());
+        }
+    }
+
     fn empty_vmesh() -> VgeomMesh {
         VgeomMesh {
             schema_version: VgeomMesh::CURRENT_VERSION,
