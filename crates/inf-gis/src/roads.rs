@@ -2129,9 +2129,16 @@ fn plan_contains(t: &[glam::DVec2; 3], p: glam::DVec2) -> bool {
     for k in 0..3 {
         let a = t[k];
         let e = t[(k + 1) % 3] - a;
-        if !(e.length_squared() > 1.0e-24) {
-            // A degenerate edge means a triangle with no plan area — a kerb
-            // face or a skirt seen from above. It covers nothing.
+        // A degenerate edge means a triangle with no plan area — a kerb face or
+        // a skirt seen from above. It covers nothing.
+        //
+        // Spelled with the finite test rather than as `!(l2 > eps)`: the bare
+        // negated comparison is what `clippy::neg_cmp_op_on_partial_ord` is for,
+        // and the reason it exists is the reason the negation was there — a NaN
+        // makes every ordering comparison false, so `l2 <= eps` would let one
+        // through. This is `pseudo_angle`'s own idiom, four hundred lines up.
+        let l2 = e.length_squared();
+        if !(l2.is_finite() && l2 > 1.0e-24) {
             return false;
         }
         let cross = e.x * (p.y - a.y) - e.y * (p.x - a.x);
