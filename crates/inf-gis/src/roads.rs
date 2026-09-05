@@ -2266,8 +2266,75 @@ fn is_covered_by(
     .all(&mut candidates)
 }
 
-/// **A footway is not drawn on a road** (audit ROAD1) — drop every kerb and
-/// pavement triangle that lies on a carriageway, and say how many.
+/// **How many times the cut bisects an edge to find the carriageway's own
+/// boundary** (wave ROAD1b).
+///
+/// Ten halvings resolve the crossing to `1/1024` of the edge. A furniture strip
+/// is emitted at [`DEFAULT_GROUND_STEP_M`] along and its widest profile run is
+/// [`PAVEMENT_M`] across, so the longest edge this bisects is about 2.2 m and
+/// the residual is **~2 mm** — under the 4 mm a marking stands proud of the
+/// asphalt, and three orders below the ~1 m raggedness of dropping the whole
+/// triangle (audit ROAD1, carried 17).
+///
+/// It is a count and not a tolerance because the predicate it is bisecting is a
+/// *boolean* — there is no distance to converge on, only an interval to halve —
+/// and because a fixed count is a fixed cost per cut triangle, which is what
+/// keeps this pass linear.
+const CLIP_BISECTIONS: u32 = 10;
+
+/// **Where the carriageway's boundary crosses one edge of a footway triangle**
+/// (wave ROAD1b), with the uv that belongs there.
+///
+/// `from_covered` states which end is on the road; the other end must be off it,
+/// which the two callers guarantee by construction (they only pass an edge whose
+/// ends disagree). Bisection rather than an analytic intersection because the
+/// thing being crossed is the **union** of every carriageway triangle sampled
+/// through a five-point cross — a shape with no closed form, and the same shape
+/// the drop test asks about, which is what makes the cut land exactly where the
+/// old boundary was instead of near it.
+///
+/// Exact f64 halving, no transcendental and no division by anything but two, so
+/// the vertex a cut invents is a function of its inputs on every platform — the
+/// P14 law reaching a committed `.inf_mesh` again.
+fn edge_crossing(
+    from: DVec3,
+    from_uv: [f32; 2],
+    to: DVec3,
+    to_uv: [f32; 2],
+    from_covered: bool,
+    covered: &dyn Fn(glam::DVec2) -> bool,
+) -> (DVec3, [f32; 2]) {
+    // The interval `[lo, hi]` always has the covered end at `lo` and the clear
+    // end at `hi`, so the answer is `hi`: the first point known to be off the
+    // road, which is the side the footway is kept on.
+    let (mut lo, mut hi) = if from_covered {
+        (0.0f64, 1.0f64)
+    } else {
+        (1.0, 0.0)
+    };
+    for _ in 0..CLIP_BISECTIONS {
+        let mid = (lo + hi) * 0.5;
+        let p = from + (to - from) * mid;
+        if covered(p.xz()) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let t = hi;
+    let p = from + (to - from) * t;
+    let tf = t as f32;
+    (
+        p,
+        [
+            from_uv[0] + (to_uv[0] - from_uv[0]) * tf,
+            from_uv[1] + (to_uv[1] - from_uv[1]) * tf,
+        ],
+    )
+}
+
+/// **A footway is not drawn on a road** (audit ROAD1) — cut every kerb and
+/// pavement triangle back to the carriageway's edge, and say how many.
 ///
 /// # What this is for, measured
 ///
@@ -2283,7 +2350,7 @@ fn is_covered_by(
 /// capture of Harbour City's main street shows as a grey plank lying diagonally
 /// across the road, and it is the defect this audit was pointed at.
 ///
-/// # Why dropping triangles is the right answer and not a patch
+/// # Why removing the concrete is the right answer and not a patch
 ///
 /// Two roads occupying one piece of ground is a **routing** fact, carried since
 /// this wave (a road crossing a stream crosses at grade; a switchback folds).
@@ -2295,6 +2362,29 @@ fn is_covered_by(
 /// the wave's own carried item 8 asked for — "kerbs stop at the rim" — made true
 /// rather than described.
 ///
+/// # It CUTS now, and the edge is straight (wave ROAD1b)
+///
+/// The first version tested one point — the triangle's centroid — and dropped
+/// the whole triangle when it was covered, so the edge it left was ragged to
+/// within one triangle: about **1 m along and 2 m across**, the strip's own
+/// station spacing and profile run (audit ROAD1, carried 17).
+///
+/// Now the three *corners* are tested and the answer is a **case split**: three
+/// covered is a drop, none covered is a keep, and one or two covered is a
+/// **cut** — [`edge_crossing`] bisects the two edges the boundary crosses and
+/// the triangle is retriangulated to the clear side of the line between them.
+/// One covered corner leaves a quad (two triangles), two leave a triangle, so
+/// the pass adds at most one triangle per cut and never more. The edge is
+/// straight, it lands within `1/1024` of an edge of the *same* boundary the drop
+/// test asked about — the union sampled through the same five-point cross — and
+/// the winding is preserved by **rotating** the corner order rather than
+/// swapping it.
+///
+/// The `n == 0` corner is kept honest rather than assumed away: a carriageway
+/// narrower than a footway triangle can pass through its middle with all three
+/// corners clear, and there is no straight cut for that. It falls back to the
+/// centroid rule, which is what this pass did everywhere before.
+///
 /// Markings are deliberately **not** clipped: a marking's whole job is to lie on
 /// a carriageway, so the same test would delete all of them.
 ///
@@ -2302,7 +2392,8 @@ fn is_covered_by(
 ///
 /// The index is a `BTreeMap` and the verdict is an `any` over its bucket, so the
 /// output is a function of the input alone at every candidate order — and the
-/// arithmetic is exact f64 with no transcendental in it (`is_inside_by`).
+/// arithmetic is exact f64 with no transcendental in it, the bisection included
+/// (`is_covered_by`, `plan_contains`, `edge_crossing`).
 fn clip_kerbs_to_open_ground(out: &mut RoadSurface) -> usize {
     if out
         .furniture
@@ -2347,35 +2438,99 @@ fn clip_kerbs_to_open_ground(out: &mut RoadSurface) -> usize {
         }
     }
 
-    let kerb = out
-        .furniture
-        .get_mut(&RoadPart::Kerb)
-        .expect("checked above");
-    let mut keep: Vec<u32> = Vec::with_capacity(kerb.indices.len());
-    let mut dropped = 0usize;
-    for t in kerb.indices.chunks_exact(3) {
-        let c = (kerb.vertices[t[0] as usize]
-            + kerb.vertices[t[1] as usize]
-            + kerb.vertices[t[2] as usize])
-            / 3.0;
-        let p = c.xz();
-        let on_road = is_covered_by(p, KERB_CLIP_INSET_M, |q| {
+    // The union predicate, as one closure so the whole-triangle test, the
+    // per-vertex test and the bisection below cannot disagree about what
+    // "on a carriageway" means.
+    let covered = |p: glam::DVec2| -> bool {
+        is_covered_by(p, KERB_CLIP_INSET_M, |q| {
             let cell = (
                 (q.x / CLIP_GRID_M).floor() as i64,
                 (q.y / CLIP_GRID_M).floor() as i64,
             );
             grid.get(&cell)
                 .is_some_and(|bucket| bucket.iter().any(|&i| plan_contains(&tris[i as usize], q)))
-        });
-        if on_road {
+        })
+    };
+
+    let kerb = out
+        .furniture
+        .get_mut(&RoadPart::Kerb)
+        .expect("checked above");
+    let mut keep: Vec<u32> = Vec::with_capacity(kerb.indices.len());
+    // Vertices the CUT invents, appended after the originals so the remap below
+    // can tell them apart by index alone.
+    let mut cut_vertices: Vec<DVec3> = Vec::new();
+    let mut cut_uvs: Vec<[f32; 2]> = Vec::new();
+    let base = kerb.vertices.len() as u32;
+    let mut dropped = 0usize;
+    let mut cut = 0usize;
+    for t in kerb.indices.chunks_exact(3) {
+        let v = [
+            kerb.vertices[t[0] as usize],
+            kerb.vertices[t[1] as usize],
+            kerb.vertices[t[2] as usize],
+        ];
+        let uv = [
+            kerb.uvs[t[0] as usize],
+            kerb.uvs[t[1] as usize],
+            kerb.uvs[t[2] as usize],
+        ];
+        let on = [covered(v[0].xz()), covered(v[1].xz()), covered(v[2].xz())];
+        let n = on.iter().filter(|c| **c).count();
+        if n == 3 {
             dropped += 1;
-        } else {
-            keep.extend_from_slice(t);
+            continue;
         }
+        if n == 0 {
+            // The union can still poke through the middle of a triangle whose
+            // three corners are all clear — a road narrower than the triangle.
+            // That case has no straight cut to make and the centroid rule is
+            // the honest fallback, which is what this pass did everywhere
+            // before it learnt to cut.
+            let c = (v[0] + v[1] + v[2]) / 3.0;
+            if covered(c.xz()) {
+                dropped += 1;
+            } else {
+                keep.extend_from_slice(t);
+            }
+            continue;
+        }
+        // ── the CUT ──────────────────────────────────────────────────────────
+        // Rotate so index 0 is the odd one out: the single covered corner when
+        // one is covered, the single clear corner when two are. Rotation keeps
+        // the winding, which a swap would not.
+        let k = (0..3)
+            .find(|&i| if n == 1 { on[i] } else { !on[i] })
+            .expect("n is 1 or 2, so exactly one corner is the odd one");
+        let idx = [k, (k + 1) % 3, (k + 2) % 3];
+        let (a, b, c) = (idx[0], idx[1], idx[2]);
+        // The two crossings, each on an edge that runs from the odd corner to a
+        // corner of the other kind. `edge_crossing` returns the point on that
+        // edge where the union's boundary is, to CLIP_BISECTIONS of the edge.
+        let (pab, uab) = edge_crossing(v[a], uv[a], v[b], uv[b], on[a], &covered);
+        let (pca, uca) = edge_crossing(v[c], uv[c], v[a], uv[a], on[c], &covered);
+        let i_ab = base + cut_vertices.len() as u32;
+        cut_vertices.push(pab);
+        cut_uvs.push(uab);
+        let i_ca = base + cut_vertices.len() as u32;
+        cut_vertices.push(pca);
+        cut_uvs.push(uca);
+        if n == 1 {
+            // `a` is covered: keep the quad `(ab-crossing, b, c, ca-crossing)`,
+            // walked in the original order so the two triangles wind as one did.
+            keep.extend_from_slice(&[i_ab, t[b], t[c]]);
+            keep.extend_from_slice(&[i_ab, t[c], i_ca]);
+        } else {
+            // `a` is the only clear corner: keep the triangle it caps.
+            keep.extend_from_slice(&[t[a], i_ab, i_ca]);
+        }
+        cut += 1;
     }
-    if dropped == 0 {
+    if dropped == 0 && cut == 0 {
         return 0;
     }
+    kerb.vertices.extend_from_slice(&cut_vertices);
+    kerb.uvs.extend_from_slice(&cut_uvs);
     // Compact, because an orphaned vertex is a vertex a `.inf_mesh` still pays
     // for and a `MeshBuildReport` still counts.
     let mut remap = vec![u32::MAX; kerb.vertices.len()];
@@ -4574,6 +4729,141 @@ mod tests {
             "no kerb face survives on the 30 m of Broadway between x = 60 and \
              x = 90 — the clip measured containment with no inset and took the \
              150 mm upstand with it"
+        );
+    }
+
+    /// **The clip invents vertices, which is what a cut is and a drop is not**
+    /// (wave ROAD1b).
+    ///
+    /// `crossing_pair`'s two roads run along X and along Z and are densified at
+    /// [`DEFAULT_GROUND_STEP_M`] from each segment's own start, which is a whole
+    /// metre. So a strip vertex has its **along** coordinate on the whole-metre
+    /// station lattice and its **across** coordinate off it (an offset of 3.5,
+    /// 3.8 or 5.8 m) — exactly one of the two is fractional. A vertex with
+    /// **both** fractional can only have been put there by [`edge_crossing`],
+    /// which places a point partway along a station.
+    ///
+    /// The first version of this arm tested `x || z` and was therefore satisfied
+    /// by every footway vertex ever emitted, cut or not: it passed unchanged
+    /// under the mutation it was written to catch. Recorded because the fix is
+    /// the whole difference between a gate and a decoration.
+    ///
+    /// Falsification: restore the centroid drop and this reds at zero — the drop
+    /// rule invents nothing, which is exactly why the edge it leaves is ragged.
+    #[test]
+    fn the_clip_cuts_triangles_rather_than_dropping_them() {
+        let opts = SurfaceOptions {
+            furniture: true,
+            ..Default::default()
+        };
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let surface = build_surface(&crossing_pair(), &opts, &mut flat);
+        let kerb = surface.furniture.get(&RoadPart::Kerb).expect("kerbs");
+
+        let off_lattice = |v: f64| (v - v.round()).abs() > 1.0e-9;
+        let invented = kerb
+            .vertices
+            .iter()
+            .filter(|v| off_lattice(v.x) && off_lattice(v.z))
+            .count();
+        // The plan area of what survived, by the shoelace. A kerb's vertical
+        // faces contribute none, which is right: they are not footway.
+        let kept: f64 = kerb
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                let a = kerb.vertices[t[0] as usize].xz();
+                let b = kerb.vertices[t[1] as usize].xz();
+                let c = kerb.vertices[t[2] as usize].xz();
+                ((b - a).perp_dot(c - a) * 0.5).abs()
+            })
+            .sum();
+        println!(
+            "ROAD1b CUT | {} footway triangles, {kept:.1} m2 plan, {invented} \
+             vertices off the station lattice, {} triangles dropped whole",
+            kerb.indices.len() / 3,
+            surface.kerbs_clipped
+        );
+        assert!(
+            invented > 0,
+            "not one footway vertex is off the whole-metre station lattice, so \
+             the clip cut nothing — every removal was a whole-triangle drop"
+        );
+        assert!(kept > 0.0, "the clip ate the whole footway");
+    }
+
+    /// **And the edge it leaves is a LINE** (wave ROAD1b) — the other half of
+    /// the cut, and the half a reader can see in a frame.
+    ///
+    /// # The fixture is offset by 40 cm, and that is the whole test
+    ///
+    /// `crossing_pair` puts Elm at `x = 100`, so its carriageway edge falls at
+    /// `x = 93` — a **whole-metre station**, which is where the strip's own
+    /// triangle boundaries already are. Measured there, the drop rule leaves a
+    /// perfectly straight edge too, and this arm passed unchanged under the
+    /// mutation it exists to catch. Elm moves 0.4 m here so its edge lands
+    /// *mid-station*, which is where the two rules differ: a quad's two
+    /// triangles have centroids a third of a station apart in x, so dropping
+    /// them whole leaves a saw with that tooth, and cutting them leaves the line.
+    ///
+    /// Falsification: restore the centroid drop and the edge wanders 0.33 m.
+    #[test]
+    fn the_cut_leaves_a_straight_edge_where_a_drop_leaves_a_saw() {
+        let graph = RoadGraph::from_layer(&layer(vec![
+            road(&[(0.0, 0.0), (200.0, 0.0)], "arterial", "Broadway"),
+            road(&[(100.4, -100.0), (100.4, 100.0)], "arterial", "Elm"),
+        ]));
+        let opts = SurfaceOptions {
+            furniture: true,
+            ..Default::default()
+        };
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let surface = build_surface(&graph, &opts, &mut flat);
+        let kerb = surface.furniture.get(&RoadPart::Kerb).expect("kerbs");
+
+        let half = RoadKind::Arterial.width_m(RoadKind::Arterial.default_lanes()) * 0.5;
+        // Elm's near carriageway edge, plus the inset the clip deliberately
+        // leaves: without it the kerb's own vertical face, whose plan footprint
+        // IS the edge line, would be deleted along the whole island.
+        let edge = 100.4 - half;
+        let mut stops: Vec<f64> = Vec::new();
+        for k in 1..=7 {
+            let z = half + KERB_WIDTH_M + PAVEMENT_M * f64::from(k) / 8.0;
+            let mut last = f64::NEG_INFINITY;
+            let mut x = 60.0f64;
+            while x <= edge + KERB_CLIP_INSET_M * 4.0 {
+                if ribbon_covers(kerb, glam::DVec2::new(x, z)) {
+                    last = x;
+                }
+                x += 0.005;
+            }
+            stops.push(last);
+        }
+        let lo = stops.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = stops.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ragged = hi - lo;
+        println!(
+            "ROAD1b CUT | footway edge across the slab: {lo:.3}..{hi:.3} m, ragged \
+             {ragged:.4} m, against Elm's edge at x = {edge:.2} plus the \
+             {KERB_CLIP_INSET_M} m inset"
+        );
+        assert!(
+            lo.is_finite(),
+            "the footway is gone from the whole probe line, so there is no edge \
+             to measure"
+        );
+        assert!(
+            ragged <= 0.02,
+            "the footway's edge wanders {ragged:.4} m across a {PAVEMENT_M} m \
+             slab ({stops:?}) — that is the strip's own triangle topology showing \
+             through, which is what dropping whole triangles leaves and cutting \
+             them does not"
+        );
+        assert!(
+            hi <= edge + KERB_CLIP_INSET_M + 0.01,
+            "the footway reaches x = {hi:.3}, past Elm's carriageway edge at \
+             {edge:.2} by more than the {KERB_CLIP_INSET_M} m inset the clip \
+             deliberately leaves — the cut kept the covered side"
         );
     }
 }
