@@ -1333,9 +1333,11 @@ pub struct RoadSurface {
     /// Junctions that could not be filled, and why.
     pub junctions_skipped: usize,
     /// **Footway triangles dropped because they lay on a carriageway** (audit
-    /// ROAD1) — see [`clip_kerbs_to_open_ground`]. Reported rather than silent,
-    /// because the number is a measure of how much of the road network runs over
-    /// itself, which is a routing fact nothing in this module can fix.
+    /// ROAD1) — see `clip_kerbs_to_open_ground` below, named in prose rather
+    /// than linked because it is private and a public doc that links to a
+    /// private item is a rustdoc warning. Reported rather than silent, because
+    /// the number is a measure of how much of the road network runs over itself,
+    /// which is a routing fact nothing in this module can fix.
     pub kerbs_clipped: usize,
     /// Segments with no buildable surface, named.
     pub skipped: Vec<String>,
