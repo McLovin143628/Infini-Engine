@@ -33184,3 +33184,17 @@ where the hero spawns.
 37. **The committed street layer's fence does not compare geometry.**
     Finding 5.
 38. **The editor draws a stale `.inf_vmesh` without saying so.** Above.
+39. **The paved street and the driven street agree only once a settlement is
+    fully resident.** The wave drew the right conclusion for the *mesh* and
+    stopped there: `sync_carriageway` re-derives whenever `block_stamp` moves,
+    so the traffic sim, the parked lattice, the crowd ring and the footway
+    collider all keep deriving from the blocks a host has **populated**, while
+    the paving is one committed layer off the **authored** set. Measured on a
+    3x3 grid of 100 m blocks at a 120 m pitch: all nine blocks give four
+    streets spanning (10,120)-(350,120) and their siblings; drop one corner and
+    the answer is byte-identical; drop the middle **column** and the two lines
+    along Z vanish (their gap is 140 m, past `MAX_STREET_GAP_M`) while each
+    line along X becomes **two** shorter ones, (10,120)-(110,120) and
+    (250,120)-(350,120). So a half-streamed settlement drives on lines whose
+    extents are not the ones under the asphalt. Nothing on this island reaches
+    that state in a demo, and nothing asserts that it cannot.
