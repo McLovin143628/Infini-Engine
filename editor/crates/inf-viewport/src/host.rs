@@ -1039,6 +1039,28 @@ struct VolumeDebug {
     tint: [f32; 4],
 }
 
+/// **The centre and radius that frame a sampled curve** (audit ROAD1).
+///
+/// Split out of [`EngineHost::spline_focus`] so the arithmetic has a seam a test
+/// can reach: the host itself cannot be built without a GPU adapter, and the
+/// thing worth pinning is that a long thin run is framed by its whole length and
+/// not by a point.
+///
+/// The radius is half the bounding box's diagonal with a 4 m floor. Half the
+/// diagonal rather than the longest side because the camera frames a sphere;
+/// the floor because a two-metre puddle framed at two metres is a picture of the
+/// inside of a puddle.
+fn curve_focus(line: &[DVec3]) -> Option<(DVec3, f64)> {
+    let first = *line.first()?;
+    let (mut lo, mut hi) = (first, first);
+    for p in line {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let centre = (lo + hi) * 0.5;
+    Some((centre, ((hi - lo).length() * 0.5).max(4.0)))
+}
+
 /// A [`Spline`]'s editor visualization (E-P5): the sampled curve as a world-space
 /// polyline plus the world-space control points (for the selected-only markers).
 /// Points are cached in world space (the entity transform already applied) and
@@ -1487,11 +1509,52 @@ impl EngineHost {
                 n += 1.0;
             }
         }
+        // …and the selected entities that are a CURVE rather than an instance.
+        // `scene.selected` holds render-instance ids and a river has none, so
+        // the document's own selection is the list that can see one.
+        for guid in &self.selected_guids {
+            if let Some((mid, _)) = self.spline_focus(*guid) {
+                sum += mid;
+                n += 1.0;
+            }
+        }
         for s in self.selected_2d.values() {
             sum += s.translation;
             n += 1.0;
         }
         (n > 0.0).then(|| sum / n)
+    }
+
+    /// **Where a curve-shaped entity actually is** — the midpoint of its sampled
+    /// spline and a radius that holds the whole run (audit ROAD1).
+    ///
+    /// # The actor whose position is not where it is
+    ///
+    /// A river, a road spline or a tunnel path is an entity whose geometry lives
+    /// entirely in its [`Spline`] component: the `Transform` is the identity and
+    /// there is no `MeshRef`, so it never becomes a render instance. `Focus
+    /// Selection` therefore found nothing for it, `selection_center` fell
+    /// through to the player start, and on the island — whose rivers are exactly
+    /// this shape — three attempts at framing one landed on the world origin.
+    /// That is wave ROAD1's carried item 12, and it is why that wave could not
+    /// photograph the river it had just measured.
+    ///
+    /// The polyline is already projected for the editor's own spline overlay
+    /// (`spline_polylines`, world space, entity transform applied), so this
+    /// costs a lookup and a walk over points the frame already holds.
+    ///
+    /// The radius is half the run's diagonal with a 4 m floor, which frames a
+    /// whole watercourse rather than one bend — a 2 km river framed at its
+    /// midpoint with a 2 m radius is a picture of some water.
+    ///
+    /// An entity that HAS a render instance is answered `None`: the instance
+    /// already contributes its own position and extent, and counting it twice
+    /// would drag the framed centre toward whichever half of it is a curve.
+    fn spline_focus(&self, id: uuid::Uuid) -> Option<(DVec3, f64)> {
+        if self.guid_to_id.contains_key(&id) {
+            return None;
+        }
+        curve_focus(&self.spline_polylines.get(&id)?.line)
     }
 
     /// Rebuild the render projection from the shared document when it changed
@@ -4787,6 +4850,13 @@ impl EngineHost {
             if let Some(inst) = self.instance_xform(*id) {
                 let extent = inst.scale.abs().max_element() as f64;
                 radius = radius.max((inst.translation - center).length() + extent);
+            }
+        }
+        for guid in &self.selected_guids {
+            // A curve-shaped entity — see `spline_focus` for the river this was
+            // written for.
+            if let Some((mid, extent)) = self.spline_focus(*guid) {
+                radius = radius.max((mid - center).length() + extent);
             }
         }
         for s in self.selected_2d.values() {
@@ -8196,6 +8266,54 @@ fn project_hair(
         shadow: inf_render::SkinnedShadow::BindSphere,
     });
 }
+#[cfg(test)]
+mod curve_focus_tests {
+    use super::curve_focus;
+    use glam::DVec3;
+
+    /// **A river is framed by its whole run, not by a point** (audit ROAD1).
+    ///
+    /// Wave ROAD1 could not photograph the river it had just measured: `Focus
+    /// Selection` read a river's `Transform`, which is the identity, so three
+    /// attempts landed on the world origin. The entity's geometry is in its
+    /// `Spline`, and this is the arithmetic that reads it.
+    ///
+    /// Falsification: return the first point instead of the box centre and the
+    /// centre assertion reds; drop the `max(4.0)` and the puddle reds.
+    #[test]
+    fn a_long_thin_run_is_framed_by_its_length() {
+        // 400 m of river running +X, wandering 6 m in Z and dropping 10 m.
+        let line: Vec<DVec3> = (0..=40)
+            .map(|i| {
+                let t = f64::from(i) / 40.0;
+                DVec3::new(100.0 + 400.0 * t, 50.0 - 10.0 * t, -20.0 + 6.0 * t)
+            })
+            .collect();
+        let (centre, radius) = curve_focus(&line).expect("a curve has a focus");
+        assert!((centre.x - 300.0).abs() < 1.0e-9, "{centre:?}");
+        assert!((centre.y - 45.0).abs() < 1.0e-9, "{centre:?}");
+        assert!((centre.z - (-17.0)).abs() < 1.0e-9, "{centre:?}");
+        // Half the diagonal of a 400 x 10 x 6 box.
+        let want = (400.0f64 * 400.0 + 10.0 * 10.0 + 6.0 * 6.0).sqrt() * 0.5;
+        assert!((radius - want).abs() < 1.0e-9, "{radius} vs {want}");
+        assert!(
+            radius > 190.0,
+            "a 400 m river framed at {radius} m is a picture of one bend"
+        );
+    }
+
+    /// A two-metre puddle takes the floor rather than a two-metre radius, and an
+    /// empty curve has no focus at all.
+    #[test]
+    fn a_short_curve_takes_the_floor_and_an_empty_one_has_none() {
+        let line = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0)];
+        let (centre, radius) = curve_focus(&line).expect("a focus");
+        assert_eq!(centre, DVec3::new(1.0, 0.0, 0.0));
+        assert_eq!(radius, 4.0);
+        assert!(curve_focus(&[]).is_none());
+    }
+}
+
 #[cfg(test)]
 mod render_settings_tests {
     use super::{apply_record, RenderSettings, RenderSettingsRecord};
