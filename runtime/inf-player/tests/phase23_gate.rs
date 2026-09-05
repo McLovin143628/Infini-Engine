@@ -891,58 +891,70 @@ fn the_workshop_opens_and_saves_inside_its_budgets() {
 
 // ── (i) COOK ADVISORIES ─────────────────────────────────────────────────────
 
-/// **What the cook says about this sample, and why it is not silence.**
+/// **The hand-modelled prop SHIPS** — and this arm used to say the opposite.
 ///
-/// Every other phase gate asserts its flagship draws no advisory. This one
-/// cannot, and the reason is a finding rather than an oversight: **a
-/// hand-modelled prop is a few dozen triangles, which is below the cook's
-/// `[vgeom] min_triangles` (2048)**. The editor's `ensure_vmesh` derives from one
-/// triangle, so the prop looks right the whole time it is being authored and
-/// ships as a placeholder cube — which is exactly what that advisory exists to
-/// say, and the DCC's entire output class lives in that gap.
+/// P23 could not assert its flagship cooks clean, and the reason was a finding
+/// rather than an oversight: **a hand-modelled prop is a few dozen triangles,
+/// which is below the cook's `[vgeom] min_triangles` (2048)**. The editor's
+/// `ensure_vmesh` derives from one triangle, so the prop looked right the whole
+/// time it was being authored and shipped as a placeholder cube. The DCC's entire
+/// output class lived in that gap, and this arm's job was to hold the gap open
+/// with an advisory in it: "expected exactly the sub-threshold advisory".
 ///
-/// So the arm asserts the advisory is **the only one**, that it says what it
-/// should, and that lowering the threshold silences the cook completely — which
-/// is what proves nothing else is wrong with the content.
+/// **Wave FIX2 closed it**, from the direction the threshold could not see. The
+/// threshold trades virtualized geometry against a cheaper path, and for a rigid
+/// `MeshRef.asset` there is no cheaper path — `RenderScene` has one door for real
+/// geometry — so the cook now derives a DAG for every mesh a level DRAWS,
+/// whatever its size. (FIX2 also deleted the placeholder cube, which is what made
+/// the gap unignorable: below the threshold the prop would not have shipped as a
+/// box, it would not have shipped at all.)
+///
+/// So the sample now cooks in **silence**, and the arm asserts the two facts that
+/// silence has to mean: no advisories, and the prop's `.inf_vmesh` really is in
+/// the pack. The second is what keeps the first from being satisfied by a cook
+/// that has stopped saying anything.
 #[test]
-fn the_workshop_cook_draws_only_the_advisory_it_earns() {
+fn the_workshop_prop_ships_its_geometry_and_the_cook_says_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     scaffold(tmp.path());
     let proj = tmp.path().join("proj");
 
     let report = cook(&proj, &tmp.path().join("out"), &CookOptions::default()).expect("cooks");
-    assert_eq!(
-        report.warnings.len(),
-        1,
-        "expected exactly the sub-threshold advisory: {:?}",
+    assert!(
+        report.warnings.is_empty(),
+        "the workshop sample trips advisories: {:?}",
         report.warnings
     );
-    let w = &report.warnings[0];
-    assert!(w.contains("PLACEHOLDER CUBE"), "{w}");
-    assert!(w.contains(&PHASE23_MESH_GUID.to_string()), "{w}");
-    assert!(w.contains("min_triangles"), "the fix is named: {w}");
-
-    // …and the fix works, which is what makes the advisory advice.
-    let opts = CookOptions {
-        vgeom: inf_packager::VgeomCookOptions {
-            min_triangles: 1,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let lowered = cook(&proj, &tmp.path().join("out2"), &opts).expect("cooks");
-    assert!(
-        lowered.warnings.is_empty(),
-        "with the threshold lowered the sample still trips advisories: {:?}",
-        lowered.warnings
-    );
-    let reader = PackReader::open(&lowered.pack_path).unwrap();
+    let reader = PackReader::open(&report.pack_path).unwrap();
     assert!(
         reader
             .index()
             .any(|e| e.guid == inf_vgeom::derived_vmesh_id(AssetId(PHASE23_MESH_GUID))),
-        "the lowered cook did not ship a .inf_vmesh for the prop"
+        "the cook shipped no .inf_vmesh for the prop the level draws, so a shipped \
+         build renders nothing where the editor renders the model"
     );
+
+    // **The advisory is not dead, it is narrowed** — and this is where that is
+    // proved rather than asserted. Cooking the MESH alone, with no level to draw
+    // it, is the case FIX2 leaves the threshold governing: nothing is missing
+    // from that pack, and the advisory says so about the binding that has not
+    // been made yet.
+    let alone = cook(
+        &proj,
+        &tmp.path().join("out2"),
+        &CookOptions {
+            roots: Some(vec![AssetId(PHASE23_MESH_GUID)]),
+            ..Default::default()
+        },
+    )
+    .expect("cooks");
+    let w = alone
+        .warnings
+        .iter()
+        .find(|w| w.contains(&PHASE23_MESH_GUID.to_string()))
+        .unwrap_or_else(|| panic!("no sub-threshold advisory in {:?}", alone.warnings));
+    assert!(w.contains("renders NOTHING"), "{w}");
+    assert!(w.contains("min_triangles"), "the fix is named: {w}");
 }
 
 /// **The sample really is the done-when sentence** — asserted on the generators,

@@ -1029,9 +1029,11 @@ fn a_dangling_terrain_reference_warns_without_failing() {
 /// **The sub-threshold advisory reaches the report** (P18.3 audit).
 ///
 /// A mesh below `min_triangles` gets no `.inf_vmesh`, and since `RenderScene` has
-/// exactly one door for real geometry, that means the shipped build draws a
-/// placeholder cube — while the editor, which derives from one triangle, shows the
-/// real thing. The threshold is a defensible cost decision; being silent about it
+/// exactly one door for real geometry, that means a shipped build renders nothing
+/// for it the day a level binds one -- while the editor, which derives from one
+/// triangle, shows the real thing. (Wave FIX2: a mesh a level ALREADY draws is
+/// virtualized whatever its size, so this fixture's mesh is a root with no level
+/// referencing it, which is exactly the case the advisory is left for.) The threshold is a defensible cost decision; being silent about it
 /// is how "it looked right in the editor" becomes a shipped bug.
 #[test]
 fn cook_advises_when_a_mesh_is_below_the_vgeom_threshold() {
@@ -1061,7 +1063,7 @@ fn cook_advises_when_a_mesh_is_below_the_vgeom_threshold() {
         .iter()
         .find(|w| w.contains(&mesh_id.to_string()))
         .unwrap_or_else(|| panic!("no sub-threshold advisory in {:?}", report.warnings));
-    assert!(advisory.contains("PLACEHOLDER CUBE"), "{advisory}");
+    assert!(advisory.contains("renders NOTHING"), "{advisory}");
     assert!(
         advisory.contains("1000000"),
         "states the threshold: {advisory}"
@@ -1082,7 +1084,7 @@ fn cook_advises_when_a_mesh_is_below_the_vgeom_threshold() {
     .expect("cook succeeds");
     assert_eq!(ok.meshlet_meshes_derived, 1);
     assert!(
-        !ok.warnings.iter().any(|w| w.contains("PLACEHOLDER CUBE")),
+        !ok.warnings.iter().any(|w| w.contains("renders NOTHING")),
         "a derived mesh must not be advised about: {:?}",
         ok.warnings
     );

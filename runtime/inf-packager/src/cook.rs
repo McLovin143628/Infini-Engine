@@ -457,6 +457,7 @@ fn cook_one(
     opts: &CookOptions,
     fractures: &BTreeMap<AssetId, FractureRequest>,
     clusters: &BTreeMap<AssetId, inf_vgeom::ClusterTextureSet>,
+    drawn: &BTreeSet<AssetId>,
 ) -> Result<CookOutput> {
     let (guid, kind, name, raw) = match input {
         CookInput::Skipped(w) => return Ok(CookOutput::Skipped(w)),
@@ -698,11 +699,38 @@ fn cook_one(
             .get(&guid)
             .cloned()
             .unwrap_or_else(inf_vgeom::ClusterTextureSet::none);
-        match derive_vmesh(guid, &cooked, opts.vgeom.min_triangles, &paired)? {
+        // **The threshold is a COST decision, and it does not apply to a mesh a
+        // level DRAWS** (wave FIX2).
+        //
+        // `min_triangles` says "below this, virtualizing costs more than it
+        // saves, and the classic path is cheaper". The premise is false for a
+        // rigid `MeshRef.asset`: `RenderScene` has exactly one door for real
+        // non-primitive geometry, so below the threshold there is no cheaper
+        // path — there is NO path, and the mesh was drawn as a placeholder cube
+        // (P18.3's own advisory said so in as many words). Since FIX2 the cube is
+        // gone and it would draw nothing at all, while a PIE session — whose
+        // editor derives from one triangle — drew it correctly. That is PIE !=
+        // shipping on the render half, and it is measured: the CI island's four
+        // road layers gave 4 DAGs in a payload and 3 in a pack.
+        //
+        // So a mesh some level in this closure draws rigidly is virtualized
+        // whatever its size. The threshold still governs every other mesh, where
+        // it is what it always was: a mesh nothing draws through vgeom pays
+        // nothing for a DAG it will not use.
+        let min = if drawn.contains(&guid) {
+            1
+        } else {
+            opts.vgeom.min_triangles
+        };
+        match derive_vmesh(guid, &cooked, min, &paired)? {
             Ok(bytes) => Some((derived_vmesh_id(guid), bytes)),
-            // A mesh with real geometry that the threshold turned away ships as a
-            // placeholder cube — say so (P18.3 audit). An empty mesh says nothing:
-            // a cube is the honest rendering of no geometry.
+            // A mesh with real geometry that the threshold turned away draws
+            // NOTHING when a level binds it (P18.3 audit; FIX2 deleted the cube
+            // that used to stand in) — say so. It reaches here only for a mesh no
+            // level draws rigidly, since one that is drawn is virtualized above
+            // whatever its size; the advisory is what a project gets when a
+            // binding is added later. An empty mesh says nothing: there is no
+            // geometry to miss.
             Err(VmeshSkip::BelowThreshold { triangles, min }) => {
                 advisories.push(sub_threshold_advisory(guid, &name, triangles, min));
                 None
@@ -1102,6 +1130,40 @@ pub fn unpairable_cluster_texture_advisory(
 /// same mesh (only one `.inf_fracture` can exist per mesh, because its id is a
 /// function of the mesh's). Deduplicated + sorted, like every other advisory
 /// here, so the report stays deterministic.
+/// **Every mesh some level in this closure draws as rigid geometry** (wave FIX2)
+/// — the `MeshRef.asset` bindings, over the level bytes about to be cooked.
+///
+/// [`plan_fractures`]' walk minus the `destructible` filter, and it answers the
+/// one question `[vgeom] min_triangles` cannot: is there a cheaper path for this
+/// mesh, or is virtualized geometry the only way it is ever drawn? A mesh here
+/// is virtualized whatever its triangle count, because below the threshold a
+/// bound `MeshRef` draws NOTHING in a shipped build while a PIE session — whose
+/// editor derives from one triangle — draws it.
+///
+/// A level that does not decode is skipped in silence: the real cook stage fails
+/// the build on it with a proper error, and this pass reporting it too would say
+/// the same thing twice.
+fn drawn_meshes(inputs: &[CookInput]) -> BTreeSet<AssetId> {
+    let mut out = BTreeSet::new();
+    for input in inputs {
+        let CookInput::Asset { kind, raw, .. } = input else {
+            continue;
+        };
+        if *kind != AssetKind::Level {
+            continue;
+        }
+        let Ok(level) = inf_scene::decode(raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            if let Some(mesh) = e.mesh.as_ref().and_then(|m| m.asset) {
+                out.insert(AssetId(mesh));
+            }
+        }
+    }
+    out
+}
+
 fn plan_fractures(inputs: &[CookInput]) -> (BTreeMap<AssetId, FractureRequest>, Vec<String>) {
     let mut plan: BTreeMap<AssetId, FractureRequest> = BTreeMap::new();
     let mut notes: BTreeSet<String> = BTreeSet::new();
@@ -1381,11 +1443,21 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     };
     warnings.extend(cluster_notes);
 
+    // Which meshes a level actually DRAWS as rigid geometry (wave FIX2) — the
+    // same cross-asset shape as the two plans above, resolved serially here and
+    // handed in as read-only data. See the threshold note in `cook_one`.
+    let drawn = if opts.vgeom.enabled {
+        let _span = tracing::info_span!("plan_drawn_meshes").entered();
+        drawn_meshes(&inputs)
+    } else {
+        BTreeSet::new()
+    };
+
     // Parallel, deterministic (in-order) map: cook every asset on the job pool.
     let outputs: Vec<Result<CookOutput>> = {
         let _span = tracing::info_span!("cook_assets", assets = inputs.len()).entered();
         inf_core::parallel_map(inputs, |input| {
-            cook_one(input, opts, &fracture_plan, &cluster_plan)
+            cook_one(input, opts, &fracture_plan, &cluster_plan, &drawn)
         })
     };
 
@@ -1762,22 +1834,33 @@ pub enum VmeshSkip {
 ///
 /// **Why this is worth a line of output.** `RenderScene` has exactly one door for
 /// real (non-primitive) geometry — virtualized geometry — so a mesh with no
-/// `.inf_vmesh` renders as a **placeholder cube**, in the editor and in the
-/// shipped build alike. Since P18.3 the editor derives from one triangle, so a
-/// 500-triangle prop looks correct while it is being authored and ships as a cube.
-/// That is the worst shape a defect can have: invisible until the build, and
-/// invisible *in* the build until someone walks up to it. The threshold itself is
-/// a defensible cost decision; leaving it silent is not.
+/// `.inf_vmesh` cannot be drawn at all. Since P18.3 the editor derives from one
+/// triangle, so a 500-triangle prop looks correct while it is being authored and
+/// is missing from the build. That is the worst shape a defect can have:
+/// invisible until the build, and invisible *in* the build until someone walks up
+/// to where it should be. The threshold itself is a defensible cost decision;
+/// leaving it silent is not.
+///
+/// **Wave FIX2 narrowed when this fires and sharpened what it says.** A mesh some
+/// level DRAWS through a `MeshRef` is now virtualized whatever its size — the
+/// threshold is a cost decision and there is no cheaper path to be traded against
+/// — so this advisory reaches only meshes nothing draws rigidly today, and its
+/// subject is the binding that has not been made yet. Its old wording promised a
+/// **placeholder cube**; FIX2 deleted the cube, because a 1 m box at an entity's
+/// transform is a claim about the world no author made, so the honest consequence
+/// is that the shipped build renders nothing at all.
 ///
 /// Pure, so the wording and the trigger are unit-tested — the
 /// `partition::streamed_actors` / `streamed_terrains` precedent.
 pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: usize) -> String {
     format!(
         "mesh {guid} ({name}) has {triangles} triangles, below the virtualized-geometry \
-         threshold of {min}, so no .inf_vmesh was derived — the shipped build renders it as a \
-         PLACEHOLDER CUBE (the editor derives from one triangle, so it looks correct while you \
-         author it). Lower [vgeom] min_triangles for this build, or merge the mesh into a \
-         denser one."
+         threshold of {min}, so no .inf_vmesh was derived. No level in this build DRAWS \
+         it through a MeshRef, and a mesh that IS drawn is virtualized whatever its size \
+         (wave FIX2), so nothing is missing from this pack. The day something binds it, \
+         the shipped build renders NOTHING for it while the editor, which derives from \
+         one triangle, renders it correctly. Lower [vgeom] min_triangles for this build, \
+         or merge the mesh into a denser one."
     )
 }
 
@@ -4079,9 +4162,13 @@ mod vmesh_advisory {
         assert!(msg.contains("2048"), "states the threshold: {msg}");
         assert!(msg.contains("min_triangles"), "states the remedy: {msg}");
         assert!(
-            msg.contains("PLACEHOLDER CUBE"),
+            msg.contains("renders NOTHING"),
             "states the consequence — the part that makes it worth reading: {msg}"
         );
+        // …and it names the condition under which the consequence arrives, which
+        // is what FIX2 changed: a mesh nothing draws is not missing from a pack,
+        // and the advisory that says otherwise is the one people learn to ignore.
+        assert!(msg.contains("DRAWS"), "states when it bites: {msg}");
     }
 
     /// **P23.6 — the unbaked-population signpost.** Same bar as above: which
