@@ -32853,6 +32853,35 @@ ROAD1b RIVER | at 200 m: 622 river px (mean 144.8/255), 194 bank px (mean 149.7/
 it*, by three per cent, and its brightest pixel is 1.43× its own mean. "A dark
 line in gravel" is not a figure of speech; it is 144.8 against 149.7.
 
+### THE DEMO LOOP, AND THE CORRECTION IT FORCED
+
+`tools/demo/demo.ps1` on the final tree: **HERO MOVED 13.861 m**, and
+`01-editor.png` is the wave's own proof — a **four-lane settlement street with a
+double yellow centreline and white edge lines** running up to the junction where
+the two-lane GIS arterial crosses it, with the crossing painted between them.
+Before this wave that street was the strip of bare graded earth the ROAD1 audit
+photographed.
+
+It also earned its place as a gate. The first run reported **HERO MOVED 1.106 m
+against a 5.0 m floor**: the hero walked 7.6 m from its spawn, stopped dead, and
+stood there for seven seconds with its own speed reading 3.75 m/s. The same run
+with the footway collider switched off read **18.733 m**. The something it
+walked into was a footway slab that had taken its height from `Street::y`
+because the terrain under it had not paged in — and `Street::y` is a doorway-sill
+median measured forty-five metres out at worst. A slab on that guess is a wall,
+and a character controller does not autostep a wall. **No ground, no footway**;
+the refusal is counted rather than silent.
+
+**AND THE PIE FRAME STILL SHOWS NO ROAD, WHICH IS NOT THIS WAVE'S DOING.**
+`runtime/inf-player/src/window.rs:1419` has said so since before ROAD1: *"PIE
+streams no vmesh assets yet (a documented follow-up); a rigid `MeshRef.asset`
+still renders as a placeholder cube in PIE."* So the ROAD1 audit's headline
+evidence — the hero on bare earth in `03-pie-b.png` — was **two defects wearing
+one symptom**, and only one of them is closed here: the settlement street really
+was unpaved, and PIE draws no road mesh of any kind, arterial included. The
+editor draws them; the shipped player draws them off its pack; the Play button
+does not. Carried, and it is the reason this wave's proof frame is the editor's.
+
 ### CARRIED
 
 24. **The parked-car lattice is not on the kerb the paving draws** — 0.650 m
@@ -32886,3 +32915,11 @@ line in gravel" is not a figure of speech; it is 144.8 against 149.7.
     through the graph, so two settlement grids whose lines coincide on one axis
     within a metre would take each other's lane count. No island produces one;
     the derivation's merged intervals cannot.
+32. **PIE draws no road mesh at all** — the documented vmesh follow-up above.
+    Until the payload carries a vmesh index, the Play button shows a placeholder
+    cube where the editor and the shipped player both show a street, and no
+    frame taken through PIE can answer "do the roads look right".
+33. **A footway is refused where the terrain has not paged in.** That is the
+    right answer for a surface nothing can place, and it means a player who
+    outruns the streamer walks through a kerb for as long as it takes the tile
+    to arrive. The alternative is a wall, measured at 1.106 m of hero.
