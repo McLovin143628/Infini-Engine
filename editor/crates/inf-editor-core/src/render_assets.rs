@@ -412,31 +412,27 @@ impl EditorRenderAssets {
         //
         // `derived_is_current` is the SAME comparison `plan_vmesh` makes, so the
         // viewport refuses exactly what the sweep would rebuild.
-        if let Some(mesh_path) = self.resolve_path(mesh_id) {
-            match (
-                inf_asset::AssetSidecar::load(&mesh_path),
-                inf_asset::AssetSidecar::load(&path),
-            ) {
-                (Ok(mesh), Ok(derived)) => {
-                    if !crate::assets::vmesh::derived_is_current(&mesh, &derived) {
-                        tracing::warn!(
-                            "inf-editor-core: .inf_vmesh {} was derived from different bytes \
-                             than {} holds now, so it is NOT drawn — the project-open meshlet \
-                             sweep rebuilds it, and until it does this mesh has no geometry \
-                             the project can honestly show",
-                            path.display(),
-                            mesh_path.display()
-                        );
-                        return None;
-                    }
-                }
-                // A `.inf_vmesh` with no readable sidecar is not one this editor
-                // derived (a cooked artifact copied in by hand, say), and a mesh
-                // with none is not in the database at all. Neither is a staleness
-                // CLAIM, so neither is a refusal: drawing it is what the editor
-                // did before this wave and the currency question does not apply.
-                _ => {}
-            }
+        //
+        // A `.inf_vmesh` with no readable sidecar is not one this editor derived
+        // (a cooked artifact copied in by hand, say), and a mesh with none is not
+        // in the database at all. Neither is a staleness CLAIM, so neither is a
+        // refusal — the `?` chain below falls through to the read, which is what
+        // the editor did before this wave.
+        let stale = self.resolve_path(mesh_id).and_then(|mesh_path| {
+            let mesh = inf_asset::AssetSidecar::load(&mesh_path).ok()?;
+            let derived = inf_asset::AssetSidecar::load(&path).ok()?;
+            (!crate::assets::vmesh::derived_is_current(&mesh, &derived)).then_some(mesh_path)
+        });
+        if let Some(mesh_path) = stale {
+            tracing::warn!(
+                "inf-editor-core: .inf_vmesh {} was derived from different bytes than {} \
+                 holds now, so it is NOT drawn — the project-open meshlet sweep rebuilds \
+                 it, and until it does this mesh has no geometry the project can honestly \
+                 show",
+                path.display(),
+                mesh_path.display()
+            );
+            return None;
         }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
