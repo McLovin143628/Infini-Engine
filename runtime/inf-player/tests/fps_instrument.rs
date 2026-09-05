@@ -1864,7 +1864,7 @@ fn cook_island(tmp: &Path) -> Option<PathBuf> {
         );
         assert!(
             total <= ROAD_TRIANGLES_CEILING,
-            "the island's road meshes hold {total} triangles against a ceiling              of {ROAD_TRIANGLES_CEILING} {RATCHET_NOTE}"
+            "the island's road meshes hold {total} triangles against a ceiling of {ROAD_TRIANGLES_CEILING} {RATCHET_NOTE}"
         );
     }
     let proj = tmp.join("island");

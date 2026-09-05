@@ -1670,6 +1670,21 @@ impl PhysicsBridge3D {
         self.terrain_audit
     }
 
+    /// **The colliders the footway slabs currently hold** (wave ROAD1b) — for a
+    /// caster that must look THROUGH concrete.
+    ///
+    /// A settle ray asks "what is under this car" and a kerb is not the answer:
+    /// a car whose derived slot is beside a footway would latch its ground
+    /// 150 mm high and be placed standing on the pavement. `not_the_ground`
+    /// already looks through people for the same reason and this is the same
+    /// list, one kind along.
+    pub fn kerb_collider_ids(&self) -> BTreeSet<super::ColliderId3D> {
+        self.kerb_admitted
+            .iter()
+            .filter_map(|g| self.collider_of(*g))
+            .collect()
+    }
+
     /// **What the last footway-slab pass described** (wave ROAD1b) — the budget
     /// instrument for the kerb colliders, on
     /// [`terrain_collider_audit`](Self::terrain_collider_audit)'s shape.

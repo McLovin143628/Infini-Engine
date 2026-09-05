@@ -1712,10 +1712,20 @@ fn carriageway_y(
         // side of a 1.78 m step (measured, on the island fixture, at
         // (-378.3, 318.1)). Unclamped, that limb's carriageway hangs in the air.
         //
-        // Clamped, the worst a road can do is sit its own crown above the
-        // ground or the same distance below it, and where the plateau IS flat —
-        // every straight and every gentle bend, which is nearly all of it — the
-        // clamp is inactive and the section is exactly planar.
+        // Clamped, the worst a road can do is sit its own crown above or below
+        // the ground THE SECTION IS BLENDED FROM — and then the crown term
+        // below is added on top of that, so the bound on a vertex against the
+        // ground beside it is `2 · crown_fall · half`, not one crown. The doc
+        // here said one until wave ROAD1b and the arithmetic has always said
+        // two; nothing measured the difference while every road on the island
+        // sat on a levelled corridor, where `blended == local` and the clamp is
+        // inactive. A settlement street is graded over a settlement PAD, which
+        // is a dome, and `road1_gate`'s `GRADED_CLAMP_M` now names the real
+        // number (0.2800 m on a 7 m half-width, against 0.1750 m measured).
+        //
+        // Where the plateau IS flat — every straight and every gentle bend on a
+        // GIS route, which is nearly all of them — the clamp is inactive and
+        // the section is exactly planar.
         let slack = opts.crown_fall * half_m;
         blended.clamp(local - slack, local + slack)
     };

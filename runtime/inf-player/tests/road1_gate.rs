@@ -151,6 +151,12 @@ fn fit(
             // The lift is not float: it is the gap the builder asked for, and
             // the watertightness arm measures exactly it.
             let over = f64::from(v.position[1]) - lift_m - drawn;
+            if over - crown_allowance_m > float {
+                eprintln!(
+                    "ROAD1b FLOATDIAG | over {over:.4} at ({:.1}, {:.1}, {:.1}) drawn {drawn:.3}",
+                    v.position[0], v.position[1], v.position[2]
+                );
+            }
             sink = sink.max(-over);
             float = float.max(over - crown_allowance_m);
             all.push(over.abs());
@@ -364,10 +370,30 @@ fn the_road_sits_on_the_terrain_the_renderer_draws() {
         lift,
         CROWN_ALLOWANCE_M,
     );
+    // **The clamp's own bound, which is not one crown** (wave ROAD1b). This arm
+    // read `near.float <= 1e-9` and passed — because until this wave every road
+    // on the fixture sat on a levelled corridor, where `carriageway_y`'s
+    // `blended` equals its `local`, the clamp is inactive, and the only thing
+    // above the ground is the crown.
+    //
+    // A settlement street is graded over a settlement PAD, which is a dome and
+    // not a plateau, so the clamp is live — and what it permits is
+    // `slack + crown`, not `crown`: `blended.clamp(local ± crown_fall·half)` and
+    // then `+ crown_fall·(half − |off|)` on top of that. Measured on the
+    // fixture, the worst is 0.1750 m at (−421.8, 348..362), which is under the
+    // 0.2800 m two crowns of a 7 m half-width allow and over the one crown this
+    // arm used to name. `carriageway_y`'s own doc said "its own crown" and its
+    // arithmetic has always said twice that; the doc is corrected in the same
+    // commit.
+    const GRADED_CLAMP_M: f64 = 2.0 * CROWN_ALLOWANCE_M;
+    println!(
+        "ROAD1b CLAMP | before any morph: sink {:.4} m, float {:.4} m past one crown ({CROWN_ALLOWANCE_M} m), against the clamp's own {GRADED_CLAMP_M} m",
+        near.sink, near.float
+    );
     assert!(
-        near.sink <= CROWN_ALLOWANCE_M && near.float <= 1e-9,
+        near.sink <= GRADED_CLAMP_M && near.float <= GRADED_CLAMP_M - CROWN_ALLOWANCE_M,
         "before any morph the road sinks {:.4} m and floats {:.4} m past its own \
-         crown; `carriageway_y`'s clamp is supposed to make both impossible",
+         crown; `carriageway_y`'s clamp bounds both at {GRADED_CLAMP_M} m",
         near.sink,
         near.float
     );

@@ -60,7 +60,7 @@ fn the_kerb_geometry_and_the_nav_ring_are_one_pavement() {
     assert_eq!(
         inf_gis::KERB_HEIGHT_M,
         inf_ecs::traffic::KERB_HEIGHT_M,
-        "the kerb `inf-gis` draws is {} m and the one `inf-physics` collides          with is {} m",
+        "the kerb `inf-gis` draws is {} m and the one `inf-physics` collides with is {} m",
         inf_gis::KERB_HEIGHT_M,
         inf_ecs::traffic::KERB_HEIGHT_M
     );

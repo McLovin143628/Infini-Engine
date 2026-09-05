@@ -346,8 +346,8 @@ fn the_footway_costs_a_bounded_number_of_boxes() {
     }
     let settled = sim.bridge3d().kerb_collider_audit();
     println!(
-        "ROAD1b KERB COST | {} slab(s) described, {} culled, over {} street(s); settled at {} described",
-        first.described, first.culled, first.streets, settled.described
+        "ROAD1b KERB COST | {} slab(s) described, {} culled by the band, {} refused across another carriageway, over {} street(s); settled at {} described",
+        first.described, first.culled, first.crossed, first.streets, settled.described
     );
     assert!(
         first.streets > 0,
@@ -372,6 +372,22 @@ fn the_footway_costs_a_bounded_number_of_boxes() {
         "the slab set moved on a level where nothing did"
     );
     assert_eq!(settled.culled, 0, "a settled pass re-tiered its slabs");
+    // **AND NOT ACROSS A JUNCTION.** A street's footway runs its whole length,
+    // so the one along Z crosses the carriageway of the one along X — and a
+    // collider laid there is a 2.3 m concrete wall through every intersection in
+    // the settlement. It is `inf_gis::clip_kerbs_to_open_ground`'s claim, one
+    // system along, and it did not present subtly: without it
+    // `ems2_dispatch_gate` loses two arms, a unit that never reaches its
+    // incident and a fleet that never comes home, because a responder driving
+    // down one street hits a kerb laid across the next.
+    //
+    // Falsification: drop the `crosses_another_carriageway` guard and this reds
+    // at zero while the walk arm above stays green — which is why it is a claim
+    // and not a comment.
+    assert!(
+        first.crossed > 0,
+        "not one slab was refused for lying across another street's          carriageway, on a fixture built out of two streets that cross"
+    );
 }
 
 /// **How many footway slab colliders a settlement may cost one fixed step.**

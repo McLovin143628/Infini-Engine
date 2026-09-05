@@ -1797,9 +1797,18 @@ mod tests {
         /// one of them is a **committed-design** door or a name-derived GUID; not
         /// one of them opens an elevation tile.
         const ALLOWED: &[&str] = &[
-            "IslandDesign",   // the committed design, read by `read_design`
-            "IslandRecipe",   // the committed recipe
-            "SiteKind",       // a site's own kind, off the committed recipe
+            "IslandDesign", // the committed design, read by `read_design`
+            "IslandRecipe", // the committed recipe
+            "SiteKind",     // a site's own kind, off the committed recipe
+            // Wave ROAD1b's street layer: the spans the level's OWN BLOCKS imply,
+            // through `inf_ecs::traffic::streets_of_blocks`, written beside the
+            // level by `write_island_level`. `StreetSpan` is the record and
+            // `layers::write_streets` the writer; neither reads a height — a
+            // span carries the settlement's own plan Y and the ribbon takes its
+            // elevation from the terrain at BUILD time, in `inf-island`, where
+            // the tiles are. That is the same division `write_roads` already
+            // has, and it is why this layer can be committed at all.
+            "StreetSpan",
             "biome_set_guid", // …and five GUIDs derived from the island's name
             "cover_pcg_guid",
             "level_guid",
@@ -1810,6 +1819,7 @@ mod tests {
             // parked on the circuit is placed from the design and not from a
             // tile. It opens nothing.
             "nearest_route_vertex",
+            "layers",      // …its writer (wave ROAD1b; see `StreetSpan` above)
             "read_design", // the one door onto the committed layers
             "road_mesh_guid",
             // Wave ROAD1's three road-furniture meshes. Same shape as

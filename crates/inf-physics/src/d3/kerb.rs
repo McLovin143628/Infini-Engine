@@ -159,6 +159,9 @@ fn ground_at(terrains: &[(&Terrain, DVec3)], p: DVec2) -> Option<f64> {
 /// settlement street is: `streets_of_blocks` only ever answers lines along X or
 /// along Z, so the two cases are a swap of the half-extents and never a rotation.
 pub fn slab_box(street: &Street, side: i8, chunk: i64, ground_y: f64) -> Option<(DVec3, DVec3)> {
+    if !footway_is_clear_of_the_parked_row(street.gap_m) {
+        return None;
+    }
     let kerb = inf_ecs::traffic::street_kerb_offset_m(street.gap_m);
     let back = kerb + KERB_WIDTH_M + inf_ecs::society::PAVEMENT_M;
     let across_half = (back - kerb) * 0.5;
@@ -200,6 +203,90 @@ pub fn slab_box(street: &Street, side: i8, chunk: i64, ground_y: f64) -> Option<
     Some((centre, half))
 }
 
+/// **Whether a street's footway can be made solid at all** — whether the
+/// SHIPPED parking lattice leaves it alone (wave ROAD1b).
+///
+/// # The measurement this exists for
+///
+/// `inf_ecs::traffic::KERB_PARK_OFFSET_M` is 5.0 m on every street and
+/// `kerb_slots` still uses it, because deriving it from the drawn kerb
+/// deadlocks the emergency service (see `kerb_park_offset_m`'s own note). On a
+/// **20 m** city reserve the kerb is at 7.000 m and a parked car's flank is at
+/// 5.900 — a metre clear. On a **16 m** town reserve the kerb is at 5.250 and
+/// that flank is at 5.900, so the car begins the level **0.650 m inside the
+/// concrete**, and rapier answers a dynamic body spawned inside a static box by
+/// pushing it out of one. Measured: the whole fleet ends up somewhere else, and
+/// `ems2_dispatch_gate` loses two arms — a unit that never reaches its incident
+/// and a fleet that never comes home.
+///
+/// So a street the parked row overlaps gets **no footway collider**, and the
+/// two carried items are one: close the parking offset and this opens by
+/// itself. Harbour City and Eastgate are 20 m and keep theirs — which is where
+/// the hero spawns and where every demo frame is taken.
+///
+/// It is a *predicate over the reserve* and not a per-car test on purpose: a
+/// slab's existence has to be a function of the street, or it would appear and
+/// vanish as cars were drawn and released.
+pub fn footway_is_clear_of_the_parked_row(gap_m: f64) -> bool {
+    inf_ecs::traffic::KERB_PARK_OFFSET_M + inf_ecs::traffic::PARKED_CAR_HALF_W_M
+        <= inf_ecs::traffic::street_kerb_offset_m(gap_m)
+}
+
+/// **Whether a slab would lie across another street's carriageway** (wave
+/// ROAD1b) — the collider's half of `inf_gis::clip_kerbs_to_open_ground`.
+///
+/// # What this closes, measured
+///
+/// A street's footway runs its whole length, and `streets_of_blocks` answers
+/// whole lines: so the footway of the street along Z crosses the carriageway of
+/// every street along X, exactly as its *drawn* footway does. `inf-gis` clips
+/// the drawn one — that is the audit's own "a footway is never drawn on a
+/// carriageway" — and until this rule the collider was not clipped at all, so
+/// every junction in a settlement carried a **2.3 m × 150 mm concrete wall
+/// across it**.
+///
+/// It is not a subtle defect and it did not present as one: `ems2_dispatch_gate`
+/// lost two arms, a unit that never reached its incident and a fleet that never
+/// came home, because a responder driving down one street hit a kerb laid across
+/// the next.
+///
+/// The test is against the crossing street's own **carriageway** —
+/// `street_kerb_offset_m`, the asphalt — and not against its footway, because
+/// two footways meeting at a corner is a corner and not an obstruction. A slab
+/// is refused whole rather than trimmed: a chunk is [`KERB_SLAB_M`] long and a
+/// junction is one chunk wide, so trimming would buy a metre of pavement for a
+/// second box.
+fn crosses_another_carriageway(
+    streets: &[Street],
+    own: &Street,
+    centre: DVec3,
+    half: DVec3,
+) -> bool {
+    for o in streets {
+        if std::ptr::eq(o, own) || o.along_x() == own.along_x() {
+            continue;
+        }
+        // The crossing street's asphalt, as a band on the plan.
+        let road = inf_ecs::traffic::street_kerb_offset_m(o.gap_m);
+        let (perp, lo, hi) = if o.along_x() {
+            (o.a.y, o.a.x.min(o.b.x), o.a.x.max(o.b.x))
+        } else {
+            (o.a.x, o.a.y.min(o.b.y), o.a.y.max(o.b.y))
+        };
+        // Does the slab's box reach the band, and does it lie along the crossing
+        // street's own span?
+        let (near, along, along_half) = if o.along_x() {
+            ((centre.z - perp).abs() - half.z, centre.x, half.x)
+        } else {
+            ((centre.x - perp).abs() - half.x, centre.z, half.z)
+        };
+        if near < road && along + along_half >= lo && along - along_half <= hi {
+            return true;
+        }
+    }
+    false
+}
+
 /// The chunk indices a street covers, on the world lattice.
 fn chunks_of(street: &Street) -> std::ops::RangeInclusive<i64> {
     let along_x = street.along_x();
@@ -229,6 +316,9 @@ pub struct KerbColliderAudit {
     pub streets: u32,
     /// Slabs the band tiered out.
     pub culled: u32,
+    /// Slabs refused because they would lie across another street's
+    /// carriageway — see [`crosses_another_carriageway`].
+    pub crossed: u32,
 }
 
 /// **Describe the footway slabs near the anchor** — the sixth derived collider
@@ -261,6 +351,7 @@ pub(crate) fn gather_kerbs(
             described: admitted_cache.len() as u32,
             streets: res.streets.len() as u32,
             culled: 0,
+            crossed: 0,
         };
     }
     let terrains = terrains_of(world);
@@ -281,6 +372,10 @@ pub(crate) fn gather_kerbs(
                 let Some((centre, half)) = slab_box(street, side, chunk, ground) else {
                     continue;
                 };
+                if crosses_another_carriageway(&res.streets, street, centre, half) {
+                    audit.crossed += 1;
+                    continue;
+                }
                 if !band.tier(centre, half, glam::DQuat::IDENTITY).is_near() {
                     audit.culled += 1;
                     continue;
@@ -341,7 +436,11 @@ mod tests {
     /// is at the carriageway's own edge.
     #[test]
     fn a_footway_slab_is_a_kerb_above_the_ground_it_stands_on() {
-        for gap in [16.0, 20.0] {
+        // 16 m is refused — `footway_is_clear_of_the_parked_row`, and the arm
+        // below says so — so the geometry claims are made on the reserve that
+        // keeps its footway.
+        assert!(slab_box(&street(16.0), 1, 0, 0.0).is_none());
+        for gap in [20.0, 32.0] {
             let s = street(gap);
             let (c, h) = slab_box(&s, 1, 0, 12.5).expect("a slab");
             let top = c.y + h.y;

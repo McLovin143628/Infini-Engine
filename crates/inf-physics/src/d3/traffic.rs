@@ -666,10 +666,20 @@ fn not_the_ground(
     world: &EcsWorld,
     bridge: &PhysicsBridge3D,
 ) -> std::collections::BTreeSet<super::ColliderId3D> {
-    inf_ecs::movement::movement_targets(world)
-        .into_iter()
-        .filter_map(|g| bridge.collider_of(g))
-        .collect()
+    let mut out: std::collections::BTreeSet<super::ColliderId3D> =
+        inf_ecs::movement::movement_targets(world)
+            .into_iter()
+            .filter_map(|g| bridge.collider_of(g))
+            .collect();
+    // **And the footway** (wave ROAD1b). The kerb slabs are solid now, and a
+    // settle ray asks "what is under this car": a slot beside a footway would
+    // latch its ground on the slab's top, 150 mm up, and the car would be
+    // PLACED standing on the pavement — the exact failure mode this function's
+    // own doc describes for a pedestrian, one kind along. Measured: without
+    // this, `ems2_dispatch_gate` loses two arms — a unit that never reaches its
+    // incident and a fleet that never comes home.
+    out.extend(bridge.kerb_collider_ids());
+    out
 }
 
 /// **What is under this car**, world Y — a ray straight down through
