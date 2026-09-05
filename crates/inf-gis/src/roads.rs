@@ -73,28 +73,72 @@ pub const SNAP_TOLERANCE_M: f64 = 2.0;
 /// approaches a hairpin. 4 is the usual limit (it is SVG's default) and admits
 /// every corner down to about 29 degrees.
 ///
-/// # What it does past that, said accurately (audit ROAD1)
+/// # It is the RATIO, and [`MITER_LIMIT_M`] is the length that bounds it
 ///
 /// This doc used to say that a sharper corner is "**clipped rather than
 /// spiked**", and that is what a *stroker's* miter limit does: SVG falls back to
-/// a bevel join and the spike disappears. This one does not. It clamps the
-/// **ratio** at 4 and [`CrossFrame::at`] still multiplies the offset by it, so a
-/// hairpin gets a spike exactly four half-widths long instead of an infinite
-/// one — which was tolerable while the only thing offset from the centreline was
-/// the carriageway, and stopped being tolerable when wave ROAD1 put a footway at
+/// a bevel join and the spike disappears. This one does not, on its own. It
+/// clamps the **ratio** at 4, and while that was the only bound
+/// [`CrossFrame::at`] multiplied the offset by it — so a hairpin got a spike
+/// exactly four half-widths long instead of an infinite one, which was tolerable
+/// while the only thing offset from the centreline was the carriageway and
+/// stopped being tolerable when wave ROAD1 put a footway at
 /// `built_half_width_m`.
 ///
-/// Measured on the shipped island: the kerb-and-pavement mesh reaches **23.200 m
-/// from the centreline**, which is 4.000 × an arterial's 5.800 m built
-/// half-width, and **4 156.5 m² of the footway (2.43 %) sits past its own
-/// route's built half-width**, worst **+17.400 m** at (-1057.7, 98.4, -453.7) —
-/// a 17 m tongue of concrete pointing into open ground at a switchback. It is
-/// distinct from the footway-on-the-carriageway defect
-/// `clip_kerbs_to_open_ground` closes: a spike points *away* from every road, so
-/// nothing clips it. Carried, with the remedy named: a real bevel join, which
-/// changes the ribbon's topology at a corner and moves a committed
-/// `.inf_mesh` — a wave, not an audit fix.
+/// Measured on the shipped island at that point: the kerb-and-pavement mesh
+/// reached **23.200 m from the centreline**, 4.000 × an arterial's 5.800 m built
+/// half-width, with **4 156.5 m² of the footway (2.43 %) past its own route's
+/// built half-width**, worst **+17.400 m** at (-1057.7, 98.4, -453.7) — a 17 m
+/// tongue of concrete pointing into open ground at a switchback.
+///
+/// Wave ROAD1b bounds it in metres instead, which is what turns the clamp into
+/// a **bevel**: see [`MITER_LIMIT_M`] and [`CrossFrame::miter_at`]. The ratio
+/// stays because it is still the right bound on a *gentle* corner, where the
+/// widening it asks for is under a metre anyway and the length cap is inactive.
 pub const MITER_LIMIT: f64 = 4.0;
+
+/// **The most a mitred corner may push a cross-section point outward, in
+/// METRES** (wave ROAD1b) — the cap that makes the join a bevel.
+///
+/// # Why a length and not a ratio
+///
+/// [`MITER_LIMIT`] bounds `half / cos(θ/2)` as a *multiple of the offset*, so
+/// the spike it admits grows with whatever is being offset: at the ratio's own
+/// ceiling the carriageway's 3.5 m edge reaches 14 m and the footway's 5.8 m
+/// outer edge reaches **23.2 m**, from the same corner, on the same road. A
+/// ratio cannot express "a join may be cut, but not by more than this much
+/// ground", because the thing it is a ratio *of* is different for every part of
+/// the cross-section.
+///
+/// # Why two and a half metres, and the property that fixes it
+///
+/// **A right-angle corner must still mitre exactly.** It is the sharpest turn a
+/// real road takes as a corner rather than as a curve, it is every city block,
+/// and a cap that cut one would put a notch at every street corner this engine
+/// builds. A right angle asks for `offset · (√2 − 1)`, which is 1.450 m at the
+/// carriageway's 3.5 m edge and **2.403 m** at an arterial's 5.800 m built
+/// half-width — the outermost point of the widest kerbed cross-section on this
+/// island. 2.5 m clears that and nothing else: it is the first quarter-metre
+/// above it, and it is also `RoadKind::Highway::shoulder_m()`, the widest single
+/// piece any cross-section adds beside its carriageway.
+///
+/// `the_bevel_keeps_a_right_angle_and_cuts_a_hairpin` asserts both halves, so
+/// the number cannot be lowered without a red test telling you which corner you
+/// broke. Raise it and the tongue grows by exactly the amount raised: a hairpin
+/// reaches `built_half_width + MITER_LIMIT_M`, measured.
+///
+/// # What it does to the corner
+///
+/// [`CrossFrame::at`] pulls the station's outer point back to `offset + 1 m`
+/// when the mitre asks for more. The strip stays one strip — no vertex is added
+/// and no row changes length, so `emit_profile_strip`'s winding is untouched —
+/// and what the pulled-back station leaves is a **cut corner**: the two legs'
+/// outer edges no longer meet at the mitre point, they meet at a chamfer. That
+/// is a bevel join, drawn without changing the ribbon's topology, which is why
+/// it could be taken as a fix rather than carried as a wave. It moves the
+/// vertices of a committed `.inf_mesh` (`samples/phase30-city/CityRoads.inf_mesh`)
+/// without changing how many there are.
+pub const MITER_LIMIT_M: f64 = 2.5;
 
 /// The road classes the document names, plus the two a real layer always has.
 ///
@@ -1217,10 +1261,41 @@ pub struct CrossFrame {
 
 impl CrossFrame {
     /// The world XZ position `offset_m` to the road's **right** of the
-    /// centreline (negative is left), with the corner mitre applied.
+    /// centreline (negative is left), with the corner mitre applied — bevelled
+    /// by [`MITER_LIMIT_M`] where the mitre would spike.
     #[inline]
     pub fn at(&self, offset_m: f64) -> glam::DVec2 {
-        self.centre.xz() - self.perp * (offset_m * self.miter)
+        self.centre.xz() - self.perp * (offset_m * self.miter_at(offset_m))
+    }
+
+    /// **The mitre this station actually applies at `offset_m`** (wave ROAD1b) —
+    /// [`miter`](Self::miter), cut back so the widening never exceeds
+    /// [`MITER_LIMIT_M`] metres.
+    ///
+    /// # The one door, and why it has to be one
+    ///
+    /// [`at`](Self::at) places the vertex and `carriageway_y` decides how far
+    /// from the plateau that vertex is — and both need the *same* answer, or a
+    /// bevelled corner is drawn at one distance from the centreline and graded
+    /// as though it were at another. Before this the two spelled
+    /// `offset_m * frame.miter` separately, which was fine while there was one
+    /// rule and is exactly the kind of thing that rots when there are two.
+    ///
+    /// The widening is `|offset| · (miter − 1)`, in metres of ground. Under the
+    /// cap the mitre is untouched, so every straight and every gentle bend is
+    /// bit-for-bit what it was; over it, the mitre is whatever puts the point
+    /// exactly `MITER_LIMIT_M` past its unmitred offset. `|offset| == 0` is the
+    /// centreline, whose widening is zero at any mitre, and the branch answers
+    /// `miter` for it — which multiplies a zero either way.
+    #[inline]
+    pub fn miter_at(&self, offset_m: f64) -> f64 {
+        let lateral = offset_m.abs();
+        let extra = lateral * (self.miter - 1.0);
+        if extra <= MITER_LIMIT_M || lateral <= 0.0 {
+            self.miter
+        } else {
+            1.0 + MITER_LIMIT_M / lateral
+        }
     }
 }
 
@@ -1595,11 +1670,15 @@ fn carriageway_y(
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> f64 {
     // **The distance from the centreline is the MITRED one**, not the offset:
-    // at a corner the cross-section is scaled out by up to `MITER_LIMIT`, and it
-    // is the real distance that decides whether this vertex is still over the
-    // plateau. Reading the offset instead is what put a hairpin's rim 14 m out
-    // and 1.56 m in the air.
-    let lateral = (offset_m * frame.miter).abs();
+    // at a corner the cross-section is scaled out by the mitre, and it is the
+    // real distance that decides whether this vertex is still over the plateau.
+    // Reading the offset instead is what put a hairpin's rim 14 m out and
+    // 1.56 m in the air.
+    //
+    // Through `miter_at` and never `frame.miter`, so the height is decided at
+    // the distance `CrossFrame::at` actually places the vertex — see that
+    // function's note on why the bevel needs one door (wave ROAD1b).
+    let lateral = (offset_m * frame.miter_at(offset_m)).abs();
     // How much this vertex conforms rather than grades: 0 over the plateau,
     // 1 past it, eased over half a plateau so the hand-off is not a crease.
     let conform = if opts.crown_fall > 0.0 && opts.graded_half_m > 0.0 {
@@ -3661,6 +3740,117 @@ mod tests {
             10.0 * MITER_LIMIT
         );
         assert!(h.vertices.iter().all(|v| v.is_finite()));
+    }
+
+    /// **The join is a bevel now** (wave ROAD1b) — a right-angle corner still
+    /// mitres exactly, and a hairpin is cut in METRES rather than scaled by a
+    /// ratio.
+    ///
+    /// The two halves are one test on purpose: [`MITER_LIMIT_M`] is the number
+    /// that separates them, and a cap that only bounded the hairpin would be
+    /// satisfied by zero — which notches every street corner in the engine.
+    ///
+    /// Falsification, both ways. Restore `at`/`carriageway_y` to
+    /// `offset_m * self.miter` and the hairpin claim reds at 4.000 × the
+    /// half-width; drop `MITER_LIMIT_M` below 2.403 and the right-angle claim
+    /// reds at the arterial's built half-width.
+    #[test]
+    fn the_bevel_keeps_a_right_angle_and_cuts_a_hairpin() {
+        // The two corners, as `cross_frames` sees them: a right angle and a
+        // fold-back. Frame 1 is the corner in both.
+        let right = cross_frames(&[
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 50.0),
+        ]);
+        let hairpin = cross_frames(&[
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.5),
+        ]);
+        // The widest kerbed cross-section this engine builds: an arterial's
+        // built half-width, which is what the island's footway is drawn at.
+        let arterial = built_half_width_m(RoadKind::Arterial, 2);
+        assert_eq!(arterial, 5.8, "the reference offset moved");
+
+        // ── a right angle is UNTOUCHED, at every offset the section uses ──────
+        let corner = right[1];
+        for off in [0.0, LANE_WIDTH_M, 3.5, arterial] {
+            assert_eq!(
+                corner.miter_at(off),
+                corner.miter,
+                "a right-angle corner was bevelled at {off} m; the cap has to \
+                 clear {:.4} m to leave one alone and it is {MITER_LIMIT_M}",
+                arterial * (std::f64::consts::SQRT_2 - 1.0)
+            );
+        }
+        // …and that is a real mitre, not one: the corner is sqrt(2) wide.
+        assert!((corner.miter - std::f64::consts::SQRT_2).abs() < 1e-12);
+
+        // ── a hairpin is cut, in metres ──────────────────────────────────────
+        let fold = hairpin[1];
+        assert!(
+            (fold.miter - MITER_LIMIT).abs() < 1e-12,
+            "the fixture is not a hairpin: its ratio is {}",
+            fold.miter
+        );
+        let reach = (fold.at(arterial) - fold.centre.xz()).length();
+        let before = arterial * MITER_LIMIT;
+        assert!(
+            (reach - (arterial + MITER_LIMIT_M)).abs() < 1e-9,
+            "the hairpin reaches {reach:.4} m from the centreline; the bevel \
+             bounds it at {arterial} + {MITER_LIMIT_M} = {:.4} m (the ratio \
+             alone gave {before:.4} m)",
+            arterial + MITER_LIMIT_M
+        );
+        assert!(
+            reach < before * 0.4,
+            "the bevel took {reach:.4} m off nothing: the ratio gave {before:.4}"
+        );
+    }
+
+    /// The mesh a hairpin builds is bounded by the same metres — the arm above
+    /// reads a frame, and this one reads the vertices a builder actually wrote.
+    #[test]
+    fn a_hairpins_footway_stays_within_a_bevel_of_its_road() {
+        let mut flat = |_: f64, _: f64| Some(0.0);
+        let spine = vec![
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.5),
+        ];
+        let frames = cross_frames(&densify_spine(&spine, DEFAULT_GROUND_STEP_M));
+        let mut kerb = RoadRibbon::default();
+        let opts = SurfaceOptions::default();
+        build_kerbs(&mut kerb, &frames, 3.5, &opts, &mut flat);
+        assert!(!kerb.vertices.is_empty(), "the fixture built no footway");
+
+        // Every footway vertex, against the centreline of the leg it belongs to.
+        // The bound is the built half-width plus one bevel; before ROAD1b it was
+        // the built half-width TIMES four.
+        let built = 3.5 + KERB_WIDTH_M + PAVEMENT_M;
+        let mut worst = 0.0f64;
+        for v in &kerb.vertices {
+            let p = v.xz();
+            let mut near = f64::INFINITY;
+            for w in spine.windows(2) {
+                let (a, b) = (w[0].xz(), w[1].xz());
+                let d = b - a;
+                let t = ((p - a).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                near = near.min((p - (a + d * t)).length());
+            }
+            worst = worst.max(near);
+        }
+        assert!(
+            worst <= built + MITER_LIMIT_M + 1e-6,
+            "a hairpin's footway reached {worst:.4} m from its own centreline; \
+             the bevel bounds it at {built} + {MITER_LIMIT_M} = {:.4} m",
+            built + MITER_LIMIT_M
+        );
+        assert!(
+            worst > built,
+            "the fixture never mitred at all ({worst:.4} m), so the bound is vacuous"
+        );
 
         // Repeated points collapse, and a spine that is all one point is refused.
         let dup = vec![DVec3::ZERO, DVec3::ZERO, DVec3::ZERO];
