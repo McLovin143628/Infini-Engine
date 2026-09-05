@@ -33203,3 +33203,376 @@ where the hero spawns.
     (250,120)-(350,120). So a half-streamed settlement drives on lines whose
     extents are not the ones under the asphalt. Nothing on this island reaches
     that state in a demo, and nothing asserts that it cannot.
+## Wave FIX2 — Play draws the world the editor draws (2026-09-05)
+
+The user's sentence, and the whole of this wave: *when I press Play, do I see what
+I built?* Until this commit the answer was no, and it had never once been yes. The
+ROAD1b audit put a number on it — **four**: exactly four entities in the island
+level carry a `MeshRef.asset` (`Roads`, `Kerbs and pavements`, `Road markings`,
+`Road markings (yellow)`), and `run_pie` handed the renderer
+`Arc::new(VmeshRegistry::new())`, an EMPTY registry built inside the function with
+a comment calling it a documented follow-up. All four resolved to nothing and fell
+through to `prim_mesh(mesh_ref.primitive)`, which for `MeshRef::default()` is a 1 m
+cube at `Transform::IDENTITY` — the world origin, 2.7 km from the spawn. So the PIE
+frame showed bare graded earth and not even a cube, while the editor frame taken
+forty seconds earlier showed a full-width asphalt street with kerbs, white edge
+lines, a double yellow and painted crossings.
+
+### CLAUSE 1 — THE VMESH DOOR INTO PIE
+
+**`ScenePayload` v12 → v13** (`crates/inf-runtime/src/pie.rs:259`), append-only, with
+the ladder rung written where the other twelve are, the wire-order pin extended,
+and `check_version` untouched — it is exact equality already, and this envelope has
+no downgrade path by doctrine: the editor and the player it spawns are built
+together, so an older payload is as unreadable as a newer one and the refusal names
+that ("rebuild both from the same commit").
+
+The rung carries **two** fields, which is one rung and not two, on the v11
+precedent — extending an unpushed bump is not a second bump, and a v13.5 would be a
+version no build ever spoke:
+
+* **`vmesh_paths: Vec<(Uuid, String)>`** (wire field 22) — `(derived .inf_vmesh
+  guid, absolute path)`, keyed by the **derived** id (`inf_vgeom::derived_vmesh_id`)
+  and not the mesh's, because that is the id a cooked pack stores the DAG under and
+  the id `VmeshRegistry` keys by. One lookup rule on both paths, the `fractures` and
+  `materials` precedent. The payload arm asserts the keying explicitly and asserts
+  `!= MESH`, because a payload keyed by the mesh id would ship four correct file
+  paths that the player indexes under four ids nothing ever asks for — the roads
+  carried and none of them drawn, with nothing reporting a problem.
+* **`audio: Vec<(Uuid, Vec<u8>)>`** (wire field 23) — see clause 4; the census found
+  it.
+
+**A PATH and no bytes twin, priced.** `terrain_paths` has a bytes twin because a
+caller may hold a terrain that exists only in memory. A `.inf_vmesh` is *derived*,
+so a caller with no file has no DAG either and the honest payload is an absent entry
+rather than an invented one. The sizes make the choice stronger rather than weaker,
+and both routes were measured at head on the shipped island's four road DAGs:
+
+| route | what it costs | measured |
+|---|---|---|
+| **A — carry the path** (shipped) | read 4 files, index header + page directory | **198.9 ms**, 102.7 MiB |
+| **B — derive at Play** | `build_vgeom` over the same four meshes | **145 902 ms** |
+
+Release binaries, this machine, the shipped island's own content:
+
+    ROUTE A (carry the path): 4 DAGs, 102.7 MB read, indexed in 198.9 ms
+    ROUTE B  VancouverIslandRoads:               828 672 verts, 1 489 058 tris ->  47.1 MB in 103 649 ms
+    ROUTE B  VancouverIslandKerbs:               614 392 verts,   934 787 tris ->  31.2 MB in  33 179 ms
+    ROUTE B  VancouverIslandRoadMarkings:        393 060 verts,   362 540 tris ->  16.1 MB in   8 324 ms
+    ROUTE B  VancouverIslandRoadMarkingsYellow:  201 402 verts,   200 242 tris ->   8.3 MB in     750 ms
+    ROUTE B TOTAL: 145 902 ms          A / B = 0.00136
+
+The path route is what shipped. The alternative the brief asked to be priced —
+deriving the DAG from the `meshes` bytes the payload already carries, at every press
+of Play — is **145.9 s — 29.2x the whole cold-start budget**, for four meshes against a cold-start budget of **5 000 ms**, so it is not
+a slower option, it is not an option. (`build_vgeom` is quadratic in one mesh's
+triangle count — measured exponent 1.95, ROAD1b's carried 34 — so it also gets worse
+with every settlement.) Carrying the bytes instead would be **107.7 MB down a pipe on
+every Play**, 40.1 % of `MAX_FRAME_LEN` for four meshes, which is the GTA1 failure
+waiting one road network away.
+
+**One door.** `VmeshRegistry::from_paths` (`runtime/inf-player/src/vmesh.rs:168`) and
+`from_dir` are the same act — read the payload, index the header and page directory,
+key it under the producer's guid — and now share one `open_file`. A PIE session
+streams meshlets exactly as a `--level` dev boot does. `run_pie` takes the registry
+as a **parameter** (`runtime/inf-player/src/window.rs`), like the voxel, skeletal
+and material stores beside it, and `run_pie_window` builds it through
+`inf_player::vmeshes_from_payload` (`runtime/inf-player/src/lib.rs`).
+
+**`app.scatter_meshes` is assigned** (window.rs) — TER2b's open item, stated in the
+tree for a whole wave. The payload's `meshes` vector now carries the meshes a
+level's `.inf_pcg` kinds name (a *use* of a field, not a bump), and
+`scatter_mesh::from_payload` is the `from_pack` twin: demand-shaped through the
+graphs, so carrying a character's body in the same vector costs the scatter path
+nothing. Both tables are completed by one `finish_scatter_meshes`, so the twelve
+building-module families cannot be added on one path and not the other.
+
+**THE PLACEHOLDER CUBE IS DELETED**, on both hosts (`runtime/inf-player/src/render.rs`
+and `editor/crates/inf-viewport/src/host.rs`). A `MeshRef` whose `asset` is bound and
+whose DAG is missing draws **nothing**: a 1 m box at an entity's transform is a claim
+about the world no author made, and on this island it hid four missing streets behind
+four boxes nobody was standing near. A **primitive-only** `MeshRef` is untouched —
+that is authored content and still draws its Sphere/Plane/Cylinder/Cone. What
+replaced the box is a line in the Output Log: `VmeshRegistry::resolve` reports each
+missing mesh once per session at `error!` level, naming both causes, at the one seam
+both hosts resolve through so neither can be the quiet one.
+
+### CLAUSE 2 — PIE == SHIPPING ON THE RENDER HALF
+
+`island_gate::both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws` is
+the gate this wave owed, and it is built to falsify. In order: the fixture's exact
+ref count first (**4**, asserted before anything is compared — two hosts that both
+draw nothing agree perfectly), then the resolved-DAG column per ref on both hosts,
+then the registries printed and the payload's contained in the pack's, then the
+scatter tables, then the frame.
+
+    MESH REFS: 4
+    REGISTRIES: pie 4 / ship 4 — the same four guids, in the same order
+    SCATTER:    pie 24 / ship 24 — the same keys
+    FRAME:      vgeom 4 / prims 9   (payload registry)
+                vgeom 0 / prims 9   (the empty registry `run_pie` used to build)
+
+The last line is the placeholder deletion asserted rather than described: **the same
+nine primitives either way**. Restore the cube and the empty-registry column becomes
+prims 13, and the arm says so by name.
+
+The comparison is over the level's refs and not over the two registries as sets,
+deliberately: a pack indexes every mesh it virtualized while a payload names exactly
+what the level draws, so the sets are different by construction and asserting
+otherwise would be wrong. Both are printed and containment is asserted.
+
+**The sweep runs BEFORE the cook in that arm**, which is the ROAD1b shape: the
+editor derives a `.inf_vmesh` beside every mesh it draws at exactly
+`derived_vmesh_id`, so the cook's collision guard used to be true by construction and
+threw away the DAG it had just built. This arm reds if that regresses.
+
+**And the threshold had to move, which the gate found rather than the wave
+assuming.** First run: **pie 4 / ship 3**. One of the fixture's four road layers is
+under the cook's `[vgeom] min_triangles` (2048), so the cook declined it and the
+editor — which derives from one triangle — drew it. `min_triangles` trades
+virtualized geometry against a cheaper path, and for a rigid `MeshRef.asset` there
+is no cheaper path: `RenderScene` has one door for real non-primitive geometry.
+`cook::drawn_meshes` is `plan_fractures`' walk minus the destructible filter, and a
+mesh in that set is virtualized whatever its size; the threshold still governs every
+other mesh. **This closes a P23 remainder**: the workshop sample's hand-modelled prop
+shipped as a placeholder cube, and `the_workshop_cook_draws_only_the_advisory_it_earns`
+existed to hold that gap open. It now cooks in silence and the arm asserts the two
+facts silence has to mean — no advisories, and the prop's `.inf_vmesh` really in the
+pack — then cooks the mesh ALONE to prove the advisory is narrowed and not dead.
+
+**The fps instrument's island row was not re-measured in PIE**, and here is why
+rather than a promise: `fps_instrument` drives a **pack** host (`VmeshRegistry::from_pack`
+over a cooked island) and measures a projection, and this wave changed neither the
+pack path's registry nor the projector's cost for a mesh that resolves. What it
+changed for PIE is *which* registry that host is handed, and both registries now hold
+the same four sources over the same page directories. The number that did move is
+PIE's cold start, measured in the demo loop below.
+
+### CLAUSE 3 — THE EDITOR'S DERIVED CACHE IS THE SOURCE OF TRUTH
+
+`derived_is_current` (`editor/crates/inf-editor-core/src/assets/vmesh.rs`) is now the
+ONE comparison — the derived sidecar's recorded `source_mesh_hash` against the mesh
+sidecar's `content_hash` — with three callers where it had one: the planner (should I
+rebuild?), the viewport (may I draw this?) and `derived_vmesh` (may Play ship this
+path?). A hash and not a timestamp, the `ImportCache` rule.
+
+* **Play refuses a STALE DAG** and names the remedy. `build_scene_payload`'s ninth
+  resolver answers `VmeshRef::Path` / `VmeshRef::Stale`, and a stale one anywhere in
+  the walk fails the payload naming every offending mesh. That is the P23
+  edit-during-Simulate law from the other side: an edit or an import must re-derive
+  before the preview, and where it has not, the preview says so rather than lying.
+* **An ABSENT DAG does not refuse**, and the asymmetry is the interesting half. A
+  cooked pack has no DAG either for a mesh below the cook's threshold, so refusing
+  here would refuse a level the shipped build runs — PIE == shipping cuts both ways.
+  The payload carries no entry, the player states the miss, both hosts draw nothing.
+* **`open_vgeom` gained the same check** (`render_assets.rs`). It used to read a
+  `.inf_vmesh` off disk and ask nothing about it, which is how the ROAD1b audit found
+  the editor drawing two of the island's four road DAGs from the **previous** build:
+  `VancouverIslandRoads` at 18 126 400 B against 49 389 216 freshly derived, and
+  `VancouverIslandRoadMarkings` at 6 021 744 against 16 919 856. The wave's own proof
+  frame had the kerbs and the double yellow and no carriageway. **Carried 38 is
+  closed**: stale is refused with a line naming the sweep, and the caller's `None` arm
+  draws nothing.
+
+Arms, both ways: `a_stale_derived_vmesh_is_told_apart_from_a_current_one_and_from_none`
+walks absent → current → stale → current again (so a session leaves the refusal
+rather than being stuck in it) and asserts the PLANNER agrees, which is what makes
+"the viewport refuses exactly what the sweep would rebuild" structural;
+`a_stale_derived_vmesh_is_refused_rather_than_drawn` resolves the mesh happily one
+line before it refuses it, so the refusal is not a fixture that failed to load; and
+`a_rigid_mesh_rides_as_a_derived_vmesh_path_and_a_stale_one_refuses_play` pins the
+derived keying, the absent-is-survivable rule and the refusal's remedy.
+
+### CLAUSE 4 — THE PLACEHOLDER CENSUS
+
+The census was run against the thing that matters rather than against a grep: every
+door `build_world_from_pack` calls, against every door `build_world_from_payload`
+calls. Eight of eight now agree. The ninth, `with_partition_pack`, is absent from the
+payload path **by design** and pinned by `a_scene_payload_carries_no_partition`: a
+`ScenePayload` carries no partition because the editor's document, not the wire, is
+the authoritative reading of a streamed world.
+
+CLOSED by this wave:
+
+1. **the meshlet DAGs** — every rigid `MeshRef.asset` drew a placeholder cube.
+2. **the scatter table** — every scattered instance drew its placeholder primitive
+   (TER2b's open item, FIX1 carried 8).
+3. **the audio clips** — `build_world_from_payload` called eight builder doors and
+   not `with_audio`, so a windowed PIE session issued exactly the audio COMMANDS a
+   cooked build issues and resolved none of them. **Nine rungs of this envelope
+   missed it because there was nothing for a gate to see**: the P12 doctrine makes
+   the command stream a pure function of sim state, so a session with no clips
+   compares byte-identical to one with them, and every determinism trace, every
+   `pie_equals_shipping` fold and the whole parity certification passed. The
+   divergence is entirely at the speaker.
+
+   **Counted on committed content, after a first draft that named the wrong
+   sample.** Three comments in this wave asserted "the island's venue plays its
+   loop in a shipped build and is silent in Play". Measured, the cooked island's
+   pack has no `audio` kind in it **at all**: `{"anim_clip": 3, "biome_set": 1,
+   "blueprint": 1, "derived_material": 7, "level": 1, "material": 7, "mesh": 8,
+   "meshlet_mesh": 4, "partition": 1, "pcg": 7, "skeleton": 1, "state_machine": 1,
+   "terrain": 1, "texture": 21}`. So the first half of that sentence is false, and
+   the reason is a larger finding than the one it stood in for — carried 43. What
+   the field really closes is the **physics playground**, which carries two
+   authored `AudioSource`s naming two stable clip GUIDs that `cook::asset_deps`'
+   `level → audio` edge ships: the cooked build played both and the preview played
+   neither. The arm asserts that exact count and both GUIDs' bytes. Corrected in
+   place at `c00ff807`.
+
+LISTED, with numbers, in "carried" below: the skeletal placeholder cube (40) and the
+scatter placeholder primitive (41). Both are cases where the two hosts **agree** —
+they are silent-placeholder gaps, not PIE-vs-shipping gaps — which is why they are
+priced rather than closed inside a wave whose subject is the divergence.
+
+### CLAUSE 5 — THE DEMO LOOP
+
+`tools/demo/demo.ps1`, on the finished tree, everything rebuilt from it — the
+player through `cargo build --release -p inf-player` and the editor through
+`npx tauri build --no-bundle` (the trap the script warns about and the ROAD1b
+audit walked into), nothing else running before or after.
+
+**HERO MOVED 12.003 m** over 114 samples, floor 5.0, exit 0, `still running:
+none`.
+
+* editor: `…/scratchpad/FIX2-DEMO/01-editor.png`
+* PIE: `…/scratchpad/FIX2-DEMO/02-pie-a.png`, `…/scratchpad/FIX2-DEMO/03-pie-b.png`
+* the run's own `hero.csv` and `demo.log` beside them
+* the frames this replaces: `…/scratchpad/AUDIT-ROAD1b-FINAL/01-editor.png` (the
+  editor's paved street) and `…/AUDIT-ROAD1b-FINAL/03-pie-b.png` (bare graded
+  earth)
+
+**And the frame is the wave.** ROAD1b's PIE frame is the hero on bare graded
+earth between two rows of buildings. FIX2's PIE frame, same spawn, same camera,
+is the hero standing on **asphalt**, with the double yellow running away under
+his feet, white edge lines down both sides, kerbs and pavements to left and
+right, and the parked car on the carriageway rather than on dirt. It is the
+editor's frame from the hero's eye.
+
+**PIE cold start, before and after.** The registry is what this wave added to
+the boot, and it is measured directly rather than inferred: **198.9 ms** to read
+and index 102.7 MiB of derived DAG, against a budget of 5 000 ms — **4.0 %** of
+it, on the largest content this engine has. The demo's own clock cannot see it:
+Play-pressed to player-process is 8 s in both the ROAD1b run and this one, and
+that interval is dominated by the CDP click settle and process spawn. Stating
+the 8 s as "unchanged" would be true and would not be a measurement, which is
+why the 198.9 ms is quoted instead.
+
+**The `-SkipBuild` trap, again, and it is now a script bug rather than a
+person's.** `demo.ps1` must be run under **pwsh**. It is BOM-less UTF-8 with
+1 203 non-ASCII bytes, and Windows PowerShell 5.1 reads it as ANSI: the em-dash
+on line 275 becomes three characters and the file fails to parse with
+"Unexpected token 'treating'". Invoked as `& powershell -File tools\demo\demo.ps1`
+it never launches anything, which reads like a demo failure and is an encoding
+one. `screenshot.ps1` is pure ASCII and is unaffected. Carried 44.
+
+### Verification
+
+| check | result |
+|---|---|
+| `cargo fmt` per member + `git diff --exit-code` | clean |
+| battery (`-j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`) | **379 binaries, 7135 passed, 0 failed, 21 ignored** (baseline 379 / 7128 / 0 / 21 — **+7**, this wave's seven new arms) |
+| goldens | **62**, none added, none re-blessed |
+| `cargo doc --no-deps --workspace` warnings | **409** — the baseline exactly, ceiling 450, **none in this wave's files** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 |
+| scene schema | **v27, unmoved** (`inf_scene::SCHEMA_VERSION`) |
+| `SCENE_PAYLOAD_VERSION` | **12 → 13**, append-only, two fields on one rung, ladder + wire pin extended, `check_version` untouched |
+| `EXPECTED_LEVELS` | 24 |
+| CRLF, at the byte level (`git show HEAD:<file>`, Python `count(b'\r')`) | **0 across all 52 changed files** |
+| manifests | `Cargo.toml`, `Cargo.lock`, `deny.toml`, `package.json` — **untouched**; zero new deps |
+| committed bytes | none moved: no golden, no sample, no `.inf_lvl`, no committed layer |
+| `editor/studio` frontend | **not touched** — the two Ring-2 changes are Rust (`commands/assets.rs`, `commands/pie.rs`) and are covered by clippy and the battery; no `.ts`/`.tsx` moved, so `tsc`/`eslint`/`vitest` have nothing to say |
+| processes | none left running (`demo.ps1`'s own `still running: none`, and `tasklist` after) |
+
+**The battery ran three times to convergence**, and the two reds it found on the
+first pass are worth recording because both were the wave working:
+
+* `runtime_destruct::the_render_swap_draws_a_mesh_or_its_chunks_and_never_both`
+  counted the intact wall as **the placeholder primitive it fell back to**, and
+  its own comment said so. FIX2 deleted that fallback, so the arm read "neither"
+  on every step before the break. Its subject is the swap, so the fixture now
+  gives the wall a DAG under the derived id and counts both lists.
+* `inf-packager`'s workspace-wide `no_string_literal_..._eaten_continuation`
+  gate refused an `island_gate` `println!` whose literal began with twelve
+  spaces to align a second line under the first — indistinguishable from a
+  continuation a scripted edit ate. One `println!` instead of two.
+
+Clippy found two more (`collapsible_match`, `single_match_else` on the new
+staleness block) and the rewrite was re-mutation-verified before it was
+committed.
+
+**Mutations run, all seven red, each restored** — `gates must falsify`:
+
+| mutation | reds |
+|---|---|
+| payload drops `with_vmesh_paths` | `island_gate` registry arm, on the resolved-DAG column |
+| cook drops the `drawn` threshold override | `island_gate` registry arm, pie 4 vs ship 3 |
+| the placeholder cube restored in `render.rs` | `island_gate` frame arm ("drew 4 placeholder primitives") **and** `projector_mirror` |
+| `open_vgeom`'s currency check bypassed | `a_stale_derived_vmesh_is_refused_rather_than_drawn` |
+| `derived_vmesh` always answers Current | `a_stale_derived_vmesh_is_told_apart_from_a_current_one_and_from_none` |
+| payload drops `with_audio_clips` | `the_clips_a_level_sounds_ride_the_wire_once_each` |
+| `run_pie` discards its scatter table | `a_pie_session_installs_every_store_it_is_handed` |
+
+The last one is the one worth reading. Its first cut was **green** under exactly
+that mutation, because `run_pie`'s comment quotes the defect it replaced —
+*"there was no `app.scatter_meshes = ...` line here at all"* — so a `contains`
+over the raw function body is satisfied by the explanation of the fix, and
+defeated in turn by the explanation of the other one
+(`Arc::new(VmeshRegistry::new())`). Every needle now reads the body with `//`
+comments stripped. That is `projector_mirror`'s phantom-guard hazard met from
+both directions inside one function, in a test whose entire subject is that a
+line of code exists.
+
+### Carried, added by this wave
+
+40. **A `SkeletalMesh` whose mesh is bound but unresolvable still draws a
+    placeholder cube**, on both hosts (`render.rs`'s skinned branch and the
+    viewport's mirror). It is the same wrong claim the rigid cube was making, and it
+    is deliberately not closed here: unlike the rigid case it is not a PIE-vs-shipping
+    divergence (the payload has carried the skinned bytes since P24.1, so the two
+    hosts agree), and the same branch also draws the cube for an entity whose
+    `SkeletalMesh` is not bound at all — which is the editor's visible-entity
+    affordance and not a lie. Closing it needs the two cases told apart in two
+    mirrored branches and a measurement of what an author loses when an unbound
+    character becomes invisible. This wave measured neither.
+41. **A scatter kind whose mesh is absent, undecodable or past
+    `MAX_SCATTER_MESH_TRIANGLES` draws the placeholder primitive**, on both hosts and
+    silently per instance. Same reasoning as 40 — the tables now agree, so it is not a
+    divergence — with one extra: a scattered instance has no authored transform of its
+    own, so its placeholder is a PCG decision rather than a claim about where an author
+    put something. The honest fix is an advisory at table-build time naming the kind,
+    not a deleted draw.
+42. **A demo frame still races the meshlet sweep, but now it fails visibly.**
+    `demo.ps1` photographs the editor ten seconds after the debug port opens and the
+    project-open sweep takes about two and a half minutes on this island. Before this
+    wave that produced a frame of the previous build; now a stale DAG is refused, so
+    it produces a frame with a hole in it and Play refuses to start at all with the
+    remedy named. That is strictly better and still not right: the demo loop should
+    wait for the sweep, and `submit_vmesh_sweep` has no completion signal a script can
+    read.
+43. **A runtime-spawned emitter naming a constant asset is an edge no closure
+    walks.** The island's venue music never reaches EITHER host, and the measurement
+    is above: the cooked pack has no `.inf_audio` in it. `inf_ecs::venue::sync_venue_emitters`
+    spawns the emitters at run time from `VENUE_MUSIC_CLIP`, a fixed engine GUID, so
+    no document entity carries an `AudioSource` naming it — and `cook::asset_deps`
+    follows the same `AudioSource.clip` edge off level entities that this wave's
+    payload collector does. Both hosts are silent, PIE == shipping holds, and that
+    is exactly why nothing saw it. `inf_ecs::weapon` has a second constant on the
+    same terms (its own doc says so, citing `VENUE_MUSIC_CLIP`), so this is a class
+    and not an instance. The fix is a rule about engine-owned assets — a Ring-0 list
+    of GUIDs the runtime spawns, read by the cook's closure and by the payload
+    builder through one door — not another wire field.
+44. **`tools/demo/demo.ps1` must be run under `pwsh` and does not say so.** It is
+    BOM-less UTF-8 with 1 203 non-ASCII bytes; Windows PowerShell 5.1 reads it as
+    ANSI and fails to parse at line 275 ("Unexpected token 'treating'"), launching
+    nothing. That reads like a demo failure and is an encoding one. A BOM, or an
+    ASCII-only script, or a `#requires -Version 7` line would each close it;
+    `screenshot.ps1` beside it is pure ASCII and is unaffected.
+45. **The scatter-kind walk is a twin with no source pin.** The payload builder
+    now reads `PcgAssetPayload → layers → rules → kinds → mesh` inline, which is
+    `inf_player::scatter_mesh::kind_meshes`' body written a second time. The two
+    are fenced END TO END rather than by a mirror gate — `island_gate`'s scatter
+    comparison builds both tables from real content and compares their keys, so a
+    drift reds there — which is the stronger fence, but the walk belongs in
+    `inf-pcg` (Ring 0) beside the document it walks, and putting it there would
+    make the fence unnecessary.
