@@ -71,9 +71,29 @@ pub const SNAP_TOLERANCE_M: f64 = 2.0;
 ///
 /// A mitre offset is `half / cos(θ/2)`, which goes to infinity as a corner
 /// approaches a hairpin. 4 is the usual limit (it is SVG's default) and admits
-/// every corner down to about 29 degrees; sharper than that the corner is
-/// **clipped rather than spiked**, which is wrong by a little at a bend no
-/// survey puts a road through, instead of wrong by a lot.
+/// every corner down to about 29 degrees.
+///
+/// # What it does past that, said accurately (audit ROAD1)
+///
+/// This doc used to say that a sharper corner is "**clipped rather than
+/// spiked**", and that is what a *stroker's* miter limit does: SVG falls back to
+/// a bevel join and the spike disappears. This one does not. It clamps the
+/// **ratio** at 4 and [`CrossFrame::at`] still multiplies the offset by it, so a
+/// hairpin gets a spike exactly four half-widths long instead of an infinite
+/// one — which was tolerable while the only thing offset from the centreline was
+/// the carriageway, and stopped being tolerable when wave ROAD1 put a footway at
+/// `built_half_width_m`.
+///
+/// Measured on the shipped island: the kerb-and-pavement mesh reaches **23.200 m
+/// from the centreline**, which is 4.000 × an arterial's 5.800 m built
+/// half-width, and **4 156.5 m² of the footway (2.43 %) sits past its own
+/// route's built half-width**, worst **+17.400 m** at (-1057.7, 98.4, -453.7) —
+/// a 17 m tongue of concrete pointing into open ground at a switchback. It is
+/// distinct from the footway-on-the-carriageway defect
+/// `clip_kerbs_to_open_ground` closes: a spike points *away* from every road, so
+/// nothing clips it. Carried, with the remedy named: a real bevel join, which
+/// changes the ribbon's topology at a corner and moves a committed
+/// `.inf_mesh` — a wave, not an audit fix.
 pub const MITER_LIMIT: f64 = 4.0;
 
 /// The road classes the document names, plus the two a real layer always has.
