@@ -1288,6 +1288,28 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut blocking: Vec<String> = Vec::new();
     let (closure, unreadable) = dependency_closure(&db, &roots);
     blocking.extend(unreadable);
+    // **WHAT THIS COOK WILL ACTUALLY PACK** (audit ROAD1b) — the set the derived
+    // ids below are guarded against.
+    //
+    // The guards used to ask `db.contains`, which is *the project*, and the two
+    // are not the same question. A derived id may only collide with something
+    // that reaches the pack, and only the closure does: an asset sitting in
+    // `Content` that no root reaches is not written, so it cannot shadow
+    // anything. Their own comment already says "added after the closure so a
+    // derived id never shadows a real **closure** asset".
+    //
+    // Measured, and not a hypothetical: the editor derives `.inf_vmesh` beside
+    // every mesh it draws (P18.3) at exactly [`derived_vmesh_id`] of the mesh —
+    // the same bijection this cook computes — and registers it in the project.
+    // So `db.contains(vmesh_id)` is TRUE by construction for every mesh the
+    // editor has ever drawn, the guard called it an "astronomically unlikely"
+    // collision, and the cook threw away the DAG it had just spent minutes
+    // building. On the shipped island that was all four road meshes: the pack
+    // came out 107.7 MB lighter with **no virtualized geometry for any road at
+    // all**, so a cooked build drew the carriageway, the kerbs and both paint
+    // layers as placeholder cubes — silently, behind a warning that read like a
+    // hash collision.
+    let packed: BTreeSet<AssetId> = closure.iter().copied().collect();
     // A level may name a terrain asset the project no longer has. The closure
     // simply cannot follow that edge, which would ship a level whose ground never
     // streams — silently. Say so.
@@ -1416,10 +1438,14 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                     blueprints_validated += 1;
                 }
                 if let Some((vmesh_id, vmesh_bytes)) = vmesh {
-                    // Guard the (astronomically unlikely) collision with a real
-                    // asset or an already-derived vmesh; skip with a warning
-                    // rather than corrupt the pack.
-                    if db.contains(vmesh_id)
+                    // Guard the collision with an asset this cook is PACKING, or
+                    // with an already-derived vmesh; skip with a warning rather
+                    // than corrupt the pack. Against `packed` and not the whole
+                    // project — see its note: the editor's own derived
+                    // `.inf_vmesh` sits in `Content` under exactly this id and is
+                    // not in any closure, and asking the project turned that into
+                    // a certain "collision" that dropped the DAG.
+                    if packed.contains(&vmesh_id)
                         || derived_vmeshes.iter().any(|(id, _)| *id == vmesh_id)
                     {
                         warnings.push(format!(
@@ -1434,7 +1460,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                     // degradation: a fracture that cannot be packed means the
                     // asset does not break, which is a warning rather than a
                     // reason to fail an otherwise-valid build.
-                    if db.contains(frac_id)
+                    if packed.contains(&frac_id)
                         || derived_fractures.iter().any(|(id, _, _, _)| *id == frac_id)
                     {
                         warnings.push(format!(
@@ -1450,7 +1476,8 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                 // renders off its scalars, which is a warning rather than a
                 // reason to fail an otherwise-valid build.
                 if let Some((mat_id, mat_bytes)) = derived_material {
-                    if db.contains(mat_id) || derived_materials.iter().any(|(id, _)| *id == mat_id)
+                    if packed.contains(&mat_id)
+                        || derived_materials.iter().any(|(id, _)| *id == mat_id)
                     {
                         warnings.push(format!(
                             "skipped derived material for {guid}: derived id {mat_id} collides"
@@ -1466,7 +1493,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                     // level ships no entities of its own — so unlike the vmesh
                     // case, degrading to "skip it" would ship an empty world.
                     // Fail the build.
-                    if db.contains(part_id)
+                    if packed.contains(&part_id)
                         || derived_partitions.iter().any(|(id, _, _)| *id == part_id)
                     {
                         return Err(CookError::Partition {

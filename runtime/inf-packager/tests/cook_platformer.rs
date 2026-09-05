@@ -311,6 +311,86 @@ fn cook_derives_a_vmesh_for_a_dense_mesh() {
     assert!(vgeom.total_triangles() > 0);
 }
 
+/// **The editor's own `.inf_vmesh` beside a mesh is not a collision** (audit
+/// ROAD1b).
+///
+/// # The defect, measured on the shipped island
+///
+/// The editor derives a `.inf_vmesh` beside every mesh it draws (P18.3) at
+/// exactly [`derived_vmesh_id`] of the mesh — the same bijection the cook
+/// computes — and registers it in the project. The cook's guard asked
+/// `AssetDb::contains`, so for every mesh the editor had ever drawn the answer
+/// was "this id is taken", it called that an *astronomically unlikely*
+/// collision, and it threw away the DAG it had just spent minutes building.
+///
+/// On `island-build/project` that was all four road meshes. The pack came out
+/// **244 304 828 bytes with no `meshlet_mesh` entry at all**; with the loose
+/// derivations moved aside it was **352 028 412** and carried four. A cooked
+/// island therefore drew its carriageway, its kerbs and both paint layers as
+/// placeholder cubes — the shipped half of wave ROAD1b's carried 32, behind a
+/// warning that read like a hash collision.
+///
+/// The guard belongs against **what this cook packs**, which is the dependency
+/// closure. A loose asset no root reaches is never written, so it cannot shadow
+/// anything.
+///
+/// Falsification: put `db.contains(vmesh_id)` back and this reds with no
+/// `meshlet_mesh` in the pack.
+#[test]
+fn the_editors_own_derived_vmesh_is_not_a_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let mesh_id = make_mesh_project(&proj);
+    let vmesh_id = derived_vmesh_id(mesh_id);
+
+    // What the editor leaves beside the mesh: a payload under the derived id,
+    // registered in the project and referenced by nothing.
+    let loose = proj.join("Content").join("Dense.inf_vmesh");
+    let bytes = b"an editor-derived meshlet image, stale or fresh".to_vec();
+    std::fs::write(&loose, &bytes).unwrap();
+    AssetSidecar::new(vmesh_id, AssetKind::MeshletMesh, ContentHash::of(&bytes))
+        .save(&loose)
+        .unwrap();
+
+    let out = dir.path().join("out");
+    let report = cook(
+        &proj,
+        &out,
+        &CookOptions {
+            roots: Some(vec![mesh_id]),
+            ..Default::default()
+        },
+    )
+    .expect("cook succeeds");
+
+    assert_eq!(
+        report.meshlet_meshes_derived, 1,
+        "the cook derived a DAG and then dropped it — the loose `.inf_vmesh` \
+         beside the mesh was read as a collision"
+    );
+    assert_eq!(report.kinds.get("meshlet_mesh"), Some(&1));
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("collides")),
+        "the cook warned about a collision with an asset it was never packing: {:?}",
+        report.warnings
+    );
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    assert!(
+        reader.contains(vmesh_id),
+        "the derived vmesh is in the pack"
+    );
+    assert_eq!(reader.entry(vmesh_id).unwrap().kind, AssetKind::MeshletMesh);
+    // And it is the COOK's derivation, not the loose bytes: the loose payload is
+    // not a paged image and nothing put it in the closure.
+    let packed: Vec<u8> = reader.read(vmesh_id).unwrap();
+    assert!(
+        inf_vgeom::asset::is_v2(&packed),
+        "the pack carries the cook's own paged image"
+    );
+    assert_ne!(packed, bytes, "the loose payload was packed instead");
+}
+
 #[test]
 fn cook_with_vmesh_derivation_is_deterministic() {
     let dir = tempfile::tempdir().unwrap();
