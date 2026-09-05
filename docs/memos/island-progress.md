@@ -32596,8 +32596,35 @@ Worth recording separately: the **parity** arm stays green under that mutation
 and the walk arm does not. Two hosts that agree are not two hosts that are
 right, which is P24's law met again — and it is why this file carries both.
 
-The cost has a ceiling read by name: `FOOTWAY_SLABS_CEILING` = 40, against 19
+The cost has a ceiling read by name: `FOOTWAY_SLABS_CEILING` = 40, against 15
 described. Unbanded, the island's 35 km of street would be about 2 200 boxes.
+
+**And it stops at a junction, which took two red EMS arms to learn.** A street's
+footway runs its whole length and `streets_of_blocks` answers whole lines, so
+the footway of the street along Z crosses the carriageway of every street along
+X — exactly as its *drawn* footway does, which is what
+`clip_kerbs_to_open_ground` exists to cut. The collider was not cut at all, so
+every intersection in a settlement carried a **2.3 m × 150 mm concrete wall
+across it**, and `ems2_dispatch_gate` lost a unit that never reached its
+incident and a fleet that never came home, because a responder driving down one
+street hit a kerb laid across the next. `crosses_another_carriageway` refuses
+those slabs whole — 4 of 28 on the fixture — and `kerb_walk` asserts the number
+is not zero.
+
+**And a street the parked row overlaps gets no footway at all.** On a 20 m city
+reserve the kerb is at 7.000 m and a parked car's flank at 5.900 — a metre
+clear. On a 16 m town reserve the kerb is at 5.250 and that flank is still
+5.900, so a car begins the level **0.650 m inside the concrete**, and rapier
+answers a body spawned inside a static box by pushing it out of one.
+`footway_is_clear_of_the_parked_row` refuses that reserve, which makes carried
+24 and this one the same item: close the parking offset and the town footways
+open by themselves. Harbour City and Eastgate are 20 m and keep theirs — which
+is where the hero spawns and where every demo frame is taken.
+
+The settle ray looks through the footway too, on `not_the_ground`'s own reason
+one kind along: a ray asking "what is under this car" must not answer with a
+kerb, or a slot beside a footway latches its ground 150 mm up and the car is
+placed standing on the pavement.
 
 ### CLAUSE 3 — THE MITRE, THE CLIP AND THE SCAR
 
@@ -32677,20 +32704,34 @@ ground around a road 19 m wide at its widest** (carried 23).
 road's own width and a stated shoulder. `smooth01` still eases it, so the join
 to the hillside keeps a matched gradient.
 
-And the settlement streets **join the corridor**, which is what makes that
-affordable and closes a seam at the same time: `build_ribbon_across` samples the
-ground at every cross-section point of the carriageway while `carriageway_y`
-samples it once on the centreline for the kerb, so on ground that is not planar
-the asphalt's edge and the channel it drains into part company by up to a crown.
-Levelled, they agree by construction. They join the corridor and **not** the
-grade audit: a street on a settlement pad has no gradient to fail, and 344 flat
-spans would bury the two real over-grade stretches the report exists to name.
+**The settlement streets do NOT join the corridor**, and the first draft of this
+ledger said they did — the edit never reached the file and the claim was false.
+It is also the wrong thing, which the fixture proves: a corridor needs a design
+height per centreline vertex and a street span has none. It is derived from
+authored blocks that have not been evaluated, have no doorway and therefore no
+pad, so the Ring-1 generator writes `y = 0`; levelling a corridor to that would
+flatten every settlement toward **sea level**. Measured before it was taken back
+out: the road's float past its own crown went from 0.0000 m to 0.0350 m and
+`the_road_sits_on_the_terrain_the_renderer_draws` reds. The settlement **pad**
+already levels the ground a street is laid on, which is what the streets have
+instead, and `build_island` says so where the decision is made.
 
 | | before | after |
 |---|---|---|
 | corridor half-width | 20.7 m (**41.4 m** scar) | 13.0 m (**26.0 m** scar) |
 | samples the carve levelled | 1 179 961 | **758 503** (−35.7 %) |
-| road length inside the corridor | 33.74 km | 68.70 km (**2.04×**) |
+
+**AND THE CLAMP IS TWO CROWNS, NOT ONE.** `road1_gate`'s morph-free arm read
+`near.float <= 1e-9` and passed for two waves — because every road on the
+fixture sat on a levelled corridor, where `carriageway_y`'s `blended` equals its
+`local`, the clamp is inactive, and the only thing above the ground is the
+crown. A settlement street is graded over a settlement pad, which is a dome, so
+the clamp is live, and what it permits is `slack + crown`:
+`blended.clamp(local ± crown_fall·half)` and then `+ crown_fall·(half − |off|)`
+on top. Measured on the fixture: **0.1750 m**, against the 0.2800 m two crowns
+of a 7 m half-width allow. The arm names `GRADED_CLAMP_M` now, and
+`carriageway_y`'s doc — which said "its own crown" while its arithmetic has
+always said twice that — is corrected beside it.
 
 ### CLAUSE 4 — WHAT THE ROADS COST
 
@@ -32839,7 +32880,9 @@ line in gravel" is not a figure of speech; it is 144.8 against 149.7.
     each. It is derived and byte-locked like `streams.geojson`, so it is a
     generated file in a source tree by the same argument; a bigger island makes
     it bigger.
-30. **A street span's reserve is found by nearest-perpendicular**, not carried
+30. **A 16 m town street has no footway collider** — the parked row overlaps
+    it, above. It is carried 24 wearing a second hat and it closes with it.
+31. **A street span's reserve is found by nearest-perpendicular**, not carried
     through the graph, so two settlement grids whose lines coincide on one axis
     within a metre would take each other's lane count. No island produces one;
     the derivation's merged intervals cannot.
