@@ -195,6 +195,7 @@ fn payload_for(proj: &Path, doc: &SceneDoc) -> inf_runtime::pie::ScenePayload {
         |_| None,
         |_| None,
         read,
+        |_| None,
         0,
         false,
     )

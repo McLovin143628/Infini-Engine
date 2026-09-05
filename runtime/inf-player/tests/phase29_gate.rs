@@ -797,6 +797,7 @@ fn course_payload(machine: Option<&inf_anim::StateMachine>) -> inf_runtime::pie:
         |_| None,
         |guid| (guid == ids.mesh).then(|| mesh.clone()),
         |_| None,
+        |_| None,
         HZ as u32,
         false,
     )

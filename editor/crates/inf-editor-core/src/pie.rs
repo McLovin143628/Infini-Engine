@@ -525,6 +525,35 @@ pub enum TerrainRef {
     Bytes(Vec<u8>),
 }
 
+/// How a caller of [`build_scene_payload`] serves one mesh's derived
+/// `.inf_vmesh` (wave FIX2, `ScenePayload` v13) — the ONLY thing a rigid
+/// `MeshRef.asset` can be drawn from.
+///
+/// The editor's copy of this question is
+/// [`crate::assets::vmesh::DerivedVmesh`]; this is it crossing the resolver
+/// boundary, minus the paths a payload has no use for.
+///
+/// **There is no `Bytes` variant and there will not be one.** A `.inf_vmesh` is
+/// *derived*, so a caller with no file has no DAG either and the honest payload
+/// is an absent entry rather than an invented one — and the island's four road
+/// DAGs are 107.7 MB together, which is the wire route walking straight back into
+/// [`inf_runtime::pie::MAX_FRAME_LEN`] and the Play button wave GTA1 rescued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmeshRef {
+    /// The derived DAG's file, current with the mesh beside it. Rides as a path,
+    /// and the player opens it through the same `VgeomSource::from_payload` door a
+    /// `--level` dev boot opens the ones beside its level with.
+    Path(std::path::PathBuf),
+    /// A derived DAG exists and was built from **different** mesh bytes.
+    ///
+    /// Play refuses the whole payload on this (it is not skipped, and it does not
+    /// ride): a preview drawn from geometry that is not in the project is the one
+    /// outcome worse than no preview, and it is the outcome the ROAD1b audit
+    /// photographed — a proof frame showing kerbs and paint from the current build
+    /// and a carriageway from the previous one.
+    Stale,
+}
+
 /// Build the [`ScenePayload`] handed to the player from the **live** document:
 /// the v3 `.inf_lvl` bytes of the current (unsaved-included) doc, plus the bound
 /// blueprint classes. Bindings resolve like [`crate::samples::bound_actors`]:
@@ -581,8 +610,24 @@ pub enum TerrainRef {
 /// in-memory fixtures). The choice is the caller's because only the caller knows
 /// which it has, and the two land in separate payload vectors so nothing has to
 /// guess later.
+/// # `resolve_vmesh`, the ninth, and why Play can REFUSE
+///
+/// Wave FIX2. Every resolver above answers with content or with `None`, and a
+/// `None` is always survivable: the level previews without that cave, that
+/// garment, that texture. The ninth is different in one direction only. A DAG
+/// that is *absent* is survivable in exactly the same way — the cook declines to
+/// derive one below `[vgeom] min_triangles`, so a shipped build is in the same
+/// position and refusing here would refuse a level the shipped build runs. A DAG
+/// that is **stale** is not: it is real geometry from a mesh the project no
+/// longer holds, and shipping it would preview a world that does not exist.
+///
+/// So a [`VmeshRef::Stale`] anywhere in the walk fails this function, naming
+/// every offending mesh and the remedy, and Play does not start. That is the P23
+/// edit-during-Simulate law read from the other side: an edit or an import must
+/// re-derive before the preview, and where it has not yet, the preview says so
+/// rather than lying.
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene_payload<F, G, H, B, V, T, M, A>(
+pub fn build_scene_payload<F, G, H, B, V, T, M, A, X>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
@@ -602,6 +647,12 @@ pub fn build_scene_payload<F, G, H, B, V, T, M, A>(
     // so four parameters would be four ways to make the same call and four
     // chances to mis-order them.
     mut resolve_bytes: A,
+    // FIX2 (`ScenePayload` v13): where a mesh's derived `.inf_vmesh` is, and
+    // whether it is current. NINTH and last rather than beside `resolve_terrain`,
+    // which it most resembles, because appending is what the tail of this
+    // signature has always done and a reader comparing two call sites across a
+    // wave should not have to count.
+    mut resolve_vmesh: X,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -614,6 +665,7 @@ where
     T: FnMut(Uuid) -> Option<TerrainRef>,
     M: FnMut(Uuid) -> Option<Vec<u8>>,
     A: FnMut(Uuid) -> Option<Vec<u8>>,
+    X: FnMut(Uuid) -> Option<VmeshRef>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -973,6 +1025,129 @@ where
         }
     }
 
+    // ── FIX2: the meshes SCATTERED content draws ─────────────────────────────
+    //
+    // Wave TER2b gave `PcgKind::mesh` a draw path on the cooked and dev-dir
+    // boots and left the PIE one with no table at all, so every scattered
+    // instance in a windowed PIE session drew the placeholder primitive while the
+    // shipped build drew the authored ground cover. `run_pie` said so in the tree
+    // for a whole wave; this is the payload half of closing it.
+    //
+    // **A use of `meshes`, not a new field.** The vector is already a general bag
+    // of `.inf_mesh` bytes that only `SkeletalMesh.mesh` and the spawn names
+    // filled; a scatter kind's mesh is the same kind of thing resolved through the
+    // same door with the same dedupe, so it rides the same slot. The player keeps
+    // the walk demand-shaped at the other end (`scatter_mesh::from_payload` reads
+    // the graphs to decide which of these to upload), which is why shipping a
+    // character's body in the same vector costs the scatter path nothing.
+    //
+    // Walked over the `.inf_pcg` BYTES collected above — the ones that really
+    // resolved, biome-dispatched graphs included — so the payload never names a
+    // kind mesh for a graph it did not ship. Sorted + deduplicated inside
+    // `kind_meshes`' twin here, so the payload is a deterministic function of the
+    // document rather than of graph order.
+    let mut scatter_kind_meshes: Vec<Uuid> = Vec::new();
+    for (guid, bytes) in &pcgs {
+        match inf_asset::decode::<inf_pcg::PcgAssetPayload>(bytes) {
+            Ok(doc) => scatter_kind_meshes.extend(
+                doc.document
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.rules)
+                    .flat_map(|r| &r.kinds)
+                    .filter_map(|k| k.mesh),
+            ),
+            // Reported, not discarded (the P24.1 audit's B1 shape): a graph that
+            // does not decode here still SHIPS — it was collected above — while
+            // the meshes its kinds name silently do not, so PIE would scatter
+            // placeholder primitives where the cooked build scatters props.
+            Err(e) => tracing::warn!(
+                "pie: scatter graph {guid} ships but did not decode here, so the meshes its \
+                 kinds name are absent and its instances preview as placeholders: {e}"
+            ),
+        }
+    }
+    scatter_kind_meshes.sort();
+    scatter_kind_meshes.dedup();
+    for mesh in scatter_kind_meshes {
+        if !seen_mesh.insert(mesh) {
+            continue;
+        }
+        if let Some(bytes) = resolve_mesh(mesh) {
+            meshes.push((mesh, bytes));
+        }
+    }
+
+    // ── FIX2: the derived meshlet DAGs a RIGID mesh is drawn from ────────────
+    //
+    // `ScenePayload` v13, and the oldest gap in this builder. `RenderScene` has
+    // exactly one door for real non-primitive geometry, and nothing ever put a
+    // `.inf_vmesh` on this wire — so a windowed PIE session drew every
+    // `MeshRef.asset` as a placeholder cube while the editor viewport, reading
+    // the same derived files off the same disk, drew the real thing. On the
+    // island that is the whole road network.
+    //
+    // Keyed by the DERIVED id (`inf_vgeom::derived_vmesh_id`), which is what the
+    // player's registry keys by and what a cooked pack stores under: one lookup
+    // rule on both paths, the `fractures` and `materials` precedent.
+    //
+    // Only entities that actually name a mesh, walked in `doc.order()` and
+    // deduplicated by MESH — two walls sharing a mesh share its DAG, exactly as
+    // they share its fracture.
+    let mut vmesh_paths: Vec<(Uuid, String)> = Vec::new();
+    let mut stale_vmeshes: Vec<Uuid> = Vec::new();
+    let mut seen_vmesh: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(mesh) = world
+            .world()
+            .get::<inf_ecs::components::MeshRef>(e)
+            .and_then(|m| m.asset)
+        else {
+            continue;
+        };
+        if !seen_vmesh.insert(mesh) {
+            continue;
+        }
+        match resolve_vmesh(mesh) {
+            Some(VmeshRef::Path(path)) => match path.to_str() {
+                Some(s) => vmesh_paths.push((
+                    inf_vgeom::derived_vmesh_id(inf_asset::AssetId(mesh)).uuid(),
+                    s.to_string(),
+                )),
+                // Lossy is a refusal in disguise — the `terrain_paths` rule — and
+                // there is no bytes route to fall back to here, so the honest
+                // outcome is an absent entry and a line saying which mesh will
+                // not draw.
+                None => tracing::warn!(
+                    "pie: mesh {mesh} has a derived DAG at a non-UTF-8 path, so it cannot be \
+                     named on the wire and this mesh will not draw in PIE"
+                ),
+            },
+            Some(VmeshRef::Stale) => stale_vmeshes.push(mesh),
+            // Absent: no entry, and the player states the miss. NOT a refusal —
+            // see `VmeshRef`'s doc and the note on this function.
+            None => {}
+        }
+    }
+    if !stale_vmeshes.is_empty() {
+        let named = stale_vmeshes
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PieError::Protocol(format!(
+            "{} mesh(es) in this level have a derived .inf_vmesh built from OLDER bytes than \
+             the mesh on disk ({named}) — Play would preview geometry this project no longer \
+             holds. The meshlet derivation sweep queued when the project opened rebuilds \
+             them; wait for it to finish (the import progress bar reports it), or re-open the \
+             project to queue it again.",
+            stale_vmeshes.len()
+        )));
+    }
+
     // Referenced garments and hairstyles (P26.3b · `ScenePayload` v8): every
     // `ClothSim.asset` / `HairGuides.asset` ref resolved to its `.inf_cloth` /
     // `.inf_hair` bytes.
@@ -1181,6 +1356,7 @@ where
             .with_voxels(voxels)
             .with_terrains(terrains)
             .with_terrain_paths(terrain_paths)
+            .with_vmesh_paths(vmesh_paths)
             .with_fractures(fractures)
             .with_meshes(meshes)
             .with_garments(cloths, hairs)
@@ -1426,6 +1602,7 @@ mod tests {
             // texture). `None` here is the honest fixture default — this arm authors
             // none of the four.
             |_| None,
+            |_| None,
             60,
             false,
         )
@@ -1530,6 +1707,7 @@ mod tests {
                 |_| None,
                 |_| None,
                 |g| (g == TERRAIN).then(|| terrain.clone()),
+                |_| None,
                 |_| None,
                 |_| None,
                 60,
@@ -1650,6 +1828,7 @@ mod tests {
             // texture). `None` here is the honest fixture default — this arm authors
             // none of the four.
             |_| None,
+            |_| None,
             60,
             false,
         )
@@ -1673,6 +1852,7 @@ mod tests {
             // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
             // texture). `None` here is the honest fixture default — this arm authors
             // none of the four.
+            |_| None,
             |_| None,
             60,
             false,
@@ -1863,6 +2043,7 @@ mod tests {
             // texture). `None` here is the honest fixture default — this arm authors
             // none of the four.
             |_| None,
+            |_| None,
             60,
             false,
         )
@@ -1987,6 +2168,7 @@ mod tests {
             // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
             // texture). `None` here is the honest fixture default — this arm authors
             // none of the four.
+            |_| None,
             |_| None,
             60,
             false,

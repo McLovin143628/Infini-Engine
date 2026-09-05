@@ -214,6 +214,7 @@ fn character_payload(windowed: bool) -> ScenePayload {
         |g| (g == MESH).then(|| mesh_bytes.clone()),
         // P26.3b: the cloth / hair / material / texture byte resolver.
         |_| None,
+        |_| None,
         0, // tick-hz 0: no per-frame sleep (step-driven determinism)
         windowed,
     )
@@ -488,6 +489,7 @@ fn character_payload_with_ik(at: inf_ecs::math::Vec3d) -> ScenePayload {
         |_| None,
         |g| (g == MESH).then(|| mesh_bytes.clone()),
         // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         |_| None,
         0,
         false,

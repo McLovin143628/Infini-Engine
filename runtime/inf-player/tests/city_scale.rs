@@ -136,6 +136,7 @@ fn pie_built() -> BuiltWorld {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         60,
         false,
     )

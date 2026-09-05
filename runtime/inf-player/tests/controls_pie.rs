@@ -363,6 +363,7 @@ fn payload(f: Fixture) -> ScenePayload {
         |_| None,
         |g| (g == mesh_id).then(|| mesh.clone()),
         |_| None,
+        |_| None,
         // tick-hz 0: no per-frame sleep. Every step this file takes is asked for.
         0,
         false,

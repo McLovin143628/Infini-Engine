@@ -108,6 +108,7 @@ fn player_fall(settings: LevelSettings) -> f64 {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         HZ as u32,
         false,
     )

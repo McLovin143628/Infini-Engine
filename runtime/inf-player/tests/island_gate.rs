@@ -313,6 +313,7 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
             }
         },
         read_asset,
+        |_| None,
         HZ as u32,
         false,
     )

@@ -206,6 +206,7 @@ fn platformer_payload() -> ScenePayload {
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.
         |_| None,
+        |_| None,
         0, // tick-hz 0: no per-frame sleep (step-driven determinism)
         false,
     )

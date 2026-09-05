@@ -171,6 +171,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         HZ,
         false,
     )
@@ -405,6 +406,7 @@ end
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         HZ,
         false,
     )
@@ -485,6 +487,7 @@ end
             asked.push(guid);
             (guid == MESH_GUID).then(|| mesh_bytes.clone())
         },
+        |_| None,
         |_| None,
         HZ,
         false,

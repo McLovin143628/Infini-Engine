@@ -192,6 +192,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.
         |_| None,
+        |_| None,
         60,
         false,
     )
@@ -1980,6 +1981,7 @@ fn skinned_pie_sim(doc: &inf_editor_core::scene::SceneDoc) -> RuntimeSim {
         // P22.3: no destructible meshes in this fixture.
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         |_| None,
         60,
         false,

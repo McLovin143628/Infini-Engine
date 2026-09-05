@@ -613,6 +613,7 @@ fn pie_matches_shipping_for_the_biome_population() {
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.
         |_| None,
+        |_| None,
         60,
         false,
     )

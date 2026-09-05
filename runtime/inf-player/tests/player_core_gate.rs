@@ -119,6 +119,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |guid| (guid == ids.mesh).then(|| mesh.clone()),
         |_| None,
+        |_| None,
         HZ as u32,
         false,
     )

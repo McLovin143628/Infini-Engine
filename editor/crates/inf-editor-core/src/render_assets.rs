@@ -394,6 +394,50 @@ impl EditorRenderAssets {
     fn open_vgeom(&mut self, mesh_id: Uuid) -> Option<LoadedVgeom> {
         let vmesh_id = inf_vgeom::derived_vmesh_id(inf_asset::AssetId(mesh_id)).uuid();
         let path = self.resolve_path(vmesh_id)?;
+        // **Is this DAG the one this mesh would derive?** (wave FIX2, carried 38.)
+        //
+        // This function used to read the payload and ask nothing about it, so a
+        // mesh rewritten under the same GUID — which is exactly what a re-import,
+        // a DCC save and `inf island build` all do — kept drawing the DAG built
+        // from the PREVIOUS bytes until the project-open sweep reached it, about
+        // two and a half minutes into a session on the island. The ROAD1b audit
+        // photographed it: two of the four road DAGs in the wave's own proof frame
+        // were the pre-paving build, so the frame showed kerbs and double yellow
+        // and no carriageway, and nothing anywhere said so.
+        //
+        // Stale is REFUSED, not drawn: the caller's `None` arm draws nothing (the
+        // placeholder cube is gone), which is the honest frame for "the project
+        // does not have current geometry for this mesh yet". The sweep replaces
+        // it and `refresh_index` drops this negative entry.
+        //
+        // `derived_is_current` is the SAME comparison `plan_vmesh` makes, so the
+        // viewport refuses exactly what the sweep would rebuild.
+        if let Some(mesh_path) = self.resolve_path(mesh_id) {
+            match (
+                inf_asset::AssetSidecar::load(&mesh_path),
+                inf_asset::AssetSidecar::load(&path),
+            ) {
+                (Ok(mesh), Ok(derived)) => {
+                    if !crate::assets::vmesh::derived_is_current(&mesh, &derived) {
+                        tracing::warn!(
+                            "inf-editor-core: .inf_vmesh {} was derived from different bytes \
+                             than {} holds now, so it is NOT drawn — the project-open meshlet \
+                             sweep rebuilds it, and until it does this mesh has no geometry \
+                             the project can honestly show",
+                            path.display(),
+                            mesh_path.display()
+                        );
+                        return None;
+                    }
+                }
+                // A `.inf_vmesh` with no readable sidecar is not one this editor
+                // derived (a cooked artifact copied in by hand, say), and a mesh
+                // with none is not in the database at all. Neither is a staleness
+                // CLAIM, so neither is a refusal: drawing it is what the editor
+                // did before this wave and the currency question does not apply.
+                _ => {}
+            }
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {

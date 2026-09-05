@@ -215,6 +215,24 @@ pub async fn pie_start(
             // KIND check lives in the loader so a mistyped binding resolves to
             // `None` here rather than shipping a garment's bytes as a texture.
             |guid| assets.load_binding_bytes(inf_asset::AssetId(guid)),
+            // Wave FIX2 (`ScenePayload` v13): where this mesh's derived
+            // `.inf_vmesh` is, and whether it was built from the bytes the mesh
+            // holds now. The ONLY thing a rigid `MeshRef.asset` can be drawn from
+            // — before this the payload carried none and Play drew placeholder
+            // cubes for the whole road network.
+            //
+            // A path when the DAG is current, `Stale` when it is not (the builder
+            // refuses the payload and names the remedy), and `None` when there is
+            // none at all — which is survivable, because a cooked pack has none
+            // either for a mesh below the cook's `[vgeom] min_triangles`.
+            |guid| {
+                use inf_editor_core::assets::vmesh::DerivedVmesh;
+                match assets.derived_vmesh(inf_asset::AssetId(guid)) {
+                    Some(DerivedVmesh::Current(p)) => Some(inf_editor_core::pie::VmeshRef::Path(p)),
+                    Some(DerivedVmesh::Stale(_)) => Some(inf_editor_core::pie::VmeshRef::Stale),
+                    Some(DerivedVmesh::Absent) | None => None,
+                }
+            },
             PIE_TICK_HZ,
             true,
         )

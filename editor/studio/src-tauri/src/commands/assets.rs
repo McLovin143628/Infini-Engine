@@ -419,6 +419,23 @@ impl AssetState {
         Some(entry.path.clone())
     }
 
+    /// Where a mesh's **derived** `.inf_vmesh` is and whether it is current (wave
+    /// FIX2), for the PIE payload's `vmesh_paths` route.
+    ///
+    /// The kind check and the currency comparison both live in
+    /// `inf_editor_core::assets::vmesh` — this is the lock plus a hand-off, for
+    /// the reason `terrain_path` above is: only the caller holding the project can
+    /// answer, and only one module should own what "current" means.
+    pub fn derived_vmesh(
+        &self,
+        id: AssetId,
+    ) -> Option<inf_editor_core::assets::vmesh::DerivedVmesh> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        Some(inf_editor_core::assets::vmesh::derived_vmesh(&proj, id))
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

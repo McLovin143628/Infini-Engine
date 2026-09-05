@@ -152,7 +152,10 @@ pub fn plan_vmesh(
     // a property of the input. (The payload's own hash lives in `content_hash`, as
     // for any asset.)
     if let Some(existing) = project.db().get(derived) {
-        if existing.path.exists() && recorded_source_hash(&existing.sidecar) == Some(mesh_hash) {
+        // The ONE currency rule (wave FIX2): `derived_is_current`, so the
+        // planner, the viewport and the Play refusal cannot come to disagree
+        // about what "current" means.
+        if existing.path.exists() && derived_is_current(&entry.sidecar, &existing.sidecar) {
             return None;
         }
     }
@@ -431,6 +434,83 @@ fn derived_import_table(mesh_id: AssetId, mesh_hash: ContentHash) -> toml::Table
 fn recorded_source_hash(sidecar: &inf_asset::AssetSidecar) -> Option<ContentHash> {
     let hex = sidecar.import.as_ref()?.get(SOURCE_HASH_KEY)?.as_str()?;
     u128::from_str_radix(hex, 16).ok().map(ContentHash)
+}
+
+/// **The one rule for "is this derived DAG current?"** (wave FIX2): the derived
+/// sidecar's recorded [`SOURCE_HASH_KEY`] against the mesh sidecar's own
+/// `content_hash`.
+///
+/// It was already the cache check inside [`plan_vmesh`] and nowhere else, which
+/// is how the ROAD1b audit found the editor viewport drawing two of the island's
+/// four road DAGs from the **previous** build: `RenderAssets::open_vgeom` read a
+/// `.inf_vmesh` off disk and asked nothing about it, so a frame taken in the
+/// first minutes of a session — before the project-open sweep finishes —
+/// photographed geometry that is not in the project. Three callers now share this
+/// one comparison: the planner (should I rebuild?), the viewport (may I draw
+/// this?) and [`derived_vmesh`] (may Play ship this path?).
+///
+/// **A hash and not a timestamp**, the `ImportCache`/`ThumbnailCache` rule: a
+/// content root that is copied, checked out or restored has mtimes nobody
+/// authored, and "unchanged" has to mean the bytes.
+pub fn derived_is_current(
+    mesh: &inf_asset::AssetSidecar,
+    derived: &inf_asset::AssetSidecar,
+) -> bool {
+    recorded_source_hash(derived) == Some(mesh.content_hash)
+}
+
+/// What the Play path finds when it asks a project for a mesh's derived DAG
+/// (wave FIX2).
+///
+/// The three answers are three different facts about the world and the payload
+/// builder treats them differently — see `crate::pie::VmeshRef`, which is this
+/// type crossing the resolver boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedVmesh {
+    /// On disk, and its recorded source hash is the mesh's current one.
+    Current(PathBuf),
+    /// On disk, derived from **different** mesh bytes. Play refuses on this: a
+    /// preview of geometry that is not in the project is the one outcome worse
+    /// than no preview.
+    Stale(PathBuf),
+    /// Nothing on the derived id, or `mesh_id` is not a mesh in this project.
+    ///
+    /// **Not a refusal.** A cooked pack has no DAG either for a mesh below the
+    /// cook's `[vgeom] min_triangles`, so a Play that refused here would refuse a
+    /// level the shipped build runs — PIE == shipping cuts both ways. The player
+    /// states the miss and draws nothing, on both hosts.
+    Absent,
+}
+
+/// Where `mesh_id`'s derived `.inf_vmesh` is, and whether it is current — the
+/// door the PIE payload builder's resolver goes through (wave FIX2).
+///
+/// Database reads plus one `exists()`, exactly like [`plan_vmesh`], and it asks
+/// [`derived_is_current`] the same question the planner asks so "the sweep would
+/// rebuild this" and "Play refuses this" can never disagree.
+pub fn derived_vmesh(project: &AssetProject, mesh_id: AssetId) -> DerivedVmesh {
+    let Some(mesh) = project.db().get(mesh_id) else {
+        return DerivedVmesh::Absent;
+    };
+    if mesh.kind() != AssetKind::Mesh {
+        return DerivedVmesh::Absent;
+    }
+    let mesh_sidecar = mesh.sidecar.clone();
+    let derived_id = inf_vgeom::derived_vmesh_id(mesh_id);
+    let Some(derived) = project.db().get(derived_id) else {
+        return DerivedVmesh::Absent;
+    };
+    // An artifact on the derived id that is not a meshlet mesh, or is not one of
+    // ours, is not a DAG this project derived — the `remove_derived_vmesh` rule,
+    // and the same answer: nothing here will draw.
+    if derived.kind() != AssetKind::MeshletMesh || !derived.path.exists() {
+        return DerivedVmesh::Absent;
+    }
+    if derived_is_current(&mesh_sidecar, &derived.sidecar) {
+        DerivedVmesh::Current(derived.path.clone())
+    } else {
+        DerivedVmesh::Stale(derived.path.clone())
+    }
 }
 
 /// Where the derived payload lands: **beside its mesh**, under the mesh's own

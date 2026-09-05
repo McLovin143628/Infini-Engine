@@ -189,6 +189,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |guid| (guid == HEIST_ALARM_MESH_GUID).then(|| mesh.clone()),
         |_| None,
+        |_| None,
         HZ,
         false,
     )

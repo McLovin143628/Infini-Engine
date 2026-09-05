@@ -283,6 +283,7 @@ fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
         |_| None,
         // P26.3b: the cloth / hair / material / texture byte resolver.
         |_| None,
+        |_| None,
         60,
         false,
     )

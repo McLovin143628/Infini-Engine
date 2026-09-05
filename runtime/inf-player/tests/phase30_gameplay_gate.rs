@@ -149,6 +149,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |guid| (guid == inf_editor_core::samples::GAMEPLAY_TARGET_MESH_GUID).then(|| mesh.clone()),
         |_| None,
+        |_| None,
         HZ as u32,
         false,
     )

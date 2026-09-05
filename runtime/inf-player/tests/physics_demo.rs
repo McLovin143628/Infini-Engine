@@ -303,6 +303,7 @@ fn pie_payload_matches_shipping_for_playground() {
         // P26.3b: the cloth / hair / material / texture byte resolver. This
         // fixture authors none of the four.
         |_| None,
+        |_| None,
         60,
         false,
     )
