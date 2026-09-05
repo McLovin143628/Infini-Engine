@@ -1,0 +1,8268 @@
+{
+  "crs": {
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::32610"
+    },
+    "type": "name"
+  },
+  "features": [
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489806.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 0",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489806.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 1",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464844.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 2",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            489806.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 3",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 4",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 5",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 6",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489874.0,
+            5464556.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 7",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464844.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 8",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 9",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 10",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            489874.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 11",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 12",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464556.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 13",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            489950.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 14",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 15",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464844.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 16",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 17",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464776.0,
+            0.0
+          ],
+          [
+            490094.0,
+            5464776.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 18",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            489950.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 19",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 20",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464556.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 21",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490026.0,
+            5464624.0,
+            0.0
+          ],
+          [
+            490094.0,
+            5464624.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 22",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490094.0,
+            5464700.0,
+            0.0
+          ],
+          [
+            490026.0,
+            5464700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 23",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490380.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 24",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5464020.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 25",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 26",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 27",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 28",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 29",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 30",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 31",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 32",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 33",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 34",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 35",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 36",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 37",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 38",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 39",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 40",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490380.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 41",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463080.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 42",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490490.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 43",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5464020.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 44",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 45",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 46",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 47",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 48",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 49",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490490.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 50",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 51",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 52",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 53",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 54",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 55",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 56",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490610.0,
+            5463080.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 57",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 58",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5464020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 59",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 60",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 61",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 62",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 63",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 64",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 65",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490610.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 66",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 67",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 68",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 69",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 70",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 71",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490730.0,
+            5463080.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 72",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5464020.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 73",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 74",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 75",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 76",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 77",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 78",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 79",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 80",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 81",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 82",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490730.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 83",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490850.0,
+            5463080.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 84",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 85",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5464020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 86",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 87",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 88",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 89",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 90",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 91",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 92",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 93",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 94",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 95",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 96",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 97",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 98",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490850.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 99",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            490970.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463080.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 100",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 101",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5464020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 102",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 103",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 104",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 105",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 106",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 107",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 108",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 109",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 110",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 111",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 112",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 113",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 114",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            490970.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 115",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 116",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463080.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 117",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491090.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 118",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5464020.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 119",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 120",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 121",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463790.0,
+            0.0
+          ],
+          [
+            491320.0,
+            5463790.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 122",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 123",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 124",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 125",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            491090.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 126",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 127",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 128",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463310.0,
+            0.0
+          ],
+          [
+            491320.0,
+            5463310.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 129",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491210.0,
+            5463080.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 130",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491306.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 131",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491306.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 132",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491320.0,
+            5463910.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463910.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 133",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491320.0,
+            5463670.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463670.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 134",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491320.0,
+            5463550.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 135",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491320.0,
+            5463430.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463430.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 136",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491320.0,
+            5463190.0,
+            0.0
+          ],
+          [
+            491210.0,
+            5463190.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 137",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5466194.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 138",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 139",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 140",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 141",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5465974.0,
+            0.0
+          ],
+          [
+            491306.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 142",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5465974.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 143",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491374.0,
+            5465906.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 144",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5466194.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 145",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491374.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 146",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 147",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 148",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 149",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491450.0,
+            5465906.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 150",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 151",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5466194.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 152",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 153",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466126.0,
+            0.0
+          ],
+          [
+            491594.0,
+            5466126.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 154",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 155",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5466050.0,
+            0.0
+          ],
+          [
+            491594.0,
+            5466050.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 156",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5465974.0,
+            0.0
+          ],
+          [
+            491450.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 157",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491526.0,
+            5465906.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 158",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            491594.0,
+            5465974.0,
+            0.0
+          ],
+          [
+            491526.0,
+            5465974.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 159",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492006.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 160",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464626.0,
+            0.0
+          ],
+          [
+            492006.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 161",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464626.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464694.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 162",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464626.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 163",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492006.0,
+            5464550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 164",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 165",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 166",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492074.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464406.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 167",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464694.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 168",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 169",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 170",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 171",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492074.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 172",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 173",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464406.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 174",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492150.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 175",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464694.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 176",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464626.0,
+            0.0
+          ],
+          [
+            492150.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 177",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 178",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 179",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464474.0,
+            0.0
+          ],
+          [
+            492294.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 180",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492226.0,
+            5464406.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464474.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 181",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492294.0,
+            5464626.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464626.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 182",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492294.0,
+            5464550.0,
+            0.0
+          ],
+          [
+            492226.0,
+            5464550.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 183",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            493956.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 184",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            493956.0,
+            5465426.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 185",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465494.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 186",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 187",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465426.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 188",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465274.0,
+            0.0
+          ],
+          [
+            493956.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 189",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465274.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 190",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465274.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 191",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494024.0,
+            5465206.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 192",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465494.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 193",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494024.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 194",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465426.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 195",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 196",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 197",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465274.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 198",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494100.0,
+            5465206.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 199",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494100.0,
+            5465426.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 200",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465494.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 201",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 202",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465426.0,
+            0.0
+          ],
+          [
+            494244.0,
+            5465426.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 203",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 204",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494176.0,
+            5465206.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 205",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494180.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 206",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494180.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 207",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494180.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 208",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494244.0,
+            5465350.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465350.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 209",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494244.0,
+            5465274.0,
+            0.0
+          ],
+          [
+            494176.0,
+            5465274.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 210",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5464320.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 211",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 212",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494180.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 213",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 214",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 215",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494180.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 216",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 217",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 218",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 219",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494180.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 220",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 221",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494180.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 222",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 223",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463380.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 224",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494290.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 225",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5464320.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 226",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 227",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 228",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 229",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 230",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 231",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 232",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 233",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 234",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 235",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 236",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494290.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 237",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 238",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494410.0,
+            5463380.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 239",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 240",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5464320.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 241",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 242",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 243",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 244",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 245",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 246",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 247",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 248",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 249",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 250",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 251",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 252",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 253",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494410.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 254",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494530.0,
+            5463380.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 255",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5464320.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 256",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 257",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 258",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 259",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 260",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 261",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 262",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 263",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 264",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 265",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494530.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 266",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 267",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463380.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 268",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494650.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 269",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 270",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5464320.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 271",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 272",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 273",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 274",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 275",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 276",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 277",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 278",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 279",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 280",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 281",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 282",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 283",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494650.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 284",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 285",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 286",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 287",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494770.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463380.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 288",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464320.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 289",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 290",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 291",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 292",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 293",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 294",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 295",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 296",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494770.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 297",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 298",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463380.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 299",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            494890.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 300",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 301",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464320.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 302",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 303",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 304",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 305",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 306",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 307",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 308",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463730.0,
+            0.0
+          ],
+          [
+            495120.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 309",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            494890.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 310",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463730.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 311",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 312",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463610.0,
+            0.0
+          ],
+          [
+            495120.0,
+            5463610.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 313",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495010.0,
+            5463380.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 314",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495056.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 315",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495056.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 316",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495120.0,
+            5464210.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464210.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 317",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495120.0,
+            5464090.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5464090.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 318",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495120.0,
+            5463970.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463970.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 319",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495120.0,
+            5463850.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463850.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 320",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495120.0,
+            5463490.0,
+            0.0
+          ],
+          [
+            495010.0,
+            5463490.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 20.0,
+        "lanes": 4,
+        "name": "Street 321",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5463094.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 322",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495056.0,
+            5462950.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 323",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 324",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 325",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5462950.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 326",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495124.0,
+            5462806.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 327",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 328",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5463094.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 329",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 330",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 331",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 332",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5462950.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 333",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495124.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 334",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495200.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5462806.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 335",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5463094.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 336",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 337",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 338",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462950.0,
+            0.0
+          ],
+          [
+            495344.0,
+            5462950.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 339",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495200.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 340",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5462806.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 341",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495276.0,
+            5462874.0,
+            0.0
+          ],
+          [
+            495344.0,
+            5462874.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 342",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            495344.0,
+            5463026.0,
+            0.0
+          ],
+          [
+            495276.0,
+            5463026.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 343",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    }
+  ],
+  "name": "the streets the island's own settlement blocks imply (wave ROAD1b)",
+  "type": "FeatureCollection"
+}

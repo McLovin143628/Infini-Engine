@@ -1274,8 +1274,8 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     doc
 }
 
-/// Write the island's committed halves beside its recipe: the level and the
-/// `.inf_pcg` its biome set binds.
+/// Write the island's committed halves beside its recipe: the level, the
+/// `.inf_pcg` its biome set binds, and the streets its own blocks imply.
 pub fn write_island_level(
     design: &inf_island::IslandDesign,
     dir: &std::path::Path,
@@ -1289,6 +1289,19 @@ pub fn write_island_level(
         &dir.join(format!("{slug}.inf_lvl")),
         Some(inf_island::level_guid(name)),
     )?;
+
+    // **The street layer** (wave ROAD1b). It is written HERE, beside the level,
+    // because it is derived from the same blocks the level writes and by the
+    // same door — `inf_ecs::traffic::streets_of_blocks`. The island build
+    // cannot derive it: `inf-island` does not link `inf-ecs` and has no
+    // settlement planner, which is exactly why the island had two road networks
+    // and paved only one of them.
+    inf_island::layers::write_streets(
+        &dir.join(&design.recipe.roads.streets),
+        &design.anchor,
+        &island_street_spans(design),
+    )
+    .map_err(|e| format!("write the island's street layer: {e}"))?;
 
     let bytes = inf_asset::encode(&island_cover_payload(design.recipe.seed_for("cover")))
         .map_err(|e| format!("encode the island's .inf_pcg: {e}"))?;
@@ -1466,6 +1479,115 @@ pub const ISLAND_RECIPES: [&str; 2] = [
     "samples/island/island.toml",
     "samples/island-fixture/island.toml",
 ];
+
+/// **The island's settlement blocks, as the street derivation reads them**
+/// (wave ROAD1b).
+///
+/// The same rectangles [`island_scene`] writes into the level as `PcgVolume`s —
+/// `b.centre` and `b.half` — carrying the same GUIDs, because
+/// `inf_ecs::traffic::streets_of_blocks` groups by proximity in `Guid` order and
+/// a different identity is a different grouping.
+///
+/// `pad_y` is the settlement's own design height rather than a doorway sill: at
+/// author time no block has been evaluated, so it has no doorways, and the
+/// paving does not read the height anyway (the ribbon takes its own from the
+/// terrain). It is the settlement's centre elevation so the value is *a*
+/// walking surface rather than a zero nobody meant.
+pub fn island_block_rects(design: &inf_island::IslandDesign) -> Vec<inf_ecs::traffic::BlockRect> {
+    let name = design.recipe.name.as_str();
+    let mut out = Vec::new();
+    for plan in &crate::settlement::settlements(design) {
+        for b in &plan.blocks {
+            out.push(inf_ecs::traffic::BlockRect {
+                guid: crate::settlement::block_guid(name, b.site, b.col, b.row),
+                centre: b.centre,
+                half: b.half,
+                pad_y: 0.0,
+            });
+        }
+    }
+    out
+}
+
+/// **The streets the island's own blocks imply** (wave ROAD1b) — the
+/// centrelines the traffic sim drives, the parked-car lattice sits on and the
+/// crowd's pavement ring surrounds, and, since this wave, the ones that get
+/// paved.
+///
+/// One line: `inf_ecs::traffic::streets_of_blocks` over [`island_block_rects`].
+/// There is no second derivation and there must not be — the defect this wave
+/// was called for is that the island had two road networks and only one of them
+/// was drawn.
+pub fn island_streets(design: &inf_island::IslandDesign) -> Vec<inf_ecs::traffic::Street> {
+    inf_ecs::traffic::streets_of_blocks(&island_block_rects(design))
+}
+
+/// **The street network as spans between grid crossings** (wave ROAD1b) — what
+/// the committed street layer holds and what the paving is built from.
+///
+/// The split points are `inf_ecs::traffic::carriageway_graph`'s nodes, which is
+/// the graph the traffic sim routes on: so a paved span and a driven edge are
+/// the same piece of street by construction, not by a comment. Every node it
+/// makes is a crossing or a line's end, and consecutive nodes are linked — the
+/// links ARE the spans.
+///
+/// Sorted at the end so the committed layer is a function of the design and not
+/// of a hash walk. The lane count comes from
+/// `inf_ecs::traffic::street_lanes`, the one door that turns a reserve into a
+/// carriageway.
+pub fn island_street_spans(design: &inf_island::IslandDesign) -> Vec<inf_island::StreetSpan> {
+    let streets = island_streets(design);
+    let graph = inf_ecs::traffic::carriageway_graph(&streets);
+    // Which street a node pair belongs to, so a span can state the reserve it
+    // came from: a crossing node is shared, but the SEGMENT between two nodes
+    // lies on exactly one line — the one whose axis it runs along.
+    let mut out: Vec<inf_island::StreetSpan> = Vec::new();
+    let mut seen: std::collections::BTreeSet<(u64, u64)> = Default::default();
+    for n in graph.nodes() {
+        for e in graph.edges_from(n.id) {
+            let key = (n.id.min(e.to), n.id.max(e.to));
+            if !seen.insert(key) {
+                continue;
+            }
+            let Some(other) = graph.node(e.to) else {
+                continue;
+            };
+            let (a, b) = (n.position, other.position);
+            // The reserve: the street this span runs along. A span is axis
+            // aligned, so the line that carries it is the one whose own axis
+            // matches and whose perpendicular coordinate it sits on.
+            let along_x = (a.z - b.z).abs() <= (a.x - b.x).abs();
+            let gap = streets
+                .iter()
+                .filter(|s| s.along_x() == along_x)
+                .map(|s| {
+                    let d = if along_x {
+                        (s.a.y - a.z).abs()
+                    } else {
+                        (s.a.x - a.x).abs()
+                    };
+                    (d, s.gap_m)
+                })
+                .min_by(|p, q| p.0.total_cmp(&q.0))
+                .map(|(_, g)| g)
+                .unwrap_or(inf_ecs::traffic::MIN_STREET_GAP_M);
+            out.push(inf_island::StreetSpan {
+                a,
+                b,
+                lanes: inf_ecs::traffic::street_lanes(gap),
+                gap_m: gap,
+            });
+        }
+    }
+    out.sort_by(|p, q| {
+        p.a.x
+            .total_cmp(&q.a.x)
+            .then(p.a.z.total_cmp(&q.a.z))
+            .then(p.b.x.total_cmp(&q.b.x))
+            .then(p.b.z.total_cmp(&q.b.z))
+    });
+    out
+}
 
 /// Read one committed island's design, or `None` when the recipe is not present.
 ///

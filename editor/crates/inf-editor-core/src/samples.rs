@@ -12038,6 +12038,35 @@ mod tests {
                 .unwrap(),
                 "committed {slug}Cover.inf_pcg drifted from the generator"
             );
+            // The STREET LAYER (wave ROAD1b), locked to the level for the same
+            // reason the `.inf_pcg` is: it is derived from the same blocks the
+            // level writes, through `inf_ecs::traffic::streets_of_blocks`, and
+            // a drifted layer would not fail here as a byte diff — it would
+            // fail in the island build as "the town is paved somewhere else",
+            // which is a much worse place to learn it.
+            let streets = dir.join(&design.recipe.roads.streets);
+            if streets.exists() {
+                let mut want = Vec::new();
+                let tmp = std::env::temp_dir().join(format!("{slug}-road1b-streets.geojson"));
+                inf_island::layers::write_streets(
+                    &tmp,
+                    &design.anchor,
+                    &crate::island::island_street_spans(&design),
+                )
+                .expect("the street layer writes");
+                std::fs::File::open(&tmp)
+                    .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut want))
+                    .expect("read it back");
+                let _ = std::fs::remove_file(&tmp);
+                assert_eq!(
+                    std::fs::read(&streets).unwrap(),
+                    want,
+                    "committed {} drifted from the island generator",
+                    streets.display()
+                );
+            } else {
+                eprintln!("SKIP: {} has not been blessed yet", streets.display());
+            }
         }
 
         // The starter character (SK1c). Every file, not a representative one --

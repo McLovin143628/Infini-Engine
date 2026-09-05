@@ -115,3 +115,13 @@
 # checked it out is one more thing to rule out when it misbehaves inside
 # another engine's embedded interpreter. Same fix, same reason.
 *.py text eol=lf
+
+# GeoJSON joins the list at wave ROAD1b. The island's layers are GENERATED —
+# `inf_island::layers::write_*` writes them with `\n` — and one of them,
+# `layers/streets.geojson`, is now byte-locked by
+# `samples::tests::committed_sample_matches_generators`, which compares the file
+# on disk against a fresh generation. A checkout that CRLF'd it turns that lock
+# red on Windows and green on Linux, which is the fifth telling of the same law.
+# Measured, not anticipated: stashing the freshly written layer and popping it
+# put 8 268 carriage returns into it.
+*.geojson text eol=lf

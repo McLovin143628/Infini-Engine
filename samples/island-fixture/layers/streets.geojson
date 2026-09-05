@@ -1,0 +1,204 @@
+{
+  "crs": {
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::32610"
+    },
+    "type": "name"
+  },
+  "features": [
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492112.0,
+            5467020.0,
+            0.0
+          ],
+          [
+            492180.0,
+            5467020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 0",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492180.0,
+            5467020.0,
+            0.0
+          ],
+          [
+            492180.0,
+            5467088.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 1",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492180.0,
+            5466952.0,
+            0.0
+          ],
+          [
+            492180.0,
+            5467020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 2",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492248.0,
+            5467020.0,
+            0.0
+          ],
+          [
+            492180.0,
+            5467020.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 3",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            492962.0,
+            5467700.0,
+            0.0
+          ],
+          [
+            493030.0,
+            5467700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 4",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            493030.0,
+            5467768.0,
+            0.0
+          ],
+          [
+            493030.0,
+            5467700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 5",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            493030.0,
+            5467632.0,
+            0.0
+          ],
+          [
+            493030.0,
+            5467700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 6",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            493098.0,
+            5467700.0,
+            0.0
+          ],
+          [
+            493030.0,
+            5467700.0,
+            0.0
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "gap_m": 16.0,
+        "lanes": 3,
+        "name": "Street 7",
+        "road_type": "arterial"
+      },
+      "type": "Feature"
+    }
+  ],
+  "name": "the streets the island's own settlement blocks imply (wave ROAD1b)",
+  "type": "FeatureCollection"
+}

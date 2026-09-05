@@ -280,6 +280,20 @@ impl SiteKind {
 pub struct RoadSpec {
     /// The committed GeoJSON, relative to the recipe.
     pub layer: String,
+    /// **The settlement streets, relative to the recipe** (wave ROAD1b).
+    ///
+    /// A second road layer, derived from the level's own blocks by the Ring-1
+    /// generator (`inf_editor_core::island::write_island_level`) and committed
+    /// beside the design, exactly as `streams.geojson` and `lakes.geojson` are.
+    /// It is read into the *same* `RoadGraph` as [`layer`](Self::layer), so a
+    /// GIS arterial arriving at a settlement's centre and the grid it arrives
+    /// on are one network with one set of junctions.
+    ///
+    /// Defaulted rather than required, so a recipe written before this wave
+    /// still loads under `deny_unknown_fields`; a build whose file is absent
+    /// says so in its road line and paves the GIS roads alone.
+    #[serde(default = "default_streets_layer")]
+    pub streets: String,
     /// The steepest grade a road of any class may hold, as a **rise over run
     /// fraction** — 0.08 is 8 %, which is about the steepest a highway is built
     /// at anywhere. A segment above it is reported with its own number and its
@@ -297,6 +311,11 @@ pub struct RoadSpec {
 
 fn default_grade_step() -> f64 {
     20.0
+}
+
+/// See [`RoadSpec::streets`].
+fn default_streets_layer() -> String {
+    "layers/streets.geojson".to_string()
 }
 
 fn default_road_shoulder() -> f64 {

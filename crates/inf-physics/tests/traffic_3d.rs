@@ -552,10 +552,28 @@ fn a_car_leaving_the_steered_tier_lands_where_its_body_already_was() {
         "hand-off: {jump:.3} m across the 64 m boundary, dy {:.3}",
         after.y - before.y
     );
+    // **The bound is the rephase's own geometry, not a round number** (wave
+    // ROAD1b). Handing the clock back projects the body onto its lane, so the
+    // most it can move is the half-lane it is projected across plus the metre
+    // the body drives while the step it is demoted on finishes. The failure
+    // mode this arm exists for is the car landing back where it was *promoted*,
+    // which is tens of metres.
+    //
+    // It read `jump < 1.0` until wave ROAD1b, which is UNDER the half-lane and
+    // was therefore never a bound — it was a threshold that held for the car
+    // this fixture happened to draw. Measured, by sweeping an unrelated
+    // constant (`kerb_park_offset_m`, which moves the parked lattice and so
+    // re-draws which commuter is picked): the jump reads 0.144 m at 5.0,
+    // 1.385 m at 5.2, 0.000 m at 6.0 and 1.041 m at 6.8. A quantity that swings
+    // tenfold on a 20 cm change somewhere else is a sample, and 1.0 m was
+    // fitting it.
+    let bound = inf_ecs::traffic::DEFAULT_LANE_WIDTH_M * 0.5
+        + inf_ecs::traffic::street_speed_mps() * DT * 2.0;
     assert!(
-        jump < 1.0,
-        "a car crossing the steered boundary jumped {jump:.2} m — the clock was \
-         not handed the metre the body reached"
+        jump < bound,
+        "a car crossing the steered boundary jumped {jump:.2} m, past the \
+         {bound:.2} m its own rephase can move it (half a lane plus two steps \
+         of driving) — the clock was not handed the metre the body reached"
     );
 }
 

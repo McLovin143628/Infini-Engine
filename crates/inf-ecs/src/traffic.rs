@@ -60,7 +60,7 @@ pub use inf_nav::lane::DEFAULT_LANE_WIDTH_M;
 pub use inf_nav::NavPath as LanePath;
 
 use crate::crowd::CrowdTier;
-use crate::society::{mix64, rect_gap, volume_sites, PAVEMENT_LATTICE_M, PAVEMENT_M};
+use crate::society::{mix64, rect_gap_2d, volume_sites, PAVEMENT_LATTICE_M, PAVEMENT_M};
 use crate::world::EcsWorld;
 
 // ── the map ─────────────────────────────────────────────────────────────────
@@ -111,6 +111,119 @@ pub fn street_speed_mps() -> f64 {
     inf_nav::lane::kmh_to_mps(f64::from(STREET_SPEED_KMH))
 }
 
+/// **A kerb stone's width, metres** — pinned by value to `inf_gis::KERB_WIDTH_M`,
+/// which is the concrete that actually gets drawn (wave ROAD1b).
+///
+/// One stone. It is stated twice because `inf-ecs` and `inf-gis` cannot name
+/// each other, and `inf-editor-core` — which links both — asserts the equality
+/// in `road_authority`, exactly as it already does for [`PAVEMENT_M`] and
+/// [`DEFAULT_LANE_WIDTH_M`]. Before this wave nothing here needed it, because
+/// nothing here knew a street had a kerb at all.
+pub const KERB_WIDTH_M: f64 = 0.30;
+
+/// **How wide a settlement street's carriageway is**, half-width in metres, for
+/// a street recovered from a `gap_m` reserve (wave ROAD1b).
+///
+/// # The rule, and the two things it has to satisfy at once
+///
+/// A street's reserve runs from block edge to block edge. What has to fit in it,
+/// outward from the crown: the carriageway, a [`KERB_WIDTH_M`] stone, and
+/// [`PAVEMENT_M`] of footway whose **back edge is the block's own frontage** —
+/// because that is where `crate::society`'s pavement ring is, `PAVEMENT_M`
+/// outside the block rectangle, and a crowd routed onto concrete that is not
+/// there is a crowd walking beside its own pavement.
+///
+/// So the carriageway is everything the reserve has left:
+/// `gap/2 − PAVEMENT_M − KERB_WIDTH_M`. On the two reserves this engine plans
+/// that is **5.700 m** on a 16 m town street and **7.700 m** on a 20 m city one,
+/// and in both cases the ring lands exactly `KERB_WIDTH_M` outside the kerb
+/// face — on the footway, by construction rather than by coincidence.
+///
+/// A gap under [`MIN_STREET_GAP_M`] never reaches here; the derivation refuses
+/// it. The `max` is the guard for one that somehow does.
+pub fn street_carriageway_half_m(gap_m: f64) -> f64 {
+    (gap_m * 0.5 - PAVEMENT_M - KERB_WIDTH_M).max(DEFAULT_LANE_WIDTH_M)
+}
+
+/// **The lane count a settlement street's reserve implies** (wave ROAD1b).
+///
+/// The paving is driven by a lane count, because that is what a road layer
+/// carries and what `inf_gis::RoadKind::width_m` multiplies — so the width in
+/// [`street_carriageway_half_m`] has to be expressed as lanes to be drawn at
+/// all. Rounded rather than floored: a 16 m reserve wants 11.400 m and gets
+/// **3** lanes (10.500 m), a 20 m reserve wants 15.400 m and gets **4**
+/// (14.000 m), and in both the footway still reaches the block frontage with a
+/// few tens of centimetres of verge rather than overhanging it.
+///
+/// Three is not a mistake and it is not a compromise: a three-lane city street
+/// is one running lane each way and a shared middle, which is what a North
+/// American town street of that width is.
+pub fn street_lanes(gap_m: f64) -> u32 {
+    let want = street_carriageway_half_m(gap_m) * 2.0 / DEFAULT_LANE_WIDTH_M;
+    if !want.is_finite() {
+        return 2;
+    }
+    (want.round() as i64).clamp(2, 8) as u32
+}
+
+/// **Where a settlement street's kerb face actually is**, metres from the
+/// centreline (wave ROAD1b).
+///
+/// [`street_carriageway_half_m`] is what the reserve *wants*;
+/// [`street_lanes`] rounds it to a whole lane because a road layer states lanes
+/// and `inf_gis::RoadKind::width_m` multiplies them. This is the number that
+/// comes back out — **the kerb the paving draws** — and it is what anything
+/// measuring against a kerb must read.
+///
+/// 5.250 m on a 16 m reserve (3 lanes) and 7.000 m on a 20 m one (4 lanes),
+/// against the 5.700 and 7.700 the reserve wanted. The residual is verge
+/// between the footway's back and the block frontage, which is what a setback
+/// is; it is the *rounding* that must not be re-derived twice, and this is the
+/// one place it is undone.
+pub fn street_kerb_offset_m(gap_m: f64) -> f64 {
+    f64::from(street_lanes(gap_m)) * DEFAULT_LANE_WIDTH_M * 0.5
+}
+
+/// **Half a parked car's width, metres.**
+///
+/// 0.9 m is a saloon's 1.8 m body. It is the figure that was already inside
+/// [`KERB_PARK_OFFSET_M`]'s arithmetic and is now spelled, because
+/// [`kerb_park_offset_m`] has to subtract it from a kerb whose position depends
+/// on the street.
+pub const PARKED_CAR_HALF_W_M: f64 = 0.9;
+
+/// **Where a car SHOULD park on a street of this reserve** — its centre's
+/// offset from the centreline, metres, so its flank is at the kerb the paving
+/// draws (wave ROAD1b).
+///
+/// # It is the right number and `kerb_slots` does not use it yet
+///
+/// [`KERB_PARK_OFFSET_M`] is 5.0 m on every street and was derived against a
+/// carriageway no settlement street ever had. Measured against the kerb wave
+/// ROAD1b actually draws ([`street_kerb_offset_m`]), that constant parks a car
+/// **0.650 m onto the footway** on a 16 m town street and **1.100 m out into
+/// the road** on a 20 m city one. This function is what puts the flank on the
+/// kerb: 4.350 m and 6.100 m respectively.
+///
+/// **Moving the lattice to it deadlocks the emergency service, measured.**
+/// Wiring this into [`kerb_slots`] turns `inf-physics`'s `dispatch_3d` red on
+/// three arms, and the middle one is not a re-sample: with the row 1.1 m
+/// further out on a 20 m street the ambulance in
+/// `a_collapse_brings_the_ambulance_and_sends_it_home_again` arrives (step
+/// 1 799) and resolves (2 159) and then **never goes home in 30 000 steps** —
+/// five hundred seconds of simulation, against a test budget of 6 000. It is a
+/// stuck vehicle, not a slow one.
+///
+/// So the number is stated here, the discrepancy is pinned by
+/// `the_parked_car_lattice_is_not_yet_on_the_kerb_the_paving_draws` in
+/// `inf-editor-core`'s `road_authority`, and the move is carried for the wave
+/// that can also answer why a unit cannot return to a kerb 1.1 m further out.
+/// Landing it here would have been trading a car in the right place for an
+/// ambulance that never comes back.
+pub fn kerb_park_offset_m(gap_m: f64) -> f64 {
+    (street_kerb_offset_m(gap_m) - PARKED_CAR_HALF_W_M).max(0.0)
+}
+
 /// How far from a street's centreline a car parks at the kerb, metres.
 ///
 /// Half the carriageway (3.5 m — one lane each way at
@@ -118,6 +231,9 @@ pub fn street_speed_mps() -> f64 {
 /// It has to leave [`PAVEMENT_M`] free at the kerb, which is what
 /// [`kerb_fits`] checks: on the narrowest street this engine plans (16 m) there
 /// are 6.0 m between the centreline and the pavement and this uses 5.0 of them.
+///
+/// **It is not the kerb the paving draws** — see [`kerb_park_offset_m`] for the
+/// measurement and for what moving to it costs.
 pub const KERB_PARK_OFFSET_M: f64 = 5.0;
 
 /// Metres of kerb one parked car occupies.
@@ -177,19 +293,86 @@ impl Street {
     }
 }
 
-/// **The streets a level's blocks imply** — the derivation, as a value, so it
-/// can be tested without a lane network and asserted against a plan.
+/// **The streets a level's blocks imply** — [`streets_of_blocks`] over the
+/// `PcgVolume`s of a world.
+///
+/// # What "a level's blocks" means here, exactly
+///
+/// `volume_sites` answers the volumes that offer a **resident**, which a
+/// `PcgVolume` only does once it has been *evaluated*. So this reads the blocks
+/// a host has populated, not the blocks a level carries — and under cell
+/// streaming those are not the same set. That is why wave ROAD1b paves from the
+/// island's **authored** plan through [`streets_of_blocks`] rather than from
+/// this: a street that appeared and moved as blocks paged in would be a street
+/// the editor and the shipped player disagreed about. The disagreement is
+/// measured in `inf-editor-core`'s `road_authority` battery.
+///
+/// It runs when the block set **changes**, never per step — see
+/// [`TrafficRes::stamp`].
+pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
+    streets_of_blocks(
+        &volume_sites(world)
+            .into_iter()
+            .map(|s| BlockRect {
+                guid: s.guid,
+                centre: DVec2::new(s.centre.x, s.centre.z),
+                half: s.extent,
+                pad_y: s.pad_y,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// **One block, as the street derivation needs it** (wave ROAD1b) — a
+/// rectangle on the ground, its identity, and the surface it stands on.
+///
+/// # Why it is a type and not four arguments
+///
+/// [`streets_of`] reads these out of an [`EcsWorld`]'s `PcgVolume`s, and until
+/// this wave that was the only way to ask the question. Wave ROAD1b needs the
+/// same answer at **island build time**, where the blocks are a plan and there
+/// is no world yet — and a settlement whose streets are PAVED in one place and
+/// DERIVED in another is two answers to where a street is. So the derivation
+/// takes the rectangles and nothing else, and both callers reach it through
+/// [`streets_of_blocks`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockRect {
+    /// The block's stable identity. It decides the grouping's representative
+    /// and therefore the order the whole answer is built in — see
+    /// [`streets_of_blocks`].
+    pub guid: Uuid,
+    /// Its centre, world XZ.
+    pub centre: DVec2,
+    /// Its half-extent, world XZ — a `PcgVolume::extent`.
+    pub half: DVec2,
+    /// The walking surface it stands on, world Y.
+    pub pad_y: f64,
+}
+
+/// **THE derivation** (wave ROAD1b) — the block rectangles in, the street
+/// centrelines out, and the one implementation both the traffic sim and the
+/// paving read.
+///
+/// [`streets_of`] is this over a world's `PcgVolume`s and
+/// `inf_editor_core::island` is this over the island's authored blocks. There
+/// is deliberately no second copy: the defect wave ROAD1b was called for is
+/// that the island had TWO road networks, and a paving that re-derived these
+/// lines its own way would have made it three.
 ///
 /// The blocks are grouped by proximity ([`MAX_STREET_GAP_M`]) so two
 /// settlements a kilometre apart do not imply a kilometre-wide street between
 /// them; within a group each axis is reduced to its occupied intervals and the
 /// gaps between consecutive intervals are the streets.
 ///
-/// `O(blocks²)` for the grouping and `O(blocks log blocks)` for the rest, walked
-/// in `Guid` order. It runs when the block set **changes**, never per step —
-/// see [`TrafficRes::stamp`].
-pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
-    let sites = volume_sites(world);
+/// `O(blocks²)` for the grouping and `O(blocks log blocks)` for the rest.
+///
+/// The blocks are sorted by `Guid` on entry rather than assumed sorted, so the
+/// answer is a function of the SET and not of the order a caller happened to
+/// collect it in — `volume_sites` already sorts and the island's plan walk does
+/// not.
+pub fn streets_of_blocks(blocks: &[BlockRect]) -> Vec<Street> {
+    let mut sites: Vec<BlockRect> = blocks.to_vec();
+    sites.sort_by_key(|b| b.guid);
     if sites.is_empty() {
         return Vec::new();
     }
@@ -207,11 +390,11 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
     }
     for i in 0..n {
         for j in i + 1..n {
-            let gap = rect_gap(
+            let gap = rect_gap_2d(
                 sites[i].centre,
-                sites[i].extent,
+                sites[i].half,
                 sites[j].centre,
-                sites[j].extent,
+                sites[j].half,
             );
             if gap <= MAX_STREET_GAP_M {
                 let (a, b) = (find(&mut parent, i), find(&mut parent, j));
@@ -245,7 +428,7 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
         let pad_of = |a: DVec2, b: DVec2| -> f64 {
             let mut near: Vec<f64> = Vec::new();
             for &i in members {
-                let c = DVec2::new(sites[i].centre.x, sites[i].centre.z);
+                let c = sites[i].centre;
                 let d = DVec2::new(
                     ((c.x - a.x).min(c.x - b.x)).max(0.0) + ((a.x - c.x).min(b.x - c.x)).max(0.0),
                     ((c.y - a.y).min(c.y - b.y)).max(0.0) + ((a.y - c.y).min(b.y - c.y)).max(0.0),
@@ -280,14 +463,14 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
         };
         let x_span = span(&|i| {
             (
-                sites[i].centre.x - sites[i].extent.x,
-                sites[i].centre.x + sites[i].extent.x,
+                sites[i].centre.x - sites[i].half.x,
+                sites[i].centre.x + sites[i].half.x,
             )
         });
         let z_span = span(&|i| {
             (
-                sites[i].centre.z - sites[i].extent.y,
-                sites[i].centre.z + sites[i].extent.y,
+                sites[i].centre.y - sites[i].half.y,
+                sites[i].centre.y + sites[i].half.y,
             )
         });
         if !(x_span.0.is_finite() && z_span.0.is_finite()) {
@@ -299,9 +482,9 @@ pub fn streets_of(world: &EcsWorld) -> Vec<Street> {
                 .iter()
                 .map(|&i| {
                     let (c, e) = if axis_x {
-                        (sites[i].centre.x, sites[i].extent.x)
+                        (sites[i].centre.x, sites[i].half.x)
                     } else {
-                        (sites[i].centre.z, sites[i].extent.y)
+                        (sites[i].centre.y, sites[i].half.y)
                     };
                     (c - e, c + e)
                 })
@@ -941,6 +1124,9 @@ pub fn kerb_slots(streets: &[Street]) -> Vec<(DVec3, f64)> {
                 if !(along >= KERB_SLOT_M * 0.5 && along <= len - KERB_SLOT_M * 0.5) {
                     continue;
                 }
+                // **Still the constant, and `kerb_park_offset_m` says why**
+                // (wave ROAD1b): the offset the drawn kerb implies is the right
+                // number and moving to it deadlocks the EMS return, measured.
                 let p =
                     DVec3::new(s.a.x, s.y, s.a.y) + dir * along + r * (side * KERB_PARK_OFFSET_M);
                 if !clear_of_junctions(streets, i, DVec2::new(p.x, p.z)) {
@@ -2786,18 +2972,25 @@ mod tests {
         // two sides of two lines.
         assert_eq!(kerb_slots(&streets[..1]).len(), 2 * 13);
         assert_eq!(slots.len(), 2 * 2 * 12);
+        // The fixture's streets are all 20 m, so every slot is at the same
+        // offset. It is still `KERB_PARK_OFFSET_M` and not the kerb the paving
+        // draws — see `kerb_park_offset_m` for the 1.100 m that separates them
+        // and for the ambulance that does not come home if this moves.
+        let want = KERB_PARK_OFFSET_M;
         for (p, _) in &slots {
-            // Every slot is exactly `KERB_PARK_OFFSET_M` from its own line —
+            // Every slot is exactly `kerb_park_offset_m` from its own line —
             // which for this fixture is the axis it is NOT running along, so
-            // one of the two coordinates is 5.0 to the bit.
-            let off = if (p.x.abs() - KERB_PARK_OFFSET_M).abs() < 1e-9 {
+            // one of the two coordinates is that number to the bit.
+            let off = if (p.x.abs() - want).abs() < 1e-9 {
                 p.x.abs()
             } else {
                 p.z.abs()
             };
-            assert!((off - KERB_PARK_OFFSET_M).abs() < 1e-9, "{p:?} is at {off}");
-            // Off the carriageway…
+            assert!((off - want).abs() < 1e-9, "{p:?} is at {off}");
+            // Off the running lanes…
             assert!(off > DEFAULT_LANE_WIDTH_M, "{p:?} is in a lane");
+            // …on the carriageway rather than on the footway, which is what
+            // parking at a kerb IS: the flank touches the kerb face.
             // …and off the pavement, on a 20 m street.
             assert!(off <= 10.0 - PAVEMENT_M, "{p:?} is on the pavement");
             // …and out of the junction: 12 m from the crossing at the origin.

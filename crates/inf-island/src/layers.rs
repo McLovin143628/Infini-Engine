@@ -128,6 +128,76 @@ pub fn write_roads(
     )
 }
 
+/// **One span of a settlement street** (wave ROAD1b) — a straight run of
+/// centreline between two grid crossings, and the lane count its reserve
+/// implies.
+///
+/// It is a *span* and not a whole line because `inf_gis::RoadGraph::from_layer`
+/// makes a junction node at a feature's **ends**: a street written as one
+/// feature from one side of a settlement to the other crosses ten others and
+/// meets none of them, so nothing fans the intersections and nothing paints a
+/// crossing at them. Written span by span, every grid crossing is a node of
+/// degree four and the arterial that arrives at the settlement's centre snaps
+/// into it — which is the "a T with a crossing, not a seam" the wave was asked
+/// for, made structural rather than special-cased.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreetSpan {
+    /// One end, world XZ, with the street's own surface height in `y`.
+    pub a: glam::DVec3,
+    /// The other.
+    pub b: glam::DVec3,
+    /// The carriageway's lane count — `inf_ecs::traffic::street_lanes` of the
+    /// reserve this street was recovered from, computed by the caller because
+    /// this crate cannot name `inf-ecs`.
+    pub lanes: u32,
+    /// The reserve it came from, metres, written for the record so a reader of
+    /// the committed layer can see which streets are 16 m and which are 20.
+    pub gap_m: f64,
+}
+
+/// **Write the settlement street network** (wave ROAD1b) — the streets a
+/// level's own blocks imply, as a road layer the island build reads beside
+/// `roads.geojson`.
+///
+/// The class is `arterial` because that is the row in `inf_gis::RoadKind` a
+/// settlement street IS: kerbed, marked, and `LANE_WIDTH_M` per lane. The
+/// alternative, `residential`, is deliberately **unmarked** — a neighbourhood
+/// street in the country this island is in carries no centre line — and a city
+/// grid with no paint at all is what the pre-ROAD1b island already looked like.
+pub fn write_streets(
+    path: &Path,
+    anchor: &inf_math::geo::GeoAnchor,
+    spans: &[StreetSpan],
+) -> Result<(), IslandError> {
+    let features: Vec<Value> = spans
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            json!({
+                "type": "Feature",
+                "properties": {
+                    "gap_m": s.gap_m,
+                    "lanes": s.lanes,
+                    "name": format!("Street {i}"),
+                    "road_type": "arterial",
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [out(anchor, s.a.x, s.a.y, s.a.z), out(anchor, s.b.x, s.b.y, s.b.z)],
+                },
+            })
+        })
+        .collect();
+    write(
+        path,
+        &collection(
+            features,
+            &crs_member(&anchor.crs),
+            "the streets the island's own settlement blocks imply (wave ROAD1b)",
+        ),
+    )
+}
+
 /// Write the derived stream network.
 pub fn write_streams(
     path: &Path,

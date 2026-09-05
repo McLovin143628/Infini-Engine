@@ -579,8 +579,18 @@ fn ring_points(centre: DVec3, extent: DVec2, y: f64) -> [DVec3; 8] {
 /// The plan distance between two axis-aligned block rectangles, metres — `0.0`
 /// when they overlap.
 pub(crate) fn rect_gap(a_c: DVec3, a_e: DVec2, b_c: DVec3, b_e: DVec2) -> f64 {
+    rect_gap_2d(DVec2::new(a_c.x, a_c.z), a_e, DVec2::new(b_c.x, b_c.z), b_e)
+}
+
+/// [`rect_gap`] over rectangles that are already **plan** (wave ROAD1b).
+///
+/// The 3D spelling above is the one every caller with a `GlobalTransform` in
+/// hand wants; this is the one `traffic::streets_of_blocks` wants, because a
+/// block's plan is all that derivation ever reads and carrying a Y through it
+/// would invite someone to use it.
+pub(crate) fn rect_gap_2d(a_c: DVec2, a_e: DVec2, b_c: DVec2, b_e: DVec2) -> f64 {
     let dx = ((a_c.x - b_c.x).abs() - (a_e.x + b_e.x)).max(0.0);
-    let dz = ((a_c.z - b_c.z).abs() - (a_e.y + b_e.y)).max(0.0);
+    let dz = ((a_c.y - b_c.y).abs() - (a_e.y + b_e.y)).max(0.0);
     (dx * dx + dz * dz).sqrt()
 }
 

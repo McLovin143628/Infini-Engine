@@ -766,10 +766,28 @@ pub fn build_island(
         // The mesh goes through IB-4's own door, over a layer written and read
         // back the way a shipped build reads it.
         let tmp = recipe.resolve(&recipe.roads.layer);
-        let layer = if tmp.exists() {
+        let mut layer = if tmp.exists() {
             layers::read_layer(&tmp, inf_gis::LayerKind::Roads, &anchor)?
         } else {
             inf_gis::GeoLayer::new("roads", inf_gis::LayerKind::Roads, &anchor.crs)
+        };
+        // **The settlement streets join the SAME layer** (wave ROAD1b), so
+        // `RoadGraph::from_layer` snaps the arterial that arrives at a town's
+        // centre into the grid it arrives on and `build_surface` fans that
+        // junction and paints its crossings. Two graphs would have produced two
+        // ribbons at one height, which is a z-fight rather than a junction.
+        //
+        // Absent is not an error: an island whose Ring-1 generator has not been
+        // run yet paves the GIS roads alone, and the road line says how many
+        // street spans it found so a reader can tell the two cases apart.
+        let streets_path = recipe.resolve(&recipe.roads.streets);
+        let street_spans = if streets_path.exists() {
+            let s = layers::read_layer(&streets_path, inf_gis::LayerKind::Roads, &anchor)?;
+            let n = s.features.len();
+            layer.features.extend(s.features);
+            n
+        } else {
+            0
         };
         let mut ground = |x: f64, z: f64| data.height_at(DVec2::new(x, z));
         let (m, mr, rr) = roads::build_mesh(
@@ -782,11 +800,13 @@ pub fn build_island(
         say(
             BuildStep::Roads,
             format!(
-                "{:.2} km over {} segments and {} junctions; carriageway {} \
+                "{:.2} km over {} segments ({} of them settlement street spans) \
+                 and {} junctions; carriageway {} \
                  vertices / {} triangles, quantisation {:.4} m; furniture {}; \
                  {} footway triangles clipped off the carriageway; \
                  worst grade {:.3} against {:.3}, {} over",
                 rr.total_km,
+                street_spans,
                 rr.segments,
                 rr.junctions,
                 mr.vertices,
