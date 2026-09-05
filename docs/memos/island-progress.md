@@ -32184,19 +32184,31 @@ does **one** road that folds back on itself, which a grade-limited router does a
 every switchback. Nothing clipped it, and a footway is drawn 190 mm above the
 carriageway.
 
-| subject | footway on a carriageway, before | after | worst |
-|---|---|---|---|
-| island | **19 754.6 m² of 170 901.7 m² (11.56 %)** | **0.0 m²** | within 0.02 m of a 7 m road's own crown |
-| fixture | **969.5 m² of 8 247.6 m² (11.75 %)** | **0.0 m²** | all of it in the switchback at (-400, 300) |
+It was measured two ways and the two numbers are **not** the same thing, so both
+are given rather than one being quoted as the other:
 
-Only 459.9 m² of the island's was within 30 m of a route end, so it is not a
-junction artefact; the largest clusters are at (-1100, -550) and (-950, -850).
+| metric | island, before | fixture, before | after |
+|---|---|---|---|
+| footway whose centroid is inside a DRAWN carriageway triangle by ≥ 0.10 m — the clip's own predicate | **16 008.3 m² of 170 901.7 m² (9.37 %)**, 26 095 triangles | **788.5 m² of 8 247.6 m² (9.56 %)**, 596 triangles | **0.0 m²** on both |
+| footway within `half` of the nearest route's centreline — the looser nominal band | **19 754.6 m² (11.56 %)** | **969.5 m² (11.75 %)** | not re-measured |
+
+The first is what the clip removes and what "0.0 m² after" is measured against.
+The second is larger because it also counts concrete over ground where the
+carriageway ribbon folded away and drew no asphalt at all — a hole in the
+carriageway rather than a slab on it, and a separate defect nobody has priced.
+
+The deepest intrusion reached within **0.02 m of a 7 m road's own crown** at
+(2046.6, 1752.3). Only 459.9 m² of the island's was within 30 m of a route end,
+so it is not a junction artefact; the largest clusters are at (-1100, -550) and
+(-950, -850), and on the fixture all of it is in the switchback at (-400, 300)
+this wave already found.
+
 `clip_kerbs_to_open_ground` (`50d1d538`) drops it at the end of `build_surface`
 against a 4 m grid of every carriageway triangle, and the island's kerb mesh goes
-**300 330 v / 480 368 t → 285 877 v / 454 273 t** (−16 008.3 m², 9.37 %).
-Markings are deliberately untouched — a marking's job is to lie on a
-carriageway. The arm is `a_footway_is_never_drawn_on_a_carriageway`, four claims,
-each mutation-verified independently.
+**300 330 v / 480 368 t → 285 877 v / 454 273 t**. Markings are deliberately
+untouched — a marking's job is to lie on a carriageway. The arm is
+`a_footway_is_never_drawn_on_a_carriageway`, four claims, each mutation-verified
+independently.
 
 **Two roads on one piece of ground is still a routing fact** and nothing here
 fixes it: what changed is that the overlap is now drawn as road rather than as
