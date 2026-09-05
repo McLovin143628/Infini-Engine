@@ -146,6 +146,15 @@ pub struct RoadReport {
     pub total_km: f64,
     pub segments: usize,
     pub junctions: usize,
+    /// **Footway triangles dropped because they lay on a carriageway** (audit
+    /// ROAD1) — `inf_gis::RoadSurface::kerbs_clipped`, carried out to the build
+    /// report so `inf island build` states it.
+    ///
+    /// It is not a defect count in this step: it is a measure of how much of the
+    /// planned network runs over itself, which is a router fact. A road that
+    /// folded at a switchback laid 2 m of concrete across its own carriageway
+    /// before this was clipped.
+    pub kerbs_clipped: usize,
     pub audit: GradeAudit,
 }
 
@@ -728,6 +737,7 @@ pub fn build_mesh(
         total_km: graph.total_length_m() / 1000.0,
         segments: graph.segments.len(),
         junctions: graph.junctions().count(),
+        kerbs_clipped: surface.kerbs_clipped,
         audit: GradeAudit::default(),
     };
     Ok((mesh, report, rr))

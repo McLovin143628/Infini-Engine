@@ -1312,6 +1312,11 @@ pub struct RoadSurface {
     pub junctions_filled: usize,
     /// Junctions that could not be filled, and why.
     pub junctions_skipped: usize,
+    /// **Footway triangles dropped because they lay on a carriageway** (audit
+    /// ROAD1) — see [`clip_kerbs_to_open_ground`]. Reported rather than silent,
+    /// because the number is a measure of how much of the road network runs over
+    /// itself, which is a routing fact nothing in this module can fix.
+    pub kerbs_clipped: usize,
     /// Segments with no buildable surface, named.
     pub skipped: Vec<String>,
 }
@@ -2044,7 +2049,243 @@ pub fn build_surface(
             }
         }
     }
+    if opts.furniture {
+        out.kerbs_clipped = clip_kerbs_to_open_ground(&mut out);
+    }
     out
+}
+
+/// **How far inside a carriageway a footway triangle has to sit before it is
+/// dropped**, metres (audit ROAD1).
+///
+/// It is not zero, and the reason is the profile: `build_kerbs`' first two
+/// points are both at `offset = half`, so the kerb's own vertical face has a
+/// centroid *exactly on* the carriageway's edge. A zero inset would delete every
+/// kerb face on the island. 100 mm is a third of a kerb stone — far inside the
+/// resolution of "is this concrete beside the road or on it", and far outside
+/// the f64 noise of a boundary that two builders compute from one frame list.
+///
+/// # It is an inset into the UNION, and that distinction cost a debugging pass
+///
+/// The first version of this clip applied the inset **per triangle**, and a road
+/// mesh is a lattice of them: a point 24 mm from the internal diagonal two
+/// carriageway triangles share is a tenth of a metre inside *neither*, so the
+/// test leaked along every shared edge and left a grid of 200 mm-wide strips of
+/// pavement standing on the road. Measured on the two-crossing-roads fixture
+/// below, which is exactly why that fixture exists. The inset is therefore
+/// sampled as a small cross about the centroid against the union — see
+/// [`is_covered_by`].
+const KERB_CLIP_INSET_M: f64 = 0.10;
+
+/// The cell of the carriageway lookup grid the clip walks, metres.
+///
+/// Four metres is a little over one cross-section step, so a road triangle lands
+/// in one or two cells and a cell holds a couple of dozen. Smaller costs more
+/// cells for the same work; larger makes every lookup walk the whole road.
+const CLIP_GRID_M: f64 = 4.0;
+
+/// The most grid cells one carriageway triangle may claim.
+///
+/// A mitred corner can stretch a triangle to four half-widths, and a guard is
+/// cheaper than the pathological case: past this the triangle is left out of the
+/// index rather than allowed to fill it. 256 cells is a 64 m square, past any
+/// road triangle this builder makes.
+const MAX_CLIP_CELLS_PER_TRIANGLE: i64 = 256;
+
+/// Whether `p` lies inside XZ triangle `t`, edges included.
+///
+/// The three edge cross products must agree in sign — the standard test — with a
+/// zero treated as agreeing with either, because a strip's triangles meet on the
+/// cross-section lines and a probe that lands on one is on *both* of them and
+/// must not fall between two `false`s.
+///
+/// No transcendental and no division: the P14 portability law reaches here,
+/// because what this decides is which triangles a committed `.inf_mesh`
+/// contains.
+fn plan_contains(t: &[glam::DVec2; 3], p: glam::DVec2) -> bool {
+    let mut sign = 0.0f64;
+    for k in 0..3 {
+        let a = t[k];
+        let e = t[(k + 1) % 3] - a;
+        if !(e.length_squared() > 1.0e-24) {
+            // A degenerate edge means a triangle with no plan area — a kerb
+            // face or a skirt seen from above. It covers nothing.
+            return false;
+        }
+        let cross = e.x * (p.y - a.y) - e.y * (p.x - a.x);
+        let s = if cross > 0.0 {
+            1.0
+        } else if cross < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        if s != 0.0 {
+            if sign == 0.0 {
+                sign = s;
+            } else if s != sign {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// **Is `p` at least `inset_m` inside the union covered by `tris`?**
+///
+/// Sampled as a five-point cross rather than as a per-triangle inset, for the
+/// reason [`KERB_CLIP_INSET_M`] records: an inset applied to one triangle leaks
+/// along every internal edge a mesh's triangles share, and a road surface is
+/// nothing but internal edges. A cross asks the *union* the question instead —
+/// the centre and four points `inset_m` away — so a shared diagonal is covered
+/// by the neighbour and only a real boundary answers no.
+///
+/// `candidates` is a closure so the caller can hand it a grid bucket per probe:
+/// the four arms can land in a different cell from the centre.
+fn is_covered_by(
+    p: glam::DVec2,
+    inset_m: f64,
+    mut candidates: impl FnMut(glam::DVec2) -> bool,
+) -> bool {
+    [
+        p,
+        glam::DVec2::new(p.x + inset_m, p.y),
+        glam::DVec2::new(p.x - inset_m, p.y),
+        glam::DVec2::new(p.x, p.y + inset_m),
+        glam::DVec2::new(p.x, p.y - inset_m),
+    ]
+    .into_iter()
+    .all(&mut candidates)
+}
+
+/// **A footway is not drawn on a road** (audit ROAD1) — drop every kerb and
+/// pavement triangle that lies on a carriageway, and say how many.
+///
+/// # What this is for, measured
+///
+/// `build_segment_furniture` lays a kerb and 2 m of footway beside *its own*
+/// segment and knows nothing about any other. Two roads that pass within
+/// `built_half_width + half` of each other therefore each lay concrete over the
+/// other's asphalt — and so does **one** road that folds back on itself, which a
+/// grade-limited router does at every switchback. Before this pass, on the
+/// island: **19 754.6 m² of the 170 901.7 m² footway (11.56 %) was drawn on top
+/// of a carriageway**, floating the kerb's 190 mm above it, reaching within
+/// 0.02 m of a 7 m road's own crown; on the fixture, 969.5 m² of 8 247.6 m²
+/// (11.75 %), all of it in the switchback at (-400, 300). It is what a 1080p
+/// capture of Harbour City's main street shows as a grey plank lying diagonally
+/// across the road, and it is the defect this audit was pointed at.
+///
+/// # Why dropping triangles is the right answer and not a patch
+///
+/// Two roads occupying one piece of ground is a **routing** fact, carried since
+/// this wave (a road crossing a stream crosses at grade; a switchback folds).
+/// Nothing here can fix that. What it can decide is what gets drawn where they
+/// overlap, and asphalt-under-nothing is strictly better than asphalt-under-
+/// concrete: the carriageway is the surface a car drives on and a person crosses
+/// at the painted crossing, so where a footway would cover it the footway is the
+/// piece that is wrong. Where the overlap is a junction fan this is also what
+/// the wave's own carried item 8 asked for — "kerbs stop at the rim" — made true
+/// rather than described.
+///
+/// Markings are deliberately **not** clipped: a marking's whole job is to lie on
+/// a carriageway, so the same test would delete all of them.
+///
+/// # Determinism
+///
+/// The index is a `BTreeMap` and the verdict is an `any` over its bucket, so the
+/// output is a function of the input alone at every candidate order — and the
+/// arithmetic is exact f64 with no transcendental in it (`is_inside_by`).
+fn clip_kerbs_to_open_ground(out: &mut RoadSurface) -> usize {
+    if out
+        .furniture
+        .get(&RoadPart::Kerb)
+        .is_none_or(|r| r.indices.is_empty())
+    {
+        return 0;
+    }
+    // The carriageway — every class, plus the shoulders and the junction fans
+    // that were appended into the same ribbons — as plan-view triangles.
+    let mut tris: Vec<[glam::DVec2; 3]> = Vec::new();
+    for r in out.parts.values() {
+        for t in r.indices.chunks_exact(3) {
+            tris.push([
+                r.vertices[t[0] as usize].xz(),
+                r.vertices[t[1] as usize].xz(),
+                r.vertices[t[2] as usize].xz(),
+            ]);
+        }
+    }
+    if tris.is_empty() {
+        return 0;
+    }
+    let mut grid: BTreeMap<(i64, i64), Vec<u32>> = BTreeMap::new();
+    for (i, t) in tris.iter().enumerate() {
+        let lo = t[0].min(t[1]).min(t[2]);
+        let hi = t[0].max(t[1]).max(t[2]);
+        if !(lo.is_finite() && hi.is_finite()) {
+            continue;
+        }
+        let x0 = (lo.x / CLIP_GRID_M).floor() as i64;
+        let x1 = (hi.x / CLIP_GRID_M).floor() as i64;
+        let y0 = (lo.y / CLIP_GRID_M).floor() as i64;
+        let y1 = (hi.y / CLIP_GRID_M).floor() as i64;
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > MAX_CLIP_CELLS_PER_TRIANGLE {
+            continue;
+        }
+        for gx in x0..=x1 {
+            for gy in y0..=y1 {
+                grid.entry((gx, gy)).or_default().push(i as u32);
+            }
+        }
+    }
+
+    let kerb = out
+        .furniture
+        .get_mut(&RoadPart::Kerb)
+        .expect("checked above");
+    let mut keep: Vec<u32> = Vec::with_capacity(kerb.indices.len());
+    let mut dropped = 0usize;
+    for t in kerb.indices.chunks_exact(3) {
+        let c = (kerb.vertices[t[0] as usize]
+            + kerb.vertices[t[1] as usize]
+            + kerb.vertices[t[2] as usize])
+            / 3.0;
+        let p = c.xz();
+        let on_road = is_covered_by(p, KERB_CLIP_INSET_M, |q| {
+            let cell = (
+                (q.x / CLIP_GRID_M).floor() as i64,
+                (q.y / CLIP_GRID_M).floor() as i64,
+            );
+            grid.get(&cell)
+                .is_some_and(|bucket| bucket.iter().any(|&i| plan_contains(&tris[i as usize], q)))
+        });
+        if on_road {
+            dropped += 1;
+        } else {
+            keep.extend_from_slice(t);
+        }
+    }
+    if dropped == 0 {
+        return 0;
+    }
+    // Compact, because an orphaned vertex is a vertex a `.inf_mesh` still pays
+    // for and a `MeshBuildReport` still counts.
+    let mut remap = vec![u32::MAX; kerb.vertices.len()];
+    let mut vertices = Vec::with_capacity(kerb.vertices.len());
+    let mut uvs = Vec::with_capacity(kerb.uvs.len());
+    for i in keep.iter_mut() {
+        let old = *i as usize;
+        if remap[old] == u32::MAX {
+            remap[old] = vertices.len() as u32;
+            vertices.push(kerb.vertices[old]);
+            uvs.push(kerb.uvs[old]);
+        }
+        *i = remap[old];
+    }
+    kerb.vertices = vertices;
+    kerb.uvs = uvs;
+    kerb.indices = keep;
+    dropped
 }
 
 // ── the surface becomes a mesh asset ────────────────────────────────────────
@@ -3947,6 +4188,173 @@ mod tests {
             near_node >= 3 * 4,
             "only {near_node} painted vertices sit in the crossing band around \
              the junction; three legs of bars is many more"
+        );
+    }
+
+    // ── the footway is not drawn on the road (audit ROAD1) ──────────────────
+
+    /// Two arterials that **cross without meeting**: 200 m along +X at `z = 0`,
+    /// 200 m along +Z at `x = 100`, sharing no endpoint.
+    ///
+    /// That is the graph's own rule, stated one fixture above: nodes come from
+    /// segment *endpoints*, so a road that merely passes through another's line
+    /// makes no junction and gets no fan. Both ribbons are simply laid, and they
+    /// overlap — which is the case the island's own network is full of, at every
+    /// switchback and every pair of routes that share a valley.
+    fn crossing_pair() -> RoadGraph {
+        RoadGraph::from_layer(&layer(vec![
+            road(&[(0.0, 0.0), (200.0, 0.0)], "arterial", "Broadway"),
+            road(&[(100.0, -100.0), (100.0, 100.0)], "arterial", "Elm"),
+        ]))
+    }
+
+    /// Every carriageway triangle of `s`, in plan.
+    fn carriageway_plan(s: &RoadSurface) -> Vec<[glam::DVec2; 3]> {
+        let mut out = Vec::new();
+        for r in s.parts.values() {
+            for t in r.indices.chunks_exact(3) {
+                out.push([
+                    r.vertices[t[0] as usize].xz(),
+                    r.vertices[t[1] as usize].xz(),
+                    r.vertices[t[2] as usize].xz(),
+                ]);
+            }
+        }
+        out
+    }
+
+    /// Does any triangle of `r` cover `p` in plan?
+    fn ribbon_covers(r: &RoadRibbon, p: glam::DVec2) -> bool {
+        r.indices.chunks_exact(3).any(|t| {
+            plan_contains(
+                &[
+                    r.vertices[t[0] as usize].xz(),
+                    r.vertices[t[1] as usize].xz(),
+                    r.vertices[t[2] as usize].xz(),
+                ],
+                p,
+            )
+        })
+    }
+
+    /// **A FOOTWAY IS NEVER DRAWN ON A CARRIAGEWAY** (audit ROAD1).
+    ///
+    /// # What this caught
+    ///
+    /// `build_segment_furniture` lays a kerb and 2 m of concrete beside *its
+    /// own* segment and cannot see any other, so where two roads pass within
+    /// `built_half_width + half` — two crossing routes, or the two limbs of one
+    /// road at a switchback — each laid its footway across the other's asphalt,
+    /// 190 mm above it. Measured on the shipped island before this clip:
+    /// **19 754.6 m² of 170 901.7 m² (11.56 %)**, reaching within 0.02 m of a
+    /// 7 m road's own crown; on the fixture, 969.5 m² of 8 247.6 m² (11.75 %).
+    /// A 1080p capture of Harbour City's main street showed it as a grey plank
+    /// lying diagonally across the road.
+    ///
+    /// # The three claims, and why the third one is here
+    ///
+    /// (a) the clip **did something** on a fixture built to make it — a clip
+    /// that fired zero times would satisfy (b) vacuously; (b) nothing of the
+    /// footway is left on the asphalt; and (c) the footway **beside** each road
+    /// survived, because a clip that deleted the whole ribbon would also satisfy
+    /// (b). (c) is checked at the exact pair of points that separates the two:
+    /// one slab position on Broadway's north footway inside Elm's carriageway,
+    /// which must be gone, and the same footway 20 m west of Elm, which must
+    /// not be.
+    ///
+    /// Falsification, measured both ways: dropping the
+    /// `clip_kerbs_to_open_ground` call in `build_surface` reds (a); applying
+    /// the inset per triangle instead of to the union reds (b), which is the
+    /// defect the first version of this clip actually had; and setting
+    /// [`KERB_CLIP_INSET_M`] to zero reds (d) — and *only* (d), which is why (d)
+    /// is here: the kerb's own vertical face has a plan footprint that IS the
+    /// carriageway's edge, so a zero inset deletes the upstand off the whole
+    /// island while (a), (b) and (c) all stay green.
+    #[test]
+    fn a_footway_is_never_drawn_on_a_carriageway() {
+        let opts = SurfaceOptions {
+            furniture: true,
+            ..Default::default()
+        };
+        let mut flat = |_x: f64, _z: f64| Some(0.0);
+        let surface = build_surface(&crossing_pair(), &opts, &mut flat);
+        let kerb = surface
+            .furniture
+            .get(&RoadPart::Kerb)
+            .expect("two arterials carry kerbs");
+
+        // (a) THE ANTI-VACUITY FLOOR. Four footways crossing two 7 m
+        //     carriageways is a real overlap, and a fixture that produced none
+        //     would make (b) mean nothing.
+        assert!(
+            surface.kerbs_clipped > 0,
+            "the clip dropped nothing on a fixture built out of two roads that \
+             cross — either the crossing stopped overlapping or the clip stopped \
+             running, and (b) below proves nothing either way"
+        );
+
+        // (b) THE PROPERTY.
+        let road = carriageway_plan(&surface);
+        for t in kerb.indices.chunks_exact(3) {
+            let c = (kerb.vertices[t[0] as usize]
+                + kerb.vertices[t[1] as usize]
+                + kerb.vertices[t[2] as usize])
+                / 3.0;
+            let p = c.xz();
+            assert!(
+                !is_covered_by(p, KERB_CLIP_INSET_M, |q| road
+                    .iter()
+                    .any(|tri| plan_contains(tri, q))),
+                "a footway triangle sits on the carriageway at ({:.2}, {:.2}) — \
+                 that is 190 mm of concrete over the surface a car drives on",
+                p.x,
+                p.y
+            );
+        }
+
+        // (c) THE CONTROL. The middle of Broadway's north slab: on Elm's
+        //     carriageway at x = 100, and 20 m clear of it at x = 80.
+        // The layer states no lane count, so both roads take the class default —
+        // derived here rather than written as a number, so a change to the
+        // default moves the probe with it.
+        let half = RoadKind::Arterial.width_m(RoadKind::Arterial.default_lanes()) * 0.5;
+        let slab = half + KERB_WIDTH_M + PAVEMENT_M * 0.5;
+        assert!(
+            !ribbon_covers(kerb, glam::DVec2::new(100.0, slab)),
+            "Broadway's footway is still drawn across Elm at (100.0, {slab:.2})"
+        );
+        assert!(
+            ribbon_covers(kerb, glam::DVec2::new(80.0, slab)),
+            "Broadway's footway is gone at (80.0, {slab:.2}), 20 m clear of any \
+             other road — the clip ate the pavement it was meant to protect"
+        );
+        assert!(
+            ribbon_covers(kerb, glam::DVec2::new(100.0 + slab, -50.0)),
+            "Elm's own footway is gone at ({:.2}, -50.0)",
+            100.0 + slab
+        );
+
+        // (d) THE KERB'S OWN FACE, which is the whole reason the inset is not
+        //     zero. It is a vertical wall whose plan footprint IS the
+        //     carriageway's edge line, so a containment test taken at the
+        //     centroid with no inset finds every one of them "on the road" and
+        //     deletes the kerb from the entire island. Counted on a stretch of
+        //     Broadway well clear of Elm.
+        let faces = kerb
+            .indices
+            .chunks_exact(3)
+            .filter(|t| {
+                t.iter().all(|&i| {
+                    let v = kerb.vertices[i as usize];
+                    (60.0..90.0).contains(&v.x) && (v.z.abs() - half).abs() < 1.0e-9
+                })
+            })
+            .count();
+        assert!(
+            faces > 0,
+            "no kerb face survives on the 30 m of Broadway between x = 60 and \
+             x = 90 — the clip measured containment with no inset and took the \
+             150 mm upstand with it"
         );
     }
 }

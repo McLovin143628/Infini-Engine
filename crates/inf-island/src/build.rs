@@ -784,6 +784,7 @@ pub fn build_island(
             format!(
                 "{:.2} km over {} segments and {} junctions; carriageway {} \
                  vertices / {} triangles, quantisation {:.4} m; furniture {}; \
+                 {} footway triangles clipped off the carriageway; \
                  worst grade {:.3} against {:.3}, {} over",
                 rr.total_km,
                 rr.segments,
@@ -811,6 +812,12 @@ pub fn build_island(
                         .collect::<Vec<_>>()
                         .join(", ")
                 },
+                // **How much of the network runs over itself** (audit ROAD1) —
+                // a footway laid beside its own segment and over somebody
+                // else's asphalt, dropped. Reported beside the furniture it is
+                // subtracted from, because a number that only exists inside the
+                // builder is a number nobody reads.
+                rr.kerbs_clipped,
                 audit.worst,
                 audit.ceiling,
                 audit.over.len()
