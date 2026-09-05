@@ -99,8 +99,8 @@ use inf_editor_core::samples;
 use inf_math::FloatingOrigin;
 use inf_packager::{cook, CookOptions};
 use inf_player::budget::{
-    CITY_STEP_BUDGET_MS, RATCHET_NOTE, SHIPPING_FRAME_BUDGET_MS, SHIPPING_FRAME_CEILING_MS,
-    SHIPPING_FRAME_P99_CEILING_MS,
+    CITY_STEP_BUDGET_MS, RATCHET_NOTE, ROAD_TRIANGLES_CEILING, SHIPPING_FRAME_BUDGET_MS,
+    SHIPPING_FRAME_CEILING_MS, SHIPPING_FRAME_P99_CEILING_MS,
 };
 use inf_player::level::PackLevelSource;
 use inf_player::render::{project_scene_full, shipped_settings, sync_voxel_store};
@@ -1831,6 +1831,42 @@ fn cook_island(tmp: &Path) -> Option<PathBuf> {
     let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default()).ok()?;
     println!("ISLAND BUILD: {:.1} s", started.elapsed().as_secs_f64());
     print!("{}", build.report.summary());
+    // **WHAT THE ROADS COST, PER MESH** (wave ROAD1b, clause 4). The ROAD1
+    // audit's carried 18 is that the four road meshes were priced by nothing;
+    // this is the census, taken where the island is actually built, and the
+    // ceiling `inf_player::budget::ROAD_TRIANGLES_CEILING` is read by name
+    // beside it. It bounds CONTENT — what the cook carries, the pack holds and
+    // the streamer pages — rather than a frame cost: every one of these meshes
+    // clears `vgeom.min_triangles` and reaches the raster through a meshlet DAG.
+    if let Some(m) = build.mesh.as_ref() {
+        let mut total = 0u64;
+        if let Some((mesh, _)) = m.carriageway.as_ref() {
+            println!(
+                "ISLAND ROADS: carriageway {} v / {} t",
+                mesh.vertex_count(),
+                mesh.triangle_count()
+            );
+            total += mesh.triangle_count() as u64;
+        }
+        for (part, a) in &m.furniture {
+            println!(
+                "ISLAND ROADS: {:>22} {} v / {} t",
+                part.label(),
+                a.vertex_count(),
+                a.triangle_count()
+            );
+            total += a.triangle_count() as u64;
+        }
+        println!(
+            "ISLAND ROADS: {total} triangles over {} draw(s), against a ceiling of {}",
+            1 + m.furniture.len(),
+            ROAD_TRIANGLES_CEILING
+        );
+        assert!(
+            total <= ROAD_TRIANGLES_CEILING,
+            "the island's road meshes hold {total} triangles against a ceiling              of {ROAD_TRIANGLES_CEILING} {RATCHET_NOTE}"
+        );
+    }
     let proj = tmp.join("island");
     inf_project::ProjectManifest::new(&recipe.name, "blank-3d")
         .save(&proj)

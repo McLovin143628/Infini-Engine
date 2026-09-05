@@ -969,6 +969,40 @@ pub const SHIPPING_FRAME_CEILING_MS: f64 = 38.0;
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 
+/// **How many triangles a world's ROAD MESHES may hold** (wave ROAD1b).
+///
+/// # Why this exists
+///
+/// Wave ROAD1 turned the island's one road mesh into four — a carriageway, the
+/// kerbs and pavements, and two paint layers — and its audit's carried 18 is
+/// that nothing priced them: **1 235 637 triangles across four always-loaded
+/// draws and no frame-budget instrument saw any of them**. Wave ROAD1b then
+/// paved 34.96 km of settlement street through the same builder, which is
+/// almost exactly the length of the GIS network again.
+///
+/// Measured on the shipped island at ROAD1b: carriageway **1 489 058**, kerbs
+/// and pavements **934 787**, white paint **362 540**, yellow **200 242** —
+/// **2 986 627** triangles, 2.42× what the audit counted.
+///
+/// # Why three and a quarter million and not the number it is
+///
+/// A ceiling pinned to today's figure is a ceiling that fails on the next
+/// settlement. 3 250 000 is ~8.8 % of headroom, which is one more town on this
+/// island and no more — enough that a deliberate addition passes and a builder
+/// that started emitting a strip per station does not.
+///
+/// # What it is NOT
+///
+/// It is a **content** bound, not a frame cost: every one of these meshes
+/// clears `inf-packager`'s `vgeom.min_triangles` (2 048) and is cooked to a
+/// meshlet DAG, so what reaches the raster at any distance is what the
+/// two-pass HZB and the DAG's own cut decide, not this number. It bounds what
+/// the cook has to carry, what the pack has to hold and what the streamer has
+/// to page — which is the half of the price a millisecond count cannot show.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const ROAD_TRIANGLES_CEILING: u64 = 3_250_000;
+
 /// The message every budget assertion fails with — the ratchet rule, at the point
 /// where somebody is most tempted to break it.
 pub const RATCHET_NOTE: &str =

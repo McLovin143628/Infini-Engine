@@ -11606,3 +11606,143 @@ fn golden_ground_close() {
         (ma - mb).abs() / mb * 100.0
     );
 }
+
+/// **How bright a river is against its own bank, at two hundred metres** (wave
+/// ROAD1b, clause 5) — the number the sparkle clause asked for, measured
+/// instead of described.
+///
+/// # The user's sentence, and what a number can say about it
+///
+/// The ROAD1 audit's honest close was that a 1.5–4 m creek "reads as a dark line
+/// in gravel". That is a **contrast** claim, so this renders the river scene from
+/// 200 m, finds the river's pixels by differencing against the same frame with
+/// the water removed, and compares their mean luminance with the mean of the
+/// pixels immediately beside them. A dark line is a ratio below one; a river you
+/// can see is one above it, and a sparkling river is one whose brightest pixels
+/// are far above its own mean.
+///
+/// # What it does NOT do
+///
+/// It does not assert a target. The sparkle itself — a normal scroll advected at
+/// `river_flow_m_s` and a sun glint that is lit by the SUN — is routed to PAR3/
+/// PAR4 with these numbers, because `water.wgsl` is built on time NOT reaching
+/// the GPU (each wave's phase arrives already reduced in f64 on the CPU) and an
+/// advection term is a uniform lane and a design decision, not an edit. What is
+/// asserted is that the instrument is not vacuous: the river was found, and it is
+/// not the same colour as the ground.
+#[test]
+fn road1b_a_rivers_contrast_against_its_bank_at_200m() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, _) = tod_scene(15.0 * 3600.0);
+    scene.grid_enabled = false;
+    scene.terrains = vec![hill_terrain(33, 4.0, 2, 2)];
+    let ripple = WaveField::from_spec(&WaveSpec {
+        amplitude_m: 0.06,
+        wavelength_m: 4.0,
+        steepness: 0.12,
+        wind_x: 1.0,
+        wind_z: 0.0,
+        spread_rad: 60f64.to_radians(),
+        seed: 0,
+        count: 3,
+    });
+    let points = [
+        DVec3::new(4.0, 9.0, 4.0),
+        DVec3::new(40.0, 7.0, 24.0),
+        DVec3::new(70.0, 5.0, 60.0),
+        DVec3::new(110.0, 3.0, 90.0),
+    ];
+    let path = inf_render::RiverPath::from_points(
+        &points,
+        false,
+        inf_math::spline::SplineInterp::CatmullRom,
+        &inf_render::RiverProfile {
+            width_start_m: 6.0,
+            width_end_m: 14.0,
+            depth_start_m: 1.0,
+            depth_end_m: 2.5,
+            flow_speed_m_s: 3.5,
+        },
+    );
+    scene.waters = vec![RenderWater {
+        level_m: 9.0,
+        flow_speed_m_s: path.flow_speed_m_s,
+        frames: path
+            .frames
+            .iter()
+            .map(inf_render::WaterFrame::from)
+            .collect(),
+        ..water_body(WaterKindGpu::River, ripple)
+    }];
+
+    // **Two hundred metres**, and stated as a distance rather than picked as a
+    // camera: the target is the reach at (70, 60) and the eye is placed on a
+    // shallow descent 200 m from it, which is the range the ROAD1 audit's
+    // sentence is about.
+    let target = DVec3::new(70.0, 5.0, 60.0);
+    let dir = DVec3::new(-0.72, 0.30, -0.62).normalize();
+    let eye = target + dir * 200.0;
+    let view = look_view(eye, target);
+    assert!(
+        ((eye - target).length() - 200.0).abs() < 1.0e-9,
+        "the eye is not 200 m from the reach"
+    );
+
+    let wet = render(&gpu, &scene, &view);
+    let dry = render(&gpu, &without_water(&scene), &view);
+
+    // The river's pixels: the ones the water changed. The bank's: the ones
+    // beside them that it did not.
+    let mut is_river = vec![false; (W * H) as usize];
+    for i in 0..(W * H) as usize {
+        let (pa, pb) = (&wet[i * 4..i * 4 + 3], &dry[i * 4..i * 4 + 3]);
+        is_river[i] = pa
+            .iter()
+            .zip(pb)
+            .any(|(x, y)| (*x as i32 - *y as i32).abs() > 6);
+    }
+    let mut river: Vec<f32> = Vec::new();
+    let mut bank: Vec<f32> = Vec::new();
+    for y in 1..H - 1 {
+        for x in 1..W - 1 {
+            let i = (y * W + x) as usize;
+            let p = px(&wet, x, y);
+            let l = (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
+            if is_river[i] {
+                river.push(l);
+            } else if [
+                ((y - 1) * W + x) as usize,
+                ((y + 1) * W + x) as usize,
+                (y * W + x - 1) as usize,
+                (y * W + x + 1) as usize,
+            ]
+            .iter()
+            .any(|k| is_river[*k])
+            {
+                bank.push(l);
+            }
+        }
+    }
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+    let (rm, bm) = (mean(&river), mean(&bank));
+    let brightest = river.iter().copied().fold(0.0f32, f32::max);
+    println!(
+        "ROAD1b RIVER | at 200 m: {} river px (mean {rm:.1}/255), {} bank px (mean {bm:.1}/255); contrast {:.3}x, brightest river px {brightest:.1} = {:.2}x its own mean",
+        river.len(),
+        bank.len(),
+        rm / bm.max(1.0e-6),
+        brightest / rm.max(1.0e-6)
+    );
+    assert!(
+        river.len() > 50 && bank.len() > 50,
+        "the instrument found {} river px and {} bank px — it is measuring \
+         nothing",
+        river.len(),
+        bank.len()
+    );
+    assert!(
+        (rm - bm).abs() > 1.0,
+        "the river and its bank are the same colour to within a level, so this \
+         frame cannot say anything about contrast"
+    );
+}

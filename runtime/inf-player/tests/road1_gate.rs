@@ -565,3 +565,141 @@ fn a_rivers_shore_band_does_not_breathe_with_the_terrains_lod() {
          the terrain's LOD"
     );
 }
+
+/// **The road meshes ride the meshlet LOD, and a road two kilometres away costs
+/// a fraction of one underfoot** (wave ROAD1b, clause 4).
+///
+/// # What the ROAD1 audit left open
+///
+/// Carried 18: the four road meshes were priced by nothing. The ceiling is
+/// `inf_player::budget::ROAD_TRIANGLES_CEILING`, asserted where the island is
+/// built (`fps_instrument`'s `cook_island`); this is the other half — that the
+/// number a ceiling bounds is not the number the raster pays, because every one
+/// of these meshes is over `inf-packager`'s `vgeom.min_triangles` (2 048) and is
+/// cooked to a meshlet DAG.
+///
+/// It builds the DAG here rather than cooking one, so the arm runs in the
+/// battery: `inf_vgeom::build_vgeom` is the same function `runtime/inf-packager`
+/// calls at `cook.rs:701`, and `VgeomAsset::from_mesh` is the door the renderer
+/// reads it through.
+///
+/// Two kilometres because that is where an island road IS: the fixture is 1.5 km
+/// across and the shipped island 7 km, so a road a player can see is routinely
+/// this far off.
+#[test]
+fn the_road_meshes_lod_down_at_two_kilometres() {
+    use glam::{DVec3, Vec3};
+    use inf_math::FloatingOrigin;
+    use inf_render::{classic_lod_selection, RenderView, VgeomAsset, VgeomInstance};
+
+    let recipe = inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let meshes = build.mesh.as_ref().expect("the road paved");
+
+    // Every road mesh, carriageway and furniture alike — the claim is about the
+    // set the level draws, and the kerb is the second largest of them.
+    let mut named: Vec<(String, &inf_mesh::MeshAsset)> = Vec::new();
+    if let Some((m, _)) = meshes.carriageway.as_ref() {
+        named.push(("carriageway".to_string(), m));
+    }
+    for (part, m) in &meshes.furniture {
+        named.push((part.label().to_string(), m));
+    }
+    assert!(
+        named.len() >= 2,
+        "the fixture paved only {} road mesh(es)",
+        named.len()
+    );
+
+    // The two views: the road underfoot, and the road two kilometres away. Both
+    // look at the world origin, which the fixture's roads run through.
+    let view_at = |eye: DVec3| RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (DVec3::ZERO - eye).as_vec3().normalize(),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: 1920,
+        height: 1080,
+        ortho: None,
+    };
+    let near = view_at(DVec3::new(0.0, 2.0, 8.0));
+    let far_eye = DVec3::new(0.0, 400.0, 2000.0);
+    let far = view_at(far_eye);
+    assert!(
+        (far_eye.length() - 2039.6).abs() < 1.0,
+        "the far eye is {:.1} m out, not the two kilometres this arm names",
+        far_eye.length()
+    );
+
+    let mut any = false;
+    for (label, mesh) in &named {
+        // The DAG, through the cook's own builder.
+        let (positions, normals, uvs, tangents, indices) = mesh.vgeom_streams();
+        let vg = inf_vgeom::build_vgeom(
+            &positions,
+            &normals,
+            &uvs,
+            &tangents,
+            &indices,
+            inf_vgeom::BuildParams::default(),
+        );
+        let asset = VgeomAsset::from_mesh(1, &vg).expect("the DAG becomes an asset");
+        let inst = vec![VgeomInstance::lit(
+            1,
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            Vec3::ONE,
+            [1.0; 4],
+            0,
+        )];
+        let assets = [asset];
+        let n = classic_lod_selection(&assets, &inst, &near, 1.0);
+        let f = classic_lod_selection(&assets, &inst, &far, 1.0);
+        println!(
+            "ROAD1b LOD | {label}: {} source triangles -> {} drawn underfoot, {} at 2 km ({:.1}x fewer)",
+            mesh.triangle_count(),
+            n.drawn_triangles,
+            f.drawn_triangles,
+            n.drawn_triangles as f64 / f.drawn_triangles.max(1) as f64
+        );
+        assert!(
+            n.drawn_triangles > 0 && f.drawn_triangles > 0,
+            "{label} drew nothing at one of the two distances"
+        );
+        // **The paint does not simplify, and that is a measurement.** A marking
+        // mesh is thousands of DISCONNECTED strips — a dash, a crosswalk bar, a
+        // 100 mm edge line — and a simplifier collapses edges *within* a
+        // connected component. There is nothing to collapse, so the DAG comes
+        // out one level deep and two kilometres of distance draws every triangle
+        // four metres of it does. On the shipped island that is 562 782
+        // triangles of paint that never coarsen; it is carried rather than
+        // hidden inside an average over four meshes.
+        if label.starts_with("marking") {
+            assert_eq!(
+                f.drawn_triangles, n.drawn_triangles,
+                "{label} finally LODs at two kilometres ({} -> {}); the carried \
+                 item about disconnected paint strips is out of date and this \
+                 arm should now bound it like the geometry below",
+                n.drawn_triangles, f.drawn_triangles
+            );
+            continue;
+        }
+        assert!(
+            f.drawn_triangles * 2 <= n.drawn_triangles,
+            "{label} draws {} triangles at two kilometres against {} underfoot, \
+             less than half off — the road's geometry is not riding its own LOD \
+             ladder",
+            f.drawn_triangles,
+            n.drawn_triangles
+        );
+        any = true;
+    }
+    assert!(
+        any,
+        "not one road mesh with connected geometry produced a coarser cut at \
+         two kilometres"
+    );
+}

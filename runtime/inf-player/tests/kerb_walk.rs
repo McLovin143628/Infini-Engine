@@ -326,8 +326,8 @@ fn both_hosts_walk_the_same_kerb_byte_for_byte() {
             e,
             "step {i}: the shipped player has the character at {:?} and the \
              editor's Simulate at {:?}",
-            decode(&[p.clone()])[0],
-            decode(&[e.clone()])[0]
+            decode(std::slice::from_ref(p))[0],
+            decode(std::slice::from_ref(e))[0]
         );
     }
 }
