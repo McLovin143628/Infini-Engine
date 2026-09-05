@@ -394,8 +394,16 @@ mod tests {
         assert_eq!(decode::<MaterialAsset>(&encode(&m).unwrap()).unwrap(), m);
     }
 
+    /// **What a material that says nothing decodes to**, version by version.
+    ///
+    /// It was called `default_blend_is_opaque_v3` and asserted `schema_version
+    /// == 4` under that name (wave ROAD1's carried item 13, closed by the
+    /// audit). A test whose name pins a version it has outgrown is a test the
+    /// next bump renames again or, worse, leaves: this one is named for the
+    /// property it checks, and the version it asserts is `CURRENT_VERSION`
+    /// beside a literal so a bump that forgets the ladder still fails here.
     #[test]
-    fn default_blend_is_opaque_v3() {
+    fn a_default_material_is_opaque_and_states_no_opinion_at_v4() {
         let m = MaterialAsset::default();
         assert_eq!(m.blend, MatBlend::Opaque);
         assert_eq!(m.alpha_cutoff, 0.5);

@@ -265,6 +265,41 @@ impl AssetPayload for DerivedMaterial {
     }
 }
 
+/// The frozen **schema-v2** `.inf_matd` layout, as the cook wrote it before
+/// wave ROAD1 (audit ROAD1).
+///
+/// # Why a real shadow struct rather than nothing
+///
+/// Wave ROAD1 carried "`.inf_matd` v3 has no frozen shadow struct" as its item
+/// 7, on the grounds that Wave G's own v2 bump had none either. The audit's
+/// finding is that the precedent is not the argument — what matters is whether
+/// a v2 payload exists that a decoder must handle, and one does: a `.inf_matd`
+/// is never committed and never authored, but it IS written into every cooked
+/// pack, and a pack cooked before this bump sits on disk until somebody cooks
+/// again. `../island-build/project/Build/content.ipack` is one.
+///
+/// So the refusal path is real and it is now armed on genuinely v2-shaped bytes
+/// rather than on a version integer, which is the difference between asserting
+/// what the author believes v2 looked like and asserting what serde actually
+/// produced for that field list. Same construction as
+/// `inf_material::MaterialAssetV3` one crate over.
+#[cfg(test)]
+#[derive(Serialize)]
+struct DerivedMaterialV2 {
+    schema_version: u32,
+    albedo: Option<AssetId>,
+    normal: Option<AssetId>,
+    orm: Option<AssetId>,
+    base_color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    emissive: [f32; 3],
+    blend: DerivedBlend,
+    alpha_cutoff: f32,
+    detail: Option<AssetId>,
+    detail_scale_m: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +358,59 @@ mod tests {
 
     /// A record from a newer build is refused by name, with a remedy that is
     /// true for a derived asset (the `UPGRADE_REMEDY` doctrine).
+    /// **A v2 record from a stale pack is refused BY NAME, with the remedy that
+    /// is true for a derived asset** (audit ROAD1).
+    ///
+    /// The downgrade bless the wave carried as item 7. Encoded through the
+    /// frozen [`DerivedMaterialV2`] shadow struct, a v2 payload is genuinely two
+    /// `f32`s short, so decoding it as v3 runs off the end of the buffer —
+    /// `decode` peeks the version first, sees an older one the ladder has no
+    /// rung for, and answers `SchemaTooOld` with the kind and the remedy rather
+    /// than a buffer underrun nobody can act on.
+    ///
+    /// That is the whole reason this matters: a `.inf_matd` is derived, never
+    /// authored, so it is never committed — but it IS written into every cooked
+    /// pack, and a pack cooked before ROAD1's bump is still on disk. What the
+    /// player must do with one is say "re-cook", and this is the arm that it
+    /// does.
+    ///
+    /// Un-fix mutation: leave `CURRENT_VERSION` at 2 and this stops failing for
+    /// the right reason.
+    #[test]
+    fn a_v2_record_is_refused_by_name_with_the_cook_remedy() {
+        let v2 = DerivedMaterialV2 {
+            schema_version: 2,
+            albedo: Some(guid(0xA1)),
+            normal: None,
+            orm: Some(guid(0xA3)),
+            base_color: [0.2, 0.3, 0.4, 1.0],
+            metallic: 0.5,
+            roughness: 0.6,
+            emissive: [0.0, 0.1, 0.2],
+            blend: DerivedBlend::Masked,
+            alpha_cutoff: 0.25,
+            detail: Some(guid(0xA4)),
+            detail_scale_m: 16.0,
+        };
+        let bytes = bincode::serde::encode_to_vec(&v2, crate::bincode_config())
+            .expect("encode the frozen v2 record");
+        let err = decode::<DerivedMaterial>(&bytes).expect_err("a v2 record must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2") && msg.contains("3"),
+            "a v2 record must be refused by name: {msg}"
+        );
+        assert!(
+            msg.contains("re-cook"),
+            "…and the refusal must name the remedy a DERIVED asset has: {msg}"
+        );
+        assert!(
+            !msg.contains("re-import"),
+            "a .inf_matd is never authored, so 're-import it' is the wrong \
+             instruction: {msg}"
+        );
+    }
+
     #[test]
     fn a_newer_record_is_refused_with_the_cook_remedy() {
         let m = DerivedMaterial {
