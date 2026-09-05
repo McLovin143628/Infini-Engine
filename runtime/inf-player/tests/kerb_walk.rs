@@ -386,7 +386,7 @@ fn the_footway_costs_a_bounded_number_of_boxes() {
     // and not a comment.
     assert!(
         first.crossed > 0,
-        "not one slab was refused for lying across another street's          carriageway, on a fixture built out of two streets that cross"
+        "not one slab was refused for lying across another street's carriageway, on a fixture built out of two streets that cross"
     );
 }
 
