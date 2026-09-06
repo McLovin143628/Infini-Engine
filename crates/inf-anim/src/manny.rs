@@ -227,6 +227,35 @@ use BoneSide as Side;
 /// the engine that still matches `contains("foot")` and takes the first hit finds
 /// `foot_l` before `ik_foot_l` **because of this ordering**, and a rig that emitted
 /// its handles first would drive a marker instead of a leg.
+/// **What a bone called this IS**, on the UE skeleton convention (wave
+/// CHAR1b.1) — `None` for a name the convention does not carry.
+///
+/// The table below already knows: it is the 161-bone hierarchy with a
+/// [`BoneRoleKind`] and a [`BoneSide`] on every row, and every rig this engine
+/// generates gets its role table from it. What it could not do until now is
+/// answer the question for a rig it did **not** generate.
+///
+/// # Why an imported rig needs one at all
+///
+/// A `RoleIndex` over an empty table answers `None` to everything, and three
+/// passes are written to do nothing when it does — deliberately, so a quadruped
+/// or a pre-v3 `.inf_skel` is left alone. The island's hero is a MetaHuman
+/// imported through the UE bridge, and the bridge writes `roles: Vec::new()`, so
+/// **look-at, the aim-offset mask and the SK1b hand pass were all silently off
+/// on the one character the game is about**. Measured in PIE at wave CHAR1b.1:
+/// the aim reached −165° and the head drew 0.00°.
+///
+/// The MetaHuman rig is the mannequin's naming convention with more bones
+/// (342 against 161: the face rig and the correctives), so a lookup by name
+/// answers for every bone that matters and `None` for the rest — which is what
+/// an untabled joint already meant.
+pub fn role_of_name(name: &str) -> Option<(BoneRoleKind, BoneSide)> {
+    BONES
+        .iter()
+        .find(|b| b.name == name)
+        .map(|b| (b.kind, b.side))
+}
+
 static BONES: [MannyBone; MANNY_JOINT_COUNT] = [
     b("root", None, Place::Origin, Kind::Root, Side::Center),
     b("pelvis", Some(0), Place::Pelvis, Kind::Pelvis, Side::Center),

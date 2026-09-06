@@ -436,7 +436,11 @@ fn import_mesh_container(
     //    skeleton; clips depend on it too (skeleton ← clips, mesh → skeleton).
     let mut skeleton_ids: Vec<AssetId> = Vec::with_capacity(g.skeletons.len());
     for sk in &g.skeletons {
-        let asset = inf_anim::SkeletonAsset::new(sk.skeleton.clone());
+        // **`imported`, not `new`** (wave CHAR1b.1): a rig that came from a glTF
+        // gets its role table inferred from its bone names, because a rig with no
+        // table silently switches off look-at, the aim-offset mask and the hand
+        // pass. See `SkeletonAsset::imported` for the number that found it.
+        let asset = inf_anim::SkeletonAsset::imported(sk.skeleton.clone());
         let name = format!("{}_{}", file_stem(source), sk.name);
         let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), vec![], None)?;
         skeleton_ids.push(id);

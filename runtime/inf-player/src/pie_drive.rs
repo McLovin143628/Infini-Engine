@@ -421,7 +421,7 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// judge, and "the hero moved" is not a claim two screenshots can make on their
 /// own — a camera that drifts looks the same as a character that walks. A
 /// windowed PIE session appends
-/// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state`
+/// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state,foot_mm`
 /// here four times a second and the script prints the first and last lines
 /// beside its frames.
 ///
@@ -517,9 +517,22 @@ impl HeroLog {
             .and_then(|g| inf_ecs::anim_bridge::anim_state(sim.world(), g))
             .map(|s| s.name.clone())
             .unwrap_or_default();
+        // **The foot-IK residual, in millimetres**, worst of the two — the one
+        // number the mandate's "the feet of characters sink in through the
+        // surface a little bit" is answerable with in a RUNNING GAME. Negative
+        // is a sole below the ground the probe found. Blank for a character with
+        // no goals, which is what "the mechanism did not run" has to look like.
+        let foot_mm = guid
+            .and_then(|g| inf_ecs::anim_bridge::foot_error(sim.world(), g))
+            .map(|e| {
+                e.iter()
+                    .flatten()
+                    .fold(0.0f64, |a, v| if v.abs() > a.abs() { *v } else { a })
+                    * 1000.0
+            });
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -535,10 +548,18 @@ impl HeroLog {
                 aim_yaw,
                 look.map(|l| l.total_yaw_deg).unwrap_or(0.0),
                 look.map(|l| l.head_pitch_deg).unwrap_or(0.0),
-                if state.is_empty() { "-".into() } else { state }
+                if state.is_empty() {
+                    "-".to_string()
+                } else {
+                    state
+                },
+                match foot_mm {
+                    Some(mm) => format!("{mm:.3}"),
+                    None => String::new(),
+                }
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

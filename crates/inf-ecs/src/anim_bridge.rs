@@ -273,6 +273,23 @@ pub struct AnimBridgeRes {
     /// it is playing one that carries baked root motion (P29.5). See
     /// [`TraversalArc`] for what it is and why only one-shots have one.
     pub traversal: BTreeMap<Uuid, TraversalArc>,
+    /// **How far each DRAWN foot ended from the ground the probe found**,
+    /// metres, signed — negative is a sole below the surface (wave CHAR1b.1).
+    ///
+    /// The one number the mandate's *"the feet of characters sink in through the
+    /// surface a little bit"* is answerable with **in a running game**, where a
+    /// headless fixture cannot go: the goal is where `inf_physics`' probe says
+    /// the surface under this foot is, and the value published here is where the
+    /// pose step actually left the foot after solving to it.
+    ///
+    /// It is not the same claim as the fixture's penetration/hover: this asks
+    /// "did the foot reach the ground the engine found", and that asks "is the
+    /// ground the engine found the ground that is there". Both are needed and
+    /// only this one can be read on the island.
+    ///
+    /// Rebuilt from scratch every step, and **absent for a character with no
+    /// goals** — which is every character on every level that has none of this.
+    pub foot_error: BTreeMap<Uuid, [Option<f64>; 2]>,
     /// **What the look-at chain did**, by entity (wave CHAR1b.1, clause 4).
     ///
     /// Published by the pose step, rebuilt from scratch every step like
@@ -299,6 +316,7 @@ impl AnimBridgeRes {
             && self.pose_matched.is_empty()
             && self.traversal.is_empty()
             && self.looks.is_empty()
+            && self.foot_error.is_empty()
     }
 }
 
@@ -491,6 +509,12 @@ pub fn anim_curve_opt(world: &EcsWorld, guid: Uuid, name: &str) -> Option<f32> {
         .and_then(|b| b.curves.get(&guid))
         .and_then(|c| c.get(name))
         .copied()
+}
+
+/// **The foot-IK residual for `guid` last step**, metres, per side — see
+/// [`AnimBridgeRes::foot_error`].
+pub fn foot_error(world: &EcsWorld, guid: Uuid) -> Option<[Option<f64>; 2]> {
+    bridge(world)?.foot_error.get(&guid).copied()
 }
 
 /// **What the look-at chain did for `guid` last step**, or `None` (wave

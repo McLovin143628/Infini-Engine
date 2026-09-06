@@ -1683,7 +1683,27 @@ fn rebind_character(
             sk.key
         )));
     };
-    let skel: inf_anim::SkeletonAsset = project.load_payload(skeleton)?;
+    let mut skel: inf_anim::SkeletonAsset = project.load_payload(skeleton)?;
+    // **A rebound rig gets a ROLE TABLE** (wave CHAR1b.1). The glTF stage infers
+    // one for a rig it writes, and this path does not always reach it: the
+    // importer's content-addressed cache reuses an asset whose source has not
+    // changed, so a project imported before that door existed keeps its
+    // table-less rig for ever. This is the door that always runs — it writes the
+    // committed GUID the level references — and a rig that already has a table
+    // keeps it.
+    //
+    // What it costs to skip: a `RoleIndex` over an empty table answers `None` to
+    // everything, and look-at, the aim-offset mask and the SK1b hand pass are
+    // each written to do nothing when it does. Measured in PIE on the island: the
+    // hero's aim reached -165.14 degrees and its head drew 0.00.
+    if skel.roles.is_empty() {
+        skel.roles = inf_anim::roles::infer_roles(&skel.skeleton);
+        report.advisories.push(format!(
+            "{}.inf_skel: inferred {} bone roles from the rig's own names",
+            stems.0,
+            skel.roles.len()
+        ));
+    }
     let body: inf_mesh::MeshAsset = project.load_payload(mesh)?;
     let root = project.root().to_path_buf();
     // **The rig this identity WORE**, read before it is replaced — see

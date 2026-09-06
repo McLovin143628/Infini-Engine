@@ -1914,3 +1914,216 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
         manifest.len()
     );
 }
+
+/// **AN IMPORTED RIG CARRIES A ROLE TABLE** (clause 4's prerequisite, found in
+/// PIE).
+///
+/// A `RoleIndex` over an empty table answers `None` to everything, and look-at,
+/// the aim-offset mask and the SK1b hand pass are all written to do nothing when
+/// it does — deliberately, so a quadruped is left alone. The UE bridge wrote
+/// `roles: Vec::new()`, so all three were silently off on the one character the
+/// game is about: measured in PIE on the island, the hero's aim reached −165.14°
+/// and its head drew **0.00°**.
+///
+/// The falsification is the other half of the door: a rig whose bones are called
+/// nothing the convention knows gets an EMPTY table and behaves as it did.
+#[test]
+fn an_imported_rig_has_the_roles_the_look_at_chain_needs() {
+    use inf_anim::roles::{BoneRoleKind as K, BoneSide as S};
+    // The mannequin's own names, which is what the MetaHuman rig uses too.
+    let manny = inf_anim::manny::build_manny(&inf_anim::BodyParams::default())
+        .expect("the shipped mannequin builds");
+    let imported = inf_anim::SkeletonAsset::imported(manny.skeleton.clone());
+    let idx = imported.role_index();
+    for (kind, side) in [
+        (K::Head, S::Center),
+        (K::Neck, S::Center),
+        (K::Spine, S::Center),
+        (K::Pelvis, S::Center),
+        (K::Foot, S::Left),
+        (K::Foot, S::Right),
+        (K::Hand, S::Left),
+        (K::Hand, S::Right),
+    ] {
+        assert!(
+            idx.first(kind, side).is_some(),
+            "an imported mannequin has no {kind:?}/{side:?} — the look-at chain \
+             and the upper-body mask both answer `None` on this rig"
+        );
+    }
+    // …and the upper-body mask, which is what the aim-offset layer needs, can
+    // actually be built from it.
+    assert!(
+        inf_anim::JointMask::upper_body("Mask_AimOffset", &imported.skeleton, idx).is_some(),
+        "no upper body on an imported mannequin"
+    );
+    println!(
+        "\n=== an imported {}-bone rig infers {} roles ===",
+        imported.skeleton.len(),
+        idx.rows().len()
+    );
+
+    // **THE FALSIFICATION**: names the convention does not carry infer nothing.
+    let alien = inf_anim::Skeleton::new(
+        (0..4)
+            .map(|i| inf_anim::Joint {
+                name: format!("Bone.{i:03}"),
+                parent: (i > 0).then(|| (i - 1) as u16),
+                inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+                local_bind: inf_anim::JointTransform::IDENTITY,
+            })
+            .collect(),
+    )
+    .expect("a chain");
+    let alien = inf_anim::SkeletonAsset::imported(alien);
+    assert!(
+        alien.role_index().is_empty(),
+        "a rig with no convention invented a role table: {:?}",
+        alien.roles
+    );
+    // …and the island's own hero, if this machine has one.
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — the rebound rig is local-only content");
+        return;
+    };
+    let path = content.join("Starter.inf_skel");
+    if !path.is_file() {
+        eprintln!("SKIP: no rebound rig at {}", path.display());
+        return;
+    }
+    let rig: inf_anim::SkeletonAsset =
+        inf_asset::decode(&std::fs::read(&path).expect("the rig reads")).expect("it decodes");
+    let idx = rig.role_index();
+    println!(
+        "  the island's hero: {} joints, {} roles",
+        rig.skeleton.len(),
+        idx.rows().len()
+    );
+    assert!(
+        idx.first(K::Head, S::Center).is_some() && idx.first(K::Neck, S::Center).is_some(),
+        "the island's rebound hero has no head or neck role — look-at cannot run \
+         on it, which is exactly the PIE measurement this arm exists for"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (8) THE ISLAND'S OWN HERO
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The island level, loaded loose out of the local project — `char1a3_gate`'s
+/// own door, mirrored so this file can stand its hero on the real ground.
+fn loose_sim(content: &Path, slug: &str) -> inf_player::runtime_sim::RuntimeSim {
+    let source = inf_player::level::DevDirLevelSource::new(content.join(format!("{slug}.inf_lvl")));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_audio(inf_player::level::load_audio_assets_from_dir(content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the loose level builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    sim
+}
+
+/// **THE ISLAND'S HERO GETS FOOT GOALS, AND ITS SOLES REACH THEM** (clause 1, in
+/// the world the game is set in).
+///
+/// The headless fixture asks "is the ground the engine found the ground that is
+/// there"; this asks the other half — **did any of it run at all on the real
+/// hero, on real terrain, with the real clip set**. Every one of the four
+/// mechanisms this wave turned on has an all-or-nothing failure mode (a rig with
+/// no role table, a clip with no channel, a mode outside the family, a probe that
+/// finds nothing), and each of them looks exactly like "the feature is off".
+///
+/// The residual is `inf_ecs::anim_bridge::foot_error`: where the pose step left
+/// the foot, against where the physics probe said the surface under it is.
+#[test]
+fn the_islands_hero_stands_on_the_ground_it_is_standing_on() {
+    let Some(content) = island_project() else {
+        eprintln!(
+            "SKIP: no island project at ../island-build/project/Content — the \
+             island is local-only content and CI has none"
+        );
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!(
+            "SKIP: no VancouverIsland.inf_lvl under {}",
+            content.display()
+        );
+        return;
+    }
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    // Let the terrain stream in under it and the foot loop settle. The seam is
+    // one fixed step wide by construction, and the ground arrives with the tile.
+    for _ in 0..600 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let cm = sim
+        .world()
+        .entity_of(hero)
+        .and_then(|e| {
+            sim.world()
+                .world()
+                .get::<inf_ecs::components::CharacterMovement>(e)
+        })
+        .expect("the hero has a movement component")
+        .clone();
+    let feet = inf_ecs::anim_bridge::feet_of(sim.world(), hero);
+    let goals =
+        inf_ecs::anim_bridge::bridge(sim.world()).and_then(|b| b.foot_ik.get(&hero).copied());
+    let error = inf_ecs::anim_bridge::foot_error(sim.world(), hero);
+    println!(
+        "\n=== the island's hero after 600 steps ===\n  \
+         mode {:?}  grounded {}  planted {}\n  \
+         state {:?}\n  \
+         feet published {:?}\n  goals {:?}\n  residual {:?}",
+        cm.mode,
+        cm.runtime.grounded,
+        cm.mode.is_grounded_family() && cm.runtime.grounded,
+        inf_ecs::anim_bridge::anim_state(sim.world(), hero).map(|s| s.name.clone()),
+        feet.map(|f| f.map(|s| s.map(|s| s.world.y))),
+        goals.map(|g| g.map(|x| x.map(|x| x.target.y))),
+        error
+    );
+    assert!(
+        cm.mode.is_grounded_family() && cm.runtime.grounded,
+        "the hero is not standing on anything, so nothing below is a claim about \
+         foot IK"
+    );
+    assert!(
+        feet.is_some_and(|f| f.iter().any(Option::is_some)),
+        "the pose step published no feet for the island's hero — its rig has no \
+         `Foot` role and no `foot_*` bone, or it was never posed"
+    );
+    let goals = goals.expect("the movement step published no foot goals");
+    assert!(
+        goals.iter().any(Option::is_some),
+        "the probe found no ground under either foot: {goals:?}"
+    );
+    let error = error.expect("no residual was published, so no foot was solved");
+    let worst = error
+        .iter()
+        .flatten()
+        .fold(0.0f64, |a, v| if v.abs() > a { v.abs() } else { a });
+    println!("  worst residual: {:.2} mm", worst * 1000.0);
+    assert!(
+        worst < 0.010,
+        "the island's hero's sole ended {:.2} mm from the ground the probe found",
+        worst * 1000.0
+    );
+}

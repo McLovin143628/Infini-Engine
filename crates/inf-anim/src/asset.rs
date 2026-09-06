@@ -117,6 +117,29 @@ impl SkeletonAsset {
         }
     }
 
+    /// **A rig that came from outside**, with its role table INFERRED from its
+    /// bone names (wave CHAR1b.1).
+    ///
+    /// [`new`](Self::new) leaves `roles` empty, which is right for a rig this
+    /// engine is about to fill in itself and wrong for one an importer just
+    /// decoded: a `RoleIndex` over an empty table answers `None` to everything,
+    /// and look-at, the aim-offset mask and the SK1b hand pass are all written to
+    /// do nothing when it does. Measured on the island in PIE before this
+    /// existed: the hero's aim reached -165 degrees and its head drew 0.00, because
+    /// the MetaHuman rig crossed the bridge with no table and nothing noticed.
+    ///
+    /// The inference is [`crate::roles::infer_roles`] — a lookup in the shipped
+    /// mannequin hierarchy's own table, so the vocabulary is one table and not
+    /// two — and it invents nothing: a rig whose bones are called `Bone.001` gets
+    /// an EMPTY table and behaves exactly as it did before this door existed.
+    pub fn imported(skeleton: Skeleton) -> Self {
+        let roles = crate::roles::infer_roles(&skeleton);
+        Self {
+            roles,
+            ..Self::new(skeleton)
+        }
+    }
+
     /// Wrap a skeleton and its authored sockets.
     pub fn with_sockets(skeleton: Skeleton, sockets: Vec<Socket>) -> Self {
         Self {

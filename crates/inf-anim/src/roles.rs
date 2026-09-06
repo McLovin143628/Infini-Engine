@@ -300,6 +300,41 @@ impl GripAffordance {
     }
 }
 
+/// **Infer a role table for a rig that carries none**, by name (wave CHAR1b.1).
+///
+/// The heuristic this module's own docs describe as *"the fallback for a rig
+/// that carries no table"*, made a door instead of a comment. It reads
+/// [`crate::manny::role_of_name`], which is the shipped 161-bone hierarchy's own
+/// table, so the vocabulary is one table and not two.
+///
+/// # It is applied at IMPORT, never at runtime
+///
+/// A rig either carries a table or it does not, and deciding that per frame
+/// would be a guess repeated 60 times a second. The UE bridge calls this once,
+/// when it writes an imported `.inf_skel` that has no roles of its own, and
+/// everything downstream keeps reading the table.
+///
+/// # What it does NOT do
+///
+/// It does not invent a row for a name the convention does not carry — a
+/// MetaHuman's 181 extra face and corrective bones get nothing, which is what an
+/// untabled joint already meant to every reader. A rig whose bones are called
+/// `Bone.001` gets an **empty** table and behaves exactly as it did before this
+/// existed, which is the property that keeps every non-humanoid where it is.
+///
+/// Ascending by joint, so the result can go straight into [`RoleIndex::new`].
+pub fn infer_roles(skeleton: &crate::skeleton::Skeleton) -> Vec<BoneRole> {
+    skeleton
+        .joints()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, j)| {
+            crate::manny::role_of_name(&j.name)
+                .map(|(kind, side)| BoneRole::new(i as u16, kind, side))
+        })
+        .collect()
+}
+
 /// A **resolved role lookup** over one rig — the door every site that used to
 /// guess at names now asks first.
 ///

@@ -1184,6 +1184,8 @@ pub fn step_pose_evaluation<'c>(
     // the end for the same reason the feet are: the write-back needs
     // `&mut EcsWorld` and the bridge is lifted out of the world for the loop.
     let mut looks: BTreeMap<Uuid, inf_anim::LookAtReport> = BTreeMap::new();
+    // …and how far each foot ended from its goal, for the same reason.
+    let mut foot_errors: BTreeMap<Uuid, [Option<f64>; 2]> = BTreeMap::new();
     // **The inertialization state** (P29.2), lifted out for the same reason the
     // IK goals are: the write-back below needs `&mut EcsWorld`. `remove_resource`
     // rather than a clone — a blender holds two poses per entity and this runs
@@ -1211,6 +1213,7 @@ pub fn step_pose_evaluation<'c>(
     bridge.feet.clear();
     bridge.traversal.clear();
     bridge.looks.clear();
+    bridge.foot_error.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
     // **The thing every NPC is looking at**, resolved ONCE (wave CHAR1b.1). See
@@ -1689,7 +1692,12 @@ pub fn step_pose_evaluation<'c>(
                         //    above where the feet are published). Identity-
                         //    composed for anything that is not a character.
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
-                            corrected |= apply_foot_ik(asset, &mut pose, &goals, to_world);
+                            let mut error = [None, None];
+                            corrected |=
+                                apply_foot_ik(asset, &mut pose, &goals, to_world, &mut error);
+                            if error.iter().any(Option::is_some) {
+                                foot_errors.insert(guid, error);
+                            }
                         }
                         // ── SK1b: **hands** — the arms that reach and the
                         //    fingers that close ──
@@ -1809,6 +1817,9 @@ pub fn step_pose_evaluation<'c>(
     }
     if !looks.is_empty() {
         bridge.looks = looks;
+    }
+    if !foot_errors.is_empty() {
+        bridge.foot_error = foot_errors;
     }
     {
         // The hand verdicts, under rule 4: rebuilt from scratch, and never
@@ -2057,12 +2068,15 @@ fn apply_aim_offset<'c>(
 ///
 /// Returns whether it **wrote a pose** (SK1b) — the engagement counter the
 /// correction re-drive is gated on, and the answer to "was this character's pose
-/// corrected at all", which nothing could ask before.
+/// corrected at all", which nothing could ask before — and, since wave
+/// CHAR1b.1, **how far each foot ended from its goal**, which is the only place
+/// both numbers exist at once.
 fn apply_foot_ik(
     rig: &inf_anim::SkeletonAsset,
     pose: &mut Pose,
     goals: &[Option<crate::anim_bridge::FootGoal>; 2],
     model_to_world: glam::DAffine3,
+    error: &mut [Option<f64>; 2],
 ) -> bool {
     let mut wrote = false;
     let skeleton = &rig.skeleton;
@@ -2142,6 +2156,22 @@ fn apply_foot_ik(
             // reason the rotations above are; and **clamped**, because the ground
             // can be steeper than an ankle bends and a normal a probe returns is
             // not a promise about anatomy.
+            // **The residual, measured here** — after the solve and before the
+            // ankle's own rotation, which does not move the joint. Recomputing
+            // the foot's global costs one composed chain and is what makes the
+            // number a measurement of the SOLVE rather than of the goal.
+            {
+                let g = inf_anim::pose::global_transforms(skeleton, pose);
+                if let Some(m) = g.get(foot as usize) {
+                    let t = m.to_scale_rotation_translation().2;
+                    let w = model_to_world.transform_point3(glam::DVec3::new(
+                        f64::from(t.x),
+                        f64::from(t.y),
+                        f64::from(t.z),
+                    ));
+                    error[side] = Some(w.y - goal.target.y);
+                }
+            }
             if let Some(local) = pose.locals.get_mut(foot as usize) {
                 let w = goal.weight.clamp(0.0, 1.0);
                 let pitch = goal
