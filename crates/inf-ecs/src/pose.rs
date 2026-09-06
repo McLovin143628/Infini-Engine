@@ -2584,7 +2584,7 @@ fn look_at_of(
                 .unwrap_or(glam::DVec3::ZERO);
             let d = at - here;
             let planar = (d.x * d.x + d.z * d.z).sqrt();
-            if planar > NPC_ATTENTION_M || planar < 1.0e-3 {
+            if !(1.0e-3..=NPC_ATTENTION_M).contains(&planar) {
                 (rt.aim_yaw_deg, rt.aim_pitch_deg)
             } else {
                 (

@@ -1595,8 +1595,8 @@ fn placing_a_second_character_does_not_move_the_pawn() {
 
     // A second character placed afterwards, with a guid that sorts LOWER still —
     // the worst case, and the one the old door lost.
-    let placed = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0000_u128 + 1);
-    let _ = placed;
+    // The lowest guid there is, so the second character is the WORST case for
+    // 's  — the run the old door lost.
     let lower = Uuid::nil();
     let e = world.spawn_with_guid(lower, "Placed", None);
     world.world_mut().entity_mut(e).insert((
