@@ -2149,8 +2149,27 @@ impl SceneDoc {
             };
             let radius = (height * 0.15).clamp(0.1, 0.5);
             let half = (height * 0.5 - radius).max(0.05);
+            // **THE FIRST CHARACTER IS THE PAWN; THE SECOND IS NOT** (carried
+            // item 112).
+            //
+            // This door used to set `player_controlled: true` unconditionally,
+            // and `inf_ecs::movement::camera_subject` answers "the first
+            // player-controlled character in `Guid` order". The island authors a
+            // hero with a DERIVED guid and this door mints a `v4` one, so who
+            // the camera followed was a byte-lexicographic race between a fixed
+            // number and a random one the moment a second character was placed —
+            // measured at one run in four, and the run it lost photographed the
+            // wrong face. `tools/demo/demo.ps1` works around it by ordering and
+            // `portrait.mjs` by taking a `--guid=`; neither is the fix.
+            //
+            // The fix is that a level has one pawn. An author who wants a second
+            // one ticks the box in the Details panel — the field is serialized
+            // and editable — and an author who wants none unticks the first,
+            // which is exactly what `camera_subject`'s own doc means by "the day
+            // a per-controller binding exists, this reads it".
+            let has_pawn = inf_ecs::movement::camera_subject(&self.world).is_some();
             let mut movement = CharacterMovement {
-                player_controlled: true,
+                player_controlled: !has_pawn,
                 ..Default::default()
             };
             movement.stand_half_height_m = half;

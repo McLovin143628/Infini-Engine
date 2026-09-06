@@ -117,6 +117,32 @@ const BLOCK_HALF_M: f64 = 160.0;
 /// is priced against.
 const ALL_FULL: (f64, f64, f64) = (1.0e9, 1.0e9, 1.0e9);
 
+/// **The same ladder with the `Full` rung closed**, so every agent is `Near`
+/// (wave CHAR1b.1).
+///
+/// The other half of the animation cost's A/B, and it has to be measured in the
+/// SAME session as `ALL_FULL` or the two numbers are two machines: the CHAR1a.3
+/// audit's §(k) is a whole finding about an A/B that was not reproducible
+/// because its halves came from different runs.
+///
+/// `Full` and `Near` both pose the whole rig; the difference the ladder makes to
+/// ANIMATION is the SK1b hand pass, which `CrowdTier::hand_ik` gives to `Full`
+/// alone. Everything else the tiers differ on — the capsule, the controller, the
+/// steering — is priced by other phases, which is why this pair is read off the
+/// `animation` row and not off the step.
+const ALL_NEAR: (f64, f64, f64) = (0.0, 1.0e9, 1.0e9);
+
+/// Which ladder one cell of the sweep runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ladder {
+    /// The shipped radii — a real mix of `Full`, `Near` and `Far`.
+    Banded,
+    /// Every agent `Full`.
+    AllFull,
+    /// Every agent `Near`.
+    AllNear,
+}
+
 // ── the fixture ─────────────────────────────────────────────────────────────
 
 /// Scaffold and cook the composed instrument level — `fps_instrument`'s
@@ -432,18 +458,23 @@ impl Row {
 }
 
 /// Run one cell of the sweep.
-fn measure(pack: &Path, n: usize, banded: bool) -> Row {
+fn measure(pack: &Path, n: usize, ladder: Ladder) -> Row {
     let mut fx = open(pack);
     let archetype = if n > 0 {
         archetype_from_hero(&fx.sim)
     } else {
         CrowdArchetype::default()
     };
-    if !banded {
-        assert!(
+    match ladder {
+        Ladder::Banded => {}
+        Ladder::AllFull => assert!(
             fx.sim.set_crowd_radii(ALL_FULL),
             "the all-Full control ladder was refused"
-        );
+        ),
+        Ladder::AllNear => assert!(
+            fx.sim.set_crowd_radii(ALL_NEAR),
+            "the all-Near control ladder was refused"
+        ),
     }
     if n > 0 {
         fx.sim.set_crowd_population(population(n, archetype));
@@ -524,7 +555,7 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
 
     Row {
         n,
-        banded,
+        banded: ladder == Ladder::Banded,
         step_ms: prof.total_ms(),
         crowd_ms: ms("crowd"),
         society_ms: ms("society"),
@@ -620,9 +651,14 @@ fn the_n_sweep() {
 
     let mut banded: Vec<Row> = Vec::new();
     let mut full: Vec<Row> = Vec::new();
+    // **The third ladder** (wave CHAR1b.1): every agent `Near`, so the animation
+    // phase can be priced per agent per TIER against the all-`Full` control in
+    // one session.
+    let mut near: Vec<Row> = Vec::new();
     for n in NS {
-        banded.push(measure(&pack, n, true));
-        full.push(measure(&pack, n, false));
+        banded.push(measure(&pack, n, Ladder::Banded));
+        full.push(measure(&pack, n, Ladder::AllFull));
+        near.push(measure(&pack, n, Ladder::AllNear));
     }
 
     // ── (a) ZERO COST WHEN ABSENT ───────────────────────────────────────────
@@ -764,7 +800,62 @@ fn the_n_sweep() {
     );
 
     // ── the tables, for the brief ───────────────────────────────────────────
-    for (label, rows) in [("BANDED", &banded), ("ALL-FULL", &full)] {
+    // ── THE PER-AGENT ANIMATION COST, BY TIER (wave CHAR1b.1, clause 7) ─────
+    //
+    // `NPC_STEP_BUDGET_MS`'s sibling, for the phase this wave gave work to. The
+    // two rows are measured in ONE session against ONE cooked pack, which is the
+    // whole point: the CHAR1a.3 audit's §(k) is a finding about an A/B whose
+    // halves came from different runs and could not be reproduced.
+    //
+    // What separates the tiers in this phase is the SK1b hand pass, which
+    // `CrowdTier::hand_ik` gives to `Full` alone; both tiers pose the whole rig.
+    // A `Near` number that equals the `Full` one is therefore not a bug in this
+    // print — it is `crowd.rs`'s own carried note that "the `Near` rung still
+    // saves nothing that can be falsified", measured rather than repeated.
+    println!("\nTHE ANIMATION PHASE, PER AGENT, PER TIER");
+    println!(
+        "  {:>5} | {:>10} | {:>6} | {:>12} | {:>10} | {:>6} | {:>12}",
+        "N", "Full ms", "posed", "us/agent", "Near ms", "posed", "us/agent"
+    );
+    for (f, nr) in full.iter().zip(near.iter()) {
+        let per = |ms: f64, posed: usize| -> f64 {
+            if posed == 0 {
+                0.0
+            } else {
+                ms * 1000.0 / posed as f64
+            }
+        };
+        println!(
+            "  {:>5} | {:>10.4} | {:>6} | {:>12.3} | {:>10.4} | {:>6} | {:>12.3}",
+            f.n,
+            f.anim_ms,
+            f.posed,
+            per(f.anim_ms, f.posed),
+            nr.anim_ms,
+            nr.posed,
+            per(nr.anim_ms, nr.posed)
+        );
+    }
+    // Not vacuous: at the top of the sweep both ladders really do pose the whole
+    // crowd, which is what makes the two columns comparable at all.
+    if let (Some(f), Some(nr)) = (
+        full.iter().find(|r| r.n == 1000),
+        near.iter().find(|r| r.n == 1000),
+    ) {
+        assert!(
+            f.posed >= 1000 && nr.posed >= 1000,
+            "the two ladders posed {} and {} agents of 1000 — they are not the \
+             same crowd and the per-agent columns are not comparable",
+            f.posed,
+            nr.posed
+        );
+    }
+
+    for (label, rows) in [
+        ("BANDED", &banded),
+        ("ALL-FULL", &full),
+        ("ALL-NEAR", &near),
+    ] {
         println!("\n{label}");
         println!(
             "  {:>5} | {:>8} | {:>7} | {:>7} | {:>10} | {:>6} | {:>7} | {:>5} | {:>6} | {:>6} | {:>8} | {:>10}",

@@ -77,6 +77,44 @@ pub const GROUNDED_VAR: &str = "grounded";
 pub const FALL_SPEED_VAR: &str = "fall_speed";
 /// How close a predicted landing is, `[0, 1]`.
 pub const LAND_ALPHA_VAR: &str = "land_alpha";
+/// **What the landing classifier decided about the last landing** — the
+/// `inf_ecs::components::LandingKind` discriminant.
+///
+/// The landing states are gated on this and not on [`LAND_ALPHA_VAR`], which is
+/// a prediction the movement step CLEARS the moment the character is grounded:
+/// a graph that read the prediction could never enter a landing state, because
+/// at the instant `grounded` goes true the prediction is already zero. Found by
+/// reading the producer rather than by watching a character never land.
+pub const LANDING_VAR: &str = "landing";
+/// **Seconds since that landing** — how a one-shot landing state knows it is
+/// over, and what stops one firing again on the next step.
+pub const TIME_SINCE_LAND_VAR: &str = "time_since_land";
+
+/// `LandingKind::Soft` — under the hard threshold, keep running.
+pub const LANDING_SOFT: f64 = 1.0;
+/// `LandingKind::Hard` — plant, with the heavier braking friction.
+pub const LANDING_HARD: f64 = 2.0;
+/// `LandingKind::Roll` — a break-fall into a roll.
+pub const LANDING_ROLL: f64 = 3.0;
+/// How long after a touch a landing state may still be entered, seconds.
+pub const LANDING_WINDOW_S: f64 = 0.12;
+/// **How far a turn-in-place is turning**, degrees, signed — negative to the
+/// character's left. `0` when none is running.
+pub const TURN_DEG_VAR: &str = "turn_deg";
+/// **Which foot is planted**: `-1` left, `+1` right, `0` neither.
+pub const PLANTED_FOOT_VAR: &str = "planted_foot";
+/// **Whether a ragdolled character is on its back**, `1` or `0`.
+pub const FACE_UP_VAR: &str = "face_up";
+/// The angle at which a turn-in-place is a 180 rather than a 90, degrees.
+///
+/// Halfway between the two clips the donor ships, so each plays for the turns it
+/// is nearer to — ALS picks the same way, off `TurnInPlaceValues`.
+pub const TURN_180_DEG: f64 = 135.0;
+/// The smallest turn that plays a clip at all, degrees — ALS's
+/// `TurnCheckMinAngle`, which `inf_ecs::movement::turn_in_place` already gates
+/// the runtime on. Repeated here as the graph's own floor, so a machine driven
+/// by a hand-written parameter set behaves like one driven by the movement step.
+pub const TURN_MIN_DEG: f64 = 45.0;
 /// **The lateral half of the movement direction in the character's own frame**,
 /// `[-1, 1]`, positive to its right (wave CHAR1b.1).
 ///
@@ -648,8 +686,13 @@ pub fn build_locomotion_graph(
                 SmParam::float(GROUNDED_VAR),
                 SmParam::float(FALL_SPEED_VAR),
                 SmParam::float(LAND_ALPHA_VAR),
+                SmParam::float(LANDING_VAR),
+                SmParam::float(TIME_SINCE_LAND_VAR),
                 SmParam::float(MOVE_X_VAR),
                 SmParam::float(MOVE_Y_VAR),
+                SmParam::float(TURN_DEG_VAR),
+                SmParam::float(PLANTED_FOOT_VAR),
+                SmParam::float(FACE_UP_VAR),
             ],
             profiles: Vec::new(),
         },
@@ -717,11 +760,137 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
         }
     }
 
+    // ── the START, between standing still and walking ───────────────────────
+    //
+    // ALS's `LocoDetail_Accel_*` is what a character does in its first stride,
+    // and it is a one-shot: `idle → start → walk`, with the start priced above
+    // the ladder's own `idle → walk` edge so it is not skipped.
+    if let (Some(i), Some(st)) = (at("idle"), at("start")) {
+        out.push(
+            SmTransition::on(i, st, ACTION_FADE_S, GAIT_VAR, CmpOp::Gt, WALK_AT)
+                .with_curve(BlendCurve::EaseInOut)
+                .with_priority(2),
+        );
+        if let Some(w) = at("walk") {
+            out.push(
+                SmTransition::new(st, w, FADE_S)
+                    .with_exit_time(0.6)
+                    .with_curve(BlendCurve::EaseInOut),
+            );
+            // …and a start that is abandoned goes back rather than finishing.
+            out.push(
+                SmTransition::on(st, i, FADE_S, GAIT_VAR, CmpOp::Le, WALK_AT)
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(3),
+            );
+        }
+    }
+
+    // ── the STOP, and which foot it is on ───────────────────────────────────
+    //
+    // ALS ships two stop-down clips because which foot is under you when you
+    // stop decides what stopping looks like. The engine publishes the animator's
+    // own `FootLock_*` window as `planted_foot`, so the choice is the CLIP's and
+    // not this table's; a cycle that authors neither lock takes neither stop and
+    // falls through to `idle`, which is the pre-CHAR1b behaviour.
+    for (name, foot) in [("stop_l", -0.5), ("stop_r", 0.5)] {
+        let Some(st) = at(name) else { continue };
+        for from in ["walk", "run", "sprint"] {
+            let Some(f) = at(from) else { continue };
+            let cmp = if foot < 0.0 { CmpOp::Lt } else { CmpOp::Gt };
+            out.push(
+                SmTransition::new(f, st, ACTION_FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                        SmCompare::float(PLANTED_FOOT_VAR, cmp, foot),
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(6),
+            );
+        }
+        if let Some(i) = at("idle") {
+            out.push(
+                SmTransition::new(st, i, FADE_S)
+                    .with_exit_time(0.7)
+                    .with_curve(BlendCurve::EaseInOut),
+            );
+        }
+    }
+
+    // ── TURN IN PLACE ───────────────────────────────────────────────────────
+    //
+    // P29.4 ported ALS's whole rule set — the delay, the two thresholds, the
+    // aim-yaw-rate limit — onto the runtime, and the eight clips crossed the
+    // bridge, and no machine could see that a turn was happening. `turn_deg` is
+    // the seam: signed, and zero when no turn is running.
+    for (stand, crouch, lo, hi, left) in [
+        (
+            "turn_l90",
+            "crouch_turn_l90",
+            TURN_MIN_DEG,
+            TURN_180_DEG,
+            true,
+        ),
+        (
+            "turn_r90",
+            "crouch_turn_r90",
+            TURN_MIN_DEG,
+            TURN_180_DEG,
+            false,
+        ),
+        ("turn_l180", "crouch_turn_l180", TURN_180_DEG, 360.0, true),
+        ("turn_r180", "crouch_turn_r180", TURN_180_DEG, 360.0, false),
+    ] {
+        for (name, from, mode) in [
+            (stand, "idle", LocoMode::Grounded),
+            (crouch, "crouch_idle", LocoMode::Crouch),
+        ] {
+            let (Some(to), Some(f)) = (at(name), at(from)) else {
+                continue;
+            };
+            let terms = if left {
+                vec![
+                    SmCompare::float(TURN_DEG_VAR, CmpOp::Lt, -lo),
+                    SmCompare::float(TURN_DEG_VAR, CmpOp::Ge, -hi),
+                    SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param()),
+                ]
+            } else {
+                vec![
+                    SmCompare::float(TURN_DEG_VAR, CmpOp::Gt, lo),
+                    SmCompare::float(TURN_DEG_VAR, CmpOp::Le, hi),
+                    SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param()),
+                ]
+            };
+            out.push(
+                SmTransition::new(f, to, ACTION_FADE_S)
+                    .when(SmCond::from_flat_and(terms))
+                    .with_curve(BlendCurve::EaseInOut)
+                    // Above the `Any -> idle` / `Any -> crouch_idle` edges, so a
+                    // turn is not a race the stance edge wins on some steps.
+                    .with_priority(7),
+            );
+            // A turn plays out and hands back to the stance it came from.
+            out.push(
+                SmTransition::new(to, f, FADE_S)
+                    .with_exit_time(0.9)
+                    .with_curve(BlendCurve::EaseInOut),
+            );
+        }
+    }
+
     // ── crouch: the whole standing family drops into it, and back ────────────
     if let Some(c) = at("crouch_idle") {
         out.push(
             SmTransition::any(c, FADE_S)
-                .when(SmCond::float(MODE_VAR, CmpOp::Eq, LocoMode::Crouch.param()))
+                .when(SmCond::from_flat_and(vec![
+                    SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Crouch.param()),
+                    // **AND STILL** — without this the `Any` edge outvotes the
+                    // crouch ladder every step and `crouch_walk` is unreachable,
+                    // which is what the reachability arm caught. The same shape
+                    // as the `idle` edge below, for the same reason.
+                    SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                ]))
                 .with_curve(BlendCurve::EaseInOut)
                 // Below the mode edges below, so an airborne character does not
                 // crouch on the way past.
@@ -757,9 +926,16 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
         ("fall", LocoMode::FallControlled),
     ] {
         if let Some(s) = at(name) {
+            let mut terms = vec![SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param())];
+            if name == "fall" {
+                // **AND SLOWLY** — the `Any` edge would otherwise outvote the
+                // `fall → fall_fast` edge below on every step and the fast loop
+                // would be unreachable. Caught by the reachability arm.
+                terms.push(SmCompare::float(FALL_SPEED_VAR, CmpOp::Le, 9.0));
+            }
             out.push(
                 SmTransition::any(s, ACTION_FADE_S)
-                    .when(SmCond::float(MODE_VAR, CmpOp::Eq, mode.param()))
+                    .when(SmCond::from_flat_and(terms))
                     .with_curve(BlendCurve::EaseInOut)
                     .with_priority(20),
             );
@@ -776,31 +952,37 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                 .with_curve(BlendCurve::EaseInOut),
         );
     }
-    // The landing, classified by how hard it is about to be.
-    if let Some(l) = at("land_light") {
-        out.push(
-            SmTransition::any(l, ACTION_FADE_S)
-                .when(SmCond::from_flat_and(vec![
-                    SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
-                    SmCompare::float(LAND_ALPHA_VAR, CmpOp::Gt, 0.5),
-                    SmCompare::float(FALL_SPEED_VAR, CmpOp::Le, 6.0),
-                    SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
-                ]))
-                .with_curve(BlendCurve::EaseInOut)
-                .with_priority(30),
-        );
+    // **The landing**, taken off the classifier's LATCH inside a short window
+    // after the touch — see [`LANDING_VAR`] for why not off the prediction.
+    for (name, kind, prio) in [
+        ("land_light", LANDING_SOFT, 30),
+        ("land_heavy", LANDING_HARD, 31),
+    ] {
+        if let Some(s) = at(name) {
+            out.push(
+                SmTransition::any(s, ACTION_FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
+                        SmCompare::float(LANDING_VAR, CmpOp::Eq, kind),
+                        SmCompare::float(TIME_SINCE_LAND_VAR, CmpOp::Lt, LANDING_WINDOW_S),
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(prio),
+            );
+        }
     }
-    if let Some(h) = at("land_heavy") {
+    // …and a break-fall goes to the roll rather than to a stand-up.
+    if let Some(r) = at("roll") {
         out.push(
-            SmTransition::any(h, ACTION_FADE_S)
+            SmTransition::any(r, ACTION_FADE_S)
                 .when(SmCond::from_flat_and(vec![
                     SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
-                    SmCompare::float(LAND_ALPHA_VAR, CmpOp::Gt, 0.5),
-                    SmCompare::float(FALL_SPEED_VAR, CmpOp::Gt, 6.0),
-                    SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
+                    SmCompare::float(LANDING_VAR, CmpOp::Eq, LANDING_ROLL),
+                    SmCompare::float(TIME_SINCE_LAND_VAR, CmpOp::Lt, LANDING_WINDOW_S),
                 ]))
                 .with_curve(BlendCurve::EaseInOut)
-                .with_priority(31),
+                .with_priority(32),
         );
     }
     // …and a landing plays out and hands back to the ladder.
@@ -837,18 +1019,31 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                 .with_curve(BlendCurve::EaseInOut),
         );
     }
-    // Getting up: the ragdoll ends and the character is on its front or back.
-    // Which one is a gameplay fact the mode does not carry, so the graph takes
-    // the FRONT get-up by default and a project that knows better arms the other
-    // through `anim.set_param`. Named here rather than silently preferred.
-    if let (Some(rag), Some(g)) = (at("ragdoll"), at("getup_front")) {
+    // **Getting up**, and which way up it ended.
+    //
+    // ALS chooses between its two get-ups by the pelvis's facing, and this
+    // engine's ragdoll bridge has recorded that as `RagdollRuntime::face_up`
+    // since P29.4 with nothing reading it. It is published now, so both clips
+    // are reachable and neither is a default nobody chose.
+    //
+    // ALS ships only the CROUCHED get-ups (`ALS_CLF_GetUp_Front/Back`); a
+    // standing one has to be authored, and is CHAR1b.2's.
+    for (name, face_up) in [("getup_front", 0.0), ("getup_back", 1.0)] {
+        let (Some(rag), Some(g)) = (at("ragdoll"), at(name)) else {
+            continue;
+        };
         out.push(
             SmTransition::new(rag, g, ACTION_FADE_S)
                 .when(SmCond::from_flat_and(vec![
                     SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
                     SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
+                    SmCompare::float(FACE_UP_VAR, CmpOp::Eq, face_up),
                 ]))
-                .with_curve(BlendCurve::EaseInOut),
+                .with_curve(BlendCurve::EaseInOut)
+                // **Above the `Any → idle` edge**, or a character that stops
+                // ragdolling goes straight to standing and the two get-ups are
+                // clips that never play. The reachability arm caught it.
+                .with_priority(8),
         );
     }
 

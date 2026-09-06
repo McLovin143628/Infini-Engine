@@ -1570,6 +1570,18 @@ fn bind_slots(
 /// `inf_ecs::crowd`'s, so a character's geometry ladder and its simulation
 /// ladder switch at the same three distances instead of at two unrelated sets
 /// of numbers.
+/// The `[import]` table on `id`'s sidecar, read **off disk** rather than out of
+/// the DB (wave CHAR1b.1).
+///
+/// `record_character_ladder` writes through `AssetSidecar::load`/`save`, so the
+/// entry the DB holds is stale the instant it returns: a reader that went to
+/// `project.db().get(id).sidecar.import` would find `None` and silently carry
+/// nothing, which is the same defect item 111 already is, one layer down.
+fn read_import_table(project: &AssetProject, id: AssetId) -> Option<toml::Table> {
+    let path = project.db().get(id)?.path.clone();
+    inf_asset::AssetSidecar::load(&path).ok()?.import
+}
+
 fn record_character_ladder(
     project: &mut AssetProject,
     lod0: AssetId,
@@ -1696,7 +1708,45 @@ fn rebind_character(
             mesh_deps.push(*id);
         }
     }
-    project.write_asset_at_with_id(&mesh_path, &body, want_mesh, mesh_deps, None)?;
+    // **AND THE LOD LADDER COMES WITH IT** (carried item 111).
+    //
+    // `record_character_ladder` writes `character_lod_assets`,
+    // `character_lod_triangles` and `character_lod_switch_m` into the sidecar of
+    // the asset the IMPORT just minted, a few lines before this call — and this
+    // call wrote `None`, which on the fresh-file path of
+    // `write_asset_at_with_id` does not merely fail to add the table, it WIPES
+    // whatever was there. So the committed GUID the level references had no
+    // ladder at all and the island's hero drew its LOD-0 mesh at every distance.
+    //
+    // The rung ids go onto the dependency list too, for the reason `bind_slots`
+    // records one section over: a reference a sidecar does not carry is a
+    // reference the cook's closure cannot see, and a ladder whose rungs are not
+    // packed is a ladder that does not exist in a shipped game.
+    //
+    // **The second half of item 111 is still open and is not this**: nothing in
+    // the engine READS `character_lod_assets` — the whole-repo search finds the
+    // writer and no consumer, `SkeletalMesh` carries one mesh GUID, and
+    // `resolve_skinned` takes no view. Carrying the ladder is necessary and not
+    // sufficient; the selector is PERF1's, with the numbers this wave's ledger
+    // prints.
+    let ladder = read_import_table(project, mesh);
+    if let Some(t) = &ladder {
+        if let Some(toml::Value::Array(rungs)) = t.get("character_lod_assets") {
+            for v in rungs {
+                let Some(id) = v
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(AssetId)
+                else {
+                    continue;
+                };
+                if id != want_mesh && !mesh_deps.contains(&id) {
+                    mesh_deps.push(id);
+                }
+            }
+        }
+    }
+    project.write_asset_at_with_id(&mesh_path, &body, want_mesh, mesh_deps, ladder)?;
     report
         .rebinds
         .push((format!("{}.inf_skel", stems.0), want_skel));

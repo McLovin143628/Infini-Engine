@@ -682,6 +682,41 @@ pub mod params {
     pub const MOVE_X: &str = inf_anim::als::MOVE_X_VAR;
     /// The forward half of the same, positive ahead. See [`MOVE_X`].
     pub const MOVE_Y: &str = inf_anim::als::MOVE_Y_VAR;
+    /// **What the landing classifier decided about the last landing** — the
+    /// [`crate::components::LandingKind`] discriminant (wave CHAR1b.1).
+    ///
+    /// [`LAND_ALPHA`] is a *prediction*, and it is cleared the moment the
+    /// character is grounded — deliberately, "a grounded character predicting a
+    /// landing is the stale-answer defect". So a graph that gated its landing
+    /// states on it could never enter one: at the instant `grounded` goes true
+    /// `land_alpha` is already zero. This is the LATCH beside it, which survives
+    /// the touch and is what the classifier actually decided.
+    pub const LANDING: &str = "landing";
+    /// **Seconds since that landing** — how a one-shot landing state knows it is
+    /// over. Large on a character that has never landed, which reads as "not
+    /// just now" everywhere it is compared.
+    pub const TIME_SINCE_LAND: &str = "time_since_land";
+    /// **How far a turn-in-place is turning**, degrees, signed — negative to the
+    /// character's left (wave CHAR1b.1).
+    ///
+    /// `0` when no turn is running, which is what a graph compares against.
+    /// P29.4 ported ALS's whole turn-in-place rule set onto the runtime
+    /// (`turning_in_place`, `turn_target_yaw_deg`, the delay, the two thresholds)
+    /// and the four `ALS_*_TurnIP_*` clips crossed the bridge — and there was no
+    /// way for a machine to know a turn was happening, so the eight clips were
+    /// unreachable.
+    pub const TURN_DEG: &str = "turn_deg";
+    /// **Which foot is planted right now**: `-1` left, `+1` right, `0` neither
+    /// (wave CHAR1b.1).
+    ///
+    /// Read off the clip's own `FootLock_L/R` channels — the animator's statement
+    /// that a foot is down — because "which foot to stop on" is a property of the
+    /// cycle's phase and this engine publishes no phase. It is what makes ALS's
+    /// two stop-down clips two clips rather than a coin toss.
+    pub const PLANTED_FOOT: &str = "planted_foot";
+    /// **Whether a ragdolled character is on its back**, `1` or `0` — which of
+    /// the two get-ups to play.
+    pub const FACE_UP: &str = "face_up";
 }
 
 /// **Publish a character's movement state into its machine's parameters**
@@ -763,7 +798,27 @@ pub fn publish_character_params(
             (0.0, 0.0)
         }
     };
-    let values: [(&str, f64); 11] = [
+    // **Which foot is down**, from the clip's own lock channels. A `Step`-
+    // interpolated curve, so this is the animator's window and not a threshold
+    // this file invented; `0` when the clip authors neither, which is every clip
+    // that has not been through the deriver.
+    let lock_l = anim_curve(world, guid, inf_anim::channels::als::FOOT_LOCK_L, 0.0);
+    let lock_r = anim_curve(world, guid, inf_anim::channels::als::FOOT_LOCK_R, 0.0);
+    let planted = if lock_l >= inf_anim::foot::LOCK_ENGAGE && lock_l > lock_r {
+        -1.0
+    } else if lock_r >= inf_anim::foot::LOCK_ENGAGE {
+        1.0
+    } else {
+        0.0
+    };
+    // **How far a turn-in-place is turning.** Zero unless one is running, which
+    // is what "no turn" has to look like to a comparison.
+    let turn = if rt.turning_in_place {
+        crate::movement::angle_delta_deg(rt.turn_target_yaw_deg, rt.body_yaw_deg)
+    } else {
+        0.0
+    };
+    let values: [(&str, f64); 16] = [
         (params::SPEED, planar),
         (params::GAIT, rt.mapped_speed),
         (params::GROUNDED, f64::from(u8::from(rt.grounded))),
@@ -775,6 +830,11 @@ pub fn publish_character_params(
         (params::FLAIL, flail),
         (params::MOVE_X, move_x),
         (params::MOVE_Y, move_y),
+        (params::LANDING, rt.landing as u8 as f64),
+        (params::TIME_SINCE_LAND, rt.time_since_land_s),
+        (params::TURN_DEG, turn),
+        (params::PLANTED_FOOT, planted),
+        (params::FACE_UP, f64::from(u8::from(rt.ragdoll.face_up))),
     ];
     with_bridge(world, |b| {
         let slot = b.params.entry(guid).or_default();

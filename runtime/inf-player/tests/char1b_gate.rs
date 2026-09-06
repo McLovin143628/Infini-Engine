@@ -1323,3 +1323,594 @@ fn an_npc_turns_its_head_toward_the_pawn_and_stops_at_the_radius() {
         inf_ecs::pose::NPC_ATTENTION_M
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (6) THE CROWD ON THE SAME GRAPH
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **A `Near` AGENT'S ARMS FOLLOW ITS CLIP** (clause 7).
+///
+/// CHAR1a.3 proved a crowd agent's `hand_l` leaves the bind pose; this proves it
+/// at the tier that is supposed to be *reduced*. `CrowdTier::Near` drops the SK1b
+/// hand pass and keeps the whole pose, and the difference between those two is
+/// the whole content of "reduced" — an agent whose arms stopped moving at 32 m
+/// would be a crowd of statues on the far pavement.
+///
+/// Committed content, no island: `char1a3_gate`'s own arm hopes an island agent
+/// happens to be `Near` (all 1 000 of the island's are `Far`), and this one puts
+/// one there by construction.
+#[test]
+fn a_near_tier_agent_still_swings_its_arms() {
+    use inf_ecs::components::{AnimStateMachine, SkeletalMesh, Transform};
+    use inf_ecs::crowd::CrowdTier;
+
+    // A rig with an arm, a clip that swings it, and a machine that plays it.
+    let rig = legs();
+    const ARM_CLIP: inf_anim::ClipRef = [0xb7; 16];
+    let swing = {
+        // `spine_03` is joint 9 and stands in for the arm the fixture rig does
+        // not carry: what the arm asserts is that a NON-LEG joint the clip moves
+        // is moved at `Near`, and the mask that could have stopped it is the
+        // upper body's.
+        let mut track = inf_anim::JointTrack::new(9);
+        // 45 degrees about X, not Y: the joints above this one sit on its own Y
+        // axis, and a rotation ABOUT that axis moves none of them. The first
+        // spelling of this line turned the spine and measured a head that had
+        // not moved, which reads exactly like a tier that stopped animating.
+        let q = glam::Quat::from_xyzw(0.3827, 0.0, 0.0, 0.9239).to_array();
+        track.rotation = Some(inf_anim::QuatTrack::new(
+            vec![0.0, 1.0],
+            vec![q, q],
+            inf_anim::Interpolation::Linear,
+        ));
+        AnimClip::new("swing", vec![track])
+    };
+    let machine = StateMachine {
+        states: vec![SmState::clip("swing", ARM_CLIP)],
+        entry: 0,
+        ..Default::default()
+    };
+
+    let posed_at = |tier: CrowdTier| -> glam::Vec3 {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(HERO, "Agent", None);
+        world.world_mut().entity_mut(e).insert((
+            Transform::IDENTITY,
+            AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            SkeletalMesh {
+                mesh: Some(Uuid::from_u128(1)),
+                skeleton: Some(SKEL),
+            },
+            inf_ecs::crowd::CrowdAgent {
+                guid: HERO,
+                tier,
+                feet_offset_m: 0.0,
+                blocked: false,
+                posture: inf_ecs::components::SlotPosture::default(),
+                face: glam::DVec3::Z,
+                posture_t: 0.0,
+            },
+        ));
+        world.mark_dirty();
+        world.propagate();
+        let machines = |g: Uuid| (g == SM).then_some(&machine);
+        let skels = |g: Uuid| (g == SKEL).then_some(&rig);
+        let clips = |c: inf_anim::ClipRef| (c == ARM_CLIP).then_some(&swing);
+        let vars = |_: Uuid| std::collections::BTreeMap::new();
+        inf_ecs::pose::step_pose_evaluation(&mut world, DT, &machines, &skels, &clips, &vars);
+        // A tier that does not pose leaves no entry — and on a world where NO
+        // entity posed, no resource at all. Both read as the bind pose, which is
+        // exactly what the renderer draws for a `Far` agent (the shared
+        // entry-clip palette).
+        let posed = world
+            .world()
+            .get_resource::<inf_ecs::pose::PoseStoreRes>()
+            .and_then(|s| s.0.get(&HERO).cloned());
+        let pose = posed
+            .map(|p| p.pose)
+            .unwrap_or_else(|| inf_anim::Pose::rest(&rig.skeleton));
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &pose);
+        g[11].to_scale_rotation_translation().2
+    };
+
+    let bind = {
+        let rest = inf_anim::Pose::rest(&rig.skeleton);
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &rest);
+        g[11].to_scale_rotation_translation().2
+    };
+    let full = posed_at(CrowdTier::Full);
+    let near = posed_at(CrowdTier::Near);
+    let far = posed_at(CrowdTier::Far);
+    println!(
+        "\n=== the head-end joint under each tier ===\n  \
+         bind {bind:?}\n  Full {full:?}\n  Near {near:?}\n  Far  {far:?}"
+    );
+    assert!(
+        (near - bind).length() > 1.0e-3,
+        "a Near agent posed its bind pose — the reduced tier stopped animating"
+    );
+    assert!(
+        (near - full).length() < 1.0e-6,
+        "a Near agent posed differently from a Full one: {near:?} vs {full:?} — \
+         the reduction is not the hand pass"
+    );
+    // …and the falsification: `Far` really does not pose, which is what makes
+    // the two claims above statements about the ladder.
+    assert!(
+        (far - bind).length() < 1.0e-9,
+        "a Far agent posed something — the ladder is not a ladder"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (7) THE CARRIED ITEMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **THE REBOUND HERO CARRIES ITS LOD LADDER** (carried item 111, first half).
+///
+/// `record_character_ladder` writes `character_lod_assets` /
+/// `character_lod_triangles` / `character_lod_switch_m` into the sidecar of the
+/// asset the import minted, and `rebind_character` used to copy the payload to
+/// the committed GUID with `import = None` — which on the fresh-file path of
+/// `write_asset_at_with_id` does not merely fail to add the table, it wipes one.
+///
+/// This reads the committed body's own sidecar in the island project and asserts
+/// the ladder is on it, with strictly decreasing triangle counts and one switch
+/// distance per rung. **It does not assert that anything draws a lower rung**,
+/// because nothing does: the second half of item 111 is that
+/// `character_lod_assets` has a writer and no reader anywhere in the tree, and
+/// that is PERF1's with the numbers this prints.
+#[test]
+fn the_rebound_hero_carries_its_lod_ladder() {
+    let Some(content) = island_project() else {
+        eprintln!(
+            "SKIP: no island project at ../island-build/project/Content — the \
+             rebind is local-only content and CI has none"
+        );
+        return;
+    };
+    let path = content.join("Starter_Body.inf_mesh");
+    if !path.is_file() {
+        eprintln!("SKIP: no rebound body at {}", path.display());
+        return;
+    }
+    let side = inf_asset::AssetSidecar::load(&path).expect("the sidecar loads");
+    let Some(import) = side.import.as_ref() else {
+        panic!(
+            "the rebound body at {} carries no [import] table at all — the \
+             rebind wiped it (carried item 111)",
+            path.display()
+        );
+    };
+    let rungs = import
+        .get("character_lod_assets")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("no `character_lod_assets` on the rebound body: {import:?}"));
+    let tris: Vec<i64> = import
+        .get("character_lod_triangles")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_integer()).collect())
+        .unwrap_or_default();
+    let switch: Vec<f64> = import
+        .get("character_lod_switch_m")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_float()).collect())
+        .unwrap_or_default();
+    println!(
+        "\n=== the rebound hero's ladder: {} rungs, {tris:?} triangles, \
+         {switch:?} m ===",
+        rungs.len()
+    );
+    assert!(rungs.len() >= 2, "a one-rung ladder is not a ladder");
+    assert_eq!(tris.len(), rungs.len(), "a rung with no triangle count");
+    assert_eq!(switch.len(), rungs.len(), "a rung with no switch distance");
+    for w in tris.windows(2) {
+        assert!(
+            w[1] < w[0],
+            "the rungs do not get cheaper: {tris:?} — `distinct_rungs` let a \
+             duplicate through"
+        );
+    }
+    for w in switch.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "the switch distances are not ordered: {switch:?}"
+        );
+    }
+    // …and every rung is a real asset beside it, which is what makes the
+    // dependency edges worth adding.
+    for v in rungs {
+        let id = v.as_str().expect("a rung guid is a string");
+        assert!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "a rung guid that is not a guid: {id}"
+        );
+    }
+    println!(
+        "  NOTE: nothing in the engine reads `character_lod_assets` yet — the \
+         hero still draws rung 0 ({} triangles) at every distance. That is the \
+         second half of carried item 111 and it is PERF1's.",
+        tris.first().copied().unwrap_or(0)
+    );
+}
+
+/// **A SECOND CHARACTER IS NOT A SECOND PAWN** (carried item 112).
+///
+/// `camera_subject` answers "the first player-controlled character in `Guid`
+/// order", and the editor's create-character door used to set
+/// `player_controlled: true` unconditionally on a `v4` guid — so who the camera
+/// followed was a byte race between the level's derived hero guid and a random
+/// one, lost about one run in four.
+///
+/// The rule is that a level has one pawn: the door hands the flag to the first
+/// character and to nothing after it.
+#[test]
+fn placing_a_second_character_does_not_move_the_pawn() {
+    use inf_ecs::components::{CharacterMovement, Transform};
+    let mut world = EcsWorld::new();
+    // The hero, with a guid that sorts LOW — the island's own case.
+    let hero = Uuid::from_u128(0x0000_0001);
+    let e = world.spawn_with_guid(hero, "Hero", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform::IDENTITY,
+        CharacterMovement {
+            player_controlled: true,
+            ..Default::default()
+        },
+    ));
+    world.mark_dirty();
+    world.propagate();
+    assert_eq!(inf_ecs::movement::camera_subject(&world), Some(hero));
+
+    // A second character placed afterwards, with a guid that sorts LOWER still —
+    // the worst case, and the one the old door lost.
+    let placed = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0000_u128 + 1);
+    let _ = placed;
+    let lower = Uuid::nil();
+    let e = world.spawn_with_guid(lower, "Placed", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform::IDENTITY,
+        CharacterMovement {
+            // What the door now writes for a document that already has a pawn.
+            player_controlled: false,
+            ..Default::default()
+        },
+    ));
+    world.mark_dirty();
+    world.propagate();
+    assert_eq!(
+        inf_ecs::movement::camera_subject(&world),
+        Some(hero),
+        "a second character took the camera — and it sorts lower, which is the \
+         exact case that lost one run in four"
+    );
+    // The falsification: with the OLD behaviour it does take it.
+    let e = world.entity_of(lower).unwrap();
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        cm.player_controlled = true;
+    }
+    assert_eq!(
+        inf_ecs::movement::camera_subject(&world),
+        Some(lower),
+        "the arm above proves nothing: a second pawn does not take the camera \
+         even when it is one"
+    );
+}
+
+/// **THE LANDING STATES ARE REACHABLE** (clause 2's sharpest edge).
+///
+/// A graph that gates a landing on `land_alpha` can never enter one: the
+/// movement step clears the prediction the moment `grounded` goes true — "a
+/// grounded character predicting a landing is the stale-answer defect" — so the
+/// two conditions are never satisfied on the same step. Found by reading the
+/// producer, and this is the arm that keeps it found: the whole gait/air family
+/// is walked over the parameter values the movement step really publishes, and
+/// every state the map names must be entered by at least one of them.
+#[test]
+fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() {
+    use inf_anim::als;
+    let (sm, report) = inf_anim::build_locomotion_graph(&|name: &str| {
+        let mut id = [0u8; 16];
+        for (i, b) in name.as_bytes().iter().enumerate() {
+            id[i % 16] ^= *b;
+        }
+        Some(id)
+    });
+    assert!(report.is_complete());
+    // The states the machine deliberately never enters — the additive layer's
+    // named clip sets. Everything else must be reachable.
+    let manifest: Vec<&str> = inf_anim::LOCOMOTION_MAP
+        .iter()
+        .filter(|s| s.kind != inf_anim::SlotKind::State)
+        .map(|s| s.state)
+        .collect();
+
+    /// One published parameter set, named.
+    struct Frame(&'static str, Vec<(&'static str, f64)>);
+    let g = als::LocoMode::Grounded.param();
+    let frames = vec![
+        Frame(
+            "standing still",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "walking",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "running",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 2.0),
+            ],
+        ),
+        Frame(
+            "sprinting",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 3.0),
+            ],
+        ),
+        Frame(
+            "crouched, still",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "crouched, walking",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "jumping",
+            vec![
+                (als::MODE_VAR, als::LocoMode::FallFree.param()),
+                (als::GROUNDED_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "falling",
+            vec![
+                (als::MODE_VAR, als::LocoMode::FallControlled.param()),
+                (als::GROUNDED_VAR, 0.0),
+                (als::FALL_SPEED_VAR, 4.0),
+            ],
+        ),
+        Frame(
+            "falling fast",
+            vec![
+                (als::MODE_VAR, als::LocoMode::FallControlled.param()),
+                (als::GROUNDED_VAR, 0.0),
+                (als::FALL_SPEED_VAR, 14.0),
+            ],
+        ),
+        Frame(
+            "landing light",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::LANDING_VAR, als::LANDING_SOFT),
+                (als::TIME_SINCE_LAND_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "landing heavy",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::LANDING_VAR, als::LANDING_HARD),
+                (als::TIME_SINCE_LAND_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "breaking the fall",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::LANDING_VAR, als::LANDING_ROLL),
+                (als::TIME_SINCE_LAND_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "rolling",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Roll.param()),
+                (als::GROUNDED_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "ragdolling",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Ragdoll.param()),
+                (als::GROUNDED_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "getting up, face down",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::FACE_UP_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "ragdolling again",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Ragdoll.param()),
+                (als::GROUNDED_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "getting up, on its back",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::FACE_UP_VAR, 1.0),
+            ],
+        ),
+        // ── the two stops, each from a cycle, chosen by the planted foot ──
+        Frame(
+            "walking again",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "stopping on the left",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 0.0),
+                (als::PLANTED_FOOT_VAR, -1.0),
+            ],
+        ),
+        Frame(
+            "running again",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 2.0),
+            ],
+        ),
+        Frame(
+            "stopping on the right",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 0.0),
+                (als::PLANTED_FOOT_VAR, 1.0),
+            ],
+        ),
+        // ── the eight turns in place ──
+        Frame(
+            "turning left 90",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, -90.0),
+            ],
+        ),
+        Frame(
+            "turning right 90",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, 90.0),
+            ],
+        ),
+        Frame(
+            "turning left 180",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, -170.0),
+            ],
+        ),
+        Frame(
+            "turning right 180",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, 170.0),
+            ],
+        ),
+        Frame(
+            "crouched, turning left 90",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, -90.0),
+            ],
+        ),
+        Frame(
+            "crouched, turning right 90",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, 90.0),
+            ],
+        ),
+        Frame(
+            "crouched, turning left 180",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, -170.0),
+            ],
+        ),
+        Frame(
+            "crouched, turning right 180",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Crouch.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::TURN_DEG_VAR, 170.0),
+            ],
+        ),
+    ];
+
+    // Walk the frames in order, letting each one settle, and record which states
+    // the machine actually visits. `time_since_land` is a clock, so a landing
+    // frame is held for one step and then released.
+    let mut rt = inf_anim::SmRuntime::default();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    seen.insert(sm.states[sm.entry].name.clone());
+    println!("\n=== every state of the built graph, from the published parameters ===");
+    for Frame(what, vals) in &frames {
+        let map: std::collections::BTreeMap<&str, f64> = vals.iter().copied().collect();
+        let vars = |name: &str| map.get(name).copied().or(Some(0.0));
+        let ctx = inf_anim::SmContext::new(&vars);
+        // Enough steps for a fade to finish and a one-shot to run out.
+        for _ in 0..90 {
+            rt.advance(&sm, &ctx, 1.0 / 60.0);
+            seen.insert(sm.states[rt.current].name.clone());
+        }
+        println!("  {what:<20} → {}", sm.states[rt.current].name);
+    }
+    let unreached: Vec<&str> = sm
+        .states
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| !seen.contains(*n) && !manifest.contains(n))
+        .collect();
+    assert!(
+        unreached.is_empty(),
+        "these states cannot be entered by any parameter set the movement step \
+         publishes: {unreached:?} — a state nothing can reach is a clip that \
+         never plays"
+    );
+    // …and the manifest states really are unreachable, which is the other half
+    // of the claim: they are the additive layer's, not the machine's.
+    for n in &manifest {
+        assert!(
+            !seen.contains(*n),
+            "the machine entered `{n}`, which is a named clip set and not a state"
+        );
+    }
+    println!(
+        "  {} states visited of {} ({} are the layer's clip sets)",
+        seen.len(),
+        sm.states.len(),
+        manifest.len()
+    );
+}
