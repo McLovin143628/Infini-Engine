@@ -562,6 +562,22 @@ impl Topo {
         inf_ecs::pose::pose_state_bytes(&self.world)
     }
 
+    /// One joint's **local** rotation in the drawn pose — the reading that can
+    /// tell one pass from another, which whole-pose bytes cannot.
+    fn joint_rotation(&self, joint: usize) -> Option<[f32; 4]> {
+        let store = self
+            .world
+            .world()
+            .get_resource::<inf_ecs::pose::PoseStoreRes>()?;
+        store
+            .0
+            .get(&HERO)?
+            .pose
+            .locals
+            .get(joint)
+            .map(|l| l.rotation)
+    }
+
     /// One fixed step in the **shipped order**: physics sync, intent, character
     /// movement, propagate, pose.
     fn step(&mut self, intent: &MovementIntent) {
@@ -1134,6 +1150,7 @@ fn the_aim_offset_layer_reaches_the_pose_and_leaves_the_feet_alone() {
     t.set_aim(0.0, 0.0);
     t.settle(40);
     let level = t.pose_bytes();
+    let level_spine = t.joint_rotation(spine as usize).expect("a posed spine");
     let level_soles = t.soles();
 
     // Looking UP: `aim_sweep(+60°)` is 1/6, so the sample is well off neutral.
@@ -1142,8 +1159,19 @@ fn the_aim_offset_layer_reaches_the_pose_and_leaves_the_feet_alone() {
     let up = t.pose_bytes();
     assert_ne!(
         level, up,
-        "the aim offset never reached the pose — `apply_aim_offset` did not run, \
-         or its early-out swallowed a real sample"
+        "nothing at all moved when the character looked up"
+    );
+    // **THE JOINT THE LAYER OWNS, AND NOTHING ELSE DOES.** Whole-pose bytes
+    // cannot tell this pass from the look-at chain — the mutation run proved it:
+    // disabling `apply_aim_offset` outright left this arm green, because the
+    // head and neck were still moving. `spine_01` is the joint the sweep clips
+    // author, and in the default `VelocityDirection` mode `LookAtLimits`'
+    // `spine_share` is ZERO, so the look-at chain cannot reach it.
+    let up_spine = t.joint_rotation(spine as usize).expect("a posed spine");
+    assert_ne!(
+        level_spine, up_spine,
+        "the aim offset never reached the spine — `apply_aim_offset` did not \
+         run, or its early-out swallowed a real sample"
     );
     // …and the legs kept walking: the mask is the upper body, so the feet are
     // still where the ground put them.
