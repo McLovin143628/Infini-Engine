@@ -2127,3 +2127,49 @@ fn the_islands_hero_stands_on_the_ground_it_is_standing_on() {
         worst * 1000.0
     );
 }
+
+/// **THE EDITOR'S OWN DOOR GIVES THE PAWN FLAG TO THE FIRST CHARACTER ONLY**
+/// (carried item 112, at the door rather than at the rule).
+///
+/// The arm above proves what `camera_subject` does with a document; this proves
+/// what the door PUTS in one, which is where the defect was: it set
+/// `player_controlled: true` unconditionally on a fresh `v4` guid, so the camera
+/// followed whichever of the island's derived hero guid and a random one sorted
+/// lower — lost about one run in four, and the run it lost photographed the
+/// wrong face.
+#[test]
+fn the_editor_door_gives_the_pawn_flag_to_the_first_character_only() {
+    use inf_editor_core::scene::SceneDoc;
+    let mut doc = SceneDoc::new();
+    let make = |doc: &mut SceneDoc, name: &str, x: f64| {
+        doc.edit_create_character(
+            name,
+            Uuid::from_u128(0x5C10_00A0),
+            Uuid::from_u128(0x5C10_00A2),
+            Uuid::from_u128(0x5C10_00A6),
+            None,
+            glam::DVec3::new(x, 0.0, 0.0),
+            None,
+            1.8,
+        )
+    };
+    let first = make(&mut doc, "Hero", 0.0);
+    assert_eq!(
+        inf_ecs::movement::camera_subject(doc.world()),
+        Some(first),
+        "the first character is not the pawn"
+    );
+    // Twenty more, because the defect was a RACE and one draw proves nothing: a
+    // door that hands the flag out freely loses this the moment a fresh `v4`
+    // sorts under the first one, which is a coin toss per placement.
+    for i in 0..20 {
+        let g = make(&mut doc, "Placed", 2.0 + f64::from(i));
+        assert_ne!(g, first);
+        assert_eq!(
+            inf_ecs::movement::camera_subject(doc.world()),
+            Some(first),
+            "character {i} took the camera from the hero"
+        );
+    }
+    println!("\n=== 21 characters placed, the pawn is still the first: {first} ===");
+}
