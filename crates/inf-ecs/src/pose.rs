@@ -1474,6 +1474,47 @@ pub fn step_pose_evaluation<'c>(
                         // ±50/45 cm envelope and ground under them at different
                         // heights. Every level that has none of that poses
                         // exactly the bytes P29.4 did.
+                        // ── **THE FEET ARE PUBLISHED BEFORE ANY CORRECTION**
+                        //    (wave CHAR1b.1) ──
+                        //
+                        // This read used to sit at the BOTTOM of the block,
+                        // after every pass, and that made the whole foot-IK loop
+                        // self-referential twice over. The movement step's goal
+                        // is `published_foot + (ground under the foot − ground
+                        // under the BODY)`, so:
+                        //
+                        // 1. publishing the foot after `apply_foot_ik` fed last
+                        //    step's correction back in as this step's origin and
+                        //    applied the offset again on top of itself. Measured
+                        //    at `origin/main` on `foot_slide_gate`'s flat floor:
+                        //    a foot that should have held still rose
+                        //    0.0801 → 0.0937 m over ten steps with the increment
+                        //    growing, inside that arm's own ±3 cm tolerance.
+                        // 2. publishing it after the **pelvis drop** double-counted
+                        //    that too: the drop had already lowered the feet by
+                        //    the low foot's own offset, and the offset was then
+                        //    measured again from the lowered position. On this
+                        //    wave's 15° slope fixture the drawn sole ended
+                        //    **48.6 mm inside the surface**, and the goal itself
+                        //    was 53 mm below the ground it was supposed to be on.
+                        //
+                        // ALS has the same shape and neither bug, for a reason
+                        // that is structural rather than careful: UE rigs carry
+                        // `ik_foot_root` / `ik_foot_l` / `ik_foot_r` as siblings
+                        // of the pelvis, so the pelvis modify does not move them
+                        // and `SetFootOffsets` reads a bone the graph rebuilt
+                        // from the clip this frame. This engine solves the real
+                        // `foot_*` joints — the retarget drops UE's IK helpers
+                        // (CHAR1a.3's carried note) — so the same independence
+                        // has to come from WHERE the read is taken. It is taken
+                        // here: after pose construction (the drive and the
+                        // posture, which are what the animation says), before
+                        // every correction.
+                        let to_world = model_to_world(world, entity);
+                        let feet = foot_states(asset, &pose, to_world);
+                        if feet.iter().any(Option::is_some) {
+                            bridge.feet.insert(guid, feet);
+                        }
                         // **Did anything below CORRECT this pose** — the gate on
                         // the SK1b re-drive at the bottom of this block. A
                         // counter and not a guess: "the pass ran" and "the pass
@@ -1572,40 +1613,9 @@ pub fn step_pose_evaluation<'c>(
                         //    **Character space** (P29.6): a rig's origin is its
                         //    FEET, and a character's entity transform is its
                         //    capsule centre, so the lift goes through the one
-                        //    door that knows the difference. Identity-composed
-                        //    for anything that is not a character.
-                        let to_world = model_to_world(world, entity);
-                        // ── **THE FEET ARE PUBLISHED BEFORE THEY ARE
-                        //    CORRECTED** (wave CHAR1b.1) ──
-                        //
-                        // This read used to sit at the bottom of the block,
-                        // after `apply_foot_ik`, and that made the whole foot-IK
-                        // loop self-referential: the movement step's goal is
-                        // `published_foot + (ground under the foot − ground
-                        // under the body)`, so publishing the CORRECTED foot fed
-                        // last step's correction back in as this step's origin
-                        // and the offset was applied again on top of itself.
-                        //
-                        // Measured on `foot_slide_gate`'s flat-floor fixture at
-                        // `origin/main`: a foot that should have held still rose
-                        // 0.0801 → 0.0937 m over ten steps, the increment
-                        // growing every step — a divergence the arm's own ±3 cm
-                        // tolerance was wide enough to hide. With the animated
-                        // foot published the goal is a constant −0.0201 m (the
-                        // gap the mover leaves between the capsule and the
-                        // floor) and the foot sits still.
-                        //
-                        // ALS has the same shape and does not have the bug:
-                        // `SetFootOffsets` computes an offset that a
-                        // `Transform (Modify) Bone` node applies to the
-                        // **animated** `ik_foot_*` bone, which the graph rebuilds
-                        // from the clip every frame. Ours is the same statement
-                        // — a correction is measured against the animation, not
-                        // against the previous correction.
-                        let feet = foot_states(asset, &pose, to_world);
-                        if feet.iter().any(Option::is_some) {
-                            bridge.feet.insert(guid, feet);
-                        }
+                        //    door that knows the difference (`to_world`, bound
+                        //    above where the feet are published). Identity-
+                        //    composed for anything that is not a character.
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
                             corrected |= apply_foot_ik(asset, &mut pose, &goals, to_world);
                         }
@@ -1888,6 +1898,12 @@ pub const FOOT_ROLL_LIMIT_DEG: f64 = 15.0;
 /// chain uses the authored [`crate::components::IkTarget`], which this pass does
 /// not disturb — both run, in that order, exactly like the runtime goals.
 ///
+/// The solve takes a **pole** and the rig's **authored limits** (wave CHAR1b.1).
+/// It used to take `None` and `&[]`, which meant a knee with no bend plane and a
+/// knee with no stop — the first is measured in the pole's own comment below,
+/// and the second is why `rig.limits` is passed here exactly as `solve_arm`
+/// passes it: a knee that can bend backwards to reach the ground will.
+///
 /// A refusal is a **value**: a chain that is not a chain, a degenerate bone or a
 /// non-finite target leaves the pose untouched and costs its own foot.
 ///
@@ -1904,6 +1920,24 @@ fn apply_foot_ik(
     let skeleton = &rig.skeleton;
     let joints = foot_joints(rig);
     let to_model = model_to_world.inverse();
+    // **The knee's pole, once** (wave CHAR1b.1). Model space, so it is computed
+    // from the pose the solve is about to change and not from the bind.
+    //
+    // A leg is the same singularity `apply_hand_ik` documents for an elbow — *"an
+    // elbow has no opinion of its own about which way to fold, because the
+    // mannequin's bind pose is a T-pose of pure translations and shoulder, elbow
+    // and wrist are exactly collinear in it"* — and the arms have had a real pole
+    // since SK1b while the legs were solving with `None`. Measured on this wave's
+    // own topography fixture, whose leg chain is dead straight: a foot given a
+    // goal 58 mm below it moved **0.23 mm**, because a straight three-joint chain
+    // asked to shorten has no plane to bend in and the solver picks whatever
+    // rounding hands it. The sole then sat 48.6 mm inside a 15° slope.
+    //
+    // Forward is model `+Z` — the convention `tools/demo/portrait.mjs` had to
+    // learn the hard way (*"mesh forward is +Z"*) and the one every rig this
+    // engine generates or imports is authored on. A knee bends forward.
+    let globals = (goals.iter().any(Option::is_some))
+        .then(|| inf_anim::pose::global_transforms(skeleton, pose));
     for (side, goal) in goals.iter().enumerate() {
         let (Some(goal), Some(foot)) = (goal, joints[side]) else {
             continue;
@@ -1930,7 +1964,14 @@ fn apply_foot_ik(
             .map(|j| (j, pose.locals[j].rotation))
             .collect();
         let chain = [thigh, shin, foot];
-        if inf_anim::solve_chain(skeleton, pose, &chain, target, None, &[]).is_ok() {
+        // A metre in front of the thigh: far enough that the direction is the
+        // content and the distance is not, and derived per side so a character
+        // standing on a rotated platform still bends its knees forward.
+        let pole = globals.as_ref().and_then(|g| {
+            let t = g.get(thigh as usize)?.to_scale_rotation_translation().2;
+            Some(t + glam::Vec3::Z)
+        });
+        if inf_anim::solve_chain(skeleton, pose, &chain, target, pole, &rig.limits).is_ok() {
             wrote = true;
             if goal.weight < 1.0 {
                 for (j, rot) in before {
