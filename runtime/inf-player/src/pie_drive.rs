@@ -420,9 +420,18 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// The demo loop's whole job is to end a wave with something the author can
 /// judge, and "the hero moved" is not a claim two screenshots can make on their
 /// own — a camera that drifts looks the same as a character that walks. A
-/// windowed PIE session appends `t,frame,x,y,z,mode,speed,camera_pull` here four
-/// times a second and the script prints the first and last lines beside its two
-/// frames.
+/// windowed PIE session appends
+/// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state`
+/// here four times a second and the script prints the first and last lines
+/// beside its frames.
+///
+/// The last four columns arrived with wave CHAR1b.1 and are what makes the
+/// look-at frames a measurement rather than a picture: `aim_yaw` is where the
+/// mouse has put the camera relative to the body, `head_yaw`/`head_pitch` are
+/// what the chain actually drew (`inf_anim::LookAtReport`), and `anim_state` is
+/// the machine state the pose came out of — so "the head follows the mouse" and
+/// "the character is walking" are both answerable from the file rather than from
+/// the frame.
 ///
 /// **Only when the variable names a path**, and the file is opened once: a
 /// shipped player writes nothing, opens nothing and pays one `Option` check per
@@ -487,9 +496,30 @@ impl HeroLog {
         }
         self.accum = 0.0;
         let probe = world_probe(sim, None, frame, None);
+        // **What the look-at chain drew, and what asked for it** (wave
+        // CHAR1b.1). Read off the animation bridge, which is where the pose step
+        // publishes it — not recomputed here, or the log would be a second
+        // opinion rather than a record.
+        let guid = inf_ecs::movement::camera_subject(sim.world());
+        let look = guid.and_then(|g| inf_ecs::anim_bridge::look_report(sim.world(), g));
+        let aim_yaw = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)
+            })
+            .map(|cm| {
+                inf_ecs::movement::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg)
+            })
+            .unwrap_or(0.0);
+        let state = guid
+            .and_then(|g| inf_ecs::anim_bridge::anim_state(sim.world(), g))
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -501,10 +531,14 @@ impl HeroLog {
                     &h.movement_mode
                 },
                 h.speed,
-                probe.camera_pull_in_m
+                probe.camera_pull_in_m,
+                aim_yaw,
+                look.map(|l| l.total_yaw_deg).unwrap_or(0.0),
+                look.map(|l| l.head_pitch_deg).unwrap_or(0.0),
+                if state.is_empty() { "-".into() } else { state }
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,\n",
+                "{:.3},{},,,,,no-hero,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

@@ -308,6 +308,13 @@ public class InfInput {
   }
   public static void Down(ushort scan) { Key(scan, true); }
   public static void Up(ushort scan) { Key(scan, false); }
+  // **A RELATIVE mouse move** (wave CHAR1b.1). `SetCursorPos` is absolute
+  // and a captured cursor is re-centred every frame, so an absolute move is
+  // a delta of whatever is left over. `MOUSEEVENTF_MOVE` is what a mouse
+  // sends, and it is what a look-at has to be driven with.
+  public static void Look(int dx, int dy) {
+    mouse_event(0x0001, (uint)dx, (uint)dy, 0, IntPtr.Zero);
+  }
   public static void Click(int x, int y) {
     SetCursorPos(x, y);
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
@@ -431,6 +438,67 @@ Say "released W"
 # which is where a second body shows if the level offers one.
 Start-Sleep -Seconds 2
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "07-pie-street.png") | ForEach-Object { Say $_ }
+
+# ── wave CHAR1b.1: the pose ──────────────────────────────────────────────────
+#
+# Everything below is a frame of a MECHANISM this wave turned on, and each one is
+# named for the mechanism rather than for the moment: a reader asked "does the
+# head follow the mouse" should not have to guess which of four running frames to
+# look at. `hero.csv` carries the numbers (aim yaw, head yaw, head pitch, the
+# machine state) at 4 Hz throughout, so every frame here has a row beside it.
+
+Say "LOOK LEFT: the mouse, 900 counts to the left"
+for ($i = 0; $i -lt 30; $i++) { [InfInput]::Look(-30, 0); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 600
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "11-look-left.png") | ForEach-Object { Say $_ }
+
+Say "LOOK RIGHT: back across, 1800 counts"
+for ($i = 0; $i -lt 60; $i++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 600
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "12-look-right.png") | ForEach-Object { Say $_ }
+
+Say "LOOK UP: back to centre, then the mouse up"
+for ($i = 0; $i -lt 30; $i++) { [InfInput]::Look(-30, 0); Start-Sleep -Milliseconds 16 }
+for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(0, -20); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 600
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "13-look-up.png") | ForEach-Object { Say $_ }
+for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(0, 20); Start-Sleep -Milliseconds 16 }
+
+Say "CROUCH: C tapped (a click crouches; a hold goes prone)"
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 900
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "14-crouch.png") | ForEach-Object { Say $_ }
+Say "CROUCH-WALK: W held while crouched"
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "15-crouch-walk.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x11)
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 700
+
+Say "JUMP: Space, and a frame while the feet are off the ground"
+[InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
+Start-Sleep -Milliseconds 260
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "16-jump.png") | ForEach-Object { Say $_ }
+Start-Sleep -Milliseconds 900
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "17-land.png") | ForEach-Object { Say $_ }
+
+Say "SPRINT: Shift + W, the third rung of the gait ladder"
+[InfInput]::Down(0x2A); [InfInput]::Down(0x11)
+Start-Sleep -Milliseconds 1800
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "18-sprint.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x11); [InfInput]::Up(0x2A)
+Start-Sleep -Milliseconds 1200
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "19-stop.png") | ForEach-Object { Say $_ }
+
+Say "STRAFE: A and D, the direction blend's own axis"
+[InfInput]::Down(0x1E); Start-Sleep -Milliseconds 1100
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "20-strafe-left.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x1E)
+[InfInput]::Down(0x20); Start-Sleep -Milliseconds 1100
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "21-strafe-right.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x20)
+Start-Sleep -Milliseconds 800
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "22-back-to-idle.png") | ForEach-Object { Say $_ }
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
