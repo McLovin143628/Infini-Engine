@@ -46,7 +46,15 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 45] = [
+const SIM_PATH: [(&str, &str, &str); 46] = [
+    // ── look-at (wave CHAR1b.1) ──
+    //
+    // Three quaternions per posed character per step, straight into the pose.
+    (
+        "look_at.rs",
+        include_str!("../src/look_at.rs"),
+        "the look-at chain writes joint rotations into the pose the fixed step publishes",
+    ),
     // ── the ALS clip -> mode map (wave CHAR1b.1) ──
     //
     // A table of names and a builder over it, so nothing here samples a pose —

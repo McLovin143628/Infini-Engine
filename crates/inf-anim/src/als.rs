@@ -43,6 +43,23 @@ use crate::state_machine::{
     BlendCurve, CmpOp, Motion, SmCompare, SmCond, SmParam, SmState, SmTransition, StateMachine,
 };
 
+/// **The state whose blend space is the look/aim sweep** — the three
+/// `ALS_N_Look_{U,F,D}_Sweep` sequences, sampled by `inf_ecs::pose`'s additive
+/// layer at the aim's own pitch.
+///
+/// A name and not an index, because a machine a human edited afterwards has
+/// different indices and the same names.
+pub const LOOK_SWEEP_STATE: &str = "aim_look";
+
+/// The blend coordinate the look sweep's **neutral** sits at — the pose the
+/// additive delta is measured from.
+///
+/// `ALS_N_Look_F_Sweep` is the middle sample and is what "looking straight
+/// ahead" means, so the delta at that coordinate is exactly zero and a character
+/// looking forward is byte-identical to one with no layer at all. That identity
+/// is a gate arm.
+pub const LOOK_SWEEP_NEUTRAL: [f64; 2] = [0.0, 0.0];
+
 /// The parameter a machine reads for planar ground speed, m/s.
 ///
 /// `inf_ecs::anim_bridge::params::SPEED` by construction, and
@@ -550,9 +567,21 @@ impl LocoBindReport {
 /// **Build the locomotion graph** from [`LOCOMOTION_MAP`] and a name→clip
 /// resolver.
 ///
-/// Only [`SlotKind::State`] rows become states; overlays and aim sweeps are the
-/// additive layer's and are reported as bound or unbound without entering the
-/// machine.
+/// **Every** row becomes a state, including the overlays and the aim sweeps —
+/// and those two families have **no transitions into them**, deliberately.
+///
+/// A `.inf_sm` is the one asset a character carries that names clips, and the
+/// additive layer needs to name some too: an aim offset is three sequences and a
+/// weapon overlay is one, and neither is a thing the machine ever *enters*. The
+/// alternatives were a second asset kind (a schema, for one `Vec` of GUIDs) or a
+/// runtime table nobody could author. So the machine is the character's
+/// **animation manifest**, an unreachable state is a named clip set, and
+/// `inf_ecs::pose` reads the look sweep off [`LOOK_SWEEP_STATE`] by name. UE's
+/// own anim graphs hold their aim offsets exactly this way — as a node in the
+/// graph that the state machine does not route through.
+///
+/// An unreachable state costs one `SmState` in the file and nothing at runtime:
+/// `SmRuntime` can only be in a state something transitioned it into.
 ///
 /// A state whose clips all fail to resolve is **left out** rather than pointed at
 /// a null GUID: a state that plays nothing is a T-pose with a name, and the
@@ -579,9 +608,6 @@ pub fn build_locomotion_graph(
                 }
                 None => report.unbound.push((slot.state.into(), (*name).into())),
             }
-        }
-        if slot.kind != SlotKind::State {
-            continue;
         }
         if got.is_empty() {
             report.missing_states.push(slot.state.into());
@@ -870,12 +896,20 @@ mod tests {
         assert!(report.is_complete(), "unbound: {:?}", report.unbound);
         assert!(report.missing_states.is_empty());
         sm.validate().expect("the built graph validates");
-        // Every `State` row is a state, and nothing else is.
-        let want = LOCOMOTION_MAP
+        // Every row is a state — including the overlays and the sweeps, which
+        // are the additive layer's named clip sets (see the builder's docs).
+        assert_eq!(sm.states.len(), LOCOMOTION_MAP.len(), "{:?}", report.states);
+        // …and the two families the machine never enters really have no edge
+        // into them, which is what "unreachable" has to mean to be true.
+        let sweep = sm
+            .states
             .iter()
-            .filter(|s| s.kind == SlotKind::State)
-            .count();
-        assert_eq!(sm.states.len(), want, "{:?}", report.states);
+            .position(|s| s.name == LOOK_SWEEP_STATE)
+            .expect("the look sweep is a state");
+        assert!(
+            !sm.transitions.iter().any(|t| t.to == sweep),
+            "something routes into the look sweep"
+        );
         assert!(sm.transitions.len() > 20, "{} edges", sm.transitions.len());
         // The direction blends really are blend spaces over the two published
         // axes, and not six states somebody flattened.
@@ -900,13 +934,7 @@ mod tests {
             report.unbound.len(),
             LOCOMOTION_MAP.iter().map(|s| s.clips.len()).sum::<usize>()
         );
-        assert_eq!(
-            report.missing_states.len(),
-            LOCOMOTION_MAP
-                .iter()
-                .filter(|s| s.kind == SlotKind::State)
-                .count()
-        );
+        assert_eq!(report.missing_states.len(), LOCOMOTION_MAP.len());
         assert!(report.summary().contains("unbound"), "{}", report.summary());
     }
 

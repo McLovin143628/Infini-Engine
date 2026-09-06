@@ -273,6 +273,14 @@ pub struct AnimBridgeRes {
     /// it is playing one that carries baked root motion (P29.5). See
     /// [`TraversalArc`] for what it is and why only one-shots have one.
     pub traversal: BTreeMap<Uuid, TraversalArc>,
+    /// **What the look-at chain did**, by entity (wave CHAR1b.1, clause 4).
+    ///
+    /// Published by the pose step, rebuilt from scratch every step like
+    /// [`states`](Self::states) and [`feet`](Self::feet), and read by anything
+    /// that wants to know where a character is actually looking — the gate, a
+    /// HUD, an AI that wants to ask whether a witness's head came round. The
+    /// alternative was a fourth resource for one `Copy` struct.
+    pub looks: BTreeMap<Uuid, inf_anim::LookAtReport>,
 }
 
 impl AnimBridgeRes {
@@ -290,6 +298,7 @@ impl AnimBridgeRes {
             && self.ragdoll_rig.is_empty()
             && self.pose_matched.is_empty()
             && self.traversal.is_empty()
+            && self.looks.is_empty()
     }
 }
 
@@ -484,6 +493,17 @@ pub fn anim_curve_opt(world: &EcsWorld, guid: Uuid, name: &str) -> Option<f32> {
         .copied()
 }
 
+/// **What the look-at chain did for `guid` last step**, or `None` (wave
+/// CHAR1b.1).
+///
+/// `None` is three different facts and the caller does not have to tell them
+/// apart: no character, no rig the chain can read, or a weight of zero. All
+/// three mean "this character is not looking at anything", which is what a
+/// reader wants to know.
+pub fn look_report(world: &EcsWorld, guid: Uuid) -> Option<inf_anim::LookAtReport> {
+    bridge(world)?.looks.get(&guid).copied()
+}
+
 /// A footstep the animation asked for this fixed step (P29.4, clause 7).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FootstepCue {
@@ -559,13 +579,24 @@ pub fn feet_of(world: &EcsWorld, guid: Uuid) -> Option<[Option<FootState>; 2]> {
 ///
 /// Consumed by the pose step's IK pass in the same fixed step, and replaced
 /// every step: a goal is a statement about where the ground is *now*.
+///
+/// **Withdrawing goals on a world that has no bridge does not make one** (wave
+/// CHAR1b.1). `step_feet` calls this with two `None`s on every airborne,
+/// ragdolling or rigless character — which is every character in every level
+/// that has none of this — and `with_bridge` creates the resource before it asks
+/// what the write is. That turned `bridge(&world).is_none()` from "nothing has
+/// ever used the animation bridge" into "no", and `weapon_3d`'s one-shot
+/// reaction arm read it as a hit reaction that never arrived. A removal from a
+/// map that does not exist is a no-op, so it is spelled as one.
 pub fn set_foot_ik(world: &mut EcsWorld, guid: Uuid, goals: [Option<FootGoal>; 2]) {
-    with_bridge(world, |b| {
-        if goals.iter().all(Option::is_none) {
+    if goals.iter().all(Option::is_none) {
+        if let Some(mut b) = world.world_mut().get_resource_mut::<AnimBridgeRes>() {
             b.foot_ik.remove(&guid);
-        } else {
-            b.foot_ik.insert(guid, goals);
         }
+        return;
+    }
+    with_bridge(world, |b| {
+        b.foot_ik.insert(guid, goals);
     });
 }
 

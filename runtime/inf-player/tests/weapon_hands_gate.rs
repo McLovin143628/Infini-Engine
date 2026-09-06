@@ -414,7 +414,22 @@ fn assert_not_vacuous(t: &[Step]) {
         (0, 0, 0, 0),
         "something was asked for on an unarmed idle step"
     );
-    assert_eq!(t[0].pose, t[5].pose, "the idle pose is not settled");
+    // **From step 3, not step 0** (wave CHAR1b.1). The foot-IK seam is one fixed
+    // step wide by construction — the movement step probes the ground under the
+    // feet the POSE step published last step — so step 0 has no goals, step 1
+    // has the first, and the character is standing on the ground it is standing
+    // on from step 2. Before this wave the whole mechanism was switched off (no
+    // clip in the engine carried `Enable_FootIK_*`), so step 0 and step 5 were
+    // the same bytes and the window did not have to be named. It does now.
+    assert_eq!(t[3].pose, t[5].pose, "the idle pose is not settled");
+    // …and it really did settle rather than never having moved: the warm-up is
+    // visible, which is what stops the line above from being a claim about a
+    // mechanism that is off again.
+    assert_ne!(
+        t[0].pose, t[5].pose,
+        "the pose never changed at all over the settle, so the foot pass is not \
+         running and the window above proves nothing"
+    );
     assert_eq!(t[0].armed, (false, 0), "the hero starts armed");
 
     // -- EQUIP: a weapon entity appears and both hands go on it --
@@ -497,8 +512,12 @@ fn assert_not_vacuous(t: &[Step]) {
     // everything must pose the bytes it posed before it ever held anything —
     // exactly, to the bit. A solver that drifted would pass every `assert_ne!`
     // above and fail here.
+    // The settled idle (step 3, see `assert_not_vacuous`) and not step 0, for
+    // the same reason: step 0 is the foot-IK seam own first frame and has no
+    // goals yet, so it is the one step in the whole course that is not a pose
+    // of a character standing on the ground.
     assert_eq!(
-        t[0].pose, t[70].pose,
+        t[3].pose, t[70].pose,
         "an unarmed hero after a whole weapon course does not pose what it \
          posed before it picked anything up"
     );
@@ -515,7 +534,8 @@ fn assert_not_vacuous(t: &[Step]) {
         "the grab snapped to its end state instead of easing in"
     );
     // …and it OPENS again, back to the settled unarmed pose, to the bit.
-    assert_eq!(t[0].pose, t[139].pose, "the hand never let go of the crate");
+    // Step 3 for the same reason as the two above: the settled idle.
+    assert_eq!(t[3].pose, t[139].pose, "the hand never let go of the crate");
 
     // -- THE PUNCH (wave WPN1), and the tripwire it could have sprung --
     //
@@ -541,7 +561,7 @@ fn assert_not_vacuous(t: &[Step]) {
     // hand pass for nothing (`equipped_weapon` answers `None`), so a punch is
     // damage and an animation trigger and no pose. Carried by name.
     assert_eq!(
-        t[0].pose, t[145].pose,
+        t[3].pose, t[145].pose,
         "the punch moved the pose — which would be an improvement, and would \
          mean this arm and the wave's carried list are both out of date"
     );
@@ -556,15 +576,20 @@ fn assert_not_vacuous(t: &[Step]) {
     distinct.sort();
     distinct.dedup();
     //
-    // **Eighteen until wave WPN1, twenty-four since**, and the six are the
-    // recoil: a 600 rpm weapon's cycle is six fixed steps at 60 Hz and the hold
-    // point is a different point on each of them. The number is quoted rather
+    // **Eighteen until wave WPN1, twenty-four since, twenty-FIVE since
+    // CHAR1b.1**, and the twenty-fifth is the foot-IK seam's own first frame:
+    // step 0 poses before any goal exists (the movement step probes the ground
+    // under the feet the pose step published LAST step), so it is one pose the
+    // rest of the course never returns to. The three `assert_eq!`s above take
+    // step 3 as the settled idle for the same reason. The six before that are
+    // the recoil: a 600 rpm weapon's cycle is six fixed steps at 60 Hz and the
+    // hold point is a different point on each of them. The number is quoted rather
     // than relaxed because that is the arithmetic — a recoil that snapped to one
     // displaced pose and back would add ONE, and a recoil that never recovered
     // would add six and break the `t[30] == t[37]` arm above.
     assert_eq!(
         distinct.len(),
-        24,
+        25,
         "the course posed {} distinct poses of {STEPS} steps",
         distinct.len()
     );
@@ -635,11 +660,14 @@ fn the_hand_pass_costs_an_unarmed_character_nothing() {
     let bare = trace(false);
     let armed = trace(true);
     assert!(!bare[0].is_empty());
-    for (i, w) in bare.iter().enumerate() {
+    // **From step 3** — see `assert_not_vacuous`'s note on the same window. The
+    // first two steps are the foot-IK seam warming up, which is a different
+    // pass entirely and is measured by `char1b_gate`.
+    for (i, w) in bare.iter().enumerate().skip(3) {
         assert_eq!(
-            &bare[0], w,
-            "step {i}: an unarmed character's pose moved, so the hand pass is \
-             not free when nothing asks for it"
+            &bare[3], w,
+            "step {i}: an unarmed character's pose moved after it settled, so \
+             the hand pass is not free when nothing asks for it"
         );
     }
     // ANTI-VACUITY: the armed run really does diverge, or the loop above is a

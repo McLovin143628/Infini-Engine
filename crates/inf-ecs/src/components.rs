@@ -1897,7 +1897,22 @@ pub struct MovementRuntime {
     /// divided across the spine chain.
     pub spine_yaw_deg: f64,
     /// How much aim offset to apply, `[0, 1]` — `1 - Mask_AimOffset`.
+    ///
+    /// Derived from [`aim_offset_mask`](Self::aim_offset_mask) every step rather
+    /// than smoothed itself, so a character that has never been stepped and one
+    /// that has been stepped once agree: `Default` is all-zero, and a zero
+    /// **mask** is what "no clip asked for less aim offset" means, while a zero
+    /// **weight** would mean the opposite. Smoothing the wrong one of the two
+    /// made every fixture's first six frames a head swinging in from nowhere.
     pub aim_offset_weight: f64,
+    /// **The smoothed `Mask_AimOffset`** the weight above is `1 -` (wave
+    /// CHAR1b.1).
+    ///
+    /// The clip's channel is a step function — a state that wants no aim offset
+    /// authors a `1` — and it now drives two things a viewer can see (the
+    /// additive layer and the look-at chain), so it is chased rather than
+    /// snapped. `0` is the default in both senses: no channel, no damping.
+    pub aim_offset_mask: f64,
 
     // ── foot IK / foot lock (P29.4) ──
     /// The left foot's world-space lock.

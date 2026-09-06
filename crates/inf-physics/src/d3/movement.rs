@@ -405,6 +405,14 @@ fn settle_on_spawn(
     }
 }
 
+/// **How fast the aim-offset layer's weight chases its target** (wave
+/// CHAR1b.1) — ALS's `Config.SmoothedAimingRotationInterpSpeed`, which is 10.
+///
+/// A rate rather than a duration, because that is what `inf_anim::interp_to`
+/// takes and what ALS's `FInterpTo` means: the step is `clamp(speed × dt, 0, 1)`
+/// of the remaining distance.
+const AIM_OFFSET_INTERP: f64 = 10.0;
+
 /// **Whether this character's ground normal is worth a query** (island wave
 /// NPC1e) — the mover's one measured lever, and the arc's answer to
 /// *"fewer or cheaper ground queries per character"*.
@@ -1647,7 +1655,22 @@ fn step_one(
         0.0,
     ) as f64;
     cm.runtime.aim_sweep = model::aim_sweep(cm.runtime.aim_pitch_deg);
-    cm.runtime.aim_offset_weight = (1.0 - aim_mask.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    // **Interpolated, not snapped** (wave CHAR1b.1). This weight is now the
+    // additive aim-offset layer's AND the look-at chain's, and a clip whose
+    // `Mask_AimOffset` steps from 0 to 1 on one frame would swing a character's
+    // head 70° in 16 ms. ALS's own answer to a layer changing is that the
+    // layered blend has a blend time; ours is `inf_anim::interp_to` at the
+    // donor's `SmoothedAimingRotationInterpSpeed`, which bounds the change to
+    // `speed × dt` — 1/6 of the range per frame at 60 Hz, so a full swap takes
+    // six frames and no single frame moves the head more than 12°.
+    cm.runtime.aim_offset_mask = inf_anim::interp_to(
+        cm.runtime.aim_offset_mask,
+        aim_mask.clamp(0.0, 1.0),
+        AIM_OFFSET_INTERP,
+        dt,
+    )
+    .clamp(0.0, 1.0);
+    cm.runtime.aim_offset_weight = 1.0 - cm.runtime.aim_offset_mask;
     cm.runtime.spine_yaw_deg = model::spine_yaw_deg(
         model::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg),
         aim_mask,

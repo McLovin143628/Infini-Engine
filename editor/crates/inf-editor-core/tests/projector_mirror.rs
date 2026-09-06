@@ -2730,13 +2730,18 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     let body = body.as_str();
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
-    const WRITERS: [(&str, &str); 8] = [
-        // (Eight still: `foot_states` moved from the tail into the middle at
-        // wave CHAR1b.1 — see its own row for why — and nothing was added or
-        // dropped.)
+    const WRITERS: [(&str, &str); 10] = [
+        // (`foot_states` moved from the tail into the middle at wave CHAR1b.1 —
+        // see its own row — and that wave ADDED two: the aim-offset layer at
+        // pose construction and the look-at chain at the head of the
+        // corrections. Eight became ten.)
         (
             "pending_pose = Some(pose);",
             "the machine + the layer stack + the inertializer produce the pose",
+        ),
+        (
+            "apply_aim_offset(asset,",
+            "wave CHAR1b.1: the ADDITIVE aim-offset layer, which is pose CONSTRUCTION — it is what the animation would have been if the animator had authored an aim into every clip — and therefore runs before the drive pass, so a twist chain reflects the aimed pose and not the neutral one. P29.2 built `inf_anim::layers` and this is its first caller: the CHAR1a audit's item 88b",
         ),
         (
             "inf_anim::drive_pose(",
@@ -2745,6 +2750,10 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         (
             "foot_states(asset,",
             "wave CHAR1b.1: the feet published for the NEXT step, read off the ANIMATED pose — after pose CONSTRUCTION (the drive and the posture) and before EVERY correction, the pelvis drop included. This row MOVED, with its cause, and it moved TWICE: the movement step's goal is `published_foot + (ground under the foot − ground under the body)`, so (1) publishing the CORRECTED foot fed last step's correction back in as this step's origin — a foot that should have held still rose 0.0801 → 0.0937 m over ten steps on `foot_slide_gate`'s flat floor at `origin/main` — and (2) publishing it after the PELVIS DROP counted that too, putting the drawn sole 48.6 mm inside a 15° slope. UE avoids both structurally: its rigs carry `ik_foot_root` as a SIBLING of the pelvis, so ALS reads a bone no correction has touched. This engine solves the real `foot_*` joints, so the independence has to come from where the read is taken",
+        ),
+        (
+            "inf_anim::apply_look_at(",
+            "wave CHAR1b.1: the head, neck and spine follow the camera — the user's own sentence. FIRST of the corrections, because a character leaning to look at something is a character whose hips have moved, and every solve below has to reach from where the lean left them",
         ),
         (
             "pelvis_joint(asset)",

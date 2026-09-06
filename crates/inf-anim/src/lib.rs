@@ -74,6 +74,10 @@ pub mod inertialize;
 pub mod layers;
 // P24.5 the default locomotion set: clips and a machine derived from a body plan.
 pub mod locomotion;
+/// **Look-at** (wave CHAR1b.1): the head, neck and spine chain that follows a
+/// camera, with the clamps a procedural chain needs and an authored aim offset
+/// does not.
+pub mod look_at;
 // SK1a the 161-bone UE5 mannequin hierarchy — `BodyPlan::Biped`'s rig.
 pub mod manny;
 // P24.3 modular rigging: assembling one skeleton out of parts.
@@ -155,6 +159,9 @@ pub use layers::{
 pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
     FOOT_SYNC_GROUP, MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
+};
+pub use look_at::{
+    apply_look_at, chain_yaw_limit_deg, LookAt, LookAtLimits, LookAtReport, SPINE_SHARE,
 };
 pub use manny::{build_manny, MANNY_JOINT_COUNT};
 pub use merge::{

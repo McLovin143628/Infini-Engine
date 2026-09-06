@@ -246,12 +246,16 @@ const RADIUS: f64 = 0.3;
 /// then be of the subtraction.
 const HIPS_FEET_AT_ORIGIN: f32 = 0.95;
 
-/// A two-leg rig — hips, then thigh → shin → foot per side, ankles at model
-/// `y = 0`, with the foot joints named so `inf_anim`'s matcher finds them.
+/// A biped: hips, a leg per side (thigh → shin → foot, ankles at model `y = 0`),
+/// and a torso (three spine segments, a neck, a head) **with a role table**.
 ///
-/// Deliberately the same shape as `inf-physics`' `foot_slide_gate::legs`, which
-/// is the fixture the **lock** half of this mechanism is measured on: two files
-/// that disagreed about what a leg is would be measuring two different engines.
+/// The legs are deliberately the same shape as `inf-physics`'
+/// `foot_slide_gate::legs`, which is the fixture the **lock** half of the foot
+/// mechanism is measured on: two files that disagreed about what a leg is would
+/// be measuring two different engines. The torso is this wave's, because a rig
+/// with no `Head` row cannot be looked at and a rig with no `Spine` row has no
+/// upper body for a mask to cover — both passes answer "nothing to do" on the
+/// leg-only rig, and an arm run against one would be measuring the absence.
 fn legs() -> SkeletonAsset {
     fn joint(name: &str, parent: Option<u16>, local: glam::Vec3) -> Joint {
         Joint {
@@ -261,7 +265,7 @@ fn legs() -> SkeletonAsset {
             local_bind: JointTransform::from_trs(local, glam::Quat::IDENTITY, glam::Vec3::ONE),
         }
     }
-    SkeletonAsset::new(
+    let mut asset = SkeletonAsset::new(
         Skeleton::new(vec![
             joint("Hips", None, glam::Vec3::new(0.0, 1.0, 0.0)),
             joint("Thigh.L", Some(0), glam::Vec3::new(0.1, -0.05, 0.0)),
@@ -270,9 +274,30 @@ fn legs() -> SkeletonAsset {
             joint("Thigh.R", Some(0), glam::Vec3::new(-0.1, -0.05, 0.0)),
             joint("Shin.R", Some(4), glam::Vec3::new(0.0, -0.45, 0.0)),
             joint("Foot.R", Some(5), glam::Vec3::new(0.0, -0.45, 0.0)),
+            joint("spine_01", Some(0), glam::Vec3::new(0.0, 0.12, 0.0)),
+            joint("spine_02", Some(7), glam::Vec3::new(0.0, 0.12, 0.0)),
+            joint("spine_03", Some(8), glam::Vec3::new(0.0, 0.12, 0.0)),
+            joint("neck_01", Some(9), glam::Vec3::new(0.0, 0.12, 0.0)),
+            joint("head", Some(10), glam::Vec3::new(0.0, 0.10, 0.0)),
         ])
-        .expect("a valid pair of legs"),
-    )
+        .expect("a valid biped"),
+    );
+    use inf_anim::roles::{BoneRole, BoneRoleKind as K, BoneSide as S};
+    asset.roles = vec![
+        BoneRole::new(0, K::Pelvis, S::Center),
+        BoneRole::new(1, K::Thigh, S::Left),
+        BoneRole::new(2, K::Calf, S::Left),
+        BoneRole::new(3, K::Foot, S::Left),
+        BoneRole::new(4, K::Thigh, S::Right),
+        BoneRole::new(5, K::Calf, S::Right),
+        BoneRole::new(6, K::Foot, S::Right),
+        BoneRole::new(7, K::Spine, S::Center),
+        BoneRole::new(8, K::Spine, S::Center),
+        BoneRole::new(9, K::Spine, S::Center),
+        BoneRole::new(10, K::Neck, S::Center),
+        BoneRole::new(11, K::Head, S::Center),
+    ];
+    asset
 }
 
 /// A one-second stance clip holding the hips at [`HIPS_FEET_AT_ORIGIN`], with
@@ -444,6 +469,9 @@ struct Topo {
     skeleton: SkeletonAsset,
     machine: StateMachine,
     clip: AnimClip,
+    /// Extra clips the machine names beyond [`CLIP`] — the aim sweep's three
+    /// samples, when an arm has put a look-sweep state on the machine.
+    sweeps: Vec<(inf_anim::ClipRef, AnimClip)>,
 }
 
 impl Topo {
@@ -511,7 +539,27 @@ impl Topo {
                 ..Default::default()
             },
             clip: stance_clip(),
+            sweeps: Vec::new(),
         }
+    }
+
+    /// Point the hero's aim at `(yaw, pitch)` degrees, world frame.
+    ///
+    /// Written straight onto the runtime, which is where `apply_intent` puts it
+    /// for a player-controlled character: this fixture has no input map and the
+    /// question is what the POSE does with an aim, not how a mouse becomes one.
+    fn set_aim(&mut self, yaw_deg: f64, pitch_deg: f64) {
+        let e = self.world.entity_of(HERO).expect("the hero");
+        if let Some(mut cm) = self.world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.runtime.aim_yaw_deg = yaw_deg;
+            cm.runtime.aim_pitch_deg = pitch_deg;
+            cm.runtime.aim_sweep = inf_ecs::movement::aim_sweep(pitch_deg);
+        }
+    }
+
+    /// The bytes the fixed step publishes for this world's poses.
+    fn pose_bytes(&self) -> Vec<u8> {
+        inf_ecs::pose::pose_state_bytes(&self.world)
     }
 
     /// One fixed step in the **shipped order**: physics sync, intent, character
@@ -522,9 +570,20 @@ impl Topo {
         step_character_movement(&mut self.world, &mut self.bridge, DT);
         self.world.propagate();
         let (machine, skeleton, clip) = (&self.machine, &self.skeleton, &self.clip);
+        // `set_aim` writes the aim onto the runtime and the movement step above
+        // has already run, so the pose below reads this step's aim — which is
+        // what a player pressing the mouse gets, one step later.
+
         let machines = |g: Uuid| (g == SM).then_some(machine);
         let skels = |g: Uuid| (g == SKEL).then_some(skeleton);
-        let clips = |c: inf_anim::ClipRef| (c == CLIP).then_some(clip);
+        let sweeps = &self.sweeps;
+        let clips = |c: inf_anim::ClipRef| {
+            if c == CLIP {
+                Some(clip)
+            } else {
+                sweeps.iter().find(|(id, _)| *id == c).map(|(_, a)| a)
+            }
+        };
         let vars = |_: Uuid| std::collections::BTreeMap::new();
         inf_ecs::pose::step_pose_evaluation(&mut self.world, DT, &machines, &skels, &clips, &vars);
     }
@@ -951,5 +1010,316 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
         machine.states.len() >= 20,
         "{} states",
         machine.states.len()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (4) THE ADDITIVE LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **AN ADDITIVE WITH NO DELTA IS BIT-IDENTICAL TO THE BASE POSE** (clause 3).
+///
+/// The identity an additive layer is defined by, asserted on the arithmetic
+/// itself rather than on the runtime's early-out: `inf_ecs::pose`'s aim-offset
+/// pass returns before it samples anything when the sweep sits at its neutral,
+/// so an arm that only drove the runtime would be measuring the `return false`
+/// and not the maths.
+///
+/// The falsification beside it is what makes the identity worth having: a REAL
+/// delta moves the masked joint and **only** the masked joint.
+#[test]
+fn an_additive_with_no_delta_is_bit_identical_to_the_base_pose() {
+    let rig = legs();
+    let base = inf_anim::Pose::rest(&rig.skeleton);
+    // The delta of a pose against ITSELF is the identity, whatever the pose is.
+    let zero = inf_anim::additive_delta(&base, &base);
+    let full = vec![1.0f32; base.locals.len()];
+    assert_eq!(
+        inf_anim::apply_additive(&base, &zero, &full),
+        base,
+        "a zero-delta additive at FULL weight moved the pose"
+    );
+    // …and at a partial weight, which is the case a `pslerp` that took a
+    // shortcut through a normalize would break.
+    let half = vec![0.5f32; base.locals.len()];
+    assert_eq!(inf_anim::apply_additive(&base, &zero, &half), base);
+
+    // **THE FALSIFICATION**: a real delta moves the masked joints and nothing
+    // else.
+    let feet = inf_anim::derive::foot_joints(&rig);
+    let (l, r) = (feet[0] as usize, feet[1] as usize);
+    let turned = glam::Quat::from_xyzw(0.0, 0.2588, 0.0, 0.9659).to_array();
+    let mut aimed = base.clone();
+    aimed.locals[l].rotation = turned;
+    aimed.locals[r].rotation = turned;
+    let delta = inf_anim::additive_delta(&base, &aimed);
+    let mask = inf_anim::JointMask::new("left foot", [(l as u16, 1.0)], 0.0);
+    let out = inf_anim::apply_additive(&base, &delta, &mask.resolve(base.locals.len(), 1.0));
+    assert_ne!(
+        out.locals[l], base.locals[l],
+        "the masked joint did not take the delta"
+    );
+    assert_eq!(
+        out.locals[r], base.locals[r],
+        "an unmasked joint took the delta — the mask is not a mask"
+    );
+    println!(
+        "\n=== the additive identity holds over {} joints, and the mask confines a real delta to 1 ===",
+        base.locals.len()
+    );
+}
+
+/// **THE AIM OFFSET REACHES THE POSE, AND THE FEET STAY ON THE GROUND**
+/// (clause 3).
+///
+/// The arm above proves the arithmetic; this proves the **pass**, inside the
+/// fixed step, over a machine that carries a real `aim_look` blend space. They
+/// are different claims and P29.2 shipped the first with no consumer for the
+/// second — the CHAR1a audit's item 88b, `apply_layers` with zero callers.
+#[test]
+fn the_aim_offset_layer_reaches_the_pose_and_leaves_the_feet_alone() {
+    /// A one-joint clip that turns the SPINE by `deg` about its own X axis.
+    fn leaning(joint: u16, deg: f32) -> AnimClip {
+        let h = deg.to_radians() * 0.5;
+        let (s, c) = (inf_math::psin(h), inf_math::pcos(h));
+        let mut track = inf_anim::JointTrack::new(joint);
+        track.rotation = Some(inf_anim::QuatTrack::new(
+            vec![0.0, 1.0],
+            vec![[s, 0.0, 0.0, c], [s, 0.0, 0.0, c]],
+            inf_anim::Interpolation::Linear,
+        ));
+        AnimClip::new("sweep", vec![track])
+    }
+    const UP: inf_anim::ClipRef = [0xb2; 16];
+    const FWD: inf_anim::ClipRef = [0xb3; 16];
+    const DOWN: inf_anim::ClipRef = [0xb4; 16];
+
+    let mut t = Topo::new(Ground::Flat);
+    // `spine_01` is joint 7 of the fixture rig — inside the upper-body mask,
+    // which is what the layer is supposed to be able to reach.
+    let spine = 7u16;
+    t.machine.states.push(SmState {
+        name: inf_anim::als::LOOK_SWEEP_STATE.into(),
+        motion: inf_anim::state_machine::Motion::Blend2D(inf_anim::BlendSpace2D::new(
+            inf_anim::als::MOVE_X_VAR,
+            inf_anim::als::MOVE_Y_VAR,
+            vec![
+                inf_anim::BlendEntry2D {
+                    pos: [0.0, 1.0],
+                    clip: UP,
+                },
+                inf_anim::BlendEntry2D {
+                    pos: [0.0, 0.0],
+                    clip: FWD,
+                },
+                inf_anim::BlendEntry2D {
+                    pos: [0.0, -1.0],
+                    clip: DOWN,
+                },
+            ],
+        )),
+        looping: false,
+        speed: 1.0,
+        position: (0.0, 0.0),
+        on_enter: Vec::new(),
+        on_exit: Vec::new(),
+    });
+    t.sweeps = vec![
+        (UP, leaning(spine, -40.0)),
+        (FWD, leaning(spine, 0.0)),
+        (DOWN, leaning(spine, 40.0)),
+    ];
+    // Looking straight ahead: the sweep sits at its neutral and the layer has
+    // nothing to say.
+    t.set_aim(0.0, 0.0);
+    t.settle(40);
+    let level = t.pose_bytes();
+    let level_soles = t.soles();
+
+    // Looking UP: `aim_sweep(+60°)` is 1/6, so the sample is well off neutral.
+    t.set_aim(0.0, 60.0);
+    t.settle(40);
+    let up = t.pose_bytes();
+    assert_ne!(
+        level, up,
+        "the aim offset never reached the pose — `apply_aim_offset` did not run, \
+         or its early-out swallowed a real sample"
+    );
+    // …and the legs kept walking: the mask is the upper body, so the feet are
+    // still where the ground put them.
+    let soles = t.soles();
+    for (side, s) in soles.iter().enumerate() {
+        assert!(
+            s.penetration_mm() <= 10.0 && s.hover_mm() <= 10.0,
+            "foot {side} left the ground while the character looked up: {s:?}"
+        );
+        assert!(
+            (s.y - level_soles[side].y).abs() < 1.0e-3,
+            "foot {side} moved {:.4} m when the aim offset came in — the mask \
+             reaches the legs",
+            (s.y - level_soles[side].y).abs()
+        );
+    }
+    println!(
+        "\n=== the aim offset moved the pose and both soles held to within \
+         {:.4} mm ===",
+        (soles[0].y - level_soles[0].y).abs() * 1000.0
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (5) LOOK-AT
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **THE HEAD TRACKS THE MOUSE TO WITHIN 2°, AND CLAMPS AT ITS LIMIT**
+/// (clause 4).
+///
+/// The user's sentence, measured in the fixed step: *"when the user moves their
+/// mouse … the character turns their head and sometimes body."* Driven through
+/// the real runtime and read back off the animation bridge, so a wiring that
+/// computed the number and dropped it — which is what P29.4 did for four waves
+/// — fails here rather than looking right in a comment.
+#[test]
+fn the_head_tracks_the_look_direction_and_clamps_at_the_limit() {
+    let mut t = Topo::new(Ground::Flat);
+    t.settle(30);
+    let limits = inf_anim::LookAtLimits {
+        spine_share: 0.0,
+        ..inf_anim::LookAtLimits::default()
+    };
+    println!("\n=== look-at: asked vs drawn (VelocityDirection) ===");
+    for want in [-60.0, -30.0, 30.0, 60.0] {
+        t.set_aim(want, 0.0);
+        t.settle(20);
+        let r = inf_ecs::anim_bridge::look_report(&t.world, HERO).expect("a look report");
+        println!(
+            "  asked {want:>6.1}°   chain {:>7.3}°   head {:>7.3}°   spine {} neck {}",
+            r.total_yaw_deg, r.head_yaw_deg, r.spine, r.neck
+        );
+        assert!(
+            (r.total_yaw_deg - want).abs() <= 2.0,
+            "the chain took {:.3}° for a {want:.1}° look — past the 2° the brief \
+             allows",
+            r.total_yaw_deg
+        );
+        // The default rotation mode is `VelocityDirection`, which is ALS's own
+        // "no spine rotation" case: the head and the neck track and the chest
+        // does not.
+        assert_eq!(r.spine, 0, "a VelocityDirection character leaned its spine");
+        assert!(
+            r.neck > 0 && r.head,
+            "the chain did not reach the head: {r:?}"
+        );
+    }
+    // **THE CLAMP.** Past the chain's own ceiling the character stops craning.
+    let ceiling = inf_anim::chain_yaw_limit_deg(0, 1, &limits);
+    t.set_aim(170.0, 0.0);
+    t.settle(20);
+    let r = inf_ecs::anim_bridge::look_report(&t.world, HERO).expect("a look report");
+    println!(
+        "  asked  170.0°   chain {:.3}°   ceiling {ceiling:.1}°",
+        r.total_yaw_deg
+    );
+    assert!(
+        r.total_yaw_deg <= ceiling + 1.0e-6,
+        "the chain took {:.3}° past its {ceiling:.1}° ceiling",
+        r.total_yaw_deg
+    );
+    assert!(
+        r.head_yaw_deg.abs() <= limits.head_yaw_deg + 1.0e-6,
+        "the HEAD alone took {:.3}° past its {:.1}° limit",
+        r.head_yaw_deg,
+        limits.head_yaw_deg
+    );
+    assert!(
+        r.total_yaw_deg < 150.0,
+        "the clamp is not clamping: {:.3}° of a 170° ask",
+        r.total_yaw_deg
+    );
+    // …and a character looking straight ahead poses what it posed with no
+    // look-at at all, which is what keeps every committed sample where it was.
+    t.set_aim(0.0, 0.0);
+    t.settle(20);
+    assert!(
+        inf_ecs::anim_bridge::look_report(&t.world, HERO).is_none(),
+        "a character looking straight ahead reported a look"
+    );
+}
+
+/// **AN NPC LOOKS AT THE PAWN, AND ONLY INSIDE ITS ATTENTION RADIUS**
+/// (clause 4's second half).
+///
+/// The brief: *"NPCs look at their attention target (EMS3's witnessing target if
+/// wired; else the nearest hero within N m, stated)."* It is the second, and it
+/// is stated in `inf_ecs::pose::look_at_of`: the witness log records acts with a
+/// place and a step and no notion of who is still interested in one, so wiring a
+/// gaze to it would be inventing the missing half.
+///
+/// The falsification is the radius: the same NPC, moved past
+/// [`inf_ecs::pose::NPC_ATTENTION_M`], stops looking.
+#[test]
+fn an_npc_turns_its_head_toward_the_pawn_and_stops_at_the_radius() {
+    const NPC: Uuid = Uuid::from_u128(0x0b1b_0009);
+    fn npc_look(at_x: f64) -> Option<inf_anim::LookAtReport> {
+        let mut t = Topo::new(Ground::Flat);
+        // A second character, not player-controlled, standing `at_x` metres to
+        // the hero's right and facing straight ahead.
+        let cm = CharacterMovement {
+            player_controlled: false,
+            ..Default::default()
+        };
+        let e = t.world.spawn_with_guid(NPC, "NPC", None);
+        let mut tr = Transform::IDENTITY;
+        tr.translation = Vec3d::new(at_x, cm.stand_half_height_m + RADIUS, 0.0);
+        t.world.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+                radius: RADIUS,
+                ..Default::default()
+            },
+            inf_ecs::components::CharacterController3D::default(),
+            cm,
+            AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            SkeletalMesh {
+                mesh: Some(Uuid::from_u128(1)),
+                skeleton: Some(SKEL),
+            },
+            tr,
+        ));
+        t.world.mark_dirty();
+        t.world.propagate();
+        t.settle(30);
+        inf_ecs::anim_bridge::look_report(&t.world, NPC)
+    }
+    // Five metres away: the hero is due `-x` of it, so the NPC's head comes
+    // round toward `-90°` and the chain clamps to what a neck can do.
+    let near = npc_look(5.0).expect("an NPC inside the radius looks at the pawn");
+    println!(
+        "\n=== an NPC 5 m from the pawn: chain {:.3}°, head {:.3}°, neck {} ===",
+        near.total_yaw_deg, near.head_yaw_deg, near.neck
+    );
+    assert!(
+        near.total_yaw_deg < -20.0,
+        "the NPC did not turn toward the pawn: {near:?}"
+    );
+    // …and past the radius it looks straight ahead, which reports nothing.
+    let far = npc_look(inf_ecs::pose::NPC_ATTENTION_M + 5.0);
+    assert!(
+        far.is_none(),
+        "an NPC {} m away still watched the pawn: {far:?}",
+        inf_ecs::pose::NPC_ATTENTION_M + 5.0
+    );
+    println!(
+        "  …and none at {} m (the radius is {} m)",
+        inf_ecs::pose::NPC_ATTENTION_M + 5.0,
+        inf_ecs::pose::NPC_ATTENTION_M
     );
 }

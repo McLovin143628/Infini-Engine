@@ -1180,6 +1180,10 @@ pub fn step_pose_evaluation<'c>(
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
     let mut fired_events: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
+    // What the look-at chain did, collected here and published on the bridge at
+    // the end for the same reason the feet are: the write-back needs
+    // `&mut EcsWorld` and the bridge is lifted out of the world for the loop.
+    let mut looks: BTreeMap<Uuid, inf_anim::LookAtReport> = BTreeMap::new();
     // **The inertialization state** (P29.2), lifted out for the same reason the
     // IK goals are: the write-back below needs `&mut EcsWorld`. `remove_resource`
     // rather than a clone — a blender holds two poses per entity and this runs
@@ -1206,8 +1210,16 @@ pub fn step_pose_evaluation<'c>(
     bridge.curves.clear();
     bridge.feet.clear();
     bridge.traversal.clear();
+    bridge.looks.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
+    // **The thing every NPC is looking at**, resolved ONCE (wave CHAR1b.1). See
+    // `look_at_of`: the pawn's own position, `None` on a level that has no pawn,
+    // and a per-character lookup would make the pass quadratic in a crowd.
+    let attention: Option<glam::DVec3> = crate::movement::camera_subject(world)
+        .and_then(|g| world.entity_of(g))
+        .and_then(|e| world.world().get::<crate::components::GlobalTransform>(e))
+        .map(|g| g.0.translation);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
@@ -1431,6 +1443,39 @@ pub fn step_pose_evaluation<'c>(
                         // every `.inf_skel` older than schema v3, every imported
                         // glTF -- takes two early returns and poses the bytes it
                         // posed before this existed.
+                        // ── **THE ADDITIVE LAYER** (wave CHAR1b.1, clause 3) ──
+                        //
+                        // P29.2 built `inf_anim::layers` whole — additive
+                        // deltas, per-joint masks, a stack — and the CHAR1a
+                        // audit's item 88b recorded what it never got: a
+                        // consumer. `apply_layers` had **zero callers** outside
+                        // its own tests, and the comment three lines below has
+                        // named it as one of this step's pose writers since SK1a
+                        // while nothing here called it.
+                        //
+                        // The layer is the **aim offset**, which is what ALS
+                        // does with the same machinery: three authored sweep
+                        // sequences (`ALS_N_Look_{U,F,D}_Sweep`), sampled at the
+                        // aim's own pitch, taken as a **delta from the forward
+                        // sample**, and blended over the upper body only —
+                        // `Mask_AimOffset`'s own region, so the legs keep
+                        // walking. The clips come off the machine's own
+                        // `aim_look` state (`inf_anim::als::LOOK_SWEEP_STATE`),
+                        // which is a named clip set the machine never enters:
+                        // see that builder's docs for why the manifest lives
+                        // there.
+                        //
+                        // **Absent costs nothing, three times over**: a machine
+                        // with no `aim_look` state, a character with no
+                        // `CharacterMovement`, or an `aim_offset_weight` of zero
+                        // each take an early return before a pose is sampled.
+                        // And at the neutral coordinate the delta is exactly the
+                        // identity, so a character looking straight ahead poses
+                        // the bytes it posed before this existed — which is the
+                        // arm `an_additive_with_no_delta_is_bit_identical`.
+                        if let Some((at, weight)) = aim_sweep_of(world, entity) {
+                            apply_aim_offset(asset, &mut pose, machine, &clips, at, weight);
+                        }
                         inf_anim::drive_pose(
                             &asset.skeleton,
                             &mut pose,
@@ -1522,6 +1567,33 @@ pub fn step_pose_evaluation<'c>(
                         // the first would pay a whole `global_transforms` per
                         // posed character per step for a pose nothing moved.
                         let mut corrected = false;
+                        // ── **LOOK-AT** (wave CHAR1b.1, clause 4) ──
+                        //
+                        // The head, the neck and the spine follow the camera.
+                        // Here — after the feet are published and before every
+                        // correction — because it is an overlay ON the animation
+                        // that the IK below must solve against: a character
+                        // leaning to look at something is a character whose hips
+                        // have moved, and the legs have to reach the ground from
+                        // where the lean left them.
+                        //
+                        // **Absent costs nothing**: a rig with no role table has
+                        // no `Head` row and `apply_look_at` returns having
+                        // written nothing, which is every `.inf_skel` older than
+                        // v3 and every non-humanoid; so does a zero weight.
+                        if let Some((look, limits)) = look_at_of(world, entity, attention) {
+                            let r = inf_anim::apply_look_at(
+                                &asset.skeleton,
+                                &mut pose,
+                                asset.role_index(),
+                                look,
+                                &limits,
+                            );
+                            corrected |= r.wrote();
+                            if r.wrote() {
+                                looks.insert(guid, r);
+                            }
+                        }
                         let drop = pelvis_drop(world, entity);
                         if drop != 0.0 {
                             if let Some(j) = pelvis_joint(asset) {
@@ -1735,6 +1807,9 @@ pub fn step_pose_evaluation<'c>(
             w.insert_resource(PoseBlendRes(blenders));
         }
     }
+    if !looks.is_empty() {
+        bridge.looks = looks;
+    }
     {
         // The hand verdicts, under rule 4: rebuilt from scratch, and never
         // created for a level that asked for nothing (SK1b).
@@ -1889,6 +1964,79 @@ pub const FOOT_PITCH_LIMIT_DEG: f64 = 30.0;
 /// **How far it rolls**, degrees — half the pitch, because a foot everts and
 /// inverts far less than it flexes, and a rolled sole reads as a sprain.
 pub const FOOT_ROLL_LIMIT_DEG: f64 = 15.0;
+
+/// **Apply the aim-offset additive layer** (wave CHAR1b.1, clause 3), answering
+/// whether it wrote anything.
+///
+/// The clips are the machine's own `aim_look` state — a named clip set the
+/// machine never enters, see `inf_anim::als::build_locomotion_graph` — sampled
+/// twice: once at `at` and once at the sweep's **neutral**. The difference is
+/// the additive delta, and it is applied over the upper-body mask so the legs
+/// keep walking while the chest and arms follow the aim.
+///
+/// Three early returns, in the order that costs least: no such state, no blend
+/// space in it, no upper body on the rig. Every one of them is the ordinary case
+/// for a character this feature is not about, and none of them samples a pose.
+///
+/// **At the neutral the delta is the identity**, so a character looking straight
+/// ahead poses exactly the bytes it posed before this pass existed. That is not
+/// an optimisation, it is the definition of an additive layer, and it is a gate
+/// arm (`an_additive_with_no_delta_is_bit_identical_to_the_base_pose`).
+fn apply_aim_offset<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    at: [f64; 2],
+    weight: f32,
+) -> bool {
+    let Some(state) = machine
+        .states
+        .iter()
+        .find(|s| s.name == inf_anim::als::LOOK_SWEEP_STATE)
+    else {
+        return false;
+    };
+    let inf_anim::state_machine::Motion::Blend2D(space) = &state.motion else {
+        return false;
+    };
+    let Some(mask) =
+        inf_anim::JointMask::upper_body("Mask_AimOffset", &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    // **At the neutral there is nothing to add**, and the two pose samples that
+    // would prove it cost more than the question. Not an optimisation: the
+    // additive arithmetic re-writes every joint of the mask, and
+    // `rotation_quat()` normalizes on read, so a delta that is mathematically
+    // the identity can still move a byte on a quaternion `sample_clip`'s lerp
+    // left slightly off-unit. Every determinism trace in the tree compares those
+    // bytes. The claim that the arithmetic ITSELF is identity-preserving is a
+    // separate one and is `char1b_gate`'s
+    // `an_additive_with_no_delta_is_bit_identical_to_the_base_pose`.
+    let neutral = inf_anim::als::LOOK_SWEEP_NEUTRAL;
+    if (at[0] - neutral[0]).abs() < 1.0e-9 && (at[1] - neutral[1]).abs() < 1.0e-9 {
+        return false;
+    }
+    let base = inf_anim::blend_space::sample_blend_space_2d(
+        space,
+        &rig.skeleton,
+        clips,
+        glam::DVec2::from_array(inf_anim::als::LOOK_SWEEP_NEUTRAL),
+        0.0,
+    );
+    let aimed = inf_anim::blend_space::sample_blend_space_2d(
+        space,
+        &rig.skeleton,
+        clips,
+        glam::DVec2::from_array(at),
+        0.0,
+    );
+    let delta = inf_anim::additive_delta(&base, &aimed);
+    let layer = inf_anim::AnimLayer::additive("aim_offset", weight).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+    true
+}
 
 /// Solve each foot toward its goal, over the P24.2 chain solver.
 ///
@@ -2354,6 +2502,133 @@ fn traversal_arc_of(clip: &inf_anim::AnimClip) -> Option<crate::anim_bridge::Tra
 /// where the movement step wrote it earlier in this same fixed step — so there
 /// is no latency and no second computation. `0` for an entity with no character
 /// movement at all, which is every entity in a level that has none.
+/// **Where this character is looking, and how hard** (wave CHAR1b.1, clause 4)
+/// — the reader beside [`pelvis_drop`], and the answer to the user's own
+/// sentence: *"when the user moves their mouse … the character turns their head
+/// and sometimes body."*
+///
+/// Everything it reads has been on `MovementRuntime` since P29.4 with **no
+/// consumer**: `aim_yaw_deg`, `aim_pitch_deg` and `aim_offset_weight` were
+/// computed every fixed step and dropped. The angle is the delta between the aim
+/// and the BODY, which is ALS's `AimingRotation - CharacterActorRotation`
+/// (`ALSCharacterAnimInstance.cpp:247`) — so a character that turns to face
+/// where it is looking stops leaning without the leaning code knowing that
+/// turning exists.
+///
+/// The **limits are chosen by the rotation mode**, which is ALS's own split:
+/// `UpdateAimingValues` computes `SpineRotation` only when the mode is *not*
+/// `VelocityDirection`, so a character running where it is going turns its head
+/// and not its chest, and one in `LookingDirection` or `Aiming` brings the body
+/// round with it.
+///
+/// `None` for anything that is not a character, which is every prop in the tree.
+fn look_at_of(
+    world: &EcsWorld,
+    entity: bevy_ecs::entity::Entity,
+    attention: Option<glam::DVec3>,
+) -> Option<(inf_anim::LookAt, inf_anim::LookAtLimits)> {
+    use crate::components::RotationMode;
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let rt = &cm.runtime;
+    // **Where an NPC is looking, when nothing has told it** (wave CHAR1b.1).
+    //
+    // A player-controlled character's aim comes from the mouse, through
+    // `apply_intent`. Nothing writes an AI's, so `aim_yaw_deg` sits at zero and
+    // an NPC stares straight through whatever is in front of it. The brief's
+    // rule is "their attention target — EMS3's witnessing target if wired, else
+    // the nearest hero within N m, **stated**", and it is the second: the
+    // witness log records acts with a place and a step
+    // (`crate::witness::WitnessedAct::at`) and no notion of who is still
+    // interested in one, so wiring a gaze to it would be inventing the missing
+    // half rather than reading it. `attention` is the pawn's own position,
+    // resolved ONCE per step by the caller — a per-character `camera_subject`
+    // would make this pass quadratic in a crowd.
+    let (aim_yaw, aim_pitch) = match (cm.player_controlled, attention) {
+        (false, Some(at)) => {
+            let here = world
+                .world()
+                .get::<crate::components::GlobalTransform>(entity)
+                .map(|g| g.0.translation)
+                .unwrap_or(glam::DVec3::ZERO);
+            let d = at - here;
+            let planar = (d.x * d.x + d.z * d.z).sqrt();
+            if planar > NPC_ATTENTION_M || planar < 1.0e-3 {
+                (rt.aim_yaw_deg, rt.aim_pitch_deg)
+            } else {
+                (
+                    crate::movement::planar_yaw_deg(crate::math::Vec2d::new(d.x, d.z)),
+                    inf_math::patan2_64(d.y, planar).to_degrees(),
+                )
+            }
+        }
+        _ => (rt.aim_yaw_deg, rt.aim_pitch_deg),
+    };
+    let yaw = crate::movement::angle_delta_deg(aim_yaw, rt.body_yaw_deg);
+    let look = inf_anim::LookAt {
+        yaw_deg: yaw,
+        // `aim_pitch_deg` is positive UP — the convention
+        // `inf_ecs::movement::aim_sweep` reads when it maps `{-90, 90}` onto
+        // `{1, 0}` — and so is `LookAt::pitch_deg`, so this is a copy and not a
+        // negation. Written down because getting it wrong is a character who
+        // looks at the floor when the player looks at the sky, and both spellings
+        // compile.
+        pitch_deg: aim_pitch,
+        weight: rt.aim_offset_weight as f32,
+    };
+    let limits = match cm.rotation_mode {
+        RotationMode::VelocityDirection => inf_anim::LookAtLimits {
+            // ALS writes no `SpineRotation` at all in this mode; the head and
+            // neck still track, which is what a third-person character glancing
+            // at something looks like.
+            spine_share: 0.0,
+            ..inf_anim::LookAtLimits::default()
+        },
+        RotationMode::LookingDirection => inf_anim::LookAtLimits::default(),
+        RotationMode::Aiming => inf_anim::LookAtLimits::aiming(),
+        // A reserved slot a NEWER build wrote. The mode table's own rule is that
+        // one is refused by name rather than entered; here there is nothing to
+        // refuse and the safe reading is the mildest of the three, so a level
+        // from the future looks around without leaning into a posture nobody
+        // has defined yet.
+        RotationMode::Reserved3 | RotationMode::Reserved4 => inf_anim::LookAtLimits {
+            spine_share: 0.0,
+            ..inf_anim::LookAtLimits::default()
+        },
+    };
+    Some((look, limits))
+}
+
+/// **How far away a character still notices the player**, metres (wave
+/// CHAR1b.1).
+///
+/// Twenty metres: past a street's width and short of the far side of a square,
+/// so a crowd on the pavement turns to look and one across the water does not.
+/// It is a *gaze* radius and not a perception one — `crate::crowd`'s own bands
+/// decide who is simulated at all, and this only decides where a simulated
+/// character's head points.
+pub const NPC_ATTENTION_M: f64 = 20.0;
+
+/// **The aim-offset layer's sample point** (wave CHAR1b.1, clause 3), or `None`
+/// for a character that wants none.
+///
+/// `aim_sweep` is ALS's `AimSweepTime`: `0` looking straight up and `1` straight
+/// down, mapped off the aim pitch. The look sweep's blend space is authored the
+/// other way round — `+1` is the UP sample — so the axis is `1 - 2 · sweep`, and
+/// this is the one place that conversion happens.
+fn aim_sweep_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<([f64; 2], f32)> {
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let w = cm.runtime.aim_offset_weight;
+    if !w.is_finite() || w <= 0.0 {
+        return None;
+    }
+    let sweep = cm.runtime.aim_sweep.clamp(0.0, 1.0);
+    Some(([0.0, 1.0 - 2.0 * sweep], w as f32))
+}
+
 fn pelvis_drop(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> f32 {
     world
         .world()
