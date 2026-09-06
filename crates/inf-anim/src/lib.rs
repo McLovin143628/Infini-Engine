@@ -35,6 +35,11 @@
 //! limit free on **more than one axis** is not applied (a swing-twist cone needs
 //! a decomposition this does not have — see [`ik`], and ROADMAP §12's P24 block).
 
+/// **The ALS clip -> mode map** (wave CHAR1b.1): which donor sequence fills
+/// which slot of a locomotion graph, and the builder that turns that plus a
+/// name->clip resolver into a `StateMachine`. Names only -- the assets are
+/// licensed content that never enters this checkout.
+pub mod als;
 pub mod asset;
 pub mod blend_space;
 // P29.2 `.inf_anim` v2: the clip channel model — named curves, timed markers,
@@ -105,6 +110,9 @@ pub mod text;
 // plus distance matching and orientation warping.
 pub mod warp;
 
+pub use als::{
+    build_locomotion_graph, LocoBindReport, LocoMode, LocoSlot, SlotKind, LOCOMOTION_MAP,
+};
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
     blend_leader, blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d,

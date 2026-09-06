@@ -924,6 +924,50 @@ pub fn import_manifest(
         )?;
     }
 
+    // -- 2e. the REBOUND character's GRAPH (wave CHAR1b.1) -----------------
+    //
+    // Step 2d rebinds the three clips the committed three-state machine names.
+    // That machine is `idle` / `walk` / `run` on one `speed` parameter, which is
+    // what the P24 wizard generates for a rig with no content — and the island's
+    // hero has 164 authored ALS sequences sitting beside it. Eleven of the
+    // fourteen catalogue modes had no animation at all.
+    //
+    // So the graph is rebuilt from `inf_anim::als::LOCOMOTION_MAP` over whatever
+    // this import brought in, and written at the SAME machine GUID the level
+    // already references — so nothing in the `.inf_lvl` moves and the hero picks
+    // up a twenty-state graph on its next load.
+    //
+    // Local-only, exactly like the body rebind: the map is a table of names (MIT
+    // ALS is cited, never copied) and the clips it resolves are this machine's
+    // own import.
+    for (want, stem) in [
+        (
+            opts.rebind_character.is_some(),
+            (
+                crate::samples::starter_character_ids(),
+                "Starter_Locomotion",
+            ),
+        ),
+        (
+            opts.rebind_character_f.is_some(),
+            (
+                crate::samples::starter_character_f_ids(),
+                "Starter_F_Locomotion",
+            ),
+        ),
+    ] {
+        if want {
+            rebind_locomotion_graph(
+                project,
+                &m.clips,
+                &report.clips.clone(),
+                &stem.0,
+                stem.1,
+                &mut report,
+            );
+        }
+    }
+
     // ── 3. fixtures ──────────────────────────────────────────────────────────
     for f in &m.fixtures {
         for l in &f.lights {
@@ -1832,6 +1876,137 @@ fn retarget_committed_clips(
                 .advisories
                 .push(format!("{file}: re-retarget not written ({e})")),
         }
+    }
+}
+
+/// **The locomotion GRAPH, rebuilt from the ALS map over what this import
+/// brought in** (wave CHAR1b.1, clause 2).
+///
+/// `inf_anim::als::LOCOMOTION_MAP` says which donor sequence fills which slot;
+/// this resolves those names against the clips the manifest just imported and
+/// writes the machine at the identity's own committed GUID. A clip is looked up
+/// by its **manifest name** (`ALS_N_Walk_F`), which is the donor's asset name
+/// and therefore the one thing the map can honestly hold: the GUIDs are this
+/// project's and the file paths carry a pack prefix.
+///
+/// Everything about it is a **value**: a project with no ALS content gets a
+/// graph with no states and an advisory saying so, and the committed three-state
+/// machine is left exactly where it is. That is the CI case, and it is also what
+/// happens on a re-import of a manifest that only carries meshes.
+///
+/// # Why it overwrites rather than writing a sibling
+///
+/// The level references the machine by GUID. A sibling would need the `.inf_lvl`
+/// edited, which is a byte-locked committed file and a schema question; writing
+/// at the same id is the same move `rebind_character` makes for the mesh, the
+/// rig and the skin, and it is local-only for the same reason.
+fn rebind_locomotion_graph(
+    project: &mut AssetProject,
+    manifest: &[Clip],
+    imported: &[(String, AssetId, usize)],
+    ids: &crate::character::CharacterIds,
+    stem: &str,
+    report: &mut UeImportReport,
+) {
+    let Some(want) = ids.machine else {
+        return;
+    };
+    // name -> the asset this import wrote for it. `manifest` carries the name and
+    // the key; `imported` carries the key and the id.
+    let by_key: BTreeMap<&str, AssetId> = imported
+        .iter()
+        .map(|(k, id, _)| (k.as_str(), *id))
+        .collect();
+    let by_name: BTreeMap<&str, AssetId> = manifest
+        .iter()
+        .filter_map(|c| by_key.get(c.key.as_str()).map(|id| (c.name.as_str(), *id)))
+        .collect();
+    // **…and the clips this project already holds.**
+    //
+    // The MetaHuman rebind and the ALS clips are in **two manifests** — the
+    // bodies come from `MHForge` and the sequences from the mannequin packs —
+    // and neither run carries the other's assets. A resolver that only saw this
+    // import's output would answer nothing on the run that rebinds the island's
+    // hero, which is the run that matters. So the project's own `.inf_anim` set
+    // is the fallback, matched on the file stem the clip importer writes
+    // (`{pack}_{name}`) with the pack prefix allowed to differ: `ALS_N_Walk_F`
+    // finds `ALS_Community_ALS_N_Walk_F` and nothing else, because the separator
+    // is part of the needle.
+    let existing: Vec<(String, AssetId)> = project
+        .db()
+        .by_kind(inf_asset::AssetKind::AnimClip)
+        .map(|e| (e.name.clone(), e.sidecar.guid))
+        .collect();
+    let find = |name: &str| -> Option<AssetId> {
+        if let Some(id) = by_name.get(name) {
+            return Some(*id);
+        }
+        let tail = format!("_{name}");
+        let mut hit = None;
+        for (stem, id) in &existing {
+            if stem == name || stem.ends_with(&tail) {
+                // A second match is ambiguous and answering either would be a
+                // guess; refuse and let the advisory name the slot.
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(*id);
+            }
+        }
+        hit
+    };
+    let (machine, bind) = inf_anim::als::build_locomotion_graph(&|name: &str| {
+        find(name).map(|id| *id.uuid().as_bytes())
+    });
+    if machine.states.is_empty() {
+        report.advisories.push(format!(
+            "{stem}: no ALS locomotion clip resolved -- the committed machine is \
+             left as it is ({})",
+            bind.summary()
+        ));
+        return;
+    }
+    if let Err(e) = machine.validate() {
+        report
+            .advisories
+            .push(format!("{stem}: the built graph does not validate ({e})"));
+        return;
+    }
+    // The clips the graph names ARE its dependencies, so a cook's closure packs
+    // them. `bind_slots`' lesson at `ue_import.rs`'s section 2b, one asset kind
+    // over: a reference the sidecar does not carry is a reference the cook
+    // cannot see.
+    let mut deps: Vec<AssetId> = ids.skeleton.into_iter().collect();
+    for (_, name) in &bind.bound {
+        if let Some(id) = find(name) {
+            if !deps.contains(&id) {
+                deps.push(id);
+            }
+        }
+    }
+    let states = machine.states.len();
+    let edges = machine.transitions.len();
+    let asset =
+        inf_anim::StateMachineAsset::new(machine, ids.skeleton.map(|s| *s.uuid().as_bytes()));
+    let path = project.root().join(format!("{stem}.inf_sm"));
+    let import = super::skeleton_binding::import_table(project, ids.skeleton);
+    match project.write_asset_at_with_id(&path, &asset, want, deps, import) {
+        Ok(_) => {
+            report.rebinds.push((format!("{stem}.inf_sm"), want));
+            report.advisories.push(format!(
+                "{stem}: the ALS locomotion graph -- {states} states, {edges} \
+                 transitions, {}",
+                bind.summary()
+            ));
+            for (state, clip) in &bind.unbound {
+                report.advisories.push(format!(
+                    "{stem}: {state} wanted `{clip}`, which this manifest does not carry"
+                ));
+            }
+        }
+        Err(e) => report
+            .advisories
+            .push(format!("{stem}.inf_sm: the graph was not written ({e})")),
     }
 }
 

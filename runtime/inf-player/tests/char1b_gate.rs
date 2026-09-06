@@ -766,3 +766,190 @@ fn the_pelvis_drops_to_the_lower_foot_on_a_step() {
         "the drop is unbounded: kerb {kerb:.4} m stairs {stairs:.4} m"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (3) THE CLIP → MODE MAP
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **THE TWO MODE TABLES AGREE.**
+///
+/// `inf_anim::als::LocoMode` mirrors `inf_ecs::components::MovementMode`'s
+/// discriminants because the ring order forbids `inf-anim` from naming the enum
+/// — and a table spelled in two crates is the shape three ledgers in this
+/// repository have a law about. This is the pin: the numbers a built graph
+/// compares `mode` against are the numbers the movement step publishes.
+#[test]
+fn the_two_mode_tables_agree() {
+    use inf_anim::als::LocoMode;
+    use inf_ecs::components::MovementMode as M;
+    let pairs = [
+        (LocoMode::Grounded, M::Grounded),
+        (LocoMode::Crouch, M::Crouch),
+        (LocoMode::Roll, M::Roll),
+        (LocoMode::FallFree, M::FallFree),
+        (LocoMode::FallControlled, M::FallControlled),
+        (LocoMode::Ragdoll, M::Ragdoll),
+    ];
+    for (a, b) in pairs {
+        assert_eq!(
+            a.param(),
+            b as u8 as f64,
+            "{a:?} and {b:?} disagree — a graph built on the first would compare \
+             `mode` against a number the movement step never publishes"
+        );
+    }
+    // …and the parameter NAMES are one word each, not two.
+    assert_eq!(
+        inf_anim::als::SPEED_VAR,
+        inf_ecs::anim_bridge::params::SPEED
+    );
+    assert_eq!(inf_anim::als::GAIT_VAR, inf_ecs::anim_bridge::params::GAIT);
+    assert_eq!(inf_anim::als::MODE_VAR, inf_ecs::anim_bridge::params::MODE);
+    assert_eq!(
+        inf_anim::als::GROUNDED_VAR,
+        inf_ecs::anim_bridge::params::GROUNDED
+    );
+    assert_eq!(
+        inf_anim::als::FALL_SPEED_VAR,
+        inf_ecs::anim_bridge::params::FALL_SPEED
+    );
+    assert_eq!(
+        inf_anim::als::LAND_ALPHA_VAR,
+        inf_ecs::anim_bridge::params::LAND_ALPHA
+    );
+    assert_eq!(
+        inf_anim::als::MOVE_X_VAR,
+        inf_ecs::anim_bridge::params::MOVE_X
+    );
+    assert_eq!(
+        inf_anim::als::MOVE_Y_VAR,
+        inf_ecs::anim_bridge::params::MOVE_Y
+    );
+}
+
+/// **THE GATE TABLE: every mode ALS ships a clip for plays a REAL clip.**
+///
+/// The mandate: *"Every mode in P29's 14-mode catalogue plays a REAL clip on the
+/// island in PIE; the gate lists each clip → mode binding and fails on an
+/// unbound mode."* This is the list, resolved against the clips actually on
+/// disk, with two failure modes: a slot the map names and the import does not
+/// carry, and a slot bound to a **shell** — a clip with fewer than ten animated
+/// joints, which plays as a bind pose wearing an animation's name (CHAR1a.3's
+/// carried item 93, one asset kind over).
+///
+/// Local-only: the ALS sequences are licensed content and CI has none, so this
+/// SKIPS with a printed reason there. The committed fixture CI *does* run is
+/// `inf_anim::als`'s own unit arms, which prove the builder over a synthetic
+/// resolver.
+#[test]
+fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
+    const SHELL_JOINTS: usize = 10;
+    let Some(content) = island_project() else {
+        eprintln!(
+            "SKIP: no island project at ../island-build/project/Content — the ALS \
+             clips are local-only content and CI has none"
+        );
+        return;
+    };
+    let dir = content.join("UE/Mannequins");
+    let clips = clips_in(&dir);
+    if clips.is_empty() {
+        eprintln!("SKIP: no .inf_anim under {}", dir.display());
+        return;
+    }
+    // The same suffix rule the import door resolves with: the file stem is
+    // `{pack}_{name}` and the map holds the donor's own name.
+    let find = |name: &str| -> Option<&inf_anim::AnimClipAsset> {
+        let tail = format!("_{name}");
+        let mut hit = None;
+        for (stem, asset) in &clips {
+            if stem == name || stem.ends_with(&tail) {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(asset);
+            }
+        }
+        hit
+    };
+    let (machine, report) = inf_anim::build_locomotion_graph(&|name: &str| {
+        find(name).map(|_| {
+            // A distinct id per name — this arm is about the TABLE, and the door
+            // that mints real GUIDs is `ue_import::rebind_locomotion_graph`.
+            let mut id = [0u8; 16];
+            for (i, b) in name.as_bytes().iter().enumerate() {
+                id[i % 16] ^= *b;
+            }
+            id
+        })
+    });
+
+    println!("\n=== the clip → mode map, against the island's own clips ===");
+    let mut shells: Vec<(String, String, usize)> = Vec::new();
+    for slot in inf_anim::LOCOMOTION_MAP {
+        let mut cells: Vec<String> = Vec::new();
+        for (name, _) in slot.clips {
+            match find(name) {
+                Some(a) => {
+                    let joints = a
+                        .clip
+                        .tracks
+                        .iter()
+                        .filter(|t| {
+                            t.translation.is_some() || t.rotation.is_some() || t.scale.is_some()
+                        })
+                        .count();
+                    if joints < SHELL_JOINTS {
+                        shells.push((slot.state.into(), (*name).into(), joints));
+                    }
+                    cells.push(format!("{name} ({joints}j)"));
+                }
+                None => cells.push(format!("{name} MISSING")),
+            }
+        }
+        println!(
+            "  {:<18} {:?}  {:?}  {}",
+            slot.state,
+            slot.mode,
+            slot.kind,
+            cells.join(", ")
+        );
+    }
+    println!(
+        "  {} states, {} transitions, {}",
+        machine.states.len(),
+        machine.transitions.len(),
+        report.summary()
+    );
+
+    assert!(
+        report.unbound.is_empty(),
+        "the map names {} sequences this import does not carry: {:?}",
+        report.unbound.len(),
+        report.unbound
+    );
+    assert!(
+        report.missing_states.is_empty(),
+        "unfilled states: {:?}",
+        report.missing_states
+    );
+    assert!(
+        shells.is_empty(),
+        "{} bindings are SHELLS (fewer than {SHELL_JOINTS} animated joints — a \
+         bind pose wearing an animation's name): {shells:?}",
+        shells.len()
+    );
+    machine
+        .validate()
+        .expect("the graph built from real clips validates");
+    // Not vacuous: the map covers the catalogue's grounded, crouched, airborne,
+    // rolling and ragdolling families, and more than one clip each.
+    let modes: std::collections::BTreeSet<_> =
+        inf_anim::LOCOMOTION_MAP.iter().map(|s| s.mode).collect();
+    assert!(modes.len() >= 6, "{modes:?}");
+    assert!(
+        machine.states.len() >= 20,
+        "{} states",
+        machine.states.len()
+    );
+}

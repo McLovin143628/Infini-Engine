@@ -2743,16 +2743,16 @@ fn every_pose_writer_runs_in_its_frozen_order() {
             "SK1a: the twist chains and the IK handles, which is pose CONSTRUCTION and not a correction",
         ),
         (
+            "foot_states(asset,",
+            "wave CHAR1b.1: the feet published for the NEXT step, read off the ANIMATED pose — after pose CONSTRUCTION (the drive and the posture) and before EVERY correction, the pelvis drop included. This row MOVED, with its cause, and it moved TWICE: the movement step's goal is `published_foot + (ground under the foot − ground under the body)`, so (1) publishing the CORRECTED foot fed last step's correction back in as this step's origin — a foot that should have held still rose 0.0801 → 0.0937 m over ten steps on `foot_slide_gate`'s flat floor at `origin/main` — and (2) publishing it after the PELVIS DROP counted that too, putting the drawn sole 48.6 mm inside a 15° slope. UE avoids both structurally: its rigs carry `ik_foot_root` as a SIBLING of the pelvis, so ALS reads a bone no correction has touched. This engine solves the real `foot_*` joints, so the independence has to come from where the read is taken",
+        ),
+        (
             "pelvis_joint(asset)",
             "P29.5: the pelvis drop, before the legs solve from a lowered hip",
         ),
         (
             "inf_anim::solve_chain(",
             "P24.2: the authored and runtime IK goals",
-        ),
-        (
-            "foot_states(asset,",
-            "wave CHAR1b.1: the feet published for the NEXT step, read off the ANIMATED pose — before `apply_foot_ik` and not after it. This row MOVED, with its cause: the movement step's goal is `published_foot + (ground under the foot − ground under the body)`, so publishing the CORRECTED foot fed last step's correction back in as this step's origin and applied the offset again on top of itself. Measured at `origin/main` on `foot_slide_gate`'s flat floor, a foot that should have held still rose 0.0801 → 0.0937 m over ten steps with the increment growing. ALS has the same shape and no bug because its `Transform (Modify) Bone` applies the offset to the bone the graph rebuilt from the clip this frame",
         ),
         (
             "apply_foot_ik(asset,",

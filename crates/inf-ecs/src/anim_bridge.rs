@@ -636,6 +636,21 @@ pub mod params {
     /// The flail blend `[0, 1]` a falling ragdoll gets, from
     /// [`inf_anim::ragdoll::flail_rate`].
     pub const FLAIL: &str = "flail";
+    /// **The lateral half of the movement direction in the character's own
+    /// frame**, positive to its right (wave CHAR1b.1).
+    ///
+    /// [`DIRECTION`] is ALS's four-value quadrant with its hysteresis, and it is
+    /// exactly enough to *pick* a clip. A direction **blend** needs a plane, and
+    /// the clip→mode map's gait states are `BlendSpace2D`s over six authored
+    /// directions, so the plane is published here.
+    ///
+    /// Normalized ALS's way — `Sum = |X| + |Y|`, so the pair lies on the
+    /// **diamond** `|x| + |y| = 1` and a diagonal reads `(±0.5, ±0.5)`. That is
+    /// `CalculateVelocityBlend`'s own normalization and it is what puts the
+    /// blend space's authored samples where the runtime can reach them.
+    pub const MOVE_X: &str = inf_anim::als::MOVE_X_VAR;
+    /// The forward half of the same, positive ahead. See [`MOVE_X`].
+    pub const MOVE_Y: &str = inf_anim::als::MOVE_Y_VAR;
 }
 
 /// **Publish a character's movement state into its machine's parameters**
@@ -688,7 +703,36 @@ pub fn publish_character_params(
     let flail = f64::from(inf_anim::ragdoll::flail_rate(
         rt.velocity.to_dvec3().length(),
     ));
-    let values: [(&str, f64); 9] = [
+    // **The direction plane** (wave CHAR1b.1). The velocity's planar heading
+    // taken into the character's OWN frame — `body_yaw_deg`, not
+    // `aim_yaw_deg` — because the clips a direction blend interpolates were
+    // authored against the mesh's facing, and the mesh wears the body yaw. Then
+    // ALS's `CalculateVelocityBlend` normalization, which is the diamond and not
+    // the circle. A character standing still publishes `(0, 0)`, which is the
+    // honest answer: it is not moving in any direction, and `idle` is a state
+    // rather than a sample.
+    let (move_x, move_y) = {
+        if planar > 1.0e-4 {
+            let rel = crate::movement::angle_delta_deg(
+                crate::movement::planar_yaw_deg(crate::math::Vec2d::new(
+                    rt.velocity.x,
+                    rt.velocity.z,
+                )),
+                rt.body_yaw_deg,
+            )
+            .to_radians();
+            let (x, y) = (inf_math::psin64(rel), inf_math::pcos64(rel));
+            let sum = x.abs() + y.abs();
+            if sum > 1.0e-9 {
+                (x / sum, y / sum)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let values: [(&str, f64); 11] = [
         (params::SPEED, planar),
         (params::GAIT, rt.mapped_speed),
         (params::GROUNDED, f64::from(u8::from(rt.grounded))),
@@ -698,6 +742,8 @@ pub fn publish_character_params(
         (params::LAND_ALPHA, rt.land_alpha),
         (params::OVERLAY, f64::from(overlay)),
         (params::FLAIL, flail),
+        (params::MOVE_X, move_x),
+        (params::MOVE_Y, move_y),
     ];
     with_bridge(world, |b| {
         let slot = b.params.entry(guid).or_default();

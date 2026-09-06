@@ -46,7 +46,19 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 44] = [
+const SIM_PATH: [(&str, &str, &str); 45] = [
+    // ── the ALS clip -> mode map (wave CHAR1b.1) ──
+    //
+    // A table of names and a builder over it, so nothing here samples a pose —
+    // but the graph it builds decides which clip plays, the clip decides the
+    // pose, and the pose is folded into `pose_state_bytes`. It is on the path
+    // for the same reason `state_machine.rs` is: a transition threshold computed
+    // with a transcendental would pick a different state on a different target.
+    (
+        "als.rs",
+        include_str!("../src/als.rs"),
+        "the clip -> mode map decides which clip a machine plays, and the pose it produces is folded into `pose_state_bytes`",
+    ),
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
