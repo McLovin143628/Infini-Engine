@@ -2731,6 +2731,9 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
     const WRITERS: [(&str, &str); 8] = [
+        // (Eight still: `foot_states` moved from the tail into the middle at
+        // wave CHAR1b.1 — see its own row for why — and nothing was added or
+        // dropped.)
         (
             "pending_pose = Some(pose);",
             "the machine + the layer stack + the inertializer produce the pose",
@@ -2748,6 +2751,10 @@ fn every_pose_writer_runs_in_its_frozen_order() {
             "P24.2: the authored and runtime IK goals",
         ),
         (
+            "foot_states(asset,",
+            "wave CHAR1b.1: the feet published for the NEXT step, read off the ANIMATED pose — before `apply_foot_ik` and not after it. This row MOVED, with its cause: the movement step's goal is `published_foot + (ground under the foot − ground under the body)`, so publishing the CORRECTED foot fed last step's correction back in as this step's origin and applied the offset again on top of itself. Measured at `origin/main` on `foot_slide_gate`'s flat floor, a foot that should have held still rose 0.0801 → 0.0937 m over ten steps with the increment growing. ALS has the same shape and no bug because its `Transform (Modify) Bone` applies the offset to the bone the graph rebuilt from the clip this frame",
+        ),
+        (
             "apply_foot_ik(asset,",
             "P29.4: foot IK, over the same solver",
         ),
@@ -2758,10 +2765,6 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         (
             "redrive(asset,",
             "SK1b: the CORRECTION re-drive, which closes SK1a's stated ordering bound — a twist bone is a statement about the pose that is finally published, so it is computed from the corrected one and not from the authored one. It is a named fn precisely so this pin can see it: a second `inf_anim::drive_pose(` would be the same needle as the first",
-        ),
-        (
-            "foot_states(asset,",
-            "P29.4: the feet published for the NEXT step, read off the final pose",
         ),
     ];
     let at: Vec<usize> = WRITERS

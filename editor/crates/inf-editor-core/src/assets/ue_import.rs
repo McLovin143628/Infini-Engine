@@ -826,6 +826,30 @@ pub fn import_manifest(
             ));
             continue;
         }
+        // **DERIVED BEFORE IT IS WRITTEN** (wave CHAR1b.1), the same rule the
+        // glTF clip stage has followed since P29.5 and the one door this one did
+        // not go through. Measured before the change: of the 164 clips this
+        // manifest imports, **zero** carried `MoveData_Speed`, `W_Gait`,
+        // `FootSpeed_*`, `FootLock_*` or `Enable_FootIK_*` — so the island's
+        // hero ran ALS's whole foot-IK and foot-lock mechanism on channels that
+        // were not there, which reads at every consumer as "this clip wants no
+        // foot IK" and is why the feet had never once been put on the ground.
+        //
+        // Derived against the TARGET rig, because the payload has just been
+        // retargeted onto it: a foot index is an index into the pose, and a
+        // derivation measured against the donor would name the wrong joints.
+        // A refusal costs this clip its channels and nothing else.
+        let mut payload = payload;
+        let target_rig = inf_anim::SkeletonAsset::new(target.skeleton.clone());
+        let derived = super::anim_derive::derive_in_place(
+            &c.key,
+            &mut payload,
+            Some(&target_rig),
+            &inf_anim::DeriveOptions::default(),
+        );
+        report
+            .advisories
+            .extend(super::anim_derive::advisories(&c.key, &derived));
         let asset = inf_anim::AnimClipAsset::new(payload, Some(*target_id.uuid().as_bytes()));
         let name = format!("{}_{}", c.pack, c.name);
         let import = super::skeleton_binding::import_table(project, Some(target_id));

@@ -2001,6 +2001,26 @@ fn step_mantle(
     })
 }
 
+/// **Whether this character's feet belong on the ground at all** (wave CHAR1b.1)
+/// — ALS's `UpdateFootIK` branch, as a predicate.
+///
+/// ALS asks two questions in sequence, `MovementState.InAir()` and
+/// `MovementState.Ragdoll()`, because those are the only two of its five states
+/// that are not on the floor. This engine's catalogue has fourteen modes, so the
+/// same question is asked of the mode table
+/// ([`inf_ecs::components::MovementMode::is_grounded_family`]: `Grounded`,
+/// `Crouch`, `Prone`, `Slide`, `Roll`) plus the runtime's own `grounded` flag —
+/// which is what tells a walking character from one who has just stepped off a
+/// kerb and is, for three frames, in `Grounded` with nothing under it.
+///
+/// The mode table is the authority rather than a list spelled here, so a mode
+/// added to the catalogue is airborne-or-not in **one** place. `Mantle`,
+/// `Ragdoll`, `SwimSurface`, `SwimUnder`, `Driving`, `Flying`, the two falls and
+/// `Dive` are all outside the family and all release.
+fn feet_are_planted(cm: &CharacterMovement) -> bool {
+    cm.mode.is_grounded_family() && cm.runtime.grounded
+}
+
 /// **Foot IK and foot locking, the half that needs a world** (P29.4, clause 5).
 ///
 /// The pure half is [`inf_anim::foot`]: the ±50/45 cm trace envelope in metres,
@@ -2019,10 +2039,32 @@ fn step_mantle(
 /// 4. **What is the slide?** The number this wave's gate holds, in **metres**,
 ///    recorded on the runtime whether or not anything is watching.
 ///
-/// Everything is inert on a character whose clips carry no curve channels: the
-/// gate curve reads its fallback of zero, no lock engages, no goal is published
-/// and the pose is exactly what the machine produced. That is what keeps every
-/// committed sample byte-identical.
+/// # The gate, and the wave that found it was shut (CHAR1b.1)
+///
+/// This function used to open with `anim_curve(…, ENABLE_FOOT_IK_L, 0.0)` and
+/// `continue` on a non-positive value, and its own docs called that "inert on a
+/// character whose clips carry no curve channels … which is what keeps every
+/// committed sample byte-identical". It kept rather more than that: **no clip in
+/// the engine has ever carried the channel** — 164 imported ALS clips and 12
+/// committed sample clips, all measured, all zero — so the probe never ran, no
+/// goal was ever published, and P29.4's whole ported mechanism was dead code
+/// wearing a curve's name. See [`inf_anim::derive::FOOT_GROUND_BAND_M`] for the
+/// census and for why the gate cannot be derived from the clip either.
+///
+/// The gate is now ALS's own, taken where ALS takes it —
+/// `UALSCharacterAnimInstance::UpdateFootIK`:
+///
+/// ```text
+/// if (MovementState.InAir())        { SetPelvisIKOffset(0,0); ResetIKOffsets(); }
+/// else if (!MovementState.Ragdoll()) { …the foot offsets… }
+/// ```
+///
+/// so an **airborne, ragdolling, mantling, swimming, driving or flying**
+/// character releases everything ([`feet_are_planted`]), and a grounded one runs
+/// the probe. An authored `Enable_FootIK_*` curve still wins where a clip
+/// carries one — that is the door a project uses to author a state with no foot
+/// IK — and a clip that carries none is read as **on**, which is what ALS's own
+/// content means by authoring `1` on every grounded clip it ships.
 #[allow(clippy::too_many_arguments)]
 fn step_feet(
     world: &mut EcsWorld,
@@ -2035,15 +2077,21 @@ fn step_feet(
     dt: f64,
 ) {
     use inf_anim::channels::als;
-    let Some(feet) = inf_ecs::anim_bridge::feet_of(world, guid) else {
-        // No rig, or a rig with no feet: release whatever was held, so a
-        // character that loses its skeleton does not leave a foot pinned to a
-        // spot on the floor.
+    // ALS's own reset branch, and the "no rig" case with it: release whatever was
+    // held, so a character that leaves the ground — or loses its skeleton — does
+    // not leave a foot pinned to a spot on the floor. `set_foot_ik` with two
+    // `None`s is what withdraws the goals the pose step is holding.
+    let planted = feet_are_planted(cm);
+    let feet = planted
+        .then(|| inf_ecs::anim_bridge::feet_of(world, guid))
+        .flatten();
+    let Some(feet) = feet else {
         cm.runtime.foot_lock_l.release();
         cm.runtime.foot_lock_r.release();
         cm.runtime.foot_slide_l_m = 0.0;
         cm.runtime.foot_slide_r_m = 0.0;
         cm.runtime.pelvis_offset = Vec3d::ZERO;
+        inf_ecs::anim_bridge::set_foot_ik(world, guid, [None, None]);
         return;
     };
     // A turn breaks a lock. `RotationAmount` is the donor's channel; ours is the
@@ -2061,7 +2109,9 @@ fn step_feet(
     let mut enables = [0.0f32, 0.0f32];
     for (side, (enable_name, lock_name)) in gates.iter().enumerate() {
         let Some(state) = feet[side] else { continue };
-        let enable = inf_ecs::anim_bridge::anim_curve(world, guid, enable_name, 0.0);
+        // **`None` is not `0.0`** — see this function's docs. A clip that authors
+        // the gate is obeyed; a clip that says nothing is read as on.
+        let enable = inf_ecs::anim_bridge::anim_curve_opt(world, guid, enable_name).unwrap_or(1.0);
         let lock_curve = inf_ecs::anim_bridge::anim_curve(world, guid, lock_name, 0.0);
         enables[side] = enable;
         let posed = state.world.to_dvec3();
@@ -2151,6 +2201,11 @@ fn step_feet(
         goals[side] = Some(inf_ecs::anim_bridge::FootGoal {
             target: Vec3d::new(target.x as f64, target.y as f64, target.z as f64),
             weight: enable.clamp(0.0, 1.0),
+            // **The two angles `ground_offset` has answered since P29.4 and
+            // nobody carried** (wave CHAR1b.1). Passed on raw; the pose step
+            // clamps them, because the limit is the ankle's and not the ground's.
+            pitch_deg: g.pitch_deg,
+            roll_deg: g.roll_deg,
         });
     }
     // The pelvis drops to the lower foot, so the low leg does not straighten past

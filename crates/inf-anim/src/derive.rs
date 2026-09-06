@@ -81,6 +81,45 @@ pub const FOOT_SPEED_PREFIX: &str = "FootSpeed_";
 /// from the plant windows, which is what P29.4's foot lock consumes.
 pub const FOOT_LOCK_PREFIX: &str = "FootLock_";
 
+/// **THE FOOT-IK GATE IS NOT A PROPERTY OF A CLIP** — the measurement, kept
+/// (wave CHAR1b.1).
+///
+/// P29.4 ported ALS's foot IK whole: the ±50/45 cm trace envelope, the
+/// ground-offset arithmetic, the lock that may only engage or release, the
+/// pelvis drop to the lower foot. Every one of those is gated on ALS's
+/// `Enable_FootIK_L/R` curve, which the donor authors by hand on each clip.
+/// **Nothing in this engine ever wrote it**: `derived_curves` writes
+/// `MoveData_Speed`, `W_Gait`, `FootSpeed_*` and `FootLock_*`; the wizard writes
+/// what the deriver writes; the UE clip door did not derive at all. Measured at
+/// this wave over all 164 imported ALS clips and all 12 committed sample clips:
+/// **zero** carried the channel — so `step_feet` read its `0.0` fallback, took
+/// its `continue`, and the whole mechanism had never once run on content.
+///
+/// The first fix attempted here was to **derive** the gate, on the theory that
+/// "does this foot reach the ground in this clip" is an absolute height test
+/// against the rig's own ground plane (`y = 0`, since every rig this engine
+/// poses has its origin at its feet). **The census falsified it.** Over the 164
+/// clips the lowest foot is 0.1749 m at the very top of the range and the
+/// families that must differ do not: `ALS_N_JumpLoop` reads 0.1739 m,
+/// `ALS_N_FallLoop` 0.1610 m and `ALS_N_Mantle_1m_RH` 0.1749 m — the *highest*
+/// three of all — against `ALS_N_Walk_F` and its neighbours in the same band.
+/// UE authors an in-air cycle with the root on the ground and the legs hanging,
+/// so a fall loop's ankle is exactly where a walk's ankle is. There is no band.
+///
+/// So the gate is taken where ALS takes it: from the **movement state**.
+/// `UALSCharacterAnimInstance::UpdateFootIK` reads
+/// `if (MovementState.InAir()) { SetPelvisIKOffset(0); ResetIKOffsets(); }
+/// else if (!MovementState.Ragdoll()) { …offsets… }`, and
+/// `inf_physics::d3::movement::step_feet` now does the same: an authored curve
+/// still wins where a clip carries one, and a clip that carries none is read as
+/// **on**, with the airborne and ragdoll modes releasing everything.
+///
+/// This constant is kept as the name of that measurement — the arm
+/// `the_foot_ik_gate_is_not_derivable_from_a_clips_foot_height` in
+/// `char1b_gate` re-runs the census and fails if some future import makes the
+/// families separable, which would mean this reasoning is stale.
+pub const FOOT_GROUND_BAND_M: f32 = 0.25;
+
 /// The prefix an **event** marker must carry to be heard as a footstep.
 ///
 /// The one spelling in the engine: `inf_ecs::anim_bridge::FOOTSTEP_PREFIX` is

@@ -1575,6 +1575,37 @@ pub fn step_pose_evaluation<'c>(
                         //    door that knows the difference. Identity-composed
                         //    for anything that is not a character.
                         let to_world = model_to_world(world, entity);
+                        // ── **THE FEET ARE PUBLISHED BEFORE THEY ARE
+                        //    CORRECTED** (wave CHAR1b.1) ──
+                        //
+                        // This read used to sit at the bottom of the block,
+                        // after `apply_foot_ik`, and that made the whole foot-IK
+                        // loop self-referential: the movement step's goal is
+                        // `published_foot + (ground under the foot − ground
+                        // under the body)`, so publishing the CORRECTED foot fed
+                        // last step's correction back in as this step's origin
+                        // and the offset was applied again on top of itself.
+                        //
+                        // Measured on `foot_slide_gate`'s flat-floor fixture at
+                        // `origin/main`: a foot that should have held still rose
+                        // 0.0801 → 0.0937 m over ten steps, the increment
+                        // growing every step — a divergence the arm's own ±3 cm
+                        // tolerance was wide enough to hide. With the animated
+                        // foot published the goal is a constant −0.0201 m (the
+                        // gap the mover leaves between the capsule and the
+                        // floor) and the foot sits still.
+                        //
+                        // ALS has the same shape and does not have the bug:
+                        // `SetFootOffsets` computes an offset that a
+                        // `Transform (Modify) Bone` node applies to the
+                        // **animated** `ik_foot_*` bone, which the graph rebuilds
+                        // from the clip every frame. Ours is the same statement
+                        // — a correction is measured against the animation, not
+                        // against the previous correction.
+                        let feet = foot_states(asset, &pose, to_world);
+                        if feet.iter().any(Option::is_some) {
+                            bridge.feet.insert(guid, feet);
+                        }
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
                             corrected |= apply_foot_ik(asset, &mut pose, &goals, to_world);
                         }
@@ -1635,10 +1666,6 @@ pub fn step_pose_evaluation<'c>(
                             if let Some(r) = hand_reports.get_mut(&guid) {
                                 r.redriven = n;
                             }
-                        }
-                        let feet = foot_states(asset, &pose, to_world);
-                        if feet.iter().any(Option::is_some) {
-                            bridge.feet.insert(guid, feet);
                         }
                         // **The ragdoll rig, on request** (P29.4, clause 6).
                         // Model-space joint positions, lifted into the world by
@@ -1838,6 +1865,21 @@ fn foot_states(
     out
 }
 
+/// **How far an ankle pitches to meet a slope**, degrees (wave CHAR1b.1).
+///
+/// The ground's normal is a measurement and an ankle's range is anatomy, so the
+/// clamp lives here — at the joint — and not on the goal. 30° forward/back is
+/// past the 27° a human ankle dorsiflexes and short of a wall: a surface steeper
+/// than that is refused upstream anyway
+/// (`inf_physics::d3::traversal::is_walkable` against the movement component's
+/// own `slope_limit_deg`, 45° by default), so this bound is what shapes the last
+/// 15° rather than what decides whether a slope is walkable.
+pub const FOOT_PITCH_LIMIT_DEG: f64 = 30.0;
+
+/// **How far it rolls**, degrees — half the pitch, because a foot everts and
+/// inverts far less than it flexes, and a rolled sole reads as a sprain.
+pub const FOOT_ROLL_LIMIT_DEG: f64 = 15.0;
+
 /// Solve each foot toward its goal, over the P24.2 chain solver.
 ///
 /// The chain is **derived**, not authored: a foot, its parent (the shin) and its
@@ -1895,6 +1937,49 @@ fn apply_foot_ik(
                     let a = glam::Quat::from_array(rot);
                     let b = glam::Quat::from_array(pose.locals[j].rotation);
                     pose.locals[j].rotation = inf_math::pslerp(a, b, goal.weight).to_array();
+                }
+            }
+            // **AND THE SOLE LIES ON THE SURFACE** (wave CHAR1b.1). `solve_chain`
+            // puts the ankle where the goal says; what angle the foot meets the
+            // ground at is a second fact, and the two angles that carry it have
+            // been computed by `inf_anim::ground_offset` since P29.4 with nothing
+            // reading them. Without this a foot on a ramp is translated onto the
+            // slope and left level — a heel or a toe through the surface, which
+            // is exactly the defect the mandate's "perfect topography" names.
+            //
+            // Applied AFTER the chain and in the foot's own local frame, as a
+            // post-multiply, so it composes with whatever the solve decided
+            // rather than replacing it; scaled by the goal's weight for the same
+            // reason the rotations above are; and **clamped**, because the ground
+            // can be steeper than an ankle bends and a normal a probe returns is
+            // not a promise about anatomy.
+            if let Some(local) = pose.locals.get_mut(foot as usize) {
+                let w = goal.weight.clamp(0.0, 1.0);
+                let pitch = goal
+                    .pitch_deg
+                    .clamp(-FOOT_PITCH_LIMIT_DEG, FOOT_PITCH_LIMIT_DEG)
+                    as f32
+                    * w;
+                let roll = goal
+                    .roll_deg
+                    .clamp(-FOOT_ROLL_LIMIT_DEG, FOOT_ROLL_LIMIT_DEG)
+                    as f32
+                    * w;
+                if pitch != 0.0 || roll != 0.0 {
+                    // **Built from `psin`/`pcos`, not `Quat::from_rotation_x`**
+                    // (the P14 law, and `portable_pose`'s own gate caught the
+                    // first spelling of this line): glam's axis constructors are
+                    // `std` `sin`/`cos` on the half-angle, and this rotation is
+                    // folded into `pose_state_bytes`, which both hosts compare.
+                    // A quaternion about a cardinal axis is `(sin θ/2 on that
+                    // axis, cos θ/2)` and nothing else, so it is two calls.
+                    let (hp, hr) = (pitch.to_radians() * 0.5, roll.to_radians() * 0.5);
+                    let qx =
+                        glam::Quat::from_xyzw(inf_math::psin(hp), 0.0, 0.0, inf_math::pcos(hp));
+                    let qz =
+                        glam::Quat::from_xyzw(0.0, 0.0, inf_math::psin(hr), inf_math::pcos(hr));
+                    let r = glam::Quat::from_array(local.rotation) * qx * qz;
+                    local.rotation = r.to_array();
                 }
             }
         }

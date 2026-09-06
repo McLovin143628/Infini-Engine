@@ -101,6 +101,20 @@ pub struct FootGoal {
     /// How much of the solve to apply, `[0, 1]` — the `Enable_FootIK` curve, so
     /// a state that wants no foot IK authors a zero and gets the pose untouched.
     pub weight: f32,
+    /// **Pitch about the character's right axis**, degrees, so the sole lies on
+    /// the surface it is standing on (wave CHAR1b.1).
+    ///
+    /// `inf_anim::ground_offset` has answered this since P29.4 and nothing
+    /// carried it: the movement step took `.offset` and dropped `.pitch_deg` and
+    /// `.roll_deg` on the floor, so a foot on a ramp was *translated* onto the
+    /// slope and left level, which reads as a heel or a toe buried in the
+    /// ground. Clamped at the seam that applies it
+    /// (`inf_ecs::pose::FOOT_PITCH_LIMIT_DEG`), never here — a goal reports what
+    /// the ground is, and what an ankle will do about it belongs to the ankle.
+    pub pitch_deg: f64,
+    /// **Roll about the character's forward axis**, degrees. See
+    /// [`pitch_deg`](Self::pitch_deg).
+    pub roll_deg: f64,
 }
 
 /// How many points a [`TraversalArc`] is resampled onto.
@@ -449,11 +463,25 @@ pub fn traversal_arc(world: &EcsWorld, guid: Uuid) -> Option<&TraversalArc> {
 /// free-form `String`s by Ruling 2, so a studio's own channel reads here exactly
 /// like one of the twenty-five.
 pub fn anim_curve(world: &EcsWorld, guid: Uuid, name: &str, fallback: f32) -> f32 {
+    anim_curve_opt(world, guid, name).unwrap_or(fallback)
+}
+
+/// The same, **without** a fallback — `None` when the clip carries no such
+/// channel (wave CHAR1b.1).
+///
+/// The distinction is load-bearing exactly once, and it cost the whole foot-IK
+/// mechanism: `Enable_FootIK_L/R` is a gate, so "the clip says 0" and "the clip
+/// says nothing" are opposite instructions, and reading them through one
+/// `fallback` collapses them. ALS authors the curve on every clip it ships and
+/// its graph therefore never meets the second case; this engine's clips carry
+/// none at all (see [`inf_anim::derive::FOOT_GROUND_BAND_M`] for the census), so
+/// the second case is the only one there is. Every other consumer wants a number
+/// and keeps [`anim_curve`].
+pub fn anim_curve_opt(world: &EcsWorld, guid: Uuid, name: &str) -> Option<f32> {
     bridge(world)
         .and_then(|b| b.curves.get(&guid))
         .and_then(|c| c.get(name))
         .copied()
-        .unwrap_or(fallback)
 }
 
 /// A footstep the animation asked for this fixed step (P29.4, clause 7).

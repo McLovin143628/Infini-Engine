@@ -363,32 +363,65 @@ fn a_planted_foot_does_not_slide_and_the_unlocked_control_does() {
     );
 }
 
-/// **Foot IK is a partial brake, and it is not the lock** (P29.6).
+/// **Foot IK is not a brake at all — and the brake P29.6 measured was a bug**
+/// (wave CHAR1b.1).
 ///
-/// A finding the character-space ruling exposed, written down rather than left
-/// as a discrepancy between two runs of the same fixture. The goal the movement
-/// step publishes is read off the feet the *pose* step published last step — one
-/// fixed step stale, by the ordering P29.4's ledger records — so solving to it
-/// drags a swinging foot back toward where it was, and the skate falls by roughly
-/// a factor of four. That is a long way from a lock (eight orders of magnitude
-/// below) and it is not nothing, which is exactly why the gate above authors the
-/// IK off: a control that quietly carried a second anti-slide mechanism would be
-/// measuring the pair and reporting the lock.
+/// P29.6 recorded this arm as "foot IK is a partial brake": with the IK curve
+/// authored on, an unlocked foot's skate fell **by roughly a factor of four**,
+/// and that wave wrote it down as a property of the mechanism — *"the goal the
+/// movement step publishes is read off the feet the pose step published last
+/// step … so solving to it drags a swinging foot back toward where it was"*.
+///
+/// That sentence is a description of a **defect**, and this wave fixed it. The
+/// goal was self-referential: the pose step published the foot **after**
+/// `apply_foot_ik` had already moved it, so every step's correction was measured
+/// against the previous step's correction and applied again on top of it. The
+/// visible symptom was a foot on a flat floor that should have held still and
+/// instead rose 0.0801 → 0.0937 m over ten steps with the increment growing
+/// (measured at `origin/main` on the fixture below `a_foot_over_ground…` uses).
+/// The horizontal half of that same feedback is what "braked".
+///
+/// With the animated foot published (`inf_ecs::pose`, the block that says so),
+/// the offset on flat ground is purely vertical — `inf_anim::ground_offset`
+/// answers `(0, dy, 0)` for a `+Y` normal, by construction — so foot IK moves a
+/// swinging foot **not at all** horizontally, which is what it was always meant
+/// to do. `bare == with_ik` to the last bit, and that equality is the claim.
+///
+/// The arm is kept, inverted, because a retired finding deserves a headstone: a
+/// change that re-introduces a horizontal component here fails this.
 #[test]
-fn foot_ik_alone_is_a_partial_brake_and_not_the_lock() {
+fn foot_ik_does_not_brake_a_swinging_foot() {
     let (bare, travel) = worst_slide_ik(false, 28, 0.0);
     let (with_ik, _) = worst_slide_ik(false, 28, 1.0);
     assert!(travel > 0.5, "the body must move: {travel}");
     assert!(
-        bare > with_ik * 2.0,
-        "foot IK did not brake at all: {bare:.3} m bare against {with_ik:.3} m \
-         with it — if these are equal the goal is no longer being published, \
-         which means character space stopped reaching the probe"
+        bare > 0.5,
+        "the control must skate, or this arm proves nothing: {bare:.6} m"
     );
     assert!(
-        with_ik > 0.05,
-        "foot IK held the foot still ({with_ik:.6} m) — it is not a lock and must \
-         not read like one"
+        (bare - with_ik).abs() < 1.0e-9,
+        "foot IK moved a swinging foot horizontally: {bare:.9} m bare against \
+         {with_ik:.9} m with it — on flat ground `ground_offset` answers a purely \
+         vertical offset, so any difference here is the self-referential goal \
+         coming back"
+    );
+    // …and the IK really is engaged, or the equality above is two runs of one
+    // disabled mechanism. A goal is published on the run that authors it.
+    let mut sim = Sim::new(true);
+    sim.clip = walk_clip_ik(false, HIPS_FEET_AT_ORIGIN + 0.08, 1.0);
+    let forward = MovementIntent {
+        move_input: inf_ecs::Vec2d::new(0.0, 1.0),
+        ..Default::default()
+    };
+    for _ in 0..8 {
+        sim.step(&forward);
+    }
+    assert!(
+        inf_ecs::anim_bridge::bridge(&sim.world)
+            .and_then(|b| b.foot_ik.get(&HERO).copied())
+            .map(|g| g[0].is_some())
+            .unwrap_or(false),
+        "no goal was published, so the equality above compares nothing"
     );
 }
 
@@ -722,11 +755,30 @@ fn a_feet_at_origin_rig_publishes_its_feet_on_the_floor() {
     );
 }
 
-/// A character whose clips carry **no curve channels at all** pays nothing: no
-/// lock engages, no goal is published, and the pose is exactly what the machine
-/// produced. That is what keeps every committed sample byte-identical.
+/// **A clip with no curve channels locks nothing — and its feet still go on the
+/// ground** (wave CHAR1b.1).
+///
+/// P29.4 wrote this arm as "engages nothing": no lock, **no goal**, no pelvis
+/// drop, *"which is what keeps every committed sample byte-identical"*. The
+/// second of those three was not a design decision, it was the whole foot-IK
+/// mechanism switched off by an `Enable_FootIK_*` fallback of `0.0` on a channel
+/// **no clip in this engine has ever carried** — 164 imported ALS clips and 12
+/// committed sample clips, all measured, all without it. See
+/// `inf_physics::d3::movement::step_feet`'s docs and
+/// `inf_anim::derive::FOOT_GROUND_BAND_M` for the census, and for why the gate
+/// cannot be derived from a clip either.
+///
+/// The two halves are now told apart, and they are different mechanisms with
+/// different authored evidence:
+///
+/// * **the lock** needs a `FootLock_*` window — an animator's statement that
+///   *this* foot is planted *now* — so a bare clip still locks nothing, and that
+///   half of the arm is P29.4's, unchanged;
+/// * **the IK** is on by default, because that is what ALS's own content means
+///   by authoring `1` on every grounded clip it ships, and a bare clip is a clip
+///   that has not asked for anything unusual.
 #[test]
-fn a_clip_with_no_channels_engages_nothing() {
+fn a_clip_with_no_channels_locks_nothing_and_still_stands_on_the_ground() {
     let mut sim = Sim::new(true);
     sim.clip = AnimClip::new("bare", Vec::new());
     let forward = MovementIntent {
@@ -739,13 +791,67 @@ fn a_clip_with_no_channels_engages_nothing() {
         assert!(!h.runtime.foot_lock_l.locked, "a bare clip locked a foot");
         assert!(!h.runtime.foot_lock_r.locked);
         assert_eq!(h.runtime.foot_slide_l_m, 0.0);
-        // …and the pelvis is not asked to drop for feet nobody is solving.
-        assert_eq!(h.runtime.pelvis_offset, Vec3d::ZERO);
+    }
+    // …and the IK ran, which is the half that changed: a goal on the surface,
+    // and a pelvis that has been asked to come down onto it rather than up.
+    let goals = inf_ecs::anim_bridge::bridge(&sim.world)
+        .and_then(|b| b.foot_ik.get(&HERO).copied())
+        .expect("a bare clip is still a grounded clip, and its feet get a goal");
+    assert!(goals[0].is_some() && goals[1].is_some(), "{goals:?}");
+    assert!(
+        sim.hero().runtime.pelvis_offset.y <= 0.0,
+        "the pelvis drop is downward or nothing: {:?}",
+        sim.hero().runtime.pelvis_offset
+    );
+}
+
+/// **…and an AIRBORNE character releases all of it** — ALS's own
+/// `if (MovementState.InAir()) { SetPelvisIKOffset(0); ResetIKOffsets(); }`,
+/// which is the branch that replaced the dead curve gate (wave CHAR1b.1).
+///
+/// The falsification the arm above needs: with the curve gate gone, an
+/// unconditional foot IK would solve a jumping character's feet onto ground it
+/// is nowhere near.
+#[test]
+fn an_airborne_character_releases_every_foot_goal() {
+    let mut sim = Sim::new(true);
+    sim.clip = walk_clip_ik(true, HIPS_FEET_AT_ORIGIN + 0.08, 1.0);
+    let forward = MovementIntent {
+        move_input: inf_ecs::Vec2d::new(0.0, 1.0),
+        ..Default::default()
+    };
+    for _ in 0..12 {
+        sim.step(&forward);
     }
     assert!(
         inf_ecs::anim_bridge::bridge(&sim.world)
-            .map(|b| b.foot_ik.is_empty())
-            .unwrap_or(true),
-        "a bare clip published a foot-IK goal"
+            .and_then(|b| b.foot_ik.get(&HERO).copied())
+            .map(|g| g[0].is_some())
+            .unwrap_or(false),
+        "the grounded control published no goal, so the jump below proves nothing"
     );
+    let jump = MovementIntent {
+        move_input: inf_ecs::Vec2d::new(0.0, 1.0),
+        jump: true,
+        ..Default::default()
+    };
+    sim.step(&jump);
+    sim.step(&forward);
+    let h = sim.hero();
+    assert!(
+        !h.mode.is_grounded_family() || !h.runtime.grounded,
+        "the fixture did not leave the ground: mode {:?} grounded {}",
+        h.mode,
+        h.runtime.grounded
+    );
+    // `set_foot_ik` with two `None`s REMOVES the row rather than storing an
+    // empty one (the bridge's own "absent costs nothing" rule), so both
+    // spellings of "no goal" are the answer and neither is "a goal".
+    let held = inf_ecs::anim_bridge::bridge(&sim.world).and_then(|b| b.foot_ik.get(&HERO).copied());
+    assert!(
+        held.is_none_or(|g| g == [None, None]),
+        "an airborne character kept a foot goal: {held:?}"
+    );
+    assert_eq!(h.runtime.pelvis_offset, Vec3d::ZERO);
+    assert!(!h.runtime.foot_lock_l.locked && !h.runtime.foot_lock_r.locked);
 }
