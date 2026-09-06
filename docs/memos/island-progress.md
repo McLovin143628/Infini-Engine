@@ -35747,7 +35747,7 @@ bit on a swinging foot, which is what a purely vertical offset means.
 
 `inf_anim::als::LOCOMOTION_MAP` — names, never assets; ALS is MIT and its
 sequences stay in the local project. Measured against the island's own clips:
-**43 slots, every one bound, 71 animated joints each**, no shells.
+**41 slots, every one bound, 71 animated joints each**, no shells.
 
 * 26 machine states: the gait ladder (`idle` → `start` → `walk` → `run` →
   `sprint`) with six-direction `BlendSpace2D`s on `walk` and `run`, two stops,
