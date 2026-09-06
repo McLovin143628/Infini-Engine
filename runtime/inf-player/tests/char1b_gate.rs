@@ -715,7 +715,7 @@ fn a_sole_rests_on_every_surface_within_ten_millimetres() {
             );
             println!(
                 "  {:<14} {name}  sole {:>8.4} m  ground {:>8.4} m  \
-                 penetration {:>6.2} mm  hover {:>6.2} mm  tilt {:>6.2}°                   roll {:>6.2}°  pitch {:>6.2}°",
+                 penetration {:>6.2} mm  hover {:>6.2} mm  tilt {:>6.2}° roll {:>6.2}° pitch {:>6.2}°",
                 ground.label(),
                 s.y,
                 s.ground,

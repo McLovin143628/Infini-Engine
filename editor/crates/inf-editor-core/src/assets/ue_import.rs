@@ -1867,6 +1867,40 @@ fn retarget_committed_clips(
     target: &inf_anim::Skeleton,
     report: &mut UeImportReport,
 ) {
+    // **THE RIG HASH IS RE-STAMPED WHATEVER HAPPENS TO THE TRACKS** (wave
+    // CHAR1b.1). The two questions are different and this function used to
+    // answer only one: "do the clips need re-retargeting" is about the rig's
+    // JOINT NAMES, and "what rig do these clips animate" is about its BYTES.
+    //
+    // Found by `char1a3_gate::the_rebound_clips_record_the_rig_they_animate`
+    // going red on this wave's own re-import: inferring a role table changes the
+    // `.inf_skel`'s content hash and changes no joint name, so the early return
+    // below fired, no clip was rewritten, and three sidecars went on naming a
+    // hash that no longer exists — which is carried item 95's shape returning
+    // through the very door it was fixed in.
+    if let Some(table) = super::skeleton_binding::import_table(project, ids.skeleton) {
+        for (stem, want) in [(stems.0, ids.idle), (stems.1, ids.walk), (stems.2, ids.run)] {
+            let Some(path) = want
+                .and_then(|w| project.db().get(w))
+                .map(|e| e.path.clone())
+            else {
+                continue;
+            };
+            let Ok(mut side) = inf_asset::AssetSidecar::load(&path) else {
+                continue;
+            };
+            let mut t = side.import.take().unwrap_or_default();
+            for (k, v) in table.clone() {
+                t.insert(k, v);
+            }
+            side.import = Some(t);
+            if let Err(e) = side.save(&path) {
+                report
+                    .advisories
+                    .push(format!("{stem}.inf_anim: rig hash not re-stamped ({e})"));
+            }
+        }
+    }
     let Some(previous) = previous else { return };
     if previous.len() == target.len()
         && previous
