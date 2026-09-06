@@ -35641,3 +35641,297 @@ face/body meshes. Both are wrong, measured under
      hits and all four are deliberate alignment (a docstring's env-var table, an
      indented banner). A ban at 0:4 signal needs an allowlist, which is the
      ban-list hazard at a worse ratio than the one it would replace.
+
+---
+
+## WAVE CHAR1b.1 — THE POSE (2026-09-06)
+
+The first slice of CHAR1b. Foot IK on real topography, the ALS clip→mode map, the
+additive layer, look-at, the crowd on the same graph, and two carried items.
+Mantling, the ALS quality checklist, the authored/sourced clip sets, body density
+and the garment CLI are CHAR1b.2's and are not started.
+
+### 1. Three mechanisms that were finished and had never run
+
+The wave's shape, and it is the same shape three times: P29 ported a mechanism
+whole, wired its inputs, and left the last hop unmade — so the code read as
+complete and the character did not do the thing.
+
+| mechanism | ported at | what was missing | measured |
+|---|---|---|---|
+| **foot IK** | P29.4 | `Enable_FootIK_L/R` gates every part of it and **no clip in the engine has ever carried the channel** | 164 imported ALS clips + 12 committed sample clips = **0** carry it |
+| **the additive layer** | P29.2 | `apply_layers` had **zero callers** outside its own tests (audit item 88b), while the pose step's own comment has named it as one of its writers since SK1a | grep |
+| **look-at** | P29.4 | `aim_yaw_deg`, `aim_pitch_deg`, `aim_offset_weight` computed every fixed step, **no reader** | grep |
+
+And a fourth, one layer up: the island's hero played the P24 wizard's three-state
+`idle`/`walk`/`run` machine while 164 authored ALS sequences sat beside it in the
+same project, so **eleven of the fourteen catalogue modes had no animation at
+all**.
+
+### 2. The foot-IK gate is not derivable from a clip — the measurement
+
+The obvious repair was to derive `Enable_FootIK_*`: "does this foot reach the
+ground in this clip" ought to be an absolute height test against the rig's own
+ground plane, since every rig this engine poses has its origin at its feet. **The
+census falsified it.** Over the island's 164 clips the lowest foot spans
+0.0801 … 0.1749 m and the families that must differ do not:
+
+| family | lowest foot, m |
+|---|---|
+| `ALS_N_Sprint_F` | 0.0801 |
+| `ALS_N_Walk_F` | 0.0907 |
+| `ALS_N_Run_F` | 0.1140 |
+| `ALS_N_TurnIP_L90` | 0.1340 |
+| `ALS_N_Mantle_2m` | 0.1432 |
+| `ALS_N_Land_Light` | 0.1546 |
+| **`ALS_N_FallLoop`** | **0.1610** |
+| **`ALS_N_JumpLoop`** | **0.1739** |
+| **`ALS_N_Mantle_1m_RH`** | **0.1749** — the highest of all 164 |
+
+UE authors an in-air cycle with the root on the ground and the legs hanging, so a
+fall loop's ankle is exactly where a walk's ankle is. There is no band. The gate
+is taken where ALS takes it — from the movement STATE
+(`if (MovementState.InAir()) { SetPelvisIKOffset(0); ResetIKOffsets(); }`) — an
+authored curve still wins, and a clip that carries none is read as **on**.
+`char1b_gate::the_foot_ik_gate_is_not_derivable_from_a_clips_foot_height` re-runs
+the census and fails if a future import ever makes the families separable, which
+is the only honest way to write down a negative result.
+
+### 3. The soles, on four surfaces
+
+The mandate: *"characters … stand on the surface with perfect topography and foot
+IK … currently the feet of characters sink in through the surface a little bit."*
+Measured on a headless fixture with a level floor, a 15° ramp, a 15 cm kerb and
+an 18 cm stair flight, on a rig whose ankle IS its sole so the number is a
+subtraction and not an estimate:
+
+| surface | left | right | pelvis drop |
+|---|---|---|---|
+| flat | hover **0.10 mm** | hover **0.10 mm** | −0.0201 m |
+| slope 15° | hover **4.77 mm**, roll 16.74° | hover **4.99 mm**, roll 15.79° | — |
+| kerb 15 cm | hover **0.00 mm** | hover **0.10 mm** | **−0.1701 m** |
+| stairs 18 cm | penetration **0.10 mm** | hover **0.10 mm** | **−0.1979 m** |
+
+Worst of the eight: **4.99 mm** against the mandate's 10 mm. The 4.8 mm on the
+ramp is exactly ALS's own `FootHeight · (1 − cos θ)` — the term that is right on a
+rig whose ankle stands 13.5 cm over its sole and a rounding error on a fixture
+whose ankle is its sole. A 40° ramp reads 21.03° / 17.25° against the 15° ramp's
+16.74° / 15.79°, so the ankle's own 15° clamp is what shapes the last of it.
+
+Three defects were in the way, each found by measuring the thing rather than the
+report:
+
+1. **The pelvis drop was counted twice.** The feet were published after it, and
+   the goal is `published_foot + (ground under the foot − ground under the BODY)`
+   — so the drop that had already lowered the feet was measured again from the
+   lowered position. On the 15° ramp the drawn sole ended **48.6 mm inside** the
+   surface and the goal itself was 53 mm below the ground it named.
+2. **The goal was self-referential.** Publishing the foot after `apply_foot_ik`
+   fed last step's correction in as this step's origin: on `foot_slide_gate`'s
+   flat floor a foot that should have held still rose **0.0801 → 0.0937 m over
+   ten steps** with the increment growing, inside that arm's own ±3 cm tolerance.
+   UE avoids both structurally — its rigs carry `ik_foot_root` as a SIBLING of the
+   pelvis, so ALS reads a bone no correction has touched. This engine solves the
+   real `foot_*` joints, so the independence has to come from WHERE the read is
+   taken: after pose construction, before every correction.
+3. **The legs solved with no pole and no limits.** `apply_hand_ik` has passed a
+   real pole since SK1b with its own note that an elbow "has no opinion of its own
+   about which way to fold"; a knee has the same problem and was getting `None`.
+   On a straight leg a foot handed a goal 58 mm away moved **0.23 mm**.
+
+And P29.6's finding **"foot IK is a partial brake"** is retired: it was the
+horizontal half of defect 2. With the feedback gone `bare == with_ik` to the last
+bit on a swinging foot, which is what a purely vertical offset means.
+
+### 4. The clip → mode map
+
+`inf_anim::als::LOCOMOTION_MAP` — names, never assets; ALS is MIT and its
+sequences stay in the local project. Measured against the island's own clips:
+**43 slots, every one bound, 71 animated joints each**, no shells.
+
+* 26 machine states: the gait ladder (`idle` → `start` → `walk` → `run` →
+  `sprint`) with six-direction `BlendSpace2D`s on `walk` and `run`, two stops,
+  four turns-in-place, the crouch set with its own four turns, `jump` / `fall` /
+  `fall_fast`, `land_light` / `land_heavy`, `roll`, `ragdoll` and the two crouched
+  get-ups;
+* 8 weapon overlays and 7 aim sweeps as **named clip sets the machine never
+  enters** — a `.inf_sm` is the one asset a character carries that names clips and
+  the additive layer needed to name some too. UE's own graphs hold their aim
+  offsets exactly this way.
+
+Through the bridge onto the island: **41 states, 53 transitions, 65 clips bound,
+0 unbound**, written at the committed machine GUIDs so nothing in the `.inf_lvl`
+moves.
+
+**The reachability arm is what made it true.** Walking the built graph over the
+parameter sets the movement step really publishes — rather than reading the table
+and believing it — found thirteen of twenty-six states unreachable:
+
+* the landing states were gated on `land_alpha`, a **prediction the producer
+  clears** the instant `grounded` goes true, so `grounded && land_alpha > 0.5` is
+  never satisfied on one step and a character could not land;
+* the eight turn-in-place clips had **no signal at all** — P29.4 ported ALS's
+  whole rule set onto the runtime and nothing published that a turn was happening;
+* the two stop-down clips had no way to choose a foot;
+* the two get-ups had no way to choose a side, while `RagdollRuntime::face_up` has
+  recorded exactly that since P29.4 with no reader;
+* two `Any` edges outvoted their own ladders every step, so `crouch_walk` and
+  `fall_fast` sat behind conditions that were never wrong.
+
+Sixteen published parameters now, up from nine: `move_x` / `move_y` (the
+direction plane, normalized ALS's way onto the diamond `|x| + |y| = 1`),
+`landing`, `time_since_land`, `turn_deg`, `planted_foot`, `face_up`.
+
+### 5. Look-at — the user's own sentence
+
+*"When the user moves their mouse … the character turns their head and sometimes
+body."* The chain is hips-outward (spine, neck, head), each link clamped against
+what the links before it did not take, so the total tracks the camera exactly
+until the whole chain saturates:
+
+| asked | chain drew | head | spine | neck |
+|---|---|---|---|---|
+| −60.0° | **−60.000°** | −33.000° | 0 | 1 |
+| −30.0° | **−30.000°** | −16.500° | 0 | 1 |
+| +30.0° | **+30.000°** | +16.500° | 0 | 1 |
+| +60.0° | **+60.000°** | +33.000° | 0 | 1 |
+| +170.0° | **+101.500°** (the ceiling) | +70.000° (its own limit) | 0 | 1 |
+
+Zero spine at the default `VelocityDirection`, which is ALS's own split:
+`UpdateAimingValues` writes `SpineRotation` only when the mode is not
+`VelocityDirection`, so a character running where it is going turns its head and
+one aiming brings its chest round. NPCs look at the pawn inside a 20 m gaze
+radius — an NPC 5 m away drew **−90.000°** of chain and one at 25 m drew nothing.
+The witness log is deliberately NOT the source and the reason is written into
+`look_at_of`: it records acts with a place and a step and no notion of who is
+still interested in one.
+
+### 6. The crowd, per agent, per tier
+
+`crowd_sweep` grows a third ladder so the animation phase is priced per agent per
+tier in **one session** — the CHAR1a.3 audit's §(k) is a finding about an A/B
+whose halves came from different runs. At N = 1000, both ladders posing 1 001 rigs:
+
+| ladder | `animation` ms | µs / agent |
+|---|---|---|
+| all-`Full` | 5.4255 | **5.420** |
+| all-`Near` | 3.8253 | **3.821** |
+
+The `Near` rung saves **29.5 %** of the phase, which is the SK1b hand pass;
+`crowd.rs`'s carried note that *"the `Near` rung still saves nothing that can be
+falsified"* is retired by measurement. And a `Near` agent's arms follow its clip:
+on the committed fixture `Near` poses the same bytes as `Full`, and `Far` poses
+the bind.
+
+### 7. The two carried items
+
+**111, first half — the rebind carries the ladder.** `rebind_character` passed
+`import = None`, and on `write_asset_at_with_id`'s fresh-file path that does not
+merely fail to add a table, it wipes one. The committed body now carries
+`character_lod_assets` = 3 rungs at **95 330 / 21 040 / 7 996** triangles
+switching at **0 / 32 / 96 m**, with the rung ids on its dependency list so a
+cook's closure packs them. **The second half is still open and the gate arm says
+so**: nothing in the engine READS `character_lod_assets` — one writer, no
+consumer, `SkeletalMesh` carries one GUID and `resolve_skinned` takes no view — so
+the hero still draws rung 0 at every distance. PERF1's, with the numbers.
+
+*(Carried 109 did not reproduce on this manifest: the project's file census is
+1 387 before and 1 387 after the re-import, 45 `.inf_mesh` before and after. The
+material names were identical, which is the condition item 109 names.)*
+
+**112 — a level has one pawn.** The editor's create-character door set
+`player_controlled: true` unconditionally on a fresh `v4` guid, so who the camera
+followed was a byte-lexicographic race between the island's derived hero guid
+(`2b9c29df…`, leading dword ≈ 0.170 of the range) and a random one. A second
+character gets the flag only if there is no pawn yet.
+
+### 9. The fourth mechanism that had never run — and how it was found
+
+The three in §1 were found by reading. The fourth was found by **reading the
+numbers the demo loop now writes down**, which is what they are for: on the
+island, in PIE, the hero's aim reached **-165.14 degrees** and its head drew
+**0.00**.
+
+A `RoleIndex` over an empty table answers `None` to everything, and look-at, the
+aim-offset mask and the SK1b hand pass are each written to do nothing when it
+does -- deliberately, so a quadruped or a pre-v3 `.inf_skel` is left alone. **The
+UE bridge writes `roles: Vec::new()`.** So all three were silently off on the one
+character the game is about, and every arm in the tree passed, because every
+fixture builds its rig through `manny`, which carries a table.
+
+`inf_anim::roles::infer_roles` reads the shipped mannequin hierarchy's own table
+by name -- one vocabulary, not two -- and invents nothing: a rig whose bones are
+called `Bone.001` gets an EMPTY table and behaves exactly as it did. Applied at
+the glTF stage (`SkeletonAsset::imported`) **and again at the rebind**, because
+the importer's content-addressed cache reuses an asset whose source has not
+changed and a project imported before the door existed would keep its table-less
+rig for ever. The island's hero: **342 joints, 150 roles**.
+
+### 10. The island, measured
+
+One 60-second PIE session on the shipped island, 220 samples at 4 Hz
+(`hero.csv`, thirteen columns since this wave):
+
+* **eight machine states play**: `idle`, `start`, `walk`, `run`, `sprint`,
+  `crouch_idle`, `crouch_walk`, `jump` -- against the three the hero had;
+* **the head follows the mouse to the digit**: `head_yaw` tracks `aim_yaw`
+  (-17.75 -> -17.75, -53.04 -> -53.04, -97.91 -> -97.91) and clamps at
+  **+-101.50 degrees**; `head_pitch` clamps at **+35.00**;
+* **the foot residual** -- where the pose step left the foot against where the
+  physics probe said the surface under it is -- is published on **216 of 220
+  rows, and the four without it are the `jump` rows**, which is ALS's own
+  airborne release working. p50 **0.071 mm**, worst **19.241 mm**.
+
+| state | rows | worst residual |
+|---|---|---|
+| `idle` | 169 | 9.704 mm |
+| `run` | 23 | 1.885 mm |
+| `walk` | 4 | 9.723 mm |
+| `start` | 14 | 10.286 mm |
+| `sprint` | 6 | **19.241 mm** |
+
+**Six rows exceed the mandate's centimetre and all six are `sprint` or `start`.**
+At full stride the goal is past the leg's own extension and the solve clamps --
+which is the stride-warping question CHAR1b.2's clause 6 owns, named here with
+its number rather than left for the next wave to discover.
+
+### 11. What the mutation runs found, and what they could not reach
+
+Nine mutations, each applied to the source, measured, reverted. Two of them found
+defects in the ARMS rather than in the code, which is what they are for:
+
+* disabling `apply_aim_offset` outright left its arm **green**, because the arm
+  compared whole-pose bytes and the look-at chain was still moving the head and
+  the neck. It reads `spine_01` now -- the joint the sweep clips author and the
+  one the look-at chain cannot reach in `VelocityDirection`, where
+  `LookAtLimits::spine_share` is zero;
+* putting `player_controlled: true` back in the editor's door reded **nothing**,
+  because the arm beside it built its world by hand. A second arm places
+  twenty-one characters through the real door -- twenty-one because the defect
+  was a race and one draw proves nothing -- and the mutation loses it at the
+  nineteenth.
+
+And one mutation is only visible on a **first** write: `write_asset_at_with_id`'s
+rewrite path preserves an existing `[import]` table when handed `None`, so
+dropping the ladder carry is invisible on a re-import and shows only on a project
+that does not have one yet. Measured that way -- sidecar stripped, mutated binary,
+re-import -- the arm reds with "carries no `[import]` table at all".
+
+### 12. What CHAR1b.2 and CHAR1c inherit
+
+* **Mantling** — the three ALS clips are imported and deliberately absent from the
+  map: a mantle is a warped, timeline-driven traversal rather than a machine
+  state, and `inf_physics::d3::traversal::probe_ledge` is the substrate.
+* **The ALS quality checklist** — stride warping, distance matching, lean,
+  in-air control and land recovery by height, ragdoll blend in/out,
+  inertialized transitions with the pop bounded.
+* **The authored/sourced sets** — slide, throwing, swimming, prone and the
+  STANDING get-up. ALS ships none of them (measured by name at CHAR1a.2), and the
+  map deliberately does not carry a row for a clip that does not exist, so an
+  unbound row is a missing import and never a missing asset kind.
+* **Body density and the garment CLI** — clause 8, untouched here.
+* **The camera** is CHAR1c's; this wave reads the look direction through the
+  existing input door and moves no camera.
+* **`ALS_N_SecondaryMotion`** is imported and unbound: ALS's idle is
+  `ALS_N_Pose` plus a breathing additive, and the additive layer now exists to
+  carry it. One row in the map away.
