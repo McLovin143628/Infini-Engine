@@ -732,6 +732,109 @@ Say "UP: another long press leaves prone"
 Start-Sleep -Milliseconds 1400
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "36-back-up.png") | ForEach-Object { Say $_ }
 
+# ── 5c. THE CAMERA (wave CHAR1c) ─────────────────────────────────────────────
+#
+# The wave's own frames, and every one of them is TRIGGERED on `hero.csv` rather
+# than slept for. The log carries four new columns since this wave — the boom's
+# length, how much of the hero's body is being drawn, the whisker steer and who
+# is holding the camera — so a frame captioned "the boom at its authored length"
+# has the number beside it instead of an adjective.
+#
+# The order is the order a reader wants: the framing at rest FIRST (carried 89 is
+# a close-up of the back of the hero's neck, photographed four times, and this is
+# the same spot photographed again), then the camera against things.
+Restore-PlayerFocus "before the camera leg"
+Say "CAMERA: the framing at rest — the boom at its authored length"
+Start-Sleep -Seconds 2
+Wait-ForHero -Csv $heroCsv -What "the hero at rest with a full boom" -TimeoutS 6.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -gt 2.5) -and ([double]$c[7] -lt 0.2) } `
+    -Out (Join-Path $OutDir "60-camera-at-rest.png") | Out-Null
+
+# **AGAINST A WALL.** Walk backwards into whatever is behind the hero and hold
+# it there: the trigger is the BOOM, not a place, so it fires wherever the street
+# actually has a wall.
+Say "CAMERA: backing into a wall — the boom clips and the body fades"
+[InfInput]::Down(0x1F)   # scancode: S
+$gotWall = Wait-ForHero -Csv $heroCsv -What "a clipped boom" -TimeoutS 8.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[7] -gt 0.8) } `
+    -Out (Join-Path $OutDir "61-camera-against-a-wall.png")
+if ($gotWall) {
+    # …and again, shorter, where the near fade has actually engaged. It is
+    # allowed to miss and to say so: a street with nothing tall behind it never
+    # takes the boom below the fade band.
+    Wait-ForHero -Csv $heroCsv -What "the near fade engaged" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 14) -and ([double]$c[14] -lt 0.999) } `
+        -Out (Join-Path $OutDir "62-camera-near-fade.png") | Out-Null
+}
+[InfInput]::Up(0x1F)
+Start-Sleep -Milliseconds 600
+
+# **THE WHISKER FAN**, photographed by its own number: a frame taken while the
+# steer is non-zero is a frame of the camera moving out of the way of something
+# it has not hit.
+Say "CAMERA: a steered boom — the fan seeing a wall the boom has not reached"
+[InfInput]::Down(0x11)
+for ($i = 0; $i -lt 40; $i++) { [InfInput]::Look(-24, 0); Start-Sleep -Milliseconds 16 }
+Wait-ForHero -Csv $heroCsv -What "a steered boom" -TimeoutS 6.0 `
+    -Predicate { param($c) ($c.Count -gt 15) -and ([math]::Abs([double]$c[15]) -gt 1.0) } `
+    -Out (Join-Path $OutDir "63-camera-whisker-steer.png") | Out-Null
+[InfInput]::Up(0x11)
+
+# **AIMING** — the shoulder block: arm 3.0 → 2.0 m, fov 70 → 55, the offset 0.45
+# → 0.55. The trigger is the boom coming inside the aim block's own length while
+# the hero is in `Aiming`.
+Restore-PlayerFocus "before the aim"
+Say "CAMERA: aiming — the shoulder block"
+[InfInput]::RightDown()
+Wait-ForHero -Csv $heroCsv -What "the aim camera" -TimeoutS 5.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -lt 2.4) -and ([double]$c[13] -gt 0.5) } `
+    -Out (Join-Path $OutDir "64-camera-aiming.png") | Out-Null
+[InfInput]::RightUp()
+Start-Sleep -Milliseconds 500
+
+# **THE ROTATION-MODE KEY** (carried 123's door): Q reaches looking-direction
+# without an aim press, and a turn in place follows from it.
+Restore-PlayerFocus "before the rotation-mode key"
+Say "CAMERA: Q — looking-direction without an aim press, then a turn in place"
+[InfInput]::Down(0x10); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x10)   # scancode: Q
+Start-Sleep -Milliseconds 400
+for ($i = 0; $i -lt 34; $i++) { [InfInput]::Look(28, 0); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 1600
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "65-camera-turn-in-place.png") | ForEach-Object { Say $_ }
+
+# **FIRST PERSON** (G): the seat, and the body drawn out of the way by the near
+# fade rather than by a visibility flag.
+Restore-PlayerFocus "before first person"
+Say "CAMERA: G — the first-person seat"
+[InfInput]::Down(0x22); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x22)   # scancode: G
+Wait-ForHero -Csv $heroCsv -What "the first-person seat" -TimeoutS 5.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -lt 0.4) } `
+    -Out (Join-Path $OutDir "66-camera-first-person.png") | Out-Null
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "67-camera-first-person-walk.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x11)
+Say "CAMERA: G again — back to third person"
+[InfInput]::Down(0x22); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x22)
+Wait-ForHero -Csv $heroCsv -What "third person again" -TimeoutS 5.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -gt 2.0) } `
+    -Out (Join-Path $OutDir "68-camera-third-person-again.png") | Out-Null
+
+# **A VEHICLE.** E is the interact key; the drive camera's boom is more than
+# twice the walk's, so the trigger is the boom itself and it fires on the blend
+# rather than at its end.
+Restore-PlayerFocus "before the vehicle"
+Say "CAMERA: E at a car — the drive camera blends in"
+[InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # scancode: E
+Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 6.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 4.0) } `
+    -Out (Join-Path $OutDir "69-camera-vehicle-blend.png") | Out-Null
+Wait-ForHero -Csv $heroCsv -What "the drive camera settled" -TimeoutS 4.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 5.5) } `
+    -Out (Join-Path $OutDir "70-camera-vehicle-settled.png") | Out-Null
+Say "CAMERA: E again — out of the car"
+[InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)
+Start-Sleep -Milliseconds 1200
+
 # ── 5b. the placements, and the frames the wave could not take ───────────────
 #
 # Only when `-SpawnAt` was given. Each waypoint is applied by the PLAYER at its
@@ -786,6 +889,15 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
     Wait-ForHero -Csv $heroCsv -What "a ragdoll" -TimeoutS 60 `
         -Predicate { param($c) $c[11] -eq "ragdoll" } `
         -Out (Join-Path $OutDir "47-ragdoll.png") | Out-Null
+    # **THE RAGDOLL FOLLOW** (wave CHAR1c, the director's `Override` layer). The
+    # gameplay rig keeps framing the parked capsule while seventeen bodies fall
+    # down the hill in its place, so the death happens off screen; the override
+    # frames the pelvis the bodies actually ended at. Column 16 says who is
+    # holding the camera, which is what makes this a frame OF the override rather
+    # than a frame taken while one happened to be running.
+    Wait-ForHero -Csv $heroCsv -What "the death cam holding the camera" -TimeoutS 20 `
+        -Predicate { param($c) ($c.Count -gt 16) -and ($c[16].Trim() -eq "override") } `
+        -Out (Join-Path $OutDir "71-camera-ragdoll-follow.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "a get-up" -TimeoutS 20 `
         -Predicate { param($c) $c[11] -match "^getup" } `
         -Out (Join-Path $OutDir "48-getup.png") | Out-Null

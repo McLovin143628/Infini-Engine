@@ -36,7 +36,11 @@ Useful switches:
 01-editor.png     the editor as it booted, on the showcase island
 02-pie-a.png      the running game
 03-pie-b.png      the same, two seconds later, with W held throughout
-hero.csv          t,frame,x,y,z,mode,speed,camera_pull — four rows a second
+hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pitch,
+                  state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder
+                  — seventeen columns, four rows a second. The last four are wave
+                  CHAR1c's and are APPENDED, so every index a script already reads
+                  keeps its meaning.
 demo.log          every step the driver took, with timings
 ```
 

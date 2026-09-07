@@ -699,9 +699,22 @@ impl HeroLog {
                     .fold(0.0f64, |a, v| if v.abs() > a.abs() { *v } else { a })
                     * 1000.0
             });
+        // **THE CAMERA'S OWN FOUR NUMBERS** (wave CHAR1c), APPENDED so every
+        // column index a script already reads keeps its meaning. Column 7 has
+        // carried the clip since P29.6; these are the boom it left, how much of
+        // the hero's body is being drawn, how far the whisker fan steered, and
+        // who is holding the camera. A frame captioned "the boom at its authored
+        // length" wants a number beside it, and this is where the number is.
+        let cam = sim.camera();
+        let holder = match cam.director.holder().map(|h| h.0) {
+            Some(inf_ecs::camera::CameraLayer::Scripted) => "scripted",
+            Some(inf_ecs::camera::CameraLayer::Override) => "override",
+            Some(inf_ecs::camera::CameraLayer::Gameplay) | None => "gameplay",
+        };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},\
+                 {:.4},{:.4},{:.2},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -725,10 +738,14 @@ impl HeroLog {
                 match foot_mm {
                     Some(mm) => format!("{mm:.3}"),
                     None => String::new(),
-                }
+                },
+                cam.arm_m,
+                cam.subject_fade,
+                cam.whisker_steer_deg,
+                holder
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
