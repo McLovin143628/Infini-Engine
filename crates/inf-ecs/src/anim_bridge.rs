@@ -758,6 +758,41 @@ pub fn ragdoll_pose(world: &EcsWorld, guid: Uuid) -> Option<&RagdollPose> {
     bridge(world)?.ragdoll_pose.get(&guid)
 }
 
+/// **Throw something** (wave CHAR1b.2) — the gameplay door for the two authored
+/// throw additives.
+///
+/// The shape `inf_physics::d3::ragdoll_bridge::start_ragdoll` set: *"the seam a
+/// Blueprint, an AI or a damage system uses"*. `overhand` picks
+/// `INF_Throw_Over` over `INF_Throw_Under`; `duration_s` is how long the
+/// additive plays, which the caller reads off the clip.
+///
+/// `false` for an entity with no [`crate::components::CharacterMovement`], and
+/// for a non-positive duration — a refusal is a value.
+///
+/// # There is no KEY for this, and that is deliberate
+///
+/// A throw needs a thing to throw. The throwable-item set is WPN1's, and a key
+/// that played an animation and released nothing would be exactly the shape this
+/// wave spent its time closing: a reader that lies. The animation half is built
+/// and driven through this door; the input binding arrives with the item.
+pub fn start_throw(world: &mut EcsWorld, guid: Uuid, overhand: bool, duration_s: f64) -> bool {
+    if !(duration_s > 0.0) {
+        return false;
+    }
+    let Some(entity) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut cm) = world
+        .world_mut()
+        .get_mut::<crate::components::CharacterMovement>(entity)
+    else {
+        return false;
+    };
+    cm.runtime.throw_s = duration_s;
+    cm.runtime.throw_over = overhand;
+    true
+}
+
 /// **Forget every bridge entry.** Called by [`crate::pose::clear_poses`], which is
 /// the one door that forgets a play session's animation state.
 pub fn clear_anim_bridge(world: &mut EcsWorld) {

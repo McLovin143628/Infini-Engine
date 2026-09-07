@@ -1528,6 +1528,23 @@ pub fn step_pose_evaluation<'c>(
                         // same idle breathe together and one that has just
                         // entered it starts at the beginning.
                         apply_breath(asset, &mut pose, machine, &clips, rt.state_time);
+                        // ── **THE THROW** (wave CHAR1b.2) ──
+                        //
+                        // The other two overlays the authored sets added, and
+                        // the same machinery a third time: a delta from the
+                        // clip's own first frame, over the upper-body mask,
+                        // played once on the character's own clock. A throw is
+                        // an additive and not a state because a character
+                        // throws a grenade *while it is running*, and a state
+                        // would stop the run.
+                        //
+                        // **Absent costs nothing**: `throw_s` is `0` on every
+                        // character that has never thrown anything — the
+                        // `Default` this field counts down for — and that is one
+                        // component read before a clip is looked at.
+                        if let Some((over, t)) = throw_of(world, entity) {
+                            apply_throw(asset, &mut pose, machine, &clips, over, t);
+                        }
                         inf_anim::drive_pose(
                             &asset.skeleton,
                             &mut pose,
@@ -2175,6 +2192,77 @@ fn apply_aim_offset<'c>(
 /// **At `t = 0` the delta is the identity** and this returns `false` before
 /// sampling anything, so a character on the frame it entered its idle poses the
 /// bytes it posed before this pass existed.
+/// **How far into a throw this character is**, and which one (wave CHAR1b.2).
+///
+/// `None` for an entity with no [`crate::components::CharacterMovement`] and for
+/// a `throw_s` of zero, which is every character that has never thrown anything.
+/// The clock counts DOWN, so the elapsed time is the clip's own duration minus
+/// what is left — resolved inside the pass, which is the only place that has the
+/// clip.
+fn throw_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<(bool, f64)> {
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let left = cm.runtime.throw_s;
+    (left.is_finite() && left > 0.0).then_some((cm.runtime.throw_over, left))
+}
+
+/// **Apply a throw additive** (wave CHAR1b.2), answering whether it wrote
+/// anything.
+///
+/// The third consumer of the same machinery as the aim offset and the breath —
+/// a delta from the clip's own first frame, over
+/// [`inf_anim::JointMask::upper_body`], because a throw is a shoulder, an elbow
+/// and a chest and the legs must keep doing whatever they were doing.
+///
+/// `left_s` is what remains on the character's own clock; the elapsed time is
+/// the clip's duration minus it, which is why the resolution happens here — the
+/// clock's owner does not have the clip.
+fn apply_throw<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    overhand: bool,
+    left_s: f64,
+) -> bool {
+    let want = if overhand {
+        inf_anim::als::THROW_OVER_STATE
+    } else {
+        inf_anim::als::THROW_UNDER_STATE
+    };
+    let Some(state) = machine.states.iter().find(|s| s.name == want) else {
+        return false;
+    };
+    let inf_anim::state_machine::Motion::Clip(cref) = &state.motion else {
+        return false;
+    };
+    let Some(clip) = clips(*cref) else {
+        return false;
+    };
+    let dur = f64::from(clip.duration);
+    if !(dur > 0.0) {
+        return false;
+    }
+    let t = (dur - left_s).clamp(0.0, dur);
+    if !(t > 1.0e-9) {
+        // The first frame of a throw is its reference pose, so the delta is the
+        // identity and this writes nothing — the same guard the breath has, for
+        // the same byte-identity reason.
+        return false;
+    }
+    let Some(mask) = inf_anim::JointMask::upper_body("Mask_Throw", &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    let base = inf_anim::pose::sample_clip(&rig.skeleton, clip, 0.0, false);
+    let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, false);
+    let delta = inf_anim::additive_delta(&base, &now);
+    let layer = inf_anim::AnimLayer::additive("throw", 1.0).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+    true
+}
+
 fn apply_breath<'c>(
     rig: &inf_anim::SkeletonAsset,
     pose: &mut Pose,
@@ -5048,7 +5136,24 @@ mod tests {
         };
         // In front of the chest and a little low — reachable, and nowhere near
         // where a T-pose puts a wrist.
-        let target = Vec3d::new(0.25, 1.15, 0.45);
+        //
+        // **Placed as a fraction of the arm this rig actually has** (wave
+        // CHAR1b.2). It was three literals, and clause 8's `arm_length_ratio`
+        // 0.42 -> 0.30 shortened the mannequin's arm from 0.735 m to 0.525 m and
+        // left the old point 0.538 m from the shoulder — 10 mm outside it, so a
+        // solve that reached exactly as far as it can was read as a miss. Two of
+        // `inf_anim::grip`'s own arms went the same way for the same reason and
+        // are repaired the same way.
+        let target = {
+            let bind = inf_anim::pose::global_transforms(
+                &rig.skeleton,
+                &inf_anim::pose::Pose::rest(&rig.skeleton),
+            );
+            let at = |j: u16| bind[j as usize].to_scale_rotation_translation().2;
+            let span = (at(lower) - at(upper)).length() + (at(hand) - at(lower)).length();
+            let s = at(upper) + glam::Vec3::new(0.12, -0.62, 0.78).normalize() * (span * 0.90);
+            Vec3d::new(f64::from(s.x), f64::from(s.y), f64::from(s.z))
+        };
         set_hand_ik(
             &mut world,
             guid,
@@ -5066,7 +5171,8 @@ mod tests {
         step_mannequin(&mut world, &rig, 0.1);
         let posed = evaluated_pose(&world, guid).expect("a pose");
         let wrist = joint_at(posed, &rig, hand);
-        let miss = (wrist - glam::Vec3::new(0.25, 1.15, 0.45)).length();
+        let miss =
+            (wrist - glam::Vec3::new(target.x as f32, target.y as f32, target.z as f32)).length();
         println!("the wrist landed {miss:.5} m from its target");
         assert!(miss < 0.01, "the hand missed its target by {miss} m");
         // …and it MOVED to get there, which the assertion above would also be

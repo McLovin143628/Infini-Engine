@@ -1794,6 +1794,21 @@ pub struct MovementRuntime {
     pub press_roll: bool,
     /// See [`press_jump`](Self::press_jump).
     pub press_dive: bool,
+    /// **How much of a throw is left to play**, seconds; `0` is no throw (wave
+    /// CHAR1b.2).
+    ///
+    /// Counted DOWN rather than up so that the `Default` this struct derives —
+    /// which every character in every level that has never thrown anything
+    /// carries — means "not throwing" rather than "on the first frame of one".
+    ///
+    /// A one-shot upper-body ADDITIVE and not a mode: a character throws a
+    /// grenade while it is running, and a `MovementMode` would stop the run.
+    /// Started by [`crate::anim_bridge::start_throw`], advanced by the ordinary
+    /// movement step, and read by the pose step's `apply_throw` — the same three
+    /// places, in the same order, as the ragdoll's own clock.
+    pub throw_s: f64,
+    /// Whether the running throw is **overhand** (`true`) or underhand.
+    pub throw_over: bool,
 
     // ── integrated state ──
     /// World velocity, m/s. **Owned by the movement step** — this is the whole

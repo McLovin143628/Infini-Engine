@@ -881,6 +881,14 @@ fn step_one(
     cm.runtime.time_in_mode_s += dt;
     cm.runtime.time_since_land_s += dt;
     super::ragdoll_bridge::tick_get_up(world, guid, &mut cm, dt);
+    // **The throw's one-shot clock** (wave CHAR1b.2), here for the same reason
+    // the get-up blend is: a throwing character walks, turns and falls like any
+    // other, because a throw is an upper-body ADDITIVE and not a mode. It counts
+    // down, so a character that has never thrown anything carries a zero and
+    // this line is one subtraction that saturates at nothing.
+    if cm.runtime.throw_s > 0.0 {
+        cm.runtime.throw_s = (cm.runtime.throw_s - dt).max(0.0);
+    }
 
     // ── 4. Mode resolution: the single table, asked once per candidate.
     let previous_mode = cm.mode;

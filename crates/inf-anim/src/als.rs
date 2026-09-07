@@ -54,6 +54,12 @@ pub const LOOK_SWEEP_STATE: &str = "aim_look";
 /// item 128) — `ALS_N_SecondaryMotion`, layered over the idle through the
 /// upper-body mask rather than entered.
 pub const BREATH_STATE: &str = "breath";
+/// The two states whose clips are the **throw additives** (wave CHAR1b.2) —
+/// `INF_Throw_Over` and `INF_Throw_Under`, layered over whatever the character
+/// is doing rather than entered, so a grenade can be thrown mid-run.
+pub const THROW_OVER_STATE: &str = "throw_over";
+/// See [`THROW_OVER_STATE`].
+pub const THROW_UNDER_STATE: &str = "throw_under";
 
 /// The blend coordinate the look sweep's **neutral** sits at — the pose the
 /// additive delta is measured from.

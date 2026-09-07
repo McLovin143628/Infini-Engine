@@ -4487,3 +4487,368 @@ fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
     // `a_lean_moves_the_chest_and_leaves_the_pelvis_and_feet_alone`, which asks
     // the same rig's feet with no stride in the window to confuse it.
 }
+
+/// **THE AUTHORED SETS RUN ON THE ISLAND** (the wave's set D — slide, prone,
+/// swimming, the throws and the standing get-up).
+///
+/// ALS ships none of these: a census by name found no slide, no throw, no swim,
+/// no prone and no standing get-up in the whole donor. They were derived from
+/// the hero's own rig by `inf_anim::authored` at this wave's first checkpoint
+/// and bound into the map — and a bound clip that nothing ever plays is exactly
+/// the shape the CHAR1b.1 audit spent its day on. This drives every one of them
+/// on the island and reads the answer off the JOINTS.
+///
+/// The doors are the ones a player has, and where a player has none the door is
+/// named:
+///
+/// * **slide** — sprint to speed and tap crouch (`movement.rs`'s own
+///   `want_sprint && speed >= slide_entry_speed_mps`);
+/// * **prone** — hold crouch past the long-press threshold, which is
+///   `MovementIntent::from_actions`' own rule;
+/// * **swimming** — stand in the island's own water and let the water probe
+///   decide, surface or under, by how deep;
+/// * **the standing get-up** — a ragdoll ended before the body reaches the
+///   ground, which is `RagdollRuntime::upright`'s whole definition ("knocked
+///   about and stayed on its feet");
+/// * **the throws** — `inf_ecs::anim_bridge::start_throw`, the gameplay door,
+///   because a throw needs a thing to throw and the throwable set is WPN1's. A
+///   key that played an animation and released nothing would be the defect this
+///   wave has spent its day closing.
+///
+/// Every claim is a POSE: a slide lowers the pelvis and the character travels
+/// while it does; prone puts the pelvis on the floor; a swim keeps it near the
+/// waterline; a throw moves the hand through an arc that the same character
+/// standing still does not.
+#[test]
+fn the_authored_sets_play_on_the_island_and_the_joints_move() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_ecs::components::MovementMode;
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let (rigs, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero was posed");
+    let rig = rigs.get(&ep.skeleton).expect("its rig is on disk").clone();
+    let roles = rig.role_index();
+    let pelvis_j = roles
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+        .expect("a pelvis");
+    let feet_j = inf_anim::derive::foot_joints(&rig);
+    let hand_j = roles
+        .first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Right)
+        .or_else(|| roles.first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Left))
+        .expect("a hand");
+
+    // **The pelvis's height in the hero's OWN model frame**, whose origin is the
+    // character's feet — so this is how high the hips are carried, with the
+    // placement taken out of it.
+    //
+    // Not "the pelvis over its lower foot", which is the landings' measure and
+    // is the wrong one here: a prone character's legs are STRAIGHT, so its hips
+    // are a full leg length from its feet exactly as a standing character's are.
+    // Measured before the metric was changed: prone read 0.8037 m against a
+    // standing 0.8020 m and said nothing at all.
+    let _ = &feet_j;
+    let stance = |sim: &inf_player::runtime_sim::RuntimeSim| -> f64 {
+        let Some(p) = inf_ecs::pose::evaluated_pose(sim.world(), hero) else {
+            return f64::NAN;
+        };
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &p.pose);
+        f64::from(g[pelvis_j as usize].to_scale_rotation_translation().2.y)
+    };
+    // Put the hero somewhere and let it settle, height included — `hero_to`
+    // takes the height it finds and adds to it, which after a dive puts the
+    // character back in the water.
+    let place = |sim: &mut inf_player::runtime_sim::RuntimeSim, p: [f64; 3]| {
+        {
+            let w = sim.world_mut();
+            let e = w.entity_of(hero).expect("the hero is in the world");
+            if let Some(mut t) = w.world_mut().get_mut::<inf_ecs::components::Transform>(e) {
+                t.translation.x = p[0];
+                t.translation.y = p[1] + 1.0;
+                t.translation.z = p[2];
+            }
+            if let Some(mut c) = w
+                .world_mut()
+                .get_mut::<inf_ecs::components::CharacterMovement>(e)
+            {
+                c.runtime.velocity = inf_ecs::math::Vec3d::ZERO;
+                c.mode = MovementMode::Grounded;
+            }
+        }
+        for _ in 0..240 {
+            sim.step_once(RuntimeInput::default());
+        }
+    };
+    let hand = |sim: &inf_player::runtime_sim::RuntimeSim| -> glam::Vec3 {
+        let p = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("posed");
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &p.pose);
+        let at = |j: u16| g[j as usize].to_scale_rotation_translation().2;
+        at(hand_j) - at(pelvis_j)
+    };
+    let axes = |x: f32, y: f32| -> std::collections::BTreeMap<String, f32> {
+        [("move_x".to_string(), x), ("move_y".to_string(), y)].into()
+    };
+    let stand_stance = stance(&sim);
+    let spawn = hero_pos(&sim, hero);
+    let mut played: std::collections::BTreeSet<String> = Default::default();
+    let mut note = |sim: &inf_player::runtime_sim::RuntimeSim,
+                    set: &mut std::collections::BTreeSet<String>| {
+        if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
+            set.insert(s.name.clone());
+        }
+    };
+
+    // ── 1. THE SLIDE ─────────────────────────────────────────────────────────
+    let mut slide_stance = f64::MAX;
+    let mut slide_travel = 0.0f64;
+    let mut slide_states: std::collections::BTreeSet<String> = Default::default();
+    {
+        // Sprint until the body is past `slide_entry_speed_mps`…
+        for _ in 0..150 {
+            sim.step_once(RuntimeInput::with_down(["sprint"]).with_axes(axes(0.0, 1.0)));
+        }
+        let at_entry = hero_pos(&sim, hero);
+        // …then tap crouch while still sprinting, which is the slide.
+        for i in 0..120 {
+            let held: Vec<&str> = if i < 3 {
+                vec!["sprint", "crouch"]
+            } else {
+                vec!["sprint"]
+            };
+            sim.step_once(RuntimeInput::with_down(held).with_axes(axes(0.0, 1.0)));
+            if hero_cm(&sim, hero).mode == MovementMode::Slide {
+                note(&sim, &mut slide_states);
+                slide_stance = slide_stance.min(stance(&sim));
+                let p = hero_pos(&sim, hero);
+                slide_travel = slide_travel
+                    .max(((p[0] - at_entry[0]).powi(2) + (p[2] - at_entry[2]).powi(2)).sqrt());
+            }
+        }
+        for _ in 0..120 {
+            sim.step_once(RuntimeInput::default());
+        }
+    }
+
+    // ── 2. PRONE ─────────────────────────────────────────────────────────────
+    let mut prone_stance = f64::MAX;
+    let mut prone_states: std::collections::BTreeSet<String> = Default::default();
+    {
+        // A LONG crouch press is prone — `MovementIntent::from_actions`' own
+        // classification, and the reason the demo loop's tap is a coin toss.
+        for _ in 0..40 {
+            sim.step_once(RuntimeInput::with_down(["crouch"]));
+        }
+        sim.step_once(RuntimeInput::default());
+        for i in 0..150 {
+            let ax = if i > 60 {
+                axes(0.0, 1.0)
+            } else {
+                axes(0.0, 0.0)
+            };
+            sim.step_once(RuntimeInput::default().with_axes(ax));
+            if hero_cm(&sim, hero).mode == MovementMode::Prone {
+                note(&sim, &mut prone_states);
+                prone_stance = prone_stance.min(stance(&sim));
+            }
+        }
+        // Back up: another long press leaves prone for the crouch.
+        for _ in 0..40 {
+            sim.step_once(RuntimeInput::with_down(["crouch"]));
+        }
+        for _ in 0..90 {
+            sim.step_once(RuntimeInput::default());
+        }
+    }
+
+    // ── 3. SWIMMING ──────────────────────────────────────────────────────────
+    //
+    // The island's own water, found by asking the world rather than by a
+    // coordinate somebody wrote down.
+    let water = {
+        let w = sim.world();
+        w.world()
+            .iter_entities()
+            .filter_map(|e| {
+                let b = e.get::<inf_ecs::components::WaterBody>()?;
+                let t = e.get::<inf_ecs::components::Transform>()?;
+                Some((t.translation.x, t.translation.y, t.translation.z, b.level_m))
+            })
+            .next()
+    };
+    let mut swim_states: std::collections::BTreeSet<String> = Default::default();
+    let mut swim_pelvis_vs_water = f64::NAN;
+    if let Some((wx, wy, wz, level)) = water {
+        let surface = if level.is_finite() { level } else { wy };
+        for depth in [0.6f64, 2.5] {
+            {
+                let w = sim.world_mut();
+                let e = w.entity_of(hero).expect("the hero is in the world");
+                if let Some(mut t) = w.world_mut().get_mut::<inf_ecs::components::Transform>(e) {
+                    t.translation.x = wx;
+                    t.translation.y = surface - depth;
+                    t.translation.z = wz;
+                }
+                if let Some(mut c) = w
+                    .world_mut()
+                    .get_mut::<inf_ecs::components::CharacterMovement>(e)
+                {
+                    c.runtime.velocity = inf_ecs::math::Vec3d::ZERO;
+                }
+            }
+            for i in 0..200 {
+                let ax = if i > 100 {
+                    axes(0.0, 1.0)
+                } else {
+                    axes(0.0, 0.0)
+                };
+                sim.step_once(RuntimeInput::default().with_axes(ax));
+                let m = hero_cm(&sim, hero).mode;
+                if matches!(m, MovementMode::SwimSurface | MovementMode::SwimUnder) {
+                    note(&sim, &mut swim_states);
+                    if depth < 1.0 {
+                        swim_pelvis_vs_water = hero_pos(&sim, hero)[1] - surface;
+                    }
+                }
+            }
+        }
+        // Back onto dry land, at the height it spawned at.
+        place(&mut sim, spawn);
+    }
+
+    // ── 4. THE STANDING GET-UP ───────────────────────────────────────────────
+    //
+    // A ragdoll ended before the body reaches the ground: `RagdollRuntime::
+    // upright` is "the pelvis is still more than half a capsule above the feet
+    // when the bodies settle", and pressing jump ends a ragdoll on the spot.
+    let mut getup_states: std::collections::BTreeSet<String> = Default::default();
+    let mut upright = false;
+    {
+        assert!(
+            inf_physics::d3::ragdoll_bridge::start_ragdoll(sim.world_mut(), hero),
+            "the gameplay door refused to ragdoll the island's hero"
+        );
+        for i in 0..200 {
+            // Two steps of ragdoll, then out again — the body has not fallen.
+            let held: Vec<&str> = if (4..8).contains(&i) {
+                vec!["jump"]
+            } else {
+                vec![]
+            };
+            sim.step_once(RuntimeInput::with_down(held));
+            let c = hero_cm(&sim, hero);
+            if c.runtime.ragdoll.upright {
+                upright = true;
+            }
+            note(&sim, &mut getup_states);
+        }
+        for _ in 0..120 {
+            sim.step_once(RuntimeInput::default());
+        }
+    }
+
+    // ── 5. THE TWO THROWS ────────────────────────────────────────────────────
+    //
+    // The control is taken PER WINDOW and from the same reference the throw's is
+    // — the hand at the step the window opens — because an idle hand drifts with
+    // the breath and a single reference taken minutes earlier measures the drift
+    // rather than the throw.
+    let mut throw_reach = [0.0f64; 2];
+    let window = |sim: &mut inf_player::runtime_sim::RuntimeSim| -> f64 {
+        let from = hand(sim);
+        let mut arc = 0.0f64;
+        for _ in 0..90 {
+            sim.step_once(RuntimeInput::default());
+            arc = arc.max(f64::from((hand(sim) - from).length()));
+        }
+        arc
+    };
+    for (k, over) in [(0usize, true), (1usize, false)] {
+        assert!(
+            inf_ecs::anim_bridge::start_throw(sim.world_mut(), hero, over, 1.2),
+            "the throw door refused"
+        );
+        throw_reach[k] = window(&mut sim);
+        for _ in 0..90 {
+            sim.step_once(RuntimeInput::default());
+        }
+    }
+    // The control: the same ninety steps of the same idle, with no throw.
+    let idle_arc = window(&mut sim);
+
+    played.extend(slide_states.iter().cloned());
+    played.extend(prone_states.iter().cloned());
+    played.extend(swim_states.iter().cloned());
+    played.extend(getup_states.iter().cloned());
+    println!("\n=== the authored sets, on the island ===");
+    println!("  standing, the hero carries its pelvis {stand_stance:.4} m up");
+    println!(
+        "  slide     {slide_states:?}  pelvis {slide_stance:.4} m, travelled {slide_travel:.2} m"
+    );
+    println!("  prone     {prone_states:?}  pelvis {prone_stance:.4} m");
+    println!(
+        "  swim      {swim_states:?}  the capsule sat {swim_pelvis_vs_water:+.3} m of the waterline"
+    );
+    println!("  get-up    {getup_states:?}  upright {upright}");
+    println!(
+        "  throw     the hand reached {:.3} m overhand, {:.3} m underhand, against {idle_arc:.3} m idle",
+        throw_reach[0], throw_reach[1]
+    );
+
+    // ── the claims ───────────────────────────────────────────────────────────
+    assert!(
+        slide_states.contains("slide"),
+        "the hero entered a slide and the machine played {slide_states:?}"
+    );
+    assert!(
+        slide_stance < stand_stance - 0.05,
+        "the slide left the pelvis at {slide_stance:.4} m against {stand_stance:.4} m standing"
+    );
+    assert!(
+        slide_travel > 1.0,
+        "the slide covered {slide_travel:.2} m, which is a crouch and not a slide"
+    );
+    assert!(
+        prone_states.contains("prone_idle") || prone_states.contains("prone_crawl"),
+        "the hero went prone and the machine played {prone_states:?}"
+    );
+    assert!(
+        prone_stance < slide_stance,
+        "prone left the pelvis at {prone_stance:.4} m against the slide's {slide_stance:.4} m"
+    );
+    if water.is_some() {
+        assert!(
+            swim_states.iter().any(|s| s.starts_with("swim_")),
+            "the hero was in the island's own water and the machine played {swim_states:?}"
+        );
+        assert!(
+            swim_pelvis_vs_water.abs() < 1.5,
+            "a surface swim sat {swim_pelvis_vs_water:+.3} m from the waterline"
+        );
+    } else {
+        panic!("the island has no water body, so the swim half of this arm proves nothing");
+    }
+    assert!(
+        upright && getup_states.contains("getup_standing"),
+        "a ragdoll that never went down should get up ON ITS FEET: upright {upright}, the \
+         machine played {getup_states:?}"
+    );
+    for (k, what) in [(0usize, "overhand"), (1usize, "underhand")] {
+        assert!(
+            throw_reach[k] > idle_arc * 3.0 + 0.05,
+            "the {what} throw moved the hand {:.3} m against {idle_arc:.3} m of idle - the \
+             additive is not reaching the pose",
+            throw_reach[k]
+        );
+    }
+}
