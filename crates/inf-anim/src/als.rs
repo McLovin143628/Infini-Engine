@@ -1143,6 +1143,28 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
             );
         }
         if let Some(i) = at("idle") {
+            // **The stop ends when the CHARACTER stops, not when the clip runs
+            // out.** `ALS_N_Stop_*_Down` is 2.333 s and a braking character comes
+            // to rest in about half of that, so an exit-time edge alone left the
+            // hero holding a decelerating pose for a second after it had already
+            // stopped — measured on the island at a **114.966 mm p50** foot
+            // residual across `stop_l`, against 0.000 in every other state,
+            // because the clip's planted foot and the ground under the
+            // stationary character had stopped agreeing.
+            //
+            // `stop_distance` is zero both while the stick is pushed and once the
+            // speed has gone; the gait separates them.
+            out.push(
+                SmTransition::new(st, i, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                        SmCompare::float(STOP_DISTANCE_VAR, CmpOp::Le, 0.0),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(5),
+            );
+            // …and the clip running out is still a way home, for a stop nothing
+            // else releases.
             out.push(
                 SmTransition::new(st, i, FADE_S)
                     .with_exit_time(0.7)
@@ -1152,9 +1174,22 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
         // …and a stop the player changes their mind about goes back to the
         // ladder rather than finishing. Above the exit-time edge, because a
         // stick pushed again is an instruction and a clip running out is not.
+        //
+        // **AND THE STICK MUST ACTUALLY BE PUSHED.** `stop_distance` is exactly
+        // zero while there is movement input and positive while the character is
+        // braking, so `> WALK_AT` alone is true for the whole of a stop — the
+        // character is still travelling, which is the point — and the two edges
+        // chatter: walk -> stop -> walk -> stop, once every few steps. Measured
+        // before this term: **226 transitions over a 1 102-step tour**, one every
+        // 4.9 steps, and a post-transition p99 of 44.008 deg against the gait's
+        // own 19.866.
         if let Some(w) = at("walk") {
             out.push(
-                SmTransition::on(st, w, FADE_S, GAIT_VAR, CmpOp::Gt, WALK_AT)
+                SmTransition::new(st, w, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(GAIT_VAR, CmpOp::Gt, WALK_AT),
+                        SmCompare::float(STOP_DISTANCE_VAR, CmpOp::Le, 0.0),
+                    ]))
                     .with_curve(BlendCurve::EaseInOut)
                     .with_priority(4),
             );
