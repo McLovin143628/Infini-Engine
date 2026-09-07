@@ -3290,3 +3290,52 @@ fn both_hosts_gather_every_terrain_for_the_ground_query() {
         );
     }
 }
+
+/// **BOTH PROJECTORS APPLY THE CAMERA'S NEAR FADE** (wave CHAR1c's audit).
+///
+/// The fade is one Ring-0 rule (`inf_render::apply_near_fade`) and both hosts
+/// call it in three places: the skinned body, the garment and the hair. Nothing
+/// pinned that. `the_skinned_instance_projection_matches_field_for_field` above
+/// compares the `SkinnedInstance` **struct literal**, and the fade is a call
+/// *after* the literal — so a host that dropped it would keep every field, keep
+/// its order, keep its expression, and silently draw a solid body where the
+/// other one draws none.
+///
+/// That is not hypothetical: the fade's own defect in this wave was exactly a
+/// call in the wrong place (set before `skinned_sections` instead of after,
+/// which the sections then overwrote), caught by a photograph and not by an arm.
+///
+/// The gate is a count over both files, which is the same instrument the
+/// neighbours use, plus the ORDER: the call has to come after the sections are
+/// built, or it is undone by them.
+#[test]
+fn both_projectors_apply_the_cameras_near_fade() {
+    let mine = read(VIEWPORT);
+    let theirs = read(PLAYER);
+    let count = |s: &str| s.matches("inf_render::apply_near_fade(").count();
+    let (a, b) = (count(&mine), count(&theirs));
+    println!("apply_near_fade: viewport {a}, player {b}");
+    assert!(
+        a >= 3,
+        "the editor's projector calls `apply_near_fade` {a} time(s); the body, the garment and the hair are three"
+    );
+    assert_eq!(
+        a, b,
+        "the two projectors apply the camera's near fade a different number of times: viewport {a}, player {b}"
+    );
+    // …and AFTER the sections, in both. `skinned_sections` overwrites
+    // `blend`/`cutoff` from each slot's own material, so a fade applied before it
+    // is taken straight back on every body whose slots name one.
+    for (who, src) in [("the editor's viewport", &mine), ("the player", &theirs)] {
+        let sections = src
+            .find("skinned_sections(")
+            .unwrap_or_else(|| panic!("{who} does not build skinned sections at all"));
+        let fade = src
+            .find("inf_render::apply_near_fade(")
+            .unwrap_or_else(|| panic!("{who} does not apply the near fade"));
+        assert!(
+            fade > sections,
+            "{who} applies the near fade BEFORE it builds the sections, which take it back"
+        );
+    }
+}
