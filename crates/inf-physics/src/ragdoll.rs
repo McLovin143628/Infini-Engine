@@ -196,21 +196,36 @@ impl BoneRole {
 pub fn classify(name: &str) -> Option<BoneRole> {
     let n = name.to_ascii_lowercase();
     let has = |k: &str| n.contains(k);
-    // Side detection: an explicit `.l`/`_l`/`left` (etc.) or a trailing letter.
-    let left = has("left")
-        || has("_l")
-        || has(".l")
-        || has(" l")
-        || n.ends_with('l')
-        || has("l_")
-        || has("l.");
-    let right = has("right")
-        || has("_r")
-        || has(".r")
-        || has(" r")
-        || n.ends_with('r')
-        || has("r_")
-        || has("r.");
+    // ── SIDE DETECTION IS BY SEGMENT, NOT BY SUBSTRING (wave CHAR1b.2) ───────
+    //
+    // It was `contains("_l")`, and **`upper_leg_r` contains `_l`** — inside the
+    // word `_leg`. So both legs of any rig named that way classified LEFT
+    // (`side` prefers left when both markers match), which on the classifier
+    // path is not a cosmetic mislabel: `build_ragdoll` keys `index_of` BY ROLE,
+    // so the second `ThighL` overwrote the first and the right shin was jointed
+    // to the LEFT thigh. A cross-wired ragdoll cannot settle — its joints pull
+    // two bodies toward two different points for ever.
+    //
+    // Measured on `samples/phase29-locomotion`, whose bones are `upper_leg_r` /
+    // `lower_leg_r`: sixteen parts, of which `upper_leg_r` came out `ThighL` and
+    // `lower_leg_r` came out `ShinL`. The ragdoll never settled — the pelvis
+    // climbed **2.3 m every eight steps** while the root body's own velocity
+    // read **1e-8 m/s** (a positional correction, not a dynamic one), and the
+    // P29.6 course's character flew to z 421, x 237 instead of swimming a pool
+    // at z 99. It surfaced when wave CHAR1b.2's `arm_length_ratio` bless moved
+    // the arm bones enough to change which way the tangle resolved; it had been
+    // wrong since P12.1.
+    //
+    // A side marker is now a whole SEGMENT (`upper_leg_r` -> `["upper", "leg",
+    // "r"]`) or a trailing letter or the words `left`/`right` anywhere — which
+    // keeps every camel-case convention (`LeftUpperArm`) working and stops
+    // `_leg` from being a side.
+    let segments: Vec<&str> = n
+        .split(|c: char| c == '_' || c == '.' || c == ' ' || c == '-' || c == ':')
+        .collect();
+    let seg_is = |t: &str| segments.iter().any(|s| *s == t);
+    let left = has("left") || seg_is("l") || seg_is("lt") || n.ends_with('l');
+    let right = has("right") || seg_is("r") || seg_is("rt") || n.ends_with('r');
 
     use BoneRole::*;
     // Order matters: check the more specific limbs before the torso keywords.

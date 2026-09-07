@@ -796,10 +796,18 @@ mod tests {
         };
         part([-0.20, 0.90, -0.12], [0.20, 1.50, 0.12]);
         part([-0.10, 1.48, -0.10], [0.10, 1.80, 0.10]);
-        // Short arms: they stop at 0.75, and a 1.8 m template's hands land at
-        // 0.72.
-        part([-0.30, 0.75, -0.08], [-0.16, 1.48, 0.08]);
-        part([0.16, 0.75, -0.08], [0.30, 1.48, 0.08]);
+        // Short arms: they stop 3 cm above where the template's hands land, so
+        // both hands overhang and the refinement has something to pull in.
+        //
+        // **The number moved with the body** (wave CHAR1b.2): clause 8's
+        // `arm_length_ratio` 0.42 -> 0.30 raises a 1.8 m template's hands from
+        // 0.72 m to about 0.97, so arms that stopped at 0.75 now CONTAIN them
+        // and the fixture's own anti-vacuity assertion — "the fixture must start
+        // with a joint outside, or this proves nothing" — went red saying
+        // exactly that. It is a fixture measured against the body, and the body
+        // changed.
+        part([-0.30, 1.00, -0.08], [-0.16, 1.48, 0.08]);
+        part([0.16, 1.00, -0.08], [0.30, 1.48, 0.08]);
         part([-0.18, 0.0, -0.09], [-0.02, 0.98, 0.09]);
         part([0.02, 0.0, -0.09], [0.18, 0.98, 0.09]);
         let short_armed = Bvh::new(tris);

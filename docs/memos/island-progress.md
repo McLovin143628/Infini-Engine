@@ -34607,6 +34607,11 @@ over, which went from **795 to 2 905** vertices; the unreached count moves from
 **35 to 102** with it — **4.40% of that cage before, 3.51% after**, so a denser
 cage buries a smaller share of itself. The f32 round-trip seam the same arm
 measures moves the same way: 349/795 = 43.9% to 1 103/2 905 = **37.97%**.
+(Wave CHAR1b.2's `arm_length_ratio` 0.42 -> 0.30 moves that last reading to
+**1 081/2 905 = 37.21%** — the arm shells sit closer to the torso, so 22 fewer
+of their vertices fall on the wrong side of an f32 round trip. The f64 reading
+is unchanged at 102, which is the check that it is a precision seam and not a
+body that lost surface.)
 
 **This is not MetaHuman-class and the ceiling is structural**, stated rather
 than left to be discovered: the generator builds the body as tubes whose ring
@@ -36169,3 +36174,285 @@ reads **5.968 us/agent** all-`Full` against **3.835 us/agent** all-`Near`
 (the wave measured 5.420 / 3.821; the `Near` number reproduces, the `Full` one
 is 10 % higher on this run), and the banded N = 1000 row reads step 8.245 ms with
 `crowd` 0.159 and `animation` 1.180 against the wave's 8.248 / 0.165 / 1.173.
+
+
+## WAVE CHAR1b.2 — THE MOVES (2026-09-07)
+
+Base `origin/main` `f8ff332b` (CHAR1b.1, audited and pushed). This slice is
+clauses 5 and 6 of the CHAR1b brief, the AUTHORED/SOURCED sets, and clause 8.
+`char1b_gate` goes from 21 arms to **32**. Nothing pushed.
+
+### The one-line verdict
+
+**Five mechanisms this engine had already finished were never once run, and the
+running game could not tell.** The mantle matched no state, so a character
+climbing a wall held a jump loop; stride warping divided by a channel that read
+exactly zero on all 310 clips in the project; the two stop clips were reachable
+and taken on no step; the ragdoll's own blend weight — the function its module
+calls *"the doctrine's load-bearing sentence"* — had no caller at all, so a
+ragdolling character drew `ALS_Flail` on the spot while its bodies fell down the
+hill; and the lean was a parameter with no pose pass. Each of them now has a
+number measured on the island.
+
+### Clause 5 — MANTLING FROM ALS
+
+Three map rows over ALS's own three sequences (`mantle_low` / `mantle_low_lh` /
+`mantle_high`), selected by one `mantle` parameter whose four values are
+`EALSMantleType` (`ALSMantleComponent.cpp:282`, the literal 125 cm) crossed with
+`GetMantleAsset(MantleType, CurrentOverlayState)` — a character carrying
+something in its right hand reaches with its left, latched at the probe.
+`HeightRemap::resolve` had answered both halves of `MantleParams` since P29.4 and
+neither had a consumer: the play rate rides a new `play_rate` seam and
+`StartingPosition` reaches the machine through `SmContext::with_entry_offset`.
+
+**On the island**, driven through the input door at a known ledge
+(−1766, 1992, bearing 0): `MovementMode::Mantle` entered, **`mantle_low`**
+played, h **0.7294 m**, `clip_start_s` 0.4623, `play_rate` 1.1541, and the
+capsule rose **+3.004 m** (peak +3.291). The control — the same drive on the road
+the hero spawns on — enters no mantle and rises 0.334 m.
+
+**The traversal substrate, for COV1.** `probe_ledge` is the capsule-forward
+trace: a sweep at chest height for a wall, then a downward sweep behind it for
+the surface, then a clearance test for the body that will stand on it. It
+answers a `MantleParams` — the ledge's height, its normal, the world point the
+hands go to — and `try_mantle` turns that into a `MantleState` with the height
+remap's clip time and play rate. COV1 wants the same three probes with a
+different verdict (is there cover here, is it high or low, which way does it
+face), and the split it should take is: `probe_ledge` stays the *geometry*
+question and a cover probe is a second reader of the same sweeps, not a second
+sweep. The door a gameplay system uses is `MovementMode::Mantle` + the `mantle`
+parameter; cover's equivalent is a mode and a parameter, not a state name.
+
+### Clause 6 — MOVEMENT QUALITY, ITEM BY ITEM
+
+**Stride warping.** `SmContext::with_play_rate` advances every play-head by
+`dt * rate` (the increment, not the accumulated clock — multiplying an elapsed
+time jumps the phase on the step the rate moves) and leaves cross-fades on wall
+time. The rate is the character's ground speed over the speed its blended clip
+depicts. **The denominator existed nowhere**: `MoveData_Speed` is the root's
+slope and every clip in this engine is authored in place, so it read *exactly
+0.000 on all 310 `.inf_anim` in the island project*, `ALS_N_Sprint_F` included.
+`derive::stance_speed_mps` answers the same question off the FEET and reads
+**walk 1.388 / run 2.686 / sprint 4.812 m/s** against ALS's hand-entered
+1.5 / 3.5 / 6.0.
+
+**Distance matching.** The stop edges asked for `gait <= 0.1` — the character has
+already stopped — which the CHAR1b.1 audit measured holding on **0** steps of
+five run-and-stops. They fire on `stop_distance` (`v²/2a`, exactly zero while the
+stick is pushed) now, and a stop clip plays on **24** steps of the same
+experiment with the largest published stopping distance **0.735 m**. The release
+edge was tightened the same way after a checkpoint measured **226 chattering
+transitions over a 1 102-step tour**.
+
+**The swing foot.** `Enable_FootIK_L/R` is derived (nobody authors it: 0 of 164
+ALS clips, 0 of 12 sample clips) from the foot's own plant window, because the
+fallback was wrong in both directions — a flat 1.0 pinned a foot in the air
+(**150.0 mm** of residual at 6.5 m/s, on exactly the steps where `FootLock_*` had
+just gone to zero) and a plant window switches foot IK OFF on an idle. Island
+residual at full gate, worst / p50 / count over 10 mm: idle 250.675 / 0.000 /
+2 of 842, run 0.000 / 0.000 / 0 of 130, walk 20.501 / 0.000 / 4 of 34, sprint
+123.582 / 0.000 / 4 of 49, start 25.346 / 0.000 / 10 of 96, and `stop_l`
+**250.654 / 114.966 / 28 of 31** — reported, not asserted, and carried by name.
+The locked-foot SLIDE is **0.0000 mm** over 371 locked samples against the
+mandate's 2 cm/s.
+
+**Lean.** `inf_anim::lean::apply_lean` is the pose pass those two published
+parameters never had. The magnitude is derived because there was nothing to port
+(ALS feeds `LeanAmount` into an artist's additive, and the import carries no lean
+sequence at all): a body accelerating at `a` leans by `atan(a/g)`, which at this
+engine's own committed maximum ground acceleration — 8.0 m/s² — is **39.20°**,
+and the SPINE takes `LEAN_SPINE_SHARE` = 0.30 of it, **11.76°** at full effort,
+split across the rig's spine joints. Measured on the island as the chest's offset
+from the pelvis in the hero's own model frame:
+
+| | z (forward) | x (right) | the hero's own lean |
+|---|---|---|---|
+| rest | +97.67 mm | −0.00 mm | — |
+| a standing start | up to **+256.30** | | `lean_y` +0.822 |
+| braking | down to **+27.71** | | `lean_y` −0.461 |
+| a hard right turn | | up to **+29.07** | `lean_x` +0.601 |
+| a hard left turn | | down to **−13.77** | `lean_x` −0.601 |
+
+**In-air control and landing by height.** The thresholds are impact SPEEDS
+(`land_hard_mps` 7.0, `land_ragdoll_mps` 10.0) and the mandate asks in metres:
+`v = sqrt(2gh)` makes them **2.497 m** and **5.097 m** of free fall. Four drops
+on the island, classified and then read off the JOINTS — how far the pelvis comes
+down toward its own lower foot, in the hero's model frame:
+
+| drop | verdict | impact | the machine played | pelvis over its foot |
+|---|---|---|---|---|
+| standing | — | — | — | 0.8020 m |
+| 1.75 m | `Soft` | 5.56 m/s | `land_light` | 0.6408 m |
+| 3.80 m | `Hard` | 8.34 m/s | `land_heavy` | 0.6284 m |
+| 3.80 m + input | `Roll` | 8.34 m/s | `roll` | **−0.6016 m** |
+| 8.15 m | `Ragdoll` | 12.75 m/s | `fall_fast` → `ragdoll` → `getup_back` | — |
+
+A break-fall puts the pelvis **below its own feet**, which is what a roll is.
+
+**The ragdoll blend, and the two defects it exposed.** The crossing back is
+`AnimBridgeRes::ragdoll_pose`: per bone, the JOINT's world rotation and head,
+plus the weight. A capsule is built from a bone's head→tail segment so its
+orientation carries no twist; the constant offset between the capsule's frame and
+the joint's is taken once at spawn and every later step recovers the joint from
+the body. `inf_ecs::pose::apply_ragdoll_pose` is the reader, last of the block's
+pose writers — exactly where the SK1a comment has listed "the ragdoll blend"
+since P29.5 while nothing called it.
+
+* the drawn skeleton sits **0.000 mm** from the bodies over 17 bones, against
+  **839.3 mm** for the pose the same character was standing in one step earlier;
+* the weight holds at **1.000** while the bodies own the pose and eases
+  0.99 → 0.00 monotonically over the get-up.
+
+**The mode never reached the machine.** Every other movement path publishes the
+character's state into its machine's parameters at its write-back — the standing
+step, the mantle, the seat, flight — and the ragdoll's never did. On the island a
+ragdolling hero sat in `idle` for all **88** steps of its ragdoll: `ALS_Flail`
+never played, and the `ragdoll → getup_*` edges could not fire because the
+machine was never in `ragdoll` to leave it.
+
+**And the get-up lasted one step.** `SmSource::Any` excludes only the state the
+machine is IN, so an action state cannot hold itself by re-entry: `Any → idle`
+took `getup_back` away on the very next step and the 0.35 s blend then
+interpolated a heap on the ground into a standing idle — **386.5 mm on one joint
+in one step**, the largest reading this wave took anywhere. `getup` is
+four-valued now (`0` NONE, `1` front, `2` back, `3` standing) and that edge is
+guarded on it; zero is NONE and not "face down" precisely because a
+`SmParam::float`'s default is zero, and making "front" the zero would have frozen
+the edge shut on every character in the engine. After both fixes the hero plays
+**`getup_back`** across the whole hand-off and the largest single-joint step
+falls to **248.8 mm**, which is the get-up CLIP's own motion — the blend's own
+steps are 13 / 37 / 56 mm.
+
+**Inertialized transitions, the pop bounded.** The bound is RELATIVE, and the
+first attempt at an absolute one is why: against a flat 25°/step ceiling the
+worst reading was **73.507°, in `sprint`, on `calf_r`** — the KNEE of a sprinting
+character at a warped play rate, which is the gait and not the blend. So the
+question is asked the way it is meant: is a step in which the machine is
+cross-fading worse than one in which it is not? Over a 1 102-step scripted tour
+with 214 transitions:
+
+| bucket | p50 | p99 | max |
+|---|---|---|---|
+| cross-fading (189 steps) | 5.402° | **50.189°** | 73.507° |
+| steady (913 steps) | 0.158° | 19.866° | 26.417° |
+| …over the 334 joints the leg IK never writes | | 23.494° vs 11.995° | |
+
+### The AUTHORED / SOURCED sets, on the island
+
+ALS ships none of these — a census by name found no slide, no throw, no swim, no
+prone and no standing get-up in the whole donor — so nine clips are derived from
+the hero's own rig by role (`inf_anim::authored`, kinematics stated per clip,
+byte-stable). Driven on the island through the doors a player has, and read off
+the joints:
+
+| set | the door | the machine | the joints |
+|---|---|---|---|
+| slide | sprint to speed, then C | `slide` | pelvis **0.6451 m** vs 0.8669 standing; travelled **1.11 m** |
+| prone | a LONG C press | `prone_idle`, `prone_crawl` | pelvis **0.1064 m** |
+| swimming | the island's own water | `swim_surface`, `swim_tread`, `swim_under` | the capsule sat **−0.560 m** of the waterline |
+| the standing get-up | a ragdoll ended before the body falls | `getup_standing` | `upright` true |
+| the two throws | `anim_bridge::start_throw` | (overlays) | the hand reached **0.241 / 0.279 m** against **0.040 m** of idle |
+
+**The throws had no reader at all** until this wave — their map rows say "WPN1's
+throwable items are their consumer", which meant two clips authored, bound and
+unplayable. `inf_ecs::pose::apply_throw` is the reader (a delta from the clip's
+first frame over the upper-body mask, on a one-shot clock that counts DOWN so the
+`Default` means "not throwing"), and `start_throw` is the gameplay door.
+**There is deliberately no key**: a throw needs a thing to throw, the throwable
+set is WPN1's, and a key that played an animation and released nothing would be
+the defect this wave spent its time closing.
+
+`ALS_N_SecondaryMotion` (carried 128) also has its reader — `apply_breath`, over
+a SPINE-only mask with a **neck counter-rotation**, because a mask says which
+joints are WRITTEN and nothing about which joints MOVE: the head is a descendant
+of the chest, and the island's own look-at arm read **+11.26°** of head elevation
+on a sideways mouse with the upper-body mask and **+9.98°** with the spine one.
+The chest moves **58.02 mm** over 1.3 s of island idle and the pelvis and both
+feet move **0.000 / 0.0009 / 0.0009 mm**.
+
+### Clause 8 — THE COMMITTED BODY
+
+**`arm_length_ratio` 0.42 → 0.30**, with two stated causes. The old value put a
+1.75 m person's shoulder-to-wrist at **73 cm** against an anatomy of about 52,
+and both of Epic's reference mannequins disagree with it: Manny **0.3048**
+(0.5502 m over 1.8054), Quinn **0.2952**. After the bless the male's
+shoulder-to-wrist is **0.5250 m** on a 1.75 m body and the female's **0.5319 m**
+on her 1.8017 m one; they were 0.735 and 0.532 — arms of different proportion on
+two bodies of the same engine, for a reason that was nobody's decision. The bless
+rewrote the male's rig, body mesh, three clips and machine sidecar (**the
+ratio**) and the female's three clips only, NOT her rig (**the derivation** — the
+check that the ratio did not reach a body that already had its own).
+
+**It also broke four arms nobody had run**, all of them absolute distances
+measured against a 0.735 m arm: `a_hinged_arm_reaches_exactly_where_a_pole_solve_
+misses` and `a_reach_refuses_by_name_and_falls_back_when_there_is_no_hinge` in
+`inf_anim::grip`, `a_hand_reaches_a_point_in_the_world_and_the_elbow_bends_
+backwards` in `inf_ecs::pose` (all three missing by **0.0100 m**, the same
+signature to seven places — a target 0.538 m from a 0.525 m shoulder), and
+`a_generated_idle_stands_with_its_arms_down`, where the same idle ROTATION brings
+a shorter hand in 0.363 m instead of 0.505 m and a 0.4 m bound read that as a
+T-pose. All four are fractions of the chain's own span now, and cannot go stale
+with the body again.
+
+**The garment door** (audit item 87). `garment_from_session` took a live
+half-edge mesh and a click-built selection — an OPEN MODEL EDITOR — so a garment
+was something no CLI, no script and no CI arm could produce.
+`groom::garment_from_files` is the headless door and the same function
+underneath; `inf-import garment --mesh … --out … [--skeleton …] [--pin-top …]`
+is the verb, in the importer's binary because `tools/inf-cli` links Ring 0 and
+nothing else, and `inf character garment` names the door it is not exactly as
+`inf import` does. One cape, on the island's hero: **117 particles, 192
+triangles, 308 stretch + 268 bend, 9 pinned, 341 capsules**; over 3 s of walking
+the worst particle moved **395.0 mm** and the **9 pinned ones moved 0.0000 mm**.
+The particles are in the wearer's own frame, so a character that has walked
+twenty metres moves none of them — only the solver does.
+
+**The subdivision route is priced and refused**, and the price is a gate arm:
+
+```
+today                         5718 triangles,   2905 vertices
+one Loop pass would be       22872 (x4)
+two would be                 91488 (x16)
+the generator turned up      39698 triangles,  19895 vertices
+...which is PAST one Loop pass, with no new kernel feature
+the island's hero draws      95330 at every distance (carried 126)
+...with 21040 and 7996 already on its ladder and no reader
+```
+
+Two reasons: `BodyOptions` is the generator's own tessellation and reaches past
+the first Loop pass without a subdivision kernel at all, so a Loop pass would buy
+SMOOTHING rather than density; and nobody on the island draws this body — the
+hero is a MetaHuman at 95 330 triangles at every distance, so quadrupling a
+5 718-triangle fallback moves nothing a viewer of the showcase sees while
+re-blessing `Starter_Body.inf_mesh` moves the committed bytes of five gates and
+the `include_bytes!` payload of every project the template scaffolds.
+
+### The gate — `runtime/inf-player/tests/char1b_gate.rs`, 32 arms
+
+Eleven are new in this slice: the mantle pair, the locked foot, the stop, the
+breath, the landing-by-height, the cross-fade ratchet, the ragdoll blend, the
+lean, the authored sets, the cape, and the density pricing. Every island arm
+drives the WINDOW's input door or a Ring-0 gameplay door and reads the WORLD or
+the POSE — the CHAR1b.1 audit's law, applied.
+
+### What the demo loop could and could not film
+
+One session, PIE on the island, **HERO MOVED 47.863 m** over 339 samples. The
+machine played `idle`, `start`, `walk`, `run`, `sprint`, `stop_l`, `stop_r`,
+`jump`, `turn_l90`, `crouch_idle`, `crouch_walk`, **`slide`** and
+**`prone_idle`** — the last two for the first time in PIE on the island.
+
+**And in `embedded` play mode the loop's input reached nothing.** Two runs,
+`HERO MOVED 0.000 m` over 313 and 315 samples: the click meant for the viewport
+hole left the EDITOR in the foreground. `-PlayMode window` — the player in its own
+window — worked on the first attempt. Carried, because it is the same shape as
+the user's own "Play doesn't work" report.
+
+**The two brief states did not coincide with their shots.** `slide` is 4 samples
+of 339 and `prone_idle` is 4 — about a second each at the log's 4 Hz — and the
+frames named for them show the hero standing, partly behind a parked car at the
+loop's own camera distance. The captions say so. The mantle course, the water at
+Harbour City and a drop from a measured height are **not filmed at all**: the
+loop drives the shipped player, the shipped player has no teleport, and none of
+the three is reachable on foot from where the level puts the hero inside a
+90-second session.

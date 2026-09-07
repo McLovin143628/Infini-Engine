@@ -1331,14 +1331,21 @@ mod tests {
         // moved the right way as a fraction of the cage:
         //
         //   f64 oracle        35 / 795   = 4.40%   ->  102 / 2 905  = 3.51%
-        //   f32 round trip   349 / 795   = 43.9%   -> 1 103 / 2 905 = 37.97%
+        //   f32 round trip   349 / 795   = 43.9%   -> 1 081 / 2 905 = 37.21%
         //
         // A denser cage buries a smaller share of itself, and the f32 seam
         // costs a smaller share too. The seam ITSELF is unchanged — it is still
         // an order of magnitude, which is the thing this arm exists to hold.
+        // **Wave CHAR1b.2 moved the f32 reading and only that**: clause 8's
+        // `arm_length_ratio` 0.42 -> 0.30 shortens the arms, so the cage's arm
+        // shells sit closer to the torso and 22 fewer of their vertices fall on
+        // the wrong side of an f32 round trip — 1 103 -> 1 081, 37.97 % ->
+        // 37.21 % of the same 2 905. The f64 reading is IDENTICAL at 102, which
+        // is the check that this is a precision seam and not a geometry change:
+        // a body that had actually lost surface would move both.
         assert_eq!(
             (exact, rounded, verts),
-            (102, 1103, 2905),
+            (102, 1081, 2905),
             "the f32/f64 oracle seam moved — if that is deliberate, the numbers in \
              `docs/memos/island-progress.md` move with it"
         );

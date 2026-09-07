@@ -2730,11 +2730,17 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     let body = body.as_str();
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
-    const WRITERS: [(&str, &str); 10] = [
+    const WRITERS: [(&str, &str); 14] = [
         // (`foot_states` moved from the tail into the middle at wave CHAR1b.1 —
         // see its own row — and that wave ADDED two: the aim-offset layer at
         // pose construction and the look-at chain at the head of the
-        // corrections. Eight became ten.)
+        // corrections. Eight became ten, and the breath made eleven.
+        //
+        // Wave CHAR1b.2 adds THREE more and the count is now fourteen: the
+        // THROW beside the breath at pose construction, the LEAN at the head of
+        // the corrections beside the look-at, and the RAGDOLL BLEND last, which
+        // is where the SK1a comment in `pose.rs` has listed it since P29.5 while
+        // nothing called it.)
         (
             "pending_pose = Some(pose);",
             "the machine + the layer stack + the inertializer produce the pose",
@@ -2748,12 +2754,20 @@ fn every_pose_writer_runs_in_its_frozen_order() {
             "wave CHAR1b.2, carried item 128: the BREATHING additive, `ALS_N_SecondaryMotion` over the upper-body mask. Immediately after the aim offset and for the same reason — it is pose CONSTRUCTION, the thing the animator would have authored into the idle, so the drive pass sees a breathing chest rather than a still one. It had been imported and unbound since CHAR1a.3",
         ),
         (
+            "apply_throw(asset,",
+            "wave CHAR1b.2: the two authored THROW additives, over the upper-body mask, on a one-shot clock. Beside the breath and for the same reason — a throw is what the animator would have layered onto whatever the character was already doing, which is why it is an additive and not a state: a character throws a grenade WHILE it is running. Their map rows named WPN1's throwable items as their consumer and had none, so both clips were authored, bound and unplayable",
+        ),
+        (
             "inf_anim::drive_pose(",
             "SK1a: the twist chains and the IK handles, which is pose CONSTRUCTION and not a correction",
         ),
         (
             "foot_states(asset,",
             "wave CHAR1b.1: the feet published for the NEXT step, read off the ANIMATED pose — after pose CONSTRUCTION (the drive and the posture) and before EVERY correction, the pelvis drop included. This row MOVED, with its cause, and it moved TWICE: the movement step's goal is `published_foot + (ground under the foot − ground under the body)`, so (1) publishing the CORRECTED foot fed last step's correction back in as this step's origin — a foot that should have held still rose 0.0801 → 0.0937 m over ten steps on `foot_slide_gate`'s flat floor at `origin/main` — and (2) publishing it after the PELVIS DROP counted that too, putting the drawn sole 48.6 mm inside a 15° slope. UE avoids both structurally: its rigs carry `ik_foot_root` as a SIBLING of the pelvis, so ALS reads a bone no correction has touched. This engine solves the real `foot_*` joints, so the independence has to come from where the read is taken",
+        ),
+        (
+            "inf_anim::apply_lean(",
+            "wave CHAR1b.2: the SPINE leans into the acceleration. Immediately before the look-at, because the two write the same chain and the order is part of the trace: the lean is what the BODY is doing and the look is an overlay on top of it. `relative_accel` had been computed every step since P29.4 with no readers and this wave's first commit published it as `lean_x`/`lean_y` with no pose pass",
         ),
         (
             "inf_anim::apply_look_at(",
@@ -2774,6 +2788,10 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         (
             "apply_hand_ik(asset,",
             "SK1b: the arms that reach, the off hand the weapon carries, and the fingers that close — after the feet, because a stance is decided by the ground and a hand solves against the body that stance produced",
+        ),
+        (
+            "apply_ragdoll_pose(asset,",
+            "wave CHAR1b.2: the articulated ragdoll's own pose, blended in at `inf_anim::ragdoll::blend_weight`'s number. LAST of the pose writers and inside `corrected`, so the re-drive below sees it — which is exactly where the SK1a comment at the head of this block has listed `the ragdoll blend` since P29.5 while nothing here called it. P29.4 built the bridge, the bodies, the get-up and the pure blend function and the pose step read NONE of it: a ragdolling character drew `ALS_Flail` standing on the spot while its bodies fell down the hill",
         ),
         (
             "redrive(asset,",
