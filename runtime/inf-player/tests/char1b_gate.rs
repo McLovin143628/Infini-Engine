@@ -3133,6 +3133,20 @@ fn hero_to(
 ///   announced;
 /// * and the **control** — the same drive on the road the hero spawns on —
 ///   enters no mantle and rises nowhere.
+///
+/// # What this arm does NOT reach, measured (CHAR1b.2 audit)
+///
+/// **`mantle_high` has never played in the world.** The map's third mantle row
+/// (`ALS_N_Mantle_2m`, the >125 cm one) is bound and its state is reachable from
+/// a hand-written parameter set, and no drive has ever entered it: the ledge
+/// this arm climbs is 0.7294 m and it is caught **from the air**, where
+/// `LedgeSettings::falling()` caps the climb at 1.50 m rather than the grounded
+/// 2.50 m. The audit went looking — 64 driven approaches to every car and all
+/// four buildings within 60 m of the spawn produced **zero** mantles, and a
+/// direct `probe_ledge` census from 289 grounded stances at 8 m spacing × 8
+/// bearings produced **zero** ledges of any height. So the classification
+/// assertion below has only ever been evaluated with `high == false`, and the
+/// `mantle_high` half of clause 5 is carried rather than proved.
 #[test]
 fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
     let Some(content) = island_project() else {
@@ -3150,30 +3164,104 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
         sim.step_once(RuntimeInput::default());
     }
     let spawn = hero_pos(&sim, hero);
+    // The hero's own rig and its two hands, for the leading-hand measurement
+    // inside the drive below.
+    let (rigs_for_hands, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let rig_for_hands = inf_ecs::pose::evaluated_pose(sim.world(), hero)
+        .and_then(|p| rigs_for_hands.get(&p.skeleton).cloned())
+        .expect("the hero's rig is on disk");
+    let hand_joint = {
+        let roles = rig_for_hands.role_index();
+        roles
+            .first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Left)
+            .zip(roles.first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Right))
+    };
 
     // Walk forward, tapping jump — ALS's own trigger (`OnOwnerJumpInput`, a jump
     // with movement input reaches for a ledge before it reaches for the air).
+    // **The rise across ONE mantle, and how many the drive took** (CHAR1b.2
+    // audit). This used to report the PEAK over the whole drive against
+    // `height_m * 0.5`, and both halves of that were wrong to lean on: the drive
+    // is 150 steps of walking into stepped terrain and it climbs FOUR ledges in
+    // a row, so the +3.004 m the wave reported for a 0.73 m ledge is the sum of
+    // four of them; and on the other side a single JUMP raises the same capsule
+    // 0.334 m, which is within 9 % of the bound the arm was asserting. The
+    // honest quantity is the height the capsule gains between the step the mode
+    // becomes `Mantle` and the step it stops being one -- the FIRST such window,
+    // the one whose `MantleState` this arm reports. Measured: 0.730 m against a
+    // 0.7294 m ledge.
     let drive = |sim: &mut inf_player::runtime_sim::RuntimeSim, steps: usize| {
         let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
         let before = hero_pos(sim, hero);
         let mut states: std::collections::BTreeSet<String> = Default::default();
         let mut entered: Option<inf_ecs::components::MantleState> = None;
         let mut peak = before[1];
+        let mut mantles = 0usize;
+        let mut in_mantle = false;
+        let mut y_at_entry = 0.0f64;
+        let mut first_rise = f64::NAN;
+        let mut hand_gap = f64::MAX;
         for i in 0..steps {
             let held: Vec<&str> = if i % 5 == 0 { vec!["jump"] } else { vec![] };
             sim.step_once(RuntimeInput::with_down(held).with_axes(ax.clone()));
-            peak = peak.max(hero_pos(sim, hero)[1]);
+            let y = hero_pos(sim, hero)[1];
+            peak = peak.max(y);
             let c = hero_cm(sim, hero);
             if c.mode == inf_ecs::components::MovementMode::Mantle {
                 if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
                     states.insert(s.name.clone());
                 }
+                if !in_mantle {
+                    in_mantle = true;
+                    mantles += 1;
+                    y_at_entry = y;
+                }
                 if entered.is_none() {
                     entered = Some(c.runtime.mantle);
                 }
+            } else if in_mantle {
+                in_mantle = false;
+                if first_rise.is_nan() {
+                    first_rise = y - y_at_entry;
+                }
+            }
+            // **The LEADING HAND against the ledge it is climbing** (CHAR1b.2
+            // audit). ALS warps the mantle in LEDGE space, so the reaching hand
+            // arrives on the lip; this engine warps the CAPSULE along the
+            // traversal and plays the clip untouched, so the hand goes wherever
+            // the animator put it on the donor's own body. Reported, not
+            // asserted, and carried by name — the number is the size of the
+            // hand-warp that is not there.
+            if in_mantle {
+                if let (Some(m), Some(j)) = (entered, hand_joint) {
+                    let lead = if m.left_hand { j.0 } else { j.1 };
+                    if let (Some(p), Some(to_world)) = (
+                        inf_ecs::pose::evaluated_pose(sim.world(), hero),
+                        inf_ecs::pose::model_to_world_of(sim.world(), hero),
+                    ) {
+                        let g = inf_anim::pose::global_transforms(&rig_for_hands.skeleton, &p.pose);
+                        let t = g[lead as usize].to_scale_rotation_translation().2;
+                        let w = to_world.transform_point3(DVec3::new(
+                            f64::from(t.x),
+                            f64::from(t.y),
+                            f64::from(t.z),
+                        ));
+                        let ledge = DVec3::new(m.target.x, m.target.y, m.target.z);
+                        hand_gap = hand_gap.min((w - ledge).length());
+                    }
+                }
             }
         }
-        (entered, states, before[1], hero_pos(sim, hero)[1], peak)
+        (
+            entered,
+            states,
+            before[1],
+            hero_pos(sim, hero)[1],
+            peak,
+            mantles,
+            first_rise,
+            hand_gap,
+        )
     };
 
     // ── the ledge ────────────────────────────────────────────────────────────
@@ -3183,7 +3271,7 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
     // it in a sweep of the hero's own neighbourhood and it is the nearest one
     // the drive can reach.
     hero_to(&mut sim, hero, -1766.0, 1992.0, 0.0);
-    let (entered, states, y0, y1, peak) = drive(&mut sim, 150);
+    let (entered, states, y0, y1, peak, mantles, first_rise, hand_gap) = drive(&mut sim, 150);
     let m = entered.expect(
         "the hero never entered `MovementMode::Mantle` at the ledge — either the probe found \
          nothing or the jump never reached `try_mantle`",
@@ -3191,7 +3279,8 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
     println!(
         "\n=== the mantle, on the island ===\n  height {:.4} m  high {}  clip_start {:.4} s  \
          play_rate {:.4}  left_hand {}\n  states {states:?}\n  pelvis {:.3} -> {:.3} (net {:+.3}, \
-         peak {:+.3})",
+         peak {:+.3}) over {mantles} mantle(s)\n  the rise across the FIRST mantle alone: \
+         {first_rise:+.4} m",
         m.height_m,
         m.high,
         m.clip_start_s,
@@ -3234,23 +3323,74 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
         "the mantle's play rate is {}",
         m.play_rate
     );
-    let remap = inf_anim::HeightRemap::default();
-    let (want_start, want_rate) = remap.resolve(m.height_m);
+    // **THE REMAP IS ASSERTED, NOT PRINTED** (CHAR1b.2 audit). This used to print
+    // `HeightRemap::default()`'s answer beside the state's and assert nothing
+    // about either, and the two DISAGREE — `try_mantle` builds the remap out of
+    // the `LedgeSettings` band it was called with, so a ledge caught in the air
+    // (`LedgeSettings::falling()`, ceiling 1.50 m) and one climbed off the
+    // ground (`default()`, ceiling 2.50 m) resolve the same height to different
+    // clip times. Printing the wrong one made this arm's own output read as a
+    // contradiction (0.4623 against 0.4164). The pair is required to BE one of
+    // the two the movement step can produce, which is the check the doc above
+    // claims: a `clip_start_s` and a `play_rate` left at their struct defaults
+    // are neither of them.
+    let candidates = [
+        (
+            "grounded",
+            inf_physics::d3::traversal::LedgeSettings::default(),
+        ),
+        (
+            "falling",
+            inf_physics::d3::traversal::LedgeSettings::falling(),
+        ),
+    ];
+    let matched = candidates.iter().find_map(|(what, set)| {
+        let remap = inf_anim::HeightRemap {
+            low_height_m: set.min_height_m,
+            high_height_m: set.max_height_m,
+            ..inf_anim::HeightRemap::default()
+        };
+        let (ws, wr) = remap.resolve(m.height_m);
+        ((ws - m.clip_start_s).abs() < 1.0e-9 && (wr - m.play_rate).abs() < 1.0e-9)
+            .then_some((*what, ws, wr))
+    });
+    let (which, want_start, want_rate) = matched.unwrap_or_else(|| {
+        panic!(
+            "the mantle carries clip_start {:.6} s / play_rate {:.6} for a {:.4} m ledge, and \
+             neither the grounded band nor the falling one resolves to that — the height remap \
+             is not what reached the state",
+            m.clip_start_s, m.play_rate, m.height_m
+        )
+    });
     println!(
-        "  the remap for {:.4} m: start {want_start:.4} s, rate {want_rate:.4}",
-        m.height_m
+        "  the remap that produced it: the {which} band -> start {want_start:.4} s, rate \
+         {want_rate:.4}"
     );
-    // …and the pelvis really went up. Not the report, the transform.
+    println!(
+        "  the LEADING HAND's closest approach to the ledge the feet land on: {hand_gap:.4} m \
+         (ALS's ledge-space warp puts it on the lip; this engine warps the capsule and plays \
+         the clip untouched — reported, carried, not asserted)"
+    );
+    // …and the pelvis really went up — **across the mantle, not across the
+    // drive**. A jump raises this capsule 0.334 m on the flat, so a bound stated
+    // against the whole 150-step walk is a bound a jump nearly clears; a bound
+    // stated against the mantle window is the climb itself.
+    let _ = peak;
     assert!(
-        peak - y0 > m.height_m * 0.5,
-        "the hero says it mantled a {:.3} m ledge and its capsule rose {:.3} m",
-        m.height_m,
-        peak - y0
+        first_rise.is_finite(),
+        "the hero entered `Mantle` and never left it over 150 steps, so there is no rise to \
+         measure"
+    );
+    assert!(
+        first_rise > m.height_m * 0.85 && first_rise < m.height_m * 1.25,
+        "the hero mantled a {:.4} m ledge and its capsule rose {first_rise:.4} m across that \
+         one mantle — a warp that lands on the ledge lands ON it",
+        m.height_m
     );
 
     // ── the control: the road it spawned on ──────────────────────────────────
     hero_to(&mut sim, hero, spawn[0], spawn[2] + 4.0, 180.0);
-    let (none, road_states, ry0, _ry1, rpeak) = drive(&mut sim, 150);
+    let (none, road_states, ry0, _ry1, rpeak, _rm, _rr, _rh) = drive(&mut sim, 150);
     println!(
         "  CONTROL on the road: mantle {none:?}, states {road_states:?}, peak {:+.3} m",
         rpeak - ry0
@@ -5180,14 +5320,18 @@ fn the_committed_bodys_density_is_measured_against_what_the_island_draws() {
         mesh2.vert_count()
     );
     println!("  ...which is PAST one Loop pass, with no new kernel feature");
+    // **The 95 330 is a LITERAL, and this arm never opens the island** (CHAR1b.2
+    // audit). It is the number `char1a3_gate`'s LOD arm measures off the island
+    // project, quoted here so the refusal's second premise is legible beside its
+    // first; the premise this arm actually ASSERTS is the parametric one below,
+    // which is a fixture question and reproduces on CI where the island does
+    // not exist. Said out loud because the arm's own name promises more.
     println!(
-        "  {:<26} {:>7} at every distance (carried 126)",
+        "  {:<26} {:>7} at every distance (carried 126, quoted from char1a3_gate — \
+         NOT measured here)",
         "the island's hero draws", 95_330
     );
     println!("  ...with 21040 and 7996 already on its ladder and no reader");
-    // The arithmetic the route rests on, asserted rather than assumed: a Loop
-    // pass is exactly four triangles for one.
-    assert_eq!(tris * 4, tris * 4);
     assert!(
         tris > 4_000 && tris < 8_000,
         "the committed body is {tris} triangles; the numbers in this arm's docs are stated \
