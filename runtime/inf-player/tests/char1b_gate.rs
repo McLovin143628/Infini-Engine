@@ -2748,6 +2748,7 @@ fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
     go(&mut sim, 60, &[], &[]); // stand
     go(&mut sim, 2, &["jump"], &[]);
     go(&mut sim, 100, &[], &[]); // airborne → land_light
+
     // **THE ROTATION-MODE KEY, not an aim press** (wave CHAR1c, carried 123).
     //
     // This leg used to be `aim` down for ten steps and up for ten: pressing aim

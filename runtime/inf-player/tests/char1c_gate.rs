@@ -772,8 +772,9 @@ fn the_near_fade_engages_below_the_threshold_and_reaches_the_instance() {
     );
     // The code is one the masked branch cannot see — the reason all three
     // committed skinned goldens re-render identically.
+    let fade_code = inf_render::BLEND_NEAR_FADE;
     assert!(
-        inf_render::BLEND_NEAR_FADE > 2,
+        fade_code > 2,
         "the fading code collides with opaque/masked/translucent"
     );
 
@@ -1458,7 +1459,11 @@ fn pie_equals_shipping_on_the_camera_trace() {
     // the course's own geometry. A pure function of the step index, because this
     // arm is about the two hosts agreeing rather than about reaching a station.
     let script = |i: u32| -> (Vec<&'static str>, BTreeMap<String, f32>) {
-        let yaw = if (i / 120) % 2 == 0 { 0.9f32 } else { -0.9 };
+        let yaw = if (i / 120).is_multiple_of(2) {
+            0.9f32
+        } else {
+            -0.9
+        };
         (
             if i % 240 < 120 {
                 vec!["sprint"]
