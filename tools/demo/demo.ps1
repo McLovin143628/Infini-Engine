@@ -751,12 +751,17 @@ Start-Sleep -Milliseconds 1400
 Restore-PlayerFocus "before the vehicle"
 Say "CAMERA: E while walking — hunting for a car, then the drive camera blends in"
 $gotCar = $false
-for ($k = 0; $k -lt 15 -and -not $gotCar; $k++) {
+# **STAND STILL FOR THE FIRST FIVE TAPS.** A session driven here by `-SpawnAt`
+# has been PUT beside a car, and the walking half of this hunt used to carry it
+# straight past one: measured, sixteen metres of walking over fifteen iterations,
+# and the run that was placed at a car reached its "at rest" frame fifteen metres
+# away from it. So the hunt presses first and walks second.
+for ($k = 0; $k -lt 25 -and -not $gotCar; $k++) {
     [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # scancode: E
     $gotCar = Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 0.9 `
         -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 4.0) } `
         -Out (Join-Path $OutDir "69-camera-vehicle-blend.png")
-    if (-not $gotCar) {
+    if (-not $gotCar -and $k -ge 5) {
         [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)
     }
 }
@@ -892,16 +897,22 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # street, where the first run of this leg backed up for eight seconds and
         # found nothing at all.
         Restore-PlayerFocus "before the interior camera frames"
-        Say "CAMERA (interior): the boom against a stairwell wall"
+        Say "CAMERA (interior): backing into a stairwell wall"
         for ($i = 0; $i -lt 24; $i++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 16 }
+        # **BACK UP FIRST, and wait DURING it.** The first cut waited for the two
+        # triggers standing still and then backed up: the clip fired (a stairwell
+        # has a wall behind the boom whichever way the hero faces) and the near
+        # fade did not, because a boom at 1.03 m is still outside the 0.90 m band
+        # and nothing was walking it in. The fade needs the hero to keep moving
+        # toward the thing behind it, which is what S does.
+        [InfInput]::Down(0x1F)   # scancode: S
         Wait-ForHero -Csv $heroCsv -What "a clipped boom indoors" -TimeoutS 6.0 `
             -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[7] -gt 0.8) } `
             -Out (Join-Path $OutDir "72-camera-interior-wall.png") | Out-Null
-        Wait-ForHero -Csv $heroCsv -What "the near fade engaged indoors" -TimeoutS 6.0 `
+        Wait-ForHero -Csv $heroCsv -What "the near fade engaged indoors" -TimeoutS 8.0 `
             -Predicate { param($c) ($c.Count -gt 14) -and ([double]$c[14] -lt 0.999) } `
             -Out (Join-Path $OutDir "73-camera-interior-near-fade.png") | Out-Null
-        Say "CAMERA (interior): backing into the stairwell"
-        [InfInput]::Down(0x1F); Start-Sleep -Milliseconds 1200
+        Start-Sleep -Milliseconds 600
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "74-camera-interior-backed-up.png") | ForEach-Object { Say $_ }
         [InfInput]::Up(0x1F)
         # …and the cape, on the same hero, two frames apart while it walks.
