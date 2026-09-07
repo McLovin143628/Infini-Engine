@@ -3344,7 +3344,10 @@ fn a_locked_foot_does_not_slide_and_a_placed_one_is_on_the_ground() {
         }
     }
     println!("\n=== the island's feet, by state ===");
-    println!("  state        worst      p50    over 10 mm   n     play_rate");
+    println!(
+        "  {:<12}{:>9}{:>9}{:>13}{:>7}  play_rate",
+        "state", "worst", "p50", "over 10 mm", "n"
+    );
     let mut worst_p50 = 0.0f64;
     for (st, mut v) in resid.into_iter() {
         v.sort_by(f64::total_cmp);
@@ -3539,14 +3542,14 @@ fn the_breath_moves_the_chest_and_leaves_the_feet_alone() {
     println!(
         "
 === the breath, 1.3 s of island idle apart ===
-  chest {:.4} mm, pelvis {:.4} mm,          feet {:?} mm",
+  chest {:.4} mm, pelvis {:.4} mm, feet {:?} mm",
         moved(chest) * 1000.0,
         moved(pelvis) * 1000.0,
         feet.iter().map(|j| moved(*j) * 1000.0).collect::<Vec<_>>()
     );
     assert!(
         moved(chest) > 0.0005,
-        "the chest moved {:.4} mm over 1.3 s of idle - `ALS_N_SecondaryMotion` is not reaching          the pose, which is what carried item 128 recorded for three waves",
+        "the chest moved {:.4} mm over 1.3 s of idle - `ALS_N_SecondaryMotion` is not reaching the pose, which is what carried item 128 recorded for three waves",
         moved(chest) * 1000.0
     );
     // The MASK, asked of the joints rather than of the mask table: a breath is a
@@ -3556,7 +3559,7 @@ fn the_breath_moves_the_chest_and_leaves_the_feet_alone() {
     {
         assert!(
             moved(j) < moved(chest) * 0.25,
-            "the breath moved {what} {:.4} mm against the chest's {:.4} mm - it is masked to              the spine and a mask that leaks is not one",
+            "the breath moved {what} {:.4} mm against the chest's {:.4} mm - it is masked to the spine and a mask that leaks is not one",
             moved(j) * 1000.0,
             moved(chest) * 1000.0
         );
@@ -3610,11 +3613,36 @@ fn a_drop_lands_light_heavy_or_rolling_by_the_height_it_fell() {
         cm0.land_hard_mps, cm0.land_ragdoll_mps
     );
     let ground = hero_pos(&sim, hero);
+    // **The joints, not the classifier** (the CHAR1b.1 audit's law). A landing is
+    // a character taking the impact through its legs, so the number that says
+    // one happened is how far the PELVIS came down toward its own feet — a pure
+    // pose quantity, measured in the hero's own model frame, so a capsule that
+    // moves does not appear in it.
+    let (rigs, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero was posed");
+    let rig = rigs.get(&ep.skeleton).expect("its rig is on disk").clone();
+    let roles = rig.role_index();
+    let pelvis_j = roles
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+        .expect("the hero has a pelvis");
+    let feet_j = inf_anim::derive::foot_joints(&rig);
+    let crouch_depth = |sim: &inf_player::runtime_sim::RuntimeSim| -> f64 {
+        let Some(p) = inf_ecs::pose::evaluated_pose(sim.world(), hero) else {
+            return f64::NAN;
+        };
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &p.pose);
+        let at = |j: u16| g[j as usize].to_scale_rotation_translation().2;
+        let lower = feet_j
+            .iter()
+            .map(|j| at(*j).y)
+            .fold(f64::MAX, |a, b| a.min(f64::from(b)));
+        f64::from(at(pelvis_j).y) - lower
+    };
 
     let drop = |sim: &mut inf_player::runtime_sim::RuntimeSim,
                 height: f64,
                 input: bool|
-     -> (LandingKind, f64, String) {
+     -> (LandingKind, f64, String, f64, f64) {
         {
             let w = sim.world_mut();
             let e = w.entity_of(hero).expect("the hero is in the world");
@@ -3640,6 +3668,8 @@ fn a_drop_lands_light_heavy_or_rolling_by_the_height_it_fell() {
         let mut worst = LandingKind::None;
         let mut impact = 0.0f64;
         let mut states: std::collections::BTreeSet<String> = Default::default();
+        let standing = crouch_depth(sim);
+        let mut lowest = f64::MAX;
         for _ in 0..240 {
             sim.step_once(RuntimeInput::default().with_axes(ax.clone()));
             let c = hero_cm(sim, hero);
@@ -3650,27 +3680,45 @@ fn a_drop_lands_light_heavy_or_rolling_by_the_height_it_fell() {
             if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
                 states.insert(s.name.clone());
             }
+            // Only once the character is back on the ground: a pelvis measured
+            // in mid-air is measuring a fall loop's tuck, not a landing.
+            if c.runtime.grounded {
+                let d = crouch_depth(sim);
+                if d.is_finite() {
+                    lowest = lowest.min(d);
+                }
+            }
         }
         // Let the machine settle before the next drop.
         for _ in 0..120 {
             sim.step_once(RuntimeInput::default());
         }
-        (worst, impact, format!("{states:?}"))
+        (worst, impact, format!("{states:?}"), standing, lowest)
     };
 
     // Just under the hard threshold: a light landing.
-    let (soft, v_soft, s1) = drop(&mut sim, h_hard * 0.7, false);
+    let (soft, v_soft, s1, stand0, low0) = drop(&mut sim, h_hard * 0.7, false);
     // Comfortably over it and under the ragdoll one, hands empty: the heavy one.
-    let (hard, v_hard, s2) = drop(&mut sim, (h_hard + h_rag) * 0.5, false);
+    let (hard, v_hard, s2, _, low1) = drop(&mut sim, (h_hard + h_rag) * 0.5, false);
     // The same drop with the stick pushed: ALS's break-fall.
-    let (roll, v_roll, s3) = drop(&mut sim, (h_hard + h_rag) * 0.5, true);
+    let (roll, v_roll, s3, _, low2) = drop(&mut sim, (h_hard + h_rag) * 0.5, true);
+    // …and past the ragdoll threshold, which is a ragdoll and not a landing.
+    let (rag, v_rag, s4, _, _) = drop(&mut sim, h_rag * 1.6, false);
     println!(
-        "  {:.2} m -> {soft:?} at {v_soft:.2} m/s  {s1}\n  {:.2} m -> {hard:?} at {v_hard:.2} m/s  \
-         {s2}\n  {:.2} m + input -> {roll:?} at {v_roll:.2} m/s  {s3}",
-        h_hard * 0.7,
-        (h_hard + h_rag) * 0.5,
+        "  {:.2} m -> {soft:?} at {v_soft:.2} m/s  {s1}",
+        h_hard * 0.7
+    );
+    println!(
+        "  {:.2} m -> {hard:?} at {v_hard:.2} m/s  {s2}",
         (h_hard + h_rag) * 0.5
     );
+    println!(
+        "  {:.2} m + input -> {roll:?} at {v_roll:.2} m/s  {s3}",
+        (h_hard + h_rag) * 0.5
+    );
+    println!("  {:.2} m -> {rag:?} at {v_rag:.2} m/s  {s4}", h_rag * 1.6);
+    println!("  the pelvis over its own lower foot, standing {stand0:.4} m");
+    println!("  lowest after the landing: light {low0:.4}, heavy {low1:.4}, roll {low2:.4}");
     assert_eq!(
         soft,
         LandingKind::Soft,
@@ -3680,17 +3728,51 @@ fn a_drop_lands_light_heavy_or_rolling_by_the_height_it_fell() {
     assert_eq!(
         hard,
         LandingKind::Hard,
-        "a {:.2} m drop with the stick centred classified {hard:?} at {v_hard:.2} m/s against a \
-         {:.2} m/s threshold",
+        "a {:.2} m drop with the stick centred classified {hard:?} at {v_hard:.2} m/s against a {:.2} m/s threshold",
         (h_hard + h_rag) * 0.5,
         cm0.land_hard_mps
     );
     assert_eq!(
         roll,
         LandingKind::Roll,
-        "the same {:.2} m drop WITH movement input classified {roll:?} — ALS's break-fall is \
-         the has-input arm of the same classifier",
+        "the same {:.2} m drop WITH movement input classified {roll:?} - ALS's break-fall is the has-input arm of the same classifier",
         (h_hard + h_rag) * 0.5
+    );
+    assert_eq!(
+        rag,
+        LandingKind::Ragdoll,
+        "a {:.2} m drop (over the {h_rag:.2} m the ragdoll threshold IS) classified {rag:?}",
+        h_rag * 1.6
+    );
+    // ── THE CLIPS PLAYED, AND THE JOINTS SAY SO ──────────────────────────────
+    //
+    // The state names are the first half and the POSE is the second: a machine
+    // that entered `land_heavy` while holding an idle pose would satisfy every
+    // assertion above. A landing is the legs taking the impact, so the number is
+    // how far the pelvis came down toward its own feet, in the hero's own model
+    // frame — a capsule that moves is not in it.
+    for (what, states, want) in [
+        ("the light landing", &s1, "land_light"),
+        ("the heavy landing", &s2, "land_heavy"),
+        ("the break-fall", &s3, "roll"),
+        ("the ragdoll landing", &s4, "ragdoll"),
+    ] {
+        assert!(
+            states.contains(want),
+            "{what} classified correctly and the machine played {states} - `{want}` never ran"
+        );
+    }
+    assert!(
+        low0 < stand0 - 0.01,
+        "the light landing left the pelvis at {low0:.4} m over its foot against {stand0:.4} m standing - the clip played and the POSE did not move"
+    );
+    assert!(
+        low1 < low0,
+        "a heavy landing sank the pelvis to {low1:.4} m and a light one to {low0:.4} m - the two clips draw the same character"
+    );
+    assert!(
+        low2 < low1,
+        "the break-fall put the pelvis at {low2:.4} m against the heavy landing's {low1:.4} m - a roll takes the body to the ground and this one did not"
     );
 }
 
@@ -4335,7 +4417,8 @@ fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
 === the lean, off the island hero's chest (model frame, mm from the pelvis) ==="
     );
     println!(
-        "  rest        z {:+7.2} mm   x {:+7.2} mm",
+        "  {:<11} z {:+7.2} mm   x {:+7.2} mm",
+        "rest",
         rest.z * 1000.0,
         rest.x * 1000.0
     );
@@ -4362,12 +4445,12 @@ fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
     // A start puts the chest FORWARD of where rest left it.
     assert!(
         start.z_hi - f64::from(rest.z) > 0.005,
-        "a standing start moved the chest {:.2} mm forward of rest - the lean is not reaching          the pose",
+        "a standing start moved the chest {:.2} mm forward of rest - the lean is not reaching the pose",
         (start.z_hi - f64::from(rest.z)) * 1000.0
     );
     assert!(
         start.ly_hi > 0.1,
-        "the hero's own `lean_y` reached {:+.3} on its hardest start, so the arm is measuring a          gait and not a lean",
+        "the hero's own `lean_y` reached {:+.3} on its hardest start, so the arm is measuring a gait and not a lean",
         start.ly_hi
     );
     // Braking pulls it back behind the start's own reach, and the parameter goes
@@ -4386,7 +4469,7 @@ fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
     // The two turns lean opposite ways, and the parameters agree with the pose.
     assert!(
         right.x_hi > f64::from(rest.x) + 0.005 && left.x_lo < f64::from(rest.x) - 0.005,
-        "the two turns took the chest to {:.2} mm and {:.2} mm against a rest of {:.2} mm - they          did not go opposite ways",
+        "the two turns took the chest to {:.2} mm and {:.2} mm against a rest of {:.2} mm - they did not go opposite ways",
         right.x_hi * 1000.0,
         left.x_lo * 1000.0,
         rest.x * 1000.0
