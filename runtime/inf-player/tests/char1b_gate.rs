@@ -2516,7 +2516,7 @@ fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
     ] {
         assert!(
             seen.contains(want),
-            "`{want}` never played on the island from the input door — played:              {seen:?}"
+            "`{want}` never played on the island from the input door; played: {seen:?}"
         );
     }
     // The FAMILIES whose gating parameter was dead. Which member of each plays
