@@ -2211,11 +2211,14 @@ impl SceneDoc {
                 // removes a character and redo restores one that still has its
                 // boom.
                 //
-                // It does not reach the level's bytes — see `CameraRig`'s own
-                // docs for where a rig persists and what a per-level one would
-                // have cost — so this is exactly a default the door hands a live
-                // character, and a level reloaded from disk gets it again the
-                // next time this door runs.
+                // It does not reach the level's bytes, and the sentence that
+                // used to stand here (*a level reloaded from disk gets it again
+                // the next time this door runs*) was wrong: loading a level runs
+                // `apply_record`, not this door, so a reloaded character has no
+                // rig at all and never gets one. This is a default handed to a
+                // character at the moment it is CREATED and nothing more. See
+                // `CameraRig`'s own docs and the audit arm
+                // `an_authored_rig_does_not_survive_a_save_and_a_reload`.
                 inf_ecs::camera::CameraRig::default(),
             ));
             // ── THE SKIN (wave CHAR1a audit) ──

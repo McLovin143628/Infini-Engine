@@ -1318,23 +1318,34 @@ fn looking_direction_is_reachable_without_an_aim_press() {
             ..Default::default()
         });
     }
+    // **The mechanism, watched over the whole settle** -- the audit's fix. The
+    // latch is transient: it is cleared the step the body reaches the look, so
+    // reading it AFTER the turn has finished reads `false` on a turn that
+    // worked. It is sampled every step instead, and the count is asserted.
+    let mut turning_steps = 0usize;
     for _ in 0..180 {
         rig.step(&MovementIntent::default());
+        if rig.hero_cm().runtime.turning_in_place {
+            turning_steps += 1;
+        }
     }
     let after = rig.hero_capsule().0;
     let turned = inf_ecs::movement::angle_delta_deg(rig.hero_yaw(), yaw0).abs();
     let walked = (after - before).length();
     println!(
         "  a 133° look, then a still stick: the BODY turned {turned:.2}° and moved \
-         {walked:.4} m"
+         {walked:.4} m, with `turning_in_place` set on {turning_steps} of 180 \
+         settle steps"
     );
     assert!(
         turned > 100.0,
         "the body did not turn with the look: {turned:.2}°"
     );
     assert!(
-        rig.hero_cm().runtime.turning_in_place || turned > 100.0,
-        "the turn did not go through the turn-in-place mechanism"
+        turning_steps > 0,
+        "the body turned {turned:.2} degrees but `turning_in_place` was never set \
+         on any of the 180 settle steps -- the turn did not go through \
+         the turn-in-place mechanism"
     );
     assert!(
         walked < 0.10,
@@ -1809,4 +1820,123 @@ fn the_camera_never_ends_inside_the_islands_geometry() {
         "the camera's optical centre was inside the island's geometry on {bad} of \
          {steps} frames"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (7) THE AUDIT'S OWN ARMS — wave CHAR1c's adversarial audit
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **WHERE AN AUTHORED RIG ACTUALLY GOES** — the audit's measurement of the
+/// wave's own persistence sentence.
+///
+/// The wave says a `CameraRig` *"persists on the character asset, as the
+/// `camera.toml` the wizard already writes beside it"*. That sentence is false
+/// in three independent ways and this arm is each of them as a number, because
+/// the user's own question was about **authoring** a boom and an author who
+/// cannot keep what they authored has not authored anything:
+///
+/// 1. The component is not in the scene record (schema v27 is unmoved, which is
+///    the wave's own claim), so a level SAVED and RELOADED has no rig on any
+///    character — including the one the wizard just made.
+/// 2. The `camera.toml` the wizard writes beside a character is
+///    `CameraTuning::default()`, unconditionally — it never reads the rig it
+///    inserted, so the file and the component cannot even be made to agree.
+/// 3. Nothing anywhere reads a character-side `camera.toml`. The runtime's own
+///    loader is `inf_player::input::load_camera_beside`, which reads
+///    `level_path.with_file_name("camera.toml")` — the file beside the **level**.
+///
+/// So the honest statement is: **a rig is a runtime default, not an authored
+/// value.** The surface that does persist is the level-side `camera.toml`, and
+/// the arm proves that one works so the sentence a future wave writes is the
+/// true one.
+#[test]
+fn an_authored_rig_does_not_survive_a_save_and_a_reload() {
+    use inf_editor_core::scene::{serialize, SceneDoc};
+    let mut doc = SceneDoc::new();
+    let guid = doc.edit_create_character(
+        "Hero",
+        Uuid::from_u128(0x1C02_0001),
+        Uuid::from_u128(0x1C02_0002),
+        Uuid::from_u128(0x1C02_0003),
+        None,
+        DVec3::ZERO,
+        None,
+        1.8,
+    );
+    // An author changes the boom — through the same by-name door the live
+    // tuning slider and `camera.set_rig` both go through.
+    assert!(inf_ecs::camera::set_camera_rig_value(
+        doc.world_mut(),
+        guid,
+        "walk.arm_length_m",
+        6.25
+    ));
+    let before = inf_ecs::camera::camera_rig_value(doc.world(), guid, "walk.arm_length_m");
+    assert_eq!(
+        before,
+        Some(6.25),
+        "the tune did not land in the first place"
+    );
+
+    // Save the level and load it back — a relaunch, in the one step that is
+    // actually about persistence.
+    let tmp = std::env::temp_dir().join(format!("inf-c1c-audit-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("a temp dir");
+    let path = tmp.join("RigPersistence.inf_lvl");
+    serialize::save(&doc, &path, None).expect("the level saves");
+    let reloaded = serialize::load(&path).expect("the level loads");
+    let after = inf_ecs::camera::camera_rig(reloaded.world(), guid);
+    let after_v = inf_ecs::camera::camera_rig_value(reloaded.world(), guid, "walk.arm_length_m");
+
+    // What the wizard writes beside a character, against the rig it inserted.
+    let wizard_text = inf_ecs::camera::CameraTuning::default()
+        .to_toml()
+        .expect("the wizard's own text");
+    let wizard_arm = inf_ecs::camera::CameraTuning::from_toml(&wizard_text)
+        .expect("it parses")
+        .get("walk.arm_length_m");
+
+    println!(
+        "\n=== where an authored rig goes ===\n  \
+         authored on the component:            {before:?}\n  \
+         after save + reload, a rig at all:    {}\n  \
+         after save + reload, the value:       {after_v:?}\n  \
+         what the wizard writes beside the character: {wizard_arm:?} \
+         (`CameraTuning::default()`, never the rig)\n  \
+         what the RUNTIME reads:               `camera.toml` beside the LEVEL \
+         (`inf_player::input::load_camera_beside`)",
+        after.is_some()
+    );
+    assert!(
+        after.is_none(),
+        "a `CameraRig` survived a save and a reload — the scene record grew and \
+         this arm's whole statement is stale (re-read schema v27)"
+    );
+    assert_eq!(after_v, None);
+    assert_eq!(
+        wizard_arm,
+        Some(3.0),
+        "the wizard's file is no longer the plain default — if it now carries the \
+         rig, this arm's second clause is closed and must be re-stated"
+    );
+
+    // …and the surface that DOES persist: a level-side `camera.toml` reaches the
+    // camera. This half is the true sentence, asserted so the false one cannot
+    // come back.
+    let mut table = inf_ecs::camera::CameraTuning::default();
+    assert!(table.set("walk.arm_length_m", 6.25));
+    std::fs::write(tmp.join("camera.toml"), table.to_toml().expect("to toml"))
+        .expect("the table writes");
+    let loaded = inf_player::input::load_camera_beside(&path);
+    println!(
+        "  a level-side `camera.toml` at 6.25 m loads as {:?} — the ONE surface \
+         that persists",
+        loaded.get("walk.arm_length_m")
+    );
+    assert_eq!(
+        loaded.get("walk.arm_length_m"),
+        Some(6.25),
+        "even the level-side table does not reach the camera"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -11,14 +11,15 @@ seat. Wave CHAR1c added the collision policy — a whisker fan, an asymmetric
 smoother, a character-ignore rule and a near fade — and the director that
 decides who is holding the camera when more than one thing wants it.
 
-## Where a rig lives
+## Where the numbers live, and what does NOT persist
 
-On the **character asset**, as `camera.toml` beside it. The New Character wizard
-writes one, and every field in it defaults, so a file naming one number is a
-legal file and every number it does not name is the shipped ALS value:
+**The table an author owns is `camera.toml` beside the LEVEL.** That is the one
+file the engine reads (`inf_player::input::load_camera_beside`), and every field
+in it defaults, so a file naming one number is a legal file and every number it
+does not name is the shipped ALS value:
 
 ```toml
-# camera.toml — only what this character wants differently
+# camera.toml -- only what this level's camera wants differently
 [velocity_direction.run]
 arm_length_m = 4.2
 
@@ -26,16 +27,33 @@ arm_length_m = 4.2
 near_fade_start_m = 1.2
 ```
 
-The engine reads it beside the level it loads. A character that carries a
-`CameraRig` **overrides** that table for as long as the camera is following it,
-which is what makes possessing an NPC a real change of camera rather than a
-change of subject.
+A character may also carry a **`CameraRig`** component, which **overrides** that
+table for as long as the camera is following it -- what makes possessing an NPC a
+real change of camera rather than a change of subject. A character built through
+the New Character wizard is given one, with the same ALS defaults on it.
 
-The rig is not in the level's own bytes. That is deliberate: every character in
-every level this engine ships wants the same table, and putting it in the scene
-record would cost a schema version, a frozen entity record, both hosts'
-apply-record mirrors, the play-in-editor payload version and a re-cook of every
-committed level — for 776 bytes per character carrying identical numbers.
+**A rig does not persist.** It is a runtime default, not an authored value, and
+the audit arm `an_authored_rig_does_not_survive_a_save_and_a_reload` is each half
+of that as a number:
+
+* the component is not in the level's bytes, so a level saved and reloaded has no
+  rig on any character -- including one the wizard made a moment earlier;
+* the `camera.toml` the wizard writes beside a *character asset* is the plain
+  default and is never read by anything;
+* a tune made with the live-tuning slider or with `camera.set_rig` is session
+  state, exactly as a vehicle's or a weapon's is, and is gone at the next launch.
+
+So: **to keep a camera change, edit the `camera.toml` beside the level.** The rig
+is for a running game -- a possessed NPC, a Blueprint that wants a different boom
+for a scene -- and the two doors that would let an authored rig survive (a write
+half for the level table, or a character-asset table read at level load) are
+filed and not built.
+
+The rig is deliberately not in the level's own bytes: every character in every
+level this engine ships wants the same table, and putting it in the scene record
+would cost a schema version, a frozen entity record, both hosts' apply-record
+mirrors, the play-in-editor payload version and a re-cook of every committed
+level -- for 776 bytes per character carrying identical numbers.
 
 ## The boom, and what gets in its way
 
@@ -117,5 +135,8 @@ slider drives, so an author who has learned one has learned all three.
 | **G** | first person ↔ third person (going first person also asks the character to face where it looks, because there is no other way to aim in first person) |
 
 The shoulder is a rig value (`shoulder`) rather than a key: it is a decision an
-author makes once, and it is reachable from `camera.toml`, from the tuning
-slider and from a Blueprint.
+author makes once. It is **not** a `camera.toml` key and **not** a live-tuning
+row -- both of those speak `CameraTuning`'s vocabulary, and the shoulder is one
+of the two names (`shoulder`, `first_person`) that live on the rig itself. Today
+its only door is a Blueprint's `camera.set_rig`, and like every rig value it is
+gone at the next launch.

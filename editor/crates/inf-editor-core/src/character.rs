@@ -1115,7 +1115,16 @@ pub fn build_character_with_ids(
     // schema (a camera is not sim state; a binding is a project's), so both are
     // text beside the character, in the formats the shipped player already reads.
     let cam_path = dir.join("camera.toml");
-    let cam_text = or_roll_back!(inf_ecs::camera::CameraTuning::default().to_toml());
+    // **The rig's OWN table, not a second copy of the defaults** (wave CHAR1c's
+    // audit). This wrote `CameraTuning::default()` unconditionally while
+    // `SceneDoc::edit_create_character` inserted a `CameraRig` beside it, so the
+    // file and the component were two independent statements that happened to
+    // agree -- and the wave's docs claimed the file was where the rig persisted.
+    // It is not (see `CameraRig`'s own docs and
+    // `char1c_gate::an_authored_rig_does_not_survive_a_save_and_a_reload`), but
+    // the two must at least be one source: the day the rig's defaults move, this
+    // file moves with them instead of silently disagreeing.
+    let cam_text = or_roll_back!(inf_ecs::camera::CameraRig::default().tuning.to_toml());
     or_roll_back!(inf_asset::write_atomically(&cam_path, cam_text.as_bytes()));
     text.push(cam_path);
     let input_path = dir.join("input.toml");

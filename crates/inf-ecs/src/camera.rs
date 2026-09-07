@@ -1917,14 +1917,42 @@ pub fn basis(yaw_deg: f64, pitch_deg: f64) -> (DVec3, DVec3, DVec3) {
 /// **Blueprint can read and write it** (`camera.*`, over `&mut EcsWorld`), and
 /// the wizard can put a default on a character it builds.
 ///
-/// # Where it PERSISTS, and what the other branch would have cost
+/// # WHERE IT PERSISTS: IT DOES NOT (wave CHAR1c's audit)
 ///
-/// On the **character asset**, as the `camera.toml` the wizard already writes
-/// beside it — which is where a camera rig has lived since P29.6 and is the
-/// branch the wave's own brief prefers ("*a positional append (VIS1a precedent)
-/// only if the rig must be authored per level — else it lives on the character
-/// asset*"). The rig is not authored per level: every character in all
-/// twenty-four committed levels wants the same table.
+/// **A rig is a runtime default, not an authored value**, and the sentence this
+/// paragraph used to carry (*"on the character asset, as the `camera.toml` the
+/// wizard already writes beside it"*) was false in three independent ways, each
+/// of them now a number in
+/// `char1c_gate::an_authored_rig_does_not_survive_a_save_and_a_reload`:
+///
+/// 1. This component is **not in the scene record** (schema v27 is unmoved,
+///    which is what the paragraph below is about), so a level saved and reloaded
+///    carries no rig on any character, including one the wizard made a moment
+///    earlier. Measured: `walk.arm_length_m` authored at 6.25 m, `camera_rig`
+///    answers `None` after a save and a load.
+/// 2. The `camera.toml` the wizard writes beside a character is
+///    `CameraTuning::default()` and nothing else. It has never read the rig it
+///    inserted, so the file and the component cannot be made to agree by an
+///    author editing either one.
+/// 3. **Nothing reads a character-side `camera.toml`.** The runtime's loader is
+///    `inf_player::input::load_camera_beside`, which reads
+///    `level_path.with_file_name("camera.toml")`: the file beside the LEVEL. The
+///    wizard's file beside a character asset reaches no camera at all.
+///
+/// The one surface that does persist is that **level-side** table, and the same
+/// arm asserts it works. What is missing is a WRITE half for it: a tune made
+/// through the live-tuning slider or `camera.set_rig` is session state, exactly
+/// as a `Tune::Vehicle` and a `Tune::Weapon` are (`TuneScope::Keep` is
+/// documented as meaningful for `Tune::Field` alone), and it is gone at the next
+/// launch. The island, which is the level the showcase runs, carries no
+/// `camera.toml` at all, so its camera is these compiled-in defaults and there
+/// is no file an author can edit to change it.
+///
+/// Two doors would close it and neither is this wave's or its audit's to spend:
+/// a **level-side write half** (`CameraTuning::to_toml` already exists; what is
+/// missing is a caller and a frontend affordance), or a **character-asset table
+/// read at level load**, which is the design the false sentence assumed and is a
+/// load-path change in both hosts. Filed as the audit's own carried item.
 ///
 /// The other branch is priced rather than waved at. A per-level rig is a
 /// **positional append to the entity record** — scene v27 → v28, the pre-v28

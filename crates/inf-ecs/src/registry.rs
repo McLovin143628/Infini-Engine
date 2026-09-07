@@ -118,11 +118,13 @@ impl ComponentRegistry {
         // ── the camera rig (wave CHAR1c) ──
         //
         // Registered, and deliberately **not editable**, which is `Name`'s own
-        // shape for a different reason. A `CameraRig` persists on the CHARACTER
-        // ASSET (`camera.toml`, which the wizard writes beside it) and not in
-        // the level record — see `CameraRig`'s own docs for what a per-level rig
-        // would have cost — so a row in the generic Details grid would be a row
-        // an author could edit, save, and lose. The dedicated surface is the
+        // shape for a different reason. A `CameraRig` is not in the level record
+        // and does not persist ANYWHERE (measured by the audit's
+        // `an_authored_rig_does_not_survive_a_save_and_a_reload`; `CameraRig`'s
+        // own docs carry the three ways the sentence that used to stand here was
+        // wrong), so a row in the generic Details grid would be a row an author
+        // could edit, save, and lose. Still the right call, and now for the true
+        // reason rather than a hopeful one. The dedicated surface is the
         // live tuning door (`inf_editor_core::tuning::Tune::Camera`, which
         // reaches the subject's rig now) plus the `camera.*` Blueprint kit, and
         // both are the same by-name vocabulary the text file uses.
