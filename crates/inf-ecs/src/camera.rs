@@ -159,6 +159,168 @@ impl GaitCameraSettings {
     }
 }
 
+/// **How the boom answers geometry** (wave CHAR1c) — the collision policy, as
+/// numbers an author owns.
+///
+/// # What P29.6 shipped, and the four things it did not
+///
+/// The sweep is one sphere cast from the pivot to where the camera wants to be,
+/// and on a blocking hit the camera goes to the contact — ALS's own
+/// `SweepSingleByChannel` plus `TargetCameraLocation += HitResult.Location -
+/// HitResult.TraceEnd` (`ALSPlayerCameraManager.cpp:200-220`). That is a
+/// *reaction*, and it has four failure modes the user reported in one sentence
+/// ("there should be no camera clipping when the user is looking around ... the
+/// camera should simply adjust position, just like any AAA game"):
+///
+/// 1. It only sees what is **directly behind** the camera. A wall arriving from
+///    the side is not in the ray until the camera is already in it.
+/// 2. It **snaps**, in both directions. ALS has no smoothing on the arm at all,
+///    so a lamp-post crossing the boom pops the camera in and out in two frames.
+/// 3. It stops at **any** collider, including other characters — so a crowd
+///    walking behind the hero shoves the camera onto its neck.
+/// 4. When the arm does go short the body fills the frame, and the camera ends
+///    up **inside the hero's head** (carried 89: the idle frame's camera sat in
+///    the back of the hero's neck, photographed four times across CHAR1a).
+///
+/// Each field below closes exactly one of those.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CameraCollision {
+    /// Cast the **whisker fan** as well as the main sweep (1).
+    ///
+    /// Off restores P29.6 exactly: one cast, no steer, no predictive shortening.
+    /// It is a switch rather than a `whisker_count = 0` because "this rig does
+    /// not want whiskers" is a decision an author makes, and a count of zero
+    /// reads like a mistake.
+    pub whiskers: bool,
+    /// How many whiskers **per side** — so the fan is `2 * count + 1` casts
+    /// including the main one.
+    pub whisker_count: u32,
+    /// The outermost whisker's angle from the boom, degrees. The inner ones are
+    /// spaced evenly to it.
+    ///
+    /// **22.5° is chosen against a corridor, not against a taste.** A whisker at
+    /// angle θ meets a wall a half-width `w` to the side at `w / sin θ`, and it
+    /// bounds the boom at `w · cos θ / sin θ`. At 22.5° a 2 m half-width alley
+    /// bounds the boom at 4.83 m, which is longer than every arm in the shipped
+    /// table (3.0 / 3.4 / 4.0 / 2.5 / 2.0), so an alley does not shorten the
+    /// boom at all — while a wall the boom is about to swing into is seen a
+    /// quarter of a turn early.
+    pub whisker_spread_deg: f64,
+    /// How hard a blocked whisker **steers** the boom away from it, as a
+    /// fraction of that whisker's own angle. `1.0` means a fully blocked
+    /// outermost whisker asks for the whole spread; `0` disables the steer and
+    /// leaves only the predictive shortening.
+    pub whisker_steer: f64,
+    /// The most the steer may reach, degrees — a ceiling, so a character in a
+    /// corner whose whiskers are all blocked cannot be spun round by the
+    /// arithmetic.
+    pub whisker_steer_max_deg: f64,
+    /// How fast the boom comes **in**, 1/s (2). Fast: a camera that eases into a
+    /// wall is a camera inside a wall for the duration of the ease.
+    pub pull_in_speed: f64,
+    /// ...and how fast it goes back **out**, 1/s (2). Slow, and slower than the
+    /// pull-in **by construction** — the asymmetry is the whole point. A boom
+    /// that returned as fast as it retracts pumps once per lamp-post.
+    pub return_speed: f64,
+    /// The boom length, metres, at which the subject's own body starts to fade
+    /// (4). Above it the body is drawn exactly as it always was.
+    pub near_fade_start_m: f64,
+    /// ...and the length at which it is fully gone. Below `near_fade_start_m` by
+    /// construction; the fade is linear between the two.
+    pub near_fade_end_m: f64,
+    /// Exclude **characters** from the sweep and the whiskers (3) — the subject
+    /// itself, every other character, and the vehicle a character is riding.
+    ///
+    /// A camera that stopped on a passer-by would be shoved onto its own
+    /// subject's neck by a crowd, and this engine now has crowds. The cost of
+    /// the other answer is a camera that sometimes sees through a body, which is
+    /// what every third-person game alive chooses.
+    pub ignore_characters: bool,
+    /// The lowest the camera's own pitch may go, degrees (camera-side).
+    ///
+    /// ALS clamps the *view* pitch in `APlayerCameraManager::ViewPitchMin/Max`
+    /// and never touches the character. So does this: the movement step keeps
+    /// its own hard `±89°` bound on `aim_pitch_deg` (which is sim state and is
+    /// what the body and the look-at read), and this pair clamps only the pose
+    /// the camera publishes.
+    pub pitch_min_deg: f64,
+    /// ...and the highest.
+    pub pitch_max_deg: f64,
+}
+
+impl Default for CameraCollision {
+    fn default() -> Self {
+        Self {
+            whiskers: true,
+            whisker_count: 2,
+            whisker_spread_deg: 22.5,
+            whisker_steer: 1.0,
+            whisker_steer_max_deg: 25.0,
+            // `FInterpTo` closes ~63 % of the gap in `1 / speed` seconds: 33 ms
+            // to come in, 400 ms to go back out.
+            pull_in_speed: 30.0,
+            return_speed: 2.5,
+            near_fade_start_m: 0.90,
+            near_fade_end_m: 0.35,
+            ignore_characters: true,
+            // The SIM's own hard bound, so the shipped default changes no
+            // frame this engine has ever drawn; a rig that wants a tighter
+            // ceiling (a cover camera, a vehicle) narrows it.
+            pitch_min_deg: -89.0,
+            pitch_max_deg: 89.0,
+        }
+    }
+}
+
+impl CameraCollision {
+    /// The **near fade** for a boom of `arm_m`: `1.0` fully drawn, `0.0` fully
+    /// gone, linear between [`near_fade_end_m`](Self::near_fade_end_m) and
+    /// [`near_fade_start_m`](Self::near_fade_start_m).
+    ///
+    /// Answers `1.0` for a degenerate band (`start <= end`), because a band an
+    /// author has inverted must not hide the character — a refusal is a value,
+    /// and the value that keeps the game playable is "draw it".
+    pub fn near_fade(&self, arm_m: f64) -> f64 {
+        let (a, b) = (self.near_fade_end_m, self.near_fade_start_m);
+        if !(a.is_finite() && b.is_finite()) || b <= a {
+            return 1.0;
+        }
+        ((arm_m - a) / (b - a)).clamp(0.0, 1.0)
+    }
+
+    /// The whisker angles, degrees, signed, **left to right and never zero** —
+    /// the main sweep is the boom itself and is not a whisker.
+    ///
+    /// Empty when the fan is off or the count is zero, which is what makes the
+    /// physics half's loop the same shape in both cases.
+    pub fn whisker_angles_deg(&self) -> Vec<f64> {
+        if !self.whiskers || self.whisker_count == 0 || !self.whisker_spread_deg.is_finite() {
+            return Vec::new();
+        }
+        let n = i64::from(self.whisker_count.min(8));
+        let mut out = Vec::with_capacity(2 * n as usize);
+        for k in (1..=n).rev() {
+            out.push(-self.whisker_spread_deg * (k as f64) / (n as f64));
+        }
+        for k in 1..=n {
+            out.push(self.whisker_spread_deg * (k as f64) / (n as f64));
+        }
+        out
+    }
+
+    /// **The steer one whisker asks for**, degrees, from its angle and how much
+    /// of its own reach was free.
+    ///
+    /// A whisker blocked at the very start asks for the whole of its own angle,
+    /// away from itself; one that reached the end asks for nothing. Split out so
+    /// the rule is a function of two numbers and can be read without a world.
+    pub fn whisker_steer_deg(&self, angle_deg: f64, free_fraction: f64) -> f64 {
+        let blocked = (1.0 - free_fraction).clamp(0.0, 1.0);
+        -angle_deg * blocked * self.whisker_steer
+    }
+}
+
 /// **The drive camera's block** (island wave VEH2a) — one settings block plus
 /// the handful of numbers that make a car's camera a car's camera.
 ///
@@ -288,6 +450,12 @@ pub struct CameraTuning {
     /// blocked, as a fraction of the arm — a floor, so a wall does not put the
     /// camera inside the character's head.
     pub min_arm_fraction: f64,
+    /// **The collision policy** (wave CHAR1c): whiskers, the asymmetric arm
+    /// smoothing, the near fade, the character-ignore rule and the camera's own
+    /// pitch limits. Every number in it is a number an author owns, and the
+    /// whole block defaults, so a `camera.toml` that names none of them gets the
+    /// shipped policy.
+    pub collision: CameraCollision,
 }
 
 impl Default for CameraTuning {
@@ -349,6 +517,7 @@ impl Default for CameraTuning {
             state_blend_speed: 6.0,
             view_blend_speed: 8.0,
             min_arm_fraction: 0.05,
+            collision: CameraCollision::default(),
         }
     }
 }
@@ -430,6 +599,62 @@ impl CameraTuning {
             }
             "min_arm_fraction" => {
                 self.min_arm_fraction = value;
+                return true;
+            }
+            // ── the collision policy (wave CHAR1c) ──
+            //
+            // Under a `collision.` prefix rather than bare names, because the
+            // block is a *policy* and an author sweeping "the pull-in" wants to
+            // find it beside "the return" rather than among the twelve gait
+            // blocks. `whiskers` is a bool on a `f64` door, so it reads the sign
+            // — the same rule the live tuner uses for every other flag, and the
+            // reason this door takes one scalar type at all.
+            "collision.whiskers" => {
+                self.collision.whiskers = value > 0.5;
+                return true;
+            }
+            "collision.whisker_count" => {
+                self.collision.whisker_count = value.clamp(0.0, 8.0) as u32;
+                return true;
+            }
+            "collision.whisker_spread_deg" => {
+                self.collision.whisker_spread_deg = value;
+                return true;
+            }
+            "collision.whisker_steer" => {
+                self.collision.whisker_steer = value;
+                return true;
+            }
+            "collision.whisker_steer_max_deg" => {
+                self.collision.whisker_steer_max_deg = value;
+                return true;
+            }
+            "collision.pull_in_speed" => {
+                self.collision.pull_in_speed = value;
+                return true;
+            }
+            "collision.return_speed" => {
+                self.collision.return_speed = value;
+                return true;
+            }
+            "collision.near_fade_start_m" => {
+                self.collision.near_fade_start_m = value;
+                return true;
+            }
+            "collision.near_fade_end_m" => {
+                self.collision.near_fade_end_m = value;
+                return true;
+            }
+            "collision.ignore_characters" => {
+                self.collision.ignore_characters = value > 0.5;
+                return true;
+            }
+            "collision.pitch_min_deg" => {
+                self.collision.pitch_min_deg = value;
+                return true;
+            }
+            "collision.pitch_max_deg" => {
+                self.collision.pitch_max_deg = value;
                 return true;
             }
             // The drive camera's own scalars (island wave VEH2a). Under the
@@ -633,6 +858,245 @@ pub struct CameraPose {
     pub fov_deg: f64,
 }
 
+/// **Which stack a camera request belongs to** (wave CHAR1c).
+///
+/// Three layers, and the order between them is the whole of "who wins": a
+/// cinematic beats a death, a death beats the gameplay rig. Priority *within* a
+/// layer breaks ties between two sources of the same kind — two overlapping
+/// sequencer tracks, a death cam and a photo mode.
+///
+/// It is an ordering and not a set of magic numbers because a number invites
+/// arithmetic: `Scripted(0)` beating `Override(9999)` has to be true by the
+/// type, or the first gameplay system in a hurry will pick 10000.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum CameraLayer {
+    /// The gameplay rig — the character's own boom, the vehicle's, an aim. The
+    /// pose [`CameraDirector::resolve`] is handed, and the layer nothing has to
+    /// request.
+    #[default]
+    Gameplay,
+    /// Something has taken the camera off the player for a moment: death, a
+    /// ragdoll follow, a photo mode. It outranks gameplay and loses to a script.
+    Override,
+    /// A sequencer shot, a cinematic, a scripted cut. Outranks everything: a
+    /// cutscene that a stumble could steal the camera from is not a cutscene.
+    Scripted,
+}
+
+/// **One claim on the camera** (wave CHAR1c).
+///
+/// A source pushes one of these per step it wants the camera; the step it stops
+/// pushing is the step the director blends back to whatever is left. There is no
+/// "release" verb for the same reason the movement intent has no "stop walking":
+/// a per-step claim cannot be leaked by a system that panicked, and a latch can.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraRequest {
+    pub layer: CameraLayer,
+    /// Rank within the layer; higher wins. Ties break on [`tag`](Self::tag)
+    /// ascending, so two sources that forgot to disagree still resolve the same
+    /// way in both hosts.
+    pub priority: i32,
+    /// Who is asking. Stable across the steps one source holds the camera —
+    /// **this is the identity the blend keys on**, so a source that changes its
+    /// pose every step does not restart its own blend.
+    pub tag: u64,
+    /// Where it wants the camera.
+    pub pose: CameraPose,
+    /// How long to blend *into* it, seconds. `0` is a **cut** — instant, and
+    /// reported as one so a renderer can flush what a cut invalidates
+    /// (`inf_render::is_camera_cut` is the consumer that already exists).
+    pub blend_s: f64,
+}
+
+impl CameraRequest {
+    /// A request that cuts (no blend) — a sequencer shot change.
+    pub fn cut(layer: CameraLayer, tag: u64, pose: CameraPose) -> Self {
+        Self {
+            layer,
+            priority: 0,
+            tag,
+            pose,
+            blend_s: 0.0,
+        }
+    }
+
+    /// A request that blends in over `blend_s` seconds.
+    pub fn blended(layer: CameraLayer, tag: u64, pose: CameraPose, blend_s: f64) -> Self {
+        Self {
+            layer,
+            priority: 0,
+            tag,
+            pose,
+            blend_s,
+        }
+    }
+}
+
+/// The tag the gameplay rig itself carries — the source that is always present
+/// and never pushed.
+pub const CAMERA_TAG_GAMEPLAY: u64 = 0;
+/// The tag [`inf_physics`'s camera door](crate::camera) raises a ragdoll follow
+/// under (wave CHAR1c). Named here so a host that wants to *outrank* the death
+/// cam knows what it is outranking.
+pub const CAMERA_TAG_RAGDOLL: u64 = 1;
+
+/// **The priority-blended camera stack** (wave CHAR1c).
+///
+/// # The rule, in one paragraph
+///
+/// Every step, the gameplay rig produces a pose and any number of sources push a
+/// [`CameraRequest`]. The winner is the highest `(layer, priority)`, ties broken
+/// by `tag` ascending. When the winning **tag** changes, the director starts a
+/// blend from the pose it was last outputting toward the new winner over that
+/// request's `blend_s` — or cuts, if that is zero. The blend curve is
+/// `smoothstep`, so a shot arrives and leaves with zero velocity and a
+/// vehicle-entry blend does not jerk at either end.
+///
+/// # Why the blend is from the OUTPUT and not from the loser
+///
+/// A blend interrupted halfway must not snap. The director blends from the pose
+/// it last *published*, which is where the viewer's eye already is, so a shot
+/// cancelled mid-blend continues from wherever it had reached. That is one
+/// field (`from`) instead of a stack of partial blends, and it is the same
+/// choice the animation cross-fade makes for the same reason.
+///
+/// # It is deterministic, and that is a property this type has to carry
+///
+/// The camera is render-side, but a `char1c_gate` arm compares PIE and shipping
+/// on the camera trace — so the director's output has to be a pure function of
+/// (gameplay pose, requests, dt). It holds no clock, no map with a hashed
+/// iteration order and no floating tie-break: the winner is chosen by a total
+/// order over `(layer, priority, tag)` and the blend clock is `dt` accumulated.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CameraDirector {
+    /// This step's claims. Pushed by hosts, drained by [`resolve`](Self::resolve).
+    requests: Vec<CameraRequest>,
+    /// Who is holding the camera, and what the resolved winner's pose was.
+    active: Option<(CameraLayer, i32, u64)>,
+    /// The pose the current blend started from.
+    from: CameraPose,
+    /// Seconds into the current blend, and how long it is. `len == 0` means
+    /// "settled" — nothing is blending.
+    elapsed_s: f64,
+    len_s: f64,
+    /// The pose the director published last step — the thing a new blend starts
+    /// from.
+    last: CameraPose,
+    /// Whether the last [`resolve`](Self::resolve) was a **cut**.
+    cut: bool,
+    seeded: bool,
+}
+
+impl CameraDirector {
+    /// Push one claim for this step. Cheap enough to call unconditionally; a
+    /// step with no claims is a `Vec` that stays empty.
+    pub fn request(&mut self, r: CameraRequest) {
+        self.requests.push(r);
+    }
+
+    /// Who is holding the camera as of the last [`resolve`](Self::resolve) —
+    /// `None` while the gameplay rig has it.
+    pub fn holder(&self) -> Option<(CameraLayer, i32, u64)> {
+        self.active
+    }
+
+    /// Whether the last resolve was a cut rather than a blend.
+    pub fn was_cut(&self) -> bool {
+        self.cut
+    }
+
+    /// How far through the current blend, `[0, 1]`; `1` when nothing is blending.
+    pub fn blend_fraction(&self) -> f64 {
+        if self.len_s <= 0.0 {
+            return 1.0;
+        }
+        (self.elapsed_s / self.len_s).clamp(0.0, 1.0)
+    }
+
+    /// **Resolve this step.** `gameplay` is the rig's own pose; the requests
+    /// pushed since the last call are consumed.
+    pub fn resolve(&mut self, gameplay: CameraPose, dt: f64) -> CameraPose {
+        // The winner, by a total order. `max_by_key` over a tuple is the whole
+        // rule; `tag` is *ascending* on a tie, so it is negated rather than
+        // sorted the other way, which keeps one comparison in one place.
+        let winner = self
+            .requests
+            .iter()
+            .max_by_key(|r| (r.layer, r.priority, std::cmp::Reverse(r.tag)))
+            .copied();
+        let (key, target, blend_s) = match winner {
+            Some(r) => (Some((r.layer, r.priority, r.tag)), r.pose, r.blend_s),
+            // The gameplay rig's own claim is implicit and blends back over the
+            // *last winner's* length, which is what makes a shot's exit as smooth
+            // as its entrance without a second number on the request.
+            None => (None, gameplay, self.len_s.max(DEFAULT_RELEASE_BLEND_S)),
+        };
+        self.requests.clear();
+
+        if !self.seeded {
+            self.seeded = true;
+            self.active = key;
+            self.from = target;
+            self.last = target;
+            self.elapsed_s = 0.0;
+            self.len_s = 0.0;
+            self.cut = false;
+            return target;
+        }
+        // A change of HOLDER starts a blend; a holder that moved its own pose
+        // does not.
+        let changed = key.map(|k| k.2) != self.active.map(|k| k.2);
+        if changed {
+            self.from = self.last;
+            self.elapsed_s = 0.0;
+            self.len_s = blend_s.max(0.0);
+            self.cut = self.len_s <= 0.0;
+            self.active = key;
+        } else if dt.is_finite() && dt > 0.0 {
+            self.cut = false;
+            self.elapsed_s += dt;
+        }
+        let out = if self.len_s <= 0.0 {
+            target
+        } else {
+            let t = (self.elapsed_s / self.len_s).clamp(0.0, 1.0);
+            // `smoothstep`: zero velocity at both ends. Spelled out rather than
+            // reached for, because `inf-ecs` has no easing module and one line is
+            // not a module.
+            let e = t * t * (3.0 - 2.0 * t);
+            lerp_pose(self.from, target, e)
+        };
+        if self.len_s > 0.0 && self.elapsed_s >= self.len_s {
+            self.len_s = 0.0;
+            self.elapsed_s = 0.0;
+        }
+        self.last = out;
+        out
+    }
+}
+
+/// How long the director takes to hand the camera **back** to gameplay when a
+/// source stops asking and never said how long its exit should be, seconds.
+pub const DEFAULT_RELEASE_BLEND_S: f64 = 0.5;
+
+/// Blend two camera poses. Position, pitch and FOV lerp; the yaw takes the short
+/// way round, for the reason [`interp_angle_deg`] exists.
+pub fn lerp_pose(a: CameraPose, b: CameraPose, t: f64) -> CameraPose {
+    let f = |x: f64, y: f64| x + (y - x) * t;
+    CameraPose {
+        position: Vec3d::new(
+            f(a.position.x, b.position.x),
+            f(a.position.y, b.position.y),
+            f(a.position.z, b.position.z),
+        ),
+        yaw_deg: crate::movement::wrap_deg(
+            a.yaw_deg + crate::movement::angle_delta_deg(b.yaw_deg, a.yaw_deg) * t,
+        ),
+        pitch_deg: f(a.pitch_deg, b.pitch_deg),
+        fov_deg: f(a.fov_deg, b.fov_deg),
+    }
+}
+
 /// **The camera**, owned by a host and never by a world.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocomotionCamera {
@@ -660,9 +1124,45 @@ pub struct LocomotionCamera {
     /// How far the sweep pulled the camera in this step, metres. `0` when
     /// nothing was in the way — the number a gate can assert a collision on.
     pub collision_pull_m: f64,
+    /// **The smoothed boom length**, metres, from
+    /// [`sweep_origin`](Self::sweep_origin) to the resolved camera (wave
+    /// CHAR1c). This is the quantity the asymmetric smoother owns: the sweep
+    /// answers a *free* length every step and this is what the camera actually
+    /// sits at, which is why the near fade reads it and not the free length.
+    pub arm_m: f64,
+    /// What the sweep asked for this step, before the smoothing — the free
+    /// length, metres. Reported so a gate (and a live tuner) can see the
+    /// asymmetry as two numbers rather than infer it from one.
+    pub target_arm_m: f64,
+    /// **How much the world is taking off the boom**, metres, smoothed — the
+    /// quantity the asymmetric law actually owns (wave CHAR1c). `0` in an open
+    /// field, and identical to [`collision_pull_m`](Self::collision_pull_m).
+    pub clip_m: f64,
+    /// How far the whisker fan steered the boom this step, degrees, smoothed.
+    /// `0` when the fan is off or nothing was blocked.
+    pub whisker_steer_deg: f64,
+    /// **How much of the subject's own body to draw**, `[0, 1]` — `1` all of it,
+    /// `0` none (wave CHAR1c). A pure function of [`arm_m`](Self::arm_m) through
+    /// [`CameraCollision::near_fade`]; the hosts project it onto the subject's
+    /// skinned instance and nothing else reads it.
+    pub subject_fade: f64,
+    /// **The director** (wave CHAR1c) — the priority-blended stack the resolved
+    /// [`pose`](Self::pose) comes out of. With no request on it the gameplay rig
+    /// is the only source and the director is the identity.
+    pub director: CameraDirector,
+    /// **The rig's own pose**, before the director (wave CHAR1c). `pose` is what
+    /// the renderer uses; this is what the gameplay rig asked for, kept so a
+    /// gate can measure a blend against the thing it is blending away from.
+    pub gameplay_pose: CameraPose,
     /// Whether the camera has taken its first frame. A camera that lerped from
     /// the origin on step one would swing across the level.
     pub seeded: bool,
+    /// Whether the ARM has taken its first sweep. Separate from
+    /// [`seeded`](Self::seeded) because `advance` seeds the smoothers and the
+    /// sweep happens afterwards: a camera whose arm interpolated from zero would
+    /// start every level inside its own subject, which is the failure this wave
+    /// is named after.
+    pub arm_seeded: bool,
 }
 
 impl Default for LocomotionCamera {
@@ -679,7 +1179,15 @@ impl Default for LocomotionCamera {
             desired: Vec3d::ZERO,
             pose: CameraPose::default(),
             collision_pull_m: 0.0,
+            arm_m: 0.0,
+            target_arm_m: 0.0,
+            clip_m: 0.0,
+            whisker_steer_deg: 0.0,
+            subject_fade: 1.0,
+            director: CameraDirector::default(),
+            gameplay_pose: CameraPose::default(),
             seeded: false,
+            arm_seeded: false,
         }
     }
 }
@@ -807,27 +1315,160 @@ impl LocomotionCamera {
             );
         }
 
-        let shoulder: f64 = if self.right_shoulder { 1.0 } else { -1.0 };
-        // The pivot's own frame is the CAMERA's yaw (pitch and roll zeroed) —
-        // ALS's `CalculateAxisIndependentLag` convention, kept for the offset so
-        // the two cannot disagree about what "right" means.
-        let pivot = self.sweep_origin().to_dvec3();
+        // **The camera's own pitch limits** (wave CHAR1c). ALS clamps the VIEW
+        // pitch in `APlayerCameraManager::ViewPitchMin/Max` and never touches
+        // the character; so does this. The sim's `aim_pitch_deg` keeps its own
+        // hard ±89° bound in the movement step — which is what the body and the
+        // look-at read — and a rig that wants a tighter ceiling narrows only
+        // what the camera publishes.
+        let (lo, hi) = (
+            self.tuning.collision.pitch_min_deg,
+            self.tuning.collision.pitch_max_deg,
+        );
+        if lo.is_finite() && hi.is_finite() && lo <= hi {
+            self.pitch_deg = self.pitch_deg.clamp(lo, hi);
+        }
 
-        // The camera's own frame carries pitch, because the arm swings with it.
-        let (cr, cu, cf) = basis(self.yaw_deg, self.pitch_deg);
-        let arm = self.settings.arm_length_m * (1.0 - self.fp_weight);
-        let desired = pivot - cf * arm
-            + cr * (self.settings.camera_offset.x * shoulder)
-            + cu * self.settings.camera_offset.y
-            + cf * self.settings.camera_offset.z;
-        self.desired = Vec3d::from_dvec3(desired);
+        // **The desired position, through the one door** (wave CHAR1c). It used
+        // to be spelled inline here and nowhere else; the sweep now needs to ask
+        // the same question with a steered yaw, and two spellings of "where the
+        // camera wants to be" is exactly the seam a whisker fan would drift
+        // through. The steer is LAST step's, which is one frame of latency and
+        // is stated rather than hidden: the fan is cast against this frame's
+        // desired position, so the answer it produces is necessarily next
+        // frame's.
+        self.desired = self.camera_at(self.arm_full(), self.whisker_steer_deg);
         self.pose = CameraPose {
             position: self.desired,
             yaw_deg: self.yaw_deg,
             pitch_deg: self.pitch_deg,
             fov_deg: self.settings.fov_deg,
         };
+        self.gameplay_pose = self.pose;
         self.collision_pull_m = 0.0;
+    }
+
+    /// The boom length the settings ask for, with the first-person weight folded
+    /// in — `0` at a first-person seat, because the camera is AT the pivot there.
+    pub fn arm_full(&self) -> f64 {
+        self.settings.arm_length_m * (1.0 - self.fp_weight)
+    }
+
+    /// **Where the camera sits** for a boom of `arm` metres and a yaw steered
+    /// `steer_deg` off the camera's own — the one place the offsets are applied.
+    pub fn camera_at(&self, arm: f64, steer_deg: f64) -> Vec3d {
+        let shoulder: f64 = if self.right_shoulder { 1.0 } else { -1.0 };
+        // The pivot's own frame is the CAMERA's yaw (pitch and roll zeroed) —
+        // ALS's `CalculateAxisIndependentLag` convention, kept for the offset so
+        // the two cannot disagree about what "right" means.
+        let pivot = self.sweep_origin().to_dvec3();
+        // The camera's own frame carries pitch, because the arm swings with it.
+        let (cr, cu, cf) = basis(crate::movement::wrap_deg(self.yaw_deg + steer_deg), self.pitch_deg);
+        Vec3d::from_dvec3(
+            pivot - cf * arm
+                + cr * (self.settings.camera_offset.x * shoulder)
+                + cu * self.settings.camera_offset.y
+                + cf * self.settings.camera_offset.z,
+        )
+    }
+
+    /// **Take the sweep's answer** (wave CHAR1c) — the asymmetric half of the
+    /// collision model, and the door the physics side resolves through.
+    ///
+    /// `free_m` is how far along the pivot→desired ray the sphere cast (and the
+    /// whisker fan's own predictive bound) says the camera may sit; `steer_deg`
+    /// is what the fan asked the boom to swing by, raw. Both are smoothed here
+    /// and nowhere else.
+    ///
+    /// # The asymmetry, and why it is not one speed
+    ///
+    /// Coming IN is an emergency and going OUT is a comfort. A boom that eased
+    /// into a wall would be a camera inside the wall for the length of the ease;
+    /// a boom that sprang back out the instant a lamp-post cleared would pump
+    /// once per lamp-post down a street. The two speeds are
+    /// [`CameraCollision::pull_in_speed`] and
+    /// [`CameraCollision::return_speed`], and the arm arm asserts
+    /// `pull_in < return` as a *time* — the wave's own measurement, not the
+    /// table's claim about itself.
+    pub fn resolve_swept(&mut self, free_m: f64, steer_deg: f64, dt: f64) {
+        let c = self.tuning.collision;
+        // ── the steer, on the same asymmetry ──
+        let cap = c.whisker_steer_max_deg.abs();
+        let want = if steer_deg.is_finite() {
+            steer_deg.clamp(-cap, cap)
+        } else {
+            0.0
+        };
+        let speed = if want.abs() > self.whisker_steer_deg.abs() {
+            c.pull_in_speed
+        } else {
+            c.return_speed
+        };
+        self.whisker_steer_deg = interp_to(self.whisker_steer_deg, want, speed, dt);
+
+        // ── the arm ──
+        let origin = self.sweep_origin().to_dvec3();
+        let delta = self.desired.to_dvec3() - origin;
+        let reach = delta.length();
+        let free = if free_m.is_finite() {
+            free_m.clamp(0.0, reach)
+        } else {
+            reach
+        };
+        self.target_arm_m = free;
+        // **The smoother owns the CLIP, not the arm** — measured, and it is the
+        // difference between a collision model and a lag.
+        //
+        // Smoothing the arm itself makes every change of `reach` look like a
+        // collision: the arm blocks blend (`walk` 3.0 m → `run` 3.4 m) through
+        // `state_blend_speed`, so a camera whose arm chased the blended reach at
+        // `return_speed` trailed it by 0.231 m in open ground with nothing in the
+        // way at all — `camera_3d`'s own control arm caught exactly that. What
+        // the collision model is about is how much the world took OFF the boom,
+        // so that is the quantity that is smoothed; the boom's own length rides
+        // the settings blend untouched, and `collision_pull_m` is zero in an
+        // empty field by construction rather than by luck.
+        let clip = (reach - free).max(0.0);
+        if !self.arm_seeded {
+            // A camera that interpolated its clip from zero would spend its first
+            // half-second inside whatever it spawned against — `seeded`'s rule,
+            // on the quantity `seeded` cannot cover because the sweep happens
+            // after it.
+            self.arm_seeded = true;
+            self.clip_m = clip;
+        } else {
+            let speed = if clip > self.clip_m {
+                c.pull_in_speed
+            } else {
+                c.return_speed
+            };
+            self.clip_m = interp_to(self.clip_m, clip, speed, dt).clamp(0.0, reach);
+        }
+        self.arm_m = (reach - self.clip_m).clamp(0.0, reach);
+        let position = if reach > 1e-6 {
+            Vec3d::from_dvec3(origin + delta / reach * self.arm_m)
+        } else {
+            self.desired
+        };
+        self.collision_pull_m = self.clip_m;
+        self.pose.position = position;
+        self.gameplay_pose = self.pose;
+        // **The near fade** — a pure function of where the camera ENDED, not of
+        // where the sweep said it could be, because the body a player sees is
+        // drawn against the camera that is actually there.
+        self.subject_fade = c.near_fade(self.arm_m);
+    }
+
+    /// **Run the director** over this step's requests and publish its answer as
+    /// [`pose`](Self::pose) (wave CHAR1c).
+    ///
+    /// With nothing pushed this is the identity on the gameplay pose — the
+    /// director seeds on its first call and then has one source for ever, so a
+    /// level with no cinematics pays one `Vec::is_empty` and one comparison.
+    pub fn direct(&mut self, dt: f64) -> CameraPose {
+        let out = self.director.resolve(self.gameplay_pose, dt);
+        self.pose = out;
+        out
     }
 
     /// The pivot the physics half sweeps **from** — the point the camera is

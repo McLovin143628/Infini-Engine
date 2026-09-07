@@ -162,6 +162,41 @@ pub fn step_locomotion_camera(
     if let Some(c) = bridge.collider_of(subject) {
         exclude.insert(c);
     }
+    // **…and every OTHER character** (wave CHAR1c), when the rig's collision
+    // policy says so — which the shipped one does.
+    //
+    // The subject's own capsule has been excluded since P29.6 for the obvious
+    // reason; every other character was not, and this engine has crowds now. A
+    // pedestrian walking behind the hero is a blocking hit two metres up the
+    // boom, so the camera snapped onto the hero's neck and back out again once
+    // per passer-by — which is carried 89's shape with a moving cause. Their
+    // ragdolls and the cars they are riding go with them, because a character
+    // whose capsule is parked is still a character and the thing filling the
+    // space around it is four metres of chassis.
+    //
+    // The cost is one `O(characters)` query per step over a world whose
+    // characters are already being iterated four times by the movement step, and
+    // it is measured in the wave's cost row rather than assumed small.
+    if cam.tuning.collision.ignore_characters {
+        let w = world.world();
+        if let Some(mut q) = w.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>() {
+            for (g, other) in q.iter(w) {
+                if let Some(c) = bridge.collider_of(g.0) {
+                    exclude.insert(c);
+                }
+                if let Some(r) = bridge.ragdoll_of(g.0) {
+                    for c in &r.colliders {
+                        exclude.insert(*c);
+                    }
+                }
+                if other.runtime.seat.is_seated() {
+                    if let Some(c) = bridge.collider_of(other.runtime.seat.vehicle) {
+                        exclude.insert(c);
+                    }
+                }
+            }
+        }
+    }
     // **…and the subject's ragdoll limbs** (P29.6 audit, A4). The capsule above
     // is the character's *one* mirrored collider, and a ragdoll DISABLES it —
     // `ragdoll_bridge` turns it off the step the ragdoll starts — while spawning
@@ -199,15 +234,21 @@ pub fn step_locomotion_camera(
     let desired = cam.desired.to_dvec3();
     let delta = desired - origin;
     let reach = delta.length();
-    let resolved = if reach > 1e-6 {
-        let dir = delta / reach;
-        let radius = cam.tuning.collision_radius_m.max(1e-3);
+    let radius = cam.tuning.collision_radius_m.max(1e-3);
+    let floor = reach * cam.tuning.min_arm_fraction.clamp(0.0, 1.0);
+    // One closure, so the main sweep and every whisker ask the world the same
+    // question with the same exclusions and the same "started inside something"
+    // rule. Answers how far along `dir` the sphere may travel.
+    let mut sweep = |dir: DVec3, len: f64| -> f64 {
+        if len <= 1e-6 {
+            return len;
+        }
         match bridge.world_mut().cast_shape_where(
             &ColliderShape3D::Sphere { radius },
             origin,
             DQuat::IDENTITY,
             dir,
-            reach,
+            len,
             &exclude,
             CastTargets::All,
         ) {
@@ -217,19 +258,124 @@ pub fn step_locomotion_camera(
             // hit: the alternative is a camera that snaps to the pivot and looks
             // out of the character's own skull.
             Some(hit) => {
-                let floor = reach * cam.tuning.min_arm_fraction.clamp(0.0, 1.0);
-                let toi = if hit.started_penetrating {
+                if hit.started_penetrating {
                     floor
                 } else {
-                    hit.toi.max(floor)
-                };
-                origin + dir * toi.min(reach)
+                    hit.toi.max(floor).min(len)
+                }
             }
-            None => desired,
+            None => len,
         }
-    } else {
-        desired
     };
-    cam.resolve(Vec3d::from_dvec3(resolved));
-    Some(cam.pose)
+
+    let mut free = if reach > 1e-6 { sweep(delta / reach, reach) } else { reach };
+
+    // ── the whisker fan (wave CHAR1c, clause 1) ──
+    //
+    // A short fan of casts either side of the boom, so the camera answers a wall
+    // it is ABOUT to swing into rather than one it is already in. Two things come
+    // out of it: a **steer**, which is what makes the camera "simply adjust
+    // position" instead of jumping in, and a **predictive bound** on the boom —
+    // a whisker blocked at `d` along a direction `cos θ` off the boom means there
+    // is geometry at boom-depth `d·cos θ`, so the boom is bounded by the smallest
+    // such depth over the fan.
+    //
+    // The whiskers share the boom's own sphere radius on purpose: a whisker cast
+    // with a different radius is answering a question about a different camera.
+    let mut steer_deg = 0.0f64;
+    let arm_full = cam.arm_full();
+    if reach > 1e-6 {
+        let dir_main = delta / reach;
+        for a in cam.tuning.collision.whisker_angles_deg() {
+            let target = cam.camera_at(arm_full, cam.whisker_steer_deg + a).to_dvec3();
+            let d = target - origin;
+            let r = d.length();
+            if r <= 1e-6 {
+                continue;
+            }
+            let dir = d / r;
+            let toi = sweep(dir, r);
+            steer_deg += cam
+                .tuning
+                .collision
+                .whisker_steer_deg(a, (toi / r).clamp(0.0, 1.0));
+            // **Only a whisker that HIT anything bounds the boom.** A whisker
+            // that reached its own full length still ends `r·cos θ` up the boom's
+            // axis — 92 % of the reach at 22.5° — so a fan that bounded on every
+            // whisker took 8 % off the boom in an empty field, measured by
+            // `camera_3d`'s own control arm at 0.231 m. The projection is a
+            // statement about where an OBSTACLE is, and there is no obstacle in
+            // a whisker that ran out of length.
+            if toi < r - 1e-6 {
+                // The projection onto the boom's own axis — taken as a dot
+                // product rather than as `cos(a)`, because the shoulder offset
+                // means the two rays are not exactly `a` degrees apart and a
+                // camera model that assumed they were would be wrong by the
+                // offset.
+                let depth = toi * dir.dot(dir_main).max(0.0);
+                free = free.min(depth.max(floor));
+            }
+        }
+    }
+    cam.resolve_swept(free, steer_deg, dt);
+
+    // ── the ragdoll follow (wave CHAR1c, clause 3) ──
+    //
+    // A character that has gone down is no longer where its capsule says it is —
+    // `ragdoll_bridge` disables that capsule and seventeen limbs fall down the
+    // hill in its place. The gameplay rig keeps framing the capsule, so the death
+    // the player just had happens off screen. This is the director's `Override`
+    // layer's whole reason to exist: a request, per step, that frames the PELVIS
+    // the bodies actually ended at, and stops being pushed the step the ragdoll
+    // is cleaned up.
+    //
+    // It is a request rather than a branch inside the rig because a photo mode, a
+    // takedown camera and a cutscene all want the same seat and only one of them
+    // can have it — which is a priority question, and a priority question wants a
+    // stack.
+    if let Some(r) = bridge.ragdoll_of(subject) {
+        if let Some(body) = r.pelvis.or(r.root) {
+            if let Some(at) = bridge.world_mut().body_translation(body) {
+                let pose = ragdoll_follow_pose(cam, at);
+                cam.director.request(inf_ecs::camera::CameraRequest::blended(
+                    inf_ecs::camera::CameraLayer::Override,
+                    inf_ecs::camera::CAMERA_TAG_RAGDOLL,
+                    pose,
+                    RAGDOLL_FOLLOW_BLEND_S,
+                ));
+            }
+        }
+    }
+
+    Some(cam.direct(dt))
+}
+
+/// How long the death cam takes to arrive, and to leave, seconds.
+pub const RAGDOLL_FOLLOW_BLEND_S: f64 = 0.6;
+
+/// How far the death cam pulls back beyond the rig's own boom, as a multiplier.
+pub const RAGDOLL_FOLLOW_ARM_SCALE: f64 = 1.35;
+
+/// How far down the death cam looks, degrees, on top of the player's own pitch.
+pub const RAGDOLL_FOLLOW_PITCH_DEG: f64 = -12.0;
+
+/// **Where the camera goes while its subject is a ragdoll** (wave CHAR1c).
+///
+/// The rig's own yaw, pitch tilted down, and the boom lengthened — around the
+/// body's actual position rather than the parked capsule's. Split out as a pure
+/// function of `(camera, world point)` so the rule can be read, and asserted,
+/// without a physics world.
+pub fn ragdoll_follow_pose(cam: &LocomotionCamera, at: DVec3) -> CameraPose {
+    let pitch = (cam.pose.pitch_deg + RAGDOLL_FOLLOW_PITCH_DEG).clamp(
+        cam.tuning.collision.pitch_min_deg,
+        cam.tuning.collision.pitch_max_deg,
+    );
+    let (_, _, forward) = inf_ecs::camera::basis(cam.pose.yaw_deg, pitch);
+    let arm = (cam.arm_m.max(cam.settings.arm_length_m * 0.5)) * RAGDOLL_FOLLOW_ARM_SCALE;
+    CameraPose {
+        position: Vec3d::from_dvec3(at - forward * arm),
+        yaw_deg: cam.pose.yaw_deg,
+        pitch_deg: pitch,
+        fov_deg: cam.pose.fov_deg,
+    }
 }
