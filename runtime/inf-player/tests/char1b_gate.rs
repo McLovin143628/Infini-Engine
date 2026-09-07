@@ -3201,6 +3201,14 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
         let mut y_at_entry = 0.0f64;
         let mut first_rise = f64::NAN;
         let mut hand_gap = f64::MAX;
+        // **The POSE, while the mantle runs** (CHAR1b.2 audit's anti-vacuity
+        // clause). Everything else this arm asserts — the mode, the state name,
+        // the remap, the capsule's rise — is true of a character drawing its
+        // BIND POSE while the warp carries its capsule up the ledge, which is
+        // the CHAR1b.1 audit's law applied to this wave's own arm. The largest
+        // single-joint step over the mantle window says the clip is playing.
+        let mut mantle_joint_step = 0.0f64;
+        let mut prev_pose: Option<inf_anim::Pose> = None;
         for i in 0..steps {
             let held: Vec<&str> = if i % 5 == 0 { vec!["jump"] } else { vec![] };
             sim.step_once(RuntimeInput::with_down(held).with_axes(ax.clone()));
@@ -3233,6 +3241,20 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
             // asserted, and carried by name — the number is the size of the
             // hand-warp that is not there.
             if in_mantle {
+                if let Some(ep) = inf_ecs::pose::evaluated_pose(sim.world(), hero) {
+                    if let Some(prev) = prev_pose.as_ref() {
+                        if prev.locals.len() == ep.pose.locals.len() {
+                            for (a, b) in prev.locals.iter().zip(ep.pose.locals.iter()) {
+                                let qa = glam::Quat::from_array(a.rotation);
+                                let qb = glam::Quat::from_array(b.rotation);
+                                let d = qa.dot(qb).abs().clamp(-1.0, 1.0);
+                                mantle_joint_step = mantle_joint_step
+                                    .max(2.0 * inf_math::pacos64(f64::from(d)).to_degrees());
+                            }
+                        }
+                    }
+                    prev_pose = Some(ep.pose.clone());
+                }
                 if let (Some(m), Some(j)) = (entered, hand_joint) {
                     let lead = if m.left_hand { j.0 } else { j.1 };
                     if let (Some(p), Some(to_world)) = (
@@ -3261,6 +3283,7 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
             mantles,
             first_rise,
             hand_gap,
+            mantle_joint_step,
         )
     };
 
@@ -3271,7 +3294,8 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
     // it in a sweep of the hero's own neighbourhood and it is the nearest one
     // the drive can reach.
     hero_to(&mut sim, hero, -1766.0, 1992.0, 0.0);
-    let (entered, states, y0, y1, peak, mantles, first_rise, hand_gap) = drive(&mut sim, 150);
+    let (entered, states, y0, y1, peak, mantles, first_rise, hand_gap, joint_step) =
+        drive(&mut sim, 150);
     let m = entered.expect(
         "the hero never entered `MovementMode::Mantle` at the ledge — either the probe found \
          nothing or the jump never reached `try_mantle`",
@@ -3381,6 +3405,16 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
         "the hero entered `Mantle` and never left it over 150 steps, so there is no rise to \
          measure"
     );
+    // **AND THE CLIP IS PLAYING WHILE IT CLIMBS.** The warp moves the CAPSULE, so
+    // every claim above holds of a hero drawing its bind pose all the way up a
+    // wall — which is exactly what a mantle looked like before this wave bound
+    // `MovementMode::Mantle` to a state at all.
+    println!("  the largest single-joint step during the mantle: {joint_step:.3} deg");
+    assert!(
+        joint_step > 0.5,
+        "no joint moved more than {joint_step:.3} deg during the whole mantle — the capsule \
+         climbed and the character was posed by nothing"
+    );
     assert!(
         first_rise > m.height_m * 0.85 && first_rise < m.height_m * 1.25,
         "the hero mantled a {:.4} m ledge and its capsule rose {first_rise:.4} m across that \
@@ -3390,7 +3424,7 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
 
     // ── the control: the road it spawned on ──────────────────────────────────
     hero_to(&mut sim, hero, spawn[0], spawn[2] + 4.0, 180.0);
-    let (none, road_states, ry0, _ry1, rpeak, _rm, _rr, _rh) = drive(&mut sim, 150);
+    let (none, road_states, ry0, _ry1, rpeak, _rm, _rr, _rh, _rj) = drive(&mut sim, 150);
     println!(
         "  CONTROL on the road: mantle {none:?}, states {road_states:?}, peak {:+.3} m",
         rpeak - ry0
@@ -3443,6 +3477,19 @@ fn a_locked_foot_does_not_slide_and_a_placed_one_is_on_the_ground() {
     let mut resid: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut slide_worst = 0.0f64;
     let mut slide_n = 0usize;
+    // **THE ANTI-VACUITY CLAUSE** (CHAR1b.2 audit). `foot_error` is produced by
+    // the foot IK whether or not any clip plays, so every number below is one a
+    // bind-posed hero would also produce — the CHAR1b.1 audit's vacuous item 5,
+    // still true of the arm this wave wrote on top of it. The feet have to be
+    // LIFTING for a residual to be about a gait: this is how far the lower foot
+    // travels in the hero's own model frame over the run.
+    let (rigs_v, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let rig_v = inf_ecs::pose::evaluated_pose(sim.world(), hero)
+        .and_then(|p| rigs_v.get(&p.skeleton).cloned())
+        .expect("the hero's rig is on disk");
+    let feet_v = inf_anim::derive::foot_joints(&rig_v);
+    let mut foot_lo = f64::MAX;
+    let mut foot_hi = f64::MIN;
     let mut rate: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
     for (n, held, ax) in [
         (240usize, vec![], vec![("move_y", 1.0f32)]),
@@ -3469,6 +3516,14 @@ fn a_locked_foot_does_not_slide_and_a_placed_one_is_on_the_ground() {
                     if weight >= 0.99 {
                         resid.entry(st.clone()).or_default().push(v.abs());
                     }
+                }
+            }
+            if let Some(ep) = inf_ecs::pose::evaluated_pose(sim.world(), hero) {
+                let g = inf_anim::pose::global_transforms(&rig_v.skeleton, &ep.pose);
+                for j in &feet_v {
+                    let y = f64::from(g[*j as usize].to_scale_rotation_translation().2.y);
+                    foot_lo = foot_lo.min(y);
+                    foot_hi = foot_hi.max(y);
                 }
             }
             let c = hero_cm(&sim, hero);
@@ -3525,9 +3580,19 @@ fn a_locked_foot_does_not_slide_and_a_placed_one_is_on_the_ground() {
         "  locked-foot slide: worst {:.4} mm over {slide_n} locked samples",
         slide_worst * 1000.0
     );
+    println!(
+        "  the lower foot's own model-frame height ranged {:.1} mm over the run",
+        (foot_hi - foot_lo) * 1000.0
+    );
     assert!(
         slide_n > 50,
         "only {slide_n} locked-foot samples — the lock never engaged"
+    );
+    assert!(
+        foot_hi - foot_lo > 0.05,
+        "the hero's feet moved {:.1} mm through the whole tour — a foot residual measured on a \
+         character that is not stepping is a residual the foot IK produces on its own",
+        (foot_hi - foot_lo) * 1000.0
     );
     // **THE SLIDE.** 2 cm/s at the 60 Hz fixed step is 0.33 mm a step; the bound
     // is a whole millimetre, which is three times looser and still an order
@@ -4235,6 +4300,18 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
         "the tour reached {seen:?} over {bn} post-transition steps — it did not cross enough \
          transitions to be one"
     );
+    // **THE ANTI-VACUITY CLAUSE** (CHAR1b.2 audit). The ratchet below is a
+    // RATIO, and a character that never moves gives `bu99 = su99 = 0`, which
+    // satisfies `0 <= 0 * 2 + 2` — so this arm was green on a hero drawing its
+    // bind pose, which is exactly the failure the CHAR1b.1 audit spent its day
+    // on (five of seventeen arms were green on a bind-posed character). The
+    // gait's own p99 has to be a real number before a ratio against it means
+    // anything. Measured on this tree: **11.995 deg**.
+    assert!(
+        su99 > 1.0,
+        "the steady p99 over the non-leg joints is {su99:.3} deg, so the hero is barely \
+         animating and the ratchet below is a ratio of nothing to nothing"
+    );
     // **THE BOUND IS OVER THE JOINTS THE BLEND OWNS, and the other number is
     // printed rather than asserted** (wave CHAR1b.2).
     //
@@ -4941,13 +5018,28 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
             .filter_map(|e| {
                 let b = e.get::<inf_ecs::components::WaterBody>()?;
                 let t = e.get::<inf_ecs::components::Transform>()?;
-                Some((t.translation.x, t.translation.y, t.translation.z, b.level_m))
+                let name = e
+                    .get::<inf_ecs::components::Name>()
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| "<unnamed water>".to_string());
+                Some((
+                    t.translation.x,
+                    t.translation.y,
+                    t.translation.z,
+                    b.level_m,
+                    name,
+                ))
             })
             .next()
     };
+    let water_name = water
+        .as_ref()
+        .map(|w| w.4.clone())
+        .unwrap_or_else(|| "<none>".into());
     let mut swim_states: std::collections::BTreeSet<String> = Default::default();
     let mut swim_pelvis_vs_water = f64::NAN;
-    if let Some((wx, wy, wz, level)) = water {
+    let mut swim_capsule_vs_water = f64::NAN;
+    if let Some((wx, wy, wz, level, _)) = water.clone() {
         let surface = if level.is_finite() { level } else { wy };
         for depth in [0.6f64, 2.5] {
             {
@@ -4976,7 +5068,26 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
                 if matches!(m, MovementMode::SwimSurface | MovementMode::SwimUnder) {
                     note(&sim, &mut swim_states);
                     if depth < 1.0 {
-                        swim_pelvis_vs_water = hero_pos(&sim, hero)[1] - surface;
+                        // **THE PELVIS JOINT, not the capsule** (CHAR1b.2
+                        // audit). The wave reported "the capsule sat -0.560 m of
+                        // the waterline", which is the entity's transform — a
+                        // placement, and a number a bind-posed hero produces
+                        // just as readily. The pose's own pelvis, lifted into
+                        // the world, is what a viewer sees at the waterline.
+                        swim_capsule_vs_water = hero_pos(&sim, hero)[1] - surface;
+                        if let (Some(p), Some(to_world)) = (
+                            inf_ecs::pose::evaluated_pose(sim.world(), hero),
+                            inf_ecs::pose::model_to_world_of(sim.world(), hero),
+                        ) {
+                            let g = inf_anim::pose::global_transforms(&rig.skeleton, &p.pose);
+                            let t = g[pelvis_j as usize].to_scale_rotation_translation().2;
+                            let w = to_world.transform_point3(DVec3::new(
+                                f64::from(t.x),
+                                f64::from(t.y),
+                                f64::from(t.z),
+                            ));
+                            swim_pelvis_vs_water = w.y - surface;
+                        }
                     }
                 }
             }
@@ -5056,7 +5167,8 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
     );
     println!("  prone     {prone_states:?}  pelvis {prone_stance:.4} m");
     println!(
-        "  swim      {swim_states:?}  the capsule sat {swim_pelvis_vs_water:+.3} m of the waterline"
+        "  swim      {swim_states:?}  in `{water_name}`: the PELVIS JOINT sat \
+         {swim_pelvis_vs_water:+.3} m of the waterline (the capsule {swim_capsule_vs_water:+.3} m)"
     );
     println!("  get-up    {getup_states:?}  upright {upright}");
     println!(
@@ -5092,7 +5204,8 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
         );
         assert!(
             swim_pelvis_vs_water.abs() < 1.5,
-            "a surface swim sat {swim_pelvis_vs_water:+.3} m from the waterline"
+            "a surface swim put the hero's PELVIS {swim_pelvis_vs_water:+.3} m from the \
+             waterline of `{water_name}`"
         );
     } else {
         panic!("the island has no water body, so the swim half of this arm proves nothing");
