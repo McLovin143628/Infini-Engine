@@ -2241,11 +2241,11 @@ fn apply_throw<'c>(
         return false;
     };
     let dur = f64::from(clip.duration);
-    if !(dur > 0.0) {
+    if dur <= 0.0 || dur.is_nan() {
         return false;
     }
     let t = (dur - left_s).clamp(0.0, dur);
-    if !(t > 1.0e-9) {
+    if t <= 1.0e-9 || t.is_nan() {
         // The first frame of a throw is its reference pose, so the delta is the
         // identity and this writes nothing — the same guard the breath has, for
         // the same byte-identity reason.
@@ -2270,7 +2270,7 @@ fn apply_breath<'c>(
     clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
     t: f64,
 ) -> bool {
-    if !(t > 1.0e-9) {
+    if t <= 1.0e-9 || t.is_nan() {
         return false;
     }
     let Some(state) = machine
@@ -2400,7 +2400,7 @@ fn apply_ragdoll_pose(
     model_to_world: glam::DAffine3,
 ) -> bool {
     let weight = published.weight;
-    if !(weight > 0.0) || published.bones.is_empty() {
+    if weight <= 0.0 || weight.is_nan() || published.bones.is_empty() {
         return false;
     }
     let skeleton = &rig.skeleton;

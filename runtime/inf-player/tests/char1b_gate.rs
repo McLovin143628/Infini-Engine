@@ -3218,12 +3218,11 @@ fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
         m.height_m,
         if m.high { "high" } else { "low" }
     );
-    assert_eq!(
+    assert!(
         played.iter().any(
             |s| s.as_str() == if m.high { "mantle_high" } else { "mantle_low" }
                 || s.as_str() == "mantle_low_lh"
         ),
-        true,
         "a {} mantle played {played:?}",
         if m.high { "high" } else { "low" }
     );
@@ -3855,7 +3854,11 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
     let mut last_state: Option<String> = None;
     let mut edges: std::collections::BTreeMap<String, usize> = Default::default();
     let mut since_change = 99usize;
-    let legs: Vec<(usize, Vec<&str>, Vec<(&str, f32)>)> = vec![
+    /// One leg of the scripted tour: how many steps, which keys are held, and
+    /// which axes are pushed. Named because the tuple is three deep and clippy's
+    /// complexity lint is right that an unnamed one is hard to read.
+    type Leg = (usize, Vec<&'static str>, Vec<(&'static str, f32)>);
+    let legs: Vec<Leg> = vec![
         (90, vec![], vec![]),
         (120, vec![], vec![("move_y", 1.0)]),
         (120, vec!["sprint"], vec![("move_y", 1.0)]),
@@ -3963,7 +3966,7 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
     );
     {
         let mut rows: Vec<(usize, String)> = edges.into_iter().map(|(k, v)| (v, k)).collect();
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0));
         println!("  the edges that fired, by count:");
         for (n, e) in rows.iter().take(12) {
             println!("    {n:4} x  {e}");

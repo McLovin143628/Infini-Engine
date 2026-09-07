@@ -731,7 +731,7 @@ pub fn set_ragdoll_pose(
     weight: f32,
     bones: Vec<RagdollBonePose>,
 ) {
-    if !(weight > 0.0) {
+    if weight <= 0.0 || weight.is_nan() {
         if let Some(mut b) = world.world_mut().get_resource_mut::<AnimBridgeRes>() {
             b.ragdoll_pose.remove(&guid);
         }
@@ -776,7 +776,7 @@ pub fn ragdoll_pose(world: &EcsWorld, guid: Uuid) -> Option<&RagdollPose> {
 /// wave spent its time closing: a reader that lies. The animation half is built
 /// and driven through this door; the input binding arrives with the item.
 pub fn start_throw(world: &mut EcsWorld, guid: Uuid, overhand: bool, duration_s: f64) -> bool {
-    if !(duration_s > 0.0) {
+    if duration_s <= 0.0 || duration_s.is_nan() {
         return false;
     }
     let Some(entity) = world.entity_of(guid) else {

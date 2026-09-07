@@ -257,7 +257,7 @@ pub fn garment_from_files(
             .filter_map(|v| mesh.position(v))
             .fold(f64::INFINITY, |a, p| a.min(p.y));
         let span = hi - lo;
-        if !(span.is_finite() && span > 0.0) {
+        if !span.is_finite() || span <= 0.0 {
             return Err(GroomError::Unreadable {
                 what: "the garment mesh",
                 why: "it has no height at all, so a top-fraction pin rule cannot name a collar"

@@ -664,6 +664,13 @@ fn finish(
 }
 
 /// Write the character's transform, capsule and component back.
+///
+/// `#[allow(clippy::too_many_arguments)]` for this file's own reason: every one
+/// of the eight is a distinct authority this function needs and none can be
+/// derived from another — the two worlds, the identity in each, the state being
+/// written, and the two numbers the placement is made of. Bundling them into a
+/// struct would name a type whose only purpose is to satisfy a count.
+#[allow(clippy::too_many_arguments)]
 fn write_back(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,

@@ -220,10 +220,8 @@ pub fn classify(name: &str) -> Option<BoneRole> {
     // "r"]`) or a trailing letter or the words `left`/`right` anywhere — which
     // keeps every camel-case convention (`LeftUpperArm`) working and stops
     // `_leg` from being a side.
-    let segments: Vec<&str> = n
-        .split(|c: char| c == '_' || c == '.' || c == ' ' || c == '-' || c == ':')
-        .collect();
-    let seg_is = |t: &str| segments.iter().any(|s| *s == t);
+    let segments: Vec<&str> = n.split(['_', '.', ' ', '-', ':']).collect();
+    let seg_is = |t: &str| segments.contains(&t);
     let left = has("left") || seg_is("l") || seg_is("lt") || n.ends_with('l');
     let right = has("right") || seg_is("r") || seg_is("rt") || n.ends_with('r');
 
