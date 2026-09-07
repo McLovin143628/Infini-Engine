@@ -35953,3 +35953,155 @@ Two, and both are laws this repository already had:
 * **`ALS_N_SecondaryMotion`** is imported and unbound: ALS's idle is
   `ALS_N_Pose` plus a breathing additive, and the additive layer now exists to
   carry it. One row in the map away.
+
+## WAVE CHAR1b.1 — THE AUDIT (2026-09-06)
+
+Base `origin/main` `25b05259`; the wave ended at `ac1e16a6`. Every number below
+was measured on this machine against the island project, and every number the
+wave reported was recomputed before it was believed.
+
+### A1. The hero was not playing its animation
+
+The wave's headline is "the island now plays 41 states / 53 transitions / 65
+bound clips". The graph is real; the POSE was not. Two independent defects, each
+of which the wave's own arms were blind to because they read the table and the
+state name rather than the joints.
+
+**The clips were bound to another rig.** `inf_anim::pose::sample_clip` addresses
+`JointTrack::joint` as an INDEX into the target's joint list — the positional
+coupling this ledger's CHAR1a.3 section 4 already wrote down — and has nothing to
+refuse a clip authored somewhere else. The ALS sequences are exported and
+retargeted in the MANNEQUIN manifest onto its own **161-joint** rig; the hero is
+a **342-joint** MetaHuman written by a different manifest, and only the first
+**twelve** joint indices carry the same name.
+
+| measured on `ALS_N_Pose` | |
+|---|---|
+| tracks | 71 |
+| landing on a bone of ANOTHER name | **59** |
+| `lowerarm_l`'s rotation went to | `upperarm_correctiveRoot_l` |
+| `hand_l`'s went to | `pinky_01_l` |
+| `upperarm_r`'s went to | `ring_01_side_out_l` |
+| the hero's upper arms, drawn | 13.59 deg and **44.90 deg** (the donor's are 13.59 and 13.59) |
+| finger correctives, worst | **172 deg** off bind |
+| thighs and calves at any gait | **at bind** — the legs never moved |
+
+`rebind_locomotion_graph` now retargets each clip it binds onto the identity's
+own rig by NAME and binds the copy, which is `retarget_committed_clips`' rule one
+function above and the **third** appearance of carried item 95. The copies are
+written per identity under `{stem}-loco/` at a derived GUID, named
+`{donor}--{stem}` so they cannot make the NEXT identity's lookups ambiguous —
+they did, and the female's machine came out with **0 states** before that was
+measured.
+
+**One host could not see them at all.** `load_anim_assets_by_guid_from_dir` read
+a single directory; `inf-import --dest UE/Mannequins` puts a project's clips in a
+subfolder. A `--level` boot therefore resolved **0 of 65** clip GUIDs and posed
+every state at rest, while a PIE session over the same document — which resolves
+by GUID out of the editor's database — animated. **Every island arm of
+`char1a3_gate`, `char1b_gate` and `island_gate` runs on the loose door.** It
+walks the tree now, skipping dot-directories so `Content/.inf/import-cache`
+cannot register a second path for one GUID.
+
+| the island's hero at `idle` | before | after |
+|---|---|---|
+| upper-arm abduction, L / R | 13.59 / 44.90 deg (PIE); the 37.38 deg **bind A-pose** on the loose host | **15.71 / 15.71 deg** |
+| joints off the bind pose | 12 (pelvis + both thighs + both calves — all of it foot IK) | **53** |
+| clip refs unresolved, loose host | 65 of 65 | **0** |
+| clip refs on another rig | 65 of 65 | **0** |
+| the hero's own foot residual | 0.071 mm p50 | **0.00 mm** after 600 steps |
+
+**And the wide arms were never the default overlay.** The wave said the idle
+silhouette is `ALS_N_Pose`'s own stance "which ALS covers with an overlay". On
+the donor's own rig `ALS_N_Pose` holds the upper arms at **13.59 deg** and
+`ALS_StanceVariation_Normal` — the pose ALS's `Default` overlay state plays — at
+**14.82 / 14.46 deg**, so layering the default overlay moves the arms OUT by about
+a degree. The 37.38 deg the frames show is the MetaHuman rig's **A-pose bind**, and
+the fix was the retarget. The five `ALS_StanceVariation_*` sequences serve
+`EALSOverlayState`'s first five values (`ALSCharacterEnumLibrary.h:65-80`) and
+had no row in the map, which left a shipped set unbound; they have rows now, and
+are inert exactly as the eight prop overlays are.
+
+### A2. The states the hero can actually reach
+
+The reachability arm hand-writes `turn_deg` and `planted_foot` and proves the
+GRAPH would enter the turns and the stops. Nothing proved the movement step ever
+publishes those values, and it did not: driven through the real input door on the
+island, `|turn_deg|` never left **0.000** and `planted_foot` never left **0**.
+The wave's report says eight states played in PIE; its own `hero.csv` shows
+**six**, and neither crouch state is among them — the demo's C tap never reached
+the game.
+
+* `planted_foot` reads `FootLock_L/R` off the playing clip. **0 of 310
+  `.inf_anim` in the island project carried any curve channel** — the deriver
+  this wave added to the clip-import path had never been run over them, so
+  clause 1's "derived before it is written" was true of the code and false of the
+  content. Re-imported: **164 of 164** carry `FootLock_L/R`, `FootSpeed_L/R`,
+  `MoveData_Speed` and `W_Gait`, and `planted_foot` takes -1, 0 and +1.
+* Turn-in-place runs only in `RotationMode::LookingDirection`, and a level starts
+  in `VelocityDirection` — where ALS does not turn in place either. The only door
+  to `LookingDirection` is **releasing the aim key**, so a player who has never
+  aimed can never turn in place. After one aim press-and-release a 220 deg/s swing
+  plays `turn_l90` and `turn_l180` and a crouched one `crouch_turn_r90`, with
+  `|turn_deg|` reaching **149.480 deg**.
+
+Driven end to end — settle, five run-and-stops at five phases, a held walk, a
+sprint and its stop, crouch/crouch-walk/stand, a jump and its landing, an aim
+press-release, a standing swing and a crouched one — **twelve of the twenty-six
+machine states play**. `fall`, `fall_fast`, `land_heavy`, `roll`, `ragdoll` and
+the two get-ups need a world event a flat road cannot make. The two STOPS are
+reported rather than asserted, because the number says why: their edge wants a
+gait state, `gait <= 0.1` and a locked foot **on one step**, and over the whole
+drive that coincidence held on **0** steps.
+
+### A3. Twenty-four of twenty-six rigs had no role table
+
+Carried item 119, measured: `SkeletonAsset::imported` infers a role table at the
+glTF stage and the content-addressed `ImportCache` reuses an unchanged source
+without re-running it, so **24 of the island's 26 rigs** carried `roles: []` —
+every Manny and Quinn LOD rung, every MetaHuman body and face rung. The two that
+had one are the two the rebind writes. A `RoleIndex` over an empty table answers
+`None` to everything and look-at, the aim mask and the hand pass are all written
+to do nothing in that case, so any character bound to one of the other
+twenty-four would have stared straight ahead with no error anywhere.
+`ue_import::sweep_roles` is the re-derive door; it is a value, not a migration
+(a rig whose bones are called nothing the convention knows is written back
+unchanged) and it is idempotent. After it: **0 of 26** without a table.
+
+### A4. What reproduced exactly
+
+The fixture is sound. Re-run at this HEAD, every one of these is the wave's own
+number to the digit: the four-surface sole table (flat 0.10/0.10 mm hover, slope
+4.77/4.99 mm with roll 16.74/15.79 deg, kerb 0.00/0.10 mm, stairs 0.10 mm
+penetration — **worst 4.99 mm**), the 40 deg ramp's 21.03/17.25 deg, the pelvis drop
+-0.0201 / -0.1701 / -0.1979 m, the `Enable_FootIK_*` census (**0 of 164**), the
+look-at chain table (-60 gives -60.000, +170 gives +101.500 at the ceiling), the
+NPC gaze (-90.000 deg at 5 m, nothing at 25 m), the LOD ladder (3 rungs, 95 330 /
+21 040 / 7 996 triangles at 0 / 32 / 96 m), `Near` posing the same bytes as `Full`
+and `Far` the bind, and the pawn holding across 21 placements. `hero.csv`
+recomputes exactly: 220 rows by 13 columns, 216 residuals, the four blanks all
+`jump`, p50 **0.071 mm**, worst **19.241 mm**, six rows over a centimetre (one
+`start`, five `sprint`), and `head_yaw == aim_yaw` on every row inside the
++/-101.50 deg clamp.
+
+### A5. Cost, measured in one process
+
+The island's ANIMATION phase over 600 profiled steps after 600 warm, three sims
+built and timed in one process:
+
+| configuration | p50 | p95 |
+|---|---|---|
+| as shipped (46 states, roles, foot IK, look-at) | **166.0 us** | 523.4 us |
+| roles stripped (look-at + aim mask + hand pass off) | 238.8 us | 810.9 us |
+| no machines at all (no pose evaluation) | **3.7 us** | 5.4 us |
+
+So the whole pose phase for the island's **two 342-joint characters** is
+**162.3 us p50**, about **2 %** of the island's 8.2 ms fixed step. The wave's own
+chain is *not separable from run-to-run noise* at this scale — the roles-stripped
+row is 73 us SLOWER than the shipped one, which is a statement about the
+measurement and not about the code, and it is written down rather than rounded
+into a claim. The crowd instrument's own A/B, re-run in one session at N = 1000,
+reads **5.968 us/agent** all-`Full` against **3.835 us/agent** all-`Near`
+(the wave measured 5.420 / 3.821; the `Near` number reproduces, the `Full` one
+is 10 % higher on this run), and the banded N = 1000 row reads step 8.245 ms with
+`crowd` 0.159 and `animation` 1.180 against the wave's 8.248 / 0.165 / 1.173.
