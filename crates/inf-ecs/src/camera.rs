@@ -216,12 +216,22 @@ pub struct CameraCollision {
     /// corner whose whiskers are all blocked cannot be spun round by the
     /// arithmetic.
     pub whisker_steer_max_deg: f64,
-    /// How fast the boom comes **in**, 1/s (2). Fast: a camera that eases into a
-    /// wall is a camera inside a wall for the duration of the ease.
+    /// How fast the **whisker steer** swings toward a blocked side, 1/s (2).
+    ///
+    /// **Not the boom's own pull-in, and the difference is measured.** The boom
+    /// does not ease in at all — see [`LocomotionCamera::resolve_swept`], where
+    /// a smoothed pull-in was measured at 33 frames of 840 with the camera
+    /// inside a collider, because any ease is a lag and a lag on this quantity
+    /// is the defect the wave is named after. The steer is a different case: it
+    /// moves the camera *sideways* out of the way rather than out of a wall, so
+    /// a lag there is a comfort question and not a safety one.
     pub pull_in_speed: f64,
-    /// ...and how fast it goes back **out**, 1/s (2). Slow, and slower than the
-    /// pull-in **by construction** — the asymmetry is the whole point. A boom
-    /// that returned as fast as it retracts pumps once per lamp-post.
+    /// How fast the boom goes back **out** once the way is clear, 1/s, and how
+    /// fast the steer relaxes (2).
+    ///
+    /// Slow, and much slower than the pull-in **by construction** — the
+    /// asymmetry is the whole point. A boom that returned as fast as it
+    /// retracts pumps once per lamp-post down a street.
     pub return_speed: f64,
     /// The boom length, metres, at which the subject's own body starts to fade
     /// (4). Above it the body is drawn exactly as it always was.
@@ -1602,12 +1612,26 @@ impl LocomotionCamera {
             self.arm_seeded = true;
             self.clip_m = clip;
         } else {
-            let speed = if clip > self.clip_m {
-                c.pull_in_speed
-            } else {
-                c.return_speed
-            };
-            self.clip_m = interp_to(self.clip_m, clip, speed, dt).clamp(0.0, reach);
+            // **The asymmetry, at its limit: the pull-in is a SNAP.**
+            //
+            // The eased value is the slow return; the `max` is the safety
+            // clamp, and it is the whole reason the pull-in is not smoothed.
+            // A clip that LAGS a growing requirement is, by definition, a camera
+            // inside the thing it was supposed to stop at — for exactly as long
+            // as the ease takes. Measured on this wave's own scripted walk with
+            // a 30/s pull-in: **33 frames of 840** with the camera's optical
+            // centre inside a collider, all of them in the two or three frames
+            // after the look swung a wall into the boom. There is no pull-in
+            // speed that makes that zero, because any speed below infinity is a
+            // lag; the answer is not a faster ease.
+            //
+            // So the boom comes in on the step the world says so, and eases back
+            // out at [`CameraCollision::return_speed`] — which is what "fast in,
+            // slow out" means once it is taken seriously. The measured pull-in
+            // time is one fixed step and the measured return is hundreds; the
+            // gate reports both.
+            let eased = interp_to(self.clip_m, clip, c.return_speed, dt);
+            self.clip_m = eased.max(clip).clamp(0.0, reach);
         }
         self.arm_m = (reach - self.clip_m).clamp(0.0, reach);
         let position = if reach > 1e-6 {

@@ -179,36 +179,45 @@ pub fn step_locomotion_camera(
     if let Some(c) = bridge.collider_of(subject) {
         exclude.insert(c);
     }
-    // **…and every OTHER character** (wave CHAR1c), when the rig's collision
-    // policy says so — which the shipped one does.
+    // **…and every OTHER character's BODY** (wave CHAR1c), when the rig's
+    // collision policy says so — which the shipped one does.
     //
     // The subject's own capsule has been excluded since P29.6 for the obvious
     // reason; every other character was not, and this engine has crowds now. A
     // pedestrian walking behind the hero is a blocking hit two metres up the
     // boom, so the camera snapped onto the hero's neck and back out again once
-    // per passer-by — which is carried 89's shape with a moving cause. Their
-    // ragdolls and the cars they are riding go with them, because a character
-    // whose capsule is parked is still a character and the thing filling the
-    // space around it is four metres of chassis.
+    // per passer-by — which is carried 89's shape with a moving cause. A
+    // ragdolling character's limbs go with its capsule, because a body on the
+    // floor is the same body.
+    //
+    // **Their VEHICLES do not**, and the first cut of this block had them.
+    // Excluding "the car every character is sitting in" reads as the same rule
+    // as excluding the subject's own — and it is not: on the island every
+    // traffic car has a driver, so the whole moving fleet became invisible to
+    // the camera. Measured, by this wave's own island arm: 11 frames of 1 800
+    // with the camera inside a **Traffic Car** and the boom reporting no clip at
+    // all, because the sweep had been told not to look. A pedestrian is
+    // something a camera may pass through; two tonnes of bodywork is not. The
+    // SUBJECT's own car stays excluded, below, for P29.7's reason — a seated
+    // character's capsule is parked and the chassis is what fills the space
+    // around it.
     //
     // The cost is one `O(characters)` query per step over a world whose
     // characters are already being iterated four times by the movement step, and
     // it is measured in the wave's cost row rather than assumed small.
     if cam.tuning.collision.ignore_characters {
         let w = world.world();
-        if let Some(mut q) = w.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>() {
-            for (g, other) in q.iter(w) {
-                if let Some(c) = bridge.collider_of(g.0) {
+        if let Some(mut q) =
+            w.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>()
+        {
+            let guids: Vec<uuid::Uuid> = q.iter(w).map(|(g, _)| g.0).collect();
+            for g in guids {
+                if let Some(c) = bridge.collider_of(g) {
                     exclude.insert(c);
                 }
-                if let Some(r) = bridge.ragdoll_of(g.0) {
+                if let Some(r) = bridge.ragdoll_of(g) {
                     for c in &r.colliders {
                         exclude.insert(*c);
-                    }
-                }
-                if other.runtime.seat.is_seated() {
-                    if let Some(c) = bridge.collider_of(other.runtime.seat.vehicle) {
-                        exclude.insert(c);
                     }
                 }
             }
@@ -285,7 +294,7 @@ pub fn step_locomotion_camera(
         }
     };
 
-    let mut free = if reach > 1e-6 { sweep(delta / reach, reach) } else { reach };
+    let free = if reach > 1e-6 { sweep(delta / reach, reach) } else { reach };
 
     // ── the whisker fan (wave CHAR1c, clause 1) ──
     //
@@ -302,7 +311,6 @@ pub fn step_locomotion_camera(
     let mut steer_deg = 0.0f64;
     let arm_full = cam.arm_full();
     if reach > 1e-6 {
-        let dir_main = delta / reach;
         for a in cam.tuning.collision.whisker_angles_deg() {
             let target = cam.camera_at(arm_full, cam.whisker_steer_deg + a).to_dvec3();
             let d = target - origin;
@@ -316,22 +324,23 @@ pub fn step_locomotion_camera(
                 .tuning
                 .collision
                 .whisker_steer_deg(a, (toi / r).clamp(0.0, 1.0));
-            // **Only a whisker that HIT anything bounds the boom.** A whisker
-            // that reached its own full length still ends `r·cos θ` up the boom's
-            // axis — 92 % of the reach at 22.5° — so a fan that bounded on every
-            // whisker took 8 % off the boom in an empty field, measured by
-            // `camera_3d`'s own control arm at 0.231 m. The projection is a
-            // statement about where an OBSTACLE is, and there is no obstacle in
-            // a whisker that ran out of length.
-            if toi < r - 1e-6 {
-                // The projection onto the boom's own axis — taken as a dot
-                // product rather than as `cos(a)`, because the shoulder offset
-                // means the two rays are not exactly `a` degrees apart and a
-                // camera model that assumed they were would be wrong by the
-                // offset.
-                let depth = toi * dir.dot(dir_main).max(0.0);
-                free = free.min(depth.max(floor));
-            }
+            // **A whisker STEERS and does not shorten** — measured, and the
+            // measurement is why the line that shortened is not here.
+            //
+            // The obvious second use of a blocked whisker is to bound the boom
+            // at the obstacle's own depth along the boom axis (`toi · cos θ`).
+            // It is wrong twice. A whisker that reached its full length still
+            // ends 92 % of the reach up that axis at 22.5°, so bounding on every
+            // whisker takes 8 % off the boom in an EMPTY field —
+            // `camera_3d`'s own control arm caught that at 0.231 m. And bounding
+            // only on a whisker that HIT is still too eager: a wall 45 cm to the
+            // side of the corridor took a metre off a 3.04 m boom (measured by
+            // this wave's own fan arm), which is a camera that bobs in and out
+            // once per alley for geometry it was never going to touch.
+            //
+            // The steer is the prediction. If the boom really is going into
+            // something the MAIN sweep is what says so, and it is the one thing
+            // that shortens the arm.
         }
     }
     cam.resolve_swept(free, steer_deg, dt);
