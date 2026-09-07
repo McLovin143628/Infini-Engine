@@ -158,6 +158,20 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         // I8b: the door bolt's own key, so `actions::LOCK` is reachable from a
         // keyboard and not only from a gamepad.
         KeyCode::KeyL => "KeyL",
+        // ── CHAR1c: the view-mode key ──
+        //
+        // **And the arm that would have caught its absence, which did not
+        // exist.** `default_map` bound `view_mode` to `KeyG`, the frontend's own
+        // rebinding UI would have offered it, and every gate in the tree was
+        // green — because the movement gates press action NAMES and the two
+        // key-route arms below tested a handful of keys by hand. Measured in the
+        // demo loop: nine synthetic presses of G, zero first-person frames, and
+        // no line in the hero log, because this `match` answered `None` and the
+        // key stopped one function short of the map.
+        //
+        // `every_key_the_default_map_binds_has_a_route` is the arm now, and it
+        // is derived from `default_map()` rather than listed.
+        KeyCode::KeyG => "KeyG",
         _ => return None,
     })
 }
@@ -183,6 +197,68 @@ mod tests {
     use super::*;
     use inf_input::InputEvent;
 
+    /// **Every `KeyCode` this player could see from a keyboard** — the whole
+    /// alphabet, the digits, the arrows and the named keys.
+    ///
+    /// One list, used by both key-route arms below, and it is an ALPHABET rather
+    /// than a selection on purpose: a hand-picked candidate set is a list that
+    /// agrees with whatever is added to it, and the two arms it feeds are about
+    /// a binding that reached no `KeyCode` at all (wave CHAR1c: `view_mode` on
+    /// `KeyG`, nine synthetic presses, zero frames).
+    const KEYCODE_CANDIDATES: &[KeyCode] = &[
+        KeyCode::KeyA,
+        KeyCode::KeyB,
+        KeyCode::KeyC,
+        KeyCode::KeyD,
+        KeyCode::KeyE,
+        KeyCode::KeyF,
+        KeyCode::KeyG,
+        KeyCode::KeyH,
+        KeyCode::KeyI,
+        KeyCode::KeyJ,
+        KeyCode::KeyK,
+        KeyCode::KeyL,
+        KeyCode::KeyM,
+        KeyCode::KeyN,
+        KeyCode::KeyO,
+        KeyCode::KeyP,
+        KeyCode::KeyQ,
+        KeyCode::KeyR,
+        KeyCode::KeyS,
+        KeyCode::KeyT,
+        KeyCode::KeyU,
+        KeyCode::KeyV,
+        KeyCode::KeyW,
+        KeyCode::KeyX,
+        KeyCode::KeyY,
+        KeyCode::KeyZ,
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::Space,
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+        KeyCode::Tab,
+        KeyCode::Enter,
+        KeyCode::Escape,
+        KeyCode::Backspace,
+    ];
+
     #[test]
     fn default_map_binds_the_coyote_vocabulary() {
         let m = default_map();
@@ -201,6 +277,68 @@ mod tests {
         let held = held_actions(&state, 1.0 / 60.0);
         assert!(held.is_down("right"));
         assert!(!held.is_down("left"));
+    }
+
+    /// **EVERY KEY THE DEFAULT MAP BINDS HAS A ROUTE** (wave CHAR1c) — the arm
+    /// that did not exist, derived from the map rather than listed beside it.
+    ///
+    /// The arm below this one checks the other direction: it takes a handful of
+    /// key NAMES, asserts the map binds them, and then asserts a handful of
+    /// `KeyCode`s by hand. That is a list, and a list agrees with whatever is
+    /// added to it. What it cannot see is a binding whose key never reaches
+    /// [`keycode_to_code`] at all — and that is exactly what wave CHAR1c did:
+    /// `default_map` bound `view_mode` to `KeyG`, the rebinding UI would have
+    /// offered it, every gate in the tree was green, and nine synthetic presses
+    /// of G in the demo loop produced **zero** first-person frames and no line
+    /// in the hero log, because this `match` answered `None` and the key stopped
+    /// one function short of the map.
+    ///
+    /// The candidate set below is the whole ALPHABET plus the named keys, so a
+    /// binding on any letter is covered by construction rather than by
+    /// somebody remembering to add a row.
+    #[test]
+    fn every_key_the_default_map_binds_has_a_route() {
+        use inf_input::{ActionSource, AxisSource};
+        let candidates = KEYCODE_CANDIDATES;
+        let routed: std::collections::BTreeSet<&'static str> = candidates
+            .iter()
+            .filter_map(|k| keycode_to_code(*k))
+            .collect();
+        let map = default_map();
+        let mut missing: Vec<String> = Vec::new();
+        for (name, sources) in map.actions_iter() {
+            for s in sources {
+                if let ActionSource::Key(code) = s {
+                    if !routed.contains(code.as_str()) {
+                        missing.push(format!("action `{name}` on `{code}`"));
+                    }
+                }
+            }
+        }
+        for (name, sources) in map.axes_iter() {
+            for s in sources {
+                if let AxisSource::Key { code, .. } = s {
+                    if !routed.contains(code.as_str()) {
+                        missing.push(format!("axis `{name}` on `{code}`"));
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "the default map binds {} key(s) no `KeyCode` reaches, so they are              controls that silently do nothing: {missing:?}",
+            missing.len()
+        );
+        // ANTI-VACUITY: the candidate set really does reach the map, and the
+        // check really can fail — a key nobody binds is not routed.
+        assert!(
+            routed.contains("KeyW") && routed.contains("KeyG"),
+            "the candidate set did not reach the alphabet"
+        );
+        assert!(
+            !routed.contains("KeyJ"),
+            "`KeyJ` is routed and nothing binds it, so this arm cannot tell a              routed key from an unrouted one"
+        );
     }
 
     #[test]
@@ -440,6 +578,8 @@ mod tests {
                 "ATTACK" => a::ATTACK,
                 "RELOAD" => a::RELOAD,
                 "WEAPON_SWITCH" => a::WEAPON_SWITCH,
+                // CHAR1c: carried 123's door.
+                "ROTATION_MODE" => a::ROTATION_MODE,
                 other => panic!(
                     "`MovementIntent::from_actions` reads `actions::{other}`, which \
                      this arm has never heard of — add it to `default_map` and to \
@@ -515,37 +655,16 @@ mod tests {
         }
         keys.sort();
         keys.dedup();
-        let reachable: std::collections::BTreeSet<&str> = [
-            KeyCode::KeyA,
-            KeyCode::KeyB,
-            KeyCode::KeyC,
-            KeyCode::KeyD,
-            KeyCode::KeyE,
-            KeyCode::KeyF,
-            KeyCode::KeyI,
-            KeyCode::KeyL,
-            KeyCode::KeyQ,
-            KeyCode::KeyR,
-            KeyCode::KeyS,
-            KeyCode::KeyV,
-            KeyCode::KeyW,
-            KeyCode::KeyX,
-            KeyCode::KeyZ,
-            KeyCode::Tab,
-            KeyCode::ArrowLeft,
-            KeyCode::ArrowRight,
-            KeyCode::ArrowUp,
-            KeyCode::ArrowDown,
-            KeyCode::Space,
-            KeyCode::ShiftLeft,
-            KeyCode::Enter,
-            KeyCode::Escape,
-            KeyCode::AltLeft,
-            KeyCode::ControlLeft,
-        ]
-        .into_iter()
-        .filter_map(keycode_to_code)
-        .collect();
+        // **The SAME candidate list the derived arm reads** (wave CHAR1c). It
+        // used to be a hand-picked selection here, and a hand-picked candidate
+        // set makes this arm fail for the wrong reason: `KeyG` was unreachable
+        // because the LIST did not name it, not because the map bound something
+        // no keyboard could send. One alphabet, two arms.
+        let reachable: std::collections::BTreeSet<&'static str> = KEYCODE_CANDIDATES
+            .iter()
+            .copied()
+            .filter_map(keycode_to_code)
+            .collect();
         for k in &keys {
             assert!(
                 reachable.contains(k.as_str()),
