@@ -156,6 +156,21 @@ pub struct BodyParams {
     /// lower bone; the foot/hand sits at the end).
     pub upper_limb_ratio: f64,
     /// Arm length shoulder-to-wrist, as a fraction of `height_m`.
+    ///
+    /// **0.30, and it is a measurement** (wave CHAR1b.2, closing the CHAR1a
+    /// audit's item 85). It was `0.42` from P24.1 until this wave, which puts a
+    /// 1.75 m person's shoulder-to-wrist at **73 cm** where the anatomy is about
+    /// 52. Both of Epic's reference mannequins were measured off their own
+    /// exported glTF at CHAR1a.3 and both disagree with it: **Manny 0.3048**
+    /// (0.5502 m over 1.8054) and **Quinn 0.2952** (0.5319 over 1.8017). The
+    /// female starter has carried Quinn's number since that wave and the default
+    /// carried the old one, so the two committed bodies had arms of different
+    /// proportion for a reason that was nobody's decision.
+    ///
+    /// 0.30 rather than either measurement exactly: it is one default serving
+    /// two bodies and every wizard-generated one, it lies between them, and a
+    /// default that is one mannequin's number to four places claims a precision
+    /// a default does not have.
     pub arm_length_ratio: f64,
     /// Body length from the rearmost girdle to the shoulder girdle (m).
     /// Ignored by **both** bipeds, whose torsos are vertical.
@@ -167,7 +182,9 @@ pub struct BodyParams {
 
 impl Default for BodyParams {
     /// An average adult human: 1.75 m, hips at 53 %, shoulders at 82 %, head at
-    /// 93 %, a 40 cm shoulder span and a 22 cm hip span.
+    /// 93 %, a 40 cm shoulder span, a 22 cm hip span and a **52.5 cm**
+    /// shoulder-to-wrist (see [`BodyParams::arm_length_ratio`] for why that last
+    /// one moved at wave CHAR1b.2).
     ///
     /// The quadruped/hexapod-only fields carry a mid-sized four-legged animal's
     /// values so `BodyParams::default()` is a valid input for *every* plan — a
@@ -183,7 +200,7 @@ impl Default for BodyParams {
             shoulder_width_m: 0.40,
             hip_width_m: 0.22,
             upper_limb_ratio: 0.52,
-            arm_length_ratio: 0.42,
+            arm_length_ratio: 0.30,
             body_length_m: 0.90,
             head_forward_m: 0.25,
         }

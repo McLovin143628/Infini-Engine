@@ -10709,14 +10709,19 @@ pub fn starter_character_files() -> Result<(Vec<(String, Vec<u8>)>, Vec<String>)
 /// narrower across the shoulders and 12.1 % wider across the hips *as a fraction
 /// of height*. That is the whole point of a second body.
 ///
-/// **What is NOT changed here, and is a finding rather than a decision**:
-/// `BodyParams::default()` — the male starter and every wizard default — carries
+/// **CLOSED at wave CHAR1b.2.** CHAR1a.3 left this as a finding: `BodyParams::
+/// default()` — the male starter and every wizard default — carried
 /// `arm_length_ratio: 0.42` where BOTH mannequins measure 0.30 (Manny 0.3048,
-/// Quinn 0.2952). A 1.75 m person's shoulder-to-wrist is about 52 cm; 0.42
-/// makes it 73 cm. It is the `HAND_OF_HEIGHT` defect one bone up and it is
-/// carried with its numbers rather than fixed here, because moving a wizard
-/// default re-blesses the male body, its three derived clips, its machine and
-/// two pinned advisories — a bless this wave is not the place for.
+/// Quinn 0.2952), which puts a 1.75 m person's shoulder-to-wrist at 73 cm
+/// against an anatomy of about 52. It was carried rather than fixed because
+/// moving a wizard default re-blesses the male body, its three derived clips,
+/// its machine and its pinned advisory.
+///
+/// That bless is this wave's, WITH the cause: the default is **0.30** now, which
+/// lies between the two measurements and is what one default serving two bodies
+/// and every generated one can honestly claim. Quinn's own 0.2952 stays here,
+/// because a body measured off a specific mannequin should carry that
+/// mannequin's number.
 pub fn starter_character_f_ids() -> crate::character::CharacterIds {
     let id = |n: u128| Some(inf_asset::AssetId(Uuid::from_u128(0x5C10_00B0 + n)));
     crate::character::CharacterIds {
