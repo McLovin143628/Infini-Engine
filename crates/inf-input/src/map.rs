@@ -445,7 +445,7 @@ pub mod actions {
     /// first-person character has to turn with the camera or it cannot aim at
     /// all — asks the character for `LookingDirection` through
     /// `inf_ecs::movement::set_desired_rotation_mode`, which is ALS's
-    /// `OnViewModeChanged` (`.cpp:856-872`). One key, two consumers, and the
+    /// `OnViewModeChanged` (`.cpp:857-872`). One key, two consumers, and the
     /// camera still writes nothing.
     pub const VIEW_MODE: &str = "view_mode";
 

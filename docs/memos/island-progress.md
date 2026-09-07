@@ -36632,7 +36632,7 @@ at, **4.097 m** back and pitched **12°** further down than the rig.
 | `DesiredRotationMode` | `ALSBaseCharacter.h:428` | `MovementRuntime::desired_rotation_mode`, seeded from the level's own authored mode |
 | `AimAction(false)` reverts to the desired mode | `.cpp:1291–1301` | the aim-release branch, which used to **promote** to `LookingDirection` with no way back |
 | `VelocityDirectionAction` / `LookingDirectionAction` | `.cpp:1404–1416` | the `rotation_mode` action (**Q** / right stick click), a cycle — a keyboard cannot bind two actions to one key |
-| `OnViewModeChanged` forces `LookingDirection` in first person | `.cpp:856–872` | the `view_mode` key calls `set_desired_rotation_mode` — the INPUT layer, not the camera |
+| `OnViewModeChanged` forces `LookingDirection` in first person | `.cpp:857–872` | the `view_mode` key calls `set_desired_rotation_mode` — the INPUT layer, not the camera |
 
 **Carried 123 is closed.** Before this wave the only path into
 `RotationMode::LookingDirection` was *press aim, release aim*, and the release

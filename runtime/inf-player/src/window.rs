@@ -900,7 +900,7 @@ impl PlayerApp {
         //    Two consumers, one key. The camera's seat moves, and the CHARACTER
         //    is asked to face where it looks, because a first-person character
         //    that strafes with its body pointing somewhere else cannot aim at
-        //    all — ALS's `OnViewModeChanged` (`ALSBaseCharacter.cpp:856-872`).
+        //    all — ALS's `OnViewModeChanged` (`ALSBaseCharacter.cpp:857-872`).
         //    The second half goes through a Ring-0 door and it is the INPUT
         //    layer calling it, not the camera: the camera still reads the world
         //    and writes nothing back.

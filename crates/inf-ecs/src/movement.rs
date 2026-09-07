@@ -1433,7 +1433,7 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
 /// The `rotation_mode` action cycles; this targets. The two exist for different
 /// callers: a player pressing a key means "the other one", and a host that has
 /// just put the camera in FIRST PERSON means `LookingDirection` specifically —
-/// which is ALS's `OnViewModeChanged` (`.cpp:856-872`), the rule that a
+/// which is ALS's `OnViewModeChanged` (`.cpp:857-872`), the rule that a
 /// first-person character turns with the camera because there is no other way to
 /// aim it.
 ///
