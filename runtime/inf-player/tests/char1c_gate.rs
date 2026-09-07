@@ -2412,3 +2412,72 @@ fn an_island_driver_is_seated_inside_its_car_and_not_on_top_of_it() {
         rows.len()
     );
 }
+
+/// **WHAT THE CAMERA COSTS ON THE ISLAND** (the audit's cost row).
+///
+/// The wave's own cost arm measures the phase-29 course — one character, a
+/// handful of colliders — and reports 3.73 µs/step against a 58.4 µs whole step.
+/// The number the campaign's budget is kept in is the ISLAND's: 5726.5 µs per
+/// fixed step at `2e3538ee` (CHAR1b.2's audit, release, one walking character).
+/// A camera phase that is 6 % of a toy course can be 0.06 % of the real one or
+/// six times worse, and only the real one is the budget.
+///
+/// Measured with the fan on and off, on the island, driven through the input
+/// door, with the step profiler on — the same instrument the campaign's other
+/// cost rows use.
+#[test]
+fn the_cameras_cost_on_the_island() {
+    use inf_player::runtime_sim::RuntimeInput;
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content, CI has none");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let cam_phase = inf_player::step_profile::STEP_PHASE_NAMES
+        .iter()
+        .position(|n| *n == "camera")
+        .expect("the step profiler has a camera phase");
+    let measure = |whiskers: bool| -> (f64, f64) {
+        let mut sim = island_sim(&content);
+        for _ in 0..900 {
+            sim.step_once(RuntimeInput::default());
+        }
+        sim.camera_mut().tuning.collision.whiskers = whiskers;
+        sim.set_step_profiling(true);
+        let (mut cam, mut total) = (0.0f64, 0.0f64);
+        const N: u32 = 600;
+        for i in 0..N {
+            let ax: BTreeMap<String, f32> = [
+                ("move_y".to_string(), 1.0f32),
+                (
+                    "look_x".to_string(),
+                    if (i / 90) % 2 == 0 { 0.7 } else { -0.7 },
+                ),
+            ]
+            .into();
+            sim.step_once(RuntimeInput::default().with_axes(ax));
+            let p = sim.step_profile();
+            cam += p.ms[cam_phase];
+            total += p.total_ms();
+        }
+        (cam / f64::from(N) * 1000.0, total / f64::from(N) * 1000.0)
+    };
+    let (on, total_on) = measure(true);
+    let (off, total_off) = measure(false);
+    println!(
+        "\n=== the camera's cost on the ISLAND (600 steps, driven) ===\n  camera phase, whiskers ON:  {on:.2} µs/step\n  camera phase, whiskers OFF: {off:.2} µs/step\n  the fan costs {:.2} µs/step\n  whole step: {total_on:.1} µs (fan on) / {total_off:.1} µs (fan off)\n  the camera is {:.3} % of the step",
+        on - off,
+        on / total_on.max(1e-9) * 100.0
+    );
+    assert!(on > 0.0, "the camera phase measured zero on the island");
+    // A ceiling on the SHARE, which is what a budget is. One per cent of a step
+    // that already carries a city is a camera nobody has to think about.
+    assert!(
+        on / total_on.max(1e-9) < 0.01,
+        "the camera is {:.2} % of the island's fixed step ({on:.1} µs of {total_on:.1} µs)",
+        on / total_on.max(1e-9) * 100.0
+    );
+}
