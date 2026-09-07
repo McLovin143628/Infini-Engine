@@ -315,6 +315,12 @@ public class InfInput {
   public static void Look(int dx, int dy) {
     mouse_event(0x0001, (uint)dx, (uint)dy, 0, IntPtr.Zero);
   }
+  // **The RIGHT button, which is `aim`** (audit CHAR1b.1). Holding it puts the
+  // character in `RotationMode::Aiming`; RELEASING it leaves it in
+  // `LookingDirection`, and that is the only door to the mode ALS turns in
+  // place in. A demo that never right-clicks can never film a turn.
+  public static void RightDown() { mouse_event(0x0008, 0, 0, 0, IntPtr.Zero); }
+  public static void RightUp() { mouse_event(0x0010, 0, 0, 0, IntPtr.Zero); }
   public static void Click(int x, int y) {
     SetCursorPos(x, y);
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
@@ -499,6 +505,36 @@ Say "STRAFE: A and D, the direction blend's own axis"
 [InfInput]::Up(0x20)
 Start-Sleep -Milliseconds 800
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "22-back-to-idle.png") | ForEach-Object { Say $_ }
+
+# ── audit CHAR1b.1: the two frames the wave could not get ────────────────────
+#
+# A TURN IN PLACE needs `RotationMode::LookingDirection`, and a level starts in
+# `VelocityDirection` -- where ALS does not turn in place either. The only door
+# is releasing the aim key, so the tap below is load-bearing rather than
+# decorative: without it `turn_deg` stays 0.000 for the whole session and the
+# eight turn clips cannot play whatever the graph says.
+Say "TURN IN PLACE: right-click to aim and release (-> LookingDirection), then swing"
+[InfInput]::RightDown(); Start-Sleep -Milliseconds 200; [InfInput]::RightUp()
+Start-Sleep -Milliseconds 400
+for ($i = 0; $i -lt 24; $i++) { [InfInput]::Look(28, 0); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 700
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "24-turn-in-place.png") | ForEach-Object { Say $_ }
+Start-Sleep -Milliseconds 900
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "25-turned.png") | ForEach-Object { Say $_ }
+
+# THE KERB. The loop drives W down the middle of a street; the pavement is to
+# one side and its kerb is the 15 cm step the fixture measures in the abstract.
+# Turning ninety degrees and walking is the scripted input carried item 117 asked
+# for, and `hero.csv`'s Y column is what says whether the hero went UP.
+Say "KERB: turn toward the pavement and walk onto it"
+for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(-30, 0); Start-Sleep -Milliseconds 16 }
+Start-Sleep -Milliseconds 400
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 2600; [InfInput]::Up(0x11)
+Start-Sleep -Milliseconds 1200
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "26-toward-the-kerb.png") | ForEach-Object { Say $_ }
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 2600; [InfInput]::Up(0x11)
+Start-Sleep -Milliseconds 1400
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "27-on-the-kerb.png") | ForEach-Object { Say $_ }
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
