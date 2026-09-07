@@ -428,7 +428,9 @@ mod tests {
         let (verbs, namespaces) = v.census();
         assert_eq!(
             (verbs, namespaces),
-            (132, 26),
+            // 132/26 → 135/27 at wave CHAR1c: the `camera.*` kit's three nodes
+            // (`set_rig`, `get_rig`, `shot`) in one new namespace.
+            (135, 27),
             "the verb surface moved; the spec's table, the memo and the \
              generated API manual all quote these two numbers"
         );

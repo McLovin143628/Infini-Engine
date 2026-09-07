@@ -4,7 +4,7 @@
 
 Every verb an InfiniScript can call, generated from the engine's own verb registry — the same table the Blueprint palette is built from and the same one the parser resolves a call against. If it is not here, a script cannot say it.
 
-The surface is **132 registered nodes across 26 namespaces**. Not all of them are *callable*: the arithmetic and comparison operators, the control-flow palette, the literals, the events and the two member-variable nodes are all written as syntax instead, and the last section lists each with the spelling that replaces it.
+The surface is **135 registered nodes across 27 namespaces**. Not all of them are *callable*: the arithmetic and comparison operators, the control-flow palette, the literals, the events and the two member-variable nodes are all written as syntax instead, and the last section lists each with the spelling that replaces it.
 
 **How to read a row.** `door.use(x: float, y: float, z: float)` takes three arguments in that order. A name in `[square brackets]` is optional and defaults to zero, false or the empty string. A verb marked *statement* runs for its effect and is written on a line of its own; a verb marked *value* answers something and can go inside an expression. A verb that is both can be used either way — write it as a statement to ignore what it answers.
 
@@ -179,6 +179,14 @@ The surface is **132 registered nodes across 26 namespaces**. Not all of them ar
 | `anim.set_trigger(entity: int, name: string)` | statement, value | `ok`: bool | Arm a declared trigger parameter once. Unlike Set Anim Parameter this is an EVENT: arming twice on consecutive steps fires twice, and an armed trigger no transition consumes stays armed. Reports false for an entity with no state machine. |
 | `anim.query_state(entity: int, name: string)` | value | `active`: bool | True while this entity's state machine is in the named state. False for an entity that has never stepped one — a state nothing has entered is not a state anything is in. |
 | `anim.consume_notify(entity: int, name: string)` | statement, value | `fired`: bool | TAKE one of this step's animation notifies by name — a state's enter/exit event or a clip's event marker (a footstep). True exactly once per fired name per step: two handlers racing for one footstep get one. |
+
+## `camera.*`
+
+| call | kind | answers | what it does |
+|---|---|---|---|
+| `camera.set_rig(entity: int, name: string, [value: float])` | statement, value | `ok`: bool | Set one value on this character's camera rig by name — `run.arm_length_m`, `aim.fov_deg`, `collision.pull_in_speed`, `shoulder`, `first_person`, and the rest of `CameraTuning::names`. A character with no rig GETS one (the ALS defaults) and then takes the write. Reports false for an entity that is not in the world, or a name the rig does not have. |
+| `camera.get_rig(entity: int, name: string)` | value | `value`: float | Read one value off this character's camera rig by name — `camera.set_rig`'s own vocabulary. Answers 0 for an entity with no rig and for a name the rig does not have, which are the same answer for the same reason: there is no number there. |
+| `camera.shot(entity: int, [blend_s: float])` | statement, value | `ok`: bool | Put the camera at `entity`'s transform for THIS step — a scripted shot, which outranks the gameplay rig and a death cam both. `blend_s` of 0 is a cut. Hold a shot by calling this every Tick; stop calling it and the camera blends back to the character on its own. Reports false for an entity that is not in the world. |
 
 ## `terrain.*`
 

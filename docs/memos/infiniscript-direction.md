@@ -51,7 +51,7 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | the parity gate | `inf-transpile/tests/{parity,flow_parity,math_parity,coyote_parity}.rs` | interpreted == compiled over **four fixture families** — see the bound below. *Preview is the shipped program, per proven family.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
 | the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
-| the verb surface | `inf_blueprint::nodekit` | **132 registered verbs** (113 `NodeDef::new` sites, three of which are the `compare`/`unary_math`/`binary_math` helpers called 22 times between them) across 23 registration groups and **26** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` `terrain.*` `crowd.*` `zone.*` — the last three added by wave SCRIPT2a, which also gave `engine.*` an arm recording that **neither host implements it** |
+| the verb surface | `inf_blueprint::nodekit` | **135 registered verbs** (116 `NodeDef::new` sites, three of which are the `compare`/`unary_math`/`binary_math` helpers called 22 times between them) across 24 registration groups and **27** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` `terrain.*` `crowd.*` `zone.*` `camera.*` — the three before last added by wave SCRIPT2a (which also gave `engine.*` an arm recording that **neither host implements it**), and `camera.*` by wave CHAR1c: `set_rig` / `get_rig` by name over a character's own `CameraRig`, and `shot`, a per-step scripted claim on the camera director |
 | the sandbox | `crates/inf-wasm-host` + `crates/inf-mod` (P14.5) | a **`wasmtime`** engine with a capability-scoped linker, a flat host ABI, and a cook path Blueprint → Rust → `cdylib` → `.wasm` |
 | dylib hot-swap | `crates/inf-hotreload` | content-addressed shadow copies, never-unload, state migration |
 
@@ -832,7 +832,8 @@ every carried item of the arc in one routed list.
 The arc set out to answer one question the owner asked: **can a designer build a
 game in this engine without waiting for a compiler?** Four waves built the
 language, the cook, the hot-reload path, the editor and the verb surface —
-**132 registered nodes, of which 94 are callable verbs**; the other 38 are the
+**135 registered nodes, of which 97 are callable verbs** (132 and 94 before wave
+CHAR1c's `camera.*` three); the other 38 are the
 29 written-as-syntax refusals and the 9 `event.*` headers, which is the
 accounting the SCRIPT2a audit closed and the shorthand "132 verbs" quietly
 re-opens. This section is what the fifth wave measured, on a real mission rather
@@ -1289,8 +1290,9 @@ are `+`, `<`, `and` here), `logic.not` and `math.neg`, the `flow.*` palette
 (control flow is syntax), `event.*` (an event is a handler's header), `lit.*`
 (write the value), and `var.get`/`var.set` (write the name).
 
-The surface is **132 verbs across 26 namespaces**, pinned by `inf_script::verbs`'
-own census arm.
+The surface is **135 verbs across 27 namespaces**, pinned by `inf_script::verbs`'
+own census arm. (It was 132 across 26 until wave CHAR1c added the `camera.*`
+kit's three.)
 
 That arm's message names this sentence, and the SCRIPT2a audit found the promise
 was worth less than it read: the wave moved the census to 132/26, the arm's
