@@ -321,28 +321,65 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
     // Stable sort by hierarchy depth so parents precede children.
     classified.sort_by_key(|(role, _)| (depth(*role), role_order(*role)));
 
-    // Role → its index in the output (for joint parent resolution).
+    // Role → its index in the output (for joint parent resolution). A role that
+    // appears more than once keeps the LAST of them, so a child role attaches to
+    // the END of that role's chain — see the chain below.
     let mut index_of: std::collections::BTreeMap<u8, usize> = std::collections::BTreeMap::new();
 
+    // ── A ROLE THAT REPEATS IS A CHAIN, NOT A COLLISION (CHAR1b.2 audit) ─────
+    //
+    // Twelve fixed roles cannot name a rig's bones one for one, and every rig
+    // that reaches this classifier has duplicates: `samples/phase29-locomotion`
+    // (no role table at all) gives two `Hips` (`hips`, `pelvis`), two `Head`
+    // (`neck`, `head`) and two `UpperArm` a side (`shoulder_*`, `upper_arm_*`).
+    // `index_of` kept whichever came last and the earlier one was wired as if it
+    // were the later, which measured on that sample as: `hips` — which is also
+    // `SpawnedRagdoll::root`, the body the settle, the velocity-scaled damping
+    // and the gravity cutoff all read — spawned as a **free body jointed to
+    // nothing**, the `head` hung off the CHEST rather than off the neck, and
+    // both upper arms hung off the chest rather than off their shoulders. The
+    // head's joint anchor was the NECK's head as well, because `skeleton_head`
+    // answers by role and found the first bone of it.
+    //
+    // The repair is the anatomy: the second bone of a role joints to the first,
+    // the third to the second, and `index_of` keeps the end of the chain so the
+    // next role down attaches there. A rig whose roles are all distinct produces
+    // exactly the parts it produced before — the chain is empty and the anchor
+    // is the same bone's head.
+    let mut chain_to: Vec<Option<usize>> = Vec::with_capacity(classified.len());
     let mut parts: Vec<RagdollPart> = Vec::with_capacity(classified.len());
     for (role, bone) in &classified {
         parts.push(capsule_part(*role, bone, config));
-        index_of.insert(role_key(*role), parts.len() - 1);
+        chain_to.push(index_of.insert(role_key(*role), parts.len() - 1));
     }
 
     // 2. Wire joints. The joint anchor is the child bone's head (the shared point
     //    with its parent), expressed in each body's local frame.
     for i in 0..parts.len() {
         let role = parts[i].role;
-        let Some(parent_role) = role.parent() else {
-            continue;
-        };
-        let Some(&parent_idx) = index_of.get(&role_key(parent_role)) else {
-            continue; // parent bone absent → leave this part free
+        let parent_idx = match chain_to[i] {
+            // The second (or third…) bone of a role hangs off the one before it.
+            Some(prev) => prev,
+            None => {
+                let Some(parent_role) = role.parent() else {
+                    continue;
+                };
+                let Some(&parent_idx) = index_of.get(&role_key(parent_role)) else {
+                    continue; // parent bone absent → leave this part free
+                };
+                parent_idx
+            }
         };
 
-        // The shared world anchor: this bone's head (its parent-facing joint).
-        let child_head = skeleton_head(&classified, role).unwrap_or(parts[i].position);
+        // The shared world anchor: **this part's own** bone head (its
+        // parent-facing joint). `parts` is pushed in `classified` order, so the
+        // two are indexed alike; asking `skeleton_head` for the role answered
+        // with the FIRST bone carrying it, which is a different bone whenever
+        // the role repeats.
+        let child_head = classified
+            .get(i)
+            .map(|(_, b)| b.head)
+            .unwrap_or(parts[i].position);
 
         let child_anchor = world_to_local(parts[i].rotation, parts[i].position, child_head);
         let parent_anchor = world_to_local(
@@ -558,14 +595,6 @@ fn capsule_part(role: BoneRole, bone: &RagdollBone, config: RagdollConfig) -> Ra
         rotation,
         joint: None,
     }
-}
-
-/// The head (world) of the bone that classified to `role`, if present.
-fn skeleton_head(classified: &[(BoneRole, &RagdollBone)], role: BoneRole) -> Option<DVec3> {
-    classified
-        .iter()
-        .find(|(r, _)| *r == role)
-        .map(|(_, b)| b.head)
 }
 
 /// Transform a world point into a body's local frame.

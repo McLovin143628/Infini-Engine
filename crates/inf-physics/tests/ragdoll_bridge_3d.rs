@@ -970,13 +970,23 @@ fn a_mannequin_ragdolls_into_one_connected_body_and_a_table_less_one_does_not() 
     // **The contrast is a NUMBER** (SK1a audit). This arm asserted `> 1`, which
     // is satisfied by two loose capsules and by two hundred — and the ledger it
     // fed said "14 parts, 4 free". Measured through this door, the classifier
-    // makes **92** parts out of 161 bones and leaves **31** of them floating:
-    // every `upperarm_*` corrective and twist claims `UpperArmL`/`UpperArmR` and
-    // every one of them wants a `Chest` that is never produced. Pinned, so the
-    // number in the ledger is the number the code makes.
+    // makes **92** parts out of 161 bones and leaves **4** of them floating.
+    //
+    // **31 → 4 (CHAR1b.2 audit), and the cause is in `build_ragdoll`.** A role
+    // that appears more than once is a CHAIN now — the second bone of a role
+    // joints to the first — where `index_of` used to keep whichever came last
+    // and leave every earlier one of them holding nothing. On this rig that was
+    // twenty-seven capsules: eleven `upperarm_*` correctives a side, both
+    // `neck_0N`, and every `thigh_*`/`calf_*` duplicate. The four that remain
+    // are the honest ones — `root`, which is the tree's root and has no parent,
+    // and `neck_01` / `upperarm_l` / `upperarm_r`, whose parent ROLE (`Chest`)
+    // this classifier never produces on a `spine_0N` rig. That is still the
+    // contrast this arm exists to draw: the role table's path leaves **zero**
+    // parts unreachable from the pelvis (asserted above), and the classifier's
+    // leaves four.
     assert_eq!(
         (legacy.len(), free.len()),
-        (92, 31),
+        (92, 4),
         "the classifier's shape on a mannequin moved: {free:?}"
     );
     assert!(
@@ -990,6 +1000,140 @@ fn a_mannequin_ragdolls_into_one_connected_body_and_a_table_less_one_does_not() 
         assert!(
             legacy.iter().any(|p| p.name == want && p.joint.is_none()),
             "`{want}` should be a free capsule under the classifier: {free:?}"
+        );
+    }
+}
+
+/// **THE COMMITTED TABLE-LESS SAMPLE RAGDOLLS INTO ONE CONNECTED BODY**
+/// (CHAR1b.2 audit — carried items 135 and 136, measured on the bytes in the
+/// repository rather than on a rig built in memory).
+///
+/// `samples/phase29-locomotion/Hero.inf_skel` carries **no role table at all**,
+/// so it is the one committed rig that reaches
+/// [`inf_physics::ragdoll::classify`] — and it names its bones the way that
+/// makes twelve fixed roles collide: two `Hips` (`hips`, `pelvis`), two `Head`
+/// (`neck`, `head`) and two `UpperArm` a side (`shoulder_*`, `upper_arm_*`).
+///
+/// Before this arm, `index_of` kept whichever bone of a role came LAST, so on
+/// this sample:
+///
+/// * `hips` — which is `bodies[0]`, and therefore `SpawnedRagdoll::root`, the
+///   body the settle test, the velocity-scaled damping and the gravity cutoff
+///   all read — spawned as a **free capsule jointed to nothing**, falling under
+///   gravity on its own while the rest of the ragdoll hung off `pelvis`;
+/// * the `head` hung off the CHEST rather than off the neck, with the NECK's
+///   head as its joint anchor (`skeleton_head` answered by role and found the
+///   first bone carrying it);
+/// * both upper arms hung off the chest rather than off their own shoulders.
+///
+/// A repeated role is a chain now, so what this asserts is the thing that was
+/// false: **every part reaches part 0 by walking its joints**, and part 0 is the
+/// only one without a joint. It reads the parts the builder makes, not a count
+/// and not a report.
+#[test]
+fn the_committed_table_less_sample_ragdolls_into_one_connected_body() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("this crate lives two levels under the workspace root")
+        .to_path_buf();
+    let path = repo.join("samples/phase29-locomotion/Hero.inf_skel");
+    let bytes = std::fs::read(&path).expect("the committed sample rig");
+    let asset: SkeletonAsset = inf_asset::decode(&bytes).expect("it decodes");
+    assert!(
+        asset.roles.is_empty(),
+        "this sample used to carry no role table; it carries {} rows now, so it no longer \
+         reaches the classifier and this arm is aimed at nothing",
+        asset.roles.len()
+    );
+    let joints = asset.skeleton.joints();
+    let globals =
+        inf_anim::pose::global_transforms(&asset.skeleton, &inf_anim::Pose::rest(&asset.skeleton));
+    let at = |i: usize| -> DVec3 {
+        let t = globals[i].to_scale_rotation_translation().2;
+        DVec3::new(f64::from(t.x), f64::from(t.y), f64::from(t.z))
+    };
+    let bones: Vec<inf_physics::ragdoll::RagdollBone> = joints
+        .iter()
+        .enumerate()
+        .map(|(i, j)| {
+            let head = at(i);
+            let tail = joints
+                .iter()
+                .position(|c| c.parent == Some(i as u16))
+                .map(at)
+                .unwrap_or(head + DVec3::Y * 0.1);
+            inf_physics::ragdoll::RagdollBone::new(j.name.clone(), head, tail)
+        })
+        .collect();
+    let parts =
+        inf_physics::ragdoll::build_ragdoll(&bones, inf_physics::ragdoll::RagdollConfig::default());
+    let free: Vec<&str> = parts
+        .iter()
+        .filter(|p| p.joint.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    println!(
+        "\n=== the committed table-less sample, through the classifier ===\n  {} parts; free: \
+         {free:?}\n{}",
+        parts.len(),
+        parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!(
+                "  [{i:2}] {:<14} {:?} -> {}\n",
+                p.name,
+                p.role,
+                p.joint
+                    .map(|j| parts[j.parent].name.clone())
+                    .unwrap_or_else(|| "(root)".into())
+            ))
+            .collect::<String>()
+    );
+    assert_eq!(
+        free,
+        ["hips"],
+        "a table-less ragdoll should have exactly one rootless body and it should be \
+         `bodies[0]` — the body `SpawnedRagdoll::root` names"
+    );
+    for (i, part) in parts.iter().enumerate() {
+        let mut cur = i;
+        let mut hops = 0usize;
+        while let Some(j) = parts[cur].joint {
+            assert!(
+                j.parent < cur,
+                "`{}` names a parent that follows it",
+                part.name
+            );
+            cur = j.parent;
+            hops += 1;
+            assert!(hops <= parts.len(), "`{}` is in a cycle", part.name);
+        }
+        assert_eq!(cur, 0, "`{}` does not reach the root body", part.name);
+    }
+    // The anatomy the chain restores, named one link at a time so a regression
+    // says which link broke.
+    let parent_of = |name: &str| -> String {
+        parts
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.joint)
+            .map(|j| parts[j.parent].name.clone())
+            .unwrap_or_else(|| "(root)".into())
+    };
+    for (child, want) in [
+        ("pelvis", "hips"),
+        ("head", "neck"),
+        ("upper_arm_l", "shoulder_l"),
+        ("upper_arm_r", "shoulder_r"),
+        ("lower_arm_l", "upper_arm_l"),
+        ("lower_leg_r", "upper_leg_r"),
+    ] {
+        assert_eq!(
+            parent_of(child),
+            want,
+            "`{child}` is jointed to `{}` and should be jointed to `{want}`",
+            parent_of(child)
         );
     }
 }
