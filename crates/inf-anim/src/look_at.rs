@@ -187,7 +187,7 @@ fn pitch_model(deg: f64) -> Quat {
 /// LOCAL axes are the rig author's and are not it. On the MetaHuman rig the head
 /// bone's local `X` points along model `+Y` and its local `Y` along model `-X`,
 /// which is why the first version of this pass drew a yaw as a nod.
-fn model_rot(skeleton: &Skeleton, pose: &Pose, joint: u16) -> Quat {
+pub(crate) fn model_rot(skeleton: &Skeleton, pose: &Pose, joint: u16) -> Quat {
     let mut q = Quat::IDENTITY;
     let mut cur = Some(joint);
     // Bounded by the chain's depth; a `Skeleton` is validated with
@@ -207,7 +207,7 @@ fn model_rot(skeleton: &Skeleton, pose: &Pose, joint: u16) -> Quat {
 /// `global = parent * local`, and we want `global' = wanted * global`; the
 /// identity `local * (global⁻¹ · wanted · global)` gives exactly that, so the
 /// call sites keep the post-multiply shape they had.
-fn local_delta_for(model: Quat, wanted: Quat) -> Quat {
+pub(crate) fn local_delta_for(model: Quat, wanted: Quat) -> Quat {
     model.inverse() * wanted * model
 }
 

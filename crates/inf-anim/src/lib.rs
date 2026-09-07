@@ -73,6 +73,7 @@ pub mod ik;
 pub mod inertialize;
 // P29.2 blending depth: additive poses, per-bone masks and the layer stack.
 pub mod layers;
+pub mod lean;
 // P24.5 the default locomotion set: clips and a machine derived from a body plan.
 pub mod locomotion;
 /// **Look-at** (wave CHAR1b.1): the head, neck and spine chain that follows a
@@ -158,6 +159,7 @@ pub use layers::{
     additive_base_pose, additive_delta, apply_additive, apply_layer, apply_layers,
     sample_additive_clip, AnimLayer, JointMask, LayerMode,
 };
+pub use lean::{apply_lean, LeanReport, LEAN_BODY_DEG, LEAN_SPINE_SHARE};
 pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
     FOOT_SYNC_GROUP, MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,

@@ -46,7 +46,17 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 47] = [
+const SIM_PATH: [(&str, &str, &str); 48] = [
+    // ── the lean (wave CHAR1b.2) ──
+    //
+    // A spine rotation per accelerating character per step, straight into the
+    // pose — the same shape as `look_at.rs` one entry down, and on the path for
+    // the same reason.
+    (
+        "lean.rs",
+        include_str!("../src/lean.rs"),
+        "the lean writes spine rotations into the pose the fixed step publishes",
+    ),
     // ── the authored clip sets (wave CHAR1b.2) ──
     //
     // Nine clips derived from a rig by role — the slide, the two throws, the

@@ -4195,3 +4195,212 @@ fn mean_gap(a: &[DVec3], b: &[DVec3]) -> f64 {
         .sum::<f64>()
         / n as f64
 }
+
+/// **THE ISLAND'S HERO LEANS INTO WHAT IT IS DOING** (clause 6 — lean on
+/// acceleration and turns).
+///
+/// P29.4 computed `MovementRuntime::relative_accel` every step with zero
+/// readers; this wave's first commit interpolated it into `lean` at ALS's own
+/// `GroundedLeanInterpSpeed` and published it as `lean_x` / `lean_y`, and left
+/// it a parameter with no pose pass. `inf_anim::lean::apply_lean` is the pass,
+/// and this is its measurement on the island rather than on a fixture.
+///
+/// The question is asked of the CHEST, in the hero's OWN frame — a world-space
+/// answer would be measuring the body yaw:
+///
+/// * a **standing start** (the stick forward from rest) puts the chest ahead of
+///   the pelvis, and it comes back when the acceleration does;
+/// * **braking** — the stick released at speed — puts it behind;
+/// * a **hard left turn at speed** leans it to the character's left, and the
+///   mirror-image right turn leans it right by the same magnitude;
+/// * the **feet** do not move with any of it, which is the mask asserted on the
+///   tree rather than on the table.
+///
+/// Mutation that reds it: delete the `apply_lean` call in the pose step (every
+/// offset falls to 0.0 mm).
+#[test]
+fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let (rigs, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero was posed");
+    let rig = rigs.get(&ep.skeleton).expect("its rig is on disk").clone();
+    let roles = rig.role_index();
+    let chest = roles
+        .last(inf_anim::BoneRoleKind::Spine, inf_anim::BoneSide::Center)
+        .expect("the hero has a spine");
+    let pelvis = roles
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+        .expect("the hero has a pelvis");
+
+    // The chest's offset from the pelvis, **in the hero's own model frame** —
+    // `x` its right, `z` its forward. Model space is exactly that frame, so this
+    // is the pose and not the placement.
+    let offset = |sim: &inf_player::runtime_sim::RuntimeSim| -> glam::Vec3 {
+        let p = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("posed");
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &p.pose);
+        let at = |j: u16| g[j as usize].to_scale_rotation_translation().2;
+        at(chest) - at(pelvis)
+    };
+    let axes = |x: f32, y: f32| -> std::collections::BTreeMap<String, f32> {
+        [("move_x".to_string(), x), ("move_y".to_string(), y)].into()
+    };
+    // Drive `steps` with an input and report the RANGE the chest's offset and
+    // the hero's own lean parameters covered over them.
+    //
+    // A range and not a peak: a lean is signed, and the interesting reading is
+    // the extreme in the direction the manoeuvre is supposed to push — a braking
+    // window that starts at a full forward lean has its largest *magnitude* at
+    // the beginning and its answer at the end.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Span {
+        z_lo: f64,
+        z_hi: f64,
+        x_lo: f64,
+        x_hi: f64,
+        ly_lo: f64,
+        ly_hi: f64,
+        lx_lo: f64,
+        lx_hi: f64,
+    }
+    let mut run = |sim: &mut inf_player::runtime_sim::RuntimeSim,
+                   ax: std::collections::BTreeMap<String, f32>,
+                   steps: usize|
+     -> Span {
+        let mut s = Span {
+            z_lo: f64::MAX,
+            z_hi: f64::MIN,
+            x_lo: f64::MAX,
+            x_hi: f64::MIN,
+            ly_lo: f64::MAX,
+            ly_hi: f64::MIN,
+            lx_lo: f64::MAX,
+            lx_hi: f64::MIN,
+        };
+        for _ in 0..steps {
+            sim.step_once(RuntimeInput::default().with_axes(ax.clone()));
+            let o = offset(sim);
+            s.z_lo = s.z_lo.min(f64::from(o.z));
+            s.z_hi = s.z_hi.max(f64::from(o.z));
+            s.x_lo = s.x_lo.min(f64::from(o.x));
+            s.x_hi = s.x_hi.max(f64::from(o.x));
+            let c = hero_cm(sim, hero);
+            s.ly_lo = s.ly_lo.min(c.runtime.lean.y);
+            s.ly_hi = s.ly_hi.max(c.runtime.lean.y);
+            s.lx_lo = s.lx_lo.min(c.runtime.lean.x);
+            s.lx_hi = s.lx_hi.max(c.runtime.lean.x);
+        }
+        s
+    };
+
+    // ── rest: the chest sits where the animation put it ──────────────────────
+    let rest = offset(&sim);
+    // ── a standing start ─────────────────────────────────────────────────────
+    let start = run(&mut sim, axes(0.0, 1.0), 25);
+    // …at speed, then the stick released: braking.
+    for _ in 0..90 {
+        sim.step_once(RuntimeInput::default().with_axes(axes(0.0, 1.0)));
+    }
+    let brake = run(&mut sim, Default::default(), 30);
+    for _ in 0..120 {
+        sim.step_once(RuntimeInput::default());
+    }
+    // ── a hard turn each way, at speed ───────────────────────────────────────
+    let mut turn = |x: f32| -> Span {
+        for _ in 0..90 {
+            sim.step_once(RuntimeInput::default().with_axes(axes(0.0, 1.0)));
+        }
+        let r = run(&mut sim, axes(x, 1.0), 25);
+        for _ in 0..120 {
+            sim.step_once(RuntimeInput::default());
+        }
+        r
+    };
+    let right = turn(1.0);
+    let left = turn(-1.0);
+    println!(
+        "
+=== the lean, off the island hero's chest (model frame, mm from the pelvis) ==="
+    );
+    println!(
+        "  rest        z {:+7.2} mm   x {:+7.2} mm",
+        rest.z * 1000.0,
+        rest.x * 1000.0
+    );
+    println!(
+        "  start       z up to   {:+7.2} mm   lean_y up to   {:+.3}",
+        start.z_hi * 1000.0,
+        start.ly_hi
+    );
+    println!(
+        "  braking     z down to {:+7.2} mm   lean_y down to {:+.3}",
+        brake.z_lo * 1000.0,
+        brake.ly_lo
+    );
+    println!(
+        "  turn right  x up to   {:+7.2} mm   lean_x up to   {:+.3}",
+        right.x_hi * 1000.0,
+        right.lx_hi
+    );
+    println!(
+        "  turn left   x down to {:+7.2} mm   lean_x down to {:+.3}",
+        left.x_lo * 1000.0,
+        left.lx_lo
+    );
+    // A start puts the chest FORWARD of where rest left it.
+    assert!(
+        start.z_hi - f64::from(rest.z) > 0.005,
+        "a standing start moved the chest {:.2} mm forward of rest - the lean is not reaching          the pose",
+        (start.z_hi - f64::from(rest.z)) * 1000.0
+    );
+    assert!(
+        start.ly_hi > 0.1,
+        "the hero's own `lean_y` reached {:+.3} on its hardest start, so the arm is measuring a          gait and not a lean",
+        start.ly_hi
+    );
+    // Braking pulls it back behind the start's own reach, and the parameter goes
+    // negative — a released stick is a deceleration.
+    assert!(
+        brake.z_lo < start.z_hi,
+        "braking left the chest no further back than {:.2} mm against the start's {:.2} mm",
+        brake.z_lo * 1000.0,
+        start.z_hi * 1000.0
+    );
+    assert!(
+        brake.ly_lo < -0.02,
+        "the hero's own `lean_y` only reached {:+.3} while braking",
+        brake.ly_lo
+    );
+    // The two turns lean opposite ways, and the parameters agree with the pose.
+    assert!(
+        right.x_hi > f64::from(rest.x) + 0.005 && left.x_lo < f64::from(rest.x) - 0.005,
+        "the two turns took the chest to {:.2} mm and {:.2} mm against a rest of {:.2} mm - they          did not go opposite ways",
+        right.x_hi * 1000.0,
+        left.x_lo * 1000.0,
+        rest.x * 1000.0
+    );
+    assert!(
+        right.lx_hi > 0.05 && left.lx_lo < -0.05,
+        "the hero's own `lean_x` reached {:+.3} turning right and {:+.3} turning left",
+        right.lx_hi,
+        left.lx_lo
+    );
+    // The mask is asserted by this arm's own measurement rather than a second
+    // time: every number above is the chest's offset from the PELVIS, so a lean
+    // that had leaked below the hips would not show up in any of them. The mask
+    // on the TREE is `inf_anim::lean`'s own
+    // `a_lean_moves_the_chest_and_leaves_the_pelvis_and_feet_alone`, which asks
+    // the same rig's feet with no stride in the window to confuse it.
+}

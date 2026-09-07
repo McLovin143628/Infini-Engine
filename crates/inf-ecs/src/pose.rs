@@ -1619,6 +1619,44 @@ pub fn step_pose_evaluation<'c>(
                         // the first would pay a whole `global_transforms` per
                         // posed character per step for a pose nothing moved.
                         let mut corrected = false;
+                        // ── **THE LEAN** (wave CHAR1b.2, clause 6) ──
+                        //
+                        // A character that is accelerating leans into it, and a
+                        // character braking leans back. P29.4 computed
+                        // `relative_accel` every step with no readers; this
+                        // wave's first commit interpolated it into `lean` at
+                        // ALS's own `GroundedLeanInterpSpeed` and published it as
+                        // `lean_x` / `lean_y` — and left it as a parameter with
+                        // no pose pass, which is the exact shape the CHAR1b.1
+                        // audit spent its day on. This is the pass.
+                        //
+                        // Immediately BEFORE the look-at, because the two write
+                        // the same chain and the order is part of the trace (the
+                        // I6 folded-order law): the lean is what the BODY is
+                        // doing, the look is an overlay on top of it, and a
+                        // character looking left while accelerating forward
+                        // should end up doing both.
+                        //
+                        // **Absent costs nothing**, twice: a character with no
+                        // `CharacterMovement` never reaches `lean_of`, and a
+                        // lean of zero returns before a quaternion is built —
+                        // so a level with no accelerating character poses the
+                        // bytes it posed before this existed.
+                        if let Some((lx, ly)) = lean_of(world, entity) {
+                            let r = inf_anim::apply_lean(
+                                &asset.skeleton,
+                                &mut pose,
+                                asset.role_index(),
+                                lx,
+                                ly,
+                                1.0,
+                            );
+                            // The report is not published: a lean is asked of
+                            // the JOINTS by the arm that measures it (the
+                            // CHAR1b.1 audit's law), and a bridge field nothing
+                            // reads is the defect this pass exists to close.
+                            corrected |= r.spine > 0;
+                        }
                         // ── **LOOK-AT** (wave CHAR1b.1, clause 4) ──
                         //
                         // The head, the neck and the spine follow the camera.
@@ -2955,6 +2993,20 @@ pub const NPC_ATTENTION_M: f64 = 20.0;
 /// down, mapped off the aim pitch. The look sweep's blend space is authored the
 /// other way round — `+1` is the UP sample — so the axis is `1 - 2 · sweep`, and
 /// this is the one place that conversion happens.
+/// **The character's own lean**, `[-1, 1]` per axis: `x` is its right, `y` its
+/// forward (wave CHAR1b.2).
+///
+/// `None` for an entity with no [`crate::components::CharacterMovement`] — every
+/// prop, every non-character — and for a lean of exactly zero, so the pose pass
+/// is not even entered on a character standing still.
+fn lean_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<(f64, f64)> {
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let (x, y) = (cm.runtime.lean.x, cm.runtime.lean.y);
+    (x.is_finite() && y.is_finite() && (x != 0.0 || y != 0.0)).then_some((x, y))
+}
+
 fn aim_sweep_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<([f64; 2], f32)> {
     let cm = world
         .world()
