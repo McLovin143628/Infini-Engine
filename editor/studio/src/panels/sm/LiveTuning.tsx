@@ -77,13 +77,36 @@ const VEHICLE_TUNABLES: { vfield: string; label: string; step: number }[] = [
  * and never a resource (Ruling 4) — so these cross as `kind: "camera"` and carry
  * no entity at all. The names are `CameraTuning::set`'s vocabulary; a gait block
  * edits both rotation modes at once, which is that type's rule and not this
- * panel's. */
+ * panel's.
+ *
+ * **Since wave CHAR1c a tune lands on the SUBJECT's own `CameraRig` when it has
+ * one**, and on the session's table when it does not — `apply_pending_tunes`
+ * decides, because the fixed-step camera door copies a rig onto the session
+ * camera every step and a tune written to the session table would be overwritten
+ * before the author let go of the slider. */
 const CAMERA_TUNABLES: { cfield: string; label: string; step: number }[] = [
   { cfield: "run.arm_length_m", label: "Arm (m)", step: 0.1 },
   { cfield: "run.lag_x", label: "Lag X", step: 0.5 },
   { cfield: "run.fov_deg", label: "FOV (deg)", step: 1 },
   { cfield: "collision_radius_m", label: "Sweep radius (m)", step: 0.05 },
   { cfield: "pivot_height_ratio", label: "Pivot height", step: 0.05 },
+  // ── wave CHAR1c: the collision policy ──
+  //
+  // The whisker fan, the boom's return, the pitch ceiling and the fade band.
+  // `collision.whiskers` is a bool on a numeric door and reads the sign, which
+  // is the same rule every other flag on this panel uses: 0 off, 1 on.
+  //
+  // The boom's PULL-IN is deliberately not here: it is a snap by construction
+  // (a lag on that quantity is a camera inside a wall), and
+  // `collision.pull_in_speed` governs the whisker steer only — a row labelled
+  // "pull-in" that moved something else would be worse than no row.
+  { cfield: "collision.whiskers", label: "Whiskers (0/1)", step: 1 },
+  { cfield: "collision.whisker_spread_deg", label: "Whisker spread (deg)", step: 2.5 },
+  { cfield: "collision.whisker_steer", label: "Whisker steer", step: 0.1 },
+  { cfield: "collision.return_speed", label: "Boom return (1/s)", step: 0.5 },
+  { cfield: "collision.near_fade_start_m", label: "Fade starts (m)", step: 0.05 },
+  { cfield: "collision.near_fade_end_m", label: "Fade ends (m)", step: 0.05 },
+  { cfield: "collision.pitch_max_deg", label: "Pitch ceiling (deg)", step: 5 },
 ];
 
 /// The weapon numbers the panel offers, by `WeaponDef::set`'s own names (I6).
