@@ -36669,6 +36669,46 @@ bound was for.
 | `pie_equals_shipping_on_the_camera_trace` | 900 steps, 900 distinct poses, byte-identical between the editor's Simulate and the shipped player |
 | `the_cameras_cost_on_both_hosts` | 3.48 µs/step with the fan, 2.53 without — the fan costs **0.95 µs/step** of a 57.4 µs step |
 
+### The hygiene, with its numbers
+
+* **Battery** (whole workspace, `INF_GOLDEN_STRICT=1`): `AGGREGATE over 386
+  binaries: 7260 passed, 0 failed, 21 ignored`, 0 warnings. Its FIRST run was
+  red in five binaries and every one was a real find — the continuation law's
+  seventh catch in `inf-packager`, two arms that had written carried 123's
+  DEFECT down as a rule (`weapon_3d`, `char1b_gate`), and the InfiniScript verb
+  census moving from (132, 26) to (135, 27) in `inf-script`'s lib test and in
+  the blessed API manual. The wave's own targeted runs were green while the
+  workspace was not, because the character gates are integration tests and the
+  arms that caught it are **lib** tests. Run the lib tests.
+* **clippy `-D warnings`**, whole workspace, all targets: exit 0, zero warnings
+  — after two lints in the new gate file. One is worth remembering:
+  `assertions_on_constants` wants `const { assert!(..) }`, which turns a gate
+  arm from a test that RUNS into a claim the compiler makes, so a mutation would
+  fail to BUILD rather than name the arm that caught it. The constant goes
+  through a local instead.
+* **rustdoc**: `cargo clean --doc` then `cargo doc --no-deps --workspace` — 49
+  crates documented, **416 warnings against the pinned ceiling of 450**, none of
+  them on a line this wave wrote.
+* **`cargo fmt --check` per member**, 49 packages, 0 diffs. `cargo fmt --all`
+  cannot run on this machine at all: it hands rustfmt every path in the
+  workspace and Windows answers *"The filename or extension is too long. (os
+  error 206)"*, then prints usage and exits 1 — which a `| grep "^Diff in"`
+  pipeline reads as CLEAN. Per member is the only spelling that measures
+  anything here.
+* **wasm32**: `cargo check --target wasm32-unknown-unknown -p inf-player` under
+  CI's own flags — exit 0, zero warnings, 211 crates.
+* **CRLF**: 0 files with a carriage return in the blob, over all 39 files in the
+  range.
+* **The editor was rebuilt from the range's head and relaunched**, which is how
+  a wave in this campaign ends. `npx tauri build --no-bundle` exit 0; the debug
+  port opened after **1 s**; after a 90 s settle the toolbar reads
+  **`Streaming 52/52`** with **553 actors** and `All changes saved`, and Harbour
+  City is drawn — both rows of buildings, the crossing, the markings, the truck
+  and the hero standing in the road. The demo loop's own editor frames were
+  taken before three of the range's commits landed, one of them a FRONTEND
+  change, which is why the relaunch is a separate act rather than a re-read of
+  `01-editor.png`.
+
 ### What CHAR1c leaves for COV1, OUTFIT1 and WPN2
 
 * **The director is the door a cover camera goes through.** COV1 does not need a
