@@ -115,6 +115,23 @@ impl ComponentRegistry {
         // `Name` is reflected (for completeness) but edited via a dedicated
         // rename command, so it is not in the generic Details grid.
         types.register::<Name>();
+        // ── the camera rig (wave CHAR1c) ──
+        //
+        // Registered, and deliberately **not editable**, which is `Name`'s own
+        // shape for a different reason. A `CameraRig` persists on the CHARACTER
+        // ASSET (`camera.toml`, which the wizard writes beside it) and not in
+        // the level record — see `CameraRig`'s own docs for what a per-level rig
+        // would have cost — so a row in the generic Details grid would be a row
+        // an author could edit, save, and lose. The dedicated surface is the
+        // live tuning door (`inf_editor_core::tuning::Tune::Camera`, which
+        // reaches the subject's rig now) plus the `camera.*` Blueprint kit, and
+        // both are the same by-name vocabulary the text file uses.
+        types.register::<crate::camera::CameraRig>();
+        types.register::<crate::camera::CameraTuning>();
+        types.register::<crate::camera::CameraSettings>();
+        types.register::<crate::camera::GaitCameraSettings>();
+        types.register::<crate::camera::DrivingCameraSettings>();
+        types.register::<crate::camera::CameraCollision>();
 
         macro_rules! editable {
             ($( $t:ty => $name:literal ),+ $(,)?) => {

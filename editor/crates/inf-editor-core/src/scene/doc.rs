@@ -2199,6 +2199,24 @@ impl SceneDoc {
                 CharacterController3D::default(),
                 movement,
                 t,
+                // ── THE CAMERA RIG (wave CHAR1c, clause 2) ──
+                //
+                // The user's own question, answered where a character is made:
+                // *"should we be able to add a camera and a camera boom, or is
+                // that stuff automatically added?"* — automatically, with the
+                // ported ALS table on it, and every number of it authorable.
+                //
+                // In the same insert as the movement component and for the same
+                // reason the skin is inserted before the record below: undo
+                // removes a character and redo restores one that still has its
+                // boom.
+                //
+                // It does not reach the level's bytes — see `CameraRig`'s own
+                // docs for where a rig persists and what a per-level one would
+                // have cost — so this is exactly a default the door hands a live
+                // character, and a level reloaded from disk gets it again the
+                // next time this door runs.
+                inf_ecs::camera::CameraRig::default(),
             ));
             // ── THE SKIN (wave CHAR1a audit) ──
             //

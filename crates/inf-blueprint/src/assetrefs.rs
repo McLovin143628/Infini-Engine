@@ -78,6 +78,11 @@ pub const STR_PORTS: &[(&str, &str, StrRole)] = &[
     ("anim.query_state", "name", StrRole::Id),
     ("anim.set_param", "name", StrRole::Id),
     ("anim.set_trigger", "name", StrRole::Id),
+    // The camera rig's by-name door (wave CHAR1c). An `Id`, not an `Asset`:
+    // `run.arm_length_m` names a field of a table, exactly as an animation
+    // parameter names a field of a machine.
+    ("camera.get_rig", "name", StrRole::Id),
+    ("camera.set_rig", "name", StrRole::Id),
     ("debug.print", "message", StrRole::Text),
     ("dispatch.bind", "handler", StrRole::Id),
     ("dispatch.bind", "name", StrRole::Id),

@@ -1908,8 +1908,12 @@ impl RuntimeSim {
     fn step_camera(&mut self, dt: f64) {
         self.camera_subject = inf_ecs::movement::camera_subject(&self.world);
         if let Some(subject) = self.camera_subject {
-            inf_physics::d3::step_locomotion_camera(
-                &self.world,
+            // **`_with_requests`** since wave CHAR1c: the same door, plus the
+            // drain of `CameraDirectorRes` — where a Blueprint's `camera.shot`
+            // and the editor sequencer's camera track leave their claims — into
+            // the director's stack. (MIRROR of `SimSession::fixed_step`.)
+            inf_physics::d3::step_camera_with_requests(
+                &mut self.world,
                 &mut self.bridge3d,
                 &mut self.camera,
                 subject,
@@ -3574,6 +3578,46 @@ impl Host for RuntimeHost<'_> {
                         guid,
                         &arg_str(args, 1),
                     ),
+                    Err(_) => false,
+                }))
+            }
+            // -- the `camera.*` kit (wave CHAR1c) --
+            //
+            // Three arms, identical in both hosts, over the Ring-0 doors in
+            // `inf_ecs::camera`. The rig is read and written BY NAME
+            // (`CameraTuning::names`, the same vocabulary the `camera.toml`
+            // beside a character uses and the same one the live tuning slider
+            // drives), and a shot is a claim on THIS step that the fixed-step
+            // camera door drains -- so a Blueprint holds a shot by calling it
+            // every Tick and releases it by not calling it.
+            (Some("camera"), Some("set_rig")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::camera::set_camera_rig_value(
+                        self.world,
+                        guid,
+                        &arg_str(args, 1),
+                        arg_f64(args, 2),
+                    ),
+                    Err(_) => false,
+                }))
+            }
+            (Some("camera"), Some("get_rig")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => {
+                        inf_ecs::camera::camera_rig_value(self.world, guid, &arg_str(args, 1))
+                            .unwrap_or(0.0)
+                    }
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("camera"), Some("shot")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => {
+                        inf_ecs::camera::camera_shot(self.world, guid, arg_f64(args, 1))
+                    }
                     Err(_) => false,
                 }))
             }

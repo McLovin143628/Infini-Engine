@@ -53,7 +53,7 @@ pub mod vehicle;
 pub mod water;
 mod world;
 
-pub use camera::step_locomotion_camera;
+pub use camera::{ragdoll_follow_pose, step_camera_with_requests, step_locomotion_camera};
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use crime::{step_recognition, RecognitionStats};
 pub use dispatch::{step_dispatch, DispatchStats};

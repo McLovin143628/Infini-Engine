@@ -291,3 +291,17 @@ z = 0.0
 x = 6.0
 y = 5.0
 z = 3.5
+
+[collision]
+whiskers = true
+whisker_count = 2
+whisker_spread_deg = 22.5
+whisker_steer = 1.0
+whisker_steer_max_deg = 25.0
+pull_in_speed = 30.0
+return_speed = 2.5
+near_fade_start_m = 0.9
+near_fade_end_m = 0.35
+ignore_characters = true
+pitch_min_deg = -89.0
+pitch_max_deg = 89.0

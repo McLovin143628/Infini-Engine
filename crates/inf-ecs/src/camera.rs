@@ -69,7 +69,7 @@ pub enum ViewMode {
 /// One settings block — ALS's `FALSCameraSettings`, with the two fields its C++
 /// path reads out of curves instead (the pivot offset and the three lag speeds)
 /// promoted to real fields, because that is what removes the dummy AnimBP.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CameraSettings {
     /// Distance from the pivot to the camera, metres (ALS `TargetArmLength`,
@@ -131,7 +131,7 @@ impl CameraSettings {
 /// default** and NOT by `#[serde(default)]`, which fills a missing field from
 /// the field type's own default and would hand this block the third-person run
 /// numbers (P29.6 audit, A7). Deserialize a camera table through that door.
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct GaitCameraSettings {
     pub walk: CameraSettings,
@@ -183,7 +183,7 @@ impl GaitCameraSettings {
 ///    the back of the hero's neck, photographed four times across CHAR1a).
 ///
 /// Each field below closes exactly one of those.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CameraCollision {
     /// Cast the **whisker fan** as well as the main sweep (1).
@@ -346,7 +346,7 @@ impl CameraCollision {
 /// the camera sits a little above roof height, five to six metres back, pitched
 /// down about ten degrees, with the car in the lower third and the horizon near
 /// the top of the frame.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DrivingCameraSettings {
     /// The block at a standstill: arm, offsets, lag, FOV.
@@ -421,7 +421,7 @@ pub struct DrivingView {
 /// The table is ALS's `FALSCameraStateSettings` — `RotationMode` × (gait +
 /// crouch) = 3 × 4 = twelve blocks — plus the first-person seat and the handful
 /// of numbers that are not per-state.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CameraTuning {
     pub velocity_direction: GaitCameraSettings,
@@ -767,6 +767,171 @@ impl CameraTuning {
 }
 
 impl CameraTuning {
+    /// **Read one tunable by name** — [`set`](Self::set)'s twin (wave CHAR1c).
+    ///
+    /// A door that can only be written cannot be read back by the thing writing
+    /// it, and a Blueprint that wants to nudge the boom has to know where it
+    /// already is. The vocabulary is exactly `set`'s, and a name `set` accepts
+    /// is a name this answers — which is what
+    /// `every_name_the_camera_door_writes_can_be_read_back` holds.
+    ///
+    /// A gait block's value is read from the **velocity-direction** table, which
+    /// is the one `set` writes first and keeps in step with `looking_direction`;
+    /// the aim block is its own, exactly as it is on the way in.
+    pub fn get(&self, name: &str) -> Option<f64> {
+        match name {
+            "pivot_height_ratio" => return Some(self.pivot_height_ratio),
+            "collision_radius_m" => return Some(self.collision_radius_m),
+            "state_blend_speed" => return Some(self.state_blend_speed),
+            "view_blend_speed" => return Some(self.view_blend_speed),
+            "min_arm_fraction" => return Some(self.min_arm_fraction),
+            "drive.arm_per_length_m" => return Some(self.driving.arm_per_length_m),
+            "drive.arm_per_speed_s" => return Some(self.driving.arm_per_speed_s),
+            "drive.fov_per_speed_deg_s" => return Some(self.driving.fov_per_speed_deg_s),
+            "drive.fov_gain_max_deg" => return Some(self.driving.fov_gain_max_deg),
+            "drive.look_ahead_s" => return Some(self.driving.look_ahead_s),
+            "drive.align_speed_mps" => return Some(self.driving.align_speed_mps),
+            "collision.whiskers" => return Some(f64::from(u8::from(self.collision.whiskers))),
+            "collision.whisker_count" => return Some(f64::from(self.collision.whisker_count)),
+            "collision.whisker_spread_deg" => return Some(self.collision.whisker_spread_deg),
+            "collision.whisker_steer" => return Some(self.collision.whisker_steer),
+            "collision.whisker_steer_max_deg" => {
+                return Some(self.collision.whisker_steer_max_deg)
+            }
+            "collision.pull_in_speed" => return Some(self.collision.pull_in_speed),
+            "collision.return_speed" => return Some(self.collision.return_speed),
+            "collision.near_fade_start_m" => return Some(self.collision.near_fade_start_m),
+            "collision.near_fade_end_m" => return Some(self.collision.near_fade_end_m),
+            "collision.ignore_characters" => {
+                return Some(f64::from(u8::from(self.collision.ignore_characters)))
+            }
+            "collision.pitch_min_deg" => return Some(self.collision.pitch_min_deg),
+            "collision.pitch_max_deg" => return Some(self.collision.pitch_max_deg),
+            _ => {}
+        }
+        let (block, field) = name.split_once('.')?;
+        let s = match block {
+            "walk" => &self.velocity_direction.walk,
+            "run" => &self.velocity_direction.run,
+            "sprint" => &self.velocity_direction.sprint,
+            "crouch" => &self.velocity_direction.crouch,
+            "aim" => &self.aiming.walk,
+            "first_person" => &self.first_person,
+            "drive" => &self.driving.base,
+            _ => return None,
+        };
+        match field {
+            "arm_length_m" => Some(s.arm_length_m),
+            "rotation_lag" => Some(s.rotation_lag),
+            "fov_deg" => Some(s.fov_deg),
+            "lag_x" => Some(s.lag_speeds.x),
+            "lag_y" => Some(s.lag_speeds.y),
+            "lag_z" => Some(s.lag_speeds.z),
+            "offset_x" => Some(s.camera_offset.x),
+            "offset_y" => Some(s.camera_offset.y),
+            "offset_z" => Some(s.camera_offset.z),
+            _ => None,
+        }
+    }
+
+    /// Every name [`set`](Self::set) accepts, in a stable order — the vocabulary
+    /// a tuning UI, a Blueprint's autocomplete and a gate all read.
+    ///
+    /// A `&'static [&'static str]` and not a built `Vec`, exactly as
+    /// `VehicleTuning::names` is: the vocabulary is a property of the type and
+    /// not of a call, and a list assembled at runtime is a list that can drift
+    /// from the `match` beside it without anything noticing.
+    pub fn names() -> &'static [&'static str] {
+        &[
+            "pivot_height_ratio",
+            "collision_radius_m",
+            "state_blend_speed",
+            "view_blend_speed",
+            "min_arm_fraction",
+            "drive.arm_per_length_m",
+            "drive.arm_per_speed_s",
+            "drive.fov_per_speed_deg_s",
+            "drive.fov_gain_max_deg",
+            "drive.look_ahead_s",
+            "drive.align_speed_mps",
+            "collision.whiskers",
+            "collision.whisker_count",
+            "collision.whisker_spread_deg",
+            "collision.whisker_steer",
+            "collision.whisker_steer_max_deg",
+            "collision.pull_in_speed",
+            "collision.return_speed",
+            "collision.near_fade_start_m",
+            "collision.near_fade_end_m",
+            "collision.ignore_characters",
+            "collision.pitch_min_deg",
+            "collision.pitch_max_deg",
+            "walk.arm_length_m",
+            "walk.rotation_lag",
+            "walk.fov_deg",
+            "walk.lag_x",
+            "walk.lag_y",
+            "walk.lag_z",
+            "walk.offset_x",
+            "walk.offset_y",
+            "walk.offset_z",
+            "run.arm_length_m",
+            "run.rotation_lag",
+            "run.fov_deg",
+            "run.lag_x",
+            "run.lag_y",
+            "run.lag_z",
+            "run.offset_x",
+            "run.offset_y",
+            "run.offset_z",
+            "sprint.arm_length_m",
+            "sprint.rotation_lag",
+            "sprint.fov_deg",
+            "sprint.lag_x",
+            "sprint.lag_y",
+            "sprint.lag_z",
+            "sprint.offset_x",
+            "sprint.offset_y",
+            "sprint.offset_z",
+            "crouch.arm_length_m",
+            "crouch.rotation_lag",
+            "crouch.fov_deg",
+            "crouch.lag_x",
+            "crouch.lag_y",
+            "crouch.lag_z",
+            "crouch.offset_x",
+            "crouch.offset_y",
+            "crouch.offset_z",
+            "aim.arm_length_m",
+            "aim.rotation_lag",
+            "aim.fov_deg",
+            "aim.lag_x",
+            "aim.lag_y",
+            "aim.lag_z",
+            "aim.offset_x",
+            "aim.offset_y",
+            "aim.offset_z",
+            "first_person.arm_length_m",
+            "first_person.rotation_lag",
+            "first_person.fov_deg",
+            "first_person.lag_x",
+            "first_person.lag_y",
+            "first_person.lag_z",
+            "first_person.offset_x",
+            "first_person.offset_y",
+            "first_person.offset_z",
+            "drive.arm_length_m",
+            "drive.rotation_lag",
+            "drive.fov_deg",
+            "drive.lag_x",
+            "drive.lag_y",
+            "drive.lag_z",
+            "drive.offset_x",
+            "drive.offset_y",
+            "drive.offset_z",
+        ]
+    }
+
     /// **Read a `camera.toml` beside a level**, or the ported ALS defaults.
     ///
     /// The same shape (and the same rationale) as the input map's own
@@ -1683,6 +1848,273 @@ pub fn basis(yaw_deg: f64, pitch_deg: f64) -> (DVec3, DVec3, DVec3) {
     // orthonormality arm, which caught exactly that sign.
     let up = forward.cross(right);
     (right, up, forward)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE AUTHORABLE RIG (wave CHAR1c, clause 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **A character's own camera rig** — the boom, the lag, the FOV, the collision
+/// policy and which shoulder, as a component on the character itself.
+///
+/// # The user's question, and the ruling
+///
+/// *"when building a character (or a character blueprint) … should we be able to
+/// add a camera and a camera boom, or is that stuff automatically added?"* —
+/// **both**. A character built through the wizard gets one of these with the
+/// ported ALS defaults on it, and every number in it is authorable.
+///
+/// # Why a component when [`ViewMode`] is camera-side only (Ruling 4)
+///
+/// Ruling 4 is about the **sim wire**: no camera value may reach `state_bytes`,
+/// and no camera may write into the simulation. Neither is touched here. This
+/// component is not in the scene record, is not folded into any trace, and is
+/// read by exactly one thing — [`crate::camera`]'s own fixed-step door, which
+/// reads the world and writes nothing back. What it buys is the three things a
+/// host-owned table could not do: a **possessed NPC brings its own boom**, a
+/// **Blueprint can read and write it** (`camera.*`, over `&mut EcsWorld`), and
+/// the wizard can put a default on a character it builds.
+///
+/// # Where it PERSISTS, and what the other branch would have cost
+///
+/// On the **character asset**, as the `camera.toml` the wizard already writes
+/// beside it — which is where a camera rig has lived since P29.6 and is the
+/// branch the wave's own brief prefers ("*a positional append (VIS1a precedent)
+/// only if the rig must be authored per level — else it lives on the character
+/// asset*"). The rig is not authored per level: every character in all
+/// twenty-four committed levels wants the same table.
+///
+/// The other branch is priced rather than waved at. A per-level rig is a
+/// **positional append to the entity record** — scene v27 → v28, the pre-v28
+/// entity record frozen as `EntityRecordV27`, both hosts' `apply_record`
+/// mirrors grown (pinned character-for-character by `apply_record_mirror`), the
+/// PIE payload v13 → v14, a downgrade bless, and all twenty-four committed
+/// `.inf_lvl` re-cooked — **for 776 bytes per character** (97 `f64` at
+/// bincode's fixed width) carrying, today, the same numbers on every one of
+/// them. That is the whole cost, and it is why this wave did not spend it.
+///
+/// # A character with no rig is not a character with no camera
+///
+/// The fixed-step door falls back to the host's own table (the one loaded from
+/// `camera.toml` beside the level) for any subject that carries no `CameraRig`,
+/// which is every character in every level committed before this wave. So the
+/// component is an **override**, and its absence is exactly the behaviour that
+/// shipped.
+#[derive(
+    bevy_ecs::prelude::Component, bevy_reflect::Reflect, Clone, Debug, PartialEq,
+)]
+pub struct CameraRig {
+    /// The whole tunable table — arms, offsets, lag, FOV, the driving block, the
+    /// collision policy and the pitch limits.
+    pub tuning: CameraTuning,
+    /// Which shoulder the third-person camera looks over. ALS's own
+    /// `bRightShoulder` (`ALSBaseCharacter.h:460`), which it defaults to
+    /// **false**; this engine has defaulted it to the right since P29.6 and
+    /// keeps that, because the shipped `camera_offset.x` is `+0.45` and a flag
+    /// that disagreed with the offset beside it would put the camera on the
+    /// wrong side of its own table.
+    pub right_shoulder: bool,
+    /// Whether this character's camera sits at the first-person seat. ALS's
+    /// `EALSViewMode` (`ALSBaseCharacter.h:535`), on the rig rather than on the
+    /// session so a possessed NPC can be authored to be first-person.
+    pub first_person: bool,
+}
+
+impl Default for CameraRig {
+    fn default() -> Self {
+        Self {
+            tuning: CameraTuning::default(),
+            right_shoulder: true,
+            first_person: false,
+        }
+    }
+}
+
+impl CameraRig {
+    /// Set one value by name — [`CameraTuning::set`]'s vocabulary plus the rig's
+    /// own two flags, `shoulder` (`> 0.5` is right) and `first_person`.
+    pub fn set(&mut self, name: &str, value: f64) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        match name {
+            "shoulder" => {
+                self.right_shoulder = value > 0.5;
+                true
+            }
+            "first_person" => {
+                self.first_person = value > 0.5;
+                true
+            }
+            _ => self.tuning.set(name, value),
+        }
+    }
+
+    /// Read one value by name — [`set`](Self::set)'s twin.
+    pub fn get(&self, name: &str) -> Option<f64> {
+        match name {
+            "shoulder" => Some(f64::from(u8::from(self.right_shoulder))),
+            "first_person" => Some(f64::from(u8::from(self.first_person))),
+            _ => self.tuning.get(name),
+        }
+    }
+}
+
+/// **The scripted and override claims waiting for the camera** (wave CHAR1c).
+///
+/// A world-level resource rather than a field on the host's camera, because the
+/// two things that need to push a claim — a Blueprint's `camera.shot` node and
+/// the editor's sequencer — both reach the world and neither can reach a host.
+/// The fixed-step camera door drains it into [`CameraDirector`] and clears it,
+/// so a claim lives exactly one step, which is the same "no latch to leak"
+/// argument [`CameraRequest`] itself is built on.
+///
+/// It is a resource and therefore never serialized, never in the scene record,
+/// and never in `state_bytes` — Ruling 4 is untouched.
+#[derive(bevy_ecs::prelude::Resource, Clone, Debug, Default, PartialEq)]
+pub struct CameraDirectorRes {
+    /// This step's claims, in push order.
+    pub pending: Vec<CameraRequest>,
+}
+
+/// **Push a camera claim** from anywhere that has the world — the Ring-0 door
+/// under the `camera.shot` node and under the editor sequencer's camera track.
+pub fn request_camera(world: &mut crate::EcsWorld, request: CameraRequest) {
+    let w = world.world_mut();
+    if let Some(mut res) = w.get_resource_mut::<CameraDirectorRes>() {
+        res.pending.push(request);
+        return;
+    }
+    w.insert_resource(CameraDirectorRes {
+        pending: vec![request],
+    });
+}
+
+/// Take this step's claims, leaving none.
+pub fn take_camera_requests(world: &mut crate::EcsWorld) -> Vec<CameraRequest> {
+    world
+        .world_mut()
+        .get_resource_mut::<CameraDirectorRes>()
+        .map(|mut r| std::mem::take(&mut r.pending))
+        .unwrap_or_default()
+}
+
+/// **Ask the camera to sit at `at`'s transform for this step** — the scripted
+/// layer's Ring-0 door (wave CHAR1c).
+///
+/// `at` is any entity: a camera actor an author placed, a socket-attached child,
+/// a marker. Its `GlobalTransform` gives the position, its euler yaw and pitch
+/// give the orientation, and a [`crate::components::Camera`] on it gives the
+/// field of view (60° if it carries none — the component's own default).
+///
+/// # It is per-step, and that is the contract
+///
+/// A claim lives exactly one fixed step. A Blueprint that wants to hold a shot
+/// calls this every Tick; the step it stops, the director blends back to
+/// gameplay over [`DEFAULT_RELEASE_BLEND_S`]. Nothing has to remember to release
+/// it, which is the failure mode a latch would have and a cutscene cannot
+/// afford.
+///
+/// `blend_s` of zero is a **cut** — instant, and reported as one.
+pub fn camera_shot(world: &mut crate::EcsWorld, at: uuid::Uuid, blend_s: f64) -> bool {
+    let Some(e) = world.entity_of(at) else {
+        return false;
+    };
+    let (pose, tag) = {
+        let w = world.world();
+        let Some(g) = w.get::<crate::components::GlobalTransform>(e) else {
+            return false;
+        };
+        let fov = w
+            .get::<crate::components::Camera>(e)
+            .map(|c| f64::from(c.fov_y_deg))
+            .unwrap_or(60.0);
+        // The FORWARD vector, not the euler triple: a `GlobalTransform` is an
+        // affine and a socket-attached camera actor's world orientation is a
+        // product of its parents' rotations, which no local euler carries.
+        // `patan2_64` / `pacos64` and not `f64::atan2` / `asin`, because a gate
+        // arm reads this yaw and the P14 law is that std trig is not
+        // bit-portable.
+        let (_, rot, translation) = g.0.to_scale_rotation_translation();
+        let f = (rot * DVec3::Z).normalize_or_zero();
+        let yaw = inf_math::patan2_64(f.x, f.z).to_degrees();
+        let pitch = 90.0 - inf_math::pacos64(f.y.clamp(-1.0, 1.0)).to_degrees();
+        (
+            CameraPose {
+                position: Vec3d::from_dvec3(translation),
+                yaw_deg: crate::movement::wrap_deg(yaw),
+                pitch_deg: pitch,
+                fov_deg: fov,
+            },
+            // The shot's identity is the entity it frames, so a Blueprint that
+            // moves one camera actor keeps ONE blend and a Blueprint that
+            // switches between two cuts between them. The low bits of the guid
+            // are enough and the top bits are the version/variant nibbles, which
+            // are constant across a level's own entities.
+            at.as_u128() as u64,
+        )
+    };
+    request_camera(
+        world,
+        CameraRequest {
+            layer: CameraLayer::Scripted,
+            priority: 0,
+            tag,
+            pose,
+            blend_s: if blend_s.is_finite() {
+                blend_s.max(0.0)
+            } else {
+                0.0
+            },
+        },
+    );
+    true
+}
+
+/// The rig on `guid`, cloned, or `None` — the read half of the Blueprint door.
+pub fn camera_rig(world: &crate::EcsWorld, guid: uuid::Uuid) -> Option<CameraRig> {
+    let e = world.entity_of(guid)?;
+    world.world().get::<CameraRig>(e).cloned()
+}
+
+/// Read one of `guid`'s rig values by name.
+///
+/// `None` for an entity with no rig **and** for a name the door does not know,
+/// which are the same answer for the same reason: a Blueprint asking for a
+/// number that is not there gets nothing rather than a zero that looks like one.
+pub fn camera_rig_value(world: &crate::EcsWorld, guid: uuid::Uuid, name: &str) -> Option<f64> {
+    let e = world.entity_of(guid)?;
+    world.world().get::<CameraRig>(e)?.get(name)
+}
+
+/// **Write one of `guid`'s rig values by name.**
+///
+/// Answers whether it landed. A character with no rig **gets one** — the
+/// defaults — and then takes the write, because "set the boom on this NPC I just
+/// possessed" is a sentence a Blueprint author means literally and a refusal
+/// there would be a door that works only on wizard-built characters.
+pub fn set_camera_rig_value(
+    world: &mut crate::EcsWorld,
+    guid: uuid::Uuid,
+    name: &str,
+    value: f64,
+) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let w = world.world_mut();
+    if let Some(mut rig) = w.get_mut::<CameraRig>(e) {
+        return rig.set(name, value);
+    }
+    let mut rig = CameraRig::default();
+    if !rig.set(name, value) {
+        return false;
+    }
+    if let Ok(mut ent) = w.get_entity_mut(e) {
+        ent.insert(rig);
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

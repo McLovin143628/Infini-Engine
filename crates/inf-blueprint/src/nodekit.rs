@@ -55,6 +55,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(gameplay_nodes());
     reg.register_all(ik_nodes());
     reg.register_all(anim_nodes());
+    reg.register_all(camera_nodes());
     reg.register_all(terrain_nodes());
     reg.register_all(crowd_nodes());
     reg.register_all(zone_nodes());
@@ -1109,6 +1110,87 @@ fn ik_nodes() -> Vec<NodeDef> {
 /// Every action reports `ok` rather than failing its handler (the `voxel.*`
 /// ruling): an entity with no `AnimStateMachine` answers `false` and the rest of
 /// the Tick body runs.
+/// **The `camera.*` kit** (wave CHAR1c) — the camera rig and the director,
+/// exposed to a Blueprint.
+///
+/// Three nodes, each a thin call onto a Ring-0 door in `inf_ecs::camera` — the
+/// `ik.*` / `anim.*` shape, where the rule is in Ring 0 and both hosts hold only
+/// the dispatch.
+///
+/// # Why a rig is read and written BY NAME
+///
+/// `CameraRig` is ninety-seven numbers in five nested blocks, and a node per
+/// number would be ninety-seven nodes. The by-name door is the same vocabulary
+/// the `camera.toml` beside a character uses and the same one the editor's live
+/// tuning slider drives, so an author who has read one has read all three
+/// (`CameraTuning::names` is the list).
+///
+/// # `camera.shot` is per-STEP and there is no release
+///
+/// A shot is a claim on this fixed step. Holding one means calling it every
+/// Tick; stopping means not calling it, and the director blends back to the
+/// gameplay rig on its own. A `release` node would be a latch, and a latch is a
+/// thing a Blueprint can leak — a cutscene that ended in an early-return would
+/// own the camera for the rest of the session.
+///
+/// # What is deliberately NOT here
+///
+/// * **The view mode and the shoulder as their own nodes.** Both are rig values
+///   (`first_person`, `shoulder`) and go through `camera.set_rig`, so there is
+///   one door and one vocabulary rather than two spellings of the same write.
+/// * **A node that reads the camera's POSE.** The camera is host-owned and the
+///   world does not carry it (Ruling 4), so a Blueprint could only be told last
+///   step's answer through a component that would then be sim state. Carried.
+fn camera_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("camera.set_rig", "Set Camera Rig Value", "camera")
+            .described(
+                "Set one value on this character's camera rig by name — `run.arm_length_m`, \
+                 `aim.fov_deg`, `collision.pull_in_speed`, `shoulder`, `first_person`, and the \
+                 rest of `CameraTuning::names`. A character with no rig GETS one (the ALS \
+                 defaults) and then takes the write. Reports false for an entity that is not in \
+                 the world, or a name the rig does not have.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+                PortDef::new("value", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
+        NodeDef::new("camera.get_rig", "Get Camera Rig Value", "camera")
+            .described(
+                "Read one value off this character's camera rig by name — `camera.set_rig`'s own \
+                 vocabulary. Answers 0 for an entity with no rig and for a name the rig does not \
+                 have, which are the same answer for the same reason: there is no number there.",
+            )
+            .with_inputs(vec![
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+            ])
+            .with_outputs(vec![PortDef::new("value", PortType::Float)]),
+        NodeDef::new("camera.shot", "Camera Shot", "camera")
+            .described(
+                "Put the camera at `entity`'s transform for THIS step — a scripted shot, which \
+                 outranks the gameplay rig and a death cam both. `blend_s` of 0 is a cut. Hold a \
+                 shot by calling this every Tick; stop calling it and the camera blends back to \
+                 the character on its own. Reports false for an entity that is not in the world.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("blend_s", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
+    ]
+}
+
 fn anim_nodes() -> Vec<NodeDef> {
     vec![
         NodeDef::new("anim.set_param", "Set Anim Parameter", "anim")

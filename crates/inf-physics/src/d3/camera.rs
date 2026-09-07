@@ -86,6 +86,23 @@ pub fn step_locomotion_camera(
     dt: f64,
 ) -> Option<CameraPose> {
     let entity = world.entity_of(subject)?;
+    // **The subject's own rig, if it has one** (wave CHAR1c, clause 2).
+    //
+    // An OVERRIDE and not a replacement: a character with no `CameraRig` — which
+    // is every character in every level committed before this wave — leaves the
+    // host's table exactly where it was, so the behaviour of an unrigged subject
+    // is byte-for-byte what P29.6 shipped. A rigged one brings its whole table,
+    // its shoulder and its seat, which is what makes possessing an NPC a camera
+    // change rather than a nothing.
+    if let Some(rig) = world.world().get::<inf_ecs::camera::CameraRig>(entity) {
+        cam.tuning = rig.tuning;
+        cam.right_shoulder = rig.right_shoulder;
+        cam.view_mode = if rig.first_person {
+            inf_ecs::camera::ViewMode::FirstPerson
+        } else {
+            inf_ecs::camera::ViewMode::ThirdPerson
+        };
+    }
     let (cm, centre, collider) = {
         let w = world.world();
         let cm = w.get::<CharacterMovement>(entity)?.clone();
@@ -348,6 +365,30 @@ pub fn step_locomotion_camera(
     }
 
     Some(cam.direct(dt))
+}
+
+/// **Advance the camera, and drain the world's camera claims into it first**
+/// (wave CHAR1c).
+///
+/// The door both hosts call. `step_locomotion_camera` is left as the door that
+/// takes an immutable world — every arm written against it since P29.6 still
+/// compiles and still means the same thing — and this is the one that also
+/// empties [`inf_ecs::camera::CameraDirectorRes`], which is where a Blueprint's
+/// `camera.shot` and the editor sequencer's camera track put their claims.
+///
+/// The drain is FIRST, so a claim raised by a Blueprint on this step's Tick is
+/// answered on this step's camera rather than one behind.
+pub fn step_camera_with_requests(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    cam: &mut LocomotionCamera,
+    subject: Uuid,
+    dt: f64,
+) -> Option<CameraPose> {
+    for r in inf_ecs::camera::take_camera_requests(world) {
+        cam.director.request(r);
+    }
+    step_locomotion_camera(world, bridge, cam, subject, dt)
 }
 
 /// How long the death cam takes to arrive, and to leave, seconds.
