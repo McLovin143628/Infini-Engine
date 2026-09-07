@@ -616,7 +616,7 @@ fn step_one(
     if cm.mode == MovementMode::Ragdoll {
         cm.runtime.press_interact = false;
         cm.runtime.press_fly = false;
-        return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt);
+        return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt, overlays);
     }
 
     // ── 0d. **A VEHICLE owns it too** (P29.7), and for the third time the same

@@ -1634,21 +1634,36 @@ mod tests {
         let idle_hand = p(&idle, hand);
         let drop_m = f64::from(bind_hand.y - idle_hand.y);
         let inward_m = f64::from(bind_hand.x.abs() - idle_hand.x.abs());
+        // **The bounds are fractions of the arm this rig has** (wave CHAR1b.2).
+        //
+        // They were two literal 0.4 m, and clause 8's `arm_length_ratio`
+        // 0.42 -> 0.30 took this rig's arm from 0.735 m to 0.525 m: the same
+        // idle ROTATION then brings the hand in 0.363 m instead of 0.505 m, and
+        // an absolute bound read that as a character still standing in a T-pose.
+        // An arm coming down is an ANGLE, and an angle is scale-free — so the
+        // claim is stated against the arm's own length and cannot go stale with
+        // the body again. Measured here: the hand drops 94 % of the arm and
+        // comes in 69 % of it.
+        let arm = f64::from((bind_hand - p(&bind, shoulder)).length());
         println!(
-            "FIX1 idle arms: hand {:?} -> {:?} (drops {drop_m:.4} m, comes in {inward_m:.4} m); \
-             shoulder {:?} -> {:?}",
+            "FIX1 idle arms: hand {:?} -> {:?} (drops {drop_m:.4} m = {:.0} % of a {arm:.4} m \
+             arm, comes in {inward_m:.4} m = {:.0} %); shoulder {:?} -> {:?}",
             bind_hand,
             idle_hand,
+            drop_m / arm * 100.0,
+            inward_m / arm * 100.0,
             p(&bind, shoulder),
             p(&idle, shoulder)
         );
         assert!(
-            drop_m > 0.4,
-            "the idle pose's hand is still up at shoulder height: it dropped {drop_m:.4} m"
+            drop_m > arm * 0.75,
+            "the idle pose's hand is still up at shoulder height: it dropped {drop_m:.4} m of a \
+             {arm:.4} m arm"
         );
         assert!(
-            inward_m > 0.4,
-            "the idle pose's arm is still out sideways: it came in {inward_m:.4} m"
+            inward_m > arm * 0.55,
+            "the idle pose's arm is still out sideways: it came in {inward_m:.4} m of a \
+             {arm:.4} m arm"
         );
         // The control: the arm came down because the ARM rotated, not because the
         // body moved. The shoulder's own displacement is the breath and nothing

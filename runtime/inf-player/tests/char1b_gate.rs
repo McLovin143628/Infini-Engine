@@ -3611,9 +3611,9 @@ fn a_drop_lands_light_heavy_or_rolling_by_the_height_it_fell() {
     );
     let ground = hero_pos(&sim, hero);
 
-    let mut drop = |sim: &mut inf_player::runtime_sim::RuntimeSim,
-                    height: f64,
-                    input: bool|
+    let drop = |sim: &mut inf_player::runtime_sim::RuntimeSim,
+                height: f64,
+                input: bool|
      -> (LandingKind, f64, String) {
         {
             let w = sim.world_mut();
@@ -3932,4 +3932,266 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
             f64::INFINITY
         }
     );
+}
+
+/// **A RAGDOLL DRAWS THE BODIES, AND GETS UP WITHOUT A SNAP** (clause 6 — the
+/// ragdoll blend in and out, on the P12 substrate).
+///
+/// # What had never run
+///
+/// P29.4 built the ragdoll bridge whole — the articulated bodies, the joints,
+/// the velocity handoff in both directions, the settle, the get-up, the face-up
+/// read — and `inf_anim::ragdoll::blend_weight`, which its own module calls *"the
+/// doctrine's load-bearing sentence"*. That function had **zero non-test
+/// callers** for two phases, and the consequence was never looked at: a
+/// character in `MovementMode::Ragdoll` drew the machine's `ragdoll` state —
+/// `ALS_Flail`, authored in place — while its rigid bodies tumbled underneath
+/// it. The capsule follows the pelvis, so the character *travelled* like a
+/// ragdoll and *posed* as a standing figure waving its arms.
+///
+/// # What this asks, of the joints
+///
+/// 1. **The drawn skeleton is where the bodies are.** For every bone the physics
+///    side publishes, the distance between the joint the pose step actually drew
+///    and that body's own head. A machine-only pose cannot pass this: the flail
+///    clip knows nothing about where a rigid body ended up. The denominator is
+///    printed beside it — the same joints against the pose the character was
+///    STANDING in one step before the ragdoll began.
+/// 2. **The get-up is an interpolation, not a cut.** The largest single-joint
+///    step across the hand-off, in millimetres, against the same *relative*
+///    ratchet the cross-fade arm uses: the hand-off may not be worse than what
+///    the ragdoll's own simulating steps were already doing.
+/// 3. **The weight really goes 1 → 0**, monotonically, and the entry is removed,
+///    so a level stops paying for a ragdoll that has finished.
+///
+/// Mutation that reds it: delete the `apply_ragdoll_pose` call in the pose step.
+#[test]
+fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let (rigs, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero was posed");
+    let rig = rigs.get(&ep.skeleton).expect("its rig is on disk").clone();
+
+    // Every DRAWN joint, in world metres — the pose the renderer skins, not a
+    // report about it.
+    let drawn = |sim: &inf_player::runtime_sim::RuntimeSim| -> Vec<DVec3> {
+        let p = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("posed");
+        let to_world =
+            inf_ecs::pose::model_to_world_of(sim.world(), hero).expect("the hero is placed");
+        inf_anim::pose::global_transforms(&rig.skeleton, &p.pose)
+            .iter()
+            .map(|m| {
+                let t = m.to_scale_rotation_translation().2;
+                to_world.transform_point3(DVec3::new(t.x as f64, t.y as f64, t.z as f64))
+            })
+            .collect()
+    };
+    let index_of: std::collections::BTreeMap<&str, usize> = rig
+        .skeleton
+        .joints()
+        .iter()
+        .enumerate()
+        .map(|(i, j)| (j.name.as_str(), i))
+        .collect();
+    // How far the drawn skeleton is from the bodies, over every published bone.
+    let agreement =
+        |sim: &inf_player::runtime_sim::RuntimeSim, pose: &[DVec3]| -> Option<(f64, f64, usize)> {
+            let rp = inf_ecs::anim_bridge::ragdoll_pose(sim.world(), hero)?;
+            let mut worst = 0.0f64;
+            let mut sum = 0.0f64;
+            let mut n = 0usize;
+            for b in &rp.bones {
+                let Some(&i) = index_of.get(b.name.as_str()) else {
+                    continue;
+                };
+                let d = (pose[i] - DVec3::new(b.head.x, b.head.y, b.head.z)).length();
+                worst = worst.max(d);
+                sum += d;
+                n += 1;
+            }
+            (n > 0).then_some((worst, sum / n as f64, n))
+        };
+
+    let standing = drawn(&sim);
+    assert!(
+        inf_physics::d3::ragdoll_bridge::start_ragdoll(sim.world_mut(), hero),
+        "the gameplay door refused to ragdoll the island's hero"
+    );
+    // ── while the bodies own the pose ────────────────────────────────────────
+    let mut best: Option<(f64, f64, usize)> = None;
+    let mut against_standing = 0.0f64;
+    let mut sim_steps: Vec<f64> = Vec::new();
+    let mut last = drawn(&sim);
+    let mut weight_hi = 0.0f32;
+    let mut settled_at: Option<usize> = None;
+    for i in 0..900 {
+        sim.step_once(RuntimeInput::default());
+        let now = drawn(&sim);
+        let step = now
+            .iter()
+            .zip(last.iter())
+            .map(|(a, b)| (*a - *b).length())
+            .fold(0.0f64, f64::max);
+        let cm = hero_cm(&sim, hero);
+        if cm.runtime.ragdoll.phase == inf_anim::RagdollPhase::Simulating
+            && cm.runtime.ragdoll.spawned
+        {
+            if let Some(a) = agreement(&sim, &now) {
+                // The tightest reading is taken past the first few steps: the
+                // very first published pose is one fixed step older than the
+                // bodies that produced it, which is the bridge's own documented
+                // beat of latency and not a miss.
+                if i > 4 && (best.is_none() || a.1 < best.expect("some").1) {
+                    best = Some(a);
+                    against_standing = mean_gap(&standing, &now);
+                }
+            }
+            if let Some(rp) = inf_ecs::anim_bridge::ragdoll_pose(sim.world(), hero) {
+                weight_hi = weight_hi.max(rp.weight);
+            }
+            sim_steps.push(step);
+        }
+        if cm.runtime.ragdoll.phase == inf_anim::RagdollPhase::GettingUp && settled_at.is_none() {
+            settled_at = Some(i);
+            last = now;
+            break;
+        }
+        last = now;
+    }
+    let (worst, mean, n) = best.expect(
+        "the physics side never published a ragdoll pose - `set_ragdoll_pose` has no writer, or \
+         the bodies never spawned",
+    );
+    // ── the hand-off ─────────────────────────────────────────────────────────
+    let switch = settled_at.expect("the ragdoll never settled into a get-up over 900 steps");
+    let mut handoff: Vec<f64> = Vec::new();
+    let mut weights: Vec<f32> = Vec::new();
+    let mut prev = last;
+    let mut getup_states: std::collections::BTreeSet<String> = Default::default();
+    for _ in 0..(((inf_physics::d3::ragdoll_bridge::GET_UP_BLEND_S * 60.0) as usize) + 20) {
+        sim.step_once(RuntimeInput::default());
+        let now = drawn(&sim);
+        if let Some(st) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
+            getup_states.insert(st.name.clone());
+        }
+        handoff.push(
+            now.iter()
+                .zip(prev.iter())
+                .map(|(a, b)| (*a - *b).length())
+                .fold(0.0f64, f64::max),
+        );
+        weights.push(
+            inf_ecs::anim_bridge::ragdoll_pose(sim.world(), hero)
+                .map(|r| r.weight)
+                .unwrap_or(0.0),
+        );
+        prev = now;
+    }
+    let pct = |v: &mut Vec<f64>, q: f64| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        v[(((v.len() as f64 - 1.0) * q).round() as usize).min(v.len().saturating_sub(1))]
+    };
+    let mut sim_sorted = sim_steps.clone();
+    let mut hand_sorted = handoff.clone();
+    let sim_p99 = pct(&mut sim_sorted, 0.99);
+    let hand_p99 = pct(&mut hand_sorted, 0.99);
+    let hand_max = handoff.iter().copied().fold(0.0f64, f64::max);
+    println!(
+        "\n=== the ragdoll, on the island ===\n  the drawn skeleton against the bodies: worst \
+         {:.3} mm, mean {:.3} mm over {n} bones\n  the same joints against the pose it was \
+         STANDING in: {:.1} mm\n  it settled after {switch} steps; weight while simulating \
+         {weight_hi:.3}; over the get-up {:?}\n  the machine over the hand-off: \
+         {getup_states:?}\n  largest single-joint step, mm: simulating p99 \
+         {:.2} (n {}), hand-off p99 {:.2} max {:.2} (n {})",
+        worst * 1000.0,
+        mean * 1000.0,
+        against_standing * 1000.0,
+        weights
+            .iter()
+            .step_by(3)
+            .map(|w| format!("{w:.2}"))
+            .collect::<Vec<_>>(),
+        sim_p99 * 1000.0,
+        sim_steps.len(),
+        hand_p99 * 1000.0,
+        hand_max * 1000.0,
+        handoff.len()
+    );
+    assert!(
+        mean < 0.010,
+        "the drawn skeleton sits {:.1} mm from the bodies it is supposed to BE - the blend is \
+         not reaching the pose (the standing pose is {:.1} mm from them)",
+        mean * 1000.0,
+        against_standing * 1000.0
+    );
+    assert!(
+        against_standing > mean * 10.0,
+        "the pose the character was standing in is only {:.1} mm from the bodies, so agreeing \
+         with them at {:.1} mm proves nothing",
+        against_standing * 1000.0,
+        mean * 1000.0
+    );
+    assert!(
+        weight_hi > 0.99,
+        "the physics pose was never drawn at full weight (peak {weight_hi})"
+    );
+    assert_eq!(
+        weights.last().copied(),
+        Some(0.0),
+        "the get-up never blended out: the weights are {weights:?}"
+    );
+    assert!(
+        weights.windows(2).all(|w| w[1] <= w[0] + 1e-6),
+        "the get-up blended back TOWARD the physics pose: {weights:?}"
+    );
+    // The ratchet, the cross-fade arm's shape: the hand-off is not worse than the
+    // motion the ragdoll was already producing.
+    assert!(
+        hand_p99 <= sim_p99 * 2.0 + 0.005,
+        "the get-up's p99 joint step is {:.2} mm against the ragdoll's own {:.2} mm - that is a \
+         cut, not a blend",
+        hand_p99 * 1000.0,
+        sim_p99 * 1000.0
+    );
+    assert!(
+        switch > 0,
+        "the ragdoll got up on the step it started, which is not a ragdoll"
+    );
+    // **And the get-up is a CLIP, not a fall back to standing.** The `Any -> idle`
+    // edge took the machine out of the get-up one step after it entered it until
+    // this wave guarded that edge on `getup`; without the guard this set is
+    // `idle` alone and the 0.35 s blend interpolates a heap into a standing pose.
+    assert!(
+        getup_states
+            .iter()
+            .any(|s| inf_anim::als::GETUP_STATES.contains(&s.as_str())),
+        "the machine played {getup_states:?} over the get-up - no get-up clip ran"
+    );
+}
+
+/// The mean distance between two sets of world-space joints — the denominator the
+/// ragdoll arm prints beside its agreement.
+fn mean_gap(a: &[DVec3], b: &[DVec3]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x - *y).length())
+        .sum::<f64>()
+        / n as f64
 }

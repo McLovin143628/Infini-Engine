@@ -46,7 +46,20 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 46] = [
+const SIM_PATH: [(&str, &str, &str); 47] = [
+    // ── the authored clip sets (wave CHAR1b.2) ──
+    //
+    // Nine clips derived from a rig by role — the slide, the two throws, the
+    // three swims, the two prone poses and the standing get-up — and every one
+    // of them is written into the project and then PLAYED. Its keys go straight
+    // into `sample_clip` and out into `pose_state_bytes`, so it is on the path
+    // for the plainest possible reason: an author's `sin` here would put two
+    // machines in two different poses on the same step.
+    (
+        "authored.rs",
+        include_str!("../src/authored.rs"),
+        "the authored sets' keys are sampled into the pose both hosts fold into `pose_state_bytes`",
+    ),
     // ── look-at (wave CHAR1b.1) ──
     //
     // Three quaternions per posed character per step, straight into the pose.

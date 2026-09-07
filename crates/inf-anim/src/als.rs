@@ -109,8 +109,8 @@ pub const TURN_DEG_VAR: &str = "turn_deg";
 pub const PLANTED_FOOT_VAR: &str = "planted_foot";
 /// **Whether a ragdolled character is on its back**, `1` or `0`.
 pub const FACE_UP_VAR: &str = "face_up";
-/// **Which get-up a ragdoll ends in** (wave CHAR1b.2): `0` face down, `1` on its
-/// back, `2` still on its feet.
+/// **Which get-up a ragdoll ends in** (wave CHAR1b.2): `0` none, `1` face down,
+/// `2` on its back, `3` still on its feet.
 ///
 /// ALS chooses between its two get-ups by the pelvis's facing and ships only the
 /// crouched pair, so a character whose ragdoll settled UPRIGHT — knocked about
@@ -122,13 +122,33 @@ pub const FACE_UP_VAR: &str = "face_up";
 /// [`FACE_UP_VAR`] stays published and unchanged; this is the parameter the
 /// three get-up edges compare, because a two-valued signal cannot name three
 /// outcomes.
+///
+/// # Why zero is NONE, and not "face down"
+///
+/// Because this parameter is also **what holds a get-up on the screen**. The
+/// `Any → idle` edge exists so that a character in any grounded state with no
+/// speed ends up standing; it has priority 5 and no exit time, so it took the
+/// machine out of a get-up on the very next step after the get-up was entered —
+/// measured on the island, `getup_back` lasted **one fixed step** and the
+/// ragdoll then blended out into `idle` instead of into a get-up clip. The edge
+/// is guarded on `getup == GETUP_NONE` now, so a running get-up is not cut
+/// short, and that guard is only correct if a character that has never
+/// ragdolled reads NONE — which is what a `SmParam::float`'s zero default gives
+/// for free. Making "face down" the zero would have frozen the `Any → idle`
+/// edge shut on every character in the engine.
 pub const GETUP_VAR: &str = "getup";
+/// [`GETUP_VAR`]'s value when no get-up is running — the declared default.
+pub const GETUP_NONE: f64 = 0.0;
 /// [`GETUP_VAR`]'s value for a character face down.
-pub const GETUP_FRONT: f64 = 0.0;
+pub const GETUP_FRONT: f64 = 1.0;
 /// [`GETUP_VAR`]'s value for a character on its back.
-pub const GETUP_BACK: f64 = 1.0;
+pub const GETUP_BACK: f64 = 2.0;
 /// [`GETUP_VAR`]'s value for a character that never went down.
-pub const GETUP_STANDING: f64 = 2.0;
+pub const GETUP_STANDING: f64 = 3.0;
+/// The get-up states, by name — the family the `Any → idle` edge must not cut
+/// short, and the family the movement step watches to know when to put
+/// [`GETUP_VAR`] back to [`GETUP_NONE`].
+pub const GETUP_STATES: [&str; 3] = ["getup_front", "getup_back", "getup_standing"];
 /// **Which mantle is running** (wave CHAR1b.2), and which hand leads it.
 ///
 /// `0` none, `1` a low mantle led by the right hand, `2` a low mantle led by the
@@ -1292,6 +1312,22 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                     SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
                     SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
                     SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                    // **…AND NO GET-UP IS RUNNING** (wave CHAR1b.2).
+                    //
+                    // `SmSource::Any` excludes the state the machine is in, so
+                    // an action state cannot hold itself by re-entry: the step
+                    // after a get-up is entered, this edge is the only eligible
+                    // one and it fires. Measured on the island: `getup_back`
+                    // lasted exactly **one fixed step**, and the ragdoll's
+                    // 0.35 s blend then interpolated a heap on the ground into a
+                    // standing idle — 386.5 mm on one joint in one step, which
+                    // is the largest reading this wave took anywhere.
+                    //
+                    // The guard is a parameter rather than a state list because
+                    // that is the vocabulary an edge has. It costs nothing on a
+                    // character that has never ragdolled: `getup` is a declared
+                    // float and its default is `GETUP_NONE`.
+                    SmCompare::float(GETUP_VAR, CmpOp::Lt, GETUP_FRONT),
                 ]))
                 .with_curve(BlendCurve::EaseInOut)
                 .with_priority(5),

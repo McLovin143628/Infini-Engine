@@ -81,6 +81,58 @@ pub struct RigBone {
     /// to reading [`name`](Self::name) — which is what it did for every rig before
     /// this field existed.
     pub role: Option<inf_anim::BoneRole>,
+    /// **The joint's own world-space rotation** at the instant the rig was
+    /// published (wave CHAR1b.2).
+    ///
+    /// The segment above says where the bone *points*; this says how it is
+    /// *turned*, and the two are different by exactly the bone's twist about its
+    /// own axis. The physics side needs both: a capsule is built from the
+    /// segment, so its spawn orientation carries no twist, and the constant
+    /// offset between the capsule's frame and the joint's frame —
+    /// `capsule_rotation⁻¹ · rot` — is what lets a *body's* rotation be read back
+    /// as a *joint's* rotation for the whole life of the ragdoll.
+    ///
+    /// Without it the pose blend could only aim bones down their segments, which
+    /// throws away every forearm roll and every spine twist the ragdoll has.
+    pub rot: glam::DQuat,
+}
+
+/// **One bone of a simulating ragdoll**, world space (wave CHAR1b.2) — the
+/// answer to `RigBone` travelling back the other way.
+///
+/// The physics side owns the articulated bodies and the animation side owns the
+/// skeleton, so neither can compute this alone: the body knows where it is, and
+/// only the rig knows which *joint* that body is. The name is the join, exactly
+/// as it is on the outbound crossing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollBonePose {
+    /// The joint's name — the same string [`RigBone::name`] carried out.
+    pub name: String,
+    /// The joint's world-space rotation, recovered from the body's rotation and
+    /// the constant capsule→joint offset taken at spawn.
+    pub rot: glam::DQuat,
+    /// The joint's world-space head position — the parent-facing end, which is
+    /// the point the pose blend places the joint at.
+    pub head: Vec3d,
+}
+
+/// **The physics pose of a ragdolled character, and how much of it to draw**
+/// (wave CHAR1b.2, clause 6).
+///
+/// `weight` is [`inf_anim::ragdoll::blend_weight`]'s number and nothing else:
+/// `1` while the bodies own the pose, easing to `0` over the get-up. The bones
+/// are *frozen* when the bodies are despawned, so the get-up blends out of the
+/// heap the ragdoll actually left rather than out of a pose recomputed from
+/// nothing.
+///
+/// A weight of zero removes the entry rather than publishing an inert one, which
+/// is what keeps a level with no ragdoll in it paying nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollPose {
+    /// `1` = the physics pose is drawn, `0` = the machine's.
+    pub weight: f32,
+    /// The bodies, by joint name.
+    pub bones: Vec<RagdollBonePose>,
 }
 
 /// One foot, as the pose left it (P29.4, clause 5).
@@ -262,6 +314,20 @@ pub struct AnimBridgeRes {
     /// Physics never reaches into the machine and the machine never reaches into
     /// physics; the P12 command-queue doctrine, applied to a rig.
     pub ragdoll_rig: BTreeMap<Uuid, Vec<RigBone>>,
+    /// **The ragdoll's own pose, and its blend weight** (wave CHAR1b.2) — the
+    /// return crossing, and the first consumer
+    /// [`inf_anim::ragdoll::blend_weight`] has ever had.
+    ///
+    /// P29.4 built the whole ragdoll bridge and the pure blend function, and the
+    /// pose step never read either: a ragdolling character *drew the flail clip*
+    /// while its articulated bodies fell somewhere else. This is what the pose
+    /// step blends toward.
+    ///
+    /// Written by `inf_physics::d3::ragdoll_bridge` (the only writer), read by
+    /// this crate's pose step (the only reader), and **persistent across steps**
+    /// rather than rebuilt — because the get-up blends out of a snapshot taken
+    /// when the bodies were despawned.
+    pub ragdoll_pose: BTreeMap<Uuid, RagdollPose>,
     /// Entities whose transitions enter at the **pose-matched** frame
     /// ([`inf_anim::TransitionEntry::PoseMatched`]) rather than at zero.
     ///
@@ -313,6 +379,7 @@ impl AnimBridgeRes {
             && self.foot_ik.is_empty()
             && self.ragdoll_requested.is_empty()
             && self.ragdoll_rig.is_empty()
+            && self.ragdoll_pose.is_empty()
             && self.pose_matched.is_empty()
             && self.traversal.is_empty()
             && self.looks.is_empty()
@@ -645,6 +712,50 @@ pub fn take_ragdoll_rig(world: &mut EcsWorld, guid: Uuid) -> Option<Vec<RigBone>
     let w = world.world_mut();
     let mut res = w.get_resource_mut::<AnimBridgeRes>()?;
     res.ragdoll_rig.remove(&guid)
+}
+
+/// **Publish the physics pose of a ragdolled character** (wave CHAR1b.2).
+///
+/// The physics side's only write into the pose. `weight` at or below zero
+/// *removes* the entry — a character that has finished getting up leaves nothing
+/// behind, which is what makes `AnimBridgeRes::is_empty` reachable again and
+/// what keeps every level with no ragdoll in it byte-identical to its
+/// pre-CHAR1b.2 self.
+///
+/// `bones` empty means "keep the bones you have and take this weight": the
+/// get-up blends out of the heap the bodies left, and by then the bodies are
+/// gone, so there is nothing left to recompute them from.
+pub fn set_ragdoll_pose(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    weight: f32,
+    bones: Vec<RagdollBonePose>,
+) {
+    if !(weight > 0.0) {
+        if let Some(mut b) = world.world_mut().get_resource_mut::<AnimBridgeRes>() {
+            b.ragdoll_pose.remove(&guid);
+        }
+        return;
+    }
+    with_bridge(world, |b| match b.ragdoll_pose.get_mut(&guid) {
+        Some(existing) => {
+            existing.weight = weight;
+            if !bones.is_empty() {
+                existing.bones = bones;
+            }
+        }
+        None => {
+            if !bones.is_empty() {
+                b.ragdoll_pose.insert(guid, RagdollPose { weight, bones });
+            }
+        }
+    });
+}
+
+/// The physics pose and blend weight published for `guid`, if it is ragdolling
+/// or getting up.
+pub fn ragdoll_pose(world: &EcsWorld, guid: Uuid) -> Option<&RagdollPose> {
+    bridge(world)?.ragdoll_pose.get(&guid)
 }
 
 /// **Forget every bridge entry.** Called by [`crate::pose::clear_poses`], which is

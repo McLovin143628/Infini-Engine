@@ -1800,6 +1800,29 @@ pub fn step_pose_evaluation<'c>(
                         // canonical biped, every imported glTF) takes the same
                         // two early returns it always did whether the gate opens
                         // or not.
+                        // ── **THE RAGDOLL BLEND** (wave CHAR1b.2, clause 6) ──
+                        //
+                        // Last of this block's pose writers, exactly where the
+                        // SK1a comment above has listed it since P29.5 while
+                        // nothing here called it. P29.4 built the bridge, the
+                        // bodies, the get-up and the pure `blend_weight`, and
+                        // the pose step read **none** of it: a ragdolling
+                        // character drew `ALS_Flail` on the spot while its
+                        // articulated bodies fell down the hill.
+                        //
+                        // Before the re-drive and inside `corrected`, because a
+                        // twist bone is a statement about the pose that is
+                        // finally published and the ragdoll is the last thing
+                        // that changes it.
+                        //
+                        // **Absent costs nothing**: no entry in `ragdoll_pose`
+                        // — which is every character in every level that has
+                        // never ragdolled — is one `BTreeMap::get` returning
+                        // `None`, and a weight of zero never reaches the map at
+                        // all because the writer removes the entry instead.
+                        if let Some(rp) = bridge.ragdoll_pose.get(&guid) {
+                            corrected |= apply_ragdoll_pose(asset, &mut pose, rp, to_world);
+                        }
                         if corrected {
                             let n = redrive(asset, &mut pose);
                             if let Some(r) = hand_reports.get_mut(&guid) {
@@ -2195,6 +2218,130 @@ fn apply_breath<'c>(
     true
 }
 
+/// **Blend the articulated ragdoll's pose into the drawn one** (wave CHAR1b.2,
+/// clause 6), answering whether it wrote anything.
+///
+/// # What this is the missing half of
+///
+/// P29.4 built the whole ragdoll bridge — the bodies, the joints, the velocity
+/// handoff, the settle, the get-up, the face-up read — and
+/// `inf_anim::ragdoll::blend_weight`, *"the doctrine's load-bearing sentence"*,
+/// as a pure function of `(phase, clock)`. It had **zero non-test callers** for
+/// two phases. The consequence was visible and nobody had looked: a character in
+/// `MovementMode::Ragdoll` played the machine's `ragdoll` state — `ALS_Flail`,
+/// authored in place — while its twenty-odd rigid bodies tumbled down the hill
+/// under it. The capsule followed the pelvis, so the character *travelled*
+/// correctly and *posed* as a standing figure waving its arms.
+///
+/// # The arithmetic
+///
+/// A body is a capsule built from a bone's head→tail segment, so its orientation
+/// carries no twist about that axis and is **not** the joint's rotation. The
+/// difference is a constant rigid offset (both frames are glued to the same
+/// bone), taken once at spawn as `RagdollJointRef::offset`, so the physics side
+/// publishes joint rotations rather than capsule rotations and this function
+/// never has to know what a capsule is.
+///
+/// From there it is a change of frame and a hierarchy walk:
+///
+/// 1. Each published joint's **model-space** rotation is the world one carried
+///    back through the entity's placement.
+/// 2. A joint with **no** body keeps the machine's local transform, so it rides
+///    its parent — which is exactly right for fingers, toes, twists and every
+///    face bone on a MetaHuman: the ragdoll has twelve-odd bodies and this rig
+///    has 342 joints.
+/// 3. A joint's **local** rotation is its model rotation relative to its
+///    parent's, and the parent's is whichever of the two the parent got. Joints
+///    are stored parents-first, so one forward pass is enough.
+/// 4. **Positions come from the bodies too**, not only rotations — a ragdoll
+///    that kept the machine's bone offsets would be a rigid puppet posed by
+///    physics rather than a body lying where the bodies are. The head published
+///    per bone is the joint's own world position.
+///
+/// The result is then [`inf_anim::blend_poses`]'d against the machine's pose at
+/// the published weight, so `1` draws the bodies, `0` draws the machine and the
+/// get-up is a real interpolation between them rather than a cut.
+///
+/// # What it does NOT do
+///
+/// It does not touch the entity's transform: the capsule already follows the
+/// pelvis (`ragdoll_bridge::step_ragdoll`), and a second placement here would
+/// double it. This is a pose pass and only a pose pass.
+fn apply_ragdoll_pose(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    published: &crate::anim_bridge::RagdollPose,
+    model_to_world: glam::DAffine3,
+) -> bool {
+    let weight = published.weight;
+    if !(weight > 0.0) || published.bones.is_empty() {
+        return false;
+    }
+    let skeleton = &rig.skeleton;
+    let joints = skeleton.joints();
+    if joints.is_empty() || pose.locals.len() < joints.len() {
+        return false;
+    }
+    // Name → the published body, resolved once. The physics side publishes a
+    // dozen bones and this rig has hundreds, so the map is built over the small
+    // side and the walk below is a lookup per joint.
+    let mut by_name: std::collections::BTreeMap<&str, &crate::anim_bridge::RagdollBonePose> =
+        std::collections::BTreeMap::new();
+    for b in &published.bones {
+        by_name.insert(b.name.as_str(), b);
+    }
+    let to_model = model_to_world.inverse();
+    let (_, world_rot, _) = model_to_world.to_scale_rotation_translation();
+    let inv_world_rot = world_rot.inverse();
+
+    // The ragdoll's model-space transforms, built parents-first in joint order —
+    // the machine's local transform wherever the ragdoll has no body, so a joint
+    // with no body rides the parent that does.
+    let mut model: Vec<glam::Mat4> = Vec::with_capacity(joints.len());
+    let mut locals: Vec<inf_anim::JointTransform> = Vec::with_capacity(joints.len());
+    let mut touched = false;
+    for (i, joint) in joints.iter().enumerate() {
+        let parent_model = match joint.parent {
+            Some(p) => model
+                .get(p as usize)
+                .copied()
+                .unwrap_or(glam::Mat4::IDENTITY),
+            None => glam::Mat4::IDENTITY,
+        };
+        let machine_local = pose.locals[i];
+        match by_name.get(joint.name.as_str()) {
+            Some(b) => {
+                touched = true;
+                // World → model, for both halves of the transform.
+                let r = (inv_world_rot * b.rot).normalize();
+                let r = glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32)
+                    .normalize();
+                let h = to_model.transform_point3(glam::DVec3::new(b.head.x, b.head.y, b.head.z));
+                let t = glam::Vec3::new(h.x as f32, h.y as f32, h.z as f32);
+                // The scale is the machine's: a ragdoll body has no opinion
+                // about how big a bone is, and a rig that scales a joint (every
+                // MetaHuman face rig does) must keep doing so.
+                let s = machine_local.scale_vec();
+                let m = glam::Mat4::from_scale_rotation_translation(s, r, t);
+                let local = parent_model.inverse() * m;
+                let (ls, lr, lt) = local.to_scale_rotation_translation();
+                model.push(m);
+                locals.push(inf_anim::JointTransform::from_trs(lt, lr, ls));
+            }
+            None => {
+                model.push(parent_model * machine_local.to_mat4());
+                locals.push(machine_local);
+            }
+        }
+    }
+    if !touched {
+        return false;
+    }
+    let physics = Pose { locals };
+    *pose = inf_anim::blend_poses(pose, &physics, weight.clamp(0.0, 1.0));
+    true
+}
+
 /// Solve each foot toward its goal, over the P24.2 chain solver.
 ///
 /// The chain is **derived**, not authored: a foot, its parent (the shin) and its
@@ -2584,6 +2731,20 @@ fn rig_bones(
             model_to_world.transform_point3(glam::DVec3::new(m.x as f64, m.y as f64, m.z as f64));
         Vec3d::new(w.x, w.y, w.z)
     };
+    // **The joint's own turn, alongside the segment it spans** (wave CHAR1b.2).
+    //
+    // A capsule built from head→tail carries no twist, so a body's rotation can
+    // only be read back as a joint's rotation if the constant offset between the
+    // two frames is known — and it is knowable exactly once, here, where the
+    // pose and the placement are both in hand. See `RigBone::rot`.
+    let entity_rot = {
+        let (_, r, _) = model_to_world.to_scale_rotation_translation();
+        r
+    };
+    let rot = |i: usize| -> glam::DQuat {
+        let (_, r, _) = globals[i].to_scale_rotation_translation();
+        (entity_rot * r.as_dquat()).normalize()
+    };
     // **The anatomical successor, not the first child** (SK1a).
     //
     // A bone spans from itself to the next bone DOWN THE LIMB, and on a rig that
@@ -2636,6 +2797,7 @@ fn rig_bones(
             tail,
             parent: j.parent,
             role: roles.role_of(i as u16),
+            rot: rot(i),
         });
     }
     Some(out)

@@ -130,6 +130,36 @@ pub struct SpawnedRagdoll {
     pub root: Option<BodyId3D>,
     /// How long the root has been slower than [`SETTLE_SPEED_MPS`].
     pub settled_s: f64,
+    /// **Which joint each body IS, and how to read its rotation as that joint's**
+    /// (wave CHAR1b.2), parallel to [`bodies`](Self::bodies).
+    ///
+    /// A capsule is built from the bone's head→tail segment, so its spawn
+    /// orientation has no twist about that axis and is *not* the joint's
+    /// rotation. The difference is a constant rigid offset — the two frames are
+    /// glued to the same bone — so it is taken once, at spawn, and every later
+    /// step recovers the joint's world rotation as `body_rotation · offset`.
+    ///
+    /// The head is recovered the same way: the bone's head in the body's own
+    /// local frame, taken at spawn, is where the joint sits on that body for
+    /// ever.
+    pub joints_of_body: Vec<RagdollJointRef>,
+}
+
+/// **What one ragdoll body is, in the skeleton's terms** (wave CHAR1b.2).
+///
+/// The pose blend's whole content: the physics side owns bodies and the
+/// animation side owns joints, and this is the constant that turns one into the
+/// other for as long as the ragdoll lives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollJointRef {
+    /// The joint's name, as [`inf_ecs::anim_bridge::RigBone::name`] carried it.
+    pub name: String,
+    /// `body_rotation⁻¹ · joint_rotation`, taken at spawn — constant, because
+    /// both frames are glued to the same rigid bone.
+    pub offset: DQuat,
+    /// The bone's head in the body's own local frame, taken at spawn — constant
+    /// for the same reason.
+    pub head_local: DVec3,
 }
 
 /// **Spawn** the articulated bodies for `guid` from the rig the pose step
@@ -161,12 +191,36 @@ pub fn spawn(
     if parts.is_empty() {
         return None;
     }
+    // The rig by name, so each part can find the joint it was built from — the
+    // one place the two vocabularies are matched up, and the reason
+    // `RagdollJointRef` is a constant rather than a per-step search.
+    let rig_by_name: std::collections::BTreeMap<&str, &inf_ecs::anim_bridge::RigBone> =
+        rig.iter().map(|b| (b.name.as_str(), b)).collect();
     let mut out = SpawnedRagdoll::default();
     let w = bridge.world_mut();
     for part in &parts {
         let body = w.add_body(part.body.kind, part.position, part.rotation);
         if let Some(c) = w.add_collider(body, part.collider.clone()) {
             out.colliders.push(c);
+        }
+        // **The capsule→joint offset, taken once.** See `RagdollJointRef`.
+        if let Some(b) = rig_by_name.get(part.name.as_str()) {
+            let inv = part.rotation.inverse();
+            out.joints_of_body.push(RagdollJointRef {
+                name: part.name.clone(),
+                offset: (inv * b.rot).normalize(),
+                head_local: inv * (b.head.to_dvec3() - part.position),
+            });
+        } else {
+            // A part whose bone is not in the rig by name cannot be read back as
+            // a joint. An identity offset would silently draw the capsule's own
+            // frame onto some joint; a refusal draws the machine's pose there,
+            // which is what every joint without a body already gets.
+            out.joints_of_body.push(RagdollJointRef {
+                name: String::new(),
+                offset: DQuat::IDENTITY,
+                head_local: DVec3::ZERO,
+            });
         }
         // **The handoff.** Every limb inherits the character's velocity.
         w.set_body_linvel(body, velocity);
@@ -268,6 +322,7 @@ pub fn step_ragdoll(
     guid: uuid::Uuid,
     mut cm: CharacterMovement,
     dt: f64,
+    overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
     cm.runtime.time_in_mode_s += dt;
@@ -293,7 +348,7 @@ pub fn step_ragdoll(
                 // A rig with no classifiable bone is not a ragdoll. Rather than
                 // stand there for ever, hand the character straight back — the
                 // refusal is visible as a `Ragdoll` mode that lasted one step.
-                return finish(world, bridge, guid, cm, false);
+                return finish(world, bridge, guid, cm, false, overlays);
             }
         } else if cm.runtime.press_jump || cm.runtime.ragdoll.time_in_phase_s > rig_wait_s(dt) {
             // **No rig is coming** (P29.4 audit, A1). See [`RIG_WAIT_S`]: the
@@ -305,7 +360,7 @@ pub fn step_ragdoll(
             // character that stops moving.
             cm.runtime.press_jump = false;
             let grounded = cm.runtime.grounded;
-            return finish(world, bridge, guid, cm, grounded);
+            return finish(world, bridge, guid, cm, grounded, overlays);
         }
     }
 
@@ -455,6 +510,12 @@ pub fn step_ragdoll(
         }
         let settled = spawned.settled_s >= SETTLE_TIME_S;
         cm.runtime.ragdoll.settled_hint = settled;
+        // **The pose crosses back** (wave CHAR1b.2). Every step the bodies own
+        // the pose, they say so in the skeleton's own vocabulary, and the pose
+        // step blends toward it at `blend_weight`'s number — which until this
+        // wave had no consumer at all, so a ragdolling character drew a flail
+        // clip while its bodies fell somewhere else entirely.
+        publish_pose(world, bridge, guid, &cm, &spawned);
         bridge.set_ragdoll(guid, spawned);
         cm.runtime.ragdoll.on_ground = on_ground;
         cm.runtime.body_yaw_deg = cm.runtime.ragdoll.pelvis_yaw_deg;
@@ -480,11 +541,11 @@ pub fn step_ragdoll(
             .is_some_and(|h| h.dead);
         if !dead && (settled || cm.runtime.press_jump) {
             cm.runtime.press_jump = false;
-            return finish(world, bridge, guid, cm, on_ground);
+            return finish(world, bridge, guid, cm, on_ground, overlays);
         }
     }
 
-    write_back(world, bridge, guid, entity, &cm, position, half);
+    write_back(world, bridge, guid, entity, &cm, position, half, overlays);
     let mode = cm.mode;
     Some(MoveOutcome {
         guid,
@@ -503,6 +564,7 @@ fn finish(
     guid: uuid::Uuid,
     mut cm: CharacterMovement,
     on_ground: bool,
+    overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
     if let Some(spawned) = bridge.take_ragdoll(guid) {
@@ -553,7 +615,13 @@ fn finish(
     cm.runtime.ragdoll.upright = cm.runtime.ragdoll.pelvis.y - feet_y > half * 0.5;
     let upright = cm.runtime.ragdoll.upright;
     let mode = cm.mode;
-    write_back(world, bridge, guid, entity, &cm, position, half);
+    write_back(world, bridge, guid, entity, &cm, position, half, overlays);
+    // **The pose the bodies left.** The bones published on the last simulating
+    // step stay exactly as they are and only the weight moves from here: `1` at
+    // the start of a get-up, `0` for a ragdoll that ended in the air — and a
+    // zero removes the entry, so a character that resumes its fall draws the
+    // machine's pose the very next step.
+    inf_ecs::anim_bridge::set_ragdoll_pose(world, guid, blend_weight(&cm), Vec::new());
     // The two doors the `anim.*` kit uses, and nothing else: a parameter that
     // says which way up, and a trigger that says now.
     if on_ground {
@@ -604,6 +672,7 @@ fn write_back(
     cm: &CharacterMovement,
     position: DVec3,
     half: f64,
+    overlays: &model::OverlayRegistry,
 ) {
     let body_yaw = cm.runtime.body_yaw_deg;
     {
@@ -623,6 +692,23 @@ fn write_back(
             *slot = cm.clone();
         }
     }
+    // ── **THE MODE REACHES THE MACHINE** (wave CHAR1b.2) ─────────────────────
+    //
+    // Every other movement path publishes the character's state into its
+    // machine's parameters at its write-back — the standing step, the mantle,
+    // the seat, flight — and this one never did. `mode` therefore stayed frozen
+    // at whatever the last GROUNDED step had published for the whole life of a
+    // ragdoll, and the consequences were both invisible and total: measured on
+    // the island, a hero put into `MovementMode::Ragdoll` sat in the `idle`
+    // state for all 88 steps of its ragdoll, so `ALS_Flail` never played, the
+    // `ragdoll → getup_*` edges could not fire because the machine was never in
+    // `ragdoll` to leave it, and the get-up blended out into a standing idle
+    // instead of a get-up clip.
+    //
+    // The three get-up states, the flail and the whole `getup` parameter this
+    // wave added were unreachable in the running game for that one reason.
+    let overlay = overlays.id_of(&cm.overlay);
+    inf_ecs::anim_bridge::publish_character_params(world, guid, cm, overlay);
     if let Some(body) = bridge.body_of(guid) {
         bridge.world_mut().set_body_translation(body, position);
     }
@@ -635,6 +721,7 @@ fn write_back(
 /// Called from the ordinary movement step, so a getting-up character walks,
 /// turns and falls like any other — the blend is a *weight*, not a mode.
 pub fn tick_get_up(world: &mut EcsWorld, guid: uuid::Uuid, cm: &mut CharacterMovement, dt: f64) {
+    release_get_up_hold(world, guid);
     if cm.runtime.ragdoll.phase != inf_anim::RagdollPhase::GettingUp {
         return;
     }
@@ -644,6 +731,94 @@ pub fn tick_get_up(world: &mut EcsWorld, guid: uuid::Uuid, cm: &mut CharacterMov
         cm.runtime.ragdoll.time_in_phase_s = 0.0;
         inf_ecs::anim_bridge::set_pose_match_entry(world, guid, false);
     }
+    // **The blend out** (wave CHAR1b.2). The bodies are gone by now, so the
+    // bones stay exactly as the last simulating step left them and only the
+    // weight moves — the get-up eases out of the heap the ragdoll really made.
+    // A weight of zero removes the entry, which is how a level stops paying for
+    // a ragdoll that has finished.
+    inf_ecs::anim_bridge::set_ragdoll_pose(world, guid, blend_weight(cm), Vec::new());
+}
+
+/// **Put `getup` back to `GETUP_NONE` once the get-up has played out** (wave
+/// CHAR1b.2).
+///
+/// The parameter does two jobs: it says *which* of the three get-ups to enter,
+/// and — since this wave — it is what stops the `Any → idle` edge cutting that
+/// get-up short one step after it starts. The second job means the parameter has
+/// to be *released*, or a character that has ragdolled once has the `Any → idle`
+/// safety net wedged shut for the rest of the level.
+///
+/// The release rule is the machine's own answer rather than a second clock: hold
+/// while the machine is in `ragdoll` or in one of the three
+/// [`inf_anim::als::GETUP_STATES`], release the step it is anywhere else. So the
+/// hold lasts exactly as long as the clip does — a 0.9 exit time on
+/// `getup_* → idle` ends it — and a machine with no get-up states at all
+/// releases on the first step, which is the pre-CHAR1b.2 behaviour.
+///
+/// Called from the ordinary movement step every step, before the phase clock,
+/// because the phase is `Inactive` again long before the get-up *clip* is over
+/// (`GET_UP_BLEND_S` is 0.35 s and the get-ups are seconds long).
+fn release_get_up_hold(world: &mut EcsWorld, guid: uuid::Uuid) {
+    let Some(v) = inf_ecs::anim_bridge::anim_param(world, guid, inf_anim::als::GETUP_VAR) else {
+        return;
+    };
+    if v < inf_anim::als::GETUP_FRONT {
+        return;
+    }
+    let holding = inf_ecs::anim_bridge::anim_state(world, guid).is_some_and(|s| {
+        s.name == "ragdoll" || inf_anim::als::GETUP_STATES.contains(&s.name.as_str())
+    });
+    if !holding {
+        inf_ecs::anim_bridge::set_anim_param(
+            world,
+            guid,
+            inf_anim::als::GETUP_VAR,
+            inf_anim::als::GETUP_NONE,
+        );
+    }
+}
+
+/// **Publish the articulated bodies as a pose**, in the skeleton's vocabulary
+/// (wave CHAR1b.2, clause 6).
+///
+/// Each body's world rotation is turned back into its joint's world rotation
+/// through the constant offset taken at spawn ([`RagdollJointRef`]), and its
+/// head is the same constant carried through the body's transform. The weight is
+/// [`blend_weight`]'s, so the number the pose step draws with is a pure function
+/// of `(phase, clock)` and the doctrine's sentence has exactly one call site.
+///
+/// A body whose joint could not be named at spawn is skipped rather than
+/// published under an identity offset: those joints keep the machine's pose,
+/// which is what every joint with no body already gets.
+fn publish_pose(
+    world: &mut EcsWorld,
+    bridge: &PhysicsBridge3D,
+    guid: uuid::Uuid,
+    cm: &CharacterMovement,
+    spawned: &SpawnedRagdoll,
+) {
+    let mut bones = Vec::with_capacity(spawned.bodies.len());
+    for (body, jref) in spawned.bodies.iter().zip(spawned.joints_of_body.iter()) {
+        if jref.name.is_empty() {
+            continue;
+        }
+        let (Some(t), Some(r)) = (
+            bridge.world().body_translation(*body),
+            bridge.world().body_rotation(*body),
+        ) else {
+            continue;
+        };
+        let head = t + r * jref.head_local;
+        bones.push(inf_ecs::anim_bridge::RagdollBonePose {
+            name: jref.name.clone(),
+            rot: (r * jref.offset).normalize(),
+            head: inf_ecs::Vec3d::new(head.x, head.y, head.z),
+        });
+    }
+    if bones.is_empty() {
+        return;
+    }
+    inf_ecs::anim_bridge::set_ragdoll_pose(world, guid, blend_weight(cm), bones);
 }
 
 /// **The blend weight**, as the renderer and the pose step would read it: `1` is

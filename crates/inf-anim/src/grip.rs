@@ -1416,7 +1416,23 @@ mod tests {
             let sx: f32 = if side == BoneSide::Left { -1.0 } else { 1.0 };
             // In front of the chest and below the shoulder — a point no bend
             // plane through a straight `-Z` pole contains.
-            let target = Vec3::new(sx * 0.25, 1.15, 0.45);
+            //
+            // **Placed as a fraction of the arm the rig actually has** (wave
+            // CHAR1b.2). It was three literals, and clause 8's
+            // `arm_length_ratio` 0.42 → 0.30 shortened this rig's arm from
+            // 0.735 m to 0.525 m and left the old point **0.538 m** from the
+            // shoulder — 13 mm outside a 0.525 m arm, so the exactness this arm
+            // exists to assert became an out-of-reach report. The target is
+            // derived now, at 0.90 of the arm's own span in a direction that is
+            // still off the pole plane, so it cannot go stale with the body
+            // again.
+            let bind = global_transforms(sk, &Pose::rest(sk));
+            let bat = |j: u16| bind[j as usize].transform_point3(Vec3::ZERO);
+            let arm =
+                (bat(chain[1]) - bat(chain[0])).length() + (bat(chain[2]) - bat(chain[1])).length();
+            let shoulder = bat(chain[0]);
+            let dir = Vec3::new(sx * 0.12, -0.62, 0.78).normalize();
+            let target = shoulder + dir * (arm * 0.90);
 
             let mut hinged = Pose::rest(sk);
             let r = reach(sk, &mut hinged, chain, target, &asset.limits).expect("a solve");
@@ -1535,7 +1551,17 @@ mod tests {
 
         // No limit at all on the elbow: it delegates to the pole solver and
         // still lands somewhere sensible, rather than refusing.
-        let r = reach(sk, &mut pose, chain, Vec3::new(0.25, 1.15, 0.45), &[]).expect("a solve");
+        //
+        // The target is a fraction of the arm's own span for the reason the
+        // hinged arm's is (wave CHAR1b.2): a literal point 0.538 m from the
+        // shoulder is inside a 0.735 m arm and outside a 0.525 m one, and this
+        // rig's arm changed length when `arm_length_ratio` did.
+        let rest = crate::pose::global_transforms(sk, &Pose::rest(sk));
+        let rat = |j: u16| rest[j as usize].transform_point3(Vec3::ZERO);
+        let span =
+            (rat(chain[1]) - rat(chain[0])).length() + (rat(chain[2]) - rat(chain[1])).length();
+        let near = rat(chain[0]) + Vec3::new(0.12, -0.62, 0.78).normalize() * (span * 0.90);
+        let r = reach(sk, &mut pose, chain, near, &[]).expect("a solve");
         assert!(
             r.reached,
             "the unlimited fallback missed by {}",
