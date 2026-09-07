@@ -545,6 +545,52 @@ Start-Sleep -Milliseconds 1600
 Start-Sleep -Milliseconds 1200
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "28-standing-on-it.png") | ForEach-Object { Say $_ }
 
+# ── wave CHAR1b.2: the moves ─────────────────────────────────────────────────
+#
+# Everything below is a mechanism this slice turned on that a player can reach
+# from where the level puts the hero. The ones a player CANNOT reach from there
+# -- the mantle course, the water, a measured drop -- are named in the wave's
+# report with the numbers the gate measures them at instead, because the loop
+# drives the shipped player and the shipped player has no teleport.
+
+Say "BREATH: two idle frames 1.3 s apart, which is the pair the additive shows in"
+Start-Sleep -Milliseconds 1500
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "30-breath-a.png") | ForEach-Object { Say $_ }
+Start-Sleep -Milliseconds 1300
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "31-breath-b.png") | ForEach-Object { Say $_ }
+
+# THE SLIDE. `movement.rs`'s own rule: sprinting, past `slide_entry_speed_mps`,
+# and then the crouch key. Sprint first for long enough to be over the entry
+# speed -- a crouch tap below it is a REFUSAL (`ConditionNotMet`) and a stance
+# toggle, which is the frame this would otherwise film and mis-caption.
+Say "SLIDE: Shift+W up to speed, then C while still sprinting"
+[InfInput]::Down(0x2A); [InfInput]::Down(0x11)
+Start-Sleep -Milliseconds 2600
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 260
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "32-slide.png") | ForEach-Object { Say $_ }
+Start-Sleep -Milliseconds 500
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "33-sliding.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x11); [InfInput]::Up(0x2A)
+Start-Sleep -Milliseconds 1400
+
+# PRONE. A LONG crouch press, which is `MovementIntent::from_actions`' own
+# classification of the same key -- and the reason the crouch TAP is a coin toss
+# (carried 124): the two are the same button and only the duration tells them
+# apart.
+Say "PRONE: C held past the long-press threshold"
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 700; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 1200
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "34-prone.png") | ForEach-Object { Say $_ }
+Say "PRONE CRAWL: W while prone"
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 1400
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "35-prone-crawl.png") | ForEach-Object { Say $_ }
+[InfInput]::Up(0x11)
+Say "UP: another long press leaves prone"
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 700; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 1400
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "36-back-up.png") | ForEach-Object { Say $_ }
+
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
     $rows = Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" }
