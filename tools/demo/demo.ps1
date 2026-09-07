@@ -513,6 +513,14 @@ Start-Sleep -Milliseconds 800
 # is releasing the aim key, so the tap below is load-bearing rather than
 # decorative: without it `turn_deg` stays 0.000 for the whole session and the
 # eight turn clips cannot play whatever the graph says.
+# **STAND, and say so.** The crouch is a TOGGLE and its click fires on RELEASE,
+# so a tap that lands while the previous one is still settling is swallowed and
+# every leg after it runs crouched — which is what the first audit run filmed
+# (313 of 488 log rows in `Crouch`). Tapped again here with room around it.
+Say "STAND: C again, with room around it, before the legs that must not be crouched"
+[InfInput]::Down(0x2E); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x2E)
+Start-Sleep -Milliseconds 1400
+
 Say "TURN IN PLACE: right-click to aim and release (-> LookingDirection), then swing"
 [InfInput]::RightDown(); Start-Sleep -Milliseconds 200; [InfInput]::RightUp()
 Start-Sleep -Milliseconds 400
@@ -526,15 +534,16 @@ Start-Sleep -Milliseconds 900
 # one side and its kerb is the 15 cm step the fixture measures in the abstract.
 # Turning ninety degrees and walking is the scripted input carried item 117 asked
 # for, and `hero.csv`'s Y column is what says whether the hero went UP.
-Say "KERB: turn toward the pavement and walk onto it"
+Say "KERB: turn toward the pavement and RUN onto it"
 for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(-30, 0); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 400
-[InfInput]::Down(0x11); Start-Sleep -Milliseconds 2600; [InfInput]::Up(0x11)
-Start-Sleep -Milliseconds 1200
+[InfInput]::Down(0x11); Start-Sleep -Milliseconds 3200
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "26-toward-the-kerb.png") | ForEach-Object { Say $_ }
-[InfInput]::Down(0x11); Start-Sleep -Milliseconds 2600; [InfInput]::Up(0x11)
-Start-Sleep -Milliseconds 1400
+Start-Sleep -Milliseconds 3200; [InfInput]::Up(0x11)
+Start-Sleep -Milliseconds 1600
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "27-on-the-kerb.png") | ForEach-Object { Say $_ }
+Start-Sleep -Milliseconds 1200
+& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "28-standing-on-it.png") | ForEach-Object { Say $_ }
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
