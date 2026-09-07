@@ -3590,6 +3590,16 @@ fn releasing_the_stick_plays_a_stop_clip() {
     let mut seen: std::collections::BTreeSet<String> = Default::default();
     let mut stop_distance_max = 0.0f64;
     let mut stops = 0usize;
+    // **THE SPEED THE STOP IS TAKEN AT** (CHAR1b.2 audit). This is the whole
+    // content of distance matching and it is the only thing that separates the
+    // new edge from the one it replaced: a stop is a decision taken WHILE
+    // MOVING, and a clip entered once the character has already come to rest is
+    // a stop-shaped idle. Reverting the entry term to the old `gait <= 0.1` and
+    // re-running this arm gives the SAME 24 steps and the SAME state set --
+    // measured -- so "a stop clip played" cannot tell the two apart and this
+    // can.
+    let mut entry_speeds: Vec<f64> = Vec::new();
+    let mut was_stop = false;
     // Five run-and-stops at five phases, which is the CHAR1b.1 audit's own
     // experiment: a single stop is a coin toss and five is the mechanism.
     for extra in [0usize, 7, 13, 19, 29] {
@@ -3604,16 +3614,96 @@ fn releasing_the_stick_plays_a_stop_clip() {
             else {
                 continue;
             };
-            if st.starts_with("stop_") {
+            let is_stop = st.starts_with("stop_");
+            if is_stop {
                 stops += 1;
             }
+            let cm = hero_cm(&sim, hero);
+            if is_stop && !was_stop {
+                let v = cm.runtime.velocity;
+                entry_speeds.push((v.x * v.x + v.z * v.z).sqrt());
+            }
+            was_stop = is_stop;
             seen.insert(st);
-            stop_distance_max = stop_distance_max.max(hero_cm(&sim, hero).runtime.stop_distance_m);
+            stop_distance_max = stop_distance_max.max(cm.runtime.stop_distance_m);
         }
     }
+    // **THE RELEASE EDGE, AND THAT IT DOES NOT CHATTER** (CHAR1b.2 audit,
+    // priority (h)). The wave gated `stop_* -> walk` on `stop_distance <= 0` to
+    // stop a chatter it measured, and the question that raises is whether the
+    // edge still fires AT ALL: a player who changes their mind mid-stop must get
+    // their character back. Five attempts, because a stop clip is only entered
+    // on three releases in five (the entry speeds above are three, not five);
+    // each one runs to speed, releases, waits for the machine to actually be IN
+    // a stop, then pushes the stick again and counts the steps back onto the
+    // ladder and the state changes on the way.
+    let mut relatch: Option<usize> = None;
+    let mut relatch_edges = 0usize;
+    let mut relatch_states: std::collections::BTreeSet<String> = Default::default();
+    let mut attempts_that_reached_a_stop = 0usize;
+    {
+        let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
+        for extra in [0usize, 5, 11, 17, 23] {
+            for _ in 0..(130 + extra) {
+                sim.step_once(RuntimeInput::default().with_axes(ax.clone()));
+            }
+            let mut pushing = false;
+            let mut since_push = 0usize;
+            let mut last: Option<String> = None;
+            let mut hit = false;
+            for _ in 0..150 {
+                let input = if pushing {
+                    RuntimeInput::default().with_axes(ax.clone())
+                } else {
+                    RuntimeInput::default()
+                };
+                sim.step_once(input);
+                let Some(st) =
+                    inf_ecs::anim_bridge::anim_state(sim.world(), hero).map(|s| s.name.clone())
+                else {
+                    continue;
+                };
+                if pushing {
+                    relatch_states.insert(st.clone());
+                    if last.as_deref() != Some(st.as_str()) {
+                        relatch_edges += 1;
+                    }
+                }
+                last = Some(st.clone());
+                if !pushing && st.starts_with("stop_") {
+                    pushing = true;
+                    hit = true;
+                    since_push = 0;
+                    continue;
+                }
+                if pushing {
+                    since_push += 1;
+                    if st == "walk" || st == "run" || st == "start" {
+                        relatch = Some(relatch.map_or(since_push, |r: usize| r.min(since_push)));
+                        break;
+                    }
+                }
+            }
+            if hit {
+                attempts_that_reached_a_stop += 1;
+            }
+            for _ in 0..60 {
+                sim.step_once(RuntimeInput::default());
+            }
+        }
+    }
+    let fastest = entry_speeds.iter().copied().fold(0.0f64, f64::max);
     println!(
         "\n=== the stop, over five run-and-stops ===\n  states {seen:?}\n  a stop clip played on \
-         {stops} steps; the largest stopping distance published was {stop_distance_max:.3} m"
+         {stops} steps; the largest stopping distance published was {stop_distance_max:.3} m\
+\n  the ground speed at each entry, m/s: {:?}\
+\n  a stick pushed mid-stop is back on the ladder after {relatch:?} step(s), over \
+         {relatch_edges} state changes over {attempts_that_reached_a_stop} of 5 attempts \
+         that reached a stop; the windows saw {relatch_states:?}",
+        entry_speeds
+            .iter()
+            .map(|v| format!("{v:.3}"))
+            .collect::<Vec<_>>()
     );
     assert!(
         stop_distance_max > 0.10,
@@ -3624,6 +3714,19 @@ fn releasing_the_stick_plays_a_stop_clip() {
         seen.iter().any(|s| s.starts_with("stop_")),
         "no stop clip played over five run-and-stops: {seen:?} — which is exactly the \
          measurement CHAR1b.1 recorded as carried item 122"
+    );
+    // **AND IT IS TAKEN WHILE THE CHARACTER IS STILL MOVING.** The mandate's
+    // "distance matching" is this number and nothing else. Half a walk is the
+    // line: below it the character has arrived and the clip is decoration.
+    assert!(
+        fastest > 0.7,
+        "the fastest a stop clip was ENTERED at over five run-and-stops is {fastest:.3} m/s, \
+         so every one of them was taken by a character that had already stopped — which is \
+         the `gait <= 0.1` edge wearing `stop_distance`'s name. The entry speeds were {:?}",
+        entry_speeds
+            .iter()
+            .map(|v| format!("{v:.3}"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -3991,6 +4094,7 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
     };
     let mut seen: std::collections::BTreeSet<String> = Default::default();
     let mut fades = 0usize;
+    let mut transitions = 0usize;
     let mut last_state: Option<String> = None;
     let mut edges: std::collections::BTreeMap<String, usize> = Default::default();
     let mut since_change = 99usize;
@@ -4035,7 +4139,14 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
             if changed {
                 since_change = 0;
                 if let Some(from) = last_state.as_deref() {
-                    fades += 1;
+                    // **The transition count is the EDGES that fired** (CHAR1b.2
+                    // audit). `fades` was incremented here AND once per step of
+                    // every post-transition window below, so the "214
+                    // transitions over 1 102 steps" this arm printed — and the
+                    // wave's report repeated — was 24 transitions plus 190
+                    // fading steps added together. The two are counted apart
+                    // now; the printed line says which is which.
+                    transitions += 1;
                     *edges.entry(format!("{from} -> {state}")).or_insert(0usize) += 1;
                 }
             } else {
@@ -4101,7 +4212,8 @@ fn a_cross_fade_moves_no_joint_faster_than_the_gait_already_does() {
         "\n=== the largest single-joint step, degrees, over a scripted tour ===\n  \
          CROSS-FADING ({bn} steps): p50 {b50:.3}  p99 {b99:.3}  max {bmax:.3}\n  \
          STEADY       ({sn} steps): p50 {s50:.3}  p99 {s99:.3}  max {smax:.3}\n  \
-         {fades} transitions fired over {} steps; states visited: {seen:?}",
+         {transitions} transitions fired over {} steps ({fades} of them inside a \
+         post-transition window); states visited: {seen:?}",
         bn + sn
     );
     {
