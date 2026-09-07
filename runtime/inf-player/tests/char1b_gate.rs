@@ -2653,9 +2653,12 @@ fn the_islands_hero_draws_the_clips_its_graph_names() {
 ///   ALS channels and `stop_l` plays.
 /// * turn-in-place runs only in `RotationMode::LookingDirection`, and a level
 ///   starts in `VelocityDirection` (where ALS does not turn in place either).
-///   The only door to `LookingDirection` is releasing the aim key, so a player
-///   who has never aimed can never turn in place. After one aim press+release a
-///   220 °/s mouse swing plays `turn_r90`, and a crouched one `crouch_turn_r90`.
+///   **The door is the `rotation_mode` key since wave CHAR1c** (Q, or the right
+///   stick's click): before it the only way in was RELEASING the aim key, which
+///   promoted a character into the mode and left no way back out — carried 123,
+///   and the reason two waves' turn-in-place frames were taken by right-clicking
+///   first. After one press of it a 220 °/s mouse swing plays `turn_r90`, and a
+///   crouched one `crouch_turn_r90`.
 ///
 /// The remaining states need a world event this flat-road drive cannot make
 /// (`fall`/`fall_fast`/`land_heavy`/`roll` need height, `ragdoll`/`getup_*` need
@@ -2740,13 +2743,27 @@ fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
     go(&mut sim, 6, &["crouch"], &[]); // click
     go(&mut sim, 60, &[], &[]); // crouch_idle
     go(&mut sim, 90, &[], &[("move_y", 1.0)]); // crouch_walk
-    go(&mut sim, 30, &[], &[("look_x", 260.0)]); // a crouched turn needs the mode below
+    go(&mut sim, 30, &[], &[("look_x", 260.0)]); // a crouched turn needs the mode set below
     go(&mut sim, 6, &["crouch"], &[]);
     go(&mut sim, 60, &[], &[]); // stand
     go(&mut sim, 2, &["jump"], &[]);
     go(&mut sim, 100, &[], &[]); // airborne → land_light
-    go(&mut sim, 10, &["aim"], &[]); // → Aiming
-    go(&mut sim, 10, &[], &[]); // → LookingDirection
+    // **THE ROTATION-MODE KEY, not an aim press** (wave CHAR1c, carried 123).
+    //
+    // This leg used to be `aim` down for ten steps and up for ten: pressing aim
+    // reached `Aiming` and RELEASING it PROMOTED the character into
+    // `LookingDirection`, which was the only door into the mode this engine had
+    // and the reason two waves' turn-in-place frames were taken by
+    // right-clicking first. CHAR1c gave the release ALS's own behaviour — back
+    // to the character's DESIRED mode (`ALSBaseCharacter.cpp:1291-1301`) — so
+    // the old two lines now leave the island's hero exactly where it started and
+    // no turn plays. Measured: this arm went red with 11 of 36 states and
+    // `|turn_deg|` at 0.000.
+    //
+    // One press of `rotation_mode` is the door now, and it is a door a PLAYER
+    // has (Q / the right stick's click) rather than a side effect of aiming.
+    go(&mut sim, 4, &["rotation_mode"], &[]); // → LookingDirection
+    go(&mut sim, 6, &[], &[]);
     go(&mut sim, 30, &[], &[("look_x", 220.0)]); // the swing
     go(&mut sim, 120, &[], &[]); // the turn plays out
     go(&mut sim, 6, &["crouch"], &[]);

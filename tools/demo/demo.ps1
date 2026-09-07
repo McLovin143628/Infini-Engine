@@ -649,9 +649,17 @@ Say "STAND: C again, with room around it, before the legs that must not be crouc
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 1400
 
-Restore-PlayerFocus "before the turn in place (the right-click)"
-Say "TURN IN PLACE: right-click to aim and release (-> LookingDirection), then swing"
-[InfInput]::RightDown(); Start-Sleep -Milliseconds 200; [InfInput]::RightUp()
+# **Q, NOT A RIGHT-CLICK** (wave CHAR1c, carried 123). This leg used to press
+# and release AIM, because releasing aim was the only door into
+# `LookingDirection` this engine had -- and the release PROMOTED the character
+# into it, so the mode was reachable and not leavable. CHAR1c gave the release
+# ALS's own behaviour (back to the DESIRED mode) and gave the player a key that
+# sets it: Q on a keyboard, the right stick's click on a pad. The right-click is
+# also what handed the EDITOR the foreground in two earlier sessions, which is
+# carried 145's whole story, so this leg no longer makes one at all.
+Restore-PlayerFocus "before the turn in place"
+Say "TURN IN PLACE: Q for looking-direction (no aim press), then swing"
+[InfInput]::Down(0x10); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x10)   # scancode: Q
 Start-Sleep -Milliseconds 400
 for ($i = 0; $i -lt 24; $i++) { [InfInput]::Look(28, 0); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 700
@@ -828,8 +836,14 @@ Start-Sleep -Milliseconds 500
 # **THE ROTATION-MODE KEY** (carried 123's door): Q reaches looking-direction
 # without an aim press, and a turn in place follows from it.
 Restore-PlayerFocus "before the rotation-mode key"
-Say "CAMERA: Q — looking-direction without an aim press, then a turn in place"
+# **The key CYCLES**, so this press is the second of the session and it puts the
+# character back in velocity-direction; the third, below the sweep, returns it to
+# looking-direction for the frame. A leg that pressed once and assumed the mode
+# would be a leg that photographed the other one.
+Say "CAMERA: Q — the rotation-mode key cycles, and the frame is taken on the second press"
 [InfInput]::Down(0x10); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x10)   # scancode: Q
+Start-Sleep -Milliseconds 250
+[InfInput]::Down(0x10); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x10)
 Start-Sleep -Milliseconds 400
 for ($i = 0; $i -lt 34; $i++) { [InfInput]::Look(28, 0); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 1600
