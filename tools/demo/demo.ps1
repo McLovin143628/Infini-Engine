@@ -823,6 +823,16 @@ Wait-ForHero -Csv $heroCsv -What "third person again" -TimeoutS 5.0 `
 # twice the walk's, so the trigger is the boom itself and it fires on the blend
 # rather than at its end.
 Restore-PlayerFocus "before the vehicle"
+# **WAIT FOR THE PLACEMENT THAT PUTS THE HERO BY A CAR.** `interact` reaches a
+# vehicle within a few metres and by this point in the session the hero is
+# wherever the look sweeps left it, so the loop asks the player to put it back at
+# the spawn — where the level parks one — and waits for it to BE there rather
+# than pressing E into an empty street. Only when `-SpawnAt` named a waypoint
+# there; without one this is a press that says plainly it found nothing.
+if ($SpawnAt -ne "") {
+    Wait-ForHero -Csv $heroCsv -What "back at the spawn, beside the parked car" -TimeoutS 45 `
+        -Predicate { param($c) ([math]::Abs([double]$c[2] + 1750.0) -lt 6.0) -and ([math]::Abs([double]$c[4] - 2050.0) -lt 6.0) } | Out-Null
+}
 Say "CAMERA: E at a car — the drive camera blends in"
 [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # scancode: E
 Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 6.0 `
@@ -867,6 +877,28 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         Start-Sleep -Milliseconds 700
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "42-mantled.png") | ForEach-Object { Say $_ }
         [InfInput]::Up(0x11)
+        # ── THE INTERIOR CAMERA FRAMES (wave CHAR1c) ──
+        #
+        # This placement is the only INTERIOR geometry on the island a scripted
+        # session can reach — the stair the mantle uses (CHAR1b.2 audit, carried
+        # 139) — and it is where the camera has the most to do: a stairwell has a
+        # wall behind the boom whichever way the hero faces. So the wall, the
+        # near fade and the room frames are taken HERE rather than out on the
+        # street, where the first run of this leg backed up for eight seconds and
+        # found nothing at all.
+        Restore-PlayerFocus "before the interior camera frames"
+        Say "CAMERA (interior): the boom against a stairwell wall"
+        for ($i = 0; $i -lt 24; $i++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 16 }
+        Wait-ForHero -Csv $heroCsv -What "a clipped boom indoors" -TimeoutS 6.0 `
+            -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[7] -gt 0.8) } `
+            -Out (Join-Path $OutDir "72-camera-interior-wall.png") | Out-Null
+        Wait-ForHero -Csv $heroCsv -What "the near fade engaged indoors" -TimeoutS 6.0 `
+            -Predicate { param($c) ($c.Count -gt 14) -and ([double]$c[14] -lt 0.999) } `
+            -Out (Join-Path $OutDir "73-camera-interior-near-fade.png") | Out-Null
+        Say "CAMERA (interior): backing into the stairwell"
+        [InfInput]::Down(0x1F); Start-Sleep -Milliseconds 1200
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "74-camera-interior-backed-up.png") | ForEach-Object { Say $_ }
+        [InfInput]::Up(0x1F)
         # …and the cape, on the same hero, two frames apart while it walks.
         [InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "43-cape-a.png") | ForEach-Object { Say $_ }
