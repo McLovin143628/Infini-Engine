@@ -1074,6 +1074,39 @@ pub fn import_manifest(
 /// The high nibble is forced to a UUID v4 shape so the value round-trips through
 /// every reader that pretty-prints one, and the salt keeps a clip's id away from
 /// any other derived id of the same key.
+/// **Rebuild a committed identity's locomotion graph from the clips a project
+/// already holds** (wave CHAR1b.2) — the door the import path had only as a
+/// side effect of `--rebind-character`.
+///
+/// `rebind_locomotion_graph` runs inside [`import_manifest`] and only when a
+/// body rebind was asked for, which couples two decisions that are not the same
+/// one: *which mesh and rig this identity wears* and *which clips its graph
+/// names*. The island's hero wears a MetaHuman body rebound from one manifest
+/// and plays ALS sequences imported from another, so rebuilding its graph after
+/// the map grows a row meant re-running the body rebind — and re-running the
+/// wrong manifest's body rebind swaps the character.
+///
+/// This is that half on its own: no import, no mesh, no textures. The resolver
+/// falls back to the project's own `.inf_anim` set exactly as the import path's
+/// does, so every clip the map names is found wherever it was written, and the
+/// authored sets are derived onto the identity's own rig here.
+///
+/// `stems` is `(ids, stem)` per identity — normally
+/// `samples::starter_character_ids()` with `"Starter_Locomotion"` and the female
+/// pair. Returns the report so a caller can print the advisories.
+pub fn rebind_graphs(
+    project: &mut AssetProject,
+    stems: &[(crate::character::CharacterIds, &str)],
+) -> UeImportReport {
+    let mut report = UeImportReport::default();
+    let manifest: Vec<Clip> = Vec::new();
+    let imported: Vec<(String, AssetId, usize)> = Vec::new();
+    for (ids, stem) in stems {
+        rebind_locomotion_graph(project, &manifest, &imported, ids, stem, &mut report);
+    }
+    report
+}
+
 pub fn clip_guid(key: &str) -> AssetId {
     let mut bytes = [0u8; 16];
     for (i, chunk) in bytes.chunks_mut(8).enumerate() {

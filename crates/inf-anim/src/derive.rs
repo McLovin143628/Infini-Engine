@@ -83,6 +83,32 @@ pub const STRIDE_DEPICTS_FLOOR_MPS: f32 = 0.20;
 /// engine derived are the same channel.
 pub const MOVE_DATA_SPEED: &str = "MoveData_Speed";
 
+/// Prefix of the per-foot **foot-IK gate** channels — `Enable_FootIK_L`,
+/// `Enable_FootIK_R` (wave CHAR1b.2).
+///
+/// # This one used to be an authoring decision, and the census retired that
+///
+/// The module's own rule is that it *does not invent a curve nothing measured*,
+/// and `Enable_FootIK_*` was on the far side of that line: "should this foot be
+/// overridden" reads like a preference. Two measurements moved it.
+///
+/// * **Nobody authors it.** All 164 imported ALS sequences and all 12 committed
+///   sample clips carry zero of these channels — the census `char1b_gate` keeps.
+///   A gate nobody ever writes is a gate that is always the fallback.
+/// * **The fallback was wrong in both directions.** Read as a flat `1.0` it pins
+///   a foot that is half a metre in the air (measured on the island's hero at
+///   6.5 m/s: **150.0 mm** of residual on exactly the steps where `FootLock_*`
+///   had just gone to zero). Read as the plant window it switches foot IK OFF on
+///   an idle, because a foot that never lifts gets no plant window at all — the
+///   deriver's own `down.iter().all()` branch — and "no plant" then means the
+///   opposite of what it means during a swing.
+///
+/// So the gate is derived here, where both cases are distinguishable, and it is
+/// a *measurement of contact* rather than a preference: `1` while the foot is
+/// down, `0` while it is not, and `1` for the whole clip when the foot never
+/// leaves the ground at all. That is what ALS's animators hand-author, computed.
+pub const ENABLE_FOOT_IK_PREFIX: &str = "Enable_FootIK_";
+
 /// Prefix of the per-foot speed channels — `FootSpeed_L`, `FootSpeed_R`
 /// (`AM_FootSpeed_L`/`_R` in the stock sample, run by hand over `ball_l`/`ball_r`).
 pub const FOOT_SPEED_PREFIX: &str = "FootSpeed_";
@@ -417,6 +443,9 @@ pub fn derive_clip(
     let distance_m = distance.distance_m.last().copied().unwrap_or(0.0);
     let travel_speed_mps = distance_m / clip.duration;
     let (stride_m, stride_speed_mps) = stride_and_speed(&feet, &traces, &plants, clip.duration);
+    // The stance-only reading, which is what a play rate divides by — see
+    // `stance_speed_mps` for why the two are different numbers.
+    let stance_mps = stance_speed_mps(&traces, clip.duration);
     // The greater, because a clip answers this question from one end or the
     // other: a root-motion clip travels and an in-place one strides. See
     // `DeriveReport::stride_speed_mps` for what their disagreement means when a
@@ -434,7 +463,8 @@ pub fn derive_clip(
         &plants,
         clip.duration,
         gait,
-        stride_speed_mps,
+        stance_mps,
+        opts.contact_lift_m,
     );
     let mut markers = derived_markers(&plants);
 
@@ -537,6 +567,8 @@ impl DerivedNames {
             let suffix = foot_suffix(skeleton, foot);
             out.curves.insert(format!("{FOOT_SPEED_PREFIX}{suffix}"));
             out.curves.insert(format!("{FOOT_LOCK_PREFIX}{suffix}"));
+            out.curves
+                .insert(format!("{ENABLE_FOOT_IK_PREFIX}{suffix}"));
             let leg = leg_name_of(skeleton, roles, foot);
             out.sync_markers.insert(plant_marker(&leg));
             out.event_markers.insert(footstep_marker(&leg));
@@ -578,6 +610,7 @@ pub fn is_derived_curve(name: &str) -> bool {
         || name == als::W_GAIT
         || name.starts_with(FOOT_SPEED_PREFIX)
         || name.starts_with(FOOT_LOCK_PREFIX)
+        || name.starts_with(ENABLE_FOOT_IK_PREFIX)
 }
 
 /// Whether a marker name belongs to the derived vocabulary — the display
@@ -977,6 +1010,9 @@ fn foot_traces(
 /// that plays in place, which is most authored locomotion and every clip
 /// [`crate::locomotion`] generates.
 ///
+/// The **stance-only** reading of the same cycle is [`stance_speed_mps`], and
+/// the two are deliberately different numbers — see its docs.
+///
 /// Averaged **per foot** rather than pooled: a creature whose left leg swings
 /// further than its right depicts one speed, not a weighted vote, and pooling
 /// would let the busier leg decide.
@@ -1021,6 +1057,117 @@ fn stride_and_speed(
     } else {
         (stride_total / counted as f32, speed_total / counted as f32)
     }
+}
+
+/// **THE SPEED A PLANTED FOOT SLIDES AT** (wave CHAR1b.2) — the number a play
+/// rate divides by, and it is not the same number as [`stride_and_speed`]'s.
+///
+/// A planted foot is stationary **in the world**, so the speed it slides
+/// backwards under a body that does not move IS the ground speed the clip
+/// depicts. The rule needs no threshold and no contact test: in a cycle played
+/// in place the two feet's horizontal velocities point **opposite ways** while
+/// one of them is carrying the body, and the slower of the two is the one that
+/// is down — the swing foot has to cover its own stride *plus* the body's
+/// advance in the same time. Take that, sample by sample, and answer with the
+/// median.
+///
+/// # Two rules were measured and thrown away first, and both numbers are here
+///
+/// * **The plant windows** the [`FOOT_LOCK_PREFIX`] channel is cut from. They
+///   are a 2 cm band around a foot's lowest point, so at speed they collapse to
+///   two or three samples and [`DeriveOptions::min_contact_s`] throws half of
+///   them away: that rule read `ALS_N_Run_F` at **1.03 m/s against
+///   `ALS_N_Walk_F`'s 1.42**, which no reading of a run should produce.
+/// * **The lower foot's own speed, every sample.** Correct for a walk and wrong
+///   for anything with a flight phase, where the lower foot is airborne: it read
+///   walk 1.356 / run 2.686 / **sprint 3.434**, monotone but a sprint at half
+///   speed.
+/// * **The slower of the two, on opposing samples.** Right in principle — the
+///   swing foot covers its own stride *plus* the body's advance — and wrong at
+///   speed, because near the top of its arc the swing foot is momentarily the
+///   slower one: walk 1.355 / run 1.950 / sprint 3.018.
+///
+/// The rule that ships drops the flight samples (opposite directions) and then
+/// identifies the planted foot by **height**, which is a fact about which foot
+/// is down rather than an inference from how fast it is going. Measured on ALS's
+/// own sequences it reads **walk 1.388, run 2.686, sprint 4.812 m/s**, against
+/// the donor's own hand-entered `Config.AnimatedWalkSpeed` / `AnimatedRunSpeed`
+/// / `AnimatedSprintSpeed` of 1.5 / 3.5 / 6.0 — 0.93x, 0.77x and 0.80x of three
+/// numbers an animator typed. Monotone by gait, which is the property a play
+/// rate needs, and derived rather than configured, which is the point.
+///
+/// # Why it is a second function and not a correction to the first
+///
+/// The two answer different questions and both answers are wanted.
+///
+/// * [`stride_and_speed`] measures the foot's **whole excursion** over the clip
+///   and multiplies by `plants / duration`. That is the gait-cycle definition
+///   [`crate::locomotion`]'s generator authors to (`stride x cadence`), it is
+///   what [`als::W_GAIT`] and [`crate::propose`]'s clustering have keyed on
+///   since P29.5, and its own arm checks it against the generator's independent
+///   arithmetic to within 4%.
+/// * This one measures what the foot **does while it is down**, which is what
+///   `inf_ecs::pose`'s foot lock pins. A play rate wants this one, because the
+///   defect it exists to fix is a *locked* foot sliding.
+fn stance_speed_mps(traces: &[Vec<FootSample>], duration: f32) -> f32 {
+    if !crate::positive(duration) || traces.len() < 2 {
+        return 0.0;
+    }
+    let n = traces.iter().map(Vec::len).min().unwrap_or(0);
+    if n < 3 {
+        return 0.0;
+    }
+    let dt = duration / (n.saturating_sub(1)).max(1) as f32;
+    if !crate::positive(dt) {
+        return 0.0;
+    }
+    // Two feet only. A quadruped's diagonal pairs are a different rule and this
+    // one refuses rather than averaging four legs into a number that is nobody's
+    // gait; `stride_and_speed` still answers for those.
+    let (l, r) = (&traces[0], &traces[1]);
+    let vel = |t: &Vec<FootSample>, i: usize| -> (f32, f32) {
+        let (a, b) = (t[i].pos, t[(i + 1) % n].pos);
+        ((b.x - a.x) / dt, (b.z - a.z) / dt)
+    };
+    let mut samples: Vec<f32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (lx, lz) = vel(l, i);
+        let (rx, rz) = vel(r, i);
+        if !(lx.is_finite() && lz.is_finite() && rx.is_finite() && rz.is_finite()) {
+            continue;
+        }
+        // **Opposite directions, or nothing.** In a cycle authored in place the
+        // planted foot slides backwards at the ground speed while the swinging
+        // one travels forwards to catch up, so their horizontal velocities point
+        // opposite ways. When they point the SAME way the character is in
+        // flight and neither foot is carrying it — a sample that means nothing
+        // about ground speed, dropped rather than averaged in. That is the whole
+        // reason a sprint under-read before: half of its cycle is flight.
+        if lx * rx + lz * rz >= 0.0 {
+            continue;
+        }
+        // Of the two, the LOWER is the planted one. Height identifies the foot;
+        // speed is then read off THAT foot rather than off whichever happens to
+        // be slower — measured, the two are not the same choice: "the slower"
+        // reads walk 1.355 / run 1.950 / sprint 3.018, because at speed the
+        // swing foot is momentarily slower than the planted one at the top of
+        // its arc and the rule then answers with the wrong leg.
+        let planted = if l[i].pos.y <= r[i].pos.y {
+            (lx, lz)
+        } else {
+            (rx, rz)
+        };
+        samples.push((planted.0 * planted.0 + planted.1 * planted.1).sqrt());
+    }
+    if samples.is_empty() {
+        return 0.0;
+    }
+    // The MEDIAN, because the samples either side of a changeover are a foot
+    // that has just set down and has not taken the load yet. An order statistic
+    // is deaf to them; a mean is not. It is also `total_cmp`, so the sort is
+    // total and the answer is byte-stable.
+    samples.sort_by(f32::total_cmp);
+    samples[samples.len() / 2]
 }
 
 /// Contact windows, foot by foot, off a grid and traces the caller already has.
@@ -1155,7 +1302,8 @@ fn derived_curves(
     plants: &[FootPlant],
     duration: f32,
     gait: f32,
-    stride_speed_mps: f32,
+    stance_speed_mps: f32,
+    contact_lift_m: f32,
 ) -> Vec<CurveChannel> {
     let mut out = Vec::new();
     // The clip's ground speed, from the distance track's own slope.
@@ -1188,9 +1336,9 @@ fn derived_curves(
     // where the root had got to would be told a story. This channel asks a
     // different question and gets the honest answer to that one.
     let root_travels = speed.iter().any(|v| v.abs() >= STRIDE_DEPICTS_FLOOR_MPS);
-    if !root_travels && stride_speed_mps >= STRIDE_DEPICTS_FLOOR_MPS {
+    if !root_travels && stance_speed_mps >= STRIDE_DEPICTS_FLOOR_MPS {
         for v in speed.iter_mut() {
-            *v = stride_speed_mps;
+            *v = stance_speed_mps;
         }
     }
     out.push(CurveChannel::new(
@@ -1212,24 +1360,55 @@ fn derived_curves(
             trace.iter().map(|s| s.speed).collect(),
             Interpolation::Linear,
         ));
+        let locked: Vec<f32> = foot_times
+            .iter()
+            .map(|t| {
+                let locked = plants.iter().any(|p| {
+                    p.joint == joint
+                        && ((*t >= p.start_s && *t <= p.end_s)
+                            || (p.end_s > duration && *t <= p.end_s - duration))
+                });
+                if locked {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        // **THE FOOT-IK GATE** (wave CHAR1b.2) — see `ENABLE_FOOT_IK_PREFIX` for
+        // why it is derived at all.
+        //
+        // The plant window says when the foot is *locked*; the gate says when it
+        // is *on the ground*, and the two differ in exactly one case: a foot that
+        // never leaves the ground gets no plant window (`foot_plants` refuses a
+        // clip with no step in it, which is right — an idle has no footstep) and
+        // must still take foot IK, because a standing character is the case foot
+        // IK exists for.
+        //
+        // `Linear`, not `Step`: this is a WEIGHT and a weight that jumps is an
+        // ankle that jumps. The lock channel above stays `Step` because it is a
+        // window and its consumer may only engage or release.
+        let lift = trace
+            .iter()
+            .map(|s| s.pos.y)
+            .fold(f32::NEG_INFINITY, f32::max)
+            - trace.iter().map(|s| s.pos.y).fold(f32::INFINITY, f32::min);
+        let grounded_throughout = lift.is_finite() && lift <= contact_lift_m;
+        let enable: Vec<f32> = if grounded_throughout {
+            vec![1.0; foot_times.len()]
+        } else {
+            locked.clone()
+        };
+        out.push(CurveChannel::new(
+            format!("{ENABLE_FOOT_IK_PREFIX}{suffix}"),
+            foot_times.to_vec(),
+            enable,
+            Interpolation::Linear,
+        ));
         out.push(CurveChannel::new(
             format!("{FOOT_LOCK_PREFIX}{suffix}"),
             foot_times.to_vec(),
-            foot_times
-                .iter()
-                .map(|t| {
-                    let locked = plants.iter().any(|p| {
-                        p.joint == joint
-                            && ((*t >= p.start_s && *t <= p.end_s)
-                                || (p.end_s > duration && *t <= p.end_s - duration))
-                    });
-                    if locked {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect(),
+            locked,
             Interpolation::Step,
         ));
     }

@@ -47,7 +47,8 @@ fn print_help() {
              inf-import --manifest <manifest.json> --into <project-dir>\n             \
              [--pack <name>]… [--max-texture <n>] [--dest <sub>]\n             \
              [--bind <Stem>=<material-key>]… [--no-meshes]\n             \
-             [--character-lods <n>] [--retarget-to <objpath>] [--dry-run]\n\n\
+             [--character-lods <n>] [--retarget-to <objpath>] [--dry-run]\n  \
+             inf-import --into <project-dir> --rebind-graph <m|f>\n\n\
          The manifest is written by tools/ue-export/export.py. A --bind writes\n\
          an imported material at the GUID the committed ground library assigns\n\
          that stem, so a committed level picks it up without naming licensed\n\
@@ -64,6 +65,12 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut manifest: Option<PathBuf> = None;
     let mut into: Option<PathBuf> = None;
     let mut dry = false;
+    // **Rebuild a committed identity's locomotion graph and nothing else**
+    // (wave CHAR1b.2). See `ue_import::rebind_graphs` for why this is its own
+    // verb rather than a side effect of `--rebind-character`: the island's hero
+    // wears a body from one manifest and plays clips from another, so re-running
+    // a body rebind to pick up a new map row swaps the character.
+    let mut rebind_graphs: Vec<String> = Vec::new();
     let mut opts = UeImportOptions::default();
     let mut i = 0;
     while i < args.len() {
@@ -101,18 +108,46 @@ fn run(args: &[String]) -> Result<(), String> {
             "--retarget-to" => opts.retarget_to = Some(take(&mut i)?),
             "--rebind-character" => opts.rebind_character = Some(take(&mut i)?),
             "--rebind-character-f" => opts.rebind_character_f = Some(take(&mut i)?),
+            "--rebind-graph" => rebind_graphs.push(take(&mut i)?),
             "--dry-run" => dry = true,
             other => return Err(format!("unknown option {other:?}")),
         }
         i += 1;
     }
-    let manifest = manifest.ok_or("--manifest is required")?;
     let into = into.ok_or("--into is required")?;
     let content = if into.join("Content").is_dir() {
         into.join("Content")
     } else {
         into.clone()
     };
+    // The graph-only verb needs no manifest at all: every clip it binds is
+    // already in the project.
+    if !rebind_graphs.is_empty() {
+        let mut project = AssetProject::open(&content).map_err(|e| e.to_string())?;
+        let mut stems: Vec<(inf_editor_core::character::CharacterIds, &str)> = Vec::new();
+        for which in &rebind_graphs {
+            match which.as_str() {
+                "m" | "male" | "Starter" => stems.push((
+                    inf_editor_core::samples::starter_character_ids(),
+                    "Starter_Locomotion",
+                )),
+                "f" | "female" | "Starter_F" => stems.push((
+                    inf_editor_core::samples::starter_character_f_ids(),
+                    "Starter_F_Locomotion",
+                )),
+                other => return Err(format!("--rebind-graph wants `m` or `f`, got {other:?}")),
+            }
+        }
+        let report = inf_editor_core::assets::ue_import::rebind_graphs(&mut project, &stems);
+        for a in &report.advisories {
+            println!("inf-import: ADVISORY {a}");
+        }
+        for (stem, id) in &report.rebinds {
+            println!("inf-import: REBOUND  {stem} -> {id}");
+        }
+        return Ok(());
+    }
+    let manifest = manifest.ok_or("--manifest is required")?;
     println!("inf-import: manifest {}", manifest.display());
     println!("inf-import: content  {}", content.display());
     println!(

@@ -95,6 +95,15 @@ const TURN_SETTLE_DEG: f64 = 1.0;
 /// jump, not a climb.
 const MANTLE_MIN_INPUT: f64 = 0.1;
 
+/// The weight below which a foot's IK goal is **withdrawn** rather than
+/// published faintly (wave CHAR1b.2).
+///
+/// `interp_to` is an exponential chase, so a gate that has gone to zero leaves
+/// the weight at 1e-4 for ever; a goal at that strength is a request nothing
+/// acts on and a residual nothing produced. One per cent is below anything a
+/// viewer can see and far above the tail.
+const FOOT_IK_MIN_WEIGHT: f64 = 0.01;
+
 /// Build the kinematic mover for `guid` from its components — **the one
 /// construction site**, replacing the byte-identical `build_mover3d` pair the
 /// two hosts each carried (IM-2b).
@@ -2260,17 +2269,36 @@ fn step_feet(
         // `ResetIKOffsets` (`ALSCharacterAnimInstance.cpp:320-340`) blends foot
         // IK out with, and it is the constant used here — one of the six ALS
         // interpolation speeds P29.4 ported and nothing had called.
-        let authored = inf_ecs::anim_bridge::anim_curve_opt(world, guid, enable_name);
+        let want = f64::from(
+            inf_ecs::anim_bridge::anim_curve_opt(world, guid, enable_name)
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0),
+        );
         let lock_curve = inf_ecs::anim_bridge::anim_curve(world, guid, lock_name, 0.0);
-        let planted_curve = inf_ecs::anim_bridge::anim_curve_opt(world, guid, lock_name);
-        let want = f64::from(match (authored, planted_curve) {
-            (Some(a), _) => a,
-            (None, Some(p)) => p.clamp(0.0, 1.0),
-            (None, None) => 1.0,
-        });
+        // **The curve IS the ramp.** ALS applies `Enable_FootIK_*` straight to
+        // the offset alpha (`SetFootOffsets`, `ALSCharacterAnimInstance.cpp:
+        // 464-535`) and the animator's curve carries its own ease; the deriver
+        // writes this one with `Linear` interpolation for exactly that reason.
+        // An `interp_to` chase on top was measured and is a ceiling, not a
+        // smoother: at `IK_ResetInterpSpeed` a stance of 0.1 s reaches only
+        // 0.78, so the island's sprint gate peaked at **0.8632** and the walk's
+        // at 0.9711 — the foot was never fully placed at any gait, and the
+        // residual measured a solve that had been told to do most of nothing.
         let w = &mut cm.runtime.foot_ik_weight[side];
-        *w = inf_anim::interp_to(*w, want, inf_anim::foot::RESET_INTERP, dt).clamp(0.0, 1.0);
-        let enable = *w as f32;
+        *w = want;
+        // **Withdrawn, not merely faint.** `interp_to` is an exponential chase
+        // and never reaches zero, so a weight left to decay keeps publishing a
+        // goal at a strength that moves nothing — and the residual then measures
+        // "the IK did not run" while reading like "the IK missed". Below the
+        // floor the goal is dropped and no residual is published for that foot,
+        // which is what "the mechanism deliberately did not run" has to look
+        // like. Measured before it: an idle whose gate is 0 published 844 goals
+        // at ~0 weight and a 19.65 mm mean residual that nothing was solving.
+        let enable = if *w < FOOT_IK_MIN_WEIGHT {
+            0.0
+        } else {
+            *w as f32
+        };
         enables[side] = enable;
         let posed = state.world.to_dvec3();
 
