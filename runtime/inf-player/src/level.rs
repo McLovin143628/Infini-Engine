@@ -1946,22 +1946,64 @@ pub fn load_pcg_payloads_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, PcgAssetP
     out
 }
 
-/// Read every P11 animation asset of extension `ext` in `dir` (non-recursive)
-/// **keyed by its asset GUID** (from the sibling inf_asset `.toml` sidecar) — the
-/// dev-dir twin of the pack anim loaders (P11.4). Files without a readable
-/// sidecar/GUID or a decodable payload are skipped. Deterministic (path-sorted).
+/// Every file under `dir` whose extension is `ext`, **recursively**, in a
+/// deterministic order (each directory's own entries sorted, parents before
+/// children).
+///
+/// Dot-directories are skipped: a project's content root carries
+/// `Content/.inf/import-cache`, whose files are content-addressed copies of
+/// assets that also live outside it, and a walk that read both would register two
+/// paths for one GUID.
+fn payload_files_deep(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for p in entries {
+        if p.is_dir() {
+            let hidden = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with('.'));
+            if !hidden {
+                dirs.push(p);
+            }
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) == Some(ext) {
+            out.push(p);
+        }
+    }
+    for d in dirs {
+        payload_files_deep(&d, ext, out);
+    }
+}
+
+/// Read every P11 animation asset of extension `ext` under `dir` — **the whole
+/// tree**, not one directory — **keyed by its asset GUID** (from the sibling
+/// inf_asset `.toml` sidecar): the dev-dir twin of the pack anim loaders (P11.4).
+/// Files without a readable sidecar/GUID or a decodable payload are skipped.
+/// Deterministic (path-sorted, parents before children).
+///
+/// # Why it walks the tree (audit CHAR1b.1)
+///
+/// It read **one directory** until this audit, and the PIE payload (which
+/// resolves by GUID out of the editor's database) did not — so the two hosts
+/// loaded different worlds the moment a project put its clips in a subfolder.
+/// The island's do: `inf-import --dest UE` writes them under `Content/UE/…`, so a
+/// `--level` boot of the island resolved **0 of the 65** clips the hero's
+/// locomotion graph names and posed every state at the bind pose, while a PIE
+/// session over the same document animated. Every island arm of `char1a3_gate`,
+/// `char1b_gate` and `island_gate` runs on THIS door, so the gates measured the
+/// host that could not see the content.
 pub fn load_anim_assets_by_guid_from_dir<T: inf_asset::AssetPayload>(
     dir: &Path,
     ext: &str,
 ) -> HashMap<Uuid, T> {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some(ext))
-            .collect(),
-        Err(_) => return HashMap::new(),
-    };
-    files.sort();
+    let mut files: Vec<PathBuf> = Vec::new();
+    payload_files_deep(dir, ext, &mut files);
     let mut out = HashMap::new();
     for p in files {
         let Ok(side) = inf_asset::AssetSidecar::load(&p) else {

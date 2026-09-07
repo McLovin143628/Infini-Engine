@@ -435,6 +435,61 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         looping: false,
         clips: &[("ALS_CLF_GetUp_Back", O)],
     },
+    // ── the STANCE overlays (audit CHAR1b.1) ─────────────────────────────────
+    //
+    // ALS's overlay state machine has one state per `EALSOverlayState`, and the
+    // enum's first five — `Default`, `Masculine`, `Feminine`, `Injured`,
+    // `HandsTied` (`ALSCharacterEnumLibrary.h:65-80`) — are served by the five
+    // `ALS_StanceVariation_*` sequences, not by a prop pose set. The map named
+    // the eight prop overlays and none of these, which left a **shipped set**
+    // unbound and made an unbound row indistinguishable from a missing import,
+    // the very thing clause 2's rule exists to prevent.
+    //
+    // Inert exactly as the weapon overlays are, and for the same reason: nothing
+    // drives an overlay stack yet (WPN1's), so a row here is a name the layer
+    // door can resolve and one `SmState` in the file.
+    //
+    // **`Default` is not why the hero's arms hang wide** — that was measured, not
+    // assumed. On the donor's own rig `ALS_N_Pose` holds the upper arms at
+    // **13.59°** from vertical and `ALS_StanceVariation_Normal` at
+    // **14.82°/14.46°**, so layering the default overlay moves the arms OUT by
+    // about a degree. The wide arms were a clip bound to the wrong rig; see
+    // `ue_import::rebind_locomotion_graph`.
+    LocoSlot {
+        state: "overlay_default",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("ALS_StanceVariation_Normal", O)],
+    },
+    LocoSlot {
+        state: "overlay_masculine",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("ALS_StanceVariation_Masculine", O)],
+    },
+    LocoSlot {
+        state: "overlay_feminine",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("ALS_StanceVariation_Feminine", O)],
+    },
+    LocoSlot {
+        state: "overlay_injured",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("ALS_StanceVariation_Injured", O)],
+    },
+    LocoSlot {
+        state: "overlay_hands_tied",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("ALS_StanceVariation_HandsTied", O)],
+    },
     // ── the weapon overlays (WPN1's items; the additive layer plays them) ─────
     LocoSlot {
         state: "overlay_m4a1",

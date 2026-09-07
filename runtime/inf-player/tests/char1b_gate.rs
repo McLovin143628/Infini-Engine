@@ -2201,3 +2201,173 @@ fn the_editor_door_gives_the_pawn_flag_to_the_first_character_only() {
     }
     println!("\n=== 21 characters placed, the pawn is still the first: {first} ===");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (9) THE POSE THE HERO ACTUALLY DRAWS  (audit CHAR1b.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **THE ISLAND'S HERO DRAWS THE CLIPS ITS GRAPH NAMES, ON THE BONES THEY NAME.**
+///
+/// The wave's own table arm walks `LOCOMOTION_MAP` against the project's clip
+/// FILES and the bridge arm counts states; neither of them ever asked what the
+/// hero's joints did, and both were green while the character stood in its bind
+/// pose at every gait. Two independent defects hid behind them:
+///
+/// 1. **The dev-dir loader read one directory.** `inf-import --dest UE` writes a
+///    project's clips under `Content/UE/…`, so a `--level` boot resolved **0 of
+///    65** clip GUIDs and posed every state at rest — while a PIE session over
+///    the same document, which resolves by GUID out of the editor's database,
+///    animated. Every island arm in this file runs on the loose door, so the
+///    gates measured the host that could not see the content.
+/// 2. **The clips were bound to another rig.** `inf_anim::pose::sample_clip`
+///    addresses `JointTrack::joint` as an INDEX. The ALS sequences are authored
+///    on the donor's 161-joint mannequin; the hero is a 342-joint MetaHuman, and
+///    only the first **twelve** joint indices carry the same name. Measured
+///    before the fix: of `ALS_N_Pose`'s 71 tracks, **59 landed on a bone of
+///    another name** — the hero's upper arms sat at 13.59° / **44.90°** instead
+///    of the donor's symmetric 13.59°, its fingers twisted up to 172°, and its
+///    legs never left the bind pose at any gait.
+///
+/// So this arm asks the world, not the report: the graph's clips resolve through
+/// the **runtime's own loader**, every one of them is authored on the rig that
+/// plays it, and the drawn pose is neither the bind pose nor an asymmetric one.
+///
+/// **Mutations that red it**: make `payload_files_deep` read one directory (the
+/// pose falls to bind — 12 joints move, all of them foot IK); skip the retarget
+/// in `rebind_locomotion_graph` and re-import (the arms come out 21.7° apart).
+#[test]
+fn the_islands_hero_draws_the_clips_its_graph_names() {
+    let Some(content) = island_project() else {
+        eprintln!(
+            "SKIP: no island project at ../island-build/project/Content — the \
+             island is local-only content and CI has none"
+        );
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+
+    // (a) THE LOADER. Through the runtime's own door, not a test's.
+    let (rigs, clips, machines) = inf_player::level::load_anim_assets_from_dir(&content);
+    println!(
+        "\n=== the loose loader sees {} skeletons, {} clips, {} machines ===",
+        rigs.len(),
+        clips.len(),
+        machines.len()
+    );
+
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..600 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let sm = sim
+        .world()
+        .entity_of(hero)
+        .and_then(|e| sim.world().world().get::<AnimStateMachine>(e))
+        .and_then(|s| s.sm)
+        .expect("the hero names a state machine");
+    let asset = machines.get(&sm).expect("its machine is on disk");
+
+    // (b) EVERY CLIP THE GRAPH NAMES RESOLVES, AND NAMES THIS RIG.
+    let rig_guid = inf_ecs::pose::evaluated_pose(sim.world(), hero)
+        .expect("the hero was posed")
+        .skeleton;
+    let refs = asset.machine.clip_refs();
+    let mut missing = 0usize;
+    let mut foreign: Vec<String> = Vec::new();
+    for r in &refs {
+        let id = Uuid::from_bytes(*r);
+        match clips.get(&id) {
+            None => missing += 1,
+            Some(c) => {
+                if c.skeleton.map(Uuid::from_bytes) != Some(rig_guid) {
+                    foreign.push(c.clip.name.clone());
+                }
+            }
+        }
+    }
+    println!(
+        "  the hero's graph: {} states, {} clip refs — {missing} unresolved, {} on \
+         another rig",
+        asset.machine.states.len(),
+        refs.len(),
+        foreign.len()
+    );
+    assert_eq!(
+        missing,
+        0,
+        "{missing} of the {} clips the hero's locomotion graph names do not resolve \
+         through the loose loader — the host that boots a `--level` poses every \
+         state at rest while PIE animates",
+        refs.len()
+    );
+    assert!(
+        foreign.is_empty(),
+        "{} clip(s) the hero's graph plays are authored on another skeleton \
+         ({:?}…) — a track is an INDEX into the pose, so every one of them drives \
+         a bone of a different name",
+        foreign.len(),
+        foreign.iter().take(4).collect::<Vec<_>>()
+    );
+
+    // (c) THE POSE. Not the bind pose, and not lopsided.
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero)
+        .expect("the hero was posed")
+        .clone();
+    let rig = rigs.get(&ep.skeleton).expect("the hero's rig is on disk");
+    let rest = inf_anim::Pose::rest(&rig.skeleton);
+    let names: Vec<&str> = rig
+        .skeleton
+        .joints()
+        .iter()
+        .map(|j| j.name.as_str())
+        .collect();
+    let moved = (0..names.len())
+        .filter(|&i| {
+            glam::Quat::from_array(ep.pose.locals[i].rotation)
+                .angle_between(glam::Quat::from_array(rest.locals[i].rotation))
+                .to_degrees()
+                > 0.5
+        })
+        .count();
+    let globals = inf_anim::pose::global_transforms(&rig.skeleton, &ep.pose);
+    let abduction = |up: &str, low: &str| -> f32 {
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(up));
+        let j = names.iter().position(|n| n.eq_ignore_ascii_case(low));
+        let (Some(i), Some(j)) = (i, j) else {
+            return f32::NAN;
+        };
+        let a = globals[i].to_scale_rotation_translation().2;
+        let b = globals[j].to_scale_rotation_translation().2;
+        (b - a)
+            .normalize()
+            .dot(glam::Vec3::NEG_Y)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    };
+    let l = abduction("upperarm_l", "lowerarm_l");
+    let r = abduction("upperarm_r", "lowerarm_r");
+    println!(
+        "  state {:?}: {moved} of {} joints off the bind pose; upper-arm abduction \
+         L {l:.2}° R {r:.2}°",
+        inf_ecs::anim_bridge::anim_state(sim.world(), hero).map(|s| s.name.clone()),
+        names.len()
+    );
+    assert!(
+        moved >= 30,
+        "only {moved} of the hero's {} joints are off the bind pose — the four \
+         that foot IK moves are pelvis, both thighs and both calves, so this is a \
+         character standing in its rig's A-pose while its machine reports a state",
+        names.len()
+    );
+    assert!(
+        (l - r).abs() < 1.0,
+        "the hero's upper arms hang {l:.2}° and {r:.2}° from vertical — the idle \
+         ALS ships is symmetric, so a difference this size is a track landing on \
+         a bone it does not name"
+    );
+}

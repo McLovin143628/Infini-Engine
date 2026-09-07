@@ -2059,6 +2059,119 @@ fn rebind_locomotion_graph(
         }
         hit
     };
+    // **…AND ONTO THE RIG THAT WILL PLAY IT** (audit CHAR1b.1).
+    //
+    // A clip's coupling to a skeleton is POSITIONAL — `inf_anim::pose::sample_clip`
+    // addresses `JointTrack::joint` as an index into the target's joint list and
+    // has nothing to refuse a clip authored on another rig with. The ALS
+    // sequences are exported and retargeted in the MANNEQUIN manifest, onto that
+    // manifest's own 161-joint rig; the hero is a 342-joint MetaHuman written by
+    // a different manifest. Binding the donor's clips straight into this
+    // identity's graph therefore pointed every track past the twelfth joint at a
+    // different bone: measured on the island, `ALS_N_Pose` has 71 tracks and
+    // **59 of them landed on a bone of another name** — `lowerarm_l`'s rotation
+    // on `upperarm_correctiveRoot_l`, `hand_l`'s on `pinky_01_l`, `upperarm_r`'s
+    // on `ring_01_side_out_l` — so the hero's arms hung at 13.59°/44.90° instead
+    // of the donor's symmetric 13.59°, its legs never left the bind pose at any
+    // gait, and its fingers twisted up to 172°.
+    //
+    // This is `retarget_committed_clips`' rule (immediately above) applied to the
+    // clips this door binds, and it is the third appearance of carried item 95:
+    // the first was a pack's own clips after a rebind, the second a stale rig
+    // hash, this one a new door that resolves clips it did not import.
+    //
+    // The retargeted copy is written **per identity** at a GUID derived from the
+    // identity's machine and the donor's name, so a re-import overwrites its own
+    // output (carried 94's rule) and the male and female bodies do not fight over
+    // one file. A clip already on this rig is bound as it is.
+    let target_rig: Option<inf_anim::Skeleton> = ids
+        .skeleton
+        .and_then(|id| project.load_payload::<inf_anim::SkeletonAsset>(id).ok())
+        .map(|a| a.skeleton);
+    let want_rig = ids.skeleton.map(|s| *s.uuid().as_bytes());
+    let mut retargeted: BTreeMap<String, AssetId> = BTreeMap::new();
+    let mut src_rigs: BTreeMap<[u8; 16], Option<inf_anim::Skeleton>> = BTreeMap::new();
+    let names: Vec<&'static str> = inf_anim::als::LOCOMOTION_MAP
+        .iter()
+        .flat_map(|s| s.clips.iter().map(|(n, _)| *n))
+        .collect();
+    for name in names {
+        let Some(id) = find(name) else {
+            continue;
+        };
+        let Some(target) = target_rig.as_ref() else {
+            // No rig to retarget onto: bind what is there and say so once.
+            retargeted.insert(name.to_string(), id);
+            continue;
+        };
+        let Ok(payload) = project.load_payload::<inf_anim::AnimClipAsset>(id) else {
+            continue;
+        };
+        if payload.skeleton == want_rig {
+            retargeted.insert(name.to_string(), id);
+            continue;
+        }
+        let Some(src_id) = payload.skeleton else {
+            report.advisories.push(format!(
+                "{stem}: `{name}` names no skeleton, so it cannot be retargeted onto \
+                 this body -- it is bound as it is and will animate whatever bone \
+                 each track's index happens to be"
+            ));
+            retargeted.insert(name.to_string(), id);
+            continue;
+        };
+        let src = src_rigs.entry(src_id).or_insert_with(|| {
+            project
+                .load_payload::<inf_anim::SkeletonAsset>(AssetId(uuid::Uuid::from_bytes(src_id)))
+                .ok()
+                .map(|a| a.skeleton)
+        });
+        let Some(src) = src.as_ref() else {
+            report.advisories.push(format!(
+                "{stem}: `{name}` is authored on a rig this project does not hold, so \
+                 it cannot be retargeted -- the slot is left unbound"
+            ));
+            continue;
+        };
+        let map = inf_anim::retarget::RetargetMap::shared_names(src, target);
+        let (clip, rep) = inf_anim::retarget::retarget_clip(&payload.clip, src, target, &map, true);
+        if rep.is_vacuous() {
+            report.advisories.push(format!(
+                "{stem}: retargeting `{name}` onto this body produced NO tracks ({} \
+                 source joints, none named on the {} of this rig) -- the slot is left \
+                 unbound rather than bound to a clip that would pose a bind pose",
+                src.len(),
+                target.len()
+            ));
+            continue;
+        }
+        let out = inf_anim::AnimClipAsset::new(clip, want_rig);
+        // **The file's own name may not look like the donor's** (audit
+        // CHAR1b.1, measured the hard way). `find` above resolves a donor name
+        // against the project's `.inf_anim` stems and REFUSES an ambiguous
+        // match; a copy written as `ALS_N_Pose.inf_anim` is a second stem that
+        // matches `ALS_N_Pose`, so the male identity's output made every one of
+        // the female's sixty-five lookups ambiguous and her machine came out with
+        // **0 states**. `{donor}--{stem}` matches neither `stem == name` nor
+        // `stem.ends_with("_{name}")`, because the character before the donor's
+        // name is a hyphen.
+        let path = project
+            .root()
+            .join(format!("{stem}-loco"))
+            .join(format!("{name}--{stem}.inf_anim"));
+        let id_out = clip_guid(&format!("{stem}:loco:{name}"));
+        let deps: Vec<AssetId> = ids.skeleton.into_iter().collect();
+        let import = super::skeleton_binding::import_table(project, ids.skeleton);
+        match project.write_asset_at_with_id(&path, &out, id_out, deps, import) {
+            Ok(id_out) => {
+                retargeted.insert(name.to_string(), id_out);
+            }
+            Err(e) => report
+                .advisories
+                .push(format!("{stem}: `{name}` was not re-retargeted ({e})")),
+        }
+    }
+    let find = |name: &str| -> Option<AssetId> { retargeted.get(name).copied() };
     let (machine, bind) = inf_anim::als::build_locomotion_graph(&|name: &str| {
         find(name).map(|id| *id.uuid().as_bytes())
     });
