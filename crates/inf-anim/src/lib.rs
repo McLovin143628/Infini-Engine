@@ -209,8 +209,9 @@ pub use template::{
 };
 pub use text::{cond_text, from_toml, parse_cond, to_toml, TextError};
 pub use warp::{
-    distance_match, height_remap, play_rate_for, warp_ease, warp_offset, warp_yaw_deg, HeightRemap,
-    WarpWindow, MANTLE_HIGH_SPLIT_M,
+    distance_match, height_remap, play_rate_for, stop_distance_m, stride_play_rate, warp_ease,
+    warp_offset, warp_yaw_deg, HeightRemap, WarpWindow, MANTLE_HIGH_SPLIT_M, MAX_PLAY_RATE,
+    MIN_PLAY_RATE, STRIDE_SPEED_FLOOR_MPS,
 };
 
 /// `v > 0.0`, written once so the **NaN-rejecting** form reads as intent rather

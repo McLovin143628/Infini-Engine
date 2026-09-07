@@ -1258,7 +1258,42 @@ pub fn step_pose_evaluation<'c>(
         let started_before = rt.started;
         {
             let lookup = |name: &str| actor_vars.get(name).copied();
-            let ctx = SmContext::with_clip_lengths(&lookup, &clip_len);
+            // ── STRIDE WARPING and the MANTLE's start position (CHAR1b.2) ──
+            //
+            // Two per-entity, per-step decisions the machine cannot make for
+            // itself, both read off the parameter overlay the movement step has
+            // just published:
+            //
+            // * `play_rate` — the ratio of the character's own ground speed to
+            //   the speed its blended clip depicts, so the feet travel at the
+            //   ground's speed instead of the animator's
+            //   (`inf_anim::stride_play_rate`). `1.0` for a character with no
+            //   movement component, which is the pre-CHAR1b.2 behaviour to the
+            //   bit.
+            // * the mantle's entry offset — ALS's `StartingPosition`, the clip
+            //   time a ledge of this height should be climbed from
+            //   (`MantleState::clip_start_s`, computed since P29.4 and consumed
+            //   here for the first time). The state it names is whichever of the
+            //   three mantle rows `mantle` selects, so a low ledge starts the
+            //   1 m clip part-way through and a high one starts the 2 m clip at
+            //   its beginning.
+            let play_rate = actor_vars
+                .get(crate::anim_bridge::params::PLAY_RATE)
+                .copied()
+                .unwrap_or(1.0);
+            let mut ctx =
+                SmContext::with_clip_lengths(&lookup, &clip_len).with_play_rate(play_rate);
+            let mantle_state = actor_vars
+                .get(crate::anim_bridge::params::MANTLE)
+                .copied()
+                .and_then(inf_anim::als::mantle_state_name);
+            let mantle_start = actor_vars
+                .get(crate::anim_bridge::params::MANTLE_START)
+                .copied()
+                .unwrap_or(0.0);
+            if let Some(name) = mantle_state {
+                ctx = ctx.with_entry_offset(name, mantle_start);
+            }
             // **The blender advances the machine AND evaluates the pose** (P29.2),
             // because inertialization is not a post-pass: it has to collapse the
             // fade the transition just set up *before* `eval_pose` runs, which is

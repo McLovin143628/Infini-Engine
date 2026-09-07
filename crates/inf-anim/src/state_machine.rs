@@ -1823,13 +1823,19 @@ fn advance_play(
         entered_now = true;
     }
 
+    // **The play-head's own step** (wave CHAR1b.2): every clip time below
+    // advances by `dt * ctx.play_rate()` and every *blend* clock by plain `dt`.
+    // See `SmContext::with_play_rate` for why the rate multiplies the increment
+    // rather than the accumulated time.
+    let clip_dt = dt * ctx.play_rate();
+
     // 3. Age an in-progress cross-fade; retire it when complete.
     if play.prev.is_some() {
         play.fade_t += dt;
         // **The outgoing pose advances** — the v1 frozen frame.
-        play.prev_time += dt;
+        play.prev_time += clip_dt;
         if play.carry.is_some() {
-            play.carry_time += dt;
+            play.carry_time += clip_dt;
         }
         if play.fade_dur <= 0.0 || play.fade_t >= play.fade_dur {
             play.prev = None;
@@ -1840,7 +1846,7 @@ fn advance_play(
         }
     }
 
-    play.state_time += dt;
+    play.state_time += clip_dt;
 
     // 5. Fire the highest-priority ready transition.
     let fading = play.prev.is_some();
@@ -1897,13 +1903,21 @@ fn advance_play(
             }
             _ => (None, 0.0, 0.0),
         };
+        // **Where the new state's clock starts** (wave CHAR1b.2). Zero, unless
+        // the caller asked for this state by name — see
+        // `SmContext::with_entry_offset`.
+        let entry_s = sm
+            .states
+            .get(tr.to)
+            .map(|s| ctx.entry_offset(&s.name))
+            .unwrap_or(0.0);
         *play = Play {
             current: tr.to,
             prev: Some(left),
             prev_time: play.state_time,
             fade_t: 0.0,
             fade_dur: tr.duration.max(0.0),
-            state_time: 0.0,
+            state_time: entry_s,
             started: true,
             carry,
             carry_time,
@@ -2112,6 +2126,8 @@ fn collect_true_triggers(
 pub struct SmContext<'a> {
     vars: &'a dyn Fn(&str) -> Option<f64>,
     clip_len: Option<&'a dyn Fn(ClipRef) -> Option<f64>>,
+    play_rate: f64,
+    entry_offset: Option<(&'a str, f64)>,
 }
 
 impl<'a> SmContext<'a> {
@@ -2122,6 +2138,8 @@ impl<'a> SmContext<'a> {
         Self {
             vars,
             clip_len: None,
+            play_rate: 1.0,
+            entry_offset: None,
         }
     }
 
@@ -2140,6 +2158,78 @@ impl<'a> SmContext<'a> {
         Self {
             vars,
             clip_len: Some(clip_len),
+            play_rate: 1.0,
+            entry_offset: None,
+        }
+    }
+
+    /// **The play rate this character's clips advance at** (wave CHAR1b.2), on
+    /// top of each state's own authored [`SmState::speed`].
+    ///
+    /// This is stride warping's seam ([`crate::stride_play_rate`]): the caller
+    /// measures the character's ground speed against the blended clip's own
+    /// depicted speed and hands the ratio in, and the machine advances its
+    /// play-heads by `dt * rate` so the *rate of advance* changes rather than
+    /// the phase — multiplying an elapsed time instead would jump the play-head
+    /// by `t * (r' - r)` on the step the rate moved, which is a pop.
+    ///
+    /// **Cross-fades are NOT scaled.** A blend is wall-clock: a transition
+    /// authored at 150 ms takes 150 ms whether the outgoing cycle is playing at
+    /// 0.6x or 2.4x. What scales is each play-head, incoming and outgoing alike.
+    ///
+    /// A non-finite or non-positive rate is refused and the default (`1.0`)
+    /// kept, because a machine that stopped advancing would look exactly like a
+    /// machine that had nothing to play.
+    pub fn with_play_rate(mut self, rate: f64) -> Self {
+        if rate.is_finite() && rate > 0.0 {
+            self.play_rate = rate;
+        }
+        self
+    }
+
+    /// The play rate set by [`with_play_rate`](Self::with_play_rate); `1.0` by
+    /// default.
+    pub fn play_rate(&self) -> f64 {
+        self.play_rate
+    }
+
+    /// **Enter the state named `state` at `seconds` into its motion** rather
+    /// than at zero, if the machine enters it on this step (wave CHAR1b.2).
+    ///
+    /// Two callers want exactly this and neither could have it:
+    ///
+    /// * **The mantle's height remap.** ALS's `MantleParams.StartingPosition`
+    ///   (`ALSMantleComponent.cpp:103-108`) maps the ledge height onto a clip
+    ///   time, so a 0.6 m ledge and a 1.2 m one share one animation by *starting
+    ///   at different points in it*. P29.4 computed that number
+    ///   (`HeightRemap::resolve`) and stored it on `MantleState::clip_start_s`,
+    ///   and nothing could consume it — a state machine had no way to enter a
+    ///   state anywhere but at its beginning.
+    /// * **Distance matching on a stop.** A stop clip carries a
+    ///   [`crate::channels::DistanceTrack`], and the frame to start it on is the
+    ///   one whose *remaining* travel equals the character's own remaining
+    ///   stopping distance — [`crate::distance_match`], which has had no caller
+    ///   since it was written.
+    ///
+    /// It is expressed on the CONTEXT rather than on the asset because it is a
+    /// per-entity, per-step decision: the same `.inf_sm` serves a character on a
+    /// 0.6 m ledge and one on a 2 m wall. Naming the state rather than its index
+    /// keeps the caller (which knows names) out of the machine's index space.
+    ///
+    /// Only the state that is *entered on this step* is affected; a state the
+    /// machine is already in keeps its clock.
+    pub fn with_entry_offset(mut self, state: &'a str, seconds: f64) -> Self {
+        if seconds.is_finite() && seconds > 0.0 {
+            self.entry_offset = Some((state, seconds));
+        }
+        self
+    }
+
+    /// The entry offset for `state`, or `0.0`.
+    pub fn entry_offset(&self, state: &str) -> f64 {
+        match self.entry_offset {
+            Some((name, s)) if name == state => s,
+            _ => 0.0,
         }
     }
 

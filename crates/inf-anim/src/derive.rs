@@ -65,6 +65,16 @@ use crate::roles::{BoneRoleKind, RoleIndex};
 use crate::root_motion::root_joint_index;
 use crate::skeleton::Skeleton;
 
+/// The slowest depicted ground speed worth writing onto [`MOVE_DATA_SPEED`],
+/// m/s (wave CHAR1b.2).
+///
+/// Below it a clip is an idle, an aim offset or a pose, and the stride the foot
+/// trace measures is a shuffle rather than a gait — writing it would make
+/// `inf_anim::stride_play_rate` divide by noise. It is the same floor that
+/// function refuses on, spelled once on each side of the wire because the two
+/// crates cannot see one constant.
+pub const STRIDE_DEPICTS_FLOOR_MPS: f32 = 0.20;
+
 /// The clip's own **ground speed**, metres per second, over its timeline.
 ///
 /// The stock sample bakes this by hand with `AM_MoveData_Speed`
@@ -424,6 +434,7 @@ pub fn derive_clip(
         &plants,
         clip.duration,
         gait,
+        stride_speed_mps,
     );
     let mut markers = derived_markers(&plants);
 
@@ -1144,6 +1155,7 @@ fn derived_curves(
     plants: &[FootPlant],
     duration: f32,
     gait: f32,
+    stride_speed_mps: f32,
 ) -> Vec<CurveChannel> {
     let mut out = Vec::new();
     // The clip's ground speed, from the distance track's own slope.
@@ -1153,6 +1165,33 @@ fn derived_curves(
         let dt = times[i1] - times[i0];
         let dd = distance.distance_m[i1] - distance.distance_m[i0];
         speed.push(if crate::positive(dt) { dd / dt } else { 0.0 });
+    }
+    // ── AN IN-PLACE CYCLE DEPICTS A SPEED TOO (wave CHAR1b.2) ────────────────
+    //
+    // The slope above is the ROOT's, and a locomotion cycle authored in place
+    // has no root travel — so this channel read **exactly 0.000 on every clip in
+    // the island project**, measured: 310 `.inf_anim`, every one of them,
+    // including `ALS_N_Sprint_F` and both mannequin `*_Walk_Fwd`. A channel that
+    // is zero everywhere is a channel with no information in it, and it is the
+    // one `inf_anim::stride_play_rate` divides by.
+    //
+    // `stride_and_speed` has answered the same question from the other end since
+    // P29.5 — stride length times cadence, measured off the feet, which is the
+    // definition of gait speed and does not care whether anything translated —
+    // and its answer went into a `DeriveReport` the runtime never sees. So: the
+    // root's slope where the root moves, the stride's constant where it does
+    // not. `MoveData_Speed` is documented as *the clip's own ground speed*, and
+    // for a cycle played in place that is what the stride depicts.
+    //
+    // The `DistanceTrack` is deliberately NOT synthesised the same way: it is
+    // documented as the ROOT's cumulative travel and a consumer that asked it
+    // where the root had got to would be told a story. This channel asks a
+    // different question and gets the honest answer to that one.
+    let root_travels = speed.iter().any(|v| v.abs() >= STRIDE_DEPICTS_FLOOR_MPS);
+    if !root_travels && stride_speed_mps >= STRIDE_DEPICTS_FLOOR_MPS {
+        for v in speed.iter_mut() {
+            *v = stride_speed_mps;
+        }
     }
     out.push(CurveChannel::new(
         MOVE_DATA_SPEED,

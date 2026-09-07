@@ -1643,7 +1643,43 @@ fn step_one(
         settings.braking_mps2,
         decelerating,
     );
-    cm.runtime.lean = cm.runtime.relative_accel;
+    // **The lean is INTERPOLATED, not copied** (wave CHAR1b.2, clause 6).
+    // `UpdateMovementValues` runs exactly these two lines
+    // (`ALSCharacterAnimInstance.cpp:633-638`) and the reason is mechanical:
+    // `relative_accel` is a step function on the frame the stick moves — a
+    // character starting from rest sees it go 0 -> 1 in one fixed step — and a
+    // body that snapped to full lean on one frame would read as a twitch.
+    // `interp_to` is the same exponential chase the foot offsets and the aim
+    // mask already use, so there is one smoothing rule in this file.
+    cm.runtime.lean = Vec2d::new(
+        inf_anim::interp_to(
+            cm.runtime.lean.x,
+            cm.runtime.relative_accel.x,
+            model::LEAN_INTERP,
+            dt,
+        ),
+        inf_anim::interp_to(
+            cm.runtime.lean.y,
+            cm.runtime.relative_accel.y,
+            model::LEAN_INTERP,
+            dt,
+        ),
+    );
+    // ── DISTANCE MATCHING's input (wave CHAR1b.2, clause 6) ──────────────────
+    //
+    //    How far this character will still travel, at the braking rate its own
+    //    curve gives at this speed. Zero while the stick is pushed, so "is this
+    //    character stopping" is a comparison against zero and the two stop clips
+    //    become a decision instead of the coincidence the CHAR1b.1 audit
+    //    measured at **0 steps of five run-and-stops**.
+    cm.runtime.stop_distance_m = if cm.runtime.intent_move.x.abs() + cm.runtime.intent_move.y.abs()
+        > 1.0e-3
+        || !cm.mode.is_grounded_family()
+    {
+        0.0
+    } else {
+        inf_anim::stop_distance_m(speed_after, settings.braking_mps2)
+    };
     // **Aim offsets** (P29.4, clause 7), over `Mask_AimOffset` — a `.inf_anim` v2
     // curve channel the pose step publishes for whatever state the machine is in.
     // A state that wants no aim offset authors a 1 and gets none, which is ALS's
@@ -1739,6 +1775,40 @@ fn step_one(
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
+    //
+    // ── 12a. **STRIDE WARPING's rate** (wave CHAR1b.2, clause 6).
+    //
+    //    The character's own ground speed over the speed the clip it is playing
+    //    depicts, read off the blended `MoveData_Speed` channel at the play-head
+    //    — the deriver's measurement of the clip, not three constants somebody
+    //    typed into a config the way ALS's `Config.Animated*Speed` are. Computed
+    //    HERE rather than inside the publisher so there is ONE number and a gate
+    //    can read the one the pose step used (`MovementRuntime::play_rate`)
+    //    instead of forming a second opinion.
+    //
+    //    The curve is last step's, because the pose step has not run yet — one
+    //    fixed step of latency on a quantity that changes with the gait, the same
+    //    latency `Mask_AimOffset` above already carries.
+    //
+    //    A mantle sets its own rate from the height remap and returns before
+    //    this line ever runs (`step_mantle`), so the two never fight.
+    let clip_mps = f64::from(inf_ecs::anim_bridge::anim_curve(
+        world,
+        guid,
+        inf_anim::derive::MOVE_DATA_SPEED,
+        0.0,
+    ));
+    cm.runtime.play_rate = inf_anim::stride_play_rate(speed_after, clip_mps);
+    // The component was written back at step 12 above, before this number
+    // existed; `lean` and `stop_distance_m` were derived at step 11 and are in
+    // that clone already. Only the rate is patched in, rather than the whole
+    // component re-cloned.
+    {
+        let w = world.world_mut();
+        if let Some(mut slot) = w.get_mut::<CharacterMovement>(entity) {
+            slot.runtime.play_rate = cm.runtime.play_rate;
+        }
+    }
     let overlay = overlays.id_of(&cm.overlay);
     inf_ecs::anim_bridge::publish_character_params(world, guid, &cm, overlay);
     if let Some(body) = bridge.body_of(guid) {
@@ -1849,6 +1919,14 @@ fn try_mantle(
         high: ledge.high,
         clip_start_s,
         play_rate,
+        // **Which hand leads** — ALS's `GetMantleAsset(MantleType,
+        // CurrentOverlayState)` (`ALSMantleComponent.h:48`, called at
+        // `.cpp:97`), made out of what this engine has. An overlay is what a
+        // character is *carrying*, and a character carrying something in its
+        // right hand reaches for the ledge with its left; the empty overlay is a
+        // character with both hands free and takes the right-handed clip.
+        // Latched here so a mantle cannot swap hands halfway up a wall.
+        left_hand: !cm.overlay.is_empty(),
     };
     true
 }
@@ -1901,6 +1979,19 @@ fn step_mantle(
     cm.runtime.grounded = false;
 
     let m = cm.runtime.mantle;
+    // **The mantle's animation plays at the remap's rate** (wave CHAR1b.2).
+    // `HeightRemap::resolve` has answered both halves of ALS's
+    // `MantleParams` — `StartingPosition` and `PlayRate`
+    // (`ALSMantleComponent.cpp:103-111`) — since P29.4, and neither had a
+    // consumer because the machine played no mantle clip at all. The rate rides
+    // the same `play_rate` seam stride warping uses, which is why a mantle does
+    // not need a second one: `step_mantle` returns before step 12a, so the
+    // gait's ratio never overwrites this.
+    cm.runtime.play_rate = if m.play_rate.is_finite() && m.play_rate > 0.0 {
+        m.play_rate
+    } else {
+        1.0
+    };
     let progress = inf_anim::warp_ease(m.alpha());
     let start = m.start.to_dvec3();
     let target_offset = m.target.to_dvec3() - start;
@@ -2009,6 +2100,7 @@ fn step_mantle(
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
+    //
     let overlay = overlays.id_of(&cm.overlay);
     inf_ecs::anim_bridge::publish_character_params(world, guid, &cm, overlay);
     if let Some(body) = bridge.body_of(guid) {
@@ -2134,8 +2226,51 @@ fn step_feet(
         let Some(state) = feet[side] else { continue };
         // **`None` is not `0.0`** — see this function's docs. A clip that authors
         // the gate is obeyed; a clip that says nothing is read as on.
-        let enable = inf_ecs::anim_bridge::anim_curve_opt(world, guid, enable_name).unwrap_or(1.0);
+        //
+        // ── THE SWING FOOT (wave CHAR1b.2, clause 6) ─────────────────────
+        //
+        // What "says nothing" fell back to was a flat `1.0`, and that is what the
+        // island's sprint residual was made of. Measured, on the hero, at
+        // 6.5 m/s: the goal is the ground under the foot, so a foot in the middle
+        // of its SWING — rising off the toe and travelling forward — was handed a
+        // target on the road and the solver spent every step dragging it back
+        // down. The residual peaked at **150.0 mm** on exactly the steps where
+        // `FootLock_*` had just gone to zero, and read **0.00 mm** on the steps
+        // where it was one. Foot IK was being asked to pin a foot that was in the
+        // air.
+        //
+        // ALS does not have this problem because a UE animator authors
+        // `Enable_FootIK_L/R` to zero across the swing. No clip in this engine
+        // carries it (the census in `char1b_gate`), and CHAR1b.1 proved the gate
+        // is not derivable from a foot's HEIGHT — an in-air cycle is authored
+        // with the root on the ground and its ankles sit where a walk's do. It
+        // *is* derivable from the foot's own **plant window**, which the P29.5
+        // deriver writes onto every clip as `FootLock_*`: that curve is the
+        // animator's own statement that this foot is down, which is the same
+        // statement `Enable_FootIK` makes.
+        //
+        // So the gate is the authored curve when there is one, the derived plant
+        // window when there is not, and a flat `1.0` only when the clip carries
+        // neither — which keeps every pre-CHAR1b.2 fixture behaving exactly as it
+        // did.
+        //
+        // **Chased, not switched.** `FootLock_*` is `Step`-interpolated, so it
+        // goes 0 -> 1 on one frame; a weight that followed it would snap the
+        // ankle. `interp_to` at ALS's own `IK_ResetInterpSpeed` is what
+        // `ResetIKOffsets` (`ALSCharacterAnimInstance.cpp:320-340`) blends foot
+        // IK out with, and it is the constant used here — one of the six ALS
+        // interpolation speeds P29.4 ported and nothing had called.
+        let authored = inf_ecs::anim_bridge::anim_curve_opt(world, guid, enable_name);
         let lock_curve = inf_ecs::anim_bridge::anim_curve(world, guid, lock_name, 0.0);
+        let planted_curve = inf_ecs::anim_bridge::anim_curve_opt(world, guid, lock_name);
+        let want = f64::from(match (authored, planted_curve) {
+            (Some(a), _) => a,
+            (None, Some(p)) => p.clamp(0.0, 1.0),
+            (None, None) => 1.0,
+        });
+        let w = &mut cm.runtime.foot_ik_weight[side];
+        *w = inf_anim::interp_to(*w, want, inf_anim::foot::RESET_INTERP, dt).clamp(0.0, 1.0);
+        let enable = *w as f32;
         enables[side] = enable;
         let posed = state.world.to_dvec3();
 

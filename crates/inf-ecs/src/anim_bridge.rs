@@ -741,6 +741,26 @@ pub mod params {
     /// **Whether a ragdolled character is on its back**, `1` or `0` — which of
     /// the two get-ups to play.
     pub const FACE_UP: &str = "face_up";
+    /// **Which mantle is running, and which hand leads it** (wave CHAR1b.2) —
+    /// `0` none, `1` low right-handed, `2` low left-handed, `3` high. See
+    /// [`inf_anim::als::MANTLE_VAR`].
+    pub const MANTLE: &str = inf_anim::als::MANTLE_VAR;
+    /// **How far the character will travel before it stops**, metres, and `0`
+    /// while the stick is still pushed (wave CHAR1b.2). The stop edges compare
+    /// against it, which is what makes a stop a decision taken *while moving*.
+    pub const STOP_DISTANCE: &str = inf_anim::als::STOP_DISTANCE_VAR;
+    /// **The clip time a running mantle's animation should be entered at**,
+    /// seconds — ALS's `StartingPosition` from the height remap. See
+    /// [`inf_anim::als::MANTLE_START_VAR`].
+    pub const MANTLE_START: &str = inf_anim::als::MANTLE_START_VAR;
+    /// **Stride warping's play rate** (wave CHAR1b.2) — the character's ground
+    /// speed over the blended clip's own depicted speed. Read by the POSE step
+    /// rather than by an edge.
+    pub const PLAY_RATE: &str = inf_anim::als::PLAY_RATE_VAR;
+    /// **Lean, left/right**, `[-1, 1]` — ALS's `LeanAmount.LR`.
+    pub const LEAN_X: &str = inf_anim::als::LEAN_X_VAR;
+    /// **Lean, forward/back**, `[-1, 1]` — ALS's `LeanAmount.FB`.
+    pub const LEAN_Y: &str = inf_anim::als::LEAN_Y_VAR;
 }
 
 /// **Publish a character's movement state into its machine's parameters**
@@ -842,7 +862,7 @@ pub fn publish_character_params(
     } else {
         0.0
     };
-    let values: [(&str, f64); 16] = [
+    let values: [(&str, f64); 22] = [
         (params::SPEED, planar),
         (params::GAIT, rt.mapped_speed),
         (params::GROUNDED, f64::from(u8::from(rt.grounded))),
@@ -859,6 +879,20 @@ pub fn publish_character_params(
         (params::TURN_DEG, turn),
         (params::PLANTED_FOOT, planted),
         (params::FACE_UP, f64::from(u8::from(rt.ragdoll.face_up))),
+        // ── wave CHAR1b.2 ────────────────────────────────────────────────────
+        (params::MANTLE, rt.mantle.param()),
+        (
+            params::MANTLE_START,
+            if rt.mantle.active {
+                rt.mantle.clip_start_s
+            } else {
+                0.0
+            },
+        ),
+        (params::STOP_DISTANCE, rt.stop_distance_m),
+        (params::PLAY_RATE, rt.play_rate),
+        (params::LEAN_X, rt.lean.x),
+        (params::LEAN_Y, rt.lean.y),
     ];
     with_bridge(world, |b| {
         let slot = b.params.entry(guid).or_default();

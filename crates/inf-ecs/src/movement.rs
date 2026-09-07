@@ -645,6 +645,15 @@ pub fn walk_run_blend(mapped: f64) -> f64 {
 /// The port map's IM-4: ALS finite-differences this from velocity, which is
 /// noisy at a variable frame rate and carries a networking hack. Our integrator
 /// knows what it commanded, so this takes the commanded acceleration directly.
+/// **How fast the lean chases the acceleration**, per second — ALS's
+/// `Config.GroundedLeanInterpSpeed` (`ALSCharacterAnimInstance.cpp:634-638`,
+/// and the same value is used for the in-air lean at `:679-680`).
+///
+/// The stock V4 value is `4.0`. Fed to [`inf_anim::interp_to`], the same
+/// exponential chase the foot offsets and the aim-offset mask already use, so
+/// there is one smoothing rule in this engine rather than three.
+pub const LEAN_INTERP: f64 = 4.0;
+
 pub fn relative_acceleration(
     accel_world: Vec2d,
     body_yaw_deg: f64,

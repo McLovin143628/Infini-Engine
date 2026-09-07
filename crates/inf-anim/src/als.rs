@@ -105,6 +105,71 @@ pub const TURN_DEG_VAR: &str = "turn_deg";
 pub const PLANTED_FOOT_VAR: &str = "planted_foot";
 /// **Whether a ragdolled character is on its back**, `1` or `0`.
 pub const FACE_UP_VAR: &str = "face_up";
+/// **Which mantle is running** (wave CHAR1b.2), and which hand leads it.
+///
+/// `0` none, `1` a low mantle led by the right hand, `2` a low mantle led by the
+/// left, `3` a high one. Four values in one parameter rather than two
+/// parameters, because ALS's own classification is one enum
+/// (`EALSMantleType` — `LowMantle`, `HighMantle`, `FallingCatch`) crossed with
+/// `GetMantleAsset(MantleType, CurrentOverlayState)`
+/// (`ALSMantleComponent.h:48`), which is where the 1 m clip's LH/RH pair comes
+/// from: a character carrying something in its right hand reaches with its left.
+pub const MANTLE_VAR: &str = "mantle";
+/// [`MANTLE_VAR`]'s value for a low mantle led by the right hand.
+pub const MANTLE_LOW_RH: f64 = 1.0;
+/// [`MANTLE_VAR`]'s value for a low mantle led by the left hand.
+pub const MANTLE_LOW_LH: f64 = 2.0;
+/// [`MANTLE_VAR`]'s value for a high mantle.
+pub const MANTLE_HIGH: f64 = 3.0;
+/// **The clip time a mantle's animation should be entered at**, seconds — ALS's
+/// `MantleParams.StartingPosition` (`ALSMantleComponent.cpp:103-108`), which the
+/// height remap produces so a 0.6 m ledge and a 1.2 m one can share one clip.
+///
+/// P29.4 computed it (`inf_anim::HeightRemap::resolve`) and stored it on
+/// `MantleState::clip_start_s`, and nothing could consume it because a state
+/// machine had no way to enter a state anywhere but at its beginning. The pose
+/// step reads it here and hands it to
+/// `inf_anim::SmContext::with_entry_offset`.
+pub const MANTLE_START_VAR: &str = "mantle_start";
+
+/// Which state [`MANTLE_VAR`]'s value names, or `None` for "no mantle".
+///
+/// The one place the four values and the three state names are held together,
+/// so a reader that needs to go from the parameter back to the row does not
+/// re-spell the table.
+pub fn mantle_state_name(param: f64) -> Option<&'static str> {
+    if param == MANTLE_LOW_RH {
+        Some("mantle_low")
+    } else if param == MANTLE_LOW_LH {
+        Some("mantle_low_lh")
+    } else if param == MANTLE_HIGH {
+        Some("mantle_high")
+    } else {
+        None
+    }
+}
+/// **How fast the machine should play its cycle** (wave CHAR1b.2) — ALS's
+/// `CalculateStandingPlayRate` (`ALSCharacterAnimInstance.cpp:754-769`).
+///
+/// The character's own ground speed divided by the speed the blended clip
+/// depicts, so a sprint whose clip was authored at 5 m/s and a character
+/// travelling at 6.5 m/s plays 1.3x and its feet keep up with the ground. This
+/// is **stride warping's** first half: a foot that travels at the capsule's
+/// speed does not slide.
+pub const PLAY_RATE_VAR: &str = "play_rate";
+/// **Lean, left/right**, `[-1, 1]` — ALS's `LeanAmount.LR`
+/// (`ALSCharacterAnimInstance.cpp:633-637`), positive to the character's right.
+pub const LEAN_X_VAR: &str = "lean_x";
+/// **Lean, forward/back**, `[-1, 1]` — ALS's `LeanAmount.FB`, positive ahead.
+pub const LEAN_Y_VAR: &str = "lean_y";
+/// **How far the character will travel before it stops**, metres (wave
+/// CHAR1b.2) — the input to distance matching on a stop.
+///
+/// `v^2 / (2 a)` at the current planar speed and braking deceleration, and `0`
+/// while the stick is still pushed. A stop is a DECISION taken while the
+/// character is still moving, which is what makes the two stop clips reachable:
+/// waiting until the speed has already fallen is waiting until the stop is over.
+pub const STOP_DISTANCE_VAR: &str = "stop_distance";
 /// The angle at which a turn-in-place is a 180 rather than a 90, degrees.
 ///
 /// Halfway between the two clips the donor ships, so each plays for the turns it
@@ -141,6 +206,8 @@ pub enum LocoMode {
     FallFree = 6,
     /// Airborne with reduced authority — walked off a ledge, or knocked back.
     FallControlled = 7,
+    /// Mantling or vaulting a ledge (wave CHAR1b.2).
+    Mantle = 10,
     /// Physics-driven ragdoll.
     Ragdoll = 11,
 }
@@ -434,6 +501,46 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         kind: SlotKind::State,
         looping: false,
         clips: &[("ALS_CLF_GetUp_Back", O)],
+    },
+    // ── the mantle (wave CHAR1b.2, clause 5) ─────────────────────────────────
+    //
+    // A mantle is a **warped, timeline-driven traversal** — `inf_physics`'
+    // `try_mantle`/`step_mantle` own the transform and the clock, and the
+    // machine owns the pose. Both halves are needed: without a row here the
+    // hero climbed a two-metre wall in whatever pose the graph happened to be
+    // holding (a jump loop), because `MovementMode::Mantle` matched no state's
+    // mode and every `Any` edge in this table asks for a different one.
+    //
+    // Three rows for ALS's three sequences. `EALSMantleType` splits low from
+    // high at a literal 125 cm (`ALSMantleComponent.cpp:282`, ported once as
+    // `inf_anim::MANTLE_HIGH_SPLIT_M`); the 1 m pair is ALS's
+    // `GetMantleAsset(MantleType, CurrentOverlayState)` (`.h:48`) — a character
+    // whose right hand is holding something reaches with its **left**. The
+    // engine publishes that choice as [`MANTLE_VAR`], latched at the probe.
+    //
+    // They are ONE-SHOTS with baked root motion, which is what makes
+    // `inf_ecs::traversal_arc` non-empty and what turns `step_mantle`'s warp
+    // from a clock ramp into the clip's own arc scaled onto the ledge.
+    LocoSlot {
+        state: "mantle_low",
+        mode: LocoMode::Mantle,
+        kind: SlotKind::State,
+        looping: false,
+        clips: &[("ALS_N_Mantle_1m_RH", O)],
+    },
+    LocoSlot {
+        state: "mantle_low_lh",
+        mode: LocoMode::Mantle,
+        kind: SlotKind::State,
+        looping: false,
+        clips: &[("ALS_N_Mantle_1m_LH", O)],
+    },
+    LocoSlot {
+        state: "mantle_high",
+        mode: LocoMode::Mantle,
+        kind: SlotKind::State,
+        looping: false,
+        clips: &[("ALS_N_Mantle_2m", O)],
     },
     // ── the STANCE overlays (audit CHAR1b.1) ─────────────────────────────────
     //
@@ -748,6 +855,17 @@ pub fn build_locomotion_graph(
                 SmParam::float(TURN_DEG_VAR),
                 SmParam::float(PLANTED_FOOT_VAR),
                 SmParam::float(FACE_UP_VAR),
+                // ── wave CHAR1b.2 ────────────────────────────────────────
+                SmParam::float(MANTLE_VAR),
+                SmParam::float(MANTLE_START_VAR),
+                SmParam::float(STOP_DISTANCE_VAR),
+                // Declared but read by the POSE step rather than by an edge:
+                // a `.inf_sm` is the character's animation manifest (see this
+                // function's own docs), and a parameter a consumer reads is
+                // part of it whether or not a transition compares against it.
+                SmParam::float(PLAY_RATE_VAR),
+                SmParam::float(LEAN_X_VAR),
+                SmParam::float(LEAN_Y_VAR),
             ],
             profiles: Vec::new(),
         },
@@ -766,6 +884,16 @@ const WALK_AT: f64 = 0.1;
 const RUN_AT: f64 = 1.5;
 /// See [`WALK_AT`].
 const SPRINT_AT: f64 = 2.5;
+
+/// **The shortest stopping distance worth playing a stop clip across**, metres.
+///
+/// Below it the character is already where it is going to end up and a stop
+/// one-shot would be a pose change rather than a movement — which is what the
+/// `Any -> idle` edge is for. A walk released at 1.5 m/s against the default
+/// braking curve has about 14 cm of travel left, so this is set under that: the
+/// two stop clips serve a released walk as well as a released sprint, which is
+/// what ALS uses them for.
+const STOP_MIN_M: f64 = 0.10;
 
 /// The cross-fade every locomotion edge uses, seconds.
 ///
@@ -856,7 +984,27 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
             out.push(
                 SmTransition::new(f, st, ACTION_FADE_S)
                     .when(SmCond::from_flat_and(vec![
-                        SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                        // **DISTANCE MATCHING** (wave CHAR1b.2, clause 6).
+                        //
+                        // This condition was `gait <= 0.1` — *the character has
+                        // already almost stopped* — and the CHAR1b.1 audit
+                        // measured the whole precondition holding on **0 steps**
+                        // of five run-and-stops at five phases plus a sprint
+                        // stop. It could not have held often: by the time the
+                        // gait scale has fallen below the walk threshold the
+                        // cycle has faded, the foot locks have gone with it, and
+                        // there is no stopping distance left to play a stop
+                        // across.
+                        //
+                        // A stop is a decision taken WHILE MOVING, and the thing
+                        // it is taken on is how far there is left to travel:
+                        // `stop_distance` is `v^2 / 2a` and is exactly zero while
+                        // the stick is pushed, so this fires on the release and
+                        // the clip is then played at the rate that lands its own
+                        // travel on that distance (`stride_play_rate`, which
+                        // matches the clip's depicted ground speed to the
+                        // character's on every step of the deceleration).
+                        SmCompare::float(STOP_DISTANCE_VAR, CmpOp::Gt, STOP_MIN_M),
                         SmCompare::float(PLANTED_FOOT_VAR, cmp, foot),
                         SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
                     ]))
@@ -869,6 +1017,16 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                 SmTransition::new(st, i, FADE_S)
                     .with_exit_time(0.7)
                     .with_curve(BlendCurve::EaseInOut),
+            );
+        }
+        // …and a stop the player changes their mind about goes back to the
+        // ladder rather than finishing. Above the exit-time edge, because a
+        // stick pushed again is an instruction and a clip running out is not.
+        if let Some(w) = at("walk") {
+            out.push(
+                SmTransition::on(st, w, FADE_S, GAIT_VAR, CmpOp::Gt, WALK_AT)
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(4),
             );
         }
     }
@@ -1046,6 +1204,48 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
             out.push(
                 SmTransition::new(s, i, ACTION_FADE_S)
                     .with_exit_time(0.9)
+                    .with_curve(BlendCurve::EaseInOut),
+            );
+        }
+    }
+
+    // ── THE MANTLE (wave CHAR1b.2) ──────────────────────────────────────────
+    //
+    // Entered from ANYWHERE, because `try_mantle` is reached from the ground
+    // (a jump at a wall with the stick forward) and from the air (the falling
+    // catch) — `ALSMantleComponent.cpp:396-413`, `OnOwnerJumpInput`. The
+    // priority is above the landing family and below the ragdoll's, which is
+    // the donor's own precedence: a ragdoll stops a running mantle outright
+    // (`OnOwnerRagdollStateChanged`, `.cpp:416-423`).
+    //
+    // Each row's own value of `mantle` selects it, so the three edges are
+    // mutually exclusive by construction and no hysteresis band is needed.
+    for (name, which) in [
+        ("mantle_low", MANTLE_LOW_RH),
+        ("mantle_low_lh", MANTLE_LOW_LH),
+        ("mantle_high", MANTLE_HIGH),
+    ] {
+        let Some(s) = at(name) else { continue };
+        out.push(
+            SmTransition::any(s, ACTION_FADE_S)
+                .when(SmCond::from_flat_and(vec![
+                    SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Mantle.param()),
+                    SmCompare::float(MANTLE_VAR, CmpOp::Eq, which),
+                ]))
+                .with_curve(BlendCurve::EaseInOut)
+                .with_priority(35),
+        );
+        // …and it hands back when the mantle ends, which the movement step
+        // signals by leaving `Mantle` — never by the clip running out, because
+        // the clock is the ledge height's and not the clip's.
+        if let Some(i) = at("idle") {
+            out.push(
+                SmTransition::new(s, i, ACTION_FADE_S)
+                    .when(SmCond::float(
+                        MODE_VAR,
+                        CmpOp::Eq,
+                        LocoMode::Grounded.param(),
+                    ))
                     .with_curve(BlendCurve::EaseInOut),
             );
         }

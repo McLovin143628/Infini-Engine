@@ -1859,7 +1859,33 @@ pub struct MovementRuntime {
     /// the *current* curve-derived accel/braking maxima, `[-1, 1]` per axis.
     pub relative_accel: Vec2d,
     /// Lean inputs `[-1, 1]`: `x` left/right, `y` forward/back.
+    ///
+    /// **Interpolated** (wave CHAR1b.2) at ALS's `GroundedLeanInterpSpeed`
+    /// toward [`relative_accel`](Self::relative_accel), which is
+    /// `UALSCharacterAnimInstance::UpdateMovementValues`'s own two lines
+    /// (`ALSCharacterAnimInstance.cpp:633-638`): raw relative acceleration is a
+    /// step function on the frame the stick moves, and a body cannot lean
+    /// instantly.
     pub lean: Vec2d,
+    /// **How far this character will travel before it stops**, metres — the
+    /// distance-matching input (wave CHAR1b.2, `inf_anim::stop_distance_m`).
+    ///
+    /// `0` while the stick is still pushed, so "is this character stopping" is a
+    /// comparison against zero rather than a second flag.
+    pub stop_distance_m: f64,
+    /// **The play rate the machine's clips are advancing at** — stride
+    /// warping's own number (wave CHAR1b.2, `inf_anim::stride_play_rate`),
+    /// recorded here so a gate can read what the pose step used rather than
+    /// recomputing it and comparing two opinions.
+    pub play_rate: f64,
+    /// **How much foot IK each foot is taking**, `[left, right]`, `[0, 1]` (wave
+    /// CHAR1b.2) — chased toward the clip's own plant window rather than
+    /// switched, so a foot leaving the ground is released over ALS's own reset
+    /// interpolation instead of on one frame.
+    ///
+    /// It is the value the goal's `weight` carries, kept on the runtime so a
+    /// gate can read what the solve was given.
+    pub foot_ik_weight: [f64; 2],
 
     // ── traversal (P29.4) ──
     /// The mantle in progress, if one is.
@@ -2056,9 +2082,36 @@ pub struct MantleState {
     pub clip_start_s: f64,
     /// The rate that animation should play at — ALS's `PlayRate`.
     pub play_rate: f64,
+    /// **Which hand leads the climb** (wave CHAR1b.2): `true` for the left.
+    ///
+    /// ALS ships the one-metre mantle as a pair — `ALS_N_Mantle_1m_LH` and
+    /// `_RH` — and picks between them in
+    /// `GetMantleAsset(MantleType, CurrentOverlayState)`
+    /// (`ALSMantleComponent.h:48`, called at `.cpp:97`): a character carrying
+    /// something in its right hand reaches for the ledge with its **left**. The
+    /// choice is latched at the probe rather than sampled per step, because a
+    /// character that put a rifle away halfway up a wall must not swap hands
+    /// mid-climb.
+    pub left_hand: bool,
 }
 
 impl MantleState {
+    /// The value of [`inf_anim::als::MANTLE_VAR`] this state selects — `0` when
+    /// no mantle is running.
+    ///
+    /// One parameter and not two: see the constant's own docs.
+    pub fn param(&self) -> f64 {
+        if !self.active {
+            0.0
+        } else if self.high {
+            inf_anim::als::MANTLE_HIGH
+        } else if self.left_hand {
+            inf_anim::als::MANTLE_LOW_LH
+        } else {
+            inf_anim::als::MANTLE_LOW_RH
+        }
+    }
+
     /// How far through the mantle it is, `[0, 1]`.
     pub fn alpha(&self) -> f64 {
         if self.duration_s.is_nan() || self.duration_s <= 0.0 {

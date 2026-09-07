@@ -48,6 +48,81 @@ use crate::channels::DistanceTrack;
 /// here, per the cm→m rule at the port boundary.
 pub const MANTLE_HIGH_SPLIT_M: f64 = 1.25;
 
+/// The slowest speed at which [`stride_play_rate`] will scale a clip, m/s.
+///
+/// Below it both numbers in the ratio are noise — a character easing to a stop
+/// and a cycle whose own depicted speed is falling to zero — and `0 / 0` is not
+/// a play rate. The floor is what makes the rule self-gating: it returns exactly
+/// `1.0` for an idle, for a one-shot with no ground travel in it, and for every
+/// clip that has never been through the deriver.
+pub const STRIDE_SPEED_FLOOR_MPS: f64 = 0.20;
+
+/// **STRIDE WARPING** (wave CHAR1b.2, clause 6) — the rate at which a clip must
+/// play so that the ground it depicts passes at the speed the character is
+/// actually travelling.
+///
+/// # The rule, in one sentence
+///
+/// `character_mps / clip_mps`, clamped to [`MIN_PLAY_RATE`]..[`MAX_PLAY_RATE`].
+///
+/// # Why this is ALS's rule and not merely like it
+///
+/// `UALSCharacterAnimInstance::CalculateStandingPlayRate`
+/// (`ALSCharacterAnimInstance.cpp:754-769`) divides the character's speed by
+/// *`Config.AnimatedWalkSpeed` / `AnimatedRunSpeed` / `AnimatedSprintSpeed`*,
+/// lerped by the `W_Gait` curve — three hand-entered constants describing what
+/// the three cycles were authored at, blended by a curve that says which cycle
+/// is showing. This engine **derives** each clip's own depicted ground speed at
+/// import (`MoveData_Speed`, [`crate::derive::MOVE_DATA_SPEED`]) and samples it
+/// at the play-head *through the blend*, so the denominator is the blended
+/// clip's own measurement rather than three numbers a person typed. The lerp is
+/// the blend's, and there is nothing left to configure.
+///
+/// # What it buys, measured
+///
+/// A foot that moves at the ground's speed does not slide. ALS's second lever —
+/// `CalculateStrideBlend`, which shortens the authored stride — is *not* ported
+/// here and does not need to be: it exists because a UE blend space cannot play
+/// its samples at different rates, and this one can.
+///
+/// # Determinism
+///
+/// One divide and one clamp. No transcendental, no `powf`. The result is folded
+/// into a play-head and therefore into `state_bytes`, which is why this file is
+/// on `tests/portable_pose.rs`'s list.
+pub fn stride_play_rate(character_mps: f64, clip_mps: f64) -> f64 {
+    if !character_mps.is_finite() || !clip_mps.is_finite() {
+        return 1.0;
+    }
+    if character_mps < STRIDE_SPEED_FLOOR_MPS || clip_mps < STRIDE_SPEED_FLOOR_MPS {
+        return 1.0;
+    }
+    (character_mps / clip_mps).clamp(MIN_PLAY_RATE, MAX_PLAY_RATE)
+}
+
+/// **How far a character travelling at `speed_mps` will slide before it stops**,
+/// metres, braking at `braking_mps2` (wave CHAR1b.2, clause 6).
+///
+/// `v^2 / (2 a)` — the distance-matching input a stop is *decided* on. ALS takes
+/// the same decision the same way round: the stop transition fires while the
+/// character is still moving (`ShouldMoveCheck`,
+/// `ALSCharacterAnimInstance.cpp:196-200`, is false the moment the stick is
+/// released and the speed is still above the threshold), and the clip's own
+/// travel is then matched onto the remaining distance. Waiting until the speed
+/// has fallen is waiting until the stop is over — which is exactly what the
+/// CHAR1b.1 audit measured: the old edge's precondition held on **0** steps of
+/// five run-and-stops.
+///
+/// `0.0` for a non-positive braking rate, which is the honest answer: a
+/// character that does not brake does not have a stopping distance.
+pub fn stop_distance_m(speed_mps: f64, braking_mps2: f64) -> f64 {
+    if !speed_mps.is_finite() || !braking_mps2.is_finite() || braking_mps2 <= 0.0 {
+        return 0.0;
+    }
+    let v = speed_mps.max(0.0);
+    v * v / (2.0 * braking_mps2)
+}
+
 /// A **warp window**: the span of a clip whose root motion is scaled onto a
 /// runtime target.
 ///
