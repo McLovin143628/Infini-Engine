@@ -2564,3 +2564,100 @@ fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
         seen.contains("stop_l") || seen.contains("stop_r")
     );
 }
+
+/// **EVERY RIG IN A PROJECT CARRIES A ROLE TABLE** (audit CHAR1b.1, carried item
+/// 119 closed).
+///
+/// `an_imported_rig_has_the_roles_the_look_at_chain_needs` asks the question of
+/// a rig built in memory. The island answered it differently: **24 of its 26
+/// rigs carried `roles: []`** — every Manny/Quinn LOD rung and every MetaHuman
+/// body and face rung — because `SkeletonAsset::imported` infers the table at
+/// the glTF stage and the content-addressed `ImportCache` reuses an unchanged
+/// source without re-running it. Only the two the rebind writes had one, which
+/// is why the hero worked and nothing else would have.
+///
+/// A rig with no table silently switches off look-at, the aim-offset mask and
+/// the SK1b hand pass, so an NPC bound to any of the other twenty-four would
+/// have stared straight ahead with no error anywhere.
+/// `ue_import::sweep_roles` is the door; this is the measurement.
+#[test]
+fn every_rig_in_the_island_project_carries_a_role_table() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, inf_anim::SkeletonAsset)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut ps: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        ps.sort();
+        for p in ps {
+            if p.is_dir() {
+                if p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with('.'))
+                {
+                    continue;
+                }
+                walk(&p, out);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "inf_skel") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else {
+                continue;
+            };
+            if let Ok(a) = inf_asset::decode::<inf_anim::SkeletonAsset>(&bytes) {
+                out.push((p, a));
+            }
+        }
+    }
+    let mut rigs = Vec::new();
+    walk(&content, &mut rigs);
+    if rigs.is_empty() {
+        eprintln!("SKIP: no .inf_skel in the island project");
+        return;
+    }
+    // A rig this convention can read at all: it has a head, or it has feet. A
+    // quadruped or a prop rig is left alone deliberately, so the arm asks only
+    // of the rigs whose names the inference knows.
+    let mut empty: Vec<String> = Vec::new();
+    for (path, a) in &rigs {
+        let humanoid = a
+            .skeleton
+            .joints()
+            .iter()
+            .any(|j| j.name.eq_ignore_ascii_case("head"));
+        if humanoid && a.roles.is_empty() {
+            empty.push(
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string(),
+            );
+        }
+    }
+    println!(
+        "\n=== {} rigs in the island project; {} humanoid rig(s) with no role table ===",
+        rigs.len(),
+        empty.len()
+    );
+    for (path, a) in rigs.iter().take(4) {
+        println!(
+            "  {:<44} {:4} joints {:4} roles",
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+            a.skeleton.joints().len(),
+            a.roles.len()
+        );
+    }
+    assert!(
+        empty.is_empty(),
+        "{} rig(s) with a `head` bone carry no role table ({:?}…) — every character \
+         bound to one of them has look-at, the aim mask and the hand pass silently \
+         off",
+        empty.len(),
+        empty.iter().take(4).collect::<Vec<_>>()
+    );
+}

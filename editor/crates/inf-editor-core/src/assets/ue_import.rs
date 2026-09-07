@@ -1006,6 +1006,14 @@ pub fn import_manifest(
         ));
     }
 
+    // **THE ROLE TABLES, ON DISK** (audit CHAR1b.1, carried item 119).
+    let rederived = sweep_roles(project, &mut report);
+    if rederived > 0 {
+        report.advisories.push(format!(
+            "{rederived} rig(s) in this project carried no role table and one was inferred from their own bone names - see `sweep_roles`"
+        ));
+    }
+
     // **THE LICENCE, ON DISK** (carried 96). Last, because it stamps everything
     // the run produced and the run is now over.
     let mut stamped = stamp_licences(project, &mut report);
@@ -1194,6 +1202,60 @@ fn stamp_licences(project: &mut AssetProject, report: &mut UeImportReport) -> us
 /// candidate and the ship position is the CONSERVATIVE one: local-only if any of
 /// the packs is local-only, because the cost of getting that wrong in the shipping
 /// direction is a licence breach and in the other direction is a missing texture.
+/// **Give every rig in the project a role table** (audit CHAR1b.1, carried item
+/// 119).
+///
+/// `SkeletonAsset::imported` infers one at the glTF stage, and the content-
+/// addressed `ImportCache` reuses an unchanged source without re-running it — so
+/// a project whose rigs were imported before that door existed keeps a rig with
+/// `roles: []` for ever, and `RoleIndex` over an empty table answers `None` to
+/// everything. Look-at, the aim-offset mask and the SK1b hand pass are all
+/// written to do nothing in that case (deliberately, so a quadruped is left
+/// alone), so the failure is silent.
+///
+/// Measured on the island before this existed: **24 of 26 rigs carried no
+/// table** — every Manny/Quinn LOD rung and every MetaHuman body and face rung.
+/// Only the two the rebind writes had one.
+///
+/// It is a VALUE, not a migration: a rig whose bones are called nothing the
+/// convention knows infers an empty table and is written back unchanged, so the
+/// sweep cannot invent a head. Idempotent — a second run re-derives the same
+/// table and finds nothing to write.
+fn sweep_roles(project: &mut AssetProject, report: &mut UeImportReport) -> usize {
+    let rigs: Vec<AssetId> = project
+        .db()
+        .by_kind(inf_asset::AssetKind::Skeleton)
+        .map(|e| e.sidecar.guid)
+        .collect();
+    let mut n = 0usize;
+    for id in rigs {
+        let Ok(asset) = project.load_payload::<inf_anim::SkeletonAsset>(id) else {
+            continue;
+        };
+        if !asset.roles.is_empty() {
+            continue;
+        }
+        let roles = inf_anim::roles::infer_roles(&asset.skeleton);
+        if roles.is_empty() {
+            continue;
+        }
+        let deps = project
+            .db()
+            .get(id)
+            .map(|e| e.sidecar.dependencies.clone())
+            .unwrap_or_default();
+        let mut out = asset;
+        out.roles = roles;
+        match project.rewrite_payload(id, &out, deps) {
+            Ok(()) => n += 1,
+            Err(e) => report
+                .advisories
+                .push(format!("a rig's role table was not written ({e})")),
+        }
+    }
+    n
+}
+
 fn sweep_licences(
     project: &AssetProject,
     dest: &Path,
