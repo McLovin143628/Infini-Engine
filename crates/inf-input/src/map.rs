@@ -435,6 +435,19 @@ pub mod actions {
     /// same reason: a panel is a decision about the session's surface rather
     /// than about the character. Its consumer is `inf_ui::inventory` (I6).
     pub const INVENTORY: &str = "inventory";
+    /// **Toggle first / third person** (wave CHAR1c) — ALS's `CameraHeldAction`
+    /// (`ALSBaseCharacter.cpp:1317-1327`).
+    ///
+    /// Read by the **HOST**, like [`MENU`] and [`INVENTORY`] and for the same
+    /// reason, with one extra: the view mode is camera-side only (P29.6's Ruling
+    /// 4) and a movement intent that carried it would be a camera value crossing
+    /// the sim wire. The host moves its own camera's seat and — because a
+    /// first-person character has to turn with the camera or it cannot aim at
+    /// all — asks the character for `LookingDirection` through
+    /// `inf_ecs::movement::set_desired_rotation_mode`, which is ALS's
+    /// `OnViewModeChanged` (`.cpp:856-872`). One key, two consumers, and the
+    /// camera still writes nothing.
+    pub const VIEW_MODE: &str = "view_mode";
 
     /// The controls whose consumers do not exist yet, in one place, so a host
     /// can answer "is this control wired to anything" without a second list.
@@ -600,6 +613,22 @@ pub fn default_map() -> InputMap {
         .bind_button("handbrake", GamepadButton::South)
         .bind_mouse("aim", MouseButton::Right)
         .bind_button("aim", GamepadButton::LeftTrigger)
+        // ── wave CHAR1c: the rotation-mode key (carried 123) ──
+        //
+        // Cycles velocity-direction ↔ looking-direction. Bound by LITERAL for
+        // the reason `attack` and `reload` are: the name lives in
+        // `inf_ecs::movement::actions` because the movement intent reads it, and
+        // this crate must not depend on the world model.
+        //
+        // **`KeyQ`**, which is the first letter this table had not spoken for
+        // and the one every third-person game alive puts a camera verb on. It is
+        // NOT shared with anything: `move_up` took Space/Ctrl in I5, `interact`
+        // has E, and a key that meant "look mode" to a walker and something else
+        // to a driver would be the `KeyE`-ascend defect I5 fixed.
+        .bind_key("rotation_mode", "KeyQ")
+        // The right stick's click — a pad's own camera button, and the twin of
+        // `sprint` on the LEFT thumb.
+        .bind_button("rotation_mode", GamepadButton::RightThumb)
         // ── I5: the owner's table, the rest of it ──
         //
         // `menu` and `inventory` are read by the HOST, not by the movement
@@ -610,6 +639,17 @@ pub fn default_map() -> InputMap {
         .bind_button(actions::MENU, GamepadButton::Start)
         .bind_key(actions::INVENTORY, "KeyI")
         .bind_button(actions::INVENTORY, GamepadButton::Select)
+        // ── wave CHAR1c: the view-mode key ──
+        //
+        // **`KeyG`**, the second letter this table had not spoken for. ALS puts
+        // it on the same key as the shoulder swap and discriminates by tap
+        // versus hold; this engine gives the swap no key at all (the `shoulder`
+        // value on the rig, reachable from `camera.set_rig`, the live tuning
+        // slider and a `camera.toml`) rather than spend a second key on a verb
+        // an author sets once. Stated, so the parity table can carry it.
+        .bind_key(actions::VIEW_MODE, "KeyG")
+        // The right bumper: `lock` has the left, and neither is a stance.
+        .bind_button(actions::VIEW_MODE, GamepadButton::RightBumper)
         // ── I6: attack, reload and the wheel, bound by LITERAL ──
         //
         // Their names live in `inf_ecs::movement::actions` now, because they are

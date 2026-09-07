@@ -1784,8 +1784,41 @@ pub struct MovementRuntime {
     pub want_walk: bool,
     /// See [`want_sprint`](Self::want_sprint).
     pub want_aim: bool,
+    /// **The mode a released aim goes BACK to** (wave CHAR1c) — ALS's
+    /// `DesiredRotationMode` (`ALSBaseCharacter.h:428`).
+    ///
+    /// Carried 123, closed: until this field existed the only path into
+    /// [`RotationMode::LookingDirection`] was *pressing and releasing aim*
+    /// (`d3::movement`'s aim block: `want_aim` → `Aiming`, and the `else if`
+    /// under it → `LookingDirection`). A level starts every character in
+    /// `VelocityDirection`, so a player who wanted to turn in place — the whole
+    /// point of a looking-direction mode — had to right-click and let go first,
+    /// and two waves of turn-in-place frames were taken that way.
+    ///
+    /// ALS has two input actions for it (`VelocityDirectionAction` /
+    /// `LookingDirectionAction`, `ALSBaseCharacter.cpp:1404-1416`) which set the
+    /// desired mode *and* apply it; this engine binds ONE key that cycles
+    /// between the two, because a keyboard cannot bind two actions to one key
+    /// and a player means "the other one".
+    ///
+    /// **Seeded from the component's authored `rotation_mode`** on the first
+    /// step a player-controlled character takes ([`camera_seeded`](Self::camera_seeded)),
+    /// so an NPC authored in `Aiming` is not dragged anywhere and a level's own
+    /// choice is the mode the aim releases back to.
+    pub desired_rotation_mode: RotationMode,
+    /// Whether [`desired_rotation_mode`](Self::desired_rotation_mode) has been
+    /// seeded from the component (wave CHAR1c).
+    ///
+    /// A latch and not a sentinel value, for `LocomotionCamera::seeded`'s
+    /// reason: `VelocityDirection` is both the enum's `Default` and a legal
+    /// authored value, so "is it still the default" cannot tell an unseeded
+    /// field from an authored one.
+    pub camera_seeded: bool,
     /// Edge intents, consumed by the mode table on the step they arrive.
     pub press_jump: bool,
+    /// **Edge: cycle the desired rotation mode** (wave CHAR1c) — the `rotation_mode`
+    /// action. See [`desired_rotation_mode`](Self::desired_rotation_mode).
+    pub press_rotation_mode: bool,
     /// See [`press_jump`](Self::press_jump).
     pub press_crouch: bool,
     /// See [`press_jump`](Self::press_jump).

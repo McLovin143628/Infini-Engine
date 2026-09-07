@@ -90,6 +90,12 @@ Key = "ArrowRight"
 [[actions.roll]]
 Key = "KeyZ"
 
+[[actions.rotation_mode]]
+Key = "KeyQ"
+
+[[actions.rotation_mode]]
+GamepadButton = "RightThumb"
+
 [[actions.sprint]]
 Key = "Shift"
 
@@ -101,6 +107,12 @@ Key = "KeyW"
 
 [[actions.up]]
 Key = "ArrowUp"
+
+[[actions.view_mode]]
+Key = "KeyG"
+
+[[actions.view_mode]]
+GamepadButton = "RightBumper"
 
 [[actions.walk]]
 Key = "Control"

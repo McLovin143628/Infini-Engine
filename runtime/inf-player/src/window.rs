@@ -890,6 +890,42 @@ impl PlayerApp {
         if self.input_state.just_pressed(inf_input::actions::INVENTORY) {
             self.ui.toggle_inventory();
         }
+        // ── the view mode (wave CHAR1c) ──
+        //
+        //    Read HERE, from the resolved state, for the reason the two above
+        //    are — the key is a *binding* — and with one more: the view mode is
+        //    camera-side only (Ruling 4), so a movement intent that carried it
+        //    would be a camera value crossing the sim wire.
+        //
+        //    Two consumers, one key. The camera's seat moves, and the CHARACTER
+        //    is asked to face where it looks, because a first-person character
+        //    that strafes with its body pointing somewhere else cannot aim at
+        //    all — ALS's `OnViewModeChanged` (`ALSBaseCharacter.cpp:856-872`).
+        //    The second half goes through a Ring-0 door and it is the INPUT
+        //    layer calling it, not the camera: the camera still reads the world
+        //    and writes nothing back.
+        if self.input_state.just_pressed(inf_input::actions::VIEW_MODE) {
+            let first = self.sim.camera().view_mode == inf_ecs::camera::ViewMode::ThirdPerson;
+            self.sim.camera_mut().view_mode = if first {
+                inf_ecs::camera::ViewMode::FirstPerson
+            } else {
+                inf_ecs::camera::ViewMode::ThirdPerson
+            };
+            if first {
+                if let Some(subject) = self.sim.camera_subject() {
+                    inf_ecs::movement::set_desired_rotation_mode(
+                        self.sim.world_mut(),
+                        subject,
+                        inf_ecs::components::RotationMode::LookingDirection,
+                    );
+                }
+            }
+            let steps = self.sim.steps();
+            self.hero_log.note(&format!(
+                "view mode {} at step {steps}",
+                if first { "FIRST person" } else { "THIRD person" }
+            ));
+        }
         //    What the panel is showing, and what it decided. The projection is
         //    one way and the verbs the other, and the verbs are applied on the
         //    SIM's step rather than here — see `PlayerUi::pending`.
@@ -1367,8 +1403,36 @@ impl ApplicationHandler for PlayerApp {
             // by the one rule in `frame`, which also knows about the menu.
             WindowEvent::Focused(true) => {
                 self.focused = true;
+                // ── THE POINTER POLICY (wave CHAR1c, carried 145) ──
+                //
+                // The ladder is BOUNDED at `GRAB_LADDER_FRAMES` so a session the
+                // author deliberately clicked away from cannot steal the
+                // keyboard back sixty times a second. That was right and it had
+                // a hole: the ladder was bounded once per PROCESS, so a session
+                // that lost the foreground after ten seconds — to the editor's
+                // own right-click context menu, which is exactly what happened
+                // to two waves' crouch/slide/prone frames — never got the
+                // keyboard back without a click, and the player could not tell a
+                // deliberate click-away from a pointer that drifted.
+                //
+                // **The camera director owns the look policy, and this is it:
+                // while the PIE window is the FOREGROUND window, the pointer is
+                // confined to it and the keyboard ladder is armed; the moment it
+                // is not, both are released.** The bound is not weakened — the
+                // ladder is still `GRAB_LADDER_FRAMES` long and still stops — it
+                // is RE-ARMED by the one event that means the player came back,
+                // which is the OS telling us we are focused again. A click
+                // inside the window re-grabs too (the mouse-button arm above),
+                // and that path is unchanged.
+                //
+                // What a deliberate click-away still gets: nothing. Losing focus
+                // does not re-arm anything, and a window that never regains
+                // focus never asks again.
+                self.keyboard_grabbed = false;
+                self.grab_frames = 0;
                 let steps = self.sim.steps();
-                self.hero_log.note(&format!("focus GAINED at step {steps}"));
+                self.hero_log
+                    .note(&format!("focus GAINED at step {steps}; grab ladder re-armed"));
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}

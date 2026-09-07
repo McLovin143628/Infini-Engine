@@ -862,11 +862,43 @@ fn step_one(
     // `LookingDirection` on its first step by the absence of a key nobody was
     // pressing. Same argument as the gait below.
     if cm.player_controlled {
+        // **The desired mode, seeded from what the level authored** (wave
+        // CHAR1c, carried 123). `VelocityDirection` is both the enum's `Default`
+        // and a legal authored value, so the latch is what tells an unseeded
+        // field from an authored one — `LocomotionCamera::seeded`'s rule on a
+        // second quantity.
+        if !cm.runtime.camera_seeded {
+            cm.runtime.camera_seeded = true;
+            cm.runtime.desired_rotation_mode = cm.rotation_mode;
+        }
+        // **The rotation-mode key** — ALS's two `…DirectionAction`s folded onto
+        // one, each of which sets the desired mode AND applies it
+        // (`ALSBaseCharacter.cpp:1404-1416`). Consumed here, on the step it
+        // arrives, like every other edge.
+        if std::mem::take(&mut cm.runtime.press_rotation_mode) {
+            cm.runtime.desired_rotation_mode = match cm.runtime.desired_rotation_mode {
+                RotationMode::VelocityDirection => RotationMode::LookingDirection,
+                _ => RotationMode::VelocityDirection,
+            };
+            cm.rotation_mode = cm.runtime.desired_rotation_mode;
+        }
         if cm.runtime.want_aim {
             cm.rotation_mode = RotationMode::Aiming;
         } else if cm.rotation_mode == RotationMode::Aiming {
-            cm.rotation_mode = RotationMode::LookingDirection;
+            // **Back to the DESIRED mode, not to `LookingDirection`** — ALS's
+            // `AimAction_Implementation(false)` (`.cpp:1291-1301`), which is the
+            // half this engine had never had. Releasing aim used to *promote* a
+            // character to `LookingDirection` and leave it there, so the only
+            // way into that mode was an aim press and there was no way out of
+            // it at all.
+            cm.rotation_mode = cm.runtime.desired_rotation_mode;
         }
+    } else {
+        // An edge nobody consumed is an edge that fires on the frame a
+        // character becomes player-controlled. The other edges are cleared by
+        // the mode table below whether or not it acted on them; this one has no
+        // such reader, so it is cleared here.
+        cm.runtime.press_rotation_mode = false;
     }
 
     // ── 2. Water, through P20's door. `update_swim` advances the latch from the

@@ -90,6 +90,20 @@ pub mod actions {
     pub const FLY: &str = "fly";
     /// Held: the handbrake, while driving (P29.7).
     pub const HANDBRAKE: &str = "handbrake";
+    /// Edge: **cycle the rotation mode** — velocity-direction ↔ looking-direction
+    /// (wave CHAR1c).
+    ///
+    /// ALS binds two actions (`VelocityDirectionAction` / `LookingDirectionAction`,
+    /// `ALSBaseCharacter.cpp:1404-1416`), each of which sets the *desired* mode
+    /// and applies it. A keyboard cannot bind two actions to one key and a
+    /// player pressing "the camera mode key" means the other one, so this is a
+    /// cycle over the same two — the third mode, `Aiming`, is not in the cycle
+    /// because it is a HELD state (`AimAction`) that reverts to the desired one,
+    /// exactly as it does in ALS.
+    ///
+    /// Carried 123 is what it closes: before it, `LookingDirection` was
+    /// reachable only by pressing aim and letting go.
+    pub const ROTATION_MODE: &str = "rotation_mode";
     /// Held **and** edged: attack — fire the equipped weapon, or kick a locked
     /// door in (I6).
     ///
@@ -1184,6 +1198,11 @@ pub struct MovementIntent {
     pub reload: bool,
     /// The wheel's sign this step, `-1`, `0` or `+1` (I6).
     pub weapon_switch: i32,
+    /// Edge: **cycle the rotation mode** between velocity-direction and
+    /// looking-direction (wave CHAR1c), and apply it now. ALS's two
+    /// `…DirectionAction`s folded onto one key — see
+    /// [`crate::components::MovementRuntime::desired_rotation_mode`].
+    pub rotation_mode: bool,
 }
 
 impl MovementIntent {
@@ -1271,6 +1290,8 @@ impl MovementIntent {
             lock: pressed(actions::LOCK),
             fly: pressed(actions::FLY),
             handbrake: held(actions::HANDBRAKE),
+            // Wave CHAR1c — carried 123's door. See `ROTATION_MODE`.
+            rotation_mode: pressed(actions::ROTATION_MODE),
             // ── I6: the four the owner's table bound and I5 left unconsumed ──
             //
             // `attack` is read **twice**, as a level and as an edge, because one
@@ -1345,6 +1366,8 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_interact |= intent.interact;
         rt.press_lock |= intent.lock;
         rt.press_fly |= intent.fly;
+        // Wave CHAR1c, and an edge for the reason every edge above is one.
+        rt.press_rotation_mode |= intent.rotation_mode;
         // I6. `want_attack` is a LEVEL and is assigned; the other three are
         // edges and are ORed, for the reason the block above gives — a frame
         // that runs two fixed steps must not erase an edge that arrived in the
@@ -1403,6 +1426,50 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
 /// per-controller binding is a gameplay concern), so a level with two of them has
 /// two characters doing the same thing and the camera watches the first. The day
 /// that binding exists, this reads it.
+/// **Set a character's desired rotation mode, and apply it** (wave CHAR1c) —
+/// ALS's `VelocityDirectionAction` / `LookingDirectionAction`
+/// (`ALSBaseCharacter.cpp:1404-1416`) as a door rather than as a key.
+///
+/// The `rotation_mode` action cycles; this targets. The two exist for different
+/// callers: a player pressing a key means "the other one", and a host that has
+/// just put the camera in FIRST PERSON means `LookingDirection` specifically —
+/// which is ALS's `OnViewModeChanged` (`.cpp:856-872`), the rule that a
+/// first-person character turns with the camera because there is no other way to
+/// aim it.
+///
+/// # This is not a camera → sim path
+///
+/// Ruling 4 forbids the camera writing into the simulation, and nothing here
+/// does: the caller is the **input layer**, and one key doing two things — moving
+/// the camera's seat and asking the character to face where it looks — is a
+/// binding table doing what a binding table is for. The camera itself reads the
+/// world and writes nothing back, exactly as it did.
+///
+/// Answers whether it landed. `false` for an entity that is not in the world or
+/// carries no [`CharacterMovement`], which is a value and not a failure for the
+/// reason every other door here says so.
+pub fn set_desired_rotation_mode(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    mode: RotationMode,
+) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) else {
+        return false;
+    };
+    cm.runtime.camera_seeded = true;
+    cm.runtime.desired_rotation_mode = mode;
+    // Applied now unless the character is AIMING, which is a held state that
+    // reverts to the desired mode on release — ALS's own precedence, and the
+    // reason `AimAction` reads `DesiredRotationMode` rather than assigning it.
+    if cm.rotation_mode != RotationMode::Aiming {
+        cm.rotation_mode = mode;
+    }
+    true
+}
+
 pub fn camera_subject(world: &EcsWorld) -> Option<Uuid> {
     let w = world.world();
     let mut q = w.try_query_filtered::<(&Guid, &CharacterMovement), With<Transform>>()?;
