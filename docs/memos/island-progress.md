@@ -35917,6 +35917,24 @@ dropping the ladder carry is invisible on a re-import and shows only on a projec
 that does not have one yet. Measured that way -- sidecar stripped, mutated binary,
 re-import -- the arm reds with "carries no `[import]` table at all".
 
+### 11b. …and what the BATTERY found, which the mutations could not
+
+Two, and both are laws this repository already had:
+
+* `char1b_gate.rs:718` carried a run of nineteen spaces inside a format string —
+  a `\`-continuation eaten by a quoted bash heredoc, named by
+  `no_string_literal_in_the_workspace_carries_an_eaten_continuation` with its
+  line number. **Fourth catch of that law**, and the first where the wave that
+  wrote the string also owned the gate.
+* `char1a3_gate::the_rebound_clips_record_the_rig_they_animate` went red on this
+  wave's own re-import. Inferring a role table changes the `.inf_skel`'s content
+  HASH and changes no joint NAME, so `retarget_committed_clips`' early return
+  fired, no clip was rewritten, and three sidecars went on naming a hash that no
+  longer exists. **Two different questions were being answered by one branch** —
+  "do the clips need re-retargeting" is about joint names, "what rig do these
+  clips animate" is about bytes — which is carried item 95's shape returning
+  through the very door it was fixed in.
+
 ### 12. What CHAR1b.2 and CHAR1c inherit
 
 * **Mantling** — the three ALS clips are imported and deliberately absent from the
