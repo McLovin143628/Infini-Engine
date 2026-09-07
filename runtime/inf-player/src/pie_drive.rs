@@ -412,6 +412,175 @@ pub fn world_probe(
 /// **The env var that turns on the demo loop's hero log** (wave FIX1).
 pub const HERO_LOG_ENV: &str = "INF_PIE_HERO_LOG";
 
+/// **Where a PREVIEW session should put the hero, and when** (CHAR1b.2 audit) —
+/// `"x,y,z@t"` world metres and seconds, `;`-separated, and nothing at all when
+/// unset. The `@t` is optional and defaults to [`SPAWN_DELAY_S`].
+///
+/// # Why this exists, and why it is not a feature
+///
+/// Wave CHAR1b.2 turned on the mantle, the swim set and landing-by-height, and
+/// filmed **none** of them: the demo loop drives the game through the keyboard,
+/// the ledge course, the island's water and a drop from a measured height are
+/// none of them reachable on foot from where the level puts the hero inside a
+/// ninety-second session, and the wave wrote that down as a limitation of the
+/// player ("it has no teleport"). It is a limitation of the *loop*: the same
+/// sentence would excuse never photographing anything more than a minute's walk
+/// from a player start.
+///
+/// So this is the loop's own stopwatch, in the same shape as [`HERO_LOG_ENV`]:
+/// an env door read **once**, applied **once**, in a **preview** session only
+/// (`--pie`, which is what the editor's Play button launches), inert in every
+/// session that did not ask for it, and never written into a level. A shipped
+/// player boot does not consult it — see [`SpawnOverride::tick`]'s caller.
+///
+/// It is not a movement mode, not an action, not a key, and no gate reads it:
+/// a gate that needed a character somewhere puts it there through the ECS the
+/// way `char1b_gate` already does.
+pub const SPAWN_AT_ENV: &str = "INF_PIE_SPAWN_AT";
+
+/// **A garment to put on the hero in a PREVIEW session** (CHAR1b.2 audit) — the
+/// asset GUID of a `.inf_cloth`, and nothing at all when unset.
+///
+/// The cape wave CHAR1b.2 authored is written into the island project's Content
+/// and worn **in the gate**; putting it on the hero in the committed `.inf_lvl`
+/// is a level edit (carried 137, OUTFIT1's). This is how the loop photographs it
+/// without making that edit — the same one-shot, preview-only, env-gated door
+/// [`SPAWN_AT_ENV`] is.
+pub const WEAR_CLOTH_ENV: &str = "INF_PIE_WEAR_CLOTH";
+
+/// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
+///
+/// The island streams; a hero teleported on frame zero arrives before the
+/// terrain under it does and falls through the world. Two seconds is past the
+/// first cell load on this machine and far inside the loop's own settle.
+const SPAWN_DELAY_S: f64 = 2.0;
+
+/// **The one-shot placement [`SPAWN_AT_ENV`] and [`WEAR_CLOTH_ENV`] describe.**
+///
+/// Inert unless the variables are set: `from_env` returns a value whose `tick`
+/// returns immediately, so a session that did not ask for one pays one
+/// `Option` check per frame, which is what the hero log costs too.
+#[derive(Default)]
+pub struct SpawnOverride {
+    /// `(x, y, z, at_seconds)`, in the order given; each fires once.
+    at: Vec<([f64; 3], f64)>,
+    cloth: Option<Uuid>,
+    accum: f64,
+    next: usize,
+    cloth_done: bool,
+}
+
+impl SpawnOverride {
+    /// Read [`SPAWN_AT_ENV`] and [`WEAR_CLOTH_ENV`], or an inert override.
+    ///
+    /// A malformed value is a **refusal with a reason on stderr**, not a
+    /// silently ignored one: the whole point of the door is that the operator
+    /// finds out whether it took.
+    pub fn from_env() -> Self {
+        let mut at: Vec<([f64; 3], f64)> = Vec::new();
+        if let Ok(v) = std::env::var(SPAWN_AT_ENV) {
+            for entry in v.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+                let (coords, when) = match entry.split_once('@') {
+                    Some((c, t)) => (c, t.trim().parse::<f64>().unwrap_or(SPAWN_DELAY_S)),
+                    None => (entry, SPAWN_DELAY_S),
+                };
+                let parts: Vec<f64> = coords
+                    .split(',')
+                    .filter_map(|p| p.trim().parse::<f64>().ok())
+                    .collect();
+                if parts.len() == 3 && parts.iter().all(|p| p.is_finite()) && when.is_finite() {
+                    at.push(([parts[0], parts[1], parts[2]], when.max(SPAWN_DELAY_S)));
+                } else {
+                    eprintln!("inf-player: {SPAWN_AT_ENV} entry `{entry}` is not `x,y,z[@s]`");
+                }
+            }
+            at.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+        let cloth = match std::env::var(WEAR_CLOTH_ENV) {
+            Err(_) => None,
+            Ok(v) if v.trim().is_empty() => None,
+            Ok(v) => match v.trim().parse::<Uuid>() {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    eprintln!("inf-player: {WEAR_CLOTH_ENV} is `{v}`, which is not a GUID ({e})");
+                    None
+                }
+            },
+        };
+        Self {
+            at,
+            cloth,
+            ..Self::default()
+        }
+    }
+
+    /// The placements this override still has to make.
+    pub fn pending(&self) -> usize {
+        self.at.len().saturating_sub(self.next)
+    }
+
+    /// Apply whichever placement is due, at most one per frame. Returns a line
+    /// for the hero log when one fires, so a frame taken afterwards can be read
+    /// against a record of where the hero was put.
+    pub fn tick(&mut self, sim: &mut RuntimeSim, dt: f64) -> Option<String> {
+        let done = self.next >= self.at.len();
+        if done && (self.cloth.is_none() || self.cloth_done) {
+            return None;
+        }
+        self.accum += dt;
+        if self.accum < SPAWN_DELAY_S {
+            return None;
+        }
+        let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
+        let wear = self.cloth.filter(|_| !self.cloth_done);
+        if due.is_none() && wear.is_none() {
+            return None;
+        }
+        let hero = inf_ecs::movement::camera_subject(sim.world())?;
+        let mut said = String::new();
+        {
+            let w = sim.world_mut();
+            let entity = w.entity_of(hero)?;
+            if let Some((at, when)) = due {
+                if let Some(mut t) = w
+                    .world_mut()
+                    .get_mut::<inf_ecs::components::Transform>(entity)
+                {
+                    t.translation.x = at[0];
+                    t.translation.y = at[1];
+                    t.translation.z = at[2];
+                }
+                if let Some(mut cm) = w
+                    .world_mut()
+                    .get_mut::<inf_ecs::components::CharacterMovement>(entity)
+                {
+                    cm.runtime.velocity = inf_ecs::math::Vec3d::ZERO;
+                }
+                self.next += 1;
+                said.push_str(&format!(
+                    "{SPAWN_AT_ENV} #{} at t={when:.0}s placed the hero at {:.2},{:.2},{:.2}",
+                    self.next, at[0], at[1], at[2]
+                ));
+            }
+            if let Some(guid) = wear {
+                w.world_mut()
+                    .entity_mut(entity)
+                    .insert(inf_ecs::components::ClothSim {
+                        asset: Some(guid),
+                        enabled: true,
+                        ..Default::default()
+                    });
+                self.cloth_done = true;
+                if !said.is_empty() {
+                    said.push_str("; ");
+                }
+                said.push_str(&format!("{WEAR_CLOTH_ENV} put {guid} on the hero"));
+            }
+        }
+        (!said.is_empty()).then_some(said)
+    }
+}
+
 /// How often a windowed PIE session appends a line, seconds.
 const HERO_LOG_PERIOD_S: f64 = 0.25;
 

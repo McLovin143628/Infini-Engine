@@ -194,6 +194,12 @@ pub struct PlayerApp {
     /// The demo loop's hero log (wave FIX1) — inert unless `INF_PIE_HERO_LOG`
     /// names a path. See [`crate::pie_drive::HeroLog`].
     hero_log: crate::pie_drive::HeroLog,
+    /// **The demo loop's one-shot placement** (CHAR1b.2 audit) — inert unless
+    /// `INF_PIE_SPAWN_AT` / `INF_PIE_WEAR_CLOTH` are set, and consulted only in
+    /// a PREVIEW session (see the `self.pie.is_some()` guard at its call site,
+    /// which is the same guard the hero log is behind). A shipped boot never
+    /// reaches it. See [`crate::pie_drive::SpawnOverride`].
+    spawn_override: crate::pie_drive::SpawnOverride,
     /// **The in-game UI session** (island wave I5): the settings dialog, the
     /// toasts and the interaction prompt. Present in the shipped player **and**
     /// in a windowed PIE preview, because a preview that could not open the menu
@@ -291,6 +297,7 @@ impl PlayerApp {
             grab_frames: 0,
             keyboard_grabbed: false,
             hero_log: crate::pie_drive::HeroLog::from_env(),
+            spawn_override: crate::pie_drive::SpawnOverride::from_env(),
             vmeshes,
             scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
@@ -914,6 +921,14 @@ impl PlayerApp {
         if self.pie.is_some() {
             let frame = self.sim.steps();
             self.hero_log.tick(&self.sim, frame, dt);
+            // …and the loop's one-shot placement, whose whole job is to let a
+            // ninety-second session photograph something that is not within a
+            // ninety-second walk of the player start. It fires once and says so
+            // in the same log, so a frame taken after it can be read against a
+            // line that names where the hero was put.
+            if let Some(said) = self.spawn_override.tick(&mut self.sim, dt) {
+                self.hero_log.note(&said);
+            }
         }
         self.ui.report_unconsumed(&self.input_state);
         let held = input::held_actions(&self.input_state, dt);

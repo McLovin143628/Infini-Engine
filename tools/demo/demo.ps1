@@ -12,7 +12,26 @@ param(
     # "embedded" reparents the player into the viewport hole; "window" is the
     # roadmap-sanctioned Play in New Window. Both must move the hero, so both
     # are drivable from here.
-    [ValidateSet("embedded", "window")][string]$PlayMode = "embedded",
+    # **`window` by default since the CHAR1b.2 audit** (carried item 129). Two
+    # `embedded` runs of wave CHAR1b.2 filmed `HERO MOVED 0.000 m` over 313 and
+    # 315 samples: the click meant for the viewport hole left the EDITOR in the
+    # foreground and every keystroke went to it. `-PlayMode embedded` still
+    # works and is still the roadmap's own preview, so it is one flag away --
+    # what changed is which one a wave gets by accident.
+    [ValidateSet("embedded", "window")][string]$PlayMode = "window",
+    # **A DEV-ONLY placement for the preview session** (CHAR1b.2 audit). A
+    # `;`-separated list of `x,y,z@seconds`, handed to the player as
+    # `INF_PIE_SPAWN_AT`; the player applies each one once, in a `--pie` preview
+    # only, and writes a line into the hero log saying it did. It exists because
+    # the wave before this one filmed neither the mantle, nor the water, nor a
+    # measured drop and wrote down "the shipped player has no teleport" -- which
+    # is a limitation of THIS SCRIPT, not of the game.
+    [string]$SpawnAt = "",
+    # A `.inf_cloth` GUID to put on the hero for the session, `INF_PIE_WEAR_CLOTH`.
+    # The cape wave CHAR1b.2 authored lives in the island's Content and is worn
+    # in the gate; carried 137 is that it is not in the committed level, and this
+    # is how the loop photographs it without making that edit.
+    [string]$WearCloth = "",
     [int]$BootWaitS = 60,
     [int]$PieWaitS = 240,
     [int]$LoadSettleS = 20,
@@ -65,6 +84,42 @@ function Say([string]$text) {
 }
 
 $failed = $false
+
+# **A SHOT TRIGGERED BY WHAT THE HERO IS DOING** (CHAR1b.2 audit, carried 132).
+# The loop's frames are timed by `Start-Sleep` and the states this wave added
+# last about a second, so `32-slide.png` and `34-prone.png` were photographs of a
+# standing character with the right filename. `hero.csv` already carries the
+# machine state in column 12 and the position in 3..5, four times a second; this
+# waits for a predicate over the newest row and shoots when it holds, or says
+# plainly that it never did.
+function Wait-ForHero {
+    param(
+        [string]$Csv,
+        [scriptblock]$Predicate,
+        [string]$What,
+        [double]$TimeoutS = 8.0,
+        [string]$Out = ""
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutS)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $Csv) {
+            $rows = @(Get-Content $Csv -ErrorAction SilentlyContinue | Where-Object { $_ -match "^[0-9]" })
+            if ($rows.Count -gt 0) {
+                $c = $rows[-1].Split(",")
+                if (& $Predicate $c) {
+                    Say "TRIGGER $What after $([math]::Round(($TimeoutS - ($deadline - (Get-Date)).TotalSeconds), 2)) s: $($rows[-1])"
+                    if ($Out -ne "") {
+                        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $Out | ForEach-Object { Say $_ }
+                    }
+                    return $true
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 120
+    }
+    Say "TRIGGER $What NEVER FIRED inside $TimeoutS s -- no frame taken"
+    return $false
+}
 
 Say "repo    $repo"
 Say "mode    $PlayMode"
@@ -149,6 +204,13 @@ if (Test-Path $recovery) {
 
 $env:INF_WEBVIEW_DEBUG_PORT = "$Port"
 $env:INF_PIE_HERO_LOG = $heroCsv
+# The dev-only preview doors, set only when asked for. `Remove-Item env:` rather
+# than an empty string so a session that did not ask for one is a session in
+# which the variable does not exist.
+if ($SpawnAt -ne "") { $env:INF_PIE_SPAWN_AT = $SpawnAt; Say "spawn override: $SpawnAt" }
+else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction SilentlyContinue }
+if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
+else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction SilentlyContinue }
 $proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru
 Say "launched pid $($proc.Id); waiting up to $BootWaitS s for the shell"
 
@@ -407,6 +469,50 @@ if ($hasWindow) {
 }
 Start-Sleep -Milliseconds 800
 
+# **THE PLAYER LOSES THE KEYBOARD MID-SESSION, AND NOTHING TAKES IT BACK**
+# (CHAR1b.2 audit). `window.rs`'s grab ladder is BOUNDED to GRAB_LADDER_FRAMES
+# (600 frames = 10 s), deliberately: a session the author clicked away from must
+# not have its focus stolen back sixty times a second. So after ten seconds the
+# only thing that re-takes the keyboard is a click into the player's own window
+# -- and this script never made one.
+#
+# Measured, in this audit's own run: `focus LOST at step 3658` (t = 61 s), the
+# foreground handed to the EDITOR at the RIGHT-CLICK the turn-in-place leg makes,
+# and `focus GAINED` again only at step 10974 (t = 183 s). Everything between --
+# the kerb, the breath pair, the slide, the prone set, and the mantle at the
+# placement -- was driven into a window that was not listening, and the frames
+# named for them show an idle hero on the road. That is the true cause of the
+# frames CHAR1b.2 carried as items 124 and 132, and it is not the crouch tap.
+#
+# So: raise the player again before every leg that follows a mouse operation.
+# It is idempotent, it costs 200 ms, and the log says whether it was needed.
+function Restore-PlayerFocus([string]$why) {
+    if ($null -eq $player) { return }
+    $player.Refresh()
+    $before = [InfInput]::Foreground()
+    if ($hasWindow -and $player.MainWindowHandle -ne [IntPtr]::Zero) {
+        [InfInput]::ShowWindow($player.MainWindowHandle, 5) | Out-Null
+        [InfInput]::SetForegroundWindow($player.MainWindowHandle) | Out-Null
+        # **AND PUT THE CURSOR BACK INSIDE IT.** A synthetic click goes to
+        # whatever window is under the POINTER, and `Look` moves the pointer by
+        # relative deltas -- so after a look sweep the cursor is wherever it
+        # drifted to, which on this machine is the editor. That is how the
+        # turn-in-place leg's right-click opened the EDITOR's actor context menu
+        # (photographed: run 1's `24-turn-in-place.png` is the editor with
+        # "Open in Editor / Edit Mesh / ... / Delete" on screen) and handed it
+        # the foreground for the rest of the session.
+        $r2 = New-Object InfInput+RECT
+        if ([InfInput]::GetWindowRect($player.MainWindowHandle, [ref]$r2)) {
+            [InfInput]::SetCursorPos([int](($r2.Left + $r2.Right) / 2), [int](($r2.Top + $r2.Bottom) / 2)) | Out-Null
+        }
+    } else {
+        [InfInput]::Click([int]($screen.Width / 2), [int]($screen.Height / 2))
+    }
+    Start-Sleep -Milliseconds 200
+    $after = [InfInput]::Foreground()
+    if ($before -ne $after) { Say "REFOCUS ($why): $before -> $after" }
+}
+
 Say ("foreground after the click:  " + [InfInput]::Foreground())
 Say ("cursor while the game has the window: " + [InfInput]::CursorState())
 
@@ -470,13 +576,31 @@ Start-Sleep -Milliseconds 600
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "13-look-up.png") | ForEach-Object { Say $_ }
 for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(0, 20); Start-Sleep -Milliseconds 16 }
 
+Restore-PlayerFocus "before the crouch"
 Say "CROUCH: C tapped (a click crouches; a hold goes prone)"
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 900
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "14-crouch.png") | ForEach-Object { Say $_ }
+# **TRIGGERED, NOT SLEPT** (CHAR1b.2 audit, carried 132 and 124). Measured over
+# five audit sessions: every frame `Wait-ForHero` took landed on the state it is
+# named for, and every frame a `Start-Sleep` took did not -- `14-crouch.png` read
+# `idle` in four sessions out of five while the crouch states were 69 rows of the
+# same log. The crouch click also fires on RELEASE and is swallowed outright
+# about one session in three, so the tap is RETRIED here rather than trusted.
+$gotCrouch = Wait-ForHero -Csv $heroCsv -What "a crouch" -TimeoutS 2.5 `
+    -Predicate { param($c) $c[5] -eq "Crouch" } `
+    -Out (Join-Path $OutDir "14-crouch.png")
+if (-not $gotCrouch) {
+    Say "the crouch tap was swallowed; tapping C again"
+    [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
+    $gotCrouch = Wait-ForHero -Csv $heroCsv -What "a crouch (2nd tap)" -TimeoutS 3.0 `
+        -Predicate { param($c) $c[5] -eq "Crouch" } `
+        -Out (Join-Path $OutDir "14-crouch.png")
+}
 Say "CROUCH-WALK: W held while crouched"
 [InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "15-crouch-walk.png") | ForEach-Object { Say $_ }
+Wait-ForHero -Csv $heroCsv -What "a crouch-walk" -TimeoutS 3.0 `
+    -Predicate { param($c) $c[11] -eq "crouch_walk" } `
+    -Out (Join-Path $OutDir "15-crouch-walk.png") | Out-Null
 [InfInput]::Up(0x11)
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 700
@@ -484,7 +608,9 @@ Start-Sleep -Milliseconds 700
 Say "JUMP: Space, and a frame while the feet are off the ground"
 [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
 Start-Sleep -Milliseconds 260
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "16-jump.png") | ForEach-Object { Say $_ }
+Wait-ForHero -Csv $heroCsv -What "the jump" -TimeoutS 2.5 `
+    -Predicate { param($c) $c[11] -eq "jump" } `
+    -Out (Join-Path $OutDir "16-jump.png") | Out-Null
 Start-Sleep -Milliseconds 900
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "17-land.png") | ForEach-Object { Say $_ }
 
@@ -494,7 +620,9 @@ Start-Sleep -Milliseconds 1800
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "18-sprint.png") | ForEach-Object { Say $_ }
 [InfInput]::Up(0x11); [InfInput]::Up(0x2A)
 Start-Sleep -Milliseconds 1200
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "19-stop.png") | ForEach-Object { Say $_ }
+Wait-ForHero -Csv $heroCsv -What "a stop clip" -TimeoutS 3.0 `
+    -Predicate { param($c) $c[11] -match "^stop_" } `
+    -Out (Join-Path $OutDir "19-stop.png") | Out-Null
 
 Say "STRAFE: A and D, the direction blend's own axis"
 [InfInput]::Down(0x1E); Start-Sleep -Milliseconds 1100
@@ -521,6 +649,7 @@ Say "STAND: C again, with room around it, before the legs that must not be crouc
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 1400
 
+Restore-PlayerFocus "before the turn in place (the right-click)"
 Say "TURN IN PLACE: right-click to aim and release (-> LookingDirection), then swing"
 [InfInput]::RightDown(); Start-Sleep -Milliseconds 200; [InfInput]::RightUp()
 Start-Sleep -Milliseconds 400
@@ -534,6 +663,7 @@ Start-Sleep -Milliseconds 900
 # one side and its kerb is the 15 cm step the fixture measures in the abstract.
 # Turning ninety degrees and walking is the scripted input carried item 117 asked
 # for, and `hero.csv`'s Y column is what says whether the hero went UP.
+Restore-PlayerFocus "before the kerb"
 Say "KERB: turn toward the pavement and RUN onto it"
 for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(-30, 0); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 400
@@ -553,6 +683,7 @@ Start-Sleep -Milliseconds 1200
 # report with the numbers the gate measures them at instead, because the loop
 # drives the shipped player and the shipped player has no teleport.
 
+Restore-PlayerFocus "before the breath"
 Say "BREATH: two idle frames 1.3 s apart, which is the pair the additive shows in"
 Start-Sleep -Milliseconds 1500
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "30-breath-a.png") | ForEach-Object { Say $_ }
@@ -563,14 +694,19 @@ Start-Sleep -Milliseconds 1300
 # and then the crouch key. Sprint first for long enough to be over the entry
 # speed -- a crouch tap below it is a REFUSAL (`ConditionNotMet`) and a stance
 # toggle, which is the frame this would otherwise film and mis-caption.
+Restore-PlayerFocus "before the slide"
 Say "SLIDE: Shift+W up to speed, then C while still sprinting"
 [InfInput]::Down(0x2A); [InfInput]::Down(0x11)
 Start-Sleep -Milliseconds 2600
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 260
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "32-slide.png") | ForEach-Object { Say $_ }
-Start-Sleep -Milliseconds 500
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "33-sliding.png") | ForEach-Object { Say $_ }
+if (Wait-ForHero -Csv $heroCsv -What "the slide" -TimeoutS 3.0 `
+        -Predicate { param($c) $c[5] -eq "Slide" } `
+        -Out (Join-Path $OutDir "32-slide.png")) {
+    Wait-ForHero -Csv $heroCsv -What "the slide, later in it" -TimeoutS 1.5 `
+        -Predicate { param($c) $c[5] -eq "Slide" } `
+        -Out (Join-Path $OutDir "33-sliding.png") | Out-Null
+}
 [InfInput]::Up(0x11); [InfInput]::Up(0x2A)
 Start-Sleep -Milliseconds 1400
 
@@ -578,27 +714,112 @@ Start-Sleep -Milliseconds 1400
 # classification of the same key -- and the reason the crouch TAP is a coin toss
 # (carried 124): the two are the same button and only the duration tells them
 # apart.
+Restore-PlayerFocus "before prone"
 Say "PRONE: C held past the long-press threshold"
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 700; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 1200
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "34-prone.png") | ForEach-Object { Say $_ }
+Wait-ForHero -Csv $heroCsv -What "prone" -TimeoutS 4.0 `
+    -Predicate { param($c) $c[5] -eq "Prone" } `
+    -Out (Join-Path $OutDir "34-prone.png") | Out-Null
 Say "PRONE CRAWL: W while prone"
 [InfInput]::Down(0x11); Start-Sleep -Milliseconds 1400
-& powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "35-prone-crawl.png") | ForEach-Object { Say $_ }
+Wait-ForHero -Csv $heroCsv -What "the prone crawl" -TimeoutS 3.0 `
+    -Predicate { param($c) $c[11] -eq "prone_crawl" } `
+    -Out (Join-Path $OutDir "35-prone-crawl.png") | Out-Null
 [InfInput]::Up(0x11)
 Say "UP: another long press leaves prone"
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 700; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 1400
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "36-back-up.png") | ForEach-Object { Say $_ }
 
+# ── 5b. the placements, and the frames the wave could not take ───────────────
+#
+# Only when `-SpawnAt` was given. Each waypoint is applied by the PLAYER at its
+# own `@seconds`; this side waits for the hero to BE there (the log's own x/z)
+# rather than sleeping and hoping, which is carried item 132's remedy.
+if ($SpawnAt -ne "") {
+    Restore-PlayerFocus "before the placements"
+Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
+    # 1. THE MANTLE. Hold W and tap Space: `try_mantle` runs on a jump press with
+    #    movement input, which is ALS's own trigger.
+    if (Wait-ForHero -Csv $heroCsv -What "at the ledge" -TimeoutS 150 `
+            -Predicate { param($c) ([math]::Abs([double]$c[2] + 1766.0) -lt 12.0) -and ([math]::Abs([double]$c[4] - 1992.0) -lt 12.0) } `
+            -Out (Join-Path $OutDir "40-at-the-ledge.png")) {
+        # **No stance key here.** Measured: a `C` press before the drive cost
+        # 1.6 s of the ledge's own window and left the character CROUCHED, and
+        # the run that did it reached no mantle at all while the run that did
+        # not reached eight `mantle_low` samples.
+        [InfInput]::Down(0x11)
+        # **THE SHOT IS TRIGGERED BY THE MANTLE, NOT BY A SLEEP** (carried 132).
+        # A mantle is 0.586 s and the loop's own sleeps put run 2's frame 1.3 s
+        # past the end of one -- the state column is what knows.
+        $mantled = $false
+        for ($k = 0; $k -lt 10 -and -not $mantled; $k++) {
+            [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
+            $mantled = Wait-ForHero -Csv $heroCsv -What "a mantle" -TimeoutS 1.2 `
+                -Predicate { param($c) $c[11] -match "^mantle" } `
+                -Out (Join-Path $OutDir "41-mantling.png")
+        }
+        if (-not $mantled) { Say "NO MANTLE reached from the ledge placement in ten jump taps" }
+        Start-Sleep -Milliseconds 700
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "42-mantled.png") | ForEach-Object { Say $_ }
+        [InfInput]::Up(0x11)
+        # …and the cape, on the same hero, two frames apart while it walks.
+        [InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "43-cape-a.png") | ForEach-Object { Say $_ }
+        Start-Sleep -Milliseconds 700
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "44-cape-b.png") | ForEach-Object { Say $_ }
+        [InfInput]::Up(0x11)
+    }
+    # 2. A MEASURED DROP. The player puts the hero above the road; the frame that
+    #    matters is the one where the machine is in a landing, so it is triggered
+    #    on the state column and not on a sleep.
+    Wait-ForHero -Csv $heroCsv -What "falling" -TimeoutS 60 `
+        -Predicate { param($c) $c[11] -match "^fall" } `
+        -Out (Join-Path $OutDir "45-falling.png") | Out-Null
+    # A landing is one sample of a 4 Hz log, so this is a wide net and it is
+    # allowed to miss -- and to say so when it does.
+    Wait-ForHero -Csv $heroCsv -What "a landing" -TimeoutS 22 `
+        -Predicate { param($c) $c[11] -match "^(land_|roll)" } `
+        -Out (Join-Path $OutDir "46-landing.png") | Out-Null
+    # 3. THE RAGDOLL DROP, and the get-up after it.
+    Wait-ForHero -Csv $heroCsv -What "a ragdoll" -TimeoutS 60 `
+        -Predicate { param($c) $c[11] -eq "ragdoll" } `
+        -Out (Join-Path $OutDir "47-ragdoll.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "a get-up" -TimeoutS 20 `
+        -Predicate { param($c) $c[11] -match "^getup" } `
+        -Out (Join-Path $OutDir "48-getup.png") | Out-Null
+    # 4. THE WATER. The island's own ocean; the trigger is the swim mode itself.
+    Wait-ForHero -Csv $heroCsv -What "in the water" -TimeoutS 70 `
+        -Predicate { param($c) $c[5] -match "Swim" } `
+        -Out (Join-Path $OutDir "49-swimming.png") | Out-Null
+    [InfInput]::Down(0x11); Start-Sleep -Milliseconds 1500
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "50-swim-forward.png") | ForEach-Object { Say $_ }
+    [InfInput]::Up(0x11)
+}
+
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
     $rows = Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" }
     if ($rows.Count -ge 2) {
         $a = $rows[0].Split(","); $b = $rows[-1].Split(",")
-        $dx = [double]$b[2] - [double]$a[2]
-        $dz = [double]$b[4] - [double]$a[4]
-        $d = [math]::Sqrt($dx * $dx + $dz * $dz)
+        # **PATH LENGTH, NOT DISPLACEMENT, AND NOT THE PLACEMENTS** (CHAR1b.2
+        # audit). `-SpawnAt` moves the hero kilometres in one sample, so the
+        # first-to-last displacement this used to print reads 2 695 m for a
+        # session in which the character walked forty. Sum the per-sample steps
+        # and drop any single step over 50 m, which is a placement and not a walk
+        # -- there is no gait in this engine that covers 50 m in a quarter of a
+        # second.
+        $d = 0.0
+        $ported = 0
+        for ($ri = 1; $ri -lt $rows.Count; $ri++) {
+            $p0 = $rows[$ri - 1].Split(","); $p1 = $rows[$ri].Split(",")
+            $sx = [double]$p1[2] - [double]$p0[2]
+            $sz = [double]$p1[4] - [double]$p0[4]
+            $step = [math]::Sqrt($sx * $sx + $sz * $sz)
+            if ($step -gt 50.0) { $ported++ } else { $d += $step }
+        }
+        if ($ported -gt 0) { Say "$ported placement jump(s) excluded from the distance" }
         Say ("hero first : t={0} ({1}, {2}, {3}) {4} speed {5}" -f $a[0], $a[2], $a[3], $a[4], $a[5], $a[6])
         Say ("hero last  : t={0} ({1}, {2}, {3}) {4} speed {5}" -f $b[0], $b[2], $b[3], $b[4], $b[5], $b[6])
         Say ("HERO MOVED {0:N3} m over {1} samples" -f $d, $rows.Count)
