@@ -3039,3 +3039,512 @@ fn a_sideways_mouse_turns_the_islands_hero_head_and_an_upward_one_tips_it() {
         "an upward mouse turned the head {uaz:.2} deg sideways against {uel:.2} deg of tip; the axes are swapped"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (10) WAVE CHAR1b.2 — THE MOVES
+//
+// Every arm below asks the JOINTS or the WORLD. The CHAR1b.1 audit's law is the
+// reason: five of that wave's seventeen arms were green on a character standing
+// in its bind pose, because each of them read a table, a state name or a report.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The hero's capsule centre, world metres.
+fn hero_pos(sim: &inf_player::runtime_sim::RuntimeSim, hero: uuid::Uuid) -> [f64; 3] {
+    let w = sim.world();
+    let t = w
+        .entity_of(hero)
+        .and_then(|e| w.world().get::<inf_ecs::components::Transform>(e))
+        .cloned()
+        .expect("the hero has a transform");
+    [t.translation.x, t.translation.y, t.translation.z]
+}
+
+/// The hero's movement component, cloned.
+fn hero_cm(
+    sim: &inf_player::runtime_sim::RuntimeSim,
+    hero: uuid::Uuid,
+) -> inf_ecs::components::CharacterMovement {
+    let w = sim.world();
+    w.entity_of(hero)
+        .and_then(|e| w.world().get::<inf_ecs::components::CharacterMovement>(e))
+        .cloned()
+        .expect("the hero has a movement component")
+}
+
+/// Put the hero at `x, z` a metre and a fifth above the ground under it, facing
+/// `bearing`, and let it settle.
+///
+/// A gate that waits for a character to *walk* somewhere measures the walk. This
+/// measures what happens at a place, which is what a mantle arm is about.
+fn hero_to(
+    sim: &mut inf_player::runtime_sim::RuntimeSim,
+    hero: uuid::Uuid,
+    x: f64,
+    z: f64,
+    bearing: f64,
+) {
+    let y = hero_pos(sim, hero)[1] + 1.2;
+    {
+        let w = sim.world_mut();
+        let e = w.entity_of(hero).expect("the hero is in the world");
+        if let Some(mut t) = w.world_mut().get_mut::<inf_ecs::components::Transform>(e) {
+            t.translation.x = x;
+            t.translation.y = y;
+            t.translation.z = z;
+            t.rotation.y = bearing;
+        }
+        if let Some(mut c) = w
+            .world_mut()
+            .get_mut::<inf_ecs::components::CharacterMovement>(e)
+        {
+            c.runtime.velocity = inf_ecs::math::Vec3d::ZERO;
+            c.runtime.aim_yaw_deg = bearing;
+            c.runtime.body_yaw_deg = bearing;
+            c.runtime.target_yaw_deg = bearing;
+            c.mode = inf_ecs::components::MovementMode::Grounded;
+        }
+    }
+    for _ in 0..180 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+}
+
+/// **THE ISLAND'S HERO MANTLES A LEDGE, AND DOES NOT MANTLE A ROAD** (clause 5).
+///
+/// The mechanism has existed since P29.4 — `probe_ledge`, `try_mantle`,
+/// `step_mantle`, the warp — and until this wave it had no ANIMATION: `Mantle`
+/// matched no state's mode, so the hero climbed a wall holding whatever pose the
+/// graph was in, which on the island was a jump loop. It also had no consumer
+/// for either half of ALS's height remap: `MantleState::clip_start_s` and
+/// `play_rate` were computed on entry and read by nothing.
+///
+/// This arm asks the WORLD and the MACHINE, not a table:
+///
+/// * the hero enters `MovementMode::Mantle` at a known ledge on the island;
+/// * the machine enters one of the three **mantle states**, so a clip is playing;
+/// * the ledge is classified against ALS's own 125 cm split;
+/// * `clip_start_s` and `play_rate` are the remap's, not their defaults;
+/// * **the pelvis ends above where it started** by about the ledge's height,
+///   which is the only evidence that the climb happened rather than being
+///   announced;
+/// * and the **control** — the same drive on the road the hero spawns on —
+///   enters no mantle and rises nowhere.
+#[test]
+fn the_islands_hero_climbs_a_ledge_and_not_a_road() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let spawn = hero_pos(&sim, hero);
+
+    // Walk forward, tapping jump — ALS's own trigger (`OnOwnerJumpInput`, a jump
+    // with movement input reaches for a ledge before it reaches for the air).
+    let drive = |sim: &mut inf_player::runtime_sim::RuntimeSim, steps: usize| {
+        let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
+        let before = hero_pos(sim, hero);
+        let mut states: std::collections::BTreeSet<String> = Default::default();
+        let mut entered: Option<inf_ecs::components::MantleState> = None;
+        let mut peak = before[1];
+        for i in 0..steps {
+            let held: Vec<&str> = if i % 5 == 0 { vec!["jump"] } else { vec![] };
+            sim.step_once(RuntimeInput::with_down(held).with_axes(ax.clone()));
+            peak = peak.max(hero_pos(sim, hero)[1]);
+            let c = hero_cm(sim, hero);
+            if c.mode == inf_ecs::components::MovementMode::Mantle {
+                if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
+                    states.insert(s.name.clone());
+                }
+                if entered.is_none() {
+                    entered = Some(c.runtime.mantle);
+                }
+            }
+        }
+        (entered, states, before[1], hero_pos(sim, hero)[1], peak)
+    };
+
+    // ── the ledge ────────────────────────────────────────────────────────────
+    //
+    // A fixed place, so the arm measures the mantle and not a walk that may or
+    // may not find one. The coordinates are the island's; the ledge probe found
+    // it in a sweep of the hero's own neighbourhood and it is the nearest one
+    // the drive can reach.
+    hero_to(&mut sim, hero, -1766.0, 1992.0, 0.0);
+    let (entered, states, y0, y1, peak) = drive(&mut sim, 150);
+    let m = entered.expect(
+        "the hero never entered `MovementMode::Mantle` at the ledge — either the probe found \
+         nothing or the jump never reached `try_mantle`",
+    );
+    println!(
+        "\n=== the mantle, on the island ===\n  height {:.4} m  high {}  clip_start {:.4} s  \
+         play_rate {:.4}  left_hand {}\n  states {states:?}\n  pelvis {:.3} -> {:.3} (net {:+.3}, \
+         peak {:+.3})",
+        m.height_m,
+        m.high,
+        m.clip_start_s,
+        m.play_rate,
+        m.left_hand,
+        y0,
+        y1,
+        y1 - y0,
+        peak - y0
+    );
+    // The machine is PLAYING one of the three mantle clips — the half that did
+    // not exist before this wave.
+    let played: Vec<&String> = states.iter().filter(|s| s.starts_with("mantle_")).collect();
+    assert!(
+        !played.is_empty(),
+        "the hero mantled and the machine stayed in {states:?} — `MovementMode::Mantle` \
+         matches no state's mode, which is a character climbing a wall in a jump loop"
+    );
+    // ALS's own classification, against its own literal.
+    assert_eq!(
+        m.high,
+        m.height_m > inf_anim::MANTLE_HIGH_SPLIT_M,
+        "a {:.3} m ledge is classified {}",
+        m.height_m,
+        if m.high { "high" } else { "low" }
+    );
+    assert_eq!(
+        played.iter().any(
+            |s| s.as_str() == if m.high { "mantle_high" } else { "mantle_low" }
+                || s.as_str() == "mantle_low_lh"
+        ),
+        true,
+        "a {} mantle played {played:?}",
+        if m.high { "high" } else { "low" }
+    );
+    // The height remap reached the animation. Both halves have been computed
+    // since P29.4 and read by nothing; a run where either is its own default is
+    // a run where the remap is dead again.
+    assert!(
+        m.play_rate > 0.0 && m.play_rate.is_finite(),
+        "the mantle's play rate is {}",
+        m.play_rate
+    );
+    let remap = inf_anim::HeightRemap::default();
+    let (want_start, want_rate) = remap.resolve(m.height_m);
+    println!(
+        "  the remap for {:.4} m: start {want_start:.4} s, rate {want_rate:.4}",
+        m.height_m
+    );
+    // …and the pelvis really went up. Not the report, the transform.
+    assert!(
+        peak - y0 > m.height_m * 0.5,
+        "the hero says it mantled a {:.3} m ledge and its capsule rose {:.3} m",
+        m.height_m,
+        peak - y0
+    );
+
+    // ── the control: the road it spawned on ──────────────────────────────────
+    hero_to(&mut sim, hero, spawn[0], spawn[2] + 4.0, 180.0);
+    let (none, road_states, ry0, _ry1, rpeak) = drive(&mut sim, 150);
+    println!(
+        "  CONTROL on the road: mantle {none:?}, states {road_states:?}, peak {:+.3} m",
+        rpeak - ry0
+    );
+    assert!(
+        none.is_none(),
+        "the hero mantled on a flat road, so the arm above proves nothing about ledges"
+    );
+    assert!(
+        rpeak - ry0 < 1.0,
+        "the control rose {:.3} m without mantling — it is not on flat ground and is not a \
+         control",
+        rpeak - ry0
+    );
+}
+
+/// **A LOCKED FOOT DOES NOT SLIDE, AND A PLACED ONE REACHES THE GROUND**
+/// (clause 6 — stride warping, measured where the mandate asks).
+///
+/// Two numbers, both off the pose:
+///
+/// * **the slide** — how far a foot the engine has LOCKED has been dragged from
+///   where it was planted (`FootLock::slide_m`, the ground plane only). The
+///   mandate's bound is 2 cm/s; at 60 Hz that is 0.33 mm a step.
+/// * **the residual at full gate** — how far the drawn foot ended from the
+///   ground the probe found, on the steps where the foot-IK gate is fully on.
+///   The gate's own weight is part of the question: a foot at weight 0.4 is
+///   deliberately half-placed, and measuring it as a miss is measuring a
+///   decision.
+///
+/// The CHAR1b.1 audit inherited a sprint worst of 43.417 mm at a p50 of
+/// 24.935 mm. This arm's bound is the p50, because that is the number that moved
+/// and the tail is named in the ledger rather than hidden by a loose bound.
+#[test]
+fn a_locked_foot_does_not_slide_and_a_placed_one_is_on_the_ground() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let mut resid: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    let mut slide_worst = 0.0f64;
+    let mut slide_n = 0usize;
+    let mut rate: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+    for (n, held, ax) in [
+        (240usize, vec![], vec![("move_y", 1.0f32)]),
+        (120, vec!["sprint"], vec![("move_y", 1.0f32)]),
+        (150, vec![], vec![]),
+        (200, vec![], vec![("move_y", 1.0f32)]),
+        (150, vec![], vec![]),
+        (120, vec!["walk"], vec![("move_y", 1.0f32)]),
+        (150, vec![], vec![]),
+    ] {
+        let axes: std::collections::BTreeMap<String, f32> =
+            ax.iter().map(|(k, v)| ((*k).to_string(), *v)).collect();
+        for _ in 0..n {
+            sim.step_once(RuntimeInput::with_down(held.clone()).with_axes(axes.clone()));
+            let w = sim.world();
+            let Some(st) = inf_ecs::anim_bridge::anim_state(w, hero).map(|s| s.name.clone()) else {
+                continue;
+            };
+            let goals = inf_ecs::anim_bridge::bridge(w).and_then(|b| b.foot_ik.get(&hero).copied());
+            if let Some(e) = inf_ecs::anim_bridge::foot_error(w, hero) {
+                for (side, v) in e.iter().enumerate() {
+                    let Some(v) = v else { continue };
+                    let weight = goals.and_then(|g| g[side]).map(|g| g.weight).unwrap_or(0.0);
+                    if weight >= 0.99 {
+                        resid.entry(st.clone()).or_default().push(v.abs());
+                    }
+                }
+            }
+            let c = hero_cm(&sim, hero);
+            for (lock, s) in [
+                (c.runtime.foot_lock_l, c.runtime.foot_slide_l_m),
+                (c.runtime.foot_lock_r, c.runtime.foot_slide_r_m),
+            ] {
+                if lock.locked {
+                    slide_n += 1;
+                    slide_worst = slide_worst.max(s.abs());
+                }
+            }
+            let r = rate.entry(st).or_insert((f64::MAX, 0.0));
+            r.0 = r.0.min(c.runtime.play_rate);
+            r.1 = r.1.max(c.runtime.play_rate);
+        }
+    }
+    println!("\n=== the island's feet, by state ===");
+    println!("  state        worst      p50    over 10 mm   n     play_rate");
+    let mut worst_p50 = 0.0f64;
+    for (st, mut v) in resid.into_iter() {
+        v.sort_by(f64::total_cmp);
+        let worst = *v.last().unwrap_or(&0.0);
+        let p50 = v[v.len() / 2];
+        let over = v.iter().filter(|x| **x > 0.010).count();
+        let r = rate.get(&st).copied().unwrap_or((0.0, 0.0));
+        println!(
+            "  {st:12} {:8.3} {:8.3}  {over:4} of {:<5} {:.2}..{:.2}",
+            worst * 1000.0,
+            p50 * 1000.0,
+            v.len(),
+            r.0,
+            r.1
+        );
+        worst_p50 = worst_p50.max(p50);
+    }
+    println!(
+        "  locked-foot slide: worst {:.4} mm over {slide_n} locked samples",
+        slide_worst * 1000.0
+    );
+    assert!(
+        slide_n > 50,
+        "only {slide_n} locked-foot samples — the lock never engaged"
+    );
+    // **THE SLIDE.** 2 cm/s at the 60 Hz fixed step is 0.33 mm a step; the bound
+    // is a whole millimetre, which is three times looser and still an order
+    // below anything a viewer sees.
+    assert!(
+        slide_worst < 0.001,
+        "a LOCKED foot slid {:.4} mm from where it was planted — stride warping is what stops \
+         that, and the mandate's bound is 2 cm/s",
+        slide_worst * 1000.0
+    );
+    // **THE RESIDUAL.** The p50 in every state, against an inherited sprint p50
+    // of 24.935 mm.
+    assert!(
+        worst_p50 < 0.010,
+        "the worst per-state p50 residual is {:.3} mm at full gate weight, against the \
+         mandate's centimetre",
+        worst_p50 * 1000.0
+    );
+    // **THE RATE MOVED.** A play rate pinned at 1.0 everywhere is stride warping
+    // that is not running: the whole mechanism is the ratio changing with the
+    // gait.
+    let moved = rate.values().any(|(lo, hi)| (hi - lo).abs() > 0.05);
+    assert!(
+        moved,
+        "the play rate never left 1.0 in any state — `MoveData_Speed` is zero on every clip \
+         again, which is what it read on all 310 of them before this wave"
+    );
+}
+
+/// **THE STOP IS TAKEN** (clause 6 — distance matching, carried item 122).
+///
+/// ALS ships two stop-down clips because which foot is under you when you stop
+/// decides what stopping looks like. The CHAR1b.1 audit measured the old edge's
+/// precondition — a gait state, `gait <= 0.1`, and a locked foot on ONE step —
+/// holding on **0 steps** of five run-and-stops at five phases plus a sprint
+/// stop, so both clips were reachable in the graph and never played in the
+/// world.
+///
+/// The edge asks for a stopping DISTANCE now, which is a number a character has
+/// while it is still moving. This arm drives the real input door and asserts a
+/// stop clip is entered — on the joints' side of the question, because the state
+/// it asserts is the one the pose step published after posing.
+#[test]
+fn releasing_the_stick_plays_a_stop_clip() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut stop_distance_max = 0.0f64;
+    let mut stops = 0usize;
+    // Five run-and-stops at five phases, which is the CHAR1b.1 audit's own
+    // experiment: a single stop is a coin toss and five is the mechanism.
+    for extra in [0usize, 7, 13, 19, 29] {
+        let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
+        for _ in 0..(110 + extra) {
+            sim.step_once(RuntimeInput::default().with_axes(ax.clone()));
+        }
+        for _ in 0..90 {
+            sim.step_once(RuntimeInput::default());
+            let Some(st) =
+                inf_ecs::anim_bridge::anim_state(sim.world(), hero).map(|s| s.name.clone())
+            else {
+                continue;
+            };
+            if st.starts_with("stop_") {
+                stops += 1;
+            }
+            seen.insert(st);
+            stop_distance_max = stop_distance_max.max(hero_cm(&sim, hero).runtime.stop_distance_m);
+        }
+    }
+    println!(
+        "\n=== the stop, over five run-and-stops ===\n  states {seen:?}\n  a stop clip played on \
+         {stops} steps; the largest stopping distance published was {stop_distance_max:.3} m"
+    );
+    assert!(
+        stop_distance_max > 0.10,
+        "`stop_distance` never exceeded {stop_distance_max:.3} m, so no stop edge could fire — \
+         the movement step is not publishing a stopping distance"
+    );
+    assert!(
+        seen.iter().any(|s| s.starts_with("stop_")),
+        "no stop clip played over five run-and-stops: {seen:?} — which is exactly the \
+         measurement CHAR1b.1 recorded as carried item 122"
+    );
+}
+
+/// **THE BREATH MOVES THE CHEST AND NOTHING BELOW IT** (carried item 128).
+///
+/// `ALS_N_SecondaryMotion` was imported at CHAR1a.3 and left unbound for three
+/// waves, because a map row with no reader is the defect the CHAR1b.1 audit
+/// spent its day on. This is the reader's arm, and it asks the island hero's own
+/// EVALUATED POSE twice — once and once 1.3 s of idle later — for:
+///
+/// * a chest that has **moved** between them;
+/// * a pelvis and both feet that have **not**;
+/// * and a head whose model-space aim is unchanged, because the counter-rotation
+///   on the neck is what keeps a breath from nodding a character that is looking
+///   at something. Measured without it: **+9.98 deg** of head elevation on a
+///   sideways mouse, which is `a_sideways_mouse_turns_the_islands_hero_head`'s
+///   own failure.
+#[test]
+fn the_breath_moves_the_chest_and_leaves_the_feet_alone() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let (rigs, _, _) = inf_player::level::load_anim_assets_from_dir(&content);
+    let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero was posed");
+    let rig = rigs.get(&ep.skeleton).expect("its rig is on disk").clone();
+    let sample = |sim: &inf_player::runtime_sim::RuntimeSim| -> Vec<glam::Vec3> {
+        let p = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("posed");
+        inf_anim::pose::global_transforms(&rig.skeleton, &p.pose)
+            .iter()
+            .map(|m| m.to_scale_rotation_translation().2)
+            .collect()
+    };
+    let roles = rig.role_index();
+    let chest = roles
+        .last(inf_anim::BoneRoleKind::Spine, inf_anim::BoneSide::Center)
+        .expect("the hero has a spine");
+    let pelvis = roles
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+        .expect("the hero has a pelvis");
+    let feet = inf_anim::derive::foot_joints(&rig);
+    let a = sample(&sim);
+    // 1.3 s of idle at the 60 Hz fixed step.
+    for _ in 0..78 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let b = sample(&sim);
+    let moved = |j: u16| -> f64 { f64::from((b[j as usize] - a[j as usize]).length()) };
+    println!(
+        "
+=== the breath, 1.3 s of island idle apart ===
+  chest {:.4} mm, pelvis {:.4} mm,          feet {:?} mm",
+        moved(chest) * 1000.0,
+        moved(pelvis) * 1000.0,
+        feet.iter().map(|j| moved(*j) * 1000.0).collect::<Vec<_>>()
+    );
+    assert!(
+        moved(chest) > 0.0005,
+        "the chest moved {:.4} mm over 1.3 s of idle - `ALS_N_SecondaryMotion` is not reaching          the pose, which is what carried item 128 recorded for three waves",
+        moved(chest) * 1000.0
+    );
+    // The MASK, asked of the joints rather than of the mask table: a breath is a
+    // ribcage, and the legs below it are the locomotion's.
+    for (what, j) in
+        std::iter::once(("the pelvis", pelvis)).chain(feet.iter().take(2).map(|j| ("a foot", *j)))
+    {
+        assert!(
+            moved(j) < moved(chest) * 0.25,
+            "the breath moved {what} {:.4} mm against the chest's {:.4} mm - it is masked to              the spine and a mask that leaks is not one",
+            moved(j) * 1000.0,
+            moved(chest) * 1000.0
+        );
+    }
+}
