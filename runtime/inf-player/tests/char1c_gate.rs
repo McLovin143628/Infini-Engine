@@ -206,9 +206,11 @@ impl Rig {
             .into_iter()
             .enumerate()
         {
-            let w = self
-                .world
-                .spawn_with_guid(Uuid::from_u128(0x1C00_0110 + i as u128), "Wheel", Some(e));
+            let w = self.world.spawn_with_guid(
+                Uuid::from_u128(0x1C00_0110 + i as u128),
+                "Wheel",
+                Some(e),
+            );
             let mut wt = Transform::IDENTITY;
             wt.translation = Vec3d::new(x, -0.75, z);
             self.world.world_mut().entity_mut(w).insert((
@@ -620,9 +622,7 @@ fn a_whisker_steers_the_boom_away_from_a_wall_it_has_not_hit_yet() {
         "\n=== the whisker fan ===\n  steer: {steer:+.3}° (fan on) against {:+.3}° (fan \
          off)\n  the camera stands {d_on:.4} m from the wall's face with the fan on and \
          {d_off:.4} m with it off\n  boom {:.3} m (on) against {:.3} m (off)",
-        off.cam.whisker_steer_deg,
-        on.cam.arm_m,
-        off.cam.arm_m
+        off.cam.whisker_steer_deg, on.cam.arm_m, off.cam.arm_m
     );
     assert_eq!(
         off.cam.whisker_steer_deg, 0.0,
@@ -657,7 +657,10 @@ fn a_whisker_steers_the_boom_away_from_a_wall_it_has_not_hit_yet() {
         clear.cam.whisker_steer_deg, 0.0,
         "the fan steered with nothing to steer away from"
     );
-    assert_eq!(clear.cam.collision_pull_m, 0.0, "and it clipped the boom too");
+    assert_eq!(
+        clear.cam.collision_pull_m, 0.0,
+        "and it clipped the boom too"
+    );
 }
 
 /// **A crowd walking behind the hero does not shove the camera onto its neck**
@@ -896,8 +899,10 @@ fn a_new_character_gets_a_camera_rig_and_a_blueprint_can_move_it() {
             unreadable.push(*name);
         }
     }
-    println!("  {} names, all readable and writable",
-        inf_ecs::camera::CameraTuning::names().len());
+    println!(
+        "  {} names, all readable and writable",
+        inf_ecs::camera::CameraTuning::names().len()
+    );
     assert!(
         unwritable.is_empty() && unreadable.is_empty(),
         "the by-name door disagrees with itself: unwritable {unwritable:?}, \
@@ -963,7 +968,10 @@ fn the_director_cuts_for_a_script_and_blends_for_everything_else() {
         (at - shot.position.to_dvec3()).length() < 1e-9,
         "a cut did not land on the pose it named"
     );
-    assert!(rig.cam.director.was_cut(), "the cut was not reported as one");
+    assert!(
+        rig.cam.director.was_cut(),
+        "the cut was not reported as one"
+    );
     assert_eq!(
         rig.cam.director.holder().map(|h| h.0),
         Some(CameraLayer::Scripted)
@@ -1031,7 +1039,10 @@ fn the_director_cuts_for_a_script_and_blends_for_everything_else() {
         "the release was a cut, not a blend: one step moved {worst_step:.4} m of a \
          {jump:.2} m gap"
     );
-    assert!(rig.cam.director.holder().is_none(), "something still holds it");
+    assert!(
+        rig.cam.director.holder().is_none(),
+        "something still holds it"
+    );
 
     // A ragdoll follow, with nothing outranking it, DOES take the camera — and
     // it is `ragdoll_follow_pose`'s own rule, asked without a physics world.
@@ -1217,8 +1228,14 @@ fn looking_direction_is_reachable_without_an_aim_press() {
         RotationMode::LookingDirection,
         "one press of the rotation-mode key did not reach LookingDirection"
     );
-    assert_eq!(cm.runtime.desired_rotation_mode, RotationMode::LookingDirection);
-    assert!(!cm.runtime.want_aim, "the arm pressed aim, which it must not");
+    assert_eq!(
+        cm.runtime.desired_rotation_mode,
+        RotationMode::LookingDirection
+    );
+    assert!(
+        !cm.runtime.want_aim,
+        "the arm pressed aim, which it must not"
+    );
 
     // TURN IN PLACE, from that mode: the look moves, the body follows, the feet
     // stay where they are.
@@ -1378,7 +1395,11 @@ fn pie_equals_shipping_on_the_camera_trace() {
     let script = |i: u32| -> (Vec<&'static str>, BTreeMap<String, f32>) {
         let yaw = if (i / 120) % 2 == 0 { 0.9f32 } else { -0.9 };
         (
-            if i % 240 < 120 { vec!["sprint"] } else { vec![] },
+            if i % 240 < 120 {
+                vec!["sprint"]
+            } else {
+                vec![]
+            },
             axes(&[("move_y", 1.0), ("look_x", yaw)]),
         )
     };
@@ -1509,16 +1530,16 @@ fn the_cameras_cost_on_both_hosts() {
         let mut total = 0.0f64;
         const N: u32 = 600;
         for i in 0..N {
-            let ax = axes(&[("move_y", 1.0), ("look_x", if i % 120 < 60 { 0.8 } else { -0.8 })]);
+            let ax = axes(&[
+                ("move_y", 1.0),
+                ("look_x", if i % 120 < 60 { 0.8 } else { -0.8 }),
+            ]);
             sim.step_once(RuntimeInput::default().with_axes(ax));
             let p = sim.step_profile();
             cam += p.ms[cam_phase];
             total += p.total_ms();
         }
-        (
-            cam / f64::from(N) * 1000.0,
-            total / f64::from(N) * 1000.0,
-        )
+        (cam / f64::from(N) * 1000.0, total / f64::from(N) * 1000.0)
     };
     let (on, total_on) = measure(true);
     let (off, _) = measure(false);
@@ -1556,8 +1577,7 @@ fn island_project() -> Option<std::path::PathBuf> {
 }
 
 fn island_sim(content: &std::path::Path) -> inf_player::runtime_sim::RuntimeSim {
-    let source =
-        inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
     let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
     let pcg_terrains = terrains.clone();
     let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
@@ -1601,12 +1621,17 @@ fn island_sim(content: &std::path::Path) -> inf_player::runtime_sim::RuntimeSim 
 fn the_camera_never_ends_inside_the_islands_geometry() {
     use inf_player::runtime_sim::RuntimeInput;
     let Some(content) = island_project() else {
-        eprintln!("SKIP: no island project at ../island-build/project/Content — the \
-                   island is local-only content and CI has none");
+        eprintln!(
+            "SKIP: no island project at ../island-build/project/Content — the \
+                   island is local-only content and CI has none"
+        );
         return;
     };
     if !content.join("VancouverIsland.inf_lvl").is_file() {
-        eprintln!("SKIP: no VancouverIsland.inf_lvl under {}", content.display());
+        eprintln!(
+            "SKIP: no VancouverIsland.inf_lvl under {}",
+            content.display()
+        );
         return;
     }
     let mut sim = island_sim(&content);
@@ -1641,8 +1666,8 @@ fn the_camera_never_ends_inside_the_islands_geometry() {
         {
             let w = sim.world();
             let ww = w.world();
-            if let Some(mut q) = ww
-                .try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>()
+            if let Some(mut q) =
+                ww.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>()
             {
                 let guids: Vec<Uuid> = q.iter(ww).map(|(g, _)| g.0).collect();
                 for g in guids {

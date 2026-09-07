@@ -923,7 +923,11 @@ impl PlayerApp {
             let steps = self.sim.steps();
             self.hero_log.note(&format!(
                 "view mode {} at step {steps}",
-                if first { "FIRST person" } else { "THIRD person" }
+                if first {
+                    "FIRST person"
+                } else {
+                    "THIRD person"
+                }
             ));
         }
         //    What the panel is showing, and what it decided. The projection is
@@ -1431,8 +1435,9 @@ impl ApplicationHandler for PlayerApp {
                 self.keyboard_grabbed = false;
                 self.grab_frames = 0;
                 let steps = self.sim.steps();
-                self.hero_log
-                    .note(&format!("focus GAINED at step {steps}; grab ladder re-armed"));
+                self.hero_log.note(&format!(
+                    "focus GAINED at step {steps}; grab ladder re-armed"
+                ));
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}

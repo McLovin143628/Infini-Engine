@@ -1448,11 +1448,7 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
 /// Answers whether it landed. `false` for an entity that is not in the world or
 /// carries no [`CharacterMovement`], which is a value and not a failure for the
 /// reason every other door here says so.
-pub fn set_desired_rotation_mode(
-    world: &mut EcsWorld,
-    guid: Uuid,
-    mode: RotationMode,
-) -> bool {
+pub fn set_desired_rotation_mode(world: &mut EcsWorld, guid: Uuid, mode: RotationMode) -> bool {
     let Some(e) = world.entity_of(guid) else {
         return false;
     };

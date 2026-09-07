@@ -3564,9 +3564,7 @@ impl Host for SimHost<'_> {
             (Some("camera"), Some("shot")) => {
                 let entity = self.guid_of(arg_i64(args, 0));
                 Ok(Value::Bool(match entity {
-                    Ok(guid) => {
-                        inf_ecs::camera::camera_shot(self.world, guid, arg_f64(args, 1))
-                    }
+                    Ok(guid) => inf_ecs::camera::camera_shot(self.world, guid, arg_f64(args, 1)),
                     Err(_) => false,
                 }))
             }

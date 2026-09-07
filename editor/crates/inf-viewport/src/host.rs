@@ -2533,8 +2533,7 @@ impl EngineHost {
                             // unchanged.
                             let (blend, cutoff) = match self.near_fade {
                                 Some((s, fade)) if s == guid => {
-                                    inf_render::near_fade_surface(fade)
-                                        .unwrap_or((blend, cutoff))
+                                    inf_render::near_fade_surface(fade).unwrap_or((blend, cutoff))
                                 }
                                 _ => (blend, cutoff),
                             };

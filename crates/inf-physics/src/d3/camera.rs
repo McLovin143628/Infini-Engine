@@ -294,7 +294,11 @@ pub fn step_locomotion_camera(
         }
     };
 
-    let free = if reach > 1e-6 { sweep(delta / reach, reach) } else { reach };
+    let free = if reach > 1e-6 {
+        sweep(delta / reach, reach)
+    } else {
+        reach
+    };
 
     // ── the whisker fan (wave CHAR1c, clause 1) ──
     //
@@ -312,7 +316,9 @@ pub fn step_locomotion_camera(
     let arm_full = cam.arm_full();
     if reach > 1e-6 {
         for a in cam.tuning.collision.whisker_angles_deg() {
-            let target = cam.camera_at(arm_full, cam.whisker_steer_deg + a).to_dvec3();
+            let target = cam
+                .camera_at(arm_full, cam.whisker_steer_deg + a)
+                .to_dvec3();
             let d = target - origin;
             let r = d.length();
             if r <= 1e-6 {
@@ -363,12 +369,13 @@ pub fn step_locomotion_camera(
         if let Some(body) = r.pelvis.or(r.root) {
             if let Some(at) = bridge.world_mut().body_translation(body) {
                 let pose = ragdoll_follow_pose(cam, at);
-                cam.director.request(inf_ecs::camera::CameraRequest::blended(
-                    inf_ecs::camera::CameraLayer::Override,
-                    inf_ecs::camera::CAMERA_TAG_RAGDOLL,
-                    pose,
-                    RAGDOLL_FOLLOW_BLEND_S,
-                ));
+                cam.director
+                    .request(inf_ecs::camera::CameraRequest::blended(
+                        inf_ecs::camera::CameraLayer::Override,
+                        inf_ecs::camera::CAMERA_TAG_RAGDOLL,
+                        pose,
+                        RAGDOLL_FOLLOW_BLEND_S,
+                    ));
             }
         }
     }

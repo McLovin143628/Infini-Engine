@@ -69,7 +69,9 @@ pub enum ViewMode {
 /// One settings block — ALS's `FALSCameraSettings`, with the two fields its C++
 /// path reads out of curves instead (the pivot offset and the three lag speeds)
 /// promoted to real fields, because that is what removes the dummy AnimBP.
-#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(default)]
 pub struct CameraSettings {
     /// Distance from the pivot to the camera, metres (ALS `TargetArmLength`,
@@ -131,7 +133,16 @@ impl CameraSettings {
 /// default** and NOT by `#[serde(default)]`, which fills a missing field from
 /// the field type's own default and would hand this block the third-person run
 /// numbers (P29.6 audit, A7). Deserialize a camera table through that door.
-#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    bevy_reflect::Reflect,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(default)]
 pub struct GaitCameraSettings {
     pub walk: CameraSettings,
@@ -183,7 +194,9 @@ impl GaitCameraSettings {
 ///    the back of the hero's neck, photographed four times across CHAR1a).
 ///
 /// Each field below closes exactly one of those.
-#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(default)]
 pub struct CameraCollision {
     /// Cast the **whisker fan** as well as the main sweep (1).
@@ -356,7 +369,9 @@ impl CameraCollision {
 /// the camera sits a little above roof height, five to six metres back, pitched
 /// down about ten degrees, with the car in the lower third and the horizon near
 /// the top of the frame.
-#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(default)]
 pub struct DrivingCameraSettings {
     /// The block at a standstill: arm, offsets, lag, FOV.
@@ -431,7 +446,9 @@ pub struct DrivingView {
 /// The table is ALS's `FALSCameraStateSettings` — `RotationMode` × (gait +
 /// crouch) = 3 × 4 = twelve blocks — plus the first-person seat and the handful
 /// of numbers that are not per-state.
-#[derive(bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    bevy_reflect::Reflect, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(default)]
 pub struct CameraTuning {
     pub velocity_direction: GaitCameraSettings,
@@ -805,9 +822,7 @@ impl CameraTuning {
             "collision.whisker_count" => return Some(f64::from(self.collision.whisker_count)),
             "collision.whisker_spread_deg" => return Some(self.collision.whisker_spread_deg),
             "collision.whisker_steer" => return Some(self.collision.whisker_steer),
-            "collision.whisker_steer_max_deg" => {
-                return Some(self.collision.whisker_steer_max_deg)
-            }
+            "collision.whisker_steer_max_deg" => return Some(self.collision.whisker_steer_max_deg),
             "collision.pull_in_speed" => return Some(self.collision.pull_in_speed),
             "collision.return_speed" => return Some(self.collision.return_speed),
             "collision.near_fade_start_m" => return Some(self.collision.near_fade_start_m),
@@ -1538,7 +1553,10 @@ impl LocomotionCamera {
         // the two cannot disagree about what "right" means.
         let pivot = self.sweep_origin().to_dvec3();
         // The camera's own frame carries pitch, because the arm swings with it.
-        let (cr, cu, cf) = basis(crate::movement::wrap_deg(self.yaw_deg + steer_deg), self.pitch_deg);
+        let (cr, cu, cf) = basis(
+            crate::movement::wrap_deg(self.yaw_deg + steer_deg),
+            self.pitch_deg,
+        );
         Vec3d::from_dvec3(
             pivot - cf * arm
                 + cr * (self.settings.camera_offset.x * shoulder)
@@ -1924,9 +1942,7 @@ pub fn basis(yaw_deg: f64, pitch_deg: f64) -> (DVec3, DVec3, DVec3) {
 /// which is every character in every level committed before this wave. So the
 /// component is an **override**, and its absence is exactly the behaviour that
 /// shipped.
-#[derive(
-    bevy_ecs::prelude::Component, bevy_reflect::Reflect, Clone, Debug, PartialEq,
-)]
+#[derive(bevy_ecs::prelude::Component, bevy_reflect::Reflect, Clone, Debug, PartialEq)]
 pub struct CameraRig {
     /// The whole tunable table — arms, offsets, lag, FOV, the driving block, the
     /// collision policy and the pitch limits.
