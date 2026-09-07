@@ -549,7 +549,6 @@ fn finish(
     // lying on the ground carries its pelvis about a foot up, a standing one
     // about a metre. `RagdollRuntime::pelvis` has recorded the position since
     // P29.4 and nothing read it.
-    let half = cm.half_height_for(MovementMode::Grounded);
     let feet_y = position.y - half - super::movement::FALLBACK_RADIUS_M;
     cm.runtime.ragdoll.upright = cm.runtime.ragdoll.pelvis.y - feet_y > half * 0.5;
     let upright = cm.runtime.ragdoll.upright;

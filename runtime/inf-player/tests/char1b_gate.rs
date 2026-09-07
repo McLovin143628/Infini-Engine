@@ -54,6 +54,41 @@ fn clips_in(dir: &Path) -> Vec<(String, inf_anim::AnimClipAsset)> {
     out
 }
 
+/// Every `.inf_anim` under `dir` **and every directory below it**, decoded, with
+/// its file stem (wave CHAR1b.2).
+///
+/// The one-directory sibling above is right for the donor pack, which is one
+/// folder. The AUTHORED sets are not: `ue_import::rebind_locomotion_graph`
+/// writes them per identity under `{stem}-loco/`, so an arm that read one
+/// directory would report nine unbound rows for nine clips sitting one level
+/// down — which is the shape of the defect the CHAR1b.1 audit's F2 found in the
+/// runtime's own loader.
+///
+/// Dot-directories are skipped, for F2's other reason: `Content/.inf/
+/// import-cache` holds a second copy of everything.
+fn clips_under(dir: &Path) -> Vec<(String, inf_anim::AnimClipAsset)> {
+    let mut out = clips_in(dir);
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut subs: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+        })
+        .collect();
+    subs.sort();
+    for sub in subs {
+        out.extend(clips_under(&sub));
+    }
+    out
+}
+
 /// Every `.inf_skel` under `dir`, keyed by its sidecar GUID's raw bytes.
 fn skeletons_in(dir: &Path) -> std::collections::BTreeMap<[u8; 16], inf_anim::SkeletonAsset> {
     let mut out = std::collections::BTreeMap::new();
@@ -87,23 +122,31 @@ fn skeletons_in(dir: &Path) -> std::collections::BTreeMap<[u8; 16], inf_anim::Sk
 /// loudly.
 ///
 /// P29.4's foot IK is gated on ALS's `Enable_FootIK_L/R` curve. **No clip in
-/// this engine has ever carried it** (this arm's sibling census: 164 imported
-/// ALS clips, zero; and the 12 committed sample clips, zero), so the mechanism
-/// never ran. The obvious repair is to derive the gate — "does this foot reach
-/// the ground in this clip" ought to be an absolute height test against the
-/// rig's own ground plane, since every rig this engine poses has its origin at
-/// its feet.
+/// this engine ever carried it** (CHAR1b.1's census: 164 imported ALS clips,
+/// zero; and the 12 committed sample clips, zero), so the mechanism never ran.
+/// The obvious repair is to derive the gate from HEIGHT — "does this foot reach
+/// the ground in this clip" ought to be an absolute test against the rig's own
+/// ground plane, since every rig this engine poses has its origin at its feet.
 ///
-/// It is not. UE authors an in-air cycle with the root on the ground and the
+/// **It is not.** UE authors an in-air cycle with the root on the ground and the
 /// legs hanging, so a fall loop's ankle sits exactly where a walk's ankle sits.
-/// This arm asserts the **negative**: over the whole imported library there is
-/// no height that separates the grounded families from the airborne ones,
-/// because the airborne clips are among the very highest. The engine therefore
-/// takes the gate from the movement STATE, as ALS's own `UpdateFootIK` does.
+/// This arm asserts that negative and it is unchanged: over the whole imported
+/// library there is no height that separates the grounded families from the
+/// airborne ones, because the airborne clips are among the very highest.
 ///
-/// It fails if a future import ever makes them separable — at which point this
-/// reasoning is stale and `step_feet` can be reconsidered, which is the only
-/// honest way to write down a negative result.
+/// # What CHAR1b.2 changed, and why the census flipped
+///
+/// The gate is derivable — from the foot's own **contact state within its own
+/// clip**, which is a different measurement from its absolute height across
+/// clips. `inf_anim::derive` writes it now
+/// ([`ENABLE_FOOT_IK_PREFIX`](inf_anim::derive::ENABLE_FOOT_IK_PREFIX)) and the
+/// census below asserts **every** clip carries one, because the fallback it
+/// replaces was measured to be wrong in both directions: a flat `1.0` pinned a
+/// swinging foot to the road (150.0 mm of island residual) and the plant window
+/// alone switched foot IK off on an idle.
+///
+/// The height result still fails loudly if a future import ever makes the
+/// families separable, which is the only honest way to keep a negative.
 #[test]
 fn the_foot_ik_gate_is_not_derivable_from_a_clips_foot_height() {
     let Some(content) = island_project() else {
@@ -158,15 +201,33 @@ fn the_foot_ik_gate_is_not_derivable_from_a_clips_foot_height() {
     }
     assert!(rows.len() > 100, "only {} clips measured", rows.len());
 
-    // **THE CENSUS**: nothing authors the gate.
+    // **THE CENSUS**, and it has flipped on purpose (wave CHAR1b.2).
+    //
+    // CHAR1b.1 measured **0 of 164** and the number was the whole reason
+    // `step_feet` had a fallback at all: nobody authors this gate. The fallback
+    // was then measured to be wrong in both directions — a flat `1.0` pinned a
+    // foot that was half a metre in the air (150.0 mm of island residual on
+    // exactly the steps where `FootLock_*` had just gone to zero) and the plant
+    // window switched foot IK OFF on an idle, because a foot that never lifts
+    // gets no plant window at all.
+    //
+    // So the gate is DERIVED now (`inf_anim::derive::ENABLE_FOOT_IK_PREFIX`),
+    // and every clip carries it. The assertion is the other way round and it
+    // means the same thing it always meant: *the value `step_feet` reads is a
+    // measurement rather than a guess*. It fails if a re-import ever stops
+    // writing the channel, which would silently put the flat fallback back.
     println!(
         "\n=== Enable_FootIK_* over {} imported clips: {with_gate} carry it ===",
         clips.len()
     );
     assert_eq!(
-        with_gate, 0,
-        "{with_gate} imported clips now carry an `Enable_FootIK_*` channel — the \
-         reasoning in `step_feet` assumes none does, and it is stale"
+        with_gate,
+        clips.len(),
+        "{with_gate} of {} imported clips carry an `Enable_FootIK_*` channel — the \
+         deriver is meant to write one onto every clip, and `step_feet` falls back \
+         to a flat 1.0 for any that has none, which is what pins a swinging foot \
+         to the road",
+        clips.len()
     );
 
     // **THE FALSIFICATION**: the airborne clips are not below the grounded ones.
@@ -919,6 +980,9 @@ fn the_two_mode_tables_agree() {
 #[test]
 fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
     const SHELL_JOINTS: usize = 10;
+    /// The floor for a clip `inf_anim::authored` wrote — see the two-floors
+    /// note below. Three is a throw: a shoulder, an elbow and a chest.
+    const AUTHORED_MIN_JOINTS: usize = 3;
     let Some(content) = island_project() else {
         eprintln!(
             "SKIP: no island project at ../island-build/project/Content — the ALS \
@@ -927,15 +991,30 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
         return;
     };
     let dir = content.join("UE/Mannequins");
-    let clips = clips_in(&dir);
+    let clips = clips_under(&content);
     if clips.is_empty() {
-        eprintln!("SKIP: no .inf_anim under {}", dir.display());
+        eprintln!("SKIP: no .inf_anim under {}", content.display());
         return;
     }
     // The same suffix rule the import door resolves with: the file stem is
     // `{pack}_{name}` and the map holds the donor's own name.
+    // **Two spellings, because there are two kinds of clip** (wave CHAR1b.2).
+    //
+    // A DONOR clip is written under its pack's own stem (`ALS_Community_
+    // ALS_N_Walk_F`), so `_{name}` is the needle. An AUTHORED one
+    // (`inf_anim::authored`, the sets ALS does not ship) is written per identity
+    // as `{name}--{stem}`, and the separator is a HYPHEN precisely so it does
+    // NOT match `_{name}`: a copy called `INF_Slide.inf_anim` would be a second
+    // stem matching `INF_Slide` and would make the other identity's lookup
+    // ambiguous (`ue_import::rebind_locomotion_graph`'s own comment, measured
+    // the hard way at CHAR1b.1 when the female machine came out with 0 states).
+    //
+    // The arm resolves both, because the door does — and an arm that could only
+    // see one of them would report nine unbound rows for nine clips that are on
+    // the disk it is reading.
     let find = |name: &str| -> Option<&inf_anim::AnimClipAsset> {
         let tail = format!("_{name}");
+        let head = format!("{name}--");
         let mut hit = None;
         for (stem, asset) in &clips {
             if stem == name || stem.ends_with(&tail) {
@@ -945,7 +1024,15 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
                 hit = Some(asset);
             }
         }
-        hit
+        if hit.is_some() {
+            return hit;
+        }
+        // An authored clip exists once per identity, so more than one match is
+        // expected and the FIRST in the sorted walk is taken deterministically.
+        clips
+            .iter()
+            .find(|(stem, _)| stem.starts_with(&head))
+            .map(|(_, a)| a)
     };
     let (machine, report) = inf_anim::build_locomotion_graph(&|name: &str| {
         find(name).map(|_| {
@@ -974,7 +1061,24 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
                             t.translation.is_some() || t.rotation.is_some() || t.scale.is_some()
                         })
                         .count();
-                    if joints < SHELL_JOINTS {
+                    // **Two floors, because there are two kinds of clip**
+                    // (wave CHAR1b.2). Ten joints is the DONOR floor and its
+                    // reason is carried item 93: an export that lost its bone
+                    // tracks arrives with two, and a two-joint clip plays as a
+                    // bind pose wearing an animation's name.
+                    //
+                    // An AUTHORED clip's joint count is a property of its own
+                    // design, not evidence of an import that went wrong: a
+                    // throw is a shoulder, an elbow and a chest, and three is
+                    // the right answer for an upper-body additive layered over
+                    // a walk. Its own floor is `AUTHORED_MIN_JOINTS`, and
+                    // `inf_anim::authored`'s arms assert the shape.
+                    let floor = if name.starts_with("INF_") {
+                        AUTHORED_MIN_JOINTS
+                    } else {
+                        SHELL_JOINTS
+                    };
+                    if joints < floor {
                         shells.push((slot.state.into(), (*name).into(), joints));
                     }
                     cells.push(format!("{name} ({joints}j)"));
@@ -1010,10 +1114,61 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
     );
     assert!(
         shells.is_empty(),
-        "{} bindings are SHELLS (fewer than {SHELL_JOINTS} animated joints — a \
-         bind pose wearing an animation's name): {shells:?}",
+        "{} bindings are SHELLS (under {SHELL_JOINTS} animated joints for a donor \
+         clip, {AUTHORED_MIN_JOINTS} for an authored one — a bind pose wearing an \
+         animation's name): {shells:?}",
         shells.len()
     );
+    // **AND THE AUTHORED SETS REALLY ARE THE AUTHORED SETS** (wave CHAR1b.2).
+    //
+    // The rows above prove a file with that name is on disk and moves joints.
+    // This proves it is the one `inf_anim::authored` derives from THIS rig:
+    // every clip in `AUTHORED_CLIPS` has a row, a file, and the same joint
+    // count the generator produces for the hero's own skeleton. A hand-dropped
+    // file of the right name would pass the first check and fail this one.
+    {
+        let rows: std::collections::BTreeMap<&str, usize> = inf_anim::LOCOMOTION_MAP
+            .iter()
+            .flat_map(|s| s.clips.iter().map(|(n, _)| *n))
+            .filter(|n| n.starts_with("INF_"))
+            .map(|n| (n, 0))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            inf_anim::AUTHORED_CLIPS.len(),
+            "the map names {} authored clips and the generator writes {}: {:?} vs {:?}",
+            rows.len(),
+            inf_anim::AUTHORED_CLIPS.len(),
+            rows.keys().collect::<Vec<_>>(),
+            inf_anim::AUTHORED_CLIPS
+        );
+        let all_rigs = skeletons_in(&dir);
+        let hero_rig = all_rigs
+            .values()
+            .filter(|r| inf_anim::can_author(r))
+            .max_by_key(|r| r.skeleton.len());
+        if let Some(rig) = hero_rig {
+            let want: std::collections::BTreeMap<String, usize> = inf_anim::author_clips(rig)
+                .expect("the rig can author")
+                .into_iter()
+                .map(|(n, c)| (n, c.tracks.len()))
+                .collect();
+            for (name, joints) in &want {
+                let got = find(name)
+                    .unwrap_or_else(|| panic!("`{name}` is not on disk beside the donor clips"));
+                assert_eq!(
+                    got.clip.tracks.len(),
+                    *joints,
+                    "`{name}` on disk drives {} joints and the generator writes {joints} for \
+                     this rig — the file is not this rig's authored clip",
+                    got.clip.tracks.len()
+                );
+            }
+            println!("  the authored sets, re-derived from the hero's own rig: {want:?}");
+        } else {
+            println!("  SKIP the authored re-derivation: no rig on disk carries a role table");
+        }
+    }
     machine
         .validate()
         .expect("the graph built from real clips validates");
@@ -1777,7 +1932,7 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
             vec![
                 (als::MODE_VAR, g),
                 (als::GROUNDED_VAR, 1.0),
-                (als::FACE_UP_VAR, 0.0),
+                (als::GETUP_VAR, als::GETUP_FRONT),
             ],
         ),
         Frame(
@@ -1792,7 +1947,25 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
             vec![
                 (als::MODE_VAR, g),
                 (als::GROUNDED_VAR, 1.0),
-                (als::FACE_UP_VAR, 1.0),
+                (als::GETUP_VAR, als::GETUP_BACK),
+            ],
+        ),
+        Frame(
+            "ragdolling a third time",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Ragdoll.param()),
+                (als::GROUNDED_VAR, 0.0),
+            ],
+        ),
+        // **The third get-up** (wave CHAR1b.2): a ragdoll that settled with the
+        // pelvis still more than half a capsule above the feet never went down,
+        // and ALS's two crouched clips are both wrong for it.
+        Frame(
+            "getting up, still on its feet",
+            vec![
+                (als::MODE_VAR, g),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GETUP_VAR, als::GETUP_STANDING),
             ],
         ),
         // ── the two stops, each from a cycle, chosen by the planted foot ──
@@ -1809,7 +1982,14 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
             vec![
                 (als::MODE_VAR, g),
                 (als::GROUNDED_VAR, 1.0),
-                (als::GAIT_VAR, 0.0),
+                // **Still moving** (wave CHAR1b.2). The stop edge used to ask for
+                // `gait <= 0.1` -- the character has already stopped -- and the
+                // CHAR1b.1 audit measured that precondition holding on **0 steps**
+                // of five run-and-stops. It asks for a stopping DISTANCE now, which
+                // is a number a character has while it is still travelling, so the
+                // frame that reaches a stop is a frame in which the gait is up.
+                (als::GAIT_VAR, 2.0),
+                (als::STOP_DISTANCE_VAR, 0.9),
                 (als::PLANTED_FOOT_VAR, -1.0),
             ],
         ),
@@ -1826,7 +2006,14 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
             vec![
                 (als::MODE_VAR, g),
                 (als::GROUNDED_VAR, 1.0),
-                (als::GAIT_VAR, 0.0),
+                // **Still moving** (wave CHAR1b.2). The stop edge used to ask for
+                // `gait <= 0.1` -- the character has already stopped -- and the
+                // CHAR1b.1 audit measured that precondition holding on **0 steps**
+                // of five run-and-stops. It asks for a stopping DISTANCE now, which
+                // is a number a character has while it is still travelling, so the
+                // frame that reaches a stop is a frame in which the gait is up.
+                (als::GAIT_VAR, 2.0),
+                (als::STOP_DISTANCE_VAR, 0.9),
                 (als::PLANTED_FOOT_VAR, 1.0),
             ],
         ),
@@ -1893,6 +2080,79 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
                 (als::MODE_VAR, als::LocoMode::Crouch.param()),
                 (als::GROUNDED_VAR, 1.0),
                 (als::TURN_DEG_VAR, 170.0),
+            ],
+        ),
+        // ── THE AUTHORED SETS (wave CHAR1b.2) ──
+        //
+        // Four modes this engine's movement step has entered since P29.3 with
+        // no clip to play. Each frame is exactly what the movement step
+        // publishes in that mode, so a row here that cannot enter its state is
+        // a row a player could not reach either.
+        Frame(
+            "the mantle, low, right-handed",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Mantle.param()),
+                (als::MANTLE_VAR, als::MANTLE_LOW_RH),
+            ],
+        ),
+        Frame(
+            "the mantle, low, left-handed",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Mantle.param()),
+                (als::MANTLE_VAR, als::MANTLE_LOW_LH),
+            ],
+        ),
+        Frame(
+            "the mantle, high",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Mantle.param()),
+                (als::MANTLE_VAR, als::MANTLE_HIGH),
+            ],
+        ),
+        Frame(
+            "sliding",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Slide.param()),
+                (als::GROUNDED_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "prone, still",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Prone.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "prone, crawling",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Prone.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "treading water",
+            vec![
+                (als::MODE_VAR, als::LocoMode::SwimSurface.param()),
+                (als::GROUNDED_VAR, 0.0),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "swimming at the surface",
+            vec![
+                (als::MODE_VAR, als::LocoMode::SwimSurface.param()),
+                (als::GROUNDED_VAR, 0.0),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "swimming under",
+            vec![
+                (als::MODE_VAR, als::LocoMode::SwimUnder.param()),
+                (als::GROUNDED_VAR, 0.0),
             ],
         ),
     ];

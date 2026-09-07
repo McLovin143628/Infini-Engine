@@ -2154,12 +2154,44 @@ fn apply_breath<'c>(
     if spine.is_empty() {
         return false;
     }
-    let mask = inf_anim::JointMask::new("Mask_Breath", spine, 0.0);
+    let mask = inf_anim::JointMask::new("Mask_Breath", spine.clone(), 0.0);
     let base = inf_anim::pose::sample_clip(&rig.skeleton, clip, 0.0, true);
     let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, true);
     let delta = inf_anim::additive_delta(&base, &now);
     let layer = inf_anim::AnimLayer::additive("breath", 1.0).with_mask(mask);
     *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+
+    // ── THE NECK TAKES IT BACK (wave CHAR1b.2) ───────────────────────────────
+    //
+    // A mask says which joints are WRITTEN; it says nothing about which joints
+    // MOVE, because a skeleton is a tree and the head is a descendant of the
+    // chest. So a breath masked to the spine still carries the head with it —
+    // measured on the island's own look-at arm, which read **+9.98° of head
+    // elevation on a sideways mouse** with the spine mask (and +11.26° with the
+    // whole upper body): the two samples fell at different points of the breath.
+    //
+    // That is what a rigger's counter-rotation is for, and it is the same
+    // arithmetic: the model-space rotation the breath added at the top of the
+    // spine is the product of the per-joint deltas down the chain, and its
+    // inverse on the first neck joint cancels it exactly. The chest rises and
+    // falls; the head does not nod with it, which is what a person looking at
+    // something does.
+    //
+    // A rig with no neck keeps the nod, and that is the honest outcome: there is
+    // nowhere to put the correction.
+    let Some(neck) = roles.first(inf_anim::BoneRoleKind::Neck, inf_anim::BoneSide::Center) else {
+        return true;
+    };
+    let mut added = glam::Quat::IDENTITY;
+    for (j, _) in &spine {
+        if let Some(d) = delta.locals.get(*j as usize) {
+            added *= glam::Quat::from_array(d.rotation);
+        }
+    }
+    if let Some(local) = pose.locals.get_mut(neck as usize) {
+        let r = glam::Quat::from_array(local.rotation);
+        local.rotation = (added.conjugate() * r).to_array();
+    }
     true
 }
 
