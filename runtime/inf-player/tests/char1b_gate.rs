@@ -2661,3 +2661,121 @@ fn every_rig_in_the_island_project_carries_a_role_table() {
         empty.iter().take(4).collect::<Vec<_>>()
     );
 }
+
+/// **A SIDEWAYS MOUSE TURNS THE HEAD; AN UPWARD ONE TIPS IT** — on the island,
+/// through the door the window resolves (audit CHAR1b.1, the user's own report).
+///
+/// *"When the user moves their mouse left/right, the character in the game looks
+/// up/down rather than left/right."* Reproduced here and measured on the drawn
+/// pose rather than on the report, which is what hid it: `LookAtReport` carries
+/// the angle the chain was ASKED for, and that angle was always right. What was
+/// wrong was the axis it was turned about.
+///
+/// The window binds `look_x` to the mouse's X at 0.15° per raw unit and `look_y`
+/// to its Y at −0.15 (`inf_input::map`), and both hosts step the same
+/// `RuntimeInput`, so driving those two axes IS the real path — the demo loop's
+/// `mouse_event` lands on the same pair one layer up.
+///
+/// Before the fix, on the island hero's rig: a pure `look_x` frame moved the
+/// head's **elevation** by ~+44° and its azimuth not at all; a pure `look_y`
+/// frame did the converse.
+#[test]
+fn a_sideways_mouse_turns_the_islands_hero_head_and_an_upward_one_tips_it() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    let mut rigs: std::collections::BTreeMap<[u8; 16], inf_anim::SkeletonAsset> =
+        std::collections::BTreeMap::new();
+    for (g, sk) in inf_player::level::load_anim_assets_from_dir(&content).0 {
+        rigs.insert(*g.as_bytes(), sk);
+    }
+    // Where the head POINTS, in the rig's own frame.
+    let dir = |sim: &inf_player::runtime_sim::RuntimeSim| -> (f64, f64) {
+        let ep = inf_ecs::pose::evaluated_pose(sim.world(), hero).expect("the hero is posed");
+        let rig = rigs.get(ep.skeleton.as_bytes()).expect("its rig");
+        let names: Vec<&str> = rig
+            .skeleton
+            .joints()
+            .iter()
+            .map(|j| j.name.as_str())
+            .collect();
+        let h = names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case("head"))
+            .expect("a head bone");
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &ep.pose);
+        let f = g[h].to_scale_rotation_translation().1 * glam::Vec3::Z;
+        (
+            inf_math::patan2_64(f64::from(f.x), f64::from(f.z)).to_degrees(),
+            inf_math::patan2_64(f64::from(f.y), f64::from((f.x * f.x + f.z * f.z).sqrt()))
+                .to_degrees(),
+        )
+    };
+    let axis = |k: &str, v: f32| -> std::collections::BTreeMap<String, f32> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(k.to_string(), v);
+        m
+    };
+    for _ in 0..600 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let base = dir(&sim);
+    // A sideways frame. 40°/s for 45 steps is 30° of aim, well inside the clamp.
+    for _ in 0..45 {
+        sim.step_once(RuntimeInput::default().with_axes(axis("look_x", 40.0)));
+    }
+    for _ in 0..20 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let sideways = dir(&sim);
+    let (daz, del) = (sideways.0 - base.0, sideways.1 - base.1);
+    println!(
+        "\n=== the island hero's head, through the input door ===\n  \
+         rest: az {:.2}° el {:.2}°\n  +look_x only: Δaz {daz:+.2}° Δel {del:+.2}°",
+        base.0, base.1
+    );
+    assert!(
+        daz.abs() > 10.0,
+        "a sideways mouse moved the head's azimuth {daz:.2}° — it did not turn"
+    );
+    assert!(
+        del.abs() * 5.0 < daz.abs(),
+        "a sideways mouse tipped the head {del:.2} deg against {daz:.2} deg of turn; that is the user's own report, and it is the look-at pass turning about a bone's local axis instead of the rig's own up"
+    );
+    // …and back, then a purely vertical one.
+    for _ in 0..45 {
+        sim.step_once(RuntimeInput::default().with_axes(axis("look_x", -40.0)));
+    }
+    for _ in 0..30 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let centred = dir(&sim);
+    for _ in 0..30 {
+        sim.step_once(RuntimeInput::default().with_axes(axis("look_y", 40.0)));
+    }
+    for _ in 0..20 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let up = dir(&sim);
+    let (uaz, uel) = (up.0 - centred.0, up.1 - centred.1);
+    println!("  +look_y only: Δaz {uaz:+.2}° Δel {uel:+.2}°");
+    assert!(
+        uel > 5.0,
+        "an upward mouse moved the head's elevation {uel:.2}° — it did not look up"
+    );
+    // A ratio and not a bound: the aim does not return to exactly where it was
+    // (the swing back overshoots by a fraction of a degree and the body carries
+    // it), so what is asserted is that the ELEVATION is what moved.
+    assert!(
+        uaz.abs() * 5.0 < uel.abs(),
+        "an upward mouse turned the head {uaz:.2} deg sideways against {uel:.2} deg of tip; the axes are swapped"
+    );
+}

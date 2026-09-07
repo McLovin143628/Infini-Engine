@@ -164,16 +164,51 @@ impl LookAtReport {
     }
 }
 
-/// A rotation about the local Y axis, built portably.
-fn yaw(deg: f64) -> Quat {
+/// **A yaw, in the RIG'S OWN frame** — about model `+Y`, the axis and the sense
+/// `Transform::rotation.y` turns the body in (`d3::movement`'s step 12 writes
+/// `body_yaw_deg` there). A character that yaws its head by d and one that yaws
+/// its body by d therefore face the same way, which is the whole contract.
+fn yaw_model(deg: f64) -> Quat {
     let h = (deg as f32).to_radians() * 0.5;
     Quat::from_xyzw(0.0, inf_math::psin(h), 0.0, inf_math::pcos(h))
 }
 
-/// A rotation about the local X axis, built portably.
-fn pitch(deg: f64) -> Quat {
+/// **A pitch, in the rig's own frame** — about model `-X`, so a POSITIVE pitch
+/// tips the head's forward toward `+Y` and the character looks UP. That is the
+/// convention `aim_pitch_deg` and `inf_ecs::movement::aim_sweep` already use.
+fn pitch_model(deg: f64) -> Quat {
     let h = (deg as f32).to_radians() * 0.5;
-    Quat::from_xyzw(inf_math::psin(h), 0.0, 0.0, inf_math::pcos(h))
+    Quat::from_xyzw(-inf_math::psin(h), 0.0, 0.0, inf_math::pcos(h))
+}
+
+/// The joint's rotation in **model space** under `pose`, by walking its parents.
+///
+/// The look is asked for in model space and has to be applied there; a joint's
+/// LOCAL axes are the rig author's and are not it. On the MetaHuman rig the head
+/// bone's local `X` points along model `+Y` and its local `Y` along model `-X`,
+/// which is why the first version of this pass drew a yaw as a nod.
+fn model_rot(skeleton: &Skeleton, pose: &Pose, joint: u16) -> Quat {
+    let mut q = Quat::IDENTITY;
+    let mut cur = Some(joint);
+    // Bounded by the chain's depth; a `Skeleton` is validated with
+    // `parent < self_index`, so this terminates.
+    while let Some(j) = cur {
+        let Some(local) = pose.locals.get(j as usize) else {
+            break;
+        };
+        q = local.rotation_quat() * q;
+        cur = skeleton.joints().get(j as usize).and_then(|jj| jj.parent);
+    }
+    q
+}
+
+/// The LOCAL post-multiply that rotates `joint` by `wanted` **in model space**.
+///
+/// `global = parent * local`, and we want `global' = wanted * global`; the
+/// identity `local * (global⁻¹ · wanted · global)` gives exactly that, so the
+/// call sites keep the post-multiply shape they had.
+fn local_delta_for(model: Quat, wanted: Quat) -> Quat {
+    model.inverse() * wanted * model
 }
 
 /// **Turn the head, the neck and the spine toward `look`.**
@@ -196,7 +231,7 @@ fn pitch(deg: f64) -> Quat {
 /// having written nothing. A zero `weight` does the same. That is what keeps
 /// every committed sample byte-identical to its pre-CHAR1b self.
 pub fn apply_look_at(
-    _skeleton: &Skeleton,
+    skeleton: &Skeleton,
     pose: &mut Pose,
     roles: RoleIndex<'_>,
     look: LookAt,
@@ -228,14 +263,22 @@ pub fn apply_look_at(
         return report;
     }
 
+    // **THE MODEL-SPACE ROTATIONS THIS PASS TURNS ABOUT**, taken once before
+    // anything is written. A joint written here rotates every joint below it, so
+    // `ancestor` accumulates what this pass has already applied above the joint
+    // being written and the later links compose exactly rather than approximately.
+    let mut ancestor = Quat::IDENTITY;
+
     // ── the spine leans ──────────────────────────────────────────────────────
     let per_spine = look.spine_share(spines.len(), limits) * w;
     if per_spine.abs() > 1.0e-9 {
-        let q = yaw(per_spine);
+        let q = yaw_model(per_spine);
         for j in &spines {
+            let model = ancestor * model_rot(skeleton, pose, *j);
             if let Some(l) = pose.locals.get_mut(*j as usize) {
-                l.rotation = (l.rotation_quat() * q).to_array();
+                l.rotation = (l.rotation_quat() * local_delta_for(model, q)).to_array();
                 report.spine += 1;
+                ancestor = q * ancestor;
             }
         }
     }
@@ -258,11 +301,13 @@ pub fn apply_look_at(
         let per_y = neck_yaw_total / necks.len() as f64;
         let per_p = neck_pitch_total / necks.len() as f64;
         if per_y.abs() > 1.0e-9 || per_p.abs() > 1.0e-9 {
-            let q = yaw(per_y) * pitch(per_p);
+            let q = yaw_model(per_y) * pitch_model(per_p);
             for j in &necks {
+                let model = ancestor * model_rot(skeleton, pose, *j);
                 if let Some(l) = pose.locals.get_mut(*j as usize) {
-                    l.rotation = (l.rotation_quat() * q).to_array();
+                    l.rotation = (l.rotation_quat() * local_delta_for(model, q)).to_array();
                     report.neck += 1;
+                    ancestor = q * ancestor;
                 }
             }
             neck_took = per_y * report.neck as f64;
@@ -276,9 +321,10 @@ pub fn apply_look_at(
         (left_pitch - neck_pitch_took).clamp(-limits.head_pitch_deg, limits.head_pitch_deg);
     if let Some(j) = head {
         if head_yaw.abs() > DEAD_DEG || head_pitch.abs() > DEAD_DEG {
+            let model = ancestor * model_rot(skeleton, pose, j);
             if let Some(l) = pose.locals.get_mut(j as usize) {
-                let q = yaw(head_yaw) * pitch(head_pitch);
-                l.rotation = (l.rotation_quat() * q).to_array();
+                let q = yaw_model(head_yaw) * pitch_model(head_pitch);
+                l.rotation = (l.rotation_quat() * local_delta_for(model, q)).to_array();
                 report.head = true;
             }
         }
@@ -352,6 +398,116 @@ mod tests {
             BoneRole::new(5, BoneRoleKind::Head, BoneSide::Center),
         ];
         a
+    }
+
+    /// **A torso whose bones are oriented like a real rig's** — every joint's
+    /// bind rotation carries the UE/MetaHuman convention, where the bone's local
+    /// `X` runs UP the chain and its local `Y` across the body. On such a rig a
+    /// rotation about local `Y` is a NOD and one about local `X` is a TURN, which
+    /// is why the first version of this pass drew a yaw as a pitch on the island's
+    /// hero and the user saw the character look up when the mouse went sideways.
+    ///
+    /// The identity-oriented `torso()` above cannot see that defect at all: on it
+    /// local `Y` IS model `Y`. This is the rig that can.
+    fn bone_oriented_torso() -> crate::asset::SkeletonAsset {
+        let mut a = torso();
+        // local X -> model +Y, local Y -> model -X, local Z -> model +Z: the
+        // exact frame measured on the island hero's `head`.
+        let bone = Quat::from_xyzw(
+            0.0,
+            0.0,
+            inf_math::psin(std::f32::consts::FRAC_PI_4),
+            inf_math::pcos(std::f32::consts::FRAC_PI_4),
+        );
+        let joints: Vec<Joint> = a
+            .skeleton
+            .joints()
+            .iter()
+            .enumerate()
+            .map(|(i, j)| {
+                let mut j = j.clone();
+                if i > 0 {
+                    // Only the first bone off the root carries the change; the
+                    // rest inherit it, which is what a real chain does.
+                    if i == 1 {
+                        j.local_bind = JointTransform::from_trs(
+                            j.local_bind.translation_vec(),
+                            bone,
+                            Vec3::ONE,
+                        );
+                    }
+                }
+                j
+            })
+            .collect();
+        a.skeleton = Skeleton::new(joints).expect("the oriented torso");
+        a
+    }
+
+    /// **A YAW TURNS THE HEAD AND A PITCH TIPS IT, ON A RIG WHOSE BONES ARE NOT
+    /// AXIS-ALIGNED** (audit CHAR1b.1, the user's own report).
+    ///
+    /// *"When the user moves their mouse left/right, the character in the game
+    /// looks up/down rather than left/right."* Measured on the island hero's rig
+    /// before the fix: an asked yaw of 45 deg rotated the head 44.35 deg about
+    /// model `-X` — a nod — and an asked pitch of 45 deg rotated it about model
+    /// `+Y` — a turn. The two were exactly swapped, because the pass built its
+    /// rotations about the JOINT'S LOCAL axes and a rig author's local axes are
+    /// not the world's.
+    ///
+    /// **The mutation that reds it**: swap `yaw_model` and `pitch_model`, or drop
+    /// the `local_delta_for` conjugation and post-multiply the raw quaternion.
+    #[test]
+    fn a_yaw_moves_the_azimuth_and_a_pitch_the_elevation_whatever_the_bones_do() {
+        let rig = bone_oriented_torso();
+        // Where the head POINTS: its forward (local +Z at rest is model +Z) in
+        // model space, as an azimuth and an elevation.
+        let dir = |pose: &Pose| -> (f64, f64) {
+            let g = crate::pose::global_transforms(&rig.skeleton, pose);
+            let f = g[5].to_scale_rotation_translation().1 * Vec3::Z;
+            (
+                inf_math::patan2_64(f64::from(f.x), f64::from(f.z)).to_degrees(),
+                inf_math::patan2_64(f64::from(f.y), f64::from((f.x * f.x + f.z * f.z).sqrt()))
+                    .to_degrees(),
+            )
+        };
+        let base = dir(&Pose::rest(&rig.skeleton));
+        for (yaw, pitch) in [(35.0_f64, 0.0_f64), (-35.0, 0.0), (0.0, 25.0), (0.0, -25.0)] {
+            let mut p = Pose::rest(&rig.skeleton);
+            apply_look_at(
+                &rig.skeleton,
+                &mut p,
+                rig.role_index(),
+                LookAt {
+                    yaw_deg: yaw,
+                    pitch_deg: pitch,
+                    weight: 1.0,
+                },
+                &LookAtLimits::default(),
+            );
+            let (az, el) = dir(&p);
+            let (daz, del) = (az - base.0, el - base.1);
+            println!("  asked yaw {yaw:6.1} pitch {pitch:6.1} -> head az {daz:+7.2} el {del:+7.2}");
+            if yaw.abs() > 0.0 {
+                assert!(
+                    daz * yaw > 0.0 && daz.abs() > 10.0,
+                    "a yaw of {yaw} moved the head's azimuth by {daz:.2} deg"
+                );
+                assert!(
+                    del.abs() < 1.0,
+                    "a yaw of {yaw} tipped the head by {del:.2} deg — the pass is turning about a bone axis rather than the rig's own up"
+                );
+            } else {
+                assert!(
+                    del * pitch > 0.0 && del.abs() > 5.0,
+                    "a pitch of {pitch} moved the head's elevation by {del:.2} deg"
+                );
+                assert!(
+                    daz.abs() < 1.0,
+                    "a pitch of {pitch} turned the head {daz:.2} deg — the axes are swapped, which is what the player sees as looking up when the mouse goes sideways"
+                );
+            }
+        }
     }
 
     /// The head's world yaw under a pose, degrees.
@@ -505,7 +661,7 @@ mod tests {
     fn the_look_composes_with_the_animation_rather_than_replacing_it() {
         let rig = torso();
         let mut posed = Pose::rest(&rig.skeleton);
-        posed.locals[5].rotation = yaw(20.0).to_array();
+        posed.locals[5].rotation = yaw_model(20.0).to_array();
         let before = head_yaw_of(&rig, &posed);
         apply_look_at(
             &rig.skeleton,
