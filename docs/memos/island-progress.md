@@ -36456,3 +36456,40 @@ Harbour City and a drop from a measured height are **not filmed at all**: the
 loop drives the shipped player, the shipped player has no teleport, and none of
 the three is reachable on foot from where the level puts the hero inside a
 90-second session.
+
+### The island's content is BAKED, and two verbs rebuild it (CHAR1b.2 audit)
+
+Written here because the next person to change a graph will not find it in a
+`--help` string.
+
+**`inf-import --into <project-dir> --rebind-graph <m|f>`** rebuilds a committed
+identity's locomotion `.inf_sm` from `ue_import::rebind_locomotion_graph` and
+nothing else. It is its own verb rather than a side effect of
+`--rebind-character` for a reason worth repeating: the island's hero wears a body
+from one manifest and plays clips from another, so re-running a body rebind to
+pick up a new map row **swaps the character**.
+
+**And until it is run, no gate can see a graph change at all.** Every island arm
+in `char1b_gate`, `char1a3_gate` and `island_gate` loads the machine that is on
+disk in the island project's Content — which this repository does not carry.
+`crates/inf-anim/src/als.rs` may therefore be edited freely and every one of
+those arms stays green. Measured at the CHAR1b.2 audit: reverting the stop
+edge's `stop_distance` term to the `gait <= 0.1` condition it replaced changed
+**nothing** — the same 24 steps, the same states, the same 0.735 m — because the
+machine the hero was playing had been built before the edit.
+
+So a wave that changes the ALS graph builder owes three things, in order:
+
+1. the change, and a unit arm in `inf-anim` that reads the BUILT graph (those do
+   see it — `every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set`
+   went red under the same mutation the island arms slept through);
+2. `inf-import --into <island project> --rebind-graph m f`;
+3. the island arm, re-run, with the number it now produces.
+
+The same hazard has a second face on the import side, carried from CHAR1a.3 as
+item 93: a manifest re-import can hand back **two-joint clip shells** when
+`UGLTFAnimSequenceExporter` picks a preview mesh rather than the sequence's own
+rig, and `ImportOutput::produced` comes back EMPTY on a re-import because the
+dedupe reuses what is already there — so a sweep keyed on it reaches everything
+on the first run and nothing on the second. Both are the same law: **content
+this repository does not carry is content no gate here can see change.**
