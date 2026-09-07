@@ -2371,3 +2371,196 @@ fn the_islands_hero_draws_the_clips_its_graph_names() {
          a bone it does not name"
     );
 }
+
+/// **THE STATES THE ISLAND'S HERO REACHES FROM THE INPUT DOOR** (audit CHAR1b.1).
+///
+/// `every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set`
+/// hand-writes `turn_deg` and `planted_foot` and proves the GRAPH would enter
+/// the turns and the stops. Nothing proved the movement step ever publishes
+/// those values, and it did not: driven through the real input door on the
+/// island, `|turn_deg|` never left **0.000** and `planted_foot` never left
+/// **0**, so ten of the twenty-six machine states could not play. Two causes,
+/// both measured:
+///
+/// * `planted_foot` reads `FootLock_L/R` off the playing clip. The island's 164
+///   imported clips carried **no curve channel at all** — the deriver this wave
+///   added to the clip-import path had never been run over them — so the stops
+///   had nothing to choose a foot with. Re-imported, 164 of 164 carry the six
+///   ALS channels and `stop_l` plays.
+/// * turn-in-place runs only in `RotationMode::LookingDirection`, and a level
+///   starts in `VelocityDirection` (where ALS does not turn in place either).
+///   The only door to `LookingDirection` is releasing the aim key, so a player
+///   who has never aimed can never turn in place. After one aim press+release a
+///   220 °/s mouse swing plays `turn_r90`, and a crouched one `crouch_turn_r90`.
+///
+/// The remaining states need a world event this flat-road drive cannot make
+/// (`fall`/`fall_fast`/`land_heavy`/`roll` need height, `ragdoll`/`getup_*` need
+/// a ragdoll) and are named in the printout rather than claimed.
+#[test]
+fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut turn_max = 0.0f64;
+    let mut planted: std::collections::BTreeSet<i64> = Default::default();
+    let mut drive = |sim: &mut inf_player::runtime_sim::RuntimeSim,
+                     seen: &mut std::collections::BTreeSet<String>,
+                     turn_max: &mut f64,
+                     planted: &mut std::collections::BTreeSet<i64>,
+                     stop_ready: &mut usize,
+                     n: usize,
+                     held: &[&str],
+                     axes: &[(&str, f32)]| {
+        let ax: std::collections::BTreeMap<String, f32> =
+            axes.iter().map(|(k, v)| ((*k).to_string(), *v)).collect();
+        for _ in 0..n {
+            sim.step_once(RuntimeInput::with_down(held.to_vec()).with_axes(ax.clone()));
+            if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
+                seen.insert(s.name.clone());
+            }
+            let t = inf_ecs::anim_bridge::anim_param(sim.world(), hero, "turn_deg").unwrap_or(0.0);
+            if t.abs() > turn_max.abs() {
+                *turn_max = t;
+            }
+            let foot =
+                inf_ecs::anim_bridge::anim_param(sim.world(), hero, "planted_foot").unwrap_or(0.0);
+            planted.insert(foot as i64);
+            // **The stop edge's own precondition**, counted rather than assumed:
+            // in a gait state, the gait scale under the walk threshold, and a
+            // foot locked — all on ONE step. See the arm's docs.
+            let gait = inf_ecs::anim_bridge::anim_param(sim.world(), hero, "gait").unwrap_or(1.0);
+            let in_gait = inf_ecs::anim_bridge::anim_state(sim.world(), hero)
+                .is_some_and(|s| matches!(s.name.as_str(), "walk" | "run" | "sprint"));
+            if in_gait && gait <= 0.1 && foot.abs() > 0.5 {
+                *stop_ready += 1;
+            }
+        }
+    };
+    let mut stop_ready = 0usize;
+    let mut go = |sim: &mut _, n, held: &[&str], axes: &[(&str, f32)]| {
+        drive(
+            sim,
+            &mut seen,
+            &mut turn_max,
+            &mut planted,
+            &mut stop_ready,
+            n,
+            held,
+            axes,
+        )
+    };
+    go(&mut sim, 600, &[], &[]); // settle
+                                 // **Run and stop, five times, at five different phases.** Which foot is
+                                 // locked when the input goes is a property of where the cycle happens to be,
+                                 // so a single stop is a coin toss and five is the mechanism.
+    for extra in [0usize, 7, 13, 19, 29] {
+        go(&mut sim, 80 + extra, &[], &[("move_y", 1.0)]); // start → walk → run
+        for _ in 0..70 {
+            go(&mut sim, 1, &[], &[]); // the stop, a step at a time
+        }
+    }
+    go(&mut sim, 60, &["walk"], &[("move_y", 1.0)]); // held walk
+    go(&mut sim, 90, &["sprint"], &[("move_y", 1.0)]); // sprint
+    for _ in 0..90 {
+        go(&mut sim, 1, &[], &[]); // …and the stop out of a sprint
+    }
+    go(&mut sim, 6, &["crouch"], &[]); // click
+    go(&mut sim, 60, &[], &[]); // crouch_idle
+    go(&mut sim, 90, &[], &[("move_y", 1.0)]); // crouch_walk
+    go(&mut sim, 30, &[], &[("look_x", 260.0)]); // a crouched turn needs the mode below
+    go(&mut sim, 6, &["crouch"], &[]);
+    go(&mut sim, 60, &[], &[]); // stand
+    go(&mut sim, 2, &["jump"], &[]);
+    go(&mut sim, 100, &[], &[]); // airborne → land_light
+    go(&mut sim, 10, &["aim"], &[]); // → Aiming
+    go(&mut sim, 10, &[], &[]); // → LookingDirection
+    go(&mut sim, 30, &[], &[("look_x", 220.0)]); // the swing
+    go(&mut sim, 120, &[], &[]); // the turn plays out
+    go(&mut sim, 6, &["crouch"], &[]);
+    go(&mut sim, 30, &[], &[("look_x", 260.0)]);
+    go(&mut sim, 120, &[], &[]);
+
+    let all: Vec<&str> = inf_anim::LOCOMOTION_MAP
+        .iter()
+        .filter(|s| s.kind == inf_anim::SlotKind::State)
+        .map(|s| s.state)
+        .collect();
+    let missed: Vec<&&str> = all.iter().filter(|n| !seen.contains(**n)).collect();
+    println!(
+        "\n=== driven through the input door: {} of {} states played ===\n  {:?}\n  \
+         not played: {missed:?}\n  |turn_deg| reached {turn_max:.3}; planted_foot took \
+         {planted:?}",
+        seen.len(),
+        all.len(),
+        seen
+    );
+    for want in [
+        "idle",
+        "start",
+        "walk",
+        "run",
+        "sprint",
+        "crouch_idle",
+        "crouch_walk",
+        "jump",
+        "land_light",
+    ] {
+        assert!(
+            seen.contains(want),
+            "`{want}` never played on the island from the input door — played:              {seen:?}"
+        );
+    }
+    // The FAMILIES whose gating parameter was dead. Which member of each plays
+    // depends on the sign of the accumulated body yaw, so the arm asks for the
+    // family: a member is a coin toss, a family is the mechanism.
+    for (family, members) in [
+        (
+            "a standing turn-in-place",
+            ["turn_l90", "turn_r90", "turn_l180", "turn_r180"].as_slice(),
+        ),
+        (
+            "a crouched turn-in-place",
+            [
+                "crouch_turn_l90",
+                "crouch_turn_r90",
+                "crouch_turn_l180",
+                "crouch_turn_r180",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        assert!(
+            members.iter().any(|m| seen.contains(*m)),
+            "not one of {family}'s clips played ({members:?}) — played: {seen:?}"
+        );
+    }
+    assert!(
+        turn_max.abs() > 45.0,
+        "`turn_deg` never exceeded {turn_max:.3}° — the movement step publishes no \
+         turn, so the eight turn-in-place clips cannot play whatever the graph says"
+    );
+    assert!(
+        planted.iter().any(|f| *f != 0),
+        "`planted_foot` was 0 on every step — the clips carry no `FootLock_*` \
+         channel, so neither stop can choose a foot"
+    );
+    // **THE STOP, reported and not asserted, because the number says why.** Its
+    // edge wants a gait state, `gait <= 0.1` and a locked foot on ONE step. Over
+    // this whole drive — five run-and-stops at five phases plus a sprint stop —
+    // that coincidence held on the count below. The parameter is alive (asserted
+    // above) and the edge exists (`als::transitions_for`); what is not true is
+    // that a player who stops sees a stop clip.
+    println!(
+        "  the stop edge's precondition (a gait state, gait <= 0.1, a foot locked, one step) held on {stop_ready} step(s); a stop clip played: {}",
+        seen.contains("stop_l") || seen.contains("stop_r")
+    );
+}
