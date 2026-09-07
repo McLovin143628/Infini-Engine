@@ -783,10 +783,23 @@ fn the_near_fade_engages_below_the_threshold_and_reaches_the_instance() {
     );
     // The code is one the masked branch cannot see — the reason all three
     // committed skinned goldens re-render identically.
-    let fade_code = inf_render::BLEND_NEAR_FADE;
+    // **Asked of the RULE, not of the constant** (the audit's fix). This read
+    // `let fade_code = BLEND_NEAR_FADE; assert!(fade_code > 2)`, and the local
+    // was there to stop clippy's `assertions_on_constants` firing on an
+    // assertion that cannot fail at runtime -- which answers the lint by hiding
+    // from it rather than by asserting something. What the arm actually wants to
+    // know is that the SHADER's masked branch cannot see a faded surface, and
+    // that is a property of what `near_fade_surface` hands back, not of a
+    // constant's value: the fragment stage takes the masked path when
+    // `w > 0.5 && w < 1.5`, so the code the rule produces must fall outside it.
+    let w = f32::from(blend);
     assert!(
-        fade_code > 2,
-        "the fading code collides with opaque/masked/translucent"
+        !(w > 0.5 && w < 1.5),
+        "a faded surface takes the skinned shader's MASKED branch (code {blend})"
+    );
+    assert!(
+        blend != 0 && blend != 2,
+        "the fading code collides with opaque or translucent (code {blend})"
     );
 
     // **AND IT REACHES EVERY SECTION**, which is the half a frame caught and no
@@ -1391,6 +1404,15 @@ fn looking_direction_is_reachable_without_an_aim_press() {
 
     // The FIRST-PERSON coupling: the input layer's own door, which is what the
     // `view_mode` key calls (ALS's `OnViewModeChanged`).
+    //
+    // **`set_desired_rotation_mode` is NOT that door** -- the audit's fix. The
+    // `view_mode` key used to call this one, which writes the DESIRED mode, so
+    // one press of G overwrote the character's standing choice permanently and
+    // two presses left it in `LookingDirection` for the session. ALS's
+    // `OnViewModeChanged` writes the CURRENT mode in both branches and never
+    // the desired one; that is `apply_view_mode_rotation`, asserted below. This
+    // door stays, because it is the correct port of the two
+    // `...DirectionAction`s, which DO set the desired mode.
     assert!(inf_ecs::movement::set_desired_rotation_mode(
         &mut rig.world,
         HERO,
@@ -1579,7 +1601,13 @@ fn pie_equals_shipping_on_the_camera_trace() {
     assert_eq!(ship.len(), pie.len());
 }
 
-/// **What the camera costs, on both hosts** (the wave's cost row).
+/// **What the camera costs, on the SHIPPING host** (the wave's cost row).
+///
+/// Renamed by the audit: it was  and titled
+/// "on both hosts", and it builds one `RuntimeSim`. The editor's `SimSession`
+/// is never profiled here and the two hosts' camera phase has never been
+/// compared. What makes them agree is `pie_equals_shipping_on_the_camera_trace`
+/// above, which is about the OUTPUT and not the cost.
 ///
 /// The camera is render-side and its phase is measured by the step profiler, so
 /// the number is the whole door — the settings blend, the pivot lag, the main
@@ -1587,7 +1615,7 @@ fn pie_equals_shipping_on_the_camera_trace() {
 /// with the fan ON and OFF, because the fan is this wave's own new cost and a
 /// total with nothing to compare it to is not a measurement.
 #[test]
-fn the_cameras_cost_on_both_hosts() {
+fn the_cameras_cost_on_the_shipping_host() {
     use inf_editor_core::samples;
     use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
 
@@ -2479,5 +2507,191 @@ fn the_cameras_cost_on_the_island() {
         on / total_on.max(1e-9) < 0.01,
         "the camera is {:.2} % of the island's fixed step ({on:.1} µs of {total_on:.1} µs)",
         on / total_on.max(1e-9) * 100.0
+    );
+}
+
+/// **WHICH SIDE OF THE CAMERA THE SUBJECT IS ON** — the shoulder, measured off
+/// the published pose (the audit's; clause 5's "aiming (shoulder swap)").
+///
+/// The wave has no arm for this at all. `a_new_character_gets_a_camera_rig_and_a
+/// _blueprint_can_move_it` reads `rig.right_shoulder` off the component and the
+/// frame captions read the offset out of the table, but nothing anywhere asks
+/// the one question a shoulder is FOR: after the rig, the lag, the sweep and the
+/// director have all had their say, is the character drawn to the left of centre
+/// or to the right of it? A flag, an offset and a basis that disagreed about
+/// what "right" means would satisfy every existing arm and put the camera on the
+/// wrong side of its own table — and the sign of `basis`'s `right` against a
+/// `forward × right` up vector is exactly the kind of thing that has been caught
+/// here before.
+///
+/// So this reads the pose: the subject's own position taken into the PUBLISHED
+/// camera's frame (`basis(pose.yaw, pose.pitch)`), and the sign and size of its
+/// component along that camera's own right axis. A camera displaced `+x` along
+/// its right sees its subject at `-x`, so the number below is the offset the
+/// table names, arriving.
+///
+/// **What this deliberately does NOT claim is which side of the SCREEN.** That
+/// depends on the render's view matrix (`glam::camera::rh::view::look_to_mat4`,
+/// whose camera `+X` is `forward x up` and therefore the negative of
+/// `basis`'s right), and the audit did not measure a rendered pixel against it.
+/// The wave's caption on `64-camera-aiming.png` says the hero sits "LEFT of
+/// centre"; read against the pixels the hero is right of the PIE window's
+/// centre, and the difference between those two readings is a projection sign
+/// this arm is not the place to settle. What it does settle is that the flag
+/// flips the side, that the two sides are mirror images, and that the aim block
+/// moves the subject further off axis on a shorter boom.
+#[test]
+fn the_shoulder_puts_the_subject_on_the_other_side_of_the_frame() {
+    // The subject's camera-space x, after everything.
+    let side = |right_shoulder: bool, aim: bool| -> (f64, f64) {
+        let mut rig = Rig::new();
+        rig.cam.right_shoulder = right_shoulder;
+        for _ in 0..240 {
+            rig.step(&MovementIntent {
+                aim,
+                ..Default::default()
+            });
+        }
+        let subject = rig.hero_capsule().0;
+        let p = rig.cam.pose.position.to_dvec3();
+        let (r, _u, _f) = inf_ecs::camera::basis(rig.cam.pose.yaw_deg, rig.cam.pose.pitch_deg);
+        ((subject - p).dot(r), rig.cam.arm_m)
+    };
+    let (right_x, walk_arm) = side(true, false);
+    let (left_x, _) = side(false, false);
+    let (aim_x, aim_arm) = side(true, true);
+    println!(
+        "\n=== the shoulder, in screen space ===\n  right shoulder: the subject sits at {right_x:+.4} m along the camera's own right (boom {walk_arm:.3} m)\n  left shoulder:  {left_x:+.4} m\n  right shoulder, AIMING: {aim_x:+.4} m (boom {aim_arm:.3} m)"
+    );
+    // A camera offset to the subject's right sees the subject to its left.
+    assert!(
+        right_x < -0.2,
+        "with the RIGHT shoulder the subject is not off the camera's axis the way the table says: x {right_x:+.4} m"
+    );
+    assert!(
+        left_x > 0.2,
+        "the LEFT shoulder did not put the subject on the other side: x {left_x:+.4} m"
+    );
+    assert!(
+        (right_x + left_x).abs() < 0.05,
+        "the two shoulders are not mirror images: {right_x:+.4} m against {left_x:+.4} m"
+    );
+    // …and the aim block tightens it: a bigger offset on a shorter boom is a
+    // bigger fraction of the frame, which is what an over-the-shoulder aim is.
+    assert!(
+        aim_x < right_x - 0.05,
+        "aiming did not push the subject further off axis: {aim_x:+.4} m against {right_x:+.4} m"
+    );
+    assert!(
+        aim_arm < walk_arm - 0.5,
+        "the aim block did not pull the boom in: {aim_arm:.3} m against {walk_arm:.3} m"
+    );
+}
+
+/// **A VIEW-MODE TOGGLE PUTS THE CHARACTER BACK WHERE IT WAS** (the audit's;
+/// ALS `OnViewModeChanged`, `ALSBaseCharacter.cpp:857-872`).
+///
+/// The wave's ALS table cites those lines for the row *"the `view_mode` key
+/// calls `inf_ecs::movement::set_desired_rotation_mode`"*, and the lines do not
+/// say that. ALS writes the CURRENT rotation mode in both branches and never
+/// touches `DesiredRotationMode` — which is the whole reason coming back out of
+/// first person RESTORES the author's choice:
+///
+/// ```text
+/// if (ViewMode == ThirdPerson && (Rotation == Velocity || Rotation == Looking))
+///     SetRotationMode(DesiredRotationMode);
+/// else if (ViewMode == FirstPerson && Rotation == Velocity)
+///     SetRotationMode(LookingDirection);
+/// ```
+///
+/// Routing the key through the DESIRED door instead meant one press of **G**
+/// overwrote a character's standing choice for the rest of the session, and two
+/// presses left it in `LookingDirection` for good — with a later aim-release
+/// reverting to `LookingDirection` too, which is carried 123's own defect coming
+/// back through a different door. The arm is the round trip: press in, press
+/// out, and the character is where it started, with its desired mode untouched
+/// the whole way.
+#[test]
+fn a_view_mode_toggle_leaves_the_rotation_mode_where_it_found_it() {
+    let mut rig = Rig::new();
+    {
+        let e = rig.world.entity_of(HERO).expect("the hero");
+        if let Some(mut cm) = rig.world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.rotation_mode = RotationMode::VelocityDirection;
+        }
+    }
+    rig.settle(30);
+    let start = rig.hero_cm().rotation_mode;
+    assert_eq!(start, RotationMode::VelocityDirection);
+
+    // IN: first person turns the body with the camera, because there is no other
+    // way to aim in first person.
+    assert!(inf_ecs::movement::apply_view_mode_rotation(
+        &mut rig.world,
+        HERO,
+        true
+    ));
+    rig.settle(5);
+    let inside = rig.hero_cm();
+    println!(
+        "\n=== the view-mode round trip ===\n  start {start:?}\n  first person -> mode {:?}, desired {:?}",
+        inside.rotation_mode, inside.runtime.desired_rotation_mode
+    );
+    assert_eq!(inside.rotation_mode, RotationMode::LookingDirection);
+    assert_eq!(
+        inside.runtime.desired_rotation_mode,
+        RotationMode::VelocityDirection,
+        "the view mode overwrote the character's STANDING choice, which is the defect"
+    );
+
+    // OUT: back where it started.
+    inf_ecs::movement::apply_view_mode_rotation(&mut rig.world, HERO, false);
+    rig.settle(5);
+    let out = rig.hero_cm();
+    println!(
+        "  third person again -> mode {:?}, desired {:?}",
+        out.rotation_mode, out.runtime.desired_rotation_mode
+    );
+    assert_eq!(
+        out.rotation_mode, start,
+        "coming out of first person did not restore the character's rotation mode"
+    );
+
+    // …and it does not stomp an aim in progress, which is the same precedence
+    // `set_desired_rotation_mode` keeps.
+    rig.step(&MovementIntent {
+        aim: true,
+        ..Default::default()
+    });
+    assert_eq!(rig.hero_cm().rotation_mode, RotationMode::Aiming);
+    inf_ecs::movement::apply_view_mode_rotation(&mut rig.world, HERO, true);
+    assert_eq!(
+        rig.hero_cm().rotation_mode,
+        RotationMode::Aiming,
+        "a view-mode change stomped an aim that was still held"
+    );
+
+    // A character whose AUTHORED mode is `LookingDirection` comes back to it too
+    // — the half a "force it to Looking on the way in, force it to Velocity on
+    // the way out" spelling would get wrong.
+    let mut rig2 = Rig::new();
+    {
+        let e = rig2.world.entity_of(HERO).expect("the hero");
+        if let Some(mut cm) = rig2.world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.rotation_mode = RotationMode::LookingDirection;
+        }
+    }
+    rig2.settle(30);
+    inf_ecs::movement::apply_view_mode_rotation(&mut rig2.world, HERO, true);
+    inf_ecs::movement::apply_view_mode_rotation(&mut rig2.world, HERO, false);
+    rig2.settle(5);
+    println!(
+        "  a character authored in LookingDirection ends the round trip in {:?}",
+        rig2.hero_cm().rotation_mode
+    );
+    assert_eq!(
+        rig2.hero_cm().rotation_mode,
+        RotationMode::LookingDirection,
+        "the round trip moved a character that was authored in LookingDirection"
     );
 }

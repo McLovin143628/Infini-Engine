@@ -36582,9 +36582,23 @@ reads the SUBJECT's rig, so possessing an NPC is a camera change. A subject with
 no rig keeps the host's `camera.toml` table exactly as P29.6 shipped it, which is
 every character in every level committed before this wave.
 
-**It persists on the character asset and not in the level record**, which is the
-wave brief's own preferred branch, and the other one is priced rather than waved
-at: scene v27 → v28, `EntityRecordV27` frozen, both hosts' `apply_record`
+**It does not persist anywhere** — CORRECTED by the wave's audit, which measured
+it (`char1c_gate::an_authored_rig_does_not_survive_a_save_and_a_reload`). The
+sentence that stood here said the rig persists on the character asset as the
+`camera.toml` the wizard writes beside it; that is false three times over. The
+component is not in the scene record, so a level saved and reloaded carries no
+rig on any character, including one the wizard made a moment earlier (authored
+6.25 m, `camera_rig` answers `None` after the round trip). The file the wizard
+writes beside a character was `CameraTuning::default()` unconditionally and never
+read the rig at all. And nothing reads a character-side `camera.toml`: the
+runtime's loader is `inf_player::input::load_camera_beside`, which reads the file
+beside the **level**. The one surface that persists is that level-side table, and
+the island — the level the showcase runs — has none, so its camera is the
+compiled-in defaults. A rig is a runtime default, not an authored value, and the
+two doors that would change that (a write half for the level table, or a
+character-asset table read at level load) are filed and not built.
+
+The per-level branch is still priced rather than waved at: scene v27 → v28, `EntityRecordV27` frozen, both hosts' `apply_record`
 mirrors grown, the PIE payload v13 → v14, a downgrade bless and all twenty-four
 committed `.inf_lvl` re-cooked — for **776 bytes per character** (97 `f64` at
 bincode's fixed width) carrying, today, the same numbers on every one of them.
@@ -36684,8 +36698,11 @@ bound was for.
   — after two lints in the new gate file. One is worth remembering:
   `assertions_on_constants` wants `const { assert!(..) }`, which turns a gate
   arm from a test that RUNS into a claim the compiler makes, so a mutation would
-  fail to BUILD rather than name the arm that caught it. The constant goes
-  through a local instead.
+  fail to BUILD rather than name the arm that caught it. The constant went
+  through a local instead — which the audit replaced: the arm asks the RULE
+  (`near_fade_surface`'s own output must fall outside the skinned shader's
+  masked test `w > 0.5 && w < 1.5`) rather than a constant, so there is nothing
+  for the lint to fire on and there is something for the arm to assert.
 * **rustdoc**: `cargo clean --doc` then `cargo doc --no-deps --workspace` — 49
   crates documented, **416 warnings against the pinned ceiling of 450**, none of
   them on a line this wave wrote.
@@ -36708,6 +36725,80 @@ bound was for.
   taken before three of the range's commits landed, one of them a FRONTEND
   change, which is why the relaunch is a separate act rather than a re-read of
   `01-editor.png`.
+
+### CHAR1c's adversarial audit — what it found
+
+Every number above reproduces on this tree to the digit, including the two the
+wave is proudest of (the smoothed pull-in's **33 of 840** and the excluded
+fleet's **11 of 1 800** both come back exactly). What did not survive is the
+scope of the claim they support.
+
+**The camera IS inside Harbour City's walls, and the boom's own floor is what
+puts it there.** Both zero-clipping arms are true and neither route ever puts
+the camera against a building: with every character's vehicle back in the
+exclusion set the island route reports **worst clip 0.000 m** over 111.63 m, so
+its anti-vacuity half is satisfied by the traffic fleet alone. An ECS census
+within 60 m of the spawn finds no static collider at all — twenty dynamic boxes
+and four kinematic capsules. The audit's own route asks the physics world where
+the walls are (a 48-ray fan out of the hero's chest, blind to characters and to
+the fleet), stands the hero against each of the **29** stations it finds, and
+sweeps the look:
+
+| | before | after |
+|---|---|---|
+| frames with the optical centre inside geometry | **104 of 3 480** | **8** |
+| …with the PIVOT inside as well (carried 153) | 3 | 5 |
+| …with the body still DRAWN | 0 | 0 |
+| shortest boom at fault | **0.1517 m** | 0.0162 m |
+
+Every one of the 104 is the camera sitting at `reach * min_arm_fraction`, and
+the cause is one `max`: `hit.toi.max(floor)` moves the camera PAST the contact
+the sweep just found whenever a wall is nearer to the pivot than the floor. The
+`max` is gone from the clean-hit branch; the floor stays in the penetrating one,
+where there is no contact to respect. Its own argument did not survive this
+wave anyway — *"looks out of the character's own skull"* was written before the
+near fade existed, and a boom under `near_fade_end_m` draws no subject at all.
+
+**A rig does not persist.** See the correction above; the arm is
+`an_authored_rig_does_not_survive_a_save_and_a_reload`.
+
+**Three of the fourteen mutation claims do not exercise what they name.**
+`whiskers = false` and `ignore_characters = false` are locals their own arms
+set, so the SHIPPED default is unguarded by them (nothing in the gate would
+notice if `CameraCollision::default()` turned either off — the rig arm's
+`assert!(rig.tuning.collision.whiskers)` is the one thing that would). And
+`min_arm_fraction` to 0 is inert on the capsule arm: the number is identical to
+the digit, because that fixture's boom is bounded by the wall and the floor
+never binds. The mutation that does red it is the penetrating branch, and it
+says the floor is not enough — the camera goes 0.1475 m inside the hero's own
+capsule, invisible only because the near fade is 0.0000 there.
+
+**Turning the whiskers off does not change the clipping count.** 0 of 840 with
+the fan and 0 of 840 without it. The fan is comfort and prediction; the safety
+is the snap clamp, and the two should not be confused.
+
+**The sim did not move**: FNV-1a over `state_bytes` across 900 steps of the
+committed phase-29 course is `0xd2db6295a16e4b54`, and the same number comes
+back with the wave's only sim-behaviour change (the aim-release revert) undone.
+The rig really is an override: a subject carrying `CameraRig::default()` and one
+carrying none differ on **0 of 900** camera-trace steps.
+
+**What the camera costs where the game is**, which the wave measured only on the
+phase-29 course: on the island, driven, 600 steps — **53.29 µs/step** with the
+fan and 46.65 without, the fan **6.64 µs**, against a 10 162 µs step: **0.524 %**.
+
+**One caption did not survive being re-read.** `71-camera-ragdoll-follow.png`'s
+"two kerb blocks … and two NPCs standing upright, which is the control" is two
+traffic cars drawn as untextured boxes with a character standing on one. Asked
+of the world: all four island drivers are `Driving` and seated, and three of
+four have their feet at **-0.000 m / -0.001 m** of their own chassis's roof —
+`step_driving` parks the capsule at `seat_world + Y*(stand_half_height + radius)`
+over a rig whose `seat_local` is at roof height. A vehicle wave's fix; carried,
+with an `#[ignore]`d arm that measures it rather than asserting it as a rule.
+
+**And one assert asserted nothing**: `runtime.turning_in_place || turned > 100.0`
+directly under `assert!(turned > 100.0)`. The latch is sampled over the settle
+now — set on **33 of 180** steps.
 
 ### What CHAR1c leaves for COV1, OUTFIT1 and WPN2
 

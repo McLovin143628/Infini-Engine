@@ -1413,19 +1413,6 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
     targets
 }
 
-/// **Who the locomotion camera follows** — the first `player_controlled`
-/// character in `Guid` order, or `None` on a level that has none.
-///
-/// One door, beside [`movement_targets`] and for the same two reasons: both
-/// hosts must pick the same subject or PIE and shipping look at different
-/// things, and the walk has to be deterministic rather than an archetype order.
-/// `O(characters)`, and `O(1)` on a level with no character at all.
-///
-/// "The first" is honest rather than clever: [`apply_intent`] already writes one
-/// intent onto **every** player-controlled character (the P29.3 remainder that a
-/// per-controller binding is a gameplay concern), so a level with two of them has
-/// two characters doing the same thing and the camera watches the first. The day
-/// that binding exists, this reads it.
 /// **Set a character's desired rotation mode, and apply it** (wave CHAR1c) —
 /// ALS's `VelocityDirectionAction` / `LookingDirectionAction`
 /// (`ALSBaseCharacter.cpp:1404-1416`) as a door rather than as a key.
@@ -1466,6 +1453,72 @@ pub fn set_desired_rotation_mode(world: &mut EcsWorld, guid: Uuid, mode: Rotatio
     true
 }
 
+/// **What a change of VIEW MODE does to the rotation mode** (wave CHAR1c's
+/// audit) — ALS's `OnViewModeChanged` (`ALSBaseCharacter.cpp:857-872`), ported
+/// as it is written rather than as it was summarised.
+///
+/// ```text
+/// if (ViewMode == ThirdPerson)                    -> SetRotationMode(DesiredRotationMode)
+/// else if (FirstPerson && RotationMode == Velocity) -> SetRotationMode(LookingDirection)
+/// ```
+///
+/// Note which mode each branch writes: the CURRENT one. `DesiredRotationMode` is
+/// the author's (or the player's `…DirectionAction`'s) standing choice and
+/// `OnViewModeChanged` never touches it, which is what makes going back to third
+/// person *restore* that choice.
+///
+/// # What this replaces, and why it is a defect and not a preference
+///
+/// The wave routed the `view_mode` key through
+/// [`set_desired_rotation_mode`], which writes the DESIRED mode. So one press of
+/// **G** overwrote the character's standing choice permanently: pressing G and
+/// pressing it again left the character in `LookingDirection` for the rest of
+/// the session, and a later aim-release reverted to `LookingDirection` too —
+/// which is carried 123's own defect coming back through a different door. The
+/// wave's ALS table cites `.cpp:857-872` for this row, and those lines do not
+/// say what the row says.
+///
+/// Answers whether anything changed, so a caller can log it.
+pub fn apply_view_mode_rotation(world: &mut EcsWorld, guid: Uuid, first_person: bool) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) else {
+        return false;
+    };
+    // Seed the desired mode from the component the same way the fixed step does,
+    // so a character that has not stepped yet is not dragged to the enum default.
+    if !cm.runtime.camera_seeded {
+        cm.runtime.camera_seeded = true;
+        cm.runtime.desired_rotation_mode = cm.rotation_mode;
+    }
+    let before = cm.rotation_mode;
+    if first_person {
+        if cm.rotation_mode == RotationMode::VelocityDirection {
+            cm.rotation_mode = RotationMode::LookingDirection;
+        }
+    } else if matches!(
+        cm.rotation_mode,
+        RotationMode::VelocityDirection | RotationMode::LookingDirection
+    ) {
+        cm.rotation_mode = cm.runtime.desired_rotation_mode;
+    }
+    cm.rotation_mode != before
+}
+
+/// **Who the locomotion camera follows** — the first `player_controlled`
+/// character in `Guid` order, or `None` on a level that has none.
+///
+/// One door, beside [`movement_targets`] and for the same two reasons: both
+/// hosts must pick the same subject or PIE and shipping look at different
+/// things, and the walk has to be deterministic rather than an archetype order.
+/// `O(characters)`, and `O(1)` on a level with no character at all.
+///
+/// "The first" is honest rather than clever: [`apply_intent`] already writes one
+/// intent onto **every** player-controlled character (the P29.3 remainder that a
+/// per-controller binding is a gameplay concern), so a level with two of them has
+/// two characters doing the same thing and the camera watches the first. The day
+/// that binding exists, this reads it.
 pub fn camera_subject(world: &EcsWorld) -> Option<Uuid> {
     let w = world.world();
     let mut q = w.try_query_filtered::<(&Guid, &CharacterMovement), With<Transform>>()?;

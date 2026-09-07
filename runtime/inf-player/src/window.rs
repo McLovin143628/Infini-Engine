@@ -911,14 +911,17 @@ impl PlayerApp {
             } else {
                 inf_ecs::camera::ViewMode::ThirdPerson
             };
-            if first {
-                if let Some(subject) = self.sim.camera_subject() {
-                    inf_ecs::movement::set_desired_rotation_mode(
-                        self.sim.world_mut(),
-                        subject,
-                        inf_ecs::components::RotationMode::LookingDirection,
-                    );
-                }
+            // **`OnViewModeChanged`, both branches** (the audit's fix). This
+            // called `set_desired_rotation_mode(LookingDirection)` on the way IN
+            // and nothing on the way out, so one press of the key overwrote the
+            // character's standing choice for the rest of the session and
+            // pressing it twice left it in `LookingDirection` for good --
+            // carried 123's own defect through a different door. ALS writes the
+            // CURRENT mode in both branches and never touches the desired one,
+            // which is what makes going back to third person restore it
+            // (`ALSBaseCharacter.cpp:857-872`).
+            if let Some(subject) = self.sim.camera_subject() {
+                inf_ecs::movement::apply_view_mode_rotation(self.sim.world_mut(), subject, first);
             }
             let steps = self.sim.steps();
             self.hero_log.note(&format!(

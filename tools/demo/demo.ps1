@@ -756,7 +756,28 @@ Start-Sleep -Milliseconds 1400
 # it. The first run of this leg pressed E once into an empty street; this one
 # walks and taps E for up to fifteen seconds and triggers on the mode the world
 # reports. It is allowed to miss and to say so.
+# **STAND UP FIRST** (the audit's fix to the instrument). The prone leg above
+# leaves the hero CROUCHED and not standing: measured over a whole audit session,
+# `mode` was `Crouch` from t = 108.6 s to t = 149 s, straight through the camera
+# leg and into the placements, so the "at rest" frame was a crouched hero on the
+# crouch block's 2.5 m arm, the stairwell placement landed in `Prone`, and the
+# clipped-boom, near-fade, steered-boom and vehicle triggers all missed. A stance
+# the loop did not intend is an instrument reading the wrong thing.
+function Stand-Up([string]$why) {
+    Say "STAND UP ($why)"
+    for ($k = 0; $k -lt 4; $k++) {
+        $standing = Wait-ForHero -Csv $heroCsv -What "a standing hero ($why)" -TimeoutS 1.5 `
+            -Predicate { param($c) ($c[5] -eq "Grounded") -and ($c[11] -notmatch "^(crouch|prone|slide)") }
+        if ($standing) { return $true }
+        [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x2E)   # scancode: C
+        Start-Sleep -Milliseconds 500
+    }
+    Say "STILL NOT STANDING after four taps of C -- the frames below are of whatever stance the world is in"
+    return $false
+}
+
 Restore-PlayerFocus "before the vehicle"
+Stand-Up "before the camera leg" | Out-Null
 Say "CAMERA: E while walking — hunting for a car, then the drive camera blends in"
 $gotCar = $false
 # **STAND STILL FOR THE FIRST FIVE TAPS.** A session driven here by `-SpawnAt`
@@ -787,8 +808,13 @@ if ($gotCar) {
 Restore-PlayerFocus "before the camera leg"
 Say "CAMERA: the framing at rest — the boom at its authored length"
 Start-Sleep -Seconds 2
-Wait-ForHero -Csv $heroCsv -What "the hero at rest with a full boom" -TimeoutS 6.0 `
-    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -gt 2.5) -and ([double]$c[7] -lt 0.2) } `
+# **THE STANCE IS PART OF THE CLAIM** (the audit's fix). `boom > 2.5` is
+# satisfied by the CROUCH block's 2.5 m arm, so this fired on a crouched hero at
+# 2.5402 m and the frame captioned "the boom at its authored length" was of a
+# different block entirely. The walk block is 3.0 m; the predicate asks for a
+# standing, idle hero above 2.9 and says so.
+Wait-ForHero -Csv $heroCsv -What "the hero at rest with a full boom" -TimeoutS 8.0 `
+    -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Grounded") -and ($c[11] -eq "idle") -and ([double]$c[13] -gt 2.9) -and ([double]$c[7] -lt 0.2) } `
     -Out (Join-Path $OutDir "60-camera-at-rest.png") | Out-Null
 
 # **AGAINST A WALL.** Walk backwards into whatever is behind the hero and hold
@@ -911,6 +937,7 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # street, where the first run of this leg backed up for eight seconds and
         # found nothing at all.
         Restore-PlayerFocus "before the interior camera frames"
+        Stand-Up "before the interior camera frames" | Out-Null
         Say "CAMERA (interior): backing into a stairwell wall"
         for ($i = 0; $i -lt 24; $i++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 16 }
         # **BACK UP FIRST, and wait DURING it.** The first cut waited for the two
