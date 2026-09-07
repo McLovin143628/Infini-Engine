@@ -36493,3 +36493,191 @@ rig, and `ImportOutput::produced` comes back EMPTY on a re-import because the
 dedupe reuses what is already there — so a sweep keyed on it reaches everything
 on the first run and nothing on the second. Both are the same law: **content
 this repository does not carry is content no gate here can see change.**
+
+---
+
+## WAVE CHAR1c — THE AAA CAMERA (2026-09-07)
+
+Base `origin/main` `2e3538ee` (CHAR1b.2, audited and pushed). The wave the user's
+own sentence asked for: *"there should be no camera clipping when the user is
+looking around … the camera should simply adjust position, just like any AAA
+game"*, and the question beside it — *"when building a character (or a character
+blueprint) … should we be able to add a camera and a camera boom, or is that
+stuff automatically added?"* Answer: automatically, with the ported ALS table on
+it, and every number authorable. New gate `char1c_gate.rs`, **14 arms**. Nothing
+pushed.
+
+### The one-line verdict
+
+**Two of this wave's own gate arms found real defects while they were being
+written, and the second one is the more interesting: a camera that is never
+clipped anywhere in a city is not a camera that works — it is a camera that has
+been told not to look.**
+
+### Clause 1 — THE COLLISION MODEL
+
+P29.6 answered geometry with one sphere cast and no smoothing at all
+(`ALSPlayerCameraManager.cpp:200–220`, which is ALS's own `SweepSingleByChannel`
+plus `TargetCameraLocation += HitResult.Location − HitResult.TraceEnd`). It saw
+only what was directly behind it, it snapped in both directions, it stopped on
+any collider including a passer-by, and when it did go short it ended inside the
+hero's own neck — carried 89, photographed four times across CHAR1a.
+
+`CameraCollision` is that policy as numbers an author owns, and four of the five
+mechanisms in it were shaped by a measurement rather than by a taste.
+
+**The smoother owns the CLIP, not the arm.** Smoothing the arm makes every change
+of `reach` look like a collision: the arm blocks blend (`walk` 3.0 m → `run`
+3.4 m) through `state_blend_speed`, so a camera whose arm chased its own blended
+length trailed **0.231 m** in an open field with nothing in the way — caught by
+`camera_3d`'s own control arm on the first run of the change.
+
+**The pull-in is a SNAP.** The first cut eased it at 30/s, which is fast. It was
+still a lag, and a clip that lags a growing requirement IS a camera inside the
+thing it was supposed to stop at, for exactly as long as the ease takes: the
+scripted-walk arm measured **33 frames of 840** with the camera's optical centre
+inside a collider, all of them in the two or three frames after a look swing put
+a wall in the boom. There is no pull-in speed that makes that zero. The eased
+value is clamped never to be smaller than the world's requirement; the measured
+asymmetry is now **1 step in against 55 steps out**, a ratio of **55**.
+
+**A whisker STEERS and does not shorten.** A whisker that reached its own full
+length still ends 92 % of the reach up the boom's axis at 22.5°, so bounding on
+every whisker took 8 % off the boom in an empty field (the same 0.231 m from the
+other direction). Bounding only on a whisker that HIT is still too eager: a wall
+45 cm to the side of a corridor took **a metre off a 3.04 m boom**, which is a
+camera that bobs once per alley for geometry it was never going to touch. The
+steer is the prediction; the main sweep is the one thing that shortens the arm.
+Measured with the fan on: **−6.148°** of steer, and the camera stands
+**1.219 m** from the wall's face against **0.900 m** with the fan off, on the
+same 3.035 m boom.
+
+**Characters are excluded; their VEHICLES are not.** The first cut excluded "the
+car every character is sitting in", which reads as the same rule as excluding the
+subject's own and is not. On the island every traffic car has a driver, so the
+whole moving fleet became invisible to the sweep: the island arm's first run
+reported **worst clip 0.000 m over 111 m of Harbour City** with eleven frames
+inside a **Traffic Car**. Only the subject's own car is excluded now. The island
+reports **0 frames of 1 800** with a worst clip of **0.747 m**.
+
+**The near fade** rides a NEW blend code (3) rather than the masked path's alpha,
+because the masked test compares a whole-surface value and dropping it would pop
+the body off in one frame. The skinned pipeline stands at
+`max_vertex_attributes: 16` exactly, so there was no second threshold to be had;
+the code packs into the same `blend * 4 + cutoff` channel and the masked
+branch's own `w > 0.5 && w < 1.5` cannot see it. All three committed skinned
+goldens re-render identically under `INF_GOLDEN_STRICT=1`. The dither is
+Jimenez's interleaved gradient noise. **Stated bounds**: the depth prepass is
+fragment-less and cannot discard, so a fading body still writes the SSAO/TAA/SSR
+depth and still casts its shadow — which is the behaviour a player wants — and
+the editor viewport is driven by the editor camera, which has no boom, so it
+reads the fade off a field nothing in the editor sets today.
+
+### Clause 2 — THE CAMERA RIG
+
+`CameraRig` is a component: the whole `CameraTuning` table, the shoulder and the
+first-person seat. `SceneDoc::edit_create_character` inserts one, so a character
+the wizard makes has a boom the moment it exists; the fixed-step camera door
+reads the SUBJECT's rig, so possessing an NPC is a camera change. A subject with
+no rig keeps the host's `camera.toml` table exactly as P29.6 shipped it, which is
+every character in every level committed before this wave.
+
+**It persists on the character asset and not in the level record**, which is the
+wave brief's own preferred branch, and the other one is priced rather than waved
+at: scene v27 → v28, `EntityRecordV27` frozen, both hosts' `apply_record`
+mirrors grown, the PIE payload v13 → v14, a downgrade bless and all twenty-four
+committed `.inf_lvl` re-cooked — for **776 bytes per character** (97 `f64` at
+bincode's fixed width) carrying, today, the same numbers on every one of them.
+
+`CameraTuning` gained the READ half of its by-name door (`get` + `names()`, 86
+names) and the `collision.*` vocabulary. `camera.set_rig` / `camera.get_rig` /
+`camera.shot` joined the node kit with the dispatch arm both hosts' verb gate
+demands, and the live tuning slider writes the subject's rig when it has one —
+without that it would be overwritten by the door on the next step.
+
+### Clause 3 — THE DIRECTOR
+
+Three layers, ordered by type rather than by number so that `Scripted(0)` beats
+`Override(9999)` by construction: **Gameplay < Override < Scripted**. A source
+pushes a claim for one step; the step it stops, the camera blends back over
+`DEFAULT_RELEASE_BLEND_S`. There is no release verb, deliberately — a cutscene
+that ended in an early return would own the camera for the rest of the session.
+The blend is a `smoothstep` keyed on the holder's **tag**, so a source that moves
+its own pose every step does not restart its own blend.
+
+Measured: a scripted cut lands **on the step it is asked**, a death cam pushed
+alongside it loses, and letting go blends home in **30 steps (0.500 s)** with the
+largest single step **2.32 m of a 46.45 m gap**. The ragdoll follow is the
+`Override` layer's first citizen: it frames the pelvis the bodies actually ended
+at, **4.097 m** back and pitched **12°** further down than the rig.
+
+**Entering a vehicle blends and does not cut**, measured through the real
+`interact` door on a real car: the camera travels **4.434 m**, takes **30 steps
+(0.500 s)** to get 90 % of the way, and its largest single step is **0.7056 m —
+15.9 % of the move** — against 0.0625 m while walking.
+
+### Clause 4 — ALS PARITY, AND THE DOOR CARRIED 123 NAMED
+
+| ALS rule | source | here |
+|---|---|---|
+| `CalculateAxisIndependentLag` | `ALSPlayerCameraManager.cpp:108–123` | `inf_ecs::camera::axis_independent_lag` (P29.6; delta form since IB-12) |
+| the sphere trace and its correction | `.cpp:184–220` | the main sweep, plus the whisker fan this wave added |
+| trace radius **15 cm** at a shoulder socket | `ALSCharacter.cpp:81–87` | `collision_radius_m` 0.15, from the pivot |
+| trace radius **10 cm** at the actor | `ALSBaseCharacter.cpp:631–636` | the whiskers share the boom's radius (a whisker with a different radius answers a question about a different camera) |
+| pivot = midpoint of `head` and `root` | `ALSCharacter.cpp:89–94` | `pivot_height_ratio` × the capsule's standing height — no rig needed, and it scales |
+| `ThirdPersonFOV` / `FirstPersonFOV` = 90 | `ALSBaseCharacter.h:454,457` | per-block `fov_deg` (70 / 78 sprint / 55 aim / 90 first person) |
+| `bRightShoulder` default **false** | `ALSBaseCharacter.h:460` | **true**, because the shipped `camera_offset.x` is `+0.45` and a flag that disagreed with the offset beside it would put the camera on the wrong side of its own table |
+| `CameraTapAction` swaps the shoulder | `.cpp:1305–1315` | the `shoulder` rig value — no key, stated |
+| `CameraHeldAction` toggles the view | `.cpp:1317–1327` | the `view_mode` action (**G** / right bumper) |
+| `DesiredRotationMode` | `ALSBaseCharacter.h:428` | `MovementRuntime::desired_rotation_mode`, seeded from the level's own authored mode |
+| `AimAction(false)` reverts to the desired mode | `.cpp:1291–1301` | the aim-release branch, which used to **promote** to `LookingDirection` with no way back |
+| `VelocityDirectionAction` / `LookingDirectionAction` | `.cpp:1404–1416` | the `rotation_mode` action (**Q** / right stick click), a cycle — a keyboard cannot bind two actions to one key |
+| `OnViewModeChanged` forces `LookingDirection` in first person | `.cpp:856–872` | the `view_mode` key calls `set_desired_rotation_mode` — the INPUT layer, not the camera |
+
+**Carried 123 is closed.** Before this wave the only path into
+`RotationMode::LookingDirection` was *press aim, release aim*, and the release
+promoted a character into it with no way out; a level starts every character in
+`VelocityDirection`, so two waves of turn-in-place frames were taken by
+right-clicking first. Measured now: one press of `rotation_mode`, with `aim`
+never touched, reaches the mode; a 133° look followed by a still stick turns the
+**body** 133.33° and moves it **0.0000 m**; pressing again cycles back; and an
+aim press-and-release returns to `VelocityDirection` instead of promoting.
+
+**The pointer policy (carried 145), decided and stated.** While the PIE window is
+the foreground window the pointer is confined to it and the keyboard ladder is
+ARMED; the moment it is not, both are released. The bound is unchanged — 600
+frames, still stopping — but it is re-armed by the one event that means the
+player came back. A deliberate click-away still gets nothing, which is what the
+bound was for.
+
+### The gate — `runtime/inf-player/tests/char1c_gate.rs`, 14 arms
+
+| arm | what it holds |
+|---|---|
+| `the_camera_never_ends_inside_geometry_over_a_scripted_walk` | 0 of 840 frames inside a collider over seven stations, worst clip 2.882 m |
+| `the_camera_never_ends_inside_the_islands_geometry` | 0 of 1 800 on the island, 111.63 m walked, worst clip 0.747 m |
+| `the_camera_is_never_inside_the_heros_own_capsule` | 0.2572 m outside the capsule surface at its closest, on a 0.557 m boom |
+| `the_boom_comes_in_fast_and_goes_back_out_slow` | 1 step in, 55 steps out, on a 2.274 m clip |
+| `a_whisker_steers_the_boom_away_from_a_wall_it_has_not_hit_yet` | −6.148°, 1.219 m from the face against 0.900 m |
+| `a_crowd_walking_behind_the_hero_does_not_shove_the_camera` | clip 0.000 m with the ignore on, 2.049 m with it off |
+| `the_near_fade_engages_below_the_threshold_and_reaches_the_instance` | boom 0.350 m → fade 0.0007 → blend code 3, cutoff 0.0007 |
+| `a_new_character_gets_a_camera_rig_and_a_blueprint_can_move_it` | the wizard's own door, 86 names readable and writable, a 6.25 m authored rig reaching the camera at 6.267 m |
+| `the_director_cuts_for_a_script_and_blends_for_everything_else` | the cut, the priority, the 30-step release, the death cam's 4.097 m |
+| `entering_a_vehicle_blends_and_does_not_cut` | 4.434 m over 30 steps, worst step 15.9 % of the move |
+| `looking_direction_is_reachable_without_an_aim_press` | carried 123, measured on the body's own transform |
+| `the_first_person_seat_takes_the_camera_to_the_pivot` | 3.035 m → 0.156 m over 49 steps, fade 0.000 |
+| `pie_equals_shipping_on_the_camera_trace` | 900 steps, 900 distinct poses, byte-identical between the editor's Simulate and the shipped player |
+| `the_cameras_cost_on_both_hosts` | 3.48 µs/step with the fan, 2.53 without — the fan costs **0.95 µs/step** of a 57.4 µs step |
+
+### What CHAR1c leaves for COV1, OUTFIT1 and WPN2
+
+* **The director is the door a cover camera goes through.** COV1 does not need a
+  branch inside the rig: a cover camera is an `Override` claim with a pose, and
+  the priority question is already answered.
+* **The rig is per character and by name.** A cover state that wants a shorter
+  boom sets `run.arm_length_m` on the subject's rig through the same door a
+  Blueprint uses, and the change is one step wide.
+* **`hero.csv` carries the camera now** — the boom, the body's fade, the whisker
+  steer and the director's holder, appended so every existing column index still
+  means what it meant. A frame captioned with a camera claim has a number beside
+  it.

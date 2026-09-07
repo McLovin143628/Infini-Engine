@@ -10,5 +10,6 @@
 - [Terrain & PCG](./terrain-pcg.md)
 - [Materials](./materials.md)
 - [Animation](./animation.md)
+- [The Camera](./camera.md)
 - [Packaging & Shipping](./packaging.md)
 - [Modding](./modding.md)
