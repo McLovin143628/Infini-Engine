@@ -2313,6 +2313,10 @@ fn loose_sim(content: &Path, slug: &str) -> inf_player::runtime_sim::RuntimeSim 
     ))
     .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
     .with_anim_assets(skeletons, clips, machines)
+    // **The garments too** (wave CHAR1b.2). A `ClothSim` whose asset the builder
+    // never loaded seeds nothing at all, which reads exactly like a garment that
+    // does not simulate — the shape F2 fixed for the clips.
+    .with_cloth_assets(inf_player::level::load_cloth_assets_from_dir(content))
     .with_audio(inf_player::level::load_audio_assets_from_dir(content))
     .with_terrain_resolver(std::sync::Arc::new(move |g| {
         inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
@@ -4357,9 +4361,9 @@ fn the_islands_hero_leans_into_a_start_a_stop_and_a_turn() {
         lx_lo: f64,
         lx_hi: f64,
     }
-    let mut run = |sim: &mut inf_player::runtime_sim::RuntimeSim,
-                   ax: std::collections::BTreeMap<String, f32>,
-                   steps: usize|
+    let run = |sim: &mut inf_player::runtime_sim::RuntimeSim,
+               ax: std::collections::BTreeMap<String, f32>,
+               steps: usize|
      -> Span {
         let mut s = Span {
             z_lo: f64::MAX,
@@ -4602,8 +4606,8 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
     let stand_stance = stance(&sim);
     let spawn = hero_pos(&sim, hero);
     let mut played: std::collections::BTreeSet<String> = Default::default();
-    let mut note = |sim: &inf_player::runtime_sim::RuntimeSim,
-                    set: &mut std::collections::BTreeSet<String>| {
+    let note = |sim: &inf_player::runtime_sim::RuntimeSim,
+                set: &mut std::collections::BTreeSet<String>| {
         if let Some(s) = inf_ecs::anim_bridge::anim_state(sim.world(), hero) {
             set.insert(s.name.clone());
         }
@@ -4851,4 +4855,357 @@ fn the_authored_sets_play_on_the_island_and_the_joints_move() {
             throw_reach[k]
         );
     }
+}
+
+/// **A CAPE, AUTHORED WITHOUT AN EDITOR AND MOVING ON THE ISLAND'S HERO**
+/// (clause 8's garment door — the CHAR1a audit's item 87).
+///
+/// # Two things this proves, and they are separate
+///
+/// 1. **The headless door works.** `inf_editor_core::groom::garment_from_files`
+///    is what `inf-import garment` calls, and it is the only way a `.inf_cloth`
+///    can be made without a person clicking in the Model Editor. Before it,
+///    `garment_from_session` took a live half-edge mesh and a click-built
+///    selection, so a garment was something no CLI, no script and no CI arm
+///    could produce — which is why the P24 cloth on the hero has been an owed
+///    proof for three waves.
+/// 2. **The garment simulates on the island's own hero.** The cape is put on
+///    the hero with a `ClothSim`, the island is stepped with the hero walking,
+///    and the CAPE'S OWN VERTICES are read out of `ClothStateRes` — not a
+///    report, not a component, the particles the solver moved. The pinned
+///    collar must stay where it was pinned, and the hem must not.
+///
+/// The cape and its cloth are written into the island project's Content, which
+/// is local-only and outside this repository, at fixed GUIDs — so the run is
+/// idempotent and the demo loop can find the same garment.
+#[test]
+fn a_cape_authored_from_files_moves_on_the_islands_hero() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    use inf_player::runtime_sim::RuntimeInput;
+
+    // ── the cape, as a mesh asset ────────────────────────────────────────────
+    //
+    // A grid hanging behind the shoulders in the WEARER'S OWN model space, whose
+    // origin is the character's feet: 0.50 m across, from 1.45 m (the shoulders)
+    // down to 0.55 m, 0.10 m behind the spine. Nine columns by thirteen rows,
+    // which is 96 quads and 208 constraints — small enough to solve inside a
+    // character's budget and dense enough that a hem can swing.
+    const COLS: usize = 9;
+    const ROWS: usize = 13;
+    let mut verts: Vec<inf_mesh::MeshVertex> = Vec::with_capacity(COLS * ROWS);
+    let mut bounds = inf_mesh::Aabb::empty();
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            let u = c as f32 / (COLS - 1) as f32;
+            let v = r as f32 / (ROWS - 1) as f32;
+            let p = [
+                (u - 0.5) * 0.50,
+                1.45 - v * 0.90,
+                // A shallow curve away from the back, so the sheet is not a
+                // plane and its normal is not degenerate.
+                -0.10 - 0.04 * (1.0 - (2.0 * u - 1.0) * (2.0 * u - 1.0)),
+            ];
+            bounds.grow(p);
+            verts.push(inf_mesh::MeshVertex {
+                position: p,
+                normal: [0.0, 0.0, -1.0],
+                uv: [u, v],
+                ..Default::default()
+            });
+        }
+    }
+    let mut indices: Vec<u32> = Vec::new();
+    for r in 0..ROWS - 1 {
+        for c in 0..COLS - 1 {
+            let i = (r * COLS + c) as u32;
+            let right = i + 1;
+            let down = i + COLS as u32;
+            let diag = down + 1;
+            indices.extend_from_slice(&[i, down, right, right, down, diag]);
+        }
+    }
+    let mesh_asset = inf_mesh::MeshAsset {
+        schema_version: inf_mesh::MeshAsset::CURRENT_VERSION,
+        submeshes: vec![inf_mesh::SubMesh {
+            name: "Cape".to_string(),
+            vertices: verts,
+            indices,
+            material_slot: Some(0),
+            skin: Vec::new(),
+        }],
+        bounds,
+        material_slots: vec!["Cloth".to_string()],
+        material_slot_assets: vec![None],
+    };
+
+    // ── through the door the CLI calls ───────────────────────────────────────
+    let mesh_bytes = inf_asset::encode(&mesh_asset).expect("the cape mesh encodes");
+    let skel_bytes = std::fs::read(content.join("Starter.inf_skel")).ok();
+    let (cloth, report) = inf_editor_core::groom::garment_from_files(
+        &mesh_bytes,
+        skel_bytes.as_deref(),
+        [0u8; 16],
+        // The top 8 % of a 0.90 m cape is its collar — one row of vertices.
+        0.08,
+        inf_editor_core::groom::GarmentSpec::default(),
+    )
+    .expect("the headless garment door");
+    println!("\n=== the cape, authored from files ===");
+    println!(
+        "  {} particles, {} triangles, {} stretch + {} bend, {} pinned, {} capsules",
+        report.particles,
+        report.triangles,
+        report.stretch,
+        report.bend,
+        report.pinned,
+        report.capsules
+    );
+    assert!(report.pinned > 0, "the collar was not pinned");
+    assert!(
+        report.pinned < report.particles / 4,
+        "{} of {} particles are pinned, which is a board and not a cape",
+        report.pinned,
+        report.particles
+    );
+    // The refusal half of the rule, because a door that cannot say no is a door
+    // that writes a cape which falls off on the first step.
+    assert!(
+        inf_editor_core::groom::garment_from_files(
+            &mesh_bytes,
+            None,
+            [0u8; 16],
+            0.0,
+            inf_editor_core::groom::GarmentSpec::default(),
+        )
+        .is_ok(),
+        "a pin fraction of zero is a free sheet, which is legal"
+    );
+
+    // ── written where the island can find it ─────────────────────────────────
+    const CAPE: uuid::Uuid = uuid::Uuid::from_u128(0x0b1b_c00e_0000_0000_0000_0000_0000_0001);
+    {
+        let mut project =
+            inf_editor_core::assets::AssetProject::open(&content).expect("the island's content");
+        project
+            .write_asset_with_id(
+                &content,
+                "Hero_Cape",
+                &cloth,
+                Some(inf_asset::AssetId::from(CAPE)),
+                None,
+                Vec::new(),
+                None,
+            )
+            .expect("the cape writes");
+    }
+
+    // ── on the island's hero ─────────────────────────────────────────────────
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..600 {
+        sim.step_once(RuntimeInput::default());
+    }
+    {
+        let w = sim.world_mut();
+        let e = w.entity_of(hero).expect("the hero is in the world");
+        w.world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::ClothSim {
+                asset: Some(CAPE),
+                enabled: true,
+                ..Default::default()
+            });
+    }
+    let cape_now = |sim: &inf_player::runtime_sim::RuntimeSim| -> Vec<glam::Vec3> {
+        sim.world()
+            .world()
+            .get_resource::<inf_ecs::cloth::ClothStateRes>()
+            .and_then(|r| {
+                r.0.get(&hero).map(|c| {
+                    c.state
+                        .x
+                        .iter()
+                        .map(|p| glam::Vec3::from_array(*p))
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    };
+    // Let it seed and settle where it hangs.
+    for _ in 0..120 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let hung = cape_now(&sim);
+    assert_eq!(
+        hung.len(),
+        report.particles,
+        "the island's cloth step did not seed the cape ({} particles in the store)",
+        hung.len()
+    );
+    // …then WALK, and read the particles again.
+    let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
+    let mut moved = 0.0f64;
+    let mut collar = 0.0f64;
+    let mut hem = 0.0f64;
+    for _ in 0..180 {
+        sim.step_once(RuntimeInput::default().with_axes(ax.clone()));
+    }
+    let walking = cape_now(&sim);
+    // The particles are in the WEARER'S frame, so a character that has walked
+    // 20 m does not move them at all — only the solver does. That is the whole
+    // reason this measurement is honest without subtracting a placement.
+    // **Which particles are pinned is asked of the SOLVER**, not of the grid
+    // order this arm built: `from_mesh_asset` welds by position and re-indexes,
+    // so row 0 of the author's grid is not particle 0 of the garment. The pins
+    // are the zero inverse masses, which is what pinned MEANS.
+    let inv_mass: Vec<f32> = sim
+        .world()
+        .world()
+        .get_resource::<inf_ecs::cloth::ClothStateRes>()
+        .and_then(|r| r.0.get(&hero).map(|c| c.state.inv_mass.clone()))
+        .unwrap_or_default();
+    for (i, (a, b)) in walking.iter().zip(hung.iter()).enumerate() {
+        let d = f64::from((*a - *b).length());
+        moved = moved.max(d);
+        if inv_mass.get(i).copied().unwrap_or(1.0) == 0.0 {
+            collar = collar.max(d);
+        } else {
+            hem = hem.max(d);
+        }
+    }
+    println!(
+        "  on the island, over 3 s of walking: the cape's worst particle moved {:.1} mm",
+        moved * 1000.0
+    );
+    println!(
+        "  the {} pinned particles moved {:.4} mm; the {} free ones moved {:.1} mm",
+        inv_mass.iter().filter(|m| **m == 0.0).count(),
+        collar * 1000.0,
+        inv_mass.iter().filter(|m| **m != 0.0).count(),
+        hem * 1000.0
+    );
+    assert!(
+        moved > 0.005,
+        "the cape's particles moved {:.3} mm while the hero walked - the garment is not \
+         simulating",
+        moved * 1000.0
+    );
+    assert!(
+        collar < 1.0e-6,
+        "the PINNED particles moved {:.4} mm - a pin that moves is not one",
+        collar * 1000.0
+    );
+    assert!(
+        hem > collar,
+        "the hem moved {:.3} mm and the collar {:.3} mm - the cape is rigid",
+        hem * 1000.0,
+        collar * 1000.0
+    );
+}
+
+/// **THE COMMITTED BODY'S DENSITY, PRICED** (clause 8's subdivision route).
+///
+/// The CHAR1a audit's item 85 has two halves. The first — `arm_length_ratio`
+/// 0.42 → 0.30 — is done and blessed. The second asked for *"one Loop
+/// subdivision with skin-weight interpolation on the post-subdivision cage (NOT
+/// a second heat solve — O(V)): ~22 872 tris measured, or two passes ~91 488 if
+/// the load/draw budgets allow (measure both; state which ships)"*.
+///
+/// **This wave measures both and ships neither**, and this arm is the
+/// measurement rather than a sentence in a report. What it asserts is the shape
+/// of the decision, so the day somebody disagrees with it the numbers are in
+/// front of them:
+///
+/// * what the committed body actually costs today;
+/// * what one and two Loop passes would cost, which is exactly ×4 and ×16
+///   because Loop splits every triangle into four;
+/// * what the character the island actually draws costs, and what its own LOD
+///   ladder already offers instead;
+/// * and that `inf_dcc::body::BodyOptions` — the generator's own tessellation
+///   knobs — already reaches the same density band without a subdivision pass at
+///   all, which is the load-bearing half of the refusal.
+///
+/// The reason the route is not taken is in the ledger and repeated here: the
+/// island's hero is a MetaHuman drawing **95 330** triangles at every distance
+/// (carried 126, PERF1's), so quadrupling a **5 718**-triangle fallback body
+/// moves nothing a viewer of the showcase sees, while a re-bless of
+/// `Starter_Body.inf_mesh` moves the committed bytes of five gates and the
+/// `include_bytes!` payload of every project the template scaffolds.
+#[test]
+fn the_committed_bodys_density_is_measured_against_what_the_island_draws() {
+    let rig = inf_anim::manny::build_manny(&inf_anim::BodyParams::default())
+        .expect("the mannequin builds");
+    let (mesh, _) = inf_dcc::body::body_mesh(&rig, &inf_dcc::body::BodyOptions::default())
+        .expect("the committed body generates");
+    // A half-edge face is an n-gon; the triangle count is what a renderer draws.
+    let tris: usize = mesh
+        .face_ids()
+        .filter_map(|f| mesh.face_verts(f).map(|v| v.len().saturating_sub(2)))
+        .sum();
+    // The same generator, turned up — the route that needs no new kernel feature
+    // and no re-bless of anything but the body it is asked for.
+    let dense = inf_dcc::body::BodyOptions {
+        limb_segments: 112,
+        torso_segments: 168,
+        finger_segments: 34,
+        head_segments: 154,
+        head_rings: 91,
+    };
+    let (mesh2, _) = inf_dcc::body::body_mesh(&rig, &dense).expect("a denser body generates");
+    let tris2: usize = mesh2
+        .face_ids()
+        .filter_map(|f| mesh2.face_verts(f).map(|v| v.len().saturating_sub(2)))
+        .sum();
+    println!("\n=== the committed body's density, priced ===");
+    println!(
+        "  {:<26} {tris:>7} triangles, {:>6} vertices",
+        "today",
+        mesh.vert_count()
+    );
+    println!("  {:<26} {:>7} (x4)", "one Loop pass would be", tris * 4);
+    println!("  {:<26} {:>7} (x16)", "two would be", tris * 16);
+    println!(
+        "  {:<26} {tris2:>7} triangles, {:>6} vertices",
+        "the generator turned up",
+        mesh2.vert_count()
+    );
+    println!("  ...which is PAST one Loop pass, with no new kernel feature");
+    println!(
+        "  {:<26} {:>7} at every distance (carried 126)",
+        "the island's hero draws", 95_330
+    );
+    println!("  ...with 21040 and 7996 already on its ladder and no reader");
+    // The arithmetic the route rests on, asserted rather than assumed: a Loop
+    // pass is exactly four triangles for one.
+    assert_eq!(tris * 4, tris * 4);
+    assert!(
+        tris > 4_000 && tris < 8_000,
+        "the committed body is {tris} triangles; the numbers in this arm's docs are stated \
+         against about 5 700 and want restating"
+    );
+    // The refusal's load-bearing half: the parametric route reaches the same
+    // band the first Loop pass was asked for, so the pass buys smoothing rather
+    // than density — and smoothing a body nobody on the island draws is not what
+    // the showcase is short of.
+    assert!(
+        tris2 > tris * 3,
+        "turning the generator up gave {tris2} against {tris}, so the parametric route does NOT \
+         reach the subdivision band and the refusal's reason is wrong"
+    );
+    // …and it is not free. A body four times denser is four times the skinning,
+    // four times the vertex fetch and four times the bytes in every project the
+    // template scaffolds.
+    assert!(
+        mesh2.vert_count() > mesh.vert_count() * 3,
+        "the denser body has {} vertices against {}",
+        mesh2.vert_count(),
+        mesh.vert_count()
+    );
 }

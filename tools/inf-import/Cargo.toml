@@ -22,6 +22,10 @@ path = "src/main.rs"
 # small. It gets its own binary instead; `inf --help` names it.
 inf-editor-core = { workspace = true }
 inf-asset = { workspace = true }
+# The `garment` verb reads a mesh asset's committed sidecar to learn its GUID,
+# which is a TOML table and a uuid. Both are already workspace pins.
+toml = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

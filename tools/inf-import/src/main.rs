@@ -31,6 +31,22 @@ fn main() -> ExitCode {
         print_help();
         return ExitCode::SUCCESS;
     }
+    // **`garment` is a VERB, not a flag** (wave CHAR1b.2, the CHAR1a audit's item
+    // 87). It shares this binary rather than getting its own for the reason this
+    // crate's own manifest gives for the binary existing at all:
+    // `garment_from_files` is `inf_editor_core`'s, and `tools/inf-cli`
+    // deliberately links Ring 0 and nothing else. Everything the verb decides
+    // lives in Ring 1 where a test can reach it; this is argument parsing and a
+    // report.
+    if args.first().map(String::as_str) == Some("garment") {
+        return match run_garment(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("inf-import garment: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -48,7 +64,9 @@ fn print_help() {
              [--pack <name>]… [--max-texture <n>] [--dest <sub>]\n             \
              [--bind <Stem>=<material-key>]… [--no-meshes]\n             \
              [--character-lods <n>] [--retarget-to <objpath>] [--dry-run]\n  \
-             inf-import --into <project-dir> --rebind-graph <m|f>\n\n\
+             inf-import --into <project-dir> --rebind-graph <m|f>\n  \
+             inf-import garment --mesh <a.inf_mesh> --out <a.inf_cloth>\n             \
+             [--skeleton <r.inf_skel>] [--pin-top <fraction>] [--body-radius <m>]\n\n\
          The manifest is written by tools/ue-export/export.py. A --bind writes\n\
          an imported material at the GUID the committed ground library assigns\n\
          that stem, so a committed level picks it up without naming licensed\n\
@@ -224,4 +242,108 @@ fn run(args: &[String]) -> Result<(), String> {
         report.bytes as f64 / 1_048_576.0,
     );
     Ok(())
+}
+
+/// **`inf-import garment`** — author a `.inf_cloth` from files (wave CHAR1b.2).
+///
+/// The whole of what a garment IS lives in
+/// `inf_editor_core::groom::garment_from_files`; this reads the arguments, the
+/// two files and writes the payload with its sidecar through the same
+/// `AssetProject` door every other written asset goes through.
+fn run_garment(args: &[String]) -> Result<(), String> {
+    let mut mesh: Option<PathBuf> = None;
+    let mut skel: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut pin_top = 0.05_f64;
+    let mut spec = inf_editor_core::groom::GarmentSpec::default();
+    let mut i = 0;
+    while i < args.len() {
+        let take = |i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("{} needs a value", args[*i - 1]))
+        };
+        match args[i].as_str() {
+            "--mesh" => mesh = Some(PathBuf::from(take(&mut i)?)),
+            "--skeleton" => skel = Some(PathBuf::from(take(&mut i)?)),
+            "--out" => out = Some(PathBuf::from(take(&mut i)?)),
+            "--pin-top" => {
+                let v = take(&mut i)?;
+                pin_top = v
+                    .parse()
+                    .map_err(|_| format!("--pin-top wants a fraction, got {v:?}"))?;
+            }
+            "--body-radius" => {
+                let v = take(&mut i)?;
+                spec.body_radius_m = v
+                    .parse()
+                    .map_err(|_| format!("--body-radius wants metres, got {v:?}"))?;
+            }
+            other => return Err(format!("unknown option {other:?}")),
+        }
+        i += 1;
+    }
+    let mesh_path = mesh.ok_or("--mesh is required")?;
+    let out_path = out.ok_or("--out is required")?;
+    let mesh_bytes =
+        std::fs::read(&mesh_path).map_err(|e| format!("{}: {e}", mesh_path.display()))?;
+    let skel_bytes = match &skel {
+        Some(p) => Some(std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?),
+        None => None,
+    };
+    // The garment's `source_mesh` is the mesh asset's own GUID, read off its
+    // sidecar — the same id the Model Editor would have passed, so a cloth
+    // authored here and one authored in a session name the same source.
+    let (asset, report) = inf_editor_core::groom::garment_from_files(
+        &mesh_bytes,
+        skel_bytes.as_deref(),
+        source_guid(&mesh_path),
+        pin_top,
+        spec,
+    )
+    .map_err(|e| e.to_string())?;
+    let dir = out_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let name = out_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("--out needs a file name")?
+        .to_string();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut project = AssetProject::open(&dir).map_err(|e| e.to_string())?;
+    let id = project
+        .write_asset(&dir, &name, &asset, None, Vec::new(), None)
+        .map_err(|e| e.to_string())?;
+    println!("inf-import: GARMENT {name}.inf_cloth -> {id}");
+    println!(
+        "  {} particles, {} triangles, {} stretch + {} bend constraints, {} pinned, {} capsules",
+        report.particles,
+        report.triangles,
+        report.stretch,
+        report.bend,
+        report.pinned,
+        report.capsules
+    );
+    Ok(())
+}
+
+/// The mesh asset's own GUID, read off its committed sidecar; sixteen zero bytes
+/// when there is no sidecar to read, which is the same "no source" a scratch mesh
+/// carries.
+fn source_guid(mesh_path: &std::path::Path) -> [u8; 16] {
+    let sidecar = {
+        let mut p = mesh_path.as_os_str().to_os_string();
+        p.push(".toml");
+        PathBuf::from(p)
+    };
+    std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("guid").and_then(|v| v.as_str()).map(str::to_string))
+        .and_then(|g| g.parse::<uuid::Uuid>().ok())
+        .map(|u| *u.as_bytes())
+        .unwrap_or([0u8; 16])
 }

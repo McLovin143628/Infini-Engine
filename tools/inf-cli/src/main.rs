@@ -48,6 +48,21 @@ fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
+        // **`inf character garment` names the door it is not** (wave CHAR1b.2,
+        // the CHAR1a audit's item 87). Authoring a garment links
+        // `inf_editor_core::groom` — the same editor core, and the same wgpu —
+        // that `inf import` is refused for above, so it lives in the same
+        // separate binary and this says where.
+        Some("character") => {
+            eprintln!("`inf character garment` lives in the importer's binary, because");
+            eprintln!("authoring a cloth links the editor core (and wgpu) and this one");
+            eprintln!("deliberately does not.\n");
+            eprintln!("  cargo run -p inf-import --release -- garment \\");
+            eprintln!("      --mesh <a.inf_mesh> --out <a.inf_cloth> \\");
+            eprintln!("      [--skeleton <r.inf_skel>] [--pin-top <fraction>]\n");
+            eprintln!("or `inf-import --help` if it is already built.");
+            ExitCode::FAILURE
+        }
         Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -75,6 +90,7 @@ fn print_help() {
              [--min-length <m>] [--project <dir> | --level <file.inf_lvl> | \
              --anchor <crs>,<easting>,<northing>[,<height>]]\n  \
              inf-import --manifest <manifest.json> --into <dir>   (separate binary)\n  \
+             inf-import garment --mesh <a.inf_mesh> --out <a.inf_cloth>  (separate binary)\n  \
              inf island plan  --recipe <island.toml>\n  \
              inf island fetch --recipe <island.toml> [--jobs <n>]\n  \
              inf island build --recipe <island.toml> [--out <dir>] [--offline] \

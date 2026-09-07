@@ -68,6 +68,15 @@ pub enum GroomError {
     /// the offending quantity.
     #[error("{0}")]
     Payload(String),
+    /// A file the headless door was handed could not be read as what it claimed
+    /// to be, or a rule it was given selects nothing (wave CHAR1b.2).
+    #[error("{what} could not be used: {why}")]
+    Unreadable {
+        /// Which input.
+        what: &'static str,
+        /// The decoder's or the rule's own words.
+        why: String,
+    },
 }
 
 impl From<ClothError> for GroomError {
@@ -179,6 +188,106 @@ pub fn garment_from_session(
         capsules: asset.collision.len(),
     };
     Ok((asset, report))
+}
+
+/// **The headless garment door** (wave CHAR1b.2, the CHAR1a audit's item 87) —
+/// author a `.inf_cloth` from files, with no open Model-Editor session.
+///
+/// # Why this exists
+///
+/// [`garment_from_session`] is the *authoring* door and it takes a live
+/// half-edge [`Mesh`] and a [`SelectionSet`] — which is to say it takes an open
+/// Model Editor. That made a garment something only a person with the editor
+/// running could produce: no CLI, no CI arm, no script, and no way for a wave to
+/// put a cape on a character and photograph it without a human clicking. The
+/// audit recorded that as *"`inf character garment` so a cloth can be authored
+/// without an open Model-Editor session"*.
+///
+/// This is that door, and it is deliberately the SAME function underneath:
+/// nothing here decides what a garment is. It reads the two files, turns the
+/// mesh into the kernel's own representation ([`inf_dcc::build::from_mesh_asset`],
+/// the Model Editor's own reader), makes the pin selection out of a rule instead
+/// of out of a click, and calls [`garment_from_session`].
+///
+/// # The pin rule, and why it is a rule rather than a click
+///
+/// `pin_top` is the fraction of the garment's own height, measured from its
+/// highest vertex down, whose vertices are pinned. `0.05` on a cape is its
+/// collar; `0.0` pins nothing (a free sheet). A rule and not a click because the
+/// interesting property of a headless door is that it is REPRODUCIBLE: the same
+/// two files and the same fraction give the same `.inf_cloth`, byte for byte,
+/// which is what lets a gate assert on one.
+///
+/// A garment whose rule selects **no** vertices is refused rather than written:
+/// an unpinned cape falls off the character on the first step, and that is a
+/// mistake worth a message rather than a file.
+pub fn garment_from_files(
+    mesh_bytes: &[u8],
+    skeleton_bytes: Option<&[u8]>,
+    source_mesh: [u8; 16],
+    pin_top: f64,
+    spec: GarmentSpec,
+) -> Result<(ClothAsset, GarmentReport), GroomError> {
+    let asset: inf_mesh::MeshAsset =
+        inf_asset::decode(mesh_bytes).map_err(|e| GroomError::Unreadable {
+            what: "the garment mesh",
+            why: e.to_string(),
+        })?;
+    let import = inf_dcc::build::from_mesh_asset(&asset).map_err(|e| GroomError::Unreadable {
+        what: "the garment mesh",
+        why: e.to_string(),
+    })?;
+    let mesh = import.mesh;
+    let skeleton: Option<inf_anim::SkeletonAsset> = match skeleton_bytes {
+        Some(b) => Some(inf_asset::decode(b).map_err(|e| GroomError::Unreadable {
+            what: "the wearer's skeleton",
+            why: e.to_string(),
+        })?),
+        None => None,
+    };
+    // ── the pins, by the rule ────────────────────────────────────────────────
+    let mut selection = SelectionSet::new(0);
+    if pin_top > 0.0 {
+        let hi = mesh
+            .vert_ids()
+            .filter_map(|v| mesh.position(v))
+            .fold(f64::NEG_INFINITY, |a, p| a.max(p.y));
+        let lo = mesh
+            .vert_ids()
+            .filter_map(|v| mesh.position(v))
+            .fold(f64::INFINITY, |a, p| a.min(p.y));
+        let span = hi - lo;
+        if !(span.is_finite() && span > 0.0) {
+            return Err(GroomError::Unreadable {
+                what: "the garment mesh",
+                why: "it has no height at all, so a top-fraction pin rule cannot name a collar"
+                    .to_string(),
+            });
+        }
+        let cut = hi - span * pin_top.clamp(0.0, 1.0);
+        for v in mesh.vert_ids() {
+            if mesh.position(v).is_some_and(|p| p.y >= cut) {
+                selection.set_vert(v, true);
+            }
+        }
+        if selection.verts().is_empty() {
+            return Err(GroomError::Unreadable {
+                what: "the pin rule",
+                why: format!(
+                    "the top {:.1} % of a {span:.3} m garment holds no vertex, so nothing would \
+                     hold it up",
+                    pin_top * 100.0
+                ),
+            });
+        }
+    }
+    garment_from_session(
+        &mesh,
+        &selection,
+        source_mesh,
+        spec,
+        skeleton.as_ref().map(|s| &s.skeleton),
+    )
 }
 
 /// The hairstyle knobs the Model Editor's Hair section exposes.
