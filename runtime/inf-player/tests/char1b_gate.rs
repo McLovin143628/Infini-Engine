@@ -2412,14 +2412,14 @@ fn the_islands_hero_plays_the_states_its_input_door_can_reach() {
     let mut seen: std::collections::BTreeSet<String> = Default::default();
     let mut turn_max = 0.0f64;
     let mut planted: std::collections::BTreeSet<i64> = Default::default();
-    let mut drive = |sim: &mut inf_player::runtime_sim::RuntimeSim,
-                     seen: &mut std::collections::BTreeSet<String>,
-                     turn_max: &mut f64,
-                     planted: &mut std::collections::BTreeSet<i64>,
-                     stop_ready: &mut usize,
-                     n: usize,
-                     held: &[&str],
-                     axes: &[(&str, f32)]| {
+    let drive = |sim: &mut inf_player::runtime_sim::RuntimeSim,
+                 seen: &mut std::collections::BTreeSet<String>,
+                 turn_max: &mut f64,
+                 planted: &mut std::collections::BTreeSet<i64>,
+                 stop_ready: &mut usize,
+                 n: usize,
+                 held: &[&str],
+                 axes: &[(&str, f32)]| {
         let ax: std::collections::BTreeMap<String, f32> =
             axes.iter().map(|(k, v)| ((*k).to_string(), *v)).collect();
         for _ in 0..n {
