@@ -870,14 +870,29 @@ fn holding_aim_puts_the_character_in_the_aiming_rotation_mode() {
     let mut rig = Rig::new();
     rig.arm("rifle");
     rig.step(&idle());
-    assert_ne!(rig.rotation_mode(), RotationMode::Aiming);
+    let started = rig.rotation_mode();
+    assert_ne!(started, RotationMode::Aiming);
     rig.step(&aim());
     println!("holding aim put the character in {:?}", rig.rotation_mode());
     assert_eq!(rig.rotation_mode(), RotationMode::Aiming);
-    // Letting go leaves it looking rather than back where it started, which is
-    // P29.6's own rule and not this wave's to change.
+    // **Letting go goes back to the character's DESIRED mode** (wave CHAR1c),
+    // which for a character nobody has pressed the rotation-mode key on is the
+    // one its level authored.
+    //
+    // This arm used to say the opposite — *"letting go leaves it looking rather
+    // than back where it started, which is P29.6's own rule and not this wave's
+    // to change"* — and that promotion WAS the defect carried 123 named: it made
+    // `LookingDirection` reachable only by an aim press and unreachable in
+    // reverse, so a level that starts in `VelocityDirection` could not get back
+    // to it at all. ALS's own `AimAction_Implementation(false)`
+    // (`ALSBaseCharacter.cpp:1291-1301`) reverts to `DesiredRotationMode`, and
+    // so does this now.
     rig.step(&idle());
-    assert_eq!(rig.rotation_mode(), RotationMode::LookingDirection);
+    assert_eq!(
+        rig.rotation_mode(),
+        started,
+        "releasing aim did not go back to the mode the character started in"
+    );
 }
 
 /// **A semi-automatic weapon fires once per press even with the button held.**

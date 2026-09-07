@@ -326,7 +326,7 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "the default map binds {} key(s) no `KeyCode` reaches, so they are              controls that silently do nothing: {missing:?}",
+            "the default map binds {} key(s) no `KeyCode` reaches: {missing:?}",
             missing.len()
         );
         // ANTI-VACUITY: the candidate set really does reach the map, and the
@@ -337,7 +337,7 @@ mod tests {
         );
         assert!(
             !routed.contains("KeyJ"),
-            "`KeyJ` is routed and nothing binds it, so this arm cannot tell a              routed key from an unrouted one"
+            "`KeyJ` is routed and bound to nothing; this arm cannot tell the two apart"
         );
     }
 

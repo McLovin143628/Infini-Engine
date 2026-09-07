@@ -828,7 +828,7 @@ fn the_near_fade_engages_below_the_threshold_and_reaches_the_instance() {
     );
     assert_eq!(
         solid, 0,
-        "{solid} of 12 sections took their material's opaque pair back, so a          sectioned body draws SOLID inside the fade band"
+        "{solid} of 12 sections kept their material's opaque pair: a sectioned body draws SOLID"
     );
     assert!(inst.sections.iter().all(|s| (s.cutoff - 0.25).abs() < 1e-6));
     // …and a fully drawn subject leaves every section exactly as it was.
