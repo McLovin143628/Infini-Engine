@@ -2266,6 +2266,69 @@ fn rebind_locomotion_graph(
                 .push(format!("{stem}: `{name}` was not re-retargeted ({e})")),
         }
     }
+    // ── THE AUTHORED SETS (wave CHAR1b.2) ────────────────────────────────────
+    //
+    // ALS ships no slide, no throw, no swim, no prone and no standing get-up —
+    // a census by name over its 164 sequences — and this engine's catalogue has
+    // a MODE for four of them. `inf_anim::authored` derives them from the rig
+    // that will play them, which is the same rule `crate::locomotion`'s
+    // generated cycles follow and the reason there is nothing to retarget: a
+    // clip authored against THIS identity's joint indices is already on it.
+    //
+    // Written beside the retargeted donor clips, under the same
+    // `{name}--{stem}` spelling, for that naming rule's own reason: a copy
+    // called `INF_Slide.inf_anim` would be a second stem that matches
+    // `INF_Slide` and would make the other identity's lookup ambiguous.
+    //
+    // Derived after authoring, through the same `derive_clip` door every other
+    // clip in this file goes through, so the authored sets carry the six ALS
+    // channels and a foot-IK gate exactly as the imported ones do.
+    let rig_asset = ids
+        .skeleton
+        .and_then(|id| project.load_payload::<inf_anim::SkeletonAsset>(id).ok());
+    if let Some(rig_asset) = rig_asset {
+        match inf_anim::author_clips(&rig_asset) {
+            Ok(set) => {
+                for (name, clip) in set {
+                    let clip = match inf_anim::derive_clip(
+                        &clip,
+                        &rig_asset,
+                        &inf_anim::DeriveOptions::default(),
+                    ) {
+                        Ok((c, _)) => c,
+                        Err(e) => {
+                            report.advisories.push(format!(
+                                "{stem}: `{name}` was authored but not derived ({e}) -- it is \
+                                 bound as it is and carries no curve channels"
+                            ));
+                            clip
+                        }
+                    };
+                    let out = inf_anim::AnimClipAsset::new(clip, want_rig);
+                    let path = project
+                        .root()
+                        .join(format!("{stem}-loco"))
+                        .join(format!("{name}--{stem}.inf_anim"));
+                    let id_out = clip_guid(&format!("{stem}:loco:{name}"));
+                    let deps: Vec<AssetId> = ids.skeleton.into_iter().collect();
+                    let import = super::skeleton_binding::import_table(project, ids.skeleton);
+                    match project.write_asset_at_with_id(&path, &out, id_out, deps, import) {
+                        Ok(id_out) => {
+                            retargeted.insert(name.clone(), id_out);
+                        }
+                        Err(e) => report
+                            .advisories
+                            .push(format!("{stem}: `{name}` was not written ({e})")),
+                    }
+                }
+            }
+            Err(e) => report.advisories.push(format!(
+                "{stem}: the authored sets were not derived ({e}) -- slide, throwing, \
+                 swimming, prone and the standing get-up have no clip on this body"
+            )),
+        }
+    }
+
     let find = |name: &str| -> Option<AssetId> { retargeted.get(name).copied() };
     let (machine, bind) = inf_anim::als::build_locomotion_graph(&|name: &str| {
         find(name).map(|id| *id.uuid().as_bytes())

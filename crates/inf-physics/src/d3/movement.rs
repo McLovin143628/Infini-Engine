@@ -67,7 +67,7 @@ use super::{AutoStep3D, CharacterMover3D, ColliderId3D, ColliderShape3D};
 /// entity whose collider is a box or a sphere keeps whatever shape it was given
 /// and simply does not change size when it crouches — a value, not a refusal,
 /// because the mode and the speeds are still meaningful.
-const FALLBACK_RADIUS_M: f64 = 0.3;
+pub(crate) const FALLBACK_RADIUS_M: f64 = 0.3;
 
 /// How far the body may be turned away from the aim direction while standing
 /// still and aiming, degrees (ALS `LimitRotation(-100, 100, 20)`).

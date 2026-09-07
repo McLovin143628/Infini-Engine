@@ -2135,6 +2135,15 @@ pub struct RagdollRuntime {
     /// The velocity the articulated bodies were last seen at, m/s. Handed back
     /// to the movement integrator when a ragdoll ends in the air.
     pub last_velocity: Vec3d,
+    /// **Whether the ragdoll never actually went down** (wave CHAR1b.2) — the
+    /// pelvis is still more than half a capsule above the feet when the bodies
+    /// settle, so the character was knocked about and stayed on its feet.
+    ///
+    /// It is the third value `getup` needs. ALS ships two crouched get-ups and
+    /// chooses between them by the pelvis's facing, which is a two-valued
+    /// question with a three-valued answer: a character that is still standing
+    /// has no floor to get up off.
+    pub upright: bool,
     /// Whether the pelvis says the character is on its back.
     pub face_up: bool,
     /// Whether the ragdoll's own ground probe found a floor under the pelvis.

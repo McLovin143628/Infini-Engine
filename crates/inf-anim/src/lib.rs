@@ -41,6 +41,7 @@
 /// licensed content that never enters this checkout.
 pub mod als;
 pub mod asset;
+pub mod authored;
 pub mod blend_space;
 // P29.2 `.inf_anim` v2: the clip channel model — named curves, timed markers,
 // the additive reference, root motion (Y included) and the distance track.
@@ -118,6 +119,7 @@ pub use als::{
     build_locomotion_graph, LocoBindReport, LocoMode, LocoSlot, SlotKind, LOCOMOTION_MAP,
 };
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
+pub use authored::{author_clips, can_author, AuthorError, AUTHORED_CLIPS};
 pub use blend_space::{
     blend_leader, blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d,
     weights_2d, BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,

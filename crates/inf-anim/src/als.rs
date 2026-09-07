@@ -50,6 +50,10 @@ use crate::state_machine::{
 /// A name and not an index, because a machine a human edited afterwards has
 /// different indices and the same names.
 pub const LOOK_SWEEP_STATE: &str = "aim_look";
+/// The state whose clip is the **breathing additive** (wave CHAR1b.2, carried
+/// item 128) — `ALS_N_SecondaryMotion`, layered over the idle through the
+/// upper-body mask rather than entered.
+pub const BREATH_STATE: &str = "breath";
 
 /// The blend coordinate the look sweep's **neutral** sits at — the pose the
 /// additive delta is measured from.
@@ -105,6 +109,26 @@ pub const TURN_DEG_VAR: &str = "turn_deg";
 pub const PLANTED_FOOT_VAR: &str = "planted_foot";
 /// **Whether a ragdolled character is on its back**, `1` or `0`.
 pub const FACE_UP_VAR: &str = "face_up";
+/// **Which get-up a ragdoll ends in** (wave CHAR1b.2): `0` face down, `1` on its
+/// back, `2` still on its feet.
+///
+/// ALS chooses between its two get-ups by the pelvis's facing and ships only the
+/// crouched pair, so a character whose ragdoll settled UPRIGHT — knocked about
+/// and never actually floored — had nowhere to go but a get-up off the ground it
+/// was not on. The third value is measured, not assumed: the ragdoll bridge has
+/// recorded the pelvis's world position since P29.4, and "the pelvis is still
+/// more than half a capsule above the feet" is what standing means.
+///
+/// [`FACE_UP_VAR`] stays published and unchanged; this is the parameter the
+/// three get-up edges compare, because a two-valued signal cannot name three
+/// outcomes.
+pub const GETUP_VAR: &str = "getup";
+/// [`GETUP_VAR`]'s value for a character face down.
+pub const GETUP_FRONT: f64 = 0.0;
+/// [`GETUP_VAR`]'s value for a character on its back.
+pub const GETUP_BACK: f64 = 1.0;
+/// [`GETUP_VAR`]'s value for a character that never went down.
+pub const GETUP_STANDING: f64 = 2.0;
 /// **Which mantle is running** (wave CHAR1b.2), and which hand leads it.
 ///
 /// `0` none, `1` a low mantle led by the right hand, `2` a low mantle led by the
@@ -200,12 +224,20 @@ pub enum LocoMode {
     Grounded = 0,
     /// Crouched.
     Crouch = 1,
+    /// Prone (wave CHAR1b.2).
+    Prone = 2,
+    /// A crouch-sprint slide (wave CHAR1b.2).
+    Slide = 3,
     /// A roll.
     Roll = 4,
     /// Airborne with full authority — a deliberate jump.
     FallFree = 6,
     /// Airborne with reduced authority — walked off a ledge, or knocked back.
     FallControlled = 7,
+    /// Swimming at the surface (wave CHAR1b.2).
+    SwimSurface = 8,
+    /// Fully submerged (wave CHAR1b.2).
+    SwimUnder = 9,
     /// Mantling or vaulting a ledge (wave CHAR1b.2).
     Mantle = 10,
     /// Physics-driven ragdoll.
@@ -521,6 +553,103 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
     // They are ONE-SHOTS with baked root motion, which is what makes
     // `inf_ecs::traversal_arc` non-empty and what turns `step_mantle`'s warp
     // from a clock ramp into the clip's own arc scaled onto the ledge.
+    // ── the AUTHORED sets (wave CHAR1b.2, clause 2's tail) ─────────────────
+    //
+    // ALS ships none of these — a census by name found no slide, no throw, no
+    // swim, no prone and no standing get-up among its 164 sequences — and this
+    // engine's catalogue has a MODE for four of them. A mode with no clip is a
+    // character sliding in its idle pose, which is what `MovementMode::Slide`,
+    // `Prone`, `SwimSurface` and `SwimUnder` all did.
+    //
+    // `inf_anim::authored` derives them from the rig that will play them, for
+    // `crate::locomotion`'s reason (a clip is bound to a skeleton by joint
+    // INDEX), and each one's kinematics are written down in that module rather
+    // than being a shape somebody liked. The `INF_` prefix is deliberate: these
+    // sit beside 164 `ALS_*` files and nothing here is ALS's.
+    LocoSlot {
+        state: "slide",
+        mode: LocoMode::Slide,
+        kind: SlotKind::State,
+        looping: false,
+        clips: &[("INF_Slide", O)],
+    },
+    LocoSlot {
+        state: "prone_idle",
+        mode: LocoMode::Prone,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Prone_Idle", O)],
+    },
+    LocoSlot {
+        state: "prone_crawl",
+        mode: LocoMode::Prone,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Prone_Crawl", O)],
+    },
+    LocoSlot {
+        state: "swim_surface",
+        mode: LocoMode::SwimSurface,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Swim_Surface", O)],
+    },
+    LocoSlot {
+        state: "swim_tread",
+        mode: LocoMode::SwimSurface,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Swim_Tread", O)],
+    },
+    LocoSlot {
+        state: "swim_under",
+        mode: LocoMode::SwimUnder,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Swim_Under", O)],
+    },
+    LocoSlot {
+        state: "getup_standing",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::State,
+        looping: false,
+        clips: &[("INF_GetUp_Standing", O)],
+    },
+    // The two throws are an upper-body ADDITIVE, not a state: a character throws
+    // a grenade while it is running, and a state would stop the run. WPN1's
+    // throwable items are their consumer; the layer door is `crate::layers`,
+    // exactly as the weapon overlays' is.
+    LocoSlot {
+        state: "throw_over",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("INF_Throw_Over", O)],
+    },
+    LocoSlot {
+        state: "throw_under",
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("INF_Throw_Under", O)],
+    },
+    // ── the BREATH (wave CHAR1b.2, carried item 128) ────────────────────
+    //
+    // ALS's idle is `ALS_N_Pose` PLUS a breathing additive, and this sequence is
+    // the additive. It was imported at CHAR1a.3 and left unbound because a row
+    // with no reader is the defect the CHAR1b.1 audit spent its day on; it has a
+    // reader now (`inf_ecs::pose::apply_breath`, over the upper-body mask), so it
+    // has a row.
+    //
+    // An `Overlay` and not a `State`: the machine never ENTERS a breath, it
+    // layers one over whatever it is in.
+    LocoSlot {
+        state: BREATH_STATE,
+        mode: LocoMode::Grounded,
+        kind: SlotKind::Overlay,
+        looping: true,
+        clips: &[("ALS_N_SecondaryMotion", O)],
+    },
     LocoSlot {
         state: "mantle_low",
         mode: LocoMode::Mantle,
@@ -858,6 +987,7 @@ pub fn build_locomotion_graph(
                 // ── wave CHAR1b.2 ────────────────────────────────────────
                 SmParam::float(MANTLE_VAR),
                 SmParam::float(MANTLE_START_VAR),
+                SmParam::float(GETUP_VAR),
                 SmParam::float(STOP_DISTANCE_VAR),
                 // Declared but read by the POSE step rather than by an edge:
                 // a `.inf_sm` is the character's animation manifest (see this
@@ -1199,7 +1329,14 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
         );
     }
     // …and a landing plays out and hands back to the ladder.
-    for name in ["land_light", "land_heavy", "getup_front", "getup_back"] {
+    for name in [
+        "land_light",
+        "land_heavy",
+        "getup_front",
+        "getup_back",
+        "getup_standing",
+        "slide",
+    ] {
         if let (Some(s), Some(i)) = (at(name), at("idle")) {
             out.push(
                 SmTransition::new(s, i, ACTION_FADE_S)
@@ -1251,6 +1388,64 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
         }
     }
 
+    // ── THE AUTHORED SETS (wave CHAR1b.2) ───────────────────────────────────
+    //
+    // Every one is a MODE edge, because every one of them is a mode this
+    // engine's movement step already enters and had no clip for. `Any`, for the
+    // reason the mantle's rows are `Any`: a slide is entered from a sprint, a
+    // dive or a crouch, and enumerating the sources would be a table that goes
+    // stale the day the movement model grows a fourth.
+    if let Some(s) = at("slide") {
+        out.push(
+            SmTransition::any(s, ACTION_FADE_S)
+                .when(SmCond::float(MODE_VAR, CmpOp::Eq, LocoMode::Slide.param()))
+                .with_curve(BlendCurve::EaseInOut)
+                .with_priority(33),
+        );
+    }
+    // Prone and the swims split on the gait the same way the standing ladder
+    // does: still is the idle member, moving is the travelling one. The
+    // conditions are exact complements on one constant, so neither can chatter.
+    for (still, moving, mode) in [
+        ("prone_idle", "prone_crawl", LocoMode::Prone),
+        ("swim_tread", "swim_surface", LocoMode::SwimSurface),
+    ] {
+        if let Some(s) = at(still) {
+            out.push(
+                SmTransition::any(s, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param()),
+                        SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(22),
+            );
+        }
+        if let Some(m) = at(moving) {
+            out.push(
+                SmTransition::any(m, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param()),
+                        SmCompare::float(GAIT_VAR, CmpOp::Gt, WALK_AT),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(22),
+            );
+        }
+    }
+    if let Some(s) = at("swim_under") {
+        out.push(
+            SmTransition::any(s, FADE_S)
+                .when(SmCond::float(
+                    MODE_VAR,
+                    CmpOp::Eq,
+                    LocoMode::SwimUnder.param(),
+                ))
+                .with_curve(BlendCurve::EaseInOut)
+                .with_priority(22),
+        );
+    }
+
     // ── roll and ragdoll ─────────────────────────────────────────────────────
     for (name, mode) in [("roll", LocoMode::Roll), ("ragdoll", LocoMode::Ragdoll)] {
         if let Some(s) = at(name) {
@@ -1283,7 +1478,11 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
     //
     // ALS ships only the CROUCHED get-ups (`ALS_CLF_GetUp_Front/Back`); a
     // standing one has to be authored, and is CHAR1b.2's.
-    for (name, face_up) in [("getup_front", 0.0), ("getup_back", 1.0)] {
+    for (name, which) in [
+        ("getup_front", GETUP_FRONT),
+        ("getup_back", GETUP_BACK),
+        ("getup_standing", GETUP_STANDING),
+    ] {
         let (Some(rag), Some(g)) = (at("ragdoll"), at(name)) else {
             continue;
         };
@@ -1292,12 +1491,15 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                 .when(SmCond::from_flat_and(vec![
                     SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Grounded.param()),
                     SmCompare::float(GROUNDED_VAR, CmpOp::Gt, 0.5),
-                    SmCompare::float(FACE_UP_VAR, CmpOp::Eq, face_up),
+                    // `getup`, not `face_up` (wave CHAR1b.2): a two-valued
+                    // signal cannot name three outcomes, and a ragdoll that
+                    // settles on its feet is the third.
+                    SmCompare::float(GETUP_VAR, CmpOp::Eq, which),
                 ]))
                 .with_curve(BlendCurve::EaseInOut)
                 // **Above the `Any → idle` edge**, or a character that stops
-                // ragdolling goes straight to standing and the two get-ups are
-                // clips that never play. The reachability arm caught it.
+                // ragdolling goes straight to standing and the get-ups are clips
+                // that never play. The reachability arm caught it.
                 .with_priority(8),
         );
     }

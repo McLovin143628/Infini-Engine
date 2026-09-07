@@ -2744,6 +2744,10 @@ fn every_pose_writer_runs_in_its_frozen_order() {
             "wave CHAR1b.1: the ADDITIVE aim-offset layer, which is pose CONSTRUCTION — it is what the animation would have been if the animator had authored an aim into every clip — and therefore runs before the drive pass, so a twist chain reflects the aimed pose and not the neutral one. P29.2 built `inf_anim::layers` and this is its first caller: the CHAR1a audit's item 88b",
         ),
         (
+            "apply_breath(asset,",
+            "wave CHAR1b.2, carried item 128: the BREATHING additive, `ALS_N_SecondaryMotion` over the upper-body mask. Immediately after the aim offset and for the same reason — it is pose CONSTRUCTION, the thing the animator would have authored into the idle, so the drive pass sees a breathing chest rather than a still one. It had been imported and unbound since CHAR1a.3",
+        ),
+        (
             "inf_anim::drive_pose(",
             "SK1a: the twist chains and the IK handles, which is pose CONSTRUCTION and not a correction",
         ),

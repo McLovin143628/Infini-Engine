@@ -1514,6 +1514,20 @@ pub fn step_pose_evaluation<'c>(
                         if let Some((at, weight)) = aim_sweep_of(world, entity) {
                             apply_aim_offset(asset, &mut pose, machine, &clips, at, weight);
                         }
+                        // ── THE BREATH (wave CHAR1b.2, carried item 128) ──
+                        //
+                        // ALS's idle is `ALS_N_Pose` PLUS `ALS_N_SecondaryMotion`,
+                        // and this engine imported the additive at CHAR1a.3 and
+                        // left it unbound for three waves because a map row with
+                        // no reader is worse than no row. This is the reader.
+                        //
+                        // The same machinery as the aim offset one line above —
+                        // a delta from the clip's own first frame, over the
+                        // upper-body mask — and the same three early returns. It
+                        // rides the state's own clock, so two characters in the
+                        // same idle breathe together and one that has just
+                        // entered it starts at the beginning.
+                        apply_breath(asset, &mut pose, machine, &clips, rt.state_time);
                         inf_anim::drive_pose(
                             &asset.skeleton,
                             &mut pose,
@@ -2080,6 +2094,71 @@ fn apply_aim_offset<'c>(
     );
     let delta = inf_anim::additive_delta(&base, &aimed);
     let layer = inf_anim::AnimLayer::additive("aim_offset", weight).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+    true
+}
+
+/// **Apply the breathing additive** (wave CHAR1b.2, carried item 128),
+/// answering whether it wrote anything.
+///
+/// ALS's idle is `ALS_N_Pose` **plus** `ALS_N_SecondaryMotion`, an additive whose
+/// first frame is its reference: the difference between the clip at `t` and the
+/// clip at zero is the breath, and adding it to whatever the machine is posing
+/// gives a chest that rises and falls while the legs do whatever they are doing.
+///
+/// It is applied over [`inf_anim::JointMask::upper_body`] for the reason the aim
+/// offset is: a breath is a chest, and a delta on a thigh would fight the walk it
+/// is layered over. The gate reads exactly that — the chest moves, and nothing
+/// below the mask does.
+///
+/// **At `t = 0` the delta is the identity** and this returns `false` before
+/// sampling anything, so a character on the frame it entered its idle poses the
+/// bytes it posed before this pass existed.
+fn apply_breath<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    t: f64,
+) -> bool {
+    if !(t > 1.0e-9) {
+        return false;
+    }
+    let Some(state) = machine
+        .states
+        .iter()
+        .find(|s| s.name == inf_anim::als::BREATH_STATE)
+    else {
+        return false;
+    };
+    let inf_anim::state_machine::Motion::Clip(cref) = &state.motion else {
+        return false;
+    };
+    let Some(clip) = clips(*cref) else {
+        return false;
+    };
+    // **The SPINE, not the whole upper body** (wave CHAR1b.2). A breath is a
+    // ribcage: masking it to `upper_body` puts a delta on the neck and the head
+    // too, and the head is where the look-at chain writes — measured, the
+    // island's own look-at arm read **+11.26° of elevation on a sideways
+    // mouse** with the wider mask, because the breath's phase differed between
+    // the arm's two samples and the head carried it. One `Spine` row per spine
+    // joint, and nothing above or below.
+    let roles = rig.role_index();
+    let spine: Vec<(u16, f32)> = roles
+        .rows()
+        .iter()
+        .filter(|r| r.kind == inf_anim::BoneRoleKind::Spine)
+        .map(|r| (r.joint, 1.0f32))
+        .collect();
+    if spine.is_empty() {
+        return false;
+    }
+    let mask = inf_anim::JointMask::new("Mask_Breath", spine, 0.0);
+    let base = inf_anim::pose::sample_clip(&rig.skeleton, clip, 0.0, true);
+    let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, true);
+    let delta = inf_anim::additive_delta(&base, &now);
+    let layer = inf_anim::AnimLayer::additive("breath", 1.0).with_mask(mask);
     *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
     true
 }

@@ -544,6 +544,15 @@ fn finish(
         cm.runtime.grounded = false;
     }
     let face_up = cm.runtime.ragdoll.face_up;
+    // **Did it actually go down?** (wave CHAR1b.2). The pelvis's world height
+    // above the character's own feet, against half a standing capsule: a body
+    // lying on the ground carries its pelvis about a foot up, a standing one
+    // about a metre. `RagdollRuntime::pelvis` has recorded the position since
+    // P29.4 and nothing read it.
+    let half = cm.half_height_for(MovementMode::Grounded);
+    let feet_y = position.y - half - super::movement::FALLBACK_RADIUS_M;
+    cm.runtime.ragdoll.upright = cm.runtime.ragdoll.pelvis.y - feet_y > half * 0.5;
+    let upright = cm.runtime.ragdoll.upright;
     let mode = cm.mode;
     write_back(world, bridge, guid, entity, &cm, position, half);
     // The two doors the `anim.*` kit uses, and nothing else: a parameter that
@@ -555,6 +564,22 @@ fn finish(
             inf_anim::GetUp::Prone
         };
         inf_ecs::anim_bridge::set_anim_param(world, guid, PARAM_FACE_UP, kind.param_value());
+        // …and the THREE-valued one the get-up edges compare (wave CHAR1b.2).
+        // `face_up` stays exactly as it was; this is a second fact, not a
+        // replacement, because "on its back" and "never went down" are different
+        // questions and the second has an authored clip now.
+        inf_ecs::anim_bridge::set_anim_param(
+            world,
+            guid,
+            inf_anim::als::GETUP_VAR,
+            if upright {
+                inf_anim::als::GETUP_STANDING
+            } else if face_up {
+                inf_anim::als::GETUP_BACK
+            } else {
+                inf_anim::als::GETUP_FRONT
+            },
+        );
         inf_ecs::anim_bridge::set_anim_trigger(world, guid, TRIGGER_GET_UP);
         // **Pose matching picks the entry frame** — P29.2 built the primitive and
         // named this consumer as the one that turns it on. It is turned off again
