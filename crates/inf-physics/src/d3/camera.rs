@@ -283,11 +283,33 @@ pub fn step_locomotion_camera(
             // head through a low ceiling. Sit at the floor rather than at the
             // hit: the alternative is a camera that snaps to the pivot and looks
             // out of the character's own skull.
+            //
+            // **THE FLOOR MAY NOT OVERRIDE A CLEAN CONTACT** (wave CHAR1c's
+            // audit). This branch used to read `hit.toi.max(floor)`, and that
+            // `max` is the user's own reported defect: when a wall is nearer to
+            // the pivot than `reach * min_arm_fraction` (0.152 m on a 3.035 m
+            // boom) the floor pushes the camera PAST the contact the sweep just
+            // found, straight into the surface. Measured on Harbour City's own
+            // façades by `the_camera_never_ends_inside_the_islands_geometry_on_a_
+            // hostile_route`: **104 of 3480 frames** with the optical centre
+            // inside geometry, **every one of them at a boom of 0.1517 m**,
+            // which is that floor exactly. Dropping the `max` takes it to
+            // **8**, and the eight left are frames where the CHARACTER is inside
+            // the geometry (five with the pivot itself buried) and no camera
+            // position is legal.
+            //
+            // The floor's own argument does not survive this wave, which is why
+            // it can go: "looks out of the character's own skull" was written in
+            // P29.6, before the near fade existed. A boom under
+            // `near_fade_end_m` (0.35 m) now draws no subject at all, so a camera
+            // that comes all the way to a contact shows the player the room and
+            // not the inside of their own character. The floor stays in the
+            // PENETRATING branch, where there is no contact to respect.
             Some(hit) => {
                 if hit.started_penetrating {
                     floor
                 } else {
-                    hit.toi.max(floor).min(len)
+                    hit.toi.min(len)
                 }
             }
             None => len,

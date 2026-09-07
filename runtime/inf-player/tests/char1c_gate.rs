@@ -469,8 +469,19 @@ fn the_camera_never_ends_inside_geometry_over_a_scripted_walk() {
 /// hero's neck.
 ///
 /// Measured as the distance from the camera to the capsule's own SEGMENT, which
-/// is what a capsule is; `min_arm_fraction` is a floor on the boom and this is
-/// the world's own statement about whether that floor is enough.
+/// is what a capsule is.
+///
+/// **Its stated mutation was inert, and the audit replaced it.** The wave's own
+/// table said this arm reds under "`min_arm_fraction` to 0"; it does not. With
+/// the floor at zero the number is identical to the digit (0.2572 m outside the
+/// surface, at a boom of 0.557 m), because on this fixture the boom is bounded
+/// by the WALL and the floor never binds at all. The mutation that does red it
+/// is the one that reaches the floor: force the sweep's penetrating branch (the
+/// pivot in geometry, carried 153) and the camera goes to `reach *
+/// min_arm_fraction` = 0.152 m, which is **0.1475 m inside the hero's own
+/// capsule** — so the floor is NOT enough, and what makes that invisible rather
+/// than carried 89 all over again is the near fade: at a 0.152 m boom
+/// `subject_fade` is 0.0000 and no part of the subject is drawn.
 #[test]
 fn the_camera_is_never_inside_the_heros_own_capsule() {
     let mut rig = Rig::new();
@@ -1939,4 +1950,465 @@ fn an_authored_rig_does_not_survive_a_save_and_a_reload() {
         "even the level-side table does not reach the camera"
     );
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **THE HOSTILE ROUTE** (the audit's own island walk) — the camera taken to the
+/// places a camera hates, chosen BY THE WORLD rather than by a guess.
+///
+/// The wave's island arm walks forward from the spawn with the look sweeping,
+/// and over 111.63 m of Harbour City that route's boom is clipped by **traffic
+/// cars and by nothing else**: with every character's vehicle excluded the same
+/// route reports a worst clip of **0.000 m**, so the arm's own anti-vacuity half
+/// is satisfied by the fleet and says nothing at all about the city's buildings.
+/// A camera that is never near a wall has not been tested against one.
+///
+/// So this arm asks the island where its walls are. It takes the static box
+/// colliders nearest the spawn that are taller than a person, stands the hero
+/// **hard against each face**, sweeps the look through two revolutions there, and
+/// counts the frames whose optical centre is inside something — naming the entity
+/// it was inside, so a failure is a place and not a number.
+///
+/// The probe is the wave's own: a zero-length sphere at the camera's position,
+/// blind to every CHARACTER (the rig's policy is that the camera may pass through
+/// people) and to nothing else.
+#[test]
+fn the_camera_never_ends_inside_the_islands_geometry_on_a_hostile_route() {
+    use inf_player::runtime_sim::RuntimeInput;
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content, CI has none");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = island_sim(&content);
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let spawn = {
+        let w = sim.world();
+        w.entity_of(hero)
+            .and_then(|e| w.world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+            .expect("the pawn has a transform")
+    };
+
+    // ── the stations, asked of the PHYSICS WORLD ──
+    //
+    // The camera sweeps the bridge, not the document, so the stations are found
+    // the way the sweep finds a wall: a fan of rays out of the hero's chest,
+    // blind to every character and every vehicle, over a ring of bearings and
+    // three ranges. Anything they hit is something the boom could hit, and the
+    // station is that hit pulled back to arm's length.
+    //
+    // **The ECS census above is why this is a ray fan and not a query.** Within
+    // 60 m of the island's spawn the document holds no static collider at all:
+    // twenty dynamic boxes (the traffic fleet) and four kinematic capsules (the
+    // crowd), and nothing else. Whatever Harbour City's façades are made of, an
+    // `&Collider3D` on an entity is not it.
+    let mut faces: Vec<(String, DVec3)> = Vec::new();
+    {
+        let mut exclude = std::collections::BTreeSet::new();
+        {
+            let w = sim.world();
+            let ww = w.world();
+            if let Some(mut q) =
+                ww.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>()
+            {
+                let guids: Vec<Uuid> = q.iter(ww).map(|(g, _)| g.0).collect();
+                for g in guids {
+                    if let Some(c) = sim.bridge3d().collider_of(g) {
+                        exclude.insert(c);
+                    }
+                }
+            }
+            // the fleet too: a parked car is a station a player can stand beside,
+            // but it is not a WALL and the wave's own island arm already counts it
+            if let Some(mut q) =
+                ww.try_query_filtered::<(&inf_ecs::components::Guid, &RigidBody3D), ()>()
+            {
+                let guids: Vec<Uuid> = q
+                    .iter(ww)
+                    .filter(|(_, rb)| rb.kind == BodyKind3D::Dynamic)
+                    .map(|(g, _)| g.0)
+                    .collect();
+                for g in guids {
+                    if let Some(c) = sim.bridge3d().collider_of(g) {
+                        exclude.insert(c);
+                    }
+                }
+            }
+        }
+        let chest = spawn + DVec3::Y * 0.4;
+        let mut seen: Vec<DVec3> = Vec::new();
+        for k in 0..48u32 {
+            let a = f64::from(k) * std::f64::consts::TAU / 48.0;
+            let dir = DVec3::new(a.cos(), 0.0, a.sin());
+            let Some(h) = sim.bridge3d_mut().world_mut().cast_ray_where(
+                chest,
+                dir,
+                45.0,
+                &exclude,
+                CastTargets::All,
+            ) else {
+                continue;
+            };
+            if h.toi < 1.5 {
+                continue;
+            }
+            let at = chest + dir * (h.toi - 0.6);
+            if seen.iter().any(|p| (*p - at).length() < 4.0) {
+                continue;
+            }
+            seen.push(at);
+            let label = sim
+                .bridge3d()
+                .guid_of_collider(h.collider)
+                .and_then(|g| {
+                    let w = sim.world();
+                    w.entity_of(g)
+                        .and_then(|e| w.world().get::<inf_ecs::components::Name>(e))
+                        .map(|n| n.0.clone())
+                })
+                .unwrap_or_else(|| "<bridge-only collider>".into());
+            faces.push((format!("{label} at {:.0} m", h.toi), at));
+        }
+    }
+    // …plus the interior stair, the one place on this island a scripted session
+    // has ever been indoors (carried 139), taken from the wave's own frames.
+    faces.push((
+        "the interior stair".into(),
+        DVec3::new(-1765.71, 17.41, 1992.93),
+    ));
+    faces.push((
+        "the stairwell, deeper".into(),
+        DVec3::new(-1766.60, 17.41, 1991.60),
+    ));
+    // **A census of what is actually around the spawn**, printed before the
+    // assert so a route that finds no stations says WHY rather than just failing.
+    {
+        let w = sim.world();
+        let ww = w.world();
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        if let Some(mut q) =
+            ww.try_query_filtered::<(&Transform, &Collider3D, Option<&RigidBody3D>), ()>()
+        {
+            for (t, c, rb) in q.iter(ww) {
+                if (t.translation.to_dvec3() - spawn).length() > 60.0 {
+                    continue;
+                }
+                let k = format!(
+                    "{:?}/{:?} half {:.1}x{:.1}x{:.1}",
+                    rb.map(|r| r.kind),
+                    c.shape_kind,
+                    c.half_extents.x,
+                    c.half_extents.y,
+                    c.half_extents.z
+                );
+                *kinds.entry(k).or_default() += 1;
+            }
+        }
+        let mut v: Vec<_> = kinds.into_iter().collect();
+        v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        println!("  colliders within 60 m of the spawn, by kind:");
+        for (k, n) in v.iter().take(24) {
+            println!("    {n:>5}  {k}");
+        }
+    }
+    println!("\n=== the hostile route ===\n  {} stations", faces.len());
+    assert!(
+        faces.len() >= 10,
+        "the world offered {} stations, which is not a route",
+        faces.len()
+    );
+
+    let mut inside_total = 0usize;
+    let mut steps = 0usize;
+    let mut worst_clip = 0.0f64;
+    let mut clipped_stations = 0usize;
+    let mut offenders: BTreeMap<String, usize> = BTreeMap::new();
+    let mut pivot_inside = 0usize;
+    let mut deep_inside = 0usize;
+    let mut inside_while_visible = 0usize;
+    let mut arm_at_fault = f64::MAX;
+    for (name, at) in &faces {
+        {
+            let w = sim.world_mut();
+            if let Some(e) = w.entity_of(hero) {
+                if let Some(mut t) = w.world_mut().get_mut::<Transform>(e) {
+                    t.translation = Vec3d::from_dvec3(*at);
+                }
+                if let Some(mut cm) = w.world_mut().get_mut::<CharacterMovement>(e) {
+                    cm.runtime.velocity = Vec3d::ZERO;
+                }
+            }
+        }
+        for _ in 0..30 {
+            sim.step_once(RuntimeInput::default());
+        }
+        let mut here = 0usize;
+        let mut here_clip = 0.0f64;
+        for i in 0..120u32 {
+            let ax: BTreeMap<String, f32> =
+                [("look_x".to_string(), if i % 2 == 0 { 1.0f32 } else { 0.9 })].into();
+            sim.step_once(RuntimeInput::default().with_axes(ax));
+            steps += 1;
+            here_clip = here_clip.max(sim.camera().collision_pull_m);
+            let at_cam = sim.camera().pose.position.to_dvec3();
+            let mut exclude = std::collections::BTreeSet::new();
+            {
+                let w = sim.world();
+                let ww = w.world();
+                if let Some(mut q) =
+                    ww.try_query_filtered::<(&inf_ecs::components::Guid, &CharacterMovement), ()>()
+                {
+                    let guids: Vec<Uuid> = q.iter(ww).map(|(g, _)| g.0).collect();
+                    for g in guids {
+                        if let Some(c) = sim.bridge3d().collider_of(g) {
+                            exclude.insert(c);
+                        }
+                    }
+                }
+            }
+            let hit = sim.bridge3d_mut().world_mut().cast_shape_where(
+                &ColliderShape3D::Sphere {
+                    radius: INSIDE_PROBE_R,
+                },
+                at_cam,
+                DQuat::IDENTITY,
+                DVec3::Y,
+                1e-4,
+                &exclude,
+                CastTargets::All,
+            );
+            if let Some(h) = hit {
+                if h.started_penetrating {
+                    here += 1;
+                    // **Was the PIVOT inside too?** The two cases have different
+                    // names and different fixes: a camera the sweep let into a
+                    // wall is a broken sweep, and a camera at `min_arm_fraction`
+                    // because its own pivot is buried is carried 153 — the
+                    // character is in the geometry and the camera has nowhere
+                    // legal to stand.
+                    let pivot = sim.camera().sweep_origin().to_dvec3();
+                    let pivot_in = sim
+                        .bridge3d_mut()
+                        .world_mut()
+                        .cast_shape_where(
+                            &ColliderShape3D::Sphere {
+                                radius: INSIDE_PROBE_R,
+                            },
+                            pivot,
+                            DQuat::IDENTITY,
+                            DVec3::Y,
+                            1e-4,
+                            &exclude,
+                            CastTargets::All,
+                        )
+                        .is_some_and(|p| p.started_penetrating);
+                    if pivot_in {
+                        pivot_inside += 1;
+                    }
+                    // How far inside: a near-point probe. If THIS penetrates the
+                    // optical centre is through the surface; if only the 5 cm one
+                    // does, the camera is pressed against it inside the near plane.
+                    if sim
+                        .bridge3d_mut()
+                        .world_mut()
+                        .cast_shape_where(
+                            &ColliderShape3D::Sphere { radius: 1e-3 },
+                            at_cam,
+                            DQuat::IDENTITY,
+                            DVec3::Y,
+                            1e-4,
+                            &exclude,
+                            CastTargets::All,
+                        )
+                        .is_some_and(|d| d.started_penetrating)
+                    {
+                        deep_inside += 1;
+                    }
+                    let arm = sim.camera().arm_m;
+                    arm_at_fault = arm_at_fault.min(arm);
+                    if arm > sim.camera().tuning.collision.near_fade_end_m {
+                        inside_while_visible += 1;
+                    }
+                    let g = sim.bridge3d().guid_of_collider(h.collider);
+                    let label = match g {
+                        Some(g) => {
+                            let w = sim.world();
+                            w.entity_of(g)
+                                .and_then(|e| w.world().get::<inf_ecs::components::Name>(e))
+                                .map(|n| n.0.clone())
+                                .unwrap_or_else(|| format!("entity-less guid {g}"))
+                        }
+                        None => "a collider with no GUID (terrain/structure)".into(),
+                    };
+                    let key = if pivot_in {
+                        format!("{label} [pivot inside too]")
+                    } else {
+                        format!("{label} [pivot CLEAR]")
+                    };
+                    *offenders.entry(key).or_default() += 1;
+                }
+            }
+        }
+        if here_clip > 0.05 {
+            clipped_stations += 1;
+        }
+        if here > 0 || here_clip > 0.05 {
+            println!("  {name:<34} clip {here_clip:.3} m, inside on {here} of 120");
+        }
+        inside_total += here;
+        worst_clip = worst_clip.max(here_clip);
+    }
+    println!(
+        "\n  {steps} frames over {} stations; {clipped_stations} of them clipped the boom\n  worst clip {worst_clip:.3} m; frames inside geometry: {inside_total} (the PIVOT was inside on {pivot_inside}; the optical CENTRE was through a surface on {deep_inside}; shortest boom at fault {arm_at_fault:.4} m; inside while the BODY IS STILL DRAWN: {inside_while_visible})\n  what the camera was inside: {offenders:?}",
+        faces.len()
+    );
+    // **The anti-vacuity half, on the thing the wave's own island arm could not
+    // say: BUILDINGS clipped this boom.** A route where nothing is ever in the
+    // way measures nothing.
+    assert!(
+        clipped_stations >= 4,
+        "only {clipped_stations} of {} stations clipped the boom at all — the route is not against the city and the count is vacuous",
+        faces.len()
+    );
+    assert!(
+        worst_clip > 0.5,
+        "the worst clip over the hostile route was {worst_clip:.3} m, which is not a camera pressed against a wall"
+    );
+    // **The user's own sentence, as the claim**: "there should be no camera
+    // clipping when the user is looking around". A camera whose optical centre
+    // is inside a surface while the HERO IS STILL BEING DRAWN is that defect;
+    // below the fade band the subject is gone and the frame is the room.
+    assert_eq!(
+        inside_while_visible, 0,
+        "the camera was inside geometry on {inside_while_visible} frames at a boom LONGER than the fade band -- the player is being shown the inside of a wall with their character still in front of it"
+    );
+    // …and the count itself, as a ceiling with its history. 104 before the
+    // `min_arm_fraction` floor stopped overriding a clean contact; the residue is
+    // a character wedged in the geometry, which has no legal camera position at
+    // all (five of the eight have the PIVOT inside the same collider).
+    assert!(
+        inside_total <= 12,
+        "the camera's optical centre was inside the island's geometry on {inside_total} of {steps} frames (104 was the number before the floor fix): {offenders:?}"
+    );
+    assert!(
+        inside_total - pivot_inside <= 4,
+        "{} frames put the camera inside geometry with its PIVOT CLEAR, which is the sweep failing rather than a wedged character: {offenders:?}",
+        inside_total - pivot_inside
+    );
+}
+
+/// **A DRIVER IS DRAWN STANDING ON THE ROOF OF ITS OWN CAR** — a frame's own
+/// question, turned into a number (the audit's, from
+/// `71-camera-ragdoll-follow.png`).
+///
+/// The wave captioned that frame *"the hero crumpled between two kerb blocks on
+/// the crossing … and two NPCs standing upright in the same frame, which is the
+/// control"*. Read against the pixels the two grey blocks are not kerb blocks:
+/// they are lane-width, five metres long, sitting between the yellow lines with
+/// a wheel under one — they are the **traffic fleet**, drawn as untextured boxes
+/// — and one of the "control" NPCs is standing on top of one of them with a
+/// second doing the same further up the street.
+///
+/// Asked of the world rather than of the pixels, it is not a crowd-navigation
+/// bug: **all four are `Driving` and seated**. What is wrong is where a seated
+/// character is *put*. The capsule is parked at the seat, and the seat this
+/// engine gives it leaves the capsule's feet at or above the chassis's own roof
+/// — so the driver, playing an upright pose, is drawn standing on the car it is
+/// driving. The same thing is visible in the wave's own `69`/`70`, which its
+/// captions explain as the hero being "still on the bonnet mid-warp"; it is
+/// still there 30 seconds and 1 800 steps into a session.
+///
+/// The arm measures the one number that says so: the driver's capsule bottom
+/// against the chassis collider's top face. Below it is a person in a car; above
+/// it is a person on one.
+///
+/// **`#[ignore]`, and that is the honest shape for it.** It fails today: three of
+/// the island's four drivers sit at `-0.000 m` and `-0.001 m` of their own roof.
+/// The cause is `step_driving`'s
+/// `seat_world + Y * (stand_half_height_m + radius)` over a rig whose
+/// `seat_local` is at the chassis's roof height, so the capsule's FEET land on
+/// the roof, and moving either number moves the drive camera pivot and every
+/// VEH gate's measurements, which is a vehicle wave's change and not a camera
+/// audit's. It is not asserted as a rule (a test that writes a defect down as a
+/// rule makes the defect load-bearing, this wave's own law), and it is not
+/// deleted; run it with `--ignored` and it names the number.
+#[ignore = "MEASURES A LIVE DEFECT: an island driver's feet sit on its own car's roof (audit CHAR1c, carried)"]
+#[test]
+fn an_island_driver_is_seated_inside_its_car_and_not_on_top_of_it() {
+    use inf_player::runtime_sim::RuntimeInput;
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content, CI has none");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = island_sim(&content);
+    for _ in 0..1800 {
+        sim.step_once(RuntimeInput::default());
+    }
+
+    let mut rows: Vec<(Uuid, f64, f64)> = Vec::new();
+    {
+        let w = sim.world();
+        let ww = w.world();
+        let mut seats: Vec<(Uuid, DVec3, f64, Uuid)> = Vec::new();
+        if let Some(mut q) = ww.try_query_filtered::<(
+            &inf_ecs::components::Guid,
+            &Transform,
+            &CharacterMovement,
+            Option<&Collider3D>,
+        ), ()>()
+        {
+            for (g, t, cm, c) in q.iter(ww) {
+                if !cm.runtime.seat.is_seated() {
+                    continue;
+                }
+                let half = cm.stand_half_height_m + c.map(|c| c.radius).unwrap_or(0.0);
+                seats.push((g.0, t.translation.to_dvec3(), half, cm.runtime.seat.vehicle));
+            }
+        }
+        for (g, at, half, veh) in seats {
+            let Some((vt, vc)) = w
+                .entity_of(veh)
+                .and_then(|e| Some((ww.get::<Transform>(e)?, ww.get::<Collider3D>(e)?)))
+            else {
+                continue;
+            };
+            let roof = vt.translation.y + vc.half_extents.y;
+            rows.push((g, at.y - half, roof));
+        }
+    }
+    assert!(
+        !rows.is_empty(),
+        "no seated driver on the island, so this arm is about nothing"
+    );
+    println!("\n=== where the island's drivers are ===");
+    let mut on_top = 0usize;
+    let mut worst = f64::MIN;
+    for (g, feet, roof) in &rows {
+        let over = feet - roof;
+        worst = worst.max(over);
+        if over >= -0.05 {
+            on_top += 1;
+        }
+        println!("  {g}: feet at {feet:.3} m, the chassis roof at {roof:.3} m — {over:+.3} m");
+    }
+    println!(
+        "  {on_top} of {} drivers have their feet at or above their own car's roof (worst {worst:+.3} m)",
+        rows.len()
+    );
+    assert_eq!(
+        on_top,
+        0,
+        "{on_top} of {} island drivers are parked with their feet on the roof of the car they are driving, so they are drawn standing on it (worst {worst:+.3} m above the roof)",
+        rows.len()
+    );
 }
