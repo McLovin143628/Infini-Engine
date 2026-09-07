@@ -776,6 +776,71 @@ fn the_near_fade_engages_below_the_threshold_and_reaches_the_instance() {
         inf_render::BLEND_NEAR_FADE > 2,
         "the fading code collides with opaque/masked/translucent"
     );
+
+    // **AND IT REACHES EVERY SECTION**, which is the half a frame caught and no
+    // arm did. `inf_render::skinned_sections` OVERWRITES `blend`/`cutoff` from
+    // each slot's own material, so a fade written onto the instance before the
+    // sections are built is taken straight back on every body whose slots name
+    // one — which is every MetaHuman in this tree since CHAR1b.2 gave them
+    // per-submesh skinned materials. Photographed at a 0.2035 m boom with the
+    // fade at 0.0000: a body that should have been entirely gone.
+    let mut inst = inf_render::SkinnedInstance {
+        vt: Default::default(),
+        translation: DVec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::ONE,
+        color: [1.0; 4],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: 0,
+        blend: 0,
+        cutoff: 0.5,
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
+        // Twelve slots, as a MetaHuman face has, every one of them OPAQUE —
+        // which is what a material lookup hands back and what used to win.
+        sections: (0..12)
+            .map(|i| inf_render::SkinnedSection {
+                first_index: i * 3,
+                index_count: 3,
+                color: [1.0; 4],
+                metallic: 0.0,
+                roughness: 0.5,
+                emissive: [0.0; 3],
+                blend: 0,
+                cutoff: 0.5,
+                vt: Default::default(),
+            })
+            .collect(),
+    };
+    inf_render::apply_near_fade(&mut inst, 0.25);
+    assert_eq!(inst.blend, inf_render::BLEND_NEAR_FADE);
+    let solid = inst
+        .sections
+        .iter()
+        .filter(|s| s.blend != inf_render::BLEND_NEAR_FADE)
+        .count();
+    println!(
+        "  a twelve-section body at fade 0.25: {} of 12 sections still opaque",
+        solid
+    );
+    assert_eq!(
+        solid, 0,
+        "{solid} of 12 sections took their material's opaque pair back, so a          sectioned body draws SOLID inside the fade band"
+    );
+    assert!(inst.sections.iter().all(|s| (s.cutoff - 0.25).abs() < 1e-6));
+    // …and a fully drawn subject leaves every section exactly as it was.
+    let before = inst.sections.clone();
+    let mut untouched = inst.clone();
+    untouched.sections = before.clone();
+    untouched.blend = 1;
+    untouched.cutoff = 0.4;
+    inf_render::apply_near_fade(&mut untouched, 1.0);
+    assert_eq!(untouched.blend, 1);
+    assert!((untouched.cutoff - 0.4).abs() < 1e-9);
+    assert_eq!(untouched.sections, before);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

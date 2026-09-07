@@ -1125,6 +1125,15 @@ pub fn project_scene_full(
             //    drawn nearly a metre above the character wearing it. Zero for
             //    an entity with no movement component, which is every prop.
             let cloth_at = translation + inf_ecs::pose::model_offset_world(world, entity);
+            // **The camera's near fade reaches the garment and the hair
+            //    too** (wave CHAR1c). At a first-person seat the body is gone
+            //    and a coat and a head of hair drawn at twenty centimetres
+            //    would be the whole frame. Both ride the SKINNED path, so both
+            //    go through the same one rule the body does.
+            let worn_fade = match sim.camera_subject() {
+                Some(s) if s == guid => sim.camera().subject_fade as f32,
+                _ => 1.0,
+            };
             project_cloth(
                 scene,
                 world,
@@ -1132,6 +1141,7 @@ pub fn project_scene_full(
                 cloth_at,
                 cloth_rot.as_quat(),
                 cloth_scale.as_vec3(),
+                worn_fade,
             );
             project_hair(
                 scene,
@@ -1140,6 +1150,7 @@ pub fn project_scene_full(
                 cloth_at,
                 cloth_rot.as_quat(),
                 cloth_scale.as_vec3(),
+                worn_fade,
             );
         }
         if w.get::<MeshRef>(entity).is_none() {
@@ -1271,12 +1282,15 @@ pub fn project_scene_full(
                         // camera (`sim`); the editor's viewport is driven by the
                         // editor camera and has no gameplay boom, so it reads a
                         // field a caller with one sets — see that site.
-                        let (blend, cutoff) = match (sim.camera_subject(), guid) {
-                            (Some(s), g) if s == g => {
-                                inf_render::near_fade_surface(sim.camera().subject_fade as f32)
-                                    .unwrap_or((blend, cutoff))
-                            }
-                            _ => (blend, cutoff),
+                        //
+                        // **AFTER the sections, not before**: `skinned_sections`
+                        // overwrites `blend`/`cutoff` from each slot's own
+                        // material, so a fade set here would be taken straight
+                        // back on every body whose slots name one — which is
+                        // every MetaHuman in this tree.
+                        let fade = match sim.camera_subject() {
+                            Some(s) if s == guid => sim.camera().subject_fade as f32,
+                            _ => 1.0,
                         };
                         let inst = SkinnedInstance {
                             vt,
@@ -1311,7 +1325,9 @@ pub fn project_scene_full(
                             |g| derived_surface(materials, g),
                             |g| inf_render::vt_set_for(vt_lib, Some(g)),
                         );
-                        scene.skinned.push(SkinnedInstance { sections, ..inst });
+                        let mut inst = SkinnedInstance { sections, ..inst };
+                        inf_render::apply_near_fade(&mut inst, fade);
+                        scene.skinned.push(inst);
                     }
                     // Unbound (or unskinned) — the editor's placeholder, down to
                     // its slate tint, so the two hosts also agree about content
@@ -3295,6 +3311,10 @@ fn project_cloth(
     translation: glam::DVec3,
     rotation: glam::Quat,
     scale: glam::Vec3,
+    // How much of this wearer's own body the camera is drawing (wave CHAR1c) —
+    // `1.0` all of it. A garment and a head of hair fade with the body they are
+    // on, through `inf_render::apply_near_fade`.
+    fade: f32,
 ) {
     let Some(live) = inf_ecs::cloth::live_cloth(world, guid) else {
         return;
@@ -3305,7 +3325,7 @@ fn project_cloth(
     }
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
-    scene.skinned.push(inf_render::SkinnedInstance {
+    let mut inst = inf_render::SkinnedInstance {
         vt: Default::default(),
         translation,
         rotation,
@@ -3326,7 +3346,9 @@ fn project_cloth(
         palette: inf_render::identity_palette(),
         shadow: inf_render::SkinnedShadow::BindSphere,
         sections: Vec::new(),
-    });
+    };
+    inf_render::apply_near_fade(&mut inst, fade);
+    scene.skinned.push(inst);
 }
 
 /// **A simulated hairstyle, as a skinned draw** (P24.4).
@@ -3349,6 +3371,10 @@ fn project_hair(
     translation: glam::DVec3,
     rotation: glam::Quat,
     scale: glam::Vec3,
+    // How much of this wearer's own body the camera is drawing (wave CHAR1c) —
+    // `1.0` all of it. A garment and a head of hair fade with the body they are
+    // on, through `inf_render::apply_near_fade`.
+    fade: f32,
 ) {
     let Some(live) = inf_ecs::hair::live_hair(world, guid) else {
         return;
@@ -3359,7 +3385,7 @@ fn project_hair(
     }
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
-    scene.skinned.push(inf_render::SkinnedInstance {
+    let mut inst = inf_render::SkinnedInstance {
         vt: Default::default(),
         translation,
         rotation,
@@ -3380,7 +3406,9 @@ fn project_hair(
         palette: inf_render::identity_palette(),
         shadow: inf_render::SkinnedShadow::BindSphere,
         sections: Vec::new(),
-    });
+    };
+    inf_render::apply_near_fade(&mut inst, fade);
+    scene.skinned.push(inst);
 }
 #[cfg(test)]
 mod render_settings_tests {

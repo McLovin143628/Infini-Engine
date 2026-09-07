@@ -1740,6 +1740,32 @@ pub fn near_fade_surface(fade: f32) -> Option<(u8, f32)> {
     Some((BLEND_NEAR_FADE, fade.clamp(0.0, 1.0)))
 }
 
+/// **Apply the near fade to an instance and to every SECTION of it** — the door
+/// both projectors call, and the one that has to be called AFTER
+/// [`skinned_sections`].
+///
+/// The first cut set the instance's pair before building the sections and its
+/// comment said the sections would inherit it. They do not:
+/// [`skinned_sections`] **overwrites** `blend` and `cutoff` from each slot's own
+/// material, so a body whose slots name materials — which is every MetaHuman in
+/// this tree since CHAR1b.2 gave them per-submesh skinned materials — took the
+/// material's opaque pair back and drew solid. Photographed at a 0.2035 m boom
+/// with the fade at 0.0000, which is a body that should have been entirely gone.
+///
+/// A no-op for a fade of `1.0`, so every instance that is not the camera's
+/// subject runs the same arithmetic it always ran.
+pub fn apply_near_fade(inst: &mut SkinnedInstance, fade: f32) {
+    let Some((blend, cutoff)) = near_fade_surface(fade) else {
+        return;
+    };
+    inst.blend = blend;
+    inst.cutoff = cutoff;
+    for sec in &mut inst.sections {
+        sec.blend = blend;
+        sec.cutoff = cutoff;
+    }
+}
+
 /// One drawn range of a [`SkinnedMeshData`]'s index buffer, with the surface it
 /// draws in (wave CHAR1a.3).
 ///

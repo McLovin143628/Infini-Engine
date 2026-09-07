@@ -743,6 +743,34 @@ Start-Sleep -Milliseconds 1400
 # The order is the order a reader wants: the framing at rest FIRST (carried 89 is
 # a close-up of the back of the hero's neck, photographed four times, and this is
 # the same spot photographed again), then the camera against things.
+# **THE VEHICLE, FIRST, AND IT HUNTS.** `interact` reaches a car within a few
+# metres, and by the end of this leg the hero is wherever the look sweeps left
+# it. The first run of this leg pressed E once into an empty street; this one
+# walks and taps E for up to fifteen seconds and triggers on the mode the world
+# reports. It is allowed to miss and to say so.
+Restore-PlayerFocus "before the vehicle"
+Say "CAMERA: E while walking — hunting for a car, then the drive camera blends in"
+$gotCar = $false
+for ($k = 0; $k -lt 15 -and -not $gotCar; $k++) {
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # scancode: E
+    $gotCar = Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 0.9 `
+        -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 4.0) } `
+        -Out (Join-Path $OutDir "69-camera-vehicle-blend.png")
+    if (-not $gotCar) {
+        [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)
+    }
+}
+if ($gotCar) {
+    Wait-ForHero -Csv $heroCsv -What "the drive camera settled" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 5.5) } `
+        -Out (Join-Path $OutDir "70-camera-vehicle-settled.png") | Out-Null
+    Say "CAMERA: E again — out of the car"
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)
+    Start-Sleep -Milliseconds 1200
+} else {
+    Say "NO CAR reached in fifteen taps of E — the drive-camera frames are not in this session"
+}
+
 Restore-PlayerFocus "before the camera leg"
 Say "CAMERA: the framing at rest — the boom at its authored length"
 Start-Sleep -Seconds 2
@@ -822,29 +850,6 @@ Wait-ForHero -Csv $heroCsv -What "third person again" -TimeoutS 5.0 `
 # **A VEHICLE.** E is the interact key; the drive camera's boom is more than
 # twice the walk's, so the trigger is the boom itself and it fires on the blend
 # rather than at its end.
-Restore-PlayerFocus "before the vehicle"
-# **WAIT FOR THE PLACEMENT THAT PUTS THE HERO BY A CAR.** `interact` reaches a
-# vehicle within a few metres and by this point in the session the hero is
-# wherever the look sweeps left it, so the loop asks the player to put it back at
-# the spawn — where the level parks one — and waits for it to BE there rather
-# than pressing E into an empty street. Only when `-SpawnAt` named a waypoint
-# there; without one this is a press that says plainly it found nothing.
-if ($SpawnAt -ne "") {
-    Wait-ForHero -Csv $heroCsv -What "back at the spawn, beside the parked car" -TimeoutS 45 `
-        -Predicate { param($c) ([math]::Abs([double]$c[2] + 1750.0) -lt 6.0) -and ([math]::Abs([double]$c[4] - 2050.0) -lt 6.0) } | Out-Null
-}
-Say "CAMERA: E at a car — the drive camera blends in"
-[InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # scancode: E
-Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 6.0 `
-    -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 4.0) } `
-    -Out (Join-Path $OutDir "69-camera-vehicle-blend.png") | Out-Null
-Wait-ForHero -Csv $heroCsv -What "the drive camera settled" -TimeoutS 4.0 `
-    -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 5.5) } `
-    -Out (Join-Path $OutDir "70-camera-vehicle-settled.png") | Out-Null
-Say "CAMERA: E again — out of the car"
-[InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)
-Start-Sleep -Milliseconds 1200
-
 # ── 5b. the placements, and the frames the wave could not take ───────────────
 #
 # Only when `-SpawnAt` was given. Each waypoint is applied by the PLAYER at its
