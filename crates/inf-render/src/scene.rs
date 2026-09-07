@@ -1708,6 +1708,38 @@ pub fn skinned_sections(
         .collect()
 }
 
+/// **The blend code the camera's near fade uses** (wave CHAR1c) — a
+/// screen-door dither on the SKINNED path, whose threshold is
+/// [`SkinnedInstance::cutoff`].
+///
+/// `0` opaque, `1` masked, `2` translucent and now `3` **fading**. The code is
+/// packed into `pbr.w` as `blend * 4 + cutoff` exactly like the other three, and
+/// the masked branch's own test (`w > 0.5 && w < 1.5`) cannot see it — so every
+/// skinned golden committed before this wave runs the identical arithmetic.
+///
+/// Rigid instances never carry it: the thing that fades is the camera's own
+/// subject, and a character is a skinned surface. `mesh.wgsl` has no branch for
+/// it and a `MeshInstance` that somehow carried it would simply draw opaque.
+pub const BLEND_NEAR_FADE: u8 = 3;
+
+/// **What a faded surface draws as** — the ONE rule both projectors apply.
+///
+/// `None` means "draw it exactly as the material says", which is every instance
+/// that is not the camera's subject and every subject whose boom is longer than
+/// the rig's fade band. Otherwise the pair replaces the instance's own
+/// `(blend, cutoff)`: code [`BLEND_NEAR_FADE`] with the fade as the threshold.
+///
+/// It is a function and not two lines in each host because the two hosts'
+/// skinned projectors are pinned field for field by `projector_mirror`, and a
+/// rule spelled twice is a rule that drifts — the reason `skinned_sections`
+/// lives here too.
+pub fn near_fade_surface(fade: f32) -> Option<(u8, f32)> {
+    if !fade.is_finite() || fade >= 1.0 {
+        return None;
+    }
+    Some((BLEND_NEAR_FADE, fade.clamp(0.0, 1.0)))
+}
+
 /// One drawn range of a [`SkinnedMeshData`]'s index buffer, with the surface it
 /// draws in (wave CHAR1a.3).
 ///

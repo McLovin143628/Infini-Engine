@@ -1922,6 +1922,16 @@ impl RuntimeSim {
         }
     }
 
+    /// **Who the camera is following**, or `None` on a level with no
+    /// player-controlled character (wave CHAR1c).
+    ///
+    /// Re-resolved every fixed step by [`step_camera`](Self::step_camera); this
+    /// is the latched answer, and the projector reads it to decide whose body
+    /// the near fade is about.
+    pub fn camera_subject(&self) -> Option<Uuid> {
+        self.camera_subject
+    }
+
     /// The camera's pose this step, or `None` on a level with no
     /// player-controlled character (where the host keeps its own view).
     pub fn camera_pose(&self) -> Option<inf_ecs::camera::CameraPose> {

@@ -1247,6 +1247,37 @@ pub fn project_scene_full(
                             scene.skinned_meshes.push(draw.mesh);
                             scene.skinned_meshes.len() - 1
                         });
+                        // ── THE CAMERA'S NEAR FADE (wave CHAR1c) ──
+                        //
+                        // The boom pulled in short enough that the body would
+                        // fill the frame: the camera door published how much of
+                        // the SUBJECT to draw (`LocomotionCamera::subject_fade`)
+                        // and this is the only place it is read. It replaces
+                        // this instance's blend/cutoff with `BLEND_NEAR_FADE`
+                        // and the fade, which the skinned fragment stage turns
+                        // into a screen-door dither. `None` — every instance
+                        // that is not the subject, and every subject whose boom
+                        // is longer than its rig's fade band — leaves the
+                        // material's own pair, so nothing that was drawing
+                        // before draws differently.
+                        //
+                        // Applied BEFORE `skinned_sections`, so a MetaHuman's
+                        // twelve sections inherit it: a face whose eyes stayed
+                        // solid while its skin faded would be worse than no fade
+                        // at all.
+                        //
+                        // MIRROR of `inf_viewport::host::rebuild_scene`'s own
+                        // three lines. This host reads the fade off its OWN
+                        // camera (`sim`); the editor's viewport is driven by the
+                        // editor camera and has no gameplay boom, so it reads a
+                        // field a caller with one sets — see that site.
+                        let (blend, cutoff) = match (sim.camera_subject(), guid) {
+                            (Some(s), g) if s == g => {
+                                inf_render::near_fade_surface(sim.camera().subject_fade as f32)
+                                    .unwrap_or((blend, cutoff))
+                            }
+                            _ => (blend, cutoff),
+                        };
                         let inst = SkinnedInstance {
                             vt,
                             translation,

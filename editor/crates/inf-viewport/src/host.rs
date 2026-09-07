@@ -183,6 +183,20 @@ pub struct EngineHost {
     picker: Picker,
     pub scene: RenderScene,
     pub origin: FloatingOrigin,
+    /// **The camera's near fade** (wave CHAR1c) — `(subject, fade)`, where the
+    /// fade is how much of that character's own body to draw, `1` all of it.
+    ///
+    /// MIRROR of the shipped player's `sim.camera().subject_fade`, carried as a
+    /// field here because this viewport is driven by the EDITOR camera — which
+    /// has no boom, no subject and therefore no near fade — and a projector that
+    /// asked a `SceneDoc` for a gameplay camera would be asking the wrong
+    /// object. Nothing in the editor sets it today (the Simulate view keeps the
+    /// author's camera, which `SimSession::camera_pose` has no caller for), so
+    /// it is `None` on every editor frame and every editor pixel is unchanged;
+    /// a host that adopts the gameplay camera sets it and gets the same fade the
+    /// shipped player draws, by construction, because both go through
+    /// `inf_render::near_fade_surface`.
+    pub near_fade: Option<(Uuid, f32)>,
     /// Active transform-gizmo mode; the gizmo shows only with a selection.
     pub gizmo_mode: GizmoMode,
     /// Gizmo orientation frame (Wave 2): world-aligned handles or local
@@ -1114,6 +1128,7 @@ impl EngineHost {
                 ..Default::default()
             },
             origin: FloatingOrigin::default(),
+            near_fade: None,
             gizmo_mode: GizmoMode::Translate,
             gizmo_space: GizmoSpace::World,
             snap_3d: SnapSettings::default(),
@@ -2502,6 +2517,27 @@ impl EngineHost {
                                 self.scene.skinned_meshes.push(draw.mesh);
                                 self.scene.skinned_meshes.len() - 1
                             });
+                            // ── THE CAMERA'S NEAR FADE (wave CHAR1c) ──
+                            //
+                            // MIRROR of `inf_player::render::project_scene_full`'s
+                            // own three lines, and the same rule
+                            // (`inf_render::near_fade_surface`) applied to the
+                            // same instance field. The difference is where the
+                            // number comes from: the shipped player reads its own
+                            // gameplay camera, and this viewport is driven by the
+                            // EDITOR camera — which has no boom and no subject —
+                            // so it reads [`near_fade`](Self::near_fade), which a
+                            // caller with a gameplay camera sets and nothing in
+                            // the editor sets today. `None` is therefore the
+                            // editor's every frame, and every editor pixel is
+                            // unchanged.
+                            let (blend, cutoff) = match self.near_fade {
+                                Some((s, fade)) if s == guid => {
+                                    inf_render::near_fade_surface(fade)
+                                        .unwrap_or((blend, cutoff))
+                                }
+                                _ => (blend, cutoff),
+                            };
                             let inst = inf_render::SkinnedInstance {
                                 vt,
                                 translation,

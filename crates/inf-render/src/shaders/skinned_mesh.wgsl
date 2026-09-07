@@ -200,6 +200,50 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z) {
         discard;
     }
+    // **THE CAMERA'S NEAR FADE** (wave CHAR1c), blend code 3.
+    //
+    // A third-person boom shortened by a wall ends inside the body it is
+    // filming, and the body then fills the frame with the back of its own neck
+    // — which is carried 89, photographed four times across CHAR1a. So the
+    // camera door publishes how much of the SUBJECT to draw
+    // (`LocomotionCamera::subject_fade`, a linear ramp over the rig's
+    // `near_fade_start_m` → `near_fade_end_m` band), the two projectors put it
+    // on the subject's own instance, and this is where it lands.
+    //
+    // # Why a NEW code and not the masked path's alpha
+    //
+    // The masked test above compares the instance's `color.a` against a
+    // threshold, which is a whole-surface decision: dropping the alpha would pop
+    // the entire body off in one frame rather than fade it. A screen-door
+    // dither needs a per-PIXEL threshold, and there is no channel left to carry
+    // a second one — this pipeline stands at `max_vertex_attributes: 16`
+    // exactly. So the fade rides the channel that already exists (`pbr.zw`, the
+    // cutoff and the code) under a code the masked branch above cannot see:
+    // `blend * 4 + cutoff` with `blend = 3` packs 12..13, `floor(w/4)` recovers
+    // 3, and `w > 0.5 && w < 1.5` is false for it. Every committed skinned
+    // golden carries code 0, 1 or 2, so this branch is present-and-false for all
+    // three of them and their pixels do not move.
+    //
+    // # Interleaved gradient noise, not a Bayer matrix
+    //
+    // Jorge Jimenez's IGN (SIGGRAPH 2014, "Next Generation Post Processing in
+    // Call of Duty: Advanced Warfare") — one `fract` chain, no array, no dynamic
+    // index into a `const`, and it is the pattern UE's own dithered opacity
+    // uses. At `fade == 1` nothing is discarded because IGN is in `[0, 1)`; at
+    // `fade == 0` everything is.
+    //
+    // The DEPTH PREPASS is fragment-less and cannot discard, so a fading body
+    // still writes the SSAO/TAA/SSR depth target and still casts its shadow.
+    // Both are stated rather than hidden: a player's shadow that vanished when
+    // they backed into a wall would be the more visible defect, and the main
+    // depth buffer is written by this pass, so a discarded fragment leaves the
+    // pixel to whatever is behind it.
+    if (in.pbr.w > 2.5 && in.pbr.w < 3.5) {
+        let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+        if (in.pbr.z <= ign) {
+            discard;
+        }
+    }
     // P26.5 RESIDENCY HEAT-MAP (`ViewMode::VtResidency`): every virtual-textured
     // surface painted by how far behind the streamer is at that pixel.
     //
