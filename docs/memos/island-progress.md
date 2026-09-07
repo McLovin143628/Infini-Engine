@@ -35960,6 +35960,70 @@ Base `origin/main` `25b05259`; the wave ended at `ac1e16a6`. Every number below
 was measured on this machine against the island project, and every number the
 wave reported was recomputed before it was believed.
 
+### A0. PRIORITY ZERO — the head turned about a bone's axis
+
+**The user, hands-on on `ac1e16a6`:** *"when the user moves their mouse
+left/right, the character in the game looks up/down rather than left/right."*
+
+Reproduced on the island hero's own rig, and the cause is one line of geometry.
+`apply_look_at` built its yaw as a rotation about the joint's LOCAL Y and its
+pitch about the joint's LOCAL X. A rig author's local axes are not the world's:
+on the MetaHuman skeleton the `head` bone's local X points along model **+Y** (up
+the chain) and its local Y along model **-X** (across the body). Measured before
+the fix:
+
+| asked | what the head actually did |
+|---|---|
+| yaw 45 deg | rotated **44.35 deg about model (-1, 0, 0)** — a NOD; forward (0,0,1) went to (0, 0.699, 0.715) |
+| pitch 45 deg | rotated **44.19 deg about model (0, 0.997, 0.07)** — a TURN; forward went to (0.695, 0.033, 0.718) |
+
+Exactly swapped, exactly as reported.
+
+**Nothing in the tree could see it.** `LookAtReport` carries the angle the chain
+was ASKED for, and that angle was always right — so the wave's arm "the head
+tracks the look direction and clamps at the limit" is green either way, and
+`hero.csv`'s `head_yaw` / `head_pitch` columns are green either way (the wave's
+own log shows `head_pitch` 0.00 through both horizontal look legs, on the broken
+build). The report is not the world. The frames could not see it either: a head
+is thirty pixels of a 1080p frame at the loop's camera distance.
+
+**The fix** applies the look in the rig's OWN frame. `yaw_model` turns about model
+`+Y` — the axis and the sense `Transform::rotation.y` turns the body in, so a
+character that yaws its head by d and one that yaws its body by d face the same
+way — and `pitch_model` about model `-X`, positive UP. Each joint's model-space
+rotation is walked from its parents and the wanted rotation conjugated into the
+joint's own frame, which keeps the post-multiply shape the pass already had; an
+`ancestor` accumulator carries what the pass applied above the joint being
+written, so spine, neck and head compose exactly.
+
+Measured after, on the island, through the door the window resolves
+(`look_x`/`look_y` on `RuntimeInput`, which is what the mouse becomes):
+
+| driven | head azimuth | head elevation |
+|---|---|---|
+| `+look_x` only | **+29.57 deg** | +0.00 deg |
+| `+look_y` only | -4.34 deg | **+32.53 deg** |
+
+and on the rig alone: asked +30 / -30 / +60 of yaw give +29.56 / -29.57 / +59.14
+of azimuth with zero elevation; asked +/-20 of pitch give +19.71 / -19.72 of
+elevation with zero azimuth.
+
+**On the shipped host, through the real mouse** (`mouse_event`, the demo loop's
+own path, `AUDIT-CHAR1b1-FINAL/hero.csv`): the left swing takes `aim` to
+**-135.74** and `head_yaw` to the **-101.50** ceiling with `head_pitch` **0.00**
+on every row; the right swing takes them to **+133.39** / **+101.50** / **0.00**;
+and only then does the up swing move `head_pitch` to **+35.00** with `head_yaw`
+at 0.31. Frames `11-look-left.png` and `12-look-right.png` show the head turned
+against the shoulders; `13-look-up.png` shows it raised.
+
+**Two arms, both mutation-verified** (swap `yaw_model` and `pitch_model`: three
+`inf-anim` arms and the island arm go red). The CI one builds a torso whose bones
+carry the UE bind orientation, because the identity-oriented fixture the crate
+already had **cannot see this defect at all** — on it local Y IS model Y. The
+island one drives the input door and asserts the sideways frame moves the azimuth
+and not the elevation, as a RATIO so a fraction of a degree of aim residue cannot
+make it flap.
+
 ### A1. The hero was not playing its animation
 
 The wave's headline is "the island now plays 41 states / 53 transitions / 65
