@@ -987,108 +987,416 @@ fn a_thousand_dressed_agents_cost_what_the_tier_says() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (7) CLAUSE 3'S REFUSAL, AS A MEASUREMENT
+// (7) THE THREE CLOSURES (wave OUTFIT1 AUDIT — carried 164, 166, 167)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **The combined body's eyes have no section of their own** — clause 3, refused
-/// with the measurement that refuses it.
+/// The connected islands of one submesh, over its triangle graph.
+fn islands(sub: &inf_mesh::SubMesh) -> Vec<Vec<u32>> {
+    let nv = sub.vertices.len();
+    let mut parent: Vec<u32> = (0..nv as u32).collect();
+    fn root(p: &mut [u32], mut a: u32) -> u32 {
+        while p[a as usize] != a {
+            p[a as usize] = p[p[a as usize] as usize];
+            a = p[a as usize];
+        }
+        a
+    }
+    for t in sub.indices.chunks_exact(3) {
+        let (a, b, c) = (
+            root(&mut parent, t[0]),
+            root(&mut parent, t[1]),
+            root(&mut parent, t[2]),
+        );
+        parent[b as usize] = a;
+        parent[c as usize] = a;
+    }
+    let mut by: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for i in 0..nv as u32 {
+        let r = root(&mut parent, i);
+        by.entry(r).or_default().push(i);
+    }
+    by.into_values().collect()
+}
+
+/// The file an asset GUID lives in, found by its sidecar under `content`.
+fn find_asset(content: &Path, id: inf_asset::AssetId) -> Option<PathBuf> {
+    fn walk(dir: &Path, want: &str, out: &mut Option<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            if out.is_some() {
+                return;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, want, out);
+            } else if p.extension().is_some_and(|x| x == "toml") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    // The sidecar's OWN guid line, not any mention: a sidecar
+                    // lists its dependencies' guids too, and matching one of
+                    // those hands back the wrong file.
+                    if t.lines().any(|l| l.trim() == format!("guid = \"{want}\"")) {
+                        *out = Some(p.with_extension(""));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = None;
+    walk(content, &id.0.to_string(), &mut out);
+    out
+}
+
+/// **The body is INSIDE the garment on it** — carried item 166, closed, and
+/// measured on the geometry rather than on a pixel box.
 ///
-/// Three facts, all read off the island's own rebound hero mesh and none
-/// inferred:
+/// The rule is the importer's own (`fit_wearable_over_wearer`) read back off the
+/// asset: for each garment vertex, the deepest a body vertex reaches along that
+/// vertex's own normal inside a narrow cylinder. A positive number is the body
+/// standing OUTSIDE the shirt, which in the pixels is a brown patch on a white
+/// tee.
 ///
-/// * **the eye GEOMETRY is there.** A 40 × 40 × 50 mm box at the right eye holds
-///   2 478 vertices, whose distances from their own centroid run 2.93 … 34.59 mm
-///   with a plateau at 8–17 mm over a 40.1 mm z-span. That is a closed eyeball.
-/// * **its own UV square SURVIVED the combine.** Those vertices span
-///   u 0.0029 … 0.9922 — a full tile, which is what an eye texture is addressed
-///   with, and not the sliver a repack would have left.
-/// * **and it is in the same SECTION as the head skin.** The combined mesh has
-///   one section per UV *tile* (the import's UDIM split) and the eye island is in
-///   tile 0 with the face, overlapping it. The material a triangle draws with in
-///   this engine is a property of its section, so there is no address at which to
-///   bind `MI_EyeL_Baked` — and the head albedo at those UVs is skin
-///   (luminance 59.6, sd 6.9, against a cheek control of 64.5; an iris and a
-///   sclera in one box would be a standard deviation three times that).
-///
-/// Separating them needs a rule the combine destroyed and this wave did not
-/// build: a connected-component split of the tile-0 section, matched against the
-/// FACE mesh's own primitives. Clause 3 is REFUSED on that, and the ledger names
-/// the three doors.
-///
-/// The arm asserts the state, so it goes RED the day a combine — or an
-/// import-side split — gives the eyes a section of their own, which is the day
-/// clause 3 becomes cheap.
+/// Runs on the committed starter character on CI and on the island's rebound
+/// MetaHuman where the project is there — two different pieces of content and
+/// one property. Wave OUTFIT1's flat 4 mm lift left **11.60 %** of the island
+/// garment's vertices with the body outside them; the fit leaves 3.57 %.
 #[test]
-fn the_combined_bodys_eyes_have_no_section_of_their_own() {
+fn a_fitted_garment_encloses_the_body_it_is_on() {
+    let mut pairs: Vec<(String, PathBuf, PathBuf)> = vec![(
+        "the committed starter character".to_string(),
+        starter_dir().join("Starter_Body.inf_mesh"),
+        starter_dir().join("Starter_Outfit.inf_mesh"),
+    )];
+    match island_project() {
+        Some(c) => pairs.push((
+            "the island's rebound MetaHuman".to_string(),
+            c.join("Starter_Body.inf_mesh"),
+            c.join("Starter_Outfit.inf_mesh"),
+        )),
+        None => eprintln!("SKIP the island half: no island project — local-only content"),
+    }
+    // The importer's own constants, restated rather than imported: this arm has
+    // to fail when the RULE moves, and a shared constant would move with it.
+    const REACH: f32 = 0.060;
+    const TANGENT: f32 = 0.008;
+    for (label, body_path, outfit_path) in pairs {
+        let (Ok(bb), Ok(ob)) = (std::fs::read(&body_path), std::fs::read(&outfit_path)) else {
+            eprintln!("SKIP {label}: {} is not there", body_path.display());
+            continue;
+        };
+        let body: inf_mesh::MeshAsset = inf_asset::decode(&bb).expect("the body decodes");
+        let outfit: inf_mesh::MeshAsset = inf_asset::decode(&ob).expect("the outfit decodes");
+        let key = |p: [f32; 3]| {
+            [
+                (p[0] / REACH).floor() as i32,
+                (p[1] / REACH).floor() as i32,
+                (p[2] / REACH).floor() as i32,
+            ]
+        };
+        let mut grid: BTreeMap<[i32; 3], Vec<[f32; 3]>> = BTreeMap::new();
+        for sub in &body.submeshes {
+            for v in &sub.vertices {
+                grid.entry(key(v.position)).or_default().push(v.position);
+            }
+        }
+        let (mut n, mut outside, mut worst) = (0usize, 0usize, 0.0f32);
+        for sub in &outfit.submeshes {
+            for v in &sub.vertices {
+                let raw = v.normal;
+                let len = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
+                if len <= 1e-6 {
+                    continue;
+                }
+                let nrm = [raw[0] / len, raw[1] / len, raw[2] / len];
+                let k = key(v.position);
+                let mut deepest = 0.0f32;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let Some(list) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
+                                continue;
+                            };
+                            for b in list {
+                                let d = [
+                                    b[0] - v.position[0],
+                                    b[1] - v.position[1],
+                                    b[2] - v.position[2],
+                                ];
+                                let along = d[0] * nrm[0] + d[1] * nrm[1] + d[2] * nrm[2];
+                                if !(0.0..=REACH).contains(&along) {
+                                    continue;
+                                }
+                                let t = [
+                                    d[0] - along * nrm[0],
+                                    d[1] - along * nrm[1],
+                                    d[2] - along * nrm[2],
+                                ];
+                                if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > TANGENT * TANGENT {
+                                    continue;
+                                }
+                                deepest = deepest.max(along);
+                            }
+                        }
+                    }
+                }
+                n += 1;
+                if deepest > 0.001 {
+                    outside += 1;
+                    worst = worst.max(deepest);
+                }
+            }
+        }
+        let pct = 100.0 * outside as f64 / n.max(1) as f64;
+        println!(
+            "{label}: {outside} of {n} garment vertices have the body outside them ({pct:.2} %), worst {:.1} mm",
+            worst * 1000.0
+        );
+        // ANTI-VACUITY: a garment with no vertices, or one nowhere near a body,
+        // would report 0 % for the wrong reason.
+        assert!(
+            n > 1_000,
+            "{label}: only {n} garment vertices were examined"
+        );
+        assert!(
+            pct < 5.0,
+            "{label}: {pct:.2} % of the garment has the body standing outside it \
+             (worst {:.1} mm) — that is a shirt with the character's own chest \
+             showing through it",
+            worst * 1000.0
+        );
+    }
+}
+
+/// **The eyes have a section of their own, and it is not skin** — carried item
+/// 167, closed by the import-side split (door (d)).
+///
+/// Wave OUTFIT1 refused clause 3 and left a trip-wire asserting the refusal.
+/// This is its inverse, and it reads three things off the world:
+///
+/// * the combined body has **two eye sections**, each still one closed round
+///   island under 50 mm across — the shape the importer selects on;
+/// * each is bound to a material of its own (`MI_EyeL/R_Baked`), which is the
+///   address clause 3 said did not exist;
+/// * and that material's base colour is an EYE and not skin, measured in its own
+///   texels: the sclera ring is much brighter than the iris disc, and the head
+///   atlas **at the same uvs** — which is exactly what those triangles used to
+///   draw with — separates the same two radii by almost nothing.
+#[test]
+fn the_eyes_have_a_section_of_their_own_and_it_is_not_skin() {
     let Some(content) = island_project() else {
         eprintln!("SKIP: no island project — it is local-only content and CI has none");
         return;
     };
-    let p = content.join("Starter_Body.inf_mesh");
-    if !p.is_file() {
-        eprintln!("SKIP: no rebound body in this project");
-        return;
-    }
-    let mesh: inf_mesh::MeshAsset = inf_asset::decode(&std::fs::read(&p).unwrap()).unwrap();
-    if mesh.triangle_count() < 50_000 {
-        eprintln!(
-            "SKIP: the body at the committed GUID is {} triangles — this is the \
-             committed low-poly one, not a rebound MetaHuman",
-            mesh.triangle_count()
-        );
-        return;
-    }
-    // Which SECTION each eye vertex is in, and how wide its uv island is.
-    let mut per_section: Vec<usize> = vec![0; mesh.submeshes.len()];
-    let (mut umin, mut umax) = (f32::MAX, f32::MIN);
-    for (si, sub) in mesh.submeshes.iter().enumerate() {
-        for v in &sub.vertices {
-            let [x, y, z] = v.position;
-            if (0.015..0.055).contains(&x)
-                && (1.645..1.685).contains(&y)
-                && (0.085..0.135).contains(&z)
-            {
-                per_section[si] += 1;
-                umin = umin.min(v.uv[0]);
-                umax = umax.max(v.uv[0]);
-            }
+    let mut checked = 0;
+    for stem in ["Starter_Body", "Starter_F_Body"] {
+        let p = content.join(format!("{stem}.inf_mesh"));
+        let Ok(bytes) = std::fs::read(&p) else {
+            eprintln!("SKIP {stem}: not in this project");
+            continue;
+        };
+        let mesh: inf_mesh::MeshAsset = inf_asset::decode(&bytes).expect("the body decodes");
+        if mesh.triangle_count() < 50_000 {
+            eprintln!(
+                "SKIP {stem}: {} triangles — the committed low-poly body, not a rebound MetaHuman",
+                mesh.triangle_count()
+            );
+            continue;
         }
+        let eye_slots: Vec<usize> = mesh
+            .material_slots
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains("MI_EyeL_Baked") || n.contains("MI_EyeR_Baked"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            eye_slots.len(),
+            2,
+            "{stem}: {} material slot(s) name an eye — the split did not run, and the \
+             eyeballs are drawing the head atlas at their own uvs, which is skin",
+            eye_slots.len()
+        );
+        let eye_sections: Vec<&inf_mesh::SubMesh> = mesh
+            .submeshes
+            .iter()
+            .filter(|s| eye_slots.contains(&(s.material_slot.unwrap_or(0) as usize)))
+            .collect();
+        assert_eq!(
+            eye_sections.len(),
+            2,
+            "{stem}: the eye slots have no sections"
+        );
+        for sub in &eye_sections {
+            let isl = islands(sub);
+            assert_eq!(
+                isl.len(),
+                1,
+                "{stem}: an eye section holds {} islands — the split took more than an \
+                 eyeball with it",
+                isl.len()
+            );
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for v in &sub.vertices {
+                for a in 0..3 {
+                    lo[a] = lo[a].min(v.position[a]);
+                    hi[a] = hi[a].max(v.position[a]);
+                }
+            }
+            let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            let widest = ext.iter().cloned().fold(0.0f32, f32::max);
+            let thinnest = ext.iter().cloned().fold(f32::MAX, f32::min);
+            println!(
+                "{stem}: eye section {} verts, {} tris, {:.1} x {:.1} x {:.1} mm",
+                sub.vertices.len(),
+                sub.triangle_count(),
+                ext[0] * 1000.0,
+                ext[1] * 1000.0,
+                ext[2] * 1000.0
+            );
+            assert!(
+                widest < 0.050 && thinnest / widest > 0.5,
+                "{stem}: the eye section is {:.1} x {:.1} x {:.1} mm, which is not a ball",
+                ext[0] * 1000.0,
+                ext[1] * 1000.0,
+                ext[2] * 1000.0
+            );
+            assert!(
+                sub.is_skinned(),
+                "{stem}: the eye section lost its skin stream and will draw in bind pose"
+            );
+        }
+        let eye_mat =
+            mesh.material_slot_assets[eye_slots[0]].expect("the eye slot resolved to a material");
+        let head_mat = mesh.material_slot_assets[0].expect("the head slot resolved to a material");
+        let load = |id: inf_asset::AssetId| -> Option<inf_material::TextureAsset> {
+            let mat: inf_material::MaterialAsset =
+                inf_asset::decode(&std::fs::read(find_asset(&content, id)?).ok()?).ok()?;
+            let tex = mat.base_color_texture?;
+            inf_material::TextureAsset::from_payload(
+                &std::fs::read(find_asset(&content, tex)?).ok()?,
+            )
+            .ok()
+        };
+        let (Some(eye), Some(head)) = (load(eye_mat), load(head_mat)) else {
+            panic!("{stem}: the eye or the head material has no base colour to read");
+        };
+        let ring = |t: &inf_material::TextureAsset, px: &[u8], r: f32| -> f64 {
+            let mut sum = 0.0f64;
+            let n = 512;
+            for k in 0..n {
+                let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                let u = 0.5 + 0.5 * r * a.cos();
+                let v = 0.5 + 0.5 * r * a.sin();
+                let x = ((u * (t.width - 1) as f32) as usize).min(t.width as usize - 1);
+                let y = ((v * (t.height - 1) as f32) as usize).min(t.height as usize - 1);
+                let i = (y * t.width as usize + x) * 4;
+                sum +=
+                    0.2126 * px[i] as f64 + 0.7152 * px[i + 1] as f64 + 0.0722 * px[i + 2] as f64;
+            }
+            sum / n as f64
+        };
+        let ep = eye.level_rgba8(0).expect("the eye albedo decodes");
+        let hp = head.level_rgba8(0).expect("the head albedo decodes");
+        // r = 0.10 is inside the iris disc (the limbus the importer derives sits
+        // at 0.30..0.36 of the square); r = 0.75 is the white of the eye.
+        let iris = ring(&eye, &ep, 0.10);
+        let sclera = ring(&eye, &ep, 0.75);
+        let skin_a = ring(&head, &hp, 0.10);
+        let skin_b = ring(&head, &hp, 0.75);
+        println!(
+            "{stem}: EYE iris {iris:.1} sclera {sclera:.1} (delta {:.1}); the HEAD atlas at \
+             the same uvs {skin_a:.1} / {skin_b:.1} (delta {:.1})",
+            sclera - iris,
+            skin_b - skin_a
+        );
+        assert!(
+            sclera - iris > 20.0,
+            "{stem}: the eye's sclera is only {:.1} brighter than its iris — this is not \
+             an eye, it is one flat colour",
+            sclera - iris
+        );
+        assert!(
+            (sclera - iris) > 3.0 * (skin_b - skin_a).abs().max(1.0),
+            "{stem}: the eye material separates its iris from its sclera by {:.1} and the \
+             HEAD atlas separates the same two uvs by {:.1} — the eyes are still drawing skin",
+            sclera - iris,
+            skin_b - skin_a
+        );
+        checked += 1;
     }
-    let n: usize = per_section.iter().sum();
-    let sections_with_eye = per_section.iter().filter(|c| **c > 0).count();
-    println!(
-        "
-=== CLAUSE 3, REFUSED ===
-           the body has {} sections over {} triangles
-           the right eye is {n} vertices, u {umin:.4}..{umax:.4}
-           and lives in {sections_with_eye} section(s): {per_section:?}",
-        mesh.submeshes.len(),
-        mesh.triangle_count()
-    );
-    assert!(
-        n > 500,
-        "only {n} vertices in the eye box — there is no eyeball in this body, \
-         and clause 3's whole refusal rests on there being one"
-    );
-    assert!(
-        umax - umin > 0.5,
-        "the eye's uv island spans only {:.4} of u — the combine repacked it \
-         after all, and the refusal's second fact has changed",
-        umax - umin
-    );
-    // THE REFUSAL ITSELF: the eyes share a section with the skin, so there is no
-    // address at which to bind an eye material.
-    let biggest = per_section
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, c)| **c)
-        .map(|(i, _)| i)
-        .unwrap();
-    assert!(
-        mesh.submeshes[biggest].triangle_count() > 10_000,
-        "the eye's own section is only {} triangles — it HAS a section of its \
-         own now, which is clause 3 become cheap: read the ledger and bind \
-         MI_EyeL_Baked to it",
-        mesh.submeshes[biggest].triangle_count()
-    );
+    assert!(checked > 0, "no rebound body was there to check");
+}
+
+/// **A hair card is a cut-out, not a ribbon** — carried item 164, closed.
+///
+/// Three facts, none of them a table:
+///
+/// * the committed hair material is **masked**, at UE's own clip value, and it
+///   names a base colour — before this it was the glTF's own white, opaque
+///   `WorldGridMaterial`, because a groom's cards mesh carries Unreal's
+///   checkerboard in its slot table and nothing bound the manifest's answer;
+/// * its base colour is the groom's **melanin**, not white;
+/// * and the ALPHA of that texture is a strand mask: a sixth of the atlas
+///   survives the cutoff and the rest is a hole. A solid ribbon is all of it.
+#[test]
+fn the_hair_cards_are_masked_by_the_grooms_own_coverage() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — it is local-only content and CI has none");
+        return;
+    };
+    let mut checked = 0;
+    for stem in ["Starter_Hair", "Starter_F_Hair"] {
+        let p = content.join(format!("{stem}.inf_mat"));
+        let Ok(bytes) = std::fs::read(&p) else {
+            eprintln!("SKIP {stem}: not in this project");
+            continue;
+        };
+        let mat: inf_material::MaterialAsset =
+            inf_asset::decode(&bytes).expect("the hair material decodes");
+        let lum =
+            0.2126 * mat.base_color[0] + 0.7152 * mat.base_color[1] + 0.0722 * mat.base_color[2];
+        let Some(tex_id) = mat.base_color_texture else {
+            panic!(
+                "{stem}: the hair material names no base colour, so there is no alpha \
+                 channel for a cut-out to live in"
+            );
+        };
+        let tex = inf_material::TextureAsset::from_payload(
+            &std::fs::read(find_asset(&content, tex_id).expect("the hair albedo is on disk"))
+                .expect("the hair albedo reads"),
+        )
+        .expect("the hair albedo decodes");
+        let px = tex.level_rgba8(0).expect("the hair albedo has a mip 0");
+        let n = px.len() / 4;
+        let open = px
+            .chunks_exact(4)
+            .filter(|p| p[3] as f32 / 255.0 >= mat.alpha_cutoff)
+            .count();
+        let frac = 100.0 * open as f64 / n as f64;
+        println!(
+            "{stem}: blend {:?} cutoff {:.3}, base colour luminance {lum:.4}, {frac:.1} % of \
+             {}x{} survives the cutoff",
+            mat.blend, mat.alpha_cutoff, tex.width, tex.height
+        );
+        assert_eq!(
+            mat.blend,
+            inf_material::MatBlend::Masked,
+            "{stem}: the hair is {:?}, so every card draws as a solid quad",
+            mat.blend
+        );
+        assert!(
+            lum < 0.3,
+            "{stem}: the hair's base colour has luminance {lum:.4} — that is the glTF's own \
+             white material, not the groom's melanin"
+        );
+        assert!(
+            (5.0..40.0).contains(&frac),
+            "{stem}: {frac:.1} % of the atlas survives the cutoff — a strand mask is a sixth \
+             of its atlas and a solid ribbon is all of it"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no hair material was there to check");
 }

@@ -454,7 +454,28 @@ impl MeshAsset {
             }
             first += count;
         }
-        if out.len() < 2 {
+        // **…UNLESS THE ONE SLOT NAMES A MATERIAL** (wave OUTFIT1 AUDIT).
+        //
+        // A single range whose slot resolves to nothing is exactly the whole-
+        // buffer draw the caller would make anyway, and returning it would cost
+        // a section per body for no decision — which is why this line has always
+        // been here. A single range whose slot names a MATERIAL is a different
+        // thing: the section path is the only place a surface is read off the
+        // `.inf_mat` rather than off the entity's `Material` component, and the
+        // component is a COPY made when the level was authored.
+        //
+        // Measured, on the island's hair: the entity carries the committed
+        // default's tint and `BlendMode::Opaque` because the level was generated
+        // before the rebind that replaced the material at that GUID, so a groom
+        // whose `.inf_mat` says masked-at-0.333 with a coverage atlas drew
+        // opaque, in the wrong colour, as solid ribbons. Nothing in this tree had
+        // a one-slot mesh with a bound slot before the wave that closed that, so
+        // this branch is inert for every asset that existed.
+        if out.len() < 2
+            && !out
+                .first()
+                .is_some_and(|(_, _, slot)| self.material_for_slot(*slot).is_some())
+        {
             return Vec::new();
         }
         out

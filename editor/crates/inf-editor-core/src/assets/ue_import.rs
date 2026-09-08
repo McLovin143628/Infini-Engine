@@ -2448,6 +2448,97 @@ pub fn parse_wearable(v: &str) -> std::result::Result<WearableRebind, String> {
 /// points along the card would shear the hairstyle.
 pub const WEARABLE_LIFT_M: f32 = 0.004;
 
+/// How far a garment vertex will look for the body vertex whose weights it
+/// takes, metres (wave OUTFIT1 AUDIT, carried item 166).
+const WEARABLE_WEIGHT_REACH_M: f32 = 0.060;
+
+/// **A garment deforms by exactly what the body under it deforms by** — the
+/// second half of carried item 166's closure.
+///
+/// # Why re-pointing the garment's own influences is not enough
+///
+/// A MetaHuman garment arrives with its OWN skin weights, authored for cloth,
+/// and this bridge re-points their joint indices by name onto the wearer's rig.
+/// That is correct arithmetic and it does not make the garment fit: the two
+/// surfaces are weighted differently, so they diverge the moment the character
+/// leaves its bind pose, and a shirt that encloses a body in bind pose has the
+/// chest through it in an idle. Measured on the island's own portrait: the
+/// bind-pose intrusion fell from 11.60 % to 3.57 % of the garment's vertices
+/// under `fit_wearable_over_wearer` alone, and 4.35 % of the POSED shirt was
+/// still the character's skin.
+///
+/// So a garment takes the weights of the body vertex nearest to it — which is
+/// exactly the rule [`crate::groom::wearable_shell`] already uses for the
+/// committed defaults, where the skin stream is kept UNCHANGED for the same
+/// reason: no transfer, no proximity solve, no seam, and the garment cannot
+/// diverge from the body because it is driven by the same numbers.
+///
+/// A vertex with no body vertex within [`WEARABLE_WEIGHT_REACH_M`] keeps the
+/// re-pointed weights it arrived with — a cape's far corner, a hat's crown —
+/// and both counts are returned so the log can say which happened.
+fn wear_the_wearers_weights(
+    mesh: &mut inf_mesh::MeshAsset,
+    body: &inf_mesh::MeshAsset,
+) -> (usize, usize) {
+    let cell = WEARABLE_WEIGHT_REACH_M;
+    let key = |p: [f32; 3]| {
+        [
+            (p[0] / cell).floor() as i32,
+            (p[1] / cell).floor() as i32,
+            (p[2] / cell).floor() as i32,
+        ]
+    };
+    let mut grid: BTreeMap<[i32; 3], Vec<([f32; 3], inf_mesh::VertexSkin)>> = BTreeMap::new();
+    for sub in &body.submeshes {
+        for (i, v) in sub.vertices.iter().enumerate() {
+            let Some(skin) = sub.skin.get(i) else {
+                continue;
+            };
+            grid.entry(key(v.position))
+                .or_default()
+                .push((v.position, *skin));
+        }
+    }
+    let (mut moved, mut total) = (0usize, 0usize);
+    for sub in &mut mesh.submeshes {
+        for (i, v) in sub.vertices.iter().enumerate() {
+            let Some(slot) = sub.skin.get_mut(i) else {
+                continue;
+            };
+            total += 1;
+            let k = key(v.position);
+            let mut best = WEARABLE_WEIGHT_REACH_M * WEARABLE_WEIGHT_REACH_M;
+            let mut take: Option<inf_mesh::VertexSkin> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(list) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
+                            continue;
+                        };
+                        for (p, skin) in list {
+                            let d = [
+                                p[0] - v.position[0],
+                                p[1] - v.position[1],
+                                p[2] - v.position[2],
+                            ];
+                            let l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                            if l2 < best {
+                                best = l2;
+                                take = Some(*skin);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(skin) = take {
+                *slot = skin;
+                moved += 1;
+            }
+        }
+    }
+    (moved, total)
+}
+
 /// **How far a fitted garment clears the body under it**, metres (wave OUTFIT1
 /// AUDIT, carried item 166).
 pub const WEARABLE_FIT_MARGIN_M: f32 = 0.002;
@@ -2752,6 +2843,13 @@ fn rebind_wearable(
             ids.mesh.and_then(|id| project.load_payload(id).ok());
         match &wearer {
             Some(body) => {
+                let moved = wear_the_wearers_weights(&mut mesh, body);
+                report.advisories.push(format!(
+                    "{key}: {} of {} vertices took the WEARER's own skin weights, so the \
+                     garment deforms by exactly what the body under it \
+                     deforms by",
+                    moved.0, moved.1
+                ));
                 let fit = fit_wearable_over_wearer(&mut mesh, body);
                 report.advisories.push(format!(
                     "{key}: {} vertices FITTED over the wearer's own surface — \
@@ -2818,6 +2916,24 @@ fn rebind_wearable(
     }
 
     let root = project.root().to_path_buf();
+    // **A ONE-SLOT WEARABLE BINDS ITS SLOT** (wave OUTFIT1 AUDIT, carried 164).
+    // `bind_slots` writes a slot table only for a mesh with two or more, and a
+    // groom's cards mesh has one — so the hair had no bound slot, no SECTION,
+    // and therefore drew the surface the entity's `Material` component copied
+    // when the level was authored: the committed default's tint, opaque, with
+    // no coverage. The slot table is the only address at which a `.inf_mat`
+    // reaches a draw, so this is what makes the atlas above visible at all.
+    if mesh.material_slots.len() == 1 && mesh.material_slot_assets.iter().flatten().count() == 0 {
+        if let Some(id) = manifest_mat {
+            mesh.material_slot_assets = vec![Some(id)];
+            report.advisories.push(format!(
+                "{key}: its ONE material slot names `{}` and had no binding, so it drew \
+                 the entity's own tint — bound to the manifest's material, which \
+                 gives it a section and its own surface",
+                mesh.material_slots[0]
+            ));
+        }
+    }
     let mut deps = vec![want_skel];
     for id in mesh.material_slot_assets.iter().flatten() {
         if !deps.contains(id) {
