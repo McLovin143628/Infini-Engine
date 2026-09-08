@@ -35,7 +35,7 @@
 //! [`probe_cover`] always answers a [`CoverProbe`], never an `Option`, and a
 //! probe that found nothing carries the [`CoverRefusal`] that says why and — for
 //! the two refusals that had a surface to look at — the
-//! [`ColliderLabel`](super::label::ColliderLabel) of the thing it looked at.
+//! [`super::label::ColliderLabel`] of the thing it looked at.
 //! Carried 162 is what makes that possible: a façade on this island has no
 //! entity at all, so without the label door a refusal could only ever have said
 //! "a guid".
@@ -98,7 +98,7 @@ pub enum CoverRefusal {
     ///
     /// This is where ALS's "do not mantle a moving platform" rule lives for the
     /// cover probe. The ledge probe expresses it as a broad-phase filter
-    /// ([`CastTargets::Fixed`]) and a cover probe cannot: the island's parked
+    /// (`CastTargets::Fixed`) and a cover probe cannot: the island's parked
     /// cars are DYNAMIC bodies, and filtering them out made every one of them
     /// invisible — 247 cover surfaces in the wave's census and not a car among
     /// them. So the question is asked directly, of the body's own velocity.
@@ -758,7 +758,7 @@ pub struct NpcCoverReport {
 ///   other way round);
 /// * one that is not already in cover **searches** for it, on the compass, at
 ///   most once every [`inf_ecs::cover::NPC_SEARCH_PERIOD`] steps;
-/// * what it finds it **walks to**, along an [`inf_nav::NavPath`], and presses
+/// * what it finds it **walks to**, along an `inf_nav::NavPath`, and presses
 ///   the same `press_cover` edge a player's key raises — one door, two callers;
 /// * once in cover it **peeks** on a duty cycle and points its weapon at the
 ///   threat through [`super::gameplay::npc_aim_at`], with the trigger **open**:
