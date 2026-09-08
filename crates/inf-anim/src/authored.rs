@@ -36,10 +36,10 @@
 //! | `INF_Prone_Idle` | torso 88° to horizontal, pelvis at 12 % of hip height, elbows 90°, legs straight | 3.00 s, looping (a 2° breath) |
 //! | `INF_Prone_Crawl` | the prone pose with alternating 35° hip and 55° elbow drive | 1.80 s, looping |
 //! | `INF_GetUp_Standing` | pelvis rises from 20 % to 100 % of hip height while the torso unfolds 70° → 0° and the knees 100° → 0° | 1.20 s, one-shot |
-//! | `INF_Cover_Low_Idle` | pelvis at 62 % of hip height, chest 12° forward and 18° twisted toward the surface, head 35° along it, near arm folded 70° across the chest, far arm braced 25° | 3.20 s, looping (a 2° breath) |
-//! | `INF_Cover_Low_Move` | the same stance with a 30° hip / 45° knee shuffle and a 10° torso counter-sway | 1.20 s, looping |
-//! | `INF_Cover_High_Idle` | upright, chest 8° back and 22° twisted toward the surface, head 40° along it, near shoulder rolled 15° into the wall, near arm 60° up across the chest | 3.60 s, looping (a 2° breath) |
-//! | `INF_Cover_High_Move` | the same stance side-stepping: 22° hip abduction alternating, 30° knee, 8° torso counter-sway | 1.10 s, looping |
+//! | `INF_Cover_Low_Idle` | pelvis at 62 % of hip height, chest 12° forward and 18° twisted toward the surface, the near forearm AIMED across the chest (86° up, 66° across) and the far arm braced, hips folded 55° and knees 75° | 3.20 s, looping (a 2° breath) |
+//! | `INF_Cover_Low_Move` | the same stance with a 22° abduction / 30° knee shuffle and a 10° torso counter-sway | 1.20 s, looping |
+//! | `INF_Cover_High_Idle` | upright, chest 8° back and 22° twisted toward the surface, the near forearm AIMED across the chest (84° up, 72° across), the far arm braced | 3.60 s, looping (a 2° breath) |
+//! | `INF_Cover_High_Move` | the same stance side-stepping: 22° hip abduction alternating, 30° knee, 10° torso counter-sway | 1.10 s, looping |
 //!
 //! # Determinism
 //!
@@ -118,14 +118,48 @@ struct Rig {
     /// the hero stood behind a wall with both arms out sideways. So `cover`
     /// composes `bind * delta` and says so.
     bind_rot: Vec<[f32; 4]>,
+    /// **Every joint's bind GLOBAL rotation**, composed down the parent chain.
+    ///
+    /// The other half of what [`Rig::aim_under`] needs, and the audit finding that
+    /// asked for it: a delta written as [`qx`] is a rotation about the JOINT's
+    /// own X, and on a UE-derived rig -- every rig this engine imports -- local
+    /// X points **down the bone**. So `qx` on an upper arm is a twist about the
+    /// humerus rather than a lift of it, `qx` on a thigh is a twist about the
+    /// femur rather than a hip fold, and a stance authored out of them moves
+    /// nothing a viewer can see. Measured on the island's own hero
+    /// (`upperarm_l`: local X reaches world (0.61, -0.79, 0.03), which is the
+    /// shoulder-to-elbow direction to two decimals).
+    ///
+    /// With the globals in hand a clip says where a bone should POINT and the
+    /// rig answers with the rotation, which is the shape `crate::retarget`
+    /// already uses.
+    bind_gq: Vec<[f32; 4]>,
+    /// Every joint's bind global TRANSLATION -- the other input to a bone
+    /// direction.
+    bind_pos: Vec<glam::Vec3>,
+    /// Every joint's parent, so [`Rig::is_ancestor`] can answer whether a
+    /// rotation this clip writes is one another bone hangs under.
+    parents: Vec<Option<u16>>,
+    /// **Which way "across the chest" is for each arm**, `+1` toward `+X` and
+    /// `-1` toward `-X` — derived from where the shoulder actually sits.
+    ///
+    /// Measured rather than assumed, because the two rigs this engine holds
+    /// disagree: the shipped MetaHuman's `upperarm_l` is at **x = +0.198** and
+    /// the biped template's left upper arm is at **x = -0.200**. A clip that
+    /// picked one of them folded the near arm on one rig and threw it wide on
+    /// the other, which is a mirrored pose that no test comparing joint COUNTS
+    /// could see.
+    across_sign: [f64; 2],
     pelvis: u16,
     pelvis_bind: [f32; 3],
     hip_height_m: f64,
     spine: Vec<u16>,
     upper_arm: [Option<u16>; 2],
     lower_arm: [Option<u16>; 2],
+    hand: [Option<u16>; 2],
     thigh: [Option<u16>; 2],
     calf: [Option<u16>; 2],
+    foot: [Option<u16>; 2],
 }
 
 impl Rig {
@@ -153,16 +187,48 @@ impl Rig {
         };
         let globals = bind_globals(sk);
         let h = f64::from(globals[pelvis as usize].y).abs();
+        // The global bind ROTATIONS, composed the way the translations above
+        // are: multiplies only, so this stays inside the module's determinism
+        // rule for `bind_globals`' own reason.
+        let mut bind_gq: Vec<[f32; 4]> = Vec::with_capacity(sk.len());
+        for j in sk.joints() {
+            let q = match j.parent {
+                Some(p) => quat_mul(bind_gq[p as usize], j.local_bind.rotation),
+                None => j.local_bind.rotation,
+            };
+            bind_gq.push(q);
+        }
+        let upper_arm = side(BoneRoleKind::UpperArm);
+        let across_sign = [0usize, 1].map(|i| {
+            let default = if i == 0 { -1.0 } else { 1.0 };
+            match upper_arm[i] {
+                Some(j) => {
+                    let d = globals[j as usize].x - globals[pelvis as usize].x;
+                    if d.abs() < 1.0e-4 {
+                        default
+                    } else {
+                        -f64::from(d.signum())
+                    }
+                }
+                None => default,
+            }
+        });
         Ok(Self {
             bind_rot,
+            bind_gq,
+            bind_pos: globals,
+            parents: sk.joints().iter().map(|j| j.parent).collect(),
+            across_sign,
             pelvis,
             pelvis_bind: sk.joints()[pelvis as usize].local_bind.translation,
             hip_height_m: if h > 1.0e-4 { h } else { 0.95 },
             spine,
-            upper_arm: side(BoneRoleKind::UpperArm),
+            upper_arm,
             lower_arm: side(BoneRoleKind::LowerArm),
+            hand: side(BoneRoleKind::Hand),
             thigh: side(BoneRoleKind::Thigh),
             calf: side(BoneRoleKind::Calf),
+            foot: side(BoneRoleKind::Foot),
         })
     }
 
@@ -171,6 +237,136 @@ impl Rig {
     fn chest(&self) -> u16 {
         *self.spine.last().expect("checked non-empty")
     }
+
+    /// **Is `a` an ancestor of `j`?**
+    ///
+    /// A chain compounds only through the bones that are actually in it. The
+    /// spine's last segment is the arms' ancestor on a MetaHuman and need not
+    /// be on every rig, and a clip that assumed it would apply the chest's
+    /// twist to an arm that never inherited it.
+    fn is_ancestor(&self, a: u16, j: Option<u16>) -> bool {
+        let mut cur = j;
+        while let Some(c) = cur {
+            if c == a {
+                return true;
+            }
+            cur = self.parents.get(c as usize).copied().flatten();
+        }
+        false
+    }
+
+    /// **Which way a bone POINTS at bind**, in the rig's own frame: from
+    /// `joint` to `tip`, normalised. `None` when the rig has neither, or when
+    /// the two sit on top of each other.
+    fn bone_dir(&self, joint: Option<u16>, tip: Option<u16>) -> Option<[f32; 3]> {
+        let (j, t) = (joint?, tip?);
+        let d = self.bind_pos[t as usize] - self.bind_pos[j as usize];
+        let len = d.length();
+        (len > 1.0e-6).then(|| (d / len).to_array())
+    }
+
+    /// **Aim a bone whose ANCESTORS have already been rotated by `parent`** —
+    /// and answer both the rotation in the rig's frame and the local delta.
+    ///
+    /// A chain compounds: rotating a thigh moves the knee, and the shin's own
+    /// delta is then applied *under* that. Aiming the shin at a rig-frame
+    /// direction without allowing for its parent leaves the leg straight, which
+    /// is what the first spelling of this repair did — measured on the biped
+    /// template: hip z 0.000, knee z 0.395, ankle z 0.650, an ankle FORWARD of
+    /// the knee on a crouch.
+    ///
+    /// So the target is seen from under the parent's own rotation first. The
+    /// world rotation comes back with it, because the next bone down needs it.
+    fn aim_under(
+        &self,
+        parent: [f32; 4],
+        joint: Option<u16>,
+        tip: Option<u16>,
+        target: [f64; 3],
+    ) -> ([f32; 4], [f32; 4]) {
+        let Some(j) = joint else {
+            return (QUAT_ID, QUAT_ID);
+        };
+        let (Some(from), Some(t)) = (
+            self.bone_dir(joint, tip),
+            norm3([target[0] as f32, target[1] as f32, target[2] as f32]),
+        ) else {
+            return (QUAT_ID, QUAT_ID);
+        };
+        let world = min_arc(from, rotate_vec(quat_conj(parent), t));
+        (world, local_of_world(self.bind_gq[j as usize], world))
+    }
+
+    /// **A rotation stated in the rig's frame, written in a joint's own** --
+    /// so a caller can say "pitch the chest forward" without knowing which way
+    /// the chest's local axes happen to point.
+    fn in_frame_of(&self, joint: u16, world: [f32; 4]) -> [f32; 4] {
+        local_of_world(self.bind_gq[joint as usize], world)
+    }
+}
+
+/// The identity quaternion, `[x, y, z, w]`.
+const QUAT_ID: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Normalise, or `None` for a vector too short to have a direction.
+fn norm3(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (len > 1.0e-6).then(|| [v[0] / len, v[1] / len, v[2] / len])
+}
+
+/// **The shortest rotation taking `a` to `b`**, both unit vectors.
+///
+/// Square roots and products only -- no trigonometry -- so it obeys the
+/// module's determinism rule for [`quat_mul`]'s reason.
+fn min_arc(a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+    if dot < -1.0 + 1.0e-6 {
+        // Opposed: every axis perpendicular to `a` is a half turn, and one of
+        // them is picked rather than a NaN being produced.
+        let axis = if a[0].abs() < 0.9 {
+            [0.0, -a[2], a[1]]
+        } else {
+            [-a[1], a[0], 0.0]
+        };
+        let axis = norm3(axis).unwrap_or([0.0, 0.0, 1.0]);
+        return [axis[0], axis[1], axis[2], 0.0];
+    }
+    let s = ((1.0 + dot) * 2.0).sqrt();
+    let inv = 1.0 / s;
+    let q = [cross[0] * inv, cross[1] * inv, cross[2] * inv, s * 0.5];
+    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
+}
+
+/// `G^-1 q G` -- a rotation stated in the rig's frame, written in the frame of
+/// a joint whose bind global rotation is `g`.
+fn local_of_world(g: [f32; 4], q: [f32; 4]) -> [f32; 4] {
+    quat_mul(quat_mul(quat_conj(g), q), g)
+}
+
+/// The conjugate of a unit quaternion -- its inverse.
+fn quat_conj(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// Rotate a vector by a unit quaternion. Products and sums only.
+fn rotate_vec(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let t = [
+        2.0 * (y * v[2] - z * v[1]),
+        2.0 * (z * v[0] - x * v[2]),
+        2.0 * (x * v[1] - y * v[0]),
+    ];
+    [
+        v[0] + w * t[0] + y * t[2] - z * t[1],
+        v[1] + w * t[1] + z * t[0] - x * t[2],
+        v[2] + w * t[2] + x * t[1] - y * t[0],
+    ]
 }
 
 /// Bind-pose global translations, composed down the parent chain. Multiplies and
@@ -388,10 +584,27 @@ fn slide(r: &Rig) -> AnimClip {
 /// * **the head is turned further still** (35° / 40°), because the thing the
 ///   player is looking at is down the wall, not into it.
 ///
-/// The near arm folds across the chest — 70° at the shoulder for a crouch, 60°
-/// with the shoulder rolled 15° into the wall for a stand — which is where a
-/// weapon is held when it is not being aimed, and it is what keeps the elbow
-/// out of the surface the character is leaning on.
+/// The near arm folds across the chest — which is where a weapon is held when
+/// it is not being aimed, and what keeps the elbow out of the surface the
+/// character is leaning on.
+///
+/// # The arms and the legs are AIMED, and that is a repair
+///
+/// Every rotation this clip writes is a delta in the JOINT's own bind frame,
+/// and the first cut chose the axis by hand: `qx` for a shoulder lift, `qx` for
+/// a hip fold, `qx` for a knee. On a UE-derived rig — which is every rig this
+/// engine imports — a bone's local **X runs down its own length**, measured on
+/// the island's shipped hero: `upperarm_l`'s local X reaches world
+/// (0.61, -0.79, 0.03), which is its shoulder-to-elbow direction, and
+/// `thigh_l`'s reaches (-0.05, 1.00, 0.02), which is straight up the femur. So
+/// every one of those angles was a **twist about the bone**, not a fold of it:
+/// the arms hung at the sides in the demo loop's frames (carried 184) and the
+/// crouch was carried entirely by the pelvis translation.
+///
+/// [`Rig::aim`] replaces the guess with the rig's own answer: the clip states
+/// where a bone should POINT, in the rig's frame, and the minimal-arc rotation
+/// that gets it there is conjugated into the joint's own. Nothing here now
+/// assumes which local axis is which.
 ///
 /// The breath is the same 2° chest oscillation the prone idle carries, so a
 /// character holding cover is not a photograph. `apply_breath`'s own additive
@@ -451,102 +664,166 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
     let of = |j: u16, q: [f32; 4]| -> [f32; 4] { quat_mul(r.bind_rot[j as usize], q) };
     let of_opt = |j: Option<u16>, q: [f32; 4]| -> [f32; 4] { j.map(|j| of(j, q)).unwrap_or(q) };
 
-    // The chest: a pitch, a twist toward the surface, and the breath.
+    // The chest: a pitch, a twist toward the surface, and the breath — stated
+    // in the RIG's frame and written in the chest's own (`Rig::in_frame_of`).
+    //
+    // A pitch about `+X` tips the sternum toward `+Z`, and a twist about `+Y`
+    // turns it toward `+X`, which is the character's left and therefore the
+    // wall. Written as `qx`/`qy` on the joint they were a twist and a bend
+    // respectively: the last spine joint's own local X runs UP the spine on
+    // this rig (measured: `spine_05` local X reaches world (0.00, 0.98, -0.19)),
+    // so the two axes were each other's.
     let pitch: f64 = if low { 12.0 } else { -8.0 };
     let twist: f64 = if low { 18.0 } else { 22.0 };
     let sway: f64 = if moving { 10.0 } else { 0.0 };
+    // The chest's rotation IN THE RIG'S FRAME, per key — the arms hang under
+    // it, so they need it as their parent.
+    let chest_world = |i: usize| -> [f32; 4] {
+        let breath = 2.0 * psin64(ph(i));
+        quat_mul(
+            qx((pitch + breath).to_radians()),
+            qy((twist + sway * psin64(ph(i))).to_radians()),
+        )
+    };
     rot1(
         &mut tracks,
         r.chest(),
         &times,
         (0..=n)
-            .map(|i| {
-                let breath = 2.0 * psin64(ph(i));
-                of(
-                    r.chest(),
-                    quat_mul(
-                        qx((pitch + breath).to_radians()),
-                        qy((twist + sway * psin64(ph(i))).to_radians()),
-                    ),
-                )
-            })
+            .map(|i| of(r.chest(), r.in_frame_of(r.chest(), chest_world(i))))
             .collect(),
     );
 
-    // The near (left) arm folds across the chest; the far arm braces.
-    let near_up: f64 = if low { 70.0 } else { 60.0 };
-    rot(
-        &mut tracks,
-        r.upper_arm[0],
-        &times,
-        (0..=n)
-            .map(|_| {
-                of_opt(
-                    r.upper_arm[0],
-                    quat_mul(qx((-near_up).to_radians()), qz(15f64.to_radians())),
-                )
-            })
-            .collect(),
-    );
-    rot(
-        &mut tracks,
-        r.lower_arm[0],
-        &times,
-        (0..=n)
-            .map(|_| of_opt(r.lower_arm[0], qx((-80f64).to_radians())))
-            .collect(),
-    );
-    rot(
-        &mut tracks,
-        r.upper_arm[1],
-        &times,
-        (0..=n)
-            .map(|_| of_opt(r.upper_arm[1], qx((-25f64).to_radians())))
-            .collect(),
-    );
-    rot(
-        &mut tracks,
-        r.lower_arm[1],
-        &times,
-        (0..=n)
-            .map(|_| of_opt(r.lower_arm[1], qx((-45f64).to_radians())))
-            .collect(),
-    );
+    // ── THE ARMS, POINTED RATHER THAN ROTATED ───────────────────────────────
+    //
+    // The near (left) arm folds across the chest and the far arm braces, and
+    // both are said as DIRECTIONS in the rig's frame — down, forward, and how
+    // far across the body's centre line — because an angle about a bone's own
+    // axis is a twist and not a fold (`Rig::bind_gq`, and carried 184).
+    //
+    // Which way "across the chest" is comes off the RIG (`Rig::across_sign`):
+    // the two rigs in this tree put the left shoulder on opposite sides of the
+    // origin, and a hard-coded sign folds one arm and throws the other wide.
+    let arm_dir = |side: usize, lift_deg: f64, across_deg: f64| -> [f64; 3] {
+        let side_sign = r.across_sign[side];
+        let (l, a) = (lift_deg.to_radians(), across_deg.to_radians());
+        [
+            side_sign * psin64(l) * psin64(a),
+            -pcos64(l),
+            psin64(l) * pcos64(a),
+        ]
+    };
+    // The near arm's own two angles. A stand keeps the elbow a little higher
+    // and a little further across than a crouch does: behind a wall the weapon
+    // rides at the chest, behind a bonnet it rides lower.
+    let (near_lift, near_across) = if low { (34.0, 26.0) } else { (30.0, 30.0) };
+    let (near_fore_lift, near_fore_across) = if low { (86.0, 66.0) } else { (84.0, 72.0) };
+    // Each arm is one chain: the shoulder aims under the CHEST, and the elbow
+    // aims under the shoulder's own answer.
+    let mut arm_local: [[Vec<[f32; 4]>; 2]; 2] = Default::default();
+    for i in 0..=n {
+        for (side, slot) in arm_local.iter_mut().enumerate() {
+            // The chest is the arms' ancestor on a MetaHuman; whether it is on
+            // any given rig is a question about that rig.
+            let parent = if r.is_ancestor(r.chest(), r.upper_arm[side]) {
+                chest_world(i)
+            } else {
+                QUAT_ID
+            };
+            let (lift, across, fore_lift, fore_across) = if side == 0 {
+                (near_lift, near_across, near_fore_lift, near_fore_across)
+            } else {
+                (22.0, 12.0, 58.0, 28.0)
+            };
+            let (upper_world, upper_local) = r.aim_under(
+                parent,
+                r.upper_arm[side],
+                r.lower_arm[side],
+                arm_dir(side, lift, across),
+            );
+            let (_, lower_local) = r.aim_under(
+                quat_mul(parent, upper_world),
+                r.lower_arm[side],
+                r.hand[side],
+                arm_dir(side, fore_lift, fore_across),
+            );
+            slot[0].push(of_opt(r.upper_arm[side], upper_local));
+            slot[1].push(of_opt(r.lower_arm[side], lower_local));
+        }
+    }
+    for (side, slot) in arm_local.iter_mut().enumerate() {
+        rot(
+            &mut tracks,
+            r.upper_arm[side],
+            &times,
+            std::mem::take(&mut slot[0]),
+        );
+        rot(
+            &mut tracks,
+            r.lower_arm[side],
+            &times,
+            std::mem::take(&mut slot[1]),
+        );
+    }
 
-    // The legs. Standing still they take the stance; moving, they side-step —
-    // alternating hip abduction with a knee fold, which is a shuffle rather
-    // than a walk, because a cover slide never crosses its feet.
-    let hip_fold: f64 = if low { 55.0 } else { 0.0 };
-    let knee_fold: f64 = if low { 75.0 } else { 0.0 };
-    for side in 0..2 {
-        let phase = if side == 0 { 0.0 } else { std::f64::consts::PI };
-        let step_amp = if moving { 22.0 } else { 0.0 };
-        let knee_amp = if moving { 30.0 } else { 0.0 };
+    // ── THE LEGS, POINTED THE SAME WAY ──────────────────────────────────────
+    //
+    // Standing still they take the stance; moving, they side-step — alternating
+    // hip abduction with a knee fold, which is a shuffle rather than a walk,
+    // because a cover slide never crosses its feet.
+    //
+    // The thigh is aimed forward-and-down by the hip fold and the shin BACK
+    // from it by the knee fold, so the two together are a crouch a viewer can
+    // see. Written as `qx` on the joints they were twists about the femur and
+    // the tibia (`thigh_l` local X reaches world (-0.05, 1.00, 0.02) — straight
+    // up, which is the leg's own length), and a crouch made of two twists is a
+    // character standing to attention with its knees rolled.
+    let hip_fold: f64 = if low { 55.0 } else { 4.0 };
+    let knee_fold: f64 = if low { 75.0 } else { 4.0 };
+    // A leg direction: `fold` forward from straight down, then `abduct` out to
+    // the character's own left (`+X`) — one spelling for both bones.
+    let leg_dir = |fold_deg: f64, abduct_deg: f64| -> [f64; 3] {
+        let (f, a) = (fold_deg.to_radians(), abduct_deg.to_radians());
+        [pcos64(f) * psin64(a), -pcos64(f) * pcos64(a), psin64(f)]
+    };
+    let mut leg_local: [[Vec<[f32; 4]>; 2]; 2] = Default::default();
+    for i in 0..=n {
+        for (side, slot) in leg_local.iter_mut().enumerate() {
+            let phase = if side == 0 { 0.0 } else { std::f64::consts::PI };
+            let step_amp = if moving { 22.0 } else { 0.0 };
+            let knee_amp = if moving { 30.0 } else { 0.0 };
+            let abduct = step_amp * psin64(ph(i) + phase);
+            let knee = knee_fold + knee_amp * (0.5 - 0.5 * pcos64(ph(i) + phase));
+            // The pelvis is TRANSLATED and never rotated, so a thigh's parent
+            // is the identity; the shin's is the thigh's own answer.
+            let (thigh_world, thigh_local) = r.aim_under(
+                QUAT_ID,
+                r.thigh[side],
+                r.calf[side],
+                leg_dir(hip_fold, abduct),
+            );
+            let (_, calf_local) = r.aim_under(
+                thigh_world,
+                r.calf[side],
+                r.foot[side],
+                leg_dir(hip_fold - knee, abduct),
+            );
+            slot[0].push(of_opt(r.thigh[side], thigh_local));
+            slot[1].push(of_opt(r.calf[side], calf_local));
+        }
+    }
+    for (side, slot) in leg_local.iter_mut().enumerate() {
         rot(
             &mut tracks,
             r.thigh[side],
             &times,
-            (0..=n)
-                .map(|i| {
-                    of_opt(
-                        r.thigh[side],
-                        quat_mul(
-                            qx((-hip_fold).to_radians()),
-                            qz((step_amp * psin64(ph(i) + phase)).to_radians()),
-                        ),
-                    )
-                })
-                .collect(),
+            std::mem::take(&mut slot[0]),
         );
         rot(
             &mut tracks,
             r.calf[side],
             &times,
-            (0..=n)
-                .map(|i| {
-                    qx((knee_fold + knee_amp * (0.5 - 0.5 * pcos64(ph(i) + phase))).to_radians())
-                })
-                .collect(),
+            std::mem::take(&mut slot[1]),
         );
     }
     let name = match (low, moving) {
@@ -948,6 +1225,85 @@ mod tests {
         let a = author_clips(&rig).unwrap();
         let b = author_clips(&rig).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// **THE COVER STANCE FOLDS AN ARM AND BENDS A KNEE** — the arm carried 184
+    /// asked for, and the one the wave did not have.
+    ///
+    /// The wave's own anti-vacuity arm compares the cover pose against the
+    /// crouch idle and passes when 55 joints differ. A pose made entirely of
+    /// TWISTS about the bones' own long axes differs on 55 joints too: that is
+    /// what `qx` on an `upperarm_l` whose local X runs shoulder-to-elbow
+    /// produces, it is what the shipped clips were, and it is why the demo
+    /// loop's frames show a hero standing to attention behind a wall.
+    ///
+    /// So this measures the POSE, in world space, on two things a twist cannot
+    /// fake:
+    ///
+    /// * the near HAND crosses toward the body's centre line — the fold;
+    /// * the KNEE of a low cover is FORWARD of both the hip and the ankle — the
+    ///   bend. A femur rolled about its own length leaves the knee exactly
+    ///   where the bind put it.
+    #[test]
+    fn the_cover_stance_folds_the_near_arm_and_bends_the_knee() {
+        let rig = biped();
+        let set = author_clips(&rig).expect("the mannequin has a role table");
+        let roles = rig.role_index();
+        let bind = crate::pose::Pose::rest(&rig.skeleton);
+        let g_bind = crate::pose::global_transforms(&rig.skeleton, &bind);
+        let at = |g: &[glam::Mat4], j: u16| -> glam::Vec3 {
+            g[j as usize].to_scale_rotation_translation().2
+        };
+        let joint = |k: BoneRoleKind, side: BoneSide| roles.first(k, side).expect("a biped bone");
+        let pelvis = joint(BoneRoleKind::Pelvis, BoneSide::Center);
+        let shoulder = joint(BoneRoleKind::UpperArm, BoneSide::Left);
+        let hand = joint(BoneRoleKind::Hand, BoneSide::Left);
+        let hip = joint(BoneRoleKind::Thigh, BoneSide::Left);
+        let knee = joint(BoneRoleKind::Calf, BoneSide::Left);
+        let ankle = joint(BoneRoleKind::Foot, BoneSide::Left);
+
+        for name in ["INF_Cover_High_Idle", "INF_Cover_Low_Idle"] {
+            let clip = &set
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} is not in the authored set"))
+                .1;
+            let pose = crate::pose::sample_clip(&rig.skeleton, clip, 0.0, true);
+            let g = crate::pose::global_transforms(&rig.skeleton, &pose);
+            // ── the fold. `across` is how far the hand is from the body's own
+            //    centre line, measured on the axis the shoulders are spread
+            //    along, so it needs no assumption about which way that is.
+            let axis = (at(&g_bind, shoulder) - at(&g_bind, pelvis)).x.signum();
+            let before = (at(&g_bind, hand).x - at(&g_bind, pelvis).x) * axis;
+            let after = (at(&g, hand).x - at(&g, pelvis).x) * axis;
+            println!(
+                "{name}: the near hand is {before:.4} m out at bind and {after:.4} m in the stance"
+            );
+            assert!(
+                after < 0.0 && after < before - 0.5,
+                "{name}: the near hand is {after:.4} m from the centre line and bind has it\
+                 at {before:.4} m -- it is twisted, not folded"
+            );
+            // ── the bend, on the low stance only: a stand has straight legs.
+            if name == "INF_Cover_Low_Idle" {
+                let (h, k, a) = (at(&g, hip), at(&g, knee), at(&g, ankle));
+                let mid = (h.z + a.z) * 0.5;
+                println!(
+                    "{name}: hip z {:.4}, knee z {:.4}, ankle z {:.4}",
+                    h.z, k.z, a.z
+                );
+                assert!(
+                    (k.z - mid).abs() > 0.05,
+                    "{name}'s knee sits {:.4} m from the hip-ankle midpoint — the leg is \
+                     straight and the crouch is the pelvis translation alone",
+                    k.z - mid
+                );
+                assert!(
+                    at(&g, pelvis).y < at(&g_bind, pelvis).y - 0.10,
+                    "{name} did not drop the pelvis"
+                );
+            }
+        }
     }
 
     /// **A rig with no role table refuses by name** rather than authoring a set
