@@ -27,6 +27,18 @@ param(
     # measured drop and wrote down "the shipped player has no teleport" -- which
     # is a limitation of THIS SCRIPT, not of the game.
     [string]$SpawnAt = "",
+    # **THE HEADING THAT GOES WITH THE PLACEMENT** (carried 186, closed by the
+    # COV1 audit). A `;`-separated list of yaw degrees, one per `-SpawnAt`
+    # entry, folded into the same `INF_PIE_SPAWN_AT` string as an `/yaw` suffix
+    # — one env door, two switches.
+    #
+    # Why it had to exist: a placement set a POSITION and nothing else, so a
+    # scripted leg reached wherever the hero happened to be looking, and a
+    # character standing still in `VelocityDirection` does not turn its body
+    # under the mouse. The COV1 loop's cover leg swept SIXTEEN presses through
+    # 360 degrees and held `W` to face a wall four metres in front of it. With
+    # a heading the leg presses once.
+    [string]$FaceAt = "",
     # A `.inf_cloth` GUID to put on the hero for the session, `INF_PIE_WEAR_CLOTH`.
     # The cape wave CHAR1b.2 authored lives in the island's Content and is worn
     # in the gate; carried 137 is that it is not in the committed level, and this
@@ -207,7 +219,23 @@ $env:INF_PIE_HERO_LOG = $heroCsv
 # The dev-only preview doors, set only when asked for. `Remove-Item env:` rather
 # than an empty string so a session that did not ask for one is a session in
 # which the variable does not exist.
-if ($SpawnAt -ne "") { $env:INF_PIE_SPAWN_AT = $SpawnAt; Say "spawn override: $SpawnAt" }
+if ($SpawnAt -ne "") {
+    # Fold `-FaceAt` into the placement entries. A missing yaw leaves the entry
+    # exactly as it was, so a caller that gives fewer headings than placements
+    # gets the old behaviour on the rest rather than a parse error.
+    $spawnValue = $SpawnAt
+    if ($FaceAt -ne "") {
+        $yaws = @($FaceAt.Split(";"))
+        $entries = @($SpawnAt.Split(";"))
+        for ($i = 0; $i -lt $entries.Count; $i++) {
+            if ($i -lt $yaws.Count -and $yaws[$i].Trim() -ne "") {
+                $entries[$i] = "$($entries[$i])/$($yaws[$i].Trim())"
+            }
+        }
+        $spawnValue = ($entries -join ";")
+    }
+    $env:INF_PIE_SPAWN_AT = $spawnValue; Say "spawn override: $spawnValue"
+}
 else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction SilentlyContinue }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
 else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction SilentlyContinue }
@@ -972,9 +1000,15 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
     #     grammar wall.
     #
     #     T is the cover key (scancode 0x14).
+    #     **The stations are the CENSUS's own**, and the low one is new (the
+    #     COV1 audit). The wave's "low" station was 7.3 m from its own
+    #     placement and its rows read `High` — it photographed the high shop
+    #     front a second time. `the_cover_census_over_the_island` now prints
+    #     WHERE the five LOW surfaces are, and this is one of them: a
+    #     0.976 m structure of `Harbour City Shop -1,0`.
     $coverStations = @(
-        @{ Name = "high"; X = -1774.0; Z = 2034.0; Yaw = 90 },
-        @{ Name = "low";  X = -1781.3; Z = 2034.0; Yaw = 68 }
+        @{ Name = "high"; X = -1798.0; Z = 2066.0; Yaw = 135 },
+        @{ Name = "low";  X = -1774.0; Z = 2090.0; Yaw = 0 }
     )
     foreach ($st in $coverStations) {
         # **`Wait-ForHero` emits its `Say` lines into the pipeline**, so what an
@@ -1005,6 +1039,9 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # presses` while the wall was four metres in front of it. Walking at the
         # wall is also how a player takes cover, and it closes the probe's own
         # 0.90 m reach.
+        # **The placement now carries the heading** (`-FaceAt`), so the first
+        # press is aimed. The sweep below stays as the fallback it always
+        # should have been, and the log says which of the two took.
         $tookCover = $false
         for ($k = 0; $k -lt 16 -and -not $tookCover; $k++) {
             [InfInput]::Down(0x11)
@@ -1017,6 +1054,7 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
             if (-not $tookCover) { for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 } }
         }
         if (-not $tookCover) { Say "NO COVER taken at the $($st.Name) station in sixteen presses"; continue }
+        Say "  cover taken on press $($k) at the $($st.Name) station"
         # The class, off the log rather than off the station's name.
         $row = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
         Say "  in cover: class $($row[17]) side $($row[18]) peek $($row[19]) mode $($row[5])"
@@ -1059,13 +1097,35 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         [InfInput]::RightUp()
         # THE VAULT, out of a LOW cover only: one Space press with no stick.
         if ($st.Name -eq "low" -and $stillIn) {
+            # **THE VAULT IS PROVEN BY THE POSITION, NOT BY A SLEEP** (the COV1
+            # audit). The wave's `64-cover-vaulted.png` was a `Start-Sleep 900`
+            # and a screenshot, and its pixels are the same walk-away as
+            # `60-cover-low.png` four seconds earlier — the mantle trigger
+            # above never fired in that session and nothing said so. Now the
+            # BEFORE and AFTER positions are read out of the hero log and
+            # printed, so the caption is a number.
             Say "COVER (low): vaulting over it with Space"
+            $beforeVault = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
             [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
-            Wait-ForHero -Csv $heroCsv -What "the vault out of cover" -TimeoutS 2.0 `
+            $vaulted = @(Wait-ForHero -Csv $heroCsv -What "the vault out of cover" -TimeoutS 3.0 `
                 -Predicate { param($c) $c[11] -match "^mantle" } `
-                -Out (Join-Path $OutDir "63-cover-vault.png") | Out-Null
-            Start-Sleep -Milliseconds 900
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "64-cover-vaulted.png") | ForEach-Object { Say $_ }
+                -Out (Join-Path $OutDir "63-cover-vault.png"))[-1]
+            if (-not $vaulted) { Say "  NO TRAVERSAL started out of the low cover" }
+            # …and the frame on the far side is triggered on LEAVING the
+            # traversal rather than on a stopwatch.
+            Wait-ForHero -Csv $heroCsv -What "the far side" -TimeoutS 4.0 `
+                -Predicate { param($c) ($c[11] -notmatch "^mantle") -and ($c[5] -ne "Cover") } `
+                -Out (Join-Path $OutDir "64-cover-vaulted.png") | Out-Null
+            $afterVault = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+            $dx = [double]$afterVault[2] - [double]$beforeVault[2]
+            $dy = [double]$afterVault[3] - [double]$beforeVault[3]
+            $dz = [double]$afterVault[4] - [double]$beforeVault[4]
+            $planar = [math]::Sqrt($dx * $dx + $dz * $dz)
+            $vaultSaid = "  the vault moved the capsule {0:N3} m in the ground plane and " +
+                "{1:N3} m vertically: ({2:N2}, {3:N2}, {4:N2}) -> ({5:N2}, {6:N2}, {7:N2})"
+            Say ($vaultSaid -f $planar, $dy,
+                [double]$beforeVault[2], [double]$beforeVault[3], [double]$beforeVault[4],
+                [double]$afterVault[2], [double]$afterVault[3], [double]$afterVault[4])
         }
         # LEAVING: the same key again, and the frame is the hero standing clear.
         Say "COVER ($($st.Name)): leaving with T"
@@ -1084,15 +1144,26 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
     # placement, and the kerb's refusal is proven where it can be: the gate's
     # `a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it` (14
     # labelled slabs, none coverable) and the fixture's 0.15 m row.
-    Say "COVER (last press): pressing T wherever the tour left the hero"
+    Say "COVER (kerb): the last placement is a kerb the gate found"
+    # **A KERB STATION OF ITS OWN** (the COV1 audit). The wave's leg pressed
+    # wherever the tour happened to leave the hero, which in its own session was
+    # beside a shop front — so `66-cover-kerb-refused.png` is a picture of a
+    # character TAKING cover and the wave said so in its report. The kerb the
+    # gate's `a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it`
+    # stands in front of has a placement and a heading now, and the frame is
+    # named for the outcome either way.
+    $kerbReached = @(Wait-ForHero -Csv $heroCsv -What "the kerb station" -TimeoutS 180 `
+        -Predicate { param($c) ([math]::Abs([double]$c[2] - (-1758.15)) -lt 3.0) -and ([math]::Abs([double]$c[4] - (1999.55)) -lt 3.0) })[-1]
+    if (-not $kerbReached) { Say "  the kerb station was never reached; pressing where the tour left the hero" }
     Restore-PlayerFocus "at the kerb"
+    Stand-Up "before the kerb press" | Out-Null
     $beforeKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
     [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
     Start-Sleep -Milliseconds 900
     $afterKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
     Say "  last press: mode $($beforeKerb[5]) -> $($afterKerb[5]), class $($afterKerb[17])"
     $outcome = if ($afterKerb[5] -eq "Cover") { "took-cover" } else { "refused" }
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "66-cover-last-press-$outcome.png") | ForEach-Object { Say $_ }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "66-cover-kerb-$outcome.png") | ForEach-Object { Say $_ }
 
     # 2. A MEASURED DROP. The player puts the hero above the road; the frame that
     #    matters is the one where the machine is in a landing, so it is triggered
