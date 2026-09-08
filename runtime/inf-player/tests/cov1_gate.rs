@@ -787,6 +787,36 @@ fn the_islands_hero_crouches_behind_low_cover_and_stands_against_high() {
             "the two classes produced the same capsule ({a:.4} and {b:.4}) — the stance is not \
              coming from the surface"
         );
+        // **AND OFF THE JOINTS** (the COV1 audit). Everything above this line
+        // reads the COLLIDER, which `half_height_for` resizes from the mode and
+        // the class — so a hero in its bind pose, snapped to a wall with its
+        // capsule shrunk, passes every assertion in this arm. The head's height
+        // above its own feet is the POSE's, and it was printed rather than
+        // asserted. The `Low` clip drops the pelvis by 38 % of hip height, so a
+        // crouched head is a long way below a standing one; two heads at the
+        // same height is a capsule that resized around a character that did
+        // not move.
+        let (want_a, head_a) = (measured[0].0, measured[0].3);
+        let (want_b, head_b) = (measured[1].0, measured[1].3);
+        let (low_head, high_head) = if want_a == CoverClass::Low {
+            (head_a, head_b)
+        } else {
+            (head_b, head_a)
+        };
+        let _ = want_b;
+        println!(
+            "  the head sits {low_head:.4} m above the feet crouched and {high_head:.4} m \
+             standing"
+        );
+        assert!(
+            low_head.is_finite() && high_head.is_finite(),
+            "one of the two stances had no head joint to read"
+        );
+        assert!(
+            low_head < high_head - 0.15,
+            "the crouched head is {low_head:.4} m above the feet and the standing one \
+             {high_head:.4} m — the capsule resized and the POSE did not"
+        );
     }
 }
 
@@ -2066,6 +2096,118 @@ fn swat_prefers_the_cover_it_can_shoot_around() {
     assert!(
         out_samples * 2 < n as usize,
         "an officer is leaned out for {out_samples} of {n} samples, which is not taking cover"
+    );
+}
+
+/// **WHAT COVER COSTS THE ISLAND'S FIXED STEP** — the audit's cost row.
+///
+/// The wave reports its cost as **counters** (shape casts: 0 idle, 1 on the
+/// press, up to 25 in cover) and those are the right numbers for a budget that
+/// has to hold with a thousand NPCs. They are not the number the campaign keeps
+/// its budget in, which is the ISLAND's whole fixed step: **5726.5 µs** at
+/// `2e3538ee` (CHAR1b.2's audit, release, one walking character), the same
+/// baseline `char1c_gate::the_cameras_cost_on_the_island` is written against.
+///
+/// A character in cover re-probes every step and re-measures its extents (up to
+/// 22 casts, carried 187), so this is the one place in the wave where a cost
+/// could hide. Measured with the step profiler on, on the island, over the same
+/// 600 steps: walking, and held in cover at a façade.
+#[test]
+fn what_cover_costs_the_islands_fixed_step() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let move_phase = inf_player::step_profile::STEP_PHASE_NAMES
+        .iter()
+        .position(|n| *n == "character move")
+        .expect("the step profiler has a character-move phase");
+
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let Some(st) = find_station(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High).structure(),
+    ) else {
+        eprintln!("SKIP: the island offered no façade cover within 64 m — see the census");
+        return;
+    };
+
+    // ── walking, never in cover.
+    sim.set_step_profiling(true);
+    let (mut walk_move, mut walk_total, mut walk_casts) = (0.0f64, 0.0f64, 0u64);
+    const N: u32 = 600;
+    for _ in 0..N {
+        let ax: std::collections::BTreeMap<String, f32> = [("move_y".to_string(), 1.0f32)].into();
+        sim.step_once(RuntimeInput::default().with_axes(ax));
+        let p = sim.step_profile();
+        walk_move += p.ms[move_phase];
+        walk_total += p.total_ms();
+        walk_casts += u64::from(hero_cm(&sim, hero).runtime.cover.sweeps);
+    }
+
+    // ── in cover, held, at the station the search found.
+    hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
+    take_cover(&mut sim, hero, 60);
+    assert_eq!(
+        hero_cm(&sim, hero).mode,
+        MovementMode::Cover,
+        "the press did not take cover, so this measures a walk twice"
+    );
+    sim.set_step_profiling(true);
+    let (mut cover_move, mut cover_total, mut cover_casts, mut in_cover) =
+        (0.0f64, 0.0f64, 0u64, 0u32);
+    for _ in 0..N {
+        sim.step_once(RuntimeInput::default());
+        let p = sim.step_profile();
+        cover_move += p.ms[move_phase];
+        cover_total += p.total_ms();
+        let cm = hero_cm(&sim, hero);
+        cover_casts += u64::from(cm.runtime.cover.sweeps);
+        if cm.mode == MovementMode::Cover {
+            in_cover += 1;
+        }
+    }
+    let us = |ms: f64| ms / f64::from(N) * 1000.0;
+    println!(
+        "\n=== what cover costs the island's fixed step (600 steps each) ===\n  \
+         walking: character-move {:.2} µs, whole step {:.1} µs, {walk_casts} cover casts\n  \
+         in cover: character-move {:.2} µs, whole step {:.1} µs, {cover_casts} cover casts \
+         over {in_cover} steps in cover\n  the campaign's baseline is 5726.5 µs (CHAR1b.2's \
+         audit, release, one walking character)",
+        us(walk_move),
+        us(walk_total),
+        us(cover_move),
+        us(cover_total),
+    );
+    assert_eq!(
+        walk_casts, 0,
+        "a walking hero spent {walk_casts} cover shape casts"
+    );
+    assert!(
+        in_cover > N / 2,
+        "the hero left cover after {in_cover} of {N} steps, so the cover column measures a walk"
+    );
+    assert!(
+        cover_casts > 0,
+        "600 steps IN cover spent no shape casts — the re-probe is not running"
+    );
+    // The bound: re-probing every step is not allowed to double the step the
+    // whole island is paying for. A ratio rather than an absolute, because the
+    // absolute is this machine's.
+    assert!(
+        cover_total < walk_total * 1.5,
+        "a character in cover costs {:.1} µs a step against {:.1} µs walking",
+        us(cover_total),
+        us(walk_total)
     );
 }
 

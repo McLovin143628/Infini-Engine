@@ -567,6 +567,20 @@ impl SpawnOverride {
             return None;
         }
         let hero = inf_ecs::movement::camera_subject(sim.world())?;
+        // **The CAMERA turns with the character** (COV1 audit, carried 186).
+        //
+        // Without this the heading buys almost nothing: `intent_move` is in the
+        // AIM frame and the aim yaw is written from the camera every step, so a
+        // scripted `W` walks where the CAMERA points and `try_cover` probes
+        // there too. Setting the body alone leaves the two disagreeing for as
+        // long as the leg holds a key.
+        if let Some((_, _, Some(y))) = due {
+            let cam = sim.camera_mut();
+            cam.yaw_deg = y;
+            cam.pose.yaw_deg = y;
+            cam.seeded = false;
+            cam.arm_seeded = false;
+        }
         let mut said = String::new();
         {
             let w = sim.world_mut();
