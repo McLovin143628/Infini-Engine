@@ -2730,6 +2730,22 @@ pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec
         },
     ));
     set_tier_components(world, e, CrowdTier::Full, a);
+    // **AND THE CLOTHES** (wave OUTFIT1 AUDIT, finding F2). A driver is a person
+    // made of the level's own archetype and the archetype carries what that
+    // person has ON — so the body door has to take the same second step
+    // `step_crowd_banded` takes, or a level whose residents are dressed puts
+    // undressed, bald drivers on its streets.
+    //
+    // Measured on the island before this line: 239 society agents, every one of
+    // them `Far` and correctly wearing nothing, and ONE `CrowdAgent` at `Full`
+    // 106.9 m from the pawn that `set_tier_wearables` was never called for at
+    // all — because `step_crowd_banded` walks `CrowdPopulationRes::records` and
+    // a driver is deliberately not in it. Photographed at three metres: a
+    // MetaHuman body in white underwear with no hair.
+    //
+    // `Full` and not the car's tier, for `set_tier_components`' own reason one
+    // line up: a driver exists only while its car is `Full`.
+    set_tier_wearables(world, guid, CrowdTier::Full, a);
     e
 }
 

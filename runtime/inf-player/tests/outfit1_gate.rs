@@ -21,11 +21,24 @@
 //! * `the_crowds_wardrobe_is_deterministic_and_far_wears_nothing`
 //! * `the_committed_default_character_is_dressed`
 //! * `the_islands_wearables_carry_their_licence_on_disk`
-//! * `pie_equals_shipping_on_a_dressed_character`
+//! * `both_authoring_shapes_resolve_to_the_same_wearer` — a hierarchy child and
+//!   an `AttachedTo`, through the one Ring-0 door.
 //! * `what_a_wearable_costs` — draws, palette bytes and geometry.
 //! * `a_thousand_dressed_agents_cost_what_the_tier_says`
-//! * `the_combined_bodys_eyes_have_no_section_of_their_own` — clause 3's
-//!   REFUSAL, as a measurement that will go red the day the combine changes.
+//!
+//! …and the five the OUTFIT1 AUDIT added, each closing something the wave
+//! carried:
+//!
+//! * `a_fitted_garment_encloses_the_body_it_is_on` — item 166, on the geometry.
+//! * `the_eyes_have_a_section_of_their_own_and_it_is_not_skin` — item 167. It
+//!   REPLACES `the_combined_bodys_eyes_have_no_section_of_their_own`, which
+//!   asserted the refusal; the refusal rested on a box around a 289-vertex
+//!   island and the island splits.
+//! * `the_hair_cards_are_masked_by_the_grooms_own_coverage` — item 164.
+//! * `a_driver_wears_what_the_level_wears` — finding F2, the one the island's
+//!   own street showed and the gate's synthetic crowd could not.
+//! * `the_two_projectors_take_the_wearable_door` — finding F8's host half,
+//!   named for what it reads: two SOURCES.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -777,16 +790,20 @@ fn the_islands_wearables_carry_their_licence_on_disk() {
 // (5) PIE == SHIPPING
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **The two hosts wear the same clothes the same way.**
+/// **Both authoring shapes resolve to the same wearer** — a hierarchy child and
+/// an `AttachedTo`.
 ///
-/// The MIRROR pin `projector_mirror` makes is a source one; this is the value.
-/// Both hosts resolve a wearable's pose through the ONE Ring-0 door
-/// `inf_ecs::wearable::pose_source`, so the question a gate can ask is whether
-/// that door answers the same thing about the same world twice — including
-/// through the `AttachedTo` shape the editor never writes and a runtime equip
-/// does.
+/// # Its name used to claim more than it reads (wave OUTFIT1 AUDIT, finding F8)
+///
+/// It was called `pie_equals_shipping_on_a_dressed_character`, and it calls ONE
+/// Ring-0 function on two worlds. That is worth holding — the editor writes a
+/// child and a runtime equip writes an `AttachedTo`, and a door that answered
+/// differently for the two would draw a garment in its own bind pose on exactly
+/// one of the paths — but it is not a comparison of two HOSTS and no name in
+/// this file may say it is. The host half is
+/// `the_two_projectors_take_the_wearable_door`, below.
 #[test]
-fn pie_equals_shipping_on_a_dressed_character() {
+fn both_authoring_shapes_resolve_to_the_same_wearer() {
     let world = dressed_world();
     let hero = world.entity_of(HERO).expect("the hero");
     for slot in [OUTFIT_SLOT, HAIR_SLOT] {
@@ -1399,4 +1416,243 @@ fn the_hair_cards_are_masked_by_the_grooms_own_coverage() {
         checked += 1;
     }
     assert!(checked > 0, "no hair material was there to check");
+}
+
+/// **A DRIVER WEARS WHAT THE LEVEL WEARS** — finding F2 of the OUTFIT1 audit,
+/// closed.
+///
+/// # The defect, measured on the island before the fix
+///
+/// `step_crowd_banded` walks `CrowdPopulationRes::records` and calls
+/// `set_tier_wearables` for each — so every RESIDENT is dressed by its tier. A
+/// traffic driver is deliberately **not** a record (`crowd::spawn_body`'s own
+/// doc: it has no route, no schedule and no tier of its own), so that walk never
+/// reached it and nothing put its clothes on. Measured on
+/// `VancouverIsland.inf_lvl` at 900 steps: 239 society agents, every one of them
+/// `Far` and correctly wearing nothing, and ONE `CrowdAgent` at `Full` 106.9 m
+/// from the pawn — named `Driver`, `in_population false` — with **no wearable
+/// entities at all**. Photographed at three metres: a MetaHuman body in white
+/// underwear with no hair, walking down the showcase's own street.
+///
+/// # What this arm reads
+///
+/// The WORLD and the PROJECTOR, on both halves:
+///
+/// * the committed starter character (CI): a driver built from the level's own
+///   archetype has both wearable children, they are visible, and the projector's
+///   skinned instance list really contains their meshes — 3 draws for the hero
+///   alone, 6 with the driver beside it;
+/// * the island's own document, through `society::level_archetype` — the same
+///   door `sync_society` plans a resident's day with — so the arm fails if the
+///   island ever stops offering a dressed body.
+///
+/// Mutation: delete `set_tier_wearables` from `crowd::spawn_body` and both
+/// halves go red.
+#[test]
+fn a_driver_wears_what_the_level_wears() {
+    let i = ids();
+    let driver = Uuid::from_u128(0x0FF1_7000_D817_0001);
+
+    // ── the committed half, on CI ────────────────────────────────────────────
+    let (mut sim, skinned) = dressed_sim();
+    if skinned
+        .resolve_skinned(
+            &SkeletalMesh {
+                mesh: Some(asset(i.mesh)),
+                skeleton: Some(asset(i.skeleton)),
+            },
+            None,
+            None,
+            None,
+        )
+        .is_none()
+    {
+        eprintln!("SKIP: the committed starter body did not resolve");
+        return;
+    }
+    sim.step_once(RuntimeInput::default());
+    let before = project(&sim, &skinned).skinned.len();
+    let archetype = inf_ecs::society::level_archetype(sim.world());
+    assert!(
+        archetype.outfit.is_some() && archetype.hair.is_some(),
+        "the level's own archetype carries no clothes, so a dressed driver would \
+         be vacuous"
+    );
+    inf_ecs::crowd::spawn_body(
+        sim.world_mut(),
+        driver,
+        &archetype,
+        DVec3::new(2.0, 1.0, 0.0),
+    );
+    sim.world_mut().mark_dirty();
+    sim.world_mut().propagate();
+    let worn = inf_ecs::wearable::wearables_of(sim.world(), driver);
+    println!(
+        "a driver built from the level's archetype wears {} thing(s); skinned \
+         draws {before} -> {}",
+        worn.len(),
+        project(&sim, &skinned).skinned.len()
+    );
+    assert_eq!(
+        worn.len(),
+        2,
+        "a traffic driver is a person made of the level's own archetype and it \
+         went out in {} thing(s) — `spawn_body` is not taking the same second \
+         step `step_crowd_banded` takes",
+        worn.len()
+    );
+    // …and they are DRAWN, which is the half a world assertion cannot see.
+    let scene = project(&sim, &skinned);
+    assert_eq!(
+        scene.skinned.len(),
+        before + 3,
+        "the driver added {} skinned draw(s) rather than a body and its two \
+         wearables — the clothes exist in the world and the projector is not \
+         drawing them",
+        scene.skinned.len() - before
+    );
+    for (label, mesh) in [("outfit", i.outfit), ("hair", i.hair)] {
+        let sm = SkeletalMesh {
+            mesh: Some(asset(mesh)),
+            skeleton: Some(asset(i.skeleton)),
+        };
+        let want = skinned
+            .resolve_skinned(&sm, None, None, None)
+            .expect("the committed garment resolves")
+            .key;
+        let n = scene
+            .skinned
+            .iter()
+            .filter(|inst| skinned_key(&scene, &skinned, inst) == Some(want))
+            .count();
+        assert_eq!(
+            n, 2,
+            "{n} instance(s) draw the {label} — the hero's and the driver's is two"
+        );
+    }
+
+    // ── and the island's own document ────────────────────────────────────────
+    let Some(content) = island_project() else {
+        eprintln!("SKIP the island half: no island project — local-only content");
+        return;
+    };
+    let lvl = content.join("VancouverIsland.inf_lvl");
+    let Ok(bytes) = std::fs::read(&lvl) else {
+        eprintln!("SKIP the island half: no built level");
+        return;
+    };
+    let level = inf_scene::decode(&bytes).expect("the island level decodes");
+    let mut world = inf_player::level::populate_world(level.entities);
+    world.propagate();
+    let a = inf_ecs::society::level_archetype(&world);
+    println!(
+        "the island offers outfit {:?} hair {:?}",
+        a.outfit.map(|w| w.mesh),
+        a.hair.map(|w| w.mesh)
+    );
+    assert!(
+        a.outfit.is_some() && a.hair.is_some(),
+        "the island's own archetype carries no clothes, so every driver and every \
+         resident on it goes out bare"
+    );
+    inf_ecs::crowd::spawn_body(&mut world, driver, &a, DVec3::new(0.0, 0.0, 0.0));
+    world.mark_dirty();
+    world.propagate();
+    let worn = inf_ecs::wearable::wearables_of(&world, driver);
+    let visible = worn
+        .iter()
+        .filter(|g| {
+            world
+                .entity_of(**g)
+                .and_then(|e| {
+                    world
+                        .world()
+                        .get::<inf_ecs::components::ComputedVisibility>(e)
+                })
+                .map(|c| c.0)
+                .unwrap_or(false)
+        })
+        .count();
+    println!(
+        "the island's driver wears {} thing(s), {visible} visible",
+        worn.len()
+    );
+    assert_eq!(
+        worn.len(),
+        2,
+        "the island's own driver is wearing {} thing(s)",
+        worn.len()
+    );
+    assert_eq!(
+        visible, 2,
+        "the island's driver has its clothes and {visible} of them are visible — \
+         a wearable the visibility chain drops is a wearable no projector draws"
+    );
+}
+
+/// **THE TWO HOSTS TAKE THE WEARABLE DOOR, AND READ THE WEARER** — the host half
+/// of finding F8, named for what it reads: two SOURCES.
+///
+/// # Why a source pin and not a value comparison
+///
+/// The player's projector is `inf_player::render::project_scene_full`, a pure
+/// function of a `RuntimeSim`; the editor's is
+/// `inf_viewport::host::EngineHost::rebuild_scene`, a method on a live GPU host
+/// with a surface, a device and a renderer. There is no headless door onto the
+/// second, so the two cannot be handed one world and compared value for value
+/// from a test — which is exactly why `projector_mirror` exists and why it pins
+/// SOURCE. This arm is that pin's wearable clause, restated where a reader of
+/// the wearables gate will meet it: if either host stopped taking the Ring-0
+/// door, or read `entity`/`guid` where the other reads `pose_entity`/`pose_guid`,
+/// one host would draw a garment in its own bind pose, at its own
+/// un-interpolated position, on a body the other host was drawing it on
+/// correctly.
+///
+/// Five fragments, because five separate reads follow from the door and each of
+/// them is a divergence on its own: the door itself, the model-space lift, the
+/// pose store, the animation player and the crowd tier.
+#[test]
+fn the_two_projectors_take_the_wearable_door() {
+    // Whitespace-STRIPPED, because rustfmt decides where a call wraps and a pin
+    // a formatter can break is a pin that reports a divergence nobody made.
+    let read = |rel: &str| -> String {
+        std::fs::read_to_string(repo().join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e}"))
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    };
+    let player = read("runtime/inf-player/src/render.rs");
+    let editor = read("editor/crates/inf-viewport/src/host.rs");
+    const SHARED: [&str; 5] = [
+        "inf_ecs::wearable::pose_source(world,entity,guid)",
+        "inf_ecs::pose::model_to_world(world,pose_entity)",
+        "inf_ecs::pose::evaluated_pose(world,pose_guid)",
+        "get::<inf_ecs::components::AnimPlayer>(pose_entity)",
+        "get::<inf_ecs::crowd::CrowdAgent>(pose_entity)",
+    ];
+    for f in SHARED {
+        assert!(
+            player.contains(f),
+            "the PLAYER's projector no longer contains `{f}` — a wearable it \
+             draws is a wearable the editor is drawing on a different body"
+        );
+        assert!(
+            editor.contains(f),
+            "the EDITOR's projector no longer contains `{f}` — a wearable it \
+             draws is a wearable the player is drawing on a different body"
+        );
+    }
+    // ANTI-VACUITY: a pin over a file it could not read passes for the wrong
+    // reason, and a pin over a fragment that is nowhere at all is worse.
+    assert!(
+        player.len() > 10_000 && editor.len() > 10_000,
+        "one of the two projector sources did not read"
+    );
+    println!(
+        "both projectors carry all {} wearable fragments ({} and {} bytes of source)",
+        SHARED.len(),
+        player.len(),
+        editor.len()
+    );
 }

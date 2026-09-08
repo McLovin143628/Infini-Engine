@@ -25,6 +25,22 @@ fn vs(in: VsIn) -> @builtin(position) vec4<f32> {
 // color alpha + blend/cutoff (pbr.z/.w) so `fs_masked` can discard alpha-tested
 // cutout fragments. Used only when the scene contains masked instances; opaque
 // scenes keep the fragment-less `vs` fast path above (byte-identical goldens).
+//
+// **AND ITS ALPHA IS THE INSTANCE'S CONSTANT, NOT A MAP** (wave OUTFIT1 AUDIT,
+// carried 176). `mesh.wgsl` and `skinned_mesh.wgsl` now multiply the albedo
+// slot's own alpha into their masked test, so a cut-out that lives in a texture
+// -- a hair card's coverage atlas -- is a hole in the COLOUR pass and is not one
+// here. The price of matching them is stated rather than paid: this shader is
+// registered `ShaderKind::Plain`, so it composes no `vt_sample.wgsl` and binds
+// no virtual-texture table at all; reading a texel here means a bind group
+// layout, a bind group and a per-frame table upload on a depth-only pipeline
+// whose whole point is that it binds neither lights nor environment.
+//
+// What it costs today, measured rather than assumed: this pipeline writes
+// `frame.targets.depth_prepass`, which is the SSAO / TAA / SSR depth and NOT the
+// main depth buffer -- so a textured cut-out's holes are absent from those three
+// effects and present everywhere a player looks. A hair card occludes its own
+// ambient occlusion and does not occlude anything else.
 struct VsMaskedIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,

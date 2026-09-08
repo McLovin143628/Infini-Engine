@@ -7,9 +7,20 @@
 // against a *layout*, not against an index, so `SkinnedMeshNode` binds the very
 // same object at slot 1 here and at slot 3 in the colour pass.
 //
-// There is **no fragment stage**: `skinned_mesh.wgsl`'s `fs` contains no
-// `discard` at all (no alpha test, no cutout, no mask), so a fragment-less
-// pipeline draws exactly the same silhouette for less.
+// There is **no fragment stage**, and since wave CHAR1a.2 that is a PRICE rather
+// than a free lunch. The sentence here used to read "`skinned_mesh.wgsl`'s `fs`
+// contains no `discard` at all (no alpha test, no cutout, no mask)", and it has
+// been false since that wave gave the skinned fragment stage a masked test; wave
+// CHAR1c added the near fade's dither on top, and the OUTFIT1 audit made the
+// masked test read the albedo slot's own alpha so a hair card's coverage atlas
+// is a hole. None of those three holes exist here.
+//
+// What that costs, exactly: this pipeline writes `frame.targets.depth_prepass`,
+// which is the SSAO / TAA / SSR depth and NOT the main depth buffer -- so a
+// masked or fading character occludes its own ambient occlusion through holes
+// the colour pass discards, and occludes nothing else. Matching it means giving
+// a depth-only pipeline the virtual-texture bind group `depth_prepass.wgsl`'s
+// own note prices.
 //
 // **The skinning arithmetic is copied character for character from
 // `skinned_mesh.wgsl`**, deliberately, and not from `vsm_skinned.wgsl` — the

@@ -149,8 +149,33 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // (code 2) never take this branch, so every pre-R-P5 golden stays
     // byte-identical (the branch is present but always false for them). Runs
     // before the unlit short-circuit so masked cutouts show in every view mode.
-    if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z) {
-        discard;
+    //
+    // **AND THE COVERAGE MAY BE A TEXTURE** (wave OUTFIT1 AUDIT, carried 176) —
+    // `skinned_mesh.wgsl`'s change, character for character, one pipeline over.
+    // Until this line the alpha it read was `in.color.a` alone, the instance's
+    // CONSTANT, so a masked RIGID surface could only be entirely there or
+    // entirely gone and a cut-out that lives in a MAP could not exist on this
+    // path either. The base colour's own alpha channel is where this engine
+    // keeps a masked material's coverage, and `vt_sample_color` is the door that
+    // reads it — the same slot, the same uv and the same derivatives
+    // `vt_surface` uses below, so the mask and the shading cannot disagree about
+    // which texel a fragment is.
+    //
+    // The derivatives are taken in UNIFORM control flow, before the branch, for
+    // the reason the VT block below states. Every instance that binds no albedo
+    // slot takes `vt_bound(0) == false` and keeps exactly the constant it had,
+    // so every committed golden runs the same arithmetic.
+    let mask_ddx = dpdx(in.uv);
+    let mask_ddy = dpdy(in.uv);
+    if (in.pbr.w > 0.5 && in.pbr.w < 1.5) {
+        var mask_a = in.color.a;
+        if (vt_bound(in.vt.x)) {
+            let mask_uv = vt_scale_uv(in.vt, in.uv, mask_ddx, mask_ddy);
+            mask_a = mask_a * vt_sample_color(in.vt.x, mask_uv[0], mask_uv[1], mask_uv[2]).a;
+        }
+        if (mask_a < in.pbr.z) {
+            discard;
+        }
     }
     // P26.5 RESIDENCY HEAT-MAP (`ViewMode::VtResidency`): every virtual-textured
     // surface painted by how far behind the streamer is at that pixel.
