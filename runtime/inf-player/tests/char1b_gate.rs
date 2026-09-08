@@ -1025,7 +1025,6 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
         );
         return;
     };
-    let dir = content.join("UE/Mannequins");
     let clips = clips_under(&content);
     if clips.is_empty() {
         eprintln!("SKIP: no .inf_anim under {}", content.display());
