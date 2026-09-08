@@ -19,6 +19,8 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 pub mod audio;
 pub mod camera;
 pub mod carjack;
+// COV1: the cover probe -- the second reader of the mantle's own two sweeps.
+pub mod cover;
 // EMS3: recognition — the officer looks at somebody and decides whether they are
 // the person on the file. The applying half of `inf_ecs::crime`, because the
 // line-of-sight primitive is `PhysicsBridge3D::cast_ray_excluding` and Ring 0
@@ -58,6 +60,10 @@ mod world;
 
 pub use camera::{ragdoll_follow_pose, step_camera_with_requests, step_locomotion_camera};
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
+pub use cover::{
+    classify as classify_cover, probe_cover, CoverClass, CoverProbe, CoverRefusal, CoverSettings,
+    MIN_COVER_HEIGHT_M,
+};
 pub use crime::{step_recognition, RecognitionStats};
 pub use dispatch::{step_dispatch, DispatchStats};
 pub use door::{door_leaf_guid, step_doors, DoorReport};
@@ -81,7 +87,8 @@ pub use ragdoll_bridge::{
     blend_weight as ragdoll_blend_weight, start_ragdoll, step_ragdoll, SpawnedRagdoll,
 };
 pub use traversal::{
-    is_walkable, predict_landing, probe_ledge, LandPrediction, Ledge, LedgeSettings,
+    is_walkable, predict_landing, probe_ledge, sweep_forward_face, sweep_surface_top,
+    LandPrediction, Ledge, LedgeSettings,
 };
 pub use vehicle::{step_vehicles, VehicleOutcome};
 pub use water::{

@@ -115,6 +115,120 @@ fn planar_yaw_deg(x: f64, z: f64) -> f64 {
     inf_math::patan2_64(x, z).to_degrees()
 }
 
+/// How far BEHIND the character the forward sweep starts, metres.
+///
+/// ALS's own trick, and the reason it is a named constant rather than a literal
+/// in two probes: a character already touching a wall must still *sweep into*
+/// it, and a sweep that begins in contact reports `started_penetrating` with no
+/// usable normal. Wave COV1's cover probe is the second reader.
+pub const SWEEP_BACKOFF_M: f64 = 0.30;
+
+/// How far INTO a surface the downward top-finding sweep steps, metres.
+///
+/// The sweep lands on the surface rather than on its lip. Shared for
+/// [`SWEEP_BACKOFF_M`]'s reason.
+pub const TOP_SWEEP_INSET_M: f64 = 0.15;
+
+/// **The forward face sweep** -- step 1 of the ledge probe, and step 1 of wave
+/// COV1's cover probe.
+///
+/// One door, two readers, and the split is where the two questions diverge: a
+/// mantle asks *what is the TOP of this thing* and a cover press asks *what is
+/// the FACE of it*, but both begin by finding a non-walkable surface in front
+/// of the character across a band of heights. The band is the caller's, because
+/// it is the only part that differs: a ledge probe sweeps the heights it could
+/// climb (0.5-2.5 m) and a cover probe sweeps the heights it could hide behind.
+///
+/// `centre_m` and `span_m` are the band's centre and half-height above `feet`;
+/// `reach_m` is how far forward, measured from the capsule (the
+/// [`SWEEP_BACKOFF_M`] behind it is added here, once).
+///
+/// `None` for a degenerate facing, a sweep that started inside something (no
+/// face to read a normal off), or a face that is **walkable** -- a floor is not
+/// a wall, and climbing onto the ground you are standing on is not a mantle any
+/// more than pressing your back against it is cover (ALS `.cpp:196`).
+#[allow(clippy::too_many_arguments)]
+pub fn sweep_forward_face(
+    world: &mut PhysicsWorld3D,
+    feet: DVec3,
+    fwd: DVec3,
+    centre_m: f64,
+    span_m: f64,
+    reach_m: f64,
+    radius_m: f64,
+    slope_limit_deg: f64,
+    exclude: &std::collections::BTreeSet<ColliderId3D>,
+) -> Option<super::ShapeHit3D> {
+    if fwd == DVec3::ZERO
+        || !feet.is_finite()
+        || !span_m.is_finite()
+        || span_m <= 0.0
+        || !reach_m.is_finite()
+        || reach_m <= 0.0
+    {
+        return None;
+    }
+    let start = feet - fwd * SWEEP_BACKOFF_M + DVec3::Y * centre_m;
+    let sweeper = ColliderShape3D::Capsule {
+        half_height: 0.01 + span_m,
+        radius: radius_m,
+    };
+    let wall = world.cast_shape_where(
+        &sweeper,
+        start,
+        DQuat::IDENTITY,
+        fwd,
+        reach_m + SWEEP_BACKOFF_M,
+        exclude,
+        CastTargets::Fixed,
+    )?;
+    if wall.started_penetrating || is_walkable(wall.normal, slope_limit_deg) {
+        return None;
+    }
+    Some(wall)
+}
+
+/// **The downward top sweep** -- step 2 of the ledge probe, and the height
+/// classifier of wave COV1's cover probe.
+///
+/// A sphere dropped from `rise_m` above the character's feet onto the surface
+/// behind `face`, stepped [`TOP_SWEEP_INSET_M`] into it so the sweep lands on
+/// the surface rather than on its lip. Answers the **world point** of the top it
+/// found, or `None` when there is no walkable top within the rise -- which a
+/// mantle reads as "not a ledge" and a cover press reads as "tall enough to
+/// stand behind".
+#[allow(clippy::too_many_arguments)]
+pub fn sweep_surface_top(
+    world: &mut PhysicsWorld3D,
+    feet_y: f64,
+    face_point: DVec3,
+    face_normal: DVec3,
+    rise_m: f64,
+    radius_m: f64,
+    slope_limit_deg: f64,
+    exclude: &std::collections::BTreeSet<ColliderId3D>,
+) -> Option<DVec3> {
+    let down_end = DVec3::new(face_point.x, feet_y, face_point.z) - face_normal * TOP_SWEEP_INSET_M;
+    let rise = rise_m + radius_m + 0.01;
+    let down_start = down_end + DVec3::Y * rise;
+    let top = world.cast_shape_where(
+        &ColliderShape3D::Sphere { radius: radius_m },
+        down_start,
+        DQuat::IDENTITY,
+        -DVec3::Y,
+        rise,
+        exclude,
+        CastTargets::Fixed,
+    )?;
+    if top.started_penetrating || !is_walkable(top.normal, slope_limit_deg) {
+        return None;
+    }
+    // The sphere's centre at impact, with the surface's own height: ALS's
+    // `(hit.Location.XY, hit.ImpactPoint.Z)`.
+    let sphere_centre = down_start - DVec3::Y * top.toi;
+    Some(DVec3::new(sphere_centre.x, top.point.y, sphere_centre.z))
+}
+
 /// **The five-step ledge probe.**
 ///
 /// `feet` is the character's ground point, `forward` its facing (planar; a
@@ -147,55 +261,34 @@ pub fn probe_ledge(
     }
 
     // ── 1. Forward capsule sweep across the band of heights a ledge can be in.
-    //    Started 30 cm BEHIND the capsule so a character already touching the
-    //    wall still sweeps into it rather than beginning in contact.
-    let start = feet - fwd * 0.30 + DVec3::Y * band;
-    let sweeper = ColliderShape3D::Capsule {
-        half_height: 0.01 + span,
-        radius: settings.forward_radius_m,
-    };
-    let wall = world.cast_shape_where(
-        &sweeper,
-        start,
-        DQuat::IDENTITY,
+    //    **Wave COV1 hoisted this into `sweep_forward_face`** — one door, two
+    //    readers: a mantle asks what the TOP of the thing in front is and a
+    //    cover press asks what its FACE is, and both start here.
+    let wall = sweep_forward_face(
+        world,
+        feet,
         fwd,
-        settings.reach_m + 0.30,
+        band,
+        span,
+        settings.reach_m,
+        settings.forward_radius_m,
+        slope_limit_deg,
         exclude,
-        CastTargets::Fixed,
     )?;
-    if wall.started_penetrating {
-        // Already inside something: there is no wall face to read a normal off.
-        return None;
-    }
-    // A walkable face is a FLOOR, not a wall — climbing onto the ground you are
-    // standing on is not a mantle (ALS `.cpp:196`).
-    if is_walkable(wall.normal, slope_limit_deg) {
-        return None;
-    }
 
     // ── 2. Downward sphere sweep to find the ledge's top surface, stepping 15 cm
     //    INTO the ledge so the sweep lands on the surface rather than on its lip.
-    let down_end = DVec3::new(wall.point.x, feet.y, wall.point.z) - wall.normal * 0.15;
-    let rise = settings.max_height_m + settings.down_radius_m + 0.01;
-    let down_start = down_end + DVec3::Y * rise;
-    let top = world.cast_shape_where(
-        &ColliderShape3D::Sphere {
-            radius: settings.down_radius_m,
-        },
-        down_start,
-        DQuat::IDENTITY,
-        -DVec3::Y,
-        rise,
+    //    Hoisted with step 1, and for the same reason.
+    let landing = sweep_surface_top(
+        world,
+        feet.y,
+        wall.point,
+        wall.normal,
+        settings.max_height_m,
+        settings.down_radius_m,
+        slope_limit_deg,
         exclude,
-        CastTargets::Fixed,
     )?;
-    if top.started_penetrating || !is_walkable(top.normal, slope_limit_deg) {
-        return None;
-    }
-    // The sphere's centre at impact, with the surface's own height: ALS's
-    // `(hit.Location.XY, hit.ImpactPoint.Z)`.
-    let sphere_centre = down_start - DVec3::Y * top.toi;
-    let landing = DVec3::new(sphere_centre.x, top.point.y, sphere_centre.z);
 
     // ── 3. Room check: the character's OWN capsule must fit where it is going.
     //    Lifted by a 2 cm skin so the check is about the space above the ledge
