@@ -1,6 +1,6 @@
 # Starter character
 
-**The engine's committed starter character** - the exact eight assets the
+**The engine's committed starter character** - the exact thirteen assets the
 New Character wizard writes for its own default spec, on the 161-bone
 mannequin (`BodyPlan::Biped`).
 
@@ -13,6 +13,10 @@ mannequin (`BodyPlan::Biped`).
 | `Starter_Locomotion.inf_sm` | the machine proposed from what the derivation measured, with the `Mask_AimOffset` upper-body profile on it |
 | `Starter_Locomotion.inf_sm.txt` | its reviewable text face |
 | `Starter_Controller.inf_act` | the Blueprint class the character binds |
+| `Starter_Outfit.inf_mesh` | the clothes: a tee and a pair of trousers, shrink-wrapped off the body's own surface over the joints each covers, skinned by the body's own weights |
+| `Starter_Outfit_Top.inf_mat`, `Starter_Outfit_Bottom.inf_mat` | the outfit's two slot materials |
+| `Starter_Hair_Mesh.inf_mesh` | a hair cap: authored geometry fitted to the measured skull, rigidly bound to the `head` joint |
+| `Starter_Hair.inf_mat` | the hair's material |
 | `camera.toml` / `input.toml` | the camera table and the bindings |
 
 Two things ship it: `ProjectTemplate::starter_content` scaffolds it into

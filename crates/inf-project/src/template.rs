@@ -322,6 +322,46 @@ pub const STARTER_CHARACTER: &[(&str, &[u8])] = &[
         "Characters/Starter_Walk.inf_anim.toml",
         include_bytes!("../../../samples/starter-character/Starter_Walk.inf_anim.toml"),
     ),
+    (
+        "Characters/Starter_Outfit.inf_mesh",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit.inf_mesh"),
+    ),
+    (
+        "Characters/Starter_Outfit.inf_mesh.toml",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit.inf_mesh.toml"),
+    ),
+    (
+        "Characters/Starter_Outfit_Top.inf_mat",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit_Top.inf_mat"),
+    ),
+    (
+        "Characters/Starter_Outfit_Top.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit_Top.inf_mat.toml"),
+    ),
+    (
+        "Characters/Starter_Outfit_Bottom.inf_mat",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit_Bottom.inf_mat"),
+    ),
+    (
+        "Characters/Starter_Outfit_Bottom.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character/Starter_Outfit_Bottom.inf_mat.toml"),
+    ),
+    (
+        "Characters/Starter_Hair_Mesh.inf_mesh",
+        include_bytes!("../../../samples/starter-character/Starter_Hair_Mesh.inf_mesh"),
+    ),
+    (
+        "Characters/Starter_Hair_Mesh.inf_mesh.toml",
+        include_bytes!("../../../samples/starter-character/Starter_Hair_Mesh.inf_mesh.toml"),
+    ),
+    (
+        "Characters/Starter_Hair.inf_mat",
+        include_bytes!("../../../samples/starter-character/Starter_Hair.inf_mat"),
+    ),
+    (
+        "Characters/Starter_Hair.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character/Starter_Hair.inf_mat.toml"),
+    ),
     // ── THE SECOND COMMITTED BODY (wave CHAR1a.2) ────────────────────────────
     //
     // The same eight assets, the same 161 joint names in the same order, built
@@ -404,6 +444,46 @@ pub const STARTER_CHARACTER: &[(&str, &[u8])] = &[
     (
         "Characters/Starter_F_Walk.inf_anim.toml",
         include_bytes!("../../../samples/starter-character-f/Starter_F_Walk.inf_anim.toml"),
+    ),
+    (
+        "Characters/Starter_F_Outfit.inf_mesh",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit.inf_mesh"),
+    ),
+    (
+        "Characters/Starter_F_Outfit.inf_mesh.toml",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit.inf_mesh.toml"),
+    ),
+    (
+        "Characters/Starter_F_Outfit_Top.inf_mat",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit_Top.inf_mat"),
+    ),
+    (
+        "Characters/Starter_F_Outfit_Top.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit_Top.inf_mat.toml"),
+    ),
+    (
+        "Characters/Starter_F_Outfit_Bottom.inf_mat",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit_Bottom.inf_mat"),
+    ),
+    (
+        "Characters/Starter_F_Outfit_Bottom.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Outfit_Bottom.inf_mat.toml"),
+    ),
+    (
+        "Characters/Starter_F_Hair_Mesh.inf_mesh",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Hair_Mesh.inf_mesh"),
+    ),
+    (
+        "Characters/Starter_F_Hair_Mesh.inf_mesh.toml",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Hair_Mesh.inf_mesh.toml"),
+    ),
+    (
+        "Characters/Starter_F_Hair.inf_mat",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Hair.inf_mat"),
+    ),
+    (
+        "Characters/Starter_F_Hair.inf_mat.toml",
+        include_bytes!("../../../samples/starter-character-f/Starter_F_Hair.inf_mat.toml"),
     ),
 ];
 /// A template's committed boot scene: the payload **and its sidecar**.

@@ -10885,7 +10885,7 @@ fn write_character_folder(
 const STARTER_CHARACTER_README: &str = concat!(
     "# Starter character\n",
     "\n",
-    "**The engine's committed starter character** - the exact eight assets the\n",
+    "**The engine's committed starter character** - the exact thirteen assets the\n",
     "New Character wizard writes for its own default spec, on the 161-bone\n",
     "mannequin (`BodyPlan::Biped`).\n",
     "\n",
@@ -10898,6 +10898,10 @@ const STARTER_CHARACTER_README: &str = concat!(
     "| `Starter_Locomotion.inf_sm` | the machine proposed from what the derivation measured, with the `Mask_AimOffset` upper-body profile on it |\n",
     "| `Starter_Locomotion.inf_sm.txt` | its reviewable text face |\n",
     "| `Starter_Controller.inf_act` | the Blueprint class the character binds |\n",
+    "| `Starter_Outfit.inf_mesh` | the clothes: a tee and a pair of trousers, shrink-wrapped off the body's own surface over the joints each covers, skinned by the body's own weights |\n",
+    "| `Starter_Outfit_Top.inf_mat`, `Starter_Outfit_Bottom.inf_mat` | the outfit's two slot materials |\n",
+    "| `Starter_Hair_Mesh.inf_mesh` | a hair cap: authored geometry fitted to the measured skull, rigidly bound to the `head` joint |\n",
+    "| `Starter_Hair.inf_mat` | the hair's material |\n",
     "| `camera.toml` / `input.toml` | the camera table and the bindings |\n",
     "\n",
     "Two things ship it: `ProjectTemplate::starter_content` scaffolds it into\n",
@@ -12496,10 +12500,15 @@ mod tests {
             warnings[0].starts_with("102 of the generated body's vertices"),
             "the starter character's advisory changed: {warnings:?}"
         );
+        // **29 since wave OUTFIT1**: the eight payloads and eight sidecars, the
+        // three text files, and the FIVE assets that dress the body — an outfit
+        // mesh, its two slot materials, a hair mesh and its material — with
+        // their sidecars. A wizard that stopped writing clothes shows up here as
+        // a count and not as an undressed screenshot three waves later.
         assert_eq!(
             a.len(),
-            19,
-            "expected eight payloads, eight sidecars and three text files, got {:?}",
+            29,
+            "expected thirteen payloads, thirteen sidecars and three text files, got {:?}",
             a.iter().map(|(n, _)| n).collect::<Vec<_>>()
         );
         assert_eq!(
@@ -12520,6 +12529,11 @@ mod tests {
             (ids.run, "Starter_Run.inf_anim.toml"),
             (ids.machine, "Starter_Locomotion.inf_sm.toml"),
             (ids.actor, "Starter_Controller.inf_act.toml"),
+            (ids.outfit, "Starter_Outfit.inf_mesh.toml"),
+            (ids.outfit_top, "Starter_Outfit_Top.inf_mat.toml"),
+            (ids.outfit_bottom, "Starter_Outfit_Bottom.inf_mat.toml"),
+            (ids.hair, "Starter_Hair_Mesh.inf_mesh.toml"),
+            (ids.hair_material, "Starter_Hair.inf_mat.toml"),
         ] {
             let want = slot.expect("every starter id is fixed").0.to_string();
             let text = a

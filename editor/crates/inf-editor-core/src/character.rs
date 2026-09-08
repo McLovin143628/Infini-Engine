@@ -3216,11 +3216,13 @@ mod tests {
             },
         )
         .expect("the second build succeeds");
-        // **Eight**, not seven: P29.6 added the `.inf_act` controller §13's gap
-        // list said the wizard emitted none of, and SK1b added the body's own
-        // `.inf_mat` — a character whose skin has no material at all is one an
-        // author has to make one for before they can change its colour.
-        assert_eq!(p.db().len(), 8);
+        // **Thirteen**, not eight: P29.6 added the `.inf_act` controller §13's
+        // gap list said the wizard emitted none of, SK1b added the body's own
+        // `.inf_mat`, and wave OUTFIT1 added the FIVE the character is dressed
+        // in — an outfit mesh, its two slot materials, a hair mesh and its
+        // material. A wizard that stopped writing clothes reads here as a
+        // count, and not as an undressed screenshot three waves later.
+        assert_eq!(p.db().len(), 13);
         let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
         assert_eq!(sm.machine.states.len(), 3);
         // …and the three text files are beside them, which is the whole of the
