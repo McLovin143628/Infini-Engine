@@ -286,6 +286,11 @@ pub async fn character_place_starter(
                     .height_m
             },
         );
+        // **DRESSED** (wave OUTFIT1). `Place Actor ▸ Starter Character` puts on
+        // the committed outfit and hair the same way the island's generator and
+        // both starter templates do — one door, so a placed body cannot be the
+        // one undressed character in a level full of dressed ones.
+        inf_editor_core::character::dress_character(&mut doc, guid, &ids);
         doc.select(&[guid], false);
         guid
     };
@@ -329,6 +334,21 @@ pub async fn character_create(
                 glam::DVec3::new(at[0], at[1], at[2]),
                 Some(built.actor.0),
                 spec.params.height_m,
+            );
+            // **The wizard dresses what it built** (wave OUTFIT1). `build_character`
+            // wrote the outfit and the hair beside the body; without this the two
+            // assets exist in the drawer and nothing wears them, which is the
+            // shape of the defect the skin binding had before the CHAR1a audit.
+            inf_editor_core::character::dress_character(
+                &mut doc,
+                guid,
+                &inf_editor_core::character::CharacterIds {
+                    outfit: built.outfit,
+                    outfit_top: built.outfit.and(built.outfit_top),
+                    hair: built.hair,
+                    hair_material: built.hair.and(built.hair_material),
+                    ..inf_editor_core::character::CharacterIds::MINTED
+                },
             );
             doc.select(&[guid], false);
             guid

@@ -666,6 +666,8 @@ pub fn hybrid_scene() -> SceneDoc {
         Some(asset(ids.actor)),
         starter_character_spec().params.height_m,
     );
+    // Dressed, through the one door (wave OUTFIT1).
+    crate::character::dress_character(&mut doc, HYBRID_PLAYER_GUID, &ids);
 
     doc.world_mut().propagate();
     doc.mark_saved();
@@ -1035,6 +1037,8 @@ pub fn blank3d_scene() -> SceneDoc {
         Some(asset(ids.actor)),
         starter_character_spec().params.height_m,
     );
+    // Dressed, through the one door (wave OUTFIT1).
+    crate::character::dress_character(&mut doc, BLANK3D_PLAYER_GUID, &ids);
 
     doc.world_mut().propagate();
     doc.mark_saved();
@@ -10597,6 +10601,14 @@ pub fn starter_character_ids() -> crate::character::CharacterIds {
         run: id(5),
         machine: id(6),
         actor: id(7),
+        // **THE CLOTHES** (wave OUTFIT1), 8..12. Appended rather than inserted:
+        // every id above is in a committed sidecar and a committed level, so the
+        // numbering is content and not an ordering.
+        outfit: id(8),
+        outfit_top: id(9),
+        outfit_bottom: id(10),
+        hair: id(11),
+        hair_material: id(12),
     }
 }
 
@@ -10733,6 +10745,14 @@ pub fn starter_character_f_ids() -> crate::character::CharacterIds {
         run: id(5),
         machine: id(6),
         actor: id(7),
+        // **THE CLOTHES** (wave OUTFIT1), 8..12. Appended rather than inserted:
+        // every id above is in a committed sidecar and a committed level, so the
+        // numbering is content and not an ordering.
+        outfit: id(8),
+        outfit_top: id(9),
+        outfit_bottom: id(10),
+        hair: id(11),
+        hair_material: id(12),
     }
 }
 

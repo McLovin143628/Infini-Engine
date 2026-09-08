@@ -217,6 +217,24 @@ pub struct CharacterIds {
     pub run: Option<AssetId>,
     pub machine: Option<AssetId>,
     pub actor: Option<AssetId>,
+    /// **The default outfit's mesh** (wave OUTFIT1) — a two-slot skinned garment
+    /// on this character's own rig, worn through `inf_ecs::wearable`.
+    ///
+    /// Fixed for the same reason the eight above are: a committed character that
+    /// is DRESSED names its clothes by GUID, and the island's hero wears whatever
+    /// an import writes at this id. That is how a MetaHuman's real clothes reach
+    /// a level nobody edited — the same trick `--rebind-character` plays with
+    /// the body.
+    pub outfit: Option<AssetId>,
+    /// The outfit's upper material (slot 0, the tee).
+    pub outfit_top: Option<AssetId>,
+    /// The outfit's lower material (slot 1, the trousers).
+    pub outfit_bottom: Option<AssetId>,
+    /// **The default hair's mesh** — a cap rigidly bound to the head joint, or
+    /// whatever an import writes at this id (a MetaHuman's cards).
+    pub hair: Option<AssetId>,
+    /// The hair's material.
+    pub hair_material: Option<AssetId>,
 }
 
 impl CharacterIds {
@@ -230,6 +248,11 @@ impl CharacterIds {
         run: None,
         machine: None,
         actor: None,
+        outfit: None,
+        outfit_top: None,
+        outfit_bottom: None,
+        hair: None,
+        hair_material: None,
     };
 }
 
@@ -260,6 +283,18 @@ pub struct CharacterBuild {
     /// One line per decision the proposal took, with the numbers behind it — the
     /// panel shows them, and they are deliberately not stored in the machine.
     pub proposal_notes: Vec<String>,
+    /// **The default outfit** (wave OUTFIT1) — a two-slot skinned garment worn
+    /// on this character's own rig, or `None` when the rig named no joint the
+    /// garment rule recognises (see `inf_editor_core::groom::ShellPart`).
+    pub outfit: Option<AssetId>,
+    /// The outfit's upper material — the fallback tint a wearable entity carries
+    /// when a section's own slot material does not resolve.
+    pub outfit_top: Option<AssetId>,
+    /// **The default hair** — a cap rigidly bound to the head joint, or `None`
+    /// when the rig has no `head`.
+    pub hair: Option<AssetId>,
+    /// The hair's material.
+    pub hair_material: Option<AssetId>,
     /// Whether `mesh` is the generated mannequin (`true`) or a skinned copy of
     /// the author's own mesh (`false`).
     pub mannequin: bool,
@@ -908,6 +943,129 @@ pub fn build_character_with_ids(
         None,
     )?;
 
+    // ── THE CLOTHES (wave OUTFIT1) ─────────────────────────────────────────
+    //
+    // **The public repository's default character has stood in the pipeline's
+    // default underwear since it existed**, and so has every character the New
+    // Character wizard has ever produced. The wizard writes the body; nothing
+    // wrote anything to put on it.
+    //
+    // Both garments are DERIVED from the body that wears them
+    // (`crate::groom::wearable_shell` for the tee and the trousers,
+    // `crate::groom::hair_cap` for the hair), which is what makes them
+    // licence-free, small, reproducible and — the part that matters at runtime —
+    // skinned by exactly the weights the body under them is skinned by. They are
+    // worn through `inf_ecs::wearable`: a child entity naming this character's
+    // own skeleton GUID.
+    //
+    // **A refusal here is not a failure.** A rig whose joints this engine does
+    // not recognise gets a body and no clothes, with a warning naming the part,
+    // because a character the wizard refuses to build is a worse outcome than an
+    // undressed one — and because `wearable_shell` is a function of the rig's
+    // NAMES, which a hand-built creature rig need not use.
+    let mut shell_subs: Vec<inf_mesh::SubMesh> = Vec::new();
+    for (part, slot) in [
+        (crate::groom::ShellPart::Shirt, "outfit_top"),
+        (crate::groom::ShellPart::Trousers, "outfit_bottom"),
+    ] {
+        match crate::groom::wearable_shell(&body, &rig.skeleton, part, slot) {
+            Ok((garment, _report)) => shell_subs.extend(garment.submeshes),
+            Err(e) => warnings.push(format!(
+                "no {slot} was made for this rig ({e}) — the character is built \
+                 and undressed on that half"
+            )),
+        }
+    }
+    let (outfit, outfit_top, outfit_bottom) = if shell_subs.is_empty() {
+        (None, None, None)
+    } else {
+        // One mesh, one slot per garment half, so a tee and a pair of trousers
+        // are two SECTIONS of one wearable rather than two entities: the
+        // skinned path already draws a range per slot with that slot's own
+        // material (wave CHAR1a.3), and one wearable is one draw's worth of
+        // palette and one row in the Outliner.
+        for (i, sub) in shell_subs.iter_mut().enumerate() {
+            sub.material_slot = Some(i as u32);
+        }
+        let slots: Vec<String> = shell_subs.iter().map(|s| s.name.clone()).collect();
+        let top = write_one(
+            project,
+            &mut written,
+            &dir,
+            &format!("{name} Outfit Top"),
+            &outfit_top_material(),
+            ids.outfit_top,
+            Vec::new(),
+            None,
+        )?;
+        let bottom = write_one(
+            project,
+            &mut written,
+            &dir,
+            &format!("{name} Outfit Bottom"),
+            &outfit_bottom_material(),
+            ids.outfit_bottom,
+            Vec::new(),
+            None,
+        )?;
+        let mut garment = inf_mesh::MeshAsset::new(shell_subs, slots);
+        // The slot table is PAYLOAD data (`.inf_mesh` v3) because neither a
+        // cooked `.ipack` nor a PIE `ScenePayload` carries a sidecar: a tee that
+        // was blue in the editor and grey in the shipped build is exactly the
+        // divergence that table exists to stop.
+        garment.bind_material_slots([(0u32, top), (1u32, bottom)]);
+        let id = write_one(
+            project,
+            &mut written,
+            &dir,
+            &format!("{name} Outfit"),
+            &garment,
+            ids.outfit,
+            vec![skeleton, top, bottom],
+            None,
+        )?;
+        (Some(id), Some(top), Some(bottom))
+    };
+    let _ = outfit_bottom;
+    let (hair, hair_material) = match crate::groom::hair_cap(
+        &body,
+        &rig.skeleton,
+        crate::groom::HAIR_CAP_RINGS,
+        crate::groom::HAIR_CAP_SEGMENTS,
+    ) {
+        Ok((cap, _report)) => {
+            let mat = write_one(
+                project,
+                &mut written,
+                &dir,
+                &format!("{name} Hair"),
+                &hair_material(),
+                ids.hair_material,
+                Vec::new(),
+                None,
+            )?;
+            let mut cap = cap;
+            cap.bind_material_slots([(0u32, mat)]);
+            let id = write_one(
+                project,
+                &mut written,
+                &dir,
+                &format!("{name} Hair Mesh"),
+                &cap,
+                ids.hair,
+                vec![skeleton, mat],
+                None,
+            )?;
+            (Some(id), Some(mat))
+        }
+        Err(e) => {
+            warnings.push(format!(
+                "no hair was made for this rig ({e}) — the character is built and bald"
+            ));
+            (None, None)
+        }
+    };
+
     // ── THE GROUND, asked of the SOLES (wave CHAR1a.2) ─────────────────────
     //
     // `derive_locomotion` settles each generated cycle onto the rig's ground
@@ -1142,6 +1300,10 @@ pub fn build_character_with_ids(
         skeleton,
         material,
         mesh,
+        outfit,
+        outfit_top,
+        hair,
+        hair_material,
         idle,
         walk,
         run,
@@ -1247,6 +1409,108 @@ pub fn starter_skin_material() -> inf_material::MaterialAsset {
         base_color: [0.62, 0.58, 0.55, 1.0],
         metallic: 0.0,
         roughness: 0.62,
+        ..Default::default()
+    }
+}
+
+/// **Put a character's committed clothes on it** (wave OUTFIT1) — the ONE door
+/// every caller that spawns a dressed character goes through.
+///
+/// The island's generator, the two starter templates, `Place Actor ▸ Starter
+/// Character` and the wizard's own spawn half all want the same three sentences:
+/// the outfit at `ids.outfit`, the hair at `ids.hair`, both as wearable children
+/// of `wearer`. Written four times they would drift four ways, and the first
+/// symptom of the drift would be a level whose hero is dressed in the editor and
+/// bald in a cook.
+///
+/// **Idempotent**, because the child identities are derived
+/// ([`inf_ecs::wearable::wearable_guid`]): dressing a character twice replaces
+/// its clothes rather than stacking a second shirt on the first.
+///
+/// Returns how many garments went on — `0` for a `CharacterIds` whose outfit and
+/// hair are both `None`, which is every character built before this wave and
+/// every creature rig the shell rule refused.
+pub fn dress_character(
+    doc: &mut crate::scene::SceneDoc,
+    wearer: uuid::Uuid,
+    ids: &CharacterIds,
+) -> usize {
+    use inf_ecs::wearable::{wearable_guid, HAIR_SLOT, OUTFIT_SLOT};
+    let mut worn = 0;
+    for (slot, mesh, material, surface) in [
+        (
+            OUTFIT_SLOT,
+            ids.outfit,
+            ids.outfit_top,
+            outfit_top_material(),
+        ),
+        (HAIR_SLOT, ids.hair, ids.hair_material, hair_material()),
+    ] {
+        let (Some(mesh), Some(material)) = (mesh, material) else {
+            continue;
+        };
+        // The entity `Material` is the FALLBACK tint. A two-slot outfit draws
+        // each slot's own material through the section path
+        // (`inf_render::skinned_sections`), and this is what a section whose
+        // material did not resolve falls back to — so it is the garment's
+        // colour, never the skin's.
+        let skin = crate::scene::doc::CharacterSkin::from_material(material.0, &surface);
+        if doc
+            .edit_dress_character(
+                wearable_guid(wearer, slot),
+                wearer,
+                slot,
+                mesh.0,
+                Some(skin),
+            )
+            .is_some()
+        {
+            worn += 1;
+        }
+    }
+    worn
+}
+
+/// **The default outfit's upper material** (wave OUTFIT1) — a mid-blue cotton.
+///
+/// A colour and a roughness and nothing else, exactly like
+/// [`starter_skin_material`]: this repository commits no fabric texture, and a
+/// tee that is one honest flat colour is a tee. What it must NOT be is the skin's
+/// own colour, which is what a garment inheriting its wearer's material would be
+/// — the reason the wearable carries a material of its own at all.
+pub fn outfit_top_material() -> inf_material::MaterialAsset {
+    inf_material::MaterialAsset {
+        base_color: [0.16, 0.24, 0.38, 1.0],
+        metallic: 0.0,
+        roughness: 0.80,
+        ..Default::default()
+    }
+}
+
+/// **The default outfit's lower material** — a slate denim, distinct from the
+/// tee so the two halves of one garment read as two garments.
+pub fn outfit_bottom_material() -> inf_material::MaterialAsset {
+    inf_material::MaterialAsset {
+        base_color: [0.22, 0.23, 0.26, 1.0],
+        metallic: 0.0,
+        roughness: 0.85,
+        ..Default::default()
+    }
+}
+
+/// **The default hair's material** — a dark brown, rougher than skin and darker
+/// than either garment.
+///
+/// OPAQUE, and that is a statement rather than a default: a hair CARD wants a
+/// masked material with an alpha cutoff, and this is a cap with no alpha texture
+/// to cut against. The masked path exists (wave CHAR1a.2 put `blend`/`cutoff` on
+/// the skinned path) and the MetaHuman groom cards use it; this does not pretend
+/// to.
+pub fn hair_material() -> inf_material::MaterialAsset {
+    inf_material::MaterialAsset {
+        base_color: [0.09, 0.06, 0.045, 1.0],
+        metallic: 0.0,
+        roughness: 0.55,
         ..Default::default()
     }
 }

@@ -2263,6 +2263,70 @@ impl SceneDoc {
         guid
     }
 
+    /// **Dress a character**: add one WEARABLE child — an outfit, a head of
+    /// hair, a pair of eyes — on the wearer's own rig (wave OUTFIT1).
+    ///
+    /// # What makes it a wearable, and why nothing new is persisted
+    ///
+    /// `inf_ecs::wearable`'s rule: a `SkeletalMesh` child whose skeleton GUID is
+    /// its parent's is worn by its parent. So this door does three things and no
+    /// more — create a child of `wearer`, give it a `SkeletalMesh` naming
+    /// `mesh` and **the wearer's own skeleton**, and give it a `Material`. Both
+    /// projectors then draw it with the wearer's evaluated pose and palette, and
+    /// it culls, cooks, fades and ragdolls with the wearer because a child entity
+    /// already does all four.
+    ///
+    /// The transform is IDENTITY and must be: a garment's vertices are in the
+    /// same model space its wearer's are, so any offset here would be an offset
+    /// between a shirt and the chest inside it.
+    ///
+    /// Returns `None` — and changes nothing — for a wearer that is not a
+    /// skeletal character. A wearable on a rock is not an authoring state this
+    /// engine has a meaning for, and inventing one would put a garment in the
+    /// world drawing in its own bind pose.
+    ///
+    /// One `Create` undo step, on `edit_create_character`'s own pattern: the
+    /// components are attached before the record is snapshotted, so undo takes
+    /// the garment off and redo puts it back on still wearing its material.
+    pub fn edit_dress_character(
+        &mut self,
+        guid: Uuid,
+        wearer: Uuid,
+        name: &str,
+        mesh: Uuid,
+        skin: Option<CharacterSkin>,
+    ) -> Option<Uuid> {
+        let skeleton = {
+            let e = self.world.entity_of(wearer)?;
+            self.world.world().get::<SkeletalMesh>(e)?.skeleton?
+        };
+        self.create_with_guid(guid, SpawnKind::Empty, name, Some(wearer));
+        let entity = self.world.entity_of(guid)?;
+        self.world.world_mut().entity_mut(entity).insert((
+            SkeletalMesh {
+                mesh: Some(mesh),
+                skeleton: Some(skeleton),
+            },
+            Transform::IDENTITY,
+        ));
+        if let Some(skin) = skin {
+            self.world.world_mut().entity_mut(entity).insert(Material {
+                base_color: Color::new(
+                    skin.base_color[0],
+                    skin.base_color[1],
+                    skin.base_color[2],
+                    skin.base_color[3],
+                ),
+                metallic: skin.metallic,
+                roughness: skin.roughness,
+                asset: Some(skin.asset),
+                ..Default::default()
+            });
+        }
+        self.record_create(guid, "Dress Character");
+        Some(guid)
+    }
+
     // ── P20.4 hydrology authoring ────────────────────────────────────────
     //
     // Three recorded mutations, and between them they are the whole water tool.

@@ -1246,6 +1246,17 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         Some(asset(ids.actor)),
         hero_height_m(),
     );
+    // **THE HERO IS DRESSED** (wave OUTFIT1). Two wearable children on the
+    // hero's own rig, through the one door every caller that spawns a dressed
+    // character takes. The GUIDs are derived from the hero's, so this level is
+    // the same level a fresh checkout authors and re-running the generator
+    // replaces the clothes rather than stacking a second set.
+    //
+    // What makes this the door the METAHUMANS reach the island through as well:
+    // the ids are the committed ones, and `inf-import --rebind-character` writes
+    // an imported outfit and an imported groom AT those ids — exactly the trick
+    // that put a MetaHuman body on this hero without editing a level.
+    crate::character::dress_character(&mut doc, hero, &ids);
     // **Both of these are outside that door, and both are load-bearing.**
     // `StreamingSource` is the partition's activation anchor AND the I3 collider
     // band's — the two cannot disagree about where the simulation is because they

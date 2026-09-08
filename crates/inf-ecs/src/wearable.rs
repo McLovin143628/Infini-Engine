@@ -73,6 +73,45 @@ use crate::world::EcsWorld;
 /// an answer instead of hanging a projector.
 const MAX_HOPS: usize = 4;
 
+/// The slot name a character's default OUTFIT is worn under.
+///
+/// Slots are STRINGS and not an enum on purpose: a slot is content (a game with
+/// a helmet, a backpack and a scarf has three this engine has never heard of),
+/// and the only thing the engine needs from one is that it names a stable
+/// identity. See [`wearable_guid`].
+pub const OUTFIT_SLOT: &str = "Outfit";
+
+/// The slot name a character's default HAIR is worn under.
+pub const HAIR_SLOT: &str = "Hair";
+
+/// The salt that carves a wearer's slots out of the scene's own GUID space —
+/// [`crate::wardrobe`]'s rule with a different number.
+const WEARABLE_SALT: u128 = 0x5745_4152_4142_4c45_4f55_5446_4954_0001;
+
+/// **The identity of the thing `wearer` has on in `slot`**, derived from the two.
+///
+/// Derived rather than minted so that dressing a character is IDEMPOTENT: the
+/// island's generator, the editor's Place Actor, a re-dress after a swap and a
+/// gate all name the same entity, and re-running any of them replaces a garment
+/// instead of stacking a second one on top of it. It is the same reasoning
+/// `inf_physics::d3::gameplay::equipped_weapon_guid` is built on — an identity
+/// both hosts can compute rather than one somebody has to store.
+pub fn wearable_guid(wearer: Uuid, slot: &str) -> Uuid {
+    let mut x = wearer.as_u128() ^ WEARABLE_SALT;
+    // FNV-1a over the slot's bytes, widened: a stable hash written here rather
+    // than taken from a crate, because this value is CONTENT — it lands in
+    // committed levels, and a hasher whose implementation moved would rename
+    // every garment in every one of them.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in slot.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    x ^= (h as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+    x = x.rotate_left(29) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
+
 /// The entity a wearable takes its pose from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Wearer {
@@ -168,6 +207,8 @@ mod tests {
     const OTHER_RIG: Uuid = Uuid::from_u128(0x0FF1_7000_0000_0002);
     const BODY: Uuid = Uuid::from_u128(0x0FF1_7000_0000_0010);
     const SHIRT: Uuid = Uuid::from_u128(0x0FF1_7000_0000_0011);
+    /// The value `wearable_guid(1, "Outfit")` had when this wave blessed it.
+    const OUTFIT_OF_ONE: &str = "be202bc4-8ee5-6dbc-a261-0cb6780add03";
 
     fn skeletal(world: &mut EcsWorld, guid: Uuid, name: &str, skeleton: Uuid) -> Entity {
         let e = world.spawn_with_guid(guid, name, None);
@@ -246,6 +287,32 @@ mod tests {
         crate::hierarchy::set_parent(world.world_mut(), hat, Some(hood));
         assert_eq!(wearer_of(&world, hat).map(|x| x.guid), Some(BODY));
         assert_eq!(worn_count(&world), 2);
+    }
+
+    /// The slot identity is a function of the wearer and the slot, and of
+    /// nothing else — which is what makes dressing idempotent.
+    #[test]
+    fn a_slot_identity_is_derived_from_the_wearer_and_the_slot() {
+        assert_eq!(
+            wearable_guid(BODY, OUTFIT_SLOT),
+            wearable_guid(BODY, OUTFIT_SLOT)
+        );
+        assert_ne!(
+            wearable_guid(BODY, OUTFIT_SLOT),
+            wearable_guid(BODY, HAIR_SLOT)
+        );
+        assert_ne!(
+            wearable_guid(BODY, OUTFIT_SLOT),
+            wearable_guid(SHIRT, OUTFIT_SLOT)
+        );
+        assert_ne!(wearable_guid(BODY, OUTFIT_SLOT), BODY);
+        // Pinned by value: these land in committed levels, so a change to the
+        // derivation renames every garment in every one of them.
+        assert_eq!(
+            wearable_guid(Uuid::from_u128(1), OUTFIT_SLOT).to_string(),
+            OUTFIT_OF_ONE,
+            "the slot derivation moved -- every committed garment is renamed"
+        );
     }
 
     /// An `AttachedTo` ring terminates with an answer rather than hanging the
