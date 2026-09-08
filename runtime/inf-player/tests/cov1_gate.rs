@@ -2053,6 +2053,182 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     );
 }
 
+/// **SWAT TAKES THE HIGH COVER AND A PATROL TAKES THE NEAREST** — the
+/// preference as a BEHAVIOUR, which the arm below it is not.
+///
+/// Added by the COV1 audit. `swat_prefers_the_cover_it_can_shoot_around` reads
+/// `inf_ecs::cover::prefers_high`, which is a `matches!` over one enum, and the
+/// duty cycle, which is arithmetic — no unit, no world, no probe. It is green
+/// under every mutation of the pass it is supposed to be about: delete the
+/// whole NPC cover search and it still passes.
+///
+/// So: one fixture, two towns. A LOW box a metre and a half from the officer
+/// and a HIGH wall four metres away, both between it and the shot. With nobody
+/// wanted the nearest wins; with the town at its top rung the officer walks
+/// past the near one to the wall it can shoot around, and `swat_high` counts
+/// it.
+#[test]
+fn swat_takes_the_high_cover_and_a_patrol_takes_the_nearest() {
+    use inf_ecs::components::{
+        BodyKind3D, CharacterController3D, Collider3D, ColliderShape3DKind, RigidBody3D,
+    };
+    use inf_ecs::math::Vec3d;
+
+    const OFFICER: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6001);
+    const GROUND: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6002);
+    const WALL: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6003);
+    const LOWBOX: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6004);
+    const CROOK: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6005);
+    const SEEN_BY: uuid::Uuid = uuid::Uuid::from_u128(0xC0_6006);
+    const DT: f64 = 1.0 / 60.0;
+
+    let build = |swat: bool| {
+        let mut w = inf_ecs::EcsWorld::new();
+        let b = inf_physics::PhysicsBridge3D::new(glam::DVec3::new(0.0, -9.81, 0.0));
+        for (guid, centre, half) in [
+            (
+                GROUND,
+                glam::DVec3::new(0.0, -0.5, 0.0),
+                glam::DVec3::new(60.0, 0.5, 60.0),
+            ),
+            // The HIGH wall, four metres out.
+            (
+                WALL,
+                glam::DVec3::new(0.0, 1.5, 5.0),
+                glam::DVec3::new(6.0, 1.5, 0.3),
+            ),
+            // The LOW box: NEARER than the wall and deliberately OFF the line
+            // to it.
+            //
+            // Measured with it dead ahead at (0, 2.5) instead: the patrol takes
+            // it (class `Low`, z 1.84) and the SWAT unit picks the wall —
+            // `swat_high` counts one — walks into the near box and STOPS,
+            // ending at z 1.88 in **no cover at all**. `UnitCover::lay_leg` is
+            // a two-point `NavPath` by design and says so; the preference is
+            // what makes that design visible as a failure, and it is this
+            // audit's finding for WPN2e. Here the box is at x = -2 so the
+            // BEHAVIOUR can be measured without the path being the thing under
+            // test.
+            (
+                LOWBOX,
+                glam::DVec3::new(-2.0, 0.45, 3.0),
+                glam::DVec3::new(1.2, 0.45, 0.3),
+            ),
+        ] {
+            let e = w.spawn_with_guid(guid, "Block", None);
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::from_dvec3(centre);
+            w.world_mut().entity_mut(e).insert((
+                RigidBody3D {
+                    kind: BodyKind3D::Static,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Box,
+                    half_extents: Vec3d::from_dvec3(half),
+                    ..Default::default()
+                },
+                t,
+            ));
+        }
+        let cm = CharacterMovement::default();
+        let e = w.spawn_with_guid(OFFICER, "Officer", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, cm.stand_half_height_m + 0.3, 1.0);
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(0.3, cm.stand_half_height_m, 0.3),
+                radius: 0.3,
+                ..Default::default()
+            },
+            CharacterController3D::default(),
+            cm,
+            t,
+        ));
+        w.mark_dirty();
+        w.propagate();
+        inf_ecs::dispatch::set_responder(&mut w, OFFICER, true);
+        if swat {
+            // The town's own rung, raised through the crime door rather than
+            // written: `Response::for_heat` puts six or more at `Swat`.
+            for step in 0..4u64 {
+                let act = inf_ecs::witness::WitnessedAct {
+                    kind: inf_ecs::witness::ActKind::Killed,
+                    actor: CROOK,
+                    at: glam::DVec3::new(0.0, 0.0, 20.0),
+                    step,
+                    observers: vec![SEEN_BY],
+                    actor_look: 0,
+                    actor_vehicle: None,
+                };
+                let _ = inf_ecs::crime::report_act(&mut w, &act, None);
+            }
+        }
+        (w, b)
+    };
+
+    let run = |swat: bool| -> (Option<CoverClass>, glam::DVec3, usize) {
+        let (mut w, mut b) = build(swat);
+        let source = glam::DVec3::new(0.0, 1.4, 20.0);
+        let mut swat_high = 0usize;
+        for i in 0..900u64 {
+            b.sync_from_world(&w);
+            let r = inf_physics::d3::step_npc_cover(&mut w, &mut b, &[source], 45.0, i, DT);
+            swat_high += r.swat_high;
+            inf_physics::d3::step_character_movement(&mut w, &mut b, DT);
+        }
+        let e = w.entity_of(OFFICER).expect("the officer is there");
+        let cm = w.world().get::<CharacterMovement>(e).unwrap().clone();
+        let at = w
+            .world()
+            .get::<Transform>(e)
+            .unwrap()
+            .translation
+            .to_dvec3();
+        (
+            (cm.mode == MovementMode::Cover).then_some(cm.runtime.cover.class),
+            at,
+            swat_high,
+        )
+    };
+
+    let (patrol_class, patrol_at, patrol_high) = run(false);
+    let (swat_class, swat_at, swat_high) = run(true);
+    println!(
+        "\n=== the cover a rung chooses ===\n  nobody wanted: class {patrol_class:?} at \
+         z {:.2}, swat_high {patrol_high}\n  the town at its top rung: class {swat_class:?} \
+         at z {:.2}, swat_high {swat_high}",
+        patrol_at.z, swat_at.z
+    );
+    assert_eq!(
+        patrol_class,
+        Some(CoverClass::Low),
+        "with nobody wanted the officer did not take the NEAREST cover, which is the \
+         0.90 m box at z = 2.5"
+    );
+    assert_eq!(
+        swat_class,
+        Some(CoverClass::High),
+        "at the top rung the officer did not take the HIGH cover it can shoot around"
+    );
+    assert!(
+        swat_at.z > patrol_at.z + 0.5,
+        "both rungs ended at the same place (z {:.2} and {:.2}), so the preference did \
+         nothing",
+        patrol_at.z,
+        swat_at.z
+    );
+    assert!(
+        swat_high > 0 && patrol_high == 0,
+        "the swat_high counter says {swat_high} at the top rung and {patrol_high} below it"
+    );
+}
+
 /// **SWAT PREFERS HIGH COVER** — the EMS3 carried item becoming a behaviour.
 ///
 /// The rule is `inf_ecs::cover::prefers_high`, and the arm is on the RULE rather
