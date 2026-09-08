@@ -104,6 +104,16 @@ pivot toward the open side and shortens the boom, and it stops by not pushing. W
 is inside geometry it **refuses** — it re-pushes the last legal pose rather than putting the optical
 centre in a wall.
 
+### What is not there yet
+
+**Blind fire** — firing from behind cover without leaning out, the arm over the top or
+around the edge with the head down — is not built. The peek, the aim and the lean are; the
+shot is not. It is deliberately WPN2e's: that wave owns the NPC firing cadence and the
+trigger, and a second override of a shot's direction written here is the thing it would
+have to reconcile. The price when it comes is one authored upper-body one-shot, one branch
+in the weapon step that points the shot along the cover's surface normal, and one gate arm
+over the ray.
+
 ### The clips
 
 ALS ships no cover sequence of any kind, so `inf_anim::authored` derives four from the rig that will
