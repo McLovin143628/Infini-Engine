@@ -4274,12 +4274,17 @@ fn composite_eyeball(
         let n = 256;
         for k in 0..n {
             let a = k as f32 / n as f32 * std::f32::consts::TAU;
+            // `inf_math`'s portable pair and not `f32::cos`/`f32::sin` (the P14
+            // law): this ring decides `iris_r`, `iris_r` decides every texel of
+            // the eyeball albedo, and that texture is an ASSET a cook packs. A
+            // std transcendental is not bit-portable, so two machines importing
+            // one manifest would write two different eyes.
             sum += lum(sample(
                 sclera,
                 sw,
                 sh,
-                0.5 + 0.5 * r * a.cos(),
-                0.5 + 0.5 * r * a.sin(),
+                0.5 + 0.5 * r * inf_math::pcos64(a as f64) as f32,
+                0.5 + 0.5 * r * inf_math::psin64(a as f64) as f32,
             ));
         }
         sum / n as f32

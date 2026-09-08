@@ -1103,9 +1103,22 @@ fn the_skinned_instance_carries_blend_and_cutoff_from_the_material() {
         std::fs::read_to_string(repo().join("crates/inf-render/src/shaders/skinned_mesh.wgsl"))
             .expect("the skinned shader")
             .replace("\r\n", "\n");
+    // **The pin moved with its cause** (wave OUTFIT1 AUDIT). It read
+    // `in.color.a` -- the instance's CONSTANT alpha -- so a cut-out that lives
+    // in a MAP could not exist on this path at all, which is why the island's
+    // grooms drew as solid pale ribbons with a coverage atlas on disk. The
+    // masked branch now multiplies the albedo slot's own alpha in, and both
+    // halves are pinned: the branch, and the sample that makes it mean anything.
     assert!(
-        wgsl.contains("if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z)"),
-        "the skinned fragment stage has no masked discard — a hair card draws solid"
+        wgsl.contains("if (in.pbr.w > 0.5 && in.pbr.w < 1.5)")
+            && wgsl.contains("if (mask_a < in.pbr.z)"),
+        "the skinned fragment stage has no masked discard -- a hair card draws solid"
+    );
+    assert!(
+        wgsl.contains("mask_a = mask_a * vt_sample_color(in.vt.x,"),
+        "the masked discard no longer reads the albedo slot's ALPHA -- a hair \
+         card's coverage atlas has nowhere to be read and every card draws as \
+         a solid quad"
     );
 }
 

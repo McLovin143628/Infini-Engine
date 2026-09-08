@@ -1095,11 +1095,19 @@ fn the_islands_hero_draws_its_head_from_its_own_atlas() {
         let draw = store
             .resolve_skinned(&sm, None, None, None)
             .unwrap_or_else(|| panic!("{label}: the committed body draws nothing"));
+        // **FOUR since the OUTFIT1 audit**, and the two new ones are the EYES.
+        // A combined MetaHuman body carries two uv atlases -- a section over both
+        // is a head wearing a torso -- and the import now lifts each eyeball out
+        // of the face-skin section into a section of its own bound to
+        // `MI_EyeL/R_Baked`, because the eye island is addressed with a whole uv
+        // tile and the head atlas at those uvs is skin. A body that reads 2 again
+        // is one whose eyes went back to being painted with a cheek.
         assert_eq!(
             draw.sections.len(),
-            2,
-            "{label} draws {} sections — a combined MetaHuman body carries TWO uv \
-             atlases and one section over both is a head wearing a torso",
+            4,
+            "{label} draws {} sections -- a combined MetaHuman body carries TWO \
+             uv atlases plus ONE PER EYE, and one section over the lot is a \
+             head wearing a torso and looking out of two patches of skin",
             draw.sections.len()
         );
         let mut albedos = Vec::new();
