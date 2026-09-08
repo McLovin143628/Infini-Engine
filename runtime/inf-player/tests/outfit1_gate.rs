@@ -899,7 +899,7 @@ fn what_a_wearable_costs() {
 /// shipped one; the assertion is the RATIO, which is profile-independent.
 #[test]
 fn a_thousand_dressed_agents_cost_what_the_tier_says() {
-    use inf_ecs::crowd::{CrowdRecord, CrowdTier};
+    use inf_ecs::crowd::CrowdRecord;
     let n = 1000u128;
     let build = |far: bool, dress: bool| {
         let mut world = dressed_world();
