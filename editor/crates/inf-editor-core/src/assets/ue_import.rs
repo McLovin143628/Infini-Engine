@@ -3060,7 +3060,18 @@ fn import_material(
         // The SLOT's settings, from the engine's own table — sRGB for exactly
         // one map, BC5 for a normal, BC1 for the rest. `source_is_float` is
         // false: everything the bridge exports is 8-bit PNG.
-        let settings: TextureImportSettings = kind.settings(false);
+        //
+        // **The packed ORM is the exception** (wave OUTFIT1, carried item 105).
+        // It is written under `MapKind::Roughness`, whose table entry is the
+        // uncompressed data preset — correct for a lone roughness map, and
+        // 25 758 080 bytes for a 2048² triple of shading terms that a lighting
+        // multiply reads. It takes `TextureImportSettings::orm()` instead, which
+        // is the same linear, mipped import at BC7.
+        let settings: TextureImportSettings = if slot == "ORM" {
+            TextureImportSettings::orm()
+        } else {
+            kind.settings(false)
+        };
         let image = inf_material::build_tiled_texture(rgba, w, h, settings)
             .map_err(|e| AssetError::Import(format!("{}_{slot}: {e}", mat.key)))?;
         // **A DETERMINISTIC PATH**, so a second run over an unchanged manifest

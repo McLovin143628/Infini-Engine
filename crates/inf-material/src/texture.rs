@@ -449,6 +449,36 @@ impl TextureImportSettings {
         }
     }
 
+    /// Preset for a packed **ORM triple** (wave OUTFIT1): linear, BC7.
+    ///
+    /// # Why this one is not [`data`](Self::data), and why BC7 and not BC1
+    ///
+    /// `data()` is the preset for every data map and it keeps all eight bits of
+    /// every channel, which is right for a map whose value is READ (a height, an
+    /// opacity threshold) and wrong for the one data map that is a *triple of
+    /// shading terms*: measured on a MetaHuman body, one 2048² ORM is
+    /// **25 758 080 bytes** against the albedo's 3 229 952, and two characters put
+    /// **51 516 160** of it on the PIE payload (carried item 105). Occlusion,
+    /// roughness and metalness each feed a multiply in the shading maths; none of
+    /// them is a lookup key.
+    ///
+    /// BC7 and not BC1 because BC1 is 5:6:5 — five bits of occlusion and five of
+    /// metalness, on channels a lighting term multiplies. BC7 mode 6 keeps seven
+    /// bits a channel at one byte a texel, so this is a **four-fold** reduction
+    /// and not the eight-fold one BC1 would buy at a cost nobody measured.
+    ///
+    /// Opted into per map, exactly like [`normal_map`](Self::normal_map) and for
+    /// the same reason: changing what `data()` produces would move the bytes of
+    /// every asset that has ever been imported through it.
+    pub fn orm() -> Self {
+        Self {
+            srgb: false,
+            generate_mips: true,
+            compression: TextureCompression::Bc7,
+            hdr: false,
+        }
+    }
+
     /// [`data`](Self::data) with the float range kept — the preset a Megascans
     /// EXR displacement/cavity map wants.
     pub fn data_hdr() -> Self {
@@ -1641,6 +1671,38 @@ mod tests {
     }
 
     /// BC5 reaches the asset through the ordinary import door, and the level
+    /// **The ORM preset is BC7, and `data()` has not moved** (wave OUTFIT1,
+    /// carried item 105).
+    ///
+    /// Two claims, and the second is the one that makes the first safe: an ORM
+    /// triple stores at a QUARTER of RGBA8's bytes, and every other data map
+    /// still stores exactly what it stored before, because a preset that changed
+    /// `data()` would move the bytes of every asset ever imported through it.
+    #[test]
+    fn the_orm_preset_imports_as_bc7_at_a_quarter_of_the_bytes() {
+        let s = TextureImportSettings::orm();
+        assert_eq!(s.compression, TextureCompression::Bc7);
+        assert!(!s.srgb, "an ORM triple is data, never sRGB");
+        let tex = texture_from_rgba8(checker(64, 64, 255), 64, 64, s).unwrap();
+        assert_eq!(tex.format, TextureFormat::Bc7);
+        let bc7 = tex.mips[0].data.len();
+        let raw = texture_from_rgba8(checker(64, 64, 255), 64, 64, TextureImportSettings::data())
+            .unwrap()
+            .mips[0]
+            .data
+            .len();
+        assert_eq!(raw, 64 * 64 * 4);
+        assert_eq!(bc7, 64 * 64, "BC7 is one byte a texel");
+        assert_eq!(raw / bc7, 4, "the ORM saving is fourfold");
+        tex.validate().expect("a BC7 asset is a valid asset");
+        // …and the preset that must NOT have moved.
+        assert_eq!(
+            TextureImportSettings::data().compression,
+            TextureCompression::None,
+            "the data preset moved, which re-bytes every asset imported through it"
+        );
+    }
+
     /// sizes it declares are the ones it stores.
     #[test]
     fn the_normal_map_preset_imports_as_bc5() {
