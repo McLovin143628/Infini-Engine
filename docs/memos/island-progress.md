@@ -37164,6 +37164,15 @@ the five LOW surfaces are three places on `Harbour City Shop -1,0` and `-1,-1`
 * **SWAT's preference was a rule with no behaviour behind it.** Measured on a
   fixture: nobody wanted -> the NEAREST (class `Low`, z 2.34); the top rung ->
   the wall it can shoot around (class `High`, z 4.34, `swat_high` 1).
+* **The cover state outlived the mode**, and the frames are how it showed. A
+  jump press whose mantle refuses falls through the traversal chain with the
+  mode untouched, and the next step that finds no ground puts the character in
+  a fall -- out of `MovementMode::Cover` with `CoverState::active` still true.
+  Measured on the shipped player: **133 samples** of the hero walking as
+  `Grounded`/`FallControlled` while the log read `class High, side Left, peek
+  1.000`, the pose still rolling the torso eighteen degrees and the machine
+  still being told `cover = 2`. One line at the end of the step, and an arm
+  that reds without it.
 * The stance arm asserted the CAPSULE and printed the JOINTS; the refusal
   sameness list compared eight of nine variants; and `step_npc_cover`'s doc named
   `npc_aim_at`, which it does not call and cannot (it is handed places, not a
