@@ -37100,8 +37100,9 @@ all building. Three facts came out of the census and each is in the report:
 Every arm reads the world or the joints: the measured surface top against the
 capsule's half-height, the head joint's world position, the ray's hit entity, the
 transform's distance from the face, the step's own probe counter. Twelve green on
-the island in 481 s, plus 12 fixture arms in `inf-physics/tests/cover_3d.rs` and
-10 rule arms in `inf_ecs::cover`.
+the island in 481 s, plus **13** fixture arms in `inf-physics/tests/cover_3d.rs`
+(and one `#[ignore]`d diagnostic that prints a slide step by step and asserts
+nothing), **9** rule arms in `inf_ecs::cover` and **2** in `d3::label`.
 
 ### What COV1 leaves
 
