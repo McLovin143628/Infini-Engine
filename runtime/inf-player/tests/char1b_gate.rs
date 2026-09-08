@@ -113,6 +113,37 @@ fn skeletons_in(dir: &Path) -> std::collections::BTreeMap<[u8; 16], inf_anim::Sk
     out
 }
 
+/// Every `.inf_skel` at `dir` **and under it**, keyed by its sidecar GUID.
+///
+/// The single-level [`skeletons_in`] above is right for the donor pack, whose
+/// rigs sit beside its clips. An AUTHORED clip does not: it is written into
+/// `{stem}-loco/` and bound to the identity's own rig at the content root, so
+/// resolving its `skeleton` guid needs the whole tree. (Wave COV1 — before
+/// this, every authored clip's rig lookup missed and the arm below skipped all
+/// ten of them while still reporting success.)
+fn skeletons_under(dir: &Path) -> std::collections::BTreeMap<[u8; 16], inf_anim::SkeletonAsset> {
+    let mut out = skeletons_in(dir);
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut subs: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+        })
+        .collect();
+    subs.sort();
+    for sub in subs {
+        out.extend(skeletons_under(&sub));
+    }
+    out
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (1) THE FOOT-IK GATE CHANNEL — the mechanism that had never run
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1146,32 +1177,62 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
             rows.keys().collect::<Vec<_>>(),
             inf_anim::AUTHORED_CLIPS
         );
-        let all_rigs = skeletons_in(&dir);
-        let hero_rig = all_rigs
-            .values()
-            .filter(|r| inf_anim::can_author(r))
-            .max_by_key(|r| r.skeleton.len());
-        if let Some(rig) = hero_rig {
-            let want: std::collections::BTreeMap<String, usize> = inf_anim::author_clips(rig)
+        // **EACH FILE AGAINST THE RIG IT IS BOUND TO** (wave COV1).
+        //
+        // An authored clip exists once per identity and `find` takes the first
+        // of them, so comparing every file against one "hero rig" compares a
+        // 342-joint MetaHuman's file with a 161-joint mannequin's generator
+        // output. That passed for nine clips by coincidence and failed on the
+        // tenth: `INF_Cover_High_Move` came out 11 tracks on disk against a
+        // generator's 10, and the two lists of joint INDICES had nothing in
+        // common (`[0, 1, 6, 11, 17, 142, …, 310]` against `[1, 6, 11, 12, 57,
+        // …, 107]`). The file says which skeleton it is bound to; this reads it.
+        let all_rigs = skeletons_under(&content);
+        let mut checked = 0usize;
+        for name in inf_anim::AUTHORED_CLIPS {
+            let got = find(name)
+                .unwrap_or_else(|| panic!("`{name}` is not on disk beside the donor clips"));
+            let Some(rig) = got.skeleton.and_then(|g| all_rigs.get(&g)) else {
+                println!("  SKIP `{name}`: its skeleton is not on disk");
+                continue;
+            };
+            if !inf_anim::can_author(rig) {
+                println!("  SKIP `{name}`: its own rig carries no role table");
+                continue;
+            }
+            let generated = inf_anim::author_clips(rig)
                 .expect("the rig can author")
                 .into_iter()
-                .map(|(n, c)| (n, c.tracks.len()))
-                .collect();
-            for (name, joints) in &want {
-                let got = find(name)
-                    .unwrap_or_else(|| panic!("`{name}` is not on disk beside the donor clips"));
-                assert_eq!(
-                    got.clip.tracks.len(),
-                    *joints,
-                    "`{name}` on disk drives {} joints and the generator writes {joints} for \
-                     this rig — the file is not this rig's authored clip",
-                    got.clip.tracks.len()
-                );
-            }
-            println!("  the authored sets, re-derived from the hero's own rig: {want:?}");
-        } else {
-            println!("  SKIP the authored re-derivation: no rig on disk carries a role table");
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| c)
+                .unwrap_or_else(|| panic!("`{name}` is in the manifest and the generator skipped it"));
+            let want: Vec<u16> = generated.tracks.iter().map(|t| t.joint).collect();
+            let have: Vec<u16> = got.clip.tracks.iter().map(|t| t.joint).collect();
+            // **Every joint the generator writes is in the file.** The file may
+            // carry MORE — `ue_import` runs `derive_clip` after authoring and a
+            // clip whose pelvis moves gains a root-motion track — and that is
+            // the one direction a hand-dropped file cannot fake.
+            let missing: Vec<u16> = want.iter().copied().filter(|j| !have.contains(j)).collect();
+            assert!(
+                missing.is_empty(),
+                "`{name}` on disk drives {have:?} and the generator writes {want:?} for its own \
+                 rig — joints {missing:?} are missing, so the file is not this rig's authored clip"
+            );
+            assert!(
+                have.len() <= want.len() + 1,
+                "`{name}` on disk drives {} joints against the generator's {} — more than the \
+                 one root track the derivation adds",
+                have.len(),
+                want.len()
+            );
+            checked += 1;
         }
+        assert!(
+            checked >= 4,
+            "only {checked} authored clips could be checked against their own rigs — an arm \
+             that checks nothing passes everything"
+        );
+        println!("  {checked} authored clips re-derived against the rig each is BOUND to");
     }
     machine
         .validate()

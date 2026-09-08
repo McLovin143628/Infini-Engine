@@ -276,7 +276,8 @@ fn a_kerb_is_not_cover_a_car_is_crouch_cover_and_a_wall_is_stand_cover() {
     assert_eq!(
         cm.runtime.cover.class,
         CoverClass::High,
-        "a {PARAPET_TOP_M} m parapet classified {:?}; its measured top is {:.4} m and the          split is {}",
+        "a {PARAPET_TOP_M} m parapet classified {:?}; its measured top is {:.4} m \
+         and the split is {}",
         cm.runtime.cover.class,
         cm.runtime.cover.top_m,
         inf_anim::MANTLE_HIGH_SPLIT_M
