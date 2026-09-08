@@ -130,6 +130,18 @@ pub struct WeaponHit {
     /// Whether the target absorbed it as **health** (a character) rather than
     /// as structure.
     pub on_flesh: bool,
+    /// **Whether this record is a round ARRIVING rather than a trigger being
+    /// pulled** (wave WPN2a).
+    ///
+    /// A hitscan is one record: the shot and the impact are the same event. A
+    /// projectile is two — the pull (loud, at the muzzle, on the step the
+    /// trigger went down) and the arrival (quiet, at the target, up to eight
+    /// seconds later) — and a reader that could not tell them apart would file
+    /// the second as a second crime. `step_witness`'s quiet-crime filter is the
+    /// reader that needed it: `!loud && on_flesh` is a PUNCH by wave WPN1's own
+    /// definition, and a bullet landing is not an assault by hand — it is the
+    /// `Shot` act already on the record finally reaching somebody.
+    pub arrived: bool,
     /// **Whether the hit point was on the target's head** (wave WPN2a) — the
     /// sphere test in [`head_point`]'s own doc, already applied to
     /// [`energy_j`](Self::energy_j).
@@ -331,20 +343,28 @@ pub fn step_gameplay(
     //    step 3 and must find the leaf where this step's solver will.
     let doors = super::door::step_doors_with(world, bridge, dt, places);
     report.doors = doors;
-    // 2. Every character with a weapon: the trigger, the reload, the clocks.
-    step_weapons(world, bridge, dt, &mut report);
-    // 2b. **Every round already in the air** (wave WPN2a) — the far half of the
-    //     hybrid. Straight after the trigger, so a shot that mints a round this
-    //     step does not also fly it this step (the round leaves the muzzle on
-    //     the step it was fired and moves on the next, which is what a body
-    //     leaving a barrel does), and BEFORE the panic, the deaths and the
-    //     witness pass below, so a projectile kill is filed on the step it
-    //     happened rather than one later. See `step_rounds` for why that
+    // 1b. **Every round already in the air** (wave WPN2a) — the far half of the
+    //     hybrid, integrated BEFORE this step's triggers.
+    //
+    //     The order is the one every physics loop uses and it is MEASURED rather
+    //     than assumed: advancing the pool AFTER the trigger flew a round minted
+    //     this step for a whole step immediately, so a rifle whose threshold is
+    //     25 m put its round at **39.96 m** on the step it was fired — the
+    //     instant ray's 25 m and a full 15 m of flight, double-counted.
+    //     Integrating first means a round leaves the muzzle on the step the
+    //     trigger went down and MOVES on the next, which is what a body leaving
+    //     a barrel does.
+    //
+    //     It is still inside `step_gameplay` and still ABOVE the panic, the
+    //     deaths and the witness pass, so a projectile kill is filed on the step
+    //     it happened rather than one later — see `step_rounds` for why that
     //     ordering is the reason this is not a thirtieth `STEP_PHASES` row.
     //
     //     Inert on every level that has never fired a round: one absent-resource
     //     read.
     step_rounds(world, bridge, &band, dt, &mut report);
+    // 2. Every character with a weapon: the trigger, the reload, the clocks.
+    step_weapons(world, bridge, dt, &mut report);
     // 3. Every pending kick: the notify, or the fuse.
     step_kicks(world, dt, &mut report);
     // 3b. **The equipped weapon is an entity** (SK1b) — spawned, moved by the
@@ -1138,11 +1158,16 @@ fn step_weapons(
         }
         let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
         // The step's ray bill so far, so the pool's spawn refusal covers the
-        // whole step and not only the flight: one cast per shot fired here, plus
-        // whatever the rounds already in the air will spend below.
-        let rays_already = report.shots as usize
-            + inf_ecs::ballistics::rounds_in_flight(world)
-                * inf_ecs::ballistics::PROJECTILE_SUB_STEPS as usize;
+        // whole step and not only the flight: **one cast per shot fired here**,
+        // and nothing else.
+        //
+        // The rounds already in the air are deliberately NOT counted here —
+        // `spawn_round` counts them itself, off the pool it is about to push
+        // into. Counting them in both places halved the effective bound:
+        // measured, at eight shooters and 900 rpm the pool peaked at **32**
+        // rounds against a stated ceiling of 64 and refused 301 spawns, because
+        // 32 rounds' rays were being billed twice.
+        let rays_already = report.shots as usize;
         let mut rounds = report.rounds;
         let hit = if def.is_melee() {
             resolve_swing(world, guid, &def, from, dir, yaw)
@@ -1233,6 +1258,7 @@ fn resolve_shot(
                 energy_j: def.damage_at(h.toi, headshot),
                 on_flesh,
                 loud: true,
+                arrived: false,
                 headshot,
                 report_max_m: def.report_max_m,
             }
@@ -1264,6 +1290,7 @@ fn resolve_shot(
                 energy_j: def.damage_at(reach, false),
                 on_flesh: false,
                 loud: true,
+                arrived: false,
                 headshot: false,
                 report_max_m: def.report_max_m,
             }
@@ -1281,9 +1308,11 @@ fn resolve_shot(
 ///    `update_attachments` uses, so a head and a weapon are placed by one rule.
 /// 2. **A height above the feet**, for a character with no pose at all — every
 ///    level committed before SK1b, the whole `phase30-gameplay` fixture, and any
-///    crowd agent the sim has tiered out of posing. The height is the capsule's
-///    own: `2·half_height − radius` is the centre of its top sphere, which is
-///    where a head is on a capsule and is not a constant somebody chose.
+///    crowd agent the sim has tiered out of posing. The height is the CAPSULE's
+///    own and not a constant somebody chose: a capsule stands with its centre at
+///    `feet + h + r` and its top sphere's centre `h` above that, so the head is
+///    at `feet + 2h + r` — 1.50 m on the shipped default, which is the neck and
+///    shoulder line of a 1.80 m body.
 ///
 /// A **posed** character whose rig authors no `head` socket takes answer 2 and
 /// is **counted** ([`RoundReport::heads_without_a_socket`]), which is
@@ -1309,14 +1338,20 @@ fn head_point(world: &EcsWorld, guid: Uuid, no_socket: &mut u32) -> Option<DVec3
         .map(|c| c.radius)
         .unwrap_or(0.3);
     let feet = feet_of(world, guid)?;
-    Some(feet + DVec3::Y * (2.0 * cm.half_height_for(cm.mode) - radius))
+    Some(feet + DVec3::Y * (2.0 * cm.half_height_for(cm.mode) + radius))
 }
 
-/// Whether `point` is on `target`'s head — [`head_point`] plus
-/// [`inf_ecs::ballistics::is_headshot`]'s sphere, and nothing else.
+/// Whether `point` arrived at `target`'s head — [`head_point`] plus
+/// [`inf_ecs::ballistics::is_headshot`]'s band, over the target's OWN collider
+/// radius, and nothing else.
 fn head_hit(world: &EcsWorld, target: Uuid, point: DVec3, no_socket: &mut u32) -> bool {
+    let radius = world
+        .entity_of(target)
+        .and_then(|e| world.world().get::<inf_ecs::components::Collider3D>(e))
+        .map(|c| c.radius)
+        .unwrap_or(0.0);
     head_point(world, target, no_socket)
-        .is_some_and(|head| inf_ecs::ballistics::is_headshot(point, head))
+        .is_some_and(|head| inf_ecs::ballistics::is_headshot(point, head, radius))
 }
 
 /// **Fly every round in the pool**, one fixed step (wave WPN2a).
@@ -1427,6 +1462,7 @@ fn step_rounds(
                             // `fire_weapon_audio` reads `hit.target`, not
                             // `hit.loud`.
                             loud: false,
+                            arrived: true,
                             headshot,
                             report_max_m: r.def.report_max_m,
                         },
@@ -1763,9 +1799,15 @@ fn step_witness(
     // from it (that is `step_panic`'s loud-only rule, unchanged) — the only
     // people who know about a punch are the ones who saw it, which is what makes
     // the observer list the whole of the evidence.
+    // **…and NOT a round arriving** (wave WPN2a). A projectile is two records —
+    // the pull, loud, at the muzzle, and the arrival, quiet, at the target, up
+    // to eight seconds later — and without `arrived` the second one lands in
+    // this bucket and files an ASSAULT against a shooter whose `Shot` is
+    // already on the record. A bullet reaching somebody is not a beating; it is
+    // the shot that was already witnessed finally arriving.
     for hit in hits
         .iter()
-        .filter(|h| !h.loud && h.on_flesh && h.from.is_finite())
+        .filter(|h| !h.loud && h.on_flesh && !h.arrived && h.from.is_finite())
     {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
@@ -1946,6 +1988,7 @@ fn resolve_swing(
             // answers `true` for — so this is a fact rather than an assumption.
             on_flesh: true,
             loud: false,
+            arrived: false,
             // A swing has no hit POINT on the target — `interact::resolve`
             // answers a body and a position on its capsule axis, not a place a
             // ray arrived at — so there is nothing to test against a head
@@ -1964,6 +2007,7 @@ fn resolve_swing(
             energy_j: def.damage_j,
             on_flesh: false,
             loud: false,
+            arrived: false,
             headshot: false,
             report_max_m: def.report_max_m,
         },

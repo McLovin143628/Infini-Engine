@@ -51,7 +51,7 @@
 /// single floor would either be vacuous for the big three or unreachable for it.
 /// The guard exists so the ban cannot pass by scanning a file that has been
 /// emptied out from under it.
-const CHARACTER_PATH: [(&str, &str, &str, usize); 6] = [
+const CHARACTER_PATH: [(&str, &str, &str, usize); 8] = [
     (
         "d3/camera.rs",
         include_str!("../src/d3/camera.rs"),
@@ -88,11 +88,23 @@ const CHARACTER_PATH: [(&str, &str, &str, usize); 6] = [
         "the whole driving model — the tyre, the torque curve, the gearbox and the steering — and its answers reach a chassis pose that both hosts compare",
         400,
     ),
+    (
+        "inf-ecs/src/ballistics.rs",
+        include_str!("../../inf-ecs/src/ballistics.rs"),
+        "wave WPN2a: a round's flight is folded into `state_bytes` and decides who gets hit, so a drag integration that disagreed in the last ulp on two machines would put a bullet through two different people — and the divergence is INVISIBLE until it lands, up to eight seconds later",
+        90,
+    ),
+    (
+        "d3/gameplay.rs",
+        include_str!("../src/d3/gameplay.rs"),
+        "wave WPN2a: the segment casts, the damage curve's call site and the head sphere all decide what a shot did, and the answer reaches `apply_hit`, the trace and the witness log",
+        400,
+    ),
 ];
 
 /// A marker that must be present in each file, so the gate cannot pass because
 /// it is scanning something that is no longer the module it names.
-const ANCHORS: [(&str, &[&str]); 6] = [
+const ANCHORS: [(&str, &[&str]); 8] = [
     ("d3/camera.rs", &["inf_ecs::camera::", "cast_shape_where("]),
     (
         "d3/movement.rs",
@@ -114,6 +126,16 @@ const ANCHORS: [(&str, &[&str]); 6] = [
         "inf-ecs/src/vehicle.rs",
         &["inf_math::pcos64(", "inf_math::psin64(", "curve_bias("],
     ),
+    // Wave WPN2a. The integrator is `+ - * /` and one `sqrt` — which
+    // `inf_math::libm_ban`'s own header names as deliberately NOT banned,
+    // because IEEE-754 specifies it exactly — so there is no `p*` call to anchor
+    // on. The anchors are the two things whose ABSENCE would mean the file has
+    // stopped being the thing this gate names.
+    (
+        "inf-ecs/src/ballistics.rs",
+        &["fn advance_round(", "fn damage_curve_j("],
+    ),
+    ("d3/gameplay.rs", &["fn step_rounds(", "cast_ray_excluding("]),
 ];
 
 /// Comment lines blanked, CRLF normalized — the `fracture_3d` recipe, for the

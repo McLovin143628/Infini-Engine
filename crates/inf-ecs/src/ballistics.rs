@@ -133,14 +133,32 @@ pub const MAX_ROUNDS_IN_FLIGHT: usize = MAX_SHOT_RAYS_PER_STEP / PROJECTILE_SUB_
 /// 115 m/s) eight seconds is 920 m, past every `range_m` in it.
 pub const MAX_ROUND_LIFETIME_S: f64 = 8.0;
 
-/// **The radius of the head sphere a headshot is tested against**, metres.
+/// **How tall the head's own band is**, metres — the half-height of the zone a
+/// round has to arrive in to be a headshot.
 ///
-/// Twelve centimetres — half the width of an adult head, measured off the
-/// MetaHuman rig this engine's characters use. It is a **sphere about the rig's
-/// own `head` socket** and not a new collider: adding a second collider per
-/// character would put a body part in the physics world for every crowd agent,
-/// which is the cost `apply_hit`'s lazy-health doc already refuses one field
-/// along.
+/// Twelve centimetres either side of the head point, which is a 24 cm band: an
+/// adult head is about that.
+///
+/// # It is a BAND, not a sphere, and the collider is why
+///
+/// A character in this engine is a **capsule** of radius ~0.30 m. A ray fired at
+/// a standing body stops on that capsule's SURFACE, which is a capsule radius
+/// away from the axis the head socket sits on — so a 12 cm sphere about the head
+/// point is a target no shot can ever reach, and a headshot would be
+/// unreachable on every character in the game. Measured, on this wave's own
+/// first draft: a shot aimed exactly at the head socket of a target 12 m away
+/// arrives 0.300 m from it and the sphere test answered `false`.
+///
+/// What a capsule CAN carry is the height a round arrived at, so that is what
+/// [`is_headshot`] measures — the vertical distance to the head point, plus a
+/// horizontal bound that is the body's OWN radius (the surface a ray can reach)
+/// plus this band. Nothing is fudged and no constant is chosen twice: the day a
+/// character grows a real head collider, the test reads the same numbers off a
+/// smaller radius.
+///
+/// It is deliberately **not a new collider**: adding a body part per character
+/// would put a shape in the physics world for every crowd agent, which is the
+/// cost `apply_hit`'s lazy-health doc already refuses one field along.
 pub const HEAD_RADIUS_M: f64 = 0.12;
 
 // ── the round ───────────────────────────────────────────────────────────────
@@ -371,13 +389,24 @@ pub fn damage_curve_j(base_j: f64, min_frac: f64, effective_m: f64, max_m: f64, 
     base_j + smoothstep(t) * (min_j - base_j)
 }
 
-/// **Is this hit point on the head?** — a sphere test, nothing more.
+/// **Did this round arrive at the head?**
 ///
 /// `head` is the world position of the rig's own `head` socket (or the capsule
 /// rule's stand-in for it; see `inf_physics::d3::gameplay::head_point`, which is
-/// the one door both answers come out of). The radius is [`HEAD_RADIUS_M`].
-pub fn is_headshot(point: DVec3, head: DVec3) -> bool {
-    point.distance_squared(head) <= HEAD_RADIUS_M * HEAD_RADIUS_M
+/// the one door both answers come out of), and `body_radius_m` is the target's
+/// own collider radius.
+///
+/// The test is a **band**, and [`HEAD_RADIUS_M`] says why: within that distance
+/// of the head point vertically, and within the body's own radius plus the same
+/// band horizontally. A sphere would be a target the capsule world can never
+/// present.
+pub fn is_headshot(point: DVec3, head: DVec3, body_radius_m: f64) -> bool {
+    let d = point - head;
+    if !d.is_finite() {
+        return false;
+    }
+    let across = (d.x * d.x + d.z * d.z).sqrt();
+    d.y.abs() <= HEAD_RADIUS_M && across <= body_radius_m.max(0.0) + HEAD_RADIUS_M
 }
 
 #[cfg(test)]
@@ -435,15 +464,23 @@ mod tests {
         assert_eq!(d.damage_at(20.0, true), 300.0 * 1.5);
     }
 
-    /// **The head sphere has a radius and a boundary**, and neither is a guess.
+    /// **The head band has a height and a width, and neither is a guess.**
     #[test]
-    fn the_head_sphere_is_twelve_centimetres() {
+    fn the_head_band_is_twelve_centimetres_tall_and_a_body_wide() {
         let head = DVec3::new(1.0, 1.7, 2.0);
-        assert!(is_headshot(head, head));
-        assert!(is_headshot(head + DVec3::X * 0.119, head));
-        assert!(!is_headshot(head + DVec3::X * 0.121, head));
+        let r = 0.30;
+        assert!(is_headshot(head, head, r));
+        // Vertically: the band, and one millimetre outside it.
+        assert!(is_headshot(head + DVec3::Y * 0.119, head, r));
+        assert!(!is_headshot(head + DVec3::Y * 0.121, head, r));
+        // Horizontally: the CAPSULE's surface is in, and half a metre out is
+        // not — which is what makes the test reachable at all.
+        assert!(is_headshot(head + DVec3::X * 0.30, head, r));
+        assert!(!is_headshot(head + DVec3::X * 0.50, head, r));
         // The pelvis of a 1.8 m character is nowhere near it.
-        assert!(!is_headshot(head - DVec3::Y * 0.7, head));
+        assert!(!is_headshot(head - DVec3::Y * 0.7, head, r));
+        // A body with no radius at all still has a head.
+        assert!(is_headshot(head, head, 0.0));
     }
 
     /// **The integrator falls like the parabola** when there is no drag — the
