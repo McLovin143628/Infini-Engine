@@ -87,6 +87,16 @@ pub const MUZZLE_HEIGHT_M: f64 = 1.4;
 /// the capsule rule, which is the same answer it got before this wave.
 pub const WEAPON_SOCKET: &str = "hand_r";
 
+/// **The socket a headshot is measured from** (wave WPN2a).
+///
+/// [`WEAPON_SOCKET`]'s sentence one joint along: `inf_anim::manny` publishes
+/// `head` under both this engine's spelling and ALS's `head_socket`, and the
+/// twenty-joint template has carried it since P24.1. A rig that does not publish
+/// it sends `head_point` to the capsule rule and is COUNTED there
+/// ([`RoundReport::heads_without_a_socket`]), which is the discipline
+/// `muzzles_without_a_socket` already applies to the other end of the character.
+pub const HEAD_SOCKET: &str = "head";
+
 /// The salt that carves equipped weapons' GUID space out of the scene's own —
 /// `item::dropped_item_guid`'s shape, with its own constant.
 const EQUIPPED_WEAPON_SALT: u128 = 0x5745_4150_4f4e_5f45_5155_4950_5045_4421;
@@ -120,6 +130,24 @@ pub struct WeaponHit {
     /// Whether the target absorbed it as **health** (a character) rather than
     /// as structure.
     pub on_flesh: bool,
+    /// **Whether the hit point was on the target's head** (wave WPN2a) — the
+    /// sphere test in [`head_point`]'s own doc, already applied to
+    /// [`energy_j`](Self::energy_j).
+    ///
+    /// A record rather than a re-derivation: by the time a HUD, a gate or a
+    /// witness reads this the pose has moved on, and asking again would answer
+    /// about a head that is somewhere else. `false` for a swing, for a miss and
+    /// for everything that is not flesh.
+    pub headshot: bool,
+    /// **How far this weapon's report carries**, metres — the per-weapon
+    /// [`inf_ecs::weapon::WeaponDef::report_max_m`], travelling on the shot for
+    /// [`loud`](Self::loud)'s reason exactly: what made the noise is a property
+    /// of the shot and not of whatever is in the hand when it lands.
+    ///
+    /// Both hosts read it inside the `weapon_report` MIRROR fence. Every weapon
+    /// authored before wave WPN2a carries `REPORT_MAX_M`, so every committed
+    /// audio command stream is byte-identical.
+    pub report_max_m: f64,
     /// **Whether this attack made a noise** (wave WPN1) — `true` for a round
     /// leaving a barrel, `false` for a swing.
     ///
@@ -137,6 +165,44 @@ pub struct WeaponHit {
     pub loud: bool,
 }
 
+/// **What the projectile pool did in one fixed step** (wave WPN2a).
+///
+/// Engagement counters on `CrowdDoorReport`'s own terms: without them "the
+/// flight pass ran" and "a round moved" are the same fact, and a pool that
+/// silently spawned nothing would look exactly like one that worked.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RoundReport {
+    /// Rounds minted this step — shots that missed inside their weapon's
+    /// hitscan threshold and had range left to fly through.
+    pub spawned: u32,
+    /// **Spawns REFUSED this step**, because the pool was full or the ray
+    /// ceiling would have been crossed. The value the law asks for: a round
+    /// dropped without a number is a shot the player fired and nobody can
+    /// account for.
+    pub refused: u32,
+    /// Rounds in flight after this step's advance.
+    pub in_flight: u32,
+    /// **Segment casts this step's flight spent** — the number
+    /// [`MAX_SHOT_RAYS_PER_STEP`] bounds, so the ceiling is a measurement
+    /// rather than an assertion about arithmetic.
+    pub rays: u32,
+    /// Rounds that ended on a hit this step.
+    pub impacts: u32,
+    /// Rounds that reached their weapon's `range_m` or aged out.
+    pub expired: u32,
+    /// Rounds that left the active partition.
+    pub left_band: u32,
+    /// **Head hits this step**, from either half of the hybrid.
+    pub headshots: u32,
+    /// **Head tests that fell back to the capsule rule** — a character that
+    /// publishes a pose whose rig authors no `head` socket. The muzzle's own
+    /// `muzzles_without_a_socket` tripwire, one joint along: without it a rig
+    /// that quietly lost its head socket is indistinguishable from a rig that
+    /// never had one, and every headshot on it would be tested against a
+    /// number instead of a bone.
+    pub heads_without_a_socket: u32,
+}
+
 /// What one fixed step of gameplay did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GameplayReport {
@@ -152,6 +218,10 @@ pub struct GameplayReport {
     pub npc_cover: super::cover::NpcCoverReport,
     /// Rounds fired this step.
     pub shots: u32,
+    /// **What the projectile pool did this step** (wave WPN2a) — every field an
+    /// engagement counter, and every one of them zero on a level that has never
+    /// fired a round, which is what tells "the pass ran" from "something flew".
+    pub rounds: RoundReport,
     /// Reloads that finished this step.
     pub reloads: u32,
     /// Kicks that landed this step.
@@ -263,6 +333,18 @@ pub fn step_gameplay(
     report.doors = doors;
     // 2. Every character with a weapon: the trigger, the reload, the clocks.
     step_weapons(world, bridge, dt, &mut report);
+    // 2b. **Every round already in the air** (wave WPN2a) — the far half of the
+    //     hybrid. Straight after the trigger, so a shot that mints a round this
+    //     step does not also fly it this step (the round leaves the muzzle on
+    //     the step it was fired and moves on the next, which is what a body
+    //     leaving a barrel does), and BEFORE the panic, the deaths and the
+    //     witness pass below, so a projectile kill is filed on the step it
+    //     happened rather than one later. See `step_rounds` for why that
+    //     ordering is the reason this is not a thirtieth `STEP_PHASES` row.
+    //
+    //     Inert on every level that has never fired a round: one absent-resource
+    //     read.
+    step_rounds(world, bridge, &band, dt, &mut report);
     // 3. Every pending kick: the notify, or the fuse.
     step_kicks(world, dt, &mut report);
     // 3b. **The equipped weapon is an entity** (SK1b) — spawned, moved by the
@@ -845,12 +927,15 @@ fn recoil_of(world: &EcsWorld, guid: Uuid) -> f64 {
 
 /// The equipped weapon's definition, if the character has one equipped and the
 /// catalogue knows it.
+///
+/// **One door** (wave WPN2a): the lookup itself is
+/// [`inf_ecs::weapon::equipped_def`], because the movement step now asks the
+/// same question — how fast does this character move for what it is carrying —
+/// and two spellings of "what is in this hand" is the shape of defect this
+/// repository has paid for at five separate seams. This is the name the fire
+/// path has always called it by.
 fn equipped_weapon(world: &EcsWorld, guid: Uuid) -> Option<(String, WeaponDef)> {
-    let entity = world.entity_of(guid)?;
-    let inv = world.world().get::<Inventory>(entity)?;
-    let id = inv.equipped_id()?.to_string();
-    let def = *item::item_defs(world)?.get(&id)?.weapon.as_ref()?;
-    Some((id, def))
+    weapon::equipped_def(world, guid)
 }
 
 /// Every character the weapon step visits, in `Guid` order — `O(characters)`.
@@ -1052,62 +1137,345 @@ fn step_weapons(
             report.muzzles_without_a_socket += 1;
         }
         let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
+        // The step's ray bill so far, so the pool's spawn refusal covers the
+        // whole step and not only the flight: one cast per shot fired here, plus
+        // whatever the rounds already in the air will spend below.
+        let rays_already = report.shots as usize
+            + inf_ecs::ballistics::rounds_in_flight(world)
+                * inf_ecs::ballistics::PROJECTILE_SUB_STEPS as usize;
+        let mut rounds = report.rounds;
         let hit = if def.is_melee() {
             resolve_swing(world, guid, &def, from, dir, yaw)
         } else {
-            resolve_shot(world, bridge, guid, &def, from, dir)
+            resolve_shot(
+                world,
+                bridge,
+                guid,
+                &def,
+                from,
+                dir,
+                rays_already,
+                &mut rounds,
+            )
         };
+        report.rounds = rounds;
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
     }
 }
 
-/// Cast one shot and answer where it landed.
+/// Cast one shot and answer where it landed — **the near half of the hybrid**
+/// (wave WPN2a).
 ///
-/// A **projectile** is resolved by the same cast today, at the same place a
-/// hitscan lands — the flight time is not simulated. That is an honest v1 and it
-/// is stated rather than implied: what `ShotKind::Projectile` changes in I6 is
-/// the tracer's speed, and closing the rest means a body in flight, which is a
-/// wave of its own.
+/// The cast reaches [`WeaponDef::hitscan_reach_m`], which for a
+/// [`ShotKind::Hitscan`] is the weapon's whole range (so every level committed
+/// before this wave resolves exactly as it did) and for a
+/// [`ShotKind::Projectile`] is the smaller of its range and its
+/// `hitscan_threshold_m`. A projectile that missed inside the threshold and has
+/// range left to fly through **mints a round** here, at the threshold point,
+/// carrying `muzzle_speed_mps` along the same spread direction — the doc's
+/// *"instantiate a bullet struct at the 20-meter point along the vector with
+/// initial velocity v"*.
+///
+/// The `WeaponHit` it answers with in that case is a **miss** whose `to` is the
+/// spawn point, and that is deliberate: the shot happened, it made a noise, and
+/// the street should panic from the muzzle now rather than in half a second when
+/// the round lands. The impact, if there is one, comes back later as its own
+/// quiet hit from [`step_rounds`].
+///
+/// `rays_already` is this step's cast count so far, so the pool's spawn refusal
+/// covers the whole step's ray bill — see [`MAX_SHOT_RAYS_PER_STEP`].
 fn resolve_shot(
-    world: &EcsWorld,
+    world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     shooter: Uuid,
     def: &WeaponDef,
     from: DVec3,
     dir: DVec3,
+    rays_already: usize,
+    rounds: &mut RoundReport,
 ) -> WeaponHit {
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
+    let reach = def.hitscan_reach_m().clamp(0.0, range);
     let mut exclude = BTreeSet::new();
     if let Some(c) = bridge.collider_of(shooter) {
         exclude.insert(c);
     }
-    let landed = bridge
-        .world_mut()
-        .cast_ray_excluding(from, dir, range, &exclude);
+    // A launcher's threshold is zero, and a zero-length cast is not a cast: skip
+    // it rather than clamping it up to 0.1 m, which would put a rocket's first
+    // ten centimetres inside a rule that has nothing to say about them.
+    let landed = (reach > 0.0)
+        .then(|| {
+            bridge
+                .world_mut()
+                .cast_ray_excluding(from, dir, reach, &exclude)
+        })
+        .flatten();
     match landed {
         Some(h) => {
             let target = bridge.guid_of_collider(h.collider);
             let on_flesh = target.is_some_and(|g| is_flesh(world, g));
+            let point = from + dir * h.toi;
+            let headshot = on_flesh
+                && target.is_some_and(|g| head_hit(world, g, point, &mut rounds.heads_without_a_socket));
+            if headshot {
+                rounds.headshots += 1;
+            }
             WeaponHit {
                 shooter,
                 target,
                 from,
-                to: from + dir * h.toi,
-                energy_j: def.damage_j,
+                to: point,
+                // ONE damage door (wave WPN2a): the curve and the head
+                // multiplier, evaluated at the cast's own distance. A weapon
+                // that named no ranges answers `damage_j` at every distance,
+                // which is the I6 number.
+                energy_j: def.damage_at(h.toi, headshot),
                 on_flesh,
                 loud: true,
+                headshot,
+                report_max_m: def.report_max_m,
             }
         }
-        None => WeaponHit {
-            shooter,
-            target: None,
-            from,
-            to: from + dir * range,
-            energy_j: def.damage_j,
-            on_flesh: false,
-            loud: true,
-        },
+        None => {
+            // **The far half.** Nothing inside the threshold; if this weapon
+            // flies, a round leaves here.
+            if def.spawns_a_round() {
+                let round = inf_ecs::ballistics::Round {
+                    shooter,
+                    at: from + dir * reach,
+                    velocity: dir * def.muzzle_speed_mps.max(1.0),
+                    travelled_m: reach,
+                    age_s: 0.0,
+                    first_segment: true,
+                    def: *def,
+                };
+                if inf_ecs::ballistics::spawn_round(world, round, rays_already) {
+                    rounds.spawned += 1;
+                } else {
+                    rounds.refused += 1;
+                }
+            }
+            WeaponHit {
+                shooter,
+                target: None,
+                from,
+                to: from + dir * reach.max(range.min(reach)),
+                energy_j: def.damage_at(reach, false),
+                on_flesh: false,
+                loud: true,
+                headshot: false,
+                report_max_m: def.report_max_m,
+            }
+        }
+    }
+}
+
+/// **Where a character's head is**, world metres — the one door a headshot is
+/// tested against, with two answers exactly as [`muzzle_of`] has.
+///
+/// 1. **The rig's own `head` socket.** `inf_anim::manny` publishes it (under
+///    both this engine's spelling and ALS's `head_socket`), the pose step
+///    resolves it into model space every step, and `pose::model_to_world` is the
+///    door that lifts a point on the rig into the world — the same one
+///    `update_attachments` uses, so a head and a weapon are placed by one rule.
+/// 2. **A height above the feet**, for a character with no pose at all — every
+///    level committed before SK1b, the whole `phase30-gameplay` fixture, and any
+///    crowd agent the sim has tiered out of posing. The height is the capsule's
+///    own: `2·half_height − radius` is the centre of its top sphere, which is
+///    where a head is on a capsule and is not a constant somebody chose.
+///
+/// A **posed** character whose rig authors no `head` socket takes answer 2 and
+/// is **counted** ([`RoundReport::heads_without_a_socket`]), which is
+/// `muzzles_without_a_socket`'s discipline one joint along.
+fn head_point(world: &EcsWorld, guid: Uuid, no_socket: &mut u32) -> Option<DVec3> {
+    let entity = world.entity_of(guid)?;
+    if let Some(pose) = inf_ecs::pose::evaluated_pose(world, guid) {
+        if let Some(m) = pose.socket(HEAD_SOCKET) {
+            let to_world = inf_ecs::pose::model_to_world(world, entity);
+            let local = glam::DAffine3::from_mat4(m.as_dmat4());
+            let at = (to_world * local).translation;
+            if at.is_finite() {
+                return Some(at);
+            }
+        } else {
+            *no_socket += 1;
+        }
+    }
+    let cm = world.world().get::<CharacterMovement>(entity)?;
+    let radius = world
+        .world()
+        .get::<inf_ecs::components::Collider3D>(entity)
+        .map(|c| c.radius)
+        .unwrap_or(0.3);
+    let feet = feet_of(world, guid)?;
+    Some(feet + DVec3::Y * (2.0 * cm.half_height_for(cm.mode) - radius))
+}
+
+/// Whether `point` is on `target`'s head — [`head_point`] plus
+/// [`inf_ecs::ballistics::is_headshot`]'s sphere, and nothing else.
+fn head_hit(world: &EcsWorld, target: Uuid, point: DVec3, no_socket: &mut u32) -> bool {
+    head_point(world, target, no_socket)
+        .is_some_and(|head| inf_ecs::ballistics::is_headshot(point, head))
+}
+
+/// **Fly every round in the pool**, one fixed step (wave WPN2a).
+///
+/// # Where this runs, and why it is not a `STEP_PHASES` row
+///
+/// Inside [`step_gameplay`], between `step_weapons` and `step_kicks`. The
+/// alternative was a thirtieth `STEP_PHASES` row on the `vehicle` precedent —
+/// attribution, a mirrored call site in both hosts and a `fixed_step_mirror`
+/// fence — and it is refused for a reason that is about correctness rather than
+/// about cost: **a round's impact has to reach this step's own witness, panic
+/// and death passes**. Those run at the bottom of `step_gameplay` over
+/// `report.hits`; a phase after gameplay would file every projectile kill one
+/// step late (and `step_deaths` would hand a body to the ragdoll a step after
+/// the blow), and a phase before it would advance a round on the step before the
+/// shot that minted it. Hoisting the four passes out to meet the new row is a
+/// bigger edit to a more load-bearing thing than a budget row is worth.
+///
+/// What that costs is stated rather than hidden: [`WEAPON_STEP_BUDGET_MS`] is a
+/// ceiling on the **`gameplay` phase**, which holds the doors, the kicks, the
+/// hands and the cover pass as well — so the arm that asserts it also reports
+/// the DELTA between a step with rounds in the air and one without, which is the
+/// pool's own cost with nothing else in it.
+///
+/// [`WEAPON_STEP_BUDGET_MS`]: inf_player::budget::WEAPON_STEP_BUDGET_MS
+///
+/// # The segment cast
+///
+/// [`inf_ecs::ballistics::PROJECTILE_SUB_STEPS`] per fixed step, and each
+/// sub-step is a cast from the previous position to the next one through the
+/// **same** `cast_ray_excluding` door the instant ray uses — never a test of the
+/// endpoint. The shooter is excluded on the first segment only. A hit resolves
+/// through the **same** `apply_hit` door with the round's remaining energy, so a
+/// projectile kill spends its joules, staggers, panics the street and is
+/// witnessed exactly as a hitscan kill is.
+fn step_rounds(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    band: &inf_ecs::band::SimBand,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    use inf_ecs::ballistics::{RoundPool, MAX_ROUND_LIFETIME_S, PROJECTILE_SUB_STEPS};
+    if world.world().get_resource::<RoundPool>().is_none() {
+        return;
+    }
+    let live: Vec<inf_ecs::ballistics::Round> = world
+        .world()
+        .resource::<RoundPool>()
+        .rounds
+        .iter()
+        .copied()
+        .collect();
+    if live.is_empty() {
+        return;
+    }
+    let sub_dt = dt / f64::from(PROJECTILE_SUB_STEPS);
+    let mut survivors: Vec<inf_ecs::ballistics::Round> = Vec::with_capacity(live.len());
+    let mut landed: Vec<(WeaponHit, f64)> = Vec::new();
+    for mut r in live {
+        let mut alive = true;
+        for _ in 0..PROJECTILE_SUB_STEPS {
+            let prev = r.at;
+            let (next, v) = inf_ecs::ballistics::advance_round(r.at, r.velocity, &r.def, sub_dt);
+            let seg = next - prev;
+            let len = seg.length();
+            report.rounds.rays += 1;
+            if len > 1e-6 {
+                let mut exclude = BTreeSet::new();
+                // **Segment 0 only.** A round leaves a hand's breadth from the
+                // body that fired it, so its first segment must not stop on its
+                // own shooter; after that the exclusion is dropped, because a
+                // round that came back at its shooter should hit them.
+                if r.first_segment {
+                    if let Some(c) = bridge.collider_of(r.shooter) {
+                        exclude.insert(c);
+                    }
+                }
+                let hit = bridge
+                    .world_mut()
+                    .cast_ray_excluding(prev, seg / len, len, &exclude);
+                if let Some(h) = hit {
+                    let point = prev + (seg / len) * h.toi;
+                    let flight = r.travelled_m + h.toi;
+                    let target = bridge.guid_of_collider(h.collider);
+                    let on_flesh = target.is_some_and(|g| is_flesh(world, g));
+                    let headshot = on_flesh
+                        && target.is_some_and(|g| {
+                            head_hit(world, g, point, &mut report.rounds.heads_without_a_socket)
+                        });
+                    if headshot {
+                        report.rounds.headshots += 1;
+                    }
+                    landed.push((
+                        WeaponHit {
+                            shooter: r.shooter,
+                            target,
+                            from: prev,
+                            to: point,
+                            energy_j: r.def.damage_at(flight, headshot),
+                            on_flesh,
+                            // **QUIET.** The bang happened at the muzzle, half a
+                            // second ago, and was queued then; a loud impact
+                            // would fire a second gunshot clip from wherever the
+                            // round landed and panic the street a second time
+                            // from the wrong place. The target's own emitter
+                            // still sounds the impact — that half of
+                            // `fire_weapon_audio` reads `hit.target`, not
+                            // `hit.loud`.
+                            loud: false,
+                            headshot,
+                            report_max_m: r.def.report_max_m,
+                        },
+                        flight,
+                    ));
+                    report.rounds.impacts += 1;
+                    alive = false;
+                    break;
+                }
+            }
+            r.at = next;
+            r.velocity = v;
+            r.travelled_m += len;
+            r.age_s += sub_dt;
+            r.first_segment = false;
+            if r.travelled_m >= r.def.range_m.clamp(0.1, SHOT_MAX_RANGE_M)
+                || r.age_s >= MAX_ROUND_LIFETIME_S
+                || !r.at.is_finite()
+            {
+                report.rounds.expired += 1;
+                alive = false;
+                break;
+            }
+            if band.tier(r.at, DVec3::ZERO, glam::DQuat::IDENTITY) == inf_math::Tier::Out {
+                // A round outside the active partition is flying through
+                // geometry that is not in the physics world, so every segment
+                // from here on would report a miss it did not earn.
+                report.rounds.left_band += 1;
+                alive = false;
+                break;
+            }
+        }
+        if alive {
+            survivors.push(r);
+        }
+    }
+    let mut pool = world.world_mut().resource_mut::<RoundPool>();
+    pool.rounds = survivors;
+    pool.impacts += u64::from(report.rounds.impacts);
+    pool.expired += u64::from(report.rounds.expired);
+    pool.left_band += u64::from(report.rounds.left_band);
+    if let Some((_, flight)) = landed.last() {
+        pool.last_flight_m = *flight;
+    }
+    report.rounds.in_flight = pool.rounds.len() as u32;
+    drop(pool);
+    for (hit, _) in landed {
+        apply_hit(world, &hit, dt, report);
+        report.hits.push(hit);
     }
 }
 
@@ -1578,6 +1946,13 @@ fn resolve_swing(
             // answers `true` for — so this is a fact rather than an assumption.
             on_flesh: true,
             loud: false,
+            // A swing has no hit POINT on the target — `interact::resolve`
+            // answers a body and a position on its capsule axis, not a place a
+            // ray arrived at — so there is nothing to test against a head
+            // sphere and a punch never multiplies. Wave WPN2d's box cast is
+            // where a melee hit grows a point.
+            headshot: false,
+            report_max_m: def.report_max_m,
         },
         None => WeaponHit {
             shooter,
@@ -1589,6 +1964,8 @@ fn resolve_swing(
             energy_j: def.damage_j,
             on_flesh: false,
             loud: false,
+            headshot: false,
+            report_max_m: def.report_max_m,
         },
     }
 }

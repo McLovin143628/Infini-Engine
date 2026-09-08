@@ -2866,7 +2866,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 13] = [
+    const SECTIONS: [&str; 14] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2907,6 +2907,14 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // player experiences as "the police behaved differently in the editor".
         "witness::witness_state_bytes",
         "crime::profile_state_bytes",
+        // WPN2a, pinned in the SAME commit that folded it. A round in flight is
+        // the one section on this list whose divergence is INVISIBLE until it
+        // lands: two hosts that integrated a bullet differently agree about
+        // every other byte in the world for up to eight seconds and then one of
+        // them kills somebody. It is also the section most likely to be dropped
+        // by accident, because a level that never fires produces an empty vec
+        // and every existing gate stays green without it.
+        "ballistics::round_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

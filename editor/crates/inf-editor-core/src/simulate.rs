@@ -597,6 +597,12 @@ impl SimSession {
         // run 1's officers still on duty could not frighten them.
         inf_ecs::dispatch::clear_dispatch(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
+        // WPN2a: and every round still in the air, for `clear_crowd`'s reason
+        // exactly — a bullet the author fired in run 1 and stopped watching is
+        // run 1's, and a second run that began with it half way to a wall would
+        // not match the shipped player, which starts from an empty pool every
+        // time.
+        inf_ecs::ballistics::clear_rounds(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -1042,6 +1048,12 @@ impl SimSession {
         // run 1's officers still on duty could not frighten them.
         inf_ecs::dispatch::clear_dispatch(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
+        // WPN2a: and every round still in the air, for `clear_crowd`'s reason
+        // exactly — a bullet the author fired in run 1 and stopped watching is
+        // run 1's, and a second run that began with it half way to a wall would
+        // not match the shipped player, which starts from an empty pool every
+        // time.
+        inf_ecs::ballistics::clear_rounds(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -2268,7 +2280,17 @@ impl SimSession {
             // this same list, and a fist that fired a rifle's clip would be the
             // funniest defect in the engine.
             if hit.loud {
-                let report = inf_ecs::weapon::report_source();
+                // **The RANGE is the weapon's** (wave WPN2a). `REPORT_MAX_M`'s
+                // own doc calls a gunshot "the one emitter whose range is the
+                // gameplay", and a .50 BMG and a suppressed .380 do not empty
+                // the same number of streets. It rides `WeaponHit` for the
+                // reason `loud` does — what made the noise is a property of the
+                // shot, not of whatever is in the hand when it lands — and it is
+                // the weapon's RANGE and not its CLIP, because P22 §5's refusal
+                // of a per-weapon sound slot stands: what a bullet SOUNDS like
+                // is decided by what it hit.
+                let mut report = inf_ecs::weapon::report_source();
+                report.max_distance = hit.report_max_m;
                 let cmd = play_command_for(
                     guid_source_key(hit.shooter),
                     &report,

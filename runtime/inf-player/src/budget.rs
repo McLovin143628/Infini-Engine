@@ -441,6 +441,62 @@ pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
 /// first time a level puts cars on its roads.
 pub const VEHICLE_BUDGET_CARS: usize = 64;
 
+/// **What the `gameplay` phase may cost with a firefight in the air**,
+/// milliseconds (wave WPN2a).
+///
+/// # Why a phase gets its own number, and what is honestly IN this one
+///
+/// [`NPC_STEP_BUDGET_MS`]'s argument once more: a whole-step total works while
+/// every phase is something the engine has always done, and stops working the
+/// moment a phase **grows**. Wave WPN2a gave `gameplay` a new inner loop — up to
+/// [`inf_ecs::ballistics::MAX_ROUNDS_IN_FLIGHT`] rounds × four segment casts a
+/// step — and a new inner loop inside a 6 ms island is invisible in a total.
+///
+/// **Unlike every other budget in this file, this one is not a phase of its
+/// own.** `step_rounds` runs inside `step_gameplay`, between the trigger and the
+/// kicks, because a projectile's impact has to reach the SAME step's panic,
+/// death and witness passes — a thirtieth `STEP_PHASES` row would file every
+/// projectile kill one step late. So the ceiling here is on the whole `gameplay`
+/// row, which also holds the doors, the kicks, the hand IK and the NPC cover
+/// pass, and the arm that asserts it also reports the **delta** between a step
+/// with rounds in the air and one without: that delta is the pool's own cost
+/// with nothing else in it. Both numbers are in the wave's report.
+///
+/// # The population, named
+///
+/// [`WEAPON_BUDGET_ROUNDS`] rounds in flight × four sub-steps =
+/// [`inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP`] segment casts, which is the
+/// pool at its ceiling — a steady-state eight-shooter firefight with assault
+/// rifles at 900 rpm produces about 84 rounds against a bound of 64, so the
+/// budget is measured at *saturation* rather than at a comfortable load.
+///
+/// # The number
+///
+/// One and a half milliseconds. A quarter of [`CITY_STEP_BUDGET_MS`] — three
+/// times [`VEHICLE_STEP_BUDGET_MS`], because 256 ray casts is an order of
+/// magnitude more than 64 cars × 4 wheel rays is *not*, and the difference is
+/// that this phase also carries everything `gameplay` already did. It is the
+/// property that makes it able to see anything: a `gameplay` row that grew to a
+/// quarter of a six-millisecond step trips this before the frame budget notices.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 1.5
+/// (WPN2a).
+pub const WEAPON_STEP_BUDGET_MS: f64 = 1.5;
+
+/// **The rounds in flight [`WEAPON_STEP_BUDGET_MS`] is measured at.**
+///
+/// [`VEHICLE_BUDGET_CARS`]' rule: a per-step millisecond without a population
+/// beside it is a number about an unnamed world. It is
+/// [`inf_ecs::ballistics::MAX_ROUNDS_IN_FLIGHT`] — the pool's own ceiling —
+/// rather than a comfortable figure, because the ceiling is the load the engine
+/// can actually be put under and a budget measured below it is a budget about a
+/// world nobody will play.
+pub const WEAPON_BUDGET_ROUNDS: usize = inf_ecs::ballistics::MAX_ROUNDS_IN_FLIGHT;
+
 /// **What the `traffic` phase may cost**, milliseconds (island wave VEH2b) —
 /// `inf_physics::d3::traffic::step_traffic` over a settlement's whole car
 /// population.

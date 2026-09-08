@@ -1398,6 +1398,21 @@ impl RuntimeSim {
         // produces two empty vecs, so every pre-EMS3 trace is byte-identical.
         out.extend_from_slice(&inf_ecs::witness::witness_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::crime::profile_state_bytes(&self.world));
+        // WPN2a appends the ROUNDS IN FLIGHT, last, on the thirteen above's
+        // argument verbatim: where a bullet is decides whether somebody is hit,
+        // so it is sim state and two hosts that disagreed about it have
+        // diverged — and a projectile is the one piece of state in this list
+        // whose divergence is INVISIBLE until it lands, which is up to eight
+        // seconds after the step that caused it.
+        //
+        // **The position is frozen**, exactly as the thirteen above it are, and
+        // `projector_mirror`'s `SECTIONS` allowlist is extended in the SAME
+        // commit — which is the whole of what the traffic section's two unpinned
+        // waves taught. **EMPTY when nothing is in the air**, which is the half
+        // that keeps every trace committed before this wave byte-identical: a
+        // level that has never fired folds nothing, and so does one that has
+        // fired and landed everything.
+        out.extend_from_slice(&inf_ecs::ballistics::round_state_bytes(&self.world));
         out
     }
 
@@ -2800,7 +2815,17 @@ impl RuntimeSim {
             // this same list, and a fist that fired a rifle's clip would be the
             // funniest defect in the engine.
             if hit.loud {
-                let report = inf_ecs::weapon::report_source();
+                // **The RANGE is the weapon's** (wave WPN2a). `REPORT_MAX_M`'s
+                // own doc calls a gunshot "the one emitter whose range is the
+                // gameplay", and a .50 BMG and a suppressed .380 do not empty
+                // the same number of streets. It rides `WeaponHit` for the
+                // reason `loud` does — what made the noise is a property of the
+                // shot, not of whatever is in the hand when it lands — and it is
+                // the weapon's RANGE and not its CLIP, because P22 §5's refusal
+                // of a per-weapon sound slot stands: what a bullet SOUNDS like
+                // is decided by what it hit.
+                let mut report = inf_ecs::weapon::report_source();
+                report.max_distance = hit.report_max_m;
                 let cmd = play_command_for(
                     guid_source_key(hit.shooter),
                     &report,

@@ -651,8 +651,11 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// own — a camera that drifts looks the same as a character that walks. A
 /// windowed PIE session appends
 /// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state,foot_mm`
-/// here four times a second and the script prints the first and last lines
-/// beside its frames.
+/// — plus the camera's four (CHAR1c), the cover's three (COV1) and the
+/// ballistics' two (WPN2a: rounds in flight, and how far the last round that hit
+/// something had flown) — here four times a second, and the script prints the
+/// first and last lines beside its frames. **Columns are only ever APPENDED**,
+/// so every index a script already reads keeps its meaning.
 ///
 /// The last four columns arrived with wave CHAR1b.1 and are what makes the
 /// look-at frames a measurement rather than a picture: `aim_yaw` is where the
@@ -792,10 +795,20 @@ impl HeroLog {
         } else {
             ("-".to_string(), "-".to_string())
         };
+        // **THE BALLISTICS COLUMNS** (wave WPN2a), APPENDED for the reason the
+        // camera's four and the cover's three were: every column index a script
+        // already reads keeps its meaning. `rounds` is how many bodies are in
+        // the air RIGHT NOW — which is what a frame of a tracer has to be
+        // triggered on, because a round crosses a hundred metres in a tenth of a
+        // second — and `last_hit_m` is how far the last one that hit something
+        // had flown, latched, so a frame of an impact has a distance beside it.
+        // Both read the pool; both are 0 on a level that has never fired.
+        let pool = inf_ecs::ballistics::round_pool(sim.world());
+        let rounds_live = pool.map(|p| p.rounds.len()).unwrap_or(0);
+        let last_hit_m = pool.map(|p| p.last_flight_m).unwrap_or(0.0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},\
-                 {:.4},{:.4},{:.2},{},{},{},{:.3}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -826,10 +839,12 @@ impl HeroLog {
                 holder,
                 cover_class,
                 cover_side,
-                if cover.active { cover.peek } else { 0.0 }
+                if cover.active { cover.peek } else { 0.0 },
+                rounds_live,
+                last_hit_m
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
