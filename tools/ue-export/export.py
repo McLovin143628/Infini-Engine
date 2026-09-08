@@ -268,6 +268,28 @@ CHARACTERS = [
             # crosses because a wave that has to prove the merge needs both
             # halves to measure against.
             {"prefix": "/Game/INF/Combined", "limit": 4},
+            # **THE CLOTHES** (wave OUTFIT1). `INF_<Name>_Outfits` is an
+            # ORDINARY SkeletalMesh on the character's own body rig, with the
+            # garment material slots on it -- so it crosses this bridge with no
+            # new exporter code at all, which is what the CHAR1a.3 audit
+            # measured and carried item 106 got wrong.
+            {"prefix": "/Game/INF/Built", "match": r"_Outfits$", "limit": 4},
+        ],
+        # **THE HAIR** (wave OUTFIT1). A groom's strand `GroomAsset` does not
+        # cross this bridge and does not need to: every groom ships
+        # `<Groom>_CardsMesh_Group0_LOD0..4` beside it, and cards are ordinary
+        # StaticMeshes with their own `MI_WI_*_Hair` materials. LOD 0 of each
+        # groom (hair, eyebrows, beard, moustache) plus the `_Helmet_LOD5` far
+        # rung, which is the low-poly cap a head wears at distance.
+        #
+        # EYELASHES have a groom and a binding and NO CardsMesh in either
+        # character's folder -- so they cannot cross as geometry, and that is a
+        # measurement rather than an omission.
+        "static_prefix": [
+            {"prefix": "/Game/INF/Built",
+             "match": r"CardsMesh_Group0_LOD0$", "limit": 16},
+            {"prefix": "/Game/INF/Built",
+             "match": r"(_Helmet)?_LOD5$", "limit": 8},
         ],
         "clips": [],
     },
@@ -441,6 +463,22 @@ NAME_KIND = [
 ]
 
 
+# Parameter names whose texture this engine has NO slot for, and which the
+# classifier above would otherwise mis-file (wave OUTFIT1).
+#
+# `HighlightsMask` is the first and it is a real defect, not tidiness:
+# it is the per-instance TINT VARIATION mask a MetaHuman groom's card material
+# takes, and every rule in `PARAM_KIND` that mentions "mask" reads it as an
+# OPACITY map. Imported that way it becomes a cut-out, and the character's hair
+# is punched full of holes wherever the highlight is dark. `DetailTex_*` is the
+# second: the MetaHuman garment master tiles a fabric weave over the surface
+# through it, and the classifier read `DetailTex_Color` as the shirt's BASE
+# COLOUR -- so a tee came across wearing a tiling macro-weave instead of its own
+# colour. A detail texture is a detail; this engine's PBR block has no slot for
+# one, and the day it does the slot is what it will be read into.
+UNMAPPED_PARAMS = ("highlight", "detailtex")
+
+
 def kind_of_texture(tex, param_name):
     """The ROLE a texture plays, from its parameter first and its name last.
 
@@ -450,6 +488,8 @@ def kind_of_texture(tex, param_name):
     that holds one. Exactness is not a shortcut here, it is the rule.
     """
     p = (param_name or "").strip().lower().replace("_", "").replace(" ", "")
+    if any(u in p for u in UNMAPPED_PARAMS):
+        return "unknown"
     if p in PARAM_KIND:
         return PARAM_KIND[p]
     for key, kind in PARAM_KIND.items():
@@ -465,11 +505,14 @@ def kind_of_texture(tex, param_name):
     for pat, kind in NAME_KIND:
         if re.search(pat, name):
             return kind
-    try:
-        if bool(tex.get_editor_property("srgb")):
-            return "albedo"
-    except Exception:
-        pass
+    # **sRGB IS NOT EVIDENCE OF A BASE COLOUR** (wave OUTFIT1). It used to be the
+    # last resort -- "if it is sRGB it is an albedo" -- and reading a master
+    # material's own parameter list turned that from a harmless guess into a
+    # wrong answer: the MetaHuman garment master binds a 32-pixel
+    # `color_spectrum` LUT to a parameter called `distort_matC_pearly`, and the
+    # fallback filed it as the shirt's ALBEDO, where it won the slot over the
+    # real one by iteration order. sRGB says a texture holds colour data; it does
+    # not say which channel of a surface that colour is.
     return "unknown"
 
 
@@ -520,6 +563,16 @@ def add_texture(tex, param_name, pack):
         # the kind depending on iteration order -- which is exactly the kind of
         # nondeterminism a manifest must not carry.
         return TEXTURES[path]["key"]
+    # **Only a Texture2D crosses** (wave OUTFIT1). A MetaHuman eye material
+    # binds a `TextureCube` (its reflection probe), which has no
+    # `blueprint_get_size_x` at all -- four exceptions, one per eye material, on
+    # the run that first read the master's own parameter list. A cube map is not
+    # a surface map and this engine has no slot for one, so it is skipped by
+    # TYPE rather than caught by a `try`.
+    if not isinstance(tex, unreal.Texture2D):
+        say("  tex SKIP  %-40s (%s is not a Texture2D)" %
+            (tex.get_name(), type(tex).__name__))
+        return None
     w = tex.blueprint_get_size_x()
     h = tex.blueprint_get_size_y()
     kind = kind_of_texture(tex, param_name)
@@ -607,32 +660,107 @@ def add_material(mat, pack, surface=False, no_textures=False):
                     if t is None:
                         continue
                     k = add_texture(t, n, pack)
+                    if k is None:
+                        continue
                     kind = TEXTURES[t.get_path_name()]["map"]
                     # First writer wins for the same reason `add_texture` keeps
                     # the first role: two slots claiming "albedo" is an authoring
                     # accident and picking by iteration order is not a decision.
+                    #
+                    # A texture this engine has no slot for is NOT filed under
+                    # "unknown" (wave OUTFIT1): the importer reads `maps` by role
+                    # and an "unknown" entry is a texture exported, packed and
+                    # sampled by nothing.
+                    if kind == "unknown":
+                        continue
                     rec["maps"].setdefault(kind, k)
             except Exception as e:
                 ERRORS.append("textures on %s: %s" % (path, e))
+        # **THE MASTER'S OWN DEFAULTS** (wave OUTFIT1). The three loops above
+        # read a material INSTANCE's overrides, which is every parameter an
+        # author touched and no parameter they did not -- and a MetaHuman's
+        # default garment overrides none of them: its colour, its normal, its AO
+        # and its stitch mask are all defaults on the master
+        # `M_DG_bodyShapeD_Shirt`. Measured: the shirt crossed with
+        # `maps={}` and `base_color=[1,1,1,1]`, i.e. a WHITE UNTEXTURED SHIRT.
+        #
+        # So the base material's parameter NAMES are enumerated and the INSTANCE
+        # is asked for each one's effective value, which is the override where
+        # there is one and the master's default where there is not. Guarded
+        # individually because these library calls are the part of UE's Python
+        # surface most likely to move between versions, and a bridge that died
+        # on one missing symbol would export nothing at all.
+        try:
+            base = mat.get_base_material()
+        except Exception:
+            base = None
+        if base is not None:
+            mel = unreal.MaterialEditingLibrary
+            try:
+                for n in mel.get_vector_parameter_names(base):
+                    n = str(n)
+                    if n in rec["vectors"]:
+                        continue
+                    v = mel.get_material_instance_vector_parameter_value(mat, n)
+                    rec["vectors"][n] = [float(v.r), float(v.g), float(v.b), float(v.a)]
+            except Exception as e:
+                ERRORS.append("master vectors on %s: %s" % (path, e))
+            try:
+                for n in mel.get_scalar_parameter_names(base):
+                    n = str(n)
+                    if n in rec["scalars"]:
+                        continue
+                    rec["scalars"][n] = float(
+                        mel.get_material_instance_scalar_parameter_value(mat, n))
+            except Exception as e:
+                ERRORS.append("master scalars on %s: %s" % (path, e))
+            if not no_textures:
+                try:
+                    for n in mel.get_texture_parameter_names(base):
+                        n = str(n)
+                        t = mel.get_material_instance_texture_parameter_value(mat, n)
+                        if t is None:
+                            continue
+                        k = add_texture(t, n, pack)
+                        if k is None:
+                            continue
+                        kind = TEXTURES[t.get_path_name()]["map"]
+                        if kind == "unknown":
+                            continue
+                        rec["maps"].setdefault(kind, k)
+                except Exception as e:
+                    ERRORS.append("master textures on %s: %s" % (path, e))
 
     # The scalar block a PBR importer actually needs, pulled out of the
     # parameter soup by NAME. Everything is kept in `scalars`/`vectors` as well,
     # so a parameter this table does not know about is still on the far side.
+    # **Underscores are stripped too** (wave OUTFIT1). The comparison used to
+    # remove spaces only, and the MetaHuman garment master spells its colour
+    # `diffuse_color_1` -- so the name list matched nothing, the shirt kept the
+    # default white, and the only place its colour exists went unread.
+    def norm(n):
+        return n.strip().lower().replace(" ", "").replace("_", "")
+
     def sca(*names):
         for n in names:
             for have, v in rec["scalars"].items():
-                if have.strip().lower().replace(" ", "") == n:
+                if norm(have) == n:
                     return v
         return None
 
     def vec(*names):
         for n in names:
             for have, v in rec["vectors"].items():
-                if have.strip().lower().replace(" ", "") == n:
+                if norm(have) == n:
                     return v
         return None
 
-    v = vec("basecolor", "color", "colour", "albedo", "tint", "basecolour")
+    # `diffusecolor1` is the MetaHuman default garment master's own spelling
+    # (`diffuse_color_1`), and it is the only place that shirt's colour exists:
+    # the master paints a tiling fabric weave and tints it, so there is no
+    # per-garment albedo to read (wave OUTFIT1).
+    v = vec("basecolor", "color", "colour", "albedo", "tint", "basecolour",
+            "diffusecolor1", "diffusecolor")
     if v:
         rec["base_color"] = v
     for name, field in (("metallic", "metallic"), ("roughness", "roughness"),
@@ -643,16 +771,58 @@ def add_material(mat, pack, surface=False, no_textures=False):
     v = vec("emissive", "emissivecolor", "emission")
     if v:
         rec["emissive"] = v[:3]
-    if rec["opacity"] < 1.0 or "opacity" in rec["maps"]:
-        rec["blend"] = "blend"
+    # **HAIR HAS NO ALBEDO; IT HAS MELANIN** (wave OUTFIT1).
+    #
+    # A MetaHuman groom's card material is `MI_Hair_Cards`, whose colour is
+    # computed in the shader out of `hairMelanin` and `hairDye` -- there is no
+    # base-colour texture and no base-colour vector to read, so every groom in
+    # the run crossed this bridge WHITE. A white head of hair on a dark-haired
+    # character is not a subtle wrongness.
+    #
+    # `hairDye` wins when the instance actually set one (Vivian's bob is dyed
+    # near-black, 0.021/0.012/0.009). Otherwise the colour is derived from the
+    # melanin the way melanin works: more of it is darker, over a warm brown
+    # base, with a floor so that 1.0 is very dark brown rather than a black hole.
+    # Dominic's 0.778 lands at 0.082/0.055/0.036 -- dark brown, which is what he
+    # has.
+    dye = vec("hairdye")
+    mel = sca("hairmelanin")
+    if dye is not None and min(dye[:3]) < 0.99:
+        rec["base_color"] = [dye[0], dye[1], dye[2], 1.0]
+    elif mel is not None:
+        t = max(0.0, min(1.0, 1.0 - float(mel)))
+        rec["base_color"] = [0.28 * t + 0.02, 0.19 * t + 0.013,
+                             0.12 * t + 0.009, 1.0]
+    # **THE MATERIAL'S OWN BLEND MODE IS AUTHORITATIVE** (wave OUTFIT1).
+    #
+    # It used to be a heuristic first ("an opacity map or an opacity below one
+    # means translucent") with UE's answer applied on top, and the order made the
+    # heuristic win whenever UE said OPAQUE: the MetaHuman garment master binds a
+    # REGION mask to a parameter called `Masks` -- which says which part of the
+    # shirt is which fabric, not which part is a hole -- and the shirt crossed as
+    # TRANSLUCENT because of it. A shirt you can see through is worse than a
+    # shirt with no mask.
+    #
+    # So UE's blend mode decides, and the heuristic is the fallback for a
+    # material whose base could not be read at all. An OPAQUE material's opacity
+    # map is dropped with it, because an opaque surface has no alpha to sample
+    # and carrying one is a texture packed, shipped and never read.
+    resolved = None
     try:
-        bm = str(mat.get_base_material().get_editor_property("blend_mode"))
-        if "MASKED" in bm.upper():
-            rec["blend"] = "masked"
-        elif "TRANSLUCENT" in bm.upper():
-            rec["blend"] = "blend"
+        bm = str(mat.get_base_material().get_editor_property("blend_mode")).upper()
+        if "MASKED" in bm:
+            resolved = "masked"
+        elif "TRANSLUCENT" in bm or "ADDITIVE" in bm or "ALPHACOMPOSITE" in bm:
+            resolved = "blend"
+        else:
+            resolved = "opaque"
     except Exception:
         pass
+    if resolved is None:
+        resolved = "blend" if (rec["opacity"] < 1.0 or "opacity" in rec["maps"]) else "opaque"
+    rec["blend"] = resolved
+    if resolved == "opaque":
+        rec["maps"].pop("opacity", None)
     say(" mat %-6s %-40s maps=%s" % ("surf" if surface else "skin",
                                      mat.get_name(),
                                      ",".join(sorted(rec["maps"]))))
@@ -684,6 +854,54 @@ def socket_list(sm):
     except Exception as e:
         ERRORS.append("sockets on %s: %s" % (sm.get_path_name(), e))
     return out
+
+
+# ---- THE GROOM CARDS' OWN MATERIAL (wave OUTFIT1) --------------------------
+#
+# A groom's cards mesh is generated by the Groom asset and its static-material
+# slot is left on `/Engine/EngineMaterials/WorldGridMaterial`: in Unreal the
+# GROOM COMPONENT applies the hair material at runtime, so the mesh itself never
+# names one. Measured on both characters -- all eight card meshes came across
+# with `WorldGridMaterial` and nothing else.
+#
+# Imported as-is that is a head of hair drawn in the engine's checkerboard. The
+# material exists; it is simply on the groom rather than on the mesh, and it is
+# named by convention in the same folder:
+#
+#   <Stem>_CardsMesh_Group0_LOD*  ->  MI_WI_<Stem>_Hair_Cards, else MI_WI_<Stem>_Hair
+#   <Stem>[_Helmet]_LOD5..7       ->  MI_WI_<Stem>_Hair_Helmet, else the two above
+#
+# So the substitution is made HERE, where the folder is in hand, rather than
+# guessed at import time. A mesh that is not a groom's cards, or whose sibling
+# material does not exist, is left exactly as it was.
+
+GRID_MATERIAL = "WorldGridMaterial"
+
+
+def groom_card_material(path, mi):
+    """The hair material a groom's cards mesh should wear, or `mi` unchanged."""
+    if mi is not None and GRID_MATERIAL not in str(mi.get_path_name()):
+        return mi
+    name = path.rsplit(".", 1)[-1]
+    folder = path.rsplit("/", 1)[0]
+    helmet = False
+    if "_CardsMesh_Group0_LOD" in name:
+        stem = name.split("_CardsMesh_Group0_LOD")[0]
+    else:
+        m = re.match(r"^(.*?)(?:_Helmet)?_LOD\d+$", name)
+        if not m:
+            return mi
+        stem, helmet = m.group(1), True
+    wanted = ["MI_WI_%s_Hair_Cards" % stem, "MI_WI_%s_Hair" % stem]
+    if helmet:
+        wanted.insert(0, "MI_WI_%s_Hair_Helmet" % stem)
+    for w in wanted:
+        obj = unreal.load_asset("%s/%s.%s" % (folder, w, w))
+        if obj is not None:
+            say("  cards material %-44s <- %s" % (name, w))
+            return obj
+    say("  cards material %-44s NOT FOUND (%s)" % (name, ", ".join(wanted)))
+    return mi
 
 
 def add_mesh(sm, pack):
@@ -725,6 +943,7 @@ def add_mesh(sm, pack):
     try:
         for slot in sm.get_editor_property("static_materials"):
             mi = slot.get_editor_property("material_interface")
+            mi = groom_card_material(path, mi)
             if mi is None:
                 rec["material_slots"].append(None)
                 continue
@@ -1307,6 +1526,43 @@ def run_characters():
                 except Exception as e:
                     ERRORS.append("%s: %s" % (pkg, e))
                     traceback.print_exc()
+        # **Discovered STATIC meshes** (wave OUTFIT1) -- the groom card meshes.
+        # The same sorted-then-truncated selector the skeletal one above is, over
+        # `StaticMesh` instead: a groom's cards are geometry with a material and
+        # nothing else, and `add_mesh` is the door every surface pack's meshes
+        # already take.
+        for sel in pack.get("static_prefix", []):
+            pat = sel.get("match")
+            limit = sel.get("limit", 8)
+            try:
+                REG.scan_paths_synchronous([sel["prefix"]], force_rescan=True)
+            except Exception as e:
+                ERRORS.append("scan %s: %s" % (sel["prefix"], e))
+            hits = []
+            for a in REG.get_assets_by_path(sel["prefix"], recursive=True):
+                if str(a.asset_class_path.asset_name) != "StaticMesh":
+                    continue
+                name = str(a.asset_name)
+                if pat and not re.search(pat, name):
+                    continue
+                hits.append((name, str(a.package_name)))
+            hits.sort()
+            hits = hits[:limit]
+            packs[-1]["selectors"].append({
+                "prefix": sel["prefix"], "match": pat, "limit": limit,
+                "chosen": [h[1] for h in hits],
+            })
+            for name, pkg in hits:
+                try:
+                    obj = unreal.load_asset("%s.%s" % (pkg, name))
+                    if obj is None:
+                        ERRORS.append("could not load %s" % pkg)
+                        continue
+                    add_mesh(obj, pack["name"])
+                except Exception as e:
+                    ERRORS.append("%s: %s" % (pkg, e))
+                    traceback.print_exc()
+            say("  cards %-24s %d" % (sel["prefix"].split("/")[-1], len(hits)))
         for sel in pack.get("clips", []):
             limit = sel.get("limit", 64)
             pat = sel.get("match")
