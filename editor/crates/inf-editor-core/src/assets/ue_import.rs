@@ -2172,6 +2172,12 @@ fn rebind_wearable(
     let skinned = mesh.submeshes.iter().any(|s| s.is_skinned());
     let mut remapped = 0usize;
     let mut dropped = 0usize;
+    let mut fallback = 0usize;
+    // Where a vertex whose every influence was dropped goes. The spec's joint if
+    // the target rig has it, else joint 0 — which is what a rig with no such
+    // bone can offer, and is why the skinless branch below refuses on the same
+    // lookup rather than guessing.
+    let fallback_joint = target.skeleton.index_of(&spec.joint).unwrap_or(0);
     if skinned {
         let source: inf_anim::SkeletonAsset = match source_skeleton {
             Some(id) => project.load_payload(id)?,
@@ -2209,12 +2215,17 @@ fn rebind_wearable(
                 *k = if sum > 1e-6 {
                     inf_mesh::VertexSkin { joints, weights }.normalized()
                 } else {
-                    // Every influence dropped for THIS vertex: it belongs to a
-                    // bone the target does not have. Pin it to the root rather
-                    // than to joint 0's weight-0 default, which decodes as a
-                    // vertex at the origin.
+                    // Every influence dropped for THIS vertex: every bone that
+                    // moved it is one the target rig does not have. It goes to
+                    // the SPEC'S OWN JOINT and not to the root — a vertex pinned
+                    // to the root of a character rig is a vertex at the
+                    // character's FEET, which is a garment torn open and dragged
+                    // to the floor. `head` is the default for the same reason a
+                    // skinless wearable takes it: what a wearable loses on this
+                    // bridge is FACIAL influences.
+                    fallback += 1;
                     inf_mesh::VertexSkin {
-                        joints: [0; 4],
+                        joints: [fallback_joint, 0, 0, 0],
                         weights: [1.0, 0.0, 0.0, 0.0],
                     }
                 };
@@ -2278,11 +2289,13 @@ fn rebind_wearable(
     }
     report.advisories.push(format!(
         "{key}: REBOUND as the {} of the {} starter character ({} triangles, {} \
-         influences re-pointed by name, {dropped} dropped). Local only.",
+         influences re-pointed by name, {dropped} dropped, {fallback} vertices \
+         pinned to `{}`). Local only.",
         if spec.hair { "HAIR" } else { "OUTFIT" },
         if spec.female { "female" } else { "male" },
         mesh.triangle_count(),
-        remapped
+        remapped,
+        spec.joint
     ));
     Ok(())
 }
