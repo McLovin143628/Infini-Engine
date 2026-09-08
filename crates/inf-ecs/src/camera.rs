@@ -1129,6 +1129,15 @@ pub const CAMERA_TAG_GAMEPLAY: u64 = 0;
 /// under (wave CHAR1c). Named here so a host that wants to *outrank* the death
 /// cam knows what it is outranking.
 pub const CAMERA_TAG_RAGDOLL: u64 = 1;
+/// The tag wave COV1's cover camera raises its claim under.
+///
+/// A **different tag** from the ragdoll's and the same LAYER, which is what
+/// makes the two behave correctly together: a character shot while in cover
+/// ragdolls, both sources push `Override` on the same step, and the stack's
+/// tie-break on tag ascending gives the ragdoll (1) the camera over the cover
+/// (2). That is the right answer — the body has stopped being in cover — and it
+/// is a consequence of the numbers rather than of a branch.
+pub const CAMERA_TAG_COVER: u64 = 2;
 
 /// **The priority-blended camera stack** (wave CHAR1c).
 ///
@@ -1353,6 +1362,24 @@ pub struct LocomotionCamera {
     /// start every level inside its own subject, which is the failure this wave
     /// is named after.
     pub arm_seeded: bool,
+    /// **The last cover pose the world allowed** (wave COV1), and the whole of
+    /// carried 161's answer for this camera.
+    ///
+    /// A cover camera presses its subject into a wall — that is what cover IS —
+    /// so the boom is at a contact every frame, which CHAR1c made safe. The case
+    /// it did not make safe is the **pivot itself** buried: there is no legal
+    /// camera position at all then, and `min_arm_fraction` puts the optical
+    /// centre inside geometry rather than admitting it. The cover camera
+    /// **refuses**: while the pivot is buried it re-pushes this, the last pose
+    /// taken when it was not, and it stops refusing the moment the pivot is
+    /// clear. Holding a stale frame is a worse picture than a live one and a
+    /// better picture than the inside of a wall.
+    ///
+    /// `None` before the first legal cover frame, which is the honest state for
+    /// a character that took cover inside a rock: nothing is pushed, the
+    /// gameplay rig keeps the camera, and the failure is one the player can see
+    /// and walk out of.
+    pub cover_hold: Option<CameraPose>,
 }
 
 impl Default for LocomotionCamera {
@@ -1378,6 +1405,7 @@ impl Default for LocomotionCamera {
             gameplay_pose: CameraPose::default(),
             seeded: false,
             arm_seeded: false,
+            cover_hold: None,
         }
     }
 }

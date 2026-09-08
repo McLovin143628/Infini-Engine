@@ -147,6 +147,9 @@ pub struct GameplayReport {
     /// something" are different facts and a gate that cannot tell them apart
     /// certifies a no-op.
     pub crowd_doors: CrowdDoorReport,
+    /// **What the NPC cover pass did** (wave COV1) — every field an engagement
+    /// counter, and `probes` zero on a step with no gunfire.
+    pub npc_cover: super::cover::NpcCoverReport,
     /// Rounds fired this step.
     pub shots: u32,
     /// Reloads that finished this step.
@@ -291,6 +294,24 @@ pub fn step_gameplay(
     report.panic.considered = panic.considered;
     report.panic.fled += panic.fled;
     report.panic.exempt += panic.exempt;
+    // 3b. **The officers who did NOT rout take cover instead** (wave COV1,
+    //     clause 5). Straight after the panic, on the same sources it just
+    //     coalesced, because they are the same fact seen from two sides: the
+    //     agents `flee_from` refuses to scatter are exactly the responders under
+    //     fire. Sharing the coalesced list is also what makes the cost bound
+    //     one bound rather than two — `panic_sources` is already capped at
+    //     `MAX_PANIC_SOURCES`.
+    //
+    //     Inert on every step nothing was fired on: the source list is empty,
+    //     the pass does not enter its loop, and `probes` is zero.
+    report.npc_cover = super::cover::step_npc_cover(
+        world,
+        bridge,
+        &panic_sources(&report.hits),
+        PANIC_RADIUS_M,
+        inf_ecs::traffic::steps(world),
+        dt,
+    );
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.

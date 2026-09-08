@@ -402,7 +402,141 @@ pub fn step_locomotion_camera(
         }
     }
 
+    // ── the cover camera (wave COV1, clause 4) ──
+    //
+    // A claim on the director's `Override` layer, pushed every step the subject
+    // is in cover and simply not pushed the step it leaves — the same shape the
+    // ragdoll follow above has, and for the same reason: a photo mode, a
+    // takedown camera and a cutscene all want this seat and only one of them can
+    // have it, which is a priority question and a priority question wants a
+    // stack. There is no second camera anywhere in this wave.
+    if cm.mode.is_cover() && cm.runtime.cover.active {
+        match cover_camera_pose(cam, &cm, feet, bridge, &exclude) {
+            Some(pose) => {
+                cam.cover_hold = Some(pose);
+                cam.director
+                    .request(inf_ecs::camera::CameraRequest::blended(
+                        inf_ecs::camera::CameraLayer::Override,
+                        inf_ecs::camera::CAMERA_TAG_COVER,
+                        pose,
+                        COVER_CAMERA_BLEND_S,
+                    ));
+            }
+            // **The refusal** (carried 161). The pivot is inside geometry and
+            // there is no legal camera position at all: hold the last one there
+            // was, and push nothing at all if there has never been one.
+            None => {
+                if let Some(hold) = cam.cover_hold {
+                    cam.director
+                        .request(inf_ecs::camera::CameraRequest::blended(
+                            inf_ecs::camera::CameraLayer::Override,
+                            inf_ecs::camera::CAMERA_TAG_COVER,
+                            hold,
+                            COVER_CAMERA_BLEND_S,
+                        ));
+                }
+            }
+        }
+    } else {
+        cam.cover_hold = None;
+    }
+
     Some(cam.direct(dt))
+}
+
+/// How long the cover camera takes to arrive, and to leave, seconds.
+///
+/// Shorter than the death cam's: taking cover is a control the player made and
+/// a camera that took two-thirds of a second to answer it would feel late.
+pub const COVER_CAMERA_BLEND_S: f64 = 0.35;
+
+/// **How far the cover camera slides toward the open side**, metres.
+///
+/// The whole point of the state: a camera behind a character whose back is
+/// against a wall is a camera looking at a wall. Sliding it toward the side the
+/// character can shoot from is what lets the player see what they are about to
+/// lean into — GTA's own cover framing, and Gears'.
+pub const COVER_CAMERA_SHIFT_M: f64 = 0.55;
+
+/// **How much shorter the boom is in cover**, as a fraction of the rig's own.
+///
+/// A quarter off. The subject is not going anywhere and the interesting part of
+/// the frame is what is past the corner, not the character.
+pub const COVER_CAMERA_ARM_SCALE: f64 = 0.75;
+
+/// **Where the camera goes while its subject is in cover** (wave COV1).
+///
+/// The rig's own yaw and pitch, around a pivot shifted toward the **open side**
+/// — the corner the character can lean around, or the top of a low cover — with
+/// a shorter boom. `None` when the shifted pivot is inside geometry, which is
+/// the refusal `LocomotionCamera::cover_hold` answers.
+///
+/// The shift is along the cover's own tangent, which is why the surface's normal
+/// is what this reads rather than the camera's yaw: a player who has swung the
+/// camera round to look down the wall must still see past the corner the
+/// character is standing at.
+fn cover_camera_pose(
+    cam: &LocomotionCamera,
+    cm: &CharacterMovement,
+    feet: DVec3,
+    bridge: &mut PhysicsBridge3D,
+    exclude: &std::collections::BTreeSet<ColliderId3D>,
+) -> Option<CameraPose> {
+    use inf_ecs::cover::CoverSide;
+    let c = cm.runtime.cover;
+    let left = inf_ecs::cover::tangent_left(c.normal).to_dvec3();
+    if left == DVec3::ZERO {
+        return None;
+    }
+    // Which way is "open". A corner peek's open side is the corner it leans
+    // around; a low cover has none, so the camera stays where the rig put it and
+    // only the boom shortens — the character rises into frame rather than
+    // stepping out of it.
+    let shift = match c.side {
+        CoverSide::Left => COVER_CAMERA_SHIFT_M,
+        CoverSide::Right => -COVER_CAMERA_SHIFT_M,
+        // Not leaning yet: bias toward whichever corner is nearer, so the
+        // player is already looking at the way out before they press aim.
+        CoverSide::Behind | CoverSide::Over => {
+            if c.left_m <= c.right_m {
+                COVER_CAMERA_SHIFT_M * 0.5
+            } else {
+                -COVER_CAMERA_SHIFT_M * 0.5
+            }
+        }
+    };
+    let pivot = cam.pivot.to_dvec3() + left * shift;
+    // **The pivot must be clear.** A sphere the boom's own radius at the shifted
+    // pivot: if it starts penetrating there is no legal camera position on any
+    // boom out of it, and the caller holds its last one.
+    let r = cam.tuning.collision_radius_m.max(1e-3);
+    if bridge
+        .world_mut()
+        .cast_shape_where(
+            &ColliderShape3D::Sphere { radius: r },
+            pivot,
+            DQuat::IDENTITY,
+            DVec3::Y,
+            1e-3,
+            exclude,
+            CastTargets::All,
+        )
+        .is_some_and(|h| h.started_penetrating)
+    {
+        return None;
+    }
+    let (_, _, forward) = inf_ecs::camera::basis(cam.pose.yaw_deg, cam.pose.pitch_deg);
+    let arm = cam.arm_m.max(0.05) * COVER_CAMERA_ARM_SCALE;
+    // The feet are read so a low cover's camera drops with the crouch rather
+    // than staying at a standing character's eye line — the pivot already
+    // carries the stance, and this is the assertion that it does.
+    debug_assert!(feet.y <= cam.pivot.y + 1.0e-6);
+    Some(CameraPose {
+        position: Vec3d::from_dvec3(pivot - forward * arm),
+        yaw_deg: cam.pose.yaw_deg,
+        pitch_deg: cam.pose.pitch_deg,
+        fov_deg: cam.pose.fov_deg,
+    })
 }
 
 /// **Advance the camera, and drain the world's camera claims into it first**

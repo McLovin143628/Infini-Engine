@@ -677,6 +677,17 @@ impl PhysicsBridge3D {
         self.collider_labels.len()
     }
 
+    /// **Every labelled guid and what it is**, in `Guid` order.
+    ///
+    /// The census a gate walks when it wants to ask a question about a whole
+    /// FAMILY — "is any kerb slab coverable", "how many façade boxes are
+    /// admitted here" — rather than about one collider it happens to have hit.
+    /// Entity colliders are not in it: they are labelled by construction and
+    /// the world already enumerates them.
+    pub fn labelled_guids(&self) -> Vec<(Uuid, super::label::ColliderLabel)> {
+        self.collider_labels.iter().map(|(g, l)| (*g, *l)).collect()
+    }
+
     /// Record what a mint site just minted. The one writer.
     fn label(&mut self, guid: Uuid, label: super::label::ColliderLabel) {
         self.collider_labels.insert(guid, label);

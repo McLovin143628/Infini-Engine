@@ -33,6 +33,11 @@
 //! peek are all fixed-step state, so PIE and shipping integrate them identically
 //! and the replay gate reproduces them.
 
+use std::collections::BTreeMap;
+
+use bevy_ecs::prelude::Resource;
+use uuid::Uuid;
+
 use crate::math::Vec3d;
 
 /// **The shortest surface a character will take cover behind**, metres above its
@@ -697,4 +702,177 @@ mod tests {
         assert!(!c.at_corner);
         assert_eq!(c.side, CoverSide::Behind);
     }
+}
+
+// ── NPCs in cover (wave COV1, clause 5) ─────────────────────────────────────
+
+/// **How far a unit will walk to reach cover**, metres.
+///
+/// Twenty. Far enough that a cruiser's crew standing in the open has somewhere
+/// to go, short enough that an officer does not abandon the incident it was
+/// sent to in order to get behind a wall two streets away.
+pub const NPC_COVER_SEARCH_M: f64 = 20.0;
+
+/// **How often a unit that has not found cover looks again**, steps.
+///
+/// Thirty — half a second at 60 Hz. The search is the expensive half (a probe
+/// per bearing) and a unit under fire that failed to find anything last frame
+/// will fail again this frame; re-asking every step would make the cost a
+/// function of how many officers are pinned rather than of how many are moving.
+pub const NPC_SEARCH_PERIOD: u64 = 30;
+
+/// **How far apart the samples along one bearing are**, metres.
+///
+/// A metre and a half, and it is the number that makes the search WORK at all.
+/// The first cut probed once, from the unit's own feet — and `CoverSettings::
+/// reach_m` is 0.90 m, so an officer five metres from a wall found nothing and
+/// stood in the open through a whole firefight. Measured: 116 shape casts spent
+/// and zero cover found. A cover probe answers about the place it is standing,
+/// so a search has to MOVE the place.
+///
+/// One and a half metres is under the probe's own reach plus its backoff, so no
+/// surface can fall between two samples.
+pub const NPC_SEARCH_STEP_M: f64 = 1.50;
+
+/// **How many bearings a unit's cover search tries.**
+///
+/// Eight — the compass, which is the same census the CHAR1b.2 audit's ledge
+/// sweep used and for the same reason: it is the coarsest set that cannot miss
+/// a wall a body could get behind, and the cost bound is what makes the search
+/// affordable at all.
+pub const NPC_SEARCH_BEARINGS: usize = 8;
+
+/// **How long a unit stays leaned out before ducking back**, seconds.
+pub const NPC_PEEK_OUT_S: f64 = 1.20;
+/// **…and how long it stays tucked in between peeks.**
+///
+/// Longer than the lean, so a unit under fire is behind its cover more often
+/// than it is out of it — which is what taking cover is for.
+pub const NPC_PEEK_IN_S: f64 = 1.80;
+
+/// **What one unit is doing about cover** — derived, never saved.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UnitCover {
+    /// Where it is going, world metres. The zero vector when it has nowhere.
+    pub anchor: Vec3d,
+    /// The leg it is walking, or `None` when it is not walking one.
+    pub path: Option<inf_nav::NavPath>,
+    /// The step its last search ran on.
+    pub searched_step: u64,
+    /// Seconds into the peek cycle.
+    pub peek_s: f64,
+    /// Whether it is leaned out right now.
+    pub peeking: bool,
+    /// Who it is taking cover from, world metres.
+    pub threat: Vec3d,
+    /// **The facing the cover it found wants**, degrees — into the surface.
+    ///
+    /// Remembered rather than re-derived on arrival: at the anchor the
+    /// direction to the anchor is zero, so a unit that turned toward where it
+    /// was going would be facing nowhere on the step it presses.
+    pub face_yaw_deg: f64,
+}
+
+impl UnitCover {
+    /// **Lay a leg to `to`** — the `inf_nav::NavPath` a unit walks to its cover.
+    ///
+    /// A two-point path, arc-length parameterized, which is exactly what
+    /// [`crate::crowd::CrowdRoute::between`] is and what every tier measurement
+    /// in this tree is written against. A searched route over the street graph
+    /// is what a unit *driving* to an incident already gets; an officer
+    /// crossing twenty metres of pavement to a wall is a straight leg in every
+    /// reference frame this campaign has looked at, and a search here would be
+    /// a wave rather than a clause. Stated, not hidden.
+    ///
+    /// The constructor lives here rather than at the caller because `inf-nav`
+    /// is `inf-ecs`' dependency and not `inf-physics`': the applying half asks
+    /// for a leg and gets one, and no new dependency edge is added to reach a
+    /// type through a crate that already holds it.
+    pub fn lay_leg(&mut self, from: Vec3d, to: Vec3d, face_yaw_deg: f64) {
+        self.anchor = to;
+        self.face_yaw_deg = face_yaw_deg;
+        self.path = Some(inf_nav::NavPath::new([from.to_dvec3(), to.to_dvec3()]));
+    }
+
+    /// **Which way to walk from `here`** along the leg, or `None` when there is
+    /// no leg. A unit already at the end gets the leg's own last direction,
+    /// which is what `NavPath::direction_at` answers past its length.
+    pub fn heading_from(&self, here: Vec3d) -> Option<Vec3d> {
+        let p = self.path.as_ref()?;
+        let s = p.project(here.to_dvec3()).s_m;
+        Some(Vec3d::from_dvec3(p.direction_at(s)))
+    }
+
+    /// Forget the leg — the unit has arrived, or has stopped needing one.
+    pub fn drop_leg(&mut self) {
+        self.path = None;
+    }
+
+    /// Whether it is walking one.
+    pub fn walking(&self) -> bool {
+        self.path.is_some()
+    }
+}
+
+/// **Every unit's cover state** (wave COV1) — [`crate::dispatch::RespondersRes`]'
+/// shape, and for its reason: a responder may be a `Dormant` crowd agent with no
+/// entity at all, so a marker component would be silently absent on exactly the
+/// agents a shot at the edge of a radius reaches.
+///
+/// Derived, never serialized, no schema moves.
+#[derive(Resource, Default, Debug, Clone, PartialEq)]
+pub struct NpcCoverRes {
+    /// Keyed by the unit's guid, in `Guid` order because a `BTreeMap` is.
+    pub units: BTreeMap<Uuid, UnitCover>,
+}
+
+/// **Is this unit under fire?** — the predicate clause 5 is written in terms of.
+///
+/// A responder ([`crate::dispatch::is_responder`]) inside `radius_m` of a place
+/// this step's gunfire came from, that it did not fire itself. It is EMS2's
+/// panic exemption read the other way round: the officers the flee door refuses
+/// to rout are exactly the officers who are under fire, and this is the same
+/// two facts — *is a responder* and *is inside the radius* — asked as a
+/// question about the world rather than as a filter inside a pass.
+///
+/// Pure, so it can be measured without a crowd: the sources are the caller's,
+/// already coalesced and capped by `inf_physics::d3::gameplay`'s own bound.
+pub fn under_fire(at: Vec3d, sources: &[Vec3d], radius_m: f64) -> Option<Vec3d> {
+    let mut best: Option<(f64, Vec3d)> = None;
+    for s in sources {
+        let d = ((s.x - at.x).powi(2) + (s.y - at.y).powi(2) + (s.z - at.z).powi(2)).sqrt();
+        if d <= radius_m && best.is_none_or(|(b, _)| d < b) {
+            best = Some((d, *s));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// **Whether a unit is leaned out right now**, and how far into the cycle it is.
+///
+/// A duty cycle rather than a decision: an officer in cover comes out, shoots,
+/// and goes back in, and the cadence is what `npc_aim_at` is called on. The
+/// firing itself is **WPN2e's seam** — this wave points the weapon and leans the
+/// body, and holds the trigger open.
+pub fn peek_cycle(peek_s: f64) -> (bool, f64) {
+    let period = NPC_PEEK_OUT_S + NPC_PEEK_IN_S;
+    let t = if period > 0.0 {
+        peek_s.rem_euclid(period)
+    } else {
+        0.0
+    };
+    (t < NPC_PEEK_OUT_S, t)
+}
+
+/// **Which class of cover a unit prefers**, given the response rung it is on.
+///
+/// The EMS3 carried item — *"Swat is a COUNT not a crew"* — becoming a
+/// behaviour. At [`crate::crime::Response::Swat`] the town has sent everything
+/// it has and the units that arrive are the ones that stack on corners: they
+/// take **HIGH** cover, which is the only class you can shoot around an edge
+/// from, and they pass over a car's flank to get it. Every other rung takes
+/// whatever is nearest, because an officer answering a shoplifting is not
+/// clearing a building.
+pub fn prefers_high(response: crate::crime::Response) -> bool {
+    matches!(response, crate::crime::Response::Swat)
 }

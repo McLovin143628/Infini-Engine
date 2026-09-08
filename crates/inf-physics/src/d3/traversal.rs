@@ -147,6 +147,21 @@ pub const TOP_SWEEP_INSET_M: f64 = 0.15;
 /// face to read a normal off), or a face that is **walkable** -- a floor is not
 /// a wall, and climbing onto the ground you are standing on is not a mantle any
 /// more than pressing your back against it is cover (ALS `.cpp:196`).
+///
+/// # `targets` is the two readers' one disagreement, and it was measured
+///
+/// A mantle asks [`CastTargets::Fixed`], because ALS's "do not mantle a moving
+/// platform" is a broad-phase filter here (see this module's own header) and a
+/// character that climbed onto a moving car would arrive somewhere else.
+///
+/// A cover press asks [`CastTargets::All`], and the reason is a **measurement**:
+/// wave COV1's census over the island found 247 cover surfaces in 2 256 probes
+/// and **every one of them was a building façade**. Not one parked car answered,
+/// because VEH2b's fleet is a set of DYNAMIC chassis boxes and `Fixed` cannot
+/// see one — and a car is the canonical low cover in the game this wave is
+/// named after. The moving-platform rule is kept where it belongs instead:
+/// `probe_cover` refuses a body that is actually MOVING, by its velocity,
+/// which is the question the filter was standing in for.
 #[allow(clippy::too_many_arguments)]
 pub fn sweep_forward_face(
     world: &mut PhysicsWorld3D,
@@ -158,6 +173,7 @@ pub fn sweep_forward_face(
     radius_m: f64,
     slope_limit_deg: f64,
     exclude: &std::collections::BTreeSet<ColliderId3D>,
+    targets: CastTargets,
 ) -> Option<super::ShapeHit3D> {
     if fwd == DVec3::ZERO
         || !feet.is_finite()
@@ -180,7 +196,7 @@ pub fn sweep_forward_face(
         fwd,
         reach_m + SWEEP_BACKOFF_M,
         exclude,
-        CastTargets::Fixed,
+        targets,
     )?;
     if wall.started_penetrating || is_walkable(wall.normal, slope_limit_deg) {
         return None;
@@ -207,6 +223,7 @@ pub fn sweep_surface_top(
     radius_m: f64,
     slope_limit_deg: f64,
     exclude: &std::collections::BTreeSet<ColliderId3D>,
+    targets: CastTargets,
 ) -> Option<DVec3> {
     let down_end = DVec3::new(face_point.x, feet_y, face_point.z) - face_normal * TOP_SWEEP_INSET_M;
     let rise = rise_m + radius_m + 0.01;
@@ -218,7 +235,7 @@ pub fn sweep_surface_top(
         -DVec3::Y,
         rise,
         exclude,
-        CastTargets::Fixed,
+        targets,
     )?;
     if top.started_penetrating || !is_walkable(top.normal, slope_limit_deg) {
         return None;
@@ -274,6 +291,7 @@ pub fn probe_ledge(
         settings.forward_radius_m,
         slope_limit_deg,
         exclude,
+        CastTargets::Fixed,
     )?;
 
     // ── 2. Downward sphere sweep to find the ledge's top surface, stepping 15 cm
@@ -288,6 +306,7 @@ pub fn probe_ledge(
         settings.down_radius_m,
         slope_limit_deg,
         exclude,
+        CastTargets::Fixed,
     )?;
 
     // ── 3. Room check: the character's OWN capsule must fit where it is going.

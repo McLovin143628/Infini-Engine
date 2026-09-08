@@ -93,6 +93,16 @@ pub enum CoverRefusal {
     /// A surface with no room for the character to stand at its standoff — it is
     /// in a gap it cannot fit into.
     NoRoom,
+    /// A surface that is **moving**. A parked car is cover; one pulling away is
+    /// not, and a character glued to its flank would be dragged down the street.
+    ///
+    /// This is where ALS's "do not mantle a moving platform" rule lives for the
+    /// cover probe. The ledge probe expresses it as a broad-phase filter
+    /// ([`CastTargets::Fixed`]) and a cover probe cannot: the island's parked
+    /// cars are DYNAMIC bodies, and filtering them out made every one of them
+    /// invisible — 247 cover surfaces in the wave's census and not a car among
+    /// them. So the question is asked directly, of the body's own velocity.
+    Moving,
 }
 
 impl CoverRefusal {
@@ -107,6 +117,7 @@ impl CoverRefusal {
             CoverRefusal::TooLow => "its top is below the cover floor",
             CoverRefusal::TooNarrow => "narrower than the character's own capsule",
             CoverRefusal::NoRoom => "no room to stand at the standoff",
+            CoverRefusal::Moving => "the surface is moving",
         }
     }
 }
@@ -156,6 +167,12 @@ pub struct CoverSettings {
     /// search is `2 * (extent_samples + EXTENT_REFINEMENTS)` forward sweeps and
     /// it runs only once a surface has been classified as cover.
     pub extent_samples: u32,
+    /// **How fast a surface may be moving and still be cover**, m/s.
+    ///
+    /// A parked car is cover and one pulling away is not. Ten centimetres a
+    /// second: a rigid body settled on its suspension jitters below this and a
+    /// vehicle under power is past it inside one step.
+    pub max_surface_speed_mps: f64,
 }
 
 impl Default for CoverSettings {
@@ -172,9 +189,19 @@ impl Default for CoverSettings {
             standoff_m: 0.06,
             extent_max_m: 4.0,
             extent_samples: 8,
+            max_surface_speed_mps: 0.10,
         }
     }
 }
+
+/// **How many times the forward sweep is retaken past a MOVING surface.**
+///
+/// Two. A car driving between a character and the wall it is pressing against is
+/// one skip; two moving things in a row is a street the press should simply
+/// refuse. The bound is what keeps the P22.3 M4 remedy from being unbounded —
+/// the whole reason that audit preferred a broad-phase filter is that a
+/// post-hoc one can retry for ever.
+pub const MOVING_RETRIES: u32 = 2;
 
 /// How many bisection steps the extent search spends refining each edge.
 ///
@@ -316,29 +343,74 @@ pub fn probe_cover(
     let span = (settings.band_high_m - settings.band_low_m) * 0.5;
     let mut sweeps = 0u32;
 
-    // ── 1. the face, through the mantle's own door.
-    sweeps += 1;
-    let Some(face) = sweep_forward_face(
-        bridge.world_mut(),
-        feet,
-        fwd,
-        centre,
-        span,
-        settings.reach_m,
-        settings.forward_radius_m,
-        slope_limit_deg,
-        exclude,
-    ) else {
-        return CoverProbe::refused(CoverRefusal::NoSurface, sweeps);
+    // ── 1. the face, through the mantle's own door — and 2b's retry, which is
+    //    why this is a loop rather than one sweep.
+    //
+    //    **A MOVING surface is skipped, not refused** (the P22.3 audit's M4).
+    //    `cast_shape_where`'s own doc states the rule this obeys: filtering
+    //    *after* a cast hides whatever was behind the rejected hit, so a car
+    //    driving past a wall would make the WALL un-cover-able rather than the
+    //    car. The ledge probe avoids it by asking the broad phase for `Fixed`
+    //    only — which a cover probe cannot do, because a parked car IS a
+    //    dynamic body and filtering the class out made every car on the island
+    //    invisible (the wave's census: 247 cover surfaces, not one of them a
+    //    car). So the moving hit is added to the exclusion set and the sweep is
+    //    taken again, at most [`MOVING_RETRIES`] times, and the thing behind it
+    //    gets its turn.
+    let cos_limit = inf_math::pcos64(settings.approach_deg.to_radians());
+    let mut skip: std::collections::BTreeSet<ColliderId3D> = exclude.clone();
+    let mut moving_label: Option<ColliderLabel> = None;
+    let mut found: Option<(super::ShapeHit3D, ColliderLabel, DVec3)> = None;
+    for _ in 0..=MOVING_RETRIES {
+        sweeps += 1;
+        let Some(face) = sweep_forward_face(
+            bridge.world_mut(),
+            feet,
+            fwd,
+            centre,
+            span,
+            settings.reach_m,
+            settings.forward_radius_m,
+            slope_limit_deg,
+            &skip,
+            super::CastTargets::All,
+        ) else {
+            break;
+        };
+        let label = bridge.label_of(face.collider).unwrap_or_default();
+        let normal = face.normal.normalize_or_zero();
+        let facing = DVec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+        // The surface is not driving away. A collider with no body at all —
+        // every static structure — answers zero and passes.
+        let speed = bridge
+            .guid_of_collider(face.collider)
+            .and_then(|g| bridge.body_of(g))
+            .and_then(|b| bridge.world_mut().body_linvel(b))
+            .map(|v| v.length())
+            .unwrap_or(0.0);
+        if speed > settings.max_surface_speed_mps {
+            moving_label = Some(label);
+            skip.insert(face.collider);
+            continue;
+        }
+        found = Some((face, label, facing));
+        break;
+    }
+    let Some((face, label, facing)) = found else {
+        // Nothing at all, or nothing that was not moving. The two are different
+        // answers and the refusal says which.
+        return match moving_label {
+            Some(l) => CoverProbe {
+                label: l,
+                ..CoverProbe::refused(CoverRefusal::Moving, sweeps)
+            },
+            None => CoverProbe::refused(CoverRefusal::NoSurface, sweeps),
+        };
     };
-    let label = bridge.label_of(face.collider).unwrap_or_default();
 
     // ── 2. the approach. `-fwd` is the direction the character came FROM, and a
     //    cover face has to point that way: a wall the character is running
     //    ALONG is not a wall it is taking cover behind.
-    let cos_limit = inf_math::pcos64(settings.approach_deg.to_radians());
-    let normal = face.normal.normalize_or_zero();
-    let facing = DVec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
     if facing == DVec3::ZERO || (-fwd).dot(facing) < cos_limit {
         return CoverProbe {
             label,
@@ -362,11 +434,15 @@ pub fn probe_cover(
         bridge.world_mut(),
         feet.y,
         face.point,
-        normal,
+        // The face's own PLANAR normal: the top sweep steps into the surface
+        // along it, and stepping along a normal with a vertical component would
+        // walk the sample up or down the face rather than into it.
+        facing,
         settings.max_top_m,
         settings.down_radius_m,
         slope_limit_deg,
         exclude,
+        super::CastTargets::All,
     );
     let top_m = match top {
         Some(p) => p.y - feet.y,
@@ -525,6 +601,7 @@ fn extent_along(
             settings.forward_radius_m,
             slope_limit_deg,
             exclude,
+            super::CastTargets::All,
         )
         .is_some()
     };
@@ -629,5 +706,387 @@ mod tests {
         let n = said.len();
         said.dedup();
         assert_eq!(said.len(), n, "two refusals say the same thing");
+    }
+}
+
+// ── NPCs IN COVER (wave COV1, clause 5) ─────────────────────────────────────
+
+use inf_ecs::components::{CharacterMovement, MovementMode, Transform};
+use inf_ecs::cover::NpcCoverRes;
+use inf_ecs::math::Vec3d;
+use inf_ecs::world::EcsWorld;
+
+/// **What one step of the NPC cover pass did.**
+///
+/// Every field is an *engagement* counter rather than a "the pass ran" flag —
+/// the EMS2 law: a gate that cannot tell "the officers held" from "no officer
+/// was ever in the radius" certifies a no-op.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NpcCoverReport {
+    /// Responders the pass looked at — the cost.
+    pub considered: usize,
+    /// Responders inside a shot's radius this step.
+    pub under_fire: usize,
+    /// Units that ran a cover SEARCH this step (the expensive half).
+    pub searched: usize,
+    /// Units walking to a cover anchor they found.
+    pub moving: usize,
+    /// Units in [`MovementMode::Cover`] right now.
+    pub in_cover: usize,
+    /// Units leaned out of it right now.
+    pub peeking: usize,
+    /// **Shape casts this pass spent.** ZERO on a step with no gunfire, which is
+    /// the budget arm's own number and the reason it is counted.
+    pub probes: u32,
+    /// Units that took HIGH cover because the town is at its top rung.
+    pub swat_high: usize,
+}
+
+/// **THE NPC COVER PASS.**
+///
+/// One pass, called by both hosts from the gameplay step, over the responders
+/// [`inf_ecs::dispatch::RespondersRes`] names.
+///
+/// * a responder inside a shot's radius is **under fire**
+///   ([`inf_ecs::cover::under_fire`] — EMS2's own exemption predicate, read the
+///   other way round);
+/// * one that is not already in cover **searches** for it, on the compass, at
+///   most once every [`inf_ecs::cover::NPC_SEARCH_PERIOD`] steps;
+/// * what it finds it **walks to**, along an [`inf_nav::NavPath`], and presses
+///   the same `press_cover` edge a player's key raises — one door, two callers;
+/// * once in cover it **peeks** on a duty cycle and points its weapon at the
+///   threat through [`super::gameplay::npc_aim_at`], with the trigger **open**:
+///   the firing cadence is **WPN2e's**, and that is the seam.
+///
+/// # The path is two points, and that is stated rather than hidden
+///
+/// `NavPath::new([here, anchor])` — a straight leg, arc-length parameterized,
+/// which is what `CrowdRoute::between` is and what every tier measurement in
+/// this tree is written against. A searched route over the street graph is what
+/// `inf_ecs::crowd`'s own routes carry and what a unit *driving* to an incident
+/// already gets; an officer crossing twenty metres of pavement to a wall is a
+/// straight leg in every reference frame this campaign has looked at, and
+/// building a search here would be a wave rather than a clause.
+///
+/// # The cost, and the zero
+///
+/// `O(responders)` on a step with gunfire and **one resource lookup** on every
+/// step without any — the sources are empty, the loop is not entered, and
+/// [`NpcCoverReport::probes`] is zero. A level with no responders pays the same
+/// nothing.
+pub fn step_npc_cover(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    sources: &[DVec3],
+    radius_m: f64,
+    step: u64,
+    dt: f64,
+) -> NpcCoverReport {
+    let mut report = NpcCoverReport::default();
+    let responders = inf_ecs::dispatch::responders(world);
+    if responders.is_empty() {
+        // A level with no responders keeps no state either — the crowd's own
+        // prune rule, so a session that despawned its units does not carry them.
+        if world.world().get_resource::<NpcCoverRes>().is_some() {
+            world.world_mut().insert_resource(NpcCoverRes::default());
+        }
+        return report;
+    }
+    report.considered = responders.len();
+    let prefer_high = inf_ecs::cover::prefers_high(hottest_response(world));
+    let mut res = world
+        .world_mut()
+        .remove_resource::<NpcCoverRes>()
+        .unwrap_or_default();
+    // A unit that has gone away forgets what it was doing, so a guid that comes
+    // back does not inherit a stale anchor.
+    let live: std::collections::BTreeSet<uuid::Uuid> = responders.iter().copied().collect();
+    res.units.retain(|g, _| live.contains(g));
+
+    let settings = CoverSettings::default();
+    for unit in responders {
+        let Some(here) = body_at(world, unit) else {
+            res.units.remove(&unit);
+            continue;
+        };
+        let threat = inf_ecs::cover::under_fire(
+            Vec3d::from_dvec3(here),
+            &sources
+                .iter()
+                .map(|s| Vec3d::from_dvec3(*s))
+                .collect::<Vec<_>>(),
+            radius_m,
+        );
+        let in_cover = mode_of(world, unit) == Some(MovementMode::Cover);
+        let Some(threat) = threat else {
+            // **Not under fire: nothing at all happens.** No probe, no path, no
+            // state — which is the budget arm's whole claim, and the reason the
+            // early return is here rather than inside the search.
+            if !in_cover {
+                res.units.remove(&unit);
+            }
+            continue;
+        };
+        let threat: Vec3d = threat;
+        report.under_fire += 1;
+        let slot = res.units.entry(unit).or_default();
+        slot.threat = threat;
+
+        if in_cover {
+            report.in_cover += 1;
+            slot.drop_leg();
+            slot.peek_s += dt;
+            let (out, _) = inf_ecs::cover::peek_cycle(slot.peek_s);
+            slot.peeking = out;
+            if out {
+                report.peeking += 1;
+            }
+            // The body's own aim goes to the threat, and the trigger stays OPEN.
+            // **WPN2e wires the firing** — this wave points and leans.
+            aim_and_lean(world, unit, threat.to_dvec3(), out);
+            continue;
+        }
+
+        // ── the SEARCH, at most once every `NPC_SEARCH_PERIOD` steps.
+        let stale = step.saturating_sub(slot.searched_step) >= inf_ecs::cover::NPC_SEARCH_PERIOD;
+        let has_anchor = slot.path.is_some();
+        if !has_anchor && stale {
+            slot.searched_step = step;
+            report.searched += 1;
+            let (found, spent) = search_for_cover(
+                world,
+                bridge,
+                unit,
+                here,
+                threat.to_dvec3(),
+                prefer_high,
+                &settings,
+            );
+            report.probes += spent;
+            if let Some((anchor, face_yaw, high)) = found {
+                if high && prefer_high {
+                    report.swat_high += 1;
+                }
+                slot.lay_leg(Vec3d::from_dvec3(here), Vec3d::from_dvec3(anchor), face_yaw);
+            }
+        }
+
+        // ── walk the leg, and press the same key a player would.
+        if slot.walking() {
+            report.moving += 1;
+            let anchor = slot.anchor.to_dvec3();
+            let gap = ((anchor.x - here.x).powi(2) + (anchor.z - here.z).powi(2)).sqrt();
+            // **The arrival distance is the PROBE's reach, not the snap's.**
+            //
+            // A unit that pressed anywhere inside `MAX_SNAP_M` (1.5 m) would
+            // press from 1.2 m back — where the surface is 1.6 m away and
+            // `CoverSettings::reach_m` is 0.9, so the press probes, finds
+            // nothing, and the unit searches, walks nowhere and presses again.
+            // Measured on the fixture: an officer parked at 1.23 m from its own
+            // anchor for the whole fifteen seconds, spending 1 961 shape casts.
+            // Half the probe's reach is inside what the press can see with room
+            // for the last step's overshoot.
+            if gap <= settings.reach_m * 0.5 {
+                // Close enough for the press to take it the rest of the way.
+                press_cover(world, unit, slot.face_yaw_deg);
+                slot.drop_leg();
+                slot.searched_step = step;
+            } else if let Some(dir) = slot.heading_from(Vec3d::from_dvec3(here)) {
+                walk_toward(world, unit, dir.to_dvec3());
+            }
+        }
+    }
+    world.world_mut().insert_resource(res);
+    report
+}
+
+/// The hottest response rung any open profile is at — `Cold` when nobody is
+/// wanted, which is every level before somebody does something.
+fn hottest_response(world: &EcsWorld) -> inf_ecs::crime::Response {
+    inf_ecs::crime::wanted(world)
+        .into_iter()
+        .filter_map(|s| inf_ecs::crime::profile_of(world, s).map(|p| p.response()))
+        .max()
+        .unwrap_or(inf_ecs::crime::Response::Cold)
+}
+
+/// Where a body is, world metres.
+fn body_at(world: &EcsWorld, guid: uuid::Uuid) -> Option<DVec3> {
+    let e = world.entity_of(guid)?;
+    let p = world.world().get::<Transform>(e)?.translation.to_dvec3();
+    p.is_finite().then_some(p)
+}
+
+fn mode_of(world: &EcsWorld, guid: uuid::Uuid) -> Option<MovementMode> {
+    let e = world.entity_of(guid)?;
+    Some(world.world().get::<CharacterMovement>(e)?.mode)
+}
+
+/// **Look for cover on the compass**, and answer where its anchor is and
+/// whether it is HIGH — plus what the look cost in shape casts.
+///
+/// The bearings are the eight the CHAR1b.2 census used. Each one probes from the
+/// unit's own feet, and the candidates are scored by **how much they put between
+/// the unit and the threat**: a surface whose face points back at the shooter is
+/// cover, and one on the far side of the unit is a wall to be shot against.
+///
+/// `prefer_high` is the SWAT behaviour: with it, a `High` candidate wins over
+/// any `Low` one regardless of distance, and without it the nearest wins.
+#[allow(clippy::too_many_arguments)]
+fn search_for_cover(
+    world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    unit: uuid::Uuid,
+    here: DVec3,
+    threat: DVec3,
+    prefer_high: bool,
+    settings: &CoverSettings,
+) -> (Option<(DVec3, f64, bool)>, u32) {
+    let Some(e) = world.entity_of(unit) else {
+        return (None, 0);
+    };
+    let (radius, half) = {
+        let w = world.world();
+        let cm = match w.get::<CharacterMovement>(e) {
+            Some(cm) => cm,
+            None => return (None, 0),
+        };
+        let r = w
+            .get::<inf_ecs::components::Collider3D>(e)
+            .map(|c| c.radius)
+            .unwrap_or(0.3);
+        (r, cm.half_height_for(MovementMode::Grounded))
+    };
+    let slope = world
+        .world()
+        .get::<CharacterMovement>(e)
+        .map(|c| c.slope_limit_deg)
+        .unwrap_or(50.0);
+    let feet = here - DVec3::Y * (half + radius);
+    let mut exclude = std::collections::BTreeSet::new();
+    if let Some(c) = bridge.collider_of(unit) {
+        exclude.insert(c);
+    }
+    let to_threat = DVec3::new(threat.x - here.x, 0.0, threat.z - here.z).normalize_or_zero();
+    let mut spent = 0u32;
+    let mut best: Option<(f64, DVec3, f64, bool)> = None;
+    let samples =
+        (inf_ecs::cover::NPC_COVER_SEARCH_M / inf_ecs::cover::NPC_SEARCH_STEP_M).ceil() as i32;
+    for i in 0..inf_ecs::cover::NPC_SEARCH_BEARINGS {
+        let a = std::f64::consts::TAU * i as f64 / inf_ecs::cover::NPC_SEARCH_BEARINGS as f64;
+        let dir = DVec3::new(inf_math::psin64(a), 0.0, inf_math::pcos64(a));
+        // **Between the unit and the threat**: the surface has to be on the
+        // side the shooting is coming from, or the unit is hiding behind
+        // something with its back to the gun. Roughly half the compass is
+        // dropped here, which is half the cost.
+        if to_threat != DVec3::ZERO && dir.dot(to_threat) < 0.0 {
+            continue;
+        }
+        // **March along the bearing.** The probe answers about the place it is
+        // standing and its reach is under a metre, so a search that asked once
+        // from the unit's own feet could only ever find cover the unit was
+        // already touching -- which is what the first cut did, and what the
+        // fixture measured as 116 shape casts and no cover at all.
+        for k in 0..=samples {
+            let d = f64::from(k) * inf_ecs::cover::NPC_SEARCH_STEP_M;
+            let at = feet + dir * d;
+            let p = probe_cover(bridge, at, dir, radius, half, slope, settings, &exclude);
+            spent += p.sweeps;
+            if !p.class.is_cover() {
+                continue;
+            }
+            let reach = ((p.anchor.x - feet.x).powi(2) + (p.anchor.z - feet.z).powi(2)).sqrt();
+            if reach > inf_ecs::cover::NPC_COVER_SEARCH_M {
+                break;
+            }
+            let high = p.class == CoverClass::High;
+            // The score: distance, with a HIGH candidate given a large discount
+            // when the town is at its top rung. A number rather than a branch so
+            // the preference is a strength and not a veto -- a SWAT unit with
+            // only a car beside it still takes the car.
+            let score = if prefer_high && high {
+                reach - 1000.0
+            } else {
+                reach
+            };
+            if best.is_none_or(|(b, _, _, _)| score < b) {
+                best = Some((score, p.anchor, p.yaw_deg, high));
+            }
+            // The nearest surface along this bearing is the one; anything
+            // further along it is behind that one.
+            break;
+        }
+    }
+    (best.map(|(_, a, y, h)| (a, y, h)), spent)
+}
+
+/// Point the unit at where it is going and hold the movement stick that way.
+fn walk_toward(world: &mut EcsWorld, unit: uuid::Uuid, dir: DVec3) {
+    let Some(e) = world.entity_of(unit) else {
+        return;
+    };
+    let planar = DVec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if planar == DVec3::ZERO {
+        return;
+    }
+    let yaw = inf_math::patan2_64(planar.x, planar.z).to_degrees();
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        // The intent is in the AIM frame, and the aim is being pointed the same
+        // way — so "forward" is the whole of it.
+        cm.runtime.aim_yaw_deg = yaw;
+        cm.runtime.intent_move = inf_ecs::math::Vec2d::new(0.0, 1.0);
+        cm.runtime.want_sprint = true;
+    }
+}
+
+/// **Press the cover key**, exactly as a player's keyboard does.
+///
+/// The one door: the AI raises the same `press_cover` edge `apply_intent` raises
+/// and the movement step answers it identically. An NPC cover system that
+/// entered `MovementMode::Cover` by writing the mode would be a second
+/// implementation of the thing this wave built, and the two would disagree the
+/// first day one of them was tuned.
+fn press_cover(world: &mut EcsWorld, unit: uuid::Uuid, face_yaw_deg: f64) {
+    let Some(e) = world.entity_of(unit) else {
+        return;
+    };
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        if face_yaw_deg.is_finite() {
+            cm.runtime.body_yaw_deg = face_yaw_deg;
+            cm.runtime.aim_yaw_deg = face_yaw_deg;
+            cm.runtime.target_yaw_deg = face_yaw_deg;
+        }
+        cm.runtime.intent_move = inf_ecs::math::Vec2d::ZERO;
+        cm.runtime.want_sprint = false;
+        cm.runtime.press_cover = true;
+    }
+}
+
+/// Aim at the threat and hold (or release) the peek.
+///
+/// `npc_aim_at` with the trigger **open**: WPN2e owns the firing cadence, and
+/// this wave hands it a unit that is pointed at the right place with its body
+/// leaned out of cover on a duty cycle. Naming the seam is the whole of the
+/// clause's own caveat.
+fn aim_and_lean(world: &mut EcsWorld, unit: uuid::Uuid, threat: DVec3, out: bool) {
+    let Some(e) = world.entity_of(unit) else {
+        return;
+    };
+    let Some(here) = body_at(world, unit) else {
+        return;
+    };
+    let to = DVec3::new(threat.x - here.x, 0.0, threat.z - here.z);
+    if to.length_squared() > 1.0e-12 {
+        let yaw = inf_math::patan2_64(to.x, to.z).to_degrees();
+        if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.runtime.aim_yaw_deg = yaw;
+        }
+    }
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        // `want_aim` is what the movement step's cover block reads to lean the
+        // body out, and it is the same field a player's right mouse button
+        // sets — one door again.
+        cm.runtime.want_aim = out;
+        cm.runtime.intent_move = inf_ecs::math::Vec2d::ZERO;
     }
 }
