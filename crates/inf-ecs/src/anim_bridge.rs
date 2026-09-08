@@ -907,6 +907,14 @@ pub mod params {
     pub const LEAN_X: &str = inf_anim::als::LEAN_X_VAR;
     /// **Lean, forward/back**, `[-1, 1]` — ALS's `LeanAmount.FB`.
     pub const LEAN_Y: &str = inf_anim::als::LEAN_Y_VAR;
+    /// **What class of cover the character is in** (wave COV1): `0` none, `1`
+    /// low (crouched), `2` high (standing).
+    pub const COVER: &str = inf_anim::als::COVER_VAR;
+    /// **Which way it is leaning out of it**: `0` tucked, `-1` left, `+1`
+    /// right, `2` over the top.
+    pub const COVER_SIDE: &str = inf_anim::als::COVER_SIDE_VAR;
+    /// **How far out that lean is**, `[0, 1]`.
+    pub const COVER_PEEK: &str = inf_anim::als::COVER_PEEK_VAR;
 }
 
 /// **Publish a character's movement state into its machine's parameters**
@@ -1008,7 +1016,7 @@ pub fn publish_character_params(
     } else {
         0.0
     };
-    let values: [(&str, f64); 22] = [
+    let values: [(&str, f64); 25] = [
         (params::SPEED, planar),
         (params::GAIT, rt.mapped_speed),
         (params::GROUNDED, f64::from(u8::from(rt.grounded))),
@@ -1039,6 +1047,25 @@ pub fn publish_character_params(
         (params::PLAY_RATE, rt.play_rate),
         (params::LEAN_X, rt.lean.x),
         (params::LEAN_Y, rt.lean.y),
+        // ── wave COV1 ────────────────────────────────────────────────────────
+        //
+        // The class is `0` when the character is not in cover, which is what
+        // makes the cover edges' `cover == 1` / `cover == 2` conditions safe on
+        // every character in every level that has never taken cover: the
+        // parameter is declared, published as zero, and matches neither.
+        (params::COVER, rt.cover.param()),
+        (
+            params::COVER_SIDE,
+            if rt.cover.active {
+                rt.cover.side.param()
+            } else {
+                0.0
+            },
+        ),
+        (
+            params::COVER_PEEK,
+            if rt.cover.active { rt.cover.peek } else { 0.0 },
+        ),
     ];
     with_bridge(world, |b| {
         let slot = b.params.entry(guid).or_default();

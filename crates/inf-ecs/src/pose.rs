@@ -1545,6 +1545,26 @@ pub fn step_pose_evaluation<'c>(
                         if let Some((over, t)) = throw_of(world, entity) {
                             apply_throw(asset, &mut pose, machine, &clips, over, t);
                         }
+                        // ── **THE PEEK'S LEAN** (wave COV1) ──
+                        //
+                        // The capsule has already stepped out around the corner
+                        // or stood up over the top — that is what makes a shot
+                        // reach the head, and it is measured on the transform.
+                        // This is the half a viewer sees: the upper body tips
+                        // OUT of cover ahead of the body, which is what turns a
+                        // side-step into a lean.
+                        //
+                        // A hand-built delta rather than a clip, and that is the
+                        // difference between this overlay and the three above
+                        // it: a peek is a continuous angle driven by
+                        // `CoverState::peek`, not a one-shot with a clock, so
+                        // there is no sequence to sample and none is imported.
+                        // **Absent costs nothing**: `cover.active` is false on
+                        // every character that is not in cover, which is one
+                        // component read.
+                        if let Some((side, peek)) = cover_lean_of(world, entity) {
+                            apply_cover_lean(asset, &mut pose, side, peek);
+                        }
                         inf_anim::drive_pose(
                             &asset.skeleton,
                             &mut pose,
@@ -2259,6 +2279,101 @@ fn apply_throw<'c>(
     let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, false);
     let delta = inf_anim::additive_delta(&base, &now);
     let layer = inf_anim::AnimLayer::additive("throw", 1.0).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+    true
+}
+
+/// **How far out of cover this character is leaning, and which way** (wave
+/// COV1).
+///
+/// `None` for an entity with no [`crate::components::CharacterMovement`], one
+/// not in cover, and one tucked all the way in — which is every character in
+/// every level that has never taken cover, at the cost of one component read.
+fn cover_lean_of(
+    world: &EcsWorld,
+    entity: bevy_ecs::entity::Entity,
+) -> Option<(crate::cover::CoverSide, f64)> {
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let c = &cm.runtime.cover;
+    (c.active && c.side.is_out() && c.peek > 1.0e-3).then_some((c.side, c.peek.clamp(0.0, 1.0)))
+}
+
+/// **How far the torso tips out of cover at a full peek**, degrees.
+///
+/// Eighteen, split across the spine chain. It is a LEAN and not a turn: the
+/// character's facing stays pinned to the surface (the movement step owns that)
+/// and what moves is the ribcage, which is what the eye reads as leaning out
+/// from behind something.
+const COVER_LEAN_DEG: f64 = 18.0;
+/// How far the torso rises and opens when a low cover is shot over, degrees.
+///
+/// A backward pitch, because rising over a bonnet to shoot means straightening,
+/// and a smaller number than the sideways lean: the capsule has already stood
+/// up, and 10 degrees of chest is the difference between standing and *aiming*.
+const COVER_RISE_DEG: f64 = 10.0;
+
+/// **Apply the peek's lean** (wave COV1), answering whether it wrote anything.
+///
+/// A per-spine-joint additive, in the same shape as the aim offset's spine
+/// distribution: the total angle divided across however many spine joints the
+/// rig has, so a three-joint mannequin and a five-joint MetaHuman both lean the
+/// same amount in total and neither hinges at one vertebra.
+///
+/// The axis is the class's: a corner peek ROLLS about the character's own
+/// forward (`Z` local, positive toward its right), and a peek over the top
+/// PITCHES back about `X`. Both go through [`inf_math::psin64`]: this reaches a
+/// pose a gate measures joints on, and a `glam` rotation constructor is
+/// `f32::sin_cos`.
+fn apply_cover_lean(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    side: crate::cover::CoverSide,
+    peek: f64,
+) -> bool {
+    let roles = rig.role_index();
+    let spine: Vec<u16> = roles
+        .rows()
+        .iter()
+        .filter(|r| r.kind == inf_anim::BoneRoleKind::Spine)
+        .map(|r| r.joint)
+        .collect();
+    if spine.is_empty() {
+        return false;
+    }
+    let per = if side.is_over() {
+        COVER_RISE_DEG
+    } else {
+        COVER_LEAN_DEG
+    } * peek
+        / spine.len() as f64;
+    if per.abs() < 1.0e-6 {
+        return false;
+    }
+    let half = per.to_radians() * 0.5;
+    let (s, c) = (inf_math::psin64(half) as f32, inf_math::pcos64(half) as f32);
+    // A corner peek leans toward the SIDE it is going round; `param` is the
+    // animation convention (`-1` left, `+1` right), which is exactly the sign a
+    // roll about the character's own forward wants.
+    let q = if side.is_over() {
+        // Pitch BACK about local X: rising and opening the chest.
+        glam::Quat::from_xyzw(-s, 0.0, 0.0, c)
+    } else {
+        glam::Quat::from_xyzw(0.0, 0.0, s * side.param() as f32, c)
+    };
+    let mut delta = Pose::rest(&rig.skeleton);
+    for j in &spine {
+        if let Some(l) = delta.locals.get_mut(*j as usize) {
+            l.rotation = q.to_array();
+        }
+    }
+    let Some(mask) =
+        inf_anim::JointMask::upper_body("Mask_CoverLean", &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    let layer = inf_anim::AnimLayer::additive("cover_lean", 1.0).with_mask(mask);
     *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
     true
 }

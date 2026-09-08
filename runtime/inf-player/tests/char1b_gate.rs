@@ -925,6 +925,10 @@ fn the_two_mode_tables_agree() {
         (LocoMode::FallFree, M::FallFree),
         (LocoMode::FallControlled, M::FallControlled),
         (LocoMode::Ragdoll, M::Ragdoll),
+        // Wave COV1. `Cover` claimed RESERVED SLOT 14, so this row is the one
+        // that would go wrong if somebody appended it at 12 instead: the graph
+        // would compare `mode` against 12 and the step would publish 14.
+        (LocoMode::Cover, M::Cover),
     ];
     for (a, b) in pairs {
         assert_eq!(

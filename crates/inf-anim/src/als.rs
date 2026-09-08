@@ -206,6 +206,28 @@ pub fn mantle_state_name(param: f64) -> Option<&'static str> {
 /// travelling at 6.5 m/s plays 1.3x and its feet keep up with the ground. This
 /// is **stride warping's** first half: a foot that travels at the capsule's
 /// speed does not slide.
+/// **What class of cover the character is in** (wave COV1): `0` none, `1` low
+/// (crouched behind a car or a counter), `2` high (standing against a wall).
+///
+/// A float and not a state name, which is the CHAR1b.2 law: the door is a MODE
+/// plus a PARAMETER. `inf_ecs::cover::CoverClass::param` is the one place the
+/// numbers are minted and `from_param` reads them back, so a gate compares
+/// against the enum rather than against a literal.
+pub const COVER_VAR: &str = "cover";
+/// [`COVER_VAR`]'s value for a low (crouched) cover.
+pub const COVER_LOW: f64 = 1.0;
+/// [`COVER_VAR`]'s value for a high (standing) cover.
+pub const COVER_HIGH: f64 = 2.0;
+/// **Which way the character is leaning out of cover** (wave COV1): `0` tucked
+/// in, `-1` around its left edge, `+1` around its right, `2` over the top.
+///
+/// Read by the POSE step's additive lean rather than by an edge — a peek is a
+/// layer over the cover stance, not a state of its own, for the reason the
+/// throws are overlays and not states.
+pub const COVER_SIDE_VAR: &str = "cover_side";
+/// **How far out that lean is**, `[0, 1]` (wave COV1). The additive's own alpha.
+pub const COVER_PEEK_VAR: &str = "cover_peek";
+
 pub const PLAY_RATE_VAR: &str = "play_rate";
 /// **Lean, left/right**, `[-1, 1]` — ALS's `LeanAmount.LR`
 /// (`ALSCharacterAnimInstance.cpp:633-637`), positive to the character's right.
@@ -268,6 +290,10 @@ pub enum LocoMode {
     Mantle = 10,
     /// Physics-driven ragdoll.
     Ragdoll = 11,
+    /// **Taking cover** behind a surface (wave COV1). Claimed reserved slot 14,
+    /// so the number is 14 and not 12 — `Driving` and `Flying` hold 12 and 13
+    /// and are not animated by this graph.
+    Cover = 14,
 }
 
 impl LocoMode {
@@ -676,6 +702,40 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         looping: true,
         clips: &[("ALS_N_SecondaryMotion", O)],
     },
+    // ── wave COV1: the cover set ─────────────────────────────────────────────
+    //
+    // Four authored clips, a stance and a move per class. ALS ships no cover
+    // sequence at all (the CHAR1a census by name), so `inf_anim::authored`
+    // derives these from the rig that will play them exactly as it derives the
+    // slide and the swims — and the `INF_` prefix says whose they are.
+    LocoSlot {
+        state: "cover_low_idle",
+        mode: LocoMode::Cover,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Cover_Low_Idle", O)],
+    },
+    LocoSlot {
+        state: "cover_low_move",
+        mode: LocoMode::Cover,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Cover_Low_Move", O)],
+    },
+    LocoSlot {
+        state: "cover_high_idle",
+        mode: LocoMode::Cover,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Cover_High_Idle", O)],
+    },
+    LocoSlot {
+        state: "cover_high_move",
+        mode: LocoMode::Cover,
+        kind: SlotKind::State,
+        looping: true,
+        clips: &[("INF_Cover_High_Move", O)],
+    },
     LocoSlot {
         state: "mantle_low",
         mode: LocoMode::Mantle,
@@ -1022,6 +1082,15 @@ pub fn build_locomotion_graph(
                 SmParam::float(PLAY_RATE_VAR),
                 SmParam::float(LEAN_X_VAR),
                 SmParam::float(LEAN_Y_VAR),
+                // ── wave COV1 ────────────────────────────────────────────
+                //
+                // The class is compared by an EDGE; the side and the peek are
+                // read by the pose step's additive lean, and are declared for
+                // `PLAY_RATE_VAR`'s reason — the machine is the character's
+                // animation manifest.
+                SmParam::float(COVER_VAR),
+                SmParam::float(COVER_SIDE_VAR),
+                SmParam::float(COVER_PEEK_VAR),
             ],
             profiles: Vec::new(),
         },
@@ -1503,6 +1572,47 @@ fn transitions_for(index: &std::collections::BTreeMap<&'static str, usize>) -> V
                 SmTransition::any(m, FADE_S)
                     .when(SmCond::from_flat_and(vec![
                         SmCompare::float(MODE_VAR, CmpOp::Eq, mode.param()),
+                        SmCompare::float(GAIT_VAR, CmpOp::Gt, WALK_AT),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(22),
+            );
+        }
+    }
+    // ── COVER (wave COV1) ───────────────────────────────────────────────────
+    //
+    // Two conditions on every edge and both are necessary: the MODE says the
+    // character is in cover and the CLASS says which stance the surface asked
+    // for, which is the whole of "crouching or standing depending on the
+    // object". The gait splits still from moving exactly as prone and the swims
+    // do, on the same constant, so neither can chatter.
+    //
+    // The priority is the prone/swim block's 22 rather than the mantle's 35: a
+    // mantle is a warp that owns the character outright and outranks everything,
+    // and a cover stance is an ordinary grounded mode that a ragdoll or a fall
+    // must be able to take away.
+    for (still, moving, class) in [
+        ("cover_low_idle", "cover_low_move", COVER_LOW),
+        ("cover_high_idle", "cover_high_move", COVER_HIGH),
+    ] {
+        if let Some(s) = at(still) {
+            out.push(
+                SmTransition::any(s, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Cover.param()),
+                        SmCompare::float(COVER_VAR, CmpOp::Eq, class),
+                        SmCompare::float(GAIT_VAR, CmpOp::Le, WALK_AT),
+                    ]))
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_priority(22),
+            );
+        }
+        if let Some(m) = at(moving) {
+            out.push(
+                SmTransition::any(m, FADE_S)
+                    .when(SmCond::from_flat_and(vec![
+                        SmCompare::float(MODE_VAR, CmpOp::Eq, LocoMode::Cover.param()),
+                        SmCompare::float(COVER_VAR, CmpOp::Eq, class),
                         SmCompare::float(GAIT_VAR, CmpOp::Gt, WALK_AT),
                     ]))
                     .with_curve(BlendCurve::EaseInOut)

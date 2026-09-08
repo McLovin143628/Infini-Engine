@@ -7,9 +7,10 @@
 //! ALS ships 164 sequences and a census by name found **none** of these: no
 //! slide, no throw, no swim, no prone, no standing get-up, no cover, no vault
 //! (`movement_sets` in the island manifest: `mantle 13`; the rest `0`). The
-//! engine's own catalogue has modes for four of them —
-//! `MovementMode::{Slide, Prone, SwimSurface, SwimUnder}` — and a mode with no
-//! clip is a character sliding in its idle pose.
+//! engine's own catalogue has modes for five of them —
+//! `MovementMode::{Slide, Prone, SwimSurface, SwimUnder, Cover}` — and a mode
+//! with no clip is a character sliding in its idle pose, or standing to
+//! attention with its back to a wall.
 //!
 //! They are **derived from the rig**, for [`crate::locomotion`]'s reason: a clip
 //! is bound to a skeleton by joint *index*, so a shipped one would fit exactly
@@ -35,6 +36,10 @@
 //! | `INF_Prone_Idle` | torso 88° to horizontal, pelvis at 12 % of hip height, elbows 90°, legs straight | 3.00 s, looping (a 2° breath) |
 //! | `INF_Prone_Crawl` | the prone pose with alternating 35° hip and 55° elbow drive | 1.80 s, looping |
 //! | `INF_GetUp_Standing` | pelvis rises from 20 % to 100 % of hip height while the torso unfolds 70° → 0° and the knees 100° → 0° | 1.20 s, one-shot |
+//! | `INF_Cover_Low_Idle` | pelvis at 62 % of hip height, chest 12° forward and 18° twisted toward the surface, head 35° along it, near arm folded 70° across the chest, far arm braced 25° | 3.20 s, looping (a 2° breath) |
+//! | `INF_Cover_Low_Move` | the same stance with a 30° hip / 45° knee shuffle and a 10° torso counter-sway | 1.20 s, looping |
+//! | `INF_Cover_High_Idle` | upright, chest 8° back and 22° twisted toward the surface, head 40° along it, near shoulder rolled 15° into the wall, near arm 60° up across the chest | 3.60 s, looping (a 2° breath) |
+//! | `INF_Cover_High_Move` | the same stance side-stepping: 22° hip abduction alternating, 30° knee, 8° torso counter-sway | 1.10 s, looping |
 //!
 //! # Determinism
 //!
@@ -70,6 +75,17 @@ pub const AUTHORED_CLIPS: &[&str] = &[
     "INF_Prone_Idle",
     "INF_Prone_Crawl",
     "INF_GetUp_Standing",
+    // ── wave COV1: taking cover ──
+    //
+    // ALS ships **no cover clip of any kind** — the census by name that found
+    // no slide and no swim found no cover and no vault either, and the module
+    // doc above has said so since CHAR1b.2. These four are the set: a stance
+    // per class, and a move per class, because a character side-stepping along
+    // a wall in its walk cycle is a character that is not in cover.
+    "INF_Cover_Low_Idle",
+    "INF_Cover_Low_Move",
+    "INF_Cover_High_Idle",
+    "INF_Cover_High_Move",
 ];
 
 /// Why an authored set refused to generate.
@@ -210,10 +226,10 @@ fn rot1(tracks: &mut Vec<JointTrack>, joint: u16, times: &[f32], values: Vec<[f3
 /// **Author every clip this module writes**, in [`AUTHORED_CLIPS`] order.
 ///
 /// A clip is grounded ([`crate::retarget::settle_to_ground`]) exactly when it
-/// depicts a character touching the floor — the slide, the prone pair and the
-/// get-up do; the three swims and the two throws do not, because a swimmer's
-/// soles are not on anything and a throw is an upper-body overlay whose legs are
-/// the locomotion's.
+/// depicts a character touching the floor — the slide, the prone pair, the
+/// get-up and the four cover clips do; the three swims and the two throws do
+/// not, because a swimmer's soles are not on anything and a throw is an
+/// upper-body overlay whose legs are the locomotion's.
 pub fn author_clips(rig: &SkeletonAsset) -> Result<Vec<(String, AnimClip)>, AuthorError> {
     let r = Rig::of(rig)?;
     let mut out: Vec<(String, AnimClip)> = vec![
@@ -232,11 +248,22 @@ pub fn author_clips(rig: &SkeletonAsset) -> Result<Vec<(String, AnimClip)>, Auth
         ("INF_Prone_Idle".into(), prone(&r, false)),
         ("INF_Prone_Crawl".into(), prone(&r, true)),
         ("INF_GetUp_Standing".into(), get_up(&r)),
+        ("INF_Cover_Low_Idle".into(), cover(&r, true, false)),
+        ("INF_Cover_Low_Move".into(), cover(&r, true, true)),
+        ("INF_Cover_High_Idle".into(), cover(&r, false, false)),
+        ("INF_Cover_High_Move".into(), cover(&r, false, true)),
     ];
     for (name, clip) in out.iter_mut() {
         if matches!(
             name.as_str(),
-            "INF_Slide" | "INF_Prone_Idle" | "INF_Prone_Crawl" | "INF_GetUp_Standing"
+            "INF_Slide"
+                | "INF_Prone_Idle"
+                | "INF_Prone_Crawl"
+                | "INF_GetUp_Standing"
+                | "INF_Cover_Low_Idle"
+                | "INF_Cover_Low_Move"
+                | "INF_Cover_High_Idle"
+                | "INF_Cover_High_Move"
         ) {
             crate::retarget::settle_to_ground(clip, &rig.skeleton);
         }
@@ -327,6 +354,191 @@ fn slide(r: &Rig) -> AnimClip {
         );
     }
     AnimClip::new("INF_Slide", tracks)
+}
+
+/// **TAKING COVER** (wave COV1) — a stance per class, moving or not.
+///
+/// `low` crouches (the character is behind a car's flank, a counter, a low
+/// wall); otherwise it stands (a façade, a container). `moving` adds the
+/// side-step the cover slide plays.
+///
+/// # What it depicts, and the two things that make it read as COVER
+///
+/// A cover pose is not a crouch and not an idle, and the difference is two
+/// rotations rather than a different skeleton:
+///
+/// * **the torso is TWISTED toward the surface** (18° low, 22° high) while the
+///   pelvis stays square to it, which is what "pressed against it" looks like
+///   from behind — a body flat to a wall is a body facing the wall, and a
+///   character in cover is facing ALONG it;
+/// * **the head is turned further still** (35° / 40°), because the thing the
+///   player is looking at is down the wall, not into it.
+///
+/// The near arm folds across the chest — 70° at the shoulder for a crouch, 60°
+/// with the shoulder rolled 15° into the wall for a stand — which is where a
+/// weapon is held when it is not being aimed, and it is what keeps the elbow
+/// out of the surface the character is leaning on.
+///
+/// The breath is the same 2° chest oscillation the prone idle carries, so a
+/// character holding cover is not a photograph. `apply_breath`'s own additive
+/// rides on top of this; the 2° here is what the clip does on its own, which is
+/// what a viewer sees when no additive is layered.
+///
+/// # Which side is "near"
+///
+/// The **left**, always, and it is a statement rather than a measurement: the
+/// engine's cover state knows which way the character is leaning
+/// (`inf_ecs::cover::CoverSide`) and a mirrored pair of clips per class would
+/// be eight files to say what one additive lean already says. The pose is
+/// authored for a character with the wall on its left and the layer mirrors it;
+/// stated here so a reader meeting a right-hand corner knows why there is no
+/// `_RH` file beside this one, exactly as the mantle's own left/right split is
+/// stated at `MantleState::left_hand`.
+fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
+    let n = 12;
+    let period = match (low, moving) {
+        (true, false) => 3.20,
+        (true, true) => 1.20,
+        (false, false) => 3.60,
+        (false, true) => 1.10,
+    };
+    let times = times_of(period, n);
+    let tau = std::f64::consts::TAU;
+    let ph = |i: usize| tau * i as f64 / n as f64;
+    let mut tracks: Vec<JointTrack> = Vec::new();
+
+    // The pelvis drops for a crouch and stays put for a stand. 62 % of hip
+    // height is a little taller than the slide's 55 %: a character behind a car
+    // is ready to rise over it, not sitting down.
+    let drop = if low { 0.38 * r.hip_height_m } else { 0.0 };
+    let mut hip = JointTrack::new(r.pelvis);
+    hip.translation = Some(Vec3Track::new(
+        times.clone(),
+        (0..=n)
+            .map(|i| {
+                // A 1.5 cm bob on the move, so the side-step has weight.
+                let bob = if moving {
+                    0.015 * psin64(2.0 * ph(i))
+                } else {
+                    0.0
+                };
+                [
+                    r.pelvis_bind[0],
+                    r.pelvis_bind[1] - (drop + bob) as f32,
+                    r.pelvis_bind[2],
+                ]
+            })
+            .collect(),
+        Interpolation::Linear,
+    ));
+    tracks.push(hip);
+
+    // The chest: a pitch, a twist toward the surface, and the breath.
+    let pitch: f64 = if low { 12.0 } else { -8.0 };
+    let twist: f64 = if low { 18.0 } else { 22.0 };
+    let sway: f64 = if moving { 10.0 } else { 0.0 };
+    rot1(
+        &mut tracks,
+        r.chest(),
+        &times,
+        (0..=n)
+            .map(|i| {
+                let breath = 2.0 * psin64(ph(i));
+                let q = quat_mul(
+                    qx((pitch + breath).to_radians()),
+                    qy((twist + sway * psin64(ph(i))).to_radians()),
+                );
+                q
+            })
+            .collect(),
+    );
+
+    // The near (left) arm folds across the chest; the far arm braces.
+    let near_up: f64 = if low { 70.0 } else { 60.0 };
+    rot(
+        &mut tracks,
+        r.upper_arm[0],
+        &times,
+        (0..=n)
+            .map(|_| quat_mul(qx((-near_up).to_radians()), qz(15f64.to_radians())))
+            .collect(),
+    );
+    rot(
+        &mut tracks,
+        r.lower_arm[0],
+        &times,
+        (0..=n).map(|_| qx((-80f64).to_radians())).collect(),
+    );
+    rot(
+        &mut tracks,
+        r.upper_arm[1],
+        &times,
+        (0..=n).map(|_| qx((-25f64).to_radians())).collect(),
+    );
+    rot(
+        &mut tracks,
+        r.lower_arm[1],
+        &times,
+        (0..=n).map(|_| qx((-45f64).to_radians())).collect(),
+    );
+
+    // The legs. Standing still they take the stance; moving, they side-step —
+    // alternating hip abduction with a knee fold, which is a shuffle rather
+    // than a walk, because a cover slide never crosses its feet.
+    let hip_fold: f64 = if low { 55.0 } else { 0.0 };
+    let knee_fold: f64 = if low { 75.0 } else { 0.0 };
+    for side in 0..2 {
+        let phase = if side == 0 { 0.0 } else { std::f64::consts::PI };
+        let step_amp = if moving { 22.0 } else { 0.0 };
+        let knee_amp = if moving { 30.0 } else { 0.0 };
+        rot(
+            &mut tracks,
+            r.thigh[side],
+            &times,
+            (0..=n)
+                .map(|i| {
+                    quat_mul(
+                        qx((-hip_fold).to_radians()),
+                        qz((step_amp * psin64(ph(i) + phase)).to_radians()),
+                    )
+                })
+                .collect(),
+        );
+        rot(
+            &mut tracks,
+            r.calf[side],
+            &times,
+            (0..=n)
+                .map(|i| {
+                    qx((knee_fold + knee_amp * (0.5 - 0.5 * pcos64(ph(i) + phase))).to_radians())
+                })
+                .collect(),
+        );
+    }
+    let name = match (low, moving) {
+        (true, false) => "INF_Cover_Low_Idle",
+        (true, true) => "INF_Cover_Low_Move",
+        (false, false) => "INF_Cover_High_Idle",
+        (false, true) => "INF_Cover_High_Move",
+    };
+    AnimClip::new(name, tracks)
+}
+
+/// Hamilton product of two `[x, y, z, w]` quaternions.
+///
+/// Spelled here rather than through `glam::Quat`: every rotation this module
+/// writes is committed content, and `glam`'s constructors are `f32::sin_cos`.
+/// This one only multiplies and adds, so composing two `psin64`-built rotations
+/// stays inside the module's own determinism rule.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let (ax, ay, az, aw) = (a[0], a[1], a[2], a[3]);
+    let (bx, by, bz, bw) = (b[0], b[1], b[2], b[3]);
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
 }
 
 /// **THE THROW** — overhand (`over`) or underhand, 0.85 / 0.75 s, one-shot.
