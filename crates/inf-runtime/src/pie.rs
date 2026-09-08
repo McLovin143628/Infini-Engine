@@ -268,6 +268,46 @@ pub const SCENE_PAYLOAD_VERSION: u32 = 13;
 /// live scene payload (level bytes + blueprint JSON) fits comfortably.
 pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
 
+/// **A garment to put on the hero in a PREVIEW session** — the asset GUID of a
+/// `.inf_cloth`, and nothing at all when unset.
+///
+/// # Why the name lives HERE, in the wire crate, and not with its reader
+///
+/// It was the player's (`inf_player::pie_drive`), read once, on one side — and
+/// that is exactly what carried item 142 was. The player inserts a `ClothSim`
+/// naming this GUID on the hero; the payload's garment set is built by the
+/// EDITOR, by walking the document for the `ClothSim.asset` refs it already has;
+/// a runtime-worn garment is by definition not one of them, so
+/// `RuntimeSim::step_cloth` opened on an empty registry, `live_cloth` answered
+/// `None` and `project_cloth` returned before it pushed an instance. The cape was
+/// simulated in the gate (which resolves every `.inf_cloth` in the project) and
+/// drawn nowhere, and the render projection was innocent.
+///
+/// One door, two readers, one string: the editor carries the bytes and the player
+/// wears the garment. Preview-only on both sides — a shipped boot consults
+/// neither — and it is never written into a level.
+pub const WEAR_CLOTH_ENV: &str = "INF_PIE_WEAR_CLOTH";
+
+/// The `.inf_cloth` GUID [`WEAR_CLOTH_ENV`] names, or `None` when it is unset,
+/// blank, or not a GUID.
+///
+/// A malformed value is a **refusal with a reason on stderr** rather than a
+/// silent skip on both sides, because the whole point of the door is that the
+/// operator finds out whether it took.
+pub fn preview_worn_cloth() -> Option<Uuid> {
+    match std::env::var(WEAR_CLOTH_ENV) {
+        Err(_) => None,
+        Ok(v) if v.trim().is_empty() => None,
+        Ok(v) => match v.trim().parse::<Uuid>() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("{WEAR_CLOTH_ENV} is `{v}`, which is not a GUID ({e})");
+                None
+            }
+        },
+    }
+}
+
 /// The real content the editor streams to the player: the live scene as v3
 /// `.inf_lvl` bytes plus the set of bound blueprint classes. The player builds
 /// its world from these exactly like the cooked-pack path, so PIE == shipping.

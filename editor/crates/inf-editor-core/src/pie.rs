@@ -1196,6 +1196,27 @@ where
             }
         }
     }
+    // ── OUTFIT1: THE GARMENT A PREVIEW IS ABOUT TO PUT ON (carried 142) ─────
+    //
+    // The walk above collects what the DOCUMENT names. A preview session can be
+    // told to wear a garment the document does not name
+    // (`inf_runtime::pie::WEAR_CLOTH_ENV`, which the demo loop's `-WearCloth`
+    // sets), and until this line the two halves of that one door disagreed: the
+    // player inserted a `ClothSim` naming a GUID, `RuntimeSim::step_cloth` found
+    // an empty garment registry, `live_cloth` answered `None`, and
+    // `project_cloth` returned before it pushed an instance. The cape was worn,
+    // simulated in the gate — which resolves every `.inf_cloth` in the project —
+    // and drawn on nothing. The render projection was innocent.
+    //
+    // Preview-only and inert unless the variable is set, exactly like the
+    // placement door beside it: a shipped cook never reads an environment
+    // variable, and a level is not edited by one.
+    carry_preview_garment(
+        inf_runtime::pie::preview_worn_cloth(),
+        &mut seen_cloth,
+        &mut cloths,
+        &mut resolve_bytes,
+    );
 
     // ── FIX2: the clips a level SOUNDS ──────────────────────────────────────
     //
@@ -1538,11 +1559,100 @@ pub fn missing_player_advice(bin: &std::path::Path) -> Option<String> {
     ))
 }
 
+/// **Carry the garment a preview session is about to put on** (wave OUTFIT1,
+/// carried 142) — the half of `INF_PIE_WEAR_CLOTH` that lives on the editor side.
+///
+/// The payload's garment set is what the DOCUMENT names. A preview can be told to
+/// wear a `.inf_cloth` the document does not name, and until this existed the two
+/// halves of that one door disagreed: the player inserted a `ClothSim` naming the
+/// GUID, `RuntimeSim::step_cloth` opened on an empty registry,
+/// `inf_ecs::cloth::live_cloth` answered `None`, and `project_cloth` returned
+/// before it pushed an instance. The cape was worn, simulated in a gate that
+/// resolves every `.inf_cloth` in the project, and drawn on nothing — and the
+/// render projection, which the wave suspected, was innocent.
+///
+/// A separate function so it can be *driven*: the env read is one line at the
+/// call site and everything that can be wrong here — the dedup against the
+/// document's own refs, the unresolvable GUID, the absent variable — is a value
+/// a test passes in.
+///
+/// `None` does nothing at all, which is every session that did not ask.
+fn carry_preview_garment<A>(
+    worn: Option<Uuid>,
+    seen: &mut std::collections::HashSet<Uuid>,
+    cloths: &mut Vec<(Uuid, Vec<u8>)>,
+    resolve_bytes: &mut A,
+) where
+    A: FnMut(Uuid) -> Option<Vec<u8>>,
+{
+    let Some(worn) = worn else {
+        return;
+    };
+    if !seen.insert(worn) {
+        return;
+    }
+    match resolve_bytes(worn) {
+        Some(bytes) => cloths.push((worn, bytes)),
+        None => tracing::warn!(
+            "PIE: {} names {worn}, which this project has no bytes for — the \
+             preview will wear nothing",
+            inf_runtime::pie::WEAR_CLOTH_ENV
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::SpawnKind;
     use inf_ecs::components::{PcgVolume, Terrain, VoxelVolume};
+
+    /// **Carried 142, as a value** (wave OUTFIT1): a garment a preview is about
+    /// to wear reaches the payload even though the document never names it, is
+    /// deduplicated against the document's own refs, and an unresolvable GUID
+    /// carries nothing rather than an empty entry the player would decode.
+    #[test]
+    fn a_preview_worn_garment_reaches_the_payload_and_a_missing_one_does_not() {
+        let worn = Uuid::from_u128(0x0FF1_7000_C107_0001);
+        let already = Uuid::from_u128(0x0FF1_7000_C107_0002);
+        let missing = Uuid::from_u128(0x0FF1_7000_C107_0003);
+        let mut resolve = |g: Uuid| (g != missing).then(|| vec![7u8, 7, 7]);
+
+        // The document named nothing; the preview names one.
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let mut cloths: Vec<(Uuid, Vec<u8>)> = Vec::new();
+        carry_preview_garment(Some(worn), &mut seen, &mut cloths, &mut resolve);
+        assert_eq!(
+            cloths,
+            vec![(worn, vec![7u8, 7, 7])],
+            "the garment the player is about to put on is not in the bytes it is handed"
+        );
+
+        // The document already named it: one entry, not two.
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        seen.insert(already);
+        let mut cloths: Vec<(Uuid, Vec<u8>)> = vec![(already, vec![1u8])];
+        carry_preview_garment(Some(already), &mut seen, &mut cloths, &mut resolve);
+        assert_eq!(
+            cloths.len(),
+            1,
+            "the payload carries the same garment twice"
+        );
+
+        // Unset: a session that did not ask pays nothing.
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let mut cloths: Vec<(Uuid, Vec<u8>)> = Vec::new();
+        carry_preview_garment(None, &mut seen, &mut cloths, &mut resolve);
+        assert!(cloths.is_empty(), "an unset door carried a garment");
+
+        // Named but unresolvable: nothing, and a warning rather than an entry
+        // whose bytes the player would fail to decode.
+        carry_preview_garment(Some(missing), &mut seen, &mut cloths, &mut resolve);
+        assert!(
+            cloths.is_empty(),
+            "an unresolvable garment was carried as an entry"
+        );
+    }
 
     /// **The positional pin for [`build_scene_payload`]'s seven resolvers.**
     ///

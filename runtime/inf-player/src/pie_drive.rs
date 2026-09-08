@@ -446,7 +446,14 @@ pub const SPAWN_AT_ENV: &str = "INF_PIE_SPAWN_AT";
 /// is a level edit (carried 137, OUTFIT1's). This is how the loop photographs it
 /// without making that edit — the same one-shot, preview-only, env-gated door
 /// [`SPAWN_AT_ENV`] is.
-pub const WEAR_CLOTH_ENV: &str = "INF_PIE_WEAR_CLOTH";
+///
+/// **It moved to the wire crate at wave OUTFIT1** (carried 142) and this is a
+/// re-export, not a copy. The player inserts a `ClothSim` naming this GUID; the
+/// EDITOR decides which garments the payload carries, and it decided by walking
+/// the document — which never names a runtime-worn one. Two doors, one string:
+/// `inf_editor_core::pie` reads the same constant when it builds the payload, so
+/// the garment the player is about to put on is in the bytes it is handed.
+pub use inf_runtime::pie::WEAR_CLOTH_ENV;
 
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
@@ -496,17 +503,10 @@ impl SpawnOverride {
             }
             at.sort_by(|a, b| a.1.total_cmp(&b.1));
         }
-        let cloth = match std::env::var(WEAR_CLOTH_ENV) {
-            Err(_) => None,
-            Ok(v) if v.trim().is_empty() => None,
-            Ok(v) => match v.trim().parse::<Uuid>() {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    eprintln!("inf-player: {WEAR_CLOTH_ENV} is `{v}`, which is not a GUID ({e})");
-                    None
-                }
-            },
-        };
+        // The same read the editor's payload builder does, through the same
+        // door: a garment worn here that the payload did not carry resolves to
+        // nothing and draws nothing, which is what carried 142 was.
+        let cloth = inf_runtime::pie::preview_worn_cloth();
         Self {
             at,
             cloth,
