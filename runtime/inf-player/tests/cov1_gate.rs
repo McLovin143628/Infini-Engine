@@ -379,6 +379,10 @@ struct Station {
     x: f64,
     z: f64,
     bearing_deg: f64,
+    /// The class the search found here. Printed by the arms rather than
+    /// asserted on — the arms assert the class the PRESS produced, which is the
+    /// one that matters, and this is what the search was looking for.
+    #[allow(dead_code)]
     class: CoverClass,
     top_m: f64,
     left_m: f64,
@@ -1276,7 +1280,7 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
 
     let build = || {
         let mut w = inf_ecs::EcsWorld::new();
-        let mut b = inf_physics::PhysicsBridge3D::new(glam::DVec3::new(0.0, -9.81, 0.0));
+        let b = inf_physics::PhysicsBridge3D::new(glam::DVec3::new(0.0, -9.81, 0.0));
         // A floor and a wall the officer can get behind.
         for (guid, centre, half) in [
             (
@@ -1510,10 +1514,24 @@ fn swat_prefers_the_cover_it_can_shoot_around() {
     let period = inf_ecs::cover::NPC_PEEK_OUT_S + inf_ecs::cover::NPC_PEEK_IN_S;
     let (again, _) = inf_ecs::cover::peek_cycle(period + 0.05);
     assert!(again, "the cycle does not repeat");
-    // And a unit is behind its cover more of the time than out of it.
+    // **And a unit is behind its cover more of the time than out of it** —
+    // asserted over the CYCLE rather than over the two constants, because a
+    // comparison of two literals is a claim the compiler can fold away (clippy
+    // says so by name: `assertions_on_constants`). Sampling the duty cycle is
+    // the same claim about the thing that actually runs.
+    let period = inf_ecs::cover::NPC_PEEK_OUT_S + inf_ecs::cover::NPC_PEEK_IN_S;
+    let mut out_samples = 0usize;
+    let n = 600;
+    for i in 0..n {
+        let t = period * f64::from(i) / f64::from(n);
+        if inf_ecs::cover::peek_cycle(t).0 {
+            out_samples += 1;
+        }
+    }
+    println!("  the peek cycle is out for {out_samples} of {n} samples of one period");
     assert!(
-        inf_ecs::cover::NPC_PEEK_IN_S > inf_ecs::cover::NPC_PEEK_OUT_S,
-        "an officer leans out for longer than it hides, which is not taking cover"
+        out_samples * 2 < n as usize,
+        "an officer is leaned out for {out_samples} of {n} samples, which is not taking cover"
     );
 }
 
@@ -1665,7 +1683,7 @@ fn pie_equals_shipping_on_a_cover_trace() {
 
     let ship: Vec<Vec<u8>> = {
         let mut world = inf_ecs::EcsWorld::new();
-        for (guid, parts) in bodies.clone() {
+        for (guid, parts) in bodies {
             let e = world.spawn_with_guid(guid, "Block", None);
             world.world_mut().entity_mut(e).insert(parts);
         }
@@ -1685,7 +1703,7 @@ fn pie_equals_shipping_on_a_cover_trace() {
 
     let pie: Vec<Vec<u8>> = {
         let mut doc = SceneDoc::new();
-        for (guid, parts) in bodies.clone() {
+        for (guid, parts) in bodies {
             let e =
                 doc.create_with_guid(guid, inf_editor_core::ipc::SpawnKind::Empty, "Block", None);
             doc.world_mut().world_mut().entity_mut(e).insert(parts);

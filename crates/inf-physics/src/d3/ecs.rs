@@ -1587,7 +1587,7 @@ impl PhysicsBridge3D {
                     super::label::ColliderLabel::part(
                         super::label::ColliderFamily::Terrain,
                         guid,
-                        described.saturating_sub(1) as u32,
+                        described.saturating_sub(1),
                     ),
                 );
                 let Some(collider) = terrain_tile_collider(tile, res, span) else {
