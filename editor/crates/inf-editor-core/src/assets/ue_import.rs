@@ -2286,8 +2286,8 @@ fn rebind_wearable(
                 let n = v.normal;
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                 if len > 1e-6 {
-                    for axis in 0..3 {
-                        v.position[axis] += n[axis] / len * WEARABLE_LIFT_M;
+                    for (axis, c) in n.iter().enumerate() {
+                        v.position[axis] += c / len * WEARABLE_LIFT_M;
                     }
                     lifted += 1;
                 }
