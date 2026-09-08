@@ -4328,7 +4328,7 @@ mod tests {
                 assert_eq!(
                     src.matches(line).count(),
                     1,
-                    "{label}.wgsl's masked predicate moved away from the caster passes'                      (missing or duplicated `{line}`)"
+                    "{label}.wgsl's masked predicate moved away from the caster passes' (missing or duplicated `{line}`)"
                 );
             }
         }
