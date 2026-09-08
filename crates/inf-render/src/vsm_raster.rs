@@ -4304,17 +4304,34 @@ mod tests {
                  cut-out that shadows as a solid is the symptom"
             );
         }
-        // The lit pass reads the same two words out of its own interpolants
-        // (`pbr.w` is the blend code, `pbr.z` the cutoff, `color.a` the alpha), so
-        // it is pinned by structure rather than by text — the numbers 0.5 and 1.5
-        // are the freeze-pinned R-P5 window and they are what a copy drifts on.
-        assert_eq!(
-            include_str!("shaders/mesh.wgsl")
-                .matches("if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z) {")
-                .count(),
-            1,
-            "mesh.wgsl's masked predicate moved away from the caster passes'"
-        );
+        // The two LIT passes read the same two words out of their own interpolants
+        // (`pbr.w` is the blend code, `pbr.z` the cutoff, `color.a` the instance's
+        // alpha), so they are pinned by structure rather than by text — the numbers
+        // 0.5 and 1.5 are the freeze-pinned R-P5 window and they are what a copy
+        // drifts on. Since wave OUTFIT1 the alpha a lit pass tests is the instance
+        // constant MULTIPLIED by the albedo slot's own texel when one is bound (a
+        // masked material's coverage lives in the base colour's alpha), so the
+        // predicate is three lines — the window, the constant, the cutoff — spelled
+        // character for character on the rigid and the skinned path. The depth-only
+        // casters cannot read a texel (`ShaderKind::Plain`, no VT table — priced in
+        // `depth_prepass.wgsl`), which is why their predicate stays the one-line
+        // form above and this half is pinned separately.
+        for (label, src) in [
+            ("mesh", include_str!("shaders/mesh.wgsl")),
+            ("skinned_mesh", include_str!("shaders/skinned_mesh.wgsl")),
+        ] {
+            for line in [
+                "if (in.pbr.w > 0.5 && in.pbr.w < 1.5) {",
+                "var mask_a = in.color.a;",
+                "if (mask_a < in.pbr.z) {",
+            ] {
+                assert_eq!(
+                    src.matches(line).count(),
+                    1,
+                    "{label}.wgsl's masked predicate moved away from the caster passes'                      (missing or duplicated `{line}`)"
+                );
+            }
+        }
         // ANTI-VACUITY: the Rust side that decides WHICH pipeline to bind reads the
         // same window, so a caster the CPU calls opaque cannot be discarded by a
         // shader that calls it masked.
