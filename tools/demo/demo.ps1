@@ -1042,7 +1042,20 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # **The placement now carries the heading** (`-FaceAt`), so the first
         # press is aimed. The sweep below stays as the fallback it always
         # should have been, and the log says which of the two took.
-        $tookCover = $false
+        # **THE FIRST PRESS IS STILL, and it is the heading that pays for it.**
+        #
+        # The sweep below holds `W` between presses, which is how the wave's own
+        # leg found a wall it was not pointed at -- and it is why the audit's
+        # first run reported `NO COVER taken at the high station in sixteen
+        # presses` while standing four metres from one: the placement put the
+        # hero AT the station and sixteen quarter-second walks carried it
+        # **3.5 m away** (measured: x -1798.0 -> -1794.5 over the sweep). With
+        # `-FaceAt` the hero is already looking at the surface, so the press
+        # that should work is the one taken before anything moves.
+        [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
+        $tookCover = @(Wait-ForHero -Csv $heroCsv -What "cover ($($st.Name)), standing still" -TimeoutS 1.5 `
+            -Predicate { param($c) ($c.Count -gt 17) -and ($c[5] -eq "Cover") } `
+            -Out (Join-Path $OutDir "60-cover-$($st.Name).png"))[-1]
         for ($k = 0; $k -lt 16 -and -not $tookCover; $k++) {
             [InfInput]::Down(0x11)
             Start-Sleep -Milliseconds 220
