@@ -1466,7 +1466,8 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     let e = w.entity_of(CIVILIAN).unwrap();
     let civ = w.world().get::<CharacterMovement>(e).unwrap().clone();
     println!(
-        "  the civilian beside it: mode {:?} over 600 steps ({civ_covered} of them in cover),          {} cover shape casts",
+        "  the civilian beside it: mode {:?} over 600 steps ({civ_covered} in cover), \
+         {} cover shape casts",
         civ.mode, civ.runtime.cover.sweeps
     );
     assert_eq!(
@@ -1479,7 +1480,8 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     assert_eq!(
         w.world().get::<CharacterMovement>(e).unwrap().mode,
         MovementMode::Cover,
-        "the officer stopped taking cover once a civilian was in the world, which would          make the civilian's zero meaningless"
+        "the officer stopped taking cover once a civilian was in the world, which \
+         would make the civilian's zero meaningless"
     );
 }
 

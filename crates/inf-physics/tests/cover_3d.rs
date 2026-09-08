@@ -828,7 +828,11 @@ fn sprinting_into_cover_takes_the_longer_slide_in_window() {
         let mut window = 0.0f64;
         let mut slide_in = false;
         for _ in 0..900 {
-            if !pressed && hero_pos(&w).z > 12.0 - 1.0 - RADIUS - 0.4 {
+            // **Inside the PROBE's reach**, not inside the snap's bound: the
+            // face is at z = 12.0 and `CoverSettings::reach_m` is 0.90 m from
+            // the feet, so a press from a metre and a half back probes empty
+            // air. The same lesson the NPC search learned the hard way.
+            if !pressed && hero_pos(&w).z > 11.15 {
                 let mut p = drive;
                 p.cover = true;
                 step(&mut w, &mut b, &p);
@@ -838,7 +842,8 @@ fn sprinting_into_cover_takes_the_longer_slide_in_window() {
                 window = c.snap_s;
                 continue;
             }
-            step(&mut w, &mut b, if pressed { &idle() } else { &drive });
+            let still = idle();
+            step(&mut w, &mut b, if pressed { &still } else { &drive });
             if hero(&w).runtime.cover.snapping() {
                 snapping += 1;
             }
@@ -857,7 +862,10 @@ fn sprinting_into_cover_takes_the_longer_slide_in_window() {
          {sprint_window:.3} s, {sprint_steps} snapping steps"
     );
     assert!(sprint_flag, "a sprint arrival was not a slide-in");
-    assert!(!walked_flag, "a walk arrival was one too, which makes it meaningless");
+    assert!(
+        !walked_flag,
+        "a walk arrival was one too, which makes it meaningless"
+    );
     assert!(
         (sprint_window - inf_ecs::cover::SLIDE_IN_S).abs() < 1e-9,
         "the sprint window is {sprint_window:.4} s"
