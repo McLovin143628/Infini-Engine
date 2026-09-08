@@ -36812,3 +36812,215 @@ now — set on **33 of 180** steps.
   steer and the director's holder, appended so every existing column index still
   means what it meant. A frame captioned with a camera claim has a number beside
   it.
+
+---
+
+## WAVE OUTFIT1 — CLOTHES, HAIR AND WHAT A WEARABLE COSTS (2026-09-07)
+
+The single loudest thing in every photograph this campaign has taken since
+CHAR1a: every character, hero and NPC, is a bare body in white underwear
+(carried 163). This wave owns the first half of it in full.
+
+### The one-line verdict
+
+The engine draws one `SkeletalMesh` per entity and it still does; a garment is a
+CHILD entity on the wearer's own rig, the rule that says so is DERIVED and costs
+no schema, and the island's two MetaHumans are wearing their own clothes and
+their own hair in the pixels — with the eyes REFUSED on three measurements and
+the door FACE1 will have to open named beside them.
+
+### The wearables door — `inf_ecs::wearable`, and it is derived
+
+> A `SkeletalMesh` entity whose **wearer** — its hierarchy parent, or the target
+> of its `AttachedTo` — carries a `SkeletalMesh` bound to the **same skeleton
+> GUID** is a WEARABLE of that wearer.
+
+Nothing is stored. The fact is already on disk in an entity's `parent` and in
+`SkeletalMesh.skeleton`. **The price of the alternative was written down before
+the door was chosen**: a persisted `Wearable { of: Uuid }` is 16 bytes an entity
+plus its `Option` tag, both `apply_record` mirrors, a `ScenePayload` bump, a
+downgrade bless and 24 levels re-cooked — for a fact the document already states.
+Scene stays **v27**, payload **13**, `EXPECTED_LEVELS` **24**.
+
+Both projectors go through the one Ring-0 door `pose_source`, so a wearable draws
+with the wearer's evaluated pose, model-space lift, interpolated position, crowd
+tier and near fade, and with its OWN mesh, material, sections and pick id. It
+rides the wearer's transform, culls with it (`ComputedVisibility` is the AND of
+the ancestor chain), cooks with it and follows its ragdoll for free, because a
+child entity already does all four. `wearer_palettes` shares the palette by
+POINTER: measured, one dressed character is **3 skinned draws and 1 palette**
+(161 joints, 10 304 bytes) rather than three.
+
+### Carried 142, diagnosed — and the render projection was innocent
+
+`-WearCloth <guid>` sets an env door the PLAYER reads; the garment set a PIE
+session resolves against is `ScenePayload::cloths`, which the EDITOR builds by
+walking `doc.order()` for the `ClothSim.asset` refs the document already has. A
+runtime-worn garment is by definition not one of them, so `step_cloth` opened on
+an empty registry, `live_cloth` answered `None`, and `project_cloth` returned
+before it pushed an instance. One string, two readers: `WEAR_CLOTH_ENV` and
+`preview_worn_cloth()` moved to `inf_runtime::pie`, which both halves already
+depend on, and the editor carries the garment it is about to be asked to wear.
+
+Carried 137 is closed with `inf-import --wear-cloth <guid>`, which puts a
+`ClothSim` on every level's pawn. It is an import verb and not an editor edit
+because the island's `.inf_lvl` is regenerated from its recipe on **every** build.
+
+### The bridge, and four classifier defects it surfaced
+
+`export.py` gained one more `skeletal_prefix` (`*_Outfits`) and a new
+`static_prefix` (`*_CardsMesh_Group0_LOD0` + `_Helmet_LOD5`). One run:
+**8 skeletal meshes, 8 card meshes, 36 materials, 128 textures, 679.9 MB, 56.8 s,
+0 errors.** EYELASHES have a groom, a binding and NO CardsMesh in either
+character's folder, so they cannot cross as geometry — a measurement, not an
+omission.
+
+Four things had to be fixed to make what crossed *wearable*, and each was found
+by reading the manifest:
+
+* a groom's cards mesh names `WorldGridMaterial` — in Unreal the GROOM COMPONENT
+  applies the hair material. All eight came across with the engine's
+  checkerboard; `groom_card_material` substitutes the sibling `MI_WI_<Stem>_Hair_
+  Cards` / `_Hair` / `_Hair_Helmet` by the convention the folder already uses.
+* `HighlightsMask` was read as an OPACITY map (every "mask" rule says so). It is a
+  tint-variation mask; as a cut-out it punches holes in the hair wherever the
+  highlight is dark. `DetailTex_Color` was read as a shirt's BASE COLOUR for the
+  same shape of reason — it is a tiling fabric weave.
+* a material's BLEND MODE is UE's answer now, not a heuristic with UE's answer on
+  top: the garment master binds a region mask to a parameter called `Masks`, and
+  the shirt crossed TRANSLUCENT.
+* "sRGB means albedo" is gone — the garment master binds a 32-pixel
+  `color_spectrum` LUT to `distort_matC_pearly`.
+
+Reading the MASTER's own parameter list is what gives a MetaHuman garment a
+surface at all (it overrides none of them, so it crossed as a white untextured
+shirt), and hair has no albedo — `MI_Hair_Cards` computes its colour from
+`hairMelanin` and `hairDye` in the shader, so every groom crossed WHITE until the
+melanin mapping. Measured: Dominic 0.778 melanin → 0.082/0.055/0.036, Vivian's
+dyed bob → 0.021/0.012/0.009, the garments 0.591 grey with AO and normal.
+
+### The import side
+
+`--wearable <m|f>:<outfit|hair>:<key>[:<joint>]` writes an imported mesh at
+`CharacterIds::outfit` / `::hair` — `--rebind-character`'s trick one asset kind
+over. A garment needs one thing a body did not: it has to be posed by the
+skeleton the BODY is using, so every influence is re-pointed BY NAME onto the
+target rig and a remap that reached no joint at all is REFUSED. A mesh with no
+skin (a groom's cards, a `StaticMesh` in Unreal) is bound rigidly to `head`.
+`--only <key substring>` keeps four bodies and 680 MB of skin textures out of a
+run that wants the clothes.
+
+Measured on the island: Dominic's outfit **22 268 triangles / 49 352 influences
+re-pointed / 0 dropped**, Vivian's **24 989 / 55 040 / 0**, his hair cards
+**15 542** triangles rigid-bound, her bob **38 413**.
+
+Two defects the first portrait found:
+
+* **the body showed through the shirt.** A MetaHuman garment is modelled ON its
+  body; UE hides the covered triangles behind a per-garment mask and this engine
+  has neither. A rebound garment is pushed **4 mm** out along its normals
+  (12 338 and 13 760 vertices). Measured on the same 150 × 100 pixel chest box of
+  the portrait: mean rgb **215.3/212.9/211.8 → 220.4/219.9/219.3**, skin-through
+  **0.29 %**.
+* **two files claiming one GUID**: the rebind wrote `Starter_Outfit.inf_mat`
+  beside the committed `Starter_Outfit_Top.inf_mat`, both `…a9`. A rebind writes
+  at a committed GUID *and* at that GUID's committed FILE NAME.
+
+### The licence, which was the wrong way round
+
+The sweep stamps by destination folder and the per-asset pass stamps
+`asset_packs`; a rebind writes at a committed GUID in the project ROOT and is
+reached by neither. So the only assets in the project that actually SHIP — the
+ones the level names — were precisely the ones with no licence row, while **252**
+sidecars under `Content/UE/…` that nothing references carried one. Every rebind
+stamps what it writes now, and a derived `.inf_vmesh` copies its source mesh's row
+(carried 110): a derivation of licensed content is licensed content.
+
+### The committed defaults, and they are derived from the body
+
+`groom::wearable_shell` takes the body's own surface over the joints a tee or a
+pair of trousers covers, pushes it out a centimetre and keeps the skin stream —
+so it deforms by exactly the weights the body under it does. The selector is the
+dominant JOINT and not a height band: a height band over a bind pose puts a
+mannequin's hands at hip height and dresses them in trousers.
+`groom::hair_cap` is authored geometry, because a shell cannot be hair: the
+committed body's head owns **316** vertices and the crown band of it closes
+**one** triangle.
+
+Measured on the committed body (5 718 triangles): tee **1 430 verts / 2 091
+tris**, trousers **392 / 504**, cap **140 / 240** at 1.659–1.751 m against a body
+crown of 1.750 m and a head joint at 1.628 m. The wizard writes **13** assets
+instead of 8; both committed folders, both island recipes,
+`inf_project::STARTER_CHARACTER`, both starter templates and two island levels
+were re-blessed with the cause.
+
+### The crowd
+
+`society::level_archetypes` surveys every entity carrying a rigged
+`SkeletalMesh`, so a dressed character's clothes would have been offered to the
+crowd as two more BODIES — a third of the island's pedestrians a walking shirt.
+The exclusion is the same load-bearing one the `CrowdAgent` predicate beside it
+is. The wardrobe itself needed no new randomness: an archetype carries the clothes
+its source character has on, `level_archetype_for` already picks per agent by
+`Guid`, and the per-agent `CROWD_LOOKS` multiplier reaches the clothes because the
+projector reads the tier and the look off the WEARER. `set_tier_wearables` is
+`set_tier_components`' twin: `Full` and `Near` wear their archetype's outfit and
+hair, `Far` wears nothing.
+
+### The ORM
+
+Carried 105. One 2048² ORM was **25 758 080** bytes against the albedo's
+3 229 952, because it is written under `MapKind::Roughness` whose table entry is
+the uncompressed data preset. `TextureImportSettings::orm()` is linear, mipped,
+BC7 — not BC1, which is five bits of occlusion and five of metalness on channels
+a lighting term multiplies. Measured: one ORM **25 758 080 → 6 448 256** (3.995×),
+`Content/UE/Outfits` **377 417 650 → 219 609 778** (**157 807 872 bytes,
+150.5 MiB**), and the two body ORMs the audit weighed on the PIE payload
+51 516 160 → 12 896 512. The island's own viewport reports
+`41 virtual texture(s) registered for 20 bound material(s) ([Bc1, Bc5, Bc7] page
+arm(s), [] demoted, 0 refused)` — the mixed-pool demotion the IASSET memo warned
+of did not happen.
+
+### Clause 3 — REFUSED, with three measurements
+
+1. **the eye GEOMETRY is in the combined body**: a 40 × 40 × 50 mm box at the
+   right eye holds **2 478** vertices whose distances from their own centroid run
+   2.93 … 34.59 mm over a 40.1 mm z-span — a closed eyeball, not an eyelid;
+2. **its own UV square survived** (u 0.0029 … 0.9922 — a full tile);
+3. **and it is in the same SECTION as the head skin.** The combined mesh has one
+   section per UV *tile* and the eye island is in tile 0 with the face. The
+   material a triangle draws with is a property of its section, so there is no
+   address at which to bind `MI_EyeL_Baked` — and the head albedo at those UVs is
+   skin (luminance **59.6**, sd **6.9**, against a cheek control of **64.5**; an
+   iris and a sclera in one box would be three times that spread).
+
+The three doors are named in the report; the gate arm asserts the state so it
+goes RED the day a combine gives the eyes a section, which is the day clause 3
+becomes cheap.
+
+### The gate — `runtime/inf-player/tests/outfit1_gate.rs`, 13 arms
+
+Every arm reads the world the rule produces. Six production mutations, one line
+each: `no_wearable_rule` reds 6 arms, `no_parent_wearer` 9, `no_palette_sharing`
+2, `wearables_are_people` 2, `far_wears_clothes` 1, `no_visibility` 1. A thousand
+agents, release: near dressed **778 851.8 µs/step** against a bare control of
+**785 048.8** — the wardrobe's own share is inside the noise — and `Far`
+**247.1 µs/step**, 0.247 µs an agent, 0 wearables.
+
+### What OUTFIT1 leaves
+
+* **the hair cards have no alpha.** `MI_Hair_Cards` is `BLEND_Masked` with an
+  `OpacityMaskClipValue`, and the only texture the instance overrides is a
+  `HighlightsMask`. The card alpha lives in the groom's own
+  `<Groom>_CardsAtlas_Attribute` / `_RootUVSeedCoverage` atlas, which the material
+  does not name — so the cards draw as solid ribbons. The remedy is one selector
+  in `export.py` plus a channel choice, and it wants somebody to look at the two
+  textures first.
+* **the hair helmet rung crossed and nothing selects it.** `_Helmet_LOD5` is in
+  the manifest; carried 111 is still open (nothing in the engine reads
+  `character_lod_assets`), so the 40 m frame the brief asked for cannot be taken
+  yet. PERF1's.
+* **4.35 % of the wider chest box still bleeds** where the garment is more than
+  4 mm inside the body. UE's answer is a hide mask; ours would be a section split.
+* the crowd's variety is two wardrobes × eight tints, which is what the level
+  offers; the eyes, the teeth and the lashes are FACE1's.
