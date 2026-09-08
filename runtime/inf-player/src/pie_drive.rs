@@ -465,6 +465,30 @@ pub const SPAWN_AT_ENV: &str = "INF_PIE_SPAWN_AT";
 /// the garment the player is about to put on is in the bytes it is handed.
 pub use inf_runtime::pie::WEAR_CLOTH_ENV;
 
+/// **A weapon to put in the hero's hands in a PREVIEW session** (wave WPN2a) —
+/// an id from `inf_ecs::weapon::WEAPON_REGISTRY_TOML`, and nothing at all when
+/// unset.
+///
+/// # Why an env door and not a level edit
+///
+/// [`SPAWN_AT_ENV`]'s argument, verbatim, one wave along. The eighty-five-row
+/// registry reaches a LEVEL through the `item.define` node — that is what the
+/// `phase30-gameplay` fixture does, and `wpn2a_gate` fires one weapon of each
+/// class off it — but the ISLAND has no Blueprint of its own to put the call in:
+/// the only class on it is the wizard's committed character controller, shared
+/// by every character the New Character wizard has ever made, and putting a
+/// weapon catalogue in that would arm every one of them.
+///
+/// So this is the demo loop's own door, in exactly [`SPAWN_AT_ENV`]'s shape:
+/// read **once**, applied **once**, in a **preview** session only, inert in
+/// every session that did not ask for it, and never written into a level. No
+/// gate reads it — `wpn2a_gate` arms its characters through the ECS.
+///
+/// It merges the registry through `ItemDefs::merge_toml`, which is the SAME
+/// door the `item.define` node calls, so what the loop photographs is what a
+/// level would define.
+pub const ARM_HERO_ENV: &str = "INF_PIE_ARM_HERO";
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -484,6 +508,9 @@ pub struct SpawnOverride {
     /// every entry written before the COV1 audit.
     at: Vec<([f64; 3], f64, Option<f64>)>,
     cloth: Option<Uuid>,
+    /// The registry id [`ARM_HERO_ENV`] named, and whether it has been given.
+    weapon: Option<String>,
+    weapon_done: bool,
     accum: f64,
     next: usize,
     cloth_done: bool,
@@ -537,9 +564,31 @@ impl SpawnOverride {
         // door: a garment worn here that the payload did not carry resolves to
         // nothing and draws nothing, which is what carried 142 was.
         let cloth = inf_runtime::pie::preview_worn_cloth();
+        // A malformed value is a refusal with a reason on stderr, exactly as the
+        // placement's is: the whole point of the door is that the operator finds
+        // out whether it took.
+        let weapon = std::env::var(ARM_HERO_ENV).ok().and_then(|v| {
+            let id = inf_ecs::item::canonical_id(&v);
+            if id.is_empty() {
+                return None;
+            }
+            let mut defs = inf_ecs::item::ItemDefs::default();
+            match defs.merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML) {
+                Ok(_) if defs.get(&id).is_some_and(|d| d.weapon.is_some()) => Some(id),
+                Ok(_) => {
+                    eprintln!("inf-player: {ARM_HERO_ENV}=`{v}` is not a weapon in the registry");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("inf-player: the weapon registry does not parse: {e}");
+                    None
+                }
+            }
+        });
         Self {
             at,
             cloth,
+            weapon,
             ..Self::default()
         }
     }
@@ -554,7 +603,10 @@ impl SpawnOverride {
     /// against a record of where the hero was put.
     pub fn tick(&mut self, sim: &mut RuntimeSim, dt: f64) -> Option<String> {
         let done = self.next >= self.at.len();
-        if done && (self.cloth.is_none() || self.cloth_done) {
+        if done
+            && (self.cloth.is_none() || self.cloth_done)
+            && (self.weapon.is_none() || self.weapon_done)
+        {
             return None;
         }
         self.accum += dt;
@@ -563,7 +615,8 @@ impl SpawnOverride {
         }
         let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
         let wear = self.cloth.filter(|_| !self.cloth_done);
-        if due.is_none() && wear.is_none() {
+        let arm = (!self.weapon_done).then(|| self.weapon.clone()).flatten();
+        if due.is_none() && wear.is_none() && arm.is_none() {
             return None;
         }
         let hero = inf_ecs::movement::camera_subject(sim.world())?;
@@ -636,6 +689,28 @@ impl SpawnOverride {
                 }
                 said.push_str(&format!("{WEAR_CLOTH_ENV} put {guid} on the hero"));
             }
+        }
+        // **The weapon** (wave WPN2a). After the placement and the garment,
+        // because it goes through the world's own catalogue and inventory doors
+        // rather than through a component write, and both of those want the hero
+        // to be where it is going to stand.
+        if let Some(id) = arm {
+            let w = sim.world_mut();
+            let taken = inf_ecs::item::item_defs_mut(w)
+                .merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML)
+                .unwrap_or(0);
+            if inf_ecs::item::inventory_of(w, hero).is_none() {
+                inf_ecs::item::give_inventory(w, hero, 6);
+            }
+            let left = inf_ecs::item::give(w, hero, &id, 1);
+            let equipped = inf_physics::d3::gameplay::equip_weapon(w, hero, &id);
+            self.weapon_done = true;
+            if !said.is_empty() {
+                said.push_str("; ");
+            }
+            said.push_str(&format!(
+                "{ARM_HERO_ENV} merged {taken} registry row(s) and gave the hero `{id}` (leftover {left}, equipped {equipped})"
+            ));
         }
         (!said.is_empty()).then_some(said)
     }

@@ -44,6 +44,19 @@ param(
     # in the gate; carried 137 is that it is not in the committed level, and this
     # is how the loop photographs it without making that edit.
     [string]$WearCloth = "",
+    # **A REGISTRY WEAPON TO PUT IN THE HERO'S HANDS** (wave WPN2a),
+    # `INF_PIE_ARM_HERO`. A `;`-separated list of ids from
+    # `crates/inf-ecs/src/weapons.toml` -- one per class is what the wave's own
+    # session photographs. The player merges the registry through the same
+    # `ItemDefs::merge_toml` the `item.define` node calls, gives the row and
+    # equips it, in a `--pie` preview only.
+    #
+    # It exists for `-SpawnAt`'s reason exactly: the island has no Blueprint of
+    # its own to hang an `item.define` on -- the only class on it is the wizard's
+    # committed character controller, shared by every character the New Character
+    # wizard has ever made -- so a weapon catalogue in there would arm all of
+    # them. The phase30 fixture is where the registry reaches a LEVEL.
+    [string]$ArmHero = "",
     [int]$BootWaitS = 60,
     [int]$PieWaitS = 240,
     [int]$LoadSettleS = 20,
@@ -239,6 +252,19 @@ if ($SpawnAt -ne "") {
 else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction SilentlyContinue }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
 else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction SilentlyContinue }
+# WPN2a: only the FIRST id is handed to the player, because the door is a
+# one-shot; the rest are switched in from this script between legs by relaunching
+# nothing at all -- the loop fires one class per session, and the wave runs it
+# once per class. The list is kept whole here so the log says what was asked for.
+$armList = @()
+if ($ArmHero -ne "") {
+    $armList = @($ArmHero.Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    if ($armList.Count -gt 0) {
+        $env:INF_PIE_ARM_HERO = $armList[0]
+        Say "arm hero: $($armList[0]) (of $($armList -join ', '))"
+    }
+}
+if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction SilentlyContinue }
 $proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru
 Say "launched pid $($proc.Id); waiting up to $BootWaitS s for the shell"
 
@@ -411,6 +437,12 @@ public class InfInput {
   // place in. A demo that never right-clicks can never film a turn.
   public static void RightDown() { mouse_event(0x0008, 0, 0, 0, IntPtr.Zero); }
   public static void RightUp() { mouse_event(0x0010, 0, 0, 0, IntPtr.Zero); }
+  // **The LEFT button, which is `attack`** (wave WPN2a). `Click` presses and
+  // releases in one call, which is a single semi-automatic shot and nothing an
+  // automatic weapon can be filmed with; a tracer in flight needs the trigger
+  // HELD across several 60 Hz steps.
+  public static void LeftDown() { mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); }
+  public static void LeftUp() { mouse_event(0x0004, 0, 0, 0, IntPtr.Zero); }
   public static void Click(int x, int y) {
     SetCursorPos(x, y);
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
@@ -1212,6 +1244,63 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
     [InfInput]::Down(0x11); Start-Sleep -Milliseconds 1500
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "50-swim-forward.png") | ForEach-Object { Say $_ }
     [InfInput]::Up(0x11)
+}
+
+# ── 5d. THE BALLISTICS (wave WPN2a) ──────────────────────────────────────────
+#
+#    A round in flight lasts a quarter of a second over a hundred metres, so
+#    none of these frames can be timed with `Start-Sleep`: every one of them is
+#    triggered on `hero.csv`'s two NEW columns -- 20 is how many rounds are in
+#    the air right now and 21 is how far the last one that hit something had
+#    flown. A frame taken on `rounds > 0` is a frame with a bullet in it.
+if ($armList.Count -gt 0) {
+    Say "── WPN2a: the hero is armed with $($armList[0]) ──"
+    Restore-PlayerFocus "the ballistics leg"
+    # Aim UP a little, so the rounds clear the ground and fly for the whole
+    # length of the shot rather than resolving inside their hitscan threshold
+    # against the pavement two metres away.
+    [InfInput]::Look(0, -140)
+    Start-Sleep -Milliseconds 400
+    # ADS first: the reticle is drawn only while aiming, and a HUD frame that
+    # has no reticle in it is a frame of a readout nobody was looking through.
+    [InfInput]::RightDown()
+    Start-Sleep -Milliseconds 700
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "80-weapon-hud-$($armList[0]).png") | ForEach-Object { Say $_ }
+    # HOLD the trigger. `Click` is one press and one release, which is a single
+    # semi-automatic shot; a tracer wants the button down across several steps.
+    [InfInput]::LeftDown()
+    $flew = Wait-ForHero -Csv $heroCsv -What "a round in flight" -TimeoutS 6.0 `
+        -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 0) } `
+        -Out (Join-Path $OutDir "81-round-in-flight-$($armList[0]).png")
+    # …and a second one, later in the burst, with more of them in the air.
+    Wait-ForHero -Csv $heroCsv -What "more rounds in flight" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 1) } `
+        -Out (Join-Path $OutDir "82-rounds-in-flight-$($armList[0]).png") | Out-Null
+    # THE IMPACT: column 21 is latched by the pool when a round lands, so a
+    # non-zero one is a hit that has already happened and the distance it flew.
+    Wait-ForHero -Csv $heroCsv -What "a round that hit something" -TimeoutS 8.0 `
+        -Predicate { param($c) ($c.Count -gt 21) -and ([double]$c[21] -gt 0.0) } `
+        -Out (Join-Path $OutDir "83-impact-$($armList[0]).png") | Out-Null
+    [InfInput]::LeftUp()
+    [InfInput]::RightUp()
+    Start-Sleep -Milliseconds 600
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "84-after-the-burst-$($armList[0]).png") | ForEach-Object { Say $_ }
+    if (-not $flew) {
+        Say "WPN2a: no round ever left the barrel -- the arming door, the trigger or the aim"
+    }
+    # What the log says about it, quoted into the demo log so a caption can be
+    # read against a number rather than against a filename.
+    if (Test-Path $heroCsv) {
+        $armed = @(Get-Content $heroCsv | Where-Object { $_ -match "INF_PIE_ARM_HERO" })
+        foreach ($l in $armed) { Say "  $l" }
+        $best = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
+            ForEach-Object { $_.Split(",") } |
+            Where-Object { $_.Count -gt 21 } |
+            Sort-Object { [double]$_[20] } -Descending)
+        if ($best.Count -gt 0) {
+            Say "  peak rounds in flight $($best[0][20]); last hit at $($best[0][21]) m"
+        }
+    }
 }
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
