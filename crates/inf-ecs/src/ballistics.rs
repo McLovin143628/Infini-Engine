@@ -258,8 +258,8 @@ pub fn clear_rounds(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RoundPool>();
 }
 
-/// **The rounds' trace bytes** — 88 a round, in flight order, and **empty when
-/// nothing is flying**.
+/// **The rounds' trace bytes** — 81 a round (16 guid + six f64 + two f64 + one
+/// flag), in flight order, and **empty when nothing is flying**.
 ///
 /// Empty is the load-bearing half: it is what keeps every trace committed before
 /// this wave byte-identical, and it is why the counters above are not in here.
@@ -272,7 +272,7 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
     if pool.rounds.is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(pool.rounds.len() * 88);
+    let mut out = Vec::with_capacity(pool.rounds.len() * 81);
     for r in &pool.rounds {
         out.extend_from_slice(r.shooter.as_bytes());
         for v in [r.at.x, r.at.y, r.at.z, r.velocity.x, r.velocity.y, r.velocity.z] {
@@ -402,7 +402,7 @@ mod tests {
     /// closed form written out by hand.
     #[test]
     fn the_curve_is_the_hermite_smoothstep_between_the_two_ranges() {
-        let (base, min_frac, eff, max) = (600.0, 0.6, 35.0, 80.0);
+        let (base, min_frac, eff, max) = (600.0f64, 0.6f64, 35.0f64, 80.0f64);
         for at in [35.0, 46.25, 57.5, 68.75, 80.0] {
             let t = ((at - eff) / (max - eff)).clamp(0.0, 1.0);
             let want = base + (t * t * (3.0 - 2.0 * t)) * (base * min_frac - base);
@@ -464,13 +464,32 @@ mod tests {
             v = n_v;
             t += sub_dt;
         }
-        let want = -0.5 * PROJECTILE_GRAVITY_MPS2 * t * t;
-        assert!(
-            (at.y - want).abs() < 2.0e-3,
-            "at {:.3} m the round is at y {:.6} and the parabola says {:.6}",
+        // **The DISCRETE closed form, exactly.** Semi-implicit Euler updates
+        // the velocity before the position, so after n sub-steps of h the drop
+        // is `g·h²·n(n+1)/2` = `½·g·t·(t+h)` — not `½·g·t²`, which is the
+        // continuous parabola and is what the round would follow at h → 0. The
+        // arm asserts the form the integrator actually implements to 1e-9 and
+        // then states the gap to the continuous one, because a tolerance wide
+        // enough to hide the difference is a tolerance wide enough to hide a
+        // wrong integrator.
+        let discrete = -0.5 * PROJECTILE_GRAVITY_MPS2 * t * (t + sub_dt);
+        let continuous = -0.5 * PROJECTILE_GRAVITY_MPS2 * t * t;
+        println!(
+            "at {:.3} m after {t:.4} s: y {:.6}, discrete {discrete:.6}, continuous {continuous:.6} (gap {:.2} mm)",
             at.z,
             at.y,
-            want
+            (at.y - continuous).abs() * 1000.0
+        );
+        assert!(
+            (at.y - discrete).abs() < 1.0e-9,
+            "at {:.3} m the round is at y {:.9} and the discrete form says {discrete:.9}",
+            at.z,
+            at.y
+        );
+        assert!(
+            (at.y - continuous).abs() < 1.0e-2,
+            "the discretization is worth {:.4} m at 200 m, which is not a bullet drop",
+            (at.y - continuous).abs()
         );
     }
 
@@ -549,7 +568,7 @@ mod tests {
         assert_eq!(round_pool(&w).expect("a pool").refused, 1);
     }
 
-    /// **The bytes are empty on a quiet level and grow at 88 a round** — the
+    /// **The bytes are empty on a quiet level and grow at 81 a round** — the
     /// property every pre-wave trace depends on.
     #[test]
     fn the_trace_section_is_empty_until_something_is_in_the_air() {
@@ -565,7 +584,7 @@ mod tests {
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));
-        assert_eq!(round_state_bytes(&w).len(), 88);
+        assert_eq!(round_state_bytes(&w).len(), 81);
         // …and a pool that has emptied folds nothing again.
         w.world_mut().resource_mut::<RoundPool>().rounds.clear();
         assert!(

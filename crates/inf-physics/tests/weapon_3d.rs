@@ -2433,6 +2433,8 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
             energy_j: 1.0,
             on_flesh: false,
             loud: true,
+            headshot: false,
+            report_max_m: inf_ecs::weapon::REPORT_MAX_M,
         })
         .collect();
     let n = d3::gameplay::panic_sources_for(&hits);
