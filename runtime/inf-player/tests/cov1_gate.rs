@@ -1419,6 +1419,68 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
         "the officer never leaned out of cover in 15 s — the peek cadence is not running"
     );
     assert!(probes > 0, "…and it found its cover without probing for it");
+
+    // ── **A CIVILIAN DOES NOT TAKE COVER** (clause 5's last sentence).
+    //
+    //    The same fixture, the same shot, one more body — and it is NOT on
+    //    `RespondersRes`. The pass walks the responder set and nothing else, so
+    //    a bystander is untouched by construction; this is the arm that says so
+    //    rather than the comment. WPN1's `flee_from` is what a civilian does
+    //    instead, and EMS2's exemption is what keeps the officer beside it from
+    //    doing the same.
+    const CIVILIAN: uuid::Uuid = uuid::Uuid::from_u128(0xC0_5004);
+    let (mut w, mut b) = build();
+    {
+        let cm = CharacterMovement::default();
+        let e = w.spawn_with_guid(CIVILIAN, "Bystander", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(1.0, cm.stand_half_height_m + 0.3, 1.0);
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(0.3, cm.stand_half_height_m, 0.3),
+                radius: 0.3,
+                ..Default::default()
+            },
+            CharacterController3D::default(),
+            cm,
+            t,
+        ));
+        w.mark_dirty();
+        w.propagate();
+    }
+    let mut civ_covered = 0usize;
+    for i in 0..600u64 {
+        b.sync_from_world(&w);
+        inf_physics::d3::step_npc_cover(&mut w, &mut b, &[source], 45.0, i, DT);
+        inf_physics::d3::step_character_movement(&mut w, &mut b, DT);
+        let e = w.entity_of(CIVILIAN).unwrap();
+        if w.world().get::<CharacterMovement>(e).unwrap().mode == MovementMode::Cover {
+            civ_covered += 1;
+        }
+    }
+    let e = w.entity_of(CIVILIAN).unwrap();
+    let civ = w.world().get::<CharacterMovement>(e).unwrap().clone();
+    println!(
+        "  the civilian beside it: mode {:?} over 600 steps ({civ_covered} of them in cover),          {} cover shape casts",
+        civ.mode, civ.runtime.cover.sweeps
+    );
+    assert_eq!(
+        civ_covered, 0,
+        "a bystander took cover — the pass is walking more than the responder set"
+    );
+    assert_eq!(civ.runtime.cover.sweeps, 0, "…and probed for it");
+    // …while the officer in the same world still did.
+    let e = w.entity_of(OFFICER).unwrap();
+    assert_eq!(
+        w.world().get::<CharacterMovement>(e).unwrap().mode,
+        MovementMode::Cover,
+        "the officer stopped taking cover once a civilian was in the world, which would          make the civilian's zero meaningless"
+    );
 }
 
 /// **SWAT PREFERS HIGH COVER** — the EMS3 carried item becoming a behaviour.

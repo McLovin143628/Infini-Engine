@@ -344,7 +344,8 @@ fn the_snap_is_bounded_and_a_teleport_would_not_be() {
     // whose wall is close still falsifies a cut.
     assert!(
         total / DT > worst * 2.0,
-        "the snap's peak ({worst:.4} m/s) is not distinguishable from covering          its whole {total:.4} m in one step ({:.4} m/s)",
+        "the snap peaked at {worst:.4} m/s, which a step covering its whole \
+         {total:.4} m ({:.4} m/s) is not distinguishable from",
         total / DT
     );
 }
@@ -783,6 +784,94 @@ fn a_vault_with_nowhere_to_land_becomes_an_ordinary_mantle() {
         after.z < 1.9,
         "and it should not have crossed the wall behind it: z = {:.4}",
         after.z
+    );
+}
+
+/// **SPRINTING INTO COVER GETS THE LONGER WINDOW** — clause 3's slide-in.
+///
+/// A body arriving at sprint speed does not stop in a quarter of a second, so
+/// the entry is given [`inf_ecs::cover::SLIDE_IN_S`] instead of
+/// [`inf_ecs::cover::SNAP_S`] and CHAR1b.2's authored slide plays over it. The
+/// arm reads the STATE's own window and the number of steps the snap actually
+/// took, not the flag beside them: a `slide_in` that set a bool and used the
+/// short window would pass on the flag alone.
+#[test]
+fn sprinting_into_cover_takes_the_longer_slide_in_window() {
+    fn enter(sprint: bool) -> (bool, f64, usize) {
+        // Far enough back that a sprint has room to reach its speed.
+        let mut w = EcsWorld::new();
+        let mut b = PhysicsBridge3D::new(GRAVITY);
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(40.0, 0.5, 40.0),
+        );
+        spawn_block(
+            &mut w,
+            SURFACE,
+            DVec3::new(0.0, WALL_TOP_M * 0.5, 12.3),
+            DVec3::new(6.0, WALL_TOP_M * 0.5, 0.3),
+        );
+        spawn_hero(&mut w, 0.0, 0.0);
+        for _ in 0..30 {
+            step(&mut w, &mut b, &idle());
+        }
+        // Run at the wall until the press can take it.
+        let drive = MovementIntent {
+            move_input: EcsVec2d::new(0.0, 1.0),
+            sprint,
+            ..Default::default()
+        };
+        let mut pressed = false;
+        let mut snapping = 0usize;
+        let mut window = 0.0f64;
+        let mut slide_in = false;
+        for _ in 0..900 {
+            if !pressed && hero_pos(&w).z > 12.0 - 1.0 - RADIUS - 0.4 {
+                let mut p = drive;
+                p.cover = true;
+                step(&mut w, &mut b, &p);
+                pressed = true;
+                let c = hero(&w).runtime.cover;
+                slide_in = c.slide_in;
+                window = c.snap_s;
+                continue;
+            }
+            step(&mut w, &mut b, if pressed { &idle() } else { &drive });
+            if hero(&w).runtime.cover.snapping() {
+                snapping += 1;
+            }
+            if pressed && !hero(&w).runtime.cover.snapping() && hero(&w).runtime.cover.active {
+                break;
+            }
+        }
+        assert_eq!(hero(&w).mode, MovementMode::Cover, "the press did not take");
+        (slide_in, window, snapping)
+    }
+    let (walked_flag, walked_window, walked_steps) = enter(false);
+    let (sprint_flag, sprint_window, sprint_steps) = enter(true);
+    println!(
+        "\n=== the slide-in ===\n  walked in: slide_in {walked_flag}, window {walked_window:.3} s, \
+         {walked_steps} snapping steps\n  sprinted in: slide_in {sprint_flag}, window \
+         {sprint_window:.3} s, {sprint_steps} snapping steps"
+    );
+    assert!(sprint_flag, "a sprint arrival was not a slide-in");
+    assert!(!walked_flag, "a walk arrival was one too, which makes it meaningless");
+    assert!(
+        (sprint_window - inf_ecs::cover::SLIDE_IN_S).abs() < 1e-9,
+        "the sprint window is {sprint_window:.4} s"
+    );
+    assert!(
+        (walked_window - inf_ecs::cover::SNAP_S).abs() < 1e-9,
+        "the walked window is {walked_window:.4} s"
+    );
+    // …and the SNAP really took longer, measured in steps rather than read off
+    // the field the branch set.
+    assert!(
+        sprint_steps > walked_steps,
+        "the sprint's snap took {sprint_steps} steps and the walk's {walked_steps} — the \
+         longer window is a number nothing spent"
     );
 }
 

@@ -37024,3 +37024,97 @@ agents, release: near dressed **778 851.8 µs/step** against a bare control of
   4 mm inside the body. UE's answer is a hide mask; ours would be a section split.
 * the crowd's variety is two wardrobes × eight tints, which is what the level
   offers; the eyes, the teeth and the lashes are FACE1's.
+
+## COV1 — taking cover (2026-09-08)
+
+GTA's verb and Gears', on the island: the character puts its back against the
+thing in front of it and **the object decides the stance**. `MovementMode::Cover`
+claimed **reserved slot 14** — the slot the P29.3 freeze-pin minted for exactly
+this — so wire number 14 is unchanged, no variant moved, and scene **v27** /
+`ScenePayload` **13** / `EXPECTED_LEVELS` **24** are untouched.
+
+### The census, measured before anything was built on it
+
+The CHAR1b.2 audit found **zero ledges** over 289 grounded stances x 8 bearings
+around the spawn. A cover probe asks a different question of the same sweeps — a
+wall FACE rather than a ledge TOP — and the answer, over the same lattice:
+
+| | |
+|---|---|
+| stations grounded x bearings | **281 x 8 = 2 248 probes**, 6 378 shape casts |
+| **HIGH** | **242** — 231 `Structure` (shop façades), 11 `Entity` (the traffic fleet) |
+| **LOW** | **5** — all `Structure` (the P19 grammar's low walls) |
+| **NONE** | 2 001 — 1 909 nothing in front, 61 face turned away, 16 too narrow, 8 not coverable (a kerb, the ground, a door leaf), 3 no room, 2 moving, 2 too low |
+
+So the island **does** have cover where it had no ledges, and it is essentially
+all building. Three facts came out of the census and each is in the report:
+
+* **the façades have no ECS collider** (carried 162), so every one of those 231
+  is an entity-less guid — the wave's LABEL DOOR (`inf_physics::d3::label`, a
+  side table keyed by the same guid, filled at the six mint sites) is what lets a
+  probe say "structure #6062 of `Harbour City Shop -1,-1`" instead;
+* **not one parked car answered until this wave fixed it.** `probe_ledge` sweeps
+  `CastTargets::Fixed` — ALS's "do not mantle a moving platform" as a broad-phase
+  filter — and VEH2b's fleet is DYNAMIC, so the whole of GTA's canonical low
+  cover was invisible. The sweeps take the class as an argument now: the mantle
+  keeps `Fixed`, the cover probe asks `All` and refuses by the body's own
+  VELOCITY, retrying past a moving hit twice (the P22.3 M4 rule: a filter after a
+  cast hides what was behind it);
+* **a car classifies HIGH here, not LOW.** The island's chassis boxes measure
+  about 2.27 m at the top, past the 1.25 m split. GTA's low cover is a car's
+  window line; ours is the whole vehicle's bounding box. VEH3's, and it is one
+  number in the lattice.
+
+### What is in the engine
+
+* `inf_ecs::cover` decides (the class, the corner clamp, the snap, the peek, the
+  leave clock) and `inf_physics::d3::cover` applies it — the same split
+  `inf_ecs::movement` / `d3::movement` and `inf_ecs::dispatch` / `d3::dispatch`
+  already have. `probe_ledge`'s two sweeps are hoisted into
+  `traversal::sweep_forward_face` / `sweep_surface_top`: **one door, two
+  readers**, and only the band of heights differs.
+* The verb is `cover`, on **T** and the pad's **d-pad down**, and it goes through
+  the same `press_cover` edge for a player's keyboard and for an NPC's AI.
+* The slide is the SAME integrator, gaits, stride warping and foot IK a walk is:
+  the stick is projected onto the surface tangent and everything downstream is
+  unchanged. The corner stop is a position clamp against the extents the probe
+  measured, with the capsule's own half-width kept off the end.
+* The peek moves the CAPSULE — 0.45 m around a corner, a stand-up over a low top
+  — because that is what makes a bullet's answer change. Measured on the island's
+  own hero at a shop's corner: the head joint moves **0.7400 m** out and comes
+  back to within **0.0436 m**.
+* Four authored clips (`INF_Cover_{Low,High}_{Idle,Move}`), derived from the rig
+  that plays them because ALS ships no cover sequence at all, plus a per-spine
+  additive lean. Measured against the crouch idle on the island's hero: **55
+  joints differ, worst 173.548 deg** — it is not the crouch idle renamed.
+* The camera is an `Override` claim on the CHAR1c director under its own tag,
+  and when the pivot itself is buried it **refuses** and holds the last legal
+  pose (carried 161, decided for this camera).
+* Police and SWAT under fire search the compass, walk an `inf_nav::NavPath` and
+  press the same key. Measured on the fixture: cover in **1.80 s**, **81** shape
+  casts, 359 of 900 steps leaned out — and **zero** shape casts on a step nobody
+  is shooting on.
+
+### The gate — `runtime/inf-player/tests/cov1_gate.rs`, 12 arms
+
+Every arm reads the world or the joints: the measured surface top against the
+capsule's half-height, the head joint's world position, the ray's hit entity, the
+transform's distance from the face, the step's own probe counter. Twelve green on
+the island in 481 s, plus 12 fixture arms in `inf-physics/tests/cover_3d.rs` and
+10 rule arms in `inf_ecs::cover`.
+
+### What COV1 leaves
+
+* **the island has no free-standing wall within 64 m of the spawn.** Harbour
+  City's shops are rows of ADJACENT structural boxes with more boxes behind
+  them, so "the far side" of a façade is inside a shop: the peek-exposure ray is
+  proven on the fixture's own wall and the island arm proves the half it can —
+  the façade stops the bullet. PAR1's street furniture and the grammar's garden
+  walls are where free-standing cover arrives.
+* **a crouched capsule is 1.20 m tall on the shipped default**, and the LOW/HIGH
+  split is 1.25 m — so the window in which a low cover hides a crouched head is
+  1.20–1.25 m and a 0.80 m car door leaves 40 cm of person above the metal. Real,
+  stated, and a number a character wave can move.
+* **blind fire is not built.** The clause named it; what exists is the peek, the
+  aim and the lean. WPN2e owns the firing cadence and it is the wave that will
+  meet the trigger.

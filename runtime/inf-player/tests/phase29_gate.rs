@@ -975,13 +975,14 @@ fn every_mode_owned_elsewhere_names_a_gate_that_exists() {
     let owned = elsewhere_modes();
     assert!(
         !owned.is_empty(),
-        "the `ProvedBy` duty exists and nothing uses it — delete the variant          or classify a mode with it"
+        "the `ProvedBy` duty exists and nothing uses it: delete the variant, or \
+         classify a mode with it"
     );
     for (gate, mode) in owned {
         let path = here.join(gate);
         assert!(
             path.is_file(),
-            "{mode:?} says it is proved by `{gate}` and there is no such gate              at {}",
+            "{mode:?} says it is proved by `{gate}` and there is no such gate at {}",
             path.display()
         );
     }
@@ -1075,7 +1076,8 @@ fn the_catalogue_is_accounted_for_variant_by_variant() {
     assert_eq!(
         refused.len(),
         3,
-        "what refuses is the three still-reserved slots and nothing else —          wave COV1 took the fourth for `Cover`"
+        "what refuses is the three still-reserved slots and nothing else: wave \
+         COV1 took the fourth for `Cover`"
     );
     let elsewhere = elsewhere_modes();
     assert_eq!(elsewhere.len(), 1, "only `Cover` is proved by another gate");

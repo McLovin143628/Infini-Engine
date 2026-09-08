@@ -977,8 +977,13 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         @{ Name = "low";  X = -1781.3; Z = 2034.0; Yaw = 68 }
     )
     foreach ($st in $coverStations) {
-        $reached = Wait-ForHero -Csv $heroCsv -What "the $($st.Name) cover station" -TimeoutS 120 `
-            -Predicate { param($c) ([math]::Abs([double]$c[2] - $st.X) -lt 6.0) -and ([math]::Abs([double]$c[4] - $st.Z) -lt 6.0) }
+        # **`Wait-ForHero` emits its `Say` lines into the pipeline**, so what an
+        # assignment captures is an ARRAY whose last element is the boolean. A
+        # bare `-not $x` on that array is always false, which is how the first
+        # run of this leg made exactly ONE cover press, in whatever direction
+        # the placement happened to leave the hero facing, and reported success.
+        $reached = @(Wait-ForHero -Csv $heroCsv -What "the $($st.Name) cover station" -TimeoutS 120 `
+            -Predicate { param($c) ([math]::Abs([double]$c[2] - $st.X) -lt 6.0) -and ([math]::Abs([double]$c[4] - $st.Z) -lt 6.0) })[-1]
         if (-not $reached) { Say "the $($st.Name) cover station was never reached"; continue }
         Restore-PlayerFocus "at the $($st.Name) cover station"
         Stand-Up "before taking cover" | Out-Null
@@ -987,13 +992,17 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # shipped sensitivity, so this is a coarse aim and the probe's own +-45
         # degree approach window is what makes it enough.
         Say "COVER ($($st.Name)): pressing T"
+        # **The facing is SWEPT.** A placement sets a position and not a heading,
+        # so the press reaches wherever the hero happens to be looking; the
+        # probe's own +-45 degree approach window means a sweep of the circle in
+        # 30-degree steps cannot miss a wall that is there.
         $tookCover = $false
-        for ($k = 0; $k -lt 12 -and -not $tookCover; $k++) {
+        for ($k = 0; $k -lt 16 -and -not $tookCover; $k++) {
             [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
-            $tookCover = Wait-ForHero -Csv $heroCsv -What "cover ($($st.Name))" -TimeoutS 1.2 `
+            $tookCover = @(Wait-ForHero -Csv $heroCsv -What "cover ($($st.Name))" -TimeoutS 1.0 `
                 -Predicate { param($c) ($c.Count -gt 17) -and ($c[5] -eq "Cover") } `
-                -Out (Join-Path $OutDir "60-cover-$($st.Name).png")
-            if (-not $tookCover) { for ($i = 0; $i -lt 8; $i++) { [InfInput]::Look(20, 0); Start-Sleep -Milliseconds 16 } }
+                -Out (Join-Path $OutDir "60-cover-$($st.Name).png"))[-1]
+            if (-not $tookCover) { for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 } }
         }
         if (-not $tookCover) { Say "NO COVER taken at the $($st.Name) station in twelve presses"; continue }
         # The class, off the log rather than off the station's name.
