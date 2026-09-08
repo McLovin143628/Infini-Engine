@@ -269,6 +269,12 @@ impl Default for CoverProbe {
 }
 
 impl CoverProbe {
+    /// **The face normal as an `inf_ecs` vector**, so a caller can hand it to
+    /// [`inf_ecs::cover::tangent_left`] without spelling the conversion.
+    pub fn normal_v(&self) -> inf_ecs::math::Vec3d {
+        inf_ecs::math::Vec3d::from_dvec3(self.normal)
+    }
+
     /// A refusal with a reason and nothing else.
     fn refused(refusal: CoverRefusal, sweeps: u32) -> Self {
         Self {

@@ -2353,14 +2353,22 @@ fn apply_cover_lean(
     }
     let half = per.to_radians() * 0.5;
     let (s, c) = (inf_math::psin64(half) as f32, inf_math::pcos64(half) as f32);
-    // A corner peek leans toward the SIDE it is going round; `param` is the
-    // animation convention (`-1` left, `+1` right), which is exactly the sign a
-    // roll about the character's own forward wants.
+    // **A corner peek leans the way the CAPSULE went**, and the sign is
+    // `lateral_sign`'s rather than `param`'s.
+    //
+    // Measured, because the first cut used the animation convention and got it
+    // backwards: the capsule steps 0.45 m around the corner and the torso
+    // leaned the other way, so the head came out only **0.1966 m** — half of
+    // the step cancelled by its own pose — and a shot aimed at it hit the
+    // façade the character was supposedly leaning past. The two signs are
+    // different conventions (`param` is the additive's left/right and
+    // `lateral_sign` is the tangent's), and this one multiplies a rotation that
+    // has to agree with a displacement.
     let q = if side.is_over() {
         // Pitch BACK about local X: rising and opening the chest.
         glam::Quat::from_xyzw(-s, 0.0, 0.0, c)
     } else {
-        glam::Quat::from_xyzw(0.0, 0.0, s * side.param() as f32, c)
+        glam::Quat::from_xyzw(0.0, 0.0, s * side.lateral_sign() as f32, c)
     };
     let mut delta = Pose::rest(&rig.skeleton);
     for j in &spine {

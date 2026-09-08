@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use inf_ecs::components::{CharacterMovement, MovementMode, Transform};
+use inf_ecs::components::{CharacterMovement, MovementMode, MovementRefusal, Transform};
 use inf_ecs::cover::{CoverClass, CoverSide};
 use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
 
@@ -149,6 +149,32 @@ fn hero_to_settling(
     }
 }
 
+/// **The exclusion set the ENGINE's own cover press uses** — ALS's
+/// `IgnoreOnlyPawn`, made out of what this engine has.
+///
+/// Every character's collider, not only the hero's. A gate helper that excluded
+/// only the hero measures a different question from the one the movement step
+/// asks, and the difference is not academic: the island's crowd walks past the
+/// spawn as kinematic capsules 2.27 m tall, and the first cut of `find_station`
+/// duly reported a PERSON as HIGH cover at the spawn — then the press refused
+/// it, because `try_cover` excludes every character, and four arms failed
+/// pointing at a station that was a pedestrian.
+fn pawn_exclusion(
+    sim: &RuntimeSim,
+    hero: uuid::Uuid,
+) -> std::collections::BTreeSet<inf_physics::d3::ColliderId3D> {
+    let mut e = std::collections::BTreeSet::new();
+    if let Some(c) = sim.bridge3d().collider_of(hero) {
+        e.insert(c);
+    }
+    for g in inf_ecs::movement::movement_targets(sim.world()) {
+        if let Some(c) = sim.bridge3d().collider_of(g) {
+            e.insert(c);
+        }
+    }
+    e
+}
+
 /// **The head joint's world position**, off the evaluated pose — the joint every
 /// exposure claim in this file is measured on.
 ///
@@ -260,13 +286,7 @@ fn the_cover_census_over_the_island() {
             let radius = hero_radius(&sim, hero);
             let halfh = cm.half_height_for(MovementMode::Grounded);
             let feet = here - glam::DVec3::Y * (halfh + radius);
-            let exclude = {
-                let mut e = std::collections::BTreeSet::new();
-                if let Some(c) = sim.bridge3d().collider_of(hero) {
-                    e.insert(c);
-                }
-                e
-            };
+            let exclude = pawn_exclusion(&sim, hero);
             for b in 0..bearings {
                 let a = std::f64::consts::TAU * f64::from(b) / f64::from(bearings);
                 let dir = glam::DVec3::new(inf_math::psin64(a), 0.0, inf_math::pcos64(a));
@@ -366,6 +386,59 @@ struct Station {
     family: inf_physics::d3::ColliderFamily,
 }
 
+/// What an arm is looking for.
+///
+/// A struct rather than six positional arguments, and every field is a fact
+/// about the GEOMETRY an arm needs rather than a coordinate: "a façade with at
+/// least a metre and a half of run and a real end to it" is what the slide and
+/// the peek are about, and the island is asked where one is.
+#[derive(Clone, Copy, Debug)]
+struct StationWant {
+    class: CoverClass,
+    family: Option<inf_physics::d3::ColliderFamily>,
+    /// How much surface, left plus right, the station must have. `0` for any.
+    min_run_m: f64,
+    /// Whether the surface must actually **END** on one side — a free corner
+    /// with nothing behind it.
+    ///
+    /// This is the difference between a corner and a seam. Harbour City's
+    /// façades are runs of ADJACENT structural boxes, so the edge of one box is
+    /// the edge of nothing: a character leaning around it is still behind the
+    /// next box, and the wave's first exposure arm measured exactly that (the
+    /// ray hit `structure #6063` after leaning past `#6062`). A free corner is
+    /// one where a probe a metre beyond the end finds no cover at all.
+    free_corner: bool,
+    /// How far out to search, in lattice cells.
+    reach: i32,
+    /// How far apart the cells are, metres.
+    spacing: f64,
+}
+
+impl StationWant {
+    fn of(class: CoverClass) -> Self {
+        Self {
+            class,
+            family: None,
+            min_run_m: 0.0,
+            free_corner: false,
+            reach: 8,
+            spacing: 8.0,
+        }
+    }
+    fn structure(mut self) -> Self {
+        self.family = Some(inf_physics::d3::ColliderFamily::Structure);
+        self
+    }
+    fn with_run(mut self, m: f64) -> Self {
+        self.min_run_m = m;
+        self
+    }
+    fn with_free_corner(mut self) -> Self {
+        self.free_corner = true;
+        self
+    }
+}
+
 /// **Walk a lattice around the spawn and find cover of `want`.**
 ///
 /// Deliberately a SEARCH and not a coordinate: a hard-coded `(x, z)` is a claim
@@ -378,14 +451,8 @@ struct Station {
 /// `family` narrows it — a parked car is a document `Entity`, a façade is a
 /// `Structure` with no entity at all (carried 162), and an arm that wants one
 /// must not accidentally measure the other.
-fn find_station(
-    sim: &mut RuntimeSim,
-    hero: uuid::Uuid,
-    want: CoverClass,
-    family: Option<inf_physics::d3::ColliderFamily>,
-    reach: i32,
-    spacing: f64,
-) -> Option<Station> {
+fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Option<Station> {
+    let (reach, spacing) = (want.reach, want.spacing);
     let spawn = hero_pos(sim, hero);
     let settings = inf_physics::d3::CoverSettings::default();
     // Rings outward from the spawn, so the nearest station wins and the arm's
@@ -409,13 +476,7 @@ fn find_station(
         let radius = hero_radius(sim, hero);
         let halfh = cm.half_height_for(MovementMode::Grounded);
         let feet = here - glam::DVec3::Y * (halfh + radius);
-        let exclude = {
-            let mut e = std::collections::BTreeSet::new();
-            if let Some(c) = sim.bridge3d().collider_of(hero) {
-                e.insert(c);
-            }
-            e
-        };
+        let exclude = pawn_exclusion(sim, hero);
         for b in 0..16 {
             let deg = 360.0 * f64::from(b) / 16.0;
             let a = deg.to_radians();
@@ -433,12 +494,25 @@ fn find_station(
                     &exclude,
                 )
             };
-            if p.class != want {
+            if p.class != want.class {
                 continue;
             }
-            if family.is_some_and(|f| p.label.family != f) {
+            if want.family.is_some_and(|f| p.label.family != f) {
                 continue;
             }
+            if p.left_m + p.right_m < want.min_run_m {
+                continue;
+            }
+            if want.free_corner && !ends_freely(sim, hero, &p, dir, &exclude, &settings) {
+                continue;
+            }
+            // **Leave the hero standing here, facing it.** The arms do NOT
+            // re-place afterwards, and that is a repair rather than a
+            // convenience: a second 180-step settle is three seconds of island,
+            // and in three seconds the traffic fleet drives away from the
+            // station the search just found. Four arms failed that way, at a
+            // station whose surface was a moving car.
+            hero_to(sim, hero, here.x, here.z, deg);
             return Some(Station {
                 x: here.x,
                 z: here.z,
@@ -454,10 +528,70 @@ fn find_station(
     None
 }
 
+/// **Does this surface actually END on one side**, with nothing behind it?
+///
+/// A probe taken a metre past the shorter extent, in the same direction. A
+/// façade made of adjacent boxes answers YES to "is there still cover here" and
+/// is therefore a SEAM rather than a corner; a building's actual end answers no.
+///
+/// Costs one probe per candidate, and only for the arms that ask.
+fn ends_freely(
+    sim: &mut RuntimeSim,
+    hero: uuid::Uuid,
+    p: &inf_physics::d3::CoverProbe,
+    dir: glam::DVec3,
+    exclude: &std::collections::BTreeSet<inf_physics::d3::ColliderId3D>,
+    settings: &inf_physics::d3::CoverSettings,
+) -> bool {
+    let cm = hero_cm(sim, hero);
+    let radius = hero_radius(sim, hero);
+    let halfh = cm.half_height_for(MovementMode::Grounded);
+    let left = inf_ecs::cover::tangent_left(p.normal_v()).to_dvec3();
+    // The shorter side is the one a slide will reach first.
+    let (side, run) = if p.left_m <= p.right_m {
+        (left, p.left_m)
+    } else {
+        (-left, p.right_m)
+    };
+    // **Three samples, not one.** Harbour City's shops are rows of adjacent
+    // structural boxes with narrow gaps between them, and a single probe a
+    // metre past the run lands in a gap and calls it a corner. Measured: a
+    // station that passed the one-sample test put a peeking head 0.425 m past
+    // its own wall's end and straight into `structure #6059` — the next box
+    // along. A real building end is clear for several metres.
+    for d in [0.5, 1.0, 2.0, 3.0] {
+        let past = p.anchor + side * (run + d);
+        let beyond = {
+            let bridge = sim.bridge3d_mut();
+            inf_physics::d3::probe_cover(
+                bridge,
+                past,
+                dir,
+                radius,
+                halfh,
+                cm.slope_limit_deg,
+                settings,
+                exclude,
+            )
+        };
+        if beyond.class.is_cover() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Take cover from where the hero is standing, and let the snap finish.
-fn take_cover(sim: &mut RuntimeSim, steps_after: usize) {
+///
+/// Answers the refusal recorded on the step the press was MADE. Reading it
+/// afterwards would read `None` on every run: `MovementRuntime::refusal` is this
+/// step's answer and the idle steps that let the snap finish clear it, which is
+/// the shape every refusal in this engine has.
+fn take_cover(sim: &mut RuntimeSim, hero: uuid::Uuid, steps_after: usize) -> MovementRefusal {
     go(sim, 1, &["cover"], &[]);
+    let refusal = hero_cm(sim, hero).runtime.refusal;
     go(sim, steps_after, &[], &[]);
+    refusal
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -489,14 +623,18 @@ fn the_islands_hero_crouches_behind_low_cover_and_stands_against_high() {
     let stand_half = hero_cm(&sim, hero).stand_half_height_m;
     let crouch_half = hero_cm(&sim, hero).crouch_half_height_m;
 
+    // **A STRUCTURE**, on both rows. The census says the island's cover is 231
+    // façade boxes and 5 low grammar walls against 11 vehicle entities, and a
+    // vehicle is a body that DRIVES: an arm that measured one would be
+    // measuring the traffic timetable. The vehicle rows are real cover and the
+    // demo loop is where they are photographed.
     let mut measured: Vec<(CoverClass, f64, f64, f64, String)> = Vec::new();
     for want in [CoverClass::High, CoverClass::Low] {
-        let Some(st) = find_station(&mut sim, hero, want, None, 8, 8.0) else {
-            println!("  no {want:?} cover within 64 m of the spawn");
+        let Some(st) = find_station(&mut sim, hero, StationWant::of(want).structure()) else {
+            println!("  no {want:?} STRUCTURE cover within 64 m of the spawn");
             continue;
         };
-        hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
-        take_cover(&mut sim, 60);
+        let refusal = take_cover(&mut sim, hero, 60);
         let cm = hero_cm(&sim, hero);
         let half = hero_half(&sim, hero);
         let feet = hero_pos(&sim, hero).y - half - hero_radius(&sim, hero);
@@ -520,10 +658,9 @@ fn the_islands_hero_crouches_behind_low_cover_and_stands_against_high() {
             cm.mode,
             MovementMode::Cover,
             "the press at a measured {want:?} surface ({:?}, top {:.4} m) did not take cover: \
-             refusal {:?}",
+             refusal {refusal:?}",
             st.family,
             st.top_m,
-            cm.runtime.refusal
         );
         assert_eq!(cm.runtime.cover.class, want);
         // The STANCE, off the collider rather than off the class.
@@ -628,12 +765,21 @@ fn the_hero_slides_to_a_corner_and_leans_its_head_past_it() {
     for _ in 0..900 {
         sim.step_once(RuntimeInput::default());
     }
-    let Some(st) = find_station(&mut sim, hero, CoverClass::High, None, 8, 8.0) else {
-        eprintln!("SKIP: the island has no HIGH cover within 64 m of the spawn — see the census");
+    let Some(st) = find_station(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High)
+            .structure()
+            .with_run(1.5)
+            .with_free_corner(),
+    ) else {
+        eprintln!(
+            "SKIP: the island has no HIGH façade with 1.5 m of run and a free corner within \
+             64 m of the spawn — see the census"
+        );
         return;
     };
-    hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
-    take_cover(&mut sim, 60);
+    take_cover(&mut sim, hero, 60);
     assert_eq!(hero_cm(&sim, hero).mode, MovementMode::Cover);
     println!(
         "  the wall at ({:.1}, {:.1}): {:?}, extents L {:.3} m / R {:.3} m",
@@ -720,14 +866,34 @@ fn the_hero_slides_to_a_corner_and_leans_its_head_past_it() {
     );
 }
 
-/// **A SHOT AT A CHARACTER IN COVER HITS THE COVER, AND A PEEKING ONE IS
-/// EXPOSED** — clause 4's exposure claim, with a RAY through the physics world.
+/// **A SHOT AT A HERO TUCKED INTO A FAÇADE HITS THE FAÇADE** — clause 4's
+/// exposure claim, the half the island can answer, with a RAY through the
+/// physics world and the LABEL door naming what it hit.
 ///
-/// The shooter is on the far side of the surface, level with the character's own
-/// head. Tucked in, the ray's first hit is the COVER; leaned around the corner
-/// it is the character.
+/// # What this arm proves, and what it deliberately hands to the fixture
+///
+/// The full claim is two rays: tucked in the shot hits the cover, leaning out
+/// it reaches the head. Both are proven in
+/// `inf-physics/tests/cover_3d.rs::a_shot_at_a_crouched_character_hits_the_cover_and_a_peeking_one_is_exposed`,
+/// on a free-standing wall.
+///
+/// **The island cannot answer the second half, and the reason is geometry
+/// rather than the cover system.** Harbour City's shops are rows of ADJACENT
+/// structural boxes with more boxes behind them, so "the far side" of a façade
+/// is *inside a shop*: a ray fired from six metres beyond the wall starts in
+/// the shop's interior and, when the character leans out, simply hits the next
+/// box along instead of the one it was behind (measured: `structure #6142`
+/// tucked, `structure #6059` leaning). There is no free-standing wall within
+/// 64 m of the spawn whose far side is outdoors. That is a real fact about the
+/// island the wave found, it is in the report, and PAR1's street furniture and
+/// the P19 grammar's garden walls are where free-standing cover arrives.
+///
+/// So what is measured here is the half that IS true on the island and that a
+/// fixture cannot claim: on the REAL geometry, with the REAL hero, the wall it
+/// pressed against stops the bullet — and the head is behind that wall's own
+/// face, measured on the JOINT.
 #[test]
-fn a_shot_from_the_far_side_hits_the_cover_and_a_peeking_hero_is_exposed() {
+fn a_shot_at_a_hero_tucked_into_a_facade_hits_the_facade() {
     let Some(content) = island_project() else {
         eprintln!("SKIP: no island project — local-only content");
         return;
@@ -741,71 +907,63 @@ fn a_shot_from_the_far_side_hits_the_cover_and_a_peeking_hero_is_exposed() {
     for _ in 0..900 {
         sim.step_once(RuntimeInput::default());
     }
-    let Some(st) = find_station(&mut sim, hero, CoverClass::High, None, 8, 8.0) else {
-        eprintln!("SKIP: the island has no HIGH cover within 64 m of the spawn — see the census");
+    let Some(st) = find_station(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High).structure(),
+    ) else {
+        eprintln!("SKIP: the island has no HIGH façade within 64 m of the spawn — see the census");
         return;
     };
-    hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
-    take_cover(&mut sim, 60);
+    take_cover(&mut sim, hero, 60);
     let cm = hero_cm(&sim, hero);
     assert_eq!(cm.mode, MovementMode::Cover);
     let normal = cm.runtime.cover.normal.to_dvec3();
+    let anchor = cm.runtime.cover.anchor.to_dvec3();
 
-    // The shot: from six metres beyond the surface, on its own normal, aimed at
-    // the character's head — the height a shooter aims at, which MOVES with the
-    // stance and with the lean.
-    let cast = |sim: &mut RuntimeSim| -> Option<(uuid::Uuid, String)> {
-        let head = head_world(sim, hero)?;
-        let from = head - normal * 6.0;
-        let dir = normal;
-        let exclude = Default::default();
-        let hit = sim
-            .bridge3d_mut()
-            .world_mut()
-            .cast_ray_excluding(from, dir, 20.0, &exclude)?;
-        let g = sim.bridge3d().guid_of_collider(hit.collider)?;
-        let said = sim.bridge3d().describe_collider(sim.world(), hit.collider);
-        Some((g, said))
+    let Some(head) = head_world(&sim, hero) else {
+        eprintln!("  the hero's skeleton has not resolved — no head to measure");
+        return;
     };
-    let Some((tucked, said)) = cast(&mut sim) else {
-        eprintln!("  the ray hit nothing at all — no cover and no character");
-        panic!("the exposure arm has nothing to measure");
-    };
-    println!("  tucked in, the shot hit {said}");
-    assert_ne!(
-        tucked, hero,
-        "a shot at a character tucked into HIGH cover reached it: the ray hit {said}"
+    // **The head is behind the wall's own face**, off the JOINT: the face is
+    // `radius + standoff` in along the normal from the anchor, and the head must
+    // be on the anchor's side of it.
+    let radius = hero_radius(&sim, hero);
+    let face = anchor - normal * (radius + inf_ecs::cover::STANDOFF_M);
+    let depth = (head - face).dot(normal);
+    println!(
+        "  the façade at ({:.1}, {:.1}): {:?}, top {:.4} m; the head is {depth:.4} m out from \
+         its face",
+        st.x, st.z, st.family, st.top_m
+    );
+    assert!(
+        depth > 0.0,
+        "the head is {depth:.4} m INSIDE the wall the character is pressed against"
     );
 
-    // Slide to the corner and lean out.
-    let axis = if st.left_m <= st.right_m {
-        -1.0f32
-    } else {
-        1.0f32
+    // The shot, from the far side, aimed at the head's own height.
+    let from = head - normal * 6.0;
+    let exclude = Default::default();
+    let hit = sim
+        .bridge3d_mut()
+        .world_mut()
+        .cast_ray_excluding(from, normal, 20.0, &exclude);
+    let Some(hit) = hit else {
+        panic!("the ray hit nothing at all — neither the façade nor the character");
     };
-    for _ in 0..40 {
-        go(&mut sim, 15, &[], &[("move_x", axis)]);
-        if hero_cm(&sim, hero).runtime.cover.at_corner {
-            break;
-        }
-    }
-    go(&mut sim, 60, &["aim"], &[]);
-    let cm = hero_cm(&sim, hero);
-    if !cm.runtime.cover.side.is_out() {
-        eprintln!(
-            "  the hero never reached a corner to lean around (side {:?}) — the exposure half \
-             of this arm needs one",
-            cm.runtime.cover.side
-        );
-        return;
-    }
-    let Some((exposed, said)) = cast(&mut sim) else {
-        panic!("the ray hit nothing while the hero was leaning out");
-    };
-    println!("  leaning out, the shot hit {said}");
-    assert_eq!(
-        exposed, hero,
-        "the peeking character was not exposed: the ray hit {said}"
+    let said = sim.bridge3d().describe_collider(sim.world(), hit.collider);
+    let who = sim.bridge3d().guid_of_collider(hit.collider);
+    println!("  tucked in, the shot hit {said}");
+    assert_ne!(
+        who,
+        Some(hero),
+        "a shot at a character tucked into a façade reached it: the ray hit {said}"
+    );
+    assert!(
+        sim.bridge3d()
+            .label_of(hit.collider)
+            .is_some_and(|l| l.family == inf_physics::d3::ColliderFamily::Structure),
+        "the shot was stopped by {said}, which is not the building"
     );
 }
 
@@ -835,10 +993,16 @@ fn the_cover_pose_is_not_the_crouch_idle_wearing_a_different_name() {
     for _ in 0..900 {
         sim.step_once(RuntimeInput::default());
     }
-    let Some(st) = find_station(&mut sim, hero, CoverClass::Low, None, 8, 8.0)
-        .or_else(|| find_station(&mut sim, hero, CoverClass::High, None, 8, 8.0))
+    let Some(st) = find_station(&mut sim, hero, StationWant::of(CoverClass::Low).structure())
+        .or_else(|| {
+            find_station(
+                &mut sim,
+                hero,
+                StationWant::of(CoverClass::High).structure(),
+            )
+        })
     else {
-        eprintln!("SKIP: the island offered no cover within 64 m — see the census");
+        eprintln!("SKIP: the island offered no façade cover within 64 m — see the census");
         return;
     };
     // The control: crouch at the same place, facing the same way, WITHOUT cover.
@@ -849,7 +1013,7 @@ fn the_cover_pose_is_not_the_crouch_idle_wearing_a_different_name() {
     let crouched = inf_ecs::pose::evaluated_pose(sim.world(), hero).map(|p| p.pose.clone());
     // …and the cover pose at the same place.
     hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
-    take_cover(&mut sim, 120);
+    take_cover(&mut sim, hero, 120);
     let cover_mode = hero_cm(&sim, hero).mode;
     let covered = inf_ecs::pose::evaluated_pose(sim.world(), hero).map(|p| p.pose.clone());
     let state = inf_ecs::anim_bridge::anim_state(sim.world(), hero).map(|s| s.name.clone());
@@ -1046,15 +1210,17 @@ fn the_cover_camera_is_an_override_claim_that_stops_by_not_asking() {
     for _ in 0..900 {
         sim.step_once(RuntimeInput::default());
     }
-    let Some(st) = find_station(&mut sim, hero, CoverClass::High, None, 8, 8.0)
-        .or_else(|| find_station(&mut sim, hero, CoverClass::Low, None, 8, 8.0))
-    else {
-        eprintln!("SKIP: the island offered no cover within 64 m — see the census");
+    let Some(st) = find_station(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High).structure(),
+    ) else {
+        eprintln!("SKIP: the island offered no façade cover within 64 m — see the census");
         return;
     };
-    hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
+    let _ = st;
     let before = sim.camera().director.holder().map(|h| h.0);
-    take_cover(&mut sim, 60);
+    take_cover(&mut sim, hero, 60);
     let cm = hero_cm(&sim, hero);
     let holder = sim.camera().director.holder();
     let arm_in = sim.camera().arm_m;
