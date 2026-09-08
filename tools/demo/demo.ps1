@@ -983,7 +983,7 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # run of this leg made exactly ONE cover press, in whatever direction
         # the placement happened to leave the hero facing, and reported success.
         $reached = @(Wait-ForHero -Csv $heroCsv -What "the $($st.Name) cover station" -TimeoutS 120 `
-            -Predicate { param($c) ([math]::Abs([double]$c[2] - $st.X) -lt 6.0) -and ([math]::Abs([double]$c[4] - $st.Z) -lt 6.0) })[-1]
+            -Predicate { param($c) ([math]::Abs([double]$c[2] - $st.X) -lt 2.5) -and ([math]::Abs([double]$c[4] - $st.Z) -lt 2.5) })[-1]
         if (-not $reached) { Say "the $($st.Name) cover station was never reached"; continue }
         Restore-PlayerFocus "at the $($st.Name) cover station"
         Stand-Up "before taking cover" | Out-Null
@@ -1074,17 +1074,25 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
             -Predicate { param($c) $c[5] -ne "Cover" } `
             -Out (Join-Path $OutDir "65-cover-left-$($st.Name).png") | Out-Null
     }
-    # THE KERB REFUSES. The press against a 0.15 m kerb does nothing at all, and
-    # the frame is the character standing beside it in `Grounded` -- which is the
-    # refusal, photographed. The station is the road the hero spawns beside.
-    Say "COVER (kerb): pressing T at the kerb, which must do nothing"
+    # THE LAST PRESS OF THE TOUR, wherever the tour left the hero.
+    #
+    # **It is NOT a kerb station and the frame is named for what HAPPENED**, not
+    # for what was hoped: the leg presses where the low leg left the character,
+    # and in the run this comment was written for that was beside a shop front,
+    # so the press took HIGH cover and the file called `...kerb-refused` was a
+    # picture of a character taking cover. A kerb station needs its own
+    # placement, and the kerb's refusal is proven where it can be: the gate's
+    # `a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it` (14
+    # labelled slabs, none coverable) and the fixture's 0.15 m row.
+    Say "COVER (last press): pressing T wherever the tour left the hero"
     Restore-PlayerFocus "at the kerb"
     $beforeKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
     [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
     Start-Sleep -Milliseconds 900
     $afterKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
-    Say "  kerb press: mode $($beforeKerb[5]) -> $($afterKerb[5]), class $($afterKerb[17])"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "66-cover-kerb-refused.png") | ForEach-Object { Say $_ }
+    Say "  last press: mode $($beforeKerb[5]) -> $($afterKerb[5]), class $($afterKerb[17])"
+    $outcome = if ($afterKerb[5] -eq "Cover") { "took-cover" } else { "refused" }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "66-cover-last-press-$outcome.png") | ForEach-Object { Say $_ }
 
     # 2. A MEASURED DROP. The player puts the hero above the road; the frame that
     #    matters is the one where the machine is in a landing, so it is triggered
