@@ -269,6 +269,19 @@ pub struct PhysicsBridge3D {
     /// it — the inverse of [`collider_of`](Self::collider_of). Deterministic
     /// (`BTreeMap`, sorted keys).
     collider_to_guid: BTreeMap<ColliderId3D, Uuid>,
+    /// **What each derived collider IS** (wave COV1) — the side table carried
+    /// 162 asked for, keyed by the same guid [`collider_to_guid`] answers with.
+    ///
+    /// Six families of collider in this engine have no entity: a PCG solid, a
+    /// group shell, a terrain tile, a voxel chunk, a kerb slab, a fracture
+    /// chunk and a door leaf. Their guids are minted by one-way mixes, so the
+    /// **mint sites record what they minted** and this is where it lands. An
+    /// absent key means [`ColliderFamily::Entity`], which is what an ordinary
+    /// document entity's collider is — so a level with no derived content
+    /// carries an empty map and pays nothing.
+    ///
+    /// Pruned in the same place `collider_to_guid` is rebuilt.
+    collider_labels: BTreeMap<Uuid, super::label::ColliderLabel>,
     /// Whether [`collider_to_guid`](Self::collider_to_guid) needs rebuilding —
     /// set by the **three** sites that can move a collider handle (a rebuilt
     /// collider on an existing entity, a new entity, a despawn) and cleared by
@@ -402,6 +415,7 @@ impl PhysicsBridge3D {
             kerb_audit: super::kerb::KerbColliderAudit::default(),
             fracture_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
+            collider_labels: BTreeMap::new(),
             collider_map_dirty: true,
             collider_refusals: 0,
             warned_colliders: BTreeSet::new(),
@@ -621,6 +635,51 @@ impl PhysicsBridge3D {
     /// entity it belongs to.
     pub fn guid_of_collider(&self, collider: ColliderId3D) -> Option<Uuid> {
         self.collider_to_guid.get(&collider).copied()
+    }
+
+    /// **What `guid` IS** (wave COV1) — the label its mint site recorded, or the
+    /// [`ColliderFamily::Entity`](super::label::ColliderFamily::Entity) label
+    /// every ordinary document entity carries by construction.
+    ///
+    /// Total: every guid has an answer, because "no row" is itself an answer.
+    /// That is deliberate — a caller that has to branch on `Option` to write a
+    /// failure message writes half a failure message.
+    pub fn label_of_guid(&self, guid: Uuid) -> super::label::ColliderLabel {
+        self.collider_labels
+            .get(&guid)
+            .copied()
+            .unwrap_or_else(|| super::label::ColliderLabel::entity(guid))
+    }
+
+    /// The same for a collider handle. `None` only when the handle is not
+    /// tracked at all, which is a stale handle rather than an unnamed thing.
+    pub fn label_of(&self, collider: ColliderId3D) -> Option<super::label::ColliderLabel> {
+        self.guid_of_collider(collider)
+            .map(|g| self.label_of_guid(g))
+    }
+
+    /// **Say what `collider` is, in words** — the door carried 162 asked for.
+    ///
+    /// `"`Cruiser_02`"` for a document entity, `"structure #412 of `HarbourCity`"`
+    /// for a façade with no entity at all, and `"an untracked collider"` for a
+    /// handle this bridge has never seen.
+    pub fn describe_collider(&self, world: &EcsWorld, collider: ColliderId3D) -> String {
+        match self.label_of(collider) {
+            Some(l) => l.describe(world),
+            None => "an untracked collider".to_string(),
+        }
+    }
+
+    /// How many derived colliders carry a label right now — the engagement
+    /// counter, so a gate can tell "everything is an entity" from "the mint
+    /// sites stopped recording".
+    pub fn labelled_colliders(&self) -> usize {
+        self.collider_labels.len()
+    }
+
+    /// Record what a mint site just minted. The one writer.
+    fn label(&mut self, guid: Uuid, label: super::label::ColliderLabel) {
+        self.collider_labels.insert(guid, label);
     }
 
     /// Advance the simulation by `dt` seconds (the caller's fixed step).
@@ -955,6 +1014,7 @@ impl PhysicsBridge3D {
             &mut self.kerb_admitted,
             &mut snaps,
             &mut retained,
+            &mut self.collider_labels,
         );
         // I6: the doors' swinging leaves, on the same rule a fifth time —
         // banded like the walls they sit in, because a door a kilometre away is
@@ -967,6 +1027,7 @@ impl PhysicsBridge3D {
             &mut self.door_stamps,
             &mut snaps,
             &mut retained,
+            &mut self.collider_labels,
         );
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
@@ -1216,7 +1277,7 @@ impl PhysicsBridge3D {
                 continue;
             }
             self.structure_stamps.insert(guid, stamp);
-            let admitted = structure_snaps_of(guid, vol, band, snaps);
+            let admitted = structure_snaps_of(guid, vol, band, snaps, &mut self.collider_labels);
             self.structure_admitted.insert(guid, admitted);
         }
         // A volume that disappeared drops its stamp, so a later volume reusing
@@ -1290,6 +1351,10 @@ impl PhysicsBridge3D {
             return;
         }
         let mut live: BTreeSet<(Uuid, inf_voxel::ChunkKey)> = BTreeSet::new();
+        // The ordinal a COV1 label carries — a chunk key is three numbers and a
+        // label has room for one, and what a failure message needs is the
+        // owning volume's name rather than the chunk's coordinate.
+        let mut chunks_labelled: u32 = 0;
         for (&entity, data) in volumes {
             let voxel_size_m = data.voxel_size_m();
             // **The mesher's own key set, and the mesher's own stamp.** Both were
@@ -1328,6 +1393,18 @@ impl PhysicsBridge3D {
                 if mesh.is_empty() {
                     continue;
                 }
+                // **What it is** (wave COV1). A voxel chunk has no entity, so
+                // without this row a cover probe that meets one can only report
+                // its guid. `chunks_labelled` counts them upward from zero.
+                self.label(
+                    voxel_chunk_guid(entity, key),
+                    super::label::ColliderLabel::part(
+                        super::label::ColliderFamily::Voxel,
+                        entity,
+                        chunks_labelled,
+                    ),
+                );
+                chunks_labelled = chunks_labelled.saturating_add(1);
                 // Chunk-local metres against the chunk's own `f64` world origin —
                 // the floating-origin split `VoxelMesh::local_positions_m` exists
                 // to make one function, so the collider surface and the drawn
@@ -1490,6 +1567,18 @@ impl PhysicsBridge3D {
                 }
                 self.terrain_stamps.insert((guid, coord), stamp);
                 described += 1;
+                // **What it is** (wave COV1) — see `gather_voxels`. The index is
+                // the tile's ordinal in this pass, which is what a message can
+                // say; the coordinate itself is two numbers a label has no room
+                // for and the owning `Terrain`'s name is the part that matters.
+                self.label(
+                    terrain_tile_guid(guid, coord),
+                    super::label::ColliderLabel::part(
+                        super::label::ColliderFamily::Terrain,
+                        guid,
+                        described.saturating_sub(1) as u32,
+                    ),
+                );
                 let Some(collider) = terrain_tile_collider(tile, res, span) else {
                     // A degenerate tile (resolution < 2, a short height buffer)
                     // gets no collider and still records its stamp, so the
@@ -1639,6 +1728,15 @@ impl PhysicsBridge3D {
                     continue;
                 };
                 let (translation, rotation) = state.chunk_pose(i);
+                // **What it is** (wave COV1) — see `gather_voxels`.
+                self.label(
+                    guid,
+                    super::label::ColliderLabel::part(
+                        super::label::ColliderFamily::Fracture,
+                        entity,
+                        i as u32,
+                    ),
+                );
                 snaps.push(EntitySync3D {
                     guid,
                     body: Some(BodyDesc3D {
@@ -1914,6 +2012,17 @@ impl PhysicsBridge3D {
                 .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
                 .collect();
             self.collider_map_dirty = false;
+        }
+        // **The labels are pruned with the colliders they name** (wave COV1).
+        //
+        // Not inside the `collider_map_dirty` branch: a label is keyed by GUID
+        // rather than by handle, so the thing that invalidates it is an entity
+        // going away and not a handle moving — and the despawn sweep above has
+        // just removed those rows from `self.entities`. Without this a level
+        // that streams a city block out and another in grows the map for ever.
+        if self.collider_labels.len() > self.entities.len() {
+            let live = &self.entities;
+            self.collider_labels.retain(|g, _| live.contains_key(g));
         }
 
         // 6. P20.2: a despawned character forgets it was swimming, so a later
@@ -2683,6 +2792,7 @@ fn structure_snaps_of(
     vol: &PcgVolume,
     band: &SimBand,
     out: &mut Vec<EntitySync3D>,
+    labels: &mut BTreeMap<Uuid, super::label::ColliderLabel>,
 ) -> Vec<Uuid> {
     let mut admitted: Vec<Uuid> = Vec::new();
     let solid_snap = |i: usize, solid: &inf_ecs::ScatteredSolid| EntitySync3D {
@@ -2701,13 +2811,26 @@ fn structure_snaps_of(
         rotation: solid.rotation,
         joint: None,
     };
-    let ungrouped = |i: usize, out: &mut Vec<EntitySync3D>, admitted: &mut Vec<Uuid>| {
+    let ungrouped = |i: usize,
+                     out: &mut Vec<EntitySync3D>,
+                     admitted: &mut Vec<Uuid>,
+                     labels: &mut BTreeMap<Uuid, super::label::ColliderLabel>| {
         let solid = &vol.structures[i];
         if band
             .tier(solid.center, solid.half_extents, solid.rotation)
             .is_near()
         {
             let s = solid_snap(i, solid);
+            // **What it is** (wave COV1, carried 162): a façade's box has no
+            // entity, so this row is the only thing that can name it.
+            labels.insert(
+                s.guid,
+                super::label::ColliderLabel::part(
+                    super::label::ColliderFamily::Structure,
+                    guid,
+                    i as u32,
+                ),
+            );
             admitted.push(s.guid);
             out.push(s);
         }
@@ -2719,7 +2842,7 @@ fn structure_snaps_of(
     for (gi, group) in vol.structure_groups.iter().enumerate() {
         let range = group.range();
         for i in cursor..range.start.min(vol.structures.len()) {
-            ungrouped(i, out, &mut admitted);
+            ungrouped(i, out, &mut admitted, labels);
         }
         cursor = range.end.min(vol.structures.len());
         let shell = &group.shell;
@@ -2727,12 +2850,28 @@ fn structure_snaps_of(
             Tier::Near => {
                 for i in range {
                     let s = solid_snap(i, &vol.structures[i]);
+                    labels.insert(
+                        s.guid,
+                        super::label::ColliderLabel::part(
+                            super::label::ColliderFamily::Structure,
+                            guid,
+                            i as u32,
+                        ),
+                    );
                     admitted.push(s.guid);
                     out.push(s);
                 }
             }
             Tier::Far => {
                 let g = pcg_shell_guid(guid, gi);
+                labels.insert(
+                    g,
+                    super::label::ColliderLabel::part(
+                        super::label::ColliderFamily::StructureShell,
+                        guid,
+                        gi as u32,
+                    ),
+                );
                 admitted.push(g);
                 out.push(EntitySync3D {
                     guid: g,
@@ -2771,7 +2910,7 @@ fn structure_snaps_of(
         }
     }
     for i in cursor..vol.structures.len() {
-        ungrouped(i, out, &mut admitted);
+        ungrouped(i, out, &mut admitted, labels);
     }
     admitted.sort_unstable();
     admitted

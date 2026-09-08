@@ -339,6 +339,7 @@ pub(crate) fn gather_kerbs(
     admitted_cache: &mut Vec<Uuid>,
     snaps: &mut Vec<EntitySync3D>,
     retained: &mut BTreeSet<Uuid>,
+    labels: &mut std::collections::BTreeMap<Uuid, super::label::ColliderLabel>,
 ) -> KerbColliderAudit {
     let Some(res) = inf_ecs::traffic::carriageway_of(world) else {
         // A level with no settlement blocks has no streets and pays one
@@ -412,6 +413,17 @@ pub(crate) fn gather_kerbs(
                     side,
                 );
                 admitted_cache.push(guid);
+                // **What it is** (wave COV1). A kerb slab has no entity, and a
+                // cover probe that meets one has to be able to say "a kerb is
+                // not cover" by NAME rather than only by height.
+                labels.insert(
+                    guid,
+                    super::label::ColliderLabel::part(
+                        super::label::ColliderFamily::Kerb,
+                        Uuid::nil(),
+                        audit.described,
+                    ),
+                );
                 snaps.push(EntitySync3D {
                     guid,
                     body: None,

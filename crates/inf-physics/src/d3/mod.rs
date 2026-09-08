@@ -41,6 +41,9 @@ pub mod interact;
 mod joint;
 /// Wave ROAD1b: the footway a settlement's streets are drawn with, as colliders.
 pub mod kerb;
+// COV1: what a collider IS -- the side table that turns an entity-less bridge
+// handle back into a place a person can name (carried 162).
+pub mod label;
 pub mod movement;
 mod query;
 // P29.4 the ragdoll bridge: the physics half of the anim<->physics handoff.
@@ -71,6 +74,7 @@ pub use fracture::{
 };
 pub use gameplay::{step_gameplay, GameplayReport, WeaponHit};
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
+pub use label::{ColliderFamily, ColliderLabel};
 pub use movement::{mover_for, step_character_movement, MoveOutcome};
 pub use query::{CastTargets, RayHit3D, ShapeHit3D};
 pub use ragdoll_bridge::{

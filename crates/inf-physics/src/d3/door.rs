@@ -904,6 +904,7 @@ pub fn gather_doors(
     stamps: &mut std::collections::BTreeMap<Uuid, u64>,
     snaps: &mut Vec<EntitySync3D>,
     retained: &mut BTreeSet<Uuid>,
+    labels: &mut std::collections::BTreeMap<Uuid, super::label::ColliderLabel>,
 ) {
     // The off path: no authored door, no volume that could carry a doorway, and
     // nothing tracked is one compare.
@@ -940,6 +941,12 @@ pub fn gather_doors(
             continue;
         }
         stamps.insert(leaf, stamp);
+        // **What it is** (wave COV1). A leaf that swings open is not a thing to
+        // put your back against, and `ColliderFamily::is_coverable` says so.
+        labels.insert(
+            leaf,
+            super::label::ColliderLabel::part(super::label::ColliderFamily::DoorLeaf, p.guid, 0),
+        );
         snaps.push(EntitySync3D {
             guid: leaf,
             // **Kinematic, not static.** A static body cannot be moved without
