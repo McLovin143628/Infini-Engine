@@ -37185,3 +37185,134 @@ whose chosen HIGH cover has a LOW box on the straight line to it walks into the
 box and stops in the open (measured: class `None`, z 1.88): `UnitCover::lay_leg`
 is a two-point `NavPath` by design, and the preference is what makes that
 visible. Both are WPN2e's.
+
+## WPN2a — BALLISTICS (2026-09-08)
+
+The first wave of the WPN2 arc, and what it closes is a sentence
+`resolve_shot`'s own doc has carried since island wave I6: *"a **projectile** is
+resolved by the same cast today, at the same place a hitscan lands — the flight
+time is not simulated."* It is simulated now.
+
+**THE HYBRID.** The research doc's distance switch, in this engine's doors. A
+shot casts ONE ray to `WeaponDef::hitscan_reach_m` — the whole range for a
+`Hitscan`, so every level committed before this wave resolves exactly as it did;
+the smaller of the range and `hitscan_threshold_m` for a `Projectile` — and a
+projectile that missed inside its threshold with range left to fly through mints
+a **round** at the threshold point with `muzzle_speed_mps` along the same spread
+direction. Measured: a 900 m/s rifle's round is minted at z 25.00 with its
+odometer already reading 25 m, and moves **14.9579 m** in the next 60 Hz step.
+
+**THE FLIGHT.** Four sub-steps a fixed step, each one a SEGMENT cast from the
+previous position to the next through the same `cast_ray_excluding` door the
+instant ray uses, with the shooter excluded on segment 0 only. Gravity is
+`PROJECTILE_GRAVITY_MPS2 · gravity_scale`; drag is the whole of `½ρC_dA/m`
+collapsed into one `drag_k` whose unit is **1/m**, the doc's own collapse. The
+integrator is `+ - * /` and one `sqrt` — no trigonometry, no `powf`, no `cbrt` —
+and `portable_character` scans it.
+
+    the drop at 200 m                 0.1989 m
+    the dragless parabola over the
+      same time of flight             0.1855 m
+    the flight to 200 m               12 steps (10 m: on the firing step)
+    a 0.2 m wall at 100 m             stopped at z 99.9; nothing reached 100.2
+
+**THE PHASE DECISION.** `step_rounds` runs INSIDE `step_gameplay`, between the
+doors and the triggers, and is deliberately not a thirtieth `STEP_PHASES` row.
+The reason is correctness rather than cost: a round's impact has to reach THIS
+step's own panic, death and witness passes, and a phase after gameplay would
+file every projectile kill one step late while a phase before it would advance a
+round on the step before the shot that minted it. It sits ABOVE the triggers
+because advancing the pool after them flew a round minted this step for a whole
+step immediately — measured, at **39.96 m** on the step it was fired.
+
+**THE CEILING AND THE BUDGET.** `MAX_SHOT_RAYS_PER_STEP` is 256 and
+`MAX_ROUNDS_IN_FLIGHT` is DERIVED from it (256 / 4 = 64) so the two can never
+disagree; bounding the pool rather than throttling the flight is deliberate,
+because a ray budget spent mid-flight is time dilation and a round that waited
+arrives at the wrong place for the rest of its life. At the population the
+ceiling was minted from — eight shooters, 900 rpm, four sub-steps — it engages:
+
+    126 rounds minted, 239 REFUSED (a value, counted on the pool and the report)
+    peak 63 in flight against a bound of 64
+    peak 252 segment casts a step against a ceiling of 256
+    the pool's own share of the `gameplay` phase: 0.0305 ms at 63 rounds,
+      0.48 us a round (dev build) against `WEAPON_STEP_BUDGET_MS` 1.5 ms
+
+**THE CURVE, AND THE HEAD.** One damage door, `WeaponDef::damage_at`, asked by
+both halves: the doc §5's Hermite smoothstep between `effective_range_m` and
+`max_range_m`, down to `min_damage_frac`, times `headshot_mult` on a head hit.
+The joule scale is FORCED rather than chosen — `DEFAULT_VITALITY_J` 2 000 J is
+the doc's 100 HP body, so 1 HP = 20 J, and that reproduces island wave I6's own
+600 J pistol from the doc's 30 HP Glock. Measured in the world, at five
+distances, against the closed form written out by hand:
+
+    35 m 600.000 J (600)   85 m 562.904 (562.5)   135 m 480.540 (480)
+    185 m 397.892 (397.5)   235 m 360.001 (360)
+
+The head is one door, `head_point`, with two answers on `muzzle_of`'s own model:
+the rig's `head` socket lifted by `pose::model_to_world`, or the capsule's own
+top-sphere centre (`feet + 2h + r`, 1.50 m on the shipped default) — and a POSED
+character whose rig publishes no head socket is COUNTED.
+
+**AND THE HEAD TEST IS A BAND, NOT A SPHERE, BECAUSE A CHARACTER IS A CAPSULE.**
+This is the wave's most useful finding and its own gate found it. A ray fired at
+a standing body stops on a capsule's SURFACE, which is a capsule radius (0.30 m)
+from the axis the head socket sits on — so a 12 cm sphere about the head point
+was a target no shot in this game could ever hit. Measured: a shot aimed exactly
+at the head socket of a target 12 m away arrives **0.300 m** from it.
+`is_headshot` measures the height a round arrived at (12 cm either side) plus a
+horizontal bound that is the body's OWN collider radius plus that band, which is
+the information a capsule can actually carry. Measured after: the head at
+1.500 m spends 600 J and the pelvis at 0.600 m spends 300.
+
+**THE REGISTRY.** All eighty-five of the doc's rows — 10 pistols, 20 SMGs, 20
+assault rifles, 10 DMRs, 10 snipers, 10 shotguns, 5 launchers — as
+`crates/inf-ecs/src/weapons.toml`, reached by `include_str!` through
+`WEAPON_REGISTRY_TOML` and by a level through the `item.define` node, which is
+`GAMEPLAY_ITEMS_TOML`'s own route. `WeaponDef` grew eleven fields and the whole
+wave cost **zero schema**: scene v27, `ScenePayload` 13 and `EXPECTED_LEVELS` 24
+are unmoved. The doc's four sub-tables (`[ballistics]`, `[damage_curve]`,
+`[recoil]`, `[audio]`) are read through the SAME by-name `set` door their parent
+is, and an unknown one is refused BY NAME — a `[ballisitcs]` typo that silently
+dropped a muzzle velocity would fire the default at a designer who had authored
+a number.
+
+Of the doc's eight metrics, one has a consumer in THIS wave and it is measured
+on the ground: `move_speed_mult` reaches `movement::settings_for`, which is the
+one place a target speed is resolved, so a walk, a run, a sprint and a crouch
+all scale and none needed a branch. Three seconds of running: **8.6435 m**
+unarmed, **6.8183 m** with a Barrett M82 whose multiplier is 0.76. `[audio]`
+carries `report_max_m`, which both hosts read inside the `weapon_report` MIRROR
+fence — the weapon's RANGE and not its CLIP, because P22 §5's refusal of a
+per-weapon sound slot stands and `REPORT_MAX_M`'s own doc already calls a
+gunshot "the one emitter whose range is the gameplay". `recoil_intensity` and
+`ads_time_ms` are authored and unread: wave WPN2b's.
+
+**DETERMINISM.** `ballistics::round_state_bytes` is the FOURTEENTH trace
+section, appended at the tail and pinned in `projector_mirror::SECTIONS` in the
+same commit — which is the whole of what the traffic section's two unpinned
+waves taught. It is EMPTY when nothing is in the air, and the gate proves the
+consequence rather than asserting the intent: inserting an empty pool moves the
+trace by **0 bytes** (782 -> 782) and one round moves it by 81 (782 -> 863),
+appended at the tail. `clear_rounds` joins both of Simulate's clear blocks. PIE
+== shipping and two independent cooks agree over a projectile course with rounds
+in the air for the whole comparison.
+
+**AND THE MUTATION HARNESS LIED ONCE.** Worth the sentence, because it is a new
+shape of the "a gate must be built to falsify" law: a script that `cp`s a source
+aside and `mv`s it back restores the ORIGINAL mtime, which is older than the
+artifact cargo just built from the mutated source — so cargo rebuilds nothing
+and the NEXT run measures the mutation. One mutation read "ok" that way and the
+following clean run reported an unrelated arm failing. The harness `touch`es on
+restore now.
+
+**WHAT IS NOT HERE, said plainly.** Shotgun pellets (a pull is one hit carrying
+the whole shell's energy; WPN2d splits it), launcher blast radius (the direct
+damage only), burst fire (the engine has automatic and semi, so the doc's
+three-round-burst rows are authored automatic), attachments, recoil springs,
+sway, spread state, the four-layer gunshot and the casing pool. Every one of
+them is a later wave of this arc and every one is named in `weapons.toml` itself
+rather than only in a report. And **a round cannot hit a car**: the shot's cast
+door filters to `CastTargets::Fixed`, so neither half of the hybrid can see a
+dynamic chassis — measured, 0 hits and 0 joules owed at the P22 door — which is
+the same reason a hitscan could not, and is VEH3c's.
