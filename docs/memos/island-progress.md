@@ -37060,10 +37060,14 @@ all building. Three facts came out of the census and each is in the report:
   keeps `Fixed`, the cover probe asks `All` and refuses by the body's own
   VELOCITY, retrying past a moving hit twice (the P22.3 M4 rule: a filter after a
   cast hides what was behind it);
-* **a car classifies HIGH here, not LOW.** The island's chassis boxes measure
-  about 2.27 m at the top, past the 1.25 m split. GTA's low cover is a car's
-  window line; ours is the whole vehicle's bounding box. VEH3's, and it is one
-  number in the lattice.
+* **a car classifies HIGH here, not LOW.** The census's own vehicle rows measure
+  **1.376 to 1.918 m** at the top — past the 1.25 m split, and the census prints
+  each one with its place and its name since the COV1 audit. (The wave's report
+  and the first draft of this bullet said **2.27 m**; that is the island crowd's
+  KINEMATIC CAPSULE height, which `cov1_gate`'s own `pawn_exclusion` doc quotes
+  twenty lines from where the number was read. Corrected.) GTA's low cover is a
+  car's window line; ours is the whole vehicle's bounding box. VEH3's, and it is
+  one number in the lattice.
 
 ### What is in the engine
 
@@ -37119,3 +37123,56 @@ nothing), **9** rule arms in `inf_ecs::cover` and **2** in `d3::label`.
 * **blind fire is not built.** The clause named it; what exists is the peek, the
   aim and the lean. WPN2e owns the firing cadence and it is the wave that will
   meet the trigger.
+
+## The COV1 audit (adversarial, `e190e67e..dbdb0432` audited; the audit's own commits follow it)
+
+**The census reproduces exactly** — 281 grounded stations x 8 bearings = 2 248
+probes, 6 378 shape casts, LOW 5 / HIGH 242 / NONE 2 001, refusal for refusal, in
+**404 s** against the wave's 481. It now also prints WHERE the rare rows are:
+the five LOW surfaces are three places on `Harbour City Shop -1,0` and `-1,-1`
+(tops 0.971-0.976 m) and the vehicle rows read 1.376-1.918 m.
+
+**What the audit fixed, in severity order.**
+
+* **A peek stretched the character.** `apply_cover_lean` built its additive delta
+  from `Pose::rest`, and `apply_additive` ADDS translations -- so every joint the
+  `upper_body` mask covers had its own bind offset added to itself for as long as
+  a peek was held. The head rose **0.669 m** and the pelvis-to-head distance went
+  0.700 -> 1.38 m. Nothing in the tree could see it: zeroing the lean angles
+  outright reddened no test, because the island arm's threshold (0.25 m) was
+  under the CAPSULE's own step (`PEEK_LATERAL_M`, 0.45 m). Both closed.
+* **The cover stance twisted every bone about its own length** (carried 184, and
+  worse than it was written down as). On a UE-derived rig local X runs down the
+  bone -- measured on the shipped hero, `upperarm_l`'s reaches world
+  (0.61, -0.79, 0.03) -- so every `qx` in the clip was a twist, the crouch was
+  the pelvis translation alone, and the arms hung. The clip states where a bone
+  should POINT now and the rig answers.
+* **The cover camera hung its boom off a pivot it never swept**, and at
+  (-1782.0, 2074.0) pushed a claim whose optical centre was inside the world.
+  After: 0 of 9 stations inside geometry, 7 live, 2 refused.
+* **The census's own kerb assertion could not fail** (it sat inside the `None`
+  arm of its match, where the discriminant made it true by construction), and the
+  island kerb arm read the label TABLE rather than the world. Standing the hero
+  in front of all 14 labelled slabs: **0 of 80 probes ever met a kerb**. A 0.15 m
+  slab is under a 0.30 m sweeper on a road, so the refusal a player gets is
+  `NoSurface` and `ColliderFamily::is_coverable`'s kerb row is belt to that
+  braces -- true, and not what the prose implied.
+* **The vault's island evidence was a frame taken by a sleep.** It is proven by
+  the capsule now: at the LOW surface (-1774.0, 2090.0), top 0.976 m, the press
+  moved it **1.7225 m** along the face's normal, from +0.3225 m out to -1.4000 m,
+  feet -0.0206 m -- over the far side.
+* **SWAT's preference was a rule with no behaviour behind it.** Measured on a
+  fixture: nobody wanted -> the NEAREST (class `Low`, z 2.34); the top rung ->
+  the wall it can shoot around (class `High`, z 4.34, `swat_high` 1).
+* The stance arm asserted the CAPSULE and printed the JOINTS; the refusal
+  sameness list compared eight of nine variants; and `step_npc_cover`'s doc named
+  `npc_aim_at`, which it does not call and cannot (it is handed places, not a
+  shooter's guid).
+
+**What the audit did not close.** Clause 5's numbers (cover in 1.80 s, 81 shape
+casts, 0 when quiet, a civilian's 0) reproduce exactly and are the FIXTURE's, not
+the island's -- no island arm dispatches a real crew under fire. And a SWAT unit
+whose chosen HIGH cover has a LOW box on the straight line to it walks into the
+box and stops in the open (measured: class `None`, z 1.88): `UnitCover::lay_leg`
+is a two-point `NavPath` by design, and the preference is what makes that
+visible. Both are WPN2e's.
