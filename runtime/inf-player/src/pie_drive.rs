@@ -747,8 +747,8 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// windowed PIE session appends
 /// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state,foot_mm`
 /// — plus the camera's four (CHAR1c), the cover's three (COV1) and the
-/// ballistics' two (WPN2a: rounds in flight, and how far the last round that hit
-/// something had flown) — here four times a second, and the script prints the
+/// ballistics' three (WPN2a: rounds in flight, how far the last round that hit
+/// something had flown, and WHAT IS IN THE HAND) — here four times a second, and the script prints the
 /// first and last lines beside its frames. **Columns are only ever APPENDED**,
 /// so every index a script already reads keeps its meaning.
 ///
@@ -901,9 +901,19 @@ impl HeroLog {
         let pool = inf_ecs::ballistics::round_pool(sim.world());
         let rounds_live = pool.map(|p| p.rounds.len()).unwrap_or(0);
         let last_hit_m = pool.map(|p| p.last_flight_m).unwrap_or(0.0);
+        // **WHAT IS ACTUALLY IN THE HAND** (wave WPN2a), and it is here because
+        // a frame was captioned wrongly without it: the demo loop cycles weapons
+        // with the scroll wheel and named each frame after the id it MEANT to
+        // equip, while the HUD in the pixels showed a different magazine. One
+        // notch of a wheel is not one slot of a bag. `-` when nothing is
+        // equipped, which is every session before this wave.
+        let equipped = guid
+            .and_then(|g| inf_ecs::weapon::equipped_def(sim.world(), g))
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| "-".to_string());
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -936,10 +946,11 @@ impl HeroLog {
                 cover_side,
                 if cover.active { cover.peek } else { 0.0 },
                 rounds_live,
-                last_hit_m
+                last_hit_m,
+                equipped
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

@@ -1276,19 +1276,33 @@ if ($armList.Count -gt 0) {
     [InfInput]::RightDown()
     Start-Sleep -Milliseconds 700
     $anyFlew = $false
+    # **THE FRAME IS NAMED BY WHAT IS IN THE HAND, NOT BY WHAT WAS ASKED FOR.**
+    # The first session of this wave cycled with the wheel and named every frame
+    # after the id it MEANT to equip; the HUD in the pixels showed a different
+    # magazine, because one notch of a wheel is not one slot of a bag. Column 22
+    # is what the sim says is equipped, so the leg CYCLES UNTIL IT MATCHES and a
+    # class it never reached takes no frame and says so.
     for ($wi = 0; $wi -lt $armList.Count; $wi++) {
         $wid = $armList[$wi]
-        if ($wi -gt 0) {
-            # One notch of the wheel per class. `cycle_equipped` walks the bag's
-            # SLOTS and skips anything that is not a weapon, so the order is the
-            # order they went in.
+        $onIt = Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped" -TimeoutS 0.6 `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) }
+        $spins = 0
+        while ((-not $onIt) -and ($spins -lt 12)) {
             [InfInput]::Wheel(1)
-            Start-Sleep -Milliseconds 500
+            $spins++
+            $onIt = Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped (notch $spins)" -TimeoutS 0.8 `
+                -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) }
+        }
+        if (-not $onIt) {
+            Say "WPN2a: the wheel never reached `"$wid`" in $spins notch(es) -- no frame for it"
+            continue
         }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("8{0}-class-{1}-hud.png" -f $wi, $wid)) | ForEach-Object { Say $_ }
         [InfInput]::LeftDown()
+        # The predicate names the WEAPON as well as the round, so a frame cannot
+        # be of somebody else's bullet.
         $flew = Wait-ForHero -Csv $heroCsv -What "a round in flight ($wid)" -TimeoutS 5.0 `
-            -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 0) } `
+            -Predicate { param($c) ($c.Count -gt 22) -and ([int]$c[20] -gt 0) -and ($c[22].Trim() -eq $wid) } `
             -Out (Join-Path $OutDir ("8{0}-class-{1}-in-flight.png" -f $wi, $wid))
         $anyFlew = $anyFlew -or $flew
         # A semi-automatic weapon fires once per PRESS, so the button is released
