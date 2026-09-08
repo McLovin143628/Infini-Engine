@@ -817,10 +817,8 @@ fn a_jump_that_cannot_vault_leaves_no_cover_state_behind() {
     );
     assert!(
         !after.runtime.cover.active,
-        "the character is in {:?} and still carries a live cover state (class {:?}, peek          {:.3})",
-        after.mode,
-        after.runtime.cover.class,
-        after.runtime.cover.peek
+        "in {:?} and still carrying a live cover state: class {:?}, peek {:.3}",
+        after.mode, after.runtime.cover.class, after.runtime.cover.peek
     );
 
     // Walk about afterwards, which is what the demo loop did.
