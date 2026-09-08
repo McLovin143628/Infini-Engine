@@ -206,6 +206,7 @@ pub fn mantle_state_name(param: f64) -> Option<&'static str> {
 /// travelling at 6.5 m/s plays 1.3x and its feet keep up with the ground. This
 /// is **stride warping's** first half: a foot that travels at the capsule's
 /// speed does not slide.
+pub const PLAY_RATE_VAR: &str = "play_rate";
 /// **What class of cover the character is in** (wave COV1): `0` none, `1` low
 /// (crouched behind a car or a counter), `2` high (standing against a wall).
 ///
@@ -227,8 +228,6 @@ pub const COVER_HIGH: f64 = 2.0;
 pub const COVER_SIDE_VAR: &str = "cover_side";
 /// **How far out that lean is**, `[0, 1]` (wave COV1). The additive's own alpha.
 pub const COVER_PEEK_VAR: &str = "cover_peek";
-
-pub const PLAY_RATE_VAR: &str = "play_rate";
 /// **Lean, left/right**, `[-1, 1]` — ALS's `LeanAmount.LR`
 /// (`ALSCharacterAnimInstance.cpp:633-637`), positive to the character's right.
 pub const LEAN_X_VAR: &str = "lean_x";
