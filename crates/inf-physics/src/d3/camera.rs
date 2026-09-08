@@ -413,6 +413,21 @@ pub fn step_locomotion_camera(
     if cm.mode.is_cover() && cm.runtime.cover.active {
         match cover_camera_pose(cam, &cm, feet, bridge, &exclude) {
             Some(pose) => {
+                // **THE FADE FOLLOWS THE CLAIM'S OWN BOOM** (wave COV1).
+                //
+                // `subject_fade` is a pure function of `arm_m`, and `arm_m` is
+                // the GAMEPLAY rig's boom — so a claim that brings the camera in
+                // closer than the rig would draws a body the fade rule has not
+                // been told about. Measured in the demo loop's peek frame: the
+                // camera a hand's width from a character's back, `subject_fade`
+                // 1.0000, and the inside of its own mesh filling the window.
+                //
+                // The fix is one call to the SAME rule (CHAR1c's law: the near
+                // fade is one function and both projectors read it), on the
+                // distance this claim is actually asking for, taking whichever
+                // of the two is thinner.
+                let d = (pose.position.to_dvec3() - cam.pivot.to_dvec3()).length();
+                cam.subject_fade = cam.subject_fade.min(cam.tuning.collision.near_fade(d));
                 cam.cover_hold = Some(pose);
                 cam.director
                     .request(inf_ecs::camera::CameraRequest::blended(
@@ -460,9 +475,13 @@ pub const COVER_CAMERA_SHIFT_M: f64 = 0.55;
 
 /// **How much shorter the boom is in cover**, as a fraction of the rig's own.
 ///
-/// A quarter off. The subject is not going anywhere and the interesting part of
-/// the frame is what is past the corner, not the character.
-pub const COVER_CAMERA_ARM_SCALE: f64 = 0.75;
+/// A tenth off. The subject is not going anywhere and the interesting part of
+/// the frame is what is past the corner, not the character — and the number is
+/// small because the rig's own boom is already the one the world allowed, so
+/// taking much off it is asking for a camera inside the subject. The first cut
+/// took a quarter and the demo loop photographed the inside of a character's
+/// own mesh; the near-fade line above is the other half of that repair.
+pub const COVER_CAMERA_ARM_SCALE: f64 = 0.90;
 
 /// **Where the camera goes while its subject is in cover** (wave COV1).
 ///

@@ -996,15 +996,27 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # so the press reaches wherever the hero happens to be looking; the
         # probe's own +-45 degree approach window means a sweep of the circle in
         # 30-degree steps cannot miss a wall that is there.
+        # **W is held while T is pressed**, and that is not decoration.
+        # `try_cover` reaches in the STICK's direction when one is held and in
+        # the BODY's facing when it is not -- and a character standing still in
+        # `VelocityDirection` does not turn its body when the mouse moves, so a
+        # sweep with no stick pressed sixteen times in exactly the same
+        # direction. Measured: `NO COVER taken at the high station in twelve
+        # presses` while the wall was four metres in front of it. Walking at the
+        # wall is also how a player takes cover, and it closes the probe's own
+        # 0.90 m reach.
         $tookCover = $false
         for ($k = 0; $k -lt 16 -and -not $tookCover; $k++) {
+            [InfInput]::Down(0x11)
+            Start-Sleep -Milliseconds 220
             [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
             $tookCover = @(Wait-ForHero -Csv $heroCsv -What "cover ($($st.Name))" -TimeoutS 1.0 `
                 -Predicate { param($c) ($c.Count -gt 17) -and ($c[5] -eq "Cover") } `
                 -Out (Join-Path $OutDir "60-cover-$($st.Name).png"))[-1]
+            [InfInput]::Up(0x11)
             if (-not $tookCover) { for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 } }
         }
-        if (-not $tookCover) { Say "NO COVER taken at the $($st.Name) station in twelve presses"; continue }
+        if (-not $tookCover) { Say "NO COVER taken at the $($st.Name) station in sixteen presses"; continue }
         # The class, off the log rather than off the station's name.
         $row = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
         Say "  in cover: class $($row[17]) side $($row[18]) peek $($row[19]) mode $($row[5])"
