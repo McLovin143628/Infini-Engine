@@ -46,6 +46,18 @@ const KERB_TOP_M: f64 = 0.15;
 const CAR_TOP_M: f64 = 0.80;
 const WALL_TOP_M: f64 = 3.00;
 
+/// **A surface between the split and the probe's look**, metres — a parapet, a
+/// skip, a shipping container on its side.
+///
+/// It is here because a MUTATION found the hole: moving the LOW/HIGH split from
+/// 1.25 m to 3.00 m reddened NOTHING in this file. A 3 m wall has no top within
+/// `CoverSettings::max_top_m` (2.50 m), so `classify` answers `High` off the
+/// infinity and never compares the split at all; the car and the counter are
+/// below 1.25 either way. 1.80 m is the only kind of surface whose class the
+/// split actually decides, and without one of them the split was a number no
+/// arm in this repository could falsify.
+const PARAPET_TOP_M: f64 = 1.80;
+
 /// **A LOW cover tall enough to hide a crouched head**, metres — a car's window
 /// line, or a bar counter.
 ///
@@ -255,6 +267,29 @@ fn a_kerb_is_not_cover_a_car_is_crouch_cover_and_a_wall_is_stand_cover() {
         (cm.runtime.cover.top_m - CAR_TOP_M).abs() < 0.05,
         "measured top {:.4} against {CAR_TOP_M}",
         cm.runtime.cover.top_m
+    );
+
+    // ── the parapet: HIGH, and it is the row the SPLIT decides.
+    let (mut w, mut b) = world_with(PARAPET_TOP_M, 4.0);
+    let cm = take_cover(&mut w, &mut b);
+    assert_eq!(cm.mode, MovementMode::Cover, "a parapet is not cover");
+    assert_eq!(
+        cm.runtime.cover.class,
+        CoverClass::High,
+        "a {PARAPET_TOP_M} m parapet classified {:?}; its measured top is {:.4} m and the          split is {}",
+        cm.runtime.cover.class,
+        cm.runtime.cover.top_m,
+        inf_anim::MANTLE_HIGH_SPLIT_M
+    );
+    assert!(
+        (cm.runtime.cover.top_m - PARAPET_TOP_M).abs() < 0.05,
+        "the parapet measured {:.4} m",
+        cm.runtime.cover.top_m
+    );
+    assert!(
+        (hero_half(&w) - stand).abs() < 1e-9,
+        "behind a {PARAPET_TOP_M} m parapet the capsule is {}",
+        hero_half(&w)
     );
 
     // ── the wall: cover, standing.
