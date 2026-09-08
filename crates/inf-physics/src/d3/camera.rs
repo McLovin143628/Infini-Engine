@@ -483,6 +483,21 @@ pub const COVER_CAMERA_SHIFT_M: f64 = 0.55;
 /// own mesh; the near-fade line above is the other half of that repair.
 pub const COVER_CAMERA_ARM_SCALE: f64 = 0.90;
 
+/// **How much room the swept cover boom leaves at its contact**, metres.
+///
+/// Two centimetres. A shape cast answers the distance at which the sphere
+/// TOUCHES, and a camera parked exactly there reads as penetrating to the next
+/// frame's query — which is how a "clear" boom becomes a black frame.
+pub const COVER_CAMERA_SKIN_M: f64 = 0.02;
+
+/// **The shortest cover boom that is still a camera**, metres.
+///
+/// Below this there is no room behind the shifted pivot at all and the claim
+/// refuses rather than sitting on the subject's own head. It is under the near
+/// fade's end (`CameraCollision::near_fade_end_m`), so a boom this short draws
+/// no subject and shows the player the room.
+pub const COVER_CAMERA_MIN_ARM_M: f64 = 0.10;
+
 /// **Where the camera goes while its subject is in cover** (wave COV1).
 ///
 /// The rig's own yaw and pitch, around a pivot shifted toward the **open side**
@@ -546,12 +561,52 @@ fn cover_camera_pose(
     }
     let (_, _, forward) = inf_ecs::camera::basis(cam.pose.yaw_deg, cam.pose.pitch_deg);
     let arm = cam.arm_m.max(0.05) * COVER_CAMERA_ARM_SCALE;
+    // ── **AND THE BOOM IS SWEPT** (the COV1 audit) ──
+    //
+    // `cam.arm_m` is the distance the world allowed out of the GAMEPLAY rig's
+    // pivot, and this claim moves the pivot sideways by up to
+    // `COVER_CAMERA_SHIFT_M` before hanging the boom off it. A boom that is
+    // legal at one pivot is not legal at another: shifted half a metre along a
+    // Harbour City shop front, the same 3 m arm reaches into the next shop.
+    //
+    // Measured by `cov1_gate::the_cover_camera_is_outside_the_world_or_it_is_
+    // not_there` over eight stations on the island: at (-1782.0, 2074.0) the
+    // claim was pushed with its optical centre INSIDE the world. That is the
+    // very failure CHAR1c's whole camera wave is named after, re-introduced by
+    // a claim that did not ask the question the rig asks.
+    //
+    // So it asks it, with the same sphere, the same exclusions and the same
+    // rule the rig's own `sweep` closure uses — CHAR1c's law that a camera
+    // question has one implementation. A sweep that starts penetrating is the
+    // pivot case above and has already refused; anything else stops at the
+    // contact, less a skin so the next frame's query does not call the touch a
+    // penetration.
+    let free = match bridge.world_mut().cast_shape_where(
+        &ColliderShape3D::Sphere { radius: r },
+        pivot,
+        DQuat::IDENTITY,
+        -forward,
+        arm,
+        exclude,
+        CastTargets::All,
+    ) {
+        Some(hit) if hit.started_penetrating => return None,
+        Some(hit) => (hit.toi.min(arm) - COVER_CAMERA_SKIN_M).max(0.0),
+        None => arm,
+    };
+    // Nowhere to stand: the shifted pivot is clear but everything behind it is
+    // solid within a sphere's width. That is the refusal `cover_hold` answers,
+    // and it is better than a camera sitting on the pivot looking out of the
+    // character's own skull.
+    if free <= COVER_CAMERA_MIN_ARM_M {
+        return None;
+    }
     // The feet are read so a low cover's camera drops with the crouch rather
     // than staying at a standing character's eye line — the pivot already
     // carries the stance, and this is the assertion that it does.
     debug_assert!(feet.y <= cam.pivot.y + 1.0e-6);
     Some(CameraPose {
-        position: Vec3d::from_dvec3(pivot - forward * arm),
+        position: Vec3d::from_dvec3(pivot - forward * free),
         yaw_deg: cam.pose.yaw_deg,
         pitch_deg: cam.pose.pitch_deg,
         fov_deg: cam.pose.fov_deg,

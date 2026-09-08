@@ -436,6 +436,16 @@ pub const HERO_LOG_ENV: &str = "INF_PIE_HERO_LOG";
 /// It is not a movement mode, not an action, not a key, and no gate reads it:
 /// a gate that needed a character somewhere puts it there through the ECS the
 /// way `char1b_gate` already does.
+///
+/// # The grammar, and the heading (COV1 audit, carried 186)
+///
+/// `x,y,z[@seconds][/yaw_deg]`, semicolon-separated. The `/yaw` suffix is the
+/// audit's addition and the reason for it is a measured one: a placement set a
+/// POSITION and nothing else, so a scripted leg reached wherever the hero
+/// happened to be looking — and a character standing still in
+/// `VelocityDirection` does not turn its body under the mouse, so the demo
+/// loop's cover leg had to sweep sixteen presses and hold `W` to face a wall
+/// four metres in front of it. With a heading the leg is deterministic.
 pub const SPAWN_AT_ENV: &str = "INF_PIE_SPAWN_AT";
 
 /// **A garment to put on the hero in a PREVIEW session** (CHAR1b.2 audit) — the
@@ -469,8 +479,10 @@ const SPAWN_DELAY_S: f64 = 2.0;
 /// `Option` check per frame, which is what the hero log costs too.
 #[derive(Default)]
 pub struct SpawnOverride {
-    /// `(x, y, z, at_seconds)`, in the order given; each fires once.
-    at: Vec<([f64; 3], f64)>,
+    /// `(x, y, z, at_seconds, facing_deg)`, in the order given; each fires
+    /// once. `facing_deg` is `None` when the entry gave no heading, which is
+    /// every entry written before the COV1 audit.
+    at: Vec<([f64; 3], f64, Option<f64>)>,
     cloth: Option<Uuid>,
     accum: f64,
     next: usize,
@@ -484,21 +496,39 @@ impl SpawnOverride {
     /// silently ignored one: the whole point of the door is that the operator
     /// finds out whether it took.
     pub fn from_env() -> Self {
-        let mut at: Vec<([f64; 3], f64)> = Vec::new();
+        let mut at: Vec<([f64; 3], f64, Option<f64>)> = Vec::new();
         if let Ok(v) = std::env::var(SPAWN_AT_ENV) {
             for entry in v.split(';').map(str::trim).filter(|e| !e.is_empty()) {
-                let (coords, when) = match entry.split_once('@') {
+                // **`/yaw` is the HEADING** (COV1 audit, carried 186). A
+                // placement set a position and nothing else, so the facing was
+                // whatever the hero happened to have — and a character standing
+                // still in `VelocityDirection` does not turn under the mouse, so
+                // a scripted leg that wanted to face a wall had to WALK at one.
+                // The demo loop's cover leg is the caller that needed it and
+                // `demo.ps1`'s `-FaceAt` is the switch that writes it.
+                let (entry_body, facing) = match entry.split_once('/') {
+                    Some((b, y)) => (b.trim(), y.trim().parse::<f64>().ok()),
+                    None => (entry, None),
+                };
+                let (coords, when) = match entry_body.split_once('@') {
                     Some((c, t)) => (c, t.trim().parse::<f64>().unwrap_or(SPAWN_DELAY_S)),
-                    None => (entry, SPAWN_DELAY_S),
+                    None => (entry_body, SPAWN_DELAY_S),
                 };
                 let parts: Vec<f64> = coords
                     .split(',')
                     .filter_map(|p| p.trim().parse::<f64>().ok())
                     .collect();
+                let facing = facing.filter(|f| f.is_finite());
                 if parts.len() == 3 && parts.iter().all(|p| p.is_finite()) && when.is_finite() {
-                    at.push(([parts[0], parts[1], parts[2]], when.max(SPAWN_DELAY_S)));
+                    at.push((
+                        [parts[0], parts[1], parts[2]],
+                        when.max(SPAWN_DELAY_S),
+                        facing,
+                    ));
                 } else {
-                    eprintln!("inf-player: {SPAWN_AT_ENV} entry `{entry}` is not `x,y,z[@s]`");
+                    eprintln!(
+                        "inf-player: {SPAWN_AT_ENV} entry `{entry}` is not `x,y,z[@s][/yaw]`"
+                    );
                 }
             }
             at.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -541,7 +571,7 @@ impl SpawnOverride {
         {
             let w = sim.world_mut();
             let entity = w.entity_of(hero)?;
-            if let Some((at, when)) = due {
+            if let Some((at, when, facing)) = due {
                 if let Some(mut t) = w
                     .world_mut()
                     .get_mut::<inf_ecs::components::Transform>(entity)
@@ -549,18 +579,34 @@ impl SpawnOverride {
                     t.translation.x = at[0];
                     t.translation.y = at[1];
                     t.translation.z = at[2];
+                    if let Some(y) = facing {
+                        t.rotation.y = y;
+                    }
                 }
                 if let Some(mut cm) = w
                     .world_mut()
                     .get_mut::<inf_ecs::components::CharacterMovement>(entity)
                 {
                     cm.runtime.velocity = inf_ecs::math::Vec3d::ZERO;
+                    // **The heading is the BODY's, the AIM's and the target's**
+                    // — all three, because the smoother turns the body toward
+                    // `target_yaw_deg` and the cover probe reaches in the body's
+                    // facing when no stick is held. Setting one of the three
+                    // would have the character turn back on the next step.
+                    if let Some(y) = facing {
+                        cm.runtime.body_yaw_deg = y;
+                        cm.runtime.target_yaw_deg = y;
+                        cm.runtime.aim_yaw_deg = y;
+                    }
                 }
                 self.next += 1;
                 said.push_str(&format!(
                     "{SPAWN_AT_ENV} #{} at t={when:.0}s placed the hero at {:.2},{:.2},{:.2}",
                     self.next, at[0], at[1], at[2]
                 ));
+                if let Some(y) = facing {
+                    said.push_str(&format!(" facing {y:.0} deg"));
+                }
             }
             if let Some(guid) = wear {
                 w.world_mut()
