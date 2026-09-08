@@ -172,6 +172,12 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         // `every_key_the_default_map_binds_has_a_route` is the arm now, and it
         // is derived from `default_map()` rather than listed.
         KeyCode::KeyG => "KeyG",
+        // ── COV1: the cover key. `every_key_the_default_map_binds_has_a_route`
+        //    is what stopped this one from being the CHAR1c defect a second
+        //    time: the binding landed, the arm went red on the same commit, and
+        //    the key never reached a demo session as a control that silently
+        //    does nothing.
+        KeyCode::KeyT => "KeyT",
         _ => return None,
     })
 }
@@ -580,6 +586,8 @@ mod tests {
                 "WEAPON_SWITCH" => a::WEAPON_SWITCH,
                 // CHAR1c: carried 123's door.
                 "ROTATION_MODE" => a::ROTATION_MODE,
+                // COV1: take cover.
+                "COVER" => a::COVER,
                 other => panic!(
                     "`MovementIntent::from_actions` reads `actions::{other}`, which \
                      this arm has never heard of — add it to `default_map` and to \

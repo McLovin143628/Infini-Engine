@@ -418,8 +418,12 @@ pub fn probe_cover(
     }
 
     // ── 5. the extents. The tangent is the face's own, in the ground plane: the
-    //    character's LEFT while it faces into the wall.
-    let tangent = DVec3::new(-facing.z, 0.0, facing.x).normalize_or_zero();
+    //    character's LEFT while it faces INTO the wall.
+    //
+    //    Spelled once, in `inf_ecs::cover::tangent_left`, because the movement
+    //    step derives the same vector every step to slide along and a second
+    //    spelling is a left that is a right in one of the two readers.
+    let tangent = inf_ecs::cover::tangent_left(inf_ecs::math::Vec3d::from_dvec3(facing)).to_dvec3();
     let (left_m, left_sweeps) = extent_along(
         bridge,
         anchor,

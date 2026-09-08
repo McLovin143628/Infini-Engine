@@ -553,6 +553,7 @@ pub fn step_ragdoll(
         refusal: MovementRefusal::None,
         grounded: on_ground,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }
 
@@ -660,6 +661,7 @@ fn finish(
         refusal: MovementRefusal::None,
         grounded: on_ground,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }
 

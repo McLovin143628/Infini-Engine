@@ -511,7 +511,8 @@ pub mod actions {
 /// | **RMB** | `aim` — `RotationMode::Aiming` |
 /// | **wheel** | `weapon_switch` |
 /// | **I** | `inventory` |
-/// | X · Z · F · V | `prone` · `roll` · `dive` · `fly`, the direct controls the table above folds |
+/// | X · Z · F · V | `prone` · `roll` · `dive` · `fly`, the direct controls the table above folds
+/// | **T** | `cover` — take cover behind what is in front, or leave it (wave COV1) |
 ///
 /// Four of those — `reload`, `attack`, `inventory`, `weapon_switch` — are bound
 /// against consumers that do not exist yet, and the shipped player *says so*
@@ -588,6 +589,25 @@ pub fn default_map() -> InputMap {
         // **R is reload** (I5, the owner's table), so the roll moved to Z.
         .bind_key("roll", "KeyZ")
         .bind_key("dive", "KeyF")
+        // ── wave COV1: TAKE COVER ──
+        //
+        // Bound by LITERAL for `attack`'s and `rotation_mode`'s reason: the name
+        // lives in `inf_ecs::movement::actions` because the movement intent
+        // reads it, and this crate must not depend on the world model.
+        //
+        // **`KeyT`** — *take cover*, and the first letter this table had not
+        // spoken for that a player would guess. GTA V puts cover on Q and Gears
+        // on A; both are taken here (Q cycles the rotation mode since CHAR1c,
+        // and Space is jump, `move_up` and the handbrake already), and MOVING a
+        // bound control is a wave's decision rather than a side effect of adding
+        // one. Stated so the parity table can carry it.
+        .bind_key("cover", "KeyT")
+        // **The D-pad's down**, for the same reason: every face button, bumper,
+        // trigger and stick click on a standard pad is already spoken for (GTA's
+        // own RB is `view_mode` since CHAR1c and Gears' A is `jump` +
+        // `handbrake`), and the d-pad is the one cluster this table has never
+        // used. A player who wants it on a bumper rebinds it.
+        .bind_button("cover", GamepadButton::DPadDown)
         // ── P29.7: the three the vehicle and flight seams read ──
         //
         // `interact` is E, which is every game's enter-a-vehicle key; it shares

@@ -47,6 +47,7 @@ use inf_ecs::components::{
     CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait, LandingKind,
     MantleState, MovementMode, MovementRefusal, RotationMode, Transform,
 };
+use inf_ecs::cover as covermodel;
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement as model;
 // **One spelling for the [0, 360) fold** (P29.6 audit). This file carried a
@@ -56,6 +57,7 @@ use inf_ecs::movement as model;
 use inf_ecs::movement::wrap_deg;
 use inf_ecs::world::EcsWorld;
 
+use super::cover::{probe_cover, CoverSettings};
 use super::ecs::PhysicsBridge3D;
 use super::traversal::{self, LedgeSettings};
 use super::water;
@@ -207,6 +209,15 @@ pub struct MoveOutcome {
     /// The landing the classifier decided this step, or
     /// [`LandingKind::None`] if nothing landed.
     pub landed: LandingKind,
+    /// **How many shape casts the cover probe spent this step** (wave COV1).
+    ///
+    /// The budget arm's number, and the reason it is on the OUTCOME rather than
+    /// only on the runtime: `CoverState::sweeps` is a field the step writes and
+    /// a step that never touched cover would leave the last value there, so a
+    /// gate reading it could not tell "nothing probed" from "nothing has probed
+    /// since". This is per step, always, and it is **zero** for every character
+    /// that is not in cover and did not press the key.
+    pub cover_sweeps: u32,
 }
 
 /// **Advance every character's movement one fixed step.** The one door.
@@ -925,6 +936,10 @@ fn step_one(
     // ── 4. Mode resolution: the single table, asked once per candidate.
     let previous_mode = cm.mode;
     let mut refusal = MovementRefusal::None;
+    // **What the cover probe cost this step** (wave COV1) -- zero on every step
+    // that did not press the key and is not in cover, which is the budget arm's
+    // own number and the reason it is counted rather than assumed.
+    let mut cover_sweeps: u32 = 0;
     let mut probe = ClearanceProbe {
         centre: position,
         radius,
@@ -957,7 +972,42 @@ fn step_one(
 
     if !cm.mode.is_swimming() {
         // Edge intents, in the order a controller resolves them.
-        if cm.runtime.press_dive {
+        //
+        // **COVER IS FIRST** (wave COV1). One key, both directions -- GTA's own
+        // binding -- so the press cannot be ambiguous and must not be swallowed
+        // by a stance edge that arrived on the same step. The chain is
+        // `else if`, so exactly one edge is honoured per step whatever order
+        // they are in; being first is what makes the honoured one the
+        // deliberate one.
+        if cm.runtime.press_cover {
+            if cm.mode == MovementMode::Cover {
+                // **Leaving.** Back to the stance the surface implied, so a
+                // character that was crouched behind a car stays crouched
+                // rather than standing up into whatever is above it -- which is
+                // the overhead-clearance refusal, and `request` will make it if
+                // the stand is the one that is asked for.
+                let to = if cm.runtime.cover.crouched {
+                    MovementMode::Crouch
+                } else {
+                    MovementMode::Grounded
+                };
+                cm.mode = request(&mut cm, bridge, &probe, to, true, &mut refusal);
+                if cm.mode != MovementMode::Cover {
+                    cm.runtime.cover = covermodel::CoverState::default();
+                }
+            } else {
+                cover_sweeps += try_cover(
+                    &mut cm,
+                    characters,
+                    bridge,
+                    &probe,
+                    position,
+                    radius,
+                    &CoverSettings::default(),
+                    &mut refusal,
+                );
+            }
+        } else if cm.runtime.press_dive {
             // **A dive needs a sprint** (I5, the owner's ruling), exactly as a
             // slide does forty lines down. The two are the same move at two
             // heights and it was never coherent that one was gated and the
@@ -1085,8 +1135,16 @@ fn step_one(
                     .abs()
                     .max(cm.runtime.intent_move.y.abs())
                     >= MANTLE_MIN_INPUT;
-                let mantled = wants
-                    && (cm.mode == MovementMode::Grounded || cm.mode == MovementMode::Crouch)
+                // **The vault out of cover needs no stick** (wave COV1). A
+                // character pressed against a car's flank is already facing the
+                // thing it is about to go over -- the cover state pinned that
+                // facing -- so ALS's `bHasMovementInput` gate has nothing left
+                // to disambiguate, and requiring it would mean holding forward
+                // INTO the wall to climb it.
+                let mantled = (wants || cm.mode == MovementMode::Cover)
+                    && (cm.mode == MovementMode::Grounded
+                        || cm.mode == MovementMode::Crouch
+                        || cm.mode == MovementMode::Cover)
                     && try_mantle(
                         &mut cm,
                         characters,
@@ -1179,6 +1237,11 @@ fn step_one(
     // of gravity: the warp's first frame must start from where the probe was
     // taken, or the character drops before it climbs.
     if cm.mode == MovementMode::Mantle {
+        // A vault out of cover leaves it (wave COV1): the mantle owns the
+        // character now, and a `CoverState` that survived would pin the capsule
+        // back against the wall the moment the climb ended.
+        cm.runtime.cover = covermodel::CoverState::default();
+        cm.runtime.press_cover = false;
         cm.runtime.press_jump = false;
         cm.runtime.press_crouch = false;
         cm.runtime.press_prone = false;
@@ -1193,6 +1256,7 @@ fn step_one(
             refusal,
             grounded: false,
             landed: LandingKind::None,
+            cover_sweeps: 0,
         });
     }
     // The edges are consumed whether or not they were honoured: an unconsumed
@@ -1203,6 +1267,32 @@ fn step_one(
     cm.runtime.press_prone = false;
     cm.runtime.press_roll = false;
     cm.runtime.press_dive = false;
+    cm.runtime.press_cover = false;
+
+    // ── 4c. **COVER: the surface, the lean, and the stick** (wave COV1).
+    //
+    //    Everything a character in cover needs decided BEFORE the capsule is
+    //    resized and before the integrator runs, because all three of those
+    //    read it: the stance comes from the class (step 5 resizes to it), the
+    //    speed comes from the class (step 6), and the wish direction is the
+    //    stick PROJECTED ONTO THE SURFACE (step 7). What is deliberately not
+    //    here is the position: a cover slide is integrated by the same
+    //    integrator, moved by the same mover and constrained afterwards, so the
+    //    gaits, the stride warping and the foot IK are the ones every other
+    //    grounded mode uses rather than a second set.
+    if cm.mode == MovementMode::Cover {
+        cover_sweeps += cover_before_move(
+            &mut cm,
+            characters,
+            bridge,
+            &probe,
+            position,
+            radius,
+            dt,
+            &CoverSettings::default(),
+            &mut refusal,
+        );
+    }
 
     // ── 5. Capsule resize. The FEET stay planted: the capsule is centred on the
     //    transform, so a half-height change of d moves the centre by d.
@@ -1438,6 +1528,22 @@ fn step_one(
         }
     }
 
+    // ── 9a. **COVER: the constraint** (wave COV1).
+    //
+    //    The mover has just swept the character wherever its velocity took it,
+    //    with the wall stopping it in the one direction that matters. This puts
+    //    it back ON the cover line -- the anchor, plus the slide along the
+    //    surface, plus whatever the peek is leaning -- and clamps the slide at
+    //    the corners the probe measured.
+    //
+    //    After the move rather than instead of it, so the wall, the ground and
+    //    every other collider still get their say and the constraint is a
+    //    correction rather than a teleport.
+    if cm.mode == MovementMode::Cover {
+        position = cover_after_move(&mut cm, position, radius, dt);
+        probe.centre = position;
+    }
+
     // ── 9b. **Land prediction** (P29.4, clause 4): the classifier's inputs,
     //    *before* the touch.
     //
@@ -1513,6 +1619,7 @@ fn step_one(
                         refusal,
                         grounded: true,
                         landed: kind,
+                        cover_sweeps: 0,
                     });
                 }
             }
@@ -1568,6 +1675,32 @@ fn step_one(
     //    keeps an idle character from spinning under the camera.
     let planar_now = Vec2d::new(cm.runtime.velocity.x, cm.runtime.velocity.z);
     let moving = (planar_now.x * planar_now.x + planar_now.y * planar_now.y).sqrt() > 0.1;
+    // **In cover the body faces the SURFACE** (wave COV1) and the smoother has
+    // nothing to say about it: a character sliding left along a wall does not
+    // turn to face left, it side-steps -- which is the whole visual difference
+    // between cover and walking. The snap eases the facing in over its own
+    // window and the rest of the time it is pinned, so this branch returns
+    // before the two-stage smoother rather than fighting it.
+    if cm.mode == MovementMode::Cover {
+        let c = cm.runtime.cover;
+        cm.runtime.body_yaw_deg = if c.snapping() {
+            covermodel::snap_yaw_deg(c.start_yaw_deg, c.yaw_deg, c.alpha())
+        } else {
+            c.yaw_deg
+        };
+        cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
+        cm.runtime.turning_in_place = false;
+        cm.runtime.turn_delay_s = 0.0;
+        cm.runtime.rotate_left = false;
+        cm.runtime.rotate_right = false;
+        cm.runtime.rotate_rate = 1.0;
+    }
+    // …and the smoother below is skipped entirely while in cover, both branches
+    // of it: the `moving` branch would chase the velocity's heading and the
+    // standing one would start a turn in place, and a body pinned against a
+    // wall must do neither.
+    let in_cover = cm.mode == MovementMode::Cover;
+    let moving = moving && !in_cover;
     let (goal, actor_interp) = match cm.rotation_mode {
         RotationMode::VelocityDirection if moving => (model::planar_yaw_deg(planar_now), 15.0),
         RotationMode::Aiming => (cm.runtime.aim_yaw_deg, 20.0),
@@ -1599,7 +1732,7 @@ fn step_one(
         cm.runtime.rotate_left = false;
         cm.runtime.rotate_right = false;
         cm.runtime.rotate_rate = 1.0;
-    } else {
+    } else if !in_cover {
         // ── Standing still: **rotate in place** while aiming, **turn in place**
         //    while looking (P29.4, clause 7). ALS gates them on exactly this
         //    split — aiming/first-person rotates, third-person looking turns —
@@ -1776,6 +1909,12 @@ fn step_one(
         dt,
     );
     cm.runtime.refusal = refusal;
+    // **This step's cover cost, recorded where the pose step and the hero log
+    // can read it** (wave COV1). Written unconditionally so it is a per-step
+    // figure: a field only the cover path wrote would keep the last probe's
+    // number for ever and a budget arm could not tell "nothing probed" from
+    // "nothing has probed since".
+    cm.runtime.cover.sweeps = cover_sweeps;
 
     // ── 12. Write the world back: the component, the transform, the capsule,
     //    and the physics body if there is one.
@@ -1871,6 +2010,7 @@ fn step_one(
         refusal,
         grounded,
         landed,
+        cover_sweeps,
     })
 }
 
@@ -1978,6 +2118,378 @@ fn try_mantle(
         left_hand: !cm.overlay.is_empty(),
     };
     true
+}
+
+/// **The exclusion set a cover probe and a mantle both use** — ALS's
+/// `IgnoreOnlyPawn`, made out of what this engine has.
+///
+/// The character's own collider is already in `base`; every other character's is
+/// added here, so a crowd can be neither climbed nor hidden behind. Hoisted at
+/// wave COV1 because [`try_mantle`] and [`try_cover`] were about to spell the
+/// same loop twice, and a cover probe that saw a different set from the mantle's
+/// would take cover behind a person the vault could not climb.
+fn ignore_only_pawn(
+    base: &BTreeSet<ColliderId3D>,
+    characters: &[uuid::Uuid],
+    bridge: &mut PhysicsBridge3D,
+) -> BTreeSet<ColliderId3D> {
+    let mut exclude = base.clone();
+    for other in characters {
+        if let Some(c) = bridge.collider_of(*other) {
+            exclude.insert(c);
+        }
+    }
+    exclude
+}
+
+/// **The character's feet**, world metres, from its capsule centre.
+fn feet_of(cm: &CharacterMovement, position: DVec3, radius: f64) -> DVec3 {
+    position - DVec3::Y * (cm.half_height_for(cm.mode) + radius)
+}
+
+/// **Take cover** (wave COV1, clause 2) — the press, answered.
+///
+/// Probes ahead of the character, and on a surface that classifies as cover
+/// enters [`MovementMode::Cover`] with a [`CoverState`](inf_ecs::cover::CoverState)
+/// carrying the anchor, the facing, the class and the extents. Answers **how
+/// many shape casts it spent**, which is the budget arm's number, and refuses by
+/// value everywhere else: a probe that found nothing sets
+/// [`MovementRefusal::ConditionNotMet`] and the character does whatever it was
+/// going to do instead, which is stand there.
+///
+/// # Where it reaches
+///
+/// From the character's own FACING, or from the stick when one is held. GTA
+/// takes cover in the direction you are pushing; a player running along a wall
+/// and pressing cover means *that wall*, not whatever is in front of their nose.
+/// The stick is in the aim frame, so it is rotated out of it first — the same
+/// rotation step 7's wish direction takes.
+#[allow(clippy::too_many_arguments)]
+fn try_cover(
+    cm: &mut CharacterMovement,
+    characters: &[uuid::Uuid],
+    bridge: &mut PhysicsBridge3D,
+    probe: &ClearanceProbe<'_>,
+    position: DVec3,
+    radius: f64,
+    settings: &CoverSettings,
+    refusal: &mut MovementRefusal,
+) -> u32 {
+    let feet = feet_of(cm, position, radius);
+    // The stick when it is held, the facing when it is not.
+    let stick = cm.runtime.intent_move;
+    let reach = if stick.x.abs().max(stick.y.abs()) >= COVER_STICK_MIN {
+        let w = model::rotate_from_frame(stick, cm.runtime.aim_yaw_deg);
+        DVec3::new(w.x, 0.0, w.y)
+    } else {
+        let f = model::rotate_from_frame(Vec2d::new(0.0, 1.0), cm.runtime.body_yaw_deg);
+        DVec3::new(f.x, 0.0, f.y)
+    };
+    let exclude = ignore_only_pawn(probe.exclude, characters, bridge);
+    let half = cm.half_height_for(MovementMode::Grounded);
+    let found = probe_cover(
+        bridge,
+        feet,
+        reach,
+        radius,
+        half,
+        cm.slope_limit_deg,
+        settings,
+        &exclude,
+    );
+    if !found.class.is_cover() {
+        *refusal = MovementRefusal::ConditionNotMet;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        cm.runtime.cover.sweeps = found.sweeps;
+        return found.sweeps;
+    }
+    // **The snap is bounded** (clause 2). A surface further than
+    // `MAX_SNAP_M` away is walked to rather than snapped to, because a blend
+    // that covered a room would be a teleport with a ramp on it.
+    let travel = ((found.anchor.x - feet.x).powi(2) + (found.anchor.z - feet.z).powi(2)).sqrt();
+    if travel > covermodel::MAX_SNAP_M {
+        *refusal = MovementRefusal::ConditionNotMet;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        cm.runtime.cover.sweeps = found.sweeps;
+        return found.sweeps;
+    }
+    let from = cm.mode;
+    let verdict = model::request_mode(from, MovementMode::Cover, true, true);
+    if verdict.refusal != MovementRefusal::None {
+        *refusal = verdict.refusal;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        return found.sweeps;
+    }
+    // **The sprint-to-cover slide-in** (clause 3): a body arriving fast gets a
+    // longer window and the authored slide over it, and one walking in gets
+    // GTA's quarter second.
+    let speed = (cm.runtime.velocity.x * cm.runtime.velocity.x
+        + cm.runtime.velocity.z * cm.runtime.velocity.z)
+        .sqrt();
+    let slide_in = from == MovementMode::Slide || speed >= cm.slide_entry_speed_mps;
+    cm.mode = MovementMode::Cover;
+    cm.runtime.time_in_mode_s = 0.0;
+    cm.runtime.cover = covermodel::CoverState {
+        active: true,
+        class: found.class,
+        crouched: found.class.crouches(),
+        anchor: Vec3d::from_dvec3(found.anchor),
+        normal: Vec3d::from_dvec3(found.normal),
+        yaw_deg: found.yaw_deg,
+        top_m: found.top_m,
+        left_m: found.left_m,
+        right_m: found.right_m,
+        along_m: 0.0,
+        side: covermodel::CoverSide::Behind,
+        peek: 0.0,
+        blend_s: 0.0,
+        snap_s: if slide_in {
+            covermodel::SLIDE_IN_S
+        } else {
+            covermodel::SNAP_S
+        },
+        slide_in,
+        start: Vec3d::from_dvec3(feet),
+        start_yaw_deg: cm.runtime.body_yaw_deg,
+        away_s: 0.0,
+        sweeps: found.sweeps,
+    };
+    found.sweeps
+}
+
+/// How far the stick must be pushed for a cover press to mean *that* direction
+/// rather than *straight ahead*, `[0, 1]`.
+const COVER_STICK_MIN: f64 = 0.3;
+
+/// **How far along a wall a corner has to be for a peek to reach it**, metres.
+///
+/// A character more than this from either end of a surface has no corner to
+/// lean around, and [`inf_ecs::cover::peek_side`] answers `Behind` — which is
+/// where blind fire is the only shot there is.
+const CORNER_REACH_M: f64 = 1.20;
+
+/// **Everything a character in cover decides before it moves** (wave COV1) —
+/// the re-probe, the re-classification, the leave clocks and the stick.
+///
+/// Answers the shape casts it spent.
+///
+/// # Why it re-probes every step
+///
+/// Because the surface CHANGES along its own length. A car's flank is `Low` and
+/// its roof line is `High`; a wall ends at a corner. The class, the anchor and
+/// the extents are all functions of where the character is standing NOW, and a
+/// state latched on entry would have the character crouching behind a wall
+/// three metres from where the car was. It costs the probe's own sweeps —
+/// counted, reported, and paid only while a character is actually in cover.
+#[allow(clippy::too_many_arguments)]
+fn cover_before_move(
+    cm: &mut CharacterMovement,
+    characters: &[uuid::Uuid],
+    bridge: &mut PhysicsBridge3D,
+    probe: &ClearanceProbe<'_>,
+    position: DVec3,
+    radius: f64,
+    dt: f64,
+    settings: &CoverSettings,
+    refusal: &mut MovementRefusal,
+) -> u32 {
+    let feet = feet_of(cm, position, radius);
+    let exclude = ignore_only_pawn(probe.exclude, characters, bridge);
+    let half = cm.half_height_for(MovementMode::Grounded);
+    // Into the surface, from where the character is now.
+    let into = -cm.runtime.cover.normal.to_dvec3();
+    let found = probe_cover(
+        bridge,
+        feet,
+        into,
+        radius,
+        half,
+        cm.slope_limit_deg,
+        settings,
+        &exclude,
+    );
+    let sweeps = found.sweeps;
+    {
+        let c = &mut cm.runtime.cover;
+        c.sweeps = sweeps;
+        // **The re-classification** (clause 3). A surface that answered keeps
+        // its class; one the probe lost for a step keeps the class it had,
+        // because leaving cover is a decision the stick and the button make and
+        // not something a missed sweep does.
+        if found.class.is_cover() {
+            c.class = found.class;
+            c.crouched = found.class.crouches();
+            c.top_m = found.top_m;
+            c.left_m = found.left_m;
+            c.right_m = found.right_m;
+            c.normal = Vec3d::from_dvec3(found.normal);
+            c.yaw_deg = found.yaw_deg;
+            // The anchor follows the surface: it is where the FEET belong for
+            // the face the probe just measured, taken at this step's slide
+            // offset, so `along_m` stays measured from where the character is
+            // rather than from where it entered a wall ago.
+            let left = covermodel::tangent_left(c.normal).to_dvec3();
+            c.anchor = Vec3d::from_dvec3(found.anchor - left * c.along_m);
+        }
+    }
+
+    // ── the leave clock: the stick held AWAY from the surface (clause 3).
+    let n = cm.runtime.cover.normal.to_dvec3();
+    let stick = cm.runtime.intent_move;
+    // The surface's normal expressed in the AIM frame, which is the frame the
+    // stick is in — one rotation rather than two.
+    let n_local = model::rotate_into_frame(Vec2d::new(n.x, n.z), cm.runtime.aim_yaw_deg);
+    let away = covermodel::pushing_away(stick.x, stick.y, n_local.x, n_local.y);
+    if away {
+        cm.runtime.cover.away_s += dt;
+    } else {
+        cm.runtime.cover.away_s = 0.0;
+    }
+    if cm.runtime.cover.away_s > covermodel::AWAY_LEAVE_S {
+        let to = if cm.runtime.cover.crouched {
+            MovementMode::Crouch
+        } else {
+            MovementMode::Grounded
+        };
+        let verdict = model::request_mode(MovementMode::Cover, to, true, true);
+        if verdict.refusal == MovementRefusal::None {
+            cm.mode = verdict.mode;
+            cm.runtime.cover = covermodel::CoverState::default();
+            return sweeps;
+        }
+        // Standing up under something is a refusal, and a character that cannot
+        // stand stays in cover with the clock reset rather than half-leaving.
+        *refusal = verdict.refusal;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        cm.runtime.cover.away_s = 0.0;
+    }
+
+    // ── the PEEK (clause 4). The aim control is what leans the body out, and
+    //    which way it leans is the class's and the nearer corner's.
+    {
+        let c = &mut cm.runtime.cover;
+        let want = cm.runtime.want_aim && !c.snapping();
+        if want {
+            c.side = covermodel::peek_side(
+                c.class,
+                c.along_m,
+                c.left_m,
+                c.right_m,
+                radius,
+                CORNER_REACH_M,
+            );
+        }
+        // A peek that has nowhere to go does not lean: a wall with no corner in
+        // reach answers `Behind`, and `Behind` is the tucked-in pose.
+        let target = if want && c.side.is_out() { 1.0 } else { 0.0 };
+        let step = covermodel::PEEK_RATE_PER_S * dt;
+        c.peek = if c.peek < target {
+            (c.peek + step).min(target)
+        } else {
+            (c.peek - step).max(target)
+        };
+        if c.peek <= 0.0 && !want {
+            c.side = covermodel::CoverSide::Behind;
+        }
+        // **The stance follows the peek** (clause 4): an `Over` peek clears a
+        // low cover by STANDING UP, which is what makes the head reach past the
+        // top rather than the pose only pretending to.
+        if c.class == covermodel::CoverClass::Low {
+            c.crouched = !covermodel::peek_stands(c.side, c.peek);
+        }
+    }
+
+    // ── the STICK, projected onto the surface (clause 3).
+    //
+    //    Everything downstream — the gait, the integrator, the stride warp —
+    //    reads `intent_move`, so constraining it here is what makes a cover
+    //    slide use the SAME machinery a walk does rather than a second one.
+    //    During the snap there is no stick at all: the blend owns the character.
+    {
+        let c = cm.runtime.cover;
+        let left = covermodel::tangent_left(c.normal).to_dvec3();
+        let world = model::rotate_from_frame(cm.runtime.intent_move, cm.runtime.aim_yaw_deg);
+        let along = if c.snapping() {
+            0.0
+        } else {
+            (world.x * left.x + world.y * left.z).clamp(-1.0, 1.0)
+        };
+        // Back into the aim frame, so step 7's own rotation puts it where it
+        // came from.
+        let w = Vec2d::new(left.x * along, left.z * along);
+        cm.runtime.intent_move = model::rotate_into_frame(w, cm.runtime.aim_yaw_deg);
+    }
+    sweeps
+}
+
+/// **Put the character back on the cover line** (wave COV1) — the constraint the
+/// mover's result is corrected by, and the corner stop.
+///
+/// Three things happen, in this order:
+///
+/// 1. **The slide is integrated and CLAMPED.** How far along the surface the
+///    character has travelled comes from its own velocity, which the integrator
+///    produced from the projected stick — so a cover slide accelerates, brakes
+///    and reads its gait exactly as a walk does. [`inf_ecs::cover::clamp_along`]
+///    stops it with its capsule's EDGE at the corner the probe measured.
+/// 2. **The peek is added on top of the clamp**, deliberately: leaning around a
+///    corner means going PAST it, and a peek that the clamp undid would be a
+///    lean nothing could ever be shot through.
+/// 3. **The position is pinned** to the anchor line in `x`/`z` and the mover's
+///    own `y` is kept, so the ground still owns the height and a character
+///    sliding along a wall follows the pavement under it.
+///
+/// While the snap runs, steps 1 and 2 are skipped and the position is the blend.
+fn cover_after_move(cm: &mut CharacterMovement, position: DVec3, radius: f64, dt: f64) -> DVec3 {
+    let c = cm.runtime.cover;
+    let left = covermodel::tangent_left(c.normal).to_dvec3();
+    if left == DVec3::ZERO {
+        return position;
+    }
+    let anchor = c.anchor.to_dvec3();
+    if c.snapping() {
+        // The blend, in the ground plane only: the mover owns `y`, so a snap
+        // cannot put the character through the floor or leave it in the air.
+        cm.runtime.cover.blend_s += dt;
+        let a = cm.runtime.cover.alpha();
+        let start = c.start.to_dvec3();
+        let p = covermodel::snap_position(
+            Vec3d::new(start.x, 0.0, start.z),
+            Vec3d::new(anchor.x, 0.0, anchor.z),
+            a,
+        );
+        // The velocity the blend implies, so the gait and the stride warp read a
+        // character that is MOVING rather than one standing in an idle while its
+        // transform travels.
+        let travel = ((anchor.x - start.x).powi(2) + (anchor.z - start.z).powi(2)).sqrt();
+        let v = if c.snap_s > 0.0 {
+            travel / c.snap_s
+        } else {
+            0.0
+        };
+        let dir = Vec3d::new(
+            (anchor.x - start.x) / travel.max(1e-9),
+            0.0,
+            (anchor.z - start.z) / travel.max(1e-9),
+        );
+        cm.runtime.velocity = Vec3d::new(dir.x * v, 0.0, dir.z * v);
+        return DVec3::new(p.x, position.y, p.z);
+    }
+    // The snap is over: the character owns its slide.
+    let v = cm.runtime.velocity.to_dvec3();
+    let tangential = v.x * left.x + v.z * left.z;
+    let (along, at_corner) =
+        covermodel::clamp_along(c.along_m + tangential * dt, c.left_m, c.right_m, radius);
+    cm.runtime.cover.along_m = along;
+    // A character wedged at a corner is not still accelerating into it.
+    let tangential = if at_corner { 0.0 } else { tangential };
+    cm.runtime.velocity = Vec3d::new(left.x * tangential, 0.0, left.z * tangential);
+    let offset = along + covermodel::peek_lateral_m(c.side, c.peek);
+    DVec3::new(
+        anchor.x + left.x * offset,
+        position.y,
+        anchor.z + left.z * offset,
+    )
 }
 
 /// **Advance a mantle one fixed step**, and hand the character back when it ends.
@@ -2162,6 +2674,7 @@ fn step_mantle(
         refusal,
         grounded,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }
 
@@ -2653,6 +3166,7 @@ fn step_driving(
         refusal,
         grounded: true,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }
 
@@ -2745,6 +3259,7 @@ fn finish_driving(
         refusal: MovementRefusal::None,
         grounded: cm.runtime.grounded,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }
 
@@ -2888,5 +3403,6 @@ fn step_flight(
         refusal: MovementRefusal::None,
         grounded: false,
         landed: LandingKind::None,
+        cover_sweeps: 0,
     })
 }

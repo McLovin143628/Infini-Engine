@@ -98,6 +98,8 @@ pub fn rows() -> Vec<BindingRow> {
         BindingRow::action("Prone (direct)", "prone"),
         BindingRow::action("Roll", "roll"),
         BindingRow::action("Dive (direct)", "dive"),
+        // Wave COV1, a literal for the reason `attack` and `reload` are.
+        BindingRow::action("Take Cover", "cover"),
         BindingRow::action("Interact", "interact"),
         BindingRow::action("Aim", "aim"),
         // Literals, like every other movement name in this list: `attack` and

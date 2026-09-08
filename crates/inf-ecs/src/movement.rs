@@ -90,6 +90,21 @@ pub mod actions {
     pub const FLY: &str = "fly";
     /// Held: the handbrake, while driving (P29.7).
     pub const HANDBRAKE: &str = "handbrake";
+    /// **Edge: take cover, or leave it** (wave COV1).
+    ///
+    /// GTA's own binding and Gears': ONE control for both directions, because a
+    /// player pressing "the cover key" while in cover means *the other one* —
+    /// the same argument [`ROTATION_MODE`] makes about cycling rather than
+    /// setting. The movement step decides which of the two it is, because only
+    /// the step knows whether the character is in cover and whether there is
+    /// anything in front of it to get behind.
+    ///
+    /// It is **not** folded onto the crouch key. The C key already carries four
+    /// verbs (click crouches or slides, hold goes prone or dives) and a fifth
+    /// that depended on whether a wall happened to be in front of the character
+    /// would be a control whose meaning the player cannot predict — which is
+    /// exactly the `KeyE`-ascend defect I5 fixed.
+    pub const COVER: &str = "cover";
     /// Edge: **cycle the rotation mode** — velocity-direction ↔ looking-direction
     /// (wave CHAR1c).
     ///
@@ -1198,6 +1213,8 @@ pub struct MovementIntent {
     pub roll: bool,
     /// Edge: dive.
     pub dive: bool,
+    /// Edge: **take cover, or leave it** (wave COV1). See [`actions::COVER`].
+    pub cover: bool,
     /// Edge: enter/exit a vehicle (P29.7).
     pub interact: bool,
     /// Edge: lock or unlock the door in reach (island wave I8b).
@@ -1302,6 +1319,10 @@ impl MovementIntent {
             prone: pressed(actions::PRONE) || (stance == PressClass::LongPress && !sprint),
             roll: pressed(actions::ROLL),
             dive: pressed(actions::DIVE) || (stance == PressClass::LongPress && sprint),
+            // Wave COV1. A plain edge: the click-versus-hold discrimination the
+            // stance key needs has no analogue here, because one press means
+            // "the other one" in both directions.
+            cover: pressed(actions::COVER),
             interact: pressed(actions::INTERACT),
             lock: pressed(actions::LOCK),
             fly: pressed(actions::FLY),
@@ -1379,6 +1400,8 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_prone |= intent.prone;
         rt.press_roll |= intent.roll;
         rt.press_dive |= intent.dive;
+        // Wave COV1, and an edge for the reason every edge above is one.
+        rt.press_cover |= intent.cover;
         rt.press_interact |= intent.interact;
         rt.press_lock |= intent.lock;
         rt.press_fly |= intent.fly;

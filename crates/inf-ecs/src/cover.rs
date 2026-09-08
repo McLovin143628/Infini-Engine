@@ -346,6 +346,26 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// **The character's LEFT while it faces into the surface**, in the ground
+/// plane — the direction a cover slide runs along.
+///
+/// One spelling, because three readers need it: the probe measures its extents
+/// along it, the movement step slides along it, and a peek steps along it. Two
+/// spellings would be a left that is a right in one of the three.
+///
+/// The convention is the engine's own compass — yaw zero is `+Z` and `+X` is
+/// `+90` — so a forward `f` has its left at `(-f.z, f.x)`. The character faces
+/// **into** the surface, which is `-normal`, so its left is `(normal.z,
+/// -normal.x)`.
+pub fn tangent_left(normal: Vec3d) -> Vec3d {
+    let n = Vec3d::new(normal.x, 0.0, normal.z);
+    let len = (n.x * n.x + n.z * n.z).sqrt();
+    if len < 1.0e-9 {
+        return Vec3d::new(0.0, 0.0, 0.0);
+    }
+    Vec3d::new(n.z / len, 0.0, -n.x / len)
+}
+
 /// **Where along the surface the character may stand** — the corner stop.
 ///
 /// `along_m` is where it wants to be (positive toward its own left) and the two
@@ -613,6 +633,31 @@ mod tests {
         // The clock: at 60 Hz it takes 18 steps.
         let steps = (AWAY_LEAVE_S * 60.0).ceil() as i32;
         assert_eq!(steps, 18);
+    }
+
+    /// **The tangent is the character's LEFT, and it is a left in every reader.**
+    ///
+    /// A wall whose outward normal points at `+X` faces a character standing to
+    /// its east; that character looks west (`-X`) and its left hand points
+    /// south, which in this engine's compass is `-Z`.
+    #[test]
+    fn the_cover_tangent_is_the_characters_own_left() {
+        let t = tangent_left(Vec3d::new(1.0, 0.0, 0.0));
+        assert!((t.x).abs() < 1.0e-12, "{t:?}");
+        assert!((t.z + 1.0).abs() < 1.0e-12, "{t:?}");
+        // A normal pointing at `+Z` (the character stands to the north, looking
+        // south): its left is east, `+X`.
+        let t = tangent_left(Vec3d::new(0.0, 0.0, 1.0));
+        assert!((t.x - 1.0).abs() < 1.0e-12, "{t:?}");
+        assert!((t.z).abs() < 1.0e-12, "{t:?}");
+        // It is a unit vector, and the vertical component of the normal is
+        // dropped rather than tilting it.
+        let t = tangent_left(Vec3d::new(3.0, 9.0, 4.0));
+        assert!(((t.x * t.x + t.z * t.z).sqrt() - 1.0).abs() < 1.0e-12);
+        assert_eq!(t.y, 0.0);
+        // A vertical normal has no tangent at all rather than a NaN one.
+        let t = tangent_left(Vec3d::new(0.0, 1.0, 0.0));
+        assert_eq!((t.x, t.y, t.z), (0.0, 0.0, 0.0));
     }
 
     /// A fresh state is not in cover, makes no claim and costs nothing — the
