@@ -1483,8 +1483,19 @@ pub enum MovementMode {
     Driving,
     /// 6-DOF flight. **P29.7 owns the mechanics**; entering refuses.
     Flying,
-    /// Reserved. A build that meets one refuses by name — see the type's docs.
-    Reserved14,
+    /// **Taking cover** behind a surface (wave COV1) — GTA's and Gears' verb.
+    ///
+    /// The class (crouched behind a car, standing against a wall), which side
+    /// the character peeks from and how far out it is leaning are all on
+    /// [`MovementRuntime::cover`], because they are a `CoverState` the fixed
+    /// step owns rather than something a level author writes — the same split
+    /// `Mantle` and `Driving` already take.
+    ///
+    /// **It claims RESERVED SLOT 14**, which is exactly what the four reserved
+    /// slots were minted for: the freeze-pin's own comment says a mode arriving
+    /// later "without a slot would need a second bump". Wire number 14 is
+    /// unchanged, no existing variant moves, and no schema does either.
+    Cover,
     /// Reserved. A build that meets one refuses by name — see the type's docs.
     Reserved15,
     /// Reserved. A build that meets one refuses by name — see the type's docs.
@@ -1499,7 +1510,6 @@ impl MovementMode {
     /// A reserved slot no reader ever asks about is a comment rather than a slot.
     pub fn reserved_slot(self) -> Option<u8> {
         match self {
-            MovementMode::Reserved14 => Some(14),
             MovementMode::Reserved15 => Some(15),
             MovementMode::Reserved16 => Some(16),
             MovementMode::Reserved17 => Some(17),
@@ -1514,9 +1524,11 @@ impl MovementMode {
     /// and the warp; the articulated handoff and the pose-matched get-up) — and
     /// **P29.7 took the last two**: `Driving` is a raycast vehicle
     /// (`inf_ecs::vehicle`) reached through a seat warp, and `Flying` is 6-DOF
-    /// with banking. Every catalogue mode has its mechanics now, so what is left
-    /// here is exactly the reserved slots: a mode a NEWER build wrote into a file
-    /// this one is reading, which must refuse by name rather than be entered.
+    /// with banking. **Wave COV1 then claimed the first RESERVED slot** for
+    /// `Cover`, which is what a reserved slot is for. Every catalogue mode has
+    /// its mechanics, so what is left here is exactly the three still-reserved
+    /// slots: a mode a NEWER build wrote into a file this one is reading, which
+    /// must refuse by name rather than be entered.
     pub fn is_deferred(self) -> bool {
         self.reserved_slot().is_some()
     }
@@ -1531,7 +1543,18 @@ impl MovementMode {
                 | MovementMode::Prone
                 | MovementMode::Slide
                 | MovementMode::Roll
+                | MovementMode::Cover
         )
+    }
+
+    /// **Whether the character is in cover** (wave COV1).
+    ///
+    /// One mode today, and a predicate rather than a comparison for
+    /// [`is_swimming`](Self::is_swimming)'s reason: the day a second cover mode
+    /// exists (a ledge hang, a corner slice) every reader already asks the right
+    /// question.
+    pub fn is_cover(self) -> bool {
+        matches!(self, MovementMode::Cover)
     }
 
     /// Whether the character is airborne: the two fall modes **and** `Dive`,
@@ -1827,6 +1850,12 @@ pub struct MovementRuntime {
     pub press_roll: bool,
     /// See [`press_jump`](Self::press_jump).
     pub press_dive: bool,
+    /// **Edge: take cover, or leave it** (wave COV1) — the `cover` action.
+    ///
+    /// One button for both directions, GTA's own binding: a player pressing "the
+    /// cover key" while in cover means *the other one*, exactly as the rotation
+    /// mode key cycles rather than sets.
+    pub press_cover: bool,
     /// **How much of a throw is left to play**, seconds; `0` is no throw (wave
     /// CHAR1b.2).
     ///
@@ -1938,6 +1967,13 @@ pub struct MovementRuntime {
     // ── traversal (P29.4) ──
     /// The mantle in progress, if one is.
     pub mantle: MantleState,
+    /// **The cover the character is in**, if it is in any (wave COV1).
+    ///
+    /// Beside the mantle deliberately: they are the same kind of thing — a mode
+    /// with a warp and a clock — and a cover-to-vault press hands one to the
+    /// other through [`MantleState`] without either of them learning about the
+    /// other's fields.
+    pub cover: crate::cover::CoverState,
     /// How close a predicted landing is, `[0, 1]`; `0` when none is predicted.
     /// The value an in-air animation blends a landing pose on.
     pub land_alpha: f64,
@@ -2643,6 +2679,14 @@ impl CharacterMovement {
                 self.crouch_half_height_m
             }
             MovementMode::Prone | MovementMode::Dive => self.prone_half_height_m,
+            // **Cover's stance is the SURFACE's, not the mode's** (wave COV1).
+            // A character behind a car crouches and one against a wall stands,
+            // and which of the two it is lives on the runtime's `CoverState`
+            // because the world decided it. `MovementMode` alone cannot answer,
+            // so this reads the class beside it -- the one place in this
+            // function that consults anything but its argument, and it is
+            // stated rather than hidden.
+            MovementMode::Cover if self.runtime.cover.crouched => self.crouch_half_height_m,
             _ => self.stand_half_height_m,
         }
     }
@@ -2655,6 +2699,12 @@ impl CharacterMovement {
                 self.crouch_speed_mps
             }
             MovementMode::Prone => self.prone_speed_mps,
+            // **Sliding along cover is a walk, and a crouched one when the
+            // surface is low** (wave COV1, clause 3): the same two gaits the
+            // stance already has, so the feet plant through the same clips and
+            // stride warping needs no second rate.
+            MovementMode::Cover if self.runtime.cover.crouched => self.crouch_speed_mps,
+            MovementMode::Cover => self.walk_speed_mps,
             MovementMode::SwimSurface => self.swim_surface_speed_mps,
             MovementMode::SwimUnder => self.swim_under_speed_mps,
             _ => match gait {
@@ -7784,8 +7834,11 @@ mod tests {
     /// accessors cannot answer `Some` for everything.
     #[test]
     fn the_movement_reserved_slots_are_reachable_and_named() {
-        assert_eq!(MovementMode::Reserved14.reserved_slot(), Some(14));
+        assert_eq!(MovementMode::Reserved15.reserved_slot(), Some(15));
         assert_eq!(MovementMode::Reserved17.reserved_slot(), Some(17));
+        // **Slot 14 is no longer reserved** (wave COV1): it is `Cover`, and a
+        // mode with mechanics is not a mode to refuse.
+        assert_eq!(MovementMode::Cover.reserved_slot(), None);
         assert_eq!(MovementMode::Grounded.reserved_slot(), None);
         assert_eq!(MovementMode::Flying.reserved_slot(), None);
         assert_eq!(Gait::Reserved3.reserved_slot(), Some(3));
@@ -7801,7 +7854,6 @@ mod tests {
         // only way this arm can change, which is what makes it a ledger of what
         // is implemented rather than a restatement of the enum.
         for m in [
-            MovementMode::Reserved14,
             MovementMode::Reserved15,
             MovementMode::Reserved16,
             MovementMode::Reserved17,
@@ -7821,9 +7873,18 @@ mod tests {
             MovementMode::SwimUnder,
             MovementMode::Mantle,
             MovementMode::Ragdoll,
+            MovementMode::Cover,
         ] {
             assert!(!m.is_deferred(), "{m:?} has its mechanics");
         }
+        // Cover is a GROUNDED stance -- the ground integrator runs for it, the
+        // capsule crouches for a low one, and it is neither falling nor
+        // swimming.
+        assert!(MovementMode::Cover.is_grounded_family());
+        assert!(MovementMode::Cover.is_cover());
+        assert!(!MovementMode::Cover.is_falling());
+        assert!(!MovementMode::Cover.is_swimming());
+        assert!(!MovementMode::Crouch.is_cover());
         // The three families, asserted rather than described.
         assert!(MovementMode::Slide.is_grounded_family());
         assert!(!MovementMode::FallFree.is_grounded_family());
@@ -8485,7 +8546,12 @@ mod tests {
             MovementMode::SwimSurface, MovementMode::SwimUnder,
             MovementMode::Mantle, MovementMode::Ragdoll,
             MovementMode::Driving, MovementMode::Flying,
-            MovementMode::Reserved14, MovementMode::Reserved15,
+            // **Wave COV1 claimed slot 14.** The row moved from `Reserved14` to
+            // `Cover` and the WIRE NUMBER did not: 14 is still 14, every
+            // variant above and below it is untouched, the counts below are
+            // unchanged, and no scene byte moved. That is what the four
+            // reserved slots were minted for.
+            MovementMode::Cover, MovementMode::Reserved15,
             MovementMode::Reserved16, MovementMode::Reserved17,
         ]);
         pin!(Gait => [

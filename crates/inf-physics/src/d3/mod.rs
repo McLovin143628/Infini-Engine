@@ -61,8 +61,7 @@ mod world;
 pub use camera::{ragdoll_follow_pose, step_camera_with_requests, step_locomotion_camera};
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use cover::{
-    classify as classify_cover, probe_cover, CoverClass, CoverProbe, CoverRefusal, CoverSettings,
-    MIN_COVER_HEIGHT_M,
+    probe_cover, CoverClass, CoverProbe, CoverRefusal, CoverSettings, CoverSide, MIN_COVER_HEIGHT_M,
 };
 pub use crime::{step_recognition, RecognitionStats};
 pub use dispatch::{step_dispatch, DispatchStats};

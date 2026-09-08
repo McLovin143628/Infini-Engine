@@ -926,7 +926,7 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         // **A mantle** is entered from the ground (jump at a wall) or from the
         // air (ALS's "falling catch"), and always ends standing — the warp puts
         // the feet on the ledge, so there is nothing else for it to end as.
-        (Grounded | Crouch | FallFree | FallControlled, Mantle) => true,
+        (Grounded | Crouch | Cover | FallFree | FallControlled, Mantle) => true,
         (Mantle, Grounded | FallFree | FallControlled) => true,
         (Mantle, _) => false,
         // **Driving** (P29.7). Entered from the ground beside a vehicle, and
@@ -950,6 +950,22 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         (Grounded | FallFree | FallControlled, Flying) => true,
         (Flying, Grounded | FallControlled) => true,
         (Flying, _) => false,
+        // **Cover** (wave COV1). Entered from a stance -- standing, crouched or
+        // out of a slide, which is the sprint-to-cover slide-in -- and left back
+        // into a stance, into the air (a vault over a low cover is a `Mantle`,
+        // and a character that walks off the end of one is falling), or into a
+        // mantle.
+        //
+        // It is BELOW the ragdoll and water rows on purpose, so a character
+        // shot while in cover still ragdolls and one that takes cover on a
+        // pier that floods still swims: those are facts about the body and the
+        // place, and cover is a choice.
+        (Grounded | Crouch | Slide, Cover) => true,
+        // (`Cover -> Mantle` is already true from the mantle row above, which
+        // names `Cover` as a source; naming it again here would be an
+        // unreachable arm. The vault out of cover is that row.)
+        (Cover, Grounded | Crouch | FallFree | FallControlled) => true,
+        (Cover, _) => false,
         // Grounded family.
         (Grounded, Crouch | Prone | Slide | Roll | Dive | FallFree | FallControlled) => true,
         (Crouch, Grounded | Prone | Slide | Roll | FallFree | FallControlled) => true,
@@ -2137,7 +2153,7 @@ mod tests {
     #[test]
     fn a_deferred_mode_refuses_by_name_rather_than_pretending() {
         use MovementMode::*;
-        for deferred in [Reserved14, Reserved15, Reserved16, Reserved17] {
+        for deferred in [Reserved15, Reserved16, Reserved17] {
             let v = request_mode(Grounded, deferred, true, true);
             assert_eq!(
                 v.mode, Grounded,
@@ -2149,11 +2165,34 @@ mod tests {
         // the same claim, without which "Mantle is deferred" could be deleted
         // from the list above and nothing would notice. P29.4 took Mantle and
         // Ragdoll; P29.7 took Driving and Flying, which is the catalogue closed.
-        for taken in [Mantle, Ragdoll, Driving, Flying] {
+        for taken in [Mantle, Ragdoll, Driving, Flying, Cover] {
             let v = request_mode(Grounded, taken, true, true);
             assert_eq!(v.mode, taken, "{taken:?} has its mechanics");
             assert_eq!(v.refusal, MovementRefusal::None);
         }
+        // **Cover's own rows** (wave COV1). It is entered from the three
+        // stances a character can be in when it presses the key -- the third is
+        // the sprint-to-cover slide -- and it is left into a stance, into the
+        // air, or into a mantle, which is the vault over a low cover.
+        for from in [Grounded, Crouch, Slide] {
+            assert!(transition_is_legal(from, Cover), "{from:?} -> Cover");
+        }
+        for to in [Grounded, Crouch, FallFree, FallControlled, Mantle] {
+            assert!(transition_is_legal(Cover, to), "Cover -> {to:?}");
+        }
+        // And it is not a door to everything: a character in cover does not
+        // dive, roll, go prone or start driving without leaving first.
+        for to in [Prone, Slide, Roll, Dive, Driving, Flying] {
+            assert!(!transition_is_legal(Cover, to), "Cover -> {to:?}");
+        }
+        // Prone is not a cover entry either -- a body on its face is not going
+        // to be pulled up against a wall by one button.
+        for from in [Prone, Roll, Dive, FallFree, Driving] {
+            assert!(!transition_is_legal(from, Cover), "{from:?} -> Cover");
+        }
+        // The facts about the body still win over it.
+        assert!(transition_is_legal(Cover, Ragdoll));
+        assert!(transition_is_legal(Cover, SwimSurface));
         // A ragdoll may be entered from ANYTHING (it is a fact about the body,
         // not a choice) and leaves to exactly two places.
         for from in [Grounded, Crouch, Slide, Dive, FallFree, SwimUnder, Mantle] {

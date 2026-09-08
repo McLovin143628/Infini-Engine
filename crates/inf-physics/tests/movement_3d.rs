@@ -459,8 +459,11 @@ fn a_mode_this_build_has_no_mechanics_for_refuses_and_changes_nothing() {
     spawn_hero(&mut w, 0.0, 0.0, 0.0);
     step(&mut w, &mut b, &idle());
 
+    // **Wave COV1 took slot 14 for `Cover`**, so three reserved slots are left
+    // and they are the only modes this build refuses. The mode it took is
+    // asserted the other way round below, so deleting `Cover` from the
+    // catalogue could not quietly shrink this list.
     for deferred in [
-        MovementMode::Reserved14,
         MovementMode::Reserved15,
         MovementMode::Reserved16,
         MovementMode::Reserved17,
@@ -476,6 +479,12 @@ fn a_mode_this_build_has_no_mechanics_for_refuses_and_changes_nothing() {
         assert!((hero_capsule_half(&w) - before_half).abs() < 1e-12);
         assert!((hero_pos(&w).y - before_pos.y).abs() < 0.02);
     }
+    // …and `Cover` is NOT one of them: it has mechanics, and asking for it from
+    // a stance is answered rather than refused (wave COV1).
+    let v =
+        inf_ecs::movement::request_mode(MovementMode::Grounded, MovementMode::Cover, true, true);
+    assert_eq!(v.mode, MovementMode::Cover);
+    assert_eq!(v.refusal, MovementRefusal::None);
 }
 
 /// Crouch, prone and slide each resize the capsule to their own height and each

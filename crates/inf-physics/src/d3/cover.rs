@@ -57,56 +57,12 @@ use super::label::{ColliderFamily, ColliderLabel};
 use super::traversal::{is_walkable, sweep_forward_face, sweep_surface_top};
 use super::{ColliderId3D, PhysicsBridge3D};
 
-/// **What a cover surface is, by height.**
-///
-/// Not a wire enum — it never reaches a file. The *mode* does
-/// (`MovementMode::Cover`) and the class rides the animation parameter
-/// `inf_anim::als::COVER_VAR`, which is a float like every other one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CoverClass {
-    /// Nothing to hide behind.
-    #[default]
-    None,
-    /// A top between [`CoverSettings::min_height_m`] and
-    /// [`inf_anim::MANTLE_HIGH_SPLIT_M`] — a car's flank, a low wall, a bar
-    /// counter. The character CROUCHES and can rise over the top to shoot.
-    Low,
-    /// A top above the split, or no top at all within
-    /// [`CoverSettings::max_top_m`] — a façade, a shipping container. The
-    /// character STANDS and can only shoot around an edge.
-    High,
-}
-
-impl CoverClass {
-    /// Whether this class is cover at all.
-    pub fn is_cover(self) -> bool {
-        !matches!(self, CoverClass::None)
-    }
-
-    /// The value the animation parameter carries: `0` none, `1` low, `2` high.
-    ///
-    /// A float rather than a state name, for the CHAR1b.2 law: the door is a
-    /// MODE plus a PARAMETER.
-    pub fn param(self) -> f64 {
-        match self {
-            CoverClass::None => 0.0,
-            CoverClass::Low => 1.0,
-            CoverClass::High => 2.0,
-        }
-    }
-
-    /// The class a `param` value names — the inverse, so a gate can read back
-    /// what a machine was told.
-    pub fn from_param(v: f64) -> Self {
-        if v >= 1.5 {
-            CoverClass::High
-        } else if v >= 0.5 {
-            CoverClass::Low
-        } else {
-            CoverClass::None
-        }
-    }
-}
+/// The class, the side and the rule that decides them all live in
+/// [`inf_ecs::cover`] — this crate is the half that needs a world, and a second
+/// spelling of "what counts as cover" is exactly the thing the ring split
+/// exists to prevent. Re-exported so a caller with a `PhysicsBridge3D` in hand
+/// does not have to name two crates to read one probe.
+pub use inf_ecs::cover::{classify, CoverClass, CoverSide, MIN_COVER_HEIGHT_M};
 
 /// **Why a cover probe found nothing** — a value, with the thing it looked at
 /// named where there was one.
@@ -220,16 +176,6 @@ impl Default for CoverSettings {
     }
 }
 
-/// **The cover floor**: the shortest surface a character will take cover behind,
-/// metres above its feet.
-///
-/// 0.55 m. Chosen against the two things on this island that bracket it: a
-/// street kerb is [`inf_ecs::traffic::KERB_HEIGHT_M`] (0.15 m) and a parked
-/// car's flank is about 0.8 m. Anything a body cannot get most of itself behind
-/// while crouching is not cover, and a crouched capsule on the shipped
-/// `CharacterMovement` default is 0.55 m from feet to shoulder.
-pub const MIN_COVER_HEIGHT_M: f64 = 0.55;
-
 /// How many bisection steps the extent search spends refining each edge.
 ///
 /// Three, which takes a 0.5 m coarse step down to 6.25 cm — inside the 10 cm the
@@ -323,23 +269,6 @@ impl CoverProbe {
                 self.sweeps
             ),
         }
-    }
-}
-
-/// **Classify a measured top**, in one place, so a gate can mutate one line.
-///
-/// `top_m` is [`f64::INFINITY`] for "no top found within the look", which is a
-/// wall — the whole point of the third case.
-pub fn classify(top_m: f64, min_height_m: f64) -> CoverClass {
-    if !top_m.is_finite() {
-        return CoverClass::High;
-    }
-    if top_m < min_height_m {
-        CoverClass::None
-    } else if top_m <= inf_anim::MANTLE_HIGH_SPLIT_M {
-        CoverClass::Low
-    } else {
-        CoverClass::High
     }
 }
 
@@ -644,46 +573,6 @@ pub fn family_of(probe: &CoverProbe) -> ColliderFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **The classification table, on numbers** — the arm a threshold mutation
-    /// reds. The floor and the split are the two lines, and both are named
-    /// constants rather than literals here so the mutation has one place to go.
-    #[test]
-    fn the_class_is_decided_by_the_measured_top() {
-        let floor = MIN_COVER_HEIGHT_M;
-        // A kerb.
-        assert_eq!(classify(0.15, floor), CoverClass::None);
-        // Just under the floor, and just over it.
-        assert_eq!(classify(floor - 0.001, floor), CoverClass::None);
-        assert_eq!(classify(floor, floor), CoverClass::Low);
-        // A car's flank.
-        assert_eq!(classify(0.82, floor), CoverClass::Low);
-        // ALS's own 125 cm split, both sides of it.
-        assert_eq!(
-            classify(inf_anim::MANTLE_HIGH_SPLIT_M, floor),
-            CoverClass::Low
-        );
-        assert_eq!(
-            classify(inf_anim::MANTLE_HIGH_SPLIT_M + 0.001, floor),
-            CoverClass::High
-        );
-        // A container.
-        assert_eq!(classify(2.4, floor), CoverClass::High);
-        // No top at all within the look — a wall.
-        assert_eq!(classify(f64::INFINITY, floor), CoverClass::High);
-    }
-
-    /// The parameter is a round trip, because a machine compares against it and
-    /// a gate reads it back.
-    #[test]
-    fn the_class_survives_the_animation_parameter() {
-        for c in [CoverClass::None, CoverClass::Low, CoverClass::High] {
-            assert_eq!(CoverClass::from_param(c.param()), c, "{c:?}");
-        }
-        assert!(!CoverClass::None.is_cover());
-        assert!(CoverClass::Low.is_cover());
-        assert!(CoverClass::High.is_cover());
-    }
 
     /// A refusal keeps the class it had rather than dropping cover on one
     /// missed sweep; a probe that found something replaces it.

@@ -908,6 +908,19 @@ enum ModeDuty {
     /// their mechanics now, the course forces them, and what is left refusing is
     /// exactly what should refuse for ever.
     Reserved,
+    /// **A mode with mechanics whose course is somewhere else** (wave COV1).
+    ///
+    /// `Cover` claimed reserved slot 14, so it must not be in `Reserved` — it
+    /// does not refuse, and asserting that it does would be false. It must not
+    /// be `Forced` either: the P29 course is a locomotion course on a flat
+    /// fixture with nothing on it to hide behind, and adding cover to it would
+    /// be this gate certifying a wave it cannot see.
+    ///
+    /// So it carries the NAME OF THE GATE THAT PROVES IT, and
+    /// `every_mode_owned_elsewhere_names_a_gate_that_exists` checks the file is
+    /// really there. A mode parked here with a fictional gate is the "carried by
+    /// name" defect one level up.
+    ProvedBy(&'static str),
 }
 
 fn duty_of(mode: MovementMode) -> ModeDuty {
@@ -928,7 +941,49 @@ fn duty_of(mode: MovementMode) -> ModeDuty {
         M::Ragdoll => Forced("Ragdoll"),
         M::Driving => Forced("Driving"),
         M::Flying => Forced("Flying"),
-        M::Reserved14 | M::Reserved15 | M::Reserved16 | M::Reserved17 => Reserved,
+        // Wave COV1: slot 14 is `Cover` now, and its course is on the island
+        // where there are cars and façades to take cover behind.
+        M::Cover => ProvedBy("cov1_gate.rs"),
+        M::Reserved15 | M::Reserved16 | M::Reserved17 => Reserved,
+    }
+}
+
+/// The modes proved by another gate — derived from the same `match`.
+fn elsewhere_modes() -> Vec<(&'static str, MovementMode)> {
+    ALL_MODES
+        .iter()
+        .filter_map(|m| match duty_of(*m) {
+            ModeDuty::ProvedBy(gate) => Some((gate, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A mode parked as "somebody else proves it" names a gate that EXISTS.**
+///
+/// Without this the `ProvedBy` variant is a place to hide a mode nothing tests:
+/// a string is not a test, and a string naming a file that was never written is
+/// the "carried by name" defect with a compiler behind it. The file is looked
+/// for beside this one.
+#[test]
+fn every_mode_owned_elsewhere_names_a_gate_that_exists() {
+    // `CARGO_MANIFEST_DIR` and not `file!()`: the latter is relative to the
+    // WORKSPACE root and a test binary's working directory is the PACKAGE root,
+    // so joining it produces `runtime/inf-player/runtime/inf-player/...` and the
+    // arm fails on a gate that is sitting right there.
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let owned = elsewhere_modes();
+    assert!(
+        !owned.is_empty(),
+        "the `ProvedBy` duty exists and nothing uses it — delete the variant          or classify a mode with it"
+    );
+    for (gate, mode) in owned {
+        let path = here.join(gate);
+        assert!(
+            path.is_file(),
+            "{mode:?} says it is proved by `{gate}` and there is no such gate              at {}",
+            path.display()
+        );
     }
 }
 
@@ -954,7 +1009,7 @@ const ALL_MODES: [MovementMode; 18] = {
         M::Ragdoll,
         M::Driving,
         M::Flying,
-        M::Reserved14,
+        M::Cover,
         M::Reserved15,
         M::Reserved16,
         M::Reserved17,
@@ -974,7 +1029,8 @@ fn required_modes() -> Vec<(&'static str, MovementMode)> {
 }
 
 /// The modes that still refuse — derived from the same `match`, so arm (g) and
-/// the anti-vacuity list cannot drift apart. The four reserved slots.
+/// the anti-vacuity list cannot drift apart. The three reserved slots left after
+/// wave COV1 claimed the fourth.
 fn refused_modes() -> Vec<MovementMode> {
     ALL_MODES
         .iter()
@@ -1018,10 +1074,15 @@ fn the_catalogue_is_accounted_for_variant_by_variant() {
     );
     assert_eq!(
         refused.len(),
-        4,
-        "what refuses is the four reserved slots and nothing else"
+        3,
+        "what refuses is the three still-reserved slots and nothing else —          wave COV1 took the fourth for `Cover`"
     );
-    assert_eq!(forced.len() + refused.len(), ALL_MODES.len());
+    let elsewhere = elsewhere_modes();
+    assert_eq!(elsewhere.len(), 1, "only `Cover` is proved by another gate");
+    assert_eq!(
+        forced.len() + refused.len() + elsewhere.len(),
+        ALL_MODES.len()
+    );
     // Every reserved slot answers `reserved_slot`, and no forced one does —
     // the classification agrees with the engine's own answer rather than with
     // this file's opinion.

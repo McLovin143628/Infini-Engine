@@ -25,6 +25,10 @@ pub mod camera;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;
 pub mod components;
+// COV1: taking cover -- the deciding half. What counts as cover, which stance it
+// implies, how far a peek leans and when a character leaves. The half that needs
+// a world (the sweeps) is `inf_physics::d3::cover`.
+pub mod cover;
 // NPC1a: the sim-LOD tier system — what a crowd NPC costs this step, decided in
 // ONE door both hosts call, keyed on `StreamingSource` distance and never on a
 // camera. `band`'s shape with a fourth rung.
