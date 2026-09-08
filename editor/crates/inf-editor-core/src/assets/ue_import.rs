@@ -148,6 +148,9 @@ pub struct UeImportOptions {
     /// material NAME differs: 18 `.inf_mesh` became 36 and 224 sidecars became
     /// 362 in one measured run.
     pub only: Vec<String>,
+    /// **A `.inf_cloth` to put on every level's pawn** (wave OUTFIT1, carried
+    /// item 137). `None` touches no level, which is every caller before it.
+    pub wear_cloth: Option<AssetId>,
     /// **Wearables to write at the committed characters' clothes GUIDs** (wave
     /// OUTFIT1) — `rebind_character`'s rule for an outfit and a head of hair.
     pub wearables: Vec<WearableRebind>,
@@ -171,6 +174,7 @@ impl Default for UeImportOptions {
             rebind_character: None,
             rebind_character_f: None,
             only: Vec::new(),
+            wear_cloth: None,
             wearables: Vec::new(),
         }
     }
@@ -834,6 +838,14 @@ pub fn import_manifest(
                 &mut report,
             )?;
         }
+    }
+    // …and the garment a LEVEL's pawn wears (carried item 137), because a level
+    // edit is re-applied by the same command sequence that rebuilt the project.
+    if let Some(cloth) = opts.wear_cloth {
+        let n = wear_cloth_in_levels(project, cloth, &mut report);
+        report
+            .advisories
+            .push(format!("{n} level(s) dressed with the garment {cloth}"));
     }
 
     // -- 2c. CLIPS, retargeted onto the rig they will be played on ------------
@@ -2316,6 +2328,106 @@ fn dominant_slot_material(mesh: &inf_mesh::MeshAsset) -> Option<AssetId> {
         .max_by_key(|(slot, n)| (*n, std::cmp::Reverse(*slot)))
         .map(|(slot, _)| slot as usize)?;
     mesh.material_slot_assets.get(slot).copied().flatten()
+}
+
+/// **Put a garment on a LEVEL's pawn** (wave OUTFIT1, carried item 137) — the
+/// door that makes a cape a property of the world rather than of an environment
+/// variable.
+///
+/// # Why this is an import verb and not a level edit somebody makes
+///
+/// The garment wave CHAR1b.2 authored lives in the island project's Content at a
+/// fixed GUID and was worn only in a gate and through the demo loop's
+/// `-WearCloth`, because the island's `.inf_lvl` is regenerated from its recipe
+/// on **every** build — so an edit made in the editor is overwritten by the next
+/// `inf island build`, and the level is not this repository's to commit either.
+/// The whole shape is `--rebind-character`'s: the project is local, the edit is
+/// re-applied by the same command sequence that rebuilt it, and nothing enters
+/// the checkout.
+///
+/// Every `.inf_lvl` in the content root whose document has a player-controlled
+/// pawn gets a `ClothSim` naming `cloth` on that pawn. A level with no pawn is
+/// skipped with an advisory rather than refused: a project holds levels that are
+/// not the showcase.
+///
+/// Returns how many levels were dressed.
+pub fn wear_cloth_in_levels(
+    project: &AssetProject,
+    cloth: AssetId,
+    report: &mut UeImportReport,
+) -> usize {
+    let mut worn = 0usize;
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(project.root())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "inf_lvl"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let mut doc = match crate::scene::serialize::load(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                report.advisories.push(format!(
+                    "{}: not a level this build reads ({e})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let Some(pawn) = inf_ecs::movement::camera_subject(doc.world()) else {
+            report.advisories.push(format!(
+                "{}: no player-controlled pawn, so no garment was put on",
+                path.display()
+            ));
+            continue;
+        };
+        let Some(e) = doc.world().entity_of(pawn) else {
+            continue;
+        };
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::ClothSim {
+                asset: Some(cloth.0),
+                enabled: true,
+                ..Default::default()
+            });
+        doc.world_mut().mark_dirty();
+        doc.world_mut().propagate();
+        // The level's own GUID, read off the sidecar beside it, so the level
+        // keeps its identity: `save` mints a fresh one for `None`, and a level
+        // that changed GUID would orphan every reference the project holds to
+        // it (and give the next scan a content-derived id that churns).
+        let side = PathBuf::from(format!("{}.toml", path.display()));
+        let guid = std::fs::read_to_string(&side)
+            .ok()
+            .and_then(|t| t.parse::<toml::Table>().ok())
+            .and_then(|t| t.get("guid").and_then(|v| v.as_str()).map(str::to_string))
+            .and_then(|g| g.parse::<uuid::Uuid>().ok());
+        if guid.is_none() {
+            report.advisories.push(format!(
+                "{}: no sidecar GUID, so the level would be re-identified — skipped",
+                path.display()
+            ));
+            continue;
+        }
+        match crate::scene::serialize::save(&doc, &path, guid) {
+            Ok(_) => {
+                worn += 1;
+                report.advisories.push(format!(
+                    "{}: the pawn is wearing {cloth}. Local only.",
+                    path.display()
+                ));
+            }
+            Err(e) => report.advisories.push(format!(
+                "{}: the garment was not written ({e})",
+                path.display()
+            )),
+        }
+    }
+    worn
 }
 
 /// **Re-retarget the clips a rebound identity already owns onto its NEW rig**

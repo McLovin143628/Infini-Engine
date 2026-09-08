@@ -13,6 +13,7 @@
 //!            [--rebind-character <key>]  write that body at the starter GUIDs
 //!            [--rebind-character-f <key>] …and that one at the FEMALE starter's
 //!            [--only <key substring>]…    import only meshes whose key matches
+//!            [--wear-cloth <guid>]        put that `.inf_cloth` on every level's pawn
 //!            [--wearable <m|f>:<outfit|hair>:<key>[:<joint>]]…  wear it
 //!            [--dry-run]                 read the manifest, write nothing
 //! ```
@@ -131,6 +132,13 @@ fn run(args: &[String]) -> Result<(), String> {
             "--rebind-character-f" => opts.rebind_character_f = Some(take(&mut i)?),
             "--rebind-graph" => rebind_graphs.push(take(&mut i)?),
             "--only" => opts.only.push(take(&mut i)?),
+            "--wear-cloth" => {
+                let v = take(&mut i)?;
+                opts.wear_cloth =
+                    Some(inf_asset::AssetId(v.parse().map_err(|e| {
+                        format!("--wear-cloth wants a GUID, got {v:?} ({e})")
+                    })?));
+            }
             "--wearable" => {
                 opts.wearables
                     .push(inf_editor_core::assets::ue_import::parse_wearable(&take(
@@ -174,6 +182,25 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("inf-import: REBOUND  {stem} -> {id}");
         }
         return Ok(());
+    }
+    // **The garment verb needs no manifest either** (carried item 137): the
+    // `.inf_cloth` it names is already in the project, exactly as every clip the
+    // graph verb binds is.
+    if manifest.is_none() {
+        if let Some(cloth) = opts.wear_cloth {
+            let project = AssetProject::open(&content).map_err(|e| e.to_string())?;
+            let mut report = inf_editor_core::assets::ue_import::UeImportReport::default();
+            let n = inf_editor_core::assets::ue_import::wear_cloth_in_levels(
+                &project,
+                cloth,
+                &mut report,
+            );
+            for a in &report.advisories {
+                println!("inf-import: ADVISORY {a}");
+            }
+            println!("inf-import: {n} level(s) dressed with the garment {cloth}");
+            return Ok(());
+        }
     }
     let manifest = manifest.ok_or("--manifest is required")?;
     println!("inf-import: manifest {}", manifest.display());
