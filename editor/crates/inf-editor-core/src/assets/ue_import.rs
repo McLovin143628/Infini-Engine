@@ -790,11 +790,22 @@ pub fn import_manifest(
             } else {
                 crate::samples::starter_character_ids()
             };
-            let stem = format!(
-                "{}_{}",
-                if spec.female { "Starter_F" } else { "Starter" },
-                if spec.hair { "Hair_Mesh" } else { "Outfit" }
-            );
+            // **THE COMMITTED FILE NAMES, both of them** — a rebind writes at a
+            // committed GUID *and* at that GUID's committed FILE NAME, or the
+            // asset scan finds TWO files claiming one id. Measured: the first
+            // cut wrote `Starter_Outfit.inf_mat` beside the committed
+            // `Starter_Outfit_Top.inf_mat`, both carrying `…a9`.
+            let prefix = if spec.female { "Starter_F" } else { "Starter" };
+            let stem = if spec.hair {
+                format!("{prefix}_Hair_Mesh")
+            } else {
+                format!("{prefix}_Outfit")
+            };
+            let mat_stem = if spec.hair {
+                format!("{prefix}_Hair")
+            } else {
+                format!("{prefix}_Outfit_Top")
+            };
             // The PACK the mesh came from, so the licence follows the bytes onto
             // the committed GUID the level references.
             let pack = m
@@ -821,7 +832,8 @@ pub fn import_manifest(
                 .map(|(k, mesh, ..)| (k.clone(), *mesh, None));
             let Some((key, mesh, skel)) = skinned.or(rigid) else {
                 report.advisories.push(format!(
-                    "--wearable {}: no imported mesh's key contains it, so                      nothing was worn (did `--only` exclude it?)",
+                    "--wearable {}: no imported mesh's key contains it, so \
+                     nothing was worn (did `--only` exclude it?)",
                     spec.key
                 ));
                 continue;
@@ -833,6 +845,7 @@ pub fn import_manifest(
                 &ids,
                 spec,
                 &stem,
+                &mat_stem,
                 &key,
                 &pack,
                 &mut report,
@@ -2110,6 +2123,27 @@ pub fn parse_wearable(v: &str) -> std::result::Result<WearableRebind, String> {
     })
 }
 
+/// **How far a rebound garment stands off the body it is fitted to**, metres.
+///
+/// # Measured, on the frame it exists for
+///
+/// A MetaHuman's default garment is modelled ON its body, so the two surfaces are
+/// coincident to within a fraction of a millimetre and the depth test picks
+/// whichever won the rounding: the wave's first portrait shows a white tee with
+/// **brown patches of the character's own chest showing through it**. UE hides
+/// the covered body triangles behind a per-garment mask; this engine's combined
+/// body has no such mask and no section to hide it with.
+///
+/// So the garment is pushed out along its own normals, which is the same rule
+/// `crate::groom::wearable_shell` uses to make a shell garment visible at all.
+/// 4 mm is a shirt's own thickness — enough that no rounding can put the body in
+/// front of it, small enough that the silhouette is the garment's own.
+///
+/// It applies to a SKINNED wearable only. A groom's cards already stand off the
+/// scalp by their own geometry, and pushing a hair card out along a normal that
+/// points along the card would shear the hairstyle.
+pub const WEARABLE_LIFT_M: f32 = 0.004;
+
 /// The joint a skinless wearable is bound to when `--wearable` names none.
 ///
 /// `head`, because the skinless wearables this bridge crosses are groom cards
@@ -2162,6 +2196,7 @@ fn rebind_wearable(
     ids: &crate::character::CharacterIds,
     spec: &WearableRebind,
     stem: &str,
+    mat_stem: &str,
     key: &str,
     pack: &str,
     report: &mut UeImportReport,
@@ -2243,6 +2278,26 @@ fn rebind_wearable(
                 };
             }
         }
+        // …and it stands off the body it is fitted to, so the depth test cannot
+        // put the chest in front of the shirt. See `WEARABLE_LIFT_M`.
+        let mut lifted = 0usize;
+        for sub in &mut mesh.submeshes {
+            for v in &mut sub.vertices {
+                let n = v.normal;
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if len > 1e-6 {
+                    for axis in 0..3 {
+                        v.position[axis] += n[axis] / len * WEARABLE_LIFT_M;
+                    }
+                    lifted += 1;
+                }
+            }
+        }
+        report.advisories.push(format!(
+            "{key}: {lifted} vertices lifted {:.0} mm along their normals so the \
+             body cannot z-fight through the garment",
+            WEARABLE_LIFT_M * 1000.0
+        ));
         if remapped == 0 {
             return Err(AssetError::Import(format!(
                 "{key}: not one of the garment's {} influences named a bone the \
@@ -2290,12 +2345,29 @@ fn rebind_wearable(
     // not resolve — the mesh's DOMINANT slot, on `rebind_character`'s own
     // reasoning: taking slot 0 would put a beard's material over a whole outfit
     // the moment a section went missing.
-    if let (Some(want_mat), Some(mat)) = (want_mat, dominant_slot_material(&mesh)) {
+    // The slot table where there is one; otherwise the mesh's own material
+    // DEPENDENCY, which is what a rigid glTF import records instead (a groom's
+    // cards have no slot table at all, and without this the hair drew the
+    // committed default's tint rather than the groom's own).
+    let fallback_mat = dominant_slot_material(&mesh).or_else(|| {
+        project
+            .db()
+            .get(source_mesh)
+            .map(|e| e.sidecar.dependencies.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|d| {
+                project.db().get(*d).map(|e| e.kind()) == Some(inf_asset::AssetKind::Material)
+            })
+    });
+    if let (Some(want_mat), Some(mat)) = (want_mat, fallback_mat) {
         if let Ok(payload) = project.load_payload::<MaterialAsset>(mat) {
             let mdeps = payload.texture_dependencies();
-            let mpath = root.join(format!("{stem}.inf_mat"));
+            let mpath = root.join(format!("{mat_stem}.inf_mat"));
             project.write_asset_at_with_id(&mpath, &payload, want_mat, mdeps, None)?;
-            report.rebinds.push((format!("{stem}.inf_mat"), want_mat));
+            report
+                .rebinds
+                .push((format!("{mat_stem}.inf_mat"), want_mat));
             report.asset_packs.push((want_mat, pack.to_string()));
         }
     }

@@ -663,7 +663,8 @@ fn the_crowds_wardrobe_is_deterministic_and_far_wears_nothing() {
     );
     assert_eq!(
         n, 0,
-        "{n} `Far` agents are still carrying a garment draw — the tier rule is          the crowd's whole clothing budget"
+        "{n} `Far` agents are still carrying a garment draw — the tier rule is \
+         the crowd's whole clothing budget"
     );
 }
 
@@ -1032,7 +1033,8 @@ fn the_combined_bodys_eyes_have_no_section_of_their_own() {
     let mesh: inf_mesh::MeshAsset = inf_asset::decode(&std::fs::read(&p).unwrap()).unwrap();
     if mesh.triangle_count() < 50_000 {
         eprintln!(
-            "SKIP: the body at the committed GUID is {} triangles — this is the              committed low-poly one, not a rebound MetaHuman",
+            "SKIP: the body at the committed GUID is {} triangles — this is the \
+             committed low-poly one, not a rebound MetaHuman",
             mesh.triangle_count()
         );
         return;
@@ -1066,11 +1068,13 @@ fn the_combined_bodys_eyes_have_no_section_of_their_own() {
     );
     assert!(
         n > 500,
-        "only {n} vertices in the eye box — there is no eyeball in this body,          and clause 3's whole refusal rests on there being one"
+        "only {n} vertices in the eye box — there is no eyeball in this body, \
+         and clause 3's whole refusal rests on there being one"
     );
     assert!(
         umax - umin > 0.5,
-        "the eye's uv island spans only {:.4} of u — the combine repacked it          after all, and the refusal's second fact has changed",
+        "the eye's uv island spans only {:.4} of u — the combine repacked it \
+         after all, and the refusal's second fact has changed",
         umax - umin
     );
     // THE REFUSAL ITSELF: the eyes share a section with the skin, so there is no
@@ -1083,7 +1087,9 @@ fn the_combined_bodys_eyes_have_no_section_of_their_own() {
         .unwrap();
     assert!(
         mesh.submeshes[biggest].triangle_count() > 10_000,
-        "the eye's own section is only {} triangles — it HAS a section of its          own now, which is clause 3 become cheap: read the ledger and bind          MI_EyeL_Baked to it",
+        "the eye's own section is only {} triangles — it HAS a section of its \
+         own now, which is clause 3 become cheap: read the ledger and bind \
+         MI_EyeL_Baked to it",
         mesh.submeshes[biggest].triangle_count()
     );
 }
