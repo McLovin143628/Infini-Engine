@@ -741,10 +741,28 @@ pub fn level_archetypes(world: &EcsWorld) -> Vec<CrowdArchetype> {
         if sk.skeleton.is_none() || e.get::<crate::crowd::CrowdAgent>().is_some() {
             continue;
         }
+        // **A WEARABLE IS NOT A PERSON** (wave OUTFIT1), and this is the same
+        // load-bearing exclusion the `CrowdAgent` one above is. A dressed
+        // character's outfit and hair are child entities carrying a rigged
+        // `SkeletalMesh` on the wearer's own rig, so a survey that counted them
+        // would offer the crowd two more "bodies" — and a street in which a
+        // third of the pedestrians are a walking shirt and a third a floating
+        // haircut is what that looks like.
+        if crate::wearable::wearer_of(world, e.id()).is_some() {
+            continue;
+        }
         let sm = e
             .get::<crate::components::AnimStateMachine>()
             .and_then(|a| a.sm);
-        let a = CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm);
+        // …and the clothes it has on come WITH it (wave OUTFIT1). That is the
+        // whole of the crowd's wardrobe: a level offering a dressed man and a
+        // dressed woman offers two archetypes, `level_archetype_for` already
+        // picks between them per agent by that agent's own `Guid`, and the
+        // per-agent `CROWD_LOOKS` multiplier the renderer applies to a body
+        // reaches its clothes too (the projector reads the tier and the look off
+        // the WEARER). Eight looks over two wardrobes is sixteen apparent
+        // outfits, deterministic, with no new randomness and no new content.
+        let a = CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm).dressed_like(world, g.0);
         if found
             .iter()
             .any(|(_, b)| (b.mesh, b.skeleton, b.sm) == (a.mesh, a.skeleton, a.sm))

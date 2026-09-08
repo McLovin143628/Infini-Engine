@@ -190,6 +190,39 @@ pub fn wearables_of(world: &EcsWorld, wearer: Uuid) -> Vec<Uuid> {
     out
 }
 
+/// **One thing a character has on**, as the two facts a wearer's copy needs: what
+/// mesh, and what surface.
+///
+/// Named rather than a tuple because it crosses a crate boundary into the crowd,
+/// where a `(Uuid, Option<Material>)` beside a `(Uuid, Option<Material>)` would
+/// be two ways to say the same thing and one chance to swap them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WornItem {
+    /// The `.inf_mesh` the wearable draws.
+    pub mesh: Uuid,
+    /// The surface it draws with — the fallback tint a section whose own slot
+    /// material did not resolve falls back to. `None` draws the renderer's
+    /// neutral, which is what an undressed wearable would look like.
+    pub material: Option<crate::components::Material>,
+}
+
+/// **What `wearer` has on in `slot`**, or `None` when it has nothing there.
+///
+/// The door a caller that has to COPY a set of clothes goes through — the crowd,
+/// which dresses a thousand agents out of the two wardrobes the level's own
+/// characters are wearing, and cannot walk the world once per agent to find them.
+pub fn worn_item(world: &EcsWorld, wearer: Uuid, slot: &str) -> Option<WornItem> {
+    let e = world.entity_of(wearable_guid(wearer, slot))?;
+    if wearer_of(world, e).map(|x| x.guid) != Some(wearer) {
+        return None;
+    }
+    let w = world.world();
+    Some(WornItem {
+        mesh: w.get::<SkeletalMesh>(e)?.mesh?,
+        material: w.get::<crate::components::Material>(e).copied(),
+    })
+}
+
 /// How many wearables the world holds — the census a perf ledger quotes.
 pub fn worn_count(world: &EcsWorld) -> usize {
     let w = world.world();

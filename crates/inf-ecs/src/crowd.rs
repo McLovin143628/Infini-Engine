@@ -1370,6 +1370,16 @@ pub struct CrowdArchetype {
     pub half_height_m: f64,
     /// Capsule radius, metres.
     pub radius_m: f64,
+    /// **The outfit this body wears** (wave OUTFIT1) — the wearable at the
+    /// source character's `Outfit` slot, copied so a crowd agent can be dressed
+    /// without walking the world to find out what its archetype had on.
+    ///
+    /// `None` for an archetype whose source character is undressed, which is
+    /// every level committed before this wave — so nothing that existed changes.
+    pub outfit: Option<crate::wearable::WornItem>,
+    /// The hair at the source character's `Hair` slot — [`outfit`](Self::outfit)'s
+    /// twin.
+    pub hair: Option<crate::wearable::WornItem>,
 }
 
 impl CrowdArchetype {
@@ -1420,7 +1430,20 @@ impl CrowdArchetype {
             sm,
             half_height_m: 0.6,
             radius_m: 0.3,
+            outfit: None,
+            hair: None,
         }
+    }
+
+    /// The same body **with the clothes `wearer` has on** (wave OUTFIT1).
+    ///
+    /// Builder-shaped rather than a tenth argument to
+    /// [`humanoid`](Self::humanoid): an archetype is a body, and what it has on
+    /// is a second question the callers that do not care never have to answer.
+    pub fn dressed_like(mut self, world: &crate::world::EcsWorld, wearer: Uuid) -> Self {
+        self.outfit = crate::wearable::worn_item(world, wearer, crate::wearable::OUTFIT_SLOT);
+        self.hair = crate::wearable::worn_item(world, wearer, crate::wearable::HAIR_SLOT);
+        self
     }
 }
 
@@ -2291,6 +2314,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         //     its subjects by COMPONENT). One authority for "is this thing
         //     physically here", which is this module's own founding law.
         set_tier_components(world, entity, tier, &rec.archetype);
+        set_tier_wearables(world, guid, tier, &rec.archetype);
 
         // 5. Where the route says it is — for the tiers that have no controller.
         //    A tier that HAS one is moved by `step_character_movement` five
@@ -2501,7 +2525,70 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -
         },
     ));
     set_tier_components(world, e, rec.tier, &a);
+    set_tier_wearables(world, guid, rec.tier, &a);
     e
+}
+
+/// **The clothes a tier draws** (wave OUTFIT1) — [`set_tier_components`]'s twin,
+/// and the same doctrine: a tier owns what it carries, so a thing that is not
+/// drawn as a person has nothing on.
+///
+/// # The tier rule, and it is the whole of the crowd's clothing budget
+///
+/// A wearable costs a draw, a `skinned_meshes` slot and two entities per agent.
+/// The tiers that POSE ([`Full`](CrowdTier::Full) and [`Near`](CrowdTier::Near))
+/// wear their archetype's outfit and hair; [`Far`](CrowdTier::Far) wears
+/// nothing, because a `Far` agent is already drawing one SHARED rest palette for
+/// its whole tier (`resolve_skinned_shared`) and giving it two more draws apiece
+/// would be a thousand characters' worth of geometry for bodies that are a few
+/// pixels tall. Demotion takes the clothes off; promotion puts the same ones back
+/// on, because the identity is derived
+/// ([`inf_ecs::wearable::wearable_guid`](crate::wearable::wearable_guid)) rather
+/// than minted.
+///
+/// Nothing here is persisted and nothing is saved: these entities live for as
+/// long as the agent wearing them, and `despawn` is recursive over `Children`, so
+/// an agent that leaves takes its clothes with it.
+fn set_tier_wearables(world: &mut EcsWorld, guid: Uuid, tier: CrowdTier, a: &CrowdArchetype) {
+    use crate::wearable::{wearable_guid, HAIR_SLOT, OUTFIT_SLOT};
+    let Some(wearer) = world.entity_of(guid) else {
+        return;
+    };
+    for (slot, item) in [(OUTFIT_SLOT, a.outfit), (HAIR_SLOT, a.hair)] {
+        let want = tier.poses().then_some(item).flatten();
+        let wg = wearable_guid(guid, slot);
+        let existing = world.entity_of(wg);
+        match (want, existing) {
+            (None, Some(e)) => {
+                world.despawn(e);
+            }
+            (None, None) => {}
+            (Some(item), existing) => {
+                let e = match existing {
+                    Some(e) => e,
+                    None => {
+                        let e = world.spawn_with_guid(wg, "Crowd Wearable", None);
+                        // A CHILD, so it rides the agent's transform, culls with
+                        // it and leaves with it — and so `inf_ecs::wearable`
+                        // reads it as worn at all.
+                        crate::hierarchy::set_parent(world.world_mut(), e, Some(wearer));
+                        e
+                    }
+                };
+                let mut em = world.world_mut().entity_mut(e);
+                em.insert((
+                    Transform::IDENTITY,
+                    SkeletalMesh {
+                        mesh: Some(item.mesh),
+                        skeleton: a.skeleton,
+                    },
+                ));
+                if let Some(m) = item.material {
+                    em.insert(m);
+                }
+            }
+        }
+    }
 }
 
 /// **The physical half of the tier, as COMPONENTS** (wave NPC1c).
