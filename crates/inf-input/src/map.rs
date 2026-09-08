@@ -511,7 +511,7 @@ pub mod actions {
 /// | **RMB** | `aim` — `RotationMode::Aiming` |
 /// | **wheel** | `weapon_switch` |
 /// | **I** | `inventory` |
-/// | X · Z · F · V | `prone` · `roll` · `dive` · `fly`, the direct controls the table above folds
+/// | X · Z · F · V | `prone` · `roll` · `dive` · `fly`, the direct controls the table above folds |
 /// | **T** | `cover` — take cover behind what is in front, or leave it (wave COV1) |
 ///
 /// Four of those — `reload`, `attack`, `inventory`, `weapon_switch` — are bound

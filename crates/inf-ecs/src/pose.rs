@@ -2370,7 +2370,23 @@ fn apply_cover_lean(
     } else {
         glam::Quat::from_xyzw(0.0, 0.0, s * side.lateral_sign() as f32, c)
     };
-    let mut delta = Pose::rest(&rig.skeleton);
+    // **THE DELTA IS IDENTITY EVERYWHERE BUT THE SPINE** (the COV1 audit).
+    //
+    // `apply_additive` composes ROTATIONS and **adds** TRANSLATIONS:
+    // `t = base.t + delta.t * w`. A delta built from `Pose::rest` carries every
+    // joint's BIND TRANSLATION, so under this layer's `upper_body` mask every
+    // masked bone's local offset was added to itself — the character's whole
+    // upper body stretched for as long as a peek was held. Measured on the
+    // biped template: the head rose **0.669 m** on a lean that should move it
+    // 0.25 m sideways and 4 cm up.
+    //
+    // `apply_breath` and `apply_throw` build their deltas through
+    // `inf_anim::additive_delta`, which is the same rule stated the other way:
+    // an additive pose's translations are DIFFERENCES, and a bind pose's are
+    // not differences from anything.
+    let mut delta = Pose {
+        locals: vec![inf_anim::JointTransform::IDENTITY; rig.skeleton.len()],
+    };
     for j in &spine {
         if let Some(l) = delta.locals.get_mut(*j as usize) {
             l.rotation = q.to_array();
@@ -3302,6 +3318,129 @@ fn crossed_markers(markers: &[inf_anim::AnimMarker], t0: f32, t1: f32, looping: 
 
 #[cfg(test)]
 mod tests {
+
+    /// **THE PEEK'S LEAN MOVES THE HEAD, AND THE TWO SIDES ARE MIRRORS** — the
+    /// arm the COV1 audit found missing.
+    ///
+    /// The wave's island arm asserts the head moves more than 0.25 m out of
+    /// cover, and the CAPSULE alone steps `PEEK_LATERAL_M` (0.45 m) — so the
+    /// pose's contribution was never measured by anything, and zeroing
+    /// `COVER_LEAN_DEG` and `COVER_RISE_DEG` reddened not one test in the
+    /// tree. The wave's own defect #7 (a lean whose sign cancelled half the
+    /// capsule's step) was found by a photograph.
+    ///
+    /// Here the lean is applied to a rest pose with nothing else in it, so what
+    /// it does is all there is to see.
+    #[test]
+    fn the_cover_lean_moves_the_head_and_left_mirrors_right() {
+        let rig = inf_anim::template::build_template(
+            inf_anim::template::BodyPlan::Biped,
+            &inf_anim::template::BodyParams::default(),
+        )
+        .expect("the biped template builds");
+        let head = rig
+            .role_index()
+            .first(inf_anim::BoneRoleKind::Head, inf_anim::BoneSide::Center)
+            .expect("the template has a head");
+        let head_at = |p: &Pose| -> glam::Vec3 {
+            inf_anim::pose::global_transforms(&rig.skeleton, p)[head as usize]
+                .to_scale_rotation_translation()
+                .2
+        };
+        let rest = Pose::rest(&rig.skeleton);
+        let base = head_at(&rest);
+
+        // Tucked in: nothing moves.
+        let mut none = rest.clone();
+        assert!(!apply_cover_lean(
+            &rig,
+            &mut none,
+            crate::cover::CoverSide::Left,
+            0.0
+        ));
+        assert!((head_at(&none) - base).length() < 1.0e-6);
+
+        // Leaning left, and leaning right.
+        let mut left = rest.clone();
+        assert!(apply_cover_lean(
+            &rig,
+            &mut left,
+            crate::cover::CoverSide::Left,
+            1.0
+        ));
+        let mut right = rest.clone();
+        assert!(apply_cover_lean(
+            &rig,
+            &mut right,
+            crate::cover::CoverSide::Right,
+            1.0
+        ));
+        let dl = head_at(&left) - base;
+        let dr = head_at(&right) - base;
+        println!("  cover lean: left {dl:?} right {dr:?}");
+        // **AND THE CHARACTER IS THE SAME SIZE.** An additive pose's
+        // translations are DIFFERENCES; a delta built from the bind pose adds
+        // every masked bone's own offset to itself and the upper body grows.
+        // Measured before this was fixed: the head rose 0.669 m on a lean that
+        // moves it 0.25 m sideways, and the spine was 0.68 m longer for as long
+        // as the peek was held.
+        let pelvis = rig
+            .role_index()
+            .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+            .expect("the template has a pelvis");
+        let pelvis_at = |p: &Pose| -> glam::Vec3 {
+            inf_anim::pose::global_transforms(&rig.skeleton, p)[pelvis as usize]
+                .to_scale_rotation_translation()
+                .2
+        };
+        let spine_rest = (base - pelvis_at(&rest)).length();
+        for (name, p) in [("left", &left), ("right", &right)] {
+            let spine_now = (head_at(p) - pelvis_at(p)).length();
+            println!("  {name}: pelvis-to-head {spine_now:.4} m against {spine_rest:.4} m at rest");
+            assert!(
+                (spine_now - spine_rest).abs() < 0.01,
+                "the {name} lean changed the pelvis-to-head distance from {spine_rest:.4} m to \
+                 {spine_now:.4} m -- the additive delta is adding bind translations"
+            );
+        }
+        assert!(
+            dl.length() > 0.05,
+            "a full peek moved the head {:.4} m — the lean is a constant nobody reads",
+            dl.length()
+        );
+        // Mirrors: the lateral components are opposite and comparable.
+        assert!(
+            dl.x * dr.x < 0.0,
+            "left and right lean the same way ({:.4} and {:.4})",
+            dl.x,
+            dr.x
+        );
+        assert!(
+            (dl.x.abs() - dr.x.abs()).abs() < 0.02,
+            "the two sides lean by different amounts ({:.4} and {:.4})",
+            dl.x,
+            dr.x
+        );
+        // …and an `Over` peek RISES and opens rather than stepping sideways.
+        let mut over = rest.clone();
+        assert!(apply_cover_lean(
+            &rig,
+            &mut over,
+            crate::cover::CoverSide::Over,
+            1.0
+        ));
+        let d_over = head_at(&over) - base;
+        println!("  the over-the-top peek moved the head {d_over:?}");
+        assert!(
+            d_over.x.abs() < dl.x.abs() * 0.5,
+            "the over-the-top peek stepped sideways {:.4} m",
+            d_over.x
+        );
+        assert!(
+            d_over.length() > 0.01,
+            "the over-the-top peek did nothing at all"
+        );
+    }
     use super::*;
     use inf_anim::{
         AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, SmState,

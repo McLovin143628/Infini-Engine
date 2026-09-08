@@ -876,6 +876,17 @@ fn a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it() {
             }
             placed += 1;
             let here = hero_pos(&sim, hero);
+            if placed == 1 {
+                // **The photographable station**, printed so the demo loop's
+                // kerb leg has a placement and a heading rather than "wherever
+                // the tour left the hero" -- which is what put a picture of a
+                // character TAKING cover in a file called `kerb-refused`.
+                println!(
+                    "  a kerb station: stand at ({:.2}, {:.2}, {:.2}) facing {deg:.0} deg; \
+                     the slab is at ({:.2}, {:.2}, {:.2})",
+                    here.x, here.y, here.z, at.x, at.y, at.z
+                );
+            }
             let radius = hero_radius(&sim, hero);
             let halfh = cm.half_height_for(MovementMode::Grounded);
             let feet = here - glam::DVec3::Y * (halfh + radius);
@@ -905,6 +916,23 @@ fn a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it() {
                 here.z,
                 p.explain(sim.world()),
             );
+            if placed == 1 {
+                let before = hero_cm(&sim, hero).mode;
+                take_cover(&mut sim, hero, 60);
+                let after = hero_cm(&sim, hero);
+                println!(
+                    "  the press at that kerb station: {before:?} -> {:?}, class {:?}, the \
+                     probe said {}",
+                    after.mode,
+                    after.runtime.cover.class,
+                    p.explain(sim.world())
+                );
+                assert_ne!(
+                    after.mode,
+                    MovementMode::Cover,
+                    "the press at a kerb station took cover"
+                );
+            }
             if p.label.family != inf_physics::d3::ColliderFamily::Kerb {
                 continue;
             }
@@ -1085,9 +1113,18 @@ fn the_hero_slides_to_a_corner_and_leans_its_head_past_it() {
         "aiming at a corner did not lean: side {:?}",
         cm.runtime.cover.side
     );
+    // **FURTHER than the capsule went** (the COV1 audit). 0.25 m was under
+    // `PEEK_LATERAL_M`, so the capsule's own step satisfied it on its own and
+    // the POSE contributed nothing the arm could see: zeroing `COVER_LEAN_DEG`
+    // and `COVER_RISE_DEG` reddens nothing in this tree, and the wave's own
+    // defect #7 -- a lean whose sign cancelled half the step, measured at
+    // 0.1966 m against 0.7400 m after -- was found by a FRAME rather than by
+    // this. A lean that opposes the step now fails here.
     assert!(
-        moved > 0.25,
-        "the head moved {moved:.4} m — the peek is a state name and not a displacement"
+        moved > inf_ecs::cover::PEEK_LATERAL_M,
+        "the head moved {moved:.4} m and the capsule alone steps {:.4} m — the pose is \
+         adding nothing, or it is leaning against the step",
+        inf_ecs::cover::PEEK_LATERAL_M
     );
     // …and it comes back.
     go(&mut sim, 60, &[], &[]);
