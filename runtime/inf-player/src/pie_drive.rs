@@ -711,10 +711,31 @@ impl HeroLog {
             Some(inf_ecs::camera::CameraLayer::Override) => "override",
             Some(inf_ecs::camera::CameraLayer::Gameplay) | None => "gameplay",
         };
+        // **THE COVER COLUMNS** (wave COV1), APPENDED for the same reason the
+        // camera's four were: every column index a script already reads keeps
+        // its meaning. Column 5 already carries the MODE, so `Cover` shows
+        // there; these are the three things the mode cannot say — which class
+        // of surface, which way the body is leaning out of it, and how far. A
+        // character not in cover writes `-`, `-` and `0.000`, which is what a
+        // predicate over them reads as "not in cover".
+        let cover = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)
+            })
+            .map(|cm| cm.runtime.cover)
+            .unwrap_or_default();
+        let (cover_class, cover_side) = if cover.active {
+            (format!("{:?}", cover.class), format!("{:?}", cover.side))
+        } else {
+            ("-".to_string(), "-".to_string())
+        };
         let line = match &probe.hero {
             Some(h) => format!(
                 "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},\
-                 {:.4},{:.4},{:.2},{}\n",
+                 {:.4},{:.4},{:.2},{},{},{},{:.3}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -742,10 +763,13 @@ impl HeroLog {
                 cam.arm_m,
                 cam.subject_fade,
                 cam.whisker_steer_deg,
-                holder
+                holder,
+                cover_class,
+                cover_side,
+                if cover.active { cover.peek } else { 0.0 }
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

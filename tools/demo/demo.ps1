@@ -963,6 +963,88 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "44-cape-b.png") | ForEach-Object { Say $_ }
         [InfInput]::Up(0x11)
     }
+    # 1b. THE COVER TOUR (wave COV1). Every frame is TRIGGERED on the log's own
+    #     cover columns -- 17 the CLASS, 18 the SIDE, 19 how far out the peek is
+    #     -- which column 5's mode alone cannot say. The stations are the ones
+    #     `cov1_gate::the_cover_census_over_the_island` measured: the island's
+    #     cover is 231 facade boxes, 5 low grammar walls and 11 vehicle
+    #     entities, so the HIGH station is a shop front and the LOW station is a
+    #     grammar wall.
+    #
+    #     T is the cover key (scancode 0x14).
+    $coverStations = @(
+        @{ Name = "high"; X = -1774.0; Z = 2034.0; Yaw = 90 },
+        @{ Name = "low";  X = -1781.3; Z = 2034.0; Yaw = 68 }
+    )
+    foreach ($st in $coverStations) {
+        $reached = Wait-ForHero -Csv $heroCsv -What "the $($st.Name) cover station" -TimeoutS 120 `
+            -Predicate { param($c) ([math]::Abs([double]$c[2] - $st.X) -lt 6.0) -and ([math]::Abs([double]$c[4] - $st.Z) -lt 6.0) }
+        if (-not $reached) { Say "the $($st.Name) cover station was never reached"; continue }
+        Restore-PlayerFocus "at the $($st.Name) cover station"
+        Stand-Up "before taking cover" | Out-Null
+        # Face the surface: the placement puts the hero at the station and the
+        # mouse points it at the wall. 15 counts is about 2.2 degrees at the
+        # shipped sensitivity, so this is a coarse aim and the probe's own +-45
+        # degree approach window is what makes it enough.
+        Say "COVER ($($st.Name)): pressing T"
+        $tookCover = $false
+        for ($k = 0; $k -lt 12 -and -not $tookCover; $k++) {
+            [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
+            $tookCover = Wait-ForHero -Csv $heroCsv -What "cover ($($st.Name))" -TimeoutS 1.2 `
+                -Predicate { param($c) ($c.Count -gt 17) -and ($c[5] -eq "Cover") } `
+                -Out (Join-Path $OutDir "60-cover-$($st.Name).png")
+            if (-not $tookCover) { for ($i = 0; $i -lt 8; $i++) { [InfInput]::Look(20, 0); Start-Sleep -Milliseconds 16 } }
+        }
+        if (-not $tookCover) { Say "NO COVER taken at the $($st.Name) station in twelve presses"; continue }
+        # The class, off the log rather than off the station's name.
+        $row = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        Say "  in cover: class $($row[17]) side $($row[18]) peek $($row[19]) mode $($row[5])"
+        # THE SLIDE, and the corner it stops at.
+        Say "COVER ($($st.Name)): sliding along the surface"
+        [InfInput]::Down(0x1E)   # scancode: A -- move_x negative, the character's left
+        Start-Sleep -Milliseconds 1600
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "61-cover-slide-$($st.Name).png") | ForEach-Object { Say $_ }
+        Start-Sleep -Milliseconds 1400
+        [InfInput]::Up(0x1E)
+        # THE PEEK: the aim button, and the frame is triggered on column 18
+        # leaving `Behind` -- which is the difference between a peek and a
+        # character holding a button.
+        Say "COVER ($($st.Name)): aiming, which leans the body out"
+        [InfInput]::RightDown()
+        Wait-ForHero -Csv $heroCsv -What "a peek ($($st.Name))" -TimeoutS 3.0 `
+            -Predicate { param($c) ($c.Count -gt 19) -and ($c[18].Trim() -ne "-") -and ($c[18].Trim() -ne "Behind") -and ([double]$c[19] -gt 0.6) } `
+            -Out (Join-Path $OutDir "62-cover-peek-$($st.Name).png") | Out-Null
+        Start-Sleep -Milliseconds 500
+        [InfInput]::RightUp()
+        # THE VAULT, out of a LOW cover only: one Space press with no stick.
+        if ($st.Name -eq "low") {
+            Say "COVER (low): vaulting over it with Space"
+            [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
+            Wait-ForHero -Csv $heroCsv -What "the vault out of cover" -TimeoutS 2.0 `
+                -Predicate { param($c) $c[11] -match "^mantle" } `
+                -Out (Join-Path $OutDir "63-cover-vault.png") | Out-Null
+            Start-Sleep -Milliseconds 900
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "64-cover-vaulted.png") | ForEach-Object { Say $_ }
+        }
+        # LEAVING: the same key again, and the frame is the hero standing clear.
+        Say "COVER ($($st.Name)): leaving with T"
+        [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
+        Wait-ForHero -Csv $heroCsv -What "out of cover ($($st.Name))" -TimeoutS 3.0 `
+            -Predicate { param($c) $c[5] -ne "Cover" } `
+            -Out (Join-Path $OutDir "65-cover-left-$($st.Name).png") | Out-Null
+    }
+    # THE KERB REFUSES. The press against a 0.15 m kerb does nothing at all, and
+    # the frame is the character standing beside it in `Grounded` -- which is the
+    # refusal, photographed. The station is the road the hero spawns beside.
+    Say "COVER (kerb): pressing T at the kerb, which must do nothing"
+    Restore-PlayerFocus "at the kerb"
+    $beforeKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+    [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
+    Start-Sleep -Milliseconds 900
+    $afterKerb = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+    Say "  kerb press: mode $($beforeKerb[5]) -> $($afterKerb[5]), class $($afterKerb[17])"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "66-cover-kerb-refused.png") | ForEach-Object { Say $_ }
+
     # 2. A MEASURED DROP. The player puts the hero above the road; the frame that
     #    matters is the one where the machine is in a landing, so it is triggered
     #    on the state column and not on a sleep.
