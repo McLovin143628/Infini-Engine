@@ -208,7 +208,7 @@ pub fn commit_vmesh(
     payload: &[u8],
 ) -> Result<AssetId> {
     write_payload_atomically(&plan.out_path, payload)?;
-    let import = derived_import_table(plan.mesh, plan.mesh_hash);
+    let import = derived_import_table(project, plan.mesh, plan.mesh_hash);
     project.register_written_asset(
         plan.out_path.clone(),
         AssetKind::MeshletMesh,
@@ -414,7 +414,24 @@ pub fn build_payload(
 }
 
 /// The sidecar `import` table an editor-derived vmesh carries.
-fn derived_import_table(mesh_id: AssetId, mesh_hash: ContentHash) -> toml::Table {
+///
+/// **And the source mesh's LICENCE with it** (wave OUTFIT1, carried item 110).
+/// The import's licence sweep stamps by destination folder at the end of a run
+/// and a `.inf_vmesh` is derived long afterwards, by a queue that opens when the
+/// project does — so every derived meshlet copy of a licensed body, garment or
+/// groom sat on disk with no licence row beside it, which is exactly the state
+/// carried item 96 was about, one asset kind over. Measured on the island
+/// project: the hero's `Starter_Body.inf_vmesh` carried none.
+///
+/// Copied rather than re-derived: a derivation of licensed content is licensed
+/// content, and the source's row is the row — there is nothing here that could
+/// know better. A source with no row leaves the table exactly as it was, so
+/// nothing this repository commits gains a licence it does not have.
+fn derived_import_table(
+    project: &AssetProject,
+    mesh_id: AssetId,
+    mesh_hash: ContentHash,
+) -> toml::Table {
     let mut t = toml::Table::new();
     t.insert(
         SOURCE_HASH_KEY.to_string(),
@@ -424,6 +441,17 @@ fn derived_import_table(mesh_id: AssetId, mesh_hash: ContentHash) -> toml::Table
         SOURCE_MESH_KEY.to_string(),
         toml::Value::String(mesh_id.to_string()),
     );
+    if let Some(src) = project
+        .db()
+        .get(mesh_id)
+        .and_then(|e| e.sidecar.import.clone())
+    {
+        for key in super::ue_import::LICENCE_KEYS {
+            if let Some(v) = src.get(key) {
+                t.insert(key.to_string(), v.clone());
+            }
+        }
+    }
     t
 }
 

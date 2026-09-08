@@ -12,6 +12,8 @@
 //!            [--retarget-to <objpath>]   the rig every clip is retargeted onto
 //!            [--rebind-character <key>]  write that body at the starter GUIDs
 //!            [--rebind-character-f <key>] …and that one at the FEMALE starter's
+//!            [--only <key substring>]…    import only meshes whose key matches
+//!            [--wearable <m|f>:<outfit|hair>:<key>[:<joint>]]…  wear it
 //!            [--dry-run]                 read the manifest, write nothing
 //! ```
 //!
@@ -63,7 +65,8 @@ fn print_help() {
              inf-import --manifest <manifest.json> --into <project-dir>\n             \
              [--pack <name>]… [--max-texture <n>] [--dest <sub>]\n             \
              [--bind <Stem>=<material-key>]… [--no-meshes]\n             \
-             [--character-lods <n>] [--retarget-to <objpath>] [--dry-run]\n  \
+             [--character-lods <n>] [--retarget-to <objpath>] [--dry-run]\n             \
+             [--only <key>]… [--wearable <m|f>:<outfit|hair>:<key>[:<joint>]]…\n  \
              inf-import --into <project-dir> --rebind-graph <m|f>\n  \
              inf-import garment --mesh <a.inf_mesh> --out <a.inf_cloth>\n             \
              [--skeleton <r.inf_skel>] [--pin-top <fraction>] [--body-radius <m>]\n\n\
@@ -127,6 +130,13 @@ fn run(args: &[String]) -> Result<(), String> {
             "--rebind-character" => opts.rebind_character = Some(take(&mut i)?),
             "--rebind-character-f" => opts.rebind_character_f = Some(take(&mut i)?),
             "--rebind-graph" => rebind_graphs.push(take(&mut i)?),
+            "--only" => opts.only.push(take(&mut i)?),
+            "--wearable" => {
+                opts.wearables
+                    .push(inf_editor_core::assets::ue_import::parse_wearable(&take(
+                        &mut i,
+                    )?)?)
+            }
             "--dry-run" => dry = true,
             other => return Err(format!("unknown option {other:?}")),
         }

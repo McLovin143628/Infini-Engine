@@ -135,6 +135,22 @@ pub struct UeImportOptions {
     /// the two MetaHumans a MALE and a FEMALE default rather than one body
     /// twice: two keys, two identities, one import.
     pub rebind_character_f: Option<String>,
+    /// **Import only the meshes whose manifest key contains one of these**
+    /// (wave OUTFIT1). Empty imports everything, which is every caller before it.
+    ///
+    /// # Why a manifest needs a narrower door than a pack filter
+    ///
+    /// One `export.py` run writes what the PACK holds, and the MetaHumans pack
+    /// holds the bodies, the faces, the combined full-bodies, the outfits and
+    /// the groom cards. A wave that wants the clothes does not want to re-import
+    /// four bodies and 450 MB of skin textures on top of the ones the island
+    /// already has — and carried item 109 says what a re-import costs when a
+    /// material NAME differs: 18 `.inf_mesh` became 36 and 224 sidecars became
+    /// 362 in one measured run.
+    pub only: Vec<String>,
+    /// **Wearables to write at the committed characters' clothes GUIDs** (wave
+    /// OUTFIT1) — `rebind_character`'s rule for an outfit and a head of hair.
+    pub wearables: Vec<WearableRebind>,
 }
 
 impl Default for UeImportOptions {
@@ -154,6 +170,8 @@ impl Default for UeImportOptions {
             retarget_to: None,
             rebind_character: None,
             rebind_character_f: None,
+            only: Vec::new(),
+            wearables: Vec::new(),
         }
     }
 }
@@ -480,6 +498,10 @@ pub fn import_manifest(
     std::fs::create_dir_all(&dest)?;
 
     let wanted = |pack: &str| opts.packs.is_empty() || opts.packs.iter().any(|p| p == pack);
+    // **The narrower door** (wave OUTFIT1, `--only`): a manifest holds what its
+    // PACK holds, and a wave that wants the clothes does not want the four
+    // bodies beside them re-imported. Empty is every caller before this option.
+    let only = |key: &str| opts.only.is_empty() || opts.only.iter().any(|k| key.contains(k));
     let mut report = UeImportReport::default();
     for p in &m.packs {
         if wanted(&p.name) {
@@ -535,7 +557,7 @@ pub fn import_manifest(
     // ── 2. meshes, through the one importer door ─────────────────────────────
     if opts.meshes {
         for mesh in &m.meshes {
-            if !wanted(&mesh.pack) {
+            if !wanted(&mesh.pack) || !only(&mesh.key) {
                 continue;
             }
             // LOD 0 is the asset. The coarser rungs are RECORDED and not stored:
@@ -606,7 +628,7 @@ pub fn import_manifest(
         BTreeMap::new();
     if opts.meshes {
         for sk in &m.skeletal_meshes {
-            if !wanted(&sk.pack) {
+            if !wanted(&sk.pack) || !only(&sk.key) {
                 continue;
             }
             let mut rungs: Vec<(u32, AssetId, usize)> = Vec::new();
@@ -746,6 +768,72 @@ pub fn import_manifest(
                 .skeletal
                 .push((sk.key.clone(), lod0, skel_id, rungs.len(), tris0, joints));
         }
+        // ── THE WEARABLES (wave OUTFIT1) ───────────────────────────────────
+        //
+        // After both mesh loops and after `rebind_character`, because a garment
+        // is re-pointed onto the rig at `CharacterIds::skeleton` and that rig is
+        // whatever the BODY rebind in this same run just wrote there. Running
+        // this first would re-point a MetaHuman's clothes onto the low-poly
+        // starter rig the level had a moment ago.
+        //
+        // A garment is looked up in `report.skeletal` (it is a skeletal mesh
+        // with its own rig) and a groom's cards in `report.meshes` (a static
+        // mesh with none), which is exactly the difference `rebind_wearable`
+        // then acts on.
+        for spec in &opts.wearables {
+            let ids = if spec.female {
+                crate::samples::starter_character_f_ids()
+            } else {
+                crate::samples::starter_character_ids()
+            };
+            let stem = format!(
+                "{}_{}",
+                if spec.female { "Starter_F" } else { "Starter" },
+                if spec.hair { "Hair_Mesh" } else { "Outfit" }
+            );
+            // The PACK the mesh came from, so the licence follows the bytes onto
+            // the committed GUID the level references.
+            let pack = m
+                .skeletal_meshes
+                .iter()
+                .find(|s| s.key.contains(&spec.key))
+                .map(|s| s.pack.clone())
+                .or_else(|| {
+                    m.meshes
+                        .iter()
+                        .find(|s| s.key.contains(&spec.key))
+                        .map(|s| s.pack.clone())
+                })
+                .unwrap_or_default();
+            let skinned = report
+                .skeletal
+                .iter()
+                .find(|(k, ..)| k.contains(&spec.key))
+                .map(|(k, mesh, skel, ..)| (k.clone(), *mesh, *skel));
+            let rigid = report
+                .meshes
+                .iter()
+                .find(|(k, ..)| k.contains(&spec.key))
+                .map(|(k, mesh, ..)| (k.clone(), *mesh, None));
+            let Some((key, mesh, skel)) = skinned.or(rigid) else {
+                report.advisories.push(format!(
+                    "--wearable {}: no imported mesh's key contains it, so                      nothing was worn (did `--only` exclude it?)",
+                    spec.key
+                ));
+                continue;
+            };
+            rebind_wearable(
+                project,
+                mesh,
+                skel,
+                &ids,
+                spec,
+                &stem,
+                &key,
+                &pack,
+                &mut report,
+            )?;
+        }
     }
 
     // -- 2c. CLIPS, retargeted onto the rig they will be played on ------------
@@ -757,7 +845,7 @@ pub fn import_manifest(
     // its clip is retargeted BY NAME onto the skeleton the body imported, and
     // one `.inf_anim` is written with a dependency edge onto that skeleton.
     for c in &m.clips {
-        if !wanted(&c.pack) {
+        if !wanted(&c.pack) || !only(&c.key) {
             continue;
         }
         let Some(file) = c.file.as_ref() else {
@@ -1174,6 +1262,11 @@ pub const LICENCE_KEY: &str = "licence";
 pub const LICENCE_SHIP_KEY: &str = "licence_may_ship";
 /// Which pack the asset came from — see [`LICENCE_KEY`].
 pub const LICENCE_PACK_KEY: &str = "licence_pack";
+
+/// The three keys a licence row is written as, together — so a reader that has
+/// to CARRY one (a derivation, a rebind) copies all three rather than the one it
+/// happened to remember.
+pub const LICENCE_KEYS: [&str; 3] = [LICENCE_KEY, LICENCE_SHIP_KEY, LICENCE_PACK_KEY];
 
 /// **Write the pack's licence position into every asset this run produced.**
 ///
@@ -1868,6 +1961,17 @@ fn rebind_character(
     report
         .rebinds
         .push((format!("{}.inf_mesh", stems.1), want_mesh));
+    // **THE LICENCE FOLLOWS THE BYTES** (wave OUTFIT1). `sweep_licences` reads
+    // the DESTINATION folder and `stamp_licences` reads `asset_packs`, and a
+    // rebind writes neither: it writes at a committed GUID in the project ROOT.
+    // So the only assets in the project that actually SHIP -- the ones the
+    // level references -- were the ones with no licence row on disk. Measured on
+    // the island: `Starter_Body.inf_mesh`, `Starter.inf_skel`, `Starter_Skin.inf_mat`
+    // and every derived `.inf_vmesh` beside them carried nothing, while 125
+    // sidecars in `Content/UE/...` that nothing references carried the row.
+    for id in [want_skel, want_mesh, want_mat] {
+        report.asset_packs.push((id, sk.pack.clone()));
+    }
 
     // The skin an instance wears — the material a reader that draws no sections
     // puts over the whole body, so it is the mesh's DOMINANT slot rather than
@@ -1923,6 +2027,282 @@ fn rebind_character(
         report,
     );
     Ok(())
+}
+
+/// **A wearable to write at a committed character's clothes GUID** (wave
+/// OUTFIT1) — one entry of [`UeImportOptions::wearables`].
+///
+/// The three facts a rebind cannot derive: WHICH imported asset (a substring of
+/// its manifest key), WHICH committed identity wears it (`female`), and WHICH
+/// SLOT it goes in — because an outfit and a head of hair land at two different
+/// GUIDs and one of them is bound rigidly to a joint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WearableRebind {
+    /// A substring of the manifest key of the mesh to import as this wearable.
+    pub key: String,
+    /// `false` = the male starter's clothes GUIDs, `true` = the female's.
+    pub female: bool,
+    /// `true` = the HAIR slot (`CharacterIds::hair`), `false` = the OUTFIT slot.
+    pub hair: bool,
+    /// The joint a mesh with **no skin stream** is bound rigidly to.
+    ///
+    /// A groom's cards are a `StaticMesh` in Unreal and arrive here with
+    /// positions and no influences at all. Binding every vertex to the head at
+    /// weight 1 is not an approximation of what a card set does — it is exactly
+    /// what a card set does, and it is what makes the mesh a WEARABLE
+    /// (`inf_ecs::wearable` reads the skeleton GUID, and a mesh with no skin
+    /// carries no joint indices to read).
+    pub joint: String,
+}
+
+/// Parse one `--wearable` value: `<m|f>:<outfit|hair>:<key substring>[:<joint>]`.
+///
+/// A refusal is a message naming what was wrong, because this is a command-line
+/// argument and the operator is the only reader.
+pub fn parse_wearable(v: &str) -> std::result::Result<WearableRebind, String> {
+    let parts: Vec<&str> = v.splitn(4, ':').collect();
+    if parts.len() < 3 {
+        return Err(format!(
+            "--wearable wants <m|f>:<outfit|hair>:<key>[:<joint>], got {v:?}"
+        ));
+    }
+    let female = match parts[0] {
+        "m" | "male" => false,
+        "f" | "female" => true,
+        other => {
+            return Err(format!(
+                "--wearable's first field is `m` or `f`, got {other:?}"
+            ))
+        }
+    };
+    let hair = match parts[1] {
+        "outfit" | "clothes" => false,
+        "hair" | "groom" => true,
+        other => {
+            return Err(format!(
+                "--wearable's second field is `outfit` or `hair`, got {other:?}"
+            ))
+        }
+    };
+    if parts[2].trim().is_empty() {
+        return Err("--wearable's key is empty, which matches every asset".into());
+    }
+    Ok(WearableRebind {
+        key: parts[2].to_string(),
+        female,
+        hair,
+        joint: parts
+            .get(3)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_WEARABLE_JOINT.to_string()),
+    })
+}
+
+/// The joint a skinless wearable is bound to when `--wearable` names none.
+///
+/// `head`, because the skinless wearables this bridge crosses are groom cards
+/// and every one of them is hair on a head. UE's own bone name, which both rigs
+/// in this tree use.
+pub const DEFAULT_WEARABLE_JOINT: &str = "head";
+
+/// **Write an imported mesh at a committed character's OUTFIT or HAIR GUID**
+/// (wave OUTFIT1) — `rebind_character`'s rule, one asset kind over.
+///
+/// # Why a wearable needs a rebind and not just an import
+///
+/// The same reason a body did. The island's hero wears the clothes at
+/// `CharacterIds::outfit` / `::hair`, the level that names those GUIDs is
+/// committed and byte-locked, and a MetaHuman's clothes are licensed content that
+/// may never enter this repository. So the imported garment is written **at the
+/// committed identity**, into the local project only, and the level does not know
+/// which one it got.
+///
+/// # And why it needs a JOINT REMAP that a body did not
+///
+/// A body rebind moves the mesh *and its rig* together, so the mesh's joint
+/// indices stay addressed to the skeleton beside them. A garment cannot: it has
+/// to be posed by the skeleton the BODY is already using, and two skeletal meshes
+/// exported from one Unreal skeleton do not necessarily arrive with the same
+/// joint ORDER — a glTF skin lists the joints that mesh uses. So every influence
+/// is re-pointed **by name** onto the target rig, exactly as
+/// `inf_anim::retarget::RetargetMap::shared_names` re-points a clip's tracks, and
+/// an influence whose bone the target does not have is dropped and the rest
+/// renormalized.
+///
+/// A mesh with **no skin stream at all** (a groom's cards, which are a
+/// `StaticMesh` in Unreal) is bound rigidly to `joint` at weight 1. That is not
+/// an approximation: a hair card set rides the head bone and nothing else.
+///
+/// # Refusals
+///
+/// * a target identity with no `outfit`/`hair` GUID — nothing to write at;
+/// * a target rig that does not resolve — a garment addressed to a rig that is
+///   not there would draw at the origin in its bind pose;
+/// * a rigid bind whose named joint the target rig does not have;
+/// * **a remap that reached no joint at all** — every influence dropped means the
+///   two rigs share no bone names, and a garment silently collapsed onto joint 0
+///   is a shirt in a heap at the character's feet.
+#[allow(clippy::too_many_arguments)]
+fn rebind_wearable(
+    project: &mut AssetProject,
+    source_mesh: AssetId,
+    source_skeleton: Option<AssetId>,
+    ids: &crate::character::CharacterIds,
+    spec: &WearableRebind,
+    stem: &str,
+    key: &str,
+    pack: &str,
+    report: &mut UeImportReport,
+) -> Result<()> {
+    let (want_mesh, want_mat) = if spec.hair {
+        (ids.hair, ids.hair_material)
+    } else {
+        (ids.outfit, ids.outfit_top)
+    };
+    let (Some(want_mesh), Some(want_skel)) = (want_mesh, ids.skeleton) else {
+        return Ok(());
+    };
+    let target: inf_anim::SkeletonAsset = project.load_payload(want_skel).map_err(|e| {
+        AssetError::Import(format!(
+            "{key}: refusing to rebind a wearable whose target rig does not \
+             resolve ({e}) — it would draw at the origin in its bind pose"
+        ))
+    })?;
+    let mut mesh: inf_mesh::MeshAsset = project.load_payload(source_mesh)?;
+    let skinned = mesh.submeshes.iter().any(|s| s.is_skinned());
+    let mut remapped = 0usize;
+    let mut dropped = 0usize;
+    if skinned {
+        let source: inf_anim::SkeletonAsset = match source_skeleton {
+            Some(id) => project.load_payload(id)?,
+            None => {
+                return Err(AssetError::Import(format!(
+                    "{key}: the mesh carries skin weights and no skeleton was \
+                     imported with it, so its joint indices cannot be re-pointed"
+                )))
+            }
+        };
+        // source index → target index, BY NAME. `None` is a bone the target rig
+        // does not have, which is what a garment exported with helper joints on
+        // it produces.
+        let map: Vec<Option<u16>> = source
+            .skeleton
+            .joints()
+            .iter()
+            .map(|j| target.skeleton.index_of(&j.name))
+            .collect();
+        for sub in &mut mesh.submeshes {
+            for k in &mut sub.skin {
+                let mut joints = [0u16; 4];
+                let mut weights = [0.0f32; 4];
+                for i in 0..4 {
+                    match map.get(k.joints[i] as usize).copied().flatten() {
+                        Some(t) => {
+                            joints[i] = t;
+                            weights[i] = k.weights[i];
+                            remapped += 1;
+                        }
+                        None => dropped += 1,
+                    }
+                }
+                let sum: f32 = weights.iter().sum();
+                *k = if sum > 1e-6 {
+                    inf_mesh::VertexSkin { joints, weights }.normalized()
+                } else {
+                    // Every influence dropped for THIS vertex: it belongs to a
+                    // bone the target does not have. Pin it to the root rather
+                    // than to joint 0's weight-0 default, which decodes as a
+                    // vertex at the origin.
+                    inf_mesh::VertexSkin {
+                        joints: [0; 4],
+                        weights: [1.0, 0.0, 0.0, 0.0],
+                    }
+                };
+            }
+        }
+        if remapped == 0 {
+            return Err(AssetError::Import(format!(
+                "{key}: not one of the garment's {} influences named a bone the \
+                 target rig has — the two rigs share no names, and the garment \
+                 would collapse onto the root",
+                dropped
+            )));
+        }
+    } else {
+        let Some(joint) = target.skeleton.index_of(&spec.joint) else {
+            return Err(AssetError::Import(format!(
+                "{key}: the target rig has no joint `{}` to bind this wearable \
+                 to (it has {} joints)",
+                spec.joint,
+                target.skeleton.len()
+            )));
+        };
+        for sub in &mut mesh.submeshes {
+            sub.skin = vec![
+                inf_mesh::VertexSkin {
+                    joints: [joint, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                };
+                sub.vertices.len()
+            ];
+            remapped += sub.vertices.len();
+        }
+    }
+
+    let root = project.root().to_path_buf();
+    let mut deps = vec![want_skel];
+    for id in mesh.material_slot_assets.iter().flatten() {
+        if !deps.contains(id) {
+            deps.push(*id);
+        }
+    }
+    let path = root.join(format!("{stem}.inf_mesh"));
+    project.write_asset_at_with_id(&path, &mesh, want_mesh, deps, None)?;
+    report.rebinds.push((format!("{stem}.inf_mesh"), want_mesh));
+    // The licence follows the bytes here for `rebind_character`'s own reason:
+    // this is the asset the level references and the one that ships.
+    report.asset_packs.push((want_mesh, pack.to_string()));
+
+    // The fallback tint an instance wears when a section's own slot material does
+    // not resolve — the mesh's DOMINANT slot, on `rebind_character`'s own
+    // reasoning: taking slot 0 would put a beard's material over a whole outfit
+    // the moment a section went missing.
+    if let (Some(want_mat), Some(mat)) = (want_mat, dominant_slot_material(&mesh)) {
+        if let Ok(payload) = project.load_payload::<MaterialAsset>(mat) {
+            let mdeps = payload.texture_dependencies();
+            let mpath = root.join(format!("{stem}.inf_mat"));
+            project.write_asset_at_with_id(&mpath, &payload, want_mat, mdeps, None)?;
+            report.rebinds.push((format!("{stem}.inf_mat"), want_mat));
+            report.asset_packs.push((want_mat, pack.to_string()));
+        }
+    }
+    report.advisories.push(format!(
+        "{key}: REBOUND as the {} of the {} starter character ({} triangles, {} \
+         influences re-pointed by name, {dropped} dropped). Local only.",
+        if spec.hair { "HAIR" } else { "OUTFIT" },
+        if spec.female { "female" } else { "male" },
+        mesh.triangle_count(),
+        remapped
+    ));
+    Ok(())
+}
+
+/// The material slot that owns the most triangles of `mesh`, or `None` for a
+/// mesh whose slots name nothing.
+///
+/// `rebind_character`'s own rule, lifted so both callers read the same sentence:
+/// slot 0 is not the dominant slot on a UDIM MetaHuman, and a fallback tint taken
+/// from the wrong one is a head texture over a whole person.
+fn dominant_slot_material(mesh: &inf_mesh::MeshAsset) -> Option<AssetId> {
+    let mut tris: BTreeMap<u32, usize> = BTreeMap::new();
+    for sub in &mesh.submeshes {
+        *tris.entry(sub.material_slot.unwrap_or(0)).or_default() += sub.triangle_count();
+    }
+    let slot = tris
+        .into_iter()
+        .max_by_key(|(slot, n)| (*n, std::cmp::Reverse(*slot)))
+        .map(|(slot, _)| slot as usize)?;
+    mesh.material_slot_assets.get(slot).copied().flatten()
 }
 
 /// **Re-retarget the clips a rebound identity already owns onto its NEW rig**
