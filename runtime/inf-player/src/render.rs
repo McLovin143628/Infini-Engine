@@ -791,6 +791,16 @@ pub fn project_scene_full(
     let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
     let mut skinned_slots: std::collections::HashMap<(Uuid, Uuid), usize> =
         std::collections::HashMap::new();
+    // **ONE PALETTE PER WEARER** (wave OUTFIT1). A wearable resolves the
+    // same (skeleton, pose) pair its wearer does, so `skinning_matrices`
+    // builds two byte-identical `Vec<Mat4>` for one character. The skinned
+    // pass's palette atlas deduplicates by POINTER, so handing the second
+    // draw the first's `Arc` is the difference between one upload of a
+    // 342-joint palette and two — and it makes "the wearable shares its
+    // wearer's palette" a pointer fact rather than a comparison.
+    // MIRROR: the other host's local of the same name and the same purpose.
+    let mut wearer_palettes: std::collections::HashMap<Uuid, std::sync::Arc<Vec<glam::Mat4>>> =
+        std::collections::HashMap::new();
 
     let world = sim.world();
     // The sky authority first (P17.1): it writes `scene.sun` / `scene.sky` and,
@@ -1164,16 +1174,32 @@ pub fn project_scene_full(
                 //    taken from the affine, because this host interpolates actor
                 //    positions and the editor does not — the drop is the same
                 //    number either way. (MIRROR of the other host's call.)
-                let affine = inf_ecs::pose::model_to_world(world, entity);
-                let drop = affine.translation
-                    - w.get::<GlobalTransform>(entity)
-                        .map(|g| g.translation())
-                        .unwrap_or(affine.translation);
-                let translation = translation + drop;
+                // ── WEARABLES (wave OUTFIT1) ── an outfit, a head of hair cards
+                //    or a pair of eyes is a CHILD entity on the wearer's own rig,
+                //    and it draws with the wearer's pose, position, tier and
+                //    fade and with its OWN mesh, material, sections and pick id.
+                //    The rule is Ring 0's (`inf_ecs::wearable`) so the two
+                //    projectors cannot disagree about who is wearing what, and it
+                //    hands back `(entity, guid)` unchanged for everything that is
+                //    not a wearable — which is every character and every prop
+                //    this tree had before the wave.
+                let (pose_entity, pose_guid) = inf_ecs::wearable::pose_source(world, entity, guid);
+                let affine = inf_ecs::pose::model_to_world(world, pose_entity);
+                let base = w
+                    .get::<GlobalTransform>(pose_entity)
+                    .map(|g| g.translation())
+                    .unwrap_or(affine.translation);
+                let drop = affine.translation - base;
+                // The WEARER's interpolated position, not this entity's: a child
+                // has none of its own, and taking its raw global would draw a
+                // coat one fixed step behind the body inside it.
+                let translation = sim.interp_translation(pose_guid, alpha).unwrap_or(base) + drop;
                 let (scale, rot, _t) = affine.to_scale_rotation_translation();
                 let id = next_id;
                 next_id += 1;
-                let player = w.get::<inf_ecs::components::AnimPlayer>(entity).copied();
+                let player = w
+                    .get::<inf_ecs::components::AnimPlayer>(pose_entity)
+                    .copied();
                 // **The machine, for the preview idle** (wave CHAR1a.2). Read the same
                 // way the player is, and handed to the same door: with no sim pose and no
                 // `AnimPlayer`, a character that carries a state machine is drawn in that
@@ -1181,14 +1207,14 @@ pub fn project_scene_full(
                 // that is every authored character in the level, which is why the viewport
                 // used to be full of T-poses.
                 let machine = w
-                    .get::<inf_ecs::components::AnimStateMachine>(entity)
+                    .get::<inf_ecs::components::AnimStateMachine>(pose_entity)
                     .copied();
                 // P24.1: the pose the SIM evaluated for this entity this fixed
                 // step, if its `AnimStateMachine` published one. Read here rather
                 // than derived here — the machine's pose is deterministic sim
                 // state, folded into the trace, and a projector that re-evaluated
                 // it would be a second opinion about what the character is doing.
-                let posed = inf_ecs::pose::evaluated_pose(world, guid);
+                let posed = inf_ecs::pose::evaluated_pose(world, pose_guid);
                 // PBR params come from the entity's `Material` exactly as they do
                 // on the rigid path; an unmaterialed character gets the renderer's
                 // neutral. Read BEFORE the match, so the placeholder branch below
@@ -1230,7 +1256,7 @@ pub fn project_scene_full(
                 // of them render-side and none of them sim state — so nothing
                 // here can move a trace byte, and both hosts derive the same
                 // answers from the same `Guid`.
-                let agent = w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied();
+                let agent = w.get::<inf_ecs::crowd::CrowdAgent>(pose_entity).copied();
                 let look = agent.map(|a| inf_ecs::crowd::agent_look_in(world, a.guid));
                 let color = look.map_or(color, |l| l.over(color));
                 let body = look.map_or(1.0, |l| l.build);
@@ -1254,6 +1280,15 @@ pub fn project_scene_full(
                         // memcpy nor a re-upload (P18.3). **This is the sharing
                         // convention the projector has to follow**, and it is the
                         // reason `skinned_meshes` is a `Vec<Arc<_>>` at all.
+                        // **The wearer's palette, shared by pointer** with every
+                        // wearable on it (wave OUTFIT1). The first of a wearer's
+                        // draws to arrive publishes it and the rest borrow it, so
+                        // a dressed character uploads ONE palette instead of one
+                        // per garment. MIRROR of the other host's four lines.
+                        let worn_palette = wearer_palettes
+                            .entry(pose_guid)
+                            .or_insert_with(|| draw.palette.clone())
+                            .clone();
                         let slot = *skinned_slots.entry(draw.key).or_insert_with(|| {
                             scene.skinned_meshes.push(draw.mesh);
                             scene.skinned_meshes.len() - 1
@@ -1289,7 +1324,7 @@ pub fn project_scene_full(
                         // back on every body whose slots name one — which is
                         // every MetaHuman in this tree.
                         let fade = match sim.camera_subject() {
-                            Some(s) if s == guid => sim.camera().subject_fade as f32,
+                            Some(s) if s == pose_guid => sim.camera().subject_fade as f32,
                             _ => 1.0,
                         };
                         let inst = SkinnedInstance {
@@ -1305,7 +1340,7 @@ pub fn project_scene_full(
                             mesh: slot,
                             blend,
                             cutoff,
-                            palette: draw.palette,
+                            palette: worn_palette,
                             shadow,
                             sections: Vec::new(),
                         };

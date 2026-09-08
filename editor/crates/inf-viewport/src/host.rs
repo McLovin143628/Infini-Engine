@@ -1812,6 +1812,15 @@ impl EngineHost {
         // name and the same purpose.
         let mut vgeom_seen: BTreeSet<u128> = BTreeSet::new();
         let mut skinned_slots: HashMap<(Uuid, Uuid), usize> = HashMap::new();
+        // **ONE PALETTE PER WEARER** (wave OUTFIT1). A wearable resolves the
+        // same (skeleton, pose) pair its wearer does, so `skinning_matrices`
+        // builds two byte-identical `Vec<Mat4>` for one character. The skinned
+        // pass's palette atlas deduplicates by POINTER, so handing the second
+        // draw the first's `Arc` is the difference between one upload of a
+        // 342-joint palette and two — and it makes "the wearable shares its
+        // wearer's palette" a pointer fact rather than a comparison.
+        // MIRROR: the other host's local of the same name and the same purpose.
+        let mut wearer_palettes: HashMap<Uuid, std::sync::Arc<Vec<glam::Mat4>>> = HashMap::new();
         // Every render asset this projection actually referenced (meshes,
         // skeletons, clips) — the input to the end-of-projection `retain_only`
         // audit (P16.4b's lesson in mesh form).
@@ -2433,13 +2442,26 @@ impl EngineHost {
                     //    difference (`inf_ecs::pose::model_to_world`,
                     //    identity-composed for everything that is not a
                     //    character). (MIRROR of the other host's call.)
-                    let affine = inf_ecs::pose::model_to_world(world, entity);
+                    // ── WEARABLES (wave OUTFIT1) ── an outfit, a head of hair cards
+                    //    or a pair of eyes is a CHILD entity on the wearer's own
+                    //    rig, and it draws with the wearer's pose, position, tier
+                    //    and fade and with its OWN mesh, material, sections and
+                    //    pick id. The rule is Ring 0's (`inf_ecs::wearable`) so
+                    //    the two projectors cannot disagree about who is wearing
+                    //    what, and it hands back `(entity, guid)` unchanged for
+                    //    everything that is not a wearable — which is every
+                    //    character and every prop this tree had before the wave.
+                    let (pose_entity, pose_guid) =
+                        inf_ecs::wearable::pose_source(world, entity, guid);
+                    let affine = inf_ecs::pose::model_to_world(world, pose_entity);
                     let (scale, rot, translation) = affine.to_scale_rotation_translation();
                     let id = next_id;
                     next_id += 1;
                     live_render_assets.extend(sm.mesh);
                     live_render_assets.extend(sm.skeleton);
-                    let player = w.get::<inf_ecs::components::AnimPlayer>(entity).copied();
+                    let player = w
+                        .get::<inf_ecs::components::AnimPlayer>(pose_entity)
+                        .copied();
                     // **The machine, for the preview idle** (wave CHAR1a.2). Read the same
                     // way the player is, and handed to the same door: with no sim pose and no
                     // `AnimPlayer`, a character that carries a state machine is drawn in that
@@ -2447,7 +2469,7 @@ impl EngineHost {
                     // that is every authored character in the level, which is why the viewport
                     // used to be full of T-poses.
                     let machine = w
-                        .get::<inf_ecs::components::AnimStateMachine>(entity)
+                        .get::<inf_ecs::components::AnimStateMachine>(pose_entity)
                         .copied();
                     live_render_assets.extend(player.and_then(|p| p.clip));
                     live_render_assets.extend(machine.and_then(|m| m.sm));
@@ -2456,7 +2478,7 @@ impl EngineHost {
                     // than derived here — the machine's pose is deterministic sim
                     // state, folded into the trace, and a projector that re-evaluated
                     // it would be a second opinion about what the character is doing.
-                    let posed = inf_ecs::pose::evaluated_pose(world, guid);
+                    let posed = inf_ecs::pose::evaluated_pose(world, pose_guid);
                     // PBR params come from the entity's `Material` exactly as they do
                     // on the rigid path; an unmaterialed character gets the renderer's
                     // neutral. Read BEFORE the match, so the placeholder branch below
@@ -2498,7 +2520,7 @@ impl EngineHost {
                     // of them render-side and none of them sim state — so nothing
                     // here can move a trace byte, and both hosts derive the same
                     // answers from the same `Guid`.
-                    let agent = w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied();
+                    let agent = w.get::<inf_ecs::crowd::CrowdAgent>(pose_entity).copied();
                     let look = agent.map(|a| inf_ecs::crowd::agent_look_in(world, a.guid));
                     let color = look.map_or(color, |l| l.over(color));
                     let body = look.map_or(1.0, |l| l.build);
@@ -2525,6 +2547,15 @@ impl EngineHost {
                             // copy here, and the pass keys its GPU upload on that
                             // pointer, so re-projecting an unchanged character
                             // costs neither a memcpy nor a re-upload (P18.3).
+                            // **The wearer's palette, shared by pointer** with every
+                            // wearable on it (wave OUTFIT1). The first of a wearer's
+                            // draws to arrive publishes it and the rest borrow it, so
+                            // a dressed character uploads ONE palette instead of one
+                            // per garment. MIRROR of the other host's four lines.
+                            let worn_palette = wearer_palettes
+                                .entry(pose_guid)
+                                .or_insert_with(|| draw.palette.clone())
+                                .clone();
                             let slot = *skinned_slots.entry(draw.key).or_insert_with(|| {
                                 self.scene.skinned_meshes.push(draw.mesh);
                                 self.scene.skinned_meshes.len() - 1
@@ -2550,7 +2581,7 @@ impl EngineHost {
                             // would be taken straight back on every body whose
                             // slots name one.
                             let fade = match self.near_fade {
-                                Some((s, f)) if s == guid => f,
+                                Some((s, f)) if s == pose_guid => f,
                                 _ => 1.0,
                             };
                             let inst = inf_render::SkinnedInstance {
@@ -2566,7 +2597,7 @@ impl EngineHost {
                                 mesh: slot,
                                 blend,
                                 cutoff,
-                                palette: draw.palette,
+                                palette: worn_palette,
                                 shadow,
                                 sections: Vec::new(),
                             };

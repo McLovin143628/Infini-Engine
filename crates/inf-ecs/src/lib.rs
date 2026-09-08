@@ -80,6 +80,9 @@ pub mod venue;
 // doorway's pattern. The one place a player can change what they look like, and
 // therefore the one place a wanted level can be walked away from.
 pub mod wardrobe;
+// OUTFIT1: WEARABLES — the derived rule that lets a character wear a second
+// skinned mesh (an outfit, hair cards, eyes) on its own rig, with no schema.
+pub mod wearable;
 // WPN1: who saw what. A seed for the EMS arc's dispatcher, written now because
 // the facts it needs live for one fixed step and are then gone.
 pub mod witness;

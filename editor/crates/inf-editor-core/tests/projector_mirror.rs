@@ -1519,11 +1519,20 @@ fn the_skinned_instance_projection_matches_field_for_field() {
 #[test]
 fn both_projectors_draw_skeletal_meshes_the_same_way() {
     // Fragments that must appear in BOTH projectors, verbatim.
-    const SHARED: [&str; 18] = [
+    const SHARED: [&str; 19] = [
         // The branch is the `MeshRef`-absent arm: an entity is a rigid draw or a
         // skinned one, never both.
         "w.get::<MeshRef>(entity).is_none()",
         "w.get::<SkeletalMesh>(entity).copied()",
+        // **WEARABLES** (wave OUTFIT1). An outfit or a head of hair cards is a
+        // CHILD entity on the wearer's own rig, and every pin below this line
+        // reads `pose_entity`/`pose_guid` rather than `entity`/`guid` BECAUSE of
+        // it: a host that dropped this call would draw a garment in its own bind
+        // pose, at its own un-interpolated position, while the other host drew it
+        // on the moving body. The rule is Ring 0's so there is exactly one
+        // answer to "who is wearing this", and it hands back `(entity, guid)`
+        // unchanged for everything that is not a wearable.
+        "inf_ecs::wearable::pose_source(world, entity, guid)",
         // **Character space** (P29.6). A rig's origin is its feet and a
         // character's entity transform is its capsule centre, so both hosts draw
         // the pose through the ONE door that knows the difference. A host that
@@ -1531,21 +1540,21 @@ fn both_projectors_draw_skeletal_meshes_the_same_way() {
         // capsule above the floor its own feet are locked to — in one host only,
         // which is exactly the PIE-versus-shipping divergence this file exists
         // for.
-        "inf_ecs::pose::model_to_world(world, entity)",
+        "inf_ecs::pose::model_to_world(world, pose_entity)",
         // The pose inputs, and the shared store call that applies the pose rule.
         // `evaluated_pose` is the load-bearing one (P24.1): a host that stopped
         // reading the sim's pose would draw every machine-driven character at
         // rest while the other host animated it — the divergence a player finds
         // and no pixel comparison in this repo would.
-        "w.get::<inf_ecs::components::AnimPlayer>(entity).copied()",
-        "inf_ecs::pose::evaluated_pose(world, guid)",
+        "w.get::<inf_ecs::components::AnimPlayer>(pose_entity).copied()",
+        "inf_ecs::pose::evaluated_pose(world, pose_guid)",
         "resolve_skinned(&sm, player.as_ref(), posed, machine.as_ref())",
         // **The preview idle reaches BOTH hosts** (wave CHAR1a.2). A host
         // that stopped reading the machine would draw every unplayed
         // character in its bind pose while the other drew an idle — the
         // exact editor-versus-shipping split this file exists to stop, and
         // the one CHAR1a photographed from the editor side.
-        "w.get::<inf_ecs::components::AnimStateMachine>(entity).copied()",
+        "w.get::<inf_ecs::components::AnimStateMachine>(pose_entity).copied()",
         // **The tier reaches the renderer** (wave NPC1b). Four fragments, because
         // four separate things follow from `CrowdAgent` and each of them is a
         // divergence if one host drops it: an agent off the pose path resolves the
@@ -1563,7 +1572,7 @@ fn both_projectors_draw_skeletal_meshes_the_same_way() {
         // wearing when they committed the crime while the other host drew the
         // one they changed into — a PIE-vs-shipping divergence in the exact
         // pixels the wanted system is played through.
-        "w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied()",
+        "w.get::<inf_ecs::crowd::CrowdAgent>(pose_entity).copied()",
         "agent.map(|a| inf_ecs::crowd::agent_look_in(world, a.guid))",
         "Some(a) if !a.tier.poses() =>",
         "resolve_skinned_shared(&sm, machine.as_ref())",
