@@ -1262,6 +1262,77 @@ fn a_projectile_hit_is_witnessed_exactly_as_a_hitscan_hit_is() {
     );
 }
 
+/// **A PROJECTILE KILL IS FILED AGAINST THE SHOOTER** — and this is the arm the
+/// one above could not be.
+///
+/// The count-of-acts comparison is **vacuous for the far half**, measured: a
+/// projectile's `Shot` act is raised by the MUZZLE record on the firing step, so
+/// deleting the impact from `report.hits` entirely leaves the count at one and
+/// the arm green. What only the impact can produce is the `Killed` act's
+/// **actor**: `step_witness` finds the killer with `hits.iter().find(|h|
+/// h.target == Some(victim))`, so a round that killed somebody without
+/// appearing in `report.hits` files the murder against `Uuid::nil()` — a crime
+/// scene on nobody's file, which is exactly the defect the EMS3 audit fixed for
+/// hitscans.
+///
+/// **Mutation → red:** not pushing the impact into `report.hits` in
+/// `step_rounds` (which the arm above survives) makes the killer nil here.
+#[test]
+fn a_kill_at_range_names_the_shooter_and_not_nobody() {
+    let mut def = test_rifle();
+    def.gravity_scale = 0.0;
+    // Enough to end a 2 000 J body in one round.
+    def.damage_j = 2500.0;
+    let mut r = Range::new(defs_with("rifle", def));
+    let at = 120.0;
+    stand(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, at), false);
+    {
+        let a = inf_ecs::crowd::CrowdArchetype::humanoid(None, None, None);
+        let mut records = std::collections::BTreeMap::new();
+        records.insert(
+            shooter_guid(9),
+            inf_ecs::crowd::CrowdRecord::standing(a, DVec3::new(4.0, 0.0, at * 0.5)),
+        );
+        assert_eq!(inf_ecs::crowd::add_agents(&mut r.world, records), 0);
+    }
+    r.world.mark_dirty();
+    r.world.reindex_guids();
+    r.world.propagate();
+    r.bridge.sync_from_world(&r.world);
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, 0.0);
+    r.hold_trigger(HERO, true);
+    let first = r.step();
+    r.hold_trigger(HERO, false);
+    assert_eq!(first.rounds.spawned, 1, "the shot did not become a round");
+    let mut kills = 0u32;
+    for _ in 0..60 {
+        kills += r.step().kills;
+    }
+    assert_eq!(kills, 1, "the round at {at} m did not stop the body");
+    let acts = inf_ecs::witness::witnessed(&r.world);
+    let killed: Vec<&inf_ecs::witness::WitnessedAct> = acts
+        .iter()
+        .filter(|a| a.kind == inf_ecs::witness::ActKind::Killed)
+        .collect();
+    println!(
+        "the log holds {} act(s); the killing(s): {:?}",
+        acts.len(),
+        killed
+            .iter()
+            .map(|a| (a.actor, a.observers.len()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(killed.len(), 1, "the killing was not recorded");
+    assert_eq!(
+        killed[0].actor, HERO,
+        "a murder at {at} m was filed against {} instead of the shooter — the \
+         projectile's impact never reached `report.hits`, so nothing in this \
+         step could say who did it",
+        killed[0].actor
+    );
+}
+
 /// **A car shot at still spends nothing** — VEH3c's, said out loud rather than
 /// discovered.
 ///
