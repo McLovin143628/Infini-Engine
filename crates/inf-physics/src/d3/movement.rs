@@ -1363,7 +1363,21 @@ fn step_one(
     );
     cm.gait = desired_gait;
     cm.runtime.actual_gait = actual;
-    let settings = model::settings_for(&cm, cm.mode, allowed, mapped, cm.runtime.aim_yaw_rate_dps);
+    // **What the character is carrying makes it slower** (wave WPN2a) — the
+    // research doc's eighth metric, read here because this is where the one
+    // production call to `settings_for` is, and applied THERE because that is
+    // the one place a target speed is resolved. `1.0` for an unarmed character
+    // and for every weapon authored before that wave, so every committed
+    // movement trace is byte-identical.
+    let equip_scale = inf_ecs::weapon::equipped_move_speed_scale(world, guid);
+    let settings = model::settings_for(
+        &cm,
+        cm.mode,
+        allowed,
+        mapped,
+        cm.runtime.aim_yaw_rate_dps,
+        equip_scale,
+    );
 
     // ── 7. Integrate. The wish direction is the planar intent rotated OUT of the
     //    aim frame into world XZ.

@@ -18,6 +18,7 @@ pub mod anim_bridge;
 pub mod attach;
 // IB-2a: which static structural colliders a fixed step may hold. Sim-side by
 // construction — its anchors are `StreamingSource` entities, never a camera.
+pub mod ballistics;
 pub mod band;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).

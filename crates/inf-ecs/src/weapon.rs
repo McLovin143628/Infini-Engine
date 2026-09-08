@@ -64,6 +64,45 @@ pub const MAX_RANGE_M: f64 = 20_000.0;
 /// [`WeaponDef::muzzle_forward_m`]. A barrel longer than this is a vehicle.
 pub const MAX_MUZZLE_FORWARD_M: f64 = 3.0;
 
+/// **The steepest quadratic drag a round may carry**, 1/m — the bound on
+/// [`WeaponDef::drag_k`] (wave WPN2a).
+///
+/// One hundredth. The doc's rifle figure is 0.0003–0.0004 /m and this is
+/// twenty-five times the top of it, which is a bound on hostile content rather
+/// than a design limit — `MAX_MUZZLE_FORWARD_M`'s own rule. At 0.01 /m a 900 m/s
+/// round loses 8 100 m/s² and stops inside a metre, which is as far as a
+/// coefficient can be pushed before the flight is not a flight.
+pub const MAX_DRAG_K: f64 = 0.01;
+
+/// **The largest head bonus a weapon may carry** — the bound on
+/// [`WeaponDef::headshot_mult`] (wave WPN2a).
+///
+/// Ten. The steepest ratio in the doc's own tables is the Barrett M82's
+/// 250/110 = 2.27; ten is four times that and is, again, a bound on content.
+/// The **floor** is 1.0: a head is never worth less than a chest, and a
+/// multiplier below one would make a headshot a way to survive.
+pub const MAX_HEADSHOT_MULT: f64 = 10.0;
+
+/// **The slowest a weapon may make its carrier**, as a multiplier on the
+/// character's own speeds — the floor on [`WeaponDef::move_speed_mult`].
+///
+/// A quarter. The doc's slowest row is the Javelin at 0.72; a quarter is a
+/// bound on hostile content, and zero is deliberately not it — a weapon that
+/// pinned a character to the floor would look like a broken control rather than
+/// a heavy gun.
+pub const MIN_MOVE_SPEED_MULT: f64 = 0.25;
+
+/// **What one hit point of the research doc's tables is worth**, joules.
+///
+/// Twenty. [`DEFAULT_VITALITY_J`] is 2 000 J and the doc's tables assume a
+/// **100 HP** body, so the conversion is forced rather than chosen — and the
+/// arithmetic checks out against a row that was authored before anybody thought
+/// about it: island wave I6's pistol is 600 J, and the doc's Glock 17 is 30 HP.
+/// `docs/memos/p22-strength.md` §1's refusal of a per-weapon conversion table
+/// stands: this is **one** number for the whole registry, applied once when the
+/// rows are authored, and nothing in the engine reads a hit point.
+pub const JOULES_PER_HIT_POINT: f64 = DEFAULT_VITALITY_J / 100.0;
+
 /// How far a melee weapon may reach, metres — the bound on a melee
 /// [`WeaponDef::range_m`].
 ///
@@ -157,6 +196,89 @@ pub struct WeaponDef {
     /// refused by the same rule and a player who is told a thing is out of reach
     /// cannot hit it.
     pub melee_arc_deg: f64,
+
+    // ── the hybrid (wave WPN2a) ─────────────────────────────────────────────
+    //
+    // Eleven fields, and every one of them is free: this type carries no
+    // `Serialize`, rides no wire and is built from TOML by `from_toml_table`, so
+    // the whole of wave WPN2a costs **zero schema** — scene v27 and
+    // `ScenePayload` 13 are untouched. Every default below is chosen so a
+    // `WeaponDef` that names none of them behaves exactly as it did at island
+    // wave I6, which is what keeps the committed catalogues byte-identical.
+    /// **How far the instant ray reaches before a round takes over**, metres —
+    /// the hybrid's switch, and it applies to [`ShotKind::Projectile`] only.
+    ///
+    /// The research doc's own thresholds, by class: pistols ~30 m ("pure
+    /// hitscan" is a pistol's whole envelope), SMGs 15 m, assault rifles 25 m,
+    /// marksman rifles 15 m, snipers ≤ 10 m, shotguns 10 m, launchers **0** (a
+    /// rocket is a body from the muzzle). Inside it, a shot is resolved by the
+    /// one cast `resolve_shot` has always made; beyond it,
+    /// `inf_physics::d3::gameplay::step_rounds` flies a
+    /// [`crate::ballistics::Round`].
+    ///
+    /// A [`ShotKind::Hitscan`] ignores this completely, which is why every
+    /// committed row keeps its behaviour: all three of them are hitscans.
+    pub hitscan_threshold_m: f64,
+    /// **The whole of the quadratic drag, as one coefficient**, units **1/m**.
+    ///
+    /// The doc writes drag as `−½ρv²C_dA·v̂` and then collapses it in its own
+    /// Rust to one `drag_coefficient` multiplying `speed_sq`; so does this.
+    /// `drag_k · v²` must come out in m/s², and `(1/m)·(m/s)² = m/s²`, so the
+    /// unit is one over metres. The doc's rifle figure is 0.0003–0.0004 /m.
+    /// Four separate fields would be four numbers an author cannot check
+    /// against anything and one they can.
+    pub drag_k: f64,
+    /// **How much of [`crate::ballistics::PROJECTILE_GRAVITY_MPS2`] a round
+    /// feels**, dimensionless. `1.0` is 9.81 m/s²; `0.0` is a flat trajectory.
+    pub gravity_scale: f64,
+    /// **What a hit on the head is worth**, as a multiplier on whatever the
+    /// damage curve gave. `1.0` — no head bonus at all — is the default, which
+    /// is the I6 behaviour.
+    pub headshot_mult: f64,
+    /// **The distance inside which a shot does full damage**, metres. See
+    /// [`crate::ballistics::damage_curve_j`].
+    pub effective_range_m: f64,
+    /// **The distance at which a shot is down to
+    /// [`min_damage_frac`](Self::min_damage_frac)**, metres.
+    ///
+    /// `0.0` — the default — means **no curve at all**: `max_range_m >
+    /// effective_range_m` is the test, and a weapon that fails it does the same
+    /// damage at every distance, which is what shipped before this wave.
+    pub max_range_m: f64,
+    /// **What is left of the damage at [`max_range_m`](Self::max_range_m)**, as
+    /// a fraction of [`damage_j`](Self::damage_j). The doc's M4A1 row is
+    /// 18 of 30, i.e. 0.6.
+    pub min_damage_frac: f64,
+    /// **The doc's 1–10 recoil stat.** Nothing in this wave reads it: it is
+    /// what `RecoilProfile::from_recoil_stat` takes in **wave WPN2b**, and it
+    /// is carried in the registry now so the 85 rows are authored once.
+    pub recoil_intensity: f64,
+    /// **How long aiming down the sights takes**, milliseconds. **Wave WPN2b**
+    /// drives the camera's `[aiming]` blend with it; nothing reads it here.
+    pub ads_time_ms: f64,
+    /// **How fast a character moves while this is equipped**, as a multiplier on
+    /// its own walk/run/sprint speeds. `1.0` is unarmed.
+    ///
+    /// **This one has a consumer in this wave.**
+    /// [`crate::movement::settings_for`] multiplies the resolved target speed by
+    /// it, through [`equipped_move_speed_scale`], so a sniper really is slower
+    /// than an empty pair of hands and `wpn2a_gate` measures the difference on
+    /// the island's own hero.
+    pub move_speed_mult: f64,
+    /// **Metres past which this weapon's report is silent** — the per-weapon
+    /// [`REPORT_MAX_M`].
+    ///
+    /// The doc's `[audio]` sub-table asks for per-weapon audio, and this is the
+    /// one field of it that does not contradict a standing ruling: P22 §5
+    /// refuses an impact-*clip* slot on a weapon ("a shot into concrete and a
+    /// shot into glass should differ by what was hit rather than by what
+    /// fired"), and `report_source`'s doc extends that to the report's clip. A
+    /// report's *range* is not a clip — it is, in [`REPORT_MAX_M`]'s own words,
+    /// "the one emitter whose range is the gameplay", and a .50 BMG and a
+    /// suppressed .380 empty different numbers of streets. It travels on
+    /// `WeaponHit` for `WeaponHit::loud`'s reason: what made the noise is a
+    /// property of the shot, not of whatever is in the hand when it lands.
+    pub report_max_m: f64,
 }
 
 impl Default for WeaponDef {
@@ -178,6 +300,22 @@ impl Default for WeaponDef {
             muzzle_forward_m: 0.45,
             // A rifle does not swing; this is what a melee definition would use.
             melee_arc_deg: FIST_ARC_DEG,
+            // WPN2a. Every one of these is chosen so a definition that names
+            // none of them is the I6 weapon it was: the threshold is unread by
+            // a hitscan, the curve is FLAT because `max_range_m` is not greater
+            // than `effective_range_m`, the head bonus is 1.0, the move scale is
+            // 1.0 and the report reaches exactly `REPORT_MAX_M`.
+            hitscan_threshold_m: 25.0,
+            drag_k: 0.0003,
+            gravity_scale: 1.0,
+            headshot_mult: 1.0,
+            effective_range_m: 0.0,
+            max_range_m: 0.0,
+            min_damage_frac: 1.0,
+            recoil_intensity: 3.0,
+            ads_time_ms: 200.0,
+            move_speed_mult: 1.0,
+            report_max_m: REPORT_MAX_M,
         }
     }
 }
@@ -267,6 +405,22 @@ pub fn fist_def() -> WeaponDef {
         spread_seed: 0,
         muzzle_forward_m: 0.0,
         melee_arc_deg: FIST_ARC_DEG,
+        // WPN2a: a fist is a `Melee`, so it never mints a round, never asks the
+        // curve for anything but its base and never lets go of a report. Every
+        // one of these is the default and is spelled out rather than
+        // `..Default::default()`-ed, because that spread would silently give a
+        // punch whatever a later wave changes a rifle's default to.
+        hitscan_threshold_m: 0.0,
+        drag_k: 0.0,
+        gravity_scale: 1.0,
+        headshot_mult: 1.0,
+        effective_range_m: 0.0,
+        max_range_m: 0.0,
+        min_damage_frac: 1.0,
+        recoil_intensity: 0.0,
+        ads_time_ms: 0.0,
+        move_speed_mult: 1.0,
+        report_max_m: REPORT_MAX_M,
     }
 }
 
@@ -293,6 +447,18 @@ impl WeaponDef {
             "muzzle_speed_mps" => self.muzzle_speed_mps = value.clamp(1.0, 10_000.0),
             "muzzle_forward_m" => self.muzzle_forward_m = value.clamp(0.0, MAX_MUZZLE_FORWARD_M),
             "melee_arc_deg" => self.melee_arc_deg = value.clamp(0.0, 360.0),
+            // WPN2a. Clamped rather than refused, exactly as the ten above are.
+            "hitscan_threshold_m" => self.hitscan_threshold_m = value.clamp(0.0, MAX_RANGE_M),
+            "drag_k" => self.drag_k = value.clamp(0.0, MAX_DRAG_K),
+            "gravity_scale" => self.gravity_scale = value.clamp(0.0, 100.0),
+            "headshot_mult" => self.headshot_mult = value.clamp(1.0, MAX_HEADSHOT_MULT),
+            "effective_range_m" => self.effective_range_m = value.clamp(0.0, MAX_RANGE_M),
+            "max_range_m" => self.max_range_m = value.clamp(0.0, MAX_RANGE_M),
+            "min_damage_frac" => self.min_damage_frac = value.clamp(0.0, 1.0),
+            "recoil_intensity" => self.recoil_intensity = value.clamp(0.0, 10.0),
+            "ads_time_ms" => self.ads_time_ms = value.clamp(0.0, 5000.0),
+            "move_speed_mult" => self.move_speed_mult = value.clamp(MIN_MOVE_SPEED_MULT, 2.0),
+            "report_max_m" => self.report_max_m = value.clamp(1.0, MAX_RANGE_M),
             // Booleans and the kind come across the same door as numbers,
             // because the door is one `(name, f64)` pair and a second door for
             // three flags would be a second thing to keep in step.
@@ -324,20 +490,92 @@ impl WeaponDef {
     /// rather than restate it.
     pub fn names() -> &'static [&'static str] {
         &[
+            "ads_time_ms",
             "automatic",
             "damage_j",
+            "drag_k",
+            "effective_range_m",
+            "gravity_scale",
+            "headshot_mult",
+            "hitscan_threshold_m",
             "magazine",
+            "max_range_m",
             "melee",
             "melee_arc_deg",
+            "min_damage_frac",
+            "move_speed_mult",
             "muzzle_forward_m",
             "muzzle_speed_mps",
             "projectile",
             "range_m",
+            "recoil_intensity",
             "reload_s",
+            "report_max_m",
             "reserve",
             "rounds_per_minute",
             "spread_deg",
         ]
+    }
+
+    /// **What one shot is worth at a distance**, joules — the one door both
+    /// halves of the hybrid spend through (wave WPN2a).
+    ///
+    /// The instant ray asks it with the cast's own `toi`; a round asks it with
+    /// [`crate::ballistics::Round::travelled_m`]. There is exactly one damage
+    /// computation in this engine and this is it — `apply_hit` then spends the
+    /// answer through [`damage_entity`], which is still the one door joules
+    /// leave by.
+    ///
+    /// # The joule scale, stated
+    ///
+    /// The research doc's tables are in **HP against a 100 HP body**; this
+    /// engine's unit is joules against [`DEFAULT_VITALITY_J`] = 2 000 J. So
+    /// **1 HP = 20 J**, and the registry's `damage_j` is the doc's torso figure
+    /// times twenty — the Glock 17's 30 HP is 600 J, which is the number the
+    /// pistol row in `GAMEPLAY_ITEMS_TOML` has carried since island wave I6
+    /// without anybody choosing the scale on purpose. See
+    /// [`JOULES_PER_HIT_POINT`].
+    pub fn damage_at(&self, distance_m: f64, headshot: bool) -> f64 {
+        let base = crate::ballistics::damage_curve_j(
+            self.damage_j,
+            self.min_damage_frac,
+            self.effective_range_m,
+            self.max_range_m,
+            distance_m,
+        );
+        if headshot {
+            base * self.headshot_mult.max(1.0)
+        } else {
+            base
+        }
+    }
+
+    /// **How far the instant ray of this weapon reaches**, metres — the hybrid's
+    /// switch, resolved against the weapon's own range.
+    ///
+    /// A [`ShotKind::Hitscan`] answers its whole [`reach_m`](Self::reach_m),
+    /// which is what makes every level committed before wave WPN2a
+    /// byte-identical. A [`ShotKind::Projectile`] answers the smaller of the
+    /// threshold and the range: a round is only worth minting where there is
+    /// range left for it to fly through.
+    pub fn hitscan_reach_m(&self) -> f64 {
+        let reach = self.reach_m();
+        if self.kind == ShotKind::Projectile {
+            reach.min(self.hitscan_threshold_m.max(0.0))
+        } else {
+            reach
+        }
+    }
+
+    /// **Whether a shot that missed inside [`hitscan_reach_m`] should mint a
+    /// round.**
+    ///
+    /// Only a projectile, and only when the threshold left something to fly
+    /// through — a pistol whose 30 m threshold covers its own range never mints
+    /// one, which is the doc's "pure hitscan" for that class expressed as a
+    /// consequence rather than as a second kind.
+    pub fn spawns_a_round(&self) -> bool {
+        self.kind == ShotKind::Projectile && self.reach_m() > self.hitscan_reach_m()
     }
 
     /// **Whether this weapon is swung rather than fired.**
@@ -387,6 +625,36 @@ impl WeaponDef {
             .ok_or_else(|| "a weapon is a table".to_string())?;
         let mut def = WeaponDef::default();
         for (k, v) in w {
+            // **The doc's sub-tables** (wave WPN2a). The research doc's schema
+            // groups a weapon's numbers under `[ballistics]`, `[damage_curve]`,
+            // `[recoil]` and `[audio]`; an 85-row registry authored as one flat
+            // table is a wall of keys nobody can read. So a sub-table is read
+            // through **the same by-name door** its parent is — one `set` per
+            // key, one place where a range is clamped — and the grouping is
+            // presentation. A sub-table this reader does not know is refused
+            // BY NAME rather than skipped, which is the whole point: a
+            // `[ballisitcs]` typo that silently dropped a muzzle velocity would
+            // fire the default at a designer who had authored a number.
+            if let toml::Value::Table(sub) = v {
+                if !WEAPON_SUB_TABLES.contains(&k.as_str()) {
+                    return Err(format!(
+                        "unknown weapon sub-table [{k}] (known: {})",
+                        WEAPON_SUB_TABLES.join(", ")
+                    ));
+                }
+                for (sk, sv) in sub {
+                    let n = match sv {
+                        toml::Value::Float(f) => *f,
+                        toml::Value::Integer(i) => *i as f64,
+                        toml::Value::Boolean(b) => f64::from(u8::from(*b)),
+                        _ => return Err(format!("weapon key {k}.{sk} is not a number")),
+                    };
+                    if !def.set(sk, n) {
+                        return Err(format!("unknown weapon key {k}.{sk}"));
+                    }
+                }
+                continue;
+            }
             let n = match v {
                 toml::Value::Float(f) => *f,
                 toml::Value::Integer(i) => *i as f64,
@@ -412,6 +680,81 @@ impl WeaponDef {
         }
         Ok(Some(def))
     }
+}
+
+/// **The sub-tables a `[<item>.weapon]` table may carry** (wave WPN2a) — the
+/// research doc's own four, enumerated beside the reader that takes them so an
+/// author reads the list rather than guessing it (the P29.6 A14 rule, one level
+/// down).
+///
+/// Every key inside every one of them goes through [`WeaponDef::set`]; the
+/// grouping carries no meaning to the engine and exists so eighty-five rows are
+/// legible. `[audio]` is on the list and carries exactly one field today
+/// ([`WeaponDef::report_max_m`]) — the four-layer stack is **wave WPN2c's**, and
+/// a per-weapon report *clip* is refused by P22 §5's own reasoning; see
+/// `report_source`.
+pub const WEAPON_SUB_TABLES: [&str; 4] = ["ballistics", "damage_curve", "recoil", "audio"];
+
+/// **The eighty-five-row weapon registry** (wave WPN2a) — the research doc's
+/// tables, as the TOML the `item.define` node takes.
+///
+/// # Why an `include_str!` and not an asset kind
+///
+/// [`crate::item::ItemDefs`]' own module header priced this: an `items.toml`
+/// beside a level reaches **one of three boot paths**, so a catalogue there is
+/// present in a dev run and absent in a build. A runtime-*editable* registry is
+/// a new asset kind with an entity `Uuid` field — a scene bump — and that window
+/// belongs to VEH3a, not here. `GAMEPLAY_ITEMS_TOML` is the precedent and this
+/// is the same route one order of magnitude larger: the bytes ride the
+/// Blueprint's own `item.define` call, so Simulate, PIE and a cooked pack all
+/// see exactly the same catalogue.
+///
+/// It lives in **Ring 0** rather than beside the editor's sample generators
+/// because the gates, the island generator and the fixture all want the same
+/// eighty-five rows and a second copy of them is a second set of numbers.
+/// [`MAX_ITEM_DEFS`](crate::item::MAX_ITEM_DEFS) is 4 096, so the cap does not
+/// bind.
+///
+/// # Real names
+///
+/// The rows carry the manufacturers' names because the doc does. **A firearm's
+/// name used to identify that firearm in a work of fiction is nominative use,
+/// not trademark use**: it does not indicate the source of this software, no
+/// endorsement is claimed or implied, and courts have consistently treated the
+/// depiction of real objects in expressive works this way. The decision is
+/// recorded here rather than assumed, and swapping in lore names is a search and
+/// replace over one file if a publisher ever wants one.
+pub const WEAPON_REGISTRY_TOML: &str = include_str!("weapons.toml");
+
+/// **The equipped weapon's definition**, if the character has one equipped and
+/// the catalogue knows it — `(item id, definition)`.
+///
+/// The **one** lookup: `inf_physics::d3::gameplay` asks it to decide what a
+/// trigger does and [`equipped_move_speed_scale`] asks it to decide how fast the
+/// carrier walks, and two spellings of "what is in this character's hand" is
+/// exactly the defect this repository has paid for at five seams.
+pub fn equipped_def(world: &EcsWorld, guid: Uuid) -> Option<(String, WeaponDef)> {
+    let entity = world.entity_of(guid)?;
+    let inv = world.world().get::<crate::item::Inventory>(entity)?;
+    let id = inv.equipped_id()?.to_string();
+    let def = *crate::item::item_defs(world)?.get(&id)?.weapon.as_ref()?;
+    Some((id, def))
+}
+
+/// **How fast this character moves for what it is carrying** — the doc's
+/// "Move Speed: relative movement multiplier (1.0 = Base/Unarmed speed)".
+///
+/// `1.0` for an unarmed character, for one carrying something the catalogue does
+/// not know, and for every weapon authored before wave WPN2a — which is what
+/// keeps every committed movement trace in the tree byte-identical.
+///
+/// Read by [`crate::movement::settings_for`], which is the one place a target
+/// speed is resolved, so a sprint, a walk, a crouch and a swim all scale by the
+/// same number and none of them needed a branch.
+pub fn equipped_move_speed_scale(world: &EcsWorld, guid: Uuid) -> f64 {
+    equipped_def(world, guid)
+        .map(|(_, d)| d.move_speed_mult.clamp(MIN_MOVE_SPEED_MULT, 2.0))
+        .unwrap_or(1.0)
 }
 
 /// **The ammunition clock on a character** — a runtime component, inserted when

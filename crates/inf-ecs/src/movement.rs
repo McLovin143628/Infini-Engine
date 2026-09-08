@@ -754,15 +754,35 @@ pub struct MovementSettings {
 
 /// Resolve the settings for a `(rotation mode, mode, gait)` at a normalized
 /// speed — ALS's `GetTargetMovementSettings` plus `GetSpeedForGait`.
+///
+/// # `equip_scale` (wave WPN2a)
+///
+/// **What the character is carrying**, as a multiplier — the research doc's
+/// eighth metric ("Move Speed: relative movement multiplier, 1.0 = Base/Unarmed
+/// speed"). It is an argument rather than a read of the world because this is a
+/// pure function with its own arms, and it multiplies the target speed here,
+/// which is **the one place a target speed is resolved** — so a walk, a run, a
+/// sprint and a crouch all scale by it and none of them needed a branch.
+///
+/// `1.0` is unarmed and is what every caller before this wave passed, so every
+/// committed movement trace in the tree is byte-identical. The world-side
+/// lookup is [`crate::weapon::equipped_move_speed_scale`]; `d3::movement` is its
+/// one production caller.
 pub fn settings_for(
     cm: &CharacterMovement,
     mode: MovementMode,
     gait: Gait,
     mapped: f64,
     aim_yaw_rate_dps: f64,
+    equip_scale: f64,
 ) -> MovementSettings {
+    let equip_scale = if equip_scale.is_finite() {
+        equip_scale.clamp(crate::weapon::MIN_MOVE_SPEED_MULT, 2.0)
+    } else {
+        1.0
+    };
     MovementSettings {
-        target_speed_mps: cm.speed_for(mode, gait) * cm.rotation_speed_scale(),
+        target_speed_mps: cm.speed_for(mode, gait) * cm.rotation_speed_scale() * equip_scale,
         acceleration_mps2: cm.acceleration.sample(mapped),
         braking_mps2: cm.braking.sample(mapped),
         friction: cm.ground_friction.sample(mapped),
@@ -2426,7 +2446,7 @@ mod tests {
     fn the_rotation_mode_scales_the_target_speed() {
         let mut c = cm();
         let at = |c: &CharacterMovement| {
-            settings_for(c, MovementMode::Grounded, Gait::Run, 2.0, 0.0).target_speed_mps
+            settings_for(c, MovementMode::Grounded, Gait::Run, 2.0, 0.0, 1.0).target_speed_mps
         };
         let free = at(&c);
         assert!((free - c.run_speed_mps).abs() < 1e-12);

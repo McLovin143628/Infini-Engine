@@ -1,0 +1,2865 @@
+# **THE WEAPON REGISTRY** (wave WPN2a) -- 85 rows, read by
+# `inf_ecs::weapon::WEAPON_REGISTRY_TOML` through `include_str!`.
+#
+# The rows are the user's research doc's own tables
+# (`docs/Weapons-in-Rust-based-Game-Engine-GTA-Game.md`, sections 1-7 of the
+# dataset): 10 pistols, 20 SMGs, 20 assault rifles, 10 DMRs, 10 snipers,
+# 10 shotguns and 5 launchers. Its eight metrics reach this engine's doors as
+# follows, and every derived number is derived by ONE rule per class so any row
+# can be checked by hand:
+#
+#   torso damage  -> `damage_j`, at 20 J per hit point
+#                    (`inf_ecs::weapon::JOULES_PER_HIT_POINT`: DEFAULT_VITALITY_J
+#                    2000 J is a 100 HP body, so the scale is forced, not chosen
+#                    -- and it reproduces island wave I6's own 600 J pistol).
+#   head damage   -> `damage_curve.headshot_mult` = head / torso.
+#   RPM           -> `rounds_per_minute`.
+#   velocity      -> `muzzle_speed_mps`.
+#   effective rng -> `damage_curve.effective_range_m`; `max_range_m` and
+#                    `min_damage_frac` are the class rule below (the doc gives
+#                    the pair only for its M4A1 example: 35 -> 80 m, 18 of 30,
+#                    which is x2.3 and 0.6, and that is the AR row here).
+#   recoil 1-10   -> `recoil.recoil_intensity`. WAVE WPN2b reads it; nothing does
+#                    today, and it is authored now so the rows are written once.
+#   ADS ms        -> `ads_time_ms`. Wave WPN2b, same sentence.
+#   mag           -> `magazine`; `reserve` is four magazines (three for a
+#                    launcher), which is a carry rule and not the doc's.
+#   move speed    -> `move_speed_mult`, and this one has a consumer HERE:
+#                    `inf_ecs::movement::settings_for` scales the target speed by
+#                    it, so a sniper really is slower than a bare pair of hands.
+#
+# PER-CLASS RULES (threshold / range / drag / max-range factor / min fraction /
+# spread / muzzle / reload / mass / report):
+#
+#   pistol    30 m  150 m  0.0008 /m  x2.5  0.50  1.20 deg  0.12 m  1.4 s  0.9 kg  220 m
+#   smg       15 m  180 m  0.0007 /m  x2.5  0.50  1.60 deg  0.25 m  1.8 s  3.0 kg  240 m
+#   ar        25 m  500 m  0.00035/m  x2.3  0.60  1.00 deg  0.45 m  2.0 s  3.6 kg  320 m
+#   dmr       15 m  800 m  0.0003 /m  x2.0  0.70  0.40 deg  0.55 m  2.4 s  4.4 kg  420 m
+#   sniper    10 m 1800 m  0.00022/m  x2.0  0.80  0.15 deg  0.65 m  3.0 s  6.5 kg  600 m
+#   shotgun   10 m   80 m  0.0015 /m  x2.0  0.35  3.00 deg  0.50 m  3.2 s  3.4 kg  260 m
+#   launcher   0 m  900 m  0.0006 /m  flat  1.00  0.50 deg  0.70 m  doc    7.0 kg  900 m
+#
+# The hitscan thresholds are the doc's own class table: "Pistols: pure hitscan
+# (<30 m)", "SMGs: short hitscan threshold (15 m)", "Assault rifles: hybrid
+# (25 m raycast, then 700-900 m/s projectile)", "Snipers: pure projectile or
+# minimal hitscan (<10 m)", "Rocket launchers: physical entity projectile" --
+# which is a threshold of zero, so a rocket is a body from the muzzle. A pistol
+# whose 30 m threshold covers its own effective envelope is the doc's "pure
+# hitscan" expressed as a CONSEQUENCE rather than as a second `ShotKind`; past
+# it, at 40 m, a 9 mm round really does fly and really does drop.
+#
+# WHAT IS NOT MODELLED YET, said in the file rather than only in a report:
+#
+# * SHOTGUN PELLETS. `damage_j` here is the WHOLE PULL -- pellets x per-pellet
+#   torso x 20 J -- delivered as one hit, because wave WPN2a has one ray per
+#   trigger pull. WAVE WPN2d splits it: N rays off `shot_uniforms` inside
+#   `cone_deg`, each carrying its own share, drawing on
+#   `MAX_SHOT_RAYS_PER_STEP`. The per-pellet numbers are in the doc's table 6
+#   and in the comment above each row.
+# * LAUNCHER BLAST. `damage_j` is the doc's DIRECT impact damage only. The blast
+#   radius, the falloff sweep and lock-on are wave WPN2d's; a rocket here flies,
+#   drops and spends its direct damage on what it hits.
+# * BURST FIRE. The engine has `automatic` and semi and no burst, so the doc's
+#   three-round-burst rows (FAMAS F1, Type 95, CZ 75 Auto, TEC-9) are authored
+#   AUTOMATIC at their listed RPM. A burst mode is wave WPN2b's fire-control
+#   work; naming it here is cheaper than a reader wondering.
+# * ATTACHMENTS. The doc's ~600 attachment rows are wave WPN2d's; nothing here
+#   carries a slot.
+#
+# REAL NAMES: nominative use. See `WEAPON_REGISTRY_TOML`'s own doc comment for
+# the recorded decision.
+#
+# GENERATED, and byte-pinned: `wpn2a_gate::the_registry_is_the_docs_own_tables`
+# counts the rows per class and re-derives every damage figure from the doc's HP.
+# Edit the numbers here, not a copy of them.
+
+# --------------------------------------------------------------------------
+# 1. HANDGUNS / PISTOLS (10)
+# --------------------------------------------------------------------------
+
+[glock_17]
+label = "Glock 17"
+stack_max = 1
+mass_kg = 0.90
+[glock_17.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 600.0
+rounds_per_minute = 450.0
+spread_deg = 1.20
+magazine = 17
+reserve = 68
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 375.0
+muzzle_forward_m = 0.12
+ads_time_ms = 140.0
+move_speed_mult = 0.98
+[glock_17.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[glock_17.weapon.damage_curve]
+headshot_mult = 1.6000
+effective_range_m = 18.0
+max_range_m = 45.0
+min_damage_frac = 0.50
+[glock_17.weapon.recoil]
+recoil_intensity = 2.5
+[glock_17.weapon.audio]
+report_max_m = 220.0
+
+[sig_p320]
+label = "SIG Sauer P320"
+stack_max = 1
+mass_kg = 0.90
+[sig_p320.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 640.0
+rounds_per_minute = 430.0
+spread_deg = 1.20
+magazine = 17
+reserve = 68
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 380.0
+muzzle_forward_m = 0.12
+ads_time_ms = 145.0
+move_speed_mult = 0.98
+[sig_p320.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[sig_p320.weapon.damage_curve]
+headshot_mult = 1.5625
+effective_range_m = 20.0
+max_range_m = 50.0
+min_damage_frac = 0.50
+[sig_p320.weapon.recoil]
+recoil_intensity = 2.8
+[sig_p320.weapon.audio]
+report_max_m = 220.0
+
+[beretta_92fs]
+label = "Beretta 92FS"
+stack_max = 1
+mass_kg = 0.90
+[beretta_92fs.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 560.0
+rounds_per_minute = 480.0
+spread_deg = 1.20
+magazine = 15
+reserve = 60
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 381.0
+muzzle_forward_m = 0.12
+ads_time_ms = 135.0
+move_speed_mult = 0.98
+[beretta_92fs.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[beretta_92fs.weapon.damage_curve]
+headshot_mult = 1.6071
+effective_range_m = 18.0
+max_range_m = 45.0
+min_damage_frac = 0.50
+[beretta_92fs.weapon.recoil]
+recoil_intensity = 2.2
+[beretta_92fs.weapon.audio]
+report_max_m = 220.0
+
+[colt_m1911]
+label = "Colt M1911"
+stack_max = 1
+mass_kg = 0.90
+[colt_m1911.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 840.0
+rounds_per_minute = 350.0
+spread_deg = 1.20
+magazine = 7
+reserve = 28
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 253.0
+muzzle_forward_m = 0.12
+ads_time_ms = 160.0
+move_speed_mult = 0.97
+[colt_m1911.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[colt_m1911.weapon.damage_curve]
+headshot_mult = 1.5476
+effective_range_m = 15.0
+max_range_m = 37.5
+min_damage_frac = 0.50
+[colt_m1911.weapon.recoil]
+recoil_intensity = 4.2
+[colt_m1911.weapon.audio]
+report_max_m = 220.0
+
+[fn_five_seven]
+label = "FN Five-seveN"
+stack_max = 1
+mass_kg = 0.90
+[fn_five_seven.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 480.0
+rounds_per_minute = 520.0
+spread_deg = 1.20
+magazine = 20
+reserve = 80
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 650.0
+muzzle_forward_m = 0.12
+ads_time_ms = 130.0
+move_speed_mult = 0.99
+[fn_five_seven.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[fn_five_seven.weapon.damage_curve]
+headshot_mult = 1.6667
+effective_range_m = 30.0
+max_range_m = 75.0
+min_damage_frac = 0.50
+[fn_five_seven.weapon.recoil]
+recoil_intensity = 1.8
+[fn_five_seven.weapon.audio]
+report_max_m = 220.0
+
+[desert_eagle]
+label = "Desert Eagle"
+stack_max = 1
+mass_kg = 0.90
+[desert_eagle.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1440.0
+rounds_per_minute = 180.0
+spread_deg = 1.20
+magazine = 7
+reserve = 28
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 470.0
+muzzle_forward_m = 0.12
+ads_time_ms = 220.0
+move_speed_mult = 0.94
+[desert_eagle.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[desert_eagle.weapon.damage_curve]
+headshot_mult = 1.6667
+effective_range_m = 25.0
+max_range_m = 62.5
+min_damage_frac = 0.50
+[desert_eagle.weapon.recoil]
+recoil_intensity = 8.5
+[desert_eagle.weapon.audio]
+report_max_m = 220.0
+
+[sw_model_500]
+label = "S&W Model 500"
+stack_max = 1
+mass_kg = 0.90
+[sw_model_500.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1800.0
+rounds_per_minute = 110.0
+spread_deg = 1.20
+magazine = 5
+reserve = 20
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 630.0
+muzzle_forward_m = 0.12
+ads_time_ms = 260.0
+move_speed_mult = 0.92
+[sw_model_500.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[sw_model_500.weapon.damage_curve]
+headshot_mult = 1.6667
+effective_range_m = 35.0
+max_range_m = 87.5
+min_damage_frac = 0.50
+[sw_model_500.weapon.recoil]
+recoil_intensity = 9.8
+[sw_model_500.weapon.audio]
+report_max_m = 220.0
+
+[cz_75_auto]
+label = "CZ 75 Auto"
+stack_max = 1
+mass_kg = 0.90
+[cz_75_auto.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 440.0
+rounds_per_minute = 900.0
+spread_deg = 1.20
+magazine = 26
+reserve = 104
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 360.0
+muzzle_forward_m = 0.12
+ads_time_ms = 150.0
+move_speed_mult = 0.96
+[cz_75_auto.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[cz_75_auto.weapon.damage_curve]
+headshot_mult = 1.5909
+effective_range_m = 12.0
+max_range_m = 30.0
+min_damage_frac = 0.50
+[cz_75_auto.weapon.recoil]
+recoil_intensity = 5.5
+[cz_75_auto.weapon.audio]
+report_max_m = 220.0
+
+[walther_ppk]
+label = "Walther PPK"
+stack_max = 1
+mass_kg = 0.90
+[walther_ppk.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 500.0
+rounds_per_minute = 400.0
+spread_deg = 1.20
+magazine = 8
+reserve = 32
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 312.0
+muzzle_forward_m = 0.12
+ads_time_ms = 110.0
+move_speed_mult = 1.00
+[walther_ppk.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[walther_ppk.weapon.damage_curve]
+headshot_mult = 1.5200
+effective_range_m = 12.0
+max_range_m = 30.0
+min_damage_frac = 0.50
+[walther_ppk.weapon.recoil]
+recoil_intensity = 1.9
+[walther_ppk.weapon.audio]
+report_max_m = 220.0
+
+# The doc's Judge is a 5-pellet .410 shell (18x5 / 25x5); the whole pull is
+# one hit here and wave WPN2d splits it into pellets.
+[taurus_judge]
+label = "Taurus Judge"
+stack_max = 1
+mass_kg = 0.90
+[taurus_judge.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1800.0
+rounds_per_minute = 150.0
+spread_deg = 1.20
+magazine = 5
+reserve = 20
+reload_s = 1.40
+range_m = 150.0
+muzzle_speed_mps = 270.0
+muzzle_forward_m = 0.12
+ads_time_ms = 180.0
+move_speed_mult = 0.95
+[taurus_judge.weapon.ballistics]
+hitscan_threshold_m = 30.0
+drag_k = 0.00080
+gravity_scale = 1.0
+[taurus_judge.weapon.damage_curve]
+headshot_mult = 1.3889
+effective_range_m = 8.0
+max_range_m = 20.0
+min_damage_frac = 0.50
+[taurus_judge.weapon.recoil]
+recoil_intensity = 7.0
+[taurus_judge.weapon.audio]
+report_max_m = 220.0
+
+# --------------------------------------------------------------------------
+# 2. SUBMACHINE GUNS (20)
+# --------------------------------------------------------------------------
+
+[mp5]
+label = "MP5"
+stack_max = 1
+mass_kg = 3.00
+[mp5.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 560.0
+rounds_per_minute = 800.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 400.0
+muzzle_forward_m = 0.25
+ads_time_ms = 180.0
+move_speed_mult = 0.95
+[mp5.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[mp5.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 16.0
+max_range_m = 40.0
+min_damage_frac = 0.50
+[mp5.weapon.recoil]
+recoil_intensity = 3.2
+[mp5.weapon.audio]
+report_max_m = 240.0
+
+[mp7]
+label = "MP7"
+stack_max = 1
+mass_kg = 3.00
+[mp7.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 440.0
+rounds_per_minute = 950.0
+spread_deg = 1.60
+magazine = 40
+reserve = 160
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 735.0
+muzzle_forward_m = 0.25
+ads_time_ms = 160.0
+move_speed_mult = 0.96
+[mp7.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[mp7.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 22.0
+max_range_m = 55.0
+min_damage_frac = 0.50
+[mp7.weapon.recoil]
+recoil_intensity = 2.4
+[mp7.weapon.audio]
+report_max_m = 240.0
+
+[vector_fennec]
+label = "Vector / Fennec"
+stack_max = 1
+mass_kg = 3.00
+[vector_fennec.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 480.0
+rounds_per_minute = 1100.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 300.0
+muzzle_forward_m = 0.25
+ads_time_ms = 170.0
+move_speed_mult = 0.96
+[vector_fennec.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[vector_fennec.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 11.0
+max_range_m = 27.5
+min_damage_frac = 0.50
+[vector_fennec.weapon.recoil]
+recoil_intensity = 4.8
+[vector_fennec.weapon.audio]
+report_max_m = 240.0
+
+[p90]
+label = "P90"
+stack_max = 1
+mass_kg = 3.00
+[p90.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 460.0
+rounds_per_minute = 900.0
+spread_deg = 1.60
+magazine = 50
+reserve = 200
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 715.0
+muzzle_forward_m = 0.25
+ads_time_ms = 185.0
+move_speed_mult = 0.94
+[p90.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[p90.weapon.damage_curve]
+headshot_mult = 1.5217
+effective_range_m = 25.0
+max_range_m = 62.5
+min_damage_frac = 0.50
+[p90.weapon.recoil]
+recoil_intensity = 2.1
+[p90.weapon.audio]
+report_max_m = 240.0
+
+[uzi]
+label = "Uzi"
+stack_max = 1
+mass_kg = 3.00
+[uzi.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 620.0
+rounds_per_minute = 600.0
+spread_deg = 1.60
+magazine = 32
+reserve = 128
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 400.0
+muzzle_forward_m = 0.25
+ads_time_ms = 190.0
+move_speed_mult = 0.95
+[uzi.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[uzi.weapon.damage_curve]
+headshot_mult = 1.4839
+effective_range_m = 18.0
+max_range_m = 45.0
+min_damage_frac = 0.50
+[uzi.weapon.recoil]
+recoil_intensity = 3.8
+[uzi.weapon.audio]
+report_max_m = 240.0
+
+[mac_10]
+label = "MAC-10"
+stack_max = 1
+mass_kg = 3.00
+[mac_10.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 400.0
+rounds_per_minute = 1150.0
+spread_deg = 1.60
+magazine = 32
+reserve = 128
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 366.0
+muzzle_forward_m = 0.25
+ads_time_ms = 150.0
+move_speed_mult = 0.97
+[mac_10.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[mac_10.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 9.0
+max_range_m = 22.5
+min_damage_frac = 0.50
+[mac_10.weapon.recoil]
+recoil_intensity = 6.5
+[mac_10.weapon.audio]
+report_max_m = 240.0
+
+[pp19_bizon]
+label = "PP-19 Bizon"
+stack_max = 1
+mass_kg = 3.00
+[pp19_bizon.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 520.0
+rounds_per_minute = 700.0
+spread_deg = 1.60
+magazine = 64
+reserve = 256
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 380.0
+muzzle_forward_m = 0.25
+ads_time_ms = 200.0
+move_speed_mult = 0.93
+[pp19_bizon.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[pp19_bizon.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 15.0
+max_range_m = 37.5
+min_damage_frac = 0.50
+[pp19_bizon.weapon.recoil]
+recoil_intensity = 2.8
+[pp19_bizon.weapon.audio]
+report_max_m = 240.0
+
+[cz_scorpion_evo3]
+label = "CZ Scorpion Evo 3"
+stack_max = 1
+mass_kg = 3.00
+[cz_scorpion_evo3.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 540.0
+rounds_per_minute = 850.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 370.0
+muzzle_forward_m = 0.25
+ads_time_ms = 175.0
+move_speed_mult = 0.95
+[cz_scorpion_evo3.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[cz_scorpion_evo3.weapon.damage_curve]
+headshot_mult = 1.4815
+effective_range_m = 17.0
+max_range_m = 42.5
+min_damage_frac = 0.50
+[cz_scorpion_evo3.weapon.recoil]
+recoil_intensity = 3.5
+[cz_scorpion_evo3.weapon.audio]
+report_max_m = 240.0
+
+[sig_mpx]
+label = "SIG MPX"
+stack_max = 1
+mass_kg = 3.00
+[sig_mpx.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 520.0
+rounds_per_minute = 850.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 390.0
+muzzle_forward_m = 0.25
+ads_time_ms = 170.0
+move_speed_mult = 0.95
+[sig_mpx.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[sig_mpx.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 18.0
+max_range_m = 45.0
+min_damage_frac = 0.50
+[sig_mpx.weapon.recoil]
+recoil_intensity = 2.6
+[sig_mpx.weapon.audio]
+report_max_m = 240.0
+
+[ump45]
+label = "UMP45"
+stack_max = 1
+mass_kg = 3.00
+[ump45.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 720.0
+rounds_per_minute = 600.0
+spread_deg = 1.60
+magazine = 25
+reserve = 100
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 285.0
+muzzle_forward_m = 0.25
+ads_time_ms = 200.0
+move_speed_mult = 0.94
+[ump45.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[ump45.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 14.0
+max_range_m = 35.0
+min_damage_frac = 0.50
+[ump45.weapon.recoil]
+recoil_intensity = 4.1
+[ump45.weapon.audio]
+report_max_m = 240.0
+
+[thompson_m1a1]
+label = "Thompson M1A1"
+stack_max = 1
+mass_kg = 3.00
+[thompson_m1a1.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 760.0
+rounds_per_minute = 700.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 280.0
+muzzle_forward_m = 0.25
+ads_time_ms = 210.0
+move_speed_mult = 0.93
+[thompson_m1a1.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[thompson_m1a1.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 13.0
+max_range_m = 32.5
+min_damage_frac = 0.50
+[thompson_m1a1.weapon.recoil]
+recoil_intensity = 5.2
+[thompson_m1a1.weapon.audio]
+report_max_m = 240.0
+
+[ppsh_41]
+label = "PPSH-41"
+stack_max = 1
+mass_kg = 3.00
+[ppsh_41.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 420.0
+rounds_per_minute = 900.0
+spread_deg = 1.60
+magazine = 71
+reserve = 284
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 488.0
+muzzle_forward_m = 0.25
+ads_time_ms = 195.0
+move_speed_mult = 0.91
+[ppsh_41.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[ppsh_41.weapon.damage_curve]
+headshot_mult = 1.4762
+effective_range_m = 16.0
+max_range_m = 40.0
+min_damage_frac = 0.50
+[ppsh_41.weapon.recoil]
+recoil_intensity = 4.6
+[ppsh_41.weapon.audio]
+report_max_m = 240.0
+
+[mp40]
+label = "MP40"
+stack_max = 1
+mass_kg = 3.00
+[mp40.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 660.0
+rounds_per_minute = 550.0
+spread_deg = 1.60
+magazine = 32
+reserve = 128
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 400.0
+muzzle_forward_m = 0.25
+ads_time_ms = 205.0
+move_speed_mult = 0.94
+[mp40.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[mp40.weapon.damage_curve]
+headshot_mult = 1.4848
+effective_range_m = 19.0
+max_range_m = 47.5
+min_damage_frac = 0.50
+[mp40.weapon.recoil]
+recoil_intensity = 2.9
+[mp40.weapon.audio]
+report_max_m = 240.0
+
+[apc9]
+label = "APC9"
+stack_max = 1
+mass_kg = 3.00
+[apc9.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 560.0
+rounds_per_minute = 820.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 410.0
+muzzle_forward_m = 0.25
+ads_time_ms = 165.0
+move_speed_mult = 0.96
+[apc9.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[apc9.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 17.0
+max_range_m = 42.5
+min_damage_frac = 0.50
+[apc9.weapon.recoil]
+recoil_intensity = 2.5
+[apc9.weapon.audio]
+report_max_m = 240.0
+
+[colt_9mm_smg]
+label = "Colt 9mm SMG"
+stack_max = 1
+mass_kg = 3.00
+[colt_9mm_smg.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 580.0
+rounds_per_minute = 750.0
+spread_deg = 1.60
+magazine = 32
+reserve = 128
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 395.0
+muzzle_forward_m = 0.25
+ads_time_ms = 180.0
+move_speed_mult = 0.95
+[colt_9mm_smg.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[colt_9mm_smg.weapon.damage_curve]
+headshot_mult = 1.4828
+effective_range_m = 16.0
+max_range_m = 40.0
+min_damage_frac = 0.50
+[colt_9mm_smg.weapon.recoil]
+recoil_intensity = 3.6
+[colt_9mm_smg.weapon.audio]
+report_max_m = 240.0
+
+[amr9]
+label = "AMR9"
+stack_max = 1
+mass_kg = 3.00
+[amr9.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 500.0
+rounds_per_minute = 830.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 420.0
+muzzle_forward_m = 0.25
+ads_time_ms = 185.0
+move_speed_mult = 0.95
+[amr9.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[amr9.weapon.damage_curve]
+headshot_mult = 1.4800
+effective_range_m = 20.0
+max_range_m = 50.0
+min_damage_frac = 0.50
+[amr9.weapon.recoil]
+recoil_intensity = 3.0
+[amr9.weapon.audio]
+report_max_m = 240.0
+
+[fn_p90_tactical]
+label = "FN P90 Tactical"
+stack_max = 1
+mass_kg = 3.00
+[fn_p90_tactical.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 440.0
+rounds_per_minute = 930.0
+spread_deg = 1.60
+magazine = 50
+reserve = 200
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 720.0
+muzzle_forward_m = 0.25
+ads_time_ms = 175.0
+move_speed_mult = 0.95
+[fn_p90_tactical.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[fn_p90_tactical.weapon.damage_curve]
+headshot_mult = 1.5455
+effective_range_m = 26.0
+max_range_m = 65.0
+min_damage_frac = 0.50
+[fn_p90_tactical.weapon.recoil]
+recoil_intensity = 1.9
+[fn_p90_tactical.weapon.audio]
+report_max_m = 240.0
+
+[mp5k]
+label = "Krig SMG / MP5K"
+stack_max = 1
+mass_kg = 3.00
+[mp5k.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 540.0
+rounds_per_minute = 850.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 375.0
+muzzle_forward_m = 0.25
+ads_time_ms = 155.0
+move_speed_mult = 0.97
+[mp5k.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[mp5k.weapon.damage_curve]
+headshot_mult = 1.4815
+effective_range_m = 12.0
+max_range_m = 30.0
+min_damage_frac = 0.50
+[mp5k.weapon.recoil]
+recoil_intensity = 3.4
+[mp5k.weapon.audio]
+report_max_m = 240.0
+
+[saiga_9]
+label = "Saiga 9"
+stack_max = 1
+mass_kg = 3.00
+[saiga_9.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 680.0
+rounds_per_minute = 450.0
+spread_deg = 1.60
+magazine = 30
+reserve = 120
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 410.0
+muzzle_forward_m = 0.25
+ads_time_ms = 170.0
+move_speed_mult = 0.95
+[saiga_9.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[saiga_9.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 22.0
+max_range_m = 55.0
+min_damage_frac = 0.50
+[saiga_9.weapon.recoil]
+recoil_intensity = 2.0
+[saiga_9.weapon.audio]
+report_max_m = 240.0
+
+[tec_9]
+label = "TEC-9"
+stack_max = 1
+mass_kg = 3.00
+[tec_9.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 520.0
+rounds_per_minute = 730.0
+spread_deg = 1.60
+magazine = 24
+reserve = 96
+reload_s = 1.80
+range_m = 180.0
+muzzle_speed_mps = 360.0
+muzzle_forward_m = 0.25
+ads_time_ms = 160.0
+move_speed_mult = 0.96
+[tec_9.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00070
+gravity_scale = 1.0
+[tec_9.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 13.0
+max_range_m = 32.5
+min_damage_frac = 0.50
+[tec_9.weapon.recoil]
+recoil_intensity = 4.9
+[tec_9.weapon.audio]
+report_max_m = 240.0
+
+# --------------------------------------------------------------------------
+# 3. ASSAULT RIFLES (20)
+# --------------------------------------------------------------------------
+
+[m4a1]
+label = "M4A1"
+stack_max = 1
+mass_kg = 3.60
+[m4a1.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 600.0
+rounds_per_minute = 800.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 910.0
+muzzle_forward_m = 0.45
+ads_time_ms = 240.0
+move_speed_mult = 0.90
+[m4a1.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[m4a1.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 35.0
+max_range_m = 80.5
+min_damage_frac = 0.60
+[m4a1.weapon.recoil]
+recoil_intensity = 3.8
+[m4a1.weapon.audio]
+report_max_m = 320.0
+
+[ak_47]
+label = "AK-47"
+stack_max = 1
+mass_kg = 3.60
+[ak_47.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 780.0
+rounds_per_minute = 600.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 715.0
+muzzle_forward_m = 0.45
+ads_time_ms = 260.0
+move_speed_mult = 0.88
+[ak_47.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[ak_47.weapon.damage_curve]
+headshot_mult = 1.4872
+effective_range_m = 38.0
+max_range_m = 87.4
+min_damage_frac = 0.60
+[ak_47.weapon.recoil]
+recoil_intensity = 5.8
+[ak_47.weapon.audio]
+report_max_m = 320.0
+
+[hk416]
+label = "HK416 / M27"
+stack_max = 1
+mass_kg = 3.60
+[hk416.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 580.0
+rounds_per_minute = 850.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 920.0
+muzzle_forward_m = 0.45
+ads_time_ms = 235.0
+move_speed_mult = 0.90
+[hk416.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[hk416.weapon.damage_curve]
+headshot_mult = 1.4828
+effective_range_m = 36.0
+max_range_m = 82.8
+min_damage_frac = 0.60
+[hk416.weapon.recoil]
+recoil_intensity = 3.2
+[hk416.weapon.audio]
+report_max_m = 320.0
+
+[scar_l]
+label = "SCAR-L"
+stack_max = 1
+mass_kg = 3.60
+[scar_l.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 620.0
+rounds_per_minute = 625.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 875.0
+muzzle_forward_m = 0.45
+ads_time_ms = 250.0
+move_speed_mult = 0.89
+[scar_l.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[scar_l.weapon.damage_curve]
+headshot_mult = 1.4839
+effective_range_m = 40.0
+max_range_m = 92.0
+min_damage_frac = 0.60
+[scar_l.weapon.recoil]
+recoil_intensity = 3.0
+[scar_l.weapon.audio]
+report_max_m = 320.0
+
+[scar_h]
+label = "SCAR-H"
+stack_max = 1
+mass_kg = 3.60
+[scar_h.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 840.0
+rounds_per_minute = 575.0
+spread_deg = 1.00
+magazine = 20
+reserve = 80
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 710.0
+muzzle_forward_m = 0.45
+ads_time_ms = 270.0
+move_speed_mult = 0.87
+[scar_h.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[scar_h.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 45.0
+max_range_m = 103.5
+min_damage_frac = 0.60
+[scar_h.weapon.recoil]
+recoil_intensity = 6.2
+[scar_h.weapon.audio]
+report_max_m = 320.0
+
+[steyr_aug_a3]
+label = "Steyr AUG A3"
+stack_max = 1
+mass_kg = 3.60
+[steyr_aug_a3.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 640.0
+rounds_per_minute = 680.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 940.0
+muzzle_forward_m = 0.45
+ads_time_ms = 255.0
+move_speed_mult = 0.89
+[steyr_aug_a3.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[steyr_aug_a3.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 42.0
+max_range_m = 96.6
+min_damage_frac = 0.60
+[steyr_aug_a3.weapon.recoil]
+recoil_intensity = 2.9
+[steyr_aug_a3.weapon.audio]
+report_max_m = 320.0
+
+[iwi_tavor_tar21]
+label = "IWI Tavor TAR-21"
+stack_max = 1
+mass_kg = 3.60
+[iwi_tavor_tar21.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 600.0
+rounds_per_minute = 750.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 910.0
+muzzle_forward_m = 0.45
+ads_time_ms = 230.0
+move_speed_mult = 0.91
+[iwi_tavor_tar21.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[iwi_tavor_tar21.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 34.0
+max_range_m = 78.2
+min_damage_frac = 0.60
+[iwi_tavor_tar21.weapon.recoil]
+recoil_intensity = 4.2
+[iwi_tavor_tar21.weapon.audio]
+report_max_m = 320.0
+
+[famas_f1]
+label = "FAMAS F1"
+stack_max = 1
+mass_kg = 3.60
+[famas_f1.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 680.0
+rounds_per_minute = 900.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 925.0
+muzzle_forward_m = 0.45
+ads_time_ms = 245.0
+move_speed_mult = 0.90
+[famas_f1.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[famas_f1.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 38.0
+max_range_m = 87.4
+min_damage_frac = 0.60
+[famas_f1.weapon.recoil]
+recoil_intensity = 3.5
+[famas_f1.weapon.audio]
+report_max_m = 320.0
+
+[fn_fal]
+label = "FN FAL"
+stack_max = 1
+mass_kg = 3.60
+[fn_fal.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1040.0
+rounds_per_minute = 450.0
+spread_deg = 1.00
+magazine = 20
+reserve = 80
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 840.0
+muzzle_forward_m = 0.45
+ads_time_ms = 260.0
+move_speed_mult = 0.88
+[fn_fal.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[fn_fal.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 50.0
+max_range_m = 115.0
+min_damage_frac = 0.60
+[fn_fal.weapon.recoil]
+recoil_intensity = 6.0
+[fn_fal.weapon.audio]
+report_max_m = 320.0
+
+[galil_ace_23]
+label = "Galil ACE 23"
+stack_max = 1
+mass_kg = 3.60
+[galil_ace_23.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 620.0
+rounds_per_minute = 710.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 915.0
+muzzle_forward_m = 0.45
+ads_time_ms = 245.0
+move_speed_mult = 0.90
+[galil_ace_23.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[galil_ace_23.weapon.damage_curve]
+headshot_mult = 1.4839
+effective_range_m = 37.0
+max_range_m = 85.1
+min_damage_frac = 0.60
+[galil_ace_23.weapon.recoil]
+recoil_intensity = 3.9
+[galil_ace_23.weapon.audio]
+report_max_m = 320.0
+
+[g36c]
+label = "G36C"
+stack_max = 1
+mass_kg = 3.60
+[g36c.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 600.0
+rounds_per_minute = 750.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 920.0
+muzzle_forward_m = 0.45
+ads_time_ms = 230.0
+move_speed_mult = 0.91
+[g36c.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[g36c.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 32.0
+max_range_m = 73.6
+min_damage_frac = 0.60
+[g36c.weapon.recoil]
+recoil_intensity = 3.6
+[g36c.weapon.audio]
+report_max_m = 320.0
+
+[honey_badger]
+label = "Honey Badger"
+stack_max = 1
+mass_kg = 3.60
+[honey_badger.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 660.0
+rounds_per_minute = 800.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 500.0
+muzzle_forward_m = 0.45
+ads_time_ms = 210.0
+move_speed_mult = 0.93
+[honey_badger.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[honey_badger.weapon.damage_curve]
+headshot_mult = 1.4848
+effective_range_m = 20.0
+max_range_m = 46.0
+min_damage_frac = 0.60
+[honey_badger.weapon.recoil]
+recoil_intensity = 4.0
+[honey_badger.weapon.audio]
+report_max_m = 320.0
+
+[mcw_acr]
+label = "MCW / ACR"
+stack_max = 1
+mass_kg = 3.60
+[mcw_acr.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 560.0
+rounds_per_minute = 715.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 930.0
+muzzle_forward_m = 0.45
+ads_time_ms = 240.0
+move_speed_mult = 0.90
+[mcw_acr.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[mcw_acr.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 40.0
+max_range_m = 92.0
+min_damage_frac = 0.60
+[mcw_acr.weapon.recoil]
+recoil_intensity = 1.8
+[mcw_acr.weapon.audio]
+report_max_m = 320.0
+
+[as_val]
+label = "AS VAL"
+stack_max = 1
+mass_kg = 3.60
+[as_val.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 700.0
+rounds_per_minute = 900.0
+spread_deg = 1.00
+magazine = 20
+reserve = 80
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 330.0
+muzzle_forward_m = 0.45
+ads_time_ms = 225.0
+move_speed_mult = 0.92
+[as_val.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[as_val.weapon.damage_curve]
+headshot_mult = 1.4857
+effective_range_m = 18.0
+max_range_m = 41.4
+min_damage_frac = 0.60
+[as_val.weapon.recoil]
+recoil_intensity = 5.0
+[as_val.weapon.audio]
+report_max_m = 320.0
+
+[sig_mcx_spear]
+label = "SIG MCX Spear"
+stack_max = 1
+mass_kg = 3.60
+[sig_mcx_spear.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 880.0
+rounds_per_minute = 650.0
+spread_deg = 1.00
+magazine = 20
+reserve = 80
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 910.0
+muzzle_forward_m = 0.45
+ads_time_ms = 275.0
+move_speed_mult = 0.87
+[sig_mcx_spear.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[sig_mcx_spear.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 48.0
+max_range_m = 110.4
+min_damage_frac = 0.60
+[sig_mcx_spear.weapon.recoil]
+recoil_intensity = 5.5
+[sig_mcx_spear.weapon.audio]
+report_max_m = 320.0
+
+[kastov_74u]
+label = "Kastov-74U"
+stack_max = 1
+mass_kg = 3.60
+[kastov_74u.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 700.0
+rounds_per_minute = 650.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 735.0
+muzzle_forward_m = 0.45
+ads_time_ms = 215.0
+move_speed_mult = 0.93
+[kastov_74u.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[kastov_74u.weapon.damage_curve]
+headshot_mult = 1.4857
+effective_range_m = 22.0
+max_range_m = 50.6
+min_damage_frac = 0.60
+[kastov_74u.weapon.recoil]
+recoil_intensity = 4.8
+[kastov_74u.weapon.audio]
+report_max_m = 320.0
+
+[l85a2]
+label = "L85A2"
+stack_max = 1
+mass_kg = 3.60
+[l85a2.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 620.0
+rounds_per_minute = 650.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 940.0
+muzzle_forward_m = 0.45
+ads_time_ms = 265.0
+move_speed_mult = 0.88
+[l85a2.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[l85a2.weapon.damage_curve]
+headshot_mult = 1.4839
+effective_range_m = 42.0
+max_range_m = 96.6
+min_damage_frac = 0.60
+[l85a2.weapon.recoil]
+recoil_intensity = 3.1
+[l85a2.weapon.audio]
+report_max_m = 320.0
+
+[cz_bren_2]
+label = "CZ BREN 2"
+stack_max = 1
+mass_kg = 3.60
+[cz_bren_2.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 600.0
+rounds_per_minute = 770.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 915.0
+muzzle_forward_m = 0.45
+ads_time_ms = 240.0
+move_speed_mult = 0.90
+[cz_bren_2.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[cz_bren_2.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 36.0
+max_range_m = 82.8
+min_damage_frac = 0.60
+[cz_bren_2.weapon.recoil]
+recoil_intensity = 3.4
+[cz_bren_2.weapon.audio]
+report_max_m = 320.0
+
+[ak_12]
+label = "AK-12"
+stack_max = 1
+mass_kg = 3.60
+[ak_12.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 580.0
+rounds_per_minute = 700.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 900.0
+muzzle_forward_m = 0.45
+ads_time_ms = 240.0
+move_speed_mult = 0.90
+[ak_12.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[ak_12.weapon.damage_curve]
+headshot_mult = 1.4828
+effective_range_m = 38.0
+max_range_m = 87.4
+min_damage_frac = 0.60
+[ak_12.weapon.recoil]
+recoil_intensity = 3.3
+[ak_12.weapon.audio]
+report_max_m = 320.0
+
+[type_95]
+label = "Type 95"
+stack_max = 1
+mass_kg = 3.60
+[type_95.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 720.0
+rounds_per_minute = 800.0
+spread_deg = 1.00
+magazine = 30
+reserve = 120
+reload_s = 2.00
+range_m = 500.0
+muzzle_speed_mps = 930.0
+muzzle_forward_m = 0.45
+ads_time_ms = 250.0
+move_speed_mult = 0.89
+[type_95.weapon.ballistics]
+hitscan_threshold_m = 25.0
+drag_k = 0.00035
+gravity_scale = 1.0
+[type_95.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 40.0
+max_range_m = 92.0
+min_damage_frac = 0.60
+[type_95.weapon.recoil]
+recoil_intensity = 3.7
+[type_95.weapon.audio]
+report_max_m = 320.0
+
+# --------------------------------------------------------------------------
+# 4. MARKSMAN RIFLES / DMRs (10)
+# --------------------------------------------------------------------------
+
+[m14_ebr]
+label = "M14 / EBR-14"
+stack_max = 1
+mass_kg = 4.40
+[m14_ebr.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1160.0
+rounds_per_minute = 320.0
+spread_deg = 0.40
+magazine = 10
+reserve = 40
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 850.0
+muzzle_forward_m = 0.55
+ads_time_ms = 290.0
+move_speed_mult = 0.85
+[m14_ebr.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[m14_ebr.weapon.damage_curve]
+headshot_mult = 1.6897
+effective_range_m = 60.0
+max_range_m = 120.0
+min_damage_frac = 0.70
+[m14_ebr.weapon.recoil]
+recoil_intensity = 6.8
+[m14_ebr.weapon.audio]
+report_max_m = 420.0
+
+[m1_garand]
+label = "M1 Garand"
+stack_max = 1
+mass_kg = 4.40
+[m1_garand.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1240.0
+rounds_per_minute = 280.0
+spread_deg = 0.40
+magazine = 8
+reserve = 32
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 853.0
+muzzle_forward_m = 0.55
+ads_time_ms = 300.0
+move_speed_mult = 0.85
+[m1_garand.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[m1_garand.weapon.damage_curve]
+headshot_mult = 1.6935
+effective_range_m = 65.0
+max_range_m = 130.0
+min_damage_frac = 0.70
+[m1_garand.weapon.recoil]
+recoil_intensity = 7.2
+[m1_garand.weapon.audio]
+report_max_m = 420.0
+
+[svd_dragunov]
+label = "SVD Dragunov"
+stack_max = 1
+mass_kg = 4.40
+[svd_dragunov.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1300.0
+rounds_per_minute = 250.0
+spread_deg = 0.40
+magazine = 10
+reserve = 40
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 830.0
+muzzle_forward_m = 0.55
+ads_time_ms = 320.0
+move_speed_mult = 0.84
+[svd_dragunov.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[svd_dragunov.weapon.damage_curve]
+headshot_mult = 1.7692
+effective_range_m = 70.0
+max_range_m = 140.0
+min_damage_frac = 0.70
+[svd_dragunov.weapon.recoil]
+recoil_intensity = 7.8
+[svd_dragunov.weapon.audio]
+report_max_m = 420.0
+
+[hk_g3_sg1]
+label = "HK G3 SG/1"
+stack_max = 1
+mass_kg = 4.40
+[hk_g3_sg1.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1120.0
+rounds_per_minute = 350.0
+spread_deg = 0.40
+magazine = 20
+reserve = 80
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 800.0
+muzzle_forward_m = 0.55
+ads_time_ms = 295.0
+move_speed_mult = 0.85
+[hk_g3_sg1.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[hk_g3_sg1.weapon.damage_curve]
+headshot_mult = 1.6964
+effective_range_m = 58.0
+max_range_m = 116.0
+min_damage_frac = 0.70
+[hk_g3_sg1.weapon.recoil]
+recoil_intensity = 6.5
+[hk_g3_sg1.weapon.audio]
+report_max_m = 420.0
+
+[sr25_m110]
+label = "SR-25 / M110"
+stack_max = 1
+mass_kg = 4.40
+[sr25_m110.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1200.0
+rounds_per_minute = 300.0
+spread_deg = 0.40
+magazine = 20
+reserve = 80
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 820.0
+muzzle_forward_m = 0.55
+ads_time_ms = 285.0
+move_speed_mult = 0.85
+[sr25_m110.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[sr25_m110.weapon.damage_curve]
+headshot_mult = 1.7000
+effective_range_m = 68.0
+max_range_m = 136.0
+min_damage_frac = 0.70
+[sr25_m110.weapon.recoil]
+recoil_intensity = 5.9
+[sr25_m110.weapon.audio]
+report_max_m = 420.0
+
+[sks]
+label = "SKS"
+stack_max = 1
+mass_kg = 4.40
+[sks.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1040.0
+rounds_per_minute = 400.0
+spread_deg = 0.40
+magazine = 20
+reserve = 80
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 735.0
+muzzle_forward_m = 0.55
+ads_time_ms = 270.0
+move_speed_mult = 0.87
+[sks.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[sks.weapon.damage_curve]
+headshot_mult = 1.6923
+effective_range_m = 50.0
+max_range_m = 100.0
+min_damage_frac = 0.70
+[sks.weapon.recoil]
+recoil_intensity = 5.2
+[sks.weapon.audio]
+report_max_m = 420.0
+
+[vss_vintorez]
+label = "VSS Vintorez"
+stack_max = 1
+mass_kg = 4.40
+[vss_vintorez.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 960.0
+rounds_per_minute = 600.0
+spread_deg = 0.40
+magazine = 10
+reserve = 40
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 300.0
+muzzle_forward_m = 0.55
+ads_time_ms = 250.0
+move_speed_mult = 0.90
+[vss_vintorez.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[vss_vintorez.weapon.damage_curve]
+headshot_mult = 1.6667
+effective_range_m = 30.0
+max_range_m = 60.0
+min_damage_frac = 0.70
+[vss_vintorez.weapon.recoil]
+recoil_intensity = 4.1
+[vss_vintorez.weapon.audio]
+report_max_m = 420.0
+
+[springfield_m1a]
+label = "Springfield M1A"
+stack_max = 1
+mass_kg = 4.40
+[springfield_m1a.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1140.0
+rounds_per_minute = 340.0
+spread_deg = 0.40
+magazine = 10
+reserve = 40
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 840.0
+muzzle_forward_m = 0.55
+ads_time_ms = 290.0
+move_speed_mult = 0.86
+[springfield_m1a.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[springfield_m1a.weapon.damage_curve]
+headshot_mult = 1.6842
+effective_range_m = 62.0
+max_range_m = 124.0
+min_damage_frac = 0.70
+[springfield_m1a.weapon.recoil]
+recoil_intensity = 6.6
+[springfield_m1a.weapon.audio]
+report_max_m = 420.0
+
+[kel_tec_rfb]
+label = "Kel-Tec RFB"
+stack_max = 1
+mass_kg = 4.40
+[kel_tec_rfb.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1100.0
+rounds_per_minute = 360.0
+spread_deg = 0.40
+magazine = 20
+reserve = 80
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 780.0
+muzzle_forward_m = 0.55
+ads_time_ms = 275.0
+move_speed_mult = 0.87
+[kel_tec_rfb.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[kel_tec_rfb.weapon.damage_curve]
+headshot_mult = 1.6727
+effective_range_m = 55.0
+max_range_m = 110.0
+min_damage_frac = 0.70
+[kel_tec_rfb.weapon.recoil]
+recoil_intensity = 5.8
+[kel_tec_rfb.weapon.audio]
+report_max_m = 420.0
+
+[mk12_spr]
+label = "MK12 SPR"
+stack_max = 1
+mass_kg = 4.40
+[mk12_spr.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 920.0
+rounds_per_minute = 450.0
+spread_deg = 0.40
+magazine = 20
+reserve = 80
+reload_s = 2.40
+range_m = 800.0
+muzzle_speed_mps = 930.0
+muzzle_forward_m = 0.55
+ads_time_ms = 260.0
+move_speed_mult = 0.88
+[mk12_spr.weapon.ballistics]
+hitscan_threshold_m = 15.0
+drag_k = 0.00030
+gravity_scale = 1.0
+[mk12_spr.weapon.damage_curve]
+headshot_mult = 1.7826
+effective_range_m = 55.0
+max_range_m = 110.0
+min_damage_frac = 0.70
+[mk12_spr.weapon.recoil]
+recoil_intensity = 3.8
+[mk12_spr.weapon.audio]
+report_max_m = 420.0
+
+# --------------------------------------------------------------------------
+# 5. SNIPER RIFLES (10)
+# --------------------------------------------------------------------------
+
+[barrett_m82]
+label = "Barrett M82"
+stack_max = 1
+mass_kg = 6.50
+[barrett_m82.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2200.0
+rounds_per_minute = 150.0
+spread_deg = 0.15
+magazine = 10
+reserve = 40
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 853.0
+muzzle_forward_m = 0.65
+ads_time_ms = 480.0
+move_speed_mult = 0.76
+[barrett_m82.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[barrett_m82.weapon.damage_curve]
+headshot_mult = 2.2727
+effective_range_m = 120.0
+max_range_m = 240.0
+min_damage_frac = 0.80
+[barrett_m82.weapon.recoil]
+recoil_intensity = 9.9
+[barrett_m82.weapon.audio]
+report_max_m = 600.0
+
+[barrett_mrad]
+label = "Barrett MRAD"
+stack_max = 1
+mass_kg = 6.50
+[barrett_mrad.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1900.0
+rounds_per_minute = 48.0
+spread_deg = 0.15
+magazine = 7
+reserve = 28
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 914.0
+muzzle_forward_m = 0.65
+ads_time_ms = 410.0
+move_speed_mult = 0.80
+[barrett_mrad.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[barrett_mrad.weapon.damage_curve]
+headshot_mult = 2.3158
+effective_range_m = 110.0
+max_range_m = 220.0
+min_damage_frac = 0.80
+[barrett_mrad.weapon.recoil]
+recoil_intensity = 8.2
+[barrett_mrad.weapon.audio]
+report_max_m = 600.0
+
+[awm_l115a3]
+label = "AWM / L115A3"
+stack_max = 1
+mass_kg = 6.50
+[awm_l115a3.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1960.0
+rounds_per_minute = 42.0
+spread_deg = 0.15
+magazine = 5
+reserve = 20
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 936.0
+muzzle_forward_m = 0.65
+ads_time_ms = 430.0
+move_speed_mult = 0.79
+[awm_l115a3.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[awm_l115a3.weapon.damage_curve]
+headshot_mult = 2.3469
+effective_range_m = 115.0
+max_range_m = 230.0
+min_damage_frac = 0.80
+[awm_l115a3.weapon.recoil]
+recoil_intensity = 8.5
+[awm_l115a3.weapon.audio]
+report_max_m = 600.0
+
+[remington_700]
+label = "Remington 700"
+stack_max = 1
+mass_kg = 6.50
+[remington_700.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1760.0
+rounds_per_minute = 55.0
+spread_deg = 0.15
+magazine = 5
+reserve = 20
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 850.0
+muzzle_forward_m = 0.65
+ads_time_ms = 370.0
+move_speed_mult = 0.82
+[remington_700.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[remington_700.weapon.damage_curve]
+headshot_mult = 2.2159
+effective_range_m = 90.0
+max_range_m = 180.0
+min_damage_frac = 0.80
+[remington_700.weapon.recoil]
+recoil_intensity = 7.5
+[remington_700.weapon.audio]
+report_max_m = 600.0
+
+[cheytac_m200]
+label = "CheyTac M200 Intervention"
+stack_max = 1
+mass_kg = 6.50
+[cheytac_m200.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2100.0
+rounds_per_minute = 40.0
+spread_deg = 0.15
+magazine = 7
+reserve = 28
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 900.0
+muzzle_forward_m = 0.65
+ads_time_ms = 450.0
+move_speed_mult = 0.77
+[cheytac_m200.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[cheytac_m200.weapon.damage_curve]
+headshot_mult = 2.2857
+effective_range_m = 130.0
+max_range_m = 260.0
+min_damage_frac = 0.80
+[cheytac_m200.weapon.recoil]
+recoil_intensity = 8.8
+[cheytac_m200.weapon.audio]
+report_max_m = 600.0
+
+[kar98k]
+label = "Kar98k"
+stack_max = 1
+mass_kg = 6.50
+[kar98k.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1700.0
+rounds_per_minute = 60.0
+spread_deg = 0.15
+magazine = 5
+reserve = 20
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 760.0
+muzzle_forward_m = 0.65
+ads_time_ms = 320.0
+move_speed_mult = 0.86
+[kar98k.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[kar98k.weapon.damage_curve]
+headshot_mult = 2.1765
+effective_range_m = 75.0
+max_range_m = 150.0
+min_damage_frac = 0.80
+[kar98k.weapon.recoil]
+recoil_intensity = 6.8
+[kar98k.weapon.audio]
+report_max_m = 600.0
+
+[dsr_50]
+label = "DSR-50"
+stack_max = 1
+mass_kg = 6.50
+[dsr_50.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2160.0
+rounds_per_minute = 38.0
+spread_deg = 0.15
+magazine = 5
+reserve = 20
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 870.0
+muzzle_forward_m = 0.65
+ads_time_ms = 460.0
+move_speed_mult = 0.78
+[dsr_50.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[dsr_50.weapon.damage_curve]
+headshot_mult = 2.2685
+effective_range_m = 125.0
+max_range_m = 250.0
+min_damage_frac = 0.80
+[dsr_50.weapon.recoil]
+recoil_intensity = 9.2
+[dsr_50.weapon.audio]
+report_max_m = 600.0
+
+[sv_98]
+label = "SV-98"
+stack_max = 1
+mass_kg = 6.50
+[sv_98.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1800.0
+rounds_per_minute = 50.0
+spread_deg = 0.15
+magazine = 10
+reserve = 40
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 820.0
+muzzle_forward_m = 0.65
+ads_time_ms = 390.0
+move_speed_mult = 0.81
+[sv_98.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[sv_98.weapon.damage_curve]
+headshot_mult = 2.2222
+effective_range_m = 95.0
+max_range_m = 190.0
+min_damage_frac = 0.80
+[sv_98.weapon.recoil]
+recoil_intensity = 7.6
+[sv_98.weapon.audio]
+report_max_m = 600.0
+
+[steyr_scout]
+label = "Steyr Scout"
+stack_max = 1
+mass_kg = 6.50
+[steyr_scout.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 1500.0
+rounds_per_minute = 70.0
+spread_deg = 0.15
+magazine = 8
+reserve = 32
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 880.0
+muzzle_forward_m = 0.65
+ads_time_ms = 290.0
+move_speed_mult = 0.88
+[steyr_scout.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[steyr_scout.weapon.damage_curve]
+headshot_mult = 2.2000
+effective_range_m = 70.0
+max_range_m = 140.0
+min_damage_frac = 0.80
+[steyr_scout.weapon.recoil]
+recoil_intensity = 5.5
+[steyr_scout.weapon.audio]
+report_max_m = 600.0
+
+[ax50]
+label = "AX50"
+stack_max = 1
+mass_kg = 6.50
+[ax50.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2040.0
+rounds_per_minute = 44.0
+spread_deg = 0.15
+magazine = 5
+reserve = 20
+reload_s = 3.00
+range_m = 1800.0
+muzzle_speed_mps = 890.0
+muzzle_forward_m = 0.65
+ads_time_ms = 440.0
+move_speed_mult = 0.78
+[ax50.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00022
+gravity_scale = 1.0
+[ax50.weapon.damage_curve]
+headshot_mult = 2.3039
+effective_range_m = 120.0
+max_range_m = 240.0
+min_damage_frac = 0.80
+[ax50.weapon.recoil]
+recoil_intensity = 9.0
+[ax50.weapon.audio]
+report_max_m = 600.0
+
+# --------------------------------------------------------------------------
+# 6. SHOTGUNS (10)
+# --------------------------------------------------------------------------
+
+# 8 pellets x 18 torso / 27 head per pellet (doc table 6): the whole pull is
+# one hit here, 144 HP. The doc gives shotguns no RPM; 60 is the action.
+[remington_870]
+label = "Remington 870"
+stack_max = 1
+mass_kg = 3.40
+[remington_870.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2880.0
+rounds_per_minute = 60.0
+spread_deg = 3.00
+magazine = 8
+reserve = 32
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 400.0
+muzzle_forward_m = 0.50
+ads_time_ms = 240.0
+move_speed_mult = 0.91
+[remington_870.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[remington_870.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 10.0
+max_range_m = 20.0
+min_damage_frac = 0.35
+[remington_870.weapon.recoil]
+recoil_intensity = 8.0
+[remington_870.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 17 torso / 25 head per pellet (doc table 6): the whole pull is
+# one hit here, 136 HP. The doc gives shotguns no RPM; 60 is the action.
+[mossberg_590]
+label = "Mossberg 590"
+stack_max = 1
+mass_kg = 3.40
+[mossberg_590.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2720.0
+rounds_per_minute = 60.0
+spread_deg = 3.00
+magazine = 8
+reserve = 32
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 410.0
+muzzle_forward_m = 0.50
+ads_time_ms = 235.0
+move_speed_mult = 0.91
+[mossberg_590.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[mossberg_590.weapon.damage_curve]
+headshot_mult = 1.4706
+effective_range_m = 11.0
+max_range_m = 22.0
+min_damage_frac = 0.35
+[mossberg_590.weapon.recoil]
+recoil_intensity = 7.8
+[mossberg_590.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 15 torso / 22 head per pellet (doc table 6): the whole pull is
+# one hit here, 120 HP. The doc gives shotguns no RPM; 180 is the action.
+[benelli_m4]
+label = "Benelli M4 / M1014"
+stack_max = 1
+mass_kg = 3.40
+[benelli_m4.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2400.0
+rounds_per_minute = 180.0
+spread_deg = 3.00
+magazine = 7
+reserve = 28
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 420.0
+muzzle_forward_m = 0.50
+ads_time_ms = 250.0
+move_speed_mult = 0.90
+[benelli_m4.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[benelli_m4.weapon.damage_curve]
+headshot_mult = 1.4667
+effective_range_m = 12.0
+max_range_m = 24.0
+min_damage_frac = 0.35
+[benelli_m4.weapon.recoil]
+recoil_intensity = 6.5
+[benelli_m4.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 12 torso / 18 head per pellet (doc table 6): the whole pull is
+# one hit here, 96 HP. The doc gives shotguns no RPM; 300 is the action.
+[aa_12]
+label = "AA-12"
+stack_max = 1
+mass_kg = 3.40
+[aa_12.weapon]
+kind = "projectile"
+automatic = true
+damage_j = 1920.0
+rounds_per_minute = 300.0
+spread_deg = 3.00
+magazine = 20
+reserve = 80
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 350.0
+muzzle_forward_m = 0.50
+ads_time_ms = 270.0
+move_speed_mult = 0.85
+[aa_12.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[aa_12.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 8.0
+max_range_m = 16.0
+min_damage_frac = 0.35
+[aa_12.weapon.recoil]
+recoil_intensity = 5.2
+[aa_12.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 19 torso / 28 head per pellet (doc table 6): the whole pull is
+# one hit here, 152 HP. The doc gives shotguns no RPM; 120 is the action.
+[spas_12]
+label = "SPAS-12"
+stack_max = 1
+mass_kg = 3.40
+[spas_12.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 3040.0
+rounds_per_minute = 120.0
+spread_deg = 3.00
+magazine = 8
+reserve = 32
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 400.0
+muzzle_forward_m = 0.50
+ads_time_ms = 245.0
+move_speed_mult = 0.90
+[spas_12.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[spas_12.weapon.damage_curve]
+headshot_mult = 1.4737
+effective_range_m = 11.0
+max_range_m = 22.0
+min_damage_frac = 0.35
+[spas_12.weapon.recoil]
+recoil_intensity = 7.9
+[spas_12.weapon.audio]
+report_max_m = 260.0
+
+# 12 pellets x 11 torso / 16 head per pellet (doc table 6): the whole pull is
+# one hit here, 132 HP. The doc gives shotguns no RPM; 60 is the action.
+[ksg_12]
+label = "KSG 12"
+stack_max = 1
+mass_kg = 3.40
+[ksg_12.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2640.0
+rounds_per_minute = 60.0
+spread_deg = 3.00
+magazine = 14
+reserve = 56
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 390.0
+muzzle_forward_m = 0.50
+ads_time_ms = 230.0
+move_speed_mult = 0.92
+[ksg_12.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[ksg_12.weapon.damage_curve]
+headshot_mult = 1.4545
+effective_range_m = 9.0
+max_range_m = 18.0
+min_damage_frac = 0.35
+[ksg_12.weapon.recoil]
+recoil_intensity = 8.2
+[ksg_12.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 13 torso / 19 head per pellet (doc table 6): the whole pull is
+# one hit here, 104 HP. The doc gives shotguns no RPM; 180 is the action.
+[origin_12]
+label = "Origin 12"
+stack_max = 1
+mass_kg = 3.40
+[origin_12.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2080.0
+rounds_per_minute = 180.0
+spread_deg = 3.00
+magazine = 12
+reserve = 48
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 370.0
+muzzle_forward_m = 0.50
+ads_time_ms = 260.0
+move_speed_mult = 0.88
+[origin_12.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[origin_12.weapon.damage_curve]
+headshot_mult = 1.4615
+effective_range_m = 9.0
+max_range_m = 18.0
+min_damage_frac = 0.35
+[origin_12.weapon.recoil]
+recoil_intensity = 5.8
+[origin_12.weapon.audio]
+report_max_m = 260.0
+
+# 10 pellets x 22 torso / 33 head per pellet (doc table 6): the whole pull is
+# one hit here, 220 HP. The doc gives shotguns no RPM; 120 is the action.
+[double_barrel_12g]
+label = "Double Barrel 12G"
+stack_max = 1
+mass_kg = 3.40
+[double_barrel_12g.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 4400.0
+rounds_per_minute = 120.0
+spread_deg = 3.00
+magazine = 2
+reserve = 8
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 430.0
+muzzle_forward_m = 0.50
+ads_time_ms = 210.0
+move_speed_mult = 0.94
+[double_barrel_12g.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[double_barrel_12g.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 13.0
+max_range_m = 26.0
+min_damage_frac = 0.35
+[double_barrel_12g.weapon.recoil]
+recoil_intensity = 9.5
+[double_barrel_12g.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 14 torso / 21 head per pellet (doc table 6): the whole pull is
+# one hit here, 112 HP. The doc gives shotguns no RPM; 180 is the action.
+[saiga_12]
+label = "Saiga-12"
+stack_max = 1
+mass_kg = 3.40
+[saiga_12.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2240.0
+rounds_per_minute = 180.0
+spread_deg = 3.00
+magazine = 10
+reserve = 40
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 380.0
+muzzle_forward_m = 0.50
+ads_time_ms = 265.0
+move_speed_mult = 0.88
+[saiga_12.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[saiga_12.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 10.0
+max_range_m = 20.0
+min_damage_frac = 0.35
+[saiga_12.weapon.recoil]
+recoil_intensity = 6.2
+[saiga_12.weapon.audio]
+report_max_m = 260.0
+
+# 8 pellets x 16 torso / 24 head per pellet (doc table 6): the whole pull is
+# one hit here, 128 HP. The doc gives shotguns no RPM; 180 is the action.
+[fn_slp]
+label = "FN SLP"
+stack_max = 1
+mass_kg = 3.40
+[fn_slp.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2560.0
+rounds_per_minute = 180.0
+spread_deg = 3.00
+magazine = 8
+reserve = 32
+reload_s = 3.20
+range_m = 80.0
+muzzle_speed_mps = 415.0
+muzzle_forward_m = 0.50
+ads_time_ms = 240.0
+move_speed_mult = 0.91
+[fn_slp.weapon.ballistics]
+hitscan_threshold_m = 10.0
+drag_k = 0.00150
+gravity_scale = 1.0
+[fn_slp.weapon.damage_curve]
+headshot_mult = 1.5000
+effective_range_m = 12.0
+max_range_m = 24.0
+min_damage_frac = 0.35
+[fn_slp.weapon.recoil]
+recoil_intensity = 6.0
+[fn_slp.weapon.audio]
+report_max_m = 260.0
+
+# --------------------------------------------------------------------------
+# 7. ROCKET LAUNCHERS (5)
+# --------------------------------------------------------------------------
+
+# Direct impact damage only; the doc's blast radius is wave WPN2d's. RPM is 60
+# / the doc's reload time, which is what a single-shot tube cycles at. Recoil
+# 9.0: the doc gives launchers no recoil column and nine is where its own 1-10
+# scale puts a shoulder-fired rocket.
+[rpg_7]
+label = "RPG-7"
+stack_max = 1
+mass_kg = 7.00
+[rpg_7.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 3000.0
+rounds_per_minute = 17.1
+spread_deg = 0.50
+magazine = 1
+reserve = 3
+reload_s = 3.50
+range_m = 900.0
+muzzle_speed_mps = 115.0
+muzzle_forward_m = 0.70
+ads_time_ms = 380.0
+move_speed_mult = 0.82
+[rpg_7.weapon.ballistics]
+hitscan_threshold_m = 0.0
+drag_k = 0.00060
+gravity_scale = 1.0
+[rpg_7.weapon.damage_curve]
+headshot_mult = 1.0000
+effective_range_m = 0.0
+max_range_m = 0.0
+min_damage_frac = 1.00
+[rpg_7.weapon.recoil]
+recoil_intensity = 9.0
+[rpg_7.weapon.audio]
+report_max_m = 900.0
+
+# Direct impact damage only; the doc's blast radius is wave WPN2d's. RPM is 60
+# / the doc's reload time, which is what a single-shot tube cycles at. Recoil
+# 9.0: the doc gives launchers no recoil column and nine is where its own 1-10
+# scale puts a shoulder-fired rocket.
+[smaw]
+label = "SMAW"
+stack_max = 1
+mass_kg = 7.00
+[smaw.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 2800.0
+rounds_per_minute = 18.8
+spread_deg = 0.50
+magazine = 1
+reserve = 3
+reload_s = 3.20
+range_m = 900.0
+muzzle_speed_mps = 220.0
+muzzle_forward_m = 0.70
+ads_time_ms = 400.0
+move_speed_mult = 0.80
+[smaw.weapon.ballistics]
+hitscan_threshold_m = 0.0
+drag_k = 0.00060
+gravity_scale = 1.0
+[smaw.weapon.damage_curve]
+headshot_mult = 1.0000
+effective_range_m = 0.0
+max_range_m = 0.0
+min_damage_frac = 1.00
+[smaw.weapon.recoil]
+recoil_intensity = 9.0
+[smaw.weapon.audio]
+report_max_m = 900.0
+
+# Direct impact damage only; the doc's blast radius is wave WPN2d's. RPM is 60
+# / the doc's reload time, which is what a single-shot tube cycles at. Recoil
+# 9.0: the doc gives launchers no recoil column and nine is where its own 1-10
+# scale puts a shoulder-fired rocket.
+[fim_92_stinger]
+label = "FIM-92 Stinger"
+stack_max = 1
+mass_kg = 7.00
+[fim_92_stinger.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 5000.0
+rounds_per_minute = 15.0
+spread_deg = 0.50
+magazine = 1
+reserve = 3
+reload_s = 4.00
+range_m = 900.0
+muzzle_speed_mps = 750.0
+muzzle_forward_m = 0.70
+ads_time_ms = 500.0
+move_speed_mult = 0.78
+[fim_92_stinger.weapon.ballistics]
+hitscan_threshold_m = 0.0
+drag_k = 0.00060
+gravity_scale = 1.0
+[fim_92_stinger.weapon.damage_curve]
+headshot_mult = 1.0000
+effective_range_m = 0.0
+max_range_m = 0.0
+min_damage_frac = 1.00
+[fim_92_stinger.weapon.recoil]
+recoil_intensity = 9.0
+[fim_92_stinger.weapon.audio]
+report_max_m = 900.0
+
+# Direct impact damage only; the doc's blast radius is wave WPN2d's. RPM is 60
+# / the doc's reload time, which is what a single-shot tube cycles at. Recoil
+# 9.0: the doc gives launchers no recoil column and nine is where its own 1-10
+# scale puts a shoulder-fired rocket.
+[javelin_fgm148]
+label = "Javelin / FGM-148"
+stack_max = 1
+mass_kg = 7.00
+[javelin_fgm148.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 7000.0
+rounds_per_minute = 12.0
+spread_deg = 0.50
+magazine = 1
+reserve = 3
+reload_s = 5.00
+range_m = 900.0
+muzzle_speed_mps = 190.0
+muzzle_forward_m = 0.70
+ads_time_ms = 650.0
+move_speed_mult = 0.72
+[javelin_fgm148.weapon.ballistics]
+hitscan_threshold_m = 0.0
+drag_k = 0.00060
+gravity_scale = 1.0
+[javelin_fgm148.weapon.damage_curve]
+headshot_mult = 1.0000
+effective_range_m = 0.0
+max_range_m = 0.0
+min_damage_frac = 1.00
+[javelin_fgm148.weapon.recoil]
+recoil_intensity = 9.0
+[javelin_fgm148.weapon.audio]
+report_max_m = 900.0
+
+# Direct impact damage only; the doc's blast radius is wave WPN2d's. RPM is 60
+# / the doc's reload time, which is what a single-shot tube cycles at. Recoil
+# 9.0: the doc gives launchers no recoil column and nine is where its own 1-10
+# scale puts a shoulder-fired rocket.
+[m3_carl_gustaf]
+label = "M3 Carl Gustaf"
+stack_max = 1
+mass_kg = 7.00
+[m3_carl_gustaf.weapon]
+kind = "projectile"
+automatic = false
+damage_j = 3200.0
+rounds_per_minute = 15.8
+spread_deg = 0.50
+magazine = 1
+reserve = 3
+reload_s = 3.80
+range_m = 900.0
+muzzle_speed_mps = 290.0
+muzzle_forward_m = 0.70
+ads_time_ms = 420.0
+move_speed_mult = 0.78
+[m3_carl_gustaf.weapon.ballistics]
+hitscan_threshold_m = 0.0
+drag_k = 0.00060
+gravity_scale = 1.0
+[m3_carl_gustaf.weapon.damage_curve]
+headshot_mult = 1.0000
+effective_range_m = 0.0
+max_range_m = 0.0
+min_damage_frac = 1.00
+[m3_carl_gustaf.weapon.recoil]
+recoil_intensity = 9.0
+[m3_carl_gustaf.weapon.audio]
+report_max_m = 900.0
+
