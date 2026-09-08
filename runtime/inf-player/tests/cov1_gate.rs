@@ -270,6 +270,12 @@ fn the_cover_census_over_the_island() {
     let mut high = 0usize;
     let mut by_family: std::collections::BTreeMap<String, usize> = Default::default();
     let mut refusals: std::collections::BTreeMap<String, usize> = Default::default();
+    // **Where the rare rows ARE**, not only how many there are. The five LOW
+    // stations and the vehicle rows are the two the demo loop needs a placement
+    // for, and a census that counts them without saying where they are is a
+    // census a photographer cannot use.
+    let mut low_sites: Vec<String> = Vec::new();
+    let mut vehicle_sites: Vec<String> = Vec::new();
     let settings = inf_physics::d3::CoverSettings::default();
 
     for ix in -half..=half {
@@ -305,28 +311,58 @@ fn the_cover_census_over_the_island() {
                 };
                 probes += 1;
                 sweeps += u64::from(p.sweeps);
+                // **A kerb is never cover**, whatever else the island holds —
+                // asserted on every probe that CLASSIFIED one, which is where
+                // the claim lives.
+                //
+                // It sat inside the `None` arm of the match below until this
+                // audit: there `p.class` IS `None`, so `!p.class.is_cover()` was
+                // true by construction and the assertion could not fail on any
+                // island, any kerb or any threshold. A check that reads a
+                // discriminant the match has already decided is a check about
+                // the match.
+                assert!(
+                    p.label.family != inf_physics::d3::ColliderFamily::Kerb || !p.class.is_cover(),
+                    "a kerb classified as {:?} cover at ({x:.1}, {z:.1}) bearing {b}: {}",
+                    p.class,
+                    p.explain(sim.world()),
+                );
                 match p.class {
                     CoverClass::Low => {
                         low += 1;
                         *by_family
                             .entry(format!("Low  / {:?}", p.label.family))
                             .or_default() += 1;
+                        // **WHERE the low cover is.** Five rows out of 2 248
+                        // probes, and the wave never photographed one because
+                        // nothing wrote down where they were. The label names
+                        // the block, so a demo placement can be derived from
+                        // this line rather than guessed.
+                        low_sites.push(format!(
+                            "({x:.1}, {z:.1}) bearing {:.0} deg, top {:.3} m, extents L {:.2} / R {:.2}, {}",
+                            360.0 * f64::from(b) / f64::from(bearings),
+                            p.top_m,
+                            p.left_m,
+                            p.right_m,
+                            p.label.describe(sim.world()),
+                        ));
                     }
                     CoverClass::High => {
                         high += 1;
                         *by_family
                             .entry(format!("High / {:?}", p.label.family))
                             .or_default() += 1;
+                        if p.label.family == inf_physics::d3::ColliderFamily::Entity {
+                            vehicle_sites.push(format!(
+                                "({x:.1}, {z:.1}) bearing {:.0} deg — top {:.3} m, {}",
+                                360.0 * f64::from(b) / f64::from(bearings),
+                                p.top_m,
+                                p.label.describe(sim.world()),
+                            ));
+                        }
                     }
                     CoverClass::None => {
                         *refusals.entry(format!("{:?}", p.refusal)).or_default() += 1;
-                        // **A kerb is never cover**, whatever else the island
-                        // holds. The floor's refusal, asserted on every station.
-                        assert!(
-                            p.label.family != inf_physics::d3::ColliderFamily::Kerb
-                                || !p.class.is_cover(),
-                            "a kerb classified as cover at ({x:.1}, {z:.1})"
-                        );
                     }
                 }
             }
@@ -340,6 +376,14 @@ fn the_cover_census_over_the_island() {
     println!("  by class and family:");
     for (k, v) in &by_family {
         println!("    {k:>34} : {v}");
+    }
+    println!("  the LOW stations, by place:");
+    for l in &low_sites {
+        println!("    {l}");
+    }
+    println!("  the VEHICLE stations, by place:");
+    for l in &vehicle_sites {
+        println!("    {l}");
     }
     println!("  refusals:");
     for (k, v) in &refusals {
@@ -416,6 +460,19 @@ struct StationWant {
     reach: i32,
     /// How far apart the cells are, metres.
     spacing: f64,
+    /// **The direction the sun is in**, when the station has to be one a camera
+    /// can SEE (the COV1 audit).
+    ///
+    /// The wave's frames are three-quarters black and the report guessed at the
+    /// reason. Measured: the level's sun sits at azimuth 138.3° and elevation
+    /// 59.3°, and the first six façades `find_station` reaches — it takes the
+    /// lowest bearing that answers at each cell — have a face-to-sun dot
+    /// between **-0.339 and -0.381**, every one of them in its own shade. Lit
+    /// ones exist ((-1798.0, 2066.0) reads **+0.381**) and the search simply
+    /// never asked for one. A frame at a lit wall is a different SEARCH, not a
+    /// different camera, and this is that search: the face's own normal must
+    /// have a positive planar dot with the direction to the sun.
+    sunlit: Option<glam::DVec3>,
 }
 
 impl StationWant {
@@ -427,7 +484,13 @@ impl StationWant {
             free_corner: false,
             reach: 8,
             spacing: 8.0,
+            sunlit: None,
         }
+    }
+    /// Only faces the sun is on, given the direction TO the sun.
+    fn facing_the_sun(mut self, sun: glam::DVec3) -> Self {
+        self.sunlit = Some(sun);
+        self
     }
     fn structure(mut self) -> Self {
         self.family = Some(inf_physics::d3::ColliderFamily::Structure);
@@ -456,6 +519,23 @@ impl StationWant {
 /// `Structure` with no entity at all (carried 162), and an arm that wants one
 /// must not accidentally measure the other.
 fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Option<Station> {
+    find_stations(sim, hero, want, 1).into_iter().next()
+}
+
+/// **The plural of [`find_station`]** — up to `n` distinct cells, each left
+/// with the hero standing at the LAST one found.
+///
+/// Added by the COV1 audit, for a reason the wave's own frames are the evidence
+/// of: every camera and stance claim in this file was measured at ONE station
+/// the search happened to reach first, and the shipped demo's log then showed
+/// the camera refusing on 290 of 303 cover samples. A claim about a system
+/// wants a population; a claim about a place wants a coordinate.
+fn find_stations(
+    sim: &mut RuntimeSim,
+    hero: uuid::Uuid,
+    want: StationWant,
+    n: usize,
+) -> Vec<Station> {
     let (reach, spacing) = (want.reach, want.spacing);
     let spawn = hero_pos(sim, hero);
     let settings = inf_physics::d3::CoverSettings::default();
@@ -468,7 +548,11 @@ fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Op
         }
     }
     cells.sort_by_key(|(a, b)| a.abs().max(b.abs()));
+    let mut found: Vec<Station> = Vec::new();
     for (ix, iz) in cells {
+        if found.len() >= n {
+            break;
+        }
         let x = spawn.x + f64::from(ix) * spacing;
         let z = spawn.z + f64::from(iz) * spacing;
         hero_to(sim, hero, x, z, 0.0);
@@ -507,6 +591,13 @@ fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Op
             if p.left_m + p.right_m < want.min_run_m {
                 continue;
             }
+            // The face's own normal points back AT the character, so a lit face
+            // is one whose normal leans toward the sun.
+            if let Some(sun) = want.sunlit {
+                if p.normal.x * sun.x + p.normal.z * sun.z <= 0.25 {
+                    continue;
+                }
+            }
             if want.free_corner && !ends_freely(sim, hero, &p, dir, &exclude, &settings) {
                 continue;
             }
@@ -517,7 +608,7 @@ fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Op
             // station the search just found. Four arms failed that way, at a
             // station whose surface was a moving car.
             hero_to(sim, hero, here.x, here.z, deg);
-            return Some(Station {
+            found.push(Station {
                 x: here.x,
                 z: here.z,
                 bearing_deg: deg,
@@ -527,9 +618,10 @@ fn find_station(sim: &mut RuntimeSim, hero: uuid::Uuid, want: StationWant) -> Op
                 right_m: p.right_m,
                 family: p.label.family,
             });
+            break;
         }
     }
-    None
+    found
 }
 
 /// **Does this surface actually END on one side**, with nothing behind it?
@@ -745,6 +837,144 @@ fn a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it() {
     println!(
         "  e.g. {} — refused by family, before any height is compared",
         sim.bridge3d().label_of_guid(kerbs[0]).describe(sim.world())
+    );
+
+    // ── **AND NOW THE WORLD** (the COV1 audit).
+    //
+    //    Everything above this line reads the label TABLE, and
+    //    `ColliderFamily::is_coverable` answers `false` for `Kerb` by
+    //    construction — so the whole arm was a restatement of a `matches!` in
+    //    another crate that `d3::label`'s own unit test already makes. The law
+    //    this file opens with is that a gate reads the WORLD.
+    //
+    //    So the hero is stood in FRONT of real slabs — their own body
+    //    translations, out of the bridge — and the probe is asked. Whatever it
+    //    answers, a kerb must never be cover and the press must never take it.
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    let settings = inf_physics::d3::CoverSettings::default();
+    let mut reached = 0usize;
+    let mut answers: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut proven: Option<(f64, f64, f64)> = None;
+    let mut placed = 0usize;
+    for g in kerbs.iter() {
+        let Some(at) = sim.bridge3d().body_of(*g).and_then(|b| {
+            let bridge = sim.bridge3d_mut();
+            bridge.world_mut().body_translation(b)
+        }) else {
+            continue;
+        };
+        for b in 0..8 {
+            let deg = 360.0 * f64::from(b) / 8.0;
+            let a = deg.to_radians();
+            let dir = glam::DVec3::new(inf_math::psin64(a), 0.0, inf_math::pcos64(a));
+            // Half the probe's own reach back from the slab, on the road side.
+            let stand = at - dir * (settings.reach_m * 0.5);
+            hero_to_settling(&mut sim, hero, stand.x, stand.z, deg, 90);
+            let cm = hero_cm(&sim, hero);
+            if !cm.runtime.grounded {
+                continue;
+            }
+            placed += 1;
+            let here = hero_pos(&sim, hero);
+            let radius = hero_radius(&sim, hero);
+            let halfh = cm.half_height_for(MovementMode::Grounded);
+            let feet = here - glam::DVec3::Y * (halfh + radius);
+            let exclude = pawn_exclusion(&sim, hero);
+            let p = {
+                let bridge = sim.bridge3d_mut();
+                inf_physics::d3::probe_cover(
+                    bridge,
+                    feet,
+                    dir,
+                    radius,
+                    halfh,
+                    cm.slope_limit_deg,
+                    &settings,
+                    &exclude,
+                )
+            };
+            *answers
+                .entry(format!("{:?}/{:?}", p.label.family, p.refusal))
+                .or_default() += 1;
+            // **A kerb is never cover, wherever the probe was standing.**
+            assert!(
+                p.label.family != inf_physics::d3::ColliderFamily::Kerb || !p.class.is_cover(),
+                "a kerb classified as {:?} cover at ({:.1}, {:.1}): {}",
+                p.class,
+                here.x,
+                here.z,
+                p.explain(sim.world()),
+            );
+            if p.label.family != inf_physics::d3::ColliderFamily::Kerb {
+                continue;
+            }
+            reached += 1;
+            let said = p.explain(sim.world());
+            assert!(
+                said.contains("kerb slab"),
+                "the refusal does not name what it looked at: {said}"
+            );
+            if proven.is_none() {
+                println!(
+                    "  standing at ({:.1}, {:.1}) facing {deg:.0}: {said}",
+                    here.x, here.z
+                );
+                let before = hero_cm(&sim, hero).mode;
+                take_cover(&mut sim, hero, 60);
+                let after = hero_cm(&sim, hero);
+                println!(
+                    "  the press there: {before:?} -> {:?}, class {:?}",
+                    after.mode, after.runtime.cover.class
+                );
+                assert_ne!(
+                    after.mode,
+                    MovementMode::Cover,
+                    "the press at a kerb took cover"
+                );
+                proven = Some((here.x, here.z, deg));
+            }
+        }
+    }
+    println!(
+        "  {placed} placements in front of {} slabs; {reached} probes actually MET a kerb; \
+         what the probe answered: {answers:?}",
+        kerbs.len()
+    );
+    match proven {
+        Some((x, z, deg)) => {
+            println!("  the kerb refusal is photographable at ({x:.1}, {z:.1}) facing {deg:.0} deg")
+        }
+        // **A finding, printed rather than hidden.** A kerb is 0.15 m and the
+        // forward sweep's capsule is 0.30 m in radius: the sweeper cannot see a
+        // slab without also touching the road it sits on, and
+        // `sweep_forward_face` refuses a walkable hit outright. So on this
+        // island the kerb's refusal is `NoSurface` — the probe never meets one
+        // — and `ColliderFamily::is_coverable`'s kerb row is belt to that
+        // braces. The arm says so rather than implying the family door is what
+        // saves the player.
+        None => println!(
+            "  NO probe met a kerb from {placed} placements: a {:.2} m slab is under a \
+             {:.2} m sweeper on a road, so the refusal a player gets is NoSurface and the \
+             family door is never reached",
+            inf_ecs::traffic::KERB_HEIGHT_M,
+            settings.forward_radius_m,
+        ),
+    }
+    // The two numbers that make the sentence above a measurement: a kerb is
+    // below the cover floor AND below the band the sweep even looks in.
+    assert!(
+        inf_ecs::traffic::KERB_HEIGHT_M < inf_ecs::cover::MIN_COVER_HEIGHT_M,
+        "a kerb is now as tall as the cover floor"
+    );
+    assert!(
+        inf_ecs::traffic::KERB_HEIGHT_M < settings.band_low_m,
+        "the forward sweep's band now starts below a kerb"
+    );
+    assert!(
+        placed > 0,
+        "the hero could not be stood in front of ANY of the {} labelled slabs — this arm \
+         measured nothing",
+        kerbs.len()
     );
 }
 
@@ -968,6 +1198,118 @@ fn a_shot_at_a_hero_tucked_into_a_facade_hits_the_facade() {
             .label_of(hit.collider)
             .is_some_and(|l| l.family == inf_physics::d3::ColliderFamily::Structure),
         "the shot was stopped by {said}, which is not the building"
+    );
+}
+
+/// **THE VAULT OUT OF COVER MOVES THE CAPSULE OVER THE THING IT WAS BEHIND** —
+/// on the island, measured on the POSITION and against the surface's own face.
+///
+/// Added by the COV1 audit. The wave's vault is proven on a fixture
+/// (`cover_3d::a_vault_out_of_low_cover_puts_the_character_on_the_far_side`)
+/// and its island evidence was `64-cover-vaulted.png`, a frame taken by a
+/// `Start-Sleep` 900 ms after a key press, whose pixels are the hero walking
+/// away from a dark block — the same pixels as `60-cover-low.png` taken four
+/// seconds earlier. A frame taken by a sleep is not a measurement of anything.
+///
+/// So: take LOW cover on the island, write down where the capsule is and where
+/// the surface's FACE is, press jump with the stick centred, run until the
+/// traversal hands the character back, and ask how far it went **along the
+/// cover's own normal**. Positive is into and past the surface.
+///
+/// A shop's low wall has more shop behind it, so `far_side_landing` may refuse
+/// and the press becomes an ordinary mantle ONTO the top — which is the
+/// documented answer for a surface with nowhere to land. The arm accepts
+/// either and says which, and fails on the third possibility: nothing
+/// happening at all.
+#[test]
+fn the_vault_out_of_cover_moves_the_capsule_over_the_thing_it_was_behind() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let Some(st) = find_station(&mut sim, hero, StationWant::of(CoverClass::Low).structure())
+    else {
+        eprintln!(
+            "SKIP: the island has no LOW structure within 64 m of the spawn — the census \
+             found five of them and this lattice reached none"
+        );
+        return;
+    };
+    take_cover(&mut sim, hero, 60);
+    let cm = hero_cm(&sim, hero);
+    assert_eq!(
+        cm.mode,
+        MovementMode::Cover,
+        "the press at the LOW station ({:.1}, {:.1}) did not take cover",
+        st.x,
+        st.z
+    );
+    assert_eq!(cm.runtime.cover.class, CoverClass::Low);
+    let normal = cm.runtime.cover.normal.to_dvec3();
+    let radius = hero_radius(&sim, hero);
+    // The surface's own face, from the anchor the probe measured.
+    let face = cm.runtime.cover.anchor.to_dvec3() - normal * (radius + inf_ecs::cover::STANDOFF_M);
+    let before = hero_pos(&sim, hero);
+    let feet_before = before.y - hero_half(&sim, hero) - radius;
+    let depth_before = (before - face).dot(normal);
+
+    // One jump press, stick centred: the cover state is the facing.
+    go(&mut sim, 1, &["jump"], &[]);
+    let mode_after_press = hero_cm(&sim, hero).mode;
+    let mut traversed = mode_after_press == MovementMode::Mantle;
+    for _ in 0..400 {
+        go(&mut sim, 1, &[], &[]);
+        if hero_cm(&sim, hero).mode == MovementMode::Mantle {
+            traversed = true;
+        } else if traversed {
+            break;
+        }
+    }
+    let after = hero_pos(&sim, hero);
+    let feet_after = after.y - hero_half(&sim, hero) - radius;
+    let depth_after = (after - face).dot(normal);
+    let crossed = depth_before - depth_after;
+    println!(
+        "  the LOW surface at ({:.1}, {:.1}), top {:.3} m: the press put the mode in {:?}; \
+         the capsule went {crossed:.4} m along the face's normal (from {depth_before:.4} m \
+         out to {depth_after:.4} m) and the feet rose {:.4} m",
+        st.x,
+        st.z,
+        st.top_m,
+        mode_after_press,
+        feet_after - feet_before,
+    );
+    assert!(
+        traversed,
+        "the jump press out of LOW cover started no traversal at all: the mode went to \
+         {mode_after_press:?} and the refusal was {:?}",
+        hero_cm(&sim, hero).runtime.refusal
+    );
+    // Either it went OVER (past the face) or it went ON TOP (it rose by about
+    // the surface's own height). What it must not have done is stay where it
+    // was, which is what the wave's frame photographed.
+    let over = depth_after < 0.0;
+    let on_top = feet_after - feet_before > st.top_m.min(2.5) * 0.5;
+    println!("  over the far side: {over}; standing on top of it: {on_top}");
+    assert!(
+        over || on_top,
+        "the capsule neither crossed the face nor climbed onto it: it moved {crossed:.4} m \
+         along the normal and rose {:.4} m over a {:.3} m surface",
+        feet_after - feet_before,
+        st.top_m
+    );
+    assert!(
+        !hero_cm(&sim, hero).runtime.cover.active,
+        "the traversal kept the cover state, which would pin the capsule back to the wall"
     );
 }
 
@@ -1249,6 +1591,161 @@ fn the_cover_camera_is_an_override_claim_that_stops_by_not_asking() {
     assert!(
         after != Some(inf_ecs::camera::CameraLayer::Override),
         "the cover claim outlived the cover"
+    );
+}
+
+/// **THE COVER CAMERA IS OUTSIDE THE WORLD, OR IT IS NOT THERE AT ALL** — and
+/// how often each of those happens, which is the number the wave never took.
+///
+/// Added by the COV1 audit. The wave's camera arm takes ONE station and asserts
+/// the `Override` claim is on the director there; the shipped demo's own log
+/// then read `gameplay` on **290 of 303** cover samples, because
+/// `cover_camera_pose` was refusing (carried 161's refusal, working) and the
+/// holder column is where that shows. One station cannot tell a camera that
+/// works from a camera that works once.
+///
+/// So this walks a POPULATION of stations and asks two questions of each:
+///
+/// * when the claim IS pushed, is the optical centre outside the world? A
+///   sphere the boom's own collision radius at the camera position, on the
+///   same collider set the sweep uses — the CHAR1c F1 shape, and the
+///   measurement that says whether a black frame is a shadow or the inside of
+///   a shop;
+/// * and how many stations get a live cover camera at all. The rate is
+///   PRINTED, and the arm fails only if **none** of them does, because a rate
+///   is a fact about the island's geometry and a zero is a fact about the
+///   camera.
+///
+/// It also prints, per station, whether the surface the hero is pressed against
+/// faces the SUN — `inf_math::solar` on the level's own clock — because "the
+/// frame is dark" and "the camera is inside a wall" are different findings and
+/// the wave's report guessed between them.
+#[test]
+fn the_cover_camera_is_outside_the_world_or_it_is_not_there() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = loose_sim(&content, "VancouverIsland");
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..900 {
+        sim.step_once(RuntimeInput::default());
+    }
+    // Where the sun is, off the level's own clock rather than off a guess.
+    let sun = sim
+        .world()
+        .world()
+        .iter_entities()
+        .find_map(|e| e.get::<inf_ecs::components::TimeOfDay>().copied())
+        .map(|t| inf_math::solar::sun_direction(&t.solar_input()))
+        .unwrap_or(glam::DVec3::new(0.0, 1.0, 0.0));
+    println!(
+        "\n=== the cover camera over a population of stations ===\n  the sun is at \
+         ({:.3}, {:.3}, {:.3}), azimuth {:.1} deg, elevation {:.1} deg",
+        sun.x,
+        sun.y,
+        sun.z,
+        inf_math::solar::azimuth_deg(sun),
+        inf_math::solar::elevation_deg(sun),
+    );
+
+    let mut stations = find_stations(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High).structure(),
+        6,
+    );
+    // …and the LIT ones, which are a different search and not a different
+    // camera. Printed with the rest so a demo placement can be read off this
+    // arm rather than guessed at.
+    let lit = find_stations(
+        &mut sim,
+        hero,
+        StationWant::of(CoverClass::High)
+            .structure()
+            .facing_the_sun(sun),
+        3,
+    );
+    println!("  {} of the stations below face the sun", lit.len());
+    stations.extend(lit);
+    assert!(
+        !stations.is_empty(),
+        "the island offered no façade cover within 64 m — see the census"
+    );
+    let mut live = 0usize;
+    let mut refused = 0usize;
+    let mut buried = 0usize;
+    for st in &stations {
+        hero_to(&mut sim, hero, st.x, st.z, st.bearing_deg);
+        take_cover(&mut sim, hero, 60);
+        let cm = hero_cm(&sim, hero);
+        if cm.mode != MovementMode::Cover {
+            println!("  ({:.1}, {:.1}) — the press did not take", st.x, st.z);
+            continue;
+        }
+        let holder = sim.camera().director.holder().map(|h| h.0);
+        let claimed = holder == Some(inf_ecs::camera::CameraLayer::Override);
+        let eye = sim.camera().pose.position.to_dvec3();
+        let r = sim.camera().tuning.collision_radius_m.max(1.0e-3);
+        // **The point-in-collider query**: a sphere at the optical centre, on
+        // everything but the characters — which is the set the camera sweep
+        // itself excludes.
+        let exclude = pawn_exclusion(&sim, hero);
+        let inside = {
+            let bridge = sim.bridge3d_mut();
+            bridge
+                .world_mut()
+                .cast_shape(
+                    &inf_physics::d3::ColliderShape3D::Sphere { radius: r },
+                    eye,
+                    glam::DQuat::IDENTITY,
+                    glam::DVec3::Y,
+                    1.0e-3,
+                    &exclude,
+                )
+                .is_some_and(|h| h.started_penetrating)
+        };
+        // Is the face this hero is pressed against lit? The normal points back
+        // AT the character, so a face turned toward the sun has a positive dot.
+        let n = cm.runtime.cover.normal.to_dvec3();
+        let lit = n.x * sun.x + n.z * sun.z;
+        println!(
+            "  ({:7.1}, {:7.1}) bearing {:3.0} — holder {:?}, eye ({:.2}, {:.2}, {:.2}), \
+             inside-geometry {inside}, face-to-sun {lit:+.3}",
+            st.x, st.z, st.bearing_deg, holder, eye.x, eye.y, eye.z,
+        );
+        if claimed {
+            live += 1;
+        } else {
+            refused += 1;
+        }
+        if inside {
+            buried += 1;
+        }
+        assert!(
+            !(claimed && inside),
+            "the cover camera pushed a claim whose optical centre is INSIDE the world at \
+             ({:.1}, {:.1}) — the refusal carried 161 asked for did not fire",
+            st.x,
+            st.z
+        );
+        go(&mut sim, 1, &["cover"], &[]);
+        go(&mut sim, 60, &[], &[]);
+    }
+    println!(
+        "  {live} of {} stations got a live cover camera; {refused} refused; \
+         {buried} had the optical centre inside geometry",
+        stations.len()
+    );
+    assert!(
+        live > 0,
+        "the cover camera refused at every one of {} stations — it is not a camera, it is a \
+         refusal",
+        stations.len()
     );
 }
 
