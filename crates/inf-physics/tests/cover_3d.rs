@@ -761,6 +761,95 @@ fn a_vault_out_of_low_cover_puts_the_character_on_the_far_side() {
     );
 }
 
+/// **A JUMP THAT CANNOT VAULT LEAVES NO COVER STATE BEHIND** — the invariant
+/// the audit's own frames found broken.
+///
+/// A press and an away-stick both clear `CoverState`, and so does a successful
+/// vault. A jump press whose mantle REFUSES does not go through any of those:
+/// it falls through the traversal chain with the mode untouched, and the next
+/// step that finds no ground under the character puts it in a fall — out of
+/// `MovementMode::Cover` with `cover.active` still true.
+///
+/// Measured in the demo loop before the fix: **133 samples** of the hero
+/// walking the rest of a session as `Grounded` while the hero log read `class
+/// High, side Left, peek 1.000`, the pose step still rolling its torso and
+/// `anim_bridge` still publishing `cover = 2` into the machine.
+///
+/// So: a HIGH wall nothing can climb, a press, a jump, and then the invariant
+/// asserted on **every step** of the drive that follows.
+#[test]
+fn a_jump_that_cannot_vault_leaves_no_cover_state_behind() {
+    let (mut w, mut b) = world_with(WALL_TOP_M, 4.0);
+    let cm = take_cover(&mut w, &mut b);
+    assert_eq!(cm.mode, MovementMode::Cover);
+    assert!(cm.runtime.cover.active);
+    let jump = MovementIntent {
+        jump: true,
+        ..Default::default()
+    };
+    step(&mut w, &mut b, &jump);
+    println!(
+        "  after the jump press: mode {:?}, cover active {}",
+        hero(&w).mode,
+        hero(&w).runtime.cover.active
+    );
+    // ── **AND ANY OTHER WAY OUT**, which is what actually happened.
+    //
+    //    The island's hero left `Cover` for a FALL. A fixture cannot easily
+    //    make the ground disappear, so the mode is moved directly -- which is
+    //    precisely the invariant under test: whatever put the character in
+    //    another mode, the cover state does not survive it. Without the one
+    //    line in `step_character_movement` this assertion fails.
+    {
+        let e = w.entity_of(HERO).expect("the hero is there");
+        let mut cmc = w
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("the hero moves");
+        cmc.mode = MovementMode::Grounded;
+        assert!(cmc.runtime.cover.active, "the fixture set up nothing");
+    }
+    step(&mut w, &mut b, &idle());
+    let after = hero(&w);
+    println!(
+        "  one step after the mode was taken away: mode {:?}, cover active {}",
+        after.mode, after.runtime.cover.active
+    );
+    assert!(
+        !after.runtime.cover.active,
+        "the character is in {:?} and still carries a live cover state (class {:?}, peek          {:.3})",
+        after.mode,
+        after.runtime.cover.class,
+        after.runtime.cover.peek
+    );
+
+    // Walk about afterwards, which is what the demo loop did.
+    let mut worst: Option<(usize, MovementMode)> = None;
+    for i in 0..300 {
+        let intent = MovementIntent {
+            move_input: EcsVec2d::new(if i % 3 == 0 { 1.0 } else { 0.0 }, 1.0),
+            ..Default::default()
+        };
+        step(&mut w, &mut b, &intent);
+        let c = hero(&w);
+        if c.mode != MovementMode::Cover && c.runtime.cover.active && worst.is_none() {
+            worst = Some((i, c.mode));
+        }
+    }
+    assert!(
+        worst.is_none(),
+        "at step {:?} the character was in {:?} with a live cover state — the state \
+         outlived the mode",
+        worst.map(|(i, _)| i),
+        worst.map(|(_, m)| m)
+    );
+    let c = hero(&w);
+    println!(
+        "  300 steps later: mode {:?}, cover active {}, class {:?}, peek {:.3}",
+        c.mode, c.runtime.cover.active, c.runtime.cover.class, c.runtime.cover.peek
+    );
+}
+
 /// **A low surface with a wall behind it is MANTLED, not vaulted** — the
 /// refusal that makes the vault a measurement rather than an assumption.
 ///

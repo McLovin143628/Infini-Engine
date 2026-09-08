@@ -1914,6 +1914,28 @@ fn step_one(
     // figure: a field only the cover path wrote would keep the last probe's
     // number for ever and a budget arm could not tell "nothing probed" from
     // "nothing has probed since".
+    // **THE COVER STATE DIES WITH THE MODE** (the COV1 audit).
+    //
+    // The two deliberate leaves clear it -- the press and the away-stick both
+    // write `CoverState::default()` -- and so does a vault, at the `Mantle`
+    // return above. Nothing else did, and there are other ways out: a jump
+    // press whose mantle REFUSES falls through that chain with the mode
+    // untouched, and a step that finds no ground under a character puts it in
+    // a fall.
+    //
+    // Measured in the demo loop's own session: after a refused vault the hero
+    // spent **133 samples** -- thirty-three seconds, the rest of the tour --
+    // as `Grounded` and `FallControlled` while the log read `class High, side
+    // Left, peek 1.000`. The pose step's additive was still rolling its torso
+    // eighteen degrees, `anim_bridge` was still publishing `cover = 2` into the
+    // machine, and the kerb leg's own row then reported a class for a character
+    // standing in a road.
+    //
+    // One line, at the end of the step where the mode is settled: a cover state
+    // is a fact about being in cover.
+    if cm.mode != MovementMode::Cover && cm.runtime.cover.active {
+        cm.runtime.cover = covermodel::CoverState::default();
+    }
     cm.runtime.cover.sweeps = cover_sweeps;
 
     // ── 12. Write the world back: the component, the transform, the capsule,
