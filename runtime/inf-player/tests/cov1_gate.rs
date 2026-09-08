@@ -1020,9 +1020,14 @@ fn a_kerb_on_the_island_is_never_cover_and_the_refusal_names_it() {
     }
     // The two numbers that make the sentence above a measurement: a kerb is
     // below the cover floor AND below the band the sweep even looks in.
-    assert!(
-        inf_ecs::traffic::KERB_HEIGHT_M < inf_ecs::cover::MIN_COVER_HEIGHT_M,
-        "a kerb is now as tall as the cover floor"
+    // Asserted through the CLASSIFIER rather than as two literals: comparing
+    // two `const`s is a claim the compiler folds away, which clippy says by
+    // name (`assertions_on_constants`) and which this wave has already been
+    // caught by once.
+    assert_eq!(
+        inf_ecs::cover::classify(inf_ecs::traffic::KERB_HEIGHT_M, settings.min_height_m),
+        CoverClass::None,
+        "a kerb's own height now classifies as cover"
     );
     assert!(
         inf_ecs::traffic::KERB_HEIGHT_M < settings.band_low_m,
