@@ -22,7 +22,8 @@
 //! * `the_committed_default_character_is_dressed`
 //! * `the_islands_wearables_carry_their_licence_on_disk`
 //! * `pie_equals_shipping_on_a_dressed_character`
-//! * `what_a_wearable_costs` — draws, palette bytes, and the crowd at 1 000.
+//! * `what_a_wearable_costs` — draws, palette bytes and geometry.
+//! * `a_thousand_dressed_agents_cost_what_the_tier_says`
 //! * `the_combined_bodys_eyes_have_no_section_of_their_own` — clause 3's
 //!   REFUSAL, as a measurement that will go red the day the combine changes.
 
@@ -884,6 +885,104 @@ fn what_a_wearable_costs() {
         palettes, 1,
         "a dressed character uploaded {palettes} palettes; the sharing is what \
          makes the door cheap"
+    );
+}
+
+/// **A THOUSAND AGENTS, DRESSED** — what the wardrobe costs the crowd, per tier.
+///
+/// The number that matters is not the total, it is the SHAPE: the tiers that pose
+/// pay two entities and two draws apiece and the tier that does not pays nothing
+/// at all, so a crowd's clothing bill is a function of how many of it are near
+/// the camera rather than of how many of it there are.
+///
+/// Printed with the profile it was taken in, because a debug step is not a
+/// shipped one; the assertion is the RATIO, which is profile-independent.
+#[test]
+fn a_thousand_dressed_agents_cost_what_the_tier_says() {
+    use inf_ecs::crowd::{CrowdRecord, CrowdTier};
+    let n = 1000u128;
+    let build = |far: bool, dress: bool| {
+        let mut world = dressed_world();
+        let mut bodies = inf_ecs::society::level_archetypes(&world);
+        if !dress {
+            // THE CONTROL: the same thousand agents, the same tier, the same
+            // rig — and nothing on. Without it the number below is the cost of
+            // posing a thousand characters, which is not what this arm claims.
+            for b in bodies.iter_mut() {
+                b.outfit = None;
+                b.hair = None;
+            }
+        }
+        let hero = world.entity_of(HERO).expect("the hero");
+        world
+            .world_mut()
+            .entity_mut(hero)
+            .insert(inf_ecs::components::StreamingSource { radius_m: 256.0 });
+        let mut pop: BTreeMap<Uuid, CrowdRecord> = BTreeMap::new();
+        for k in 0..n {
+            let g = Uuid::from_u128(0x0FF1_7000_C000_0000 + k);
+            let a = inf_ecs::society::level_archetype_for(&bodies, g);
+            let x = if far { 300.0 } else { 1.0 } + (k % 40) as f64 * 0.4;
+            let z = (k / 40) as f64 * 0.4;
+            pop.insert(g, CrowdRecord::standing(a, DVec3::new(x, 1.0, z)));
+        }
+        world.mark_dirty();
+        world.propagate();
+        let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::new(0.0, -9.81), HZ);
+        assert!(
+            sim.set_crowd_radii((40.0, 60.0, 4000.0)),
+            "the ladder is legal"
+        );
+        sim.set_crowd_population(pop);
+        sim
+    };
+    let mut out = Vec::new();
+    for (label, far, dress) in [
+        ("near", false, true),
+        ("near/bare", false, false),
+        ("far", true, true),
+    ] {
+        let mut sim = build(far, dress);
+        for _ in 0..3 {
+            sim.step_once(RuntimeInput::default());
+        }
+        // The CROWD's clothes, not the world's: the hero is dressed at every
+        // tier because it is not a crowd agent at all.
+        let worn = inf_ecs::wearable::worn_count(sim.world())
+            - inf_ecs::wearable::wearables_of(sim.world(), HERO).len();
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            sim.step_once(RuntimeInput::default());
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / 10.0;
+        println!(
+            "  {label:<5} {n} agents: {worn} wearables, {:.1} us/step, {:.3} us/agent",
+            us,
+            us / n as f64
+        );
+        out.push((worn, us));
+    }
+    let (near_worn, near_us) = out[0];
+    let (bare_worn, bare_us) = out[1];
+    let (far_worn, far_us) = out[2];
+    println!(
+        "
+=== A THOUSAND AGENTS (debug profile; the SHAPE is the claim) ===
+           near, dressed  {near_worn} wearables at {near_us:.1} us/step
+           near, bare     {bare_worn} wearables at {bare_us:.1} us/step
+           far, dressed   {far_worn} wearables at {far_us:.1} us/step
+           the wardrobe's own share of a near step: {:.1} us ({:+.1}%)",
+        near_us - bare_us,
+        100.0 * (near_us - bare_us) / bare_us
+    );
+    assert_eq!(bare_worn, 0, "the bare control is wearing something");
+    assert_eq!(
+        far_worn, 0,
+        "{far_worn} wearables at Far — the tier rule IS the crowd's clothing budget"
+    );
+    assert!(
+        near_worn > 0,
+        "no wearables at all near the camera, so the far number means nothing"
     );
 }
 
