@@ -89,7 +89,12 @@ fn clips_under(dir: &Path) -> Vec<(String, inf_anim::AnimClipAsset)> {
     out
 }
 
-/// Every `.inf_skel` under `dir`, keyed by its sidecar GUID's raw bytes.
+/// Every `.inf_skel` **in `dir` itself**, keyed by its sidecar GUID's raw bytes.
+///
+/// One directory, no recursion — [`skeletons_under`] below is the recursive
+/// one. The doc said "under" until the COV1 audit (carried 189) and the name
+/// says "in": a reader picking between the two by their prose picked the wrong
+/// one, which is how every authored clip's rig lookup came to miss.
 fn skeletons_in(dir: &Path) -> std::collections::BTreeMap<[u8; 16], inf_anim::SkeletonAsset> {
     let mut out = std::collections::BTreeMap::new();
     let Ok(rd) = std::fs::read_dir(dir) else {

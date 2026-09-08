@@ -695,6 +695,13 @@ mod tests {
 
     /// Every refusal has a sentence, and no two of them share one — a message
     /// that could mean two things is a message nobody can act on.
+    ///
+    /// **The list is exhaustive by construction** (the COV1 audit): it was a
+    /// hand-written array of eight and the enum has nine, so `Moving` — the
+    /// variant the census's own two refusals are — was never compared against
+    /// anything and a tenth variant would have been just as invisible. The
+    /// `match` below has no wildcard, so adding a refusal is a compile error
+    /// here rather than a silent gap.
     #[test]
     fn every_refusal_says_something_of_its_own() {
         let all = [
@@ -706,7 +713,28 @@ mod tests {
             CoverRefusal::TooLow,
             CoverRefusal::TooNarrow,
             CoverRefusal::NoRoom,
+            CoverRefusal::Moving,
         ];
+        for r in all {
+            // The exhaustiveness itself: a new variant that is not added to the
+            // array above cannot reach this `match` without naming itself.
+            let named = match r {
+                CoverRefusal::None => "None",
+                CoverRefusal::NoFacing => "NoFacing",
+                CoverRefusal::NoSurface => "NoSurface",
+                CoverRefusal::FaceTurnedAway => "FaceTurnedAway",
+                CoverRefusal::NotCoverable => "NotCoverable",
+                CoverRefusal::TooLow => "TooLow",
+                CoverRefusal::TooNarrow => "TooNarrow",
+                CoverRefusal::NoRoom => "NoRoom",
+                CoverRefusal::Moving => "Moving",
+            };
+            assert!(
+                all.iter().any(|x| format!("{x:?}") == named),
+                "{named} is a refusal the sameness list has never seen"
+            );
+            assert!(!r.why().is_empty(), "{named} says nothing at all");
+        }
         let mut said: Vec<&str> = all.iter().map(|r| r.why()).collect();
         said.sort_unstable();
         let n = said.len();
@@ -760,9 +788,19 @@ pub struct NpcCoverReport {
 ///   most once every [`inf_ecs::cover::NPC_SEARCH_PERIOD`] steps;
 /// * what it finds it **walks to**, along an `inf_nav::NavPath`, and presses
 ///   the same `press_cover` edge a player's key raises — one door, two callers;
-/// * once in cover it **peeks** on a duty cycle and points its weapon at the
-///   threat through [`super::gameplay::npc_aim_at`], with the trigger **open**:
-///   the firing cadence is **WPN2e's**, and that is the seam.
+/// * once in cover it **peeks** on a duty cycle and points its **body's aim**
+///   at the threat — `MovementRuntime::aim_yaw_deg` and `want_aim`, the same
+///   two fields a player's right mouse button writes.
+///
+/// # The seam, said exactly (the COV1 audit)
+///
+/// This pass does **not** call [`super::gameplay::npc_aim_at`], and an earlier
+/// spelling of this list said it did. It cannot: `npc_aim_at` takes the
+/// **guid** of a target and this pass is handed the *places* a step's gunfire
+/// came from ([`super::gameplay::panic_sources_for`]'s own coalesced list), so
+/// there is no shooter entity here to name. What the pass hands WPN2e is a unit
+/// standing behind cover, turned toward the threat, leaning out on a duty cycle
+/// — and WPN2e resolves the shooter, calls `npc_aim_at` and owns the trigger.
 ///
 /// # The path is two points, and that is stated rather than hidden
 ///
@@ -1070,10 +1108,12 @@ fn press_cover(world: &mut EcsWorld, unit: uuid::Uuid, face_yaw_deg: f64) {
 
 /// Aim at the threat and hold (or release) the peek.
 ///
-/// `npc_aim_at` with the trigger **open**: WPN2e owns the firing cadence, and
-/// this wave hands it a unit that is pointed at the right place with its body
-/// leaned out of cover on a duty cycle. Naming the seam is the whole of the
-/// clause's own caveat.
+/// The **body's** aim, not the weapon's: `aim_yaw_deg` and `want_aim` are the
+/// two fields a player's own right mouse button writes, and pointing them is
+/// what leans a unit out of cover. `gameplay::npc_aim_at` — the weapon door —
+/// is **not** called here and needs a target guid this pass has not got; WPN2e
+/// owns that call and the trigger with it. See `step_npc_cover`'s own seam
+/// paragraph.
 fn aim_and_lean(world: &mut EcsWorld, unit: uuid::Uuid, threat: DVec3, out: bool) {
     let Some(e) = world.entity_of(unit) else {
         return;
