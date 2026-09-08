@@ -1008,25 +1008,45 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         # The class, off the log rather than off the station's name.
         $row = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
         Say "  in cover: class $($row[17]) side $($row[18]) peek $($row[19]) mode $($row[5])"
-        # THE SLIDE, and the corner it stops at.
+        # THE SLIDE, and the corner it stops at. **Short**: three seconds of A
+        # walks a character clean off the end of a four-metre wall and out of
+        # cover, which is what the first run of this leg photographed.
         Say "COVER ($($st.Name)): sliding along the surface"
         [InfInput]::Down(0x1E)   # scancode: A -- move_x negative, the character's left
-        Start-Sleep -Milliseconds 1600
+        Start-Sleep -Milliseconds 900
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "61-cover-slide-$($st.Name).png") | ForEach-Object { Say $_ }
-        Start-Sleep -Milliseconds 1400
         [InfInput]::Up(0x1E)
+        Start-Sleep -Milliseconds 400
+        # **Still in cover?** A slide that reached a corner stays; one that ran
+        # out of surface does not, and pressing aim after that photographs an
+        # aim rather than a peek. Re-take it if it went.
+        $stillIn = @(Wait-ForHero -Csv $heroCsv -What "still in cover ($($st.Name))" -TimeoutS 1.0 `
+            -Predicate { param($c) $c[5] -eq "Cover" })[-1]
+        if (-not $stillIn) {
+            Say "  the slide left cover; re-taking it"
+            for ($k = 0; $k -lt 10 -and -not $stillIn; $k++) {
+                [InfInput]::Down(0x14); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x14)
+                $stillIn = @(Wait-ForHero -Csv $heroCsv -What "cover again ($($st.Name))" -TimeoutS 1.0 `
+                    -Predicate { param($c) $c[5] -eq "Cover" })[-1]
+                if (-not $stillIn) { for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 } }
+            }
+        }
         # THE PEEK: the aim button, and the frame is triggered on column 18
         # leaving `Behind` -- which is the difference between a peek and a
         # character holding a button.
         Say "COVER ($($st.Name)): aiming, which leans the body out"
         [InfInput]::RightDown()
-        Wait-ForHero -Csv $heroCsv -What "a peek ($($st.Name))" -TimeoutS 3.0 `
-            -Predicate { param($c) ($c.Count -gt 19) -and ($c[18].Trim() -ne "-") -and ($c[18].Trim() -ne "Behind") -and ([double]$c[19] -gt 0.6) } `
-            -Out (Join-Path $OutDir "62-cover-peek-$($st.Name).png") | Out-Null
+        $peeked = @(Wait-ForHero -Csv $heroCsv -What "a peek ($($st.Name))" -TimeoutS 4.0 `
+            -Predicate { param($c) ($c.Count -gt 19) -and ($c[5] -eq "Cover") -and ($c[18].Trim() -ne "-") -and ($c[18].Trim() -ne "Behind") -and ([double]$c[19] -gt 0.6) } `
+            -Out (Join-Path $OutDir "62-cover-peek-$($st.Name).png"))[-1]
+        if (-not $peeked) {
+            $r = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+            Say "  no peek: mode $($r[5]) class $($r[17]) side $($r[18]) peek $($r[19])"
+        }
         Start-Sleep -Milliseconds 500
         [InfInput]::RightUp()
         # THE VAULT, out of a LOW cover only: one Space press with no stick.
-        if ($st.Name -eq "low") {
+        if ($st.Name -eq "low" -and $stillIn) {
             Say "COVER (low): vaulting over it with Space"
             [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
             Wait-ForHero -Csv $heroCsv -What "the vault out of cover" -TimeoutS 2.0 `

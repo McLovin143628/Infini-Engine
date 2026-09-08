@@ -106,6 +106,18 @@ pub enum AuthorError {
 /// the whole set down over a bone one clip wanted.
 #[derive(Debug, Clone)]
 struct Rig {
+    /// **Every joint's bind local ROTATION**, indexed by joint.
+    ///
+    /// Used by [`cover`] and by nothing else, and the split is the point: the
+    /// clips in this module that depict a pose far from the bind — prone, the
+    /// swims, the get-up — write a local rotation OUTRIGHT, because what the
+    /// arm was doing at bind is irrelevant to a body lying on its face. A cover
+    /// stance is a STANDING pose that differs from bind by a small delta, and
+    /// writing the local outright puts the shoulder wherever the clavicle's own
+    /// frame happens to point: measured in the demo loop's first cover frame,
+    /// the hero stood behind a wall with both arms out sideways. So `cover`
+    /// composes `bind * delta` and says so.
+    bind_rot: Vec<[f32; 4]>,
     pelvis: u16,
     pelvis_bind: [f32; 3],
     hip_height_m: f64,
@@ -120,6 +132,7 @@ impl Rig {
     fn of(rig: &SkeletonAsset) -> Result<Self, AuthorError> {
         let roles = rig.role_index();
         let sk = &rig.skeleton;
+        let bind_rot: Vec<[f32; 4]> = sk.joints().iter().map(|j| j.local_bind.rotation).collect();
         let pelvis = roles
             .first(BoneRoleKind::Pelvis, BoneSide::Center)
             .ok_or(AuthorError::MissingRole { role: "Pelvis" })?;
@@ -141,6 +154,7 @@ impl Rig {
         let globals = bind_globals(sk);
         let h = f64::from(globals[pelvis as usize].y).abs();
         Ok(Self {
+            bind_rot,
             pelvis,
             pelvis_bind: sk.joints()[pelvis as usize].local_bind.translation,
             hip_height_m: if h > 1.0e-4 { h } else { 0.95 },
@@ -433,6 +447,10 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
     ));
     tracks.push(hip);
 
+    // **Every rotation below is `bind * delta`.** See `Rig::bind_rot`.
+    let of = |j: u16, q: [f32; 4]| -> [f32; 4] { quat_mul(r.bind_rot[j as usize], q) };
+    let of_opt = |j: Option<u16>, q: [f32; 4]| -> [f32; 4] { j.map(|j| of(j, q)).unwrap_or(q) };
+
     // The chest: a pitch, a twist toward the surface, and the breath.
     let pitch: f64 = if low { 12.0 } else { -8.0 };
     let twist: f64 = if low { 18.0 } else { 22.0 };
@@ -444,11 +462,13 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
         (0..=n)
             .map(|i| {
                 let breath = 2.0 * psin64(ph(i));
-                let q = quat_mul(
-                    qx((pitch + breath).to_radians()),
-                    qy((twist + sway * psin64(ph(i))).to_radians()),
-                );
-                q
+                of(
+                    r.chest(),
+                    quat_mul(
+                        qx((pitch + breath).to_radians()),
+                        qy((twist + sway * psin64(ph(i))).to_radians()),
+                    ),
+                )
             })
             .collect(),
     );
@@ -460,26 +480,37 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
         r.upper_arm[0],
         &times,
         (0..=n)
-            .map(|_| quat_mul(qx((-near_up).to_radians()), qz(15f64.to_radians())))
+            .map(|_| {
+                of_opt(
+                    r.upper_arm[0],
+                    quat_mul(qx((-near_up).to_radians()), qz(15f64.to_radians())),
+                )
+            })
             .collect(),
     );
     rot(
         &mut tracks,
         r.lower_arm[0],
         &times,
-        (0..=n).map(|_| qx((-80f64).to_radians())).collect(),
+        (0..=n)
+            .map(|_| of_opt(r.lower_arm[0], qx((-80f64).to_radians())))
+            .collect(),
     );
     rot(
         &mut tracks,
         r.upper_arm[1],
         &times,
-        (0..=n).map(|_| qx((-25f64).to_radians())).collect(),
+        (0..=n)
+            .map(|_| of_opt(r.upper_arm[1], qx((-25f64).to_radians())))
+            .collect(),
     );
     rot(
         &mut tracks,
         r.lower_arm[1],
         &times,
-        (0..=n).map(|_| qx((-45f64).to_radians())).collect(),
+        (0..=n)
+            .map(|_| of_opt(r.lower_arm[1], qx((-45f64).to_radians())))
+            .collect(),
     );
 
     // The legs. Standing still they take the stance; moving, they side-step —
@@ -497,9 +528,12 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
             &times,
             (0..=n)
                 .map(|i| {
-                    quat_mul(
-                        qx((-hip_fold).to_radians()),
-                        qz((step_amp * psin64(ph(i) + phase)).to_radians()),
+                    of_opt(
+                        r.thigh[side],
+                        quat_mul(
+                            qx((-hip_fold).to_radians()),
+                            qz((step_amp * psin64(ph(i) + phase)).to_radians()),
+                        ),
                     )
                 })
                 .collect(),
