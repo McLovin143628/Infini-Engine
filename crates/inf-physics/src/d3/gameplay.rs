@@ -1242,7 +1242,8 @@ fn resolve_shot(
             let on_flesh = target.is_some_and(|g| is_flesh(world, g));
             let point = from + dir * h.toi;
             let headshot = on_flesh
-                && target.is_some_and(|g| head_hit(world, g, point, &mut rounds.heads_without_a_socket));
+                && target
+                    .is_some_and(|g| head_hit(world, g, point, &mut rounds.heads_without_a_socket));
             if headshot {
                 rounds.headshots += 1;
             }

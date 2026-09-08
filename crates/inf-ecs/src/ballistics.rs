@@ -293,7 +293,14 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
     let mut out = Vec::with_capacity(pool.rounds.len() * 81);
     for r in &pool.rounds {
         out.extend_from_slice(r.shooter.as_bytes());
-        for v in [r.at.x, r.at.y, r.at.z, r.velocity.x, r.velocity.y, r.velocity.z] {
+        for v in [
+            r.at.x,
+            r.at.y,
+            r.at.z,
+            r.velocity.x,
+            r.velocity.y,
+            r.velocity.z,
+        ] {
             out.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         out.extend_from_slice(&r.travelled_m.to_bits().to_le_bytes());

@@ -135,7 +135,10 @@ const ANCHORS: [(&str, &[&str]); 8] = [
         "inf-ecs/src/ballistics.rs",
         &["fn advance_round(", "fn damage_curve_j("],
     ),
-    ("d3/gameplay.rs", &["fn step_rounds(", "cast_ray_excluding("]),
+    (
+        "d3/gameplay.rs",
+        &["fn step_rounds(", "cast_ray_excluding("],
+    ),
 ];
 
 /// Comment lines blanked, CRLF normalized — the `fracture_3d` recipe, for the

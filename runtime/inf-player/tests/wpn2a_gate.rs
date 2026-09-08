@@ -268,7 +268,13 @@ const MUZZLE_Y: f64 = d3::gameplay::MUZZLE_HEIGHT_M;
 fn a_shot_past_the_threshold_becomes_a_body_in_flight() {
     // The near half, unchanged: a target at 10 m is inside the 25 m threshold.
     let mut near = Range::new(defs_with("rifle", test_rifle()));
-    stand(&mut near.world, TARGET, "Target", DVec3::new(0.0, 0.0, 10.0), false);
+    stand(
+        &mut near.world,
+        TARGET,
+        "Target",
+        DVec3::new(0.0, 0.0, 10.0),
+        false,
+    );
     near.world.mark_dirty();
     near.world.reindex_guids();
     near.world.propagate();
@@ -318,9 +324,7 @@ fn a_shot_past_the_threshold_becomes_a_body_in_flight() {
     far.step();
     let at1 = far.rounds()[0].at;
     let moved = at1.z - at0.z;
-    println!(
-        "the round moved {moved:.4} m in one 60 Hz step (v0 900 m/s => 15.0 m)"
-    );
+    println!("the round moved {moved:.4} m in one 60 Hz step (v0 900 m/s => 15.0 m)");
     assert!(
         moved > 14.0 && moved < 15.1,
         "a 900 m/s round moved {moved:.4} m in a 60 Hz step"
@@ -340,7 +344,13 @@ fn a_shot_past_the_threshold_becomes_a_body_in_flight() {
 fn a_rifle_hits_later_and_lower_at_two_hundred_metres_than_at_ten() {
     // 10 m: inside the threshold, so it lands on the firing step.
     let mut near = Range::new(defs_with("rifle", test_rifle()));
-    stand(&mut near.world, TARGET, "Target", DVec3::new(0.0, 0.0, 10.0), false);
+    stand(
+        &mut near.world,
+        TARGET,
+        "Target",
+        DVec3::new(0.0, 0.0, 10.0),
+        false,
+    );
     near.world.mark_dirty();
     near.world.reindex_guids();
     near.world.propagate();
@@ -656,7 +666,13 @@ fn the_damage_curve_is_the_docs_own_at_five_distances_in_the_world() {
     let mut rows = Vec::new();
     for d in distances {
         let mut r = Range::new(defs_with("rifle", def));
-        stand(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, d), false);
+        stand(
+            &mut r.world,
+            TARGET,
+            "Target",
+            DVec3::new(0.0, 0.0, d),
+            false,
+        );
         r.world.mark_dirty();
         r.world.reindex_guids();
         r.world.propagate();
@@ -715,7 +731,13 @@ fn a_shot_at_the_head_multiplies_and_one_at_the_pelvis_does_not() {
     let at = 12.0;
     let spend = |aim_y: f64| -> (f64, bool) {
         let mut r = Range::new(defs_with("rifle", def));
-        stand(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, at), false);
+        stand(
+            &mut r.world,
+            TARGET,
+            "Target",
+            DVec3::new(0.0, 0.0, at),
+            false,
+        );
         r.world.mark_dirty();
         r.world.reindex_guids();
         r.world.propagate();
@@ -744,7 +766,10 @@ fn a_shot_at_the_head_multiplies_and_one_at_the_pelvis_does_not() {
          one at the pelvis ({pelvis_y:.3} m) spent {pelvis} J (headshot {pelvis_flag})"
     );
     assert!(head_flag, "a shot at the head joint was not a headshot");
-    assert!(!pelvis_flag, "a shot at the pelvis was recorded as a headshot");
+    assert!(
+        !pelvis_flag,
+        "a shot at the pelvis was recorded as a headshot"
+    );
     assert!(
         (head - pelvis * 2.0).abs() < 1e-6,
         "the head shot spent {head} J and the pelvis shot {pelvis} J — the \
@@ -763,7 +788,13 @@ fn a_headshot_past_the_threshold_multiplies_as_well() {
     let head_y = 2.0 * cm.stand_half_height_m + RADIUS;
     let at = 120.0;
     let mut r = Range::new(defs_with("rifle", def));
-    stand(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, at), false);
+    stand(
+        &mut r.world,
+        TARGET,
+        "Target",
+        DVec3::new(0.0, 0.0, at),
+        false,
+    );
     r.world.mark_dirty();
     r.world.reindex_guids();
     r.world.propagate();
@@ -936,12 +967,17 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
     sorted.sort_unstable();
     assert_eq!(sorted, names, "`names()` is not sorted");
     for (id, item) in defs.0.iter() {
-        let mut def = item.weapon.unwrap_or_else(|| panic!("{id} is not a weapon"));
+        let mut def = item
+            .weapon
+            .unwrap_or_else(|| panic!("{id} is not a weapon"));
         for n in names {
             assert!(def.set(n, 1.0), "{id}: the door does not know {n}");
             assert!(!def.set(n, f64::NAN), "{id}: {n} took a NaN");
         }
-        assert!(!def.set("no_such_key", 1.0), "{id}: an unknown key was taken");
+        assert!(
+            !def.set("no_such_key", 1.0),
+            "{id}: an unknown key was taken"
+        );
     }
 
     // The doc's own eight metrics, re-derived for four named rows rather than
@@ -968,9 +1004,15 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
         assert_eq!(d.rounds_per_minute, rpm, "{id}: rpm");
         assert_eq!(d.muzzle_speed_mps, v0, "{id}: muzzle velocity");
         assert_eq!(d.magazine, mag, "{id}: magazine");
-        assert!((d.move_speed_mult - move_mult).abs() < 1e-9, "{id}: move speed");
+        assert!(
+            (d.move_speed_mult - move_mult).abs() < 1e-9,
+            "{id}: move speed"
+        );
         assert!(d.ads_time_ms > 0.0, "{id}: no ADS time for wave WPN2b");
-        assert!(d.recoil_intensity > 0.0, "{id}: no recoil stat for wave WPN2b");
+        assert!(
+            d.recoil_intensity > 0.0,
+            "{id}: no recoil stat for wave WPN2b"
+        );
         assert!(d.report_max_m > 0.0, "{id}: no report range");
     }
 }
@@ -992,7 +1034,10 @@ fn a_misspelled_sub_table_is_refused_by_name() {
         ))
         .expect_err("a misspelled sub-table was accepted");
     println!("the reader said: {e}");
-    assert!(e.contains("ballisitcs"), "the refusal does not name the table: {e}");
+    assert!(
+        e.contains("ballisitcs"),
+        "the refusal does not name the table: {e}"
+    );
     assert!(
         e.contains("ballistics"),
         "the refusal does not say what the known tables are: {e}"
@@ -1111,7 +1156,10 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_projectile_course() {
         ta.2
     );
     assert!(ta.1 > 0, "the course minted no rounds — it proves nothing");
-    assert!(ta.2 > 0, "no round was ever in flight during the comparison");
+    assert!(
+        ta.2 > 0,
+        "no round was ever in flight during the comparison"
+    );
     for (i, (x, y)) in ta.0.iter().zip(tb.0.iter()).enumerate() {
         assert_eq!(x, y, "step {i}: two independent cooks diverged");
     }
@@ -1132,9 +1180,9 @@ fn projectile_course(mut sim: inf_player::runtime_sim::RuntimeSim) -> (Vec<Vec<u
     let mut minted = 0u32;
     let mut peak = 0u32;
     let push = |sim: &mut inf_player::runtime_sim::RuntimeSim,
-                    trace: &mut Vec<Vec<u8>>,
-                    minted: &mut u32,
-                    peak: &mut u32| {
+                trace: &mut Vec<Vec<u8>>,
+                minted: &mut u32,
+                peak: &mut u32| {
         trace.push(sim.state_bytes());
         let r = sim.gameplay();
         *minted += r.rounds.spawned;
@@ -1237,7 +1285,8 @@ fn a_projectile_hit_is_witnessed_exactly_as_a_hitscan_hit_is() {
             witnessed += rep.witnessed;
         }
         assert!(
-            r.health(TARGET).is_some_and(|j| j < weapon::DEFAULT_VITALITY_J),
+            r.health(TARGET)
+                .is_some_and(|j| j < weapon::DEFAULT_VITALITY_J),
             "the target at {distance} m was never hit"
         );
         witnessed as usize
@@ -1285,7 +1334,13 @@ fn a_kill_at_range_names_the_shooter_and_not_nobody() {
     def.damage_j = 2500.0;
     let mut r = Range::new(defs_with("rifle", def));
     let at = 120.0;
-    stand(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, at), false);
+    stand(
+        &mut r.world,
+        TARGET,
+        "Target",
+        DVec3::new(0.0, 0.0, at),
+        false,
+    );
     {
         let a = inf_ecs::crowd::CrowdArchetype::humanoid(None, None, None);
         let mut records = std::collections::BTreeMap::new();
@@ -1372,7 +1427,11 @@ fn a_round_into_a_car_spends_nothing_and_the_gate_says_so() {
     let mut owed = 0usize;
     for _ in 0..60 {
         let rep = r.step();
-        hit_the_car += rep.hits.iter().filter(|h| h.target == Some(CHASSIS)).count();
+        hit_the_car += rep
+            .hits
+            .iter()
+            .filter(|h| h.target == Some(CHASSIS))
+            .count();
         owed += rep.destruct.len();
     }
     println!(
@@ -1443,7 +1502,11 @@ fn a_full_pool_costs_what_it_costs() {
         "the gameplay phase on this range ({} build): {quiet:.4} ms quiet, {busy:.4} ms with \
          {live} round(s) in flight ({} segment casts a step) — the pool's own share is \
          {:.4} ms, {per_round_us:.2} us a round, against a {} ms ceiling at {} rounds",
-        if cfg!(debug_assertions) { "dev" } else { "release" },
+        if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "release"
+        },
         live * PROJECTILE_SUB_STEPS as usize,
         busy - quiet,
         inf_player::budget::WEAPON_STEP_BUDGET_MS,
@@ -1579,7 +1642,11 @@ fn pie_sim() -> inf_player::runtime_sim::RuntimeSim {
         false,
     )
     .expect("the payload builds");
-    assert_eq!(payload.classes.len(), 1, "the author class must ride the wire");
+    assert_eq!(
+        payload.classes.len(),
+        1,
+        "the author class must ride the wire"
+    );
     inf_player::sim_from_payload(&payload)
         .expect("the PIE world builds")
         .sim
