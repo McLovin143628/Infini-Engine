@@ -205,7 +205,9 @@ pub struct CoverProbe {
     /// as a mantle faces into its ledge.
     pub yaw_deg: f64,
     /// How far the surface runs to the character's LEFT before it ends, metres,
-    /// measured from [`anchor`](Self::anchor) along the face tangent. Capped at
+    /// measured from [`anchor`](Self::anchor) along the face tangent, with the
+    /// sweeper's own radius taken back off so it is the CORNER's distance and
+    /// not the reach of the thing that found it. Capped at
     /// [`CoverSettings::extent_max_m`], which means "further than we looked".
     pub left_m: f64,
     /// The same to the right.
@@ -382,12 +384,21 @@ pub fn probe_cover(
         };
     }
 
-    // Where the character's feet end up: out along the face normal by its own
-    // radius plus the standoff, at the height it is standing at. The FACE's
-    // point rather than the character's own position, so two approaches to the
-    // same wall from different angles anchor at the same distance from it.
-    let anchor =
-        DVec3::new(face.point.x, feet.y, face.point.z) + facing * (radius + settings.standoff_m);
+    // **Where the character's feet end up**: exactly where they are, moved along
+    // the face's own normal until the capsule's surface is `standoff_m` off it.
+    //
+    // The correction is along the NORMAL only, and that is the whole of it. The
+    // first cut anchored at the face's witness point instead — which reads as
+    // "against the wall, where the probe touched it" and is wrong for a reason
+    // that took a step-by-step trace to see: a capsule swept against a box
+    // reports its witness at whatever feature of the manifold the narrow phase
+    // picked, which for a flat wall is a corner metres away. The anchor then
+    // walked sideways a few centimetres per step under a character that was
+    // standing still, and a slide along a 1.5 m wall drifted 1.75 m past its
+    // end before the extents stopped moving with it. Measured; the fix is this
+    // line.
+    let depth = (feet - face.point).dot(facing);
+    let anchor = feet + facing * (radius + settings.standoff_m - depth);
     let yaw_deg = inf_math::patan2_64(-facing.x, -facing.z).to_degrees();
 
     // ── 4b. room. The character's own capsule must fit where it is going —
@@ -540,7 +551,14 @@ fn extent_along(
             bad = mid;
         }
     }
-    (good, sweeps)
+    // **The sweeper's own radius comes back off.** The bisection finds the
+    // offset at which a capsule of `forward_radius_m` stops touching the
+    // surface, which is the corner PLUS that radius — so reporting `good` would
+    // over-measure every extent by 30 cm and a slide clamped against it would
+    // stop with the character's centre exactly on the corner and its whole
+    // outboard half hanging over the drop. Measured before this line: a 1.5 m
+    // wall reported 1.75 m of extent.
+    ((good - settings.forward_radius_m).max(0.0), sweeps)
 }
 
 /// **Is this face still the same cover** — the question a slide asks every step.

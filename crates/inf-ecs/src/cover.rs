@@ -204,12 +204,22 @@ impl CoverSide {
         }
     }
 
-    /// The sign of the lateral displacement: `-1` toward the character's left,
-    /// `+1` toward its right, `0` for the two that do not move sideways.
+    /// **The sign of the lateral displacement, in the TANGENT's own frame.**
+    ///
+    /// The tangent is [`tangent_left`], so `+1` is toward the character's left
+    /// and `-1` toward its right; the two that do not move sideways are `0`.
+    ///
+    /// It is deliberately NOT [`param`](Self::param)'s sign. That one is an
+    /// animation number, where `-1`/`+1` is the additive lean's own left/right
+    /// convention; this one multiplies a world vector, and the two disagreeing
+    /// is what made the first corner peek step the capsule the wrong way round
+    /// the corner — measured: a lean at the left-hand end of a wall moved the
+    /// character 0.45 m to its RIGHT, away from the corner it was leaning
+    /// around.
     pub fn lateral_sign(self) -> f64 {
         match self {
-            CoverSide::Left => -1.0,
-            CoverSide::Right => 1.0,
+            CoverSide::Left => 1.0,
+            CoverSide::Right => -1.0,
             _ => 0.0,
         }
     }
@@ -262,6 +272,10 @@ pub struct CoverState {
     /// **How far along the surface the character has slid** from where it
     /// entered, metres, positive toward its own left.
     pub along_m: f64,
+    /// **Whether the slide is against a corner right now** — the fact a peek and
+    /// a caption both read, and the engagement counter behind "it stopped at the
+    /// end" as opposed to "it never got there".
+    pub at_corner: bool,
     /// Which way it is leaning out.
     pub side: CoverSide,
     /// How far out, `[0, 1]`.
@@ -607,8 +621,17 @@ mod tests {
     /// a top, and the two are never both.
     #[test]
     fn a_corner_peek_steps_and_a_top_peek_stands() {
-        assert!((peek_lateral_m(CoverSide::Left, 1.0) + PEEK_LATERAL_M).abs() < 1.0e-12);
-        assert!((peek_lateral_m(CoverSide::Right, 1.0) - PEEK_LATERAL_M).abs() < 1.0e-12);
+        // Positive is along `tangent_left`, which is the character's own left —
+        // so a LEFT peek is positive and a RIGHT one negative. The animation
+        // parameter's sign is the other convention and is asserted apart.
+        assert!((peek_lateral_m(CoverSide::Left, 1.0) - PEEK_LATERAL_M).abs() < 1.0e-12);
+        assert!((peek_lateral_m(CoverSide::Right, 1.0) + PEEK_LATERAL_M).abs() < 1.0e-12);
+        assert_eq!(
+            CoverSide::Left.param(),
+            -1.0,
+            "the ANIMATION lean is signed the other way, and the two must not be confused"
+        );
+        assert_eq!(CoverSide::Right.param(), 1.0);
         assert_eq!(peek_lateral_m(CoverSide::Over, 1.0), 0.0);
         assert_eq!(peek_lateral_m(CoverSide::Behind, 1.0), 0.0);
         assert!(!peek_stands(CoverSide::Over, 0.4));
@@ -671,6 +694,7 @@ mod tests {
         assert_eq!(c.alpha(), 1.0, "no snap is a finished snap");
         assert_eq!(c.sweeps, 0);
         assert!(!c.crouched);
+        assert!(!c.at_corner);
         assert_eq!(c.side, CoverSide::Behind);
     }
 }

@@ -2056,10 +2056,11 @@ fn try_mantle(
             exclude.insert(c);
         }
     }
+    let into = DVec3::new(forward.x, 0.0, forward.y);
     let Some(ledge) = traversal::probe_ledge(
         bridge.world_mut(),
         feet,
-        DVec3::new(forward.x, 0.0, forward.y),
+        into,
         radius,
         half,
         cm.slope_limit_deg,
@@ -2069,6 +2070,21 @@ fn try_mantle(
         return false;
     };
     let from = cm.mode;
+    // **A vault goes OVER, a mantle goes ONTO** (wave COV1, clause 3).
+    //
+    // The same probe answers both — the ledge, its height and its clip are
+    // identical — and the only difference is where the feet end up. From cover,
+    // over a LOW surface, the target is the ground on the FAR side: that is what
+    // "vault over the hood" means, and a mantle that put the character standing
+    // on the bonnet would be a different move with the same button.
+    //
+    // It is offered rather than assumed: a surface with nothing behind it (a
+    // parapet over a drop, a container against a wall) answers `None` and the
+    // press is the ordinary mantle onto the top, which is the right answer for
+    // a low wall at the edge of a roof.
+    let vault = (from == MovementMode::Cover && !ledge.high)
+        .then(|| far_side_landing(bridge, ledge.feet, into, feet.y, radius, half, &exclude))
+        .flatten();
     let verdict = model::request_mode(from, MovementMode::Mantle, true, true);
     if verdict.refusal != MovementRefusal::None {
         *refusal = verdict.refusal;
@@ -2091,11 +2107,21 @@ fn try_mantle(
     // The feet start where they ARE and end on the ledge; the warp is expressed
     // in feet rather than in capsule centres so a stance change on the way in
     // cannot move the target.
+    let target = vault.unwrap_or(ledge.feet);
+    // A vault crosses further than a mantle climbs, so it is given the time to:
+    // the clock is scaled by how much further, bounded at twice, so the same
+    // clip plays over a longer arc rather than the character skating.
+    let reach_top = (ledge.feet - feet).length().max(1e-3);
+    let stretch = if vault.is_some() {
+        ((target - feet).length() / reach_top).clamp(1.0, 2.0)
+    } else {
+        1.0
+    };
     cm.runtime.mantle = MantleState {
         active: true,
         start: Vec3d::from_dvec3(feet),
         start_yaw_deg: cm.runtime.body_yaw_deg,
-        target: Vec3d::from_dvec3(ledge.feet),
+        target: Vec3d::from_dvec3(target),
         target_yaw_deg: ledge.yaw_deg,
         elapsed_s: 0.0,
         duration_s: model::mantle_duration_s(
@@ -2103,7 +2129,7 @@ fn try_mantle(
             settings.min_height_m,
             settings.max_height_m,
             play_rate,
-        ),
+        ) * stretch,
         height_m: ledge.height_m,
         high: ledge.high,
         clip_start_s,
@@ -2240,6 +2266,7 @@ fn try_cover(
         left_m: found.left_m,
         right_m: found.right_m,
         along_m: 0.0,
+        at_corner: false,
         side: covermodel::CoverSide::Behind,
         peek: 0.0,
         blend_s: 0.0,
@@ -2293,9 +2320,16 @@ fn cover_before_move(
     settings: &CoverSettings,
     refusal: &mut MovementRefusal,
 ) -> u32 {
-    let feet = feet_of(cm, position, radius);
     let exclude = ignore_only_pawn(probe.exclude, characters, bridge);
     let half = cm.half_height_for(MovementMode::Grounded);
+    // **The probe is taken from the TUCKED position**, not from where a peek has
+    // leaned the capsule to: a character leaning around a corner is, by
+    // definition, standing where the surface is not, and a probe from there
+    // would lose the very cover the lean is measured against. Subtracting the
+    // lean is one vector and it keeps the anchor still while the body moves.
+    let lean = covermodel::tangent_left(cm.runtime.cover.normal).to_dvec3()
+        * covermodel::peek_lateral_m(cm.runtime.cover.side, cm.runtime.cover.peek);
+    let feet = feet_of(cm, position, radius) - lean;
     // Into the surface, from where the character is now.
     let into = -cm.runtime.cover.normal.to_dvec3();
     let found = probe_cover(
@@ -2324,12 +2358,17 @@ fn cover_before_move(
             c.right_m = found.right_m;
             c.normal = Vec3d::from_dvec3(found.normal);
             c.yaw_deg = found.yaw_deg;
-            // The anchor follows the surface: it is where the FEET belong for
-            // the face the probe just measured, taken at this step's slide
-            // offset, so `along_m` stays measured from where the character is
-            // rather than from where it entered a wall ago.
-            let left = covermodel::tangent_left(c.normal).to_dvec3();
-            c.anchor = Vec3d::from_dvec3(found.anchor - left * c.along_m);
+            // **The anchor is where the feet belong RIGHT NOW.**
+            //
+            // Re-measured from the character's own tucked position every step,
+            // which is what makes the extents beside it mean "how far to the
+            // corner FROM HERE" rather than "from where I pressed the button
+            // four metres ago". The first cut kept the entry anchor and
+            // accumulated a slide offset against it, and the two disagreed the
+            // moment the character moved: a 1.5 m wall let a slide run 1.75 m
+            // PAST its end, because the extents were measured at one place and
+            // the clamp applied at another.
+            c.anchor = Vec3d::from_dvec3(found.anchor);
         }
     }
 
@@ -2370,14 +2409,11 @@ fn cover_before_move(
         let c = &mut cm.runtime.cover;
         let want = cm.runtime.want_aim && !c.snapping();
         if want {
-            c.side = covermodel::peek_side(
-                c.class,
-                c.along_m,
-                c.left_m,
-                c.right_m,
-                radius,
-                CORNER_REACH_M,
-            );
+            // The extents are already measured FROM the character, so the
+            // offset is zero: `peek_side` answers with the corner it is nearer
+            // to right now.
+            c.side =
+                covermodel::peek_side(c.class, 0.0, c.left_m, c.right_m, radius, CORNER_REACH_M);
         }
         // A peek that has nowhere to go does not lean: a wall with no corner in
         // reach answers `Behind`, and `Behind` is the tucked-in pose.
@@ -2476,21 +2512,122 @@ fn cover_after_move(cm: &mut CharacterMovement, position: DVec3, radius: f64, dt
         return DVec3::new(p.x, position.y, p.z);
     }
     // The snap is over: the character owns its slide.
+    //
+    // **The step is a DELTA against the anchor the probe just re-measured**, and
+    // the extents beside it are distances from that same place — so the clamp
+    // and the thing it clamps are in one frame. `along_m` accumulates beside it
+    // as the total travelled, which is what a trace and a caption read; nothing
+    // decides on it.
     let v = cm.runtime.velocity.to_dvec3();
     let tangential = v.x * left.x + v.z * left.z;
-    let (along, at_corner) =
-        covermodel::clamp_along(c.along_m + tangential * dt, c.left_m, c.right_m, radius);
-    cm.runtime.cover.along_m = along;
+    let (delta, at_corner) = covermodel::clamp_along(tangential * dt, c.left_m, c.right_m, radius);
+    cm.runtime.cover.along_m += delta;
+    cm.runtime.cover.at_corner = at_corner;
     // A character wedged at a corner is not still accelerating into it.
     let tangential = if at_corner { 0.0 } else { tangential };
     cm.runtime.velocity = Vec3d::new(left.x * tangential, 0.0, left.z * tangential);
-    let offset = along + covermodel::peek_lateral_m(c.side, c.peek);
+    let offset = delta + covermodel::peek_lateral_m(c.side, c.peek);
     DVec3::new(
         anchor.x + left.x * offset,
         position.y,
         anchor.z + left.z * offset,
     )
 }
+
+/// **The ground on the FAR side of a low surface** (wave COV1) — where a vault
+/// out of cover lands.
+///
+/// Marched rather than solved: step into the surface from its own top in
+/// [`VAULT_STEP_M`] increments and drop a sphere at each; the first place the
+/// ground comes back down to within [`VAULT_LAND_TOLERANCE_M`] of the
+/// character's own feet, **and** where its capsule fits, is the far side.
+///
+/// `None` when there is no such place inside [`VAULT_MAX_DEPTH_M`] — a container
+/// against a wall, a parapet over a drop, a hedge four metres deep — and the
+/// caller then does the ordinary mantle onto the top, which is the honest answer
+/// for all three.
+///
+/// Costs at most `2 x VAULT_MAX_DEPTH_M / VAULT_STEP_M` casts and runs only on
+/// the press that vaults.
+#[allow(clippy::too_many_arguments)]
+fn far_side_landing(
+    bridge: &mut PhysicsBridge3D,
+    ledge_feet: DVec3,
+    into: DVec3,
+    feet_y: f64,
+    radius: f64,
+    half_height: f64,
+    exclude: &BTreeSet<ColliderId3D>,
+) -> Option<DVec3> {
+    let dir = DVec3::new(into.x, 0.0, into.z).normalize_or_zero();
+    if dir == DVec3::ZERO {
+        return None;
+    }
+    let mut d = VAULT_STEP_M;
+    while d <= VAULT_MAX_DEPTH_M {
+        let over = ledge_feet + dir * d;
+        // From a little above the ledge's own top, straight down, far enough to
+        // reach the character's own level and a metre past it.
+        let start = over + DVec3::Y * 0.25;
+        let reach = (over.y - feet_y).max(0.0) + 1.25;
+        let ground = bridge.world_mut().cast_shape(
+            &ColliderShape3D::Sphere { radius: 0.15 },
+            start,
+            DQuat::IDENTITY,
+            -DVec3::Y,
+            reach,
+            exclude,
+        );
+        match ground {
+            // **The march stops at the first thing it cannot see the ground
+            // from.** A sample inside a wall, or one with nothing under it at
+            // all, means the far side is not reachable in a straight line —
+            // and continuing past it is how a vault over a car parked against a
+            // building came out on the far side of the BUILDING. Measured: the
+            // search walked 2.25 m through a wall and answered.
+            None => break,
+            Some(h) if h.started_penetrating => break,
+            Some(_) => {}
+        }
+        if let Some(hit) = ground {
+            if (hit.point.y - feet_y).abs() <= VAULT_LAND_TOLERANCE_M {
+                let landing = DVec3::new(over.x, hit.point.y, over.z);
+                // The character has to FIT there, or the vault ends inside a
+                // parked car — `probe_ledge`'s own room check, one place along.
+                let centre = landing + DVec3::Y * (half_height + radius + 0.02);
+                let blocked = bridge
+                    .world_mut()
+                    .cast_shape(
+                        &ColliderShape3D::Capsule {
+                            half_height: half_height.max(1e-3),
+                            radius: radius.max(1e-3),
+                        },
+                        centre,
+                        DQuat::IDENTITY,
+                        DVec3::Y,
+                        1e-3,
+                        exclude,
+                    )
+                    .is_some_and(|h| h.started_penetrating);
+                if !blocked {
+                    return Some(landing);
+                }
+            }
+        }
+        d += VAULT_STEP_M;
+    }
+    None
+}
+
+/// How finely the vault search steps across a surface, metres.
+const VAULT_STEP_M: f64 = 0.25;
+/// How deep a surface a vault will cross, metres. A car is about 1.8 m across
+/// its bonnet and a counter is under a metre; past two and a half metres the
+/// thing is a platform to climb onto rather than an object to go over.
+const VAULT_MAX_DEPTH_M: f64 = 2.50;
+/// How far off the character's own feet the far side may be and still be "the
+/// ground on the other side", metres. A kerb's worth.
+const VAULT_LAND_TOLERANCE_M: f64 = 0.35;
 
 /// **Advance a mantle one fixed step**, and hand the character back when it ends.
 ///
