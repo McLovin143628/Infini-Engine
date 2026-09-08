@@ -432,10 +432,20 @@ enum Verb {
     ScatterTheCrowd,
     /// Somebody who is not the player pulls a trigger.
     NpcOpensFire,
+    // -- wave WPN2a --
+    /// **One weapon of every CLASS in the registry is equipped and fired** --
+    /// pistol, SMG, assault rifle, DMR, sniper, shotgun and launcher, from the
+    /// eighty-five rows the level's own `item.define` node defines.
+    ///
+    /// It is one verb and not seven because what it forces is one fact: the
+    /// registry is REACHABLE from a level, by name, through the shipped equip
+    /// door, and every class of it fires. Seven verbs would say the same thing
+    /// seven times and make the catalogue's shape a property of this list.
+    FireEveryClass,
 }
 
 /// **The catalogue**, in the order a player meets them.
-const ALL_VERBS: [Verb; 17] = [
+const ALL_VERBS: [Verb; 18] = [
     Verb::PickUp,
     Verb::OpenInventory,
     Verb::EquipFromPanel,
@@ -453,6 +463,7 @@ const ALL_VERBS: [Verb; 17] = [
     Verb::DownAnNpc,
     Verb::ScatterTheCrowd,
     Verb::NpcOpensFire,
+    Verb::FireEveryClass,
 ];
 
 /// What the trace owes a verb.
@@ -483,6 +494,9 @@ fn duty_of(v: Verb) -> Duty {
         Verb::DownAnNpc => Duty::Forced("rifle rounds down an NPC and ragdoll it"),
         Verb::ScatterTheCrowd => Duty::Forced("the gunfire scatters the street"),
         Verb::NpcOpensFire => Duty::Forced("an armed NPC fires back"),
+        Verb::FireEveryClass => {
+            Duty::Forced("one weapon of each registry class is equipped and fired")
+        }
     }
 }
 
@@ -495,6 +509,24 @@ fn required_verbs() -> Vec<(&'static str, Verb)> {
         .collect()
 }
 
+/// **One weapon of each registry CLASS** (wave WPN2a), by the id the doc's own
+/// tables give it. Seven rows, one per section of the dataset, and every one of
+/// them is a `ShotKind::Projectile` with its class's own hitscan threshold.
+///
+/// They are named here rather than derived from the catalogue on purpose: a
+/// station that asked the world "give me anything from each class" would pass on
+/// a registry that had lost eighty of its rows, and a station that names seven
+/// ids fails the moment one of them stops being defined.
+const CLASS_EXEMPLARS: [(&str, &str); 7] = [
+    ("pistol", "glock_17"),
+    ("smg", "mp5"),
+    ("assault rifle", "m4a1"),
+    ("dmr", "svd_dragunov"),
+    ("sniper", "barrett_m82"),
+    ("shotgun", "remington_870"),
+    ("launcher", "rpg_7"),
+];
+
 /// **The catalogue is accounted for, variant by variant.**
 #[test]
 fn every_verb_the_mandate_names_is_on_the_list() {
@@ -502,8 +534,8 @@ fn every_verb_the_mandate_names_is_on_the_list() {
     println!("the gate owes {} verbs: {forced:?}", forced.len());
     assert_eq!(
         forced.len(),
-        17,
-        "the obligation is seventeen verbs and this list has {} — a row was \
+        18,
+        "the obligation is eighteen verbs and this list has {} — a row was \
          deleted, and the coverage check below only says when one is MISSING",
         forced.len()
     );
@@ -679,6 +711,19 @@ struct Run {
     audio_dropped: u64,
     /// How many of those were the gunshot report.
     reports: usize,
+    // -- wave WPN2a --
+    /// **Every registry class that fired**, `(class, item id, rounds, rounds
+    /// spawned into the pool)` — the station's own record, printed by the arm.
+    classes_fired: Vec<(&'static str, &'static str, u32, u32)>,
+    /// Rounds the whole course minted into the projectile pool, and the refusals.
+    rounds_spawned: u32,
+    rounds_refused: u32,
+    /// Projectile impacts the whole course produced, and head hits from either
+    /// half of the hybrid.
+    round_impacts: u32,
+    headshots: u32,
+    /// Head tests that fell back to the capsule rule on a POSED character.
+    heads_without_a_socket: u32,
 }
 
 impl Run {
@@ -707,6 +752,14 @@ fn run_course(sim: RuntimeSim) -> Run {
         run.fled += r.panic.fled;
         run.witnessed += r.witnessed;
         run.muzzles_without_a_socket += r.muzzles_without_a_socket;
+        // Wave WPN2a: the pool's own engagement counters, on the same terms as
+        // the eight above — "the flight pass ran" and "a round flew" are
+        // different facts.
+        run.rounds_spawned += r.rounds.spawned;
+        run.rounds_refused += r.rounds.refused;
+        run.round_impacts += r.rounds.impacts;
+        run.headshots += r.rounds.headshots;
+        run.heads_without_a_socket += r.rounds.heads_without_a_socket;
         for hit in &r.hits {
             if hit.on_flesh {
                 run.hits_on_flesh += 1;
@@ -1272,6 +1325,83 @@ fn run_course(sim: RuntimeSim) -> Run {
             "an armed NPC fired {} round(s) at the hero, taking it from \
              {hero_before} J to {hero_after} J",
             run.npc_shots - npc_before
+        ));
+    }
+
+    // ── 15. ONE WEAPON OF EACH REGISTRY CLASS, FIRED (wave WPN2a) ──
+    //
+    //    The eighty-five rows the level's own `item.define` node defined are
+    //    only a table until something equips one, so this station takes seven of
+    //    them — one per section of the research doc's dataset — through the
+    //    shipped equip door by NAME and pulls the trigger.
+    //
+    //    The hero is aimed UP (pitch +25°, and `aim_forward` puts `sin(pitch)`
+    //    on `+Y`, so a positive pitch is the sky) so the rounds fly
+    //    rather than landing on the fixture's own house: what this station
+    //    proves is that each class fires and that a projectile class puts a body
+    //    into the pool, and a wall two metres away would resolve every one of
+    //    them inside its hitscan threshold and prove neither.
+    //
+    //    Every row is a `ShotKind::Projectile`, so the pool is what says the far
+    //    half engaged. A launcher's threshold is zero, so its round is minted at
+    //    the muzzle; a pistol's is thirty metres, so its round is minted thirty
+    //    metres out — both are the same door.
+    for (class, id) in CLASS_EXEMPLARS {
+        assert_eq!(
+            inf_ecs::item::give(h.sim.world_mut(), GAMEPLAY_HERO_GUID, id, 1),
+            0,
+            "the hero's bag would not take a {id} (the count is the LEFTOVER)"
+        );
+        assert!(
+            inf_physics::d3::gameplay::equip_weapon(h.sim.world_mut(), GAMEPLAY_HERO_GUID, id),
+            "the level's catalogue has no `{id}` — the registry did not reach it"
+        );
+        let shots_before = run.shots;
+        let spawned_before = run.rounds_spawned;
+        // Aim into the sky and hold the trigger for a second.
+        {
+            let e = h.sim.world().entity_of(GAMEPLAY_HERO_GUID).expect("hero");
+            if let Some(mut cm) = h
+                .sim
+                .world_mut()
+                .world_mut()
+                .get_mut::<CharacterMovement>(e)
+            {
+                cm.runtime.aim_pitch_deg = 25.0;
+            }
+        }
+        for _ in 0..60 {
+            h.frame(&[], (0.0, 0.0), 0.0, &[true, true]);
+            rec(&mut h, &mut run);
+        }
+        h.frame(&[], (0.0, 0.0), 0.0, &[false, false]);
+        rec(&mut h, &mut run);
+        run.classes_fired.push((
+            class,
+            id,
+            run.shots - shots_before,
+            run.rounds_spawned - spawned_before,
+        ));
+    }
+    // The rounds are left to fly, land or expire, so the pool empties and the
+    // trace's fourteenth section goes back to being empty — which is the
+    // property `wpn2a_gate` asserts and this course must not leave broken for
+    // the arms that compare it.
+    for _ in 0..240 {
+        h.frame(&[], (0.0, 0.0), 0.0, &[]);
+        rec(&mut h, &mut run);
+    }
+    let fired_classes: Vec<&str> = run
+        .classes_fired
+        .iter()
+        .filter(|(_, _, shots, _)| *shots > 0)
+        .map(|(c, _, _, _)| *c)
+        .collect();
+    if fired_classes.len() == CLASS_EXEMPLARS.len() {
+        run.saw(Verb::FireEveryClass);
+        run.notes.push(format!(
+            "every registry class fired: {:?}; {} round(s) minted into the pool, {} refused, {} impact(s)",
+            run.classes_fired, run.rounds_spawned, run.rounds_refused, run.round_impacts
         ));
     }
 

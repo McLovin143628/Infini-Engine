@@ -10254,6 +10254,33 @@ pub fn gameplay_controller() -> BlueprintClass {
             ret: Ty::Unit,
             body: vec![
                 call(&["item", "define"], vec![s(GAMEPLAY_ITEMS_TOML)]),
+                // **AND THE WHOLE EIGHTY-FIVE-ROW REGISTRY** (wave WPN2a),
+                // through the same node, as a SECOND call rather than a longer
+                // string — `GAMEPLAY_ITEMS_TOML` is a `concat!` of literals and
+                // a `const` cannot go inside one, and two calls is what
+                // `ItemDefs::merge_toml` is for anyway.
+                //
+                // Appended rather than substituted: the rifle, the pistol and
+                // the bandage are what every arm of `phase30_gameplay_gate`
+                // written before this wave picks up, equips, cycles between and
+                // fires, and replacing them would rewrite a course rather than
+                // extend one. The registry's rows sit beside them and are what
+                // this wave's own station equips one of each CLASS from.
+                //
+                // It is the same `&str` `inf_ecs::weapon::WEAPON_REGISTRY_TOML`
+                // holds, not a copy of it: the numbers live in
+                // `crates/inf-ecs/src/weapons.toml` and this is the route by
+                // which they reach a level, a PIE preview and a cooked pack as
+                // one set of bytes. `MAX_ITEM_DEFS` is 4 096, so eighty-eight
+                // definitions is nowhere near the cap; the committed
+                // `Gameplay.inf_act` grows by the registry's own size, which is
+                // the honest cost of a catalogue that rides a Blueprint rather
+                // than an asset kind (`item.rs:33-45`'s ruling, and VEH3a's
+                // schema window is where that trade is revisited).
+                call(
+                    &["item", "define"],
+                    vec![s(inf_ecs::weapon::WEAPON_REGISTRY_TOML)],
+                ),
                 call(&["door", "spawn"], vec![s(GAMEPLAY_DOORS_TOML)]),
                 call(
                     &["item", "spawn_pickup"],
