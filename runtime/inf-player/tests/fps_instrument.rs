@@ -1667,10 +1667,12 @@ fn island_archetype(sim: &inf_player::runtime_sim::RuntimeSim) -> inf_ecs::crowd
     // fixed for: a dressed character's outfit and hair are CHILD entities
     // carrying a rigged `SkeletalMesh`, and a lowest-`Guid` pick takes whichever
     // of the three sorts first.
-    let a = *inf_ecs::society::level_archetypes(sim.world()).first().expect(
-        "the island has no rigged character to copy, so a crowd of it would pose \
+    let a = *inf_ecs::society::level_archetypes(sim.world())
+        .first()
+        .expect(
+            "the island has no rigged character to copy, so a crowd of it would pose \
          nothing and this row would price an empty pipeline",
-    );
+        );
     println!("island crowd archetype: skeleton {:?}", a.skeleton);
     a
 }

@@ -221,10 +221,12 @@ fn archetype_from_hero(sim: &RuntimeSim) -> CrowdArchetype {
     // fixed for: a dressed character's outfit and hair are CHILD entities
     // carrying a rigged `SkeletalMesh`, and a lowest-`Guid` pick takes whichever
     // of the three sorts first.
-    let a = *inf_ecs::society::level_archetypes(sim.world()).first().expect(
-        "the sweep scene has no rigged character to copy — every NPC would pose \
+    let a = *inf_ecs::society::level_archetypes(sim.world())
+        .first()
+        .expect(
+            "the sweep scene has no rigged character to copy — every NPC would pose \
          nothing and the whole measurement would be of an empty pipeline",
-    );
+        );
     println!(
         "archetype: mesh {:?}, skeleton {:?}, machine {:?}",
         a.mesh, a.skeleton, a.sm

@@ -2243,11 +2243,14 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //    instrument's "N virtual textures" line reports.
     let mats = content.vt_materials();
     // Seven since the wave CHAR1a audit — the hero's skin (see the pack
-    // assertion above). It contributes no TEXTURE to the counts below: the
-    // committed `Starter_Skin.inf_mat` is a scalars-only dielectric, and it is
-    // `inf-import --rebind-character` that fills it with an imported body's
-    // maps, in a local project this gate never opens.
-    assert_eq!(mats.len(), 7, "the host's material map is not the pack's");
+    // assertion above); **TEN since wave OUTFIT1** — its clothes. None of the
+    // three new ones contributes a TEXTURE to the counts below: the committed
+    // `Starter_Skin.inf_mat`, `Starter_Outfit_Top.inf_mat`,
+    // `Starter_Outfit_Bottom.inf_mat` and `Starter_Hair.inf_mat` are all
+    // scalars-only dielectrics, and it is `inf-import` that fills them with an
+    // imported body's and an imported garment's maps, in a local project this
+    // gate never opens.
+    assert_eq!(mats.len(), 10, "the host's material map is not the pack's");
     let order = inf_render::registration_order(&mats);
     assert_eq!(
         order.len(),
@@ -2258,7 +2261,8 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
         order.len()
     );
     println!(
-        "ISLAND GROUND: 4 layers + 1 road + 1 kerb + 1 hero skin -> 7 materials \
+        "ISLAND GROUND: 4 layers + 1 road + 1 kerb + 1 hero skin + 3 hero \
+         clothes -> 10 materials \
          -> {} textures; registration order {:?}",
         content.textures.len(),
         order

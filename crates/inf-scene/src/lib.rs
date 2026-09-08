@@ -7019,7 +7019,14 @@ mod tests {
         // Play mean anything (`camera_subject` answered `None` on all four
         // starter levels before it). The runtime reader is the right place to
         // notice a template growing an entity, so the count moves with it.
-        assert_eq!(level.len(), 6);
+        //
+        // **EIGHT since wave OUTFIT1**, and the two are the character's CLOTHES:
+        // a dressed character is a body with an `Outfit` and a `Hair` CHILD
+        // entity, each naming its own mesh and its own material on the wearer's
+        // own rig. They are entities and the runtime reader counts entities —
+        // which is the point of counting here: a template that stopped dressing
+        // its pawn reads as 6 again.
+        assert_eq!(level.len(), 8);
         // A **PAWN**, which is `player_controlled` and not merely a body that can
         // move (wave GTA1 audit): `inf_ecs::movement::camera_subject` filters on
         // exactly that field, so a `CharacterMovement` with it false is a level
