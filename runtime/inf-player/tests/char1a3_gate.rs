@@ -73,32 +73,21 @@ fn a_crowd_agents_hand_leaves_the_bind_pose() {
         glam::DVec3::new(t.translation.x, t.translation.y, t.translation.z)
     };
 
-    // The archetype the crowd wears is the hero's own, read off the world.
-    let archetype = {
-        let w = sim.world().world();
-        let mut best: Option<(uuid::Uuid, inf_ecs::crowd::CrowdArchetype)> = None;
-        for e in w.iter_entities() {
-            let (Some(g), Some(sk)) = (
-                e.get::<inf_ecs::Guid>(),
-                e.get::<inf_ecs::components::SkeletalMesh>(),
-            ) else {
-                continue;
-            };
-            if sk.skeleton.is_none() {
-                continue;
-            }
-            let sm = e
-                .get::<inf_ecs::components::AnimStateMachine>()
-                .and_then(|a| a.sm);
-            if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
-                best = Some((
-                    g.0,
-                    inf_ecs::crowd::CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm),
-                ));
-            }
-        }
-        best.expect("the fixture has a rigged character to copy").1
-    };
+    // The archetype the crowd wears is the hero's own, read off the world
+    // **through the one door that surveys a level** (`society::level_archetypes`,
+    // which answers in `Guid` order).
+    //
+    // This used to be a hand-rolled scan for the lowest-`Guid` rigged entity, and
+    // wave OUTFIT1 made that wrong in the way the door itself had to be fixed
+    // for: a dressed character's outfit and hair are CHILD entities carrying a
+    // rigged `SkeletalMesh`, their identities are derived and therefore sort
+    // anywhere, and the scan picked whichever of the three came first. When it
+    // picked the outfit the archetype had no state machine and this arm's own
+    // vacuity guard fired — correctly, and about the scan rather than about the
+    // fixture. A survey written twice is a survey that disagrees with itself.
+    let archetype = *inf_ecs::society::level_archetypes(sim.world())
+        .first()
+        .expect("the fixture has a rigged character to copy");
     assert!(
         archetype.skeleton.is_some() && archetype.sm.is_some(),
         "the fixture hero carries no skeleton or no machine, so the crowd would \

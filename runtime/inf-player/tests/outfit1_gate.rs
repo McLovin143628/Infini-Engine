@@ -872,9 +872,8 @@ fn what_a_wearable_costs() {
         .unwrap_or(0);
     println!(
         "\n=== ONE DRESSED CHARACTER ===\n  \
-         skinned draws        {}\n  \
-         distinct palettes    {} ({} bytes each)\n  \
-         geometry             {} triangles over {} mesh slots",
+         skinned draws {}, distinct palettes {} ({} bytes each), \
+         geometry {} triangles over {} mesh slots",
         scene.skinned.len(),
         palettes,
         bytes,

@@ -824,7 +824,11 @@ pub fn hair_cap(
     let span = hi[1] - lo[1];
     let cut_y = hi[1] - span * HAIR_CAP_DROP;
     let cos_max = (((cut_y - cy) / radius[1]) as f64).clamp(-1.0, 1.0);
-    let theta_max = cos_max.acos();
+    // `inf_math::pacos64` and not `f64::acos`: this angle decides the geometry of
+    // a mesh this repository COMMITS, and a std transcendental is not
+    // bit-portable (the P14 law). The same reason the ring and segment loops
+    // below take `psin64`/`pcos64`.
+    let theta_max = inf_math::pacos64(cos_max);
 
     let mut verts: Vec<inf_mesh::MeshVertex> = Vec::new();
     let mut skin: Vec<inf_mesh::VertexSkin> = Vec::new();

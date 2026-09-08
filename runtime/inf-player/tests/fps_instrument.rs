@@ -1661,34 +1661,17 @@ const ISLAND_CROWD_HALF_M: f64 = 160.0;
 /// instruments measuring the same subject have to build it the same way, or the
 /// island's numbers and the city's are about two different crowds.
 fn island_archetype(sim: &inf_player::runtime_sim::RuntimeSim) -> inf_ecs::crowd::CrowdArchetype {
-    let w = sim.world().world();
-    let mut best: Option<(uuid::Uuid, inf_ecs::crowd::CrowdArchetype)> = None;
-    for e in w.iter_entities() {
-        let (Some(g), Some(sk)) = (
-            e.get::<inf_ecs::Guid>(),
-            e.get::<inf_ecs::components::SkeletalMesh>(),
-        ) else {
-            continue;
-        };
-        if sk.skeleton.is_none() {
-            continue;
-        }
-        let sm = e
-            .get::<inf_ecs::components::AnimStateMachine>()
-            .and_then(|a| a.sm);
-        let a = inf_ecs::crowd::CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm);
-        if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
-            best = Some((g.0, a));
-        }
-    }
-    let (guid, a) = best.expect(
+    // **Through the one door that surveys a level** (`society::level_archetypes`,
+    // which answers in `Guid` order), and not a scan written here. Wave OUTFIT1
+    // made a hand-rolled scan wrong in exactly the way the door itself had to be
+    // fixed for: a dressed character's outfit and hair are CHILD entities
+    // carrying a rigged `SkeletalMesh`, and a lowest-`Guid` pick takes whichever
+    // of the three sorts first.
+    let a = *inf_ecs::society::level_archetypes(sim.world()).first().expect(
         "the island has no rigged character to copy, so a crowd of it would pose \
          nothing and this row would price an empty pipeline",
     );
-    println!(
-        "island crowd archetype: hero {guid} — skeleton {:?}",
-        a.skeleton
-    );
+    println!("island crowd archetype: skeleton {:?}", a.skeleton);
     a
 }
 

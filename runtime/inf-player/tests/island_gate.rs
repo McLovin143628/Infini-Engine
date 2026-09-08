@@ -970,34 +970,21 @@ const CROWD_N: usize = 24;
 /// what makes this arm able to quote the 6 476 B figure the trace re-shape is
 /// argued against, because that number *is* this rig.
 fn crowd_archetype(sim: &RuntimeSim) -> inf_ecs::crowd::CrowdArchetype {
-    let w = sim.world().world();
-    let mut best: Option<(Uuid, inf_ecs::crowd::CrowdArchetype)> = None;
-    for e in w.iter_entities() {
-        let (Some(g), Some(sk)) = (
-            e.get::<inf_ecs::Guid>(),
-            e.get::<inf_ecs::components::SkeletalMesh>(),
-        ) else {
-            continue;
-        };
-        if sk.skeleton.is_none() {
-            continue;
-        }
-        let sm = e
-            .get::<inf_ecs::components::AnimStateMachine>()
-            .and_then(|a| a.sm);
-        if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
-            best = Some((
-                g.0,
-                inf_ecs::crowd::CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm),
-            ));
-        }
-    }
-    let (guid, a) = best.expect(
+    // **Through the one door that surveys a level** (`society::level_archetypes`,
+    // which answers in `Guid` order), and not a scan written here.
+    //
+    // Wave OUTFIT1 made a hand-rolled scan wrong in exactly the way the door
+    // itself had to be fixed for: a dressed character's outfit and hair are CHILD
+    // entities carrying a rigged `SkeletalMesh`, their identities are derived and
+    // therefore sort anywhere, and a lowest-`Guid` scan picks whichever of the
+    // three comes first. A survey written twice is a survey that disagrees with
+    // itself.
+    let a = *inf_ecs::society::level_archetypes(sim.world()).first().expect(
         "the island has no rigged character to copy, so every test NPC would pose nothing and the arm would compare two empty pipelines",
     );
     assert!(
         a.skeleton.is_some() && a.sm.is_some(),
-        "the island hero {guid} has no skeleton or no machine"
+        "the island hero has no skeleton or no machine"
     );
     a
 }
@@ -2224,12 +2211,21 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     // the renderer's neutral 0.8 grey in both hosts. The door binds it now, the
     // island's `.inf_lvl` was re-blessed with that cause, and the closure follows
     // the edge: a drop back to six is the hero's skin unbound again.
+    // **TEN since wave OUTFIT1, and the three new ones are the HERO'S CLOTHES.**
+    // A dressed character is a body with two child entities on its own rig, each
+    // naming its own mesh and its own material, and the outfit is a two-slot
+    // garment — a tee and a pair of trousers — so the closure grows by the
+    // outfit's two slot materials and the hair's one. That the count MOVED is the
+    // claim: a cook that did not follow a WEARABLE's `Material` would ship a
+    // level whose hero's clothes draw the renderer's neutral grey, which is the
+    // shape the seventh entry (the hero's own skin) was added for one wave ago.
+    // A drop back to seven is a garment unbound.
     assert_eq!(
         content.materials.len(),
-        7,
-        "the pack carries {} derived material records, not seven — the cook's \
+        10,
+        "the pack carries {} derived material records, not ten — the cook's \
          closure did not follow `Terrain.layers[*].material`, the road's \
-         `Material.asset`, the kerb's, or the hero's skin",
+         `Material.asset`, the kerb's, the hero's skin, or its clothes",
         content.materials.len()
     );
     // Twenty-one: six albedo + six normal + six ORM + three detail (grass, rock

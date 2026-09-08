@@ -215,33 +215,18 @@ fn open(pack: &Path) -> Fixture {
 /// Panics if the scene has no rigged character at all, because a sweep whose
 /// NPCs pose nothing measures nothing.
 fn archetype_from_hero(sim: &RuntimeSim) -> CrowdArchetype {
-    let w = sim.world().world();
-    let mut best: Option<(Uuid, CrowdArchetype)> = None;
-    for e in w.iter_entities() {
-        let (Some(g), Some(sk)) = (
-            e.get::<inf_ecs::Guid>(),
-            e.get::<inf_ecs::components::SkeletalMesh>(),
-        ) else {
-            continue;
-        };
-        if sk.skeleton.is_none() {
-            continue;
-        }
-        let sm = e
-            .get::<inf_ecs::components::AnimStateMachine>()
-            .and_then(|a| a.sm);
-        let a = CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm);
-        // Ascending `Guid`, so the pick is a function of the level's contents.
-        if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
-            best = Some((g.0, a));
-        }
-    }
-    let (guid, a) = best.expect(
+    // **Through the one door that surveys a level** (`society::level_archetypes`,
+    // which answers in `Guid` order), and not a scan written here. Wave OUTFIT1
+    // made a hand-rolled scan wrong in exactly the way the door itself had to be
+    // fixed for: a dressed character's outfit and hair are CHILD entities
+    // carrying a rigged `SkeletalMesh`, and a lowest-`Guid` pick takes whichever
+    // of the three sorts first.
+    let a = *inf_ecs::society::level_archetypes(sim.world()).first().expect(
         "the sweep scene has no rigged character to copy — every NPC would pose \
          nothing and the whole measurement would be of an empty pipeline",
     );
     println!(
-        "archetype: hero {guid} — mesh {:?}, skeleton {:?}, machine {:?}",
+        "archetype: mesh {:?}, skeleton {:?}, machine {:?}",
         a.mesh, a.skeleton, a.sm
     );
     assert!(
