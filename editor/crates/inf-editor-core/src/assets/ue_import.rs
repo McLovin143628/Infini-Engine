@@ -1894,7 +1894,6 @@ fn record_character_ladder(
 // body, its rig, the manifest record, the material map, WHICH committed identity
 // it becomes, that identity's three asset stems and its three clip stems. A
 // struct here would be a struct with one caller per field.
-#[allow(clippy::too_many_arguments)]
 /// What [`split_eye_sections`] lifted out of a combined body.
 struct EyeSplit {
     left_verts: usize,
@@ -2135,6 +2134,7 @@ fn split_eye_sections(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebind_character(
     project: &mut AssetProject,
     mesh: AssetId,
