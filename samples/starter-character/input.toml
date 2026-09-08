@@ -12,6 +12,12 @@ MouseButton = "Left"
 [[actions.attack]]
 GamepadButton = "RightTrigger"
 
+[[actions.cover]]
+Key = "KeyT"
+
+[[actions.cover]]
+GamepadButton = "DPadDown"
+
 [[actions.crouch]]
 Key = "KeyC"
 

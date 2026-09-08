@@ -2220,6 +2220,52 @@ fn every_state_of_the_built_graph_is_reachable_from_a_published_parameter_set() 
                 (als::GROUNDED_VAR, 0.0),
             ],
         ),
+        // ── COVER (wave COV1) ──
+        //
+        // Four more states, and the parameters below are what
+        // `inf_ecs::anim_bridge` publishes while `MovementMode::Cover` holds:
+        // the mode, the CLASS the surface asked for, and the gait that splits
+        // the stance from the shuffle along it. `cover_side`/`cover_peek` are
+        // published beside them and are deliberately absent here — the peek is
+        // an additive layer over the stance, so a frame that reached its state
+        // only when a lean was also set would be describing a graph this one
+        // is not.
+        Frame(
+            "in low cover, still",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Cover.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::COVER_VAR, als::COVER_LOW),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "shuffling along low cover",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Cover.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::COVER_VAR, als::COVER_LOW),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
+        Frame(
+            "in high cover, still",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Cover.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::COVER_VAR, als::COVER_HIGH),
+                (als::GAIT_VAR, 0.0),
+            ],
+        ),
+        Frame(
+            "shuffling along high cover",
+            vec![
+                (als::MODE_VAR, als::LocoMode::Cover.param()),
+                (als::GROUNDED_VAR, 1.0),
+                (als::COVER_VAR, als::COVER_HIGH),
+                (als::GAIT_VAR, 1.0),
+            ],
+        ),
     ];
 
     // Walk the frames in order, letting each one settle, and record which states
