@@ -160,6 +160,51 @@ table.
 > a MetaHuman mesh sits among 190 stamped siblings), and both are carried as items
 > 110 and the ledger's own row so that the next reader does not have to
 > re-discover that "441 of 441" was counting the stamped.
+>
+> **Both holes are closed at wave OUTFIT1, and the measurement that found them was
+> the wrong way round.** A rebind writes at a committed GUID in the project ROOT,
+> which is neither the destination folder the sweep reads nor the `asset_packs`
+> list the per-asset pass reads -- so the only assets in the project that actually
+> SHIP, the ones the level references by name, were precisely the ones with no
+> licence row: `Starter_Body.inf_mesh`, `Starter.inf_skel`, `Starter_Skin.inf_mat`
+> and every derived `.inf_vmesh` beside them, while 252 sidecars under
+> `Content/UE/...` that nothing references carried the row. Every rebind stamps
+> what it writes now, and a derived `.inf_vmesh` copies its source mesh's row
+> (`derived_import_table`) -- a derivation of licensed content is licensed
+> content.
+
+
+### Dressing the island's two MetaHumans (wave OUTFIT1)
+
+The whole sequence, in the only order that works, with the reason each step is
+where it is. Everything below writes into the LOCAL project and nothing into this
+repository.
+
+```
+# 1. the project, from the recipe (this OVERWRITES every committed asset,
+#    including the ones a previous import rebound)
+inf island build --recipe samples/island/island.toml --out <project> --offline
+
+# 2. the CLIPS, first, because a body rebind re-retargets the clips that are
+#    already at the committed GUIDs onto the rig it is about to write
+inf-import --manifest <ue-out>/char1a3/manifest.json --into <project>            --dest UE/Mannequins
+
+# 3. the BODIES and the CLOTHES, in one run: `--only` keeps the bodies and faces
+#    beside them out of it, `--rebind-character` writes each combined MetaHuman at
+#    a starter character's committed GUIDs, and `--wearable` writes the outfit and
+#    the groom cards at that same character's clothes GUIDs, re-pointing every
+#    influence onto the rig this same run just wrote
+inf-import --manifest <ue-out>/outfit1/manifest.json --into <project>   --dest UE/Outfits   --only INF_Combined_INF_Dominic_FullBody --only INF_Combined_INF_Vivian_FullBody   --only INF_Dominic_Outfits --only INF_Vivian_Outfits   --only Hair_S_PulledBack_CardsMesh --only Hair_S_BobLayered_CardsMesh   --rebind-character   INF_Combined_INF_Dominic_FullBody_INF_Dominic_FullBody   --rebind-character-f INF_Combined_INF_Vivian_FullBody_INF_Vivian_FullBody   --wearable m:outfit:INF_Dominic_Outfits --wearable f:outfit:INF_Vivian_Outfits   --wearable m:hair:Hair_S_PulledBack_CardsMesh   --wearable f:hair:Hair_S_BobLayered_CardsMesh
+
+# 4. the locomotion GRAPHS last: the island's `.inf_sm` is baked content and a
+#    body rebind re-points every clip in it
+inf-import --into <project> --rebind-graph m --rebind-graph f
+```
+
+Measured on one run: 54.6 s, 5.1 s, 10.3 s and under a second. The hero then
+draws 95 330 body + 22 268 outfit + 15 542 hair triangles at LOD 0 and Vivian
+95 330 + 24 989 + 38 413, all on ONE 342-joint palette (a wearable shares its
+wearer's, by pointer).
 
 **The order matters and there is only one that works:**
 
