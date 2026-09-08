@@ -343,6 +343,16 @@ PARAM_KIND = {
     "ao": "ao", "occlusion": "ao", "ambientocclusion": "ao",
     "orm": "orm", "arm": "orm", "packed": "orm",
     "opacity": "opacity", "alpha": "opacity", "mask": "opacity",
+    # **THE CARD ALPHA A GROOM'S MATERIAL DOES NOT NAME** (wave OUTFIT1 AUDIT,
+    # carried item 164). `MI_Hair_Cards` is `BLEND_Masked` and binds no opacity
+    # texture at all -- in Unreal the hair is drawn by the GROOM COMPONENT,
+    # which reads the coverage out of the groom's own cards atlas. So the
+    # material's parameter list cannot lead a bridge to it and every groom
+    # crossed as SOLID RIBBONS. `attach_groom_coverage` finds the atlas beside
+    # the groom and binds it under this role; the importer composites the
+    # chosen channel into the albedo's alpha, which is where this engine keeps
+    # a masked material's coverage.
+    "haircoverage": "hair_coverage",
     "emissive": "emissive", "emission": "emissive",
     "displacement": "displacement", "height": "displacement",
     # Wave CHAR1a: the UE5 mannequin material names its albedo slot
@@ -904,6 +914,65 @@ def groom_card_material(path, mi):
     return mi
 
 
+# ---- THE CARD ALPHA (wave OUTFIT1 AUDIT, carried item 164) ------------------
+#
+# A groom's card material is `BLEND_Masked` and binds NO opacity texture: in
+# Unreal the coverage comes off the groom's own cards atlas, which the GROOM
+# COMPONENT feeds the shader. A bridge that reads only the material's parameter
+# list therefore cannot see it, and every groom in wave OUTFIT1's run crossed as
+# solid pale ribbons -- measured in the portrait, and photographed sticking out
+# of Vivian's shoulders.
+#
+# The atlas is not hidden; it is simply somewhere else, and named by the same
+# convention the material is:
+#
+#   <Groom folder>/Textures/<Stem>_CardsAtlas_Attribute
+#
+# It is recorded under `hair_coverage` and the importer chooses the CHANNEL,
+# because which channel carries what is a fact about the texture rather than
+# about the asset graph, and this script cannot open one. Measured on both
+# grooms: channel R is the strand mask on a pure black ground (81.6 % / 85.4 %
+# of the atlas is exactly zero there); G and B are the attribute fields and are
+# filled everywhere. A mesh that is not a groom's cards, or a groom with no
+# atlas beside it, adds nothing and says so.
+
+# `<Groom>_RootUVSeedCoverage` is NOT in this tuple, and that is a measurement:
+# opened, it is the groom's SCALP -- a head-shaped blob in the binding's root-uv
+# space, 512 x 512, with nothing of the cards atlas in it. Its name says
+# "coverage" and it is coverage of the scalp by roots, not of a card by a strand.
+COVERAGE_SUFFIXES = (("hair_coverage", "CardsAtlas_Attribute"),)
+
+
+def attach_groom_coverage(path, mi, pack):
+    """Bind a groom's own cards atlas to the cards material as its coverage."""
+    if mi is None:
+        return
+    name = path.rsplit(".", 1)[-1]
+    folder = path.rsplit("/", 1)[0]
+    if "_CardsMesh_Group0_LOD" in name:
+        stem = name.split("_CardsMesh_Group0_LOD")[0]
+    else:
+        m = re.match(r"^(.*?)(?:_Helmet)?_LOD\d+$", name)
+        if not m:
+            return
+        stem = m.group(1)
+    rec = MATERIALS.get(mi.get_path_name())
+    if rec is None:
+        return
+    for role, suffix in COVERAGE_SUFFIXES:
+        if role in rec["maps"]:
+            continue
+        w = "%s_%s" % (stem, suffix)
+        obj = unreal.load_asset("%s/Textures/%s.%s" % (folder, w, w))
+        if obj is None:
+            say("  cards alpha    %-44s NOT FOUND (%s)" % (name, w))
+            continue
+        k = add_texture(obj, "HairCoverage", pack)
+        if k:
+            rec["maps"][role] = k
+            say("  cards alpha    %-44s <- %s" % (name, w))
+
+
 def add_mesh(sm, pack):
     path = sm.get_path_name()
     if path in MESHES:
@@ -948,6 +1017,9 @@ def add_mesh(sm, pack):
                 rec["material_slots"].append(None)
                 continue
             rec["material_slots"].append(add_material(mi, pack))
+            # …and the coverage atlas the material itself does not name. AFTER
+            # `add_material`, because it writes into the record that call makes.
+            attach_groom_coverage(path, mi, pack)
     except Exception as e:
         ERRORS.append("slots on %s: %s" % (path, e))
 

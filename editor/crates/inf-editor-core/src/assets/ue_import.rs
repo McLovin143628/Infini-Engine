@@ -830,6 +830,31 @@ pub fn import_manifest(
                 .iter()
                 .find(|(k, ..)| k.contains(&spec.key))
                 .map(|(k, mesh, ..)| (k.clone(), *mesh, None));
+            // **THE MATERIAL THE MANIFEST NAMES FOR THIS MESH** (wave OUTFIT1
+            // AUDIT, carried item 164). A groom's cards mesh carries
+            // `WorldGridMaterial` — Unreal's checkerboard — in its own static
+            // slot, because in Unreal the GROOM COMPONENT applies the hair
+            // material; the exporter already substitutes the real one into the
+            // MANIFEST's slot list, and nothing on this side was reading it for
+            // a mesh with one slot. Measured on the island: the committed
+            // `Starter_Hair.inf_mat` was the glTF's own WHITE OPAQUE
+            // `WorldGridMaterial`, which is why both characters' hair drew pale
+            // — not the melanin brown the manifest states, and with no coverage
+            // and no masked blend either.
+            let manifest_mat = m
+                .meshes
+                .iter()
+                .find(|s| s.key.contains(&spec.key))
+                .map(|s| s.material_slots.clone())
+                .or_else(|| {
+                    m.skeletal_meshes
+                        .iter()
+                        .find(|s| s.key.contains(&spec.key))
+                        .map(|s| s.material_slots.clone())
+                })
+                .filter(|slots| slots.len() == 1)
+                .and_then(|slots| slots.into_iter().next().flatten())
+                .and_then(|k| mat_ids.get(&k).copied());
             let Some((key, mesh, skel)) = skinned.or(rigid) else {
                 report.advisories.push(format!(
                     "--wearable {}: no imported mesh's key contains it, so \
@@ -842,6 +867,7 @@ pub fn import_manifest(
                 project,
                 mesh,
                 skel,
+                manifest_mat,
                 &ids,
                 spec,
                 &stem,
@@ -1869,6 +1895,246 @@ fn record_character_ladder(
 // it becomes, that identity's three asset stems and its three clip stems. A
 // struct here would be a struct with one caller per field.
 #[allow(clippy::too_many_arguments)]
+/// What [`split_eye_sections`] lifted out of a combined body.
+struct EyeSplit {
+    left_verts: usize,
+    right_verts: usize,
+    tris: usize,
+    left_key: String,
+    right_key: String,
+}
+
+/// The widest a closed island may be, metres, and still be an EYEBALL.
+const EYE_ISLAND_MAX_M: f32 = 0.050;
+/// The least of the uv square an eyeball's own island covers.
+const EYE_ISLAND_UV_SPAN: f32 = 0.85;
+/// How round a closed island must be to be an eyeball rather than the cornea
+/// shell in front of one — its thinnest extent over its widest.
+const EYE_ISLAND_ROUNDNESS: f32 = 0.5;
+
+/// **Give a combined MetaHuman's eyeballs a section of their own** — the closure
+/// of clause 3 (wave OUTFIT1 AUDIT, carried item 167).
+///
+/// # What wave OUTFIT1 measured, and the half of it that was a box
+///
+/// The wave refused clause 3 on three measurements, and the first of them was
+/// taken with a 40 × 40 × 50 mm BOX at the right eye: **2 478 vertices**. A box
+/// at an eye holds an eyeball *and the lids, the socket and the cheek around
+/// it*. The eyeball itself is a **connected component of 289 vertices** — the
+/// box over-counts it 8.6-fold — and once it is addressed as a component rather
+/// than as a box it is trivially separable, because nothing else in a 95 330
+/// triangle body looks like it:
+///
+/// * it is CLOSED and SMALL — 29 × 29 × 22 mm, under [`EYE_ISLAND_MAX_M`] on
+///   every axis;
+/// * and it is addressed with a WHOLE UV TILE — u 0.010…0.990, v 0.010…0.990,
+///   which is what an eye texture is addressed with and what no piece of a UDIM
+///   face atlas is. The head component spans the same u and v and is 389 mm
+///   across; the teeth are 66 mm and span 0.18 of v. Both tests are needed and
+///   neither alone is enough.
+///
+/// The wave's second and third measurements stand: the uv island survived the
+/// combine, and the head albedo at those uvs is skin. This is what makes the
+/// split worth doing — the eyes were being painted with whatever the face atlas
+/// holds at the eye texture's own coordinates.
+///
+/// # Why this door and not the two the wave priced
+///
+/// (a) wearing the FACE mesh re-opens the neck seam the combine exists to close;
+/// (b) a slot-keeping combine is a `metahuman.py` change plus a re-assembly of
+/// both characters, which is a step a human presses. This is (d): an import-side
+/// split, which needs neither — the geometry and the materials are both already
+/// on this side of the bridge.
+fn split_eye_sections(
+    mesh: &mut inf_mesh::MeshAsset,
+    left_is_positive_x: bool,
+    mat_ids: &BTreeMap<String, AssetId>,
+) -> std::result::Result<EyeSplit, String> {
+    // The islands, per section, by union-find over the triangle graph.
+    let mut found: Vec<(usize, Vec<u32>, f32)> = Vec::new(); // (section, verts, centre x)
+    for (si, sub) in mesh.submeshes.iter().enumerate() {
+        let nv = sub.vertices.len();
+        let mut parent: Vec<u32> = (0..nv as u32).collect();
+        fn root(p: &mut [u32], mut a: u32) -> u32 {
+            while p[a as usize] != a {
+                p[a as usize] = p[p[a as usize] as usize];
+                a = p[a as usize];
+            }
+            a
+        }
+        for t in sub.indices.chunks_exact(3) {
+            let (a, b, c) = (
+                root(&mut parent, t[0]),
+                root(&mut parent, t[1]),
+                root(&mut parent, t[2]),
+            );
+            parent[b as usize] = a;
+            parent[c as usize] = a;
+        }
+        let mut islands: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for i in 0..nv as u32 {
+            let r = root(&mut parent, i);
+            islands.entry(r).or_default().push(i);
+        }
+        for (_, vs) in islands {
+            if vs.len() < 64 {
+                continue;
+            }
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            let mut ulo = [f32::MAX; 2];
+            let mut uhi = [f32::MIN; 2];
+            for &i in &vs {
+                let v = &sub.vertices[i as usize];
+                for a in 0..3 {
+                    lo[a] = lo[a].min(v.position[a]);
+                    hi[a] = hi[a].max(v.position[a]);
+                }
+                for a in 0..2 {
+                    ulo[a] = ulo[a].min(v.uv[a]);
+                    uhi[a] = uhi[a].max(v.uv[a]);
+                }
+            }
+            let small = (0..3).all(|a| hi[a] - lo[a] < EYE_ISLAND_MAX_M);
+            let whole_tile = (0..2).all(|a| uhi[a] - ulo[a] > EYE_ISLAND_UV_SPAN);
+            // …and it is a BALL and not a disc. Measured: the two islands in
+            // front of the eyeballs — the cornea shells — are 30 × 11 × 11 mm
+            // and are also addressed with a whole tile, so `small` and
+            // `whole_tile` alone match four islands and an eyeball pair is two.
+            // An eyeball is 29 × 29 × 22: its thinnest axis is three quarters of
+            // its widest, and a shell's is a third.
+            let extent = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            let widest = extent.iter().cloned().fold(0.0f32, f32::max);
+            let thinnest = extent.iter().cloned().fold(f32::MAX, f32::min);
+            let closed = widest > 1e-6 && thinnest / widest > EYE_ISLAND_ROUNDNESS;
+            if small && whole_tile && closed {
+                found.push((si, vs, (hi[0] + lo[0]) / 2.0));
+            }
+        }
+    }
+    if found.len() != 2 {
+        return Err(format!(
+            "{} island(s) are closed, under {:.0} mm across and addressed with a \
+             whole uv tile, and an eyeball pair is exactly two",
+            found.len(),
+            EYE_ISLAND_MAX_M * 1000.0
+        ));
+    }
+    // The eye MATERIALS, named off the section's own binding rather than off the
+    // character's name: the face-skin slot this island sits in is
+    // `<...>_Face_Materials_MI_Face_Skin_Baked_LOD1_<...>`, and the eyes are the
+    // two siblings of it that Unreal binds by slot on the face mesh.
+    let si = found[0].0;
+    let slot = mesh.submeshes[si].material_slot.unwrap_or(0) as usize;
+    let face = mesh.material_slots.get(slot).cloned().unwrap_or_default();
+    let Some(stem) = face.split("_Materials_").next().map(|s| s.to_string()) else {
+        return Err(format!(
+            "the section's slot `{face}` names no material folder"
+        ));
+    };
+    let key_for = |side: &str| format!("{stem}_Materials_MI_Eye{side}_Baked_MI_Eye{side}_Baked");
+    let (lk, rk) = (key_for("L"), key_for("R"));
+    let (Some(lm), Some(rm)) = (mat_ids.get(&lk), mat_ids.get(&rk)) else {
+        return Err(format!(
+            "neither {} nor {} was imported in this run — the eye materials live \
+             on the FACE mesh, so `--only` has to let it across",
+            short_name(&lk),
+            short_name(&rk)
+        ));
+    };
+    // Slots first, so both new sections index a slot that exists.
+    while mesh.material_slot_assets.len() < mesh.material_slots.len() {
+        mesh.material_slot_assets.push(None);
+    }
+    let left_slot = mesh.material_slots.len() as u32;
+    mesh.material_slots.push(lk.clone());
+    mesh.material_slot_assets.push(Some(*lm));
+    let right_slot = mesh.material_slots.len() as u32;
+    mesh.material_slots.push(rk.clone());
+    mesh.material_slot_assets.push(Some(*rm));
+
+    let mut out = EyeSplit {
+        left_verts: 0,
+        right_verts: 0,
+        tris: 0,
+        left_key: lk,
+        right_key: rk,
+    };
+    let mut keep: Vec<bool> = vec![true; mesh.submeshes[si].vertices.len()];
+    let mut new_sections: Vec<inf_mesh::SubMesh> = Vec::new();
+    for (_, vs, cx) in &found {
+        let is_left = (*cx > 0.0) == left_is_positive_x;
+        let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
+        let src = &mesh.submeshes[si];
+        let mut sub = inf_mesh::SubMesh {
+            name: if is_left {
+                "EyeL".into()
+            } else {
+                "EyeR".into()
+            },
+            vertices: Vec::with_capacity(vs.len()),
+            indices: Vec::new(),
+            material_slot: Some(if is_left { left_slot } else { right_slot }),
+            skin: Vec::with_capacity(vs.len()),
+        };
+        for &i in vs {
+            keep[i as usize] = false;
+            remap.insert(i, sub.vertices.len() as u32);
+            sub.vertices.push(src.vertices[i as usize]);
+            if let Some(s) = src.skin.get(i as usize) {
+                sub.skin.push(*s);
+            }
+        }
+        for t in src.indices.chunks_exact(3) {
+            if let (Some(a), Some(b), Some(c)) =
+                (remap.get(&t[0]), remap.get(&t[1]), remap.get(&t[2]))
+            {
+                sub.indices.extend_from_slice(&[*a, *b, *c]);
+            }
+        }
+        out.tris += sub.triangle_count();
+        if is_left {
+            out.left_verts = sub.vertices.len();
+        } else {
+            out.right_verts = sub.vertices.len();
+        }
+        new_sections.push(sub);
+    }
+    // …and the face-skin section loses exactly those vertices and their
+    // triangles. Compacted rather than left as orphans: an unreferenced vertex
+    // is a vertex the cook packs and the skinning pass transforms.
+    {
+        let src = &mut mesh.submeshes[si];
+        let mut remap: Vec<Option<u32>> = vec![None; src.vertices.len()];
+        let mut verts = Vec::with_capacity(src.vertices.len());
+        let mut skin = Vec::with_capacity(src.skin.len());
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                remap[i] = Some(verts.len() as u32);
+                verts.push(src.vertices[i]);
+                if let Some(s) = src.skin.get(i) {
+                    skin.push(*s);
+                }
+            }
+        }
+        let mut indices = Vec::with_capacity(src.indices.len());
+        for t in src.indices.chunks_exact(3) {
+            if let (Some(a), Some(b), Some(c)) = (
+                remap[t[0] as usize],
+                remap[t[1] as usize],
+                remap[t[2] as usize],
+            ) {
+                indices.extend_from_slice(&[a, b, c]);
+            }
+        }
+        src.vertices = verts;
+        src.skin = skin;
+        src.indices = indices;
+    }
+    mesh.submeshes.extend(new_sections);
+    Ok(out)
+}
+
 fn rebind_character(
     project: &mut AssetProject,
     mesh: AssetId,
@@ -1917,7 +2183,45 @@ fn rebind_character(
             skel.roles.len()
         ));
     }
-    let body: inf_mesh::MeshAsset = project.load_payload(mesh)?;
+    let mut body: inf_mesh::MeshAsset = project.load_payload(mesh)?;
+    // **THE EYES GET A SECTION OF THEIR OWN** (wave OUTFIT1 AUDIT, carried item
+    // 167). Before the dependency list below, because the split adds two
+    // material references the cook's closure has to see.
+    let bind =
+        inf_anim::pose::global_transforms(&skel.skeleton, &inf_anim::Pose::rest(&skel.skeleton));
+    let hand = |n: &str| {
+        skel.skeleton
+            .index_of(n)
+            .and_then(|i| bind.get(i as usize))
+            .map(|m| m.w_axis.x)
+    };
+    // Which side of the rig is its LEFT, from the rig's own `_l`/`_r` pair
+    // rather than from a convention this file would have to be told. `true`
+    // when nothing answers, which is the MetaHuman/UE frame this bridge writes.
+    let left_is_positive_x = match (hand("hand_l"), hand("hand_r")) {
+        (Some(l), Some(r)) => l > r,
+        _ => true,
+    };
+    match split_eye_sections(&mut body, left_is_positive_x, mat_ids) {
+        Ok(split) => report.advisories.push(format!(
+            "{}: the EYES have a section of their own — two islands of {} and {} \
+             vertices, {} triangles between them, lifted out of the face-skin \
+             section and bound to {} and {}. They drew with the head atlas at \
+             their own uvs before this, which is skin.",
+            sk.key,
+            split.left_verts,
+            split.right_verts,
+            split.tris,
+            short_name(&split.left_key),
+            short_name(&split.right_key),
+        )),
+        Err(why) => report.advisories.push(format!(
+            "{}: the eyes were NOT split out — {why}. They draw with whatever \
+             the head atlas holds at their own uvs.",
+            sk.key
+        )),
+    }
+    let body = body;
     let root = project.root().to_path_buf();
     // **The rig this identity WORE**, read before it is replaced — see
     // `retarget_committed_clips`. `None` on a first rebind into a project that
@@ -2144,6 +2448,167 @@ pub fn parse_wearable(v: &str) -> std::result::Result<WearableRebind, String> {
 /// points along the card would shear the hairstyle.
 pub const WEARABLE_LIFT_M: f32 = 0.004;
 
+/// **How far a fitted garment clears the body under it**, metres (wave OUTFIT1
+/// AUDIT, carried item 166).
+pub const WEARABLE_FIT_MARGIN_M: f32 = 0.002;
+
+/// **The ceiling on a fit**, metres — no garment vertex is pushed further than
+/// this however deep the body is behind it.
+///
+/// A ceiling is needed because the search below is a MAXIMUM, and a maximum over
+/// a body that folds under a garment (an armpit, the crook of an elbow) will
+/// name a distance no shirt has. 30 mm is three times a shirt's thickness and
+/// still under the 35 mm the deepest measured intrusion needed; a vertex that
+/// hits it is COUNTED and reported rather than silently clamped.
+pub const WEARABLE_FIT_MAX_M: f32 = 0.030;
+
+/// How far off a garment vertex's own normal a body vertex may be and still
+/// count as "under" it, metres.
+///
+/// This is the whole difference between a fit and a balloon. A garment ends: at
+/// a sleeve, a hem and a neck the body CONTINUES, and a body vertex 30 mm to the
+/// side of the hem is 30 mm "outside" along the hem's normal without being under
+/// it at all. So the search is a narrow CYLINDER along the normal and not a
+/// ball, and the hem stays where the garment put it.
+const WEARABLE_FIT_TANGENT_M: f32 = 0.008;
+
+/// How far along the normal, in both directions, the fit looks for the body.
+const WEARABLE_FIT_REACH_M: f32 = 0.060;
+
+/// What [`fit_wearable_over_wearer`] did.
+struct WearableFit {
+    lifted: usize,
+    pushed: usize,
+    capped: usize,
+    mean_mm: f32,
+    max_mm: f32,
+}
+
+/// **Push a rebound garment out until the body it is on is inside it** — the
+/// closure of carried item 166 (wave OUTFIT1 AUDIT).
+///
+/// # What the flat lift could not do, measured
+///
+/// Wave OUTFIT1 pushed every garment vertex a flat 4 mm along its own normal,
+/// which is a shirt's thickness and is the right answer for the defect it was
+/// aimed at: two coincident surfaces and a depth test picking whichever won the
+/// rounding. It is the wrong answer for the defect that was actually there. A
+/// MetaHuman garment is modelled on ITS OWN body and this engine re-points its
+/// influences onto the wearer's rig by name, and the two surfaces are not
+/// coincident at all: measured on the island's hero, **11.60 %** of the
+/// garment's 11 470 vertices had the body OUTSIDE them after the flat lift, by
+/// a median of 9.5 mm and a maximum of 35.0 mm — so 4.54 % of the whole visible
+/// shirt in the wave's own portrait was the character's chest, not a shirt.
+///
+/// # The rule
+///
+/// For each garment vertex, the deepest the body reaches along that vertex's own
+/// normal, within a narrow cylinder around it — plus a margin, floored at the
+/// flat lift and capped at [`WEARABLE_FIT_MAX_M`]. The offset field is smooth
+/// because it is a maximum over a ball of body vertices rather than a
+/// nearest-neighbour, so no smoothing pass is needed and none is done: a
+/// smoothing pass would pull the field back down exactly where it is load
+/// bearing.
+///
+/// This is a LIFT and not UE's per-garment body hide mask, deliberately. The
+/// hide mask would have to remove the covered body triangles, and in this engine
+/// the body a dressed character wears is the same asset its crowd archetype
+/// wears at `Far` — where `set_tier_wearables` deliberately takes the clothes
+/// OFF. A baked hide mask would put a hole in the chest of every undressed agent
+/// on the island. The lift touches only the garment.
+fn fit_wearable_over_wearer(
+    mesh: &mut inf_mesh::MeshAsset,
+    body: &inf_mesh::MeshAsset,
+) -> WearableFit {
+    let cell = WEARABLE_FIT_REACH_M;
+    let key = |p: [f32; 3]| {
+        [
+            (p[0] / cell).floor() as i32,
+            (p[1] / cell).floor() as i32,
+            (p[2] / cell).floor() as i32,
+        ]
+    };
+    let mut grid: BTreeMap<[i32; 3], Vec<[f32; 3]>> = BTreeMap::new();
+    for sub in &body.submeshes {
+        for v in &sub.vertices {
+            grid.entry(key(v.position)).or_default().push(v.position);
+        }
+    }
+    let mut fit = WearableFit {
+        lifted: 0,
+        pushed: 0,
+        capped: 0,
+        mean_mm: 0.0,
+        max_mm: 0.0,
+    };
+    let mut total = 0.0f64;
+    for sub in &mut mesh.submeshes {
+        for v in &mut sub.vertices {
+            let n = v.normal;
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len <= 1e-6 {
+                continue;
+            }
+            let n = [n[0] / len, n[1] / len, n[2] / len];
+            let k = key(v.position);
+            let mut deepest = 0.0f32;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(list) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
+                            continue;
+                        };
+                        for b in list {
+                            let d = [
+                                b[0] - v.position[0],
+                                b[1] - v.position[1],
+                                b[2] - v.position[2],
+                            ];
+                            let along = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+                            if !(0.0..=WEARABLE_FIT_REACH_M).contains(&along) {
+                                continue;
+                            }
+                            let t = [
+                                d[0] - along * n[0],
+                                d[1] - along * n[1],
+                                d[2] - along * n[2],
+                            ];
+                            if t[0] * t[0] + t[1] * t[1] + t[2] * t[2]
+                                > WEARABLE_FIT_TANGENT_M * WEARABLE_FIT_TANGENT_M
+                            {
+                                continue;
+                            }
+                            deepest = deepest.max(along);
+                        }
+                    }
+                }
+            }
+            let want = if deepest > 0.0 {
+                deepest + WEARABLE_FIT_MARGIN_M
+            } else {
+                0.0
+            };
+            if want > WEARABLE_LIFT_M {
+                fit.pushed += 1;
+            }
+            if want > WEARABLE_FIT_MAX_M {
+                fit.capped += 1;
+            }
+            let offset = want.clamp(WEARABLE_LIFT_M, WEARABLE_FIT_MAX_M);
+            for (axis, c) in n.iter().enumerate() {
+                v.position[axis] += c * offset;
+            }
+            fit.lifted += 1;
+            total += offset as f64;
+            fit.max_mm = fit.max_mm.max(offset * 1000.0);
+        }
+    }
+    if fit.lifted > 0 {
+        fit.mean_mm = (total / fit.lifted as f64) as f32 * 1000.0;
+    }
+    fit
+}
+
 /// The joint a skinless wearable is bound to when `--wearable` names none.
 ///
 /// `head`, because the skinless wearables this bridge crosses are groom cards
@@ -2193,6 +2658,7 @@ fn rebind_wearable(
     project: &mut AssetProject,
     source_mesh: AssetId,
     source_skeleton: Option<AssetId>,
+    manifest_mat: Option<AssetId>,
     ids: &crate::character::CharacterIds,
     spec: &WearableRebind,
     stem: &str,
@@ -2279,25 +2745,49 @@ fn rebind_wearable(
             }
         }
         // …and it stands off the body it is fitted to, so the depth test cannot
-        // put the chest in front of the shirt. See `WEARABLE_LIFT_M`.
-        let mut lifted = 0usize;
-        for sub in &mut mesh.submeshes {
-            for v in &mut sub.vertices {
-                let n = v.normal;
-                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                if len > 1e-6 {
-                    for (axis, c) in n.iter().enumerate() {
-                        v.position[axis] += c / len * WEARABLE_LIFT_M;
+        // put the chest in front of the shirt — by the FLAT lift where nothing
+        // is known about the body, and by the FITTED one where the body is in
+        // hand. See `WEARABLE_LIFT_M` and `fit_wearable_over_wearer`.
+        let wearer: Option<inf_mesh::MeshAsset> =
+            ids.mesh.and_then(|id| project.load_payload(id).ok());
+        match &wearer {
+            Some(body) => {
+                let fit = fit_wearable_over_wearer(&mut mesh, body);
+                report.advisories.push(format!(
+                    "{key}: {} vertices FITTED over the wearer's own surface — \
+                     {} of them needed more than the flat {:.0} mm (mean {:.1} mm, \
+                     max {:.1} mm, {} at the {:.0} mm ceiling)",
+                    fit.lifted,
+                    fit.pushed,
+                    WEARABLE_LIFT_M * 1000.0,
+                    fit.mean_mm,
+                    fit.max_mm,
+                    fit.capped,
+                    WEARABLE_FIT_MAX_M * 1000.0
+                ));
+            }
+            None => {
+                let mut lifted = 0usize;
+                for sub in &mut mesh.submeshes {
+                    for v in &mut sub.vertices {
+                        let n = v.normal;
+                        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                        if len > 1e-6 {
+                            for (axis, c) in n.iter().enumerate() {
+                                v.position[axis] += c / len * WEARABLE_LIFT_M;
+                            }
+                            lifted += 1;
+                        }
                     }
-                    lifted += 1;
                 }
+                report.advisories.push(format!(
+                    "{key}: {lifted} vertices lifted a FLAT {:.0} mm along their \
+                     normals — the wearer's mesh did not resolve, so there was \
+                     nothing to fit the garment over",
+                    WEARABLE_LIFT_M * 1000.0
+                ));
             }
         }
-        report.advisories.push(format!(
-            "{key}: {lifted} vertices lifted {:.0} mm along their normals so the \
-             body cannot z-fight through the garment",
-            WEARABLE_LIFT_M * 1000.0
-        ));
         if remapped == 0 {
             return Err(AssetError::Import(format!(
                 "{key}: not one of the garment's {} influences named a bone the \
@@ -2349,7 +2839,10 @@ fn rebind_wearable(
     // DEPENDENCY, which is what a rigid glTF import records instead (a groom's
     // cards have no slot table at all, and without this the hair drew the
     // committed default's tint rather than the groom's own).
-    let fallback_mat = dominant_slot_material(&mesh).or_else(|| {
+    // …the MANIFEST's own answer next (a groom's cards name Unreal's
+    // checkerboard in their slot table and the real material only in the
+    // manifest), and the glTF's embedded dependency last.
+    let fallback_mat = dominant_slot_material(&mesh).or(manifest_mat).or_else(|| {
         project
             .db()
             .get(source_mesh)
@@ -3193,6 +3686,12 @@ fn import_material(
     // in the report, and one of the silent roles was clobbering the albedo.
     let mut unplaced: Vec<&str> = Vec::new();
     for (role, key) in &mat.maps {
+        // `hair_coverage` has no `MapKind` and is not unplaced: it is composited
+        // into the albedo's ALPHA below, which is where this engine keeps a
+        // masked material's cut-out (wave OUTFIT1 AUDIT).
+        if role == "hair_coverage" {
+            continue;
+        }
         let targets = role_to_planes(role);
         if targets.is_empty() {
             unplaced.push(role.as_str());
@@ -3243,6 +3742,90 @@ fn import_material(
             unplaced.join(", "),
             if unplaced.len() == 1 { "it" } else { "them" }
         ));
+    }
+
+    // **THE CARD ALPHA** (wave OUTFIT1 AUDIT, carried item 164) and **THE
+    // EYEBALL** (carried item 167) — two roles whose home is the albedo's own
+    // channels rather than a slot of their own.
+    let mut cutoff_override: Option<f32> = None;
+    if let Some((cov, cw, ch)) = load_map(base, &mat.maps, "hair_coverage", by_key, opts, report)? {
+        // The coverage is channel R: measured on both grooms' atlases, R is the
+        // strand mask on a pure black ground (81.6 % / 85.4 % of the atlas is
+        // exactly zero there) while G and B are the attribute fields, which are
+        // filled everywhere — 99.4 % of G is non-zero on Dominic's, so a bridge
+        // that took G would draw the same solid ribbons with an extra texture.
+        let alpha: Vec<u8> = cov.chunks_exact(4).map(|p| p[0]).collect();
+        match planes.get_mut(&MapKind::Albedo) {
+            // A groom's cards material has NO albedo (its colour is the shader's
+            // melanin, which the bridge already reads into `base_color`), so the
+            // usual case is the second one: a WHITE plane carrying the coverage
+            // in its alpha, which multiplies the melanin tint by one and the
+            // cut-out by itself.
+            Some((px, w, h)) if *w == cw && *h == ch => {
+                for (i, p) in px.chunks_exact_mut(4).enumerate() {
+                    p[3] = alpha[i];
+                }
+            }
+            _ => {
+                let mut px = vec![255u8; cov.len()];
+                for (i, p) in px.chunks_exact_mut(4).enumerate() {
+                    p[3] = alpha[i];
+                }
+                planes.insert(MapKind::Albedo, (px, cw, ch));
+            }
+        }
+        cutoff_override = Some(HAIR_CARD_CUTOFF);
+        let open = alpha
+            .iter()
+            .filter(|a| **a as f32 / 255.0 >= HAIR_CARD_CUTOFF)
+            .count();
+        report.advisories.push(format!(
+            "{}: the groom's own cards atlas is its ALPHA — {:.1} % of the atlas \
+             is a strand at a {:.3} cutoff, and the rest is a hole. Before this \
+             the material named no coverage at all and every card drew as a \
+             solid ribbon.",
+            mat.key,
+            100.0 * open as f32 / alpha.len().max(1) as f32,
+            HAIR_CARD_CUTOFF
+        ));
+    }
+    if let Some(iris_key) = mat.maps.get("albedo").filter(|k| k.contains("EyeIris")) {
+        let sclera_key = iris_key.replace("EyeIris", "EyeSclera");
+        match (
+            planes.remove(&MapKind::Albedo),
+            by_key.get(sclera_key.as_str()),
+        ) {
+            (Some((iris, w, h)), Some(tex)) => {
+                let sclera = tex
+                    .file
+                    .as_ref()
+                    .map(|f| base.join(f))
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|b| inf_material::decode_image_rgba8(&b).ok());
+                match sclera {
+                    Some((sc, sw, sh)) => {
+                        let (px, r) = composite_eyeball(&iris, w, h, &sc, sw, sh);
+                        report.advisories.push(format!(
+                            "{}: the eyeball's albedo is its SCLERA with its IRIS \
+                             composited into the disc the sclera's own limbus \
+                             marks (r = {r:.3} of the uv square, derived from the \
+                             sclera's radial luminance). The manifest binds only \
+                             the iris, which alone would draw a whole eyeball the \
+                             colour of an iris.",
+                            mat.key
+                        ));
+                        planes.insert(MapKind::Albedo, (px, w, h));
+                    }
+                    None => {
+                        planes.insert(MapKind::Albedo, (iris, w, h));
+                    }
+                }
+            }
+            (Some(a), _) => {
+                planes.insert(MapKind::Albedo, a);
+            }
+            _ => {}
+        }
     }
 
     let name = short_name(&mat.key);
@@ -3364,6 +3947,7 @@ fn import_material(
             "blend" => MatBlend::Translucent,
             _ => MatBlend::Opaque,
         },
+        alpha_cutoff: cutoff_override.unwrap_or(0.5),
         ..Default::default()
     };
     let deps = asset.texture_dependencies();
@@ -3489,6 +4073,135 @@ pub fn role_to_planes(role: &str) -> &'static [(MapKind, Option<usize>)] {
         "srmf" => &[(MapKind::Roughness, Some(1)), (MapKind::Metallic, Some(2))],
         _ => &[],
     }
+}
+
+/// **The threshold a hair card's coverage is cut at** — UE's own default
+/// `OpacityMaskClipValue` for a `BLEND_Masked` material (wave OUTFIT1 AUDIT).
+///
+/// The atlas is nearly binary — 81.6 % of Dominic's coverage channel is exactly
+/// zero and 10.8 % is above 224 — so the number between them barely moves the
+/// silhouette; it is UE's rather than invented so that a card cut here is the
+/// card Unreal draws.
+pub const HAIR_CARD_CUTOFF: f32 = 0.333;
+
+/// Decode the texture a manifest material binds to `role`, or `None`.
+///
+/// The plane loop above cannot be reused for a role with no [`MapKind`]: these
+/// are roles whose home is a CHANNEL of another map, and they are read here so
+/// that the loop's "a role with no slot is reported unplaced" rule keeps meaning
+/// what it says.
+fn load_map(
+    base: &Path,
+    maps: &BTreeMap<String, String>,
+    role: &str,
+    by_key: &BTreeMap<&str, &Texture>,
+    opts: &UeImportOptions,
+    report: &mut UeImportReport,
+) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    let Some(key) = maps.get(role) else {
+        return Ok(None);
+    };
+    let Some(tex) = by_key.get(key.as_str()) else {
+        report
+            .advisories
+            .push(format!("{role}: no texture record for {key}"));
+        return Ok(None);
+    };
+    let Some(file) = tex.file.as_ref() else {
+        return Ok(None);
+    };
+    let path = base.join(file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        report
+            .advisories
+            .push(format!("{role}: {} is not on disk", path.display()));
+        return Ok(None);
+    };
+    let (rgba, w, h) = inf_material::decode_image_rgba8(&bytes)
+        .map_err(|e| AssetError::Import(format!("{}: {e}", path.display())))?;
+    let (rgba, w, h) = inf_material::downscale_rgba8(rgba, w, h, opts.max_texture)
+        .map_err(|e| AssetError::Import(format!("{}: {e}", path.display())))?;
+    Ok(Some((rgba, w, h)))
+}
+
+/// **One eyeball albedo out of the two textures a MetaHuman eye is painted
+/// with** (wave OUTFIT1 AUDIT, carried item 167).
+///
+/// UE's eyeball shader samples the SCLERA over the whole uv square and refracts
+/// the IRIS into the middle of it. This bridge carries one base-colour slot, so
+/// the two are composited once, at import, and the radius they meet at is
+/// DERIVED from the sclera itself rather than typed in: the sclera's own limbus
+/// is where its radial luminance leaves the flat plateau under the iris —
+/// measured at r ≈ 0.30 of the uv square's half-width on both characters, with
+/// the plateau at 98 and the ring above it at 108.
+///
+/// Returns the composited plane and the radius it used, so the caller can say
+/// which number this eye was built with.
+fn composite_eyeball(
+    iris: &[u8],
+    w: u32,
+    h: u32,
+    sclera: &[u8],
+    sw: u32,
+    sh: u32,
+) -> (Vec<u8>, f32) {
+    let sample = |px: &[u8], pw: u32, ph: u32, u: f32, v: f32| -> [u8; 4] {
+        let x = ((u.clamp(0.0, 1.0) * (pw - 1) as f32) as usize).min(pw as usize - 1);
+        let y = ((v.clamp(0.0, 1.0) * (ph - 1) as f32) as usize).min(ph as usize - 1);
+        let i = (y * pw as usize + x) * 4;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    // The limbus, off the sclera's own radial luminance.
+    let lum = |c: [u8; 4]| 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
+    let ring = |r: f32| -> f32 {
+        let mut sum = 0.0f32;
+        let n = 256;
+        for k in 0..n {
+            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+            sum += lum(sample(
+                sclera,
+                sw,
+                sh,
+                0.5 + 0.5 * r * a.cos(),
+                0.5 + 0.5 * r * a.sin(),
+            ));
+        }
+        sum / n as f32
+    };
+    let plateau = (ring(0.02) + ring(0.06) + ring(0.10)) / 3.0;
+    let mut iris_r = 0.30f32;
+    let mut r = 0.12f32;
+    while r < 0.70 {
+        if ring(r) > plateau * 1.05 {
+            iris_r = r;
+            break;
+        }
+        r += 0.01;
+    }
+    let feather = 0.02f32;
+    let mut out = vec![255u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let u = x as f32 / (w - 1).max(1) as f32;
+            let v = y as f32 / (h - 1).max(1) as f32;
+            let d = (((u - 0.5) * 2.0).powi(2) + ((v - 0.5) * 2.0).powi(2)).sqrt();
+            let sc = sample(sclera, sw, sh, u, v);
+            let ir = sample(
+                iris,
+                w,
+                h,
+                0.5 + (u - 0.5) / iris_r.max(1e-3),
+                0.5 + (v - 0.5) / iris_r.max(1e-3),
+            );
+            let t = ((d - (iris_r - feather)) / feather).clamp(0.0, 1.0);
+            let i = (y * w as usize + x) * 4;
+            for c in 0..3 {
+                out[i + c] = (ir[c] as f32 * (1.0 - t) + sc[c] as f32 * t).round() as u8;
+            }
+            out[i + 3] = 255;
+        }
+    }
+    (out, iris_r)
 }
 
 /// One channel of an RGBA plane, broadcast into a fresh grey RGBA plane.
