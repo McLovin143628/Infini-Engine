@@ -252,16 +252,16 @@ if ($SpawnAt -ne "") {
 else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction SilentlyContinue }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
 else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction SilentlyContinue }
-# WPN2a: only the FIRST id is handed to the player, because the door is a
-# one-shot; the rest are switched in from this script between legs by relaunching
-# nothing at all -- the loop fires one class per session, and the wave runs it
-# once per class. The list is kept whole here so the log says what was asked for.
+# WPN2a: the WHOLE list goes to the player, which puts every one of them in the
+# hero's bag and equips the first. The loop cycles the rest in with the SCROLL
+# WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one
+# weapon of each class instead of seven sessions photographing one each.
 $armList = @()
 if ($ArmHero -ne "") {
     $armList = @($ArmHero.Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
     if ($armList.Count -gt 0) {
-        $env:INF_PIE_ARM_HERO = $armList[0]
-        Say "arm hero: $($armList[0]) (of $($armList -join ', '))"
+        $env:INF_PIE_ARM_HERO = ($armList -join ";")
+        Say "arm hero: $($armList -join ', ')"
     }
 }
 if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction SilentlyContinue }
@@ -443,6 +443,12 @@ public class InfInput {
   // HELD across several 60 Hz steps.
   public static void LeftDown() { mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); }
   public static void LeftUp() { mouse_event(0x0004, 0, 0, 0, IntPtr.Zero); }
+  // **THE SCROLL WHEEL, which is `weapon_switch`** (wave WPN2a). One notch is
+  // 120; the sign is the direction. It is how the loop gets one frame per
+  // weapon CLASS out of one session, through the verb a player uses.
+  public static void Wheel(int notches) {
+    mouse_event(0x0800, 0, 0, (uint)(notches * 120), IntPtr.Zero);
+  }
   public static void Click(int x, int y) {
     SetCursorPos(x, y);
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
@@ -1253,39 +1259,55 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
 #    triggered on `hero.csv`'s two NEW columns -- 20 is how many rounds are in
 #    the air right now and 21 is how far the last one that hit something had
 #    flown. A frame taken on `rounds > 0` is a frame with a bullet in it.
+#
+#    One session, one weapon of each CLASS: the player put the whole list in the
+#    hero's bag and equipped the first, and the wheel cycles the rest in through
+#    the shipped `weapon_switch` verb.
 if ($armList.Count -gt 0) {
-    Say "── WPN2a: the hero is armed with $($armList[0]) ──"
+    Say "── WPN2a: the hero is armed with $($armList -join ', ') ──"
     Restore-PlayerFocus "the ballistics leg"
-    # Aim UP a little, so the rounds clear the ground and fly for the whole
-    # length of the shot rather than resolving inside their hitscan threshold
-    # against the pavement two metres away.
+    # Aim UP a little, so the rounds clear the ground and fly for the length of
+    # the shot rather than resolving inside their hitscan threshold against the
+    # pavement two metres away.
     [InfInput]::Look(0, -140)
     Start-Sleep -Milliseconds 400
-    # ADS first: the reticle is drawn only while aiming, and a HUD frame that
-    # has no reticle in it is a frame of a readout nobody was looking through.
+    # ADS: the reticle is drawn only while aiming, and a HUD frame with no
+    # reticle in it is a frame of a readout nobody was looking through.
     [InfInput]::RightDown()
     Start-Sleep -Milliseconds 700
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "80-weapon-hud-$($armList[0]).png") | ForEach-Object { Say $_ }
-    # HOLD the trigger. `Click` is one press and one release, which is a single
-    # semi-automatic shot; a tracer wants the button down across several steps.
-    [InfInput]::LeftDown()
-    $flew = Wait-ForHero -Csv $heroCsv -What "a round in flight" -TimeoutS 6.0 `
-        -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 0) } `
-        -Out (Join-Path $OutDir "81-round-in-flight-$($armList[0]).png")
-    # …and a second one, later in the burst, with more of them in the air.
-    Wait-ForHero -Csv $heroCsv -What "more rounds in flight" -TimeoutS 4.0 `
-        -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 1) } `
-        -Out (Join-Path $OutDir "82-rounds-in-flight-$($armList[0]).png") | Out-Null
+    $anyFlew = $false
+    for ($wi = 0; $wi -lt $armList.Count; $wi++) {
+        $wid = $armList[$wi]
+        if ($wi -gt 0) {
+            # One notch of the wheel per class. `cycle_equipped` walks the bag's
+            # SLOTS and skips anything that is not a weapon, so the order is the
+            # order they went in.
+            [InfInput]::Wheel(1)
+            Start-Sleep -Milliseconds 500
+        }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("8{0}-class-{1}-hud.png" -f $wi, $wid)) | ForEach-Object { Say $_ }
+        [InfInput]::LeftDown()
+        $flew = Wait-ForHero -Csv $heroCsv -What "a round in flight ($wid)" -TimeoutS 5.0 `
+            -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -gt 0) } `
+            -Out (Join-Path $OutDir ("8{0}-class-{1}-in-flight.png" -f $wi, $wid))
+        $anyFlew = $anyFlew -or $flew
+        # A semi-automatic weapon fires once per PRESS, so the button is released
+        # and pressed again rather than held: a held trigger on a Barrett is one
+        # round and a very long wait.
+        [InfInput]::LeftUp(); Start-Sleep -Milliseconds 200
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 400
+        [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 300
+    }
     # THE IMPACT: column 21 is latched by the pool when a round lands, so a
     # non-zero one is a hit that has already happened and the distance it flew.
     Wait-ForHero -Csv $heroCsv -What "a round that hit something" -TimeoutS 8.0 `
         -Predicate { param($c) ($c.Count -gt 21) -and ([double]$c[21] -gt 0.0) } `
-        -Out (Join-Path $OutDir "83-impact-$($armList[0]).png") | Out-Null
-    [InfInput]::LeftUp()
+        -Out (Join-Path $OutDir "88-impact.png") | Out-Null
     [InfInput]::RightUp()
     Start-Sleep -Milliseconds 600
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "84-after-the-burst-$($armList[0]).png") | ForEach-Object { Say $_ }
-    if (-not $flew) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "89-after-the-bursts.png") | ForEach-Object { Say $_ }
+    if (-not $anyFlew) {
         Say "WPN2a: no round ever left the barrel -- the arming door, the trigger or the aim"
     }
     # What the log says about it, quoted into the demo log so a caption can be
@@ -1293,12 +1315,12 @@ if ($armList.Count -gt 0) {
     if (Test-Path $heroCsv) {
         $armed = @(Get-Content $heroCsv | Where-Object { $_ -match "INF_PIE_ARM_HERO" })
         foreach ($l in $armed) { Say "  $l" }
-        $best = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
-            ForEach-Object { $_.Split(",") } |
-            Where-Object { $_.Count -gt 21 } |
-            Sort-Object { [double]$_[20] } -Descending)
-        if ($best.Count -gt 0) {
-            Say "  peak rounds in flight $($best[0][20]); last hit at $($best[0][21]) m"
+        $rowsB = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
+            ForEach-Object { $_.Split(",") } | Where-Object { $_.Count -gt 21 })
+        if ($rowsB.Count -gt 0) {
+            $peak = ($rowsB | ForEach-Object { [int]$_[20] } | Measure-Object -Maximum).Maximum
+            $far = ($rowsB | ForEach-Object { [double]$_[21] } | Measure-Object -Maximum).Maximum
+            Say "  peak rounds in flight $peak; furthest round that hit something $far m"
         }
     }
 }

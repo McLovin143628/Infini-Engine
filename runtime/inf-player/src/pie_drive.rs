@@ -465,9 +465,14 @@ pub const SPAWN_AT_ENV: &str = "INF_PIE_SPAWN_AT";
 /// the garment the player is about to put on is in the bytes it is handed.
 pub use inf_runtime::pie::WEAR_CLOTH_ENV;
 
-/// **A weapon to put in the hero's hands in a PREVIEW session** (wave WPN2a) —
-/// an id from `inf_ecs::weapon::WEAPON_REGISTRY_TOML`, and nothing at all when
-/// unset.
+/// **Weapons to put in the hero's hands in a PREVIEW session** (wave WPN2a) —
+/// a `;`-separated list of ids from `inf_ecs::weapon::WEAPON_REGISTRY_TOML`, and
+/// nothing at all when unset.
+///
+/// **All of them go in the bag and the FIRST is equipped**, which is what makes
+/// one session able to photograph one weapon of each class: the demo loop cycles
+/// the rest in with the scroll wheel, through `Inventory::cycle_equipped` — the
+/// shipped `weapon_switch` verb — rather than through a second door.
 ///
 /// # Why an env door and not a level edit
 ///
@@ -508,8 +513,9 @@ pub struct SpawnOverride {
     /// every entry written before the COV1 audit.
     at: Vec<([f64; 3], f64, Option<f64>)>,
     cloth: Option<Uuid>,
-    /// The registry id [`ARM_HERO_ENV`] named, and whether it has been given.
-    weapon: Option<String>,
+    /// The registry ids [`ARM_HERO_ENV`] named, and whether they have been
+    /// given.
+    weapons: Vec<String>,
     weapon_done: bool,
     accum: f64,
     next: usize,
@@ -567,28 +573,32 @@ impl SpawnOverride {
         // A malformed value is a refusal with a reason on stderr, exactly as the
         // placement's is: the whole point of the door is that the operator finds
         // out whether it took.
-        let weapon = std::env::var(ARM_HERO_ENV).ok().and_then(|v| {
-            let id = inf_ecs::item::canonical_id(&v);
-            if id.is_empty() {
-                return None;
-            }
+        let mut weapons: Vec<String> = Vec::new();
+        if let Ok(v) = std::env::var(ARM_HERO_ENV) {
             let mut defs = inf_ecs::item::ItemDefs::default();
             match defs.merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML) {
-                Ok(_) if defs.get(&id).is_some_and(|d| d.weapon.is_some()) => Some(id),
                 Ok(_) => {
-                    eprintln!("inf-player: {ARM_HERO_ENV}=`{v}` is not a weapon in the registry");
-                    None
+                    for entry in v.split(';') {
+                        let id = inf_ecs::item::canonical_id(entry);
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if defs.get(&id).is_some_and(|d| d.weapon.is_some()) {
+                            weapons.push(id);
+                        } else {
+                            eprintln!(
+                                "inf-player: {ARM_HERO_ENV} entry `{entry}` is not a weapon in the registry"
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("inf-player: the weapon registry does not parse: {e}");
-                    None
-                }
+                Err(e) => eprintln!("inf-player: the weapon registry does not parse: {e}"),
             }
-        });
+        }
         Self {
             at,
             cloth,
-            weapon,
+            weapons,
             ..Self::default()
         }
     }
@@ -605,7 +615,7 @@ impl SpawnOverride {
         let done = self.next >= self.at.len();
         if done
             && (self.cloth.is_none() || self.cloth_done)
-            && (self.weapon.is_none() || self.weapon_done)
+            && (self.weapons.is_empty() || self.weapon_done)
         {
             return None;
         }
@@ -615,7 +625,7 @@ impl SpawnOverride {
         }
         let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
         let wear = self.cloth.filter(|_| !self.cloth_done);
-        let arm = (!self.weapon_done).then(|| self.weapon.clone()).flatten();
+        let arm = (!self.weapon_done && !self.weapons.is_empty()).then(|| self.weapons.clone());
         if due.is_none() && wear.is_none() && arm.is_none() {
             return None;
         }
@@ -694,22 +704,32 @@ impl SpawnOverride {
         // because it goes through the world's own catalogue and inventory doors
         // rather than through a component write, and both of those want the hero
         // to be where it is going to stand.
-        if let Some(id) = arm {
+        if let Some(ids) = arm {
             let w = sim.world_mut();
             let taken = inf_ecs::item::item_defs_mut(w)
                 .merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML)
                 .unwrap_or(0);
+            // A bag big enough for the whole list, so the wheel has somewhere to
+            // cycle between: `cycle_equipped` walks SLOTS, and a bag with fewer
+            // slots than weapons would silently drop the tail of the list.
             if inf_ecs::item::inventory_of(w, hero).is_none() {
-                inf_ecs::item::give_inventory(w, hero, 6);
+                inf_ecs::item::give_inventory(w, hero, ids.len().max(6));
             }
-            let left = inf_ecs::item::give(w, hero, &id, 1);
-            let equipped = inf_physics::d3::gameplay::equip_weapon(w, hero, &id);
+            let mut given: Vec<&str> = Vec::new();
+            for id in &ids {
+                if inf_ecs::item::give(w, hero, id, 1) == 0 {
+                    given.push(id.as_str());
+                }
+            }
+            let equipped = ids
+                .first()
+                .is_some_and(|id| inf_physics::d3::gameplay::equip_weapon(w, hero, id));
             self.weapon_done = true;
             if !said.is_empty() {
                 said.push_str("; ");
             }
             said.push_str(&format!(
-                "{ARM_HERO_ENV} merged {taken} registry row(s) and gave the hero `{id}` (leftover {left}, equipped {equipped})"
+                "{ARM_HERO_ENV} merged {taken} registry row(s) and gave the hero {given:?} (equipped the first: {equipped})"
             ));
         }
         (!said.is_empty()).then_some(said)

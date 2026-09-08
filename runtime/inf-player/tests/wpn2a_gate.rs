@@ -508,6 +508,66 @@ fn a_round_dies_at_its_range_and_the_pool_empties() {
 
 // ── (b) THE SEGMENT CAST AND THE SHOOTER ────────────────────────────────────
 
+/// **A round that leaves the active partition dies, and is counted.**
+///
+/// The third of the four deaths (`range_m`, a hit, the band, old age) and the
+/// only one that needs a banded world: a `StreamingSource` on the hero and a
+/// band tight enough that 200 m is outside it. Without a source the band is
+/// UNBOUNDED and every position answers `Tier::Near`, which is what every other
+/// arm in this file runs under — so this arm is also the statement that the
+/// check is reachable at all.
+///
+/// It matters because a round outside the band is flying through geometry that
+/// is not in the physics world: every segment from there on reports a miss it
+/// did not earn.
+#[test]
+fn a_round_that_leaves_the_active_partition_dies_and_is_counted() {
+    let mut r = Range::new(defs_with("rifle", test_rifle()));
+    {
+        let e = r.world.entity_of(HERO).expect("the hero");
+        r.world
+            .world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::StreamingSource { radius_m: 64.0 });
+        r.world.mark_dirty();
+        r.world.reindex_guids();
+        r.world.propagate();
+    }
+    // Tight enough that a round crossing 200 m is outside it, and wide enough
+    // that the threshold spawn at 25 m is inside.
+    r.bridge.set_collider_band_radii(48.0, 96.0);
+    r.bridge.sync_from_world(&r.world);
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, 0.0);
+    r.hold_trigger(HERO, true);
+    let first = r.step();
+    r.hold_trigger(HERO, false);
+    assert_eq!(first.rounds.spawned, 1, "the shot did not become a round");
+    let mut left = 0u32;
+    let mut expired = 0u32;
+    let mut furthest = 0.0_f64;
+    for _ in 0..40 {
+        for round in r.rounds() {
+            furthest = furthest.max(round.at.z);
+        }
+        let rep = r.step();
+        left += rep.rounds.left_band;
+        expired += rep.rounds.expired;
+        if r.rounds().is_empty() {
+            break;
+        }
+    }
+    println!(
+        "with a 48/96 m band the round reached {furthest:.2} m and died: left_band {left}, expired {expired}"
+    );
+    assert_eq!(left, 1, "the round did not die on leaving the band");
+    assert_eq!(expired, 0, "it died of something else first");
+    assert!(
+        furthest < 200.0,
+        "the round reached {furthest:.2} m, well past a 96 m band"
+    );
+}
+
 /// **A round fired from inside a body does not hit that body.**
 ///
 /// Two halves, and the second is the one the brief asks for. The shooter's own
