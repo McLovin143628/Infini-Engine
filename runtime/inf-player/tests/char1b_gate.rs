@@ -1204,7 +1204,9 @@ fn every_mode_the_donor_ships_a_clip_for_binds_a_real_one() {
                 .into_iter()
                 .find(|(n, _)| n == name)
                 .map(|(_, c)| c)
-                .unwrap_or_else(|| panic!("`{name}` is in the manifest and the generator skipped it"));
+                .unwrap_or_else(|| {
+                    panic!("`{name}` is in the manifest and the generator skipped it")
+                });
             let want: Vec<u16> = generated.tracks.iter().map(|t| t.joint).collect();
             let have: Vec<u16> = got.clip.tracks.iter().map(|t| t.joint).collect();
             // **Every joint the generator writes is in the file.** The file may

@@ -1051,8 +1051,10 @@ fn refused_modes() -> Vec<MovementMode> {
 /// 2. every one of them is classified, and the classification is a `match` with
 ///    no wildcard, so adding a variant is a **compile error** rather than a
 ///    silently unclassified mode;
-/// 3. the counts are the ledger's: **fourteen** forced and four reserved,
-///    which is the catalogue closed.
+/// 3. the counts are the ledger's: **fourteen** forced, **three** still
+///    reserved and **one** proved by another gate, which is the catalogue
+///    closed. (It read "four reserved" until wave COV1 spent slot 14 on
+///    `Cover`; the SUM, not the individual numbers, is the invariant.)
 #[test]
 fn the_catalogue_is_accounted_for_variant_by_variant() {
     for (i, m) in ALL_MODES.iter().enumerate() {
@@ -2220,17 +2222,22 @@ fn the_committed_clips_are_derived_and_the_machine_is_proposed() {
 /// sub-phase refusal is a note to a future wave, and this is a compatibility
 /// contract.
 ///
+/// **Three of the four spare rows are left.** Wave COV1 spent slot 14 on
+/// `Cover`, which is what a reserved slot is FOR, and the price of spending one
+/// is that this arm's count moves, deliberately, in the same commit.
+///
 /// What ties it to the course is `refused_modes()`: the same `match` that says
-/// these four are exempt from the fourteen-mode obligation says they refuse
-/// here, so the exemption and the refusal cannot drift apart.
+/// these are exempt from the fourteen-mode obligation says they refuse here, so
+/// the exemption and the refusal cannot drift apart.
 #[test]
 fn a_reserved_slot_is_a_refusal_with_no_way_in() {
     let refused = refused_modes();
     assert_eq!(
         refused.len(),
-        4,
+        3,
         "the exemption list moved: {refused:?} — the fourteen-mode obligation \
-         and this arm read the same `match`, so it must be the reserved slots"
+         and this arm read the same `match`, so it must be the reserved slots \
+         that are LEFT (wave COV1 spent the fourth on `Cover`)"
     );
     for mode in refused {
         assert!(
