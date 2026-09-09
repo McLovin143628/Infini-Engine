@@ -205,6 +205,12 @@ content = [
   # since wave WPN1, and a GUID names exactly one file.
   "../phase30-gameplay/Report.inf_audio",
   "../phase30-gameplay/Report.inf_audio.toml",
+  "../weapon-audio/Melee_Hard.inf_audio.toml",
+  "../weapon-audio/Melee_Hard.inf_audio",
+  "../weapon-audio/Melee_Flesh.inf_audio.toml",
+  "../weapon-audio/Melee_Flesh.inf_audio",
+  "../weapon-audio/Blast.inf_audio.toml",
+  "../weapon-audio/Blast.inf_audio",
   "../weapon-audio/Casing_Drop.inf_audio",
   "../weapon-audio/Casing_Drop.inf_audio.toml",
   "../weapon-audio/Report_Ar_Crack.inf_audio",

@@ -59,7 +59,7 @@ pub struct WeaponClip {
 ///
 /// The assault rifle's body is skipped; see this module's own header.
 pub fn weapon_audio_clips() -> Vec<WeaponClip> {
-    let mut out = Vec::with_capacity(39);
+    let mut out = Vec::with_capacity(38);
     for class in WeaponClass::ALL {
         for clip in ReportClip::ALL {
             let guid = report_clip(class, clip);
@@ -157,16 +157,19 @@ pub fn write_weapon_audio_library(dir: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Thirty-five clips, thirty-five distinct GUIDs, thirty-five distinct
+    /// Thirty-eight clips, thirty-eight distinct GUIDs, thirty-eight distinct
     /// names, and every one of them decodes — which is the whole contract with
     /// the engine, since a `Play` that names a clip nothing resolves is silence.
+    ///
+    /// Thirty-five until wave WPN2d, which added the blast and the two melee
+    /// surfaces (and the casing has always been the thirty-sixth).
     #[test]
-    fn the_library_is_thirty_five_distinct_resolvable_clips() {
+    fn the_library_is_thirty_eight_distinct_resolvable_clips() {
         let clips = weapon_audio_clips();
         assert_eq!(
             clips.len(),
-            35,
-            "seven classes times five, less the rifle's body"
+            38,
+            "seven classes times five, less the rifle's body, plus the casing,              the blast and the two melee surfaces"
         );
         let mut guids = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();
@@ -186,12 +189,12 @@ mod tests {
             clips.len(),
             bytes as f64 / 1024.0
         );
-        // Seventy files: a payload and a sidecar each, and nothing else.
+        // Seventy-six files: a payload and a sidecar each, and nothing else.
         let files = weapon_audio_files();
-        assert_eq!(files.len(), 70);
+        assert_eq!(files.len(), 76);
         assert_eq!(
             files.iter().filter(|f| f.ends_with(".toml")).count(),
-            35,
+            38,
             "every payload needs a sidecar or its GUID is invisible"
         );
     }

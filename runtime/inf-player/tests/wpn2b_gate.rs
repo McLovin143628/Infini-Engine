@@ -2550,10 +2550,12 @@ fn the_hero_log_and_its_readme_agree() {
         "`demo.ps1` no longer reads the mode at `$c[5]`, so index 5 is not the mode any more"
     );
     // **The README counts the same columns** — carried 225.
+    // **Thirty-two since wave WPN2d** — `class`, `attach` and `lock`, appended
+    // for the reason every block before them was.
     let n = width(&armed);
-    assert_eq!(n, 29, "the row is {n} fields and this arm's word is 29");
+    assert_eq!(n, 32, "the row is {n} fields and this arm's word is 32");
     assert!(
-        README.contains("TWENTY-NINE") || README.contains("twenty-nine"),
+        README.contains("THIRTY-TWO") || README.contains("thirty-two"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2565,6 +2567,10 @@ fn the_hero_log_and_its_readme_agree() {
         // Wave WPN2c's two.
         "casings",
         "tail",
+        // Wave WPN2d's three.
+        "class",
+        "attach",
+        "lock",
     ] {
         assert!(
             README.contains(col),

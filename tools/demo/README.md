@@ -39,8 +39,9 @@ Useful switches:
 hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pitch,
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
-                  recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail
-                  — TWENTY-NINE columns, four rows a second, and NO header line:
+                  recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
+                  class,attach,lock
+                  — THIRTY-TWO columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -49,15 +50,30 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   distance, and the equipped id), 24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,
-                  and the aim-down-sights blend) and 28-29 are WPN2c's (how many
+                  and the aim-down-sights blend), 28-29 are WPN2c's (how many
                   shell casings exist right now, and which TAIL the last loud
                   shot chose — `indoor`, `outdoor`, or `-` before anything has
-                  been fired).
+                  been fired) and 30-32 are WPN2d's:
+
+                    class   what KIND of gun is in the hand — `pistol`, `smg`,
+                            `ar`, `dmr`, `sniper`, `shotgun`, `launcher` — or
+                            `-`. Column 23 carries the row NAME; a leg that
+                            rotates one weapon per class waits on this.
+                    attach  `n@x.xx`: how many attachments are bolted on, and
+                            the fold's own loudness multiplier. `0@1.00` is a
+                            bare rail; `1@0.35` is a suppressor fitted and
+                            WORKING, which is the difference between a table row
+                            and an effect.
+                    lock    how far into a lock-on the launcher is, `[0, 1]`,
+                            with a `+` once it has completed. A lock takes
+                            1.2-1.6 s to acquire and releases the instant the
+                            cone loses it, so a frame of the indicator has to be
+                            triggered on it.
 
                   The numbers above are ONE-based, which is how a person counts
                   columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
-                  so `boom_m` is `$c[13]`, `ads` is `$c[26]` and `tail` is
-                  `$c[28]`.
+                  so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`
+                  and `lock` is `$c[31]`.
 demo.log          every step the driver took, with timings
 ```
 

@@ -131,6 +131,67 @@ pub const ISLAND_SIDEARM_ID: &str = "glock_17";
 /// the fixture does.
 pub const ISLAND_SIDEARM_OFFSET_M: (f64, f64, f64) = (0.0, 0.4, 1.4);
 
+/// **THE CLASS COURSE** (wave WPN2d) — one weapon of every class, on the kerb
+/// beside the sidearm.
+///
+/// Nine rows: the seven the research doc's tables name, plus the two wave WPN2d
+/// added that its tables do not (the grenade and the knife). Every id is a
+/// `weapons.toml` row and nothing else, so a wave that renames one renames it
+/// here and the level regenerates.
+///
+/// # Why they are ON THE GROUND and not in the hero's bag
+///
+/// `island_author_class`' own ruling, unchanged: *"a weapon that is simply in
+/// your hands when the level opens is not a door the player can see working"*.
+/// A player walks up the kerb and presses E nine times, which is the pickup
+/// verb, the inventory verb and the scroll wheel all doing what they do — and
+/// it is what makes "one of each class" a route through the shipped game rather
+/// than an environment variable a screenshot script sets.
+///
+/// # The order is the doc's, and it is the order they are laid out in
+///
+/// Pistol first, because the sidearm already is one and the course reads left to
+/// right from the thing the level opened with. Then the doc's own table order,
+/// then the two throwables. A frame of "each class in the hero's hands" walks
+/// this list.
+pub const ISLAND_CLASS_COURSE: [&str; 9] = [
+    // pistol — the sidearm's own row, deliberately repeated so the course is
+    // complete on its own terms and a leg that walks it does not have to know
+    // about `ISLAND_SIDEARM_ID`.
+    "sig_p320",
+    // smg
+    "mp5",
+    // ar
+    "m4a1",
+    // dmr
+    "svd_dragunov",
+    // sniper
+    "barrett_m82",
+    // shotgun
+    "remington_870",
+    // launcher
+    "rpg_7",
+    // throwable — the grenade, and the knife it is thrown beside
+    "g67_grenade",
+    "thrown_knife",
+];
+
+/// **How far apart the course's pickups lie**, metres along `+X`.
+///
+/// Eighty centimetres. Wide enough that
+/// `inf_ecs::interact::resolve`'s nearest-in-the-cone rule picks the one a
+/// player is standing at rather than its neighbour (a pickup's own reach is
+/// 2.5 m from the feet, so the discriminator is DISTANCE and the player's own
+/// position is what moves), and tight enough that all nine are inside one
+/// partition cell and one screen.
+pub const ISLAND_COURSE_SPACING_M: f64 = 0.8;
+
+/// **Where the course starts**, metres from the hero's own start — one metre to
+/// the LEFT of the sidearm and the same 1.4 m ahead, so the sidearm keeps the
+/// spot directly in front of the player it has had since wave WPN2a's audit and
+/// the course runs off to the right of it.
+pub const ISLAND_COURSE_OFFSET_M: (f64, f64, f64) = (-1.0, 0.4, 1.4);
+
 /// **THE ISLAND'S OWN LEVEL BLUEPRINT** (wave WPN2a audit) — the door that
 /// closes carried 204.
 ///
@@ -165,7 +226,11 @@ pub const ISLAND_SIDEARM_OFFSET_M: (f64, f64, f64) = (0.0, 0.4, 1.4);
 /// second time and stated in the same words: a runtime-editable catalogue is an
 /// asset kind and a scene bump, and VEH3a's schema window is where that trade is
 /// revisited.
-pub fn island_author_class(name: &str, sidearm_at: DVec3) -> inf_blueprint::BlueprintClass {
+pub fn island_author_class(
+    name: &str,
+    sidearm_at: DVec3,
+    course_at: DVec3,
+) -> inf_blueprint::BlueprintClass {
     use inf_blueprint::{
         BlueprintClass, BlueprintFn, EventBinding, EventKind, Expr, Lit, Stmt, Ty,
     };
@@ -203,10 +268,48 @@ pub fn island_author_class(name: &str, sidearm_at: DVec3) -> inf_blueprint::Blue
                         Expr::Lit(Lit::Int(1)),
                     ],
                 ),
-            ],
+            ]
+            .into_iter()
+            // **THE CLASS COURSE** (wave WPN2d) — nine more `item.spawn_pickup`
+            // calls, one per class, laid out along the kerb. Appended to the
+            // sidearm's own call rather than replacing it: the sidearm is what
+            // the level OPENS with and keeps the spot dead ahead of the player,
+            // and the course runs off to its left.
+            //
+            // A THROWABLE gets three of itself and a knife six, because one
+            // grenade is one press: the counts are the registry rows' own
+            // `stack_max`, read here rather than restated, so a row that
+            // changes how many fit in a slot changes how many are on the kerb.
+            .chain(ISLAND_CLASS_COURSE.iter().enumerate().map(|(i, id)| {
+                let at = course_at + DVec3::new(ISLAND_COURSE_SPACING_M * i as f64, 0.0, 0.0);
+                let count = course_stack(id);
+                call(
+                    &["item", "spawn_pickup"],
+                    vec![
+                        str_lit(id),
+                        f(at.x),
+                        f(at.y),
+                        f(at.z),
+                        Expr::Lit(Lit::Int(count)),
+                    ],
+                )
+            }))
+            .collect(),
         },
     }];
     class
+}
+
+/// **How many of a course row lie on the kerb** — the registry's own
+/// `stack_max`, read rather than restated.
+///
+/// A rifle is one and a grenade is three, because that is what the rows say a
+/// slot holds; a course that put one grenade down would let a player throw once
+/// and then stand looking at an empty hand.
+fn course_stack(id: &str) -> i64 {
+    let mut defs = inf_ecs::item::ItemDefs::default();
+    let _ = defs.merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML);
+    defs.get(id).map(|d| i64::from(d.stack_max)).unwrap_or(1)
 }
 
 /// How tall the island's hero is, metres — **the starter character's own
@@ -1467,7 +1570,13 @@ pub fn write_island_level(
             ISLAND_SIDEARM_OFFSET_M.1,
             ISLAND_SIDEARM_OFFSET_M.2,
         );
-    let act = crate::samples::encode_actor(&island_author_class(name, sidearm_at))?;
+    let course_at = feet
+        + DVec3::new(
+            ISLAND_COURSE_OFFSET_M.0,
+            ISLAND_COURSE_OFFSET_M.1,
+            ISLAND_COURSE_OFFSET_M.2,
+        );
+    let act = crate::samples::encode_actor(&island_author_class(name, sidearm_at, course_at))?;
     let ap = dir.join(format!("{slug}Author.inf_act"));
     std::fs::write(&ap, &act).map_err(|e| format!("write {}: {e}", ap.display()))?;
     inf_asset::AssetSidecar::new(

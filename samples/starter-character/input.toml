@@ -108,6 +108,15 @@ Key = "Shift"
 [[actions.sprint]]
 GamepadButton = "LeftThumb"
 
+[[actions.throw]]
+Key = "KeyB"
+
+[[actions.throw]]
+MouseButton = "Middle"
+
+[[actions.throw]]
+GamepadButton = "DPadUp"
+
 [[actions.up]]
 Key = "KeyW"
 

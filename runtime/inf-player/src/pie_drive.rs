@@ -1086,9 +1086,65 @@ impl HeroLog {
                 ))
             })
             .unwrap_or(0.0);
+        // **THE CLASS COLUMNS** (wave WPN2d), APPENDED for the reason every
+        // block above them was: every column index a script already reads keeps
+        // its meaning. None of the three is derivable from the columns in front:
+        //
+        // * `class` — what KIND of gun is in the hand (`ar`, `shotgun`,
+        //   `launcher`, …). Column 23 carries the equipped ID, which is a row
+        //   name; a frame captioned "the shotgun" wants the class, and a leg
+        //   that rotates through one weapon per class has to be able to WAIT
+        //   for one.
+        // * `attach` — how many attachments are bolted on, and the fold's own
+        //   loudness multiplier, as `n@x.xx`. Two numbers because they answer
+        //   the two questions a frame of an attachment asks: is anything fitted,
+        //   and did it CHANGE anything. `0@1.00` is a bare rail.
+        // * `lock` — how far into a lock-on the launcher is, `[0, 1]`, and
+        //   whether it has completed (`+`). What a frame of the lock indicator
+        //   is triggered on, because a lock takes 1.2–1.6 s to acquire and
+        //   releases the instant the cone loses it.
+        //
+        // All three are inert for a character with no weapon, which is every
+        // session before this wave.
+        let class = guid
+            .and_then(|g| inf_ecs::weapon::equipped_def(sim.world(), g))
+            .map(|(_, d)| d.audio_class().name().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let attach = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::weapon::WeaponState>(e)
+                    .map(|s| {
+                        let n = s
+                            .attach
+                            .iter()
+                            .filter(|i| **i != inf_ecs::attachment::NO_ATTACHMENT)
+                            .count();
+                        let fold = inf_ecs::attachment::fold(&s.attach);
+                        format!("{n}@{:.2}", fold.loudness_mult)
+                    })
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let lock = guid
+            .and_then(|g| {
+                let (_, def) = inf_ecs::weapon::equipped_def(sim.world(), g)?;
+                let e = sim.world().entity_of(g)?;
+                let st = sim
+                    .world()
+                    .world()
+                    .get::<inf_ecs::weapon::WeaponState>(e)?;
+                Some(format!(
+                    "{:.2}{}",
+                    st.lock_fraction(&def),
+                    if st.locked_on(&def).is_some() { "+" } else { "" }
+                ))
+            })
+            .unwrap_or_else(|| "-".to_string());
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1128,7 +1184,10 @@ impl HeroLog {
                 spread_deg,
                 ads,
                 casings_live,
-                tail
+                tail,
+                class,
+                attach,
+                lock
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1142,10 +1201,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is still 27 fields wide, which the gate asserts against
-            // the armed branch above it and against the demo README.
+            // The row is 32 fields wide since wave WPN2d, which the gate
+            // asserts against the armed branch above it and against the demo
+            // README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
