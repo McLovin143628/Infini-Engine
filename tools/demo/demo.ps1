@@ -1746,6 +1746,204 @@ if ($armList.Count -gt 0) {
     }
 }
 
+# -- 5e. THE CLASSES, THE MESHES AND THE BENCH (wave WPN2d) -------------------
+#
+#    Every frame here is TRIGGERED on `hero.csv`'s three NEW columns -- 29 is
+#    what KIND of gun is in the hand, 30 is `n@x.xx` (how many attachments and
+#    what the fold did to the report's loudness) and 31 is how far into a
+#    lock-on a launcher is. None of the three can be timed with a `Start-Sleep`:
+#    a lock takes 1.2-1.6 s and releases the instant the cone loses it, a
+#    grenade's fuse is three seconds from a release the animation decides, and
+#    what is in the hand is a rotation this leg does not drive.
+#
+#    The rotation is `-ArmHero`'s, which is a DEV door; the shipped route is the
+#    island's own Quartermaster, which since this wave puts one weapon of every
+#    class on the kerb the hero starts beside (`ISLAND_CLASS_COURSE`, nine rows,
+#    asserted by `wpn2a_gate::the_island_puts_a_registry_weapon_on_the_kerb...`).
+#    The env door is used here because a leg that walked nine pickups would
+#    spend the whole session picking things up rather than photographing them.
+if ($armList.Count -gt 0) {
+    Say "-- WPN2d: the classes, their meshes, and the bench --"
+    Restore-PlayerFocus "the classes leg"
+    Stand-Up "before the classes leg" | Out-Null
+    $cycleS = [math]::Max(4.0, $ArmDwellS) * ($armList.Count + 1)
+
+    # 1. FIRST PERSON, so the mesh is the frame rather than thirty pixels over a
+    #    shoulder -- and so the wave's own first-person rule is what the pixels
+    #    show: the BODY is faded to nothing at a 0.2 m boom and the WEAPON is
+    #    not. Column 13 is the boom and 14 is how much of the body is drawn.
+    [InfInput]::Down(0x22); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x22)   # G: first person
+    $fp = @(Wait-ForHero -Csv $heroCsv -What "a first-person seat with a gun in it" -TimeoutS 12 `
+        -Predicate { param($c) ($c.Count -gt 29) -and ([double]$c[13] -lt 0.35) -and ($c[29].Trim() -ne "-") } `
+        -Out (Join-Path $OutDir "90-first-person-weapon.png"))[-1]
+    if (-not $fp) { Say "WPN2d: no first-person seat with a weapon -- no un-faded frame" }
+    else {
+        $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        Say ("WPN2d: at boom {0} m the body draws {1} and the {2} in the hand does not fade" -f $row[13], $row[14], $row[29])
+    }
+
+    # 2. ONE FRAME PER CLASS, in first person, waiting for the CLASS column
+    #    rather than for a filename. A class the rotation never brings round
+    #    takes no frame and says so.
+    $seen = @()
+    foreach ($wid in $armList) {
+        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" in the hand (the mesh)" -TimeoutS $cycleS `
+            -Predicate { param($c) ($c.Count -gt 29) -and ($c[22].Trim() -eq $wid) })[-1]
+        if (-not $onIt) { Say "WPN2d: the rotation never brought `"$wid`" round for its mesh frame"; continue }
+        $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        $cls = $row[29].Trim()
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("91-mesh-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
+        Say ("WPN2d: {0} is class `"{1}`", attach {2}" -f $wid, $cls, $row[30])
+        $seen += $cls
+    }
+    Say ("WPN2d: classes photographed -> " + (($seen | Select-Object -Unique) -join ", "))
+
+    # 3. THE PATTERN. A shotgun pull is eight rays out of one shell, so the frame
+    #    that shows it is the one where the pellets are still in the air --
+    #    column 20, on the shotgun.
+    $sg = "remington_870"
+    $onSg = @(Wait-ForHero -Csv $heroCsv -What "the shotgun in the hand" -TimeoutS $cycleS `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sg) })[-1]
+    if ($onSg) {
+        [InfInput]::Look(0, -900); Start-Sleep -Milliseconds 250
+        [InfInput]::Look(0, 250);  Start-Sleep -Milliseconds 300
+        [InfInput]::RightDown(); Start-Sleep -Milliseconds 500
+        $pat = $false
+        for ($t = 0; ($t -lt 6) -and (-not $pat); $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 220
+            [InfInput]::LeftUp()
+            $pat = @(Wait-ForHero -Csv $heroCsv -What "the pattern in the air (press $($t + 1))" -TimeoutS 1.4 `
+                -Predicate { param($c) ($c.Count -gt 29) -and ($c[29].Trim() -eq "shotgun") -and ([int]$c[20] -gt 1) } `
+                -Out (Join-Path $OutDir "92-shotgun-pattern.png"))[-1]
+        }
+        [InfInput]::RightUp()
+        if (-not $pat) { Say "WPN2d: the shotgun never had two pellets in the air at once" }
+    } else { Say "WPN2d: the rotation never brought the shotgun round for its pattern" }
+
+    # 4. THE BLAST. The RPG's threshold is zero, so every shot is a body in
+    #    flight and everything it touches goes off; the frame is the step the
+    #    rocket is still flying, and the one after it is the bang.
+    $rl = "rpg_7"
+    $onRl = @(Wait-ForHero -Csv $heroCsv -What "the launcher in the hand" -TimeoutS $cycleS `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $rl) })[-1]
+    if ($onRl) {
+        [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
+        [InfInput]::Look(0, -420); Start-Sleep -Milliseconds 300
+        [InfInput]::RightDown(); Start-Sleep -Milliseconds 400
+        # The lock indicator, if a car is in the cone. It is not asserted: the
+        # island's traffic is where it is, and a leg that DEMANDED a car in front
+        # of it would fail on an empty street rather than say so.
+        $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something" -TimeoutS 4.0 `
+            -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
+            -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
+        if (-not $lk) { Say "WPN2d: nothing lockable was in the launcher's cone -- no lock frame" }
+        $boom = $false
+        for ($t = 0; ($t -lt 4) -and (-not $boom); $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 220
+            [InfInput]::LeftUp()
+            @(Wait-ForHero -Csv $heroCsv -What "the rocket in flight (press $($t + 1))" -TimeoutS 1.6 `
+                -Predicate { param($c) ($c.Count -gt 29) -and ($c[29].Trim() -eq "launcher") -and ([int]$c[20] -gt 0) } `
+                -Out (Join-Path $OutDir "94-rocket-in-flight.png")) | Out-Null
+            # The bang is where the rocket STOPS: column 21 latches the flight
+            # distance of the last round that hit something.
+            $boom = @(Wait-ForHero -Csv $heroCsv -What "the rocket arriving (press $($t + 1))" -TimeoutS 2.5 `
+                -Predicate { param($c) ($c.Count -gt 21) -and ([double]$c[21] -gt 1.0) -and ([int]$c[20] -eq 0) } `
+                -Out (Join-Path $OutDir "95-launcher-blast.png"))[-1]
+            [InfInput]::Look(40, 0)
+        }
+        [InfInput]::RightUp()
+        if (-not $boom) { Say "WPN2d: no rocket ever arrived -- no blast frame" }
+    } else { Say "WPN2d: the rotation never brought the launcher round" }
+
+    # 5. THE THROW. `KeyB` is the first key this engine has ever bound to one.
+    #    The arc is drawn while AIMING with a throwable, so the frame before the
+    #    press is the arc and the frame after the fuse is the detonation.
+    $gr = "g67_grenade"
+    $onGr = @(Wait-ForHero -Csv $heroCsv -What "the grenade in the hand" -TimeoutS $cycleS `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $gr) })[-1]
+    if ($onGr) {
+        [InfInput]::Look(0, -900); Start-Sleep -Milliseconds 250
+        [InfInput]::Look(0, 300);  Start-Sleep -Milliseconds 300
+        [InfInput]::RightDown(); Start-Sleep -Milliseconds 700
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "96-throw-arc.png") | ForEach-Object { Say $_ }
+        [InfInput]::Down(0x30); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x30)   # B: throw
+        $flew = @(Wait-ForHero -Csv $heroCsv -What "the grenade in the air" -TimeoutS 6.0 `
+            -Predicate { param($c) ($c.Count -gt 29) -and ([int]$c[20] -gt 0) } `
+            -Out (Join-Path $OutDir "97-grenade-in-flight.png"))[-1]
+        if (-not $flew) { Say "WPN2d: nothing left the hand on the throw key" }
+        else {
+            # The fuse is three seconds; the pool empties when it goes off.
+            $off = @(Wait-ForHero -Csv $heroCsv -What "the grenade going off" -TimeoutS 8.0 `
+                -Predicate { param($c) ($c.Count -gt 20) -and ([int]$c[20] -eq 0) } `
+                -Out (Join-Path $OutDir "98-grenade-detonation.png"))[-1]
+            if (-not $off) { Say "WPN2d: the grenade never left the pool -- no detonation frame" }
+        }
+        [InfInput]::RightUp()
+    } else { Say "WPN2d: the rotation never brought the grenade round" }
+
+    # 6. THE KNIFE. A melee swing is an ARC and a box cast; the frame is the
+    #    swing, and the class column is what says a knife is in the hand.
+    $kn = "m9_knife"
+    $onKn = @(Wait-ForHero -Csv $heroCsv -What "the knife in the hand" -TimeoutS $cycleS `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $kn) })[-1]
+    if ($onKn) {
+        [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
+        [InfInput]::Look(0, -430); Start-Sleep -Milliseconds 300
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 200; [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 180
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "99-knife.png") | ForEach-Object { Say $_ }
+    } else { Say "WPN2d: the rotation never brought the knife round" }
+
+    # 7. THE BENCH. `I` opens the panel, `Tab` walks the rail and `]` fits the
+    #    next part; column 30 is `n@x.xx`, so the frame is TRIGGERED on the fold
+    #    having actually changed something rather than on a key having been
+    #    pressed.
+    $ar = "m4a1"
+    $onAr = @(Wait-ForHero -Csv $heroCsv -What "the rifle in the hand (for the bench)" -TimeoutS $cycleS `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $ar) })[-1]
+    if ($onAr) {
+        [InfInput]::Down(0x17); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x17)   # I: the panel
+        Start-Sleep -Milliseconds 400
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "9A-bench-panel.png") | ForEach-Object { Say $_ }
+        # The muzzle is rail slot 0, which is where the cursor opens: `]` fits
+        # the first row in it, and the first row of the AR's muzzles is the
+        # tactical monolithic suppressor.
+        $fitted = $false
+        for ($t = 0; ($t -lt 3) -and (-not $fitted); $t++) {
+            [InfInput]::Down(0x1B); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x1B)   # ]
+            $fitted = @(Wait-ForHero -Csv $heroCsv -What "an attachment fitted (press $($t + 1))" -TimeoutS 2.0 `
+                -Predicate { param($c) ($c.Count -gt 30) -and ($c[30].Trim() -notmatch "^(-|0@)") } `
+                -Out (Join-Path $OutDir "9B-attachment-fitted.png"))[-1]
+        }
+        [InfInput]::Down(0x17); Start-Sleep -Milliseconds 250; [InfInput]::Up(0x17)   # I: close it
+        Start-Sleep -Milliseconds 400
+        if ($fitted) {
+            $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+            Say ("WPN2d: the bench fitted something -- attach reads {0} (n@loudness)" -f $row[30])
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "9C-attachment-on-the-rifle.png") | ForEach-Object { Say $_ }
+        } else {
+            Say "WPN2d: the bench never fitted anything -- attach stayed at 0@1.00"
+        }
+    } else { Say "WPN2d: the rotation never brought the rifle round for the bench" }
+
+    [InfInput]::Down(0x22); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x22)   # G: back to third person
+
+    # What the session's own columns say, quoted where the captions are read.
+    if (Test-Path $heroCsv) {
+        $rowsD = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
+            ForEach-Object { $_.Split(",") } | Where-Object { $_.Count -gt 31 })
+        if ($rowsD.Count -gt 0) {
+            $classes = ($rowsD | ForEach-Object { $_[29].Trim() } | Where-Object { $_ -ne "-" } | Select-Object -Unique) -join ", "
+            $atts = ($rowsD | ForEach-Object { $_[30].Trim() } | Where-Object { $_ -ne "-" } | Select-Object -Unique) -join ", "
+            $locks = ($rowsD | ForEach-Object { $_[31].Trim() } | Where-Object { $_ -ne "-" -and $_ -ne "0.00" } | Select-Object -Unique) -join ", "
+            Say "  classes held : $classes"
+            Say "  attach states: $atts"
+            Say "  lock states  : $locks"
+        }
+    }
+}
+
+
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
     $rows = Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" }
