@@ -718,7 +718,7 @@ pub fn blend_speed_for_ads(ads_s: f64, dt: f64) -> f64 {
     if !ads_s.is_finite() || ads_s <= dt {
         return 1.0 / dt;
     }
-    let n = (ads_s / dt).floor().max(1.0).min(4096.0) as u32;
+    let n = (ads_s / dt).floor().clamp(1.0, 4096.0) as u32;
     let target = 1.0 - ADS_BLEND_REACH;
     // `remaining(a) = (1 - a)^n` is monotonically DECREASING in `a`, so the
     // bracket is [0, 1] and the test is "have we passed the target yet".

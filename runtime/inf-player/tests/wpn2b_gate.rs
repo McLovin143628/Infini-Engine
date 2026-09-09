@@ -107,7 +107,6 @@ fn defs_with(rows: &[(&str, WeaponDef)]) -> ItemDefs {
             stack_max: 1,
             mass_kg: 3.6,
             weapon: Some(*def),
-            ..Default::default()
         });
     }
     defs
@@ -871,7 +870,7 @@ fn the_thirty_round_pattern_orders_ads_then_hip_then_moving() {
         // the run actually has.
         if intent.is_some() {
             for _ in 0..60 {
-                r.step_with(intent.clone());
+                r.step_with(intent);
             }
             let v = r.cm(HERO).runtime.velocity.to_dvec3();
             let s = (v.x * v.x + v.z * v.z).sqrt();
@@ -897,7 +896,7 @@ fn the_thirty_round_pattern_orders_ads_then_hip_then_moving() {
         let mut speeds: Vec<f64> = Vec::new();
         let mut blooms: Vec<f64> = Vec::new();
         for _ in 0..400 {
-            let rep = r.step_with(intent.clone());
+            let rep = r.step_with(intent);
             let cm = r.cm(HERO);
             let bloom_now = r.bloom();
             let aim = weapon::aim_forward(cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg);
@@ -1104,7 +1103,7 @@ fn the_sway_is_zero_at_rest_and_grows_with_speed() {
     };
     let mut sprinting = 0.0_f64;
     for _ in 0..240 {
-        r.step_with(Some(intent.clone()));
+        r.step_with(Some(intent));
         sprinting = sprinting.max(r.feel(HERO).map(|f| f.sway.length()).unwrap_or(0.0));
     }
     let v = r.cm(HERO).runtime.velocity.to_dvec3();
@@ -1279,7 +1278,7 @@ fn an_aiming_character_covers_less_ground() {
             .expect("a hero");
         let _ = start;
         for _ in 0..180 {
-            r.step_with(Some(intent.clone()));
+            r.step_with(Some(intent));
         }
         let to = r
             .world
@@ -2062,10 +2061,17 @@ fn the_gate_names_the_constants_it_is_about() {
     assert_eq!(feel::AIM_STIFFNESS, 180.0);
     assert_eq!(feel::DOC_VM_DAMPING, 18.0);
     assert_eq!(feel::DOC_AIM_DAMPING, 16.0);
-    assert!(feel::SPREAD_ADS_MULT < 1.0);
-    assert!(feel::SPREAD_CROUCH_MULT < 1.0);
-    assert!(feel::SPREAD_MOVE_MULT_MAX > 1.0);
-    assert!(feel::ADS_MOVE_SPEED_MULT < 1.0);
+    // **Through `black_box`**, because the whole point of these four is that
+    // they are CONSTANTS and clippy's `assertions_on_constants` is otherwise
+    // right: a comparison of two literals is a claim about the compiler. What
+    // is being asserted is that the shipped value still has the SIGN the rest
+    // of this file's arms assume, so a retune to 1.0 -- which is exactly
+    // mutations M3, M4 and M8 -- reds here as well as in the arm it breaks.
+    let one = std::hint::black_box(1.0_f64);
+    assert!(feel::SPREAD_ADS_MULT < one);
+    assert!(feel::SPREAD_CROUCH_MULT < one);
+    assert!(feel::SPREAD_MOVE_MULT_MAX > one);
+    assert!(feel::ADS_MOVE_SPEED_MULT < one);
     // The overlay resolver is by BARREL and the registry's own two numbers sit
     // either side of it.
     assert!(test_pistol().muzzle_forward_m < feel::PISTOL_MUZZLE_M);

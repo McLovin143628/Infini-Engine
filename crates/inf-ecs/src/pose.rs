@@ -1517,8 +1517,10 @@ pub fn step_pose_evaluation<'c>(
                                 &mut pose,
                                 machine,
                                 &clips,
-                                inf_anim::als::LOOK_SWEEP_STATE,
-                                inf_anim::als::LOOK_SWEEP_NEUTRAL,
+                                SweepRef {
+                                    state: inf_anim::als::LOOK_SWEEP_STATE,
+                                    neutral: inf_anim::als::LOOK_SWEEP_NEUTRAL,
+                                },
                                 at,
                                 weight,
                             );
@@ -2173,16 +2175,35 @@ pub const FOOT_ROLL_LIMIT_DEG: f64 = 15.0;
 /// ahead poses exactly the bytes it posed before this pass existed. That is not
 /// an optimisation, it is the definition of an additive layer, and it is a gate
 /// arm (`an_additive_with_no_delta_is_bit_identical_to_the_base_pose`).
+/// **Which blend space an aim offset is sampled from, and where its NEUTRAL
+/// sits** (wave WPN2b).
+///
+/// A pair rather than two arguments because they only ever travel together and
+/// separating them is how a caller ends up sampling the look sweep's neutral
+/// out of a prop sweep — the look sweep's second axis is PITCH and a prop
+/// sweep's is STANCE, so the mistake is silent and looks like a character
+/// crouching when it aims downhill.
+#[derive(Clone, Copy, Debug)]
+struct SweepRef<'a> {
+    /// The `als::LOCOMOTION_MAP` state name whose motion is the blend space.
+    state: &'a str,
+    /// The coordinate at which the delta is exactly the identity.
+    neutral: [f64; 2],
+}
+
 fn apply_aim_offset<'c>(
     rig: &inf_anim::SkeletonAsset,
     pose: &mut Pose,
     machine: &inf_anim::StateMachine,
     clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
-    sweep: &str,
-    neutral: [f64; 2],
+    sweep: SweepRef<'_>,
     at: [f64; 2],
     weight: f32,
 ) -> bool {
+    let SweepRef {
+        state: sweep,
+        neutral,
+    } = sweep;
     // **The state NAME is a parameter since wave WPN2b.** It was
     // `inf_anim::als::LOOK_SWEEP_STATE`, hard-coded, which is why the seven prop
     // sweeps in `LOCOMOTION_MAP` (`aim_m4a1`, `aim_pistol_1h`, ...) had been
