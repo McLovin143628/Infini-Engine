@@ -178,7 +178,7 @@ pub fn island_author_class(name: &str, sidearm_at: DVec3) -> inf_blueprint::Blue
         })
     };
     let mut class = BlueprintClass::new(
-        &format!("act:{}-author", inf_island::slug(name).to_lowercase()),
+        format!("act:{}-author", inf_island::slug(name).to_lowercase()),
         "Island Author",
     );
     class.events = vec![EventBinding {
