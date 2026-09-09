@@ -373,12 +373,12 @@ pub const FIST_ARC_DEG: f64 = 100.0;
 /// than a flurry.
 ///
 /// It paces the swings and **nothing else** (the WPN1 audit's correction: this
-/// used to add *"and through [`recoil_fraction`] is also how long the body
-/// carries the swing's own pose"*, which the wave's own carried list already
-/// contradicted). A fist is not *equipped* — it is not in the catalogue at all —
-/// so `d3::gameplay`'s `recoil_of` answers `0.0` for it and a punch moves no
-/// bone. `weapon_hands_gate` asserts exactly that, so the day it changes the arm
-/// fails.
+/// used to add *"and is also how long the body carries the swing's own pose"*,
+/// which the wave's own carried list already contradicted). A fist is not
+/// *equipped* — it is not in the catalogue at all — so a punch installs no
+/// [`crate::feel::WeaponFeel`], the hold point stays where the animation put it
+/// and a punch moves no bone. `weapon_hands_gate` asserts exactly that, so the
+/// day it changes the arm fails.
 pub const FIST_RPM: f64 = 90.0;
 
 /// **A pair of hands, as a weapon** (wave WPN1) — what an unarmed character's
@@ -785,6 +785,22 @@ pub struct WeaponState {
     /// Whether the trigger was down last step, so a semi-automatic weapon fires
     /// once per press.
     pub trigger_held: bool,
+    /// **How much cone this magazine has bloomed**, degrees (wave WPN2b).
+    ///
+    /// The doc's *"subtle bullet vector drift"*: every round adds
+    /// [`crate::feel::bloom_per_shot_deg`] and every step takes
+    /// [`crate::feel::bloom_decay_dps`] back off, so the thirtieth round of a
+    /// magazine really does land somewhere the first did not.
+    ///
+    /// It lives HERE and not on `crate::feel::WeaponFeel` because the bloom
+    /// belongs to the magazine: putting a weapon away and taking it out again is
+    /// what a player does to reset it in every game that has one, and this
+    /// struct is already replaced when the equipped id changes.
+    ///
+    /// **`0.0` is not folded** by [`weapon_state_bytes`] — see its doc. That is
+    /// what keeps every trace of a weapon that is merely being CARRIED
+    /// byte-identical to its pre-WPN2b self.
+    pub spread_bloom_deg: f64,
 }
 
 /// The animation notify a reload finishes on.
@@ -974,6 +990,7 @@ impl WeaponState {
             reload_left_s: 0.0,
             shots: 0,
             trigger_held: false,
+            spread_bloom_deg: 0.0,
         }
     }
 
@@ -981,38 +998,6 @@ impl WeaponState {
     pub fn reloading(&self) -> bool {
         self.reload_left_s > 0.0
     }
-}
-
-/// **How much of a weapon's recoil is still on it**, `[0, 1]` (wave WPN1).
-///
-/// # It is DERIVED, and that is the whole design
-///
-/// A recoil field on [`WeaponState`] would be a second copy of a number the
-/// state already answers: `cooldown_s` is set to [`WeaponDef::fire_interval_s`]
-/// the instant a round leaves and counts down to zero as the weapon cycles, so
-/// *"how far through its own cycle is this weapon"* is already sim state, is
-/// already in [`weapon_state_bytes`], and is already identical on both hosts.
-/// The copy is the thing that drifts (`CrowdRecord::speed_of`'s own argument),
-/// and it would have cost eight bytes an armed character in every trace in the
-/// tree for a number that was already there.
-///
-/// So the recoil **is** the cycle: `1.0` on the step the shot is fired, falling
-/// linearly to `0.0` as the action closes. At 600 rpm that is a tenth of a
-/// second of kick per round and the next round arrives exactly as the last one
-/// finishes, which is what an automatic weapon looks like; at a pistol's 400 rpm
-/// it is a hundred and fifty milliseconds and a visible settle between shots.
-///
-/// **A reload is not a recoil.** `advance` runs the cooldown and the reload
-/// clock independently, and this reads only the first.
-///
-/// Answers `0.0` for a weapon whose rate makes the interval non-finite, which is
-/// the same refusal-as-a-value `fire_interval_s` makes.
-pub fn recoil_fraction(def: &WeaponDef, state: &WeaponState) -> f64 {
-    let interval = def.fire_interval_s();
-    if !interval.is_finite() || interval <= 0.0 {
-        return 0.0;
-    }
-    (state.cooldown_s / interval).clamp(0.0, 1.0)
 }
 
 /// **What a shooter's own instruments say** — the magazine and the reserve, as
@@ -1178,7 +1163,13 @@ pub fn advance(def: &WeaponDef, state: &mut WeaponState, dt: f64) -> bool {
 /// way in a replay, in a PIE preview and in a shipped build, and a gate can name
 /// where a bullet went. Pure integer arithmetic, so it is bit-portable by
 /// construction.
-fn shot_uniforms(seed: u64, shot: u64) -> (f64, f64) {
+///
+/// **Public since wave WPN2b**, because the recoil's own noise is drawn here
+/// too — the doc's `rand_val()` with no RNG behind it. It is the ONE
+/// counter-hash door in this engine's gunplay and a second one would be a second
+/// thing to keep replay-safe; `feel::RecoilProfile::peaks` salts the seed so a
+/// shot that scattered left does not also kick left for ever.
+pub fn shot_uniforms(seed: u64, shot: u64) -> (f64, f64) {
     let mix = |mut z: u64| {
         z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut x = z;
@@ -1233,6 +1224,28 @@ pub fn aim_forward(yaw_deg: f64, pitch_deg: f64) -> DVec3 {
 /// the angle, because the second concentrates shots at the middle in a way a
 /// player reads as the weapon being more accurate than its number says.
 pub fn shot_direction(def: &WeaponDef, yaw_deg: f64, pitch_deg: f64, shot: u64) -> DVec3 {
+    shot_direction_with(def, yaw_deg, pitch_deg, shot, def.spread_deg)
+}
+
+/// **Where a shot goes, through a cone this caller resolved** (wave WPN2b).
+///
+/// [`shot_direction`] with the weapon's own `spread_deg` replaced by
+/// `cone_deg`, which is what the fire path computes each shot from the bloom on
+/// [`WeaponState::spread_bloom_deg`] and the shooter's stance, speed and aim
+/// (`crate::feel::resolved_cone_deg`). One function, one scatter, one seed: a
+/// second copy of the disc sampling would be a bullet that went somewhere the
+/// pattern arm never looked.
+///
+/// It is also the door **wave WPN2d's shotgun** takes — N pellets through one
+/// `cone_deg` at N consecutive shot indices — which is why the parameter is a
+/// cone and not a multiplier.
+pub fn shot_direction_with(
+    def: &WeaponDef,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    shot: u64,
+    cone_deg: f64,
+) -> DVec3 {
     let yaw = if yaw_deg.is_finite() { yaw_deg } else { 0.0 };
     let pitch = if pitch_deg.is_finite() {
         pitch_deg.clamp(-89.9, 89.9)
@@ -1244,8 +1257,8 @@ pub fn shot_direction(def: &WeaponDef, yaw_deg: f64, pitch_deg: f64, shot: u64) 
         (inf_math::psin64(r), inf_math::pcos64(r))
     };
     let forward = aim_forward(yaw, pitch);
-    let half = if def.spread_deg.is_finite() {
-        (def.spread_deg * 0.5).clamp(0.0, MAX_SPREAD_DEG)
+    let half = if cone_deg.is_finite() {
+        (cone_deg * 0.5).clamp(0.0, MAX_SPREAD_DEG)
     } else {
         0.0
     };
@@ -1512,6 +1525,19 @@ pub fn health_state_bytes(world: &EcsWorld) -> Vec<u8> {
 
 /// **The weapon trace bytes**, in `Guid` order — the ammunition clock is sim
 /// state and a PIE-versus-shipping gate has to see it.
+///
+/// # The bloom is folded only when it is NOT zero (wave WPN2b)
+///
+/// This buffer is **hashed, never decoded** (`RuntimeSim::state_bytes`' own
+/// words), so a row may be two lengths and no reader has to tell them apart.
+/// That buys the thing a fixed-width column could not: a weapon that is being
+/// carried, or that fired long enough ago for the bloom to have decayed to
+/// zero, folds exactly the bytes it folded before this wave — so every
+/// committed trace with a resting weapon in it stays byte-identical, and only a
+/// trace where somebody has ACTUALLY JUST FIRED moves.
+///
+/// `crate::ballistics::round_state_bytes`' empty-when-nothing-is-flying rule,
+/// one level down: the same argument, applied per row instead of per section.
 pub fn weapon_state_bytes(world: &EcsWorld) -> Vec<u8> {
     let w = world.world();
     let Some(mut q) = w.try_query_filtered::<(&Guid, &WeaponState), With<WeaponState>>() else {
@@ -1533,6 +1559,9 @@ pub fn weapon_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(&s.reload_left_s.to_bits().to_le_bytes());
         out.extend_from_slice(&s.shots.to_le_bytes());
         out.push(u8::from(s.trigger_held));
+        if s.spread_bloom_deg != 0.0 {
+            out.extend_from_slice(&s.spread_bloom_deg.to_bits().to_le_bytes());
+        }
     }
     out
 }
@@ -1892,60 +1921,6 @@ automatic = true
         assert!(!is_staggering(rifle, 0.0));
         assert!(!is_staggering(f64::NAN, 100.0));
         assert!(!is_staggering(10.0, f64::INFINITY));
-    }
-
-    /// **The recoil IS the weapon's own cycle** (wave WPN1) — full on the step
-    /// the round leaves, gone by the time the next one may.
-    ///
-    /// The mutation this kills: a recoil derived from `shots` alone would be
-    /// `1.0` for ever after the first round, and a recoil derived from
-    /// `reload_left_s` would fire on a reload and never on a shot.
-    #[test]
-    fn the_recoil_is_full_on_the_shot_and_gone_when_the_action_closes() {
-        let d = WeaponDef::default();
-        let mut s = WeaponState::full("rifle", &d);
-        assert_eq!(recoil_fraction(&d, &s), 0.0, "a rested weapon has recoil");
-        assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
-        assert!(
-            (recoil_fraction(&d, &s) - 1.0).abs() < 1e-12,
-            "the shot did not kick: {}",
-            recoil_fraction(&d, &s)
-        );
-        // It falls, monotonically, and is spent exactly when the weapon may fire
-        // again — which is the property that makes it the cycle rather than a
-        // second clock beside it.
-        let mut last = 1.0_f64;
-        let mut steps = 0;
-        while recoil_fraction(&d, &s) > 0.0 && steps < 600 {
-            advance(&d, &mut s, DT);
-            let now = recoil_fraction(&d, &s);
-            assert!(now <= last, "the recoil went back up: {last} -> {now}");
-            last = now;
-            steps += 1;
-        }
-        println!(
-            "a {} rpm weapon's kick lasted {steps} steps ({:.4} s)",
-            d.rounds_per_minute,
-            steps as f64 * DT
-        );
-        assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
-        // A RELOAD is not a recoil: the two clocks are independent and this
-        // reads one of them.
-        let mut r = WeaponState::full("rifle", &d);
-        r.magazine = 1;
-        assert_eq!(try_reload(&d, &mut r), ReloadVerdict::Started);
-        assert!(r.reloading());
-        assert_eq!(
-            recoil_fraction(&d, &r),
-            0.0,
-            "a reload registered as a recoil"
-        );
-        // A weapon whose rate cannot make an interval refuses as a value.
-        let dead = WeaponDef {
-            rounds_per_minute: 0.0,
-            ..d
-        };
-        assert_eq!(recoil_fraction(&dead, &s), 0.0);
     }
 
     /// **The ammunition readout is the two numbers and nothing else** (wave
