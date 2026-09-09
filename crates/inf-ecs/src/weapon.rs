@@ -1454,6 +1454,80 @@ pub fn equipped_move_speed_scale(world: &EcsWorld, guid: Uuid) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// **The entity a character's equipped weapon IS drawn as** (wave WPN2d) — a
+/// runtime marker, never serialized.
+///
+/// `inf_ecs::casing::CasingMark`'s shape and its reason: the weapon entity is
+/// spawned by the fixed step on a derived guid, and a projector, a fade rule and
+/// a gate all need to be able to ask *is this thing a weapon somebody is
+/// holding* without re-deriving that guid from an owner they may not have.
+///
+/// It carries the owner because the one question anybody asks of it is *whose*
+/// — the first-person fade rule ([`subject_fade_for`]) asks exactly that.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EquippedWeapon {
+    /// The character holding it.
+    pub owner: Uuid,
+}
+
+/// **What one drawn ACCESSORY is** (wave WPN2d) — a runtime marker,
+/// [`EquippedWeapon`]'s twin one level down.
+///
+/// It carries the weapon it is bolted to, because the one question anybody asks
+/// of it is *whose rail* — `inf_physics::d3::gameplay::step_accessories`
+/// reconciles one weapon's rail against its equipped set every step and must be
+/// able to find it without walking the whole world.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessoryMark {
+    /// The weapon entity it is bolted to.
+    pub weapon: Uuid,
+}
+
+/// **HOW MUCH OF A THING THE CAMERA IS DRAWING** (wave WPN2d) — the one door the
+/// near fade goes through, and the rule that keeps a first-person weapon on
+/// screen.
+///
+/// The camera thins its own subject as the boom shortens
+/// (`LocomotionCamera::subject_fade`), so that at a first-person seat the body,
+/// the garment and the hair are gone rather than filling the frame. **The
+/// weapon must not go with them**: a first-person view with no gun in it is the
+/// one thing that would make the whole of this arc invisible at the range a
+/// player spends most of their time at.
+///
+/// So the rule is stated HERE rather than left to be an accident of which
+/// render path a draw takes. Today the fade reaches only
+/// `inf_render::SkinnedInstance` and a weapon is a rigid `MeshRef`, so the
+/// behaviour would be right by construction — and that is exactly why it is
+/// written down: the day somebody extends the fade to the rigid path, this
+/// function is what stops the gun disappearing, and `wpn2d_gate` is what says
+/// so if it does.
+///
+/// `1.0` — draw all of it — for anything that is not the camera subject, and
+/// for the subject's own equipped weapon. `fade` otherwise.
+pub fn subject_fade_for(world: &EcsWorld, guid: Uuid, subject: Option<Uuid>, fade: f64) -> f64 {
+    if subject != Some(guid) {
+        return 1.0;
+    }
+    // A weapon is never the camera SUBJECT, so this arm is about the day the
+    // fade is applied per drawn entity rather than per character: an entity
+    // carrying `EquippedWeapon` is excluded by name.
+    if world
+        .entity_of(guid)
+        .is_some_and(|e| world.world().get::<EquippedWeapon>(e).is_some())
+    {
+        return 1.0;
+    }
+    fade
+}
+
+/// **Whether this entity is somebody's equipped weapon** (wave WPN2d) — the
+/// question a projector asks about a rigid draw.
+pub fn is_equipped_weapon(world: &EcsWorld, guid: Uuid) -> bool {
+    world
+        .entity_of(guid)
+        .is_some_and(|e| world.world().get::<EquippedWeapon>(e).is_some())
+}
+
 /// **The ammunition clock on a character** — a runtime component, inserted when
 /// a weapon is equipped and replaced when a different one is.
 #[derive(Component, Clone, Debug, PartialEq)]

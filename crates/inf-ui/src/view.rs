@@ -262,6 +262,59 @@ pub fn reticle(list: &mut UiDrawList, colour: Color) {
     }
 }
 
+/// How far out of the reticle the lock brackets sit, in pixels at scale 1.
+const LOCK_RADIUS_PX: f32 = 22.0;
+/// How long each bracket's arm is, in pixels at scale 1.
+const LOCK_ARM_PX: f32 = 7.0;
+/// How thick a bracket arm is, in pixels at scale 1.
+const LOCK_THICK_PX: f32 = 2.0;
+
+/// **Draw the LOCK-ON indicator** around the reticle (wave WPN2d).
+///
+/// Four corner brackets that CLOSE as the lock acquires: at `progress = 0` they
+/// sit [`LOCK_RADIUS_PX`] out, and at `1` they are on the reticle's own arms.
+/// That is the whole readout — a player watching a bracket shrink knows both
+/// that something is being locked and how long is left, from one shape, without
+/// a number to read.
+///
+/// The colour is the caller's, and the caller changes it: an incomplete lock is
+/// drawn in the reticle's own ink and a COMPLETE one in the warning colour, so
+/// the moment the missile becomes guided is a colour change rather than a
+/// subtlety of geometry.
+///
+/// Nothing is drawn at a non-positive progress, which is a launcher pointed at
+/// nothing — the same rule the reticle itself follows about not making a claim
+/// the world does not support.
+pub fn lock_reticle(list: &mut UiDrawList, progress: f32, colour: Color) {
+    let vp = list.viewport;
+    if !vp.x.is_finite() || !vp.y.is_finite() || vp.x <= 0.0 || vp.y <= 0.0 {
+        return;
+    }
+    if !progress.is_finite() || progress <= 0.0 {
+        return;
+    }
+    let p = progress.clamp(0.0, 1.0);
+    let s = text_scale(vp.y);
+    let arm = LOCK_ARM_PX * s;
+    let t = LOCK_THICK_PX * s;
+    // The brackets travel from `LOCK_RADIUS_PX` in to the reticle's own gap.
+    let far = LOCK_RADIUS_PX * s;
+    let near = RETICLE_GAP_PX * s;
+    let r = far + (near - far) * p;
+    let (cx, cy) = ((vp.x * 0.5).round(), (vp.y * 0.5).round());
+    for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let x = cx + sx * r;
+        let y = cy + sy * r;
+        // The horizontal arm of the corner, then the vertical one. Each is drawn
+        // INWARD from the corner, so a bracket reads as a corner rather than as
+        // a cross.
+        let hx = if sx < 0.0 { x } else { x - arm };
+        let vy = if sy < 0.0 { y } else { y - arm };
+        list.rect(Rect::new(hx, y - t * 0.5, arm, t), colour);
+        list.rect(Rect::new(x - t * 0.5, vy, t, arm), colour);
+    }
+}
+
 /// **The wanted rating's own colour** — a warning, because that is what it is.
 ///
 /// `palette::WARN` rather than a new entry: the palette's own note for it is

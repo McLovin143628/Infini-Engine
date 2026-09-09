@@ -643,6 +643,57 @@ pub fn blast_falloff(radius_m: f64, distance_m: f64) -> f64 {
     k * k
 }
 
+/// **How many points a previewed throw arc is drawn with.**
+///
+/// Twenty-four. Enough that a lob over a wall reads as a curve rather than as
+/// three straight lines, and small enough that the whole preview is twenty-three
+/// debug segments — the same order as one tracer's, on a path that already draws
+/// one per shot.
+pub const THROW_ARC_POINTS: usize = 24;
+
+/// **How long a previewed throw arc looks ahead**, seconds.
+///
+/// Two. A grenade's fuse is three, and a preview that ran the whole fuse would
+/// draw the bounce and the roll as well — which is a prediction this function
+/// cannot make (it integrates drag and gravity and nothing else) and would
+/// therefore be a line that lies. Two seconds is the flight, and the arc ends in
+/// the air on purpose.
+pub const THROW_ARC_S: f64 = 2.0;
+
+/// **Where a thrown body would go** (wave WPN2d) — the preview arc, as a pure
+/// function.
+///
+/// The SAME integrator the body itself flies on ([`advance_round`]), stepped at
+/// the same `PROJECTILE_SUB_STEPS`-derived rate, so the line a player is shown
+/// and the path the grenade takes are one arithmetic. A second copy that
+/// "approximated the parabola" would be a reticle that lies, which is the ruling
+/// `inf_physics::d3::gameplay`'s camera-recoil refusal is built on.
+///
+/// What it does NOT model is the world: it integrates drag and gravity and stops
+/// after [`THROW_ARC_S`], so it does not know about the wall the grenade will
+/// bounce off. That is stated rather than hidden — the arc ends in the air, and
+/// a preview that drew a bounce it had not cast for would be worse than one that
+/// stops.
+pub fn throw_arc(at: DVec3, velocity: DVec3, def: &WeaponDef) -> Vec<DVec3> {
+    let mut out = Vec::with_capacity(THROW_ARC_POINTS);
+    if !at.is_finite() || !velocity.is_finite() {
+        return out;
+    }
+    let dt = THROW_ARC_S / THROW_ARC_POINTS as f64;
+    let (mut p, mut v) = (at, velocity);
+    out.push(p);
+    for _ in 1..THROW_ARC_POINTS {
+        let (np, nv) = advance_round(p, v, def, dt);
+        if !np.is_finite() {
+            break;
+        }
+        p = np;
+        v = nv;
+        out.push(p);
+    }
+    out
+}
+
 /// **What a blast spends on a body at a distance**, joules -- the falloff
 /// applied to [`WeaponDef::blast_damage_j`].
 ///

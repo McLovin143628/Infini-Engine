@@ -248,6 +248,12 @@ fn bag_view(sim: &RuntimeSim) -> inf_ui::InventoryView {
                 None => inf_ui::InventorySlot::default(),
             })
             .collect(),
+        // The demo loop's probe reads the BAG; the attachment bench is drawn by
+        // the panel and has no probe of its own. Empty rather than projected,
+        // stated so the omission is a decision: what `hero.csv` carries about
+        // attachments is the FOLD's own summary column (wave WPN2d), which is
+        // the thing a frame is triggered on.
+        bench: Vec::new(),
     }
 }
 

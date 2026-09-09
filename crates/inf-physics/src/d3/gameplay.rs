@@ -872,17 +872,33 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
     use inf_ecs::components::{AttachedTo, MeshRef, Name, Primitive, Transform, Visibility};
 
     for guid in gunners(world) {
-        let want = equipped_weapon(world, guid).map(|(id, def)| (id, def.muzzle_forward_m));
+        // **WHAT IT DRAWS AS** (wave WPN2d). Three things now rather than one:
+        // the id, the barrel length the placeholder is scaled to, and the mesh
+        // asset — `inf_ecs::weapon::weapon_mesh_of`, which is the `ItemDef`'s own
+        // override if it names one and the class -> art table's derived identity
+        // otherwise. `None` is a shotgun, a launcher, or a project whose art is
+        // not on this machine, and it draws the primitive it always drew.
+        let want = equipped_weapon_item(world, guid).map(|(id, item)| {
+            let forward = item
+                .weapon
+                .as_ref()
+                .map(|w| w.muzzle_forward_m)
+                .unwrap_or_default();
+            (id, forward, inf_ecs::weapon::weapon_mesh_of(&item))
+        });
         let weapon_guid = equipped_weapon_guid(guid);
         let existing = world.entity_of(weapon_guid);
         match (want, existing) {
             (None, Some(e)) => {
                 // Nothing equipped: the weapon leaves the world, so a holstered
                 // character is byte-identical to one that never had a weapon.
+                // Its accessories go with it — a scope with no rifle under it
+                // would hang in the air on the derived guid for ever.
+                despawn_accessories(world, weapon_guid);
                 world.despawn(e);
             }
             (None, None) => {}
-            (Some((id, forward)), existing) => {
+            (Some((id, forward, mesh)), existing) => {
                 let e = match existing {
                     Some(e) => e,
                     None => world.spawn_with_guid(weapon_guid, &format!("Weapon: {id}"), None),
@@ -910,12 +926,33 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
                 // `the_equipped_weapon_is_an_entity_attached_to_the_hand_socket`.
                 let mut t = w.get_mut::<Transform>(e).map(|t| *t).unwrap_or_default();
                 let len = forward.clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M);
-                t.scale = inf_ecs::math::Vec3d::new(0.06, 0.06, len);
+                // **A REAL MESH IS DRAWN AT ITS OWN SIZE** (wave WPN2d), and the
+                // placeholder is still scaled to the barrel.
+                //
+                // The inversion is deliberate and it is the honest one. A
+                // placeholder box has no size of its own, so it is stretched to
+                // `muzzle_forward_m` — that number IS the barrel, and the box is
+                // a stand-in for it. A real weapon mesh is modelled in metres and
+                // already IS the length its class says it is, so stretching it
+                // would distort a rifle to fit a number that was authored to
+                // describe that rifle. The fixed step cannot measure a mesh (it
+                // has no asset database — that is the editor's and the pack's),
+                // so the choice is between scaling art by a number nobody has
+                // checked against it and drawing art at 1:1 and letting the
+                // registry's own barrel lengths be what a shot's muzzle offset
+                // is measured along. This takes the second, and `wpn2d_gate`
+                // measures the consequence: the hand holds the mesh at its
+                // origin and the muzzle is `muzzle_forward_m` along its `+Z`.
+                t.scale = if mesh.is_some() {
+                    inf_ecs::math::Vec3d::ONE
+                } else {
+                    inf_ecs::math::Vec3d::new(0.06, 0.06, len)
+                };
                 w.entity_mut(e).insert((
                     t,
                     MeshRef {
                         primitive: Primitive::Cube,
-                        asset: None,
+                        asset: mesh,
                     },
                     Visibility::default(),
                     // Zero offset: the weapon sits AT the hand socket, which is
@@ -923,10 +960,170 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
                     // transform is the refinement, and it needs the rig — which
                     // this step does not have and the pose step does.
                     AttachedTo::new(guid, WEAPON_SOCKET, inf_ecs::math::Vec3d::ZERO),
+                    // **The marker** (wave WPN2d): what makes this entity
+                    // askable-about without re-deriving its guid — the
+                    // first-person fade rule's door
+                    // (`inf_ecs::weapon::subject_fade_for`) and the gate's.
+                    inf_ecs::weapon::EquippedWeapon { owner: guid },
                 ));
+                step_accessories(world, guid, weapon_guid, len);
             }
         }
     }
+}
+
+/// **What is bolted onto the weapon, as things you can SEE** (wave WPN2d).
+///
+/// `step_casing_entities`' doctrine exactly: a derived guid per slot, a runtime
+/// entity reconciled against the state every step, no schema. An accessory is
+/// `AttachedTo` the WEAPON with an **empty socket name**, which
+/// `inf_ecs::attach::update_attachments` reads as *ride the entity, not a rig* —
+/// so a scope follows the rifle the rifle's own attachment already put in the
+/// hand, one pass later and with no second rule.
+///
+/// The three offsets are in the weapon's own local frame (`+Z` down the barrel),
+/// and each is the place that part of a gun physically is:
+///
+/// * an **optic** sits on top of the receiver, a little forward of the grip;
+/// * a **muzzle device** sits at the muzzle, which is `muzzle_forward_m` along
+///   the barrel — the same number the shot leaves from, so a suppressor is
+///   drawn exactly where the bullet comes out;
+/// * an **underbarrel** grip sits under the handguard at the FORE-GRIP point,
+///   which is [`fore_grip_m`]'s own two-thirds-of-barrel rule — the same number
+///   the off hand reaches for, so a hand and a grip cannot end up in two places.
+///
+/// A checkout without the accessory art draws nothing at all rather than a box:
+/// a floating cube on a rifle is worse than an unadorned rifle, and the
+/// attachment's EFFECT (the fold) is what the wave is really about.
+fn step_accessories(world: &mut EcsWorld, owner: Uuid, weapon_guid: Uuid, barrel_m: f64) {
+    use inf_ecs::attachment::{AttachmentArt, AttachmentSlot};
+    use inf_ecs::components::{AttachedTo, MeshRef, Name, Primitive, Transform, Visibility};
+    let Some(entity) = world.entity_of(owner) else {
+        return;
+    };
+    let equipped = world
+        .world()
+        .get::<weapon::WeaponState>(entity)
+        .map(|s| s.attach);
+    let art: Vec<(AttachmentSlot, AttachmentArt)> = match equipped {
+        Some(a) => inf_ecs::attachment::equipped_art(&a),
+        None => Vec::new(),
+    };
+    let mut want: BTreeSet<Uuid> = BTreeSet::new();
+    for (slot, kind) in &art {
+        let Some(asset) = inf_ecs::weapon::attachment_mesh_guid(*kind) else {
+            continue;
+        };
+        let g = accessory_guid(weapon_guid, *slot);
+        want.insert(g);
+        let offset = accessory_offset(*slot, barrel_m);
+        let e = match world.entity_of(g) {
+            Some(e) => e,
+            None => world.spawn_with_guid(g, &format!("Attachment: {}", slot.name()), None),
+        };
+        let mut t = world
+            .world()
+            .get::<Transform>(e)
+            .copied()
+            .unwrap_or_default();
+        t.scale = inf_ecs::math::Vec3d::ONE;
+        world.world_mut().entity_mut(e).insert((
+            t,
+            MeshRef {
+                primitive: Primitive::Cube,
+                asset: Some(asset),
+            },
+            Visibility::default(),
+            AttachedTo::new(weapon_guid, "", offset),
+            inf_ecs::weapon::AccessoryMark { weapon: weapon_guid },
+        ));
+        if let Some(mut n) = world.world_mut().get_mut::<Name>(e) {
+            let label = format!("Attachment: {}", slot.name());
+            if n.0 != label {
+                n.0 = label;
+            }
+        }
+    }
+    // Anything on this weapon's rail that is no longer bolted on is gone.
+    for g in drawn_accessories(world, weapon_guid) {
+        if !want.contains(&g) {
+            if let Some(e) = world.entity_of(g) {
+                world.despawn(e);
+            }
+        }
+    }
+}
+
+/// Every accessory currently drawn on this weapon, in `Guid` order.
+fn drawn_accessories(world: &EcsWorld, weapon_guid: Uuid) -> Vec<Uuid> {
+    use inf_ecs::components::Guid;
+    let w = world.world();
+    let Some(mut q) = w.try_query::<(&Guid, &inf_ecs::weapon::AccessoryMark)>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<Uuid> = q
+        .iter(w)
+        .filter(|(_, m)| m.weapon == weapon_guid)
+        .map(|(g, _)| g.0)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Take every accessory off a weapon that is leaving the world.
+fn despawn_accessories(world: &mut EcsWorld, weapon_guid: Uuid) {
+    for g in drawn_accessories(world, weapon_guid) {
+        if let Some(e) = world.entity_of(g) {
+            world.despawn(e);
+        }
+    }
+}
+
+/// **The identity of one accessory on one weapon** — content-derived, so a fixed
+/// step mints nothing random (`equipped_weapon_guid`'s own law).
+fn accessory_guid(weapon_guid: Uuid, slot: inf_ecs::attachment::AttachmentSlot) -> Uuid {
+    let mut n = weapon_guid.as_u128();
+    n ^= ACCESSORY_SALT;
+    n = n.rotate_left(u32::from(slot.index() as u8) * 7 + 1);
+    Uuid::from_u128(n)
+}
+
+/// The salt accessory identities are derived against — `equipped_weapon_guid`'s
+/// own construction, one level down.
+const ACCESSORY_SALT: u128 = 0x4143_4345_5353_4f52_595f_5750_4e32_4421;
+
+/// **Where an accessory sits on the weapon**, in the weapon's own local frame.
+/// See [`step_accessories`] for why each is where it is.
+fn accessory_offset(
+    slot: inf_ecs::attachment::AttachmentSlot,
+    barrel_m: f64,
+) -> inf_ecs::math::Vec3d {
+    use inf_ecs::attachment::AttachmentSlot;
+    match slot {
+        // On top of the receiver, a third of the way down it.
+        AttachmentSlot::Optic => inf_ecs::math::Vec3d::new(0.0, 0.055, barrel_m * 0.33),
+        // At the muzzle — the same point the shot leaves from.
+        AttachmentSlot::Muzzle => inf_ecs::math::Vec3d::new(0.0, 0.0, barrel_m),
+        // Under the handguard, at the fore-grip the off hand reaches for.
+        AttachmentSlot::Underbarrel => {
+            inf_ecs::math::Vec3d::new(0.0, -0.045, f64::from(fore_grip_len(barrel_m)))
+        }
+        // Everything else changes numbers and not silhouettes; nothing is drawn
+        // for it and `equipped_art` never answers one.
+        _ => inf_ecs::math::Vec3d::ZERO,
+    }
+}
+
+/// **The equipped item, whole** (wave WPN2d) — what `equipped_weapon` answers
+/// plus the `ItemDef` around it, because the mesh is a property of the ITEM and
+/// the numbers are a property of the weapon inside it.
+fn equipped_weapon_item(world: &EcsWorld, guid: Uuid) -> Option<(String, inf_ecs::item::ItemDef)> {
+    let entity = world.entity_of(guid)?;
+    let inv = world.world().get::<inf_ecs::item::Inventory>(entity)?;
+    let id = inv.equipped_id()?.to_string();
+    let item = inf_ecs::item::item_defs(world)?.get(&id)?.clone();
+    item.weapon.as_ref()?;
+    Some((id, item))
 }
 
 /// **Where a two-handed weapon's fore-grip is**, metres along the barrel from
@@ -937,10 +1134,20 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
 /// where a hand sits on a rifle's handguard, and clamping the result keeps a
 /// 5 cm weapon from asking the off hand to occupy the same space as the on hand.
 fn fore_grip_m(def: &WeaponDef) -> f32 {
-    let len = def
-        .muzzle_forward_m
-        .clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M);
-    (len * 0.66).clamp(0.12, 0.60) as f32
+    fore_grip_len(
+        def.muzzle_forward_m
+            .clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M),
+    )
+}
+
+/// **The two-thirds rule itself**, over a barrel length (wave WPN2d).
+///
+/// Split out of [`fore_grip_m`] with nothing changed, because two things read it
+/// now: the off HAND, which is what it was written for, and the underbarrel
+/// GRIP an attachment draws. A hand and the grip it is holding must be in the
+/// same place, and one function is how.
+fn fore_grip_len(barrel_m: f64) -> f32 {
+    (barrel_m * 0.66).clamp(0.12, 0.60) as f32
 }
 
 /// How far in front of the character's chest an AIMED weapon is brought,

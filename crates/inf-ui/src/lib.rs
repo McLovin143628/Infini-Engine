@@ -46,7 +46,8 @@ pub mod view;
 
 pub use draw::{Align, Color, Rect, UiDrawList};
 pub use inventory::{
-    InventoryInput, InventoryOutcome, InventorySlot, InventoryState, InventoryVerb, InventoryView,
+    BenchSlot, InventoryInput, InventoryOutcome, InventorySlot, InventoryState, InventoryVerb,
+    InventoryView,
 };
 pub use menu::{Capture, MenuInput, MenuOutcome, MenuState, Page, Row, RowId};
 pub use settings::GameSettings;

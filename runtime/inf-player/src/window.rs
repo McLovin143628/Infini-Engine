@@ -686,6 +686,26 @@ impl PlayerApp {
         inf_ecs::crime::wanted_readout(world, inf_ecs::movement::camera_subject(world)?)
     }
 
+    /// **How far into a lock the camera subject's launcher is** (wave WPN2d) —
+    /// the indicator's condition, and the whole of the host's share of it.
+    ///
+    /// One Ring-0 pair, exactly as [`Self::ammo_readout`] is: the hold time, the
+    /// cone and the decision that a lock exists at all are sim state, and a host
+    /// that divided a held time by a weapon's own `lock_s` for itself would be a
+    /// second opinion about `WeaponState::lock_fraction`.
+    ///
+    /// `None` for a character with no weapon, a weapon that cannot lock, and a
+    /// launcher pointed at nothing — which is every session before this wave.
+    fn lock_readout(sim: &RuntimeSim) -> Option<(f64, bool)> {
+        let world = sim.world();
+        let guid = inf_ecs::movement::camera_subject(world)?;
+        let (_, def) = inf_ecs::weapon::equipped_def(world, guid)?;
+        let entity = world.entity_of(guid)?;
+        let state = world.world().get::<inf_ecs::weapon::WeaponState>(entity)?;
+        let progress = state.lock_fraction(&def);
+        (progress > 0.0).then(|| (progress, state.locked_on(&def).is_some()))
+    }
+
     /// **Is the camera subject pointing a weapon?** — the reticle's condition.
     ///
     /// Two halves, and both are needed: the aim mode (RMB), because a carried
@@ -753,7 +773,56 @@ impl PlayerApp {
                     None => inf_ui::InventorySlot::default(),
                 })
                 .collect(),
+            bench: Self::bench_of(sim),
         }
+    }
+
+    /// **The equipped weapon's rail**, as the panel renders it (wave WPN2d).
+    ///
+    /// `bag_of`'s sentence one list along: `inf-ui` does not depend on the world
+    /// model, so the host walks the attachment catalogue once a frame and hands
+    /// over strings. Empty for a character with nothing equipped and for one
+    /// carrying something that is not a weapon, which is what an absent bench
+    /// means to the panel.
+    ///
+    /// The COUNT is what tells a bare rail from a rail with nothing to fit: a
+    /// launcher has no `Underbarrel` row in the catalogue at all, and a slot
+    /// whose cycle key would do nothing says so rather than looking broken.
+    fn bench_of(sim: &RuntimeSim) -> Vec<inf_ui::BenchSlot> {
+        use inf_ecs::attachment::{catalogue, AttachmentSlot};
+        let world = sim.world();
+        let Some(actor) = inf_ecs::movement::camera_subject(world) else {
+            return Vec::new();
+        };
+        // The BASE definition: a bench shows what a part is worth, so it must
+        // not be reading numbers the parts have already changed.
+        let Some((_, def)) = inf_ecs::weapon::base_equipped_def(world, actor) else {
+            return Vec::new();
+        };
+        let Some(entity) = world.entity_of(actor) else {
+            return Vec::new();
+        };
+        let fitted = world
+            .world()
+            .get::<inf_ecs::weapon::WeaponState>(entity)
+            .map(|s| s.attach);
+        let cat = catalogue();
+        let class = def.audio_class();
+        AttachmentSlot::ALL
+            .into_iter()
+            .map(|slot| inf_ui::BenchSlot {
+                name: slot.name().to_string(),
+                fitted: fitted
+                    .and_then(|a| {
+                        let i = a[slot.index()];
+                        (i != inf_ecs::attachment::NO_ATTACHMENT).then_some(i)
+                    })
+                    .and_then(|i| cat.get(i))
+                    .map(|d| d.label.clone())
+                    .unwrap_or_default(),
+                options: cat.for_slot(class, slot).len(),
+            })
+            .collect()
     }
 
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
@@ -1045,6 +1114,10 @@ impl PlayerApp {
         live.host.draw_tracers(&self.sim);
         // EMS2: and the hoses, out of the same list and into the same layer.
         live.host.draw_extinguish(&self.sim);
+        // …and where the grenade in the hand would land (wave WPN2d). Only
+        // while aiming with a throwable, which is `draw_throw_arc`'s own
+        // decision; here it costs one call.
+        live.host.draw_throw_arc(&self.sim);
         // ── the in-game UI (island wave I5) ──
         //
         //    BETWEEN the projection and the render, which is the only window in
@@ -1103,6 +1176,14 @@ impl PlayerApp {
         // this engine's carried weapons do not honour.
         if Self::is_aiming(&self.sim) {
             self.ui.reticle();
+        }
+        // **THE LOCK** (wave WPN2d) — four brackets closing around the reticle,
+        // drawn whenever the camera subject's launcher has something in its
+        // cone. It is NOT gated on `is_aiming`: a launcher acquires while it is
+        // being pointed, which is the same aim line the shot leaves along, and a
+        // player who cannot see the lock has no reason to keep holding it.
+        if let Some((progress, complete)) = Self::lock_readout(&self.sim) {
+            self.ui.lock(progress, complete);
         }
         live.host.set_ui(self.ui.list());
         if let Some(view) = view {

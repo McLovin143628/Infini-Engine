@@ -44,6 +44,14 @@ pub struct InventoryState {
     /// the panel is keyboard-driven (the mouse is I5's own carried remainder)
     /// and because two presses are what a gamepad can do.
     pub held: Option<usize>,
+    /// **Which rail slot the bench cursor is on** (wave WPN2d).
+    ///
+    /// Its own cursor rather than a mode on [`focus`](Self::focus), because the
+    /// bag and the rail are two different lists a player moves between rather
+    /// than one list with a mode: `Tab` steps this one and the arrows step the
+    /// other, so a player never has to remember which of the two the arrows are
+    /// pointing at.
+    pub bench_focus: usize,
 }
 
 impl InventoryState {
@@ -52,6 +60,7 @@ impl InventoryState {
         self.open = open;
         self.focus = 0;
         self.held = None;
+        self.bench_focus = 0;
     }
 }
 
@@ -76,11 +85,34 @@ impl InventorySlot {
     }
 }
 
+/// **One rail slot of the attachment bench**, as the panel renders it (wave
+/// WPN2d) — the host's projection of `inf_ecs::attachment::AttachmentSlot` plus
+/// what is bolted in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BenchSlot {
+    /// What the slot is called — `muzzle`, `optic`, and the eight others.
+    pub name: String,
+    /// What is fitted, or empty for a bare rail.
+    pub fitted: String,
+    /// How many rows the catalogue has for this class and slot — the number
+    /// that tells an empty rail from one with nothing to fit.
+    pub options: usize,
+}
+
 /// **What a character is carrying**, as the panel sees it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InventoryView {
     /// Every slot, in grid order.
     pub slots: Vec<InventorySlot>,
+    /// **The equipped weapon's rail** (wave WPN2d), one entry per
+    /// `AttachmentSlot` in that enum's own order — empty when nothing that takes
+    /// attachments is equipped, which is every session before this wave and
+    /// every character carrying a bandage.
+    ///
+    /// It is a projection for exactly `slots`' reason: `inf-ui` does not depend
+    /// on the world model, so the host walks the catalogue once a frame and
+    /// hands over strings.
+    pub bench: Vec<BenchSlot>,
 }
 
 /// One input the panel might take.
@@ -99,6 +131,15 @@ pub enum InventoryVerb {
     Drop(usize),
     /// Equip a slot.
     Equip(usize),
+    /// **Step the attachment in one rail slot** (wave WPN2d) — `slot` is an
+    /// index into `inf_ecs::attachment::AttachmentSlot::ALL` and `delta` is
+    /// `+1`, `-1` or `0`, where **zero clears the slot**.
+    ///
+    /// A CYCLE rather than a pick-from-a-list, on `rotation_mode`'s own
+    /// reasoning: five hundred and thirty rows will not fit in a HUD panel, and
+    /// what a player at a bench wants is *the next one*. A list is a menu, and
+    /// this panel is deliberately not one.
+    CycleAttachment { slot: u8, delta: i8 },
 }
 
 /// What routing one input did.
@@ -182,6 +223,32 @@ pub fn handle(
                 out.verb = Some(InventoryVerb::Equip(state.focus));
             }
         }
+        // ── the attachment bench (wave WPN2d) ──
+        //
+        // Three keys, and none of them is one the bag already spends: `Tab`
+        // moves the rail cursor, `[` and `]` step what is in it, and `Backspace`
+        // takes it off. They do nothing at all when nothing that takes
+        // attachments is equipped, which is what an empty `bench` means.
+        "Tab" => {
+            if !view.bench.is_empty() {
+                state.bench_focus = step(state.bench_focus, view.bench.len(), 1);
+            }
+        }
+        "BracketRight" | "BracketLeft" | "Backspace" => {
+            if !view.bench.is_empty() {
+                let i = state.bench_focus.min(view.bench.len() - 1);
+                if view.bench[i].options > 0 {
+                    out.verb = Some(InventoryVerb::CycleAttachment {
+                        slot: i as u8,
+                        delta: match code.as_str() {
+                            "BracketRight" => 1,
+                            "BracketLeft" => -1,
+                            _ => 0,
+                        },
+                    });
+                }
+            }
+        }
         // Every other key is taken and does nothing — see the doc above.
         _ => {}
     }
@@ -205,6 +272,13 @@ fn step(focus: usize, n: usize, by: isize) -> usize {
 /// row read the same sentence.
 pub fn legend() -> &'static str {
     "arrows move  Enter takes/places  F equips  Q drops  Esc closes"
+}
+
+/// The bench's own key legend (wave WPN2d) — its own string beside
+/// [`legend`], because the two rows are two different lists and a player reading
+/// one should not have to filter the other out of it.
+pub fn bench_legend() -> &'static str {
+    "Tab rail  [ ] fit  Backspace strips"
 }
 
 /// **Draw it.** A grid in the lower half of the screen, with the focused slot
@@ -282,6 +356,67 @@ pub fn draw(list: &mut UiDrawList, state: &InventoryState, view: &InventoryView)
         (scale - 1.0).max(1.0),
         crate::view::palette::MUTED,
     );
+    draw_bench(list, state, view, x, y, w, pad, scale);
+}
+
+/// **The attachment bench**, drawn ABOVE the bag (wave WPN2d).
+///
+/// One row per rail slot, `name  fitted`, with the cursor's row outlined — the
+/// same vocabulary the bag itself uses, so a player reads one panel rather than
+/// two. Nothing is drawn when the bench is empty, which is a character carrying
+/// nothing that takes attachments.
+///
+/// It sits above rather than beside because the bag is already `GRID_COLUMNS`
+/// wide and centred, and a second column would push one of the two off the
+/// middle of the screen.
+#[allow(clippy::too_many_arguments)]
+fn draw_bench(
+    list: &mut UiDrawList,
+    state: &InventoryState,
+    view: &InventoryView,
+    x: f32,
+    bag_y: f32,
+    w: f32,
+    pad: f32,
+    scale: f32,
+) {
+    if view.bench.is_empty() {
+        return;
+    }
+    let line = 12.0 * scale;
+    let h = view.bench.len() as f32 * line + pad * 4.0;
+    let y = bag_y - h - pad;
+    list.rect(Rect::new(x, y, w, h), crate::view::palette::PANEL);
+    list.stroke(Rect::new(x, y, w, h), 2.0, crate::view::palette::EDGE);
+    for (i, slot) in view.bench.iter().enumerate() {
+        let r = Rect::new(x + pad, y + pad + i as f32 * line, w - pad * 2.0, line);
+        if state.bench_focus == i {
+            list.rect(r, crate::view::palette::TOAST);
+            list.stroke(r, 1.0, crate::view::palette::TEXT);
+        }
+        list.text_in(
+            r,
+            2.0,
+            Align::Left,
+            &slot.name,
+            (scale - 1.0).max(1.0),
+            crate::view::palette::MUTED,
+        );
+        let (text, colour) = if slot.fitted.is_empty() {
+            ("--", crate::view::palette::MUTED)
+        } else {
+            (slot.fitted.as_str(), crate::view::palette::TEXT)
+        };
+        list.text_in(r, 2.0, Align::Right, text, (scale - 1.0).max(1.0), colour);
+    }
+    list.text_in(
+        Rect::new(x, y + h - pad * 3.0, w, pad * 3.0),
+        pad,
+        Align::Center,
+        bench_legend(),
+        (scale - 1.0).max(1.0),
+        crate::view::palette::MUTED,
+    );
 }
 
 #[cfg(test)]
@@ -290,6 +425,7 @@ mod tests {
 
     fn view() -> InventoryView {
         InventoryView {
+            bench: Vec::new(),
             slots: vec![
                 InventorySlot {
                     label: "Rifle".into(),
@@ -354,6 +490,7 @@ mod tests {
         // bounds — the case a bag of three slots is.
         let small = InventoryView {
             slots: vec![InventorySlot::default(); 3],
+            ..Default::default()
         };
         let mut s2 = InventoryState::default();
         s2.set_open(true);

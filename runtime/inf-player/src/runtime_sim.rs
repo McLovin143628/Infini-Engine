@@ -1482,6 +1482,53 @@ impl RuntimeSim {
                     None => false,
                 }
             }
+            // **THE BENCH** (wave WPN2d). A CYCLE over the catalogue's own
+            // rows for this weapon's class and this slot — `+1` next, `-1`
+            // previous, `0` strips it — through the one write door
+            // (`inf_ecs::weapon::equip_attachment`), which is what refuses a
+            // part that does not fit and what tops the magazine up when an
+            // override changes it.
+            //
+            // The cycle wraps through an EMPTY position, so a player who cycles
+            // past the last row gets a bare rail back rather than the first row
+            // again: taking a part off has to be reachable by the same key that
+            // put one on, or the panel needs a second verb for the common case.
+            inf_ui::InventoryVerb::CycleAttachment { slot, delta } => {
+                use inf_ecs::attachment::{catalogue, AttachmentSlot, NO_ATTACHMENT};
+                let Some(slot) = AttachmentSlot::from_index(slot as usize) else {
+                    return false;
+                };
+                let Some((_, def)) = inf_ecs::weapon::base_equipped_def(&self.world, actor) else {
+                    return false;
+                };
+                if delta == 0 {
+                    return inf_ecs::weapon::equip_attachment(&mut self.world, actor, slot, None);
+                }
+                let rows = catalogue().for_slot(def.audio_class(), slot);
+                if rows.is_empty() {
+                    return false;
+                }
+                let Some(e) = self.world.entity_of(actor) else {
+                    return false;
+                };
+                let now = self
+                    .world
+                    .world()
+                    .get::<inf_ecs::weapon::WeaponState>(e)
+                    .map(|s| s.attach[slot.index()])
+                    .unwrap_or(NO_ATTACHMENT);
+                // The cycle is over `rows.len() + 1` positions: the rows, and
+                // one empty.
+                let here = rows.iter().position(|i| *i == now);
+                let n = rows.len() as isize + 1;
+                let at = match here {
+                    Some(i) => i as isize,
+                    None => rows.len() as isize,
+                };
+                let next = (at + delta as isize).rem_euclid(n);
+                let want = rows.get(next as usize).copied();
+                inf_ecs::weapon::equip_attachment(&mut self.world, actor, slot, want)
+            }
             inf_ui::InventoryVerb::Equip(slot) => {
                 let Some(e) = self.world.entity_of(actor) else {
                     return false;

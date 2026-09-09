@@ -474,6 +474,27 @@ impl PlayerUi {
         inf_ui::view::reticle(&mut self.list, inf_ui::view::palette::TEXT);
     }
 
+    /// **Draw the lock-on indicator** (wave WPN2d) — four brackets that close
+    /// around the reticle as a launcher acquires.
+    ///
+    /// [`reticle`](Self::reticle)'s split, verbatim: the caller decides
+    /// *whether* (a launcher with something in its cone) and this decides *how*.
+    /// The colour is the difference between "acquiring" and "locked" — the
+    /// reticle's own ink until the hold completes and the warning colour after
+    /// it, so the moment a missile becomes guided is visible without reading a
+    /// number.
+    pub fn lock(&mut self, progress: f64, complete: bool) {
+        if self.menu.open {
+            return;
+        }
+        let colour = if complete {
+            inf_ui::view::palette::WARN
+        } else {
+            inf_ui::view::palette::TEXT
+        };
+        inf_ui::view::lock_reticle(&mut self.list, progress as f32, colour);
+    }
+
     /// The finished list.
     pub fn list(&self) -> &UiDrawList {
         &self.list

@@ -447,6 +447,72 @@ impl PlayerRenderHost {
         }
     }
 
+    /// **Draw the throw arc** (wave WPN2d) — where the grenade in the camera
+    /// subject's hand would land, while it is being aimed.
+    ///
+    /// `draw_tracers`' sentence one system along: there is no particle system
+    /// and no projected decal, so a trajectory preview is a run of debug-line
+    /// segments, which is the substrate this engine has. Twenty-three of them —
+    /// the same order as one tracer's.
+    ///
+    /// **The line is the SAME arithmetic the body flies on**
+    /// (`inf_ecs::ballistics::throw_arc` calls `advance_round`), which is the
+    /// whole point: a preview computed a second way would be a reticle that
+    /// lies, and this engine has a standing ruling about exactly that.
+    ///
+    /// Drawn only while **aiming** and only with a `throwable` equipped: an arc
+    /// on screen at all times is a claim that the character is always about to
+    /// throw something.
+    ///
+    /// Read-only, like every other overlay.
+    pub fn draw_throw_arc(&mut self, sim: &RuntimeSim) {
+        let world = sim.world();
+        let Some(guid) = inf_ecs::movement::camera_subject(world) else {
+            return;
+        };
+        let Some(entity) = world.entity_of(guid) else {
+            return;
+        };
+        let aiming = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)
+            .is_some_and(|cm| {
+                cm.rotation_mode == inf_ecs::components::RotationMode::Aiming
+                    && !cm.runtime.seat.is_seated()
+            });
+        if !aiming {
+            return;
+        }
+        let Some((_, def)) = inf_ecs::weapon::equipped_def(world, guid) else {
+            return;
+        };
+        if !def.throwable {
+            return;
+        }
+        let Some((from, yaw, pitch)) = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)
+            .and_then(|cm| {
+                inf_physics::d3::gameplay::feet_of(world, guid).map(|f| {
+                    (
+                        f + glam::DVec3::Y * inf_physics::d3::gameplay::MUZZLE_HEIGHT_M,
+                        cm.runtime.aim_yaw_deg,
+                        cm.runtime.aim_pitch_deg,
+                    )
+                })
+            })
+        else {
+            return;
+        };
+        let v = inf_ecs::weapon::aim_forward(yaw, pitch) * def.muzzle_speed_mps.max(0.1);
+        let arc = inf_ecs::ballistics::throw_arc(from, v, &def);
+        for pair in arc.windows(2) {
+            let a = self.origin.to_render(pair[0]);
+            let b = self.origin.to_render(pair[1]);
+            self.scene.debug.line(a, b, THROW_ARC_COLOR);
+        }
+    }
+
     /// **Draw this step's extinguish lines** (wave EMS2) — one per fire crew
     /// working a scene, from the crew member's shoulder to what is burning.
     ///
@@ -582,6 +648,10 @@ const MUZZLE_COLOR: [f32; 4] = [1.0, 0.96, 0.80, 1.0];
 /// point-blank shot still has one and a four-hundred-metre one does not have a
 /// forty-metre flash.
 const MUZZLE_FLASH_FRACTION: f32 = 0.02;
+
+/// The throw arc's colour (wave WPN2d) — a pale green, so a trajectory preview
+/// does not read as a tracer (warm) or as a hose (blue-white).
+const THROW_ARC_COLOR: [f32; 4] = [0.60, 1.0, 0.66, 0.8];
 
 /// An extinguish line's colour (wave EMS2) — a pale blue-white, so a hose does
 /// not read as a tracer.
@@ -1140,10 +1210,20 @@ pub fn project_scene_full(
             //    and a coat and a head of hair drawn at twenty centimetres
             //    would be the whole frame. Both ride the SKINNED path, so both
             //    go through the same one rule the body does.
-            let worn_fade = match sim.camera_subject() {
-                Some(s) if s == guid => sim.camera().subject_fade as f32,
-                _ => 1.0,
-            };
+            //
+            // **Through the one door since wave WPN2d** — `subject_fade_for`.
+            // The rule it states is that an equipped WEAPON is excluded: a
+            // first-person view with no gun in it would make the whole of the
+            // WPN2 arc invisible at the range a player spends most of their time
+            // at. Today a weapon is a rigid draw and this path is the skinned
+            // one, so the exclusion is right by construction — which is exactly
+            // why it is a named function rather than an accident of routing.
+            let worn_fade = inf_ecs::weapon::subject_fade_for(
+                world,
+                guid,
+                sim.camera_subject(),
+                sim.camera().subject_fade,
+            ) as f32;
             project_cloth(
                 scene,
                 world,
@@ -1323,10 +1403,16 @@ pub fn project_scene_full(
                         // material, so a fade set here would be taken straight
                         // back on every body whose slots name one — which is
                         // every MetaHuman in this tree.
-                        let fade = match sim.camera_subject() {
-                            Some(s) if s == pose_guid => sim.camera().subject_fade as f32,
-                            _ => 1.0,
-                        };
+                        //
+                        // **Through `subject_fade_for` since wave WPN2d** — the
+                        // one door, and the place the first-person weapon rule
+                        // is stated. See the garment's own call for why.
+                        let fade = inf_ecs::weapon::subject_fade_for(
+                            world,
+                            pose_guid,
+                            sim.camera_subject(),
+                            sim.camera().subject_fade,
+                        ) as f32;
                         let inst = SkinnedInstance {
                             vt,
                             translation,

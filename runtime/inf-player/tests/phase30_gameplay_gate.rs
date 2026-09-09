@@ -385,6 +385,7 @@ fn bag_of(sim: &RuntimeSim) -> inf_ui::InventoryView {
     };
     let defs = inf_ecs::item::item_defs(world);
     inf_ui::InventoryView {
+        bench: Vec::new(),
         slots: inv
             .slots
             .iter()
