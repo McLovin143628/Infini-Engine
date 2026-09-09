@@ -1157,33 +1157,11 @@ fn step_weapons(
             report.muzzles_without_a_socket += 1;
         }
         let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
-        // The step's ray bill so far, so the pool's spawn refusal covers the
-        // whole step and not only the flight: **one cast per shot fired here**,
-        // and nothing else.
-        //
-        // The rounds already in the air are deliberately NOT counted here —
-        // `spawn_round` counts them itself, off the pool it is about to push
-        // into. Counting them in both places halved the effective bound:
-        // measured, at eight shooters and 900 rpm the pool peaked at **32**
-        // rounds against a stated ceiling of 64 and refused 301 spawns, because
-        // 32 rounds' rays were being billed twice.
-        let rays_already = report.shots as usize;
-        let mut rounds = report.rounds;
         let hit = if def.is_melee() {
             resolve_swing(world, guid, &def, from, dir, yaw)
         } else {
-            resolve_shot(
-                world,
-                bridge,
-                guid,
-                &def,
-                from,
-                dir,
-                rays_already,
-                &mut rounds,
-            )
+            resolve_shot(world, bridge, guid, &def, from, dir, report)
         };
-        report.rounds = rounds;
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
     }
@@ -1208,8 +1186,10 @@ fn step_weapons(
 /// the round lands. The impact, if there is one, comes back later as its own
 /// quiet hit from [`step_rounds`].
 ///
-/// `rays_already` is this step's cast count so far, so the pool's spawn refusal
-/// covers the whole step's ray bill — see [`MAX_SHOT_RAYS_PER_STEP`].
+/// The step's own report comes in rather than a ray count and a round report,
+/// because the spawn refusal has to cover the WHOLE step's ray bill: one cast
+/// per shot fired so far (`report.shots`) plus what the flight will spend — see
+/// `inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP`.
 fn resolve_shot(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -1217,9 +1197,15 @@ fn resolve_shot(
     def: &WeaponDef,
     from: DVec3,
     dir: DVec3,
-    rays_already: usize,
-    rounds: &mut RoundReport,
+    report: &mut GameplayReport,
 ) -> WeaponHit {
+    // The step's ray bill so far: **one cast per shot fired here**, and nothing
+    // else. The rounds already in the air are deliberately NOT counted —
+    // `spawn_round` counts them itself, off the pool it is about to push into.
+    // Counting them in both places halved the effective bound: measured, at
+    // eight shooters and 900 rpm the pool peaked at **32** rounds against a
+    // stated ceiling of 64 and refused 301 spawns.
+    let rays_already = report.shots as usize;
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
     let mut exclude = BTreeSet::new();
@@ -1242,10 +1228,11 @@ fn resolve_shot(
             let on_flesh = target.is_some_and(|g| is_flesh(world, g));
             let point = from + dir * h.toi;
             let headshot = on_flesh
-                && target
-                    .is_some_and(|g| head_hit(world, g, point, &mut rounds.heads_without_a_socket));
+                && target.is_some_and(|g| {
+                    head_hit(world, g, point, &mut report.rounds.heads_without_a_socket)
+                });
             if headshot {
-                rounds.headshots += 1;
+                report.rounds.headshots += 1;
             }
             WeaponHit {
                 shooter,
@@ -1278,9 +1265,9 @@ fn resolve_shot(
                     def: *def,
                 };
                 if inf_ecs::ballistics::spawn_round(world, round, rays_already) {
-                    rounds.spawned += 1;
+                    report.rounds.spawned += 1;
                 } else {
-                    rounds.refused += 1;
+                    report.rounds.refused += 1;
                 }
             }
             WeaponHit {
@@ -1399,13 +1386,8 @@ fn step_rounds(
     if world.world().get_resource::<RoundPool>().is_none() {
         return;
     }
-    let live: Vec<inf_ecs::ballistics::Round> = world
-        .world()
-        .resource::<RoundPool>()
-        .rounds
-        .iter()
-        .copied()
-        .collect();
+    let live: Vec<inf_ecs::ballistics::Round> =
+        world.world().resource::<RoundPool>().rounds.to_vec();
     if live.is_empty() {
         return;
     }
@@ -1500,16 +1482,17 @@ fn step_rounds(
             survivors.push(r);
         }
     }
-    let mut pool = world.world_mut().resource_mut::<RoundPool>();
-    pool.rounds = survivors;
-    pool.impacts += u64::from(report.rounds.impacts);
-    pool.expired += u64::from(report.rounds.expired);
-    pool.left_band += u64::from(report.rounds.left_band);
-    if let Some((_, flight)) = landed.last() {
-        pool.last_flight_m = *flight;
+    {
+        let mut pool = world.world_mut().resource_mut::<RoundPool>();
+        pool.rounds = survivors;
+        pool.impacts += u64::from(report.rounds.impacts);
+        pool.expired += u64::from(report.rounds.expired);
+        pool.left_band += u64::from(report.rounds.left_band);
+        if let Some((_, flight)) = landed.last() {
+            pool.last_flight_m = *flight;
+        }
+        report.rounds.in_flight = pool.rounds.len() as u32;
     }
-    report.rounds.in_flight = pool.rounds.len() as u32;
-    drop(pool);
     for (hit, _) in landed {
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);

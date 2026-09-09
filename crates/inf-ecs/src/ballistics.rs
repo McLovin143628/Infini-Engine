@@ -382,7 +382,12 @@ pub fn smoothstep(t: f64) -> f64 {
 /// ranges at zero, `max_m > effective_m` is false, and the answer is `base_j`
 /// at every distance — the I6 behaviour exactly.
 pub fn damage_curve_j(base_j: f64, min_frac: f64, effective_m: f64, max_m: f64, at_m: f64) -> f64 {
-    if !(max_m > effective_m) || !at_m.is_finite() {
+    // The negation is on the BOOL and not on the comparison, which is what
+    // keeps a NaN out of the curve: `max_m > effective_m` is false for a NaN
+    // either way, and `is_finite` says so out loud rather than by accident.
+    let bends =
+        max_m.is_finite() && effective_m.is_finite() && at_m.is_finite() && max_m > effective_m;
+    if !bends {
         return base_j;
     }
     if at_m <= effective_m {
