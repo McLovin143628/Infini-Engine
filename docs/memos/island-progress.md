@@ -37628,3 +37628,239 @@ has no per-calibre clip — one metal one-shot serves every class and the pitch
 hash is the difference — and no per-calibre mesh; `MeshRef.asset` is the door and
 the art is WPN2d's. Shotgun cones, launchers, attachments and real weapon meshes
 are WPN2d's untouched.
+
+## WAVE WPN2d — CLASSES, ATTACHMENTS AND MESHES (2026-09-09)
+
+**A TRIGGER PULL IS N RAYS.** `pellets` and `cone_deg` on `WeaponDef`, N casts
+off the counter hash at N consecutive indices, each carrying
+`damage_j / pellets` — so the doc's table 6 per-pellet figures come back out of
+the registry's whole-pull numbers by division rather than by a second column
+somebody could disagree with. Measured on the Remington 870: **one shot, eight
+pellets, eight hits, 360.0 J each = 18 HP, which is the doc's own row**, and
+**one** of them `loud`, because `loud` is what four report layers and
+`panic_sources` are built on and eight loud pellets would be thirty-two commands
+and eight witness sources for one trigger.
+
+The pattern is measured as a RADIUS off the hit points, against the cone's own
+closed form: at 9.80 m the eight impacts sit inside **0.331 m** of their centroid (mean
+0.205 m) where a 4.00° cone allows **0.342 m**, and the widest is **more than a
+third of the bound** — which is the arm's own vacuity check, because eight rays through a
+collapsed cone would land in one place and pass a bound test.
+
+**THE CEILING REFUSES WITH A VALUE.** `RoundReport::shot_rays` is a RUNNING
+count now rather than `shots × 7`: a shotgun pull is one shot and up to
+sixty-four casts, so the product was an estimate a pattern makes wrong by a
+factor of the pellet count — and the ceiling is what the pellet loop refuses
+against. Measured: four shooters each pulling a 64-pellet trigger on one fixed
+step is 256 casts against a ceiling of 256; **232 pellets are thrown, 24 are
+refused and counted**, and 232 + 24 is 256 exactly.
+
+And the probe that priced it ran EIGHT TIMES. The enclosure probe is a question
+about where the MUZZLE is, and eight pellets leave one muzzle: running it per
+pellet was six extra rays each for an identical answer and counted one trigger
+as eight indoor shots. `ShotContext` resolves the room and the ear once per
+PULL now -- measured, an eight-pellet pull went from **56 casts to 14**.
+
+**A ROCKET ACCELERATES.** The doc §5's *"accelerating engine force"* as one
+term inside the ONE integrator — a body whose gravity and drag were integrated in
+one place and its thrust in another would have a trajectory that depends on the
+order two functions ran in. Measured on the RPG-7: launched at **115.0 m/s**,
+**132.7** ten steps later, peaking at **289.1** against its row's own 300 m/s
+burnout.
+
+**THE BLAST IS `(1 − d/r)²`, AND IT IS EXACT AT BOTH ENDS.** Not inverse-square,
+because that does not terminate: a clamped `1/d` has a hard edge at the radius
+where the damage jumps from something to nothing. The quadratic has neither
+problem, is one multiply, and is exact enough that the gate compares it against a
+closed form at five distances rather than against a tolerance — 1.000000,
+0.562500, 0.250000, 0.062500, 0.000000, all to 1e-12, and the joules five bodies
+actually lost match the curve to 1e-6.
+
+It spends through the SAME `apply_hit` door a bullet spends through, so a blast
+kill staggers, panics the street, is witnessed and reaches the P22 destructible
+door exactly as a rifle round does — and it asks **one line-of-sight ray per
+candidate**, so a grenade in a stairwell does not kill everybody in the building.
+Measured: two bodies at 5 m, one behind a 0.5 m slab; the exposed one loses
+**340.3 J** and the shadowed one **0.0**.
+
+**A LOCK IS A TARGET AND A CLOCK, ON THE WEAPON.** `PhysicsBridge3D::
+vehicle_guids` is the target set — the same door the E-key prompt asks, because a
+second spelling of "what is a vehicle" is a lock that could acquire something the
+game does not think is a car. It holds while the SAME target stays inside
+`lock_cone_deg` and **releases to nothing** the instant it leaves: a
+half-remembered lock would fire a missile at a car that has driven behind a
+building. The Stinger's `lock_air_only` is measured as ALTITUDE, because this
+engine has no is-flying flag and altitude is the honest question.
+
+**AND A GUIDED ROUND COULD NOT FIND A CAR.** The guidance asked `strike_point`,
+which is `feet_of` plus a height, and `feet_of` reads `CharacterMovement` —
+which no vehicle has. So every lock this engine can actually acquire produced a
+guide the flight could not resolve, and a guided missile flew exactly as straight
+as a dumb one: **5.11 m from a stationary car either way**.
+
+AND THE ARM COULD NOT HAVE SEEN IT, twice over. It aimed straight AT the car,
+where a dumb round is as accurate as a guided one; and it read the closest
+SAMPLE, which at 200 m/s is a number about the sampling rate -- 4.649 m for a
+round that STRUCK the car and 3.241 for one that sailed past it. The car is three
+metres off a forty-metre shot now, and the arm asks the world: **guided
+hit=true, unguided hit=false**.
+
+AND THE GUIDANCE ITSELF WAS A LERP, which moves a direction by roughly
+`f x (the angle remaining)` -- so a bound expressed as a fraction turns SLOWER
+THE CLOSER IT GETS: **1.9 deg/s** at a shipped 90. It is a bounded step across
+the tangent now, still `+ - * /` and one `sqrt`.
+
+**THE FIRST KEY THIS ENGINE HAS EVER BOUND TO A THROW.** `actions::THROW` =
+`KeyB` + the middle mouse button + the d-pad's up. G is `view_mode` since CHAR1c
+and T is `cover` since COV1, and MOVING a bound control is a wave's decision
+rather than a side effect of adding one — so the throw takes the free letter
+nearest the verb and says so.
+
+A throw releases **two ways and both are armed**, on a reload's own precedent:
+the clip's own notify, fired by the pose step when CHAR1b.2's additive crosses
+`inf_anim::THROW_RELEASE_FRAC` (0.60, read off the clip's own shoulder sweep),
+and the character's own clock `THROW_RELEASE_GRACE_S` behind it for every
+character with no rig — which is every headless run and every crowd agent the sim
+has tiered out of posing. The notify always gets there first on a rigged
+character, which is what keeps the clock from making it decoration. Measured: the clip releases at
+**0.510 s (step 31)**, the grace is 2 steps, and the clock path lets go on step
+**33**; a notify injected on step **28** lets go on step **28**.
+
+**A THROWN GRENADE IS NOT IN THE HAND.** The entity leaves the world and the
+hand pose lets go for the frames the body is in the air, through one door
+(`WeaponState::in_hand`) both the drawn entity and the pose ask — a rifle with an
+empty magazine is still a rifle and a grenade is not.
+
+**AND IT DETONATED ON ITS OWN THROWER.** `Round::first_segment` was "the first
+sub-step", which is a rule about bullets wearing a rule about distance: one
+sub-step of a 900 m/s round is 3.75 m and one sub-step of a 16 m/s grenade is
+**seven centimetres**, still inside the capsule that threw it. Measured, by the
+arm that found it: a G67 went off **33 ms** after leaving the hand, at
+**(0.00, 1.45, 0.06)**. The window is `SHOOTER_CLEARANCE_S` = 0.15 s of flight
+now, in which a rifle round is 135 m out and a grenade is 2.4 m out.
+
+**AND ITS FUSE STOPPED COUNTING WHEN IT STOPPED ROLLING.** A thrown body out of
+bounces is not a body that explodes on its next contact — it is a body lying on
+the ground, and what makes it go off is the clock; and the fuse tick was at the
+BOTTOM of the sub-step where every `continue` the loop has skipped it. Measured:
+a three-second fuse ran **3.317 s**, which is three seconds plus the time the
+body spent lying still. It is at the top now and a settled body waits: **3.00 s**
+exactly, at **(0.00, 0.00, 17.35)** -- where the grenade came to rest, seventeen
+metres down the throwing line and not at the muzzle -- hurting two of the five
+bodies standing along it.
+
+**A PUNCH CANNOT REACH THROUGH A WALL** — wave WPN1's carried defect, closed by a
+box cast asked only of the body the SHARED reach-and-cone door already chose. The
+reach and the cone are still `inf_ecs::interact::resolve`, unchanged, so a punch
+still cannot land on somebody the E-key prompt calls unreachable; what this adds
+is a second question. A 24 cm box rather than a ray, because a ray between two
+capsule axes threads a door frame an arm does not fit through. It costs **one
+cast per swing that found a body and none at all for a swing that found nobody**,
+which is the cost wave WPN1 refused to pay per candidate. **Cleave is decided and
+it is no**: the nearest body takes the blow, and a swing that hit everything in
+its cone needs a field, a second resolution and a cast per body — three changes
+to buy a verb no weapon in the registry has.
+
+**530 ATTACHMENT ROWS, AND THE FOLD HAS ONE DOOR.** The doc's own per-class
+lists; its ARs name a `Lasers` slot they never fill, so the honest total is 530
+and not the 600 a header count promises. Every number is derived from the
+attachment's NAME by one rule per keyword, stated in the file, because inventing
+530 hand-tuned numbers would have been 530 numbers nobody could check.
+
+`weapon::equipped_def` applies the fold INSIDE itself, so `try_fire`,
+`damage_at`, `shot_direction`, `report_layers`, `RecoilProfile::of`,
+`equipped_move_speed_scale` and `feel::blend_speed_for_ads` all read a
+suppressed, drummed, bipodded rifle through exactly the code they read a bare one
+through. An attachment is proved by its EFFECT, never by its presence: the
+tactical monolithic suppressor takes the M4A1's report from **320.0 m to 112.0 m
+and its body layer from 0.900 to 0.315** in the command both hosts queue (and
+its transient from 38.4 m to 13.4 m, and its range from 500 m to 460, and its
+ADS from 240 ms to 280); the 45-round mag takes the READOUT from `30 / 120` to
+`45 / 120`; the 4x ACOG takes the ADS from **240 ms to 288 ms** and the camera's
+own blend speed from 14.627 to 12.334 a second with it.
+
+The equipped set is SIM STATE: **57 B bare and 77 B with a can on it** -- twenty
+bytes at the tail of the weapon's trace row when something is bolted on, twenty-four more when a lock is held, and
+**nothing at all otherwise** — so a bare rifle folds exactly what it folded
+before this wave, and a stripped one folds it again byte for byte.
+
+**A REAL MESH IN THE HAND, AND IT IS DRAWN AT 1:1.** `ItemDef.mesh` is the field
+`step_equipped_weapons` has asked for since island wave I6. A placeholder box has
+no size of its own and is stretched to `muzzle_forward_m`; a weapon mesh is
+modelled in metres and already IS the length its class says it is, and the fixed
+step has no asset database to measure one with — so the art is drawn at its own
+scale and the registry's barrel lengths stay what a muzzle offset is measured
+along.
+
+The class → mesh table is committed and the ART IS NOT: the NAME and the identity
+it derives (`weapon_mesh_guid`) are in the repository, and the meshes are written
+at those identities into the LOCAL project only. **Two classes have no art in the
+licensed bundle** — a shotgun and a rocket launcher — and draw the committed
+primitive; every place that reports the table says so rather than implying a mesh
+that is not there. Two are stated substitutions: a pistol draws the STOCKLESS
+SMG11, because a machine pistol is the nearest real silhouette the licence covers
+and a 6 cm cube is not, and a sniper draws the second KA_Val variant.
+
+**THE WEAPON DOES NOT FADE WITH THE BODY.** The camera thins its subject as the
+boom shortens, and a first-person view with no gun in it would make the whole of
+this arc invisible at the range a player spends most of their time at. Today the
+fade reaches only the skinned path and a weapon is a rigid draw, so the behaviour
+is right by construction — which is exactly why `weapon::subject_fade_for` is a
+named door with an arm on it rather than an accident of routing.
+
+**THE ISLAND'S KERB IS A CLASS COURSE.** Nine more pickups beside the sidearm,
+one of every class the doc names plus the two this wave added, 80 cm apart, with
+counts read off each row's own `stack_max` so a grenade lies there three deep.
+Walking it is the pickup verb, the inventory verb and the scroll wheel all doing
+what they do — a route through the shipped game rather than an environment
+variable a screenshot script sets. The course sits 1.2 m to the RIGHT of the
+sidearm and that is a measurement: a course that straddled it put two pickups
+0.2 m apart, and `interact::resolve` picks by distance.
+
+**THE COST.** One blast over 30 bodies is **103.1 µs** and spends **30 rays**
+against a `MAX_BLAST_TARGETS` bound of 32. An eight-pellet pull spends **14
+casts** (eight pellets, one six-ray probe) of a 256 ceiling.
+
+**THE CLASS -> ART CENSUS**, over the shipped 88 rows: `SM_AR4` 16, `SM_SMG11`
+19, `SM_SMG11_NOSTOCK` 10, `SM_KA47` 6, `SM_KA_VAL` 10, `SM_KA_VAL_Y` 10,
+`SM_M9_KNIFE` 2, `SM_G67` 1, and **14 rows with no art at all** -- ten shotguns
+and four rocket launchers, every one of which draws the committed primitive and
+says so.
+
+`wpn2d_gate` is **28 arms**, and its own first drafts found four things beyond
+the three defects above: a pattern bound measured off a z coordinate instead of
+the muzzle, five blast rings in a row where the nearest shadowed every other, a
+suppressor arm comparing a distant layer that was silent at both ends, and an art
+census that expected the grenade to be a bare launcher row. Every one is fixed
+with the measurement written beside it.
+
+**AND A SHIPPED SESSION FOUND THREE MORE.** The demo loop is what found all of
+them, and none was visible to a test:
+
+* **THE HERO HELD AN INVISIBLE RIFLE.** `MeshRef.asset` was the AR4's committed
+  identity and NOTHING DREW, because the PIE payload's vmesh walk and the cook's
+  dependency closure only ever visited `doc.order()` -- and the weapon entity is
+  spawned by the FIXED STEP on a derived guid. Island carried 43 exactly, one
+  asset kind along; `inf_ecs::weapon::engine_spawned_meshes` is the door the
+  WPN2c audit prescribed for the whole class.
+* **THE ENCLOSURE PROBE RAN ONCE PER PELLET** -- six extra rays each for an
+  identical answer, and one trigger counted as eight indoor shots.
+* **THE ATTACHMENT BENCH'S KEYS REACHED NOTHING.** `keycode_to_code` had no
+  route for `BracketLeft`, `BracketRight` or `Backspace`, so three presses of
+  `]` in a shipped session fitted nothing. CHAR1c's `KeyG` defect in the one
+  class no arm could see: a PANEL key is read off the raw code by the panel's
+  own reducer and `default_map` never binds it, so
+  `every_key_the_default_map_binds_has_a_route` was blind to it.
+  `every_key_the_inventory_panel_reads_has_a_route` scrapes the reducer's own
+  `match` and is the arm now.
+
+**WHAT IS NOT HERE.** A **shotgun and a rocket launcher** have no mesh, and the
+Lyra `SK_Pistol`/`SK_Shotgun` skeletal meshes in the same UE project are the
+carried route: they are `SkeletalMesh` and the weapon entity draws a rigid
+`MeshRef`, so crossing them is its own wave. A **magazine** is not drawn — there
+is no `Magazine` seat in `step_accessories`' offsets, so importing one would be
+bytes with no reader. **Backblast** is not a Sprite puff: this engine still has
+no particle system (the P22 remainder), so a launcher's own smoke is PAR2's along
+with the muzzle flash. The **NPC firing policy** is WPN2e's and nothing of it
+leaked in — asserted, in a source arm and in a course where an armed NPC stands
+beside the hero for two seconds and fires nothing.
