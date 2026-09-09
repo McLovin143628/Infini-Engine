@@ -241,7 +241,43 @@ impl Spring1 {
     pub fn at_rest(&self) -> bool {
         self.position == 0.0 && self.velocity == 0.0
     }
+
+    /// **Snap a spring that has decayed below the epsilons to EXACT zero.**
+    ///
+    /// A critically damped spring approaches zero and never arrives, so without
+    /// this a character that fired one round on step 12 of a level would carry
+    /// a denormal in its trace section for the rest of the session — measured
+    /// on `phase30_gameplay_gate`'s own hero, whose hold-point spring was
+    /// sitting at `-3.5e-40 m` two stations after the shot. That is not a
+    /// rounding curiosity: [`at_rest`](Self::at_rest) is what decides whether
+    /// this shooter's 160 bytes are folded at all, so a spring that never
+    /// reaches zero is a trace section that never empties, and the
+    /// empty-when-nothing-is-happening rule is the whole reason the pre-wave
+    /// traces are byte-identical.
+    ///
+    /// The epsilons are stated in the quantity's own units by the caller
+    /// ([`SPRING_REST_M`] / [`SPRING_REST_DEG`] and their rates), and they are
+    /// a **billionth** of anything anybody can see: a nanometre of hold point
+    /// and a nanodegree of aim.
+    pub fn settle(&mut self, eps_pos: f64, eps_vel: f64) {
+        if self.position.abs() < eps_pos && self.velocity.abs() < eps_vel {
+            self.position = 0.0;
+            self.velocity = 0.0;
+        }
+    }
 }
+
+/// **A hold-point spring at rest**, metres — see [`Spring1::settle`].
+pub const SPRING_REST_M: f64 = 1.0e-9;
+
+/// **A hold-point spring at rest**, m/s.
+pub const SPRING_REST_MPS: f64 = 1.0e-9;
+
+/// **An aim spring at rest**, degrees — see [`Spring1::settle`].
+pub const SPRING_REST_DEG: f64 = 1.0e-9;
+
+/// **An aim spring at rest**, degrees a second.
+pub const SPRING_REST_DPS: f64 = 1.0e-9;
 
 /// **Three axes of spring**, in the aim frame: `x` right, `y` up, `z` forward.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -284,6 +320,17 @@ impl Spring3 {
     /// Whether both vectors are exactly zero. See [`Spring1::at_rest`].
     pub fn at_rest(&self) -> bool {
         self.position == DVec3::ZERO && self.velocity == DVec3::ZERO
+    }
+
+    /// [`Spring1::settle`] on the vector as a whole — all three axes or none,
+    /// so a spring cannot be at rest in `x` and moving in `y`.
+    pub fn settle(&mut self, eps_pos: f64, eps_vel: f64) {
+        if self.position.abs().max_element() < eps_pos
+            && self.velocity.abs().max_element() < eps_vel
+        {
+            self.position = DVec3::ZERO;
+            self.velocity = DVec3::ZERO;
+        }
     }
 }
 
@@ -816,12 +863,27 @@ pub fn advance_feel(feel: &mut WeaponFeel, input: &FeelInputs, dt: f64) -> FeelS
     feel.vm.advance(VM_STIFFNESS, VM_DAMPING, dt);
     feel.aim_pitch.advance(AIM_STIFFNESS, AIM_DAMPING, dt);
     feel.aim_yaw.advance(AIM_STIFFNESS, AIM_DAMPING, dt);
+    // …and a spring that has decayed past anything anybody can see is put
+    // EXACTLY at rest, because `at_rest` is what empties this shooter's trace
+    // section. See `Spring1::settle`.
+    feel.vm.settle(SPRING_REST_M, SPRING_REST_MPS);
+    feel.aim_pitch.settle(SPRING_REST_DEG, SPRING_REST_DPS);
+    feel.aim_yaw.settle(SPRING_REST_DEG, SPRING_REST_DPS);
     let out = FeelStep {
         aim_pitch_delta_deg: feel.aim_pitch.position - feel.applied_pitch_deg,
         aim_yaw_delta_deg: feel.aim_yaw.position - feel.applied_yaw_deg,
     };
     feel.applied_pitch_deg = feel.aim_pitch.position;
     feel.applied_yaw_deg = feel.aim_yaw.position;
+    // The applied accumulators go to rest WITH their springs, which is the same
+    // statement twice: the delta above has just given the aim back everything
+    // the spring had, so what is owed is zero and the field says so.
+    if feel.aim_pitch.at_rest() {
+        feel.applied_pitch_deg = 0.0;
+    }
+    if feel.aim_yaw.at_rest() {
+        feel.applied_yaw_deg = 0.0;
+    }
     // The mouse-delta lag: a first-order chase of the look rate, so a flick
     // trails and a still mouse trails nothing.
     let a = (SWAY_LOOK_LAG_HZ * dt).clamp(0.0, 1.0);

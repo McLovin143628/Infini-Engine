@@ -2866,7 +2866,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 14] = [
+    const SECTIONS: [&str; 15] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2915,6 +2915,13 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // by accident, because a level that never fires produces an empty vec
         // and every existing gate stays green without it.
         "ballistics::round_state_bytes",
+        // WPN2b, pinned in the SAME commit that folds it. Its absence would be
+        // invisible for the reason the round's is and one more: the feel is a
+        // spring, so a host that stopped folding it would still agree about
+        // every POSITION the spring had already produced — the pose section
+        // carries those — and would only diverge one step later, when the
+        // velocity nobody was comparing turned into a position somebody was.
+        "feel::feel_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

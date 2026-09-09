@@ -328,6 +328,31 @@ struct Step {
     melee: (u32, u32),
     /// Whether a weapon entity exists this step, and the magazine.
     armed: (bool, u32),
+    /// **Where the hands were asked to hold the weapon**, world metres (wave
+    /// WPN2b) -- `HandIk::reach[1]`, which is `aim_hold_point`'s own answer.
+    ///
+    /// A NUMBER beside the pose bytes, because this wave made three of this
+    /// gate's byte-equality arms false by design: a breathing character's hands
+    /// SWAY, so an aimed pose is never twice the same bytes again. The claims
+    /// those arms were making -- settled, kicked, recovered -- are claims about
+    /// a DISTANCE, and this is the distance.
+    hold: Option<[f64; 3]>,
+}
+
+/// Where the hand pass was told to put the weapon this step.
+fn hold_of(world: &EcsWorld) -> Option<[f64; 3]> {
+    let h = inf_ecs::pose::hand_ik(world, HERO)?;
+    let r = h.reach[1].as_ref()?;
+    Some([r.target.x, r.target.y, r.target.z])
+}
+
+/// Millimetres between two hold points; `0.0` when either is absent.
+fn hold_mm(a: Option<[f64; 3]>, b: Option<[f64; 3]>) -> f64 {
+    let (Some(a), Some(b)) = (a, b) else {
+        return 0.0;
+    };
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() * 1000.0
 }
 
 fn armed_of(world: &EcsWorld) -> (bool, u32) {
@@ -359,6 +384,7 @@ fn player_trace() -> Vec<Step> {
                 engagement: (r.hands.0, r.hands.1, r.shots, r.reloads),
                 melee: (r.swings, r.muzzles_without_a_socket),
                 armed: armed_of(sim.world()),
+                hold: hold_of(sim.world()),
             }
         })
         .collect()
@@ -382,6 +408,7 @@ fn editor_trace() -> Vec<Step> {
                 engagement: (r.hands.0, r.hands.1, r.shots, r.reloads),
                 melee: (r.swings, r.muzzles_without_a_socket),
                 armed: armed_of(doc.world()),
+                hold: hold_of(doc.world()),
             }
         })
         .collect();
@@ -455,7 +482,28 @@ fn assert_not_vacuous(t: &[Step]) {
         t[14].pose, t[25].pose,
         "aiming did not move the hands — the reach is not driving the hold"
     );
-    assert_eq!(t[25].pose, t[28].pose, "the aimed pose is not settled");
+    // **RE-STATED AT WAVE WPN2b, WITH ITS CAUSE.** This was
+    // `assert_eq!(t[25].pose, t[28].pose)` -- the aimed pose settles to the same
+    // bytes twice -- and that is now FALSE by design: a breathing character's
+    // hands sway (`inf_ecs::feel::sway_offset` -- six millimetres of chest at
+    // 0.2 Hz, plus a bob that is zero when standing still), so the hold point
+    // moves every step for as long as the weapon is up. It is the doc's own
+    // "offset the weapon using Sin/Cos waves ... so the gun model feels organic
+    // rather than rigid".
+    //
+    // What the arm was claiming is still claimed, as the distance it always
+    // was: three steps of an aimed idle move the hold point by less than the
+    // sway's whole amplitude, and the shot below moves it by an order of
+    // magnitude more.
+    let settle_mm = hold_mm(t[25].hold, t[28].hold);
+    assert!(
+        settle_mm < 8.0,
+        "the aimed hold moved {settle_mm:.4} mm over three idle steps, which is more than the sway's own amplitude -- something other than breathing is moving the hands"
+    );
+    assert!(
+        hold_mm(t[25].hold, t[26].hold) > 0.0,
+        "the aimed hold did not move at all between two steps -- the sway is not reaching the hold point"
+    );
 
     // -- THE RECOIL (wave WPN1): the shot MOVES the hands, and the weapon
     //    settles back onto the aim line by the time it may fire again --
@@ -465,20 +513,42 @@ fn assert_not_vacuous(t: &[Step]) {
     // shape a recoil written as a latch nobody clears has. The rifle here is
     // 600 rpm, so its cycle is 0.1 s = six steps at 60 Hz — step 31 fires, 32–36
     // are the settle, and 37 is the weapon back where aiming put it.
-    assert_ne!(
-        t[30].pose, t[31].pose,
-        "the shot did not move the hands at all — the recoil is not reaching \
-         `HandIk::reach`, and the pose two hosts compare cannot see it"
+    // **RE-STATED AT WAVE WPN2b**, in millimetres, for the settle arm's reason
+    // above and one more: the recoil is a SPRING now, not a linear ramp off the
+    // fire clock, so "back where it was" is an amplitude and not a byte.
+    //
+    // The impulse is deposited on the firing step and integrated by the movement
+    // runtime's look integrator on the NEXT one (the stated one-step seam), so
+    // the kick is read from step 31 forward rather than from step 30.
+    // Every step read here is inside the course's own aiming band (15..=60), and
+    // that is asserted rather than assumed: `hold_mm` answers `0.0` when either
+    // hold is absent, so a character that stopped aiming would satisfy the
+    // settle arms perfectly and fail nothing.
+    for at in [30_usize, 31, 35, 45, 58] {
+        assert!(
+            t[at].hold.is_some(),
+            "step {at} asked for no hold at all - it is outside the aiming band and the millimetres below mean nothing"
+        );
+    }
+    // The spring's peak is `1 / sqrt(k)` after the impulse, which at k = 220 is
+    // 67 ms -- four steps. So 31 -> 35 is the rise, 35 -> 45 is the fall, and 58
+    // is twenty-seven steps out, where a critically damped spring is at 1.5 % of
+    // its peak.
+    let kick_mm = hold_mm(t[31].hold, t[35].hold);
+    let decay_mm = hold_mm(t[35].hold, t[45].hold);
+    let home_mm = hold_mm(t[30].hold, t[58].hold);
+    println!("the shot moved the hold {kick_mm:.3} mm, decayed {decay_mm:.3} mm, and came home to {home_mm:.3} mm");
+    assert!(
+        kick_mm > 20.0,
+        "the shot moved the hold {kick_mm:.4} mm -- the recoil spring is not reaching `HandIk::reach`, and the pose two hosts compare cannot see it"
     );
-    assert_ne!(
-        t[31].pose, t[33].pose,
-        "the recoil is a LATCH rather than a decay: the pose on the firing step \
-         and two steps into the settle are identical"
+    assert!(
+        decay_mm > 20.0,
+        "the recoil is a LATCH rather than a decay: {decay_mm:.4} mm of movement over ten steps of settle"
     );
-    assert_eq!(
-        t[30].pose, t[37].pose,
-        "the weapon never came back onto the aim line — a recoil that does not \
-         recover is a weapon pointing somewhere else for the rest of the level"
+    assert!(
+        home_mm < 8.0,
+        "the weapon never came back onto the aim line: {home_mm:.4} mm off, which is more than the sway -- a recoil that does not recover is a weapon pointing somewhere else for the rest of the level"
     );
     // …and the aim itself did NOT move, which is the ruling `aim_hold_point`
     // states: the pose climbs and the bullet goes where the player is pointing.
@@ -576,23 +646,44 @@ fn assert_not_vacuous(t: &[Step]) {
     distinct.sort();
     distinct.dedup();
     //
-    // **Eighteen until wave WPN1, twenty-four since, twenty-FIVE since
-    // CHAR1b.1**, and the twenty-fifth is the foot-IK seam's own first frame:
-    // step 0 poses before any goal exists (the movement step probes the ground
-    // under the feet the pose step published LAST step), so it is one pose the
-    // rest of the course never returns to. The three `assert_eq!`s above take
-    // step 3 as the settled idle for the same reason. The six before that are
-    // the recoil: a 600 rpm weapon's cycle is six fixed steps at 60 Hz and the
-    // hold point is a different point on each of them. The number is quoted rather
-    // than relaxed because that is the arithmetic — a recoil that snapped to one
-    // displaced pose and back would add ONE, and a recoil that never recovered
-    // would add six and break the `t[30] == t[37]` arm above.
+    // **Eighteen until wave WPN1, twenty-four since, twenty-FIVE since CHAR1b.1
+    // -- and SIXTY-FOUR since WPN2b**, which is this wave's own re-statement of
+    // the arm with its cause.
+    //
+    // The twenty-fifth was the foot-IK seam's own first frame: step 0 poses
+    // before any goal exists (the movement step probes the ground under the feet
+    // the pose step published LAST step), so it is one pose the rest of the
+    // course never returns to. The three settle arms above take step 3 as the
+    // settled idle for the same reason.
+    //
+    // The thirty-nine this wave adds are the SWAY. The hold point is offset by
+    // `inf_ecs::feel::sway_offset` for as long as the weapon is up, and the
+    // course's aiming band is steps 15..=60 -- forty-six steps, every one of
+    // them a different point, because a breathing character's hands are never
+    // twice in the same place. So the count is now roughly "the aiming band,
+    // plus the carried and unarmed poses that really are still".
+    //
+    // The number is quoted rather than relaxed because that is still the
+    // arithmetic, and because the mutation it catches is unchanged: a solver
+    // that collapsed the course onto three poses would satisfy every pair above
+    // by keeping exactly those apart. What it no longer catches on its own is a
+    // recoil that never recovered, which the millimetres above now measure
+    // directly.
     assert_eq!(
         distinct.len(),
-        25,
+        64,
         "the course posed {} distinct poses of {STEPS} steps",
         distinct.len()
     );
+    // The claim the number is a proxy for, said outright: the aiming band is
+    // where the sway lives and it is very nearly all distinct.
+    let aiming: std::collections::BTreeSet<&Vec<u8>> = t[15..=60].iter().map(|s| &s.pose).collect();
+    assert!(
+        aiming.len() >= 40,
+        "the aiming band posed {} distinct poses of 46 - the sway is not reaching the hands",
+        aiming.len()
+    );
+
     println!(
         "WEAPON HANDS: {STEPS} steps, {} distinct poses, {} bytes a step",
         distinct.len(),

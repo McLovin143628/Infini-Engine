@@ -1413,6 +1413,20 @@ impl RuntimeSim {
         // level that has never fired folds nothing, and so does one that has
         // fired and landed everything.
         out.extend_from_slice(&inf_ecs::ballistics::round_state_bytes(&self.world));
+        // WPN2b appends the SHOOTERS' FEEL, last, on the fourteen above's
+        // argument: the recoil springs are what the aim was moved by and what
+        // the hands are holding, so two hosts that disagreed about them have
+        // diverged about where the next round goes and about where the weapon is
+        // drawn. The aim itself is already visible through the pose section; the
+        // spring is the state that PRODUCES it, and a divergence in a velocity
+        // is invisible in a position for exactly one step.
+        //
+        // **The position is frozen** and `projector_mirror`'s `SECTIONS`
+        // allowlist is extended in the SAME commit. **EMPTY when every shooter
+        // is at rest** — and a shooter merely CARRYING a weapon is at rest —
+        // which is the half that keeps every trace committed before this wave
+        // byte-identical.
+        out.extend_from_slice(&inf_ecs::feel::feel_state_bytes(&self.world));
         out
     }
 

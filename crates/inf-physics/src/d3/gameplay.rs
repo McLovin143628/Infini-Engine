@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 use inf_ecs::components::{CharacterMovement, Transform};
 use inf_ecs::door::{self, DoorSide, PendingKick};
+use inf_ecs::feel::{self, ShotStance, WeaponFeel};
 use inf_ecs::item::{self, Inventory};
 use inf_ecs::weapon::{self, FireVerdict, Health, ShotKind, WeaponDef, WeaponState};
 use inf_ecs::world::EcsWorld;
@@ -701,21 +702,20 @@ fn fore_grip_m(def: &WeaponDef) -> f32 {
 /// metres.
 pub const AIM_REACH_M: f64 = 0.42;
 
-/// **How far a shot drives the weapon back into the shoulder**, metres (wave
-/// WPN1).
+/// **The smallest the aimed reach may be pulled to**, metres (wave WPN2b).
 ///
-/// Six centimetres against [`AIM_REACH_M`]'s forty-two — a seventh of the reach,
-/// which is enough to read as a shove at 60 Hz and small enough that the hand
-/// stays in front of the chest rather than passing through it.
-pub const RECOIL_PULL_M: f64 = 0.06;
-
-/// **How far a shot lifts the muzzle**, degrees.
+/// Five centimetres. The recoil spring pulls the hold point back along the aim
+/// by up to twenty centimetres at a launcher's `recoil_intensity`, and a reach
+/// that went to zero would put the hand inside the chest — so the pull is
+/// clamped here rather than in the profile, because the floor is a property of
+/// the BODY and the pull is a property of the weapon.
 ///
-/// Four. The hold point is on the aim line at shoulder height, so lifting the
-/// *point* is what lifts the weapon; four degrees at forty-two centimetres is
-/// three centimetres of rise, which is a muzzle climbing rather than a weapon
-/// being thrown over a shoulder.
-pub const RECOIL_RISE_DEG: f64 = 4.0;
+/// It replaces wave WPN1's `RECOIL_PULL_M` / `RECOIL_RISE_DEG` pair, whose whole
+/// job was to scale a derived `recoil_fraction` that no longer exists: the
+/// spring's own `vm_kick_back` and `vm_kick_up` are the numbers now, they are
+/// per-weapon rather than global, and they are metres of measured displacement
+/// rather than a fraction of a fire interval.
+pub const AIM_REACH_MIN_M: f64 = 0.05;
 
 /// The fraction of a character's height its shoulder line sits at.
 ///
@@ -867,24 +867,41 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
 /// reason: this number is folded into `pose_state_bytes` and compared between
 /// two machines (the P14 law).
 ///
-/// # THE RECOIL IS HERE, and it is a POSE (wave WPN1)
+/// # THE RECOIL IS HERE, and since wave WPN2b it is a SPRING
 ///
-/// A shot lifts this point by [`RECOIL_RISE_DEG`] and pulls it back by
-/// [`RECOIL_PULL_M`], scaled by [`weapon::recoil_fraction`] — which is the
-/// weapon's own cycle and therefore already sim state on both hosts. It reaches
-/// `HandIk::reach`, then `apply_hand_ik`, then `pose_state_bytes`, so the two
-/// hosts are compared on it byte for byte and a replay reproduces it.
+/// A shot deposits an impulse on [`inf_ecs::feel::WeaponFeel::vm`] — a
+/// critically damped spring in the aim frame, `x` right, `y` up, `z` forward —
+/// and this reads its position. The spring is advanced once a step by the
+/// movement runtime's look integrator, one phase earlier, so what lands here is
+/// this step's own displacement; it reaches `HandIk::reach`, then
+/// `apply_hand_ik`, then `pose_state_bytes`, so the two hosts are compared on it
+/// byte for byte and a replay reproduces it.
 ///
-/// **It does NOT move the aim, and that is deliberate.** `cm.runtime.aim_*` is
-/// what the bullet leaves along and what the camera chases; this reads those two
-/// numbers and writes neither. A shot fired during a burst goes exactly where the
-/// player is pointing while the weapon visibly climbs, which is a game with a
-/// climbing weapon and honest aim rather than one with recoil.
+/// What it replaces is wave WPN1's `recoil_fraction`: the weapon's own fire
+/// cycle, scaled by two engine-wide constants, which meant every weapon in the
+/// game kicked the same distance and a 450 rpm pistol kicked for LONGER than a
+/// 900 rpm rifle because its interval was longer. The spring's numbers come off
+/// the registry's `recoil_intensity`, per row.
 ///
-/// # Why there is no CAMERA recoil, stated as a ruling
+/// The **sway** ([`inf_ecs::feel::sway_offset`]) is added in the same frame and
+/// the same units: the doc's *"blend this with procedural recoil so the gun
+/// model feels organic"*, which is one addition because both are offsets of the
+/// same point.
+///
+/// # This still does NOT move the aim, and now something else does
+///
+/// `cm.runtime.aim_*` is what the bullet leaves along and what the camera
+/// chases; this reads those two numbers and writes neither. The aim's OWN
+/// recoil — wave WPN1's named honest form, and this wave's clause 2 — is a
+/// second spring applied inside `inf_physics::d3::movement`'s look integrator,
+/// where it is sim state that the camera then follows. So the reticle stays
+/// true: it is drawn at the centre of the screen, the camera's pitch tracks
+/// `aim_pitch_deg`, and the round leaves along `aim_pitch_deg`.
+///
+/// # Why there is still no CAMERA recoil, stated as a ruling
 ///
 /// The obvious companion — kick the camera's pitch and let it settle — was
-/// priced and refused, and the refusal has two halves that meet:
+/// priced and refused at wave WPN1, and the refusal has two halves that meet:
 ///
 /// * a camera kick that does **not** move the aim makes the reticle **lie**. The
 ///   shot leaves along `aim_pitch_deg`, the reticle is drawn at the centre of the
@@ -897,12 +914,8 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
 ///   `phase29_gate` pins by running the same course under two different cameras
 ///   and comparing the sim trace.
 ///
-/// The honest form is an **aim** recoil: the movement step's own aim integrator
-/// gaining a per-shot impulse and a recovery, so the aim really moves, the camera
-/// follows it because it always did, and the reticle stays true. That is a change
-/// to `step_character_movement`'s look integration and it moves every committed
-/// aim in the tree; it is named on this wave's carried list rather than done
-/// quietly at the end of a different clause.
+/// Wave WPN2b honours it by moving the AIM. `camera.rs` and `camera.toml` gain
+/// no per-shot input, and `wpn2b_gate` greps both for one.
 fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     let entity = world.entity_of(guid)?;
     let cm = world.world().get::<CharacterMovement>(entity)?;
@@ -913,36 +926,104 @@ fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     // The stand height is what the capsule was built from, so this tracks a
     // 1.2 m character and a 2.4 m one without a second opinion about either.
     let height = (cm.stand_half_height_m * 2.0).max(0.4);
-    // The recoil, read off the weapon's own cycle. Zero — and every byte below
-    // identical to what it was before this wave — for a character whose weapon
-    // is not cooling, which is every step but the ten a second a rifle fires on.
-    let kick = recoil_of(world, guid);
-    let dir = weapon::aim_forward(
-        cm.runtime.aim_yaw_deg,
-        cm.runtime.aim_pitch_deg + RECOIL_RISE_DEG * kick,
-    );
-    let reach = (AIM_REACH_M - RECOIL_PULL_M * kick).max(0.05);
-    let at = feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT) + dir * reach;
+    // The recoil spring and the sway, both in the AIM FRAME and both in metres.
+    // Exactly zero — and every byte below identical to what it was before this
+    // wave — for a character with no `WeaponFeel`, which is every character that
+    // has never held a weapon.
+    let offset = inf_ecs::feel::feel_of(world, guid)
+        .map(|f| f.vm.position + f.sway)
+        .unwrap_or(DVec3::ZERO);
+    let yaw = cm.runtime.aim_yaw_deg;
+    let dir = weapon::aim_forward(yaw, cm.runtime.aim_pitch_deg);
+    // The frame: `right` is horizontal by construction and `up` completes it —
+    // `weapon::shot_direction_with`'s own two lines, because a hold point that
+    // used a different basis from the bullet would drift away from the aim as
+    // the character pitched.
+    let (sy, cy) = {
+        let r = yaw.to_radians();
+        (inf_math::psin64(r), inf_math::pcos64(r))
+    };
+    let right = DVec3::new(cy, 0.0, -sy);
+    let up = right.cross(dir);
+    let reach = (AIM_REACH_M + offset.z).max(AIM_REACH_MIN_M);
+    let at = feet
+        + DVec3::Y * (height * SHOULDER_OF_HEIGHT)
+        + dir * reach
+        + right * offset.x
+        + up * offset.y;
     at.is_finite().then_some(at)
 }
 
-/// **How much recoil is on this character's weapon**, `[0, 1]` — the equipped
-/// definition and the live ammunition clock, through the one Ring-0 rule.
+/// **The posture a shot is fired from** (wave WPN2b) — `(stance, planar speed,
+/// ADS blend)`, the three things that are true of the SHOOTER rather than of the
+/// weapon and that the cone is scaled by.
 ///
-/// `0.0` for a character with nothing equipped or no clock, which is the answer
-/// that leaves [`aim_hold_point`] byte-identical to its pre-WPN1 self.
-fn recoil_of(world: &EcsWorld, guid: Uuid) -> f64 {
-    let Some(entity) = world.entity_of(guid) else {
-        return 0.0;
+/// A character with no `CharacterMovement` is standing, still and hip-firing,
+/// which is what every rig-less fixture in the tree is and what keeps their
+/// patterns identical to their pre-wave selves.
+fn shot_posture(world: &EcsWorld, entity: inf_ecs::Entity) -> (ShotStance, f64, f64) {
+    let Some(cm) = world.world().get::<CharacterMovement>(entity) else {
+        return (ShotStance::Standing, 0.0, 0.0);
     };
-    let Some((_, def)) = equipped_weapon(world, guid) else {
-        return 0.0;
+    let stance = match cm.mode {
+        inf_ecs::components::MovementMode::Crouch => ShotStance::Crouched,
+        inf_ecs::components::MovementMode::Prone => ShotStance::Prone,
+        _ => ShotStance::Standing,
     };
-    world
+    let v = cm.runtime.velocity.to_dvec3();
+    let speed = DVec3::new(v.x, 0.0, v.z).length();
+    let ads = world
         .world()
-        .get::<WeaponState>(entity)
-        .map(|s| weapon::recoil_fraction(&def, s))
-        .unwrap_or(0.0)
+        .get::<WeaponFeel>(entity)
+        .map(|f| f.ads_blend)
+        .unwrap_or(0.0);
+    (stance, speed, ads)
+}
+
+/// **Give a character's feel back** (wave WPN2b) — the removal half of the
+/// install beside `WeaponState`.
+///
+/// It is its own function and not a `remove::<WeaponFeel>()` at the call site
+/// because there is a second thing owed: the camera rig's `state_blend_speed`,
+/// which the ADS blend borrowed and which has to go back exactly as it was
+/// (`WeaponFeel::blend_speed_prior`). One door, so a weapon put away can never
+/// leave a character's camera settling at a rifle's rate for the rest of the
+/// session.
+fn release_feel(world: &mut EcsWorld, guid: Uuid, entity: inf_ecs::Entity) {
+    let Some(feel) = world.world().get::<WeaponFeel>(entity).copied() else {
+        return;
+    };
+    // **THE AIM IS OWED WHATEVER THE SPRING HAD NOT GIVEN BACK YET**, and this
+    // is the whole reason the removal is a function.
+    //
+    // The centre-recovery is the DELTA the look integrator adds each step
+    // (`inf_physics::d3::movement::step_weapon_feel`), so an aim spring that is
+    // still 0.02 deg from home when the weapon is put away has 0.02 deg of the
+    // player's aim in it — and dropping the component would stranded that offset
+    // on the character for the rest of the level. Measured on
+    // `weapon_hands_gate`'s own course: without this, an unarmed hero after a
+    // whole weapon course did not pose what it posed before it picked anything
+    // up, and the difference was one shot's unpaid residual.
+    if feel.applied_pitch_deg != 0.0 || feel.applied_yaw_deg != 0.0 {
+        if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+            cm.runtime.aim_pitch_deg =
+                (cm.runtime.aim_pitch_deg - feel.applied_pitch_deg).clamp(-89.0, 89.0);
+            cm.runtime.aim_yaw_deg =
+                inf_ecs::movement::wrap_deg(cm.runtime.aim_yaw_deg - feel.applied_yaw_deg);
+        }
+    }
+    let prior = Some(feel.blend_speed_prior);
+    if let Some(prior) = prior {
+        if prior.is_finite() {
+            inf_ecs::camera::set_camera_rig_value(
+                world,
+                guid,
+                inf_ecs::feel::ADS_BLEND_RIG_KEY,
+                prior,
+            );
+        }
+    }
+    world.world_mut().entity_mut(entity).remove::<WeaponFeel>();
 }
 
 /// The equipped weapon's definition, if the character has one equipped and the
@@ -1064,7 +1145,12 @@ fn step_weapons(
             armed.or_else(|| punching.then(|| (weapon::FIST_ITEM.to_string(), weapon::fist_def())))
         else {
             // A character who put their weapon away keeps no ammunition clock:
-            // a stale state is a magazine two weapons would share.
+            // a stale state is a magazine two weapons would share. The FEEL goes
+            // with it (wave WPN2b) for the same reason and one more: a spring
+            // left behind would go on folding trace bytes for a character with
+            // nothing in its hands, and `feel_state_bytes`' empty-when-at-rest
+            // rule is what keeps every pre-wave trace byte-identical.
+            release_feel(world, guid, entity);
             world.world_mut().entity_mut(entity).remove::<WeaponState>();
             continue;
         };
@@ -1081,14 +1167,38 @@ fn step_weapons(
                 .entity_mut(entity)
                 .insert(WeaponState::full(&item_id, &def));
         }
+        // **The feel** (wave WPN2b) — installed beside the clock and replaced
+        // with it, so a spring never carries one weapon's kick into another's.
+        //
+        // **A MELEE WEAPON GETS NONE**, and a pair of fists is a melee weapon.
+        // `FIST_RPM`'s doc has said since the WPN1 audit that a punch moves no
+        // bone, and `weapon_hands_gate`'s last arm asserts it: giving the fists a
+        // recoil spring gave them a gun's aim kick as well (the profile's `stat
+        // = 0` is 0.03 rad of pitch, not zero), and the punch started moving the
+        // hero's look. A melee recoil is a real thing and it is not this wave's;
+        // when it arrives it is its own profile, not a rifle's.
+        if def.is_melee() {
+            release_feel(world, guid, entity);
+        } else if stale || world.world().get::<WeaponFeel>(entity).is_none() {
+            world
+                .world_mut()
+                .entity_mut(entity)
+                .insert(WeaponFeel::new());
+        }
         // The animation's own reload notify, taken exactly once — the P29.4
         // seam, and the reason the fixed step asks rather than the animation
         // pushing: a notify is consumed by whoever gets there first, and there
         // must be exactly one consumer of a reload.
         let notified =
             inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::RELOAD_NOTIFY);
+        // **What this shot's cone is made of** (wave WPN2b), gathered before the
+        // trigger because a shot fired on the step a character stands up is
+        // fired from the stance it was in. `speed_planar` and not `speed`: a
+        // character in a lift is not moving its weapon.
+        let (stance, speed_mps, ads) = shot_posture(world, entity);
         let mut fired = false;
         let mut reloaded = false;
+        let mut cone_deg = def.spread_deg;
         let (shot_index, aim) = {
             let mut aim = None;
             let mut shot = 0u64;
@@ -1098,12 +1208,26 @@ fn step_weapons(
                     reloaded |= weapon::finish_reload(&def, &mut state);
                 }
                 reloaded |= weapon::advance(&def, &mut state, dt);
+                // The bloom decays whether or not this weapon fires — it is the
+                // half that makes a burst worse than five aimed shots.
+                feel::decay_bloom(&def, &mut state, dt);
                 if want_reload {
                     weapon::try_reload(&def, &mut state);
                 }
                 if weapon::try_fire(&def, &mut state, want_fire) == FireVerdict::Fired {
                     fired = true;
                     shot = state.shots;
+                    // THE CONE THIS ROUND LEAVES THROUGH, taken BEFORE this
+                    // round's own bloom is added: the first round of a burst is
+                    // as accurate as the weapon is, and the second one pays.
+                    cone_deg = feel::resolved_cone_deg(
+                        &def,
+                        state.spread_bloom_deg,
+                        stance,
+                        speed_mps,
+                        ads,
+                    );
+                    feel::bloom_on_shot(&def, &mut state);
                 }
             }
             if fired {
@@ -1111,6 +1235,18 @@ fn step_weapons(
             }
             (shot, aim)
         };
+        if fired {
+            // **THE RECOIL IMPULSE** — deposited on both springs at once, from
+            // the weapon's own `recoil_intensity` through the doc's mapping. The
+            // viewmodel half is read by `aim_hold_point` and the aim half is
+            // spent by the movement runtime's look integrator on the NEXT step,
+            // which is the right way round: the round that caused the kick left
+            // along the aim the player had.
+            let profile = feel::RecoilProfile::of(&def);
+            if let Some(mut f) = world.world_mut().get_mut::<WeaponFeel>(entity) {
+                f.fire(&profile, def.spread_seed, shot_index, dt);
+            }
+        }
         if reloaded {
             report.reloads += 1;
         }
@@ -1156,7 +1292,7 @@ fn step_weapons(
         if !def.is_melee() && !from_weapon && inf_ecs::pose::evaluated_pose(world, guid).is_some() {
             report.muzzles_without_a_socket += 1;
         }
-        let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
+        let dir = weapon::shot_direction_with(&def, yaw, pitch, shot_index, cone_deg);
         let hit = if def.is_melee() {
             resolve_swing(world, guid, &def, from, dir, yaw)
         } else {

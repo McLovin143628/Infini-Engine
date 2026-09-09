@@ -254,6 +254,29 @@ pub fn step_character_movement(
     let overlays = model::overlay_registry(world, &targets);
     let mut out = Vec::with_capacity(targets.len());
     for guid in &targets {
+        // **THE WEAPON'S FEEL, ONE STEP** (wave WPN2b) — both recoil springs,
+        // the sway, the mouse-delta lag and the ADS blend, and the aim delta the
+        // first of those spends.
+        //
+        // HERE, and not inside `step_one`'s look integrator, although this IS
+        // clause 2's "inside `step_character_movement`'s look integrator" and the
+        // aim it writes is integrated by that integrator on this very step. The
+        // reason is that there are THREE look integrators — standing, driving
+        // and flight — and a spring that stopped advancing when a shooter got
+        // into a car would leave the hold point displaced for the rest of the
+        // session and the aim owing a recovery it never paid. One call, before
+        // the dispatch that chooses between them, is the only place all three
+        // are covered by one line.
+        //
+        // The delta is applied to the component the step below is about to read,
+        // so the player's own look is integrated ON TOP of it in the same step,
+        // which is what makes the two commute: both are additive on the same
+        // number.
+        //
+        // Inert — and every byte below identical to its pre-wave self — for a
+        // character with no `WeaponFeel`, which is every character that has never
+        // held a weapon: one component probe.
+        step_weapon_feel(world, *guid, dt);
         // **The list is walked once and then passed down** (P29.4 audit, A8).
         // `try_mantle` needs it too — `IgnoreOnlyPawn` is "every other
         // character's collider" — and it used to ask for its own copy, which
@@ -278,6 +301,133 @@ pub fn step_character_movement(
     // (`MIRROR-BEGIN vehicle_step`) and pinned character-for-character by
     // `inf-editor-core`'s `fixed_step_mirror`.
     out
+}
+
+/// **One step of a shooter's feel** (wave WPN2b) — the whole of clause 2's aim
+/// layer and clause 4's sway, at the one seam that reaches every look integrator.
+///
+/// # The aim really moves, and that is the point
+///
+/// `inf_ecs::feel::advance_feel` answers a DELTA — how much further the aim
+/// spring has travelled since last step — and this adds it to
+/// `cm.runtime.aim_pitch_deg` / `aim_yaw_deg`, which is sim state: the bullet
+/// leaves along it, the pose reads it, the trace folds it, and the camera
+/// follows it because the camera has always followed it. So the reticle stays on
+/// the aim line under sustained fire, which is the WPN1 ruling's entire
+/// requirement (`d3::gameplay::aim_hold_point`'s doc states both halves).
+///
+/// **The centre-recovery is the delta itself.** The spring returns to zero, so
+/// the sum of the deltas over a burst and its settle is exactly zero and the aim
+/// ends where the player left it. A recoil that only added would walk the
+/// reticle up the wall over a magazine.
+///
+/// The one place the identity does not hold exactly is the `±89°` pitch clamp,
+/// which is the movement runtime's own hard bound: an aim already at the ceiling
+/// cannot take the kick, so it cannot give it back either. Nobody is shooting
+/// straight up, and the alternative — an unclamped accumulator — would let a
+/// recoil push the aim past vertical.
+///
+/// # One clock
+///
+/// The sway samples `inf_ecs::anim_bridge::anim_state_time`, which is the same
+/// `SmRuntimeState::state_time` the breath additive (`inf_ecs::pose`'s
+/// `apply_breath`) samples. Two clocks would drift apart and a chest that rose
+/// while the hands fell is what a player reads as "floaty"; `wpn2b_gate`
+/// compares the two.
+fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
+    let Some(entity) = world.entity_of(guid) else {
+        return;
+    };
+    if world
+        .world()
+        .get::<inf_ecs::feel::WeaponFeel>(entity)
+        .is_none()
+    {
+        return;
+    }
+    let Some(cm) = world.world().get::<CharacterMovement>(entity) else {
+        return;
+    };
+    let aiming = cm.rotation_mode == inf_ecs::components::RotationMode::Aiming;
+    let v = cm.runtime.velocity.to_dvec3();
+    let speed_mps = DVec3::new(v.x, 0.0, v.z).length();
+    let look_yaw_dps = cm.runtime.intent_look_yaw_dps;
+    let look_pitch_dps = cm.runtime.intent_look_pitch_dps;
+    let ads_time_s = inf_ecs::weapon::equipped_def(world, guid)
+        .map(|(_, d)| d.ads_time_ms / 1000.0)
+        .unwrap_or(0.0);
+    // **THE ADS TIME REACHES THE CAMERA** (wave WPN2b, clause 5) through the
+    // rig's by-name door, which is the route CHAR1c's addendum names: the aim
+    // block's 2.0 m boom and 55 deg field are already reached by
+    // `CameraTuning::state_blend_speed`, and this is what makes that speed the
+    // WEAPON's rather than the engine's default six.
+    //
+    // Written when it differs and never otherwise, so it is one comparison a
+    // step for an armed character and nothing at all for anybody else; the value
+    // it replaced is kept on the feel and given back by
+    // `d3::gameplay::release_feel` when the weapon is put away, because stomping
+    // an authored camera for the rest of a session would be a weapon editing a
+    // level.
+    //
+    // It is a SIM to CAMERA-RIG write and not a camera to sim one: `CameraRig`
+    // is a component the sim owns and the camera reads, it is not in
+    // `sim_snapshot` and it never reaches `state_bytes`. The ruling this wave
+    // honours is about the aim, and the aim is untouched by it.
+    if ads_time_s > 0.0 {
+        let want = inf_ecs::feel::blend_speed_for_ads(ads_time_s, dt);
+        let now = inf_ecs::camera::camera_rig_value(world, guid, inf_ecs::feel::ADS_BLEND_RIG_KEY);
+        if now != Some(want) {
+            if let Some(mut f) = world
+                .world_mut()
+                .get_mut::<inf_ecs::feel::WeaponFeel>(entity)
+            {
+                if !f.blend_speed_prior.is_finite() {
+                    f.blend_speed_prior =
+                        now.unwrap_or(inf_ecs::camera::CameraTuning::default().state_blend_speed);
+                }
+            }
+            inf_ecs::camera::set_camera_rig_value(
+                world,
+                guid,
+                inf_ecs::feel::ADS_BLEND_RIG_KEY,
+                want,
+            );
+        }
+    }
+    let clock_s = inf_ecs::anim_bridge::anim_state_time(world, guid);
+    // **Breathing** is "the animation clock is running and the body still
+    // works". A rig-less fixture has no clock and does not breathe, which is
+    // what makes `sway == 0` reachable at all and is the arm clause 4 names; a
+    // dead one has stopped, which is the other half of the same sentence.
+    let dead = world
+        .world()
+        .get::<inf_ecs::weapon::Health>(entity)
+        .is_some_and(|h| h.dead);
+    let breath = f64::from(u8::from(clock_s > 0.0 && !dead));
+    let input = inf_ecs::feel::FeelInputs {
+        aiming,
+        ads_time_s,
+        speed_mps,
+        breath,
+        clock_s,
+        look_yaw_dps,
+        look_pitch_dps,
+    };
+    let Some(mut feel) = world
+        .world_mut()
+        .get_mut::<inf_ecs::feel::WeaponFeel>(entity)
+    else {
+        return;
+    };
+    let out = inf_ecs::feel::advance_feel(&mut feel, &input, dt);
+    if out.aim_pitch_delta_deg == 0.0 && out.aim_yaw_delta_deg == 0.0 {
+        return;
+    }
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+        cm.runtime.aim_pitch_deg =
+            (cm.runtime.aim_pitch_deg + out.aim_pitch_delta_deg).clamp(-89.0, 89.0);
+        cm.runtime.aim_yaw_deg = wrap_deg(cm.runtime.aim_yaw_deg + out.aim_yaw_delta_deg);
+    }
 }
 
 /// Whether the capsule may grow from `from_half` to `to_half` where it stands.
@@ -1369,7 +1519,11 @@ fn step_one(
     // the one place a target speed is resolved. `1.0` for an unarmed character
     // and for every weapon authored before that wave, so every committed
     // movement trace is byte-identical.
-    let equip_scale = inf_ecs::weapon::equipped_move_speed_scale(world, guid);
+    // **…and how far into an aim it is** (wave WPN2b): the same seam, one more
+    // factor. `inf_ecs::feel::equipped_move_speed_scale` folds the weapon's own
+    // `move_speed_mult` and the aim's `ADS_MOVE_SPEED_MULT` into one number, so
+    // there is still exactly one place a target speed is scaled.
+    let equip_scale = inf_ecs::feel::equipped_move_speed_scale(world, guid);
     let settings = model::settings_for(
         &cm,
         cm.mode,
