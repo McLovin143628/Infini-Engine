@@ -460,12 +460,27 @@ fn the_audio_log_holds_a_hundred_and_twenty_seconds_of_eight_shooters() {
         cm.runtime.want_attack = true;
         cm.runtime.press_attack = true;
     }
+    // The per-phase clock is OFF on every shipped run and answers all zeroes
+    // until it is armed -- measured on this arm's own first draft, which printed
+    // `0.0000 ms` and would have held any budget ever written.
+    sim.set_step_profiling(true);
     let before = sim.audio_command_log().len();
     let steps = (120.0 / DT) as usize;
     let mut shots = 0u64;
+    // **THE AUDIO PHASE AT THIS WAVE'S OWN POPULATION** (the audit's (i)).
+    // `AUDIO_STEP_BUDGET_MS` is 1.0 and the only arm that holds it stands in a
+    // VENUE, where nobody is shooting -- so the budget had never been read at
+    // the population this wave created: four `Play`s a shot and a casing, at
+    // eight shooters, for two minutes.
+    let mut audio_ms = 0.0f64;
     for _ in 0..steps {
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         shots += u64::from(sim.gameplay().shots);
+        for (name, ms) in sim.step_profile().rows() {
+            if name == "audio" {
+                audio_ms += ms;
+            }
+        }
         // The trigger is re-pressed because the host clears the edge every step;
         // `want_attack` alone is what an automatic weapon needs, and both are set
         // for the shooter that is not one.
@@ -479,11 +494,27 @@ fn the_audio_log_holds_a_hundred_and_twenty_seconds_of_eight_shooters() {
         }
     }
     let commands = sim.audio_command_log().len() - before;
+    let audio_mean = audio_ms / steps as f64;
     println!(
         "120 s at eight shooters, on the shipped host: {shots} rounds, \
-         {commands} commands, {} dropped (ceiling {})",
+         {commands} commands, {} dropped (ceiling {}); the audio phase costs \
+         {audio_mean:.4} ms a step (budget {})",
         sim.dropped_audio_commands(),
-        inf_audio::AUDIO_LOG_CAPACITY
+        inf_audio::AUDIO_LOG_CAPACITY,
+        inf_player::budget::AUDIO_STEP_BUDGET_MS
+    );
+    // Timed only off CI and out of a debug build, on `island_gate`'s own terms:
+    // a wall clock under a debug build's instrumentation is not a budget.
+    assert!(
+        audio_mean > 0.0,
+        "the phase clock read zero, so this measurement is of nothing"
+    );
+    let timed = !cfg!(debug_assertions) && std::env::var_os("CI").is_none();
+    assert!(
+        !timed || audio_mean <= inf_player::budget::AUDIO_STEP_BUDGET_MS,
+        "the audio phase costs {audio_mean:.4} ms a step at eight shooters against \
+         a {} ms budget",
+        inf_player::budget::AUDIO_STEP_BUDGET_MS
     );
     assert!(
         shots > 8_000,
