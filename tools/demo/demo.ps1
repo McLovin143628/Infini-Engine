@@ -719,13 +719,26 @@ if ($armList.Count -eq 0 -and $inHand) {
     #     always looks like a recoil frame.
     #
     #     So the clicks come first and the waits are SHORT: one round every
-    #     ~140 ms, which is the registry's own 450 rpm, with a 0.10 s look at
-    #     the CSV between them. The three thresholds are then crossed by a
-    #     spring that is genuinely stacking.
+    #     ~140 ms -- about 230 rpm once PowerShell's own sleep granularity and
+    #     the input calls are paid for -- with a 0.10 s look at the CSV between
+    #     them. The three thresholds are then crossed by a spring that is
+    #     genuinely stacking: measured, aim 2.3403 -> 5.6528 -> 5.3424 deg and
+    #     hold points of 52.809 -> 122.435 -> 118.713 mm.
+    #
+    #     **AND THE PIXELS STILL WILL NOT SHOW IT, for a reason worth writing
+    #     down.** The frame is taken by a `powershell -File $shot` SUBPROCESS,
+    #     which the log's own timestamps put at up to a second behind the row
+    #     that armed it -- and a 2.5-recoil pistol's hold-point spring is home
+    #     in about a third of that. The whole excursion is 40 mm of lift at an
+    #     aiming boom of 2.0749 m, which is 13 pixels of a 730-line window. So
+    #     a photograph of THIS weapon's recoil is not obtainable through this
+    #     harness at any click rate, and the honest place for the number is the
+    #     row printed beside each frame. A 10-recoil launcher would photograph;
+    #     nothing on the island's kerb does.
     $burst = @(
         @{ n = "92-burst-1.png"; what = "the first round's kick";                     col = 23; over = 5.0 },
         @{ n = "93-burst-2.png"; what = "the burst climbing (the aim past 4 deg)";    col = 24; over = 4.0 },
-        @{ n = "94-burst-3.png"; what = "the burst at its top (the aim past 5.5 deg)"; col = 24; over = 5.5 }
+        @{ n = "94-burst-3.png"; what = "the burst at its top (the aim past 5 deg)";   col = 24; over = 5.0 }
     )
     $shotsFired = 0
     $stage = 0
@@ -767,14 +780,32 @@ if ($armList.Count -eq 0 -and $inHand) {
     #     the HIP cone.
     [InfInput]::RightUp()
     Start-Sleep -Milliseconds 200
-    $bloom = $false
-    for ($t = 0; ($t -lt 20) -and (-not $bloom); $t++) {
+    #     **The clicks come with NO CSV read between them.** Measured on the
+    #     first audit run: a leg that polls the log between rounds fires at
+    #     about 227 rpm -- half the Glock's own rate -- because a
+    #     `Wait-ForHero` turnaround is longer than a fire interval, and at
+    #     227 rpm the decay (0.178 deg between rounds) outruns the gain
+    #     (0.150), so the cone still cannot climb. So the burst is fired
+    #     BLIND, at the weapon's own 133 ms, and the log is read once at the
+    #     end -- which is the only shape that reaches a real bloom through a
+    #     scripted trigger.
+    #     **RELOAD FIRST.** Measured on the second audit run: the leg reached
+    #     the bloom burst with an empty magazine, the weapon spent the whole
+    #     1.6 s firing NOTHING, and the cone sat at exactly 1.2000 -- the
+    #     registry's own base -- for six seconds of hero log. A Glock holds
+    #     seventeen and the burst leg above it spends most of them.
+    [InfInput]::Down(0x13)   # scancode: R
+    Start-Sleep -Milliseconds 60
+    [InfInput]::Up(0x13)
+    Start-Sleep -Milliseconds 1700
+    for ($t = 0; $t -lt 12; $t++) {
         [InfInput]::LeftDown(); Start-Sleep -Milliseconds 40; [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 95
         $shotsFired++
-        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past 1.60 deg (the registry's own base is 1.20)" -TimeoutS 0.10 `
-            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.60) } `
-            -Out (Join-Path $OutDir "95-bloom.png"))[-1]
     }
+    $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past 1.60 deg (the registry's own base is 1.20)" -TimeoutS 1.0 `
+        -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.60) } `
+        -Out (Join-Path $OutDir "95-bloom.png"))[-1]
     if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.60 deg over $shotsFired rounds" }
     Say "WPN2b: $shotsFired rounds fired over the feel leg"
     Start-Sleep -Milliseconds 1200
