@@ -67,8 +67,8 @@ pub mod asset;
 
 pub use asset::{AudioAsset, AudioFormat, AudioImportSettings, BusChoice};
 pub use command::{AudioCommand, AudioCommandQueue, PlayCommand, AUDIO_LOG_CAPACITY};
-pub use filter::OnePole;
 pub use engine::{AudioEngine, Bus, BusRef, OcclusionHook, PlaySettings, SoundHandle};
+pub use filter::OnePole;
 pub use mixer::{Effect, MixerConfig, ResolvedBus};
 pub use sound::{DecodeError, SoundData};
 pub use spatial::{Attenuation, AttenuationModel, Listener};

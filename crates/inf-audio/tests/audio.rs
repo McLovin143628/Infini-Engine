@@ -376,7 +376,10 @@ fn a_play_that_names_a_cutoff_is_filtered_before_it_starts() {
     // One that names a cutoff does.
     let mut p = PlayCommand::new(2, clip, "sfx");
     p.lowpass_hz = Some(700.0);
-    engine.drain(&[AudioCommand::Play(p.clone())], &clip_stream(sound.clone()));
+    engine.drain(
+        &[AudioCommand::Play(p.clone())],
+        &clip_stream(sound.clone()),
+    );
     assert_eq!(engine.filtered_clip_count(), 1);
 
     // …and the copy is CACHED: a burst at the same cutoff filters once.

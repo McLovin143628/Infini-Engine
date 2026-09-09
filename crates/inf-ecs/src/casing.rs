@@ -199,6 +199,42 @@ pub struct CasingPool {
     pub settled: u64,
     /// How many aged out.
     pub expired: u64,
+    /// **Whether the last loud shot was fired indoors** (wave WPN2c), or `None`
+    /// before anything has been fired.
+    ///
+    /// A DIAGNOSTIC beside the state rather than inside it, on
+    /// [`crate::ballistics::RoundPool::last_flight_m`]'s own terms: it is a
+    /// pure function of a verdict the shot already carried, it is **not
+    /// folded** by [`casing_state_bytes`], and its only reader is the demo
+    /// loop's `hero.csv`.
+    ///
+    /// It lives on the POOL rather than in a host, and that is a measurement
+    /// rather than a preference. The first draft latched it in
+    /// `inf_player::pie_drive::HeroLog::tick` off `GameplayReport::shots`, and
+    /// the column read `-` through an eight-round burst on the island: the
+    /// report is replaced by every fixed step, a frame may run more than one,
+    /// and the log ticks once a FRAME — so a shot on any step but the last of
+    /// its frame is invisible to a host-side latch. A latch inside the sim
+    /// cannot miss a step, and it is the same number in both hosts.
+    pub last_shot_indoors: Option<bool>,
+}
+
+/// **Remember which room the last loud shot was fired in** (wave WPN2c) — the
+/// diagnostic `hero.csv`'s tail column reads.
+///
+/// It creates the pool if there is none, because a weapon whose ejection port
+/// throws nothing still fires in a room.
+pub fn note_shot_room(world: &mut EcsWorld, indoors: bool) {
+    let w = world.world_mut();
+    if w.get_resource::<CasingPool>().is_none() {
+        w.insert_resource(CasingPool::default());
+    }
+    w.resource_mut::<CasingPool>().last_shot_indoors = Some(indoors);
+}
+
+/// **Which room the last loud shot was fired in**, or `None`.
+pub fn last_shot_indoors(world: &EcsWorld) -> Option<bool> {
+    casing_pool(world).and_then(|p| p.last_shot_indoors)
 }
 
 /// The pool, if this world has ever ejected a casing.
@@ -510,11 +546,7 @@ mod tests {
         assert_eq!(casings_live(&w), MAX_CASINGS_LIVE);
         assert_eq!(casing_pool(&w).unwrap().recycled, 1);
         // …and the oldest is the one that went: sequence 0 is gone.
-        assert!(casing_pool(&w)
-            .unwrap()
-            .casings
-            .iter()
-            .all(|c| c.seq != 0));
+        assert!(casing_pool(&w).unwrap().casings.iter().all(|c| c.seq != 0));
         // The bytes are 121 a casing and empty again once the pool is cleared.
         assert_eq!(
             casing_state_bytes(&w).len(),
@@ -571,7 +603,10 @@ mod tests {
         // Facing +X (yaw 90): right is -Z, and the whole thing rotates with it.
         let v90 = eject_velocity(&def, 90.0);
         assert!(v90.z < 0.0, "{v90:?}");
-        assert!((v90.y - v.y).abs() < 1e-9, "the rise is not a function of yaw");
+        assert!(
+            (v90.y - v.y).abs() < 1e-9,
+            "the rise is not a function of yaw"
+        );
         // A left-handed port throws the other way.
         let left = WeaponDef {
             eject_dir_deg: -80.0,
@@ -590,7 +625,10 @@ mod tests {
         let up = bounce_velocity(DVec3::new(0.0, -4.0, 0.0), DVec3::Y);
         assert!((up.y - 4.0 * CASING_RESTITUTION).abs() < 1e-12, "{up:?}");
         // A degenerate normal is a dead stop, not a NaN.
-        assert_eq!(bounce_velocity(DVec3::new(1.0, -1.0, 0.0), DVec3::ZERO), DVec3::ZERO);
+        assert_eq!(
+            bounce_velocity(DVec3::new(1.0, -1.0, 0.0), DVec3::ZERO),
+            DVec3::ZERO
+        );
         let mut c = a_casing(0);
         assert!(!c.settled());
         c.contacts = 1;

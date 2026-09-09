@@ -137,10 +137,10 @@ impl Range {
         let e = self.world.spawn_with_guid(EAR, "Ear", None);
         let mut t = Transform::IDENTITY;
         t.translation = Vec3d::new(at.x, at.y, at.z);
-        self.world.world_mut().entity_mut(e).insert((
-            t,
-            inf_ecs::components::AudioListener { active: true },
-        ));
+        self.world
+            .world_mut()
+            .entity_mut(e)
+            .insert((t, inf_ecs::components::AudioListener { active: true }));
         self.world.propagate();
     }
 
@@ -475,7 +475,10 @@ fn the_probe_calls_a_room_a_room_and_a_street_a_street() {
     let room = weapon::report_layers(WeaponClass::Ar, inside.1, 320.0, 10.0, 0);
     assert_eq!(
         street[2].source.clip,
-        Some(weapon::report_clip(WeaponClass::Ar, ReportClip::OutdoorTail))
+        Some(weapon::report_clip(
+            WeaponClass::Ar,
+            ReportClip::OutdoorTail
+        ))
     );
     assert_eq!(
         room[2].source.clip,
@@ -570,7 +573,10 @@ fn the_enclosure_probe_pays_for_its_own_rays() {
 #[test]
 fn every_clip_the_engine_names_is_a_file_that_decodes() {
     let dir = inf_editor_core::samples::weapon_audio_dir();
-    if !dir.join(inf_editor_core::weapon_audio::CASING_FILE).exists() {
+    if !dir
+        .join(inf_editor_core::weapon_audio::CASING_FILE)
+        .exists()
+    {
         eprintln!("SKIP: the gunshot library has not been blessed yet");
         return;
     }
@@ -586,7 +592,10 @@ fn every_clip_the_engine_names_is_a_file_that_decodes() {
             }
         }
     }
-    println!("class    clip          bytes    rate   seconds");
+    println!(
+        "{:8} {:12} {:>8} {:>6} {:>8}",
+        "class", "clip", "bytes", "rate", "seconds"
+    );
     let mut n = 0usize;
     for class in WeaponClass::ALL {
         for clip in ReportClip::ALL {
@@ -673,10 +682,16 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
     let f = inf_audio::OnePole::new(weapon::DISTANT_LOWPASS_HZ, inf_audio::synth::SYNTH_RATE);
     let at = f.response_at(weapon::DISTANT_LOWPASS_HZ, inf_audio::synth::SYNTH_RATE);
     let db = 20.0 * at.log10();
-    println!("{} Hz one-pole: {db:.3} dB at its own cutoff", weapon::DISTANT_LOWPASS_HZ);
+    println!(
+        "{} Hz one-pole: {db:.3} dB at its own cutoff",
+        weapon::DISTANT_LOWPASS_HZ
+    );
     assert!((db + 3.0103).abs() < 0.01);
     // …and eight octaves up it is gone.
-    let up = f.response_at(weapon::DISTANT_LOWPASS_HZ * 8.0, inf_audio::synth::SYNTH_RATE);
+    let up = f.response_at(
+        weapon::DISTANT_LOWPASS_HZ * 8.0,
+        inf_audio::synth::SYNTH_RATE,
+    );
     assert!(up < at / 4.0, "the filter is not filtering");
 
     let inside = weapon::report_layers(WeaponClass::Ar, true, 320.0, 400.0, 0);
@@ -713,7 +728,7 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
 /// jumps 3.75 m a sub-step and never lands inside four metres of the ear).
 #[test]
 fn a_supersonic_round_cracks_within_four_metres_and_a_subsonic_one_never_does() {
-    println!("weapon          v0     miss    cracks");
+    println!("{:14} {:>6} {:>6} {:>9}", "weapon", "v0", "miss", "cracks");
     for (name, v0, miss, want) in [
         ("m4a1", 900.0, 2.0, true),
         ("m4a1", 900.0, 10.0, false),
@@ -893,9 +908,15 @@ fn the_casing_pool_is_bounded_and_folds_nothing_when_it_is_empty() {
         "{} ejected, {} recycled, peak {peak} live (ceiling {MAX_CASINGS_LIVE})",
         pool.spawned, pool.recycled
     );
-    assert!(pool.spawned > MAX_CASINGS_LIVE as u64, "the ring never wrapped");
+    assert!(
+        pool.spawned > MAX_CASINGS_LIVE as u64,
+        "the ring never wrapped"
+    );
     assert!(peak <= MAX_CASINGS_LIVE, "the ring held {peak}");
-    assert!(pool.recycled > 0, "nothing was recycled, so nothing wrapped");
+    assert!(
+        pool.recycled > 0,
+        "nothing was recycled, so nothing wrapped"
+    );
     // The bytes are the live casings and nothing else.
     assert_eq!(
         casing::casing_state_bytes(&r.world).len(),
@@ -950,10 +971,59 @@ fn every_live_casing_is_an_entity_and_every_dead_one_is_not() {
     for _ in 0..(casing::CASING_LIFETIME_S / DT) as usize + 30 {
         r.step();
     }
-    assert_eq!(casing::casings_live(&r.world), 0, "the brass never aged out");
+    assert_eq!(
+        casing::casings_live(&r.world),
+        0,
+        "the brass never aged out"
+    );
     assert!(
         casing::drawn_casings(&r.world).is_empty(),
         "the entities outlived the pool"
+    );
+}
+
+/// **THE ROOM THE LAST SHOT WAS FIRED IN IS REMEMBERED IN THE SIM**, which is
+/// what `hero.csv`'s tail column reads.
+///
+/// The latch lives on the casing pool rather than in the host, and the reason
+/// is measured: the first draft latched it in `HeroLog::tick` off
+/// `GameplayReport::shots`, and the island's own eight-round burst wrote `-` in
+/// every row — a frame may run more than one fixed step, and the report is
+/// replaced by each of them.
+///
+/// **Mutation → red:** dropping the `note_shot_room` call (the latch stays
+/// `None` through a burst).
+#[test]
+fn the_sim_remembers_which_room_the_last_shot_was_fired_in() {
+    for (indoors, want) in [(false, false), (true, true)] {
+        let mut r = Range::new(defs_with("rifle", test_rifle()), indoors);
+        assert_eq!(casing::last_shot_indoors(&r.world), None);
+        r.arm(HERO, "rifle");
+        r.aim(HERO, 0.0, 0.0);
+        r.hold_trigger(HERO, true);
+        let mut shots = 0u32;
+        for _ in 0..30 {
+            shots += r.step().shots;
+        }
+        assert!(shots > 0, "nothing fired");
+        assert_eq!(
+            casing::last_shot_indoors(&r.world),
+            Some(want),
+            "{shots} shots {} and the pool remembers otherwise",
+            if indoors { "in a room" } else { "in the open" }
+        );
+    }
+    // A punch is not a loud shot, so it does not move the latch: a hero that
+    // fired outdoors and then threw a punch indoors still reads `outdoor`.
+    let mut r = Range::new(ItemDefs::default(), true);
+    r.hold_trigger(HERO, true);
+    for _ in 0..30 {
+        r.step();
+    }
+    assert_eq!(
+        casing::last_shot_indoors(&r.world),
+        None,
+        "a punch moved the tail latch"
     );
 }
 
@@ -986,15 +1056,21 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_sound_course() {
     // layers is in the stream, and so is a casing landing — otherwise the three
     // comparisons below are agreeing about a stream with nothing in it.
     for (clip, what) in [
-        (weapon::report_clip(WeaponClass::Ar, ReportClip::Transient), "the transient"),
+        (
+            weapon::report_clip(WeaponClass::Ar, ReportClip::Transient),
+            "the transient",
+        ),
         (weapon::WEAPON_REPORT_CLIP, "the body"),
-        (weapon::report_clip(WeaponClass::Ar, ReportClip::Crack), "the distant crack"),
+        (
+            weapon::report_clip(WeaponClass::Ar, ReportClip::Crack),
+            "the distant crack",
+        ),
         (weapon::CASING_CLIP, "a casing landing"),
     ] {
         let needle = format!("{clip}");
         assert!(
             ta.audio.iter().any(|c| c.contains(&needle)),
-            "{what} is not in the course's command stream, so the arms below              compare a stream that does not contain it"
+            "{what} is not in the stream, so the arms below compare a stream that does not contain it"
         );
     }
     // **THE FIXTURE IS A ROOM**, measured rather than assumed: the gameplay
@@ -1003,7 +1079,10 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_sound_course() {
     // stream is the short one. That is the probe working on committed content
     // rather than on a fixture built to make it work, and the two tails are
     // named here so the day the house moves the arm says which way.
-    let indoor = format!("{}", weapon::report_clip(WeaponClass::Ar, ReportClip::IndoorTail));
+    let indoor = format!(
+        "{}",
+        weapon::report_clip(WeaponClass::Ar, ReportClip::IndoorTail)
+    );
     let outdoor = format!(
         "{}",
         weapon::report_clip(WeaponClass::Ar, ReportClip::OutdoorTail)
@@ -1017,7 +1096,7 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_sound_course() {
     );
     assert!(
         saw_indoor,
-        "the gameplay fixture's hero stands inside its own PCG house, so the          probe should call it indoors"
+        "the gameplay fixture's hero stands inside its own PCG house, so the probe should call it indoors"
     );
     for (i, (x, y)) in ta.trace.iter().zip(tb.trace.iter()).enumerate() {
         assert_eq!(x, y, "step {i}: two independent cooks diverged");
@@ -1163,10 +1242,8 @@ fn the_cost_of_eight_shooters_is_measured_and_printed() {
     for _ in 0..N {
         let report = r.step();
         shots += report.shots;
-        commands += report.shots as usize * 4
-            + report.casings.bounces.len()
-            + report.cracks.len()
-            + 1;
+        commands +=
+            report.shots as usize * 4 + report.casings.bounces.len() + report.cracks.len() + 1;
         casing_rays += report.casings.rays;
         shot_rays += report.rounds.rays + report.rounds.probe_rays + report.shots;
         peak = peak.max(casing::casings_live(&r.world));

@@ -52,9 +52,9 @@ use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
 use inf_core::BoundedLog;
 use inf_ecs::components::{
-    AnimPlayer, AudioSource, CharacterController2D, CharacterController3D,
-    Collider2D, ColliderShape2DKind, Destructible, DistanceModel, GlobalTransform, RootMotion,
-    RootMotionMode, Terrain, Transform, VoxelVolume,
+    AnimPlayer, AudioSource, CharacterController2D, CharacterController3D, Collider2D,
+    ColliderShape2DKind, Destructible, DistanceModel, GlobalTransform, RootMotion, RootMotionMode,
+    Terrain, Transform, VoxelVolume,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::d3::{
@@ -2881,10 +2881,7 @@ impl RuntimeSim {
                     hit.shot_index,
                 ) {
                     let mut cmd = play_command_for(
-                        inf_ecs::weapon::layer_source_key(
-                            guid_source_key(hit.shooter),
-                            layer.kind,
-                        ),
+                        inf_ecs::weapon::layer_source_key(guid_source_key(hit.shooter), layer.kind),
                         &layer.source,
                         layer.source.spatial.then_some(hit.from),
                     );

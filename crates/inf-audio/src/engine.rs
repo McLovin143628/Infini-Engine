@@ -192,7 +192,9 @@ impl Voice {
             .into_iter()
             .flatten()
             .filter(|c| c.is_finite() && *c > 0.0)
-            .fold(None, |acc: Option<f64>, c| Some(acc.map_or(c, |a| a.min(c))))
+            .fold(None, |acc: Option<f64>, c| {
+                Some(acc.map_or(c, |a| a.min(c)))
+            })
     }
 }
 

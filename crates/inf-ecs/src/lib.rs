@@ -25,11 +25,11 @@ pub mod ballistics;
 pub mod band;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).
+pub mod camera;
 // WPN2c: the brass. A bounded RING of shell casings -- the doc's own shape,
 // and deliberately not `ballistics`' refuse-and-count pool: a casing that
 // cannot be afforded should vanish, not fail to exist.
 pub mod casing;
-pub mod camera;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;
 pub mod components;

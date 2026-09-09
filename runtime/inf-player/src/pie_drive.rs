@@ -863,13 +863,6 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 pub struct HeroLog {
     file: Option<std::fs::File>,
     accum: f64,
-    /// **Which tail the last loud shot chose** (wave WPN2c) — `"indoor"`,
-    /// `"outdoor"`, or `"-"` before anything has been fired.
-    ///
-    /// Latched on every tick rather than sampled at the write, because the
-    /// write is four times a second and a shot is a fixed step. See
-    /// [`HeroLog::tick`].
-    last_tail: &'static str,
 }
 
 impl Default for HeroLog {
@@ -877,7 +870,6 @@ impl Default for HeroLog {
         Self {
             file: None,
             accum: 0.0,
-            last_tail: "-",
         }
     }
 }
@@ -928,28 +920,6 @@ impl HeroLog {
         let Some(file) = self.file.as_mut() else {
             return;
         };
-        // **THE TAIL LATCH, BEFORE THE RATE GATE** (wave WPN2c). Which tail a
-        // shot chose is a per-STEP fact and this file is written four times a
-        // second, so a column sampled at the write would miss fourteen shots in
-        // fifteen. The latch is updated on every tick and only the WRITE is
-        // rate-limited, which is the same shape `last_hit_m` has one pool over
-        // — except that one latches in the sim and this one cannot, because
-        // which tail played is a property of a command and not of the world.
-        //
-        // The honest bound: a tick is a FRAME and the shot is a fixed STEP, so
-        // on a machine running below 60 fps this misses shots. It is a caption
-        // for a screenshot, not a gate's evidence — `wpn2c_gate` reads the
-        // command stream.
-        {
-            let g = sim.gameplay();
-            if g.shots > 0 {
-                self.last_tail = if g.rounds.indoor_shots > 0 {
-                    "indoor"
-                } else {
-                    "outdoor"
-                };
-            }
-        }
         self.accum += dt;
         if self.accum < HERO_LOG_PERIOD_S {
             return;
@@ -1040,6 +1010,16 @@ impl HeroLog {
         // then looked would photograph an empty floor if it read anything else.
         // Zero on a level that has never fired.
         let casings_live = inf_ecs::casing::casings_live(sim.world());
+        // **WHICH TAIL THE LAST SHOT CHOSE**, read off the pool the sim latched
+        // it on. The first draft latched it here, off `GameplayReport::shots`,
+        // and the column read `-` through an eight-round burst on the island —
+        // see `inf_ecs::casing::CasingPool::last_shot_indoors` for why a
+        // host-side latch cannot see every step.
+        let tail = match inf_ecs::casing::last_shot_indoors(sim.world()) {
+            Some(true) => "indoor",
+            Some(false) => "outdoor",
+            None => "-",
+        };
         // **WHAT IS ACTUALLY IN THE HAND** (wave WPN2a), and it is here because
         // a frame was captioned wrongly without it: the demo loop cycles weapons
         // with the scroll wheel and named each frame after the id it MEANT to
@@ -1142,7 +1122,7 @@ impl HeroLog {
                 spread_deg,
                 ads,
                 casings_live,
-                self.last_tail
+                tail
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //

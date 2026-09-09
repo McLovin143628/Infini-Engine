@@ -904,8 +904,7 @@ impl WeaponDef {
 /// ([`WeaponDef::report_max_m`]) — the four-layer stack is **wave WPN2c's**, and
 /// a per-weapon report *clip* is refused by P22 §5's own reasoning; see
 /// `report_source`.
-pub const WEAPON_SUB_TABLES: [&str; 5] =
-    ["ballistics", "damage_curve", "recoil", "audio", "eject"];
+pub const WEAPON_SUB_TABLES: [&str; 5] = ["ballistics", "damage_curve", "recoil", "audio", "eject"];
 
 /// **The eighty-five-row weapon registry** (wave WPN2a) — the research doc's
 /// tables, as the TOML the `item.define` node takes.
@@ -2419,7 +2418,10 @@ mod tests {
         );
         // The salt is recoverable, which is what makes a key in a log readable.
         for k in ReportLayerKind::ALL {
-            assert_eq!(layer_source_key(shooter, k) ^ shooter, LAYER_SALTS[k.index()]);
+            assert_eq!(
+                layer_source_key(shooter, k) ^ shooter,
+                LAYER_SALTS[k.index()]
+            );
         }
         assert_eq!(ReportLayerKind::ALL.len(), LAYER_SALTS.len());
     }
@@ -2515,11 +2517,19 @@ mod tests {
             }
             seen.insert(p.to_bits());
         }
-        assert!(seen.len() > 50, "the pitch barely moves: {} values", seen.len());
+        assert!(
+            seen.len() > 50,
+            "the pitch barely moves: {} values",
+            seen.len()
+        );
         // Deterministic: the same round is the same note in a replay.
         assert_eq!(
-            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1].source.pitch,
-            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1].source.pitch
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1]
+                .source
+                .pitch,
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1]
+                .source
+                .pitch
         );
     }
 

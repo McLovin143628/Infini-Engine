@@ -1494,6 +1494,15 @@ fn step_weapons(
         } else {
             resolve_shot(world, bridge, guid, &def, from, dir, shot_index, report)
         };
+        // **WHICH ROOM THIS SHOT WAS FIRED IN** (wave WPN2c) — a diagnostic on
+        // the casing pool, so `hero.csv` can caption a frame with the tail the
+        // shot chose. It is written HERE, once per loud shot, rather than
+        // latched host-side off `GameplayReport::shots`: a frame may run more
+        // than one fixed step and the report is replaced by each of them, so a
+        // host-side latch misses every shot but the last of its frame.
+        if hit.loud {
+            inf_ecs::casing::note_shot_room(world, hit.indoors);
+        }
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
     }
@@ -1612,8 +1621,7 @@ fn resolve_shot(
     // about them would be a ceiling on a sixth of the real bill. So the step's
     // ray count is the shot's cast plus its probe's, per shot fired so far, and
     // the pool's spawn refusal is priced against the larger number.
-    let rays_already =
-        report.shots as usize * (1 + super::audio::ENCLOSURE_PROBE_RAYS);
+    let rays_already = report.shots as usize * (1 + super::audio::ENCLOSURE_PROBE_RAYS);
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
     let exclude = shot_exclusions(world, bridge, shooter);

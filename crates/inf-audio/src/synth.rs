@@ -74,13 +74,7 @@ pub const CLASS_NAMES: [&str; 7] = [
 
 /// **The five layer clips, by index** — the order
 /// `inf_ecs::weapon::ReportClip::ALL` publishes.
-pub const CLIP_NAMES: [&str; 5] = [
-    "Transient",
-    "Body",
-    "IndoorTail",
-    "OutdoorTail",
-    "Crack",
-];
+pub const CLIP_NAMES: [&str; 5] = ["Transient", "Body", "IndoorTail", "OutdoorTail", "Crack"];
 
 /// **What one class's gunshot is made of** — seven rows, one per class.
 ///
@@ -457,7 +451,10 @@ mod tests {
             let last = pcm.iter().rposition(|s| s.abs() > floor).unwrap_or(0);
             (last as f64) / f64::from(SYNTH_RATE)
         };
-        println!("class  clip          samples   secs    -60 dB   peak");
+        println!(
+            "{:7} {:12} {:>8} {:>7} {:>8} {:>6}",
+            "class", "clip", "samples", "secs", "-60 dB", "peak"
+        );
         for c in 0..7u8 {
             for k in 0..5u8 {
                 let pcm = clip_pcm(c, k);
