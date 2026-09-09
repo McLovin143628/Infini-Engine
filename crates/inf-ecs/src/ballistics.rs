@@ -521,10 +521,24 @@ pub struct Crack {
 /// Portable: one dot product, one clamp and one length. No trigonometry, so it
 /// is bit-identical on every target — which it has to be, because the crack it
 /// decides is a command two hosts are compared on.
+/// `a > b`, written once so the **NaN-rejecting** negation `!greater(a, b)`
+/// reads as intent rather than as a negated comparison.
+///
+/// `inf_anim::greater`'s discipline exactly, and for its reason: clippy's
+/// `neg_cmp_op_on_partial_ord` is right that `!(a > b)` reads badly and wrong
+/// that `partial_cmp` is the fix, because `partial_cmp` answers `None` for a
+/// NaN and both callers here want the NaN on the REFUSING side. A segment whose
+/// length is not a number must not be divided by, and a round whose speed is
+/// not a number must not crack.
+#[inline]
+fn greater(a: f64, b: f64) -> bool {
+    a > b
+}
+
 pub fn point_to_segment_m(point: DVec3, a: DVec3, b: DVec3) -> (f64, DVec3) {
     let seg = b - a;
     let len2 = seg.length_squared();
-    if !(len2 > 0.0) || !point.is_finite() {
+    if !greater(len2, 0.0) || !point.is_finite() {
         return ((point - a).length(), a);
     }
     let t = ((point - a).dot(seg) / len2).clamp(0.0, 1.0);
@@ -546,7 +560,7 @@ pub fn crack_for(
     speed_mps: f64,
     listener: Option<DVec3>,
 ) -> Option<Crack> {
-    if !(speed_mps > SPEED_OF_SOUND_MPS) {
+    if !greater(speed_mps, SPEED_OF_SOUND_MPS) {
         return None;
     }
     let ear = listener?;

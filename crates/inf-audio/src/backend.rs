@@ -98,7 +98,15 @@ impl Backend {
     /// live device that refused the sound answers `false`, and that is the case
     /// the engine must not record as a playing source — an untracked voice makes
     /// `is_playing()` lie for the rest of the process.
+    ///
+    /// **Eight arguments, and the eighth is why** (wave WPN2c): `start_s` is the
+    /// position a re-filtered voice resumes at, and a voice that could not be
+    /// resumed where it had reached would have to restart from zero every time
+    /// a door shut. A parameter object would hide the seam this function exists
+    /// to be -- it is the one call that crosses into kira -- so the lint is
+    /// allowed here with its reason rather than the shape bent around it.
     #[allow(unused_variables)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn play(
         &mut self,
         id: VoiceId,
@@ -243,6 +251,9 @@ mod cpal_impl {
             }
         }
 
+        /// The device half of [`Backend::play`]; see its note on the eighth
+        /// argument.
+        #[allow(clippy::too_many_arguments)]
         pub(super) fn play(
             &mut self,
             id: VoiceId,
