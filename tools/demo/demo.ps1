@@ -616,6 +616,7 @@ Say ("cursor while the game has the window: " + [InfInput]::CursorState())
 #
 #    It is first, before any movement, because the pickup is at the spawn and a
 #    hero that has run down the street is out of the E key's 2.5 m reach.
+$inHand = $false
 if ($armList.Count -eq 0) {
     Say "-- SIDEARM: the pickup the island's own Blueprint put on the kerb --"
     Restore-PlayerFocus "before the sidearm"
@@ -624,7 +625,6 @@ if ($armList.Count -eq 0) {
     # the hand (`weapon_switch`). Both are shipped controls and neither is this
     # script's own door. The trigger is column 23 -- what the sim says is in the
     # hand -- so the frame cannot be of an empty pair of hands.
-    $inHand = $false
     for ($k = 0; ($k -lt 10) -and (-not $inHand); $k++) {
         [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # scancode: E
         Start-Sleep -Milliseconds 250
@@ -653,6 +653,85 @@ if ($armList.Count -eq 0) {
         Say "SIDEARM: ten taps of E and a wheel notch each, and the hand is still empty -- carried 204 is not closed on this build"
     }
     Start-Sleep -Milliseconds 400
+}
+
+# ── 5a2. THE FEEL (wave WPN2b) ───────────────────────────────────────────────
+#
+#    Five claims, five frames, every one of them TRIGGERED on a column the sim
+#    writes rather than taken after a sleep:
+#
+#      col 24 `recoil_mm`       how far the hold-point spring has the weapon off
+#                               the aim line right now
+#      col 25 `aim_recoil_deg`  how far the AIM itself has been pushed
+#      col 26 `spread_deg`      the whole cone the next round leaves through
+#      col 27 `ads`             the aim-down-sights blend
+#      col 14 `boom_m`          the camera arm the aim block pulls in to 2.0 m
+#
+#    (One-based here; `$c[..]` below is zero-based, as everywhere in this file.)
+#
+#    It runs only when the sidearm leg above actually put the Glock in the hand,
+#    because every frame is of a weapon and a frame of an empty pair of hands
+#    captioned "the recoil" is worse than no frame.
+if ($armList.Count -eq 0 -and $inHand) {
+    Say "-- WPN2b: the feel, on the island's own Glock --"
+    Restore-PlayerFocus "before the feel leg"
+    # Level the aim: the sidearm leg left it pitched down 60 counts and a burst
+    # into the pavement is a burst nobody can see.
+    [InfInput]::Look(0, -40)
+    Start-Sleep -Milliseconds 400
+
+    # (1) ADS. Right button HELD, and the frame is taken the moment the camera
+    #     has actually arrived -- the boom at the aim block's 2.0 m AND the sim's
+    #     own blend at 1. Two columns, because either alone is satisfied by a
+    #     camera that was already close.
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "90-hip.png") | ForEach-Object { Say $_ }
+    [InfInput]::RightDown()
+    $ads = @(Wait-ForHero -Csv $heroCsv -What "the aim arrived (boom at 2.0 m, blend at 1)" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 26) -and ([double]$c[26] -gt 0.98) -and ([double]$c[13] -lt 2.4) } `
+        -Out (Join-Path $OutDir "91-ads.png"))[-1]
+    if (-not $ads) { Say "WPN2b: the aim never arrived -- no ADS frame" }
+
+    # (2) THE BURST, at three frames. A shot's climb peaks four steps and 66 ms
+    #     after the trigger, so these cannot be taken on a wall clock: each one
+    #     waits for `recoil_mm` to cross a threshold the one before it did not.
+    #     The trigger is HELD across all three, which is what makes it a burst.
+    [InfInput]::LeftDown()
+    $b1 = @(Wait-ForHero -Csv $heroCsv -What "the first round's kick" -TimeoutS 2.0 `
+        -Predicate { param($c) ($c.Count -gt 23) -and ([double]$c[23] -gt 5.0) } `
+        -Out (Join-Path $OutDir "92-burst-1.png"))[-1]
+    $b2 = @(Wait-ForHero -Csv $heroCsv -What "the burst climbing (the aim past 1.5 deg)" -TimeoutS 3.0 `
+        -Predicate { param($c) ($c.Count -gt 24) -and ([double]$c[24] -gt 1.5) } `
+        -Out (Join-Path $OutDir "93-burst-2.png"))[-1]
+    $b3 = @(Wait-ForHero -Csv $heroCsv -What "the burst at its top (the aim past 3 deg)" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 24) -and ([double]$c[24] -gt 3.0) } `
+        -Out (Join-Path $OutDir "94-burst-3.png"))[-1]
+    if (-not ($b1 -and $b2 -and $b3)) { Say "WPN2b: the burst never climbed -- $b1 / $b2 / $b3" }
+
+    # (3) THE SPREAD, at the top of the magazine's own bloom. The cone widens
+    #     with every round; this waits for it to pass the base 1.20 deg the
+    #     registry authors for a pistol, which only a fired magazine can do.
+    $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past its base" -TimeoutS 5.0 `
+        -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.5) } `
+        -Out (Join-Path $OutDir "95-bloom.png"))[-1]
+    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.5 deg" }
+    [InfInput]::LeftUp()
+    [InfInput]::RightUp()
+    Start-Sleep -Milliseconds 900
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "96-after-the-burst.png") | ForEach-Object { Say $_ }
+
+    # (4) THE SWAY, at a sprint, with the weapon still in the hand. The bob is
+    #     proportional to speed, so the frame waits for the hero to actually be
+    #     moving -- column 7 -- rather than for a key to have been pressed.
+    [InfInput]::Down(0x2A)   # scancode: Left Shift
+    [InfInput]::Down(0x11)   # scancode: W
+    $sway = @(Wait-ForHero -Csv $heroCsv -What "the hero sprinting with the sidearm out" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 22) -and ([double]$c[6] -gt 4.0) -and ($c[22].Trim() -eq "glock_17") } `
+        -Out (Join-Path $OutDir "97-sway-sprint.png"))[-1]
+    if (-not $sway) { Say "WPN2b: the hero never reached a sprint with the weapon out" }
+    [InfInput]::Up(0x11)
+    [InfInput]::Up(0x2A)
+    Start-Sleep -Milliseconds 600
+    Restore-PlayerFocus "after the feel leg"
 }
 
 # **FOUR NAMED FRAMES, not two anonymous ones** (wave CHAR1a.2). A wave that is
