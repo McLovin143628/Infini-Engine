@@ -753,9 +753,14 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
         rest_after * px
     );
     println!("  the aim, after the burst   {aim_after:.6} deg");
+    // **Against the rest error, not against zero** (mutation M2 found this):
+    // dropping the aim delta in `step_weapon_feel` leaves the camera perfectly
+    // still, the error at its 0.0384 deg resting value, and `> 0.0` passes.
+    // What the arm claims is that the burst MOVED the view, so the number it is
+    // fought against is the view standing still.
     assert!(
-        recoil_worst > 0.0,
-        "the reticle never moved at all - the camera is not following the aim, or nothing was fired"
+        recoil_worst > rest_before * 10.0,
+        "the reticle moved {recoil_worst:.6} deg during the burst against {rest_before:.6} at rest - the camera is not following an aim that moved, or nothing was fired"
     );
     assert!(
         recoil_worst <= mouse_worst,
@@ -1304,6 +1309,15 @@ fn an_aiming_character_covers_less_ground() {
     assert!(
         (ads / hip - want).abs() < 0.08,
         "the ratio is {:.4} against {want:.4} - the ADS factor is not the one that was authored",
+        ads / hip
+    );
+    // **…and it is BELOW the aiming scale alone** (mutation M8 found this):
+    // `ADS_MOVE_SPEED_MULT := 1.0` leaves the ratio at exactly `aim_scale`, and
+    // an arm that only checks the ratio against a product containing the
+    // mutated constant passes. This half names no constant of the wave's.
+    assert!(
+        ads / hip < aim_scale * 0.9,
+        "the ratio is {:.4} against the aiming scale's own {aim_scale:.4} - the ADS factor is 1.0 and only ALS's table is slowing this character down",
         ads / hip
     );
 }
