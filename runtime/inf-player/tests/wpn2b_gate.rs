@@ -851,14 +851,18 @@ fn the_camera_has_no_per_shot_input() {
     // cut" in that file and banning it would ban the camera's own feature. What
     // is banned is every spelling of a WEAPON.
     let step: String = STEP
-        .replace("
+        .replace(
+            "
 ", "
-")
+",
+        )
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     for (what, code) in [("inf-ecs/src/camera.rs", &code), ("d3/camera.rs", &step)] {
         for banned in ["recoil", "WeaponFeel", "weapon::", "WeaponState", "feel::"] {
             assert!(
@@ -1794,8 +1798,9 @@ fn the_overlays_own_arm_survives_the_hand_ik() {
         let (rig, _) = r.rig.as_ref().expect("a rig");
         let posed = inf_ecs::pose::evaluated_pose(&r.world, HERO).expect("a posed hero");
         let a = glam::Quat::from_array(posed.pose.locals[elbow as usize].rotation);
-        let b =
-            glam::Quat::from_array(inf_anim::Pose::rest(&rig.skeleton).locals[elbow as usize].rotation);
+        let b = glam::Quat::from_array(
+            inf_anim::Pose::rest(&rig.skeleton).locals[elbow as usize].rotation,
+        );
         let bend = f64::from(a.angle_between(b).to_degrees());
         // The reach the hold point was built at, and how far the hand landed
         // from it — both read off the world.
@@ -1811,7 +1816,11 @@ fn the_overlays_own_arm_survives_the_hand_ik() {
         let p = g[hand as usize].to_scale_rotation_translation().2;
         let got =
             to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)));
-        ((want - shoulder).length(), bend, (got - want).length() * 1000.0)
+        (
+            (want - shoulder).length(),
+            bend,
+            (got - want).length() * 1000.0,
+        )
     }
 
     let (bare_reach, bare_bend, bare_mm) = run(false);
@@ -2443,7 +2452,10 @@ fn every_row_in_the_registry_can_bloom_at_its_own_rate() {
         "=== the bloom's own inequality over {rows} rows: D = {:.2} needs {floor:.0} rpm ===",
         feel::BLOOM_DECAY_PER_S
     );
-    println!("  {autos} automatic rows, {} of which cannot bloom", auto_cannot.len());
+    println!(
+        "  {autos} automatic rows, {} of which cannot bloom",
+        auto_cannot.len()
+    );
     println!("  {semis} semi-automatic rows, {semi_cannot} of which cannot bloom");
     println!(
         "  the slowest AUTOMATIC row is {} at {:.0} rpm",
@@ -2534,7 +2546,13 @@ fn the_hero_log_and_its_readme_agree() {
         README.contains("TWENTY-SEVEN") || README.contains("twenty-seven"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
-    for col in ["recoil_mm", "aim_recoil_deg", "spread_deg", "ads", "equipped"] {
+    for col in [
+        "recoil_mm",
+        "aim_recoil_deg",
+        "spread_deg",
+        "ads",
+        "equipped",
+    ] {
         assert!(
             README.contains(col),
             "`tools/demo/README.md` does not document the `{col}` column"
@@ -2652,7 +2670,10 @@ fn one_blend_speed_makes_every_settings_blend_the_weapons() {
 /// different behaviour: the magazine does not cool, it is a NEW magazine.
 #[test]
 fn a_weapon_switch_resets_the_bloom_rather_than_ageing_it() {
-    let mut r = Range::new(defs_with(&[("rifle", test_rifle()), ("pistol", test_pistol())]));
+    let mut r = Range::new(defs_with(&[
+        ("rifle", test_rifle()),
+        ("pistol", test_pistol()),
+    ]));
     r.arm(HERO, "rifle");
     r.aim(HERO, 0.0, 0.0);
     for _ in 0..10 {
@@ -2831,7 +2852,8 @@ fn the_sway_snaps_when_the_animation_clock_resets() {
         let mut worst = 0.0_f64;
         for i in 0..20_000 {
             let t = f64::from(i) * 1.0e-3;
-            worst = worst.max((feel::sway_offset(t, speed_before, 1.0, (0.0, 0.0)) - after).length());
+            worst =
+                worst.max((feel::sway_offset(t, speed_before, 1.0, (0.0, 0.0)) - after).length());
         }
         worst
     };

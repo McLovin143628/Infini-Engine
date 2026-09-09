@@ -957,10 +957,7 @@ fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
             // tracks a 1.2 m character and a 2.4 m one without a second opinion
             // about either.
             let height = (cm.stand_half_height_m * 2.0).max(0.4);
-            (
-                feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT),
-                AIM_REACH_M,
-            )
+            (feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT), AIM_REACH_M)
         }
     };
     let reach = (span + offset.z).max(AIM_REACH_MIN_M);
