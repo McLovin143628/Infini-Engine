@@ -679,7 +679,7 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
         let eye = weapon::aim_forward(cam.pose.yaw_deg, cam.pose.pitch_deg);
         aim.dot(eye).clamp(-1.0, 1.0).acos().to_degrees()
     }
-    let run = |burst: bool, look_dps: f64| -> (f64, f64, f64, f64) {
+    let run = |burst: bool, look_dps: f64| -> (f64, f64, f64, f64, f64) {
         let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
         if burst {
             r.arm(HERO, "rifle");
@@ -700,6 +700,13 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
         }
         let at_rest_before = error_deg(&cam, &r.cm(HERO));
         let mut worst = 0.0_f64;
+        // **How far the AIM ITSELF moved**, which is the number the reticle
+        // error has to be judged against (the WPN2b audit): a camera that
+        // followed nothing and a camera that followed an aim which never moved
+        // are the same picture, and so are a camera that follows its aim and one
+        // that adds a kick of its own on top.
+        let mut aim_worst = 0.0_f64;
+        let aim0 = r.cm(HERO).runtime.aim_pitch_deg;
         if burst {
             r.hold_trigger(HERO, true);
         }
@@ -712,6 +719,7 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
             }
             step(&mut r, &mut cam);
             worst = worst.max(error_deg(&cam, &r.cm(HERO)));
+            aim_worst = aim_worst.max((r.cm(HERO).runtime.aim_pitch_deg - aim0).abs());
         }
         if burst {
             r.hold_trigger(HERO, false);
@@ -731,11 +739,12 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
             worst,
             at_rest_after,
             r.cm(HERO).runtime.aim_pitch_deg,
+            aim_worst,
         )
     };
     // The recoil, and a mouse flick of the same shape as the control.
-    let (rest_before, recoil_worst, rest_after, aim_after) = run(true, 0.0);
-    let (_, mouse_worst, _, _) = run(false, 120.0);
+    let (rest_before, recoil_worst, rest_after, aim_after, aim_excursion) = run(true, 0.0);
+    let (_, mouse_worst, _, _, _) = run(false, 120.0);
     // 55 degrees of field over 1080 lines: what one degree is worth in pixels.
     let px = 1080.0 / 55.0;
     println!("=== the reticle against the aim, degrees and 1080p pixels at a 55 deg field ===");
@@ -760,6 +769,11 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
         rest_after * px
     );
     println!("  {:<27}{aim_after:.6} deg", "the aim, after the burst");
+    println!(
+        "  {:<27}{aim_excursion:.6} deg (the reticle error is {:.4} of it)",
+        "the AIM's own excursion",
+        recoil_worst / aim_excursion.max(1.0e-12)
+    );
     // **Against the rest error, not against zero** (mutation M2 found this):
     // dropping the aim delta in `step_weapon_feel` leaves the camera perfectly
     // still, the error at its 0.0384 deg resting value, and `> 0.0` passes.
@@ -782,6 +796,26 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
         "the reticle sits {:.2} px off the aim at rest",
         rest_after * px
     );
+    // **AGAINST THE AIM'S OWN EXCURSION, not only against a mouse flick** — the
+    // WPN2b audit's second reticle finding, and the half a transient camera kick
+    // survives. `recoil_worst <= mouse_worst` is a ceiling of 9.74 deg against
+    // an aim that moves 7.95, so a camera kick of up to THREE TIMES the aim
+    // spring, added on top of the aim and decaying with it, passed every arm of
+    // this gate: it is under the mouse's ceiling and it is exactly zero at rest
+    // before and after, so neither of the two assertions above sees it.
+    //
+    // What a camera that FOLLOWS an aim does is lag it. The error is therefore a
+    // fraction of the aim's own movement, and the fraction is what the lag is:
+    // measured, 0.356 of it. A camera that ADDS to the aim is over 1.0 by
+    // construction, because it is the aim's movement plus its own.
+    assert!(
+        aim_excursion > 1.0,
+        "the aim moved {aim_excursion:.4} deg during the burst - nothing was fired and this arm is measuring a still camera"
+    );
+    assert!(
+        recoil_worst < aim_excursion * 0.6,
+        "the reticle went {recoil_worst:.4} deg off an aim that moved {aim_excursion:.4} - a camera that merely LAGS its aim cannot exceed it, so this camera is adding a kick of its own (the WPN1 ruling's first half)"
+    );
 }
 
 /// **Neither the camera nor its authored tuning has a per-shot input.**
@@ -793,6 +827,15 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
 #[test]
 fn the_camera_has_no_per_shot_input() {
     const SRC: &str = include_str!("../../../crates/inf-ecs/src/camera.rs");
+    // **AND THE FILE THAT ACTUALLY POSES THE CAMERA** (the WPN2b audit).
+    // `inf-ecs/src/camera.rs` is the rig, the tuning and the interpolation;
+    // `inf-physics/src/d3/camera.rs` is `step_camera_with_requests`, which is
+    // where a pose is produced every step and therefore where a per-shot kick
+    // would actually be written. It was not on the list, and a
+    // `cam.pose.pitch_deg += feel.aim_pitch.position` planted there passed
+    // every one of this gate's twenty arms at one times and at three times the
+    // aim spring.
+    const STEP: &str = include_str!("../../../crates/inf-physics/src/d3/camera.rs");
     const TOML: &str = include_str!("../../../samples/phase29-locomotion/camera.toml");
     // Comments name the ruling, so they are stripped before the ban is applied
     // — `portable_character`'s own recipe, for its own reason.
@@ -807,12 +850,27 @@ fn the_camera_has_no_per_shot_input() {
     // whose whole vocabulary is cinematography, so the word means "a cinematic
     // cut" in that file and banning it would ban the camera's own feature. What
     // is banned is every spelling of a WEAPON.
-    for banned in ["recoil", "WeaponFeel", "weapon::", "WeaponState", "feel::"] {
-        assert!(
-            !code.contains(banned),
-            "`camera.rs` names `{banned}` outside a comment - a camera that knows a weapon fired is the camera kick the WPN1 ruling refuses"
-        );
+    let step: String = STEP
+        .replace("
+", "
+")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("
+");
+    for (what, code) in [("inf-ecs/src/camera.rs", &code), ("d3/camera.rs", &step)] {
+        for banned in ["recoil", "WeaponFeel", "weapon::", "WeaponState", "feel::"] {
+            assert!(
+                !code.contains(banned),
+                "`{what}` names `{banned}` outside a comment - a camera that knows a weapon fired is the camera kick the WPN1 ruling refuses"
+            );
+        }
     }
+    // …and the stepper really is the file this is about, so the ban cannot pass
+    // because somebody moved the camera somewhere else.
+    assert!(step.contains("fn step_camera_with_requests"));
+    assert!(step.contains("cam.advance("));
     for banned in ["recoil", "kick", "weapon"] {
         assert!(
             !TOML.to_ascii_lowercase().contains(banned),
@@ -1596,6 +1654,27 @@ fn the_hand_arrives_where_the_aim_sends_it() {
     assert!(
         far > 0.3,
         "the five aims sent the hand to points {far:.4} m apart - `aim_hold_point` is not reading the aim"
+    );
+    // **THE PITCH SEPARATELY** (the WPN2b audit). The line above is satisfied by
+    // the two YAW rows alone, so a hold point that read the yaw and ignored the
+    // pitch passed it -- measured, as a mutation: `aim_forward(yaw, 0.0)` left
+    // all twenty arms of this gate green while sending a character aiming
+    // 35 degrees downhill to hold its weapon dead level. The three pitch rows
+    // are 0, +35 and -35 at one yaw, so what they are owed is HEIGHT.
+    let (level, up, down) = (
+        spread_of_targets[0],
+        spread_of_targets[1],
+        spread_of_targets[2],
+    );
+    println!(
+        "  the three pitch rows hold at y {:.4} / {:.4} / {:.4} m",
+        level.y, up.y, down.y
+    );
+    assert!(
+        up.y - level.y > 0.15 && level.y - down.y > 0.15,
+        "aiming 35 deg up and 35 deg down moved the hold point {:.4} m and {:.4} m in height - `aim_hold_point` is not reading the aim PITCH",
+        up.y - level.y,
+        level.y - down.y
     );
     assert!(
         worst < 20.0,
