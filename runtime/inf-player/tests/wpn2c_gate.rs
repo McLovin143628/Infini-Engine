@@ -379,6 +379,20 @@ fn every_loud_shot_is_four_plays_on_four_salted_keys_in_a_pinned_order() {
 /// 9 600 shots, 38 400 layer commands, plus a casing each and a listener
 /// command a step: `dropped == 0` or every arm above it is reading a window.
 ///
+/// # It reads the SHIPPED log, not a model of it (wave WPN2c's audit)
+///
+/// The first spelling built its own `BoundedLog` beside a `Range` and pushed
+/// `report.shots * 4 + bounces + cracks + 1` placeholders into it per step. That
+/// is the host's arithmetic re-typed, and it can only ever answer the question
+/// it already assumed: a host that queued a fifth command per shot, or a
+/// `SetOcclusion` per step per audible loop -- which the island's venues DO --
+/// would evict inside the window and this arm would still have read zero,
+/// because the thing it was counting was not the thing that fills up.
+///
+/// So it drives `RuntimeSim` -- the shipped host, the shipped fence, the
+/// shipped `AudioCommand` log -- and reads `dropped_audio_commands()` off it.
+/// The count below is what the stream ACTUALLY carried.
+///
 /// **Mutation → red:** `AUDIO_LOG_CAPACITY` back to `inf_core`'s 8 192 evicts
 /// after about 17.8 s of this course.
 #[test]
@@ -393,56 +407,99 @@ fn the_audio_log_holds_a_hundred_and_twenty_seconds_of_eight_shooters() {
         reserve: weapon::MAX_MAGAZINE,
         ..test_rifle()
     };
-    let mut r = Range::new(defs_with("rifle", deep), false);
-    r.listen(DVec3::new(0.0, 1.5, -6.0));
-    let mut log: inf_core::BoundedLog<AudioCommand> =
-        inf_core::BoundedLog::new(inf_audio::AUDIO_LOG_CAPACITY);
+    let mut sim = pie_sim();
+    for _ in 0..40 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    // The deep rifle joins the level's own registry rather than replacing it,
+    // so the hero's `m4a1` and everything else the fixture defines still exist.
+    item::item_defs_mut(sim.world_mut())
+        .insert(ItemDef {
+            id: "deep_rifle".into(),
+            label: "deep_rifle".into(),
+            stack_max: 1,
+            mass_kg: 3.6,
+            weapon: Some(deep),
+        })
+        .then_some(())
+        .expect("the deep rifle is a new id");
+    // Eight shooters, on the ground the fixture's hero is standing on, spread
+    // along x so no two are inside each other.
+    let hero = inf_editor_core::samples::GAMEPLAY_HERO_GUID;
+    let at = {
+        let e = sim.world().entity_of(hero).expect("the fixture's hero");
+        sim.world()
+            .world()
+            .get::<inf_ecs::components::GlobalTransform>(e)
+            .map(|g| g.translation())
+            .expect("a placed hero")
+    };
     for i in 0..8 {
-        let g = shooter_guid(i);
         stand(
-            &mut r.world,
-            g,
+            sim.world_mut(),
+            shooter_guid(i),
             "Shooter",
-            DVec3::new(i as f64 * 4.0 - 14.0, 0.0, 0.0),
+            DVec3::new(at.x + i as f64 * 4.0 - 14.0, at.y - 0.9, at.z + 6.0),
             false,
         );
     }
-    r.world.propagate();
+    sim.world_mut().mark_dirty();
+    sim.world_mut().propagate();
     for i in 0..8 {
         let g = shooter_guid(i);
-        r.arm(g, "rifle");
-        r.aim(g, 0.0, 8.0);
-        r.hold_trigger(g, true);
+        assert!(item::give_inventory(sim.world_mut(), g, 4));
+        assert_eq!(item::give(sim.world_mut(), g, "deep_rifle", 1), 0);
+        assert!(d3::gameplay::equip_weapon(sim.world_mut(), g, "deep_rifle"));
+        let e = sim.world().entity_of(g).expect("a shooter");
+        let mut cm = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("a character");
+        cm.runtime.aim_pitch_deg = 8.0;
+        cm.runtime.want_attack = true;
+        cm.runtime.press_attack = true;
     }
+    let before = sim.audio_command_log().len();
     let steps = (120.0 / DT) as usize;
     let mut shots = 0u64;
     for _ in 0..steps {
-        let report = r.step();
-        shots += u64::from(report.shots);
-        // The host's own arithmetic: four layers a loud shot, one landing per
-        // first contact, and one listener command a step.
-        for _ in 0..report.shots * 4 + report.casings.bounces.len() as u32 + 1 {
-            log.push(AudioCommand::Stop { source: 0 });
-        }
-        for _ in 0..report.cracks.len() {
-            log.push(AudioCommand::Stop { source: 0 });
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        shots += u64::from(sim.gameplay().shots);
+        // The trigger is re-pressed because the host clears the edge every step;
+        // `want_attack` alone is what an automatic weapon needs, and both are set
+        // for the shooter that is not one.
+        for i in 0..8 {
+            let g = shooter_guid(i);
+            if let Some(e) = sim.world().entity_of(g) {
+                if let Some(mut cm) = sim.world_mut().world_mut().get_mut::<CharacterMovement>(e) {
+                    cm.runtime.want_attack = true;
+                }
+            }
         }
     }
+    let commands = sim.audio_command_log().len() - before;
     println!(
-        "120 s at eight shooters: {shots} rounds, {} commands, {} dropped (ceiling {})",
-        log.len(),
-        log.dropped(),
+        "120 s at eight shooters, on the shipped host: {shots} rounds, \
+         {commands} commands, {} dropped (ceiling {})",
+        sim.dropped_audio_commands(),
         inf_audio::AUDIO_LOG_CAPACITY
     );
     assert!(
         shots > 8_000,
         "only {shots} rounds in two minutes — eight shooters at 600 rpm is 9 600"
     );
+    // **The stream is at least the four layers a shot**, so a host that had
+    // quietly stopped queueing three of them could not pass this by evicting
+    // nothing.
+    assert!(
+        commands as u64 >= shots * 4,
+        "{commands} commands for {shots} rounds is under four layers a shot"
+    );
     assert_eq!(
-        log.dropped(),
+        sim.dropped_audio_commands(),
         0,
-        "the log evicted {} commands over the arm it was re-priced for",
-        log.dropped()
+        "the shipped log evicted over the arm its ceiling was re-priced for"
     );
 }
 
@@ -1113,6 +1170,111 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_sound_course() {
     assert_eq!(ta.audio, tb.audio, "two cooks made different noises");
     assert_eq!(ta.audio, tp.audio, "PIE and shipping made different noises");
     assert_eq!(ta.casings, tp.casings);
+}
+
+/// **THE COOKED PACK CARRIES THE CLIPS NO ENTITY REFERENCES** -- island carried
+/// 43's closure, read off the PACK.
+///
+/// # Why this arm exists (wave WPN2c's audit)
+///
+/// The wave closed carried 43 by teaching `cook::asset_deps` and
+/// `pie::build_scene_payload` to read `inf_ecs::audio::engine_spawned_clips`,
+/// and **nothing falsified it**. Measured: deleting the whole `deps.extend(...
+/// engine_spawned_clips ...)` block from the cook left all seventeen arms of
+/// this gate GREEN, because every other arm here reads the COMMAND STREAM --
+/// and the command stream is identical whether or not the clip it names is in
+/// the pack. That is carried 43's own defect exactly: *"a `Play` whose clip does
+/// not resolve is silence with no error"*, which is why the venue's music was
+/// silent in every shipped build for a whole island wave and nobody heard it.
+///
+/// So this one reads the pack's asset index instead of the sim's queue, and it
+/// is the only arm in the tree that does.
+///
+/// # The fixture is scaffolded WITH the library
+///
+/// `scaffold` copies the `phase30-gameplay` folder, which holds exactly one
+/// `.inf_audio` -- wave WPN1's rifle body. The other thirty-five live in
+/// `samples/weapon-audio/`, which is engine content a project opts into, so the
+/// arm copies them in: a closure that cannot be seen to pull thirty-six files
+/// proves less than one that can.
+///
+/// **Mutation -> red:** the `engine_spawned_clips` extension deleted from
+/// `asset_deps` (the pack then carries only what the document names).
+#[test]
+fn a_cooked_pack_carries_every_clip_the_engine_names() {
+    let lib = inf_editor_core::samples::weapon_audio_dir();
+    if !lib
+        .join(inf_editor_core::weapon_audio::CASING_FILE)
+        .exists()
+    {
+        eprintln!("SKIP: the gunshot library has not been blessed yet");
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = scaffold(tmp.path());
+    let content = proj.join("Content");
+    for entry in std::fs::read_dir(&lib).expect("the library folder") {
+        let path = entry.expect("an entry").path();
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        std::fs::copy(&path, content.join(name)).expect("copy");
+    }
+    let out = tmp.path().join("out");
+    inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default()).expect("it cooks");
+
+    // THE PACK's own index, not the source tree's.
+    let source = inf_player::level::PackLevelSource::open(&out).expect("the pack opens");
+    let carried = source.audio_assets().expect("the pack's audio index reads");
+
+    // Every clip the ENGINE names, and whether the pack has it.
+    let mut want: Vec<(String, Uuid)> = Vec::new();
+    for class in WeaponClass::ALL {
+        for clip in ReportClip::ALL {
+            want.push((
+                format!("{} {}", class.name(), clip.file_stem()),
+                weapon::report_clip(class, clip),
+            ));
+        }
+    }
+    want.push(("the casing".into(), weapon::CASING_CLIP));
+    println!(
+        "the cooked pack carries {} .inf_audio entries",
+        carried.len()
+    );
+    let mut missing: Vec<String> = Vec::new();
+    for (what, guid) in &want {
+        match carried.get(guid) {
+            Some(a) => println!("  {what:22} {guid} {:6} bytes", a.bytes.len()),
+            None => missing.push(format!("{what} ({guid})")),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the cook closed over a level that plays these and the pack does not carry them: {missing:?}"
+    );
+    assert_eq!(
+        want.len(),
+        36,
+        "thirty-five report clips and the brass; the list moved"
+    );
+    // …and the bytes in the pack are the bytes that decode, so "carried" is not
+    // "carried as something the player cannot play".
+    for (what, guid) in &want {
+        let a = carried.get(guid).expect("checked above");
+        let sound = a.decode().unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(sound.sample_rate(), inf_audio::synth::SYNTH_RATE);
+    }
+    // **THE VENUE LOOP IS THE ONE THE ENGINE NAMES AND THIS PROJECT DOES NOT
+    // HAVE**, and its absence is the arm's own control: the closure pulls what
+    // the project HOLDS and invents nothing. It rides the island's pack, where
+    // its file is (`samples/settlement/Venue_Music.inf_audio`, named in both
+    // island recipes), and `island_gate` is where that is asserted.
+    assert!(
+        !carried.contains_key(&inf_ecs::venue::VENUE_MUSIC_CLIP),
+        "the fixture project has no venue music file, so a pack carrying one \
+         means the closure is inventing assets"
+    );
 }
 
 struct Course {

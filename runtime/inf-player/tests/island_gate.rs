@@ -7530,6 +7530,35 @@ fn pie_equals_shipping_inside_a_venue_at_night() {
     let proj = build_project(tmp.path());
     let content = proj.join("Content");
     let pack = cook(tmp.path());
+    // **CARRIED 43, ON THE PACK** (wave WPN2c's audit). Everything below reads
+    // the venue's music as a COMMAND -- `music_resolved` is a `Play` on the
+    // emitter's source key -- and a `Play` whose clip is not in the pack is
+    // silence with no error. That is exactly the shape carried 43 was: the
+    // cooked island pack contained no `.inf_audio` AT ALL, the club was silent
+    // in every shipped build, and this arm was green throughout. Wave WPN2c
+    // taught `cook::asset_deps` to close over `engine_spawned_clips`; this is
+    // the line that would notice if it stopped.
+    {
+        let src = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+        let audio = src.audio_assets().expect("the pack's audio index reads");
+        println!(
+            "VEN1b: the cooked pack carries {} .inf_audio entries",
+            audio.len()
+        );
+        let music = audio
+            .get(&inf_ecs::venue::VENUE_MUSIC_CLIP)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the cooked pack carries no {} -- the venue's music is a \
+                     `Play` nothing can resolve, which is silence with no error",
+                    inf_ecs::venue::VENUE_MUSIC_CLIP
+                )
+            });
+        assert!(
+            music.decode().is_ok(),
+            "the pack carries the venue's clip and it does not decode"
+        );
+    }
     let recipe =
         inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
     let slug = inf_island::slug(&recipe.name);
