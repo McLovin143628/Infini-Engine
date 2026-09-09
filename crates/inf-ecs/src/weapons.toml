@@ -8,6 +8,10 @@
 # follows, and every derived number is derived by ONE rule per class so any row
 # can be checked by hand:
 #
+#   class         -> `class`, the string key wave WPN2c added beside `kind`.
+#                    It is the one metric the doc's tables carry that is not a
+#                    number: seven tables, seven classes, and a report's five
+#                    clips are chosen by it (`inf_ecs::weapon::WeaponClass`).
 #   torso damage  -> `damage_j`, at 20 J per hit point
 #                    (`inf_ecs::weapon::JOULES_PER_HIT_POINT`: DEFAULT_VITALITY_J
 #                    2000 J is a 100 HP body, so the scale is forced, not chosen
@@ -83,6 +87,7 @@ stack_max = 1
 mass_kg = 0.90
 [glock_17.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 600.0
 rounds_per_minute = 450.0
@@ -115,6 +120,7 @@ stack_max = 1
 mass_kg = 0.90
 [sig_p320.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 640.0
 rounds_per_minute = 430.0
@@ -147,6 +153,7 @@ stack_max = 1
 mass_kg = 0.90
 [beretta_92fs.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 560.0
 rounds_per_minute = 480.0
@@ -179,6 +186,7 @@ stack_max = 1
 mass_kg = 0.90
 [colt_m1911.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 840.0
 rounds_per_minute = 350.0
@@ -211,6 +219,7 @@ stack_max = 1
 mass_kg = 0.90
 [fn_five_seven.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 480.0
 rounds_per_minute = 520.0
@@ -243,6 +252,7 @@ stack_max = 1
 mass_kg = 0.90
 [desert_eagle.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 1440.0
 rounds_per_minute = 180.0
@@ -275,6 +285,7 @@ stack_max = 1
 mass_kg = 0.90
 [sw_model_500.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 1800.0
 rounds_per_minute = 110.0
@@ -307,6 +318,7 @@ stack_max = 1
 mass_kg = 0.90
 [cz_75_auto.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = true
 damage_j = 440.0
 rounds_per_minute = 900.0
@@ -339,6 +351,7 @@ stack_max = 1
 mass_kg = 0.90
 [walther_ppk.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 500.0
 rounds_per_minute = 400.0
@@ -373,6 +386,7 @@ stack_max = 1
 mass_kg = 0.90
 [taurus_judge.weapon]
 kind = "projectile"
+class = "pistol"
 automatic = false
 damage_j = 1800.0
 rounds_per_minute = 150.0
@@ -409,6 +423,7 @@ stack_max = 1
 mass_kg = 3.00
 [mp5.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 560.0
 rounds_per_minute = 800.0
@@ -441,6 +456,7 @@ stack_max = 1
 mass_kg = 3.00
 [mp7.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 440.0
 rounds_per_minute = 950.0
@@ -473,6 +489,7 @@ stack_max = 1
 mass_kg = 3.00
 [vector_fennec.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 480.0
 rounds_per_minute = 1100.0
@@ -505,6 +522,7 @@ stack_max = 1
 mass_kg = 3.00
 [p90.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 460.0
 rounds_per_minute = 900.0
@@ -537,6 +555,7 @@ stack_max = 1
 mass_kg = 3.00
 [uzi.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 620.0
 rounds_per_minute = 600.0
@@ -569,6 +588,7 @@ stack_max = 1
 mass_kg = 3.00
 [mac_10.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 400.0
 rounds_per_minute = 1150.0
@@ -601,6 +621,7 @@ stack_max = 1
 mass_kg = 3.00
 [pp19_bizon.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 520.0
 rounds_per_minute = 700.0
@@ -633,6 +654,7 @@ stack_max = 1
 mass_kg = 3.00
 [cz_scorpion_evo3.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 540.0
 rounds_per_minute = 850.0
@@ -665,6 +687,7 @@ stack_max = 1
 mass_kg = 3.00
 [sig_mpx.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 520.0
 rounds_per_minute = 850.0
@@ -697,6 +720,7 @@ stack_max = 1
 mass_kg = 3.00
 [ump45.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 720.0
 rounds_per_minute = 600.0
@@ -729,6 +753,7 @@ stack_max = 1
 mass_kg = 3.00
 [thompson_m1a1.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 760.0
 rounds_per_minute = 700.0
@@ -761,6 +786,7 @@ stack_max = 1
 mass_kg = 3.00
 [ppsh_41.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 420.0
 rounds_per_minute = 900.0
@@ -793,6 +819,7 @@ stack_max = 1
 mass_kg = 3.00
 [mp40.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 660.0
 rounds_per_minute = 550.0
@@ -825,6 +852,7 @@ stack_max = 1
 mass_kg = 3.00
 [apc9.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 560.0
 rounds_per_minute = 820.0
@@ -857,6 +885,7 @@ stack_max = 1
 mass_kg = 3.00
 [colt_9mm_smg.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 580.0
 rounds_per_minute = 750.0
@@ -889,6 +918,7 @@ stack_max = 1
 mass_kg = 3.00
 [amr9.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 500.0
 rounds_per_minute = 830.0
@@ -921,6 +951,7 @@ stack_max = 1
 mass_kg = 3.00
 [fn_p90_tactical.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 440.0
 rounds_per_minute = 930.0
@@ -953,6 +984,7 @@ stack_max = 1
 mass_kg = 3.00
 [mp5k.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 540.0
 rounds_per_minute = 850.0
@@ -985,6 +1017,7 @@ stack_max = 1
 mass_kg = 3.00
 [saiga_9.weapon]
 kind = "projectile"
+class = "smg"
 automatic = false
 damage_j = 680.0
 rounds_per_minute = 450.0
@@ -1017,6 +1050,7 @@ stack_max = 1
 mass_kg = 3.00
 [tec_9.weapon]
 kind = "projectile"
+class = "smg"
 automatic = true
 damage_j = 520.0
 rounds_per_minute = 730.0
@@ -1053,6 +1087,7 @@ stack_max = 1
 mass_kg = 3.60
 [m4a1.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 600.0
 rounds_per_minute = 800.0
@@ -1085,6 +1120,7 @@ stack_max = 1
 mass_kg = 3.60
 [ak_47.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 780.0
 rounds_per_minute = 600.0
@@ -1117,6 +1153,7 @@ stack_max = 1
 mass_kg = 3.60
 [hk416.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 580.0
 rounds_per_minute = 850.0
@@ -1149,6 +1186,7 @@ stack_max = 1
 mass_kg = 3.60
 [scar_l.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 620.0
 rounds_per_minute = 625.0
@@ -1181,6 +1219,7 @@ stack_max = 1
 mass_kg = 3.60
 [scar_h.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 840.0
 rounds_per_minute = 575.0
@@ -1213,6 +1252,7 @@ stack_max = 1
 mass_kg = 3.60
 [steyr_aug_a3.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 640.0
 rounds_per_minute = 680.0
@@ -1245,6 +1285,7 @@ stack_max = 1
 mass_kg = 3.60
 [iwi_tavor_tar21.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 600.0
 rounds_per_minute = 750.0
@@ -1277,6 +1318,7 @@ stack_max = 1
 mass_kg = 3.60
 [famas_f1.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 680.0
 rounds_per_minute = 900.0
@@ -1309,6 +1351,7 @@ stack_max = 1
 mass_kg = 3.60
 [fn_fal.weapon]
 kind = "projectile"
+class = "ar"
 automatic = false
 damage_j = 1040.0
 rounds_per_minute = 450.0
@@ -1341,6 +1384,7 @@ stack_max = 1
 mass_kg = 3.60
 [galil_ace_23.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 620.0
 rounds_per_minute = 710.0
@@ -1373,6 +1417,7 @@ stack_max = 1
 mass_kg = 3.60
 [g36c.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 600.0
 rounds_per_minute = 750.0
@@ -1405,6 +1450,7 @@ stack_max = 1
 mass_kg = 3.60
 [honey_badger.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 660.0
 rounds_per_minute = 800.0
@@ -1437,6 +1483,7 @@ stack_max = 1
 mass_kg = 3.60
 [mcw_acr.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 560.0
 rounds_per_minute = 715.0
@@ -1469,6 +1516,7 @@ stack_max = 1
 mass_kg = 3.60
 [as_val.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 700.0
 rounds_per_minute = 900.0
@@ -1501,6 +1549,7 @@ stack_max = 1
 mass_kg = 3.60
 [sig_mcx_spear.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 880.0
 rounds_per_minute = 650.0
@@ -1533,6 +1582,7 @@ stack_max = 1
 mass_kg = 3.60
 [kastov_74u.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 700.0
 rounds_per_minute = 650.0
@@ -1565,6 +1615,7 @@ stack_max = 1
 mass_kg = 3.60
 [l85a2.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 620.0
 rounds_per_minute = 650.0
@@ -1597,6 +1648,7 @@ stack_max = 1
 mass_kg = 3.60
 [cz_bren_2.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 600.0
 rounds_per_minute = 770.0
@@ -1629,6 +1681,7 @@ stack_max = 1
 mass_kg = 3.60
 [ak_12.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 580.0
 rounds_per_minute = 700.0
@@ -1661,6 +1714,7 @@ stack_max = 1
 mass_kg = 3.60
 [type_95.weapon]
 kind = "projectile"
+class = "ar"
 automatic = true
 damage_j = 720.0
 rounds_per_minute = 800.0
@@ -1697,6 +1751,7 @@ stack_max = 1
 mass_kg = 4.40
 [m14_ebr.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1160.0
 rounds_per_minute = 320.0
@@ -1729,6 +1784,7 @@ stack_max = 1
 mass_kg = 4.40
 [m1_garand.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1240.0
 rounds_per_minute = 280.0
@@ -1761,6 +1817,7 @@ stack_max = 1
 mass_kg = 4.40
 [svd_dragunov.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1300.0
 rounds_per_minute = 250.0
@@ -1793,6 +1850,7 @@ stack_max = 1
 mass_kg = 4.40
 [hk_g3_sg1.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1120.0
 rounds_per_minute = 350.0
@@ -1825,6 +1883,7 @@ stack_max = 1
 mass_kg = 4.40
 [sr25_m110.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1200.0
 rounds_per_minute = 300.0
@@ -1857,6 +1916,7 @@ stack_max = 1
 mass_kg = 4.40
 [sks.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1040.0
 rounds_per_minute = 400.0
@@ -1889,6 +1949,7 @@ stack_max = 1
 mass_kg = 4.40
 [vss_vintorez.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 960.0
 rounds_per_minute = 600.0
@@ -1921,6 +1982,7 @@ stack_max = 1
 mass_kg = 4.40
 [springfield_m1a.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1140.0
 rounds_per_minute = 340.0
@@ -1953,6 +2015,7 @@ stack_max = 1
 mass_kg = 4.40
 [kel_tec_rfb.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 1100.0
 rounds_per_minute = 360.0
@@ -1985,6 +2048,7 @@ stack_max = 1
 mass_kg = 4.40
 [mk12_spr.weapon]
 kind = "projectile"
+class = "dmr"
 automatic = false
 damage_j = 920.0
 rounds_per_minute = 450.0
@@ -2021,6 +2085,7 @@ stack_max = 1
 mass_kg = 6.50
 [barrett_m82.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 2200.0
 rounds_per_minute = 150.0
@@ -2053,6 +2118,7 @@ stack_max = 1
 mass_kg = 6.50
 [barrett_mrad.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1900.0
 rounds_per_minute = 48.0
@@ -2085,6 +2151,7 @@ stack_max = 1
 mass_kg = 6.50
 [awm_l115a3.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1960.0
 rounds_per_minute = 42.0
@@ -2117,6 +2184,7 @@ stack_max = 1
 mass_kg = 6.50
 [remington_700.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1760.0
 rounds_per_minute = 55.0
@@ -2149,6 +2217,7 @@ stack_max = 1
 mass_kg = 6.50
 [cheytac_m200.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 2100.0
 rounds_per_minute = 40.0
@@ -2181,6 +2250,7 @@ stack_max = 1
 mass_kg = 6.50
 [kar98k.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1700.0
 rounds_per_minute = 60.0
@@ -2213,6 +2283,7 @@ stack_max = 1
 mass_kg = 6.50
 [dsr_50.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 2160.0
 rounds_per_minute = 38.0
@@ -2245,6 +2316,7 @@ stack_max = 1
 mass_kg = 6.50
 [sv_98.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1800.0
 rounds_per_minute = 50.0
@@ -2277,6 +2349,7 @@ stack_max = 1
 mass_kg = 6.50
 [steyr_scout.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 1500.0
 rounds_per_minute = 70.0
@@ -2309,6 +2382,7 @@ stack_max = 1
 mass_kg = 6.50
 [ax50.weapon]
 kind = "projectile"
+class = "sniper"
 automatic = false
 damage_j = 2040.0
 rounds_per_minute = 44.0
@@ -2347,6 +2421,7 @@ stack_max = 1
 mass_kg = 3.40
 [remington_870.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2880.0
 rounds_per_minute = 60.0
@@ -2381,6 +2456,7 @@ stack_max = 1
 mass_kg = 3.40
 [mossberg_590.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2720.0
 rounds_per_minute = 60.0
@@ -2415,6 +2491,7 @@ stack_max = 1
 mass_kg = 3.40
 [benelli_m4.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2400.0
 rounds_per_minute = 180.0
@@ -2449,6 +2526,7 @@ stack_max = 1
 mass_kg = 3.40
 [aa_12.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = true
 damage_j = 1920.0
 rounds_per_minute = 300.0
@@ -2483,6 +2561,7 @@ stack_max = 1
 mass_kg = 3.40
 [spas_12.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 3040.0
 rounds_per_minute = 120.0
@@ -2517,6 +2596,7 @@ stack_max = 1
 mass_kg = 3.40
 [ksg_12.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2640.0
 rounds_per_minute = 60.0
@@ -2551,6 +2631,7 @@ stack_max = 1
 mass_kg = 3.40
 [origin_12.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2080.0
 rounds_per_minute = 180.0
@@ -2585,6 +2666,7 @@ stack_max = 1
 mass_kg = 3.40
 [double_barrel_12g.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 4400.0
 rounds_per_minute = 120.0
@@ -2619,6 +2701,7 @@ stack_max = 1
 mass_kg = 3.40
 [saiga_12.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2240.0
 rounds_per_minute = 180.0
@@ -2653,6 +2736,7 @@ stack_max = 1
 mass_kg = 3.40
 [fn_slp.weapon]
 kind = "projectile"
+class = "shotgun"
 automatic = false
 damage_j = 2560.0
 rounds_per_minute = 180.0
@@ -2693,6 +2777,7 @@ stack_max = 1
 mass_kg = 7.00
 [rpg_7.weapon]
 kind = "projectile"
+class = "launcher"
 automatic = false
 damage_j = 3000.0
 rounds_per_minute = 17.1
@@ -2729,6 +2814,7 @@ stack_max = 1
 mass_kg = 7.00
 [smaw.weapon]
 kind = "projectile"
+class = "launcher"
 automatic = false
 damage_j = 2800.0
 rounds_per_minute = 18.8
@@ -2765,6 +2851,7 @@ stack_max = 1
 mass_kg = 7.00
 [fim_92_stinger.weapon]
 kind = "projectile"
+class = "launcher"
 automatic = false
 damage_j = 5000.0
 rounds_per_minute = 15.0
@@ -2801,6 +2888,7 @@ stack_max = 1
 mass_kg = 7.00
 [javelin_fgm148.weapon]
 kind = "projectile"
+class = "launcher"
 automatic = false
 damage_j = 7000.0
 rounds_per_minute = 12.0
@@ -2837,6 +2925,7 @@ stack_max = 1
 mass_kg = 7.00
 [m3_carl_gustaf.weapon]
 kind = "projectile"
+class = "launcher"
 automatic = false
 damage_j = 3200.0
 rounds_per_minute = 15.8

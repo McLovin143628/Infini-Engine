@@ -144,6 +144,119 @@ pub enum ShotKind {
     Melee,
 }
 
+/// **What KIND of gun a weapon is** (wave WPN2c) — the seven the research doc's
+/// own tables enumerate, and the one thing a gunshot's *sound* is chosen by.
+///
+/// # Why the sound needs a class and the ballistics did not
+///
+/// Wave WPN2a authored eighty-five rows without one, because every number a
+/// round needs is on the row itself: a muzzle velocity is a muzzle velocity and
+/// the class is a way of grouping the authoring, not a thing the flight reads.
+/// A REPORT is the other way round. There are five clips per class
+/// ([`ReportClip`]) and thirty-five in the tree, and a shot has to name one —
+/// so the grouping stops being presentation and becomes the key.
+///
+/// P22 §5's refusal of a per-weapon *clip* slot is untouched by this and is in
+/// fact what forces the shape: a weapon does not name its own gunshot file, it
+/// names what kind of gun it is, and the engine owns the sound of each kind.
+/// Adding a weapon is still a row of numbers; adding a *class* is a wave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WeaponClass {
+    /// A handgun. The doc's table 1.
+    Pistol,
+    /// A submachine gun. Table 2.
+    Smg,
+    /// An assault rifle. Table 3.
+    Ar,
+    /// A marksman rifle. Table 4.
+    Dmr,
+    /// A sniper rifle. Table 5.
+    Sniper,
+    /// A shotgun. Table 6.
+    Shotgun,
+    /// A rocket launcher. Table 7.
+    Launcher,
+}
+
+impl WeaponClass {
+    /// Every class, in the doc's own table order — so a generator, a test and a
+    /// UI enumerate the list rather than restate it.
+    pub const ALL: [WeaponClass; 7] = [
+        WeaponClass::Pistol,
+        WeaponClass::Smg,
+        WeaponClass::Ar,
+        WeaponClass::Dmr,
+        WeaponClass::Sniper,
+        WeaponClass::Shotgun,
+        WeaponClass::Launcher,
+    ];
+
+    /// The TOML spelling — the string a registry row's `class = "…"` carries.
+    pub fn name(self) -> &'static str {
+        match self {
+            WeaponClass::Pistol => "pistol",
+            WeaponClass::Smg => "smg",
+            WeaponClass::Ar => "ar",
+            WeaponClass::Dmr => "dmr",
+            WeaponClass::Sniper => "sniper",
+            WeaponClass::Shotgun => "shotgun",
+            WeaponClass::Launcher => "launcher",
+        }
+    }
+
+    /// Read a class by name; `None` for anything else, so a typo in a registry
+    /// row is refused BY NAME rather than silently defaulted (the
+    /// [`WEAPON_SUB_TABLES`] rule one level down).
+    pub fn from_name(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.name() == s.trim().to_ascii_lowercase())
+    }
+
+    /// **Its index**, `0..7` — the offset a clip GUID and a salt are built from.
+    pub fn index(self) -> u8 {
+        Self::ALL
+            .iter()
+            .position(|c| *c == self)
+            .expect("ALL contains every variant") as u8
+    }
+
+    /// **The class a weapon that names none is**, from the one number that
+    /// happens to separate all seven: how far the muzzle is along the barrel.
+    ///
+    /// This is the SECOND answer, in `inf_physics::d3::gameplay::muzzle_of`'s
+    /// own shape — a door with two answers, the second for content authored
+    /// before the field existed. The registry's own per-class table gives the
+    /// seven values (`weapons.toml`, the PER-CLASS RULES block): 0.12 / 0.25 /
+    /// 0.45 / 0.50 / 0.55 / 0.65 / 0.70, which are distinct, so the bands below
+    /// are the midpoints between neighbours and every one of the eighty-five
+    /// rows lands on the class it names. `weapons_registry_rows_name_the_class_
+    /// their_barrel_implies` is the arm that says so, and it is not circular:
+    /// the class name and the muzzle offset are two independent authorings of
+    /// the same fact.
+    ///
+    /// A weapon authored outside the registry — a gate fixture, a mod's row —
+    /// gets the nearest band. That is a guess and it is stated as one; what it
+    /// buys is that no weapon is ever silent for want of a field.
+    pub fn from_muzzle_forward_m(m: f64) -> Self {
+        if m <= 0.185 {
+            WeaponClass::Pistol
+        } else if m <= 0.35 {
+            WeaponClass::Smg
+        } else if m <= 0.475 {
+            WeaponClass::Ar
+        } else if m <= 0.525 {
+            WeaponClass::Shotgun
+        } else if m <= 0.60 {
+            WeaponClass::Dmr
+        } else if m <= 0.675 {
+            WeaponClass::Sniper
+        } else {
+            WeaponClass::Launcher
+        }
+    }
+}
+
 /// **What a weapon IS.**
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeaponDef {
@@ -279,6 +392,49 @@ pub struct WeaponDef {
     /// `WeaponHit` for `WeaponHit::loud`'s reason: what made the noise is a
     /// property of the shot, not of whatever is in the hand when it lands.
     pub report_max_m: f64,
+
+    // ── the sound and the brass (wave WPN2c) ────────────────────────
+    //
+    // Four more free fields, on the eleven above's argument verbatim: this type
+    // carries no `Serialize`, so wave WPN2c also costs **zero schema** — scene
+    // v27 and `ScenePayload` 13 are untouched.
+    /// **What kind of gun this is** (wave WPN2c), or `None` for a definition
+    /// that does not say.
+    ///
+    /// Read through [`audio_class`](Self::audio_class), never directly, because
+    /// the answer for `None` is a rule and not a default — see
+    /// [`WeaponClass::from_muzzle_forward_m`]. Every one of the eighty-five
+    /// registry rows names it; the fists do not, and a fist is a
+    /// [`ShotKind::Melee`] that never reports at all.
+    ///
+    /// It comes across `from_toml_table` as the string `class = "ar"`, on
+    /// `kind`'s own terms: it is the second string key in the reader and the
+    /// numeric [`set`](Self::set) door does not carry it, because a class is a
+    /// name and encoding it as an integer would put a magic number in
+    /// eighty-five rows.
+    pub class: Option<WeaponClass>,
+    /// **How far right of the aim line the ejection port sits**, metres.
+    ///
+    /// The doc §3's *"ejection port socket"*, expressed as the one number a
+    /// side-ejecting weapon needs — exactly what
+    /// [`muzzle_forward_m`](Self::muzzle_forward_m) is for the muzzle, and it
+    /// sits beside it for that reason. The brief asked for this on
+    /// [`crate::item::ItemDef`]; it is here instead, one field in, because the
+    /// `ItemDef` is the wrapper and the *weapon* is what has a barrel: putting
+    /// it on the wrapper would have needed a second TOML reader and a second
+    /// clamp for a number this one already takes by name.
+    pub eject_offset_m: f64,
+    /// **Which way the brass leaves**, degrees right of the aim line
+    /// (`90` is straight out to the right; `0` would be down range).
+    ///
+    /// The doc's *"outward linear impulse"* as a bearing rather than a vector,
+    /// so a registry row is three numbers rather than six and an author can
+    /// read it. The rise is not a field: see [`crate::casing::EJECT_RISE_DEG`],
+    /// which is one constant for every weapon because no gun in the doc's seven
+    /// tables ejects anywhere but up and out.
+    pub eject_dir_deg: f64,
+    /// **How fast the brass leaves**, m/s. The doc's impulse, as a speed.
+    pub eject_speed_mps: f64,
 }
 
 impl Default for WeaponDef {
@@ -316,6 +472,14 @@ impl Default for WeaponDef {
             ads_time_ms: 200.0,
             move_speed_mult: 1.0,
             report_max_m: REPORT_MAX_M,
+            // WPN2c. `None` is the honest default: a definition that does not
+            // name a class gets the band rule rather than somebody's favourite
+            // gun. The three ejection numbers are a rifle's, which is what
+            // every other default on this struct is.
+            class: None,
+            eject_offset_m: 0.06,
+            eject_dir_deg: 80.0,
+            eject_speed_mps: 2.4,
         }
     }
 }
@@ -421,6 +585,13 @@ pub fn fist_def() -> WeaponDef {
         ads_time_ms: 0.0,
         move_speed_mult: 1.0,
         report_max_m: REPORT_MAX_M,
+        // WPN2c: a fist is silent (`WeaponHit::loud` is false for a swing), so
+        // it never reaches a report layer and never names a class; and it
+        // ejects nothing, which is what a zero speed means here.
+        class: None,
+        eject_offset_m: 0.0,
+        eject_dir_deg: 0.0,
+        eject_speed_mps: 0.0,
     }
 }
 
@@ -459,6 +630,12 @@ impl WeaponDef {
             "ads_time_ms" => self.ads_time_ms = value.clamp(0.0, 5000.0),
             "move_speed_mult" => self.move_speed_mult = value.clamp(MIN_MOVE_SPEED_MULT, 2.0),
             "report_max_m" => self.report_max_m = value.clamp(1.0, MAX_RANGE_M),
+            // WPN2c, clamped exactly as everything above it is. The CLASS is
+            // not here: it is a name, and it comes across the reader's string
+            // branch beside `kind`.
+            "eject_offset_m" => self.eject_offset_m = value.clamp(0.0, 1.0),
+            "eject_dir_deg" => self.eject_dir_deg = value.clamp(-180.0, 180.0),
+            "eject_speed_mps" => self.eject_speed_mps = value.clamp(0.0, 20.0),
             // Booleans and the kind come across the same door as numbers,
             // because the door is one `(name, f64)` pair and a second door for
             // three flags would be a second thing to keep in step.
@@ -495,6 +672,9 @@ impl WeaponDef {
             "damage_j",
             "drag_k",
             "effective_range_m",
+            "eject_dir_deg",
+            "eject_offset_m",
+            "eject_speed_mps",
             "gravity_scale",
             "headshot_mult",
             "hitscan_threshold_m",
@@ -576,6 +756,19 @@ impl WeaponDef {
     /// consequence rather than as a second kind.
     pub fn spawns_a_round(&self) -> bool {
         self.kind == ShotKind::Projectile && self.reach_m() > self.hitscan_reach_m()
+    }
+
+    /// **What kind of gun this is, always** (wave WPN2c) — the one door a
+    /// report's clips are chosen through.
+    ///
+    /// Two answers, in `inf_physics::d3::gameplay::muzzle_of`'s own shape: the
+    /// class the definition NAMES, or, for one that names none, the band its
+    /// barrel implies ([`WeaponClass::from_muzzle_forward_m`]). Never read
+    /// [`class`](Self::class) directly — a call site that did would have to
+    /// decide what `None` sounds like, and then there would be two rules.
+    pub fn audio_class(&self) -> WeaponClass {
+        self.class
+            .unwrap_or_else(|| WeaponClass::from_muzzle_forward_m(self.muzzle_forward_m))
     }
 
     /// **Whether this weapon is swung rather than fired.**
@@ -660,7 +853,25 @@ impl WeaponDef {
                 toml::Value::Integer(i) => *i as f64,
                 toml::Value::Boolean(b) => f64::from(u8::from(*b)),
                 toml::Value::String(s) => {
-                    // The one string key: `kind = "projectile" | "hitscan"`.
+                    // **The second string key** (wave WPN2c): `class = "ar"`.
+                    // Refused BY NAME on a typo, which is the rule the sub-table
+                    // reader above already follows and for the same reason: a
+                    // `class = "assault_rifle"` that was silently ignored would
+                    // give an assault rifle a pistol's gunshot and say nothing.
+                    if k == "class" {
+                        def.class = Some(WeaponClass::from_name(s).ok_or_else(|| {
+                            format!(
+                                "unknown weapon class {s} (known: {})",
+                                WeaponClass::ALL
+                                    .iter()
+                                    .map(|c| c.name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })?);
+                        continue;
+                    }
+                    // The first string key: `kind = "projectile" | "hitscan"`.
                     if k == "kind" {
                         def.kind = match s.trim().to_ascii_lowercase().as_str() {
                             "projectile" => ShotKind::Projectile,
@@ -693,7 +904,8 @@ impl WeaponDef {
 /// ([`WeaponDef::report_max_m`]) — the four-layer stack is **wave WPN2c's**, and
 /// a per-weapon report *clip* is refused by P22 §5's own reasoning; see
 /// `report_source`.
-pub const WEAPON_SUB_TABLES: [&str; 4] = ["ballistics", "damage_curve", "recoil", "audio"];
+pub const WEAPON_SUB_TABLES: [&str; 5] =
+    ["ballistics", "damage_curve", "recoil", "audio", "eject"];
 
 /// **The eighty-five-row weapon registry** (wave WPN2a) — the research doc's
 /// tables, as the TOML the `item.define` node takes.
@@ -1781,6 +1993,88 @@ mod tests {
         // nothing can hurt.
         assert_eq!(Health::new(f64::NAN).capacity_j, DEFAULT_VITALITY_J);
         assert_eq!(Health::new(0.0).capacity_j, DEFAULT_VITALITY_J);
+    }
+
+    /// **THE CLASS DOOR** (wave WPN2c) — a string key beside `kind`, refused by
+    /// name on a typo, and a definition that names none answers the band its
+    /// barrel implies.
+    #[test]
+    fn a_weapon_names_its_class_or_takes_the_one_its_barrel_implies() {
+        let read = |s: &str| -> Result<WeaponDef, String> {
+            let doc: toml::Value = toml::from_str(s).expect("a document");
+            Ok(
+                WeaponDef::from_toml_table(doc["w"].as_table().expect("a table"))?
+                    .expect("it is a weapon"),
+            )
+        };
+        let d = read("[w.weapon]\nclass = \"sniper\"\n").expect("a weapon");
+        assert_eq!(d.class, Some(WeaponClass::Sniper));
+        assert_eq!(d.audio_class(), WeaponClass::Sniper);
+        // Case and padding are the reader's to absorb, exactly as `kind`'s are.
+        assert_eq!(
+            read("[w.weapon]\nclass = \" Shotgun \"\n")
+                .expect("a weapon")
+                .audio_class(),
+            WeaponClass::Shotgun
+        );
+        // **A typo is refused BY NAME.** Silently defaulting would give an
+        // assault rifle a pistol's gunshot and say nothing.
+        let e = read("[w.weapon]\nclass = \"assault_rifle\"\n").expect_err("refused");
+        assert!(e.contains("assault_rifle") && e.contains("launcher"), "{e}");
+        // …and a definition that names none takes the band. The seven values
+        // are the registry's own per-class muzzle table.
+        for (m, want) in [
+            (0.12, WeaponClass::Pistol),
+            (0.25, WeaponClass::Smg),
+            (0.45, WeaponClass::Ar),
+            (0.50, WeaponClass::Shotgun),
+            (0.55, WeaponClass::Dmr),
+            (0.65, WeaponClass::Sniper),
+            (0.70, WeaponClass::Launcher),
+        ] {
+            let d = WeaponDef {
+                muzzle_forward_m: m,
+                ..Default::default()
+            };
+            assert_eq!(d.class, None);
+            assert_eq!(d.audio_class(), want, "muzzle {m} m");
+            assert_eq!(WeaponClass::from_muzzle_forward_m(m), want);
+        }
+        // The seven names round-trip and the indices are the enumeration's own.
+        for (i, c) in WeaponClass::ALL.into_iter().enumerate() {
+            assert_eq!(WeaponClass::from_name(c.name()), Some(c));
+            assert_eq!(c.index() as usize, i);
+        }
+        assert_eq!(WeaponClass::from_name("carbine"), None);
+    }
+
+    /// **THE EJECTION PORT** (wave WPN2c) — three more numbers across the same
+    /// by-name door, clamped rather than refused, and enumerated by `names()`.
+    #[test]
+    fn the_ejection_port_is_three_numbers_on_the_tuning_door() {
+        let mut d = WeaponDef::default();
+        assert!(d.set("eject_offset_m", 0.11));
+        assert!(d.set("eject_dir_deg", 95.0));
+        assert!(d.set("eject_speed_mps", 3.5));
+        assert!((d.eject_offset_m - 0.11).abs() < 1e-12);
+        assert!((d.eject_dir_deg - 95.0).abs() < 1e-12);
+        assert!((d.eject_speed_mps - 3.5).abs() < 1e-12);
+        // Clamped, on `CameraTuning`'s rule: a slider dragged past a bound wants
+        // the bound.
+        assert!(d.set("eject_speed_mps", 1e9));
+        assert!((d.eject_speed_mps - 20.0).abs() < 1e-12);
+        assert!(!d.set("eject_speed_mps", f64::NAN));
+        for n in ["eject_offset_m", "eject_dir_deg", "eject_speed_mps"] {
+            assert!(WeaponDef::names().contains(&n), "{n} is not enumerated");
+        }
+        // …and the sub-table they are authored under is on the reader's list.
+        assert!(WEAPON_SUB_TABLES.contains(&"eject"));
+        let doc: toml::Value =
+            toml::from_str("[w.weapon.eject]\neject_speed_mps = 4.0\n").expect("a document");
+        let d = WeaponDef::from_toml_table(doc["w"].as_table().expect("a table"))
+            .expect("a weapon")
+            .expect("it is a weapon");
+        assert!((d.eject_speed_mps - 4.0).abs() < 1e-12);
     }
 
     /// **A weapon TOML is the item TOML's own sub-table**, and a malformed one
