@@ -1032,6 +1032,175 @@ fn a_headshot_past_the_threshold_multiplies_as_well() {
     );
 }
 
+/// **A SHORTER body's head band is LOWER** — the WPN2a audit's arm, and the one
+/// that decides whether the band is derived or chosen.
+///
+/// The wave's finding is that a headshot is a BAND and not a sphere, because a
+/// ray stops on a capsule's surface 0.30 m from the joint it is tested against.
+/// Both of the wave's own head arms fire at the SAME default capsule, so a
+/// `head_point` that answered a constant 1.50 m would pass them both — and the
+/// claim that the band comes off the character's own body rather than off a
+/// number would be untested. That is exactly the shape of the thing the wave
+/// itself caught one door along (an unreachable sphere), so it is worth an arm.
+///
+/// `head_point`'s capsule answer is `feet + 2·half_height_for(mode) + radius`,
+/// which is a property of the TARGET. This arm stands a **1.40 m** body — half
+/// height 0.40 against the default's 0.60 — and fires at its own head point
+/// (1.10 m) and at its chest (0.50 m). A constant 1.50 m band is 0.40 m above
+/// the first, so the headshot would not fire at all.
+///
+/// **Mutation → red:** any constant in `head_point`'s second answer makes the
+/// head shot spend exactly what the chest shot did.
+#[test]
+fn a_shorter_bodys_head_band_is_lower() {
+    let mut def = test_rifle();
+    def.damage_j = 300.0;
+    def.headshot_mult = 2.0;
+    const SHORT_HALF: f64 = 0.4;
+    let tall_head = 2.0 * CharacterMovement::default().stand_half_height_m + RADIUS;
+    let short_head = 2.0 * SHORT_HALF + RADIUS;
+    assert!(
+        tall_head - short_head > 2.0 * ballistics::HEAD_RADIUS_M,
+        "the default body's head point is {tall_head:.3} m and this one's is \
+         {short_head:.3} m, and the band is {:.3} m tall — a constant would be \
+         indistinguishable",
+        2.0 * ballistics::HEAD_RADIUS_M
+    );
+    let at = 12.0;
+    let spend = |aim_y: f64| -> (f64, bool) {
+        let mut r = Range::new(defs_with("rifle", def));
+        // The short body, stood up by hand: `stand`'s own bundle with one
+        // number changed, because the height IS the subject.
+        {
+            let cm = CharacterMovement {
+                stand_half_height_m: SHORT_HALF,
+                ..Default::default()
+            };
+            let e = r.world.spawn_with_guid(TARGET, "Short", None);
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(0.0, SHORT_HALF + RADIUS, at);
+            r.world.world_mut().entity_mut(e).insert((
+                RigidBody3D {
+                    kind: BodyKind3D::Kinematic,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(RADIUS, SHORT_HALF, RADIUS),
+                    radius: RADIUS,
+                    ..Default::default()
+                },
+                CharacterController3D::default(),
+                cm,
+                t,
+            ));
+        }
+        r.world.mark_dirty();
+        r.world.reindex_guids();
+        r.world.propagate();
+        r.bridge.sync_from_world(&r.world);
+        r.arm(HERO, "rifle");
+        let pitch = ((aim_y - MUZZLE_Y) / at).atan().to_degrees();
+        r.aim(HERO, 0.0, pitch);
+        r.hold_trigger(HERO, true);
+        let rep = r.step();
+        let hit = rep
+            .hits
+            .iter()
+            .find(|h| h.target == Some(TARGET))
+            .copied()
+            .expect("the shot missed the short body entirely");
+        (
+            weapon::DEFAULT_VITALITY_J - r.health(TARGET).expect("a body"),
+            hit.headshot,
+        )
+    };
+    let (head, head_flag) = spend(short_head);
+    let (chest, chest_flag) = spend(SHORT_HALF + RADIUS - 0.2);
+    println!(
+        "a 1.40 m body (the default is 1.80): a shot at its OWN head point \
+         ({short_head:.3} m, not the default's {tall_head:.3}) spent {head} J \
+         (headshot {head_flag}); one at its chest spent {chest} J (headshot \
+         {chest_flag})"
+    );
+    assert!(
+        head_flag,
+        "a shot at a short body's own head point was not a headshot — the band \
+         is not derived from the body it is about"
+    );
+    assert!(
+        !chest_flag,
+        "a shot at the chest was recorded as a headshot"
+    );
+    assert!((head - chest * 2.0).abs() < 1e-6);
+}
+
+/// **The registry's CLASS census, read off the rows** — the WPN2a audit's arm.
+///
+/// `the_registry_is_the_docs_own_eighty_five_rows` sums a hard-coded
+/// `[("pistols", 10), …]` and asserts the sum is 85, which is a constant the
+/// compiler could fold: a registry of eighty-five pistols passes it as long as
+/// seven named exemplars exist. This one partitions the PARSED rows by the one
+/// field that is unique per class in `weapons.toml`'s own class-rule table —
+/// `range_m` — and counts them.
+///
+/// **Mutation → red:** deleting any row, or moving one between classes, moves a
+/// count.
+#[test]
+fn the_registrys_class_census_is_read_off_the_rows() {
+    let mut defs = ItemDefs::default();
+    assert_eq!(
+        defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
+            .expect("the registry parses"),
+        85
+    );
+    // The class rule's own `range_m` column, which is unique per class — the
+    // header comment of `weapons.toml` is where these seven numbers are stated.
+    let class_of = |range_m: f64| -> &'static str {
+        match range_m as i64 {
+            150 => "pistols",
+            180 => "smgs",
+            500 => "assault rifles",
+            800 => "dmrs",
+            1800 => "snipers",
+            80 => "shotguns",
+            900 => "launchers",
+            _ => "UNCLASSED",
+        }
+    };
+    let mut census: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for (id, item) in defs.0.iter() {
+        let w = item
+            .weapon
+            .unwrap_or_else(|| panic!("{id} is in the weapon registry and is not a weapon"));
+        *census.entry(class_of(w.range_m)).or_default() += 1;
+    }
+    println!("the registry's census, off the rows themselves: {census:?}");
+    for (class, want) in [
+        ("pistols", 10usize),
+        ("smgs", 20),
+        ("assault rifles", 20),
+        ("dmrs", 10),
+        ("snipers", 10),
+        ("shotguns", 10),
+        ("launchers", 5),
+    ] {
+        assert_eq!(
+            census.get(class).copied().unwrap_or(0),
+            want,
+            "the doc gives {want} {class} and the registry holds {}",
+            census.get(class).copied().unwrap_or(0)
+        );
+    }
+    assert_eq!(
+        census.get("UNCLASSED").copied().unwrap_or(0),
+        0,
+        "a row carries a range no class rule names"
+    );
+    assert_eq!(census.values().sum::<usize>(), 85);
+}
+
 // ── (e) THE MOVE-SPEED CONSUMER ─────────────────────────────────────────────
 
 /// **A sniper really is slower than a bare pair of hands** — measured in metres
