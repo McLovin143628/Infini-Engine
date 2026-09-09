@@ -50,6 +50,7 @@ fn defs() -> ItemDefs {
             damage_j: RIFLE_J,
             ..Default::default()
         }),
+        mesh: None,
     }));
     assert!(d.insert(ItemDef {
         id: "pistol".into(),
@@ -65,6 +66,7 @@ fn defs() -> ItemDefs {
             spread_seed: 7,
             ..Default::default()
         }),
+        mesh: None,
     }));
     assert!(d.insert(ItemDef {
         id: "bandage".into(),
@@ -72,6 +74,7 @@ fn defs() -> ItemDefs {
         stack_max: 5,
         mass_kg: 0.1,
         weapon: None,
+        mesh: None,
     }));
     d
 }
@@ -1701,6 +1704,7 @@ fn an_authored_melee_weapon_swings_instead_of_casting() {
             stack_max: 1,
             mass_kg: 1.1,
             weapon: Some(def),
+            mesh: None,
         }));
     }
     rig.arm("bat");
@@ -1732,6 +1736,7 @@ fn an_authored_melee_weapon_swings_instead_of_casting() {
             stack_max: 1,
             mass_kg: 1.1,
             weapon: Some(def),
+            mesh: None,
         }));
     }
     far.arm("bat");
@@ -1798,6 +1803,7 @@ fn a_punch_is_witnessed_by_the_bystander_who_can_see_it() {
             stack_max: 1,
             mass_kg: 1.1,
             weapon: Some(def),
+            mesh: None,
         }));
     }
     rig.arm("bat");
@@ -2436,6 +2442,7 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
             arrived: false,
             headshot: false,
             report_max_m: inf_ecs::weapon::REPORT_MAX_M,
+            report_gain: 1.0,
             class: inf_ecs::weapon::WeaponClass::Ar,
             indoors: false,
             listener_m: f64::INFINITY,

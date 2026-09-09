@@ -103,6 +103,30 @@ pub const MIN_MOVE_SPEED_MULT: f64 = 0.25;
 /// rows are authored, and nothing in the engine reads a hit point.
 pub const JOULES_PER_HIT_POINT: f64 = DEFAULT_VITALITY_J / 100.0;
 
+/// **The most projectiles one trigger pull may throw** — the bound on
+/// [`WeaponDef::pellets`] (wave WPN2d).
+///
+/// Sixty-four. The widest load in the research doc's own table 6 is eight 00
+/// buck, and a duckbill choke is still eight; sixty-four is eight times the top
+/// of it and is a bound on hostile content rather than a design limit, on
+/// [`MAX_MUZZLE_FORWARD_M`]'s own rule.
+///
+/// It is deliberately **larger than one shooter's share** of
+/// [`crate::ballistics::MAX_SHOT_RAYS_PER_STEP`] (256, minus six probe rays a
+/// pull): four shooters each pulling a 64-pellet trigger on one fixed step is
+/// 280 rays, which is over the ceiling — so the refusal this wave writes is a
+/// refusal something can actually reach, which is what
+/// `MAX_ROUNDS_IN_FLIGHT`'s own doc says a bound nobody tests is worth.
+pub const MAX_PELLETS: u32 = 64;
+
+/// **The widest a blast may reach**, metres — the bound on
+/// [`WeaponDef::blast_radius_m`] (wave WPN2d).
+///
+/// A hundred. The doc names no radius at all; a hundred metres is four city
+/// blocks of this island's own `settlement::CITY_BLOCK_M` and is the point past
+/// which a blast is not a weapon but a level event. Content, not design.
+pub const MAX_BLAST_RADIUS_M: f64 = 100.0;
+
 /// How far a melee weapon may reach, metres — the bound on a melee
 /// [`WeaponDef::range_m`].
 ///
@@ -435,6 +459,103 @@ pub struct WeaponDef {
     pub eject_dir_deg: f64,
     /// **How fast the brass leaves**, m/s. The doc's impulse, as a speed.
     pub eject_speed_mps: f64,
+
+    // ── the classes (wave WPN2d) ────────────────────────────────────────────
+    //
+    // Fifteen more free fields, on the twenty above's argument verbatim: this
+    // type carries no `Serialize`, rides no wire and is built from TOML by
+    // `from_toml_table`, so the whole of wave WPN2d costs **zero schema** —
+    // scene v27 and `ScenePayload` 13 are untouched. Every default below is the
+    // one that makes a definition naming none of them the weapon it was at wave
+    // WPN2c: one pellet, no blast, no motor, no lock, no fuse, not throwable
+    // and a report at its authored gain.
+    /// **How many projectiles one trigger pull throws** — the doc §5's
+    /// *"multi-raycast cone spread"*, as a count.
+    ///
+    /// `1` is every weapon that is not a shotgun and is the default, so a row
+    /// that does not name it fires exactly the one ray it fired before this
+    /// wave. Above one, `inf_physics::d3::gameplay::step_weapons` casts N rays
+    /// through [`cone_deg`](Self::cone_deg) at N consecutive counter indices and
+    /// **splits [`damage_j`](Self::damage_j) between them** — which is why the
+    /// registry's shotgun rows carry the whole pull's joules and the doc's
+    /// per-pellet table comes back out by division rather than by a second
+    /// column somebody could disagree with.
+    ///
+    /// Bounded by [`MAX_PELLETS`]. A pull that would cross
+    /// `crate::ballistics::MAX_SHOT_RAYS_PER_STEP` is **refused with a value**
+    /// (`RoundReport::pellets_refused`), never silently shortened.
+    pub pellets: u32,
+    /// **The cone the pellets scatter into**, degrees (total).
+    ///
+    /// It is NOT [`spread_deg`](Self::spread_deg), and the difference is the
+    /// whole of what a shotgun is: `spread_deg` is how far the *pull* may go
+    /// from the aim line (the weapon's accuracy, which wave WPN2b's bloom,
+    /// stance and movement all scale), and this is how far the *pellets* go from
+    /// each other once the pull has a direction. A single-projectile weapon has
+    /// no pattern and leaves this at `0.0`, which makes every pellet take the
+    /// resolved pull cone — i.e. exactly the pre-wave behaviour for `pellets =
+    /// 1`.
+    pub cone_deg: f64,
+    /// **How far a blast reaches**, metres. `0.0` — the default — is no blast at
+    /// all, which is every weapon that is not a launcher or a grenade.
+    pub blast_radius_m: f64,
+    /// **What the blast is worth at the epicentre**, joules, before
+    /// `crate::ballistics::blast_falloff` takes distance off it.
+    ///
+    /// Separate from [`damage_j`](Self::damage_j), which stays the DIRECT hit —
+    /// the doc's own *"direct + blast split"*. A rocket that struck a wall spent
+    /// its direct joules on that wall through the P22 door and its blast joules
+    /// on everything within the radius, and one number could not say both.
+    pub blast_damage_j: f64,
+    /// **A sustainer motor**, m/s² along the round's own velocity. `0.0` is a
+    /// ballistic round, which is every bullet.
+    ///
+    /// The doc §5's *"physical entity projectile (accelerating engine force)"*.
+    /// The RPG-7's own numbers are the registry's: it leaves the tube at
+    /// 115 m/s and the motor takes it to [`burnout_mps`](Self::burnout_mps).
+    pub accel_mps2: f64,
+    /// **The speed the motor stops at**, m/s — the cap on
+    /// [`accel_mps2`](Self::accel_mps2). Below the muzzle speed (or with no
+    /// motor) it does nothing.
+    pub burnout_mps: f64,
+    /// **How long a target must be held in the aim cone before it locks**,
+    /// seconds. `0.0` is a weapon with no lock-on, which is everything but a
+    /// guided launcher.
+    pub lock_s: f64,
+    /// **The cone a lock is acquired and held inside**, degrees (total).
+    pub lock_cone_deg: f64,
+    /// **Whether this launcher only locks onto something in the air** — the
+    /// Stinger's rule. A ground vehicle is not a target for it.
+    pub lock_air_only: bool,
+    /// **Whether a locked round climbs and dives** — the Javelin's top attack.
+    /// See `crate::ballistics::guide_round`.
+    pub top_attack: bool,
+    /// **How long after it leaves the hand a throwable goes off**, seconds.
+    /// `0.0` means it detonates (or simply stops) on impact.
+    pub fuse_s: f64,
+    /// **How much of its speed a thrown body keeps through a bounce**, `[0, 1]`.
+    pub restitution: f64,
+    /// **How much of the TANGENTIAL speed a bounce scrubs off**, `[0, 1]` — the
+    /// doc's *"bounce elasticity"*'s other half. `0.0` is a frictionless skid,
+    /// `1.0` stops the slide dead.
+    pub bounce_friction: f64,
+    /// **Whether this is thrown rather than fired** — the throw verb's
+    /// question.
+    ///
+    /// A throwable's [`muzzle_speed_mps`](Self::muzzle_speed_mps) is how fast it
+    /// leaves the hand, which is the same field meaning the same thing: how fast
+    /// the body starts.
+    pub throwable: bool,
+    /// **How loud this weapon's report is**, as a multiplier on the layer
+    /// volumes `crate::weapon::report_layers` builds (wave WPN2d).
+    ///
+    /// `1.0` is every weapon authored before this wave. It exists so a
+    /// **suppressor** has something to change that a listener can hear: the
+    /// attachment fold multiplies this and [`report_max_m`](Self::report_max_m)
+    /// by the same `loudness_mult`, so a can makes a gunshot both quieter and
+    /// shorter-ranged through one number, and the `weapon_report` MIRROR fence
+    /// in both hosts carries it on the hit.
+    pub report_gain: f64,
 }
 
 impl Default for WeaponDef {
@@ -480,6 +601,25 @@ impl Default for WeaponDef {
             eject_offset_m: 0.06,
             eject_dir_deg: 80.0,
             eject_speed_mps: 2.4,
+            // WPN2d. Every one of these is the value that makes a definition
+            // naming none of them the WPN2c weapon it was: one projectile, no
+            // pattern, no blast, no motor, no lock, no fuse, not throwable, and
+            // a report at exactly the gain `report_layers` already builds.
+            pellets: 1,
+            cone_deg: 0.0,
+            blast_radius_m: 0.0,
+            blast_damage_j: 0.0,
+            accel_mps2: 0.0,
+            burnout_mps: 0.0,
+            lock_s: 0.0,
+            lock_cone_deg: 0.0,
+            lock_air_only: false,
+            top_attack: false,
+            fuse_s: 0.0,
+            restitution: 0.35,
+            bounce_friction: 0.5,
+            throwable: false,
+            report_gain: 1.0,
         }
     }
 }
@@ -592,6 +732,25 @@ pub fn fist_def() -> WeaponDef {
         eject_offset_m: 0.0,
         eject_dir_deg: 0.0,
         eject_speed_mps: 0.0,
+        // WPN2d: one "pellet" (a fist throws one fist), no pattern, no blast, no
+        // motor, no lock, no fuse, not throwable, and a report gain nothing ever
+        // reads because a swing is never loud. Spelled out for the reason the
+        // eleven above are.
+        pellets: 1,
+        cone_deg: 0.0,
+        blast_radius_m: 0.0,
+        blast_damage_j: 0.0,
+        accel_mps2: 0.0,
+        burnout_mps: 0.0,
+        lock_s: 0.0,
+        lock_cone_deg: 0.0,
+        lock_air_only: false,
+        top_attack: false,
+        fuse_s: 0.0,
+        restitution: 0.0,
+        bounce_friction: 0.0,
+        throwable: false,
+        report_gain: 1.0,
     }
 }
 
@@ -636,6 +795,24 @@ impl WeaponDef {
             "eject_offset_m" => self.eject_offset_m = value.clamp(0.0, 1.0),
             "eject_dir_deg" => self.eject_dir_deg = value.clamp(-180.0, 180.0),
             "eject_speed_mps" => self.eject_speed_mps = value.clamp(0.0, 20.0),
+            // WPN2d, clamped exactly as everything above it is. The two
+            // launcher FLAGS come across the same `(name, f64)` door the three
+            // shot-kind flags already do.
+            "pellets" => self.pellets = value.clamp(1.0, f64::from(MAX_PELLETS)) as u32,
+            "cone_deg" => self.cone_deg = value.clamp(0.0, MAX_SPREAD_DEG),
+            "blast_radius_m" => self.blast_radius_m = value.clamp(0.0, MAX_BLAST_RADIUS_M),
+            "blast_damage_j" => self.blast_damage_j = value.max(0.0),
+            "accel_mps2" => self.accel_mps2 = value.clamp(0.0, 10_000.0),
+            "burnout_mps" => self.burnout_mps = value.clamp(0.0, 10_000.0),
+            "lock_s" => self.lock_s = value.clamp(0.0, 30.0),
+            "lock_cone_deg" => self.lock_cone_deg = value.clamp(0.0, 180.0),
+            "lock_air_only" => self.lock_air_only = value != 0.0,
+            "top_attack" => self.top_attack = value != 0.0,
+            "fuse_s" => self.fuse_s = value.clamp(0.0, crate::ballistics::MAX_ROUND_LIFETIME_S),
+            "restitution" => self.restitution = value.clamp(0.0, 1.0),
+            "bounce_friction" => self.bounce_friction = value.clamp(0.0, 1.0),
+            "throwable" => self.throwable = value != 0.0,
+            "report_gain" => self.report_gain = value.clamp(0.0, 4.0),
             // Booleans and the kind come across the same door as numbers,
             // because the door is one `(name, f64)` pair and a second door for
             // three flags would be a second thing to keep in step.
@@ -667,17 +844,27 @@ impl WeaponDef {
     /// rather than restate it.
     pub fn names() -> &'static [&'static str] {
         &[
+            "accel_mps2",
             "ads_time_ms",
             "automatic",
+            "blast_damage_j",
+            "blast_radius_m",
+            "bounce_friction",
+            "burnout_mps",
+            "cone_deg",
             "damage_j",
             "drag_k",
             "effective_range_m",
             "eject_dir_deg",
             "eject_offset_m",
             "eject_speed_mps",
+            "fuse_s",
             "gravity_scale",
             "headshot_mult",
             "hitscan_threshold_m",
+            "lock_air_only",
+            "lock_cone_deg",
+            "lock_s",
             "magazine",
             "max_range_m",
             "melee",
@@ -686,14 +873,19 @@ impl WeaponDef {
             "move_speed_mult",
             "muzzle_forward_m",
             "muzzle_speed_mps",
+            "pellets",
             "projectile",
             "range_m",
             "recoil_intensity",
             "reload_s",
+            "report_gain",
             "report_max_m",
             "reserve",
+            "restitution",
             "rounds_per_minute",
             "spread_deg",
+            "throwable",
+            "top_attack",
         ]
     }
 
@@ -792,6 +984,43 @@ impl WeaponDef {
         } else {
             self.range_m.clamp(0.1, MAX_RANGE_M)
         }
+    }
+
+    /// **How many projectiles one pull throws**, clamped (wave WPN2d) — the one
+    /// door the fire path, the ray bill and the per-pellet damage split all ask,
+    /// so a hostile `pellets = 0` is a single projectile everywhere rather than
+    /// a division by zero in one place and a silent no-op in another.
+    pub fn pellet_count(&self) -> u32 {
+        self.pellets.clamp(1, MAX_PELLETS)
+    }
+
+    /// **What one pellet is worth** — the whole pull's
+    /// [`damage_j`](Self::damage_j) divided by [`pellet_count`](Self::pellet_count).
+    ///
+    /// The registry's shotgun rows carry the WHOLE PULL, because that is the
+    /// number the doc's table 6 gives after multiplying its per-pellet figure by
+    /// its pellet count, and a second per-pellet column is a second number an
+    /// author could disagree with.
+    pub fn pellet_damage_j(&self) -> f64 {
+        self.damage_j / f64::from(self.pellet_count())
+    }
+
+    /// **Whether this weapon throws a pattern rather than a projectile.**
+    pub fn is_pattern(&self) -> bool {
+        self.pellet_count() > 1
+    }
+
+    /// **Whether anything this weapon delivers explodes** (wave WPN2d) — a
+    /// positive radius AND positive joules, because either alone is a blast
+    /// nobody can feel.
+    pub fn has_blast(&self) -> bool {
+        self.blast_radius_m > 0.0 && self.blast_damage_j > 0.0
+    }
+
+    /// **Whether this weapon can hold a lock** — a positive hold time and a
+    /// positive cone, on [`has_blast`](Self::has_blast)'s own rule.
+    pub fn can_lock(&self) -> bool {
+        self.lock_s > 0.0 && self.lock_cone_deg > 0.0
     }
 
     /// How long one round takes, seconds.
@@ -937,6 +1166,153 @@ pub const WEAPON_SUB_TABLES: [&str; 5] = ["ballistics", "damage_curve", "recoil"
 /// replace over one file if a publisher ever wants one.
 pub const WEAPON_REGISTRY_TOML: &str = include_str!("weapons.toml");
 
+/// **THE CLASS → MESH TABLE** (wave WPN2d) — which piece of art a weapon draws
+/// as, by family and then by class.
+///
+/// # The art is LOCAL and the identity is COMMITTED
+///
+/// The meshes are the FPS Weapon Bundle's, which is Marketplace/Fab content
+/// under a licence whose reach outside Unreal is unestablished, so **not one
+/// byte of it may enter this repository**. What is committed is the *name* and
+/// the *identity it derives* ([`weapon_mesh_guid`]) — exactly the arrangement
+/// wave ASSET0 clause 0 built for the island's road surface and wave CHAR1a
+/// re-used for the starter body: the imported asset is written at the committed
+/// identity into a LOCAL project, and a checkout without the art resolves that
+/// identity to nothing and draws the placeholder primitive.
+///
+/// # The families, and the two honest substitutions
+///
+/// The bundle holds five rifles, a knife and a grenade, and this engine's
+/// registry has eighty-five weapons in seven classes. So four families are the
+/// art's own (`SM_AR4` the M4A1 pattern, `SM_KA47` the AK pattern, `SM_KA74U`
+/// the short carbines, `SM_KA_VAL` the VSS/AS VAL), two are **stated
+/// substitutions** — a pistol draws the **stockless SMG11**, because a machine
+/// pistol is the nearest real silhouette the licence covers and a 6 cm cube is
+/// not; a sniper draws the second `KA_Val` variant, because a suppressed
+/// marksman rifle is the nearest — and **two classes have no art at all**:
+/// a **shotgun** and a **launcher** draw the committed primitive, and every
+/// place that reports this says so rather than implying a mesh that is not
+/// there. The Lyra `SK_Pistol`/`SK_Shotgun` skeletal meshes exist in the same
+/// UE project and are the carried route for those two: they are `SkeletalMesh`
+/// and this door draws a rigid `MeshRef`, so crossing them is its own wave.
+pub fn weapon_mesh_key(id: &str, def: &WeaponDef) -> Option<&'static str> {
+    let id = id.trim().to_ascii_lowercase();
+    // A THROWABLE and a MELEE weapon are decided by what they ARE, before any
+    // class rule: a thrown knife is a `Melee` definition that flies, and the
+    // grenade is not in any of the doc's seven tables at all.
+    if def.throwable {
+        return Some("SM_G67");
+    }
+    if def.is_melee() {
+        return Some("SM_M9_KNIFE");
+    }
+    // The AK pattern, by name, because a class cannot tell an AK from an M4 and
+    // the two are the most recognisable silhouettes in the bundle. The short
+    // carbines take the KA74U, which is what a `_u` suffix means on this
+    // pattern.
+    const AK_SHORT: &[&str] = &["aks_74u", "ak_74u", "ak74u", "vityaz", "pp_19"];
+    const AK: &[&str] = &[
+        "ak_47", "ak47", "akm", "ak_74", "ak74", "ak_12", "ak12", "rpk", "saiga", "asval_ak",
+        "galil", "sks",
+    ];
+    const VAL: &[&str] = &["as_val", "asval", "vss", "vintorez", "vsk_94", "sr_3"];
+    if AK_SHORT.iter().any(|p| id.starts_with(p)) {
+        return Some("SM_KA74U");
+    }
+    if VAL.iter().any(|p| id.starts_with(p)) {
+        return Some("SM_KA_VAL");
+    }
+    if AK.iter().any(|p| id.starts_with(p)) {
+        return Some("SM_KA47");
+    }
+    match def.audio_class() {
+        WeaponClass::Ar => Some("SM_AR4"),
+        WeaponClass::Smg => Some("SM_SMG11"),
+        // The two stated substitutions.
+        WeaponClass::Pistol => Some("SM_SMG11_NOSTOCK"),
+        WeaponClass::Dmr => Some("SM_KA_VAL"),
+        WeaponClass::Sniper => Some("SM_KA_VAL_Y"),
+        // The two classes with no art. `None` is what draws the primitive.
+        WeaponClass::Shotgun | WeaponClass::Launcher => None,
+    }
+}
+
+/// **Every art key [`weapon_mesh_key`] can answer**, sorted — the enumerate-the-
+/// door rule (the P29.6 A14 defect), so the importer's rebind list and a gate's
+/// coverage arm read the set rather than restate it.
+pub const WEAPON_MESH_KEYS: &[&str] = &[
+    "SM_AR4",
+    "SM_G67",
+    "SM_KA47",
+    "SM_KA74U",
+    "SM_KA_VAL",
+    "SM_KA_VAL_Y",
+    "SM_M9_KNIFE",
+    "SM_SMG11",
+    "SM_SMG11_NOSTOCK",
+];
+
+/// **The salt the weapon-mesh identities are derived against.**
+///
+/// `"inf_ecs:weapon-mesh:"`, on `assets::ue_import::clip_guid`'s own
+/// construction and for its own reason: a name-derived GUID has to be the same
+/// number in the generator, in the importer's rebind and in the running game, or
+/// the committed catalogue names a file the project does not have.
+const WEAPON_MESH_SALT: &[u8] = b"inf_ecs:weapon-mesh:";
+
+/// **The committed identity of a piece of weapon art**, from its key.
+///
+/// FNV-1a over the salt and the key, twice, into a v4-shaped UUID — the exact
+/// construction `inf_editor_core::assets::ue_import::clip_guid` uses, because
+/// two spellings of "derive an asset id from a name" is two sets of files.
+///
+/// It is a **pure function of a string**, so it costs no schema, mints nothing
+/// random inside a fixed step, and the importer's `--rebind-mesh` and this
+/// engine's own lookup cannot disagree about it.
+pub fn weapon_mesh_guid(key: &str) -> Uuid {
+    let key = key.trim().to_ascii_uppercase();
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for b in WEAPON_MESH_SALT.iter().chain(key.as_bytes()) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        chunk.copy_from_slice(&h.to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// **The identity of an accessory's art** (wave WPN2d) — the same derivation,
+/// for the four `Accessories/` meshes an attachment can draw.
+pub fn attachment_mesh_guid(art: crate::attachment::AttachmentArt) -> Option<Uuid> {
+    let key = match art {
+        crate::attachment::AttachmentArt::None => return None,
+        crate::attachment::AttachmentArt::Scope => "SM_SCOPE_25X56",
+        crate::attachment::AttachmentArt::Sight => "SM_T4_SIGHT",
+        crate::attachment::AttachmentArt::Suppressor => "SM_SUPPRESSOR5",
+        crate::attachment::AttachmentArt::Vertgrip => "SM_VERTGRIP",
+    };
+    Some(weapon_mesh_guid(key))
+}
+
+/// **Which mesh asset this weapon draws as** — the one door
+/// `inf_physics::d3::gameplay::step_equipped_weapons` asks.
+///
+/// The `ItemDef`'s own [`crate::item::ItemDef::mesh`] wins when it names one,
+/// because a project that authored a mesh means it; otherwise the class table's
+/// derived identity. `None` — a shotgun, a launcher, or an item with neither —
+/// draws the placeholder primitive.
+pub fn weapon_mesh_of(item: &crate::item::ItemDef) -> Option<Uuid> {
+    if let Some(m) = item.mesh {
+        return Some(m);
+    }
+    let def = item.weapon.as_ref()?;
+    weapon_mesh_key(&item.id, def).map(weapon_mesh_guid)
+}
+
 /// **The equipped weapon's definition**, if the character has one equipped and
 /// the catalogue knows it — `(item id, definition)`.
 ///
@@ -944,12 +1320,122 @@ pub const WEAPON_REGISTRY_TOML: &str = include_str!("weapons.toml");
 /// trigger does and [`equipped_move_speed_scale`] asks it to decide how fast the
 /// carrier walks, and two spellings of "what is in this character's hand" is
 /// exactly the defect this repository has paid for at five seams.
+/// # It applies the ATTACHMENT FOLD (wave WPN2d), and that is why it is the one
+/// door
+///
+/// What comes back is the weapon **as it is configured**, not as the catalogue
+/// authored it: [`crate::attachment::fold`] over
+/// [`WeaponState::attach`] is composed onto the base definition here, once, so
+/// every rule downstream — `try_fire`, `damage_at`, `shot_direction`,
+/// `report_layers`, `RecoilProfile::of`, [`equipped_move_speed_scale`],
+/// `feel::ads_speed`, `casing::eject_velocity` — reads a suppressed, drummed,
+/// bipodded rifle through exactly the code it reads a bare one through. A
+/// second `effective_stats` helper beside this would be the second copy of a
+/// rule the one-door law exists to refuse; [`base_equipped_def`] is the escape
+/// hatch for the two callers that genuinely want the catalogue's own numbers
+/// (the bench, which must show what a part is worth, and the fold's own test).
 pub fn equipped_def(world: &EcsWorld, guid: Uuid) -> Option<(String, WeaponDef)> {
+    let (id, def) = base_equipped_def(world, guid)?;
+    let entity = world.entity_of(guid)?;
+    let folded = match world.world().get::<WeaponState>(entity) {
+        // The state is installed by the fire path on the step after the weapon
+        // is equipped, so a freshly equipped weapon takes this arm for one
+        // step — with a bare rail, which is the same answer.
+        Some(s) if s.item_id == id && s.has_attachments() => {
+            crate::attachment::fold(&s.attach).apply(&def)
+        }
+        _ => def,
+    };
+    Some((id, folded))
+}
+
+/// **The equipped weapon as the CATALOGUE authored it** — no attachment fold.
+///
+/// Two callers, both of which need the base by definition: an attachment bench
+/// that has to show what a part is worth (base against folded is the delta a
+/// panel draws), and the fold's own arms. Everything that decides what a shot
+/// does asks [`equipped_def`].
+pub fn base_equipped_def(world: &EcsWorld, guid: Uuid) -> Option<(String, WeaponDef)> {
     let entity = world.entity_of(guid)?;
     let inv = world.world().get::<crate::item::Inventory>(entity)?;
     let id = inv.equipped_id()?.to_string();
     let def = *crate::item::item_defs(world)?.get(&id)?.weapon.as_ref()?;
     Some((id, def))
+}
+
+/// **Bolt an attachment on, or take one off** (wave WPN2d) — the one write door,
+/// and a refusal is a value.
+///
+/// `Some(index)` fits that catalogue row; `None` clears the slot the row would
+/// have gone in. It answers `false` when the character has no weapon state, when
+/// the row is not in the catalogue, or when the row's class is not the equipped
+/// weapon's class — a 100-round C-Mag does not fit a revolver, and the catalogue
+/// is class-keyed precisely so that refusal is a lookup rather than a rule.
+///
+/// It is here and not on the component because the decision needs three things
+/// the component does not have: the catalogue, the equipped item and its class.
+pub fn equip_attachment(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    slot: crate::attachment::AttachmentSlot,
+    index: Option<u16>,
+) -> bool {
+    let Some((_, def)) = base_equipped_def(world, guid) else {
+        return false;
+    };
+    let class = def.audio_class();
+    if let Some(i) = index {
+        let cat = crate::attachment::catalogue();
+        let Some(row) = cat.get(i) else {
+            return false;
+        };
+        if row.class != class || row.slot != slot {
+            return false;
+        }
+    }
+    let Some(entity) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut state) = world.world_mut().get_mut::<WeaponState>(entity) else {
+        return false;
+    };
+    state.attach[slot.index()] = index.unwrap_or(crate::attachment::NO_ATTACHMENT);
+    // The magazine an override just changed is TOPPED UP rather than left at
+    // whatever the smaller one held: a bench is not a firefight, and a player
+    // who fits a drum and finds thirty rounds in it would read the readout as
+    // the defect it would be. It is deliberately not the other way round — a
+    // SMALLER magazine spills, which is the same rule.
+    let folded = crate::attachment::fold(&state.attach).apply(&def);
+    state.magazine = state.magazine.min(folded.magazine).max(0);
+    if folded.magazine > def.magazine {
+        state.magazine = folded.magazine;
+    }
+    true
+}
+
+/// **Bolt an attachment on by NAME** — the Blueprint kit's and the inventory
+/// panel's door, on `crate::item::canonical_id`'s own terms.
+///
+/// The slot comes from the catalogue row rather than from the caller, because a
+/// row knows where it goes and a caller that had to say would be a second place
+/// to get it wrong.
+pub fn equip_attachment_by_id(world: &mut EcsWorld, guid: Uuid, id: &str) -> bool {
+    let Some((_, def)) = base_equipped_def(world, guid) else {
+        return false;
+    };
+    let cat = crate::attachment::catalogue();
+    let class = def.audio_class();
+    let Some(index) = crate::attachment::AttachmentSlot::ALL
+        .into_iter()
+        .find_map(|s| cat.find(class, s, id))
+    else {
+        return false;
+    };
+    let slot = match cat.get(index) {
+        Some(row) => row.slot,
+        None => return false,
+    };
+    equip_attachment(world, guid, slot, Some(index))
 }
 
 /// **How fast this character moves for what it is carrying** — the doc's
@@ -1012,6 +1498,31 @@ pub struct WeaponState {
     /// what keeps every trace of a weapon that is merely being CARRIED
     /// byte-identical to its pre-WPN2b self.
     pub spread_bloom_deg: f64,
+    /// **What is bolted onto this weapon**, one catalogue index per slot (wave
+    /// WPN2d).
+    ///
+    /// [`crate::attachment::NO_ATTACHMENT`] in every slot is a bare rail, which
+    /// is what [`full`](Self::full) builds and what every weapon in every level
+    /// committed before this wave carries — and an all-empty set folds **no
+    /// bytes** in [`weapon_state_bytes`], so those traces stay byte-identical.
+    ///
+    /// It lives HERE, beside the magazine, for `spread_bloom_deg`'s reason
+    /// verbatim: what is bolted on belongs to the WEAPON INSTANCE, this struct
+    /// is already replaced when the equipped id changes, and a bench that
+    /// swapped a scope onto one rifle must not change the one in the next
+    /// character's hands.
+    pub attach: [u16; crate::attachment::ATTACHMENT_SLOTS],
+    /// **What this weapon is trying to lock onto**, and for how long it has been
+    /// (wave WPN2d) — `Uuid::nil()` and `0.0` for every weapon that cannot lock.
+    ///
+    /// SIM state, because a lock decides where a missile goes: two hosts that
+    /// disagreed about it have diverged. Folded by [`weapon_state_bytes`] only
+    /// when a lock is actually being held, on the bloom's own empty-when-zero
+    /// rule.
+    pub lock_target: Uuid,
+    /// How long [`lock_target`](Self::lock_target) has been held inside the aim
+    /// cone, seconds. Reaches [`WeaponDef::lock_s`] and no further.
+    pub lock_held_s: f64,
 }
 
 /// The animation notify a reload finishes on.
@@ -1510,6 +2021,13 @@ pub struct ReportLayer {
 ///   whether it is the thing being heard. Computed sim-side, so both hosts get
 ///   the same number from the same world rather than each asking its own engine.
 /// * `shot_index` — the round's own counter, for the body's pitch jitter.
+/// * `gain` — the weapon's own [`WeaponDef::report_gain`] (wave WPN2d), which
+///   is `1.0` for everything the catalogue authors and is what an attachment's
+///   `loudness_mult` moves. It multiplies every layer's volume, so a suppressor
+///   makes a gunshot QUIETER as well as shorter-ranged, and it is an argument
+///   rather than a constant for `report_max_m`'s reason verbatim: it is a
+///   property of the shot, carried on the hit, and by the time this runs the
+///   shooter may have scrolled.
 ///
 /// # Every layer is a command, always
 ///
@@ -1523,8 +2041,13 @@ pub fn report_layers(
     report_max_m: f64,
     listener_m: f64,
     shot_index: u64,
+    gain: f64,
 ) -> [ReportLayer; 4] {
     let max = report_max_m.clamp(1.0, MAX_RANGE_M);
+    // A non-finite gain is a definition somebody broke, not a silent silence:
+    // it takes the authored 1.0, which is the refusal-is-a-value rule applied
+    // to a number that reaches a mixer.
+    let gain = if gain.is_finite() { gain.clamp(0.0, 4.0) } else { 1.0 };
     // **Every layer is a [`report_source`]** with three fields moved. That is
     // deliberate rather than tidy: the bus, the spatialisation, the near field,
     // the distance model, the rolloff and the two flags are what "a gunshot's
@@ -1533,7 +2056,11 @@ pub fn report_layers(
     let base = |clip: Uuid, volume: f64, max_distance: f64| {
         let mut s = report_source();
         s.clip = Some(clip);
-        s.volume = volume;
+        // The gain is applied HERE, in the one closure every layer is built
+        // through, rather than at the four call sites — `report_source`'s own
+        // argument: four multiplications is four places for one of them to be
+        // forgotten, and the suppressor arm would pass with three.
+        s.volume = volume * gain;
         s.max_distance = max_distance;
         s
     };
@@ -1616,12 +2143,48 @@ impl WeaponState {
             shots: 0,
             trigger_held: false,
             spread_bloom_deg: 0.0,
+            attach: [crate::attachment::NO_ATTACHMENT; crate::attachment::ATTACHMENT_SLOTS],
+            lock_target: Uuid::nil(),
+            lock_held_s: 0.0,
         }
     }
 
     /// Whether a reload is running.
     pub fn reloading(&self) -> bool {
         self.reload_left_s > 0.0
+    }
+
+    /// **Whether anything is bolted on** (wave WPN2d) — the question the fold
+    /// and the trace both ask before they do any work.
+    pub fn has_attachments(&self) -> bool {
+        self.attach
+            .iter()
+            .any(|i| *i != crate::attachment::NO_ATTACHMENT)
+    }
+
+    /// **What is in the slot**, or `None`.
+    pub fn attachment(&self, slot: crate::attachment::AttachmentSlot) -> Option<u16> {
+        let i = self.attach[slot.index()];
+        (i != crate::attachment::NO_ATTACHMENT).then_some(i)
+    }
+
+    /// **Whether this weapon has a full lock** — a target and enough time on it.
+    ///
+    /// The def comes in because the hold time is the weapon's, not the state's:
+    /// one door, so the HUD indicator and the round that leaves cannot disagree
+    /// about whether the launcher was locked.
+    pub fn locked_on(&self, def: &WeaponDef) -> Option<Uuid> {
+        (def.can_lock() && !self.lock_target.is_nil() && self.lock_held_s >= def.lock_s)
+            .then_some(self.lock_target)
+    }
+
+    /// **How far into a lock this weapon is**, `[0, 1]` — what the reticle draws
+    /// and what `hero.csv` carries. `0.0` for a weapon that cannot lock.
+    pub fn lock_fraction(&self, def: &WeaponDef) -> f64 {
+        if !def.can_lock() || self.lock_target.is_nil() {
+            return 0.0;
+        }
+        (self.lock_held_s / def.lock_s).clamp(0.0, 1.0)
     }
 }
 
@@ -2187,6 +2750,26 @@ pub fn weapon_state_bytes(world: &EcsWorld) -> Vec<u8> {
         if s.spread_bloom_deg != 0.0 {
             out.extend_from_slice(&s.spread_bloom_deg.to_bits().to_le_bytes());
         }
+        // **THE ATTACHMENTS** (wave WPN2d), on the bloom's own rule one field
+        // along: a bare rail folds NOTHING, so every trace of an unmodified
+        // weapon stays byte-identical to its pre-WPN2d self, and only a weapon
+        // somebody has actually been to a bench with moves. Twenty bytes when it
+        // does — ten `u16`s, one per slot, in `AttachmentSlot::ALL` order, which
+        // is why that order is pinned.
+        if s.has_attachments() {
+            for i in s.attach {
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+        }
+        // **THE LOCK** (wave WPN2d), on the same rule: a weapon that is not
+        // holding one folds nothing. Twenty-four bytes when it is — the target's
+        // guid and how long it has been held — and both are needed, because a
+        // host that agreed about the target and not about the time would fire a
+        // guided missile on one side and a dumb one on the other.
+        if !s.lock_target.is_nil() || s.lock_held_s != 0.0 {
+            out.extend_from_slice(s.lock_target.as_bytes());
+            out.extend_from_slice(&s.lock_held_s.to_bits().to_le_bytes());
+        }
     }
     out
 }
@@ -2465,7 +3048,7 @@ mod tests {
     /// the room.
     #[test]
     fn a_gunshot_is_four_layers_and_the_third_is_the_room() {
-        let out = report_layers(WeaponClass::Ar, false, 320.0, 10.0, 0);
+        let out = report_layers(WeaponClass::Ar, false, 320.0, 10.0, 0, 1.0);
         assert_eq!(
             out.iter().map(|l| l.kind).collect::<Vec<_>>(),
             ReportLayerKind::ALL.to_vec(),
@@ -2479,7 +3062,7 @@ mod tests {
         assert_eq!(out[2].lowpass_hz, None);
         assert!((out[2].source.max_distance - 320.0).abs() < 1e-9);
         // Indoors: the short tail, filtered, at a quarter of the reach.
-        let inside = report_layers(WeaponClass::Ar, true, 320.0, 10.0, 0);
+        let inside = report_layers(WeaponClass::Ar, true, 320.0, 10.0, 0, 1.0);
         assert_eq!(
             inside[2].source.clip,
             Some(report_clip(WeaponClass::Ar, ReportClip::IndoorTail))
@@ -2523,8 +3106,8 @@ mod tests {
         assert_eq!(distant_gain(f64::NAN), 0.0);
         // A layer whose volume is zero is STILL a command: the count must not
         // be a function of where the player is standing.
-        let near = report_layers(WeaponClass::Sniper, false, 600.0, 5.0, 0);
-        let far = report_layers(WeaponClass::Sniper, false, 600.0, 600.0, 0);
+        let near = report_layers(WeaponClass::Sniper, false, 600.0, 5.0, 0, 1.0);
+        let far = report_layers(WeaponClass::Sniper, false, 600.0, 600.0, 0, 1.0);
         assert_eq!(near.len(), far.len());
         assert_eq!(near[3].source.volume, 0.0);
         assert!((far[3].source.volume - REPORT_VOLUME).abs() < 1e-12);
@@ -2546,10 +3129,10 @@ mod tests {
             far[3].source.max_distance
         );
         // The doc's own case: an M4A1 (320 m of report) heard at 400 m.
-        let m4a1 = report_layers(WeaponClass::Ar, false, 320.0, 400.0, 0);
+        let m4a1 = report_layers(WeaponClass::Ar, false, 320.0, 400.0, 0, 1.0);
         assert!(m4a1[3].source.max_distance > 400.0);
         // …and the clamp holds for a weapon at the range ceiling.
-        let huge = report_layers(WeaponClass::Sniper, false, MAX_RANGE_M, 400.0, 0);
+        let huge = report_layers(WeaponClass::Sniper, false, MAX_RANGE_M, 400.0, 0, 1.0);
         assert!((huge[3].source.max_distance - MAX_RANGE_M).abs() < 1e-9);
     }
 
@@ -2559,7 +3142,7 @@ mod tests {
     fn the_body_layers_pitch_wanders_by_the_shot_index_and_nothing_else() {
         let mut seen = std::collections::BTreeSet::new();
         for shot in 0..64u64 {
-            let l = report_layers(WeaponClass::Smg, false, 240.0, 10.0, shot);
+            let l = report_layers(WeaponClass::Smg, false, 240.0, 10.0, shot, 1.0);
             let p = l[1].source.pitch;
             assert!(
                 (p - 1.0).abs() <= BODY_PITCH_JITTER + 1e-12,
@@ -2579,10 +3162,10 @@ mod tests {
         );
         // Deterministic: the same round is the same note in a replay.
         assert_eq!(
-            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1]
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17, 1.0)[1]
                 .source
                 .pitch,
-            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1]
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17, 1.0)[1]
                 .source
                 .pitch
         );

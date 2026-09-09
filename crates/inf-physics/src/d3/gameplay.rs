@@ -161,6 +161,17 @@ pub struct WeaponHit {
     /// authored before wave WPN2a carries `REPORT_MAX_M`, so every committed
     /// audio command stream is byte-identical.
     pub report_max_m: f64,
+    /// **How loud this weapon's report is** (wave WPN2d), as the multiplier
+    /// `inf_ecs::weapon::report_layers` applies to every layer's volume — the
+    /// per-weapon `WeaponDef::report_gain`, travelling on the shot for
+    /// [`report_max_m`](Self::report_max_m)'s reason verbatim.
+    ///
+    /// It is what makes a **suppressor** audible as a difference rather than as
+    /// a table entry: the attachment fold multiplies this and `report_max_m` by
+    /// the same `loudness_mult`, and both hosts read it inside the
+    /// `weapon_report` MIRROR fence. `1.0` for everything the catalogue authors,
+    /// so every committed audio command stream is byte-identical.
+    pub report_gain: f64,
     /// **Whether this attack made a noise** (wave WPN1) — `true` for a round
     /// leaving a barrel, `false` for a swing.
     ///
@@ -1684,6 +1695,7 @@ fn resolve_shot(
                 arrived: false,
                 headshot,
                 report_max_m: def.report_max_m,
+                report_gain: def.report_gain,
                 class: def.audio_class(),
                 indoors: enclosure.indoors,
                 listener_m,
@@ -1702,6 +1714,10 @@ fn resolve_shot(
                     age_s: 0.0,
                     first_segment: true,
                     cracked: false,
+                    kind: inf_ecs::ballistics::RoundKind::Bullet,
+                    fuse_left_s: 0.0,
+                    bounces: 0,
+                    guide: Uuid::nil(),
                     def: *def,
                 };
                 if inf_ecs::ballistics::spawn_round(world, round, rays_already) {
@@ -1721,6 +1737,7 @@ fn resolve_shot(
                 arrived: false,
                 headshot: false,
                 report_max_m: def.report_max_m,
+                report_gain: def.report_gain,
                 class: def.audio_class(),
                 indoors: enclosure.indoors,
                 listener_m,
@@ -2119,6 +2136,7 @@ fn step_rounds(
                             arrived: true,
                             headshot,
                             report_max_m: r.def.report_max_m,
+                            report_gain: r.def.report_gain,
                             // **A quiet hit reaches no report layer**, so these
                             // four are carried for completeness rather than
                             // read: `fire_weapon_audio` builds a stack only
@@ -2661,6 +2679,7 @@ fn resolve_swing(
             // where a melee hit grows a point.
             headshot: false,
             report_max_m: def.report_max_m,
+            report_gain: def.report_gain,
             // A swing is never loud (see `loud` above), so no report layer ever
             // reads these. A fist names no class and its band answers `Pistol`
             // on a zero-length barrel, which is as meaningless as it is
@@ -2683,6 +2702,7 @@ fn resolve_swing(
             arrived: false,
             headshot: false,
             report_max_m: def.report_max_m,
+            report_gain: def.report_gain,
             class: def.audio_class(),
             indoors: false,
             listener_m: f64::INFINITY,

@@ -187,6 +187,7 @@ fn weapon_catalogue() -> Vec<inf_ecs::item::ItemDef> {
             stack_max: 1,
             mass_kg: 3.5,
             weapon: Some(rifle),
+            mesh: None,
         },
         inf_ecs::item::ItemDef {
             id: PISTOL.into(),
@@ -194,6 +195,7 @@ fn weapon_catalogue() -> Vec<inf_ecs::item::ItemDef> {
             stack_max: 1,
             mass_kg: 0.9,
             weapon: Some(pistol),
+            mesh: None,
         },
         inf_ecs::item::ItemDef {
             id: BANDAGE.into(),
@@ -201,6 +203,7 @@ fn weapon_catalogue() -> Vec<inf_ecs::item::ItemDef> {
             stack_max: 5,
             mass_kg: 0.05,
             weapon: None,
+            mesh: None,
         },
     ]
 }

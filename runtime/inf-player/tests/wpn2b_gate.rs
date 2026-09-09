@@ -107,6 +107,7 @@ fn defs_with(rows: &[(&str, WeaponDef)]) -> ItemDefs {
             stack_max: 1,
             mass_kg: 3.6,
             weapon: Some(*def),
+            mesh: None,
         });
     }
     defs
@@ -2433,7 +2434,10 @@ fn every_row_in_the_registry_can_bloom_at_its_own_rate() {
     let rows = defs
         .merge_toml(weapon::WEAPON_REGISTRY_TOML)
         .expect("the registry parses");
-    assert_eq!(rows, 85, "the registry is not eighty-five rows");
+    // **Eighty-eight since wave WPN2d** — the G67 grenade, the thrown knife and
+    // the M9 combat knife, in `weapons.toml`'s own section 8. The doc's seven
+    // FIREARM tables are still eighty-five.
+    assert_eq!(rows, 88, "the registry is not eighty-eight rows");
     let floor = feel::BLOOM_DECAY_PER_S * 450.0;
     let mut slowest_auto = (f64::MAX, String::new());
     let mut auto_cannot: Vec<String> = Vec::new();

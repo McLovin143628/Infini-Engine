@@ -141,6 +141,7 @@ fn defs() -> ItemDefs {
         label: "Rifle".into(),
         stack_max: 1,
         mass_kg: 3.5,
+        mesh: None,
         weapon: Some(WeaponDef {
             automatic: false,
             magazine: 5,

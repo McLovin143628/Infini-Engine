@@ -263,6 +263,7 @@ fn defs_with(id: &str, def: WeaponDef) -> ItemDefs {
         stack_max: 1,
         mass_kg: 3.6,
         weapon: Some(def),
+        mesh: None,
     }));
     d
 }
@@ -420,6 +421,7 @@ fn the_audio_log_holds_a_hundred_and_twenty_seconds_of_eight_shooters() {
             stack_max: 1,
             mass_kg: 3.6,
             weapon: Some(deep),
+            mesh: None,
         })
         .then_some(())
         .expect("the deep rifle is a new id");
@@ -559,8 +561,8 @@ fn the_probe_calls_a_room_a_room_and_a_street_a_street() {
     assert_eq!(inside.0, 6, "a six-sided room should answer six");
     assert!(inside.1);
     // …and the TAIL follows, which is the whole point of the probe.
-    let street = weapon::report_layers(WeaponClass::Ar, outside.1, 320.0, 10.0, 0);
-    let room = weapon::report_layers(WeaponClass::Ar, inside.1, 320.0, 10.0, 0);
+    let street = weapon::report_layers(WeaponClass::Ar, outside.1, 320.0, 10.0, 0, 1.0);
+    let room = weapon::report_layers(WeaponClass::Ar, inside.1, 320.0, 10.0, 0, 1.0);
     assert_eq!(
         street[2].source.clip,
         Some(weapon::report_clip(
@@ -782,7 +784,7 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
     );
     assert!(up < at / 4.0, "the filter is not filtering");
 
-    let inside = weapon::report_layers(WeaponClass::Ar, true, 320.0, 400.0, 0);
+    let inside = weapon::report_layers(WeaponClass::Ar, true, 320.0, 400.0, 0, 1.0);
     let cutoffs: Vec<Option<f64>> = inside.iter().map(|l| l.lowpass_hz).collect();
     println!("indoors, far away: {cutoffs:?}");
     assert_eq!(
@@ -794,7 +796,7 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
             Some(weapon::DISTANT_LOWPASS_HZ)
         ]
     );
-    let outside = weapon::report_layers(WeaponClass::Ar, false, 320.0, 10.0, 0);
+    let outside = weapon::report_layers(WeaponClass::Ar, false, 320.0, 10.0, 0, 1.0);
     assert_eq!(outside[2].lowpass_hz, None, "a street does not muffle");
     assert_eq!(
         outside[3].lowpass_hz,

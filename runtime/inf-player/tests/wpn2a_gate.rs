@@ -118,6 +118,7 @@ fn defs_with(id: &str, def: WeaponDef) -> ItemDefs {
         stack_max: 1,
         mass_kg: 3.6,
         weapon: Some(def),
+        mesh: None,
     }));
     d
 }
@@ -1203,7 +1204,7 @@ fn a_shorter_bodys_head_band_is_lower() {
 /// **The registry's CLASS census, read off the rows** — the WPN2a audit's arm.
 ///
 /// `the_registry_is_the_docs_own_eighty_five_rows` sums a hard-coded
-/// `[("pistols", 10), …]` and asserts the sum is 85, which is a constant the
+/// `[("pistols", 10), …]` and asserts the sum is 88, which is a constant the
 /// compiler could fold: a registry of eighty-five pistols passes it as long as
 /// seven named exemplars exist. This one partitions the PARSED rows by the one
 /// field that is unique per class in `weapons.toml`'s own class-rule table —
@@ -1217,7 +1218,7 @@ fn the_registrys_class_census_is_read_off_the_rows() {
     assert_eq!(
         defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
             .expect("the registry parses"),
-        85
+        88
     );
     // The class rule's own `range_m` column, which is unique per class — the
     // header comment of `weapons.toml` is where these seven numbers are stated.
@@ -1230,6 +1231,15 @@ fn the_registrys_class_census_is_read_off_the_rows() {
             1800 => "snipers",
             80 => "shotguns",
             900 => "launchers",
+            // **Wave WPN2d's three**, which are not in the doc's seven tables
+            // at all: its section 5 class matrix names throwables and melee and
+            // gives them no rows, so `weapons.toml` authors them from that
+            // matrix and states their provenance in the file. They are here
+            // rather than folded into a neighbour because the whole point of
+            // this arm is that a row moving between classes moves a count.
+            120 => "throwables",
+            90 => "throwables",
+            2 => "melee",
             _ => "UNCLASSED",
         }
     };
@@ -1250,6 +1260,9 @@ fn the_registrys_class_census_is_read_off_the_rows() {
         ("snipers", 10),
         ("shotguns", 10),
         ("launchers", 5),
+        // Wave WPN2d: the G67 and the thrown knife, and the M9.
+        ("throwables", 2),
+        ("melee", 1),
     ] {
         assert_eq!(
             census.get(class).copied().unwrap_or(0),
@@ -1263,7 +1276,7 @@ fn the_registrys_class_census_is_read_off_the_rows() {
         0,
         "a row carries a range no class rule names"
     );
-    assert_eq!(census.values().sum::<usize>(), 85);
+    assert_eq!(census.values().sum::<usize>(), 88);
 }
 
 // ── (e) THE MOVE-SPEED CONSUMER ─────────────────────────────────────────────
@@ -1280,7 +1293,7 @@ fn the_registrys_move_speed_multiplier_is_metres_on_the_ground() {
         assert_eq!(
             d.merge_toml(weapon::WEAPON_REGISTRY_TOML)
                 .expect("the registry parses"),
-            85
+            88
         );
         d
     };
@@ -1355,7 +1368,7 @@ fn the_registrys_move_speed_multiplier_is_metres_on_the_ground() {
 
 /// The doc's own class census, as ids, so the count is a claim about the
 /// dataset's seven sections rather than about a number 85.
-const CLASS_CENSUS: [(&str, usize, &str); 7] = [
+const CLASS_CENSUS: [(&str, usize, &str); 8] = [
     ("pistols", 10, "glock_17"),
     ("smgs", 20, "mp5"),
     ("assault rifles", 20, "m4a1"),
@@ -1363,6 +1376,12 @@ const CLASS_CENSUS: [(&str, usize, &str); 7] = [
     ("snipers", 10, "barrett_m82"),
     ("shotguns", 10, "remington_870"),
     ("launchers", 5, "rpg_7"),
+    // **Wave WPN2d's throwables**, which the doc's seven tables do not contain
+    // and its section 5 class matrix does. The M9 knife is deliberately NOT an
+    // exemplar here: this arm asserts every exemplar is a `Projectile`, and a
+    // melee weapon is not one — which is the arm doing its job rather than a
+    // gap in it.
+    ("throwables", 2, "g67_grenade"),
 ];
 
 /// **Eighty-five rows, each one parsed, counted per class and round-tripped
@@ -1376,7 +1395,11 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
     let taken = defs
         .merge_toml(weapon::WEAPON_REGISTRY_TOML)
         .expect("the registry parses");
-    assert_eq!(taken, 85, "the registry defines {taken} items, not 85");
+    // **Eighty-eight since wave WPN2d**, and the cause is in `weapons.toml`'s
+    // own section 8: the G67 grenade, the thrown knife and the M9 combat knife.
+    // The doc's seven FIREARM tables are still exactly eighty-five rows, which
+    // is what the census below counts.
+    assert_eq!(taken, 88, "the registry defines {taken} items, not 88");
     assert!(
         taken <= item::MAX_ITEM_DEFS,
         "the registry is over the catalogue cap"
@@ -1399,7 +1422,11 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
     }
     let total: usize = classes.iter().map(|(_, n)| n).sum();
     println!("the registry's census: {classes:?} = {total}");
-    assert_eq!(total, 85);
+    // The seven doc tables (85) plus wave WPN2d's two throwables. The M9 is the
+    // eighty-eighth row and is not in this census because it is not a
+    // projectile — see `CLASS_CENSUS`.
+    assert_eq!(total, 87);
+    assert_eq!(taken, total + 1, "the M9 knife is the row this census omits");
 
     // The BY-NAME DOOR: every settable name takes a value and refuses a NaN,
     // for every row, which is what `set`/`names()` being one door means.
@@ -1557,6 +1584,10 @@ fn an_empty_pool_changes_no_trace_and_a_round_changes_every_one() {
         age_s: 0.0,
         first_segment: true,
         cracked: false,
+        kind: ballistics::RoundKind::Bullet,
+        fuse_left_s: 0.0,
+        bounces: 0,
+        guide: Uuid::nil(),
         def: WeaponDef::default(),
     };
     assert!(ballistics::spawn_round(sim.world_mut(), r, 0));

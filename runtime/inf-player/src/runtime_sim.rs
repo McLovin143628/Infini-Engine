@@ -2879,6 +2879,7 @@ impl RuntimeSim {
                     hit.report_max_m,
                     hit.listener_m,
                     hit.shot_index,
+                    hit.report_gain,
                 ) {
                     // The key is HOISTED, and that is not a style choice: with
                     // the call nested inside `play_command_for`, rustfmt broke

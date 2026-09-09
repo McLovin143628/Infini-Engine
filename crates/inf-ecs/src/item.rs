@@ -91,6 +91,26 @@ pub struct ItemDef {
     pub mass_kg: f64,
     /// The weapon this item is, if it is one (I6, the weapons half).
     pub weapon: Option<crate::weapon::WeaponDef>,
+    /// **The mesh asset this item DRAWS as** (wave WPN2d), or `None` for one
+    /// that draws the placeholder primitive.
+    ///
+    /// The field `inf_physics::d3::gameplay::step_equipped_weapons`' own doc has
+    /// asked for since island wave I6 — *"an `ItemDef` that names a mesh asset
+    /// is the next field"* — and it costs **zero schema**, because this type
+    /// carries no `Serialize` and `crate::components::MeshRef::asset` is
+    /// additive, `serde(default)` and already walked by the cook.
+    ///
+    /// It is an **override**, not the only route: a weapon that names nothing
+    /// takes the derived identity of its class's art
+    /// (`crate::weapon::weapon_mesh_guid` of `crate::weapon::weapon_mesh_key`),
+    /// which is what lets the committed catalogue name a mesh whose *bytes* are
+    /// licensed content that may never enter this repository — the road
+    /// surface's and the starter body's arrangement exactly (ASSET0 clause 0).
+    /// A checkout without the art resolves the identity to nothing and draws the
+    /// committed primitive.
+    ///
+    /// It comes across `merge_toml` as `mesh = "<uuid>"`.
+    pub mesh: Option<Uuid>,
 }
 
 impl Default for ItemDef {
@@ -101,6 +121,7 @@ impl Default for ItemDef {
             stack_max: DEFAULT_STACK_MAX,
             mass_kg: 1.0,
             weapon: None,
+            mesh: None,
         }
     }
 }
@@ -214,12 +235,26 @@ impl ItemDefs {
                 .filter(|m| m.is_finite() && *m >= 0.0)
                 .unwrap_or(1.0);
             let weapon = crate::weapon::WeaponDef::from_toml_table(t)?;
+            // **The mesh** (wave WPN2d), by name, and refused BY NAME on a
+            // malformed GUID rather than silently dropped: an item that was
+            // authored to draw a rifle and drew a cube instead would be exactly
+            // the reader-that-lies this catalogue's own weapon reader refuses a
+            // typo for.
+            let mesh = match t.get("mesh") {
+                None => None,
+                Some(toml::Value::String(s)) => Some(
+                    Uuid::parse_str(s.trim())
+                        .map_err(|e| format!("item {id}: mesh {s:?} is not a GUID: {e}"))?,
+                ),
+                Some(_) => return Err(format!("item {id}: mesh is not a string")),
+            };
             if self.insert(ItemDef {
                 id: id.clone(),
                 label,
                 stack_max,
                 mass_kg,
                 weapon,
+                mesh,
             }) {
                 taken += 1;
             }

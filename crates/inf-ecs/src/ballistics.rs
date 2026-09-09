@@ -209,9 +209,110 @@ pub struct Round {
     /// that disagreed about it would agree about every number the trace carried
     /// and one of them would crack twice.
     pub cracked: bool,
+    /// **What KIND of body this is** (wave WPN2d) — a bullet, a rocket under
+    /// power, or something somebody threw.
+    ///
+    /// It is on the ROUND and not derived from `def` at every read for
+    /// `WeaponHit::loud`'s reason verbatim: a grenade in the air was thrown by a
+    /// weapon the character may already have put away, and what a body does in
+    /// flight is a property of the body.
+    pub kind: RoundKind,
+    /// **How long until this body goes off**, seconds; `0.0` for one with no
+    /// fuse, which is every bullet and every rocket.
+    ///
+    /// Counted DOWN, on `MovementRuntime::throw_s`' own rule: `Default` means
+    /// "no fuse" rather than "goes off this instant".
+    pub fuse_left_s: f64,
+    /// How many times it has bounced. Bounded by [`MAX_BOUNCES`], after which a
+    /// thrown body settles rather than jittering along a floor for its whole
+    /// fuse.
+    pub bounces: u32,
+    /// **What this round is guided onto**, or `Uuid::nil()` for an unguided one.
+    ///
+    /// Set at the muzzle from the shooter's own lock
+    /// (`crate::weapon::WeaponState::locked_on`) and never re-acquired in
+    /// flight: a missile that could pick a new target mid-air is a different
+    /// weapon, and the lock a player earned is the one that should be spent.
+    pub guide: Uuid,
     /// The weapon that fired it.
     pub def: WeaponDef,
 }
+
+/// **What kind of body is in the air** (wave WPN2d).
+///
+/// Not a wire enum — the pool is a bevy resource and nothing serializes it — but
+/// it DOES reach [`round_state_bytes`] as [`RoundKind::index`], so the order is
+/// pinned there and by a gate arm rather than left to the declaration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RoundKind {
+    /// A bullet: ballistic, drag, dies on the first thing it touches. Wave
+    /// WPN2a's only kind, and the default, so a pool built before this wave is
+    /// byte-identical.
+    #[default]
+    Bullet,
+    /// A rocket: a sustainer motor along its own velocity
+    /// ([`WeaponDef::accel_mps2`]), a blast where it lands, and optionally a
+    /// lock it steers onto.
+    Rocket,
+    /// Something thrown: bounces, and goes off on a fuse or on impact.
+    Thrown,
+}
+
+impl RoundKind {
+    /// Every kind, in the order [`index`](Self::index) answers.
+    pub const ALL: [RoundKind; 3] = [RoundKind::Bullet, RoundKind::Rocket, RoundKind::Thrown];
+
+    /// Its position in [`ALL`](Self::ALL) — the byte the trace folds.
+    pub fn index(self) -> u8 {
+        match self {
+            RoundKind::Bullet => 0,
+            RoundKind::Rocket => 1,
+            RoundKind::Thrown => 2,
+        }
+    }
+
+    /// **Whether a body of this kind bounces rather than stopping** on what it
+    /// hits.
+    pub fn bounces(self) -> bool {
+        self == RoundKind::Thrown
+    }
+}
+
+/// **The most times a thrown body may bounce** before it settles.
+///
+/// Four. A grenade thrown down a street bounces two or three times and rolls;
+/// the fourth is where a bounce's remaining energy is smaller than the settle
+/// threshold on every restitution the registry authors, and a bound is what
+/// keeps a body from chattering along a floor for the whole of a five-second
+/// fuse at one raycast a sub-step.
+pub const MAX_BOUNCES: u32 = 4;
+
+/// **The speed below which a bounce settles**, m/s.
+///
+/// Half a metre a second. Below it a grenade is rolling rather than bouncing,
+/// and this engine has no rolling: the body stops where it is and waits out its
+/// fuse, which is what a grenade on a pavement looks like.
+pub const SETTLE_SPEED_MPS: f64 = 0.5;
+
+/// **How fast a guided round may turn**, degrees per second (wave WPN2d).
+///
+/// Ninety. A shoulder-fired missile crossing 300 m in three seconds has to be
+/// able to follow a car that moved twenty metres in that time, which is about
+/// four degrees a second — ninety is twenty times that, which is a bound on how
+/// wrong the launch can be rather than the rate the weapon flies at.
+///
+/// The steering is a **vector lerp toward the bearing, renormalised**, not a
+/// rotation: `+ - * /` and one `sqrt`, which is the whole of what the P14 law
+/// leaves on a trace path (see [`advance_round`]'s own note).
+pub const GUIDANCE_TURN_DPS: f64 = 90.0;
+
+/// **How high above its target a top-attack missile climbs** before it dives,
+/// metres — the Javelin's profile ([`WeaponDef::top_attack`]).
+///
+/// Sixty. High enough to be visibly a top attack from a street, low enough that
+/// the climb and the dive both fit inside [`MAX_ROUND_LIFETIME_S`] at the
+/// Javelin's own 190 m/s.
+pub const TOP_ATTACK_ALT_M: f64 = 60.0;
 
 /// **Every round in flight** — the pool, a bevy resource.
 ///
@@ -293,11 +394,15 @@ pub fn clear_rounds(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RoundPool>();
 }
 
-/// **The rounds' trace bytes** — 82 a round (16 guid + six f64 + two f64 + two
-/// flags), in flight order, and **empty when nothing is flying**.
+/// **The rounds' trace bytes** — 111 a round (16 guid + six f64 + two f64 + two
+/// flags + a kind, a fuse, a bounce count and a guide guid), in flight order,
+/// and **empty when nothing is flying**.
 ///
-/// It was 81 until wave WPN2c added [`Round::cracked`]; see that field for why
-/// a latch has to be folded.
+/// It was 81 until wave WPN2c added [`Round::cracked`] (see that field for why a
+/// latch has to be folded) and 82 until wave WPN2d gave a round a KIND: a rocket
+/// under power, a grenade on a fuse and a bullet are three different futures at
+/// one position and one velocity, so the bytes have to tell them apart or two
+/// hosts can agree about a trace and disagree about the next step.
 ///
 /// Empty is the load-bearing half: it is what keeps every trace committed before
 /// this wave byte-identical, and it is why the counters above are not in here.
@@ -327,6 +432,18 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(&r.age_s.to_bits().to_le_bytes());
         out.push(u8::from(r.first_segment));
         out.push(u8::from(r.cracked));
+        // **WHAT KIND OF BODY, AND WHAT IT IS DOING** (wave WPN2d). Fixed width
+        // and unconditional, unlike `crate::weapon::weapon_state_bytes`' three
+        // optional tails, and the reason is the section's own rule: this whole
+        // buffer is EMPTY when nothing is flying, so a level that has never
+        // fired folds nothing either way and there is no byte-identity to buy by
+        // making a row variable. What it buys instead is that a rocket and a
+        // bullet at the same position and speed are DIFFERENT bytes, which they
+        // must be: one of them is about to accelerate.
+        out.push(r.kind.index());
+        out.extend_from_slice(&r.fuse_left_s.to_bits().to_le_bytes());
+        out.extend_from_slice(&r.bounces.to_le_bytes());
+        out.extend_from_slice(r.guide.as_bytes());
     }
     out
 }
@@ -337,7 +454,7 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
 /// Named because the fold and the arm that measures it must not be able to
 /// disagree about the arithmetic, which is a mistake this wave made once
 /// already one module over.
-pub const ROUND_TRACE_BYTES: usize = 16 + 8 * 8 + 2;
+pub const ROUND_TRACE_BYTES: usize = 16 + 8 * 8 + 2 + 1 + 8 + 4 + 16;
 
 // ── the flight ──────────────────────────────────────────────────────────────
 
@@ -381,8 +498,158 @@ pub fn advance_round(at: DVec3, velocity: DVec3, def: &WeaponDef, sub_dt: f64) -
         DVec3::ZERO
     };
     let gravity = DVec3::new(0.0, -PROJECTILE_GRAVITY_MPS2 * def.gravity_scale, 0.0);
-    let v = velocity + (gravity + drag) * sub_dt;
+    // **THE SUSTAINER MOTOR** (wave WPN2d) -- the doc section 5's *"accelerating
+    // engine force"*, along the body's OWN velocity and capped at
+    // [`WeaponDef::burnout_mps`]. It is here, inside the one integrator, rather
+    // than as a second pass over the pool: a rocket that gravity and drag were
+    // integrated for in one place and thrust in another would be a body whose
+    // trajectory depends on the order two functions ran in.
+    //
+    // Zero for every weapon that names no motor, which is every bullet, so the
+    // added term is `+ 0.0` and every pre-WPN2d flight is bit-identical.
+    let thrust = if def.accel_mps2 > 0.0 && speed > 1e-9 && speed < def.burnout_mps.max(0.0) {
+        velocity * (def.accel_mps2 / speed)
+    } else {
+        DVec3::ZERO
+    };
+    let v = velocity + (gravity + drag + thrust) * sub_dt;
     (at + v * sub_dt, v)
+}
+
+/// **Steer a guided round toward a bearing**, as a pure function: the new
+/// velocity (wave WPN2d).
+///
+/// # It is a lerp, not a rotation, and that is the P14 law
+///
+/// A rotation toward a bearing is `acos` of a dot product and an axis-angle
+/// quaternion, which is two transcendentals on a path that reaches
+/// [`round_state_bytes`]. What this does instead is move the velocity's
+/// DIRECTION a bounded fraction of the way toward the bearing and renormalise --
+/// `+ - * /` and one `sqrt`, which IEEE-754 specifies exactly and
+/// `inf_math::libm_ban`'s own header names as deliberately not banned.
+///
+/// The bound is [`GUIDANCE_TURN_DPS`] expressed as that fraction: at `dt` the
+/// most the direction may move is `turn_dps * dt / 180`, i.e. the whole way at
+/// half a second of turn budget. It is deliberately an approximation of a
+/// rotation rather than one -- the quantity a player can see is *how fast the
+/// missile can follow*, and a lerp bound is that, exactly, at both ends.
+///
+/// Speed is preserved: a guided round loses nothing by turning, which is what
+/// makes the top-attack profile arrive rather than stall.
+pub fn guide_velocity(velocity: DVec3, toward: DVec3, turn_dps: f64, dt: f64) -> DVec3 {
+    let speed = velocity.length();
+    if speed <= 1e-9 {
+        return velocity;
+    }
+    let want = toward.normalize_or_zero();
+    if want == DVec3::ZERO || !dt.is_finite() || dt <= 0.0 {
+        return velocity;
+    }
+    let t = (turn_dps.max(0.0) * dt / 180.0).clamp(0.0, 1.0);
+    let dir = velocity / speed;
+    let blended = (dir + (want - dir) * t).normalize_or_zero();
+    if blended == DVec3::ZERO {
+        return velocity;
+    }
+    blended * speed
+}
+
+/// **Where a guided round should be pointing**, given where it is and where its
+/// target is (wave WPN2d) -- the top-attack profile's whole shape.
+///
+/// A direct-attack missile aims at the target. A **top-attack** one aims at a
+/// point [`TOP_ATTACK_ALT_M`] ABOVE the target until it is over it, and at the
+/// target after that -- which is a climb and then a dive, and is what the
+/// Javelin's own profile is. The switch is horizontal distance against the
+/// altitude, so the missile tips over when the dive angle would be 45 degrees,
+/// and nothing has to remember which phase it is in.
+pub fn guidance_bearing(at: DVec3, target: DVec3, top_attack: bool) -> DVec3 {
+    if !top_attack {
+        return target - at;
+    }
+    let flat = DVec3::new(target.x - at.x, 0.0, target.z - at.z);
+    let over = flat.length();
+    if over > TOP_ATTACK_ALT_M {
+        // Still on the way: climb toward the point above the target.
+        (target + DVec3::Y * TOP_ATTACK_ALT_M) - at
+    } else {
+        // Overhead: dive.
+        target - at
+    }
+}
+
+/// **Reflect a thrown body off a surface**, as a pure function (wave WPN2d): the
+/// velocity a bounce leaves with.
+///
+/// The doc section 5's *"parabolic physics entity with drag and bounce
+/// elasticity"*. The incoming velocity is split into the surface NORMAL
+/// component and the TANGENT one; the normal half is reflected and scaled by
+/// [`WeaponDef::restitution`] (how bouncy), the tangent half is scaled by
+/// `1 - bounce_friction` (how much of the slide the surface scrubs off). Two
+/// numbers, two axes, and neither of them touches the other -- which is the
+/// whole difference between a grenade that skips off a road and one that dies
+/// on grass.
+///
+/// A normal that is not a unit vector, or a zero one, returns the velocity
+/// unchanged rather than a NaN: a refusal is a value, even in arithmetic.
+pub fn bounce_velocity(velocity: DVec3, normal: DVec3, restitution: f64, friction: f64) -> DVec3 {
+    let n = normal.normalize_or_zero();
+    if n == DVec3::ZERO || !velocity.is_finite() {
+        return velocity;
+    }
+    let along = velocity.dot(n);
+    let normal_part = n * along;
+    let tangent = velocity - normal_part;
+    let e = if restitution.is_finite() {
+        restitution.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let f = if friction.is_finite() {
+        friction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // The normal half is reflected: a body arriving with `along < 0` (into the
+    // surface) leaves with `-along * e` along the normal, i.e. away from it.
+    tangent * (1.0 - f) - normal_part * e
+}
+
+/// **What a blast is worth at a distance**, as a fraction of its epicentre value
+/// (wave WPN2d) -- the falloff, as a pure function.
+///
+/// `(1 - d/r)^2`, clamped: full at the centre, zero at the radius, and **falling
+/// faster near the edge than near the middle**, which is the shape a blast
+/// actually has and is what makes standing at 80 % of the radius survivable
+/// while 20 % is not.
+///
+/// # Why not inverse square
+///
+/// Because it does not terminate. A physical blast's overpressure falls roughly
+/// as `1/d`, which is infinite at zero and never reaches zero at the radius --
+/// so a game has to clamp both ends anyway, and a clamped `1/d` has a *hard
+/// edge* at the radius where the damage jumps from something to nothing. The
+/// quadratic falloff has neither problem, is one multiply, and is exact at both
+/// ends, which is what lets `wpn2d_gate` compare it against a closed form at
+/// five distances rather than against a tolerance.
+///
+/// A non-finite or non-positive radius answers `0.0`: no radius, no blast.
+pub fn blast_falloff(radius_m: f64, distance_m: f64) -> f64 {
+    if !radius_m.is_finite() || radius_m <= 0.0 || !distance_m.is_finite() {
+        return 0.0;
+    }
+    let t = (distance_m.max(0.0) / radius_m).clamp(0.0, 1.0);
+    let k = 1.0 - t;
+    k * k
+}
+
+/// **What a blast spends on a body at a distance**, joules -- the falloff
+/// applied to [`WeaponDef::blast_damage_j`].
+///
+/// One door, so the HUD, the gate's closed form and the joules
+/// `inf_physics::d3::gameplay::apply_hit` actually spends cannot disagree.
+pub fn blast_damage_j(def: &WeaponDef, distance_m: f64) -> f64 {
+    def.blast_damage_j.max(0.0) * blast_falloff(def.blast_radius_m, distance_m)
 }
 
 // ── the damage curve ────────────────────────────────────────────────────────
@@ -778,6 +1045,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
+                    kind: RoundKind::Bullet,
+                    fuse_left_s: 0.0,
+                    bounces: 0,
+                    guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         for i in 0..MAX_ROUNDS_IN_FLIGHT {
@@ -802,6 +1073,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
+                    kind: RoundKind::Bullet,
+                    fuse_left_s: 0.0,
+                    bounces: 0,
+                    guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(!spawn_round(&mut w, r, MAX_SHOT_RAYS_PER_STEP));
@@ -822,6 +1097,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
+                    kind: RoundKind::Bullet,
+                    fuse_left_s: 0.0,
+                    bounces: 0,
+                    guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));
@@ -849,6 +1128,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
+                    kind: RoundKind::Bullet,
+                    fuse_left_s: 0.0,
+                    bounces: 0,
+                    guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));

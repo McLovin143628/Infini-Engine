@@ -16,6 +16,10 @@ pub mod anim;
 // movement step share.
 pub mod anim_bridge;
 pub mod attach;
+// WPN2d: the ten attachment slots, the multiplicative modifier fold and the
+// 530-row catalogue. Zero schema -- an `include_str!` table and a runtime
+// component, on `weapon`'s own terms.
+pub mod attachment;
 // WPN2c: who is listening. One Ring-0 rule, called by both hosts AND by the
 // fixed step, replacing two private copies that only happened to agree.
 pub mod audio;

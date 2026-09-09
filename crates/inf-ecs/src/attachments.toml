@@ -1,0 +1,869 @@
+# **THE ATTACHMENT CATALOGUE** (wave WPN2d) -- 530 rows, read by
+# `inf_ecs::attachment::ATTACHMENTS_TOML` through `include_str!`, on
+# `crates/inf-ecs/src/weapons.toml`'s own terms: a generated, byte-pinned table
+# that reaches a running game through the SAME by-name doors the registry does
+# and costs ZERO schema (nothing here derives `Serialize`).
+#
+# THE ROWS ARE THE USER'S RESEARCH DOC'S OWN LISTS
+# (`docs/Weapons-in-Rust-based-Game-Engine-GTA-Game.md`, the modular-attachment
+# chapter): ten attachments per category per class. The doc's ARs name a
+# `Lasers` slot in their header and then never fill it, so the assault rifle has
+# eight filled categories like every other rifle class and the honest total is
+# **530**, not the 600 a header count would promise. Counted by
+# `wpn2d_gate::the_attachment_catalogue_is_the_docs_own_lists`.
+#
+# THE TEN SLOTS ARE THE DOC'S OWN `AttachmentSlot` ENUM, verbatim, and several
+# of the doc's per-class categories have no seat of their own in it. They take
+# the seat of the part they physically ARE, which is stated here rather than
+# left to a reader to infer:
+#
+#   Comb / Cheek Risers (DMR)      -> `stock`   -- a cheek piece IS the stock's
+#                                                  top, and a DMR carries both
+#                                                  lists, so `stock` holds 20.
+#   Bolt Assemblies (sniper)       -> `trigger_action` -- a bolt IS the action.
+#   Fire Control Units (launcher)  -> `trigger_action` -- likewise.
+#   Warhead Types (launcher)       -> `ammunition` -- a warhead IS the round.
+#   Stocks / Shoulder Pads         -> `stock`.
+#   Barrel / Tube Shroud           -> `barrel`.
+#   Stocks / Conversions (pistol)  -> `stock`.
+#   Muzzles / Chokes (shotgun)     -> `muzzle`.
+#   Magazine / Tube (shotgun)      -> `magazine`.
+#
+# THE ROW FORMAT is one pipe-separated string per attachment, because 530 rows
+# of eleven-key TOML tables is 6 000 lines nobody reads and this is 530 lines
+# anybody can diff:
+#
+#   id | label | damage | range | recoil | ads_ms | move | velocity | loudness | mag | art
+#
+# * `damage`/`range`/`recoil`/`move`/`velocity`/`loudness` are MULTIPLIERS on
+#   the base `WeaponDef` (the doc's `StatModifiers`, which are multiplicative);
+# * `ads_ms` is the doc's `ads_time_delta_ms`, an ADDITIVE delta in
+#   milliseconds (a slower optic is `+`);
+# * `loudness` is this engine's own eleventh field and it is what makes a
+#   suppressor MEAN something: it multiplies the report's volume AND its
+#   `report_max_m`, which are the two fields `inf_ecs::weapon::report_layers`
+#   builds every gunshot command out of. The doc's `StatModifiers` has no
+#   loudness because the doc's audio section is a separate chapter; a suppressor
+#   that changed nothing audible would be a row with no reader.
+# * `mag` is the doc's `mag_capacity_override`, or `-`;
+# * `art` names the accessory MESH this attachment draws, one of
+#   `scope` / `sight` / `suppressor` / `vertgrip` (the four `SM_*` in the FPS
+#   Weapon Bundle's `Accessories/` folder) or `-` for a part with no art. The
+#   art is LOCAL-ONLY: the ids are committed, the meshes are not.
+#
+# THE NUMBERS ARE DERIVED FROM THE NAME, BY ONE RULE PER KEYWORD, so any row can
+# be checked by hand against the row above it. The doc gives no per-attachment
+# numbers at all -- only the struct and its example comments (1.05 damage, 1.15
+# range, 0.85 recoil, +25 ms ADS, 0.98 move, 1.20 velocity) -- so inventing 530
+# hand-tuned rows would have been 530 numbers nobody could check. The keyword
+# rules, in the order they compose:
+#
+#   suppressor/moderator/silencer  loudness x0.35, recoil x0.92, velocity x0.95,
+#                                  range x0.92, ADS +30 ms          [art suppressor]
+#   flash hider/blast shield       loudness x0.85, recoil x0.95     [art suppressor]
+#   compensator/brake/choke        recoil x0.82, loudness x1.10     [art suppressor]
+#   breaching                      damage x1.08, recoil x1.05
+#   long/heavy/match barrel        range x1.15, damage x1.03, velocity x1.10,
+#                                  ADS +40 ms, move x0.97
+#   short/CQB/sawed barrel         range x0.85, velocity x0.90, ADS -35 ms, move x1.03
+#   integrally suppressed barrel   loudness x0.45, velocity x0.95
+#   lightweight/skeleton/carbon    move x1.02, ADS -15 ms
+#   heavy/steel/brass/weighted     move x0.98, recoil x0.94, ADS +10 ms
+#   an optic's magnification N     ADS +12N ms, range x(1 + 0.02N), recoil x0.98
+#   thermal/digital/smart optic    ADS +40 ms, range x1.05
+#   red dot/reflex/irons           ADS -10 ms                       [art sight]
+#   a scope at 3x or more                                           [art scope]
+#   heavy/padded/adjustable stock  recoil x0.85, move x0.97, ADS +15 ms
+#   no stock/folding/wire          move x1.04, ADS -25 ms, recoil x1.12
+#   bipod/handstop/barricade       recoil x0.80, move x0.98         [art vertgrip]
+#   vertical/fore grip             recoil x0.88, ADS -10 ms         [art vertgrip]
+#   an N-round magazine            mag override N
+#   drum                           move x0.95, ADS +25 ms (60 rounds if unnamed)
+#   flush/fast/speed/quick mag     ADS -20 ms
+#   grip texture (rubber/G10/...)  recoil x0.94, ADS -8 ms
+#   armour-piercing ammunition     damage x1.10, velocity x1.08, range x1.05
+#   hollow point                   damage x1.15, range x0.88
+#   subsonic                       loudness x0.60, velocity x0.75, damage x0.92
+#   high-velocity/match/+P         velocity x1.15, range x1.08
+#   incendiary/explosive/warhead   damage x1.20, range x0.95
+#   frangible/rubber/less-lethal   damage x0.75, range x0.80
+#   flechette                      damage x1.05, range x1.10
+#   slug                           damage x1.10, range x1.30
+#   a laser                        ADS -20 ms, recoil x0.97
+#   a light/strobe                 ADS -10 ms
+#   hair/binary/fast trigger       ADS -15 ms, recoil x1.05
+#   heavy/polished/sealed action   recoil x0.92, ADS +10 ms
+#   smart/guided fire control      ADS +25 ms, range x1.10
+#
+# Every product is then CLAMPED -- damage/range/recoil/velocity to [0.50, 2.00],
+# move to [0.80, 1.20], loudness to [0.20, 2.00], the ADS delta to +/-150 ms --
+# which is `inf_ecs::attachment::StatModifiers::clamped`, the same bound the
+# parser applies to a hand-edited row.
+#
+# GENERATED, and byte-pinned. Edit the numbers here, not a copy of them.
+
+# --------------------------------------------------------------------------
+# PISTOL
+# --------------------------------------------------------------------------
+
+[pistol.muzzle]
+rows = [
+  "pistol_compensator|Pistol Compensator|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "low_profile_suppressor|Low-Profile Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "threaded_flash_hider|Threaded Flash Hider|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "stand_off_breaching_device|Stand-Off Breaching Device|1.0800|1.0000|1.0500|+0.0|1.0000|1.0000|1.0000|-|suppressor",
+  "heavy_duty_monolithic_suppressor|Heavy Duty Monolithic Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "linear_compensator|Linear Compensator|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "match_grade_ported_muzzle|Match Grade Ported Muzzle|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "ghost_flash_suppressor|Ghost Flash Suppressor|1.0000|0.9200|0.8740|+30.0|1.0000|0.9500|0.2975|-|suppressor",
+  "titanium_brake|Titanium Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "osprey_square_suppressor|Osprey Square Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+]
+
+[pistol.barrel]
+rows = [
+  "threaded_match_barrel|Threaded Match Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "extended_heavy_barrel|Extended Heavy Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "integrated_compensator_barrel|Integrated Compensator Barrel|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|-",
+  "lightweight_skeleton_barrel|Lightweight Skeleton Barrel|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "fluted_precision_barrel|Fluted Precision Barrel|1.0300|1.1500|0.9400|+25.0|0.9894|1.1000|1.0000|-|-",
+  "ported_competition_barrel|Ported Competition Barrel|1.0000|1.0000|0.9400|+0.0|1.0000|1.0000|1.0000|-|-",
+  "subsonic_suppressed_barrel|Subsonic Suppressed Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "heavy_target_barrel|Heavy Target Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "shorty_cqc_barrel|Shorty CQC Barrel|1.0000|0.8500|1.0000|-35.0|1.0300|0.9000|1.0000|-|-",
+  "polygonal_rifled_barrel|Polygonal Rifled Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[pistol.optic]
+rows = [
+  "micro_reflex_sight|Micro Reflex Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "low_profile_mini_dot|Low-Profile Mini Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "open_frame_red_dot|Open Frame Red Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "solar_micro_optic|Solar Micro Optic|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "enclosed_emitter_sight|Enclosed Emitter Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "tritium_combat_sights|Tritium Combat Sights|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "fiber_optic_target_sights|Fiber Optic Target Sights|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "competition_c_more_dot|Competition C-More Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "thermal_micro_scope|Thermal Micro Scope|1.0000|1.0500|1.0000|+30.0|1.0000|1.0000|1.0000|-|sight",
+  "custom_co_witness_iron_sights|Custom Co-Witness Iron Sights|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+]
+
+[pistol.stock]
+rows = [
+  "pistol_braced_stock|Pistol Braced Stock|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "folding_wire_stock|Folding Wire Stock|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "pdw_chassis_enclosure|PDW Chassis Enclosure|1.0000|1.0000|0.9520|-10.0|1.0088|1.0000|1.0000|-|-",
+  "heavy_carbine_stock_kit|Heavy Carbine Stock Kit|1.0000|1.0000|0.7191|+25.0|0.9316|1.0000|1.0000|-|-",
+  "quick_deploy_shoulder_brace|Quick-Deploy Shoulder Brace|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "carbon_fiber_stabilizer|Carbon Fiber Stabilizer|1.0000|1.0000|0.9000|-15.0|0.9996|1.0000|1.0000|-|-",
+  "sling_swivel_endplate|Sling Swivel Endplate|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "counter_weight_tail_extension|Counter-Weight Tail Extension|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "pistol_buffer_tube_adapter|Pistol Buffer Tube Adapter|1.0000|1.0000|0.9000|+0.0|0.9800|1.0000|1.0000|-|-",
+  "full_tactical_carbine_conversion|Full Tactical Carbine Conversion|1.0000|1.0000|0.9000|+0.0|0.9800|1.0000|1.0000|-|-",
+]
+
+[pistol.magazine]
+rows = [
+  "extended_21_round_mag|Extended 21-Round Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|21|-",
+  "high_capacity_30_round_stick_mag|High-Capacity 30-Round Stick Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|30|-",
+  "50_round_drum_mag|50-Round Drum Mag|1.0000|1.0000|1.0000|+25.0|0.9500|1.0000|1.0000|50|-",
+  "flush_fit_10_round_mag|Flush-Fit 10-Round Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|10|-",
+  "speed_reload_mag_plate|Speed Reload Mag Plate|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_duty_steel_mag|Heavy Duty Steel Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "lightweight_polymer_mag|Lightweight Polymer Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "subsonic_caliber_conversion_mag|Subsonic Caliber Conversion Mag|1.0800|1.0000|1.0800|+0.0|1.0000|0.8000|0.7000|-|-",
+  "fluted_mag_basepack|Fluted Mag Basepack|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "fast_draw_reload_mag|Fast-Draw Reload Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[pistol.rear_grip]
+rows = [
+  "granulated_rubber_grip|Granulated Rubber Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "stippled_polymer_grip|Stippled Polymer Grip|1.0000|1.0000|0.9400|-23.0|1.0200|1.0000|1.0000|-|-",
+  "wood_competition_scale_panel|Wood Competition Scale Panel|1.0000|1.0000|1.0000|-15.0|1.0000|1.0000|1.0000|-|-",
+  "aggressive_checkered_g10_grip|Aggressive Checkered G10 Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "ergonomic_finger_groove_grip|Ergonomic Finger-Groove Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "tactical_tape_wrap|Tactical Tape Wrap|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "smooth_competition_grip|Smooth Competition Grip|1.0000|1.0000|1.0000|-15.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_brass_counterweight_grip|Heavy Brass Counterweight Grip|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "lightweight_carbon_fiber_grip|Lightweight Carbon Fiber Grip|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "cold_weather_textured_grip|Cold-Weather Textured Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[pistol.laser]
+rows = [
+  "1mw_red_targeting_laser|1mW Red Targeting Laser|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+  "5mw_green_hip_fire_laser|5mW Green Hip-Fire Laser|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+  "300_lumen_tactical_light|300 Lumen Tactical Light|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|-",
+  "ir_laser_nvg_only|IR Laser (NVG Only)|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+  "compact_laser_light_combo|Compact Laser/Light Combo|1.0000|1.0000|0.9700|-30.0|1.0000|1.0000|1.0000|-|-",
+  "high_output_strobe_flashlight|High-Output Strobe Flashlight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|-",
+  "streamlined_frame_laser|Streamlined Frame Laser|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+  "match_competition_laser|Match Competition Laser|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+  "underbarrel_ir_illuminator|Underbarrel IR Illuminator|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|-",
+  "micro_aiming_module|Micro Aiming Module|1.0000|1.0000|0.9700|-20.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[pistol.trigger_action]
+rows = [
+  "match_grade_flat_trigger|Match Grade Flat Trigger|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_double_action_trigger|Heavy Double-Action Trigger|1.0000|1.0000|0.8648|+20.0|0.9800|1.0000|1.0000|-|-",
+  "lightened_hair_trigger|Lightened Hair Trigger|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "polished_competition_sear|Polished Competition Sear|1.0000|1.0000|0.9660|-5.0|1.0000|1.0000|1.0000|-|-",
+  "binary_trigger_unit|Binary Trigger Unit|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_duty_duty_trigger|Heavy Duty Duty Trigger|1.0000|1.0000|0.8648|+20.0|0.9800|1.0000|1.0000|-|-",
+  "short_reset_trigger|Short Reset Trigger|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "skeletonized_aluminum_trigger|Skeletonized Aluminum Trigger|1.0000|1.0000|1.0500|-30.0|1.0200|1.0000|1.0000|-|-",
+  "target_match_trigger|Target Match Trigger|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "full_auto_conversion_sear|Full-Auto Conversion Sear|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# SMG
+# --------------------------------------------------------------------------
+
+[smg.muzzle]
+rows = [
+  "submachine_sound_suppressor|Submachine Sound Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "dual_port_muzzle_brake|Dual-Port Muzzle Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "cqb_flash_hider|CQB Flash Hider|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "spiral_fluted_compensator|Spiral Fluted Compensator|1.0000|1.0000|0.8200|-15.0|1.0200|1.0000|1.1000|-|suppressor",
+  "integrated_shroud_suppressor|Integrated Shroud Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "breaching_muzzle_device|Breaching Muzzle Device|1.0800|1.0000|1.0500|+0.0|1.0000|1.0000|1.0000|-|suppressor",
+  "heavy_sound_moderating_suppressor|Heavy Sound Moderating Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "linear_blast_shield|Linear Blast Shield|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "match_grade_brake|Match Grade Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "recoil_dampening_flash_suppressor|Recoil Dampening Flash Suppressor|1.0000|0.9200|0.7167|+30.0|1.0000|0.9500|0.3272|-|suppressor",
+]
+
+[smg.barrel]
+rows = [
+  "subcompact_cqb_barrel|Subcompact CQB Barrel|1.0000|0.8500|1.0000|-35.0|1.0300|0.9000|1.0000|-|-",
+  "long_range_precision_barrel|Long Range Precision Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "integrally_suppressed_barrel|Integrally Suppressed Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "lightweight_carbon_barrel|Lightweight Carbon Barrel|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "fluted_competition_barrel|Fluted Competition Barrel|1.0000|1.0000|0.9400|-15.0|1.0200|1.0000|1.0000|-|-",
+  "heavy_bull_barrel|Heavy Bull Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "ported_velocity_barrel|Ported Velocity Barrel|1.0000|1.0000|0.9400|+0.0|1.0000|1.0000|1.0000|-|-",
+  "short_threaded_barrel|Short Threaded Barrel|1.0000|0.8500|1.0000|-35.0|1.0300|0.9000|1.0000|-|-",
+  "extended_match_barrel|Extended Match Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "ribbed_heat_dissipating_barrel|Ribbed Heat-Dissipating Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[smg.optic]
+rows = [
+  "compact_holographic_sight|Compact Holographic Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "1x_micro_reflex|1x Micro Reflex|1.0000|1.0200|0.9800|+2.0|1.0000|1.0000|1.0000|-|sight",
+  "enclosed_red_dot|Enclosed Red Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "wide_view_reflex|Wide-View Reflex|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "prism_1_5x_scope|Prism 1.5x Scope|1.0000|1.0300|0.9800|+18.0|1.0000|1.0000|1.0000|-|-",
+  "low_magnification_cqb_optic|Low-Magnification CQB Optic|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "solar_red_dot|Solar Red Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "flip_up_magnifier_combo_1x_3x|Flip-Up Magnifier Combo (1x-3x)|1.0000|1.0600|0.9800|+36.0|1.0000|1.0000|1.0000|-|scope",
+  "thermal_cqb_sight|Thermal CQB Sight|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "integrated_carry_handle_optic|Integrated Carry Handle Optic|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[smg.stock]
+rows = [
+  "no_stock_attachment|No Stock Attachment|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "collapsible_wire_stock|Collapsible Wire Stock|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "folding_skeleton_stock|Folding Skeleton Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+  "heavy_tactical_precision_stock|Heavy Tactical Precision Stock|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "cqb_lightweight_stock|CQB Lightweight Stock|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "pistol_grip_buffer_extension|Pistol Grip Buffer Extension|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "padded_marksman_stock|Padded Marksman Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "minimalist_aluminum_stock|Minimalist Aluminum Stock|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "integrated_mag_holder_stock|Integrated Mag-Holder Stock|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "side_folding_polymer_stock|Side-Folding Polymer Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+]
+
+[smg.underbarrel]
+rows = [
+  "angled_foregrip|Angled Foregrip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "vertical_stubby_grip|Vertical Stubby Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "operator_vertical_grip|Operator Vertical Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "handstop_enclosure|Handstop Enclosure|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "tactical_handstop|Tactical Handstop|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "skeletal_forward_grip|Skeletal Forward Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "ergonomic_swivel_grip|Ergonomic Swivel Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "picatinny_handstop_bar|Picatinny Handstop Bar|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "smooth_contour_underbarrel_shroud|Smooth Contour Underbarrel Shroud|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "barricade_stop_grip|Barricade Stop Grip|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+]
+
+[smg.magazine]
+rows = [
+  "40_round_extended_stick_mag|40-Round Extended Stick Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|40|-",
+  "50_round_drum_mag|50-Round Drum Mag|1.0000|1.0000|1.0000|+25.0|0.9500|1.0000|1.0000|50|-",
+  "100_round_dual_drum_mag|100-Round Dual Drum Mag|1.0000|1.0000|1.0000|+10.0|0.9310|1.0000|1.0000|100|-",
+  "fast_pull_20_round_mag|Fast-Pull 20-Round Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|20|-",
+  "coupled_dual_magazines|Coupled Dual Magazines|1.0000|1.0000|1.0000|-15.0|0.9800|1.0000|1.0000|-|-",
+  "high_velocity_caliber_mag|High-Velocity Caliber Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.1000|1.0000|-|-",
+  "clear_polymer_windowed_mag|Clear Polymer Windowed Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "lightweight_aluminum_mag|Lightweight Aluminum Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "heavy_duty_steel_mag|Heavy-Duty Steel Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "subsonic_extended_mag|Subsonic Extended Mag|1.0000|1.0000|1.0000|+0.0|1.0000|0.8000|0.7000|-|-",
+]
+
+[smg.rear_grip]
+rows = [
+  "rubberized_grip_tape|Rubberized Grip Tape|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "aggressive_stippled_grip|Aggressive Stippled Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "tactical_cqb_rear_grip|Tactical CQB Rear Grip|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "ergonomic_match_grip|Ergonomic Match Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "lightweight_skeleton_grip|Lightweight Skeleton Grip|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "heavy_counterweight_grip|Heavy Counterweight Grip|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "frictional_match_texture_grip|Frictional Match Texture Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "finger_grooved_target_grip|Finger-Grooved Target Grip|1.0000|1.0000|0.8648|-8.0|1.0000|1.0000|1.0000|-|-",
+  "cold_weather_wrapped_grip|Cold-Weather Wrapped Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "smooth_draw_grip|Smooth Draw Grip|1.0000|1.0000|1.0000|-15.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[smg.ammunition]
+rows = [
+  "9mm_subsonic_rounds|9mm Subsonic Rounds|0.9200|1.0000|1.0000|+0.0|1.0000|0.7500|0.6000|-|-",
+  "high_velocity_fmj|High-Velocity FMJ|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "overpressured_p_rounds|Overpressured (+P) Rounds|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "hollow_point_stopping_power|Hollow Point Stopping Power|1.1500|0.8800|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "armor_piercing_ap_rounds|Armor-Piercing AP Rounds|1.1000|1.0500|1.0000|+0.0|1.0000|1.0800|1.0000|-|-",
+  "frangible_cqb_ammo|Frangible CQB Ammo|0.7500|0.8000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "tracer_match_rounds|Tracer Match Rounds|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "low_recoil_competition_ammo|Low-Recoil Competition Ammo|0.9500|1.0000|0.8500|+0.0|1.0000|1.0000|1.0000|-|-",
+  "incendiary_rounds|Incendiary Rounds|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_weight_sub_grain_rounds|Heavy Weight Sub-Grain Rounds|1.0600|1.0000|0.9400|+10.0|0.9800|0.9200|1.0000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# AR
+# --------------------------------------------------------------------------
+
+[ar.muzzle]
+rows = [
+  "tactical_monolithic_suppressor|Tactical Monolithic Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "compensator_brake|Compensator Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "prong_flash_hider|Prong Flash Hider|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "heavy_breacher_muzzle|Heavy Breacher Muzzle|1.0800|1.0000|0.9870|+10.0|0.9800|1.0000|1.0000|-|suppressor",
+  "recoil_mitigating_gas_brake|Recoil Mitigating Gas Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "low_profile_suppressor|Low-Profile Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "blast_diverter_shield|Blast Diverter Shield|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "titanium_match_compensator|Titanium Match Compensator|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "subsonic_suppressor|Subsonic Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "quad_port_flash_suppressor|Quad-Port Flash Suppressor|1.0000|0.9200|0.8740|+30.0|1.0000|0.9500|0.2975|-|suppressor",
+]
+
+[ar.barrel]
+rows = [
+  "20_marksman_barrel|20\" Marksman Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "16_standard_patrol_barrel|16\" Standard Patrol Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "11_5_commando_short_barrel|11.5\" Commando Short Barrel|1.0000|0.8500|1.0000|-35.0|1.0300|0.9000|1.0000|-|-",
+  "heavy_bull_barrel|Heavy Bull Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "integrally_suppressed_shroud_barrel|Integrally Suppressed Shroud Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "fluted_competition_barrel|Fluted Competition Barrel|1.0000|1.0000|0.9400|-15.0|1.0200|1.0000|1.0000|-|-",
+  "lightweight_skeletonized_barrel|Lightweight Skeletonized Barrel|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "cold_hammer_forged_barrel|Cold-Hammer Forged Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "precision_rifled_match_barrel|Precision Rifled Match Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "heat_shielded_heavy_barrel|Heat-Shielded Heavy Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+]
+
+[ar.optic]
+rows = [
+  "holographic_weapon_sight|Holographic Weapon Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "red_dot_reflex|Red Dot Reflex|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "4x_acog_scope|4x ACOG Scope|1.0000|1.0800|0.9800|+48.0|1.0000|1.0000|1.0000|-|scope",
+  "1_6x_variable_zoom_lpvo|1-6x Variable Zoom LPVO|1.0000|1.1200|0.9800|+72.0|1.0000|1.0000|1.0000|-|scope",
+  "hybrid_canted_red_dot_3x|Hybrid Canted Red Dot + 3x|1.0000|1.0600|0.9800|+26.0|1.0000|1.0000|1.0000|-|scope",
+  "thermal_assault_scope|Thermal Assault Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "prismatic_3x_sight|Prismatic 3x Sight|1.0000|1.0600|0.9800|+36.0|1.0000|1.0000|1.0000|-|scope",
+  "solar_reflex_sight|Solar Reflex Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "wide_frame_reflex_sight|Wide Frame Reflex Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "target_tracking_smart_optic|Target-Tracking Smart Optic|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[ar.stock]
+rows = [
+  "heavy_precision_adjustable_stock|Heavy Precision Adjustable Stock|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "tactical_skeleton_stock|Tactical Skeleton Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+  "no_stock_tube|No Stock Tube|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "cqb_lightweight_stock|CQB Lightweight Stock|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "fixed_polymer_stock|Fixed Polymer Stock|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "folding_combat_stock|Folding Combat Stock|1.0000|1.0000|0.9520|-10.0|1.0088|1.0000|1.0000|-|-",
+  "marksman_cheek_riser_stock|Marksman Cheek-Riser Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "minimalist_buffer_stock|Minimalist Buffer Stock|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "recoil_dampening_padded_stock|Recoil-Dampening Padded Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "high_agility_ergonomic_stock|High-Agility Ergonomic Stock|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[ar.underbarrel]
+rows = [
+  "vertical_foregrip|Vertical Foregrip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "angled_commando_grip|Angled Commando Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "operator_foregrip|Operator Foregrip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "bipod_foregrip_combo|Bipod Foregrip Combo|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "40mm_high_explosive_launcher|40mm High-Explosive Launcher|1.0200|1.0000|1.0000|+0.0|0.9500|1.0000|1.0000|-|-",
+  "underbarrel_shotgun_attachment|Underbarrel Shotgun Attachment|1.0200|1.0000|1.0000|+0.0|0.9500|1.0000|1.0000|-|-",
+  "tactical_handstop|Tactical Handstop|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "skeletal_forward_grip|Skeletal Forward Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "smooth_barricade_grip|Smooth Barricade Grip|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "laser_integrated_foregrip|Laser-Integrated Foregrip|1.0000|1.0000|0.8800|-20.0|1.0000|1.0000|1.0000|-|vertgrip",
+]
+
+[ar.magazine]
+rows = [
+  "45_round_extended_mag|45-Round Extended Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|45|-",
+  "60_round_polymer_drum_mag|60-Round Polymer Drum Mag|1.0000|1.0000|1.0000|+10.0|0.9690|1.0000|1.0000|60|-",
+  "100_round_c_mag_dual_drum|100-Round C-Mag Dual Drum|1.0000|1.0000|1.0000|+10.0|0.9310|1.0000|1.0000|100|-",
+  "20_round_straight_precision_mag|20-Round Straight Precision Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|20|-",
+  "fast_reload_pull_mag|Fast-Reload Pull Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+  "steel_reinforced_combat_mag|Steel Reinforced Combat Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "translucent_polymer_mag|Translucent Polymer Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "coupled_fast_mags|Coupled Fast Mags|1.0000|1.0000|1.0000|-35.0|0.9800|1.0000|1.0000|-|-",
+  "heavy_caliber_conversion_mag|Heavy Caliber Conversion Mag|1.0800|1.0000|1.0152|+10.0|0.9800|1.0000|1.0000|-|-",
+  "lightweight_composite_mag|Lightweight Composite Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+]
+
+[ar.rear_grip]
+rows = [
+  "stippled_ergonomic_grip|Stippled Ergonomic Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "granulated_rubber_grip|Granulated Rubber Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "tactical_combat_grip|Tactical Combat Grip|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_precision_match_grip|Heavy Precision Match Grip|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "skeletonized_aluminum_grip|Skeletonized Aluminum Grip|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "finger_grooved_rubber_grip|Finger-Grooved Rubber Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "smooth_draw_grip|Smooth Draw Grip|1.0000|1.0000|1.0000|-15.0|1.0000|1.0000|1.0000|-|-",
+  "high_friction_texture_grip|High-Friction Texture Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "g10_tactical_plate_grip|G10 Tactical Plate Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "vertical_angle_rear_grip|Vertical Angle Rear Grip|1.0000|1.0000|0.9200|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[ar.ammunition]
+rows = [
+  "5_56_green_tip_armor_piercing|5.56 Green Tip Armor Piercing|1.1000|1.0500|1.0000|+0.0|1.0000|1.0800|1.0000|-|-",
+  "high_velocity_match_grade|High-Velocity Match Grade|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "subsonic_heavy_grain|Subsonic Heavy Grain|0.9752|1.0000|0.9400|+10.0|0.9800|0.6900|0.6000|-|-",
+  "hollow_point_expandable|Hollow Point Expandable|1.1500|0.8800|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "frangible_disintegrating|Frangible Disintegrating|0.7500|0.8000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "incendiary_burn_rounds|Incendiary Burn Rounds|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "overpressured_p|Overpressured (+P+)|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "low_yield_explosive_tip|Low-Yield Explosive Tip|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "tracer_rounds|Tracer rounds|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "full_metal_jacket_fmj|Full Metal Jacket (FMJ)|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# DMR
+# --------------------------------------------------------------------------
+
+[dmr.muzzle]
+rows = [
+  "heavy_precision_suppressor|Heavy Precision Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "long_range_muzzle_brake|Long-Range Muzzle Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "tapered_flash_hider|Tapered Flash Hider|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "linear_compensator|Linear Compensator|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "threaded_target_brake|Threaded Target Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "titanium_match_suppressor|Titanium Match Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "multi_port_recoil_tamer|Multi-Port Recoil Tamer|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "blast_deflector_cap|Blast Deflector Cap|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+  "subsonic_barrel_shroud|Subsonic Barrel Shroud|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_duty_caliber_brake|Heavy Duty Caliber Brake|1.0000|1.0000|0.7708|+10.0|0.9800|1.0000|1.1000|-|suppressor",
+]
+
+[dmr.barrel]
+rows = [
+  "24_match_grade_heavy_barrel|24\" Match Grade Heavy Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "22_fluted_precision_barrel|22\" Fluted Precision Barrel|1.0300|1.1500|0.9400|+25.0|0.9894|1.1000|1.0000|-|-",
+  "18_recon_barrel|18\" Recon Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "integral_suppressed_dmr_barrel|Integral Suppressed DMR Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "cold_hammer_forged_bull_barrel|Cold Hammer Forged Bull Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "lightweight_carbon_wrapped_barrel|Lightweight Carbon Wrapped Barrel|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "ported_velocity_barrel|Ported Velocity Barrel|1.0000|1.0000|0.9400|+0.0|1.0000|1.0000|1.0000|-|-",
+  "threaded_target_barrel|Threaded Target Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "heavy_duty_stainless_steel_barrel|Heavy Duty Stainless Steel Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "extended_range_dmr_barrel|Extended Range DMR Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+]
+
+[dmr.optic]
+rows = [
+  "1_8x_first_focal_plane_lpvo|1-8x First Focal Plane LPVO|1.0000|1.1600|0.9800|+96.0|1.0000|1.0000|1.0000|-|scope",
+  "3_5x_acog_scope|3.5x ACOG Scope|1.0000|1.0700|0.9800|+42.0|1.0000|1.0000|1.0000|-|scope",
+  "6x_fixed_power_precision_scope|6x Fixed Power Precision Scope|1.0000|1.1200|0.9800|+72.0|1.0000|1.0000|1.0000|-|scope",
+  "thermal_dmr_scope|Thermal DMR Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "canted_hybrid_dual_optic|Canted Hybrid Dual Optic|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "digital_rangefinding_scope|Digital Rangefinding Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "prismatic_5x_sight|Prismatic 5x Sight|1.0000|1.1000|0.9800|+60.0|1.0000|1.0000|1.0000|-|scope",
+  "variable_thermal_daylight_scope|Variable Thermal/Daylight Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "illuminated_reticle_target_scope|Illuminated Reticle Target Scope|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "low_profile_target_optic|Low-Profile Target Optic|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[dmr.stock]
+rows = [
+  "fully_adjustable_precision_stock|Fully Adjustable Precision Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "marksman_cheek_riser_stock|Marksman Cheek-Riser Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "heavy_fixed_target_stock|Heavy Fixed Target Stock|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "lightweight_skeleton_stock|Lightweight Skeleton Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+  "folding_precision_chassis|Folding Precision Chassis|1.0000|1.0000|0.9520|-10.0|1.0088|1.0000|1.0000|-|-",
+  "padded_dmr_stock|Padded DMR Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "minimalist_target_buffer_stock|Minimalist Target Buffer Stock|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "tactical_adjustable_buttstock|Tactical Adjustable Buttstock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "recoil_dampening_sniper_stock|Recoil-Dampening Sniper Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "carbon_fiber_match_stock|Carbon Fiber Match Stock|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "adjustable_polymer_cheek_rest|Adjustable Polymer Cheek Rest|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "padded_leather_riser|Padded Leather Riser|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "neoprene_cushion_wrap|Neoprene Cushion Wrap|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "carbon_fiber_cheekpiece|Carbon Fiber Cheekpiece|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "high_profile_target_comb|High-Profile Target Comb|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "low_profile_rubber_rest|Low-Profile Rubber Rest|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "precision_aluminum_riser|Precision Aluminum Riser|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "weighted_buttplate_comb|Weighted Buttplate Comb|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "quick_adjust_locking_riser|Quick-Adjust Locking Riser|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "contoured_target_pad|Contoured Target Pad|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+]
+
+[dmr.underbarrel]
+rows = [
+  "precision_adjustable_bipod|Precision Adjustable Bipod|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "angled_target_foregrip|Angled Target Foregrip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "vertical_match_grip|Vertical Match Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "tactical_handstop_rail|Tactical Handstop Rail|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "bipod_grip_hybrid|Bipod/Grip Hybrid|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "heavy_barricade_rest|Heavy Barricade Rest|1.0000|1.0000|0.7520|+10.0|0.9604|1.0000|1.0000|-|vertgrip",
+  "lightweight_aluminum_bipod|Lightweight Aluminum Bipod|1.0000|1.0000|0.8000|-15.0|0.9996|1.0000|1.0000|-|vertgrip",
+  "skeletal_underbarrel_stop|Skeletal Underbarrel Stop|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "contoured_support_grip|Contoured Support Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "heavy_duty_swivel_bipod|Heavy duty Swivel Bipod|1.0000|1.0000|0.7520|+10.0|0.9604|1.0000|1.0000|-|vertgrip",
+]
+
+[dmr.magazine]
+rows = [
+  "20_round_extended_steel_mag|20-Round Extended Steel Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|20|-",
+  "10_round_flush_match_mag|10-Round Flush Match Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|10|-",
+  "25_round_polymer_mag|25-Round Polymer Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|25|-",
+  "5_round_hunting_capacity_mag|5-Round Hunting Capacity Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|5|-",
+  "fast_reload_box_mag|Fast-Reload Box Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+  "high_velocity_caliber_mag|High-Velocity Caliber Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.1000|1.0000|-|-",
+  "lightweight_composite_mag|Lightweight Composite Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "coupled_dmr_mags|Coupled DMR Mags|1.0000|1.0000|1.0000|-15.0|0.9800|1.0000|1.0000|-|-",
+  "heavy_duty_steel_box_mag|Heavy Duty Steel Box Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "subsonic_match_mag|Subsonic Match Mag|1.0000|1.0000|1.0000|+0.0|1.0000|0.8000|0.7000|-|-",
+]
+
+[dmr.rear_grip]
+rows = [
+  "precision_vertical_target_grip|Precision Vertical Target Grip|1.0000|1.0000|0.9200|+0.0|1.0000|1.0000|1.0000|-|-",
+  "granulated_rubber_grip|Granulated Rubber Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "stippled_match_grip|Stippled Match Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "ergonomic_palm_rest_grip|Ergonomic Palm-Rest Grip|1.0000|1.0000|0.8648|-8.0|1.0000|1.0000|1.0000|-|-",
+  "aggressive_g10_tactical_grip|Aggressive G10 Tactical Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "lightweight_skeletonized_grip|Lightweight Skeletonized Grip|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "smooth_competition_grip|Smooth Competition Grip|1.0000|1.0000|1.0000|-15.0|1.0000|1.0000|1.0000|-|-",
+  "finger_groove_target_grip|Finger-Groove Target Grip|1.0000|1.0000|0.8648|-8.0|1.0000|1.0000|1.0000|-|-",
+  "rubberized_contour_grip|Rubberized Contour Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_brass_counterweight_grip|Heavy Brass Counterweight Grip|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# SNIPER
+# --------------------------------------------------------------------------
+
+[sniper.muzzle]
+rows = [
+  "large_bore_50_cal_suppressor|Large-Bore .50 Cal Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "heavy_duty_dual_baffle_muzzle_brake|Heavy Duty Dual-Baffle Muzzle Brake|1.0000|1.0000|0.7708|+10.0|0.9800|1.0000|1.1000|-|suppressor",
+  "extreme_range_compensator|Extreme Range Compensator|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "tactical_sound_moderator|Tactical Sound Moderator|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "titanium_anti_recoil_brake|Titanium Anti-Recoil Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "threaded_target_flash_suppressor|Threaded Target Flash Suppressor|1.0000|0.9200|0.8740|+30.0|1.0000|0.9500|0.2975|-|suppressor",
+  "linear_diverter_brake|Linear Diverter Brake|1.0000|1.0000|0.7790|+0.0|1.0000|1.0000|0.9350|-|suppressor",
+  "subsonic_precision_suppressor|Subsonic Precision Suppressor|1.0000|0.9200|0.9200|+30.0|1.0000|0.9500|0.3500|-|suppressor",
+  "quad_port_monster_brake|Quad-Port Monster Brake|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "stealth_flash_hider|Stealth Flash Hider|1.0000|1.0000|0.9500|+0.0|1.0000|1.0000|0.8500|-|suppressor",
+]
+
+[sniper.barrel]
+rows = [
+  "29_extreme_heavy_target_barrel|29\" Extreme Heavy Target Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "26_fluted_match_barrel|26\" Fluted Match Barrel|1.0300|1.1500|0.9400|+25.0|0.9894|1.1000|1.0000|-|-",
+  "24_lightweight_carbon_wrapped_barrel|24\" Lightweight Carbon Wrapped Barrel|1.0300|1.1500|1.0000|+25.0|0.9894|1.1000|1.0000|-|-",
+  "integrally_suppressed_sniper_barrel|Integrally Suppressed Sniper Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "bull_target_barrel|Bull Target Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "cold_hammer_forged_long_barrel|Cold Hammer Forged Long Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "threaded_precision_barrel|Threaded Precision Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "ported_anti_recoil_barrel|Ported Anti-Recoil Barrel|1.0000|1.0000|0.7708|+0.0|1.0000|1.0000|1.1000|-|-",
+  "heat_dissipating_ribbed_barrel|Heat-Dissipating Ribbed Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_armor_piercing_barrel|Heavy Armor-Piercing Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+]
+
+[sniper.optic]
+rows = [
+  "8_32x_high_power_precision_scope|8-32x High Power Precision Scope|1.0000|1.2400|0.9800|+144.0|1.0000|1.0000|1.0000|-|scope",
+  "12x_fixed_sniper_scope|12x Fixed Sniper Scope|1.0000|1.2400|0.9800|+144.0|1.0000|1.0000|1.0000|-|scope",
+  "variable_zoom_5x_20x_scope|Variable Zoom (5x-20x) Scope|1.0000|1.2400|0.9800|+144.0|1.0000|1.0000|1.0000|-|scope",
+  "ballistic_rangefinding_computer_scope|Ballistic Rangefinding Computer Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "thermal_high_resolution_scope|Thermal High-Resolution Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "night_vision_nvg_scope|Night Vision NVG Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "dual_grid_tactical_scope|Dual-Grid Tactical Scope|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "digital_target_lock_scope|Digital Target-Lock Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "illuminated_mildot_scope|Illuminated Mildot Scope|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "ultra_extreme_range_scope|Ultra-Extreme Range Scope|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[sniper.stock]
+rows = [
+  "heavy_aluminum_chassis_stock|Heavy Aluminum Chassis Stock|1.0000|1.0000|0.7990|+10.0|0.9696|1.0000|1.0000|-|-",
+  "fully_adjustable_precision_sniper_stock|Fully Adjustable Precision Sniper Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "folding_heavy_chassis|Folding Heavy Chassis|1.0000|1.0000|0.8949|+0.0|0.9886|1.0000|1.0000|-|-",
+  "carbon_fiber_target_stock|Carbon Fiber Target Stock|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "fixed_polymer_sniper_stock|Fixed Polymer Sniper Stock|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "weighted_anti_recoil_stock|Weighted Anti-Recoil Stock|1.0000|1.0000|0.6552|+25.0|0.9506|1.0000|1.1000|-|-",
+  "minimalist_skeleton_sniper_stock|Minimalist Skeleton Sniper Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+  "padded_long_range_stock|Padded Long-Range Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "monopod_integrated_buttstock|Monopod-Integrated Buttstock|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "quick_detach_modular_chassis|Quick-Detach Modular Chassis|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+]
+
+[sniper.underbarrel]
+rows = [
+  "heavy_duty_swivel_bipod|Heavy duty Swivel Bipod|1.0000|1.0000|0.7520|+10.0|0.9604|1.0000|1.0000|-|vertgrip",
+  "quick_deploy_carbon_bipod|Quick-Deploy Carbon Bipod|1.0000|1.0000|0.8000|-15.0|0.9996|1.0000|1.0000|-|vertgrip",
+  "adjustable_precision_bench_bipod|Adjustable Precision Bench Bipod|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "barricade_support_wedge|Barricade Support Wedge|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "underbarrel_monopod_mount|Underbarrel Monopod Mount|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "heavy_target_rail_rest|Heavy Target Rail Rest|1.0000|1.0000|0.7520|+10.0|0.9604|1.0000|1.0000|-|vertgrip",
+  "tactical_stabilization_bipod|Tactical Stabilization Bipod|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "wide_stance_anti_sway_bipod|Wide-Stance Anti-Sway Bipod|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "skeletal_underbarrel_rest|Skeletal Underbarrel Rest|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "swivel_target_bipod|Swivel Target Bipod|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+]
+
+[sniper.magazine]
+rows = [
+  "10_round_extended_box_mag|10-Round Extended Box Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|10|-",
+  "5_round_flush_match_mag|5-Round Flush Match Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|5|-",
+  "12_round_high_capacity_mag|12-Round High-Capacity Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|12|-",
+  "single_shot_precision_feed_plate|Single-Shot Precision Feed Plate|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|1|-",
+  "fast_pull_detachable_mag|Fast-Pull Detachable Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_armor_steel_mag|Heavy Armor Steel Mag|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "lightweight_polymer_mag|Lightweight Polymer Mag|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "subsonic_heavy_grain_mag|Subsonic Heavy Grain Mag|1.0000|1.0000|0.9400|+10.0|0.9800|0.8000|0.7000|-|-",
+  "windowed_capacity_mag|Windowed Capacity Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "quick_release_box_mag|Quick-Release Box Mag|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[sniper.ammunition]
+rows = [
+  "50_bmg_armor_piercing_explosive_apex|.50 BMG Armor Piercing Explosive (APEX)|1.3200|0.9975|1.0000|+0.0|1.0000|1.0800|1.0000|-|-",
+  "338_lapua_match_grade|.338 Lapua Match Grade|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "high_velocity_very_low_drag_vld|High-Velocity Very Low Drag (VLD)|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "subsonic_heavy_penetrator|Subsonic Heavy Penetrator|1.0120|1.0500|0.9400|+10.0|0.9800|0.8100|0.6000|-|-",
+  "incendiary_anti_material_rounds|Incendiary Anti-Material Rounds|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "tracer_target_rounds|Tracer Target Rounds|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "full_metal_jacket_high_velocity|Full Metal Jacket High-Velocity|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "explosive_tip_payload_rounds|Explosive Tip Payload Rounds|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "armor_piercing_core|Armor Piercing Core|1.1000|1.0500|1.0000|+0.0|1.0000|1.0800|1.0000|-|-",
+  "solid_copper_precision_rounds|Solid Copper Precision Rounds|1.0600|1.0000|1.0000|+0.0|1.0000|0.9200|1.0000|-|-",
+]
+
+[sniper.trigger_action]
+rows = [
+  "polished_smooth_action_bolt|Polished Smooth Action Bolt|1.0000|1.0000|0.9200|+10.0|1.0000|1.0000|1.0000|-|-",
+  "lightened_skeletonized_bolt|Lightened Skeletonized Bolt|1.0000|1.0000|1.0500|-30.0|1.0200|1.0000|1.0000|-|-",
+  "straight_pull_fast_action_bolt|Straight-Pull Fast Action Bolt|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_duty_match_bolt|Heavy Duty Match Bolt|1.0000|1.0000|0.9080|+5.0|0.9800|1.0000|1.0000|-|-",
+  "tactical_oversized_bolt_knob|Tactical Oversized Bolt Knob|1.0000|1.0000|0.9200|+10.0|1.0000|1.0000|1.0000|-|-",
+  "fluted_precision_bolt|Fluted Precision Bolt|1.0000|1.0000|0.9200|-5.0|1.0200|1.0000|1.0000|-|-",
+  "titanium_nitride_coated_bolt|Titanium Nitride Coated Bolt|1.0000|1.0000|0.9200|+10.0|1.0000|1.0000|1.0000|-|-",
+  "short_throw_competition_bolt|Short-Throw Competition Bolt|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "weather_sealed_action_bolt|Weather-Sealed Action Bolt|1.0000|1.0000|0.9200|+10.0|1.0000|1.0000|1.0000|-|-",
+  "anti_binding_match_bolt|Anti-Binding Match Bolt|1.0000|1.0000|0.9660|-5.0|1.0000|1.0000|1.0000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# SHOTGUN
+# --------------------------------------------------------------------------
+
+[shotgun.muzzle]
+rows = [
+  "full_choke_tight_spread|Full Choke (Tight Spread)|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "modified_choke_medium_spread|Modified Choke (Medium Spread)|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "breaching_muzzle_brake|Breaching Muzzle Brake|1.0800|1.0000|0.8610|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "heavy_shotgun_suppressor|Heavy Shotgun Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "duckbill_choke_horizontal_spread|Duckbill Choke (Horizontal Spread)|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "spiked_door_breacher_cap|Spiked Door-Breacher Cap|1.0800|1.0000|1.0500|+0.0|1.0000|1.0000|1.0000|-|suppressor",
+  "polychoke_adjustable_cap|Polychoke Adjustable Cap|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+  "compensated_barrel_extension|Compensated Barrel Extension|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "subsonic_heavy_suppressor|Subsonic Heavy Suppressor|1.0000|0.9200|0.8648|+40.0|0.9800|0.9500|0.3500|-|suppressor",
+  "threaded_cylinder_choke|Threaded Cylinder Choke|1.0000|1.0000|0.8200|+0.0|1.0000|1.0000|1.1000|-|suppressor",
+]
+
+[shotgun.barrel]
+rows = [
+  "18_tactical_defender_barrel|18\" Tactical Defender Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "14_sawed_off_cqb_barrel|14\" Sawed-Off CQB Barrel|1.0000|0.8500|1.0000|-35.0|1.0300|0.9000|1.0000|-|-",
+  "30_long_hunting_ribbed_barrel|30\" Long Hunting Ribbed Barrel|1.0300|1.1500|1.0000|+40.0|0.9700|1.1000|1.0000|-|-",
+  "heavy_rifled_slug_barrel|Heavy Rifled Slug Barrel|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "ported_recoil_reducing_barrel|Ported Recoil-Reducing Barrel|1.0000|1.0000|0.9400|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heat_shielded_combat_barrel|Heat-Shielded Combat Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "integrally_suppressed_shotgun_barrel|Integrally Suppressed Shotgun Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "lightweight_fluted_barrel|Lightweight Fluted Barrel|1.0000|1.0000|0.9400|-15.0|1.0200|1.0000|1.0000|-|-",
+  "double_threaded_breaching_barrel|Double-Threaded Breaching Barrel|1.0800|1.0000|1.0500|+0.0|1.0000|1.0000|1.0000|-|-",
+  "chrome_lined_duty_barrel|Chrome-Lined Duty Barrel|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[shotgun.optic]
+rows = [
+  "micro_reflex_sight|Micro Reflex Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "open_frame_red_dot|Open-Frame Red Dot|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "ghost_ring_iron_sights|Ghost Ring Iron Sights|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "wide_view_cqb_holographic|Wide-View CQB Holographic|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "illuminated_fiber_optic_bead|Illuminated Fiber Optic Bead|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "thermal_shotgun_sight|Thermal Shotgun Sight|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "1_5x_compact_scope|1.5x Compact Scope|1.0000|1.0300|0.9800|+18.0|1.0000|1.0000|1.0000|-|-",
+  "solar_powered_reflex|Solar Powered Reflex|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "low_profile_target_dot|Low-Profile Target Dot|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "tactical_tritium_ring|Tactical Tritium Ring|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+]
+
+[shotgun.stock]
+rows = [
+  "full_tactical_pistol_grip_stock|Full Tactical Pistol Grip Stock|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "sawed_off_grip_no_stock|Sawed-Off Grip (No Stock)|1.0000|1.0000|1.1200|-25.0|1.0400|1.0000|1.0000|-|-",
+  "folding_wire_combat_stock|Folding Wire Combat Stock|1.0000|1.0000|0.9520|-10.0|1.0088|1.0000|1.0000|-|-",
+  "recoil_dampening_hydraulic_stock|Recoil-Dampening Hydraulic Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "shell_holder_target_stock|Shell-Holder Target Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "fixed_polymer_stock|Fixed Polymer Stock|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "lightweight_skeleton_stock|Lightweight Skeleton Stock|1.0000|1.0000|1.1200|-40.0|1.0608|1.0000|1.0000|-|-",
+  "adjustable_cqb_buffer_stock|Adjustable CQB Buffer Stock|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "heavy_wooden_field_stock|Heavy Wooden Field Stock|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "padded_breaching_stock|Padded Breaching Stock|1.0800|1.0000|0.8925|+15.0|0.9700|1.0000|1.0000|-|-",
+]
+
+[shotgun.underbarrel]
+rows = [
+  "vertical_pump_foregrip|Vertical Pump Foregrip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "angled_contour_handstop|Angled Contour Handstop|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "tactical_flashlight_pump_shroud|Tactical Flashlight Pump Shroud|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "skeletal_underbarrel_grip|Skeletal Underbarrel Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "horizontal_handstop_rest|Horizontal Handstop Rest|1.0000|1.0000|0.8000|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "laser_integrated_pump_handle|Laser-Integrated Pump Handle|1.0000|1.0000|0.8800|-20.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "heavy_duty_strap_handle|Heavy Duty Strap Handle|1.0000|1.0000|0.8272|+0.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "barricade_stop_grip|Barricade Stop Grip|1.0000|1.0000|0.7040|-10.0|0.9800|1.0000|1.0000|-|vertgrip",
+  "swivel_vertical_grip|Swivel Vertical Grip|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+  "ergonomic_ribbed_pump|Ergonomic Ribbed Pump|1.0000|1.0000|0.8800|-10.0|1.0000|1.0000|1.0000|-|vertgrip",
+]
+
+[shotgun.magazine]
+rows = [
+  "8_round_extended_tube|8-Round Extended Tube|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|8|-",
+  "10_round_extended_tube|10-Round Extended Tube|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|10|-",
+  "12_round_detachable_box_mag|12-Round Detachable Box Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|12|-",
+  "20_round_drum_mag|20-Round Drum Mag|1.0000|1.0000|1.0000|+25.0|0.9500|1.0000|1.0000|20|-",
+  "4_round_flush_tube|4-Round Flush Tube|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|4|-",
+  "dual_tube_selectable_system|Dual-Tube Selectable System|1.0000|1.0000|1.0000|-15.0|0.9800|1.0000|1.0000|-|-",
+  "fast_load_tube_extension|Fast-Load Tube Extension|1.0000|1.0000|1.0000|-20.0|1.0000|1.0000|1.0000|10|-",
+  "clear_translucent_box_mag|Clear Translucent Box Mag|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_duty_steel_tube|Heavy Duty Steel Tube|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "lightweight_aluminum_tube|Lightweight Aluminum Tube|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+]
+
+[shotgun.rear_grip]
+rows = [
+  "rubberized_ergonomic_grip|Rubberized Ergonomic Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "aggressive_stippled_grip|Aggressive Stippled Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "tactical_pistol_rear_grip|Tactical Pistol Rear Grip|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "wood_grain_traditional_grip|Wood Grain Traditional Grip|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "skeletonized_aluminum_grip|Skeletonized Aluminum Grip|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "smooth_draw_polymer_grip|Smooth Draw Polymer Grip|1.0000|1.0000|1.0000|-30.0|1.0200|1.0000|1.0000|-|-",
+  "finger_grooved_target_grip|Finger-Grooved Target Grip|1.0000|1.0000|0.8648|-8.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_brass_counterweight_grip|Heavy Brass Counterweight Grip|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "tactical_tape_wrap|Tactical Tape Wrap|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+  "cold_weather_wrapped_grip|Cold-Weather Wrapped Grip|1.0000|1.0000|0.9400|-8.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[shotgun.ammunition]
+rows = [
+  "8_pellet_00_buckshot|8-Pellet 00 Buckshot|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "rifled_solid_lead_slug|Rifled Solid Lead Slug|1.1000|1.3000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "dragon_s_breath_incendiary_shells|Dragon's Breath Incendiary Shells|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "explosive_payload_slugs|Explosive Payload Slugs|1.3200|1.2350|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "armor_piercing_flechette_darts|Armor-Piercing Flechette Darts|1.1550|1.1550|1.0000|+0.0|1.0000|1.0800|1.0000|-|-",
+  "heavy_magnum_buckshot|Heavy Magnum Buckshot|1.0000|1.0000|0.9400|+10.0|0.9800|1.0000|1.0000|-|-",
+  "breaching_powder_rounds|Breaching Powder Rounds|0.8100|0.8000|1.0500|+0.0|1.0000|1.0000|1.0000|-|-",
+  "rubber_less_lethal_pellets|Rubber Less-Lethal Pellets|0.7500|0.8000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "high_velocity_game_shells|High-Velocity Game Shells|1.0000|1.0800|1.0000|+0.0|1.0000|1.1500|1.0000|-|-",
+  "subsonic_heavy_buckshot|Subsonic Heavy Buckshot|0.9200|1.0000|0.9400|+10.0|0.9800|0.7500|0.6000|-|-",
+]
+
+# --------------------------------------------------------------------------
+# LAUNCHER
+# --------------------------------------------------------------------------
+
+[launcher.barrel]
+rows = [
+  "heat_shielded_fiberglass_tube|Heat-Shielded Fiberglass Tube|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "lightweight_carbon_fiber_barrel|Lightweight Carbon Fiber Barrel|1.0000|1.0000|1.0000|-15.0|1.0200|1.0000|1.0000|-|-",
+  "reinforced_steel_launch_tube|Reinforced Steel Launch Tube|1.0300|1.1500|0.9400|+50.0|0.9506|1.1000|1.0000|-|-",
+  "quad_bore_multi_launch_array|Quad-Bore Multi-Launch Array|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "ventilated_backblast_tube|Ventilated Backblast Tube|1.0000|1.0000|0.8930|+0.0|1.0000|1.0000|0.8500|-|-",
+  "camouflage_fabric_wrapped_tube|Camouflage Fabric Wrapped Tube|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "heavy_armored_launcher_shroud|Heavy Armored Launcher Shroud|1.0300|1.1500|0.9400|+50.0|0.9506|1.0450|0.4500|-|-",
+  "shorty_lightweight_launch_tube|Shorty Lightweight Launch Tube|1.0000|0.8500|1.0000|-50.0|1.0506|0.9000|1.0000|-|-",
+  "integral_sound_dampening_tube|Integral Sound-Dampening Tube|1.0000|1.0000|1.0000|+0.0|1.0000|0.9500|0.4500|-|-",
+  "quick_reload_hinged_tube|Quick-Reload Hinged Tube|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[launcher.optic]
+rows = [
+  "direct_fire_iron_sight_assembly|Direct-Fire Iron Sight Assembly|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "2x_optical_anti_tank_scope|2x Optical Anti-Tank Scope|1.0000|1.0400|0.9800|+24.0|1.0000|1.0000|1.0000|-|-",
+  "thermal_target_tracking_scope|Thermal Target-Tracking Scope|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "laser_rangefinding_computer_optic|Laser Rangefinding Computer Optic|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "digital_smart_lock_display|Digital Smart-Lock Display|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "night_vision_nvg_sight|Night Vision NVG Sight|1.0000|1.0500|1.0000|+40.0|1.0000|1.0000|1.0000|-|-",
+  "integrated_lock_on_optic|Integrated Lock-On Optic|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "wide_angle_reflex_sight|Wide-Angle Reflex Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "holographic_launcher_sight|Holographic Launcher Sight|1.0000|1.0000|1.0000|-10.0|1.0000|1.0000|1.0000|-|sight",
+  "fold_out_anti_aircraft_sight|Fold-Out Anti-Aircraft Sight|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[launcher.stock]
+rows = [
+  "padded_ergonomic_shoulder_rest|Padded Ergonomic Shoulder Rest|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "heavy_duty_recoil_cushion|Heavy Duty Recoil Cushion|1.0000|1.0000|0.7990|+25.0|0.9506|1.0000|1.0000|-|-",
+  "adjustable_rubber_buttpad|Adjustable Rubber Buttpad|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "counter_weighted_shoulder_brace|Counter-Weighted Shoulder Brace|1.0000|1.0000|0.8949|+0.0|0.9886|1.0000|1.0000|-|-",
+  "fold_out_stabilization_stock|Fold-Out Stabilization Stock|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "lightweight_composite_pad|Lightweight Composite Pad|1.0000|1.0000|0.8500|+0.0|0.9894|1.0000|1.0000|-|-",
+  "dual_grip_shoulder_chassis|Dual-Grip Shoulder Chassis|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "non_slip_rubberized_saddle|Non-Slip Rubberized Saddle|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "shock_absorbing_hydraulic_rest|Shock-Absorbing Hydraulic Rest|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+  "tactical_sling_swivel_pad|Tactical Sling Swivel Pad|1.0000|1.0000|0.8500|+15.0|0.9700|1.0000|1.0000|-|-",
+]
+
+[launcher.ammunition]
+rows = [
+  "high_explosive_dual_purpose_hedp|High-Explosive Dual-Purpose (HEDP)|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "tandem_charge_anti_armor|Tandem Charge (Anti-Armor)|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "thermobaric_fuel_air_payload|Thermobaric Fuel-Air Payload|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "proximity_airburst_warhead|Proximity Airburst Warhead|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "high_explosive_fragmentation|High-Explosive Fragmentation|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "top_attack_smart_missile|Top-Attack Smart Missile|1.0000|1.1500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "white_phosphorus_incendiary|White Phosphorus Incendiary|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "emp_disruptor_payload|EMP Disruptor Payload|1.0200|0.9975|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "cluster_submunition_payload|Cluster Submunition Payload|1.2000|0.9500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "guided_micro_missile_array|Guided Micro-Missile Array|1.0000|1.1500|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+]
+
+[launcher.trigger_action]
+rows = [
+  "standard_mechanical_trigger|Standard Mechanical Trigger|1.0000|1.0000|1.0000|+0.0|1.0000|1.0000|1.0000|-|-",
+  "smart_target_lock_unit|Smart Target-Lock Unit|1.0000|1.1000|1.0000|+25.0|1.0000|1.0000|1.0000|-|-",
+  "wire_guided_manual_control_unit|Wire-Guided Manual Control Unit|1.0000|1.1000|1.0000|+25.0|1.0000|1.0000|1.0000|-|-",
+  "laser_designated_tracking_unit|Laser-Designated Tracking Unit|1.0000|1.1000|1.0000|+25.0|1.0000|1.0000|1.0000|-|-",
+  "remote_detonation_control|Remote Detonation Control|1.0000|1.1000|1.0000|+25.0|1.0000|1.0000|1.0000|-|-",
+  "fast_lock_electronics_module|Fast-Lock Electronics Module|1.0000|1.1000|1.0500|+10.0|1.0000|1.0000|1.0000|-|-",
+  "dual_stage_launch_trigger|Dual-Stage Launch Trigger|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "burst_fire_control_module|Burst-Fire Control Module|1.0000|1.0000|1.0500|-15.0|1.0000|1.0000|1.0000|-|-",
+  "programmable_airburst_unit|Programmable Airburst Unit|1.0000|1.1000|1.0500|+10.0|1.0000|1.0000|1.0000|-|-",
+  "frequency_hopping_anti_jam_unit|Frequency-Hopping Anti-Jam Unit|1.0000|1.1000|1.0000|+25.0|1.0000|1.0000|1.0000|-|-",
+]
