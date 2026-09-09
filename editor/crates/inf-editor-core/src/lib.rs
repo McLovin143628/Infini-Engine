@@ -105,10 +105,10 @@ pub mod thumbnail;
 pub mod tuning;
 // WPN2c: the generated gunshot library, committed under
 // `samples/weapon-audio/` and bound by both island recipes.
-pub mod weapon_audio;
 /// Island wave VEH1a: the one door that authors a car — geometry, wheels, a
 /// drawn body and the class it is tuned with, from one `VehicleDef`.
 pub mod vehicle;
+pub mod weapon_audio;
 // Wave E: the drag-to-viewport payload contract, parsed here rather than in
 // `inf_viewport::host` so the Linux CI leg exercises it (the `render_assets`
 // reason).

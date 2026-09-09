@@ -136,7 +136,11 @@ mod tests {
     #[test]
     fn the_library_is_thirty_five_distinct_resolvable_clips() {
         let clips = weapon_audio_clips();
-        assert_eq!(clips.len(), 35, "seven classes times five, less the rifle's body");
+        assert_eq!(
+            clips.len(),
+            35,
+            "seven classes times five, less the rifle's body"
+        );
         let mut guids = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();
         let mut bytes = 0usize;

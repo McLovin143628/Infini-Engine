@@ -2880,8 +2880,15 @@ impl RuntimeSim {
                     hit.listener_m,
                     hit.shot_index,
                 ) {
+                    // The key is HOISTED, and that is not a style choice: with
+                    // the call nested inside `play_command_for`, rustfmt broke
+                    // the two hosts differently and left one with a trailing
+                    // comma the other did not have. The fence caught it, which
+                    // is what the fence is for; a short `let` cannot drift.
+                    let source =
+                        inf_ecs::weapon::layer_source_key(guid_source_key(hit.shooter), layer.kind);
                     let mut cmd = play_command_for(
-                        inf_ecs::weapon::layer_source_key(guid_source_key(hit.shooter), layer.kind),
+                        source,
                         &layer.source,
                         layer.source.spatial.then_some(hit.from),
                     );

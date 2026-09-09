@@ -2055,12 +2055,28 @@ mod tests {
         .expect("payload builds");
 
         let carried: Vec<Uuid> = payload.audio.iter().map(|(g, _)| *g).collect();
+        // **TWO AUTHORED, PLUS EVERY CLIP THE ENGINE SPAWNS** (wave WPN2c,
+        // closing island carried 43). This arm used to read exactly two, and
+        // that number was the defect: a sound the fixed step decides to play
+        // names its clip by a Ring-0 constant, no entity references it, and
+        // neither this builder nor the cook's closure could see it — so the
+        // venue's music was silent in every shipped build and every gunshot
+        // layer would have been. The resolver here answers every GUID, so the
+        // whole engine list rides.
+        let engine = inf_ecs::audio::engine_spawned_clips();
         assert_eq!(
             carried.len(),
-            2,
-            "the playground's two authored AudioSources carried {} clip(s): {carried:?}",
+            2 + engine.len(),
+            "two authored AudioSources plus the engine's {} carried {}: {carried:?}",
+            engine.len(),
             carried.len()
         );
+        for want in &engine {
+            assert!(
+                carried.contains(want),
+                "the engine spawns {want} and the payload does not carry it"
+            );
+        }
         for want in [
             crate::samples::PLAYGROUND_SPINNER_CLIP_GUID,
             crate::samples::PLAYGROUND_SENSOR_CLIP_GUID,
@@ -2105,6 +2121,9 @@ mod tests {
             false,
         )
         .expect("payload builds");
+        // The resolver answers only `CLIP`, so the engine's own list resolves to
+        // nothing and the payload is what the document names — which is the
+        // half that keeps a project without the gunshot library unchanged.
         assert_eq!(
             payload.audio,
             vec![(CLIP, b"AUDIO".to_vec())],
