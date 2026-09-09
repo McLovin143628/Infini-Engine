@@ -37365,3 +37365,123 @@ still VEH3c's. A ragdolled body of **17** limbs is named by the hit and loses it
 **400 J**. And the segment-0 shooter exclusion finally means something: the same
 chassis with nobody in it stops the round at z 37.500 m, which is the control the
 wave's own arm did not have.
+## WAVE WPN2b — FEEL (the three recoil layers, the sway, the spread state, the ADS blend)
+
+`recoil_fraction` is deleted. From wave WPN1 to this one the recoil in this
+engine was `cooldown_s / fire_interval_s` scaled by two engine-wide constants,
+which had a consequence its own doc never followed through: the kick's DURATION
+was the fire interval, so a 450 rpm pistol carried its recoil for 133 ms and a
+900 rpm rifle for 67 — the slower weapon kicking for twice as long — and every
+weapon in the game kicked exactly 4.0 degrees and 6 cm. The registry's
+`recoil_intensity` and `ads_time_ms`, authored on all eighty-five rows at WPN2a,
+were read by nothing (carried 203). Both are read now.
+
+**THE THREE LAYERS** are the research doc's own split. `inf_ecs::feel` is the
+Ring-0 half: `Spring1`/`Spring3` (the doc's semi-implicit integration, target
+pinned at zero because a recoil spring's rest position is the hand the animation
+put there), `RecoilProfile::from_recoil_stat` (the doc's 1-10 mapping verbatim),
+the sway, the bloom and the ADS blend. `WeaponFeel` is a runtime component
+installed beside `WeaponState` — never serialized, so **no schema moves** (scene
+v27 and `ScenePayload` 13 stand) — and `feel_state_bytes` is the FIFTEENTH trace
+section, folded at the TAIL and **empty for every shooter that is at rest**,
+which is what keeps every trace committed before this wave byte-identical. A
+character merely CARRYING a rifle is at rest.
+
+* **The viewmodel layer** is a spring on the hold point, read by
+  `aim_hold_point`. Measured on `HandIk::reach[1]`: a shot drives the weapon
+  **104.47 mm** back into the shoulder, overshoots its rest position by
+  **0.0000 %** and comes home to **0.0000 mm**.
+* **The aim layer** is the WPN1 ruling's own named honest form: an impulse in
+  `step_character_movement`'s look integrator, as SIM state. One round moves the
+  aim **+3.4254 deg**, five move it **+7.9517**, and it comes home to
+  **0.000000 deg** in **0.833 s** — because the integrator adds the spring's
+  DELTA, so the sum over a burst and its settle is exactly the spring's final
+  position, which is zero. The reticle sits **0.0384 deg** off the aim at rest
+  BEFORE and AFTER the burst (bit-identical), **2.83 deg** at its worst during
+  it, against a 120 deg/s mouse flick's **9.74**. `camera.rs` and `camera.toml`
+  gain no per-shot input and the gate greps both.
+* **The spread layer** is `WeaponState::spread_bloom_deg` — folded into the
+  trace ONLY when non-zero, which is `round_state_bytes`' empty-when-nothing-is-
+  flying rule applied per row instead of per section, and which is why a
+  committed trace with a resting weapon in it did not move. Thirty rounds at
+  25 m: ADS + crouched + still **0.157 m**, hip + still **0.349**, hip +
+  sprinting **0.895**.
+
+**THE ALS OVERLAYS ARE DRIVEN AT LAST.** `als::LOCOMOTION_MAP` had carried eight
+prop overlays, five stance variations and seven aim sweeps since CHAR1a.3 with
+nothing driving any of them — its own comment said so, and `char1b_gate` had two
+arms asserting the states were unreachable. `pose::apply_weapon_overlay` is the
+driver, pinned into `projector_mirror`'s frozen writer order in the same commit.
+An overlay is a **blend**, not an additive (read as a delta it put the island
+hero's upper arms twelve degrees apart on a symmetric stance), it is masked to
+**both clavicle subtrees and nothing else** (the spine is where the lean, the
+peek and the aim offset live), and it cross-fades with the weapon's own aim
+sweep by the ADS blend into ONE target before either is applied. Measured on the
+shoulder: **0.000 → 11.835 → 29.664 deg** unarmed / carrying / aiming, against a
+pose set authoring 12 and a sweep authoring 30.
+
+**REFUSED, WITH THE NUMBERS: `overlay_default` on every idle.** The clause asked
+for it on the reading that the engine's idle arms hang wide because no stance
+variation is layered. Measured on the island's own hero, the arms go **OUT** —
+18.07/18.07 becomes **18.37/19.93 deg** — and a stance ALS ships symmetric comes
+out 1.56 deg apart, enough to red `char1b_gate`'s own asymmetry arm. It is the
+SECOND time this has been measured: the CHAR1b.1 audit wrote the same finding on
+the donor rig beside the map row itself (13.59 → 14.82/14.46) together with the
+real cause of the wide arms, which was a clip bound to the wrong rig and was
+fixed there. So an unarmed character wears no overlay unless it NAMES one,
+through `CharacterMovement::overlay` — a field with exactly one consumer since
+P29.3 that now poses a character.
+
+**TWO PIECES OF ARITHMETIC NOBODY HAD RUN**, and they are the wave's headline:
+
+1. **The doc's "critically damped" spring is not.** It asks for a *"Critically
+   Damped Spring-Damper System"* and prints `k = 220, c = 18` and
+   `k = 180, c = 16`; critical damping of a unit mass is `2*sqrt(k)` = 29.6648
+   and 26.8328. At the doc's 18 the 60 Hz recurrence overshoots its own rest
+   position by **6.328 %**, past this wave's 5 % ceiling, against **0.0000 %**
+   at the critical value. The doc's stiffness ships with the critical damping
+   derived from it, its numbers are recorded as constants, and the mutation
+   lives permanently in the gate.
+2. **`v0 = peak * sqrt(k) * e` is 42 % wrong at 60 Hz.** A 0.05 m peak measured
+   0.029104. The first semi-implicit update is `v <- v0*(1 - c*dt)` and `c*dt`
+   is 0.4944 at this damping, so half the impulse is spent before the position
+   has moved. `discrete_peak_gain` measures the gain from the recurrence that
+   will actually run, which makes the conversion exact to **0.0000 %**.
+
+**SWAY SHARES THE BREATH'S CLOCK.** `pose::apply_breath` samples
+`SmRuntimeState::state_time` and `step_weapon_feel` reads the same number
+through `anim_bridge::anim_state_time`; two clocks would drift and a chest that
+rose while the hands fell is what a player reads as "floaty". Measured:
+**0.000000 mm** for a character with no animation clock (exactly zero, which is
+what makes the trace section empty), **6.0000 mm** breathing and standing still,
+**91.4362 mm** at a 5.85 m/s sprint. The bound is stated: a character with no
+clock does not breathe and its bob is frozen at phase zero.
+
+**ADS TIMING** drives three things off one column. The camera, through the rig's
+by-name `state_blend_speed`, solved by **bisection** so no transcendental
+reaches a camera pose — rifle **250.0 ms** measured for 240 asked, pistol
+**133.3** for 140, both inside one frame, with the field going 70 → 55.2 deg and
+the boom 3.180 → 2.311 m. The pose, as the overlay/sweep cross-fade, so the aim
+is visible in the shoulder. And the walk, as a second factor at the one
+`equip_scale` seam: **8.8945 → 3.4484 m** in three seconds, which is ALS's own
+0.6500 aiming scale times this wave's 0.5500.
+
+**THE COST**, on eight shooters bursting: **0.0133 ms** for the gameplay phase
+against **0.0046** with nobody armed — **0.970 µs** a shooter, against a 1.5 ms
+budget.
+
+`wpn2b_gate` is **18 arms** and **10 mutations**, every one of which reds the arm
+it names — and two of which found vacuities in the gate's own arms (a reticle
+check against zero rather than against the view standing still, and a walk ratio
+checked against a product containing the constant being mutated). Both fixed.
+
+**WHAT IS NOT HERE.** The four-layer gunshot, the casing pool, the supersonic
+crack and the lowpass are WPN2c's; shotgun cones, attachments and weapon meshes
+are WPN2d's — `shot_direction_with` takes a resolved cone precisely so the
+shotgun has a door. A melee recoil is refused deliberately: a pair of hands got
+a gun's profile and started moving the hero's look, and `FIST_RPM`'s doc has
+said since the WPN1 audit that a punch moves no bone. And the overlay's UPPER
+ARM is overwritten by the hand IK — `solve_arm` runs after the overlay and
+writes the whole arm chain, so what survives is the CLAVICLE; closing that means
+the hold point becoming an offset from the overlay's own hand rather than a
+world point, which is a change to `HandIk` and not to this wave.
