@@ -31,8 +31,8 @@ use inf_ecs::ballistics::{
     PROJECTILE_SUB_STEPS,
 };
 use inf_ecs::components::{
-    BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind,
-    RigidBody3D, Transform,
+    AnimStateMachine, BodyKind3D, CharacterController3D, CharacterMovement, Collider3D,
+    ColliderShape3DKind, MovementMode, RigidBody3D, SkeletalMesh, Transform,
 };
 use inf_ecs::item::{self, ItemDef, ItemDefs};
 use inf_ecs::math::Vec3d;
@@ -51,6 +51,9 @@ const GROUND: Uuid = Uuid::from_u128(0x2A00_0002);
 const TARGET: Uuid = Uuid::from_u128(0x2A00_0003);
 const WALL: Uuid = Uuid::from_u128(0x2A00_0004);
 const CHASSIS: Uuid = Uuid::from_u128(0x2A00_0005);
+/// A SECOND chassis, down range, that nobody is sitting in — the control
+/// half of the shooter-exclusion arm (wave WPN2a audit).
+const PARKED: Uuid = Uuid::from_u128(0x2A00_0006);
 fn shooter_guid(i: usize) -> Uuid {
     Uuid::from_u128(0x2A00_0100 + i as u128)
 }
@@ -67,7 +70,23 @@ fn shooter_guid(i: usize) -> Uuid {
 struct Range {
     world: EcsWorld,
     bridge: PhysicsBridge3D,
+    /// **The pose seam**, installed only by the arms that need one (wave WPN2a
+    /// audit). `None` for every arm written before it, so their steps are the
+    /// steps they always were: `step_pose_evaluation` publishes an
+    /// `evaluated_pose`, and `head_point` prefers a pose's `head` socket to the
+    /// capsule rule — a seam a rig-less arm must not be given by accident.
+    rig: Option<(
+        inf_anim::SkeletonAsset,
+        inf_anim::StateMachine,
+        inf_anim::AnimClip,
+    )>,
 }
+
+/// The rig, the machine and the clip a ragdoll needs before the bridge will
+/// build it any bodies (wave WPN2a audit).
+const SKEL_GUID: Uuid = Uuid::from_u128(0x2A00_0007);
+const SM_GUID: Uuid = Uuid::from_u128(0x2A00_0008);
+const CLIP_REF: inf_anim::ClipRef = [0x2a; 16];
 
 /// The one rifle every flight arm fires, so a drop is read against one set of
 /// numbers. A **projectile** past 25 m, the doc's own assault-rifle threshold.
@@ -130,6 +149,7 @@ impl Range {
         let mut r = Self {
             world,
             bridge: PhysicsBridge3D::new(GRAVITY),
+            rig: None,
         };
         r.bridge.sync_from_world(&r.world);
         r
@@ -187,7 +207,45 @@ impl Range {
         self.bridge.step(DT);
         self.bridge.write_back_into(&mut self.world);
         self.world.propagate();
+        if let Some((skeleton, machine, clip)) = &self.rig {
+            let machines = |g: Uuid| (g == SM_GUID).then_some(machine);
+            let skels = |g: Uuid| (g == SKEL_GUID).then_some(skeleton);
+            let clips = |c: inf_anim::ClipRef| (c == CLIP_REF).then_some(clip);
+            let vars = |_: Uuid| std::collections::BTreeMap::new();
+            inf_ecs::pose::step_pose_evaluation(
+                &mut self.world,
+                DT,
+                &machines,
+                &skels,
+                &clips,
+                &vars,
+            );
+        }
         report
+    }
+
+    /// **Give this range a rig**, so a character on it can ragdoll (wave WPN2a
+    /// audit). The mannequin the wizard builds, and a one-state machine — the
+    /// bridge only needs the rig; the machine is what `AnimStateMachine` binds.
+    fn install_rig(&mut self) {
+        let skeleton = inf_anim::build_template(
+            inf_anim::BodyPlan::Biped,
+            &inf_anim::BodyParams {
+                height_m: 1.8,
+                ..Default::default()
+            },
+        )
+        .expect("the mannequin builds");
+        let machine = inf_anim::StateMachine {
+            states: vec![inf_anim::SmState::clip("idle", CLIP_REF)],
+            entry: 0,
+            ..Default::default()
+        };
+        self.rig = Some((
+            skeleton,
+            machine,
+            inf_anim::AnimClip::new("pose", Vec::new()),
+        ));
     }
 
     /// Every round in flight, right now.
@@ -227,6 +285,23 @@ fn stand(world: &mut EcsWorld, guid: Uuid, name: &str, at: DVec3, player: bool) 
         cm,
         t,
     ));
+}
+
+/// The same, with the rig and machine a **ragdoll** needs (wave WPN2a audit).
+fn stand_rigged(world: &mut EcsWorld, guid: Uuid, name: &str, at: DVec3) {
+    stand(world, guid, name, at, false);
+    let e = world.entity_of(guid).expect("the character just stood up");
+    world.world_mut().entity_mut(e).insert((
+        AnimStateMachine {
+            sm: Some(SM_GUID),
+            ..Default::default()
+        },
+        SkeletalMesh {
+            mesh: Some(Uuid::from_u128(0x2A00_0009)),
+            skeleton: Some(SKEL_GUID),
+        },
+    ));
+    world.mark_dirty();
 }
 
 /// A **thin** static slab across the range at `z` — the tunnelling test's whole
@@ -568,14 +643,20 @@ fn a_round_that_leaves_the_active_partition_dies_and_is_counted() {
     );
 }
 
-/// **A round fired from inside a body does not hit that body.**
+/// **A round fired from inside a body does not hit that body — and one fired at
+/// a chassis nobody is sitting in STOPS IN IT.**
 ///
-/// Two halves, and the second is the one the brief asks for. The shooter's own
-/// capsule is excluded on segment 0; a **vehicle chassis** the shooter is
-/// sitting in is not excluded and is not hit either, because the shot's cast
-/// door filters to `CastTargets::Fixed` and a chassis is a DYNAMIC body — which
-/// is the same reason a hitscan cannot hit a car. Measured rather than assumed,
-/// and the number is what VEH3c inherits.
+/// Two halves, and until the WPN2a audit only one of them meant anything: the
+/// shot's cast door filtered to `CastTargets::Fixed`, so a chassis was invisible
+/// to the cast and "the round did not hit the car it was fired from inside" was
+/// satisfied by a round that could not have hit any car at all. The cast asks
+/// `CastTargets::AllSolid` now, so the second half is a control rather than a
+/// tautology: the SAME box, forty metres down range with nobody in it, stops the
+/// round.
+///
+/// **Mutation → red:** dropping the seat from `shot_exclusions` (or the whole
+/// exclusion set from segment 0) makes the first half fail — the round stops on
+/// the chassis it left.
 #[test]
 fn a_round_does_not_hit_its_own_shooter_or_the_chassis_it_is_sitting_in() {
     let mut r = Range::new(defs_with("rifle", test_rifle()));
@@ -602,6 +683,19 @@ fn a_round_does_not_hit_its_own_shooter_or_the_chassis_it_is_sitting_in() {
         r.world.propagate();
         r.bridge.sync_from_world(&r.world);
     }
+    // **THE HERO IS SITTING IN IT.** `MovementRuntime::seat` is what the engine
+    // means by "which vehicle this character is in", and it is what
+    // `shot_exclusions` reads. The mode is deliberately left alone: this fixture
+    // has no `Vehicle`, and what is under test is the exclusion, not the drive.
+    {
+        let e = r.world.entity_of(HERO).expect("the hero");
+        let mut cm = r
+            .world
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("a character");
+        cm.runtime.seat.vehicle = CHASSIS;
+    }
     r.arm(HERO, "rifle");
     r.aim(HERO, 0.0, 0.0);
     r.hold_trigger(HERO, true);
@@ -626,6 +720,60 @@ fn a_round_does_not_hit_its_own_shooter_or_the_chassis_it_is_sitting_in() {
     assert!(
         hits.iter().all(|t| *t != Some(HERO) && *t != Some(CHASSIS)),
         "a segment after the first hit the shooter or its chassis"
+    );
+
+    // **THE CONTROL.** The same box, forty metres away, with nobody in it. If
+    // this passes and the half above passes, the exclusion is doing the work; if
+    // this fails, the cast cannot see a chassis at all and the half above proved
+    // nothing (which is what it proved for the whole of wave WPN2a).
+    let mut c = Range::new(defs_with("rifle", test_rifle()));
+    {
+        let e = c.world.spawn_with_guid(PARKED, "Parked", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, 1.0, 40.0);
+        c.world.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(1.0, 1.0, 2.5),
+                ..Default::default()
+            },
+            t,
+        ));
+        c.world.mark_dirty();
+        c.world.reindex_guids();
+        c.world.propagate();
+        c.bridge.sync_from_world(&c.world);
+    }
+    c.arm(HERO, "rifle");
+    c.aim(HERO, 0.0, 0.0);
+    c.hold_trigger(HERO, true);
+    c.step();
+    c.hold_trigger(HERO, false);
+    let mut stopped_at = None;
+    for _ in 0..40 {
+        let rep = c.step();
+        if let Some(h) = rep.hits.iter().find(|h| h.target == Some(PARKED)) {
+            stopped_at = Some(h.to);
+            break;
+        }
+    }
+    let at = stopped_at.expect(
+        "a round fired at a parked chassis nobody is in flew straight through it — \
+         the cast class is back to `Fixed` and the exclusion half of this arm is \
+         vacuous again",
+    );
+    println!(
+        "the control: the round stopped at z {:.3} m (the chassis' near face is 37.5 m)",
+        at.z
+    );
+    assert!(
+        (at.z - 37.5).abs() < 0.5,
+        "the round stopped at z {:.3} and the chassis' near face is 37.5 m",
+        at.z
     );
 }
 
@@ -1448,14 +1596,21 @@ fn a_kill_at_range_names_the_shooter_and_not_nobody() {
     );
 }
 
-/// **A car shot at still spends nothing** — VEH3c's, said out loud rather than
-/// discovered.
+/// **A round STOPS IN a parked car, and the car spends nothing** — the WPN2a
+/// audit's closure of carried 200, and VEH3c's half said out loud beside it.
 ///
-/// The shot's cast door filters to `CastTargets::Fixed`, so neither half of the
-/// hybrid can see a DYNAMIC chassis at all. The round flies straight through the
-/// space a car occupies and dies at its range.
+/// Until this audit the shot's cast door filtered to `CastTargets::Fixed`, so
+/// neither half of the hybrid could SEE a dynamic chassis: a bullet flew through
+/// a car, a crate, a fractured chunk and a body on the floor, and this arm
+/// asserted that it did. In a GTA-parity game a round must stop at a car. The
+/// damage to the car is still VEH3c's — a chassis has no `Health` and no
+/// `Destructible`, so the honest outcome is a round that ENDS there and spends
+/// nothing, which is what is measured.
+///
+/// **Mutation → red:** putting the cast back to `cast_ray_excluding` (`Fixed`)
+/// makes the round fly through and `stopped` is `None`.
 #[test]
-fn a_round_into_a_car_spends_nothing_and_the_gate_says_so() {
+fn a_round_stops_in_a_parked_car_and_the_car_spends_nothing() {
     let mut r = Range::new(defs_with("rifle", test_rifle()));
     {
         let e = r.world.spawn_with_guid(CHASSIS, "Car", None);
@@ -1483,28 +1638,144 @@ fn a_round_into_a_car_spends_nothing_and_the_gate_says_so() {
     r.hold_trigger(HERO, true);
     r.step();
     r.hold_trigger(HERO, false);
-    let mut hit_the_car = 0;
+    let mut stopped = None;
     let mut owed = 0usize;
+    let mut furthest = 0.0_f64;
     for _ in 0..60 {
+        for round in r.rounds() {
+            furthest = furthest.max(round.at.z);
+        }
         let rep = r.step();
-        hit_the_car += rep
-            .hits
-            .iter()
-            .filter(|h| h.target == Some(CHASSIS))
-            .count();
         owed += rep.destruct.len();
+        if let Some(h) = rep.hits.iter().find(|h| h.target == Some(CHASSIS)) {
+            stopped = Some(*h);
+        }
+    }
+    let hit = stopped.expect(
+        "a round fired at a parked car flew straight through it -- the cast door \
+         is back to `CastTargets::Fixed` and carried 200 is open again",
+    );
+    println!(
+        "a round flown at a parked car: stopped at z {:.3} (the near face is 77.5 m), \
+         on_flesh {}, {} J of energy carried, {owed} entr(ies) owed at the P22 door, \
+         health after: {:?} -- a chassis has no `Health` and no `Destructible`, so it \
+         spends NOTHING, which is VEH3c's",
+        hit.to.z,
+        hit.on_flesh,
+        hit.energy_j,
+        weapon::health_of(&r.world, CHASSIS).map(|h| h.joules),
+    );
+    assert!(
+        (hit.to.z - 77.5).abs() < 0.5,
+        "the round stopped at z {:.3} and the car's near face is 77.5 m",
+        hit.to.z
+    );
+    assert!(!hit.on_flesh, "a car is not flesh");
+    assert!(
+        furthest < 80.0,
+        "a round reached {furthest:.2} m, which is past the car it should have \
+         stopped in"
+    );
+    // …and NOTHING is spent on it. Both doors, because they are the two ways a
+    // hit can cost something: the health door and the P22 destructible door.
+    assert_eq!(owed, 0, "a car owed joules at the P22 door");
+    assert!(
+        weapon::health_of(&r.world, CHASSIS).is_none(),
+        "a car grew a `Health` from being shot -- that is VEH3c's decision, not \
+         this wave's"
+    );
+    assert!(r.rounds().is_empty(), "the pool did not empty");
+}
+
+/// **A round hits a body on the FLOOR** — the second half of carried 200, and
+/// the one that decides whether a ragdolled person is bulletproof.
+///
+/// A ragdolling character's own capsule is DISABLED and its limbs are dynamic
+/// articulated bodies the bridge attached itself. Two things had to be true for
+/// a round to hurt one and neither was: the cast had to be able to see a dynamic
+/// body (it filtered to `Fixed`), and the collider it hit had to name the
+/// character (ragdoll limbs are in no document entity's row, so
+/// `guid_of_collider` answered `None`, `is_flesh` answered `false`, and the
+/// joules went nowhere).
+///
+/// **Mutation → red:** dropping `guid_of_ragdoll_collider` out of `hit_owner`
+/// leaves the target at full health with the round stopped in mid-air on a limb
+/// that belongs to nobody.
+#[test]
+fn a_round_into_a_body_on_the_floor_spends_its_joules() {
+    let mut def = test_rifle();
+    def.damage_j = 400.0;
+    // Inside the threshold: the ragdoll is 8 m away and what is under test is
+    // WHO the cast named, which is the same door for both halves.
+    let mut r = Range::new(defs_with("rifle", def));
+    r.install_rig();
+    stand_rigged(&mut r.world, TARGET, "Target", DVec3::new(0.0, 0.0, 8.0));
+    r.world.mark_dirty();
+    r.world.reindex_guids();
+    r.world.propagate();
+    r.bridge.sync_from_world(&r.world);
+    // Two steps for the pose to publish a rig and the bridge to build bodies.
+    r.step();
+    assert!(
+        d3::ragdoll_bridge::start_ragdoll(&mut r.world, TARGET),
+        "the target would not ragdoll"
+    );
+    let mut spawned = false;
+    for _ in 0..6 {
+        r.step();
+        if r.bridge.ragdoll_count() > 0 {
+            spawned = true;
+            break;
+        }
+    }
+    assert!(
+        spawned,
+        "no ragdoll bodies were built -- this arm is vacuous"
+    );
+    let limbs = r
+        .bridge
+        .ragdoll_of(TARGET)
+        .map(|s| s.colliders.len())
+        .unwrap_or(0);
+    assert!(limbs >= 7, "a ragdoll of {limbs} colliders is not a body");
+    assert_eq!(
+        r.world
+            .entity_of(TARGET)
+            .and_then(|e| r.world.world().get::<CharacterMovement>(e))
+            .map(|cm| cm.mode),
+        Some(MovementMode::Ragdoll),
+        "the target is not ragdolling"
+    );
+    // Fire at it, level, and keep firing while it settles: a body on the floor
+    // is a moving target and the arm is about whether it can be hit at all.
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, -6.0);
+    let mut spent = 0.0;
+    let mut named = 0usize;
+    for _ in 0..90 {
+        r.hold_trigger(HERO, true);
+        let rep = r.step();
+        named += rep.hits.iter().filter(|h| h.target == Some(TARGET)).count();
+        if let Some(h) = weapon::health_of(&r.world, TARGET) {
+            spent = weapon::DEFAULT_VITALITY_J - h.joules;
+        }
+        if spent > 0.0 {
+            break;
+        }
     }
     println!(
-        "a round flown at a parked car: {hit_the_car} hit(s) on the chassis, {owed} \
-         entr(ies) owed at the P22 door — a car has no Health and no Destructible, \
-         and the cast door is `CastTargets::Fixed`, so it cannot even be SEEN"
+        "a ragdolled body of {limbs} limbs was named by {named} hit(s) and lost \
+         {spent} J"
     );
-    assert_eq!(
-        hit_the_car, 0,
-        "a round hit a dynamic chassis — the cast door changed, and \
-         `the_snapped_normal_reaches_no_force_in_the_model`'s neighbours want to know"
+    assert!(
+        named > 0,
+        "every round went through a body lying on the floor -- carried 200's \
+         ragdoll half is open"
     );
-    assert_eq!(owed, 0, "a car owed joules at the P22 door");
+    assert!(
+        spent > 0.0,
+        "a ragdolled body was hit {named} time(s) and lost no joules at all"
+    );
 }
 
 // ── (i) COST ────────────────────────────────────────────────────────────────

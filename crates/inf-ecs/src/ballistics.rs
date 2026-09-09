@@ -58,12 +58,17 @@
 //!
 //! Pellets, blasts, lock-on, fuses and bounce are WPN2c/WPN2d's; this pool is
 //! deliberately the substrate they will extend rather than five kinds today.
-//! Recoil springs, sway and spread state are WPN2b's. A round that hits a
-//! **dynamic** body — a car, a crate, a ragdoll — is not modelled, and that is
-//! not this pool's doing: the shot's cast door
-//! (`PhysicsWorld3D::cast_ray_excluding`) filters to `CastTargets::Fixed`, so a
-//! hitscan cannot see one either. One door, one behaviour, and VEH3c is where a
-//! car grows something to hurt.
+//! Recoil springs, sway and spread state are WPN2b's.
+//!
+//! A round that hits a **dynamic** body — a car, a crate, a fractured chunk, a
+//! ragdoll — **stops there** since this wave's audit: both halves of the hybrid
+//! cast `CastTargets::AllSolid` minus everything the shooter is
+//! (`d3::gameplay::shot_exclusions`), and a ragdoll's limb names the character
+//! it belongs to (`PhysicsBridge3D::guid_of_ragdoll_collider`), so a body on the
+//! floor takes the joules. What a **car** does about being shot is still
+//! VEH3c's: a chassis has no `Health` and no `Destructible`, so the round ends
+//! there and spends nothing — measured in
+//! `wpn2a_gate::a_round_stops_in_a_parked_car_and_the_car_spends_nothing`.
 
 use bevy_ecs::prelude::Resource;
 use glam::DVec3;

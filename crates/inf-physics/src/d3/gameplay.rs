@@ -1190,6 +1190,74 @@ fn step_weapons(
 /// because the spawn refusal has to cover the WHOLE step's ray bill: one cast
 /// per shot fired so far (`report.shots`) plus what the flight will spend — see
 /// `inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP`.
+/// **Everything the SHOOTER is**, as colliders a shot must not stop on (wave
+/// WPN2a, closed by its audit) — the one exclusion set both halves of the
+/// hybrid build.
+///
+/// It exists because the shot's cast class changed. Until this audit both
+/// halves went through `cast_ray_excluding`, which is
+/// [`CastTargets::Fixed`](super::CastTargets::Fixed), so a bullet passed
+/// through a car, a crate, a fractured chunk and a **ragdoll** — and the
+/// shooter exclusion was belt to a brace, because the only dynamic body it
+/// could ever have named was already invisible. The casts ask
+/// [`CastTargets::AllSolid`](super::CastTargets::AllSolid) now, and the moment
+/// they can see a dynamic body the exclusion has three jobs rather than one:
+///
+/// 1. **the shooter's own capsule**, which is where it started;
+/// 2. **the chassis it is sitting in** — `MovementRuntime::seat` names it, and a
+///    driver firing through a windscreen must not shoot the car out from under
+///    itself on segment 0. This is the half the wave could not measure and
+///    `a_round_does_not_hit_its_own_shooter_or_the_chassis_it_is_sitting_in`
+///    now can;
+/// 3. **its own ragdoll's limbs**, if it has any. A ragdolling character cannot
+///    pull a trigger today, so this is the cheap half of "the set is what the
+///    shooter IS" rather than a behaviour anybody can see — and it costs one
+///    map lookup on a map that is empty on every level with nobody on the floor.
+///
+/// Sensors are not in it, and do not need to be: `AllSolid` is
+/// `QueryFilter::default().exclude_sensors()`, so a trigger volume cannot stop
+/// a bullet.
+fn shot_exclusions(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+    shooter: Uuid,
+) -> BTreeSet<super::ColliderId3D> {
+    let mut exclude = BTreeSet::new();
+    if let Some(c) = bridge.collider_of(shooter) {
+        exclude.insert(c);
+    }
+    if let Some(r) = bridge.ragdoll_of(shooter) {
+        exclude.extend(r.colliders.iter().copied());
+    }
+    let seated = world
+        .entity_of(shooter)
+        .and_then(|e| world.world().get::<CharacterMovement>(e))
+        .map(|cm| cm.runtime.seat.vehicle)
+        .filter(|v| !v.is_nil());
+    if let Some(c) = seated.and_then(|v| bridge.collider_of(v)) {
+        exclude.insert(c);
+    }
+    exclude
+}
+
+/// **Whose body a shot's cast just hit** (wave WPN2a, closed by its audit) —
+/// [`PhysicsBridge3D::guid_of_collider`], and then the ragdolls.
+///
+/// A ragdolling character's own capsule is *disabled* and its limbs are
+/// articulated bodies the bridge attached itself, so they are not in the
+/// collider→guid index a document entity is in. Without this door a round that
+/// hit somebody lying on the floor named nobody, `is_flesh` answered `false`
+/// and the joules went nowhere: a body on the ground was bulletproof.
+///
+/// The scan is over `ragdoll_count()` entries and runs only when the index
+/// misses, which is a hit on terrain, a structure or a limb — and the map is
+/// empty on every level where nobody is down.
+fn hit_owner(bridge: &PhysicsBridge3D, collider: super::ColliderId3D) -> Option<Uuid> {
+    bridge
+        .guid_of_collider(collider)
+        .or_else(|| bridge.guid_of_ragdoll_collider(collider))
+}
+
 fn resolve_shot(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -1208,23 +1276,28 @@ fn resolve_shot(
     let rays_already = report.shots as usize;
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
-    let mut exclude = BTreeSet::new();
-    if let Some(c) = bridge.collider_of(shooter) {
-        exclude.insert(c);
-    }
+    let exclude = shot_exclusions(world, bridge, shooter);
     // A launcher's threshold is zero, and a zero-length cast is not a cast: skip
     // it rather than clamping it up to 0.1 m, which would put a rocket's first
     // ten centimetres inside a rule that has nothing to say about them.
+    //
+    // **`AllSolid`, not `Fixed`** (the WPN2a audit's closure of carried 200): a
+    // round must stop at a parked car and must hit a body on the floor. Sensors
+    // stay out, so a trigger volume is still not a wall.
     let landed = (reach > 0.0)
         .then(|| {
-            bridge
-                .world_mut()
-                .cast_ray_excluding(from, dir, reach, &exclude)
+            bridge.world_mut().cast_ray_where(
+                from,
+                dir,
+                reach,
+                &exclude,
+                super::CastTargets::AllSolid,
+            )
         })
         .flatten();
     match landed {
         Some(h) => {
-            let target = bridge.guid_of_collider(h.collider);
+            let target = hit_owner(bridge, h.collider);
             let on_flesh = target.is_some_and(|g| is_flesh(world, g));
             let point = from + dir * h.toi;
             let headshot = on_flesh
@@ -1403,23 +1476,29 @@ fn step_rounds(
             let len = seg.length();
             report.rounds.rays += 1;
             if len > 1e-6 {
-                let mut exclude = BTreeSet::new();
                 // **Segment 0 only.** A round leaves a hand's breadth from the
                 // body that fired it, so its first segment must not stop on its
-                // own shooter; after that the exclusion is dropped, because a
-                // round that came back at its shooter should hit them.
-                if r.first_segment {
-                    if let Some(c) = bridge.collider_of(r.shooter) {
-                        exclude.insert(c);
-                    }
-                }
-                let hit = bridge
-                    .world_mut()
-                    .cast_ray_excluding(prev, seg / len, len, &exclude);
+                // own shooter — nor on the chassis the shooter is sitting in,
+                // which is what `shot_exclusions` adds and what only means
+                // something now the cast can SEE a dynamic body. After that the
+                // exclusion is dropped, because a round that came back at its
+                // shooter should hit them.
+                let exclude = if r.first_segment {
+                    shot_exclusions(world, bridge, r.shooter)
+                } else {
+                    BTreeSet::new()
+                };
+                let hit = bridge.world_mut().cast_ray_where(
+                    prev,
+                    seg / len,
+                    len,
+                    &exclude,
+                    super::CastTargets::AllSolid,
+                );
                 if let Some(h) = hit {
                     let point = prev + (seg / len) * h.toi;
                     let flight = r.travelled_m + h.toi;
-                    let target = bridge.guid_of_collider(h.collider);
+                    let target = hit_owner(bridge, h.collider);
                     let on_flesh = target.is_some_and(|g| is_flesh(world, g));
                     let headshot = on_flesh
                         && target.is_some_and(|g| {

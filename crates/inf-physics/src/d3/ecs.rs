@@ -571,6 +571,27 @@ impl PhysicsBridge3D {
         self.ragdolls.len()
     }
 
+    /// **Whose limb this collider is** (wave WPN2a audit) — the ragdoll half of
+    /// [`guid_of_collider`](Self::guid_of_collider).
+    ///
+    /// A ragdolling character's own capsule is *disabled* and its limbs are
+    /// articulated bodies this bridge attached itself, so they are in no
+    /// document entity's row and `guid_of_collider` answers `None` for every one
+    /// of them. That was invisible until a shot could see a dynamic body: a
+    /// round that hit somebody lying on the floor named nobody, `is_flesh`
+    /// answered `false`, and a body on the ground was bulletproof.
+    ///
+    /// It is a scan rather than a second index because the map is
+    /// [`ragdoll_count`](Self::ragdoll_count) entries deep — empty on every
+    /// level where nobody is down — and the caller only asks when the index has
+    /// already missed.
+    pub fn guid_of_ragdoll_collider(&self, collider: ColliderId3D) -> Option<Uuid> {
+        self.ragdolls
+            .iter()
+            .find(|(_, r)| r.colliders.contains(&collider))
+            .map(|(g, _)| *g)
+    }
+
     /// The vehicle `guid` is the chassis of, if the scene describes one (P29.7).
     pub fn vehicle_of(&self, guid: Uuid) -> Option<&dyn inf_ecs::vehicle::Vehicle> {
         self.vehicles.get(&guid).map(|v| v.as_ref())

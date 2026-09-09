@@ -37312,7 +37312,22 @@ damage only), burst fire (the engine has automatic and semi, so the doc's
 three-round-burst rows are authored automatic), attachments, recoil springs,
 sway, spread state, the four-layer gunshot and the casing pool. Every one of
 them is a later wave of this arc and every one is named in `weapons.toml` itself
-rather than only in a report. And **a round cannot hit a car**: the shot's cast
-door filters to `CastTargets::Fixed`, so neither half of the hybrid can see a
-dynamic chassis — measured, 0 hits and 0 joules owed at the P22 door — which is
-the same reason a hitscan could not, and is VEH3c's.
+rather than only in a report.
+
+**A ROUND STOPS AT A CAR, AND AT A BODY ON THE FLOOR** (the WPN2a audit's
+closure of carried 200). The wave shipped both halves of the hybrid casting
+through `cast_ray_excluding`, which is `CastTargets::Fixed`, so a bullet passed
+through a car, a crate, a fractured chunk and a **ragdoll** — and the ledger
+above said so as though it were a property of cars rather than of the cast. Two
+changes close it: the casts ask `CastTargets::AllSolid` minus
+`d3::gameplay::shot_exclusions` (the shooter's own capsule, the chassis its
+`MovementRuntime::seat` names, and its own ragdoll's limbs), and a limb names its
+character through `PhysicsBridge3D::guid_of_ragdoll_collider` — without which a
+ragdoll's collider belonged to nobody, `is_flesh` answered `false`, and a body on
+the ground was bulletproof. Measured: a round fired at a parked car stops at
+z 77.500 m, which is the chassis' own near face, and the car spends **nothing**
+(no `Health`, 0 entries at the P22 door) — what a car does about being shot is
+still VEH3c's. A ragdolled body of **17** limbs is named by the hit and loses its
+**400 J**. And the segment-0 shooter exclusion finally means something: the same
+chassis with nobody in it stops the round at z 37.500 m, which is the control the
+wave's own arm did not have.
