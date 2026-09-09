@@ -2739,7 +2739,7 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     let body = body.as_str();
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
-    const WRITERS: [(&str, &str); 14] = [
+    const WRITERS: [(&str, &str); 15] = [
         // (`foot_states` moved from the tail into the middle at wave CHAR1b.1 —
         // see its own row — and that wave ADDED two: the aim-offset layer at
         // pose construction and the look-at chain at the head of the
@@ -2755,8 +2755,18 @@ fn every_pose_writer_runs_in_its_frozen_order() {
             "the machine + the layer stack + the inertializer produce the pose",
         ),
         (
-            "apply_aim_offset(asset,",
+            // The needle lost its `asset,` at wave WPN2b: the call takes the
+            // sweep's STATE NAME and its NEUTRAL now (so the seven prop sweeps
+            // are reachable at all), which is eight arguments, and rustfmt
+            // wraps eight arguments one per line. `apply_aim_offset(` is still
+            // unambiguous inside this function's body, which is the only text
+            // this pin reads.
+            "apply_aim_offset(",
             "wave CHAR1b.1: the ADDITIVE aim-offset layer, which is pose CONSTRUCTION — it is what the animation would have been if the animator had authored an aim into every clip — and therefore runs before the drive pass, so a twist chain reflects the aimed pose and not the neutral one. P29.2 built `inf_anim::layers` and this is its first caller: the CHAR1a audit's item 88b",
+        ),
+        (
+            "apply_weapon_overlay(asset,",
+            "wave WPN2b: the ALS OVERLAY pose set and the weapon's own aim sweep, cross-faded by the aim-down-sights blend, over the upper-body mask. Between the look sweep and the breath because that is the order ALS layers them in -- the aim offset is where the character is LOOKING, the overlay is what its hands are DOING, and the breath is on top of both. Every one of those states had existed in `als::LOCOMOTION_MAP` since CHAR1a.3 with NOTHING driving it (the map's own comment said so, and `char1b_gate` had two arms asserting they were unreachable); the CHAR1b.1 audit recorded the consequence, which is that the idle's arms hang wide because no stance variation is layered at all",
         ),
         (
             "apply_breath(asset,",

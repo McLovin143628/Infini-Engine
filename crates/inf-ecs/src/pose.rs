@@ -1512,8 +1512,41 @@ pub fn step_pose_evaluation<'c>(
                         // the bytes it posed before this existed — which is the
                         // arm `an_additive_with_no_delta_is_bit_identical`.
                         if let Some((at, weight)) = aim_sweep_of(world, entity) {
-                            apply_aim_offset(asset, &mut pose, machine, &clips, at, weight);
+                            apply_aim_offset(
+                                asset,
+                                &mut pose,
+                                machine,
+                                &clips,
+                                inf_anim::als::LOOK_SWEEP_STATE,
+                                inf_anim::als::LOOK_SWEEP_NEUTRAL,
+                                at,
+                                weight,
+                            );
                         }
+                        // ── **THE WEAPON OVERLAY AND ITS AIM SWEEP** (wave
+                        //    WPN2b) ──
+                        //
+                        // ALS's overlay and aim states have existed in
+                        // `inf_anim::als::LOCOMOTION_MAP` since CHAR1a.3 and
+                        // NOTHING drove them: the map's own comment said so
+                        // ("nothing drives an overlay stack yet"), the CHAR1b.1
+                        // audit recorded that the consequence was an idle whose
+                        // arms hang wide, and `char1b_gate` had two arms whose
+                        // whole job was to assert the states were unreachable.
+                        // This is the driver.
+                        //
+                        // AFTER the look sweep and BEFORE the breath, which is
+                        // the order ALS itself layers them in: the aim offset is
+                        // where the character is LOOKING, the overlay is what its
+                        // hands are DOING, and the breath is on top of both.
+                        //
+                        // **Absent costs nothing**: a rig whose machine has no
+                        // `overlay_default` state — every committed sample in
+                        // the tree, because the ALS stance clips are local-only
+                        // content — takes one `find` over the state list and
+                        // returns, so every trace committed before this wave is
+                        // byte-identical.
+                        apply_weapon_overlay(asset, &mut pose, machine, &clips, world, entity);
                         // ── THE BREATH (wave CHAR1b.2, carried item 128) ──
                         //
                         // ALS's idle is `ALS_N_Pose` PLUS `ALS_N_SecondaryMotion`,
@@ -2145,14 +2178,23 @@ fn apply_aim_offset<'c>(
     pose: &mut Pose,
     machine: &inf_anim::StateMachine,
     clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    sweep: &str,
+    neutral: [f64; 2],
     at: [f64; 2],
     weight: f32,
 ) -> bool {
-    let Some(state) = machine
-        .states
-        .iter()
-        .find(|s| s.name == inf_anim::als::LOOK_SWEEP_STATE)
-    else {
+    // **The state NAME is a parameter since wave WPN2b.** It was
+    // `inf_anim::als::LOOK_SWEEP_STATE`, hard-coded, which is why the seven prop
+    // sweeps in `LOCOMOTION_MAP` (`aim_m4a1`, `aim_pistol_1h`, ...) had been
+    // unreachable since the map was written: nothing could ask for one. The
+    // arithmetic below never cared which blend space it was given.
+    //
+    // The NEUTRAL is a parameter for the same reason and it is NOT the same
+    // coordinate: the look sweep's second axis is PITCH (up `[0,1]`, forward
+    // `[0,0]`, down `[0,-1]`) and a prop sweep's is STANCE (standing `[0,0]`,
+    // crouched `[0,-1]`). One constant for both would make a character aiming
+    // downhill crouch.
+    let Some(state) = machine.states.iter().find(|s| s.name == sweep) else {
         return false;
     };
     let inf_anim::state_machine::Motion::Blend2D(space) = &state.motion else {
@@ -2172,7 +2214,6 @@ fn apply_aim_offset<'c>(
     // bytes. The claim that the arithmetic ITSELF is identity-preserving is a
     // separate one and is `char1b_gate`'s
     // `an_additive_with_no_delta_is_bit_identical_to_the_base_pose`.
-    let neutral = inf_anim::als::LOOK_SWEEP_NEUTRAL;
     if (at[0] - neutral[0]).abs() < 1.0e-9 && (at[1] - neutral[1]).abs() < 1.0e-9 {
         return false;
     }
@@ -2180,7 +2221,7 @@ fn apply_aim_offset<'c>(
         space,
         &rig.skeleton,
         clips,
-        glam::DVec2::from_array(inf_anim::als::LOOK_SWEEP_NEUTRAL),
+        glam::DVec2::from_array(neutral),
         0.0,
     );
     let aimed = inf_anim::blend_space::sample_blend_space_2d(
@@ -2194,6 +2235,176 @@ fn apply_aim_offset<'c>(
     let layer = inf_anim::AnimLayer::additive("aim_offset", weight).with_mask(mask);
     *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
     true
+}
+
+/// **What this character's hands are doing**, for the overlay pass (wave WPN2b)
+/// — `(overlay state, aim sweep state, ADS blend, crouched)`.
+///
+/// The overlay is chosen by [`crate::feel::overlay_states_for`] from the
+/// equipped weapon, unless the character AUTHORS one: `CharacterMovement::overlay`
+/// is a string field that has existed since P29.3 with exactly one consumer (an
+/// interned id handed to the animation graph as a float parameter, which no
+/// transition reads), so an author who names `overlay_injured` gets it and
+/// everybody else gets what they are carrying.
+fn overlay_of(
+    world: &EcsWorld,
+    entity: bevy_ecs::entity::Entity,
+) -> (&'static str, &'static str, f32, bool) {
+    let guid = world
+        .world()
+        .get::<crate::components::Guid>(entity)
+        .map(|g| g.0);
+    let def = guid.and_then(|g| crate::weapon::equipped_def(world, g));
+    let (mut overlay, sweep) = crate::feel::overlay_states_for(def.as_ref().map(|(_, d)| d));
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity);
+    // The AUTHORED overlay wins, because a level that says a character is
+    // injured knows something the inventory does not.
+    if let Some(cm) = cm {
+        if let Some(named) = inf_anim::als::LOCOMOTION_MAP
+            .iter()
+            .find(|s| s.kind == inf_anim::als::SlotKind::Overlay && s.state == cm.overlay)
+        {
+            overlay = named.state;
+        }
+    }
+    let ads = guid
+        .and_then(|g| crate::feel::feel_of(world, g))
+        .map(|f| f.ads_blend.clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let crouched = cm.is_some_and(|cm| {
+        matches!(
+            cm.mode,
+            crate::components::MovementMode::Crouch | crate::components::MovementMode::Prone
+        )
+    });
+    (overlay, sweep, ads as f32, crouched)
+}
+
+/// **Layer the stance overlay and the weapon's aim sweep** (wave WPN2b),
+/// answering whether it wrote anything.
+///
+/// # An overlay is a BLEND, not an additive, and that is the whole design
+///
+/// The other four layers in this file are deltas: an aim offset, a breath, a
+/// throw and a lean are all *"what the animator would have added on top"*. An
+/// overlay is not. ALS's overlay states are POSE SETS — the arms a character
+/// holding a rifle has — and ALS layers them with a per-bone **blend** that
+/// replaces the arms outright. Sampling one as `pose(dur) - pose(0)` is
+/// nonsense for a one-pose clip and was measured to be: on the island hero it
+/// put the upper arms at **32.90 deg and 20.44 deg** from vertical, twelve
+/// degrees apart on a stance ALS ships symmetric, and `char1b_gate`'s own
+/// asymmetry arm is what caught it.
+///
+/// So the sampled pose is blended over [`inf_anim::JointMask::arms`] — both
+/// clavicle subtrees and nothing else. NOT the upper body: the spine is where
+/// the lean, the cover peek and the aim offset live, and a character holding a
+/// rifle must still lean into its own run.
+///
+/// # The overlay and the aim sweep are ONE slot, and they cross-fade
+///
+/// A character carrying a rifle wears the carry pose, a character aiming one
+/// wears the aim pose, and the aim-down-sights blend is what moves between
+/// them. They are cross-faded into a single target FIRST and applied once, so
+/// the base pose gets no share at the half-way point — applying two layers in
+/// sequence at `1 - ads` and `ads` would leave `ads*(1 - ads)` of the
+/// locomotion's own arms in the middle of every aim.
+///
+/// That makes the ADS blend visible IN THE JOINTS and not only in the camera's
+/// field of view, which is the arm clause 5 asks for, on the shoulder rather
+/// than on a number.
+///
+/// # Absent costs nothing
+///
+/// A machine with no `overlay_default` state, a rig with no arm roles, or a
+/// clip the resolver does not have each take an early return before a pose is
+/// sampled — which is every committed sample in the tree, because the ALS
+/// stance clips are local-only content. So every trace committed before this
+/// wave is byte-identical.
+fn apply_weapon_overlay<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    world: &EcsWorld,
+    entity: bevy_ecs::entity::Entity,
+) -> bool {
+    let (overlay, sweep, ads, crouched) = overlay_of(world, entity);
+    let carry = overlay_pose(rig, machine, clips, overlay);
+    let aimed = (ads > 0.0 && !sweep.is_empty())
+        .then(|| weapon_sweep_pose(rig, machine, clips, sweep, crouched))
+        .flatten();
+    let target = match (carry, aimed) {
+        (Some(carry), Some(aimed)) => {
+            let layer = inf_anim::AnimLayer::blend("aim_pose", ads);
+            inf_anim::apply_layer(&carry, &aimed, &layer)
+        }
+        (Some(carry), None) => carry,
+        (None, Some(aimed)) => aimed,
+        (None, None) => return false,
+    };
+    let Some(mask) = inf_anim::JointMask::arms("Mask_Overlay", &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    let layer = inf_anim::AnimLayer::blend("overlay", 1.0).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &target)]);
+    true
+}
+
+/// **The pose one overlay state holds**, or `None` if this machine, this rig or
+/// this clip resolver cannot produce it.
+///
+/// Frame zero, not the clip's end: an overlay is a POSE and the pose is the
+/// first frame. (`LOCOMOTION_MAP` marks every overlay row `looping: false`, and
+/// the imported sets are one key long.)
+fn overlay_pose<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    state: &str,
+) -> Option<Pose> {
+    if state.is_empty() {
+        return None;
+    }
+    let state = machine.states.iter().find(|s| s.name == state)?;
+    let inf_anim::state_machine::Motion::Clip(cref) = &state.motion else {
+        return None;
+    };
+    let clip = clips(*cref)?;
+    Some(inf_anim::pose::sample_clip(&rig.skeleton, clip, 0.0, false))
+}
+
+/// **The pose a weapon's aim sweep holds at this stance.**
+///
+/// The prop sweeps are two-sample blend spaces whose second axis is the STANCE
+/// — standing `[0, 0]` and crouched `[0, -1]` — and NOT the pitch, which is
+/// what the look sweep's is. One coordinate for both would make a character
+/// aiming downhill crouch.
+fn weapon_sweep_pose<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    state: &str,
+    crouched: bool,
+) -> Option<Pose> {
+    let state = machine.states.iter().find(|s| s.name == state)?;
+    let inf_anim::state_machine::Motion::Blend2D(space) = &state.motion else {
+        return None;
+    };
+    let at = if crouched {
+        inf_anim::als::WEAPON_SWEEP_CROUCHED
+    } else {
+        inf_anim::als::WEAPON_SWEEP_STANDING
+    };
+    Some(inf_anim::blend_space::sample_blend_space_2d(
+        space,
+        &rig.skeleton,
+        clips,
+        glam::DVec2::from_array(at),
+        0.0,
+    ))
 }
 
 /// **Apply the breathing additive** (wave CHAR1b.2, carried item 128),

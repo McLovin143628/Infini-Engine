@@ -728,6 +728,76 @@ pub fn blend_speed_for_ads(ads_s: f64, dt: f64) -> f64 {
     ((lo + hi) * 0.5) / dt
 }
 
+// ── the ALS overlays, driven at last ────────────────────────────────────────
+
+/// **The longest barrel a handgun has**, metres — the discriminator between the
+/// registry's ten pistols and its seventy-five long guns (wave WPN2b).
+///
+/// Fifteen centimetres, and it is `WeaponDef::muzzle_forward_m`, which the
+/// registry authors per class as the distance from the grip to the muzzle:
+/// **0.12** for a pistol and **0.25** for the next-shortest thing in the file, an
+/// SMG (`weapons.toml`'s own per-class table). So the threshold sits in a
+/// thirteen-centimetre gap and is not delicate.
+///
+/// It is a derived rule and not an eighty-sixth column because the barrel length
+/// IS the fact being asked about — "is this thing held in one hand or braced
+/// against a shoulder" — and a second column would be a place for the two to
+/// disagree the first time somebody authored a weapon and forgot it.
+pub const PISTOL_MUZZLE_M: f64 = 0.15;
+
+/// **Which ALS overlay and which aim sweep a weapon wears** (wave WPN2b) —
+/// `(overlay state, aim sweep state)`, both by the names
+/// `inf_anim::als::LOCOMOTION_MAP` gives them.
+///
+/// # An EMPTY pair of hands wears nothing, and that is a measured refusal
+///
+/// This wave's brief asked for [`inf_anim::als::OVERLAY_DEFAULT_STATE`] on every
+/// idle — ALS layers a stance variation at all times, and the reading was that
+/// the engine's idle arms hang wide because none was layered here. It was
+/// measured on the island's own hero and it is **the wrong way round**:
+///
+/// | | left | right |
+/// |---|---|---|
+/// | the idle, as it ships | 18.07 deg | 18.07 deg |
+/// | with `overlay_default` layered | 18.37 deg | 19.93 deg |
+///
+/// The arms go **out** by 0.30 and 1.86 degrees, and a stance ALS ships
+/// symmetric comes out 1.56 degrees apart on this rig — enough to red
+/// `char1b_gate`'s own asymmetry arm, which exists to catch a track landing on a
+/// bone it does not name. And this is the SECOND time it has been measured: the
+/// CHAR1b.1 audit wrote the same finding on the donor's rig beside the map row
+/// itself (`inf_anim::als`, the `overlay_default` slot — 13.59 deg becoming
+/// 14.82/14.46), together with the real cause of the wide arms, which was a clip
+/// bound to the wrong rig and was fixed there.
+///
+/// So an unarmed character wears **no** overlay unless it names one, and a
+/// character that names one gets exactly what it named. That closes the gap that
+/// was actually open — nothing drove an overlay stack at all — without making
+/// every idle in the game measurably worse to satisfy a sentence.
+///
+/// A **melee** weapon wears nothing either. There is no ALS knife pose set in
+/// the imported catalogue and a character holding a bat with a rifle's arms
+/// would be worse than one holding it with its own.
+pub fn overlay_states_for(def: Option<&WeaponDef>) -> (&'static str, &'static str) {
+    let Some(def) = def else {
+        return ("", "");
+    };
+    if def.is_melee() {
+        return ("", "");
+    }
+    if def.muzzle_forward_m <= PISTOL_MUZZLE_M {
+        (
+            inf_anim::als::OVERLAY_PISTOL_2H_STATE,
+            inf_anim::als::AIM_PISTOL_2H_STATE,
+        )
+    } else {
+        (
+            inf_anim::als::OVERLAY_M4A1_STATE,
+            inf_anim::als::AIM_M4A1_STATE,
+        )
+    }
+}
+
 // ── the component ───────────────────────────────────────────────────────────
 
 /// **A shooter's feel**, a runtime component — installed beside [`WeaponState`]

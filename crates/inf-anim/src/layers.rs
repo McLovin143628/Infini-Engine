@@ -171,6 +171,71 @@ impl JointMask {
         Some(Self::from_subtree(name, skeleton, spine, 1.0, 0.0))
     }
 
+    /// **BOTH ARMS AND NOTHING ELSE** (wave WPN2b) — the mask an ALS *overlay*
+    /// pose set lives on.
+    ///
+    /// Rooted at each **clavicle** (or, on a rig with none, each upper arm), so
+    /// the two shoulder subtrees are in — upper arm, forearm, hand, every
+    /// finger — and the spine, the neck, the head, the pelvis and the legs are
+    /// out.
+    ///
+    /// # Why not [`upper_body`](Self::upper_body)
+    ///
+    /// An overlay is a **blend**, not an additive: a character carrying a rifle
+    /// wears the rifle's arms rather than its own plus a delta. On the
+    /// upper-body mask that would replace the SPINE too, and the spine is where
+    /// the locomotion's lean, the cover peek and the aim offset all live — so a
+    /// character holding a rifle would stop leaning into its own run. ALS's own
+    /// overlay layering is per-bone for exactly this reason
+    /// (`Layering_Arm_L` / `Layering_Arm_R`, which
+    /// [`from_subtree`](Self::from_subtree)'s doc has named since P29.2).
+    ///
+    /// `None` for a rig whose role table names no arm at all, on
+    /// [`upper_body`](Self::upper_body)'s terms: a mask that guessed would
+    /// confine an overlay to whatever the guess picked, silently.
+    pub fn arms(
+        name: impl Into<String>,
+        skeleton: &Skeleton,
+        roles: crate::roles::RoleIndex<'_>,
+    ) -> Option<Self> {
+        use crate::roles::{BoneRoleKind, BoneSide};
+        let mut roots: Vec<u16> = Vec::new();
+        for side in [BoneSide::Left, BoneSide::Right] {
+            if let Some(j) = roles
+                .first(BoneRoleKind::Clavicle, side)
+                .or_else(|| roles.first(BoneRoleKind::UpperArm, side))
+            {
+                roots.push(j);
+            }
+        }
+        if roots.is_empty() {
+            return None;
+        }
+        let joints = skeleton.joints();
+        let mut inside = vec![false; joints.len()];
+        for r in roots {
+            if let Some(slot) = inside.get_mut(r as usize) {
+                *slot = true;
+            }
+        }
+        // One forward pass: the skeleton is topologically ordered, so a parent
+        // is always already resolved when its child is reached
+        // (`from_subtree`'s own argument, twice over).
+        for (i, j) in joints.iter().enumerate() {
+            if let Some(p) = j.parent {
+                if inside.get(p as usize).copied().unwrap_or(false) {
+                    inside[i] = true;
+                }
+            }
+        }
+        let rows = inside
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(i, _)| (i as u16, 1.0));
+        Some(Self::new(name, rows, 0.0))
+    }
+
     /// Read an authored [`BlendProfile`] as a mask.
     ///
     /// The conversion is where the two meanings meet, so it takes `default` from

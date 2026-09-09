@@ -61,6 +61,47 @@ pub const THROW_OVER_STATE: &str = "throw_over";
 /// See [`THROW_OVER_STATE`].
 pub const THROW_UNDER_STATE: &str = "throw_under";
 
+/// **The stance overlay every character wears** (wave WPN2b) —
+/// `ALS_StanceVariation_Normal`, layered over the idle through the upper-body
+/// mask.
+///
+/// ALS layers a stance variation at ALL times and this engine layered none,
+/// which is the CHAR1b.1 audit's own finding: the idle's arms hang wide because
+/// nothing was bringing them in. `inf_ecs::pose`'s overlay pass is the reader.
+pub const OVERLAY_DEFAULT_STATE: &str = "overlay_default";
+
+/// **The long-gun overlay** (wave WPN2b) — `ALS_Props_M4A1_Poses`, worn by
+/// every weapon in the registry whose barrel is not a handgun's.
+pub const OVERLAY_M4A1_STATE: &str = "overlay_m4a1";
+
+/// **The two-handed pistol overlay** (wave WPN2b) —
+/// `ALS_Props_Pistol_2H_Poses`, worn by the registry's ten handguns.
+///
+/// Two-handed and not `overlay_pistol_1h`, which is still reachable and still
+/// undriven: a modern shooter holds a sidearm with both hands, and the one-handed
+/// set is the casual carry an author asks for by name through
+/// `CharacterMovement::overlay`.
+pub const OVERLAY_PISTOL_2H_STATE: &str = "overlay_pistol_2h";
+
+/// **The long-gun aim sweep** (wave WPN2b) — `ALS_Props_M4A1_Aim_Sweep` and its
+/// crouched sample, layered in as the aim-down-sights blend comes up.
+pub const AIM_M4A1_STATE: &str = "aim_m4a1";
+
+/// **The two-handed pistol aim sweep** (wave WPN2b).
+pub const AIM_PISTOL_2H_STATE: &str = "aim_pistol_2h";
+
+/// **The coordinate a weapon aim sweep's STANDING sample sits at** (wave WPN2b).
+///
+/// The prop sweeps are two-sample blend spaces — `[0, 0]` standing and
+/// `[0, -1]` crouched (see the rows below) — so their second axis is the STANCE
+/// and not the pitch, which is what the look sweep's is. Driving one with the
+/// other's coordinate would make a character aiming downhill crouch, and that is
+/// the reason the two are separate constants rather than one.
+pub const WEAPON_SWEEP_STANDING: [f64; 2] = [0.0, 0.0];
+
+/// **The coordinate a weapon aim sweep's CROUCHED sample sits at** (wave WPN2b).
+pub const WEAPON_SWEEP_CROUCHED: [f64; 2] = [0.0, -1.0];
+
 /// The blend coordinate the look sweep's **neutral** sits at — the pose the
 /// additive delta is measured from.
 ///
@@ -777,7 +818,7 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
     // about a degree. The wide arms were a clip bound to the wrong rig; see
     // `ue_import::rebind_locomotion_graph`.
     LocoSlot {
-        state: "overlay_default",
+        state: OVERLAY_DEFAULT_STATE,
         mode: LocoMode::Grounded,
         kind: SlotKind::Overlay,
         looping: false,
@@ -813,7 +854,7 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
     },
     // ── the weapon overlays (WPN1's items; the additive layer plays them) ─────
     LocoSlot {
-        state: "overlay_m4a1",
+        state: OVERLAY_M4A1_STATE,
         mode: LocoMode::Grounded,
         kind: SlotKind::Overlay,
         looping: false,
@@ -827,7 +868,7 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         clips: &[("ALS_Props_Pistol_1H_Poses", O)],
     },
     LocoSlot {
-        state: "overlay_pistol_2h",
+        state: OVERLAY_PISTOL_2H_STATE,
         mode: LocoMode::Grounded,
         kind: SlotKind::Overlay,
         looping: false,
@@ -881,7 +922,7 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         ],
     },
     LocoSlot {
-        state: "aim_m4a1",
+        state: AIM_M4A1_STATE,
         mode: LocoMode::Grounded,
         kind: SlotKind::AimSweep,
         looping: false,
@@ -901,7 +942,7 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         ],
     },
     LocoSlot {
-        state: "aim_pistol_2h",
+        state: AIM_PISTOL_2H_STATE,
         mode: LocoMode::Grounded,
         kind: SlotKind::AimSweep,
         looping: false,
