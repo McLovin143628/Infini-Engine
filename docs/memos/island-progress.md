@@ -37568,7 +37568,8 @@ position, because at 900 m/s a round crosses 3.75 m in a sub-step and 15 m in a
 fixed step — a point test never lands inside four metres of an ear. Measured:
 2 m passes crack (at **2.46 m**, placed at the closest point beside the ear
 rather than at the muzzle forty metres back), 10 m do not, and the AS VAL at
-295 m/s never does, by physics rather than by a flag. The latch is folded into
+330 m/s -- the registry's own number for it -- never does, by physics
+rather than by a flag. The latch is folded into
 the round's trace bytes (**81 → 82**) because it is a latch over history rather
 than a function of the positions beside it.
 
@@ -37612,7 +37613,7 @@ dropped** over two minutes.
 whole gameplay phase, 6.7 audio commands a step, 66.3 casing rays a step, peak
 128 casings.
 
-`wpn2c_gate` is **15 arms**, and its own first drafts found five things: a probe
+`wpn2c_gate` is **17 arms**, and its own first drafts found five things: a probe
 that counted its shooter, a crack arm that fired a burst and read four cracks
 where it asserted one, a ring one shooter cannot fill, a thirty-round burst that
 was only two seconds long, and a two-minute firefight with one minute of

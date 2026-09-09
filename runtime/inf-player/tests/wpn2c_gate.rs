@@ -733,7 +733,13 @@ fn a_supersonic_round_cracks_within_four_metres_and_a_subsonic_one_never_does() 
         ("m4a1", 900.0, 2.0, true),
         ("m4a1", 900.0, 10.0, false),
         // The AS VAL is deliberately subsonic; it is silent by physics.
-        ("as_val", 295.0, 2.0, false),
+        // 330 m/s is the REGISTRY's own number for it
+        // (`weapons.toml`, `[as_val.weapon] muzzle_speed_mps`), not a
+        // convenient one: an arm that names a weapon and then invents its
+        // muzzle speed proves something about a number nobody ships. It is
+        // 13 m/s under the speed of sound, which is the margin the row was
+        // authored with and the margin this arm is entitled to assert.
+        ("as_val", 330.0, 2.0, false),
     ] {
         let mut def = test_rifle();
         def.muzzle_speed_mps = v0;
