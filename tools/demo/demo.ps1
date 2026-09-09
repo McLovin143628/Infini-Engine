@@ -868,6 +868,68 @@ if ($armList.Count -eq 0 -and $inHand) {
     [InfInput]::Look(0, -320)
     Start-Sleep -Milliseconds 400
     Restore-PlayerFocus "after the brass leg"
+    # ----------------------------------------------------- WPN2c AUDIT: THE PIXELS
+    # (6) THE BRASS, CLOSE ENOUGH TO SEE. The three frames above are TRIGGERED on
+    #     the casing column and are honest about the sim -- and at a 1.2-3 m
+    #     third-person boom a 19 mm casing is one or two pixels, so
+    #     `100-brass-on-the-ground.png` is a photograph of a road with the brass
+    #     below the resolution of the claim its caption makes. That is the
+    #     CHAR1b.2 caption law's shape, and the fix is a camera and not a
+    #     caption.
+    #
+    #     FIRST PERSON (G) puts the eye at ~1.6 m instead of on a boom, and
+    #     looking down 60-70 degrees fills the frame with the road the shells are
+    #     on: a 19 mm case at 1.7 m is ~7 px of a 715-line window, which crops
+    #     and diffs.
+    #
+    #     THE CONTROL FRAME is what makes it a measurement rather than a better
+    #     picture. `101` is the same camera, same pose, with `casings == 0` --
+    #     so `101` against `103` is a pixel difference that can only be the
+    #     brass. A leg with no control frame cannot tell "the casings are drawn"
+    #     from "the road has speckles in its texture", and this road does.
+    Say "WPN2c-AUDIT: the brass, close enough to see"
+    [InfInput]::Down(0x22); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x22)   # G: first person
+    $fp = @(Wait-ForHero -Csv $heroCsv -What "the first-person seat" -TimeoutS 5.0 `
+        -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -lt 0.4) })[-1]
+    if (-not $fp) { Say "WPN2c-AUDIT: no first-person seat -- the close-up is on the boom" }
+    # Down, in steps: one big `Look` is a single mouse delta the camera clamps.
+    for ($i = 0; $i -lt 6; $i++) { [InfInput]::Look(0, 120); Start-Sleep -Milliseconds 40 }
+    Start-Sleep -Milliseconds 600
+    # THE CONTROL: this exact camera with an empty road. A casing lives eight
+    # seconds, so this waits the last burst out rather than sleeping a guess.
+    $clean = @(Wait-ForHero -Csv $heroCsv -What "the road with no brass on it (the control)" -TimeoutS 14.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -eq 0) } `
+        -Out (Join-Path $OutDir "101-road-before-the-brass.png"))[-1]
+    if (-not $clean) { Say "WPN2c-AUDIT: the road never emptied -- 101 is not a control" }
+    $closeFired = 0
+    for ($t = 0; $t -lt 10; $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 40; [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 95
+        $closeFired++
+    }
+    $airClose = @(Wait-ForHero -Csv $heroCsv -What "brass in the air, close ($closeFired rounds)" -TimeoutS 2.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "102-brass-airborne-close.png"))[-1]
+    if (-not $airClose) { Say "WPN2c-AUDIT: no casing was live for the airborne close-up" }
+    # …and settled. A case bounces once and stops on its second contact, which is
+    # well inside a second; this waits for the fall and photographs the floor.
+    Start-Sleep -Milliseconds 1800
+    $floorClose = @(Wait-ForHero -Csv $heroCsv -What "brass on the road, close" -TimeoutS 3.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "103-brass-on-the-road-close.png"))[-1]
+    if (-not $floorClose) { Say "WPN2c-AUDIT: the brass was gone before the close floor frame" }
+    # One from the ejection side: the port throws right, so a quarter turn that
+    # way is where a pile of it is.
+    [InfInput]::Look(240, -140); Start-Sleep -Milliseconds 700
+    $side = @(Wait-ForHero -Csv $heroCsv -What "the brass from the ejection side" -TimeoutS 3.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "104-brass-from-the-ejection-side.png"))[-1]
+    if (-not $side) { Say "WPN2c-AUDIT: no brass was live for the side frame" }
+    [InfInput]::Look(-240, -580)
+    Start-Sleep -Milliseconds 300
+    [InfInput]::Down(0x22); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x22)   # G: back to third person
+    Start-Sleep -Milliseconds 400
+    Restore-PlayerFocus "after the close-up leg"
 }
 
 # **FOUR NAMED FRAMES, not two anonymous ones** (wave CHAR1a.2). A wave that is
