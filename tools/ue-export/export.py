@@ -190,6 +190,40 @@ PACKS = [
             {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/Ammunition",
              "classes": ["StaticMesh"], "match": r"(?i)^SM_Shell_.*_Empty$",
              "limit": 16},
+            # ── wave WPN2d: THE GUNS THEMSELVES ─────────────────────────────
+            #
+            # Eleven static meshes, one per row of `inf_ecs::weapon::
+            # WEAPON_MESH_KEYS` plus the four accessories an attachment draws.
+            # Each selector is EXACT (`^SM_X$`) rather than a sweep, for the
+            # reason the character packs' are: which mesh is the assault rifle
+            # is a decision, not a sample -- and the `_X`/`_Y` suffixes in this
+            # pack are two dressings of one weapon rather than two weapons.
+            #
+            # The magazines are deliberately NOT here. A magazine is a child
+            # mesh on a socket this engine's weapon entity does not publish
+            # (there is no `Magazine` slot in `step_accessories`' offsets), so
+            # importing one would be bytes with no reader.
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/AR4",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_AR4$", "limit": 1},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/Ka47",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_KA47$", "limit": 1},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/KA74U",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_KA74U_X$", "limit": 1},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/KA_Val",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_KA_Val_(X|Y)$",
+             "limit": 2},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/SMG11",
+             "classes": ["StaticMesh"],
+             "match": r"(?i)^SM_SMG11_(X|Nostock_X)$", "limit": 2},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/M9_Knife",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_M9_Knife$",
+             "limit": 1},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/G67_Grenade",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_G67$", "limit": 1},
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/Accessories",
+             "classes": ["StaticMesh"],
+             "match": r"(?i)^SM_(Scope_25x56_X|Suppressor5|T4_Sight|Vertgrip)$",
+             "limit": 4},
         ],
     },
     {

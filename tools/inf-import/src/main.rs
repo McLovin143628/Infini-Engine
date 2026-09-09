@@ -10,6 +10,7 @@
 //!            [--no-meshes]               materials and textures only
 //!            [--character-lods <n>]      LOD rungs to store per character (default 3)
 //!            [--retarget-to <objpath>]   the rig every clip is retargeted onto
+//!            [--rebind-mesh <Stem>=<key>] write that RIGID mesh at <Stem>'s GUID
 //!            [--rebind-character <key>]  write that body at the starter GUIDs
 //!            [--rebind-character-f <key>] …and that one at the FEMALE starter's
 //!            [--only <key substring>]…    import only meshes whose key matches
@@ -119,6 +120,18 @@ fn run(args: &[String]) -> Result<(), String> {
                     .split_once('=')
                     .ok_or_else(|| format!("--bind wants <Stem>=<material-key>, got {v:?}"))?;
                 opts.rebinds.push((stem.to_string(), key.to_string()));
+            }
+            // **Wave WPN2d.** `--bind` writes a MATERIAL at a committed stem's
+            // GUID; this writes a rigid MESH at one. Two flags because the two
+            // identities are derived by two different Ring-0 functions and a
+            // single flag would have to guess which.
+            "--rebind-mesh" => {
+                let v = take(&mut i)?;
+                let (stem, key) = v.split_once('=').ok_or_else(|| {
+                    format!("--rebind-mesh wants <Stem>=<mesh-key>, got {v:?}")
+                })?;
+                opts.rebind_meshes
+                    .push((stem.to_string(), key.to_string()));
             }
             "--no-meshes" => opts.meshes = false,
             "--character-lods" => {

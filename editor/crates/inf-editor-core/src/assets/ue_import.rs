@@ -101,6 +101,23 @@ pub struct UeImportOptions {
     /// **clip** is retargeted onto. `None` uses the first skeleton the run
     /// imports, which is right when the manifest carries one body.
     pub retarget_to: Option<String>,
+    /// **`(committed stem, manifest mesh key)` — write an imported RIGID mesh
+    /// at the identity that stem derives** (wave WPN2d).
+    ///
+    /// [`rebind_character`]'s arrangement for a prop rather than a body, and for
+    /// its reason exactly: the engine's weapon catalogue names its art by a
+    /// GUID derived from a NAME (`inf_ecs::weapon::weapon_mesh_guid`), that
+    /// catalogue is committed, and the meshes are licensed content that may
+    /// never enter the repository. So the importer writes the imported mesh at
+    /// the committed identity, into the local project only, and a checkout
+    /// without the art resolves the identity to nothing and draws the
+    /// placeholder.
+    ///
+    /// The stem is the ART KEY (`SM_AR4`), not a file name: the file is written
+    /// as `<stem>.inf_mesh` in the project ROOT beside the starter body, which
+    /// is where a rebind's products live and where the asset scan finds one
+    /// asset rather than two claiming one id.
+    pub rebind_meshes: Vec<(String, String)>,
     /// The manifest key of the skeletal mesh to write **at the starter
     /// character's committed GUIDs** — the REBIND, for a body.
     ///
@@ -171,6 +188,7 @@ impl Default for UeImportOptions {
             meshes: true,
             character_lods: 3,
             retarget_to: None,
+            rebind_meshes: Vec::new(),
             rebind_character: None,
             rebind_character_f: None,
             only: Vec::new(),
@@ -614,6 +632,38 @@ pub fn import_manifest(
             report
                 .meshes
                 .push((mesh.key.clone(), id, mesh.lods.len(), tris));
+            // **THE RIGID REBIND** (wave WPN2d) — write this mesh a second time
+            // at the identity a committed name derives, so a level that names
+            // that identity draws licensed art it never references by path.
+            // `rebind_character`'s arrangement, for a prop.
+            for (stem, key) in &opts.rebind_meshes {
+                if key != &mesh.key {
+                    continue;
+                }
+                let want = AssetId(inf_ecs::weapon::weapon_mesh_guid(stem));
+                let payload: inf_mesh::MeshAsset = project.load_payload(id)?;
+                // The materials the mesh's own slot table names — the same edge
+                // set `rebind_character` builds, so a cook that packs the
+                // committed identity packs its skins with it.
+                let deps: Vec<AssetId> = {
+                    let mut out: Vec<AssetId> = Vec::new();
+                    for m in payload.material_slot_assets.iter().flatten() {
+                        if !out.contains(m) {
+                            out.push(*m);
+                        }
+                    }
+                    out
+                };
+                let path = project.root().join(format!("{stem}.inf_mesh"));
+                project.write_asset_at_with_id(&path, &payload, want, deps, None)?;
+                report.rebinds.push((format!("{stem}.inf_mesh"), want));
+                report.asset_packs.push((want, mesh.pack.clone()));
+                report.advisories.push(format!(
+                    "rebind: {} -> {stem}.inf_mesh at {}",
+                    mesh.key,
+                    want.0
+                ));
+            }
         }
     }
 
