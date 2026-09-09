@@ -779,20 +779,47 @@ fn a_lock_holds_for_lock_s_and_releases_outside_the_cone() {
 /// guided round flies as straight as the dumb one).
 #[test]
 fn a_locked_round_follows_its_target_and_an_unlocked_one_does_not() {
-    let miss_by = |lock: bool| -> f64 {
-        let mut r = Range::new(registry());
-        // The car is 25 m off to the side and 40 m out: a straight shot along
-        // the aim line misses it by 25 m.
-        car(&mut r.world, DVec3::new(25.0, 1.0, 40.0));
+    // **THE CAR IS OFF THE AIM LINE AND INSIDE THE CONE**, which is the whole
+    // fixture. The Javelin's cone is 10 degrees, so at 40 m a target 3 m to the
+    // side is inside it and OFF the line the shot leaves along: a dumb round
+    // flies down `+Z` and misses by three metres, and only guidance brings one
+    // back. This arm's first draft aimed straight AT the car, where a dumb round
+    // is as accurate as a guided one and both missed by 5.11 m — the arm passed
+    // and measured nothing.
+    // **AND ITS GRAVITY IS OFF, IN THE FIXTURE ONLY.** A guided missile that
+    // drops on the way is measuring two things at once — how fast it can turn
+    // and how far it falls — and the second is `advance_round`'s, already
+    // measured by `wpn2a_gate`'s own drop table. With `gravity_scale = 0` the
+    // only thing that can move this round off the line it left on is the
+    // guidance, which is what the arm names.
+    let mut defs = registry();
+    {
+        let mut flat = row("javelin_fgm148");
+        flat.gravity_scale = 0.0;
+        assert!(defs.insert(ItemDef {
+            id: "javelin_flat".into(),
+            label: "Javelin (level)".into(),
+            stack_max: 1,
+            mass_kg: 7.0,
+            weapon: Some(flat),
+            mesh: None,
+        }));
+    }
+    let miss_by = |lock: bool| -> (bool, f64) {
+        let mut r = Range::new(defs.clone());
+        car(&mut r.world, DVec3::new(3.0, 1.0, 40.0));
         r.resync();
-        r.arm(HERO, "javelin_fgm148");
-        // Aim AT the car so the lock can acquire…
-        let yaw = 25.0f64.atan2(40.0).to_degrees();
+        r.arm(HERO, "javelin_flat");
+        let yaw = 0.0;
         for _ in 0..140 {
             r.aim(HERO, yaw, 0.0);
             r.step();
         }
-        assert_eq!(r.state(HERO).lock_target, CHASSIS);
+        assert_eq!(
+            r.state(HERO).lock_target,
+            CHASSIS,
+            "a car 3 m off a 40 m shot is inside a 10 degree cone and was not locked"
+        );
         if !lock {
             // …then take the lock away, leaving the same aim.
             let e = r.world.entity_of(HERO).expect("the hero");
@@ -814,26 +841,38 @@ fn a_locked_round_follows_its_target_and_an_unlocked_one_does_not() {
             !lock,
             "the round's guide does not match the lock"
         );
-        let target = DVec3::new(25.0, 1.0, 40.0);
+        // **DID IT HIT THE CAR** — the question, and it is asked of the world
+        // rather than of a sampled distance. A missile crosses three metres a
+        // FIXED STEP at this speed, so the closest SAMPLE is a number about the
+        // sampling rate: this arm's own first draft read 4.649 m for a round
+        // that struck the car and 3.241 for one that sailed past it, and called
+        // the second one better.
+        let target = DVec3::new(3.0, 1.0, 40.0);
         let mut closest = f64::INFINITY;
+        let mut hit = false;
         for _ in 0..240 {
             for round in r.rounds() {
                 closest = closest.min((round.at - target).length());
             }
-            r.step();
+            let rep = r.step();
+            if rep.hits.iter().any(|h| h.target == Some(CHASSIS)) {
+                hit = true;
+            }
         }
-        closest
+        (hit, closest)
     };
-    let guided = miss_by(true);
-    let dumb = miss_by(false);
-    println!("the Javelin: guided came within {guided:.2} m, unguided {dumb:.2} m");
-    assert!(
-        guided < dumb,
-        "the guided round ({guided:.2} m) did no better than the dumb one ({dumb:.2} m)"
+    let (guided_hit, guided) = miss_by(true);
+    let (dumb_hit, dumb) = miss_by(false);
+    println!(
+        "the Javelin at a car 3 m off a 40 m shot: guided hit={guided_hit}          (closest sample {guided:.3} m), unguided hit={dumb_hit} (closest sample          {dumb:.3} m)"
     );
     assert!(
-        guided < 8.0,
-        "a guided missile missed a stationary car by {guided:.2} m"
+        guided_hit,
+        "the guided missile did not reach the car it was locked onto"
+    );
+    assert!(
+        !dumb_hit,
+        "the UNGUIDED round hit a car three metres off the line it was fired          along — the fixture is not measuring guidance"
     );
 }
 

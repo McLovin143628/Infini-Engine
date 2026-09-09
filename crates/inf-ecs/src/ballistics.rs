@@ -543,20 +543,32 @@ pub fn advance_round(at: DVec3, velocity: DVec3, def: &WeaponDef, sub_dt: f64) -
 /// **Steer a guided round toward a bearing**, as a pure function: the new
 /// velocity (wave WPN2d).
 ///
-/// # It is a lerp, not a rotation, and that is the P14 law
+/// # It is a bounded step across the TANGENT, not a rotation, and that is the
+/// P14 law
 ///
 /// A rotation toward a bearing is `acos` of a dot product and an axis-angle
 /// quaternion, which is two transcendentals on a path that reaches
-/// [`round_state_bytes`]. What this does instead is move the velocity's
-/// DIRECTION a bounded fraction of the way toward the bearing and renormalise --
-/// `+ - * /` and one `sqrt`, which IEEE-754 specifies exactly and
-/// `inf_math::libm_ban`'s own header names as deliberately not banned.
+/// [`round_state_bytes`]. What this does instead is decompose the wanted
+/// direction into the part ALONG the current one and the part ACROSS it, step
+/// the direction across by a bounded amount, and renormalise -- `+ - * /` and
+/// one `sqrt`, which IEEE-754 specifies exactly and `inf_math::libm_ban`'s own
+/// header names as deliberately not banned.
 ///
-/// The bound is [`GUIDANCE_TURN_DPS`] expressed as that fraction: at `dt` the
-/// most the direction may move is `turn_dps * dt / 180`, i.e. the whole way at
-/// half a second of turn budget. It is deliberately an approximation of a
-/// rotation rather than one -- the quantity a player can see is *how fast the
-/// missile can follow*, and a lerp bound is that, exactly, at both ends.
+/// The bound is [`GUIDANCE_TURN_DPS`] in RADIANS of turn per second, which is
+/// what a turn rate is: adding `across_unit * theta` to a unit direction and
+/// renormalising turns it by `atan(theta)`, which is `theta` to within a part in
+/// ten thousand at the 0.375 degrees a sub-step of this budget buys. The step is
+/// also capped at the tangent of the angle that is actually left
+/// (`across / along`), so a round pointing nearly at its target does not
+/// overshoot it and oscillate.
+///
+/// **It was a LERP toward the bearing, and that was wrong by two orders of
+/// magnitude.** A lerp fraction `f` moves a direction by roughly `f x (the angle
+/// remaining)`, so a bound expressed as a fraction turns *slower the closer it
+/// gets* -- at the shipped 90 deg/s and four sub-steps it was 1.9 deg/s against
+/// a target four degrees off. Measured by the arm that found it: a guided
+/// Javelin came within **2.983 m** of a car three metres off its line and an
+/// unguided one within 3.212, which is a missile that is not guided.
 ///
 /// Speed is preserved: a guided round loses nothing by turning, which is what
 /// makes the top-attack profile arrive rather than stall.
@@ -569,9 +581,28 @@ pub fn guide_velocity(velocity: DVec3, toward: DVec3, turn_dps: f64, dt: f64) ->
     if want == DVec3::ZERO || !dt.is_finite() || dt <= 0.0 {
         return velocity;
     }
-    let t = (turn_dps.max(0.0) * dt / 180.0).clamp(0.0, 1.0);
     let dir = velocity / speed;
-    let blended = (dir + (want - dir) * t).normalize_or_zero();
+    let along = dir.dot(want);
+    let across = want - dir * along;
+    let reach = across.length();
+    if reach <= 1e-12 {
+        // Already pointing at it, or exactly away from it — and "exactly away"
+        // has no plane to turn in, so the honest answer is to keep flying.
+        return velocity;
+    }
+    // Degrees to radians is a multiply by a constant; there is no trigonometry
+    // here and the P14 ban has nothing to object to.
+    let budget = (turn_dps.max(0.0) * dt) * (std::f64::consts::PI / 180.0);
+    // The tangent of what is LEFT, so a round nearly on target steps exactly on
+    // to it rather than past it. A target behind the round has no finite
+    // tangent and takes the whole budget.
+    let left = if along > 1e-9 {
+        reach / along
+    } else {
+        f64::INFINITY
+    };
+    let step = budget.min(left);
+    let blended = (dir + (across / reach) * step).normalize_or_zero();
     if blended == DVec3::ZERO {
         return velocity;
     }
