@@ -51,7 +51,7 @@
 /// single floor would either be vacuous for the big three or unreachable for it.
 /// The guard exists so the ban cannot pass by scanning a file that has been
 /// emptied out from under it.
-const CHARACTER_PATH: [(&str, &str, &str, usize); 8] = [
+const CHARACTER_PATH: [(&str, &str, &str, usize); 9] = [
     (
         "d3/camera.rs",
         include_str!("../src/d3/camera.rs"),
@@ -100,11 +100,17 @@ const CHARACTER_PATH: [(&str, &str, &str, usize); 8] = [
         "wave WPN2a: the segment casts, the damage curve's call site and the head sphere all decide what a shot did, and the answer reaches `apply_hit`, the trace and the witness log",
         400,
     ),
+    (
+        "inf-ecs/src/feel.rs",
+        include_str!("../../inf-ecs/src/feel.rs"),
+        "wave WPN2b: the recoil springs are folded into `state_bytes` and their POSITION is the aim the next round leaves along, so a spring that disagreed in the last ulp on two machines would put two bullets in different people -- and the sway reaches `pose_state_bytes` through the hold point, which is the section every character parity gate compares",
+        120,
+    ),
 ];
 
 /// A marker that must be present in each file, so the gate cannot pass because
 /// it is scanning something that is no longer the module it names.
-const ANCHORS: [(&str, &[&str]); 8] = [
+const ANCHORS: [(&str, &[&str]); 9] = [
     ("d3/camera.rs", &["inf_ecs::camera::", "cast_shape_where("]),
     (
         "d3/movement.rs",
@@ -142,6 +148,18 @@ const ANCHORS: [(&str, &[&str]); 8] = [
     (
         "d3/gameplay.rs",
         &["fn step_rounds(", "cast_ray_where(", "fn shot_exclusions("],
+    ),
+    // Wave WPN2b. `discrete_peak_gain` is the integrator the springs are
+    // calibrated against and `sway_offset` is the one place a trigonometric
+    // function is called at all -- through `psin64`, which is what makes the
+    // ban above a rule this file obeys rather than one it happens not to break.
+    (
+        "inf-ecs/src/feel.rs",
+        &[
+            "fn discrete_peak_gain(",
+            "fn sway_offset(",
+            "inf_math::psin64(",
+        ],
     ),
 ];
 

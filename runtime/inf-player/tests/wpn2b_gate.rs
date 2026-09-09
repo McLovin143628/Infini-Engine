@@ -601,13 +601,17 @@ fn a_five_round_burst_raises_the_aim_and_it_returns() {
     }
     let after = r.aim_pitch();
     println!("=== the burst, a 3.8-recoil AR at 600 rpm, degrees of aim pitch ===");
-    println!("  one round, peak        {one_peak:.4} deg (home to {one_home:.6})");
-    for (n, at) in &table {
-        println!("  five rounds, peak by {n}  {at:.4} deg");
-    }
-    println!("  the burst's peak       {peak:.4} deg");
     println!(
-        "  home to                {:.6} deg after {:.3} s",
+        "  {:<22}{one_peak:.4} deg (home to {one_home:.6})",
+        "one round, peak"
+    );
+    for (n, at) in &table {
+        println!("  {:<24}{at:.4} deg", format!("five rounds, peak by {n}"));
+    }
+    println!("  {:<24}{peak:.4} deg", "the burst's peak");
+    println!(
+        "  {:<24}{:.6} deg after {:.3} s",
+        "home to",
         after - before,
         settle_steps.map(|s| f64::from(s) * DT).unwrap_or(f64::NAN)
     );
@@ -629,7 +633,7 @@ fn a_five_round_burst_raises_the_aim_and_it_returns() {
     let sum: f64 = (1..=6)
         .map(|shot| profile.peaks(test_rifle().spread_seed, shot).1)
         .sum();
-    println!("  the profile's own sum  {sum:.4} deg");
+    println!("  {:<24}{sum:.4} deg", "the profile's own sum");
     assert!(
         peak < sum,
         "the aim climbed {peak:.4} deg against a profile sum of {sum:.4} - more than every impulse together is not recovery, it is drift"
@@ -737,22 +741,26 @@ fn the_reticle_stays_on_the_aim_line_through_a_burst() {
     let px = 1080.0 / 55.0;
     println!("=== the reticle against the aim, degrees and 1080p pixels at a 55 deg field ===");
     println!(
-        "  at rest, before the burst  {rest_before:.6} deg  ({:.2} px)",
+        "  {:<27}{rest_before:.6} deg ({:.2} px)",
+        "at rest, before the burst",
         rest_before * px
     );
     println!(
-        "  worst DURING the burst     {recoil_worst:.6} deg  ({:.2} px)",
+        "  {:<27}{recoil_worst:.6} deg ({:.2} px)",
+        "worst DURING the burst",
         recoil_worst * px
     );
     println!(
-        "  a 120 deg/s mouse, worst   {mouse_worst:.6} deg  ({:.2} px)",
+        "  {:<27}{mouse_worst:.6} deg ({:.2} px)",
+        "a 120 deg/s mouse, worst",
         mouse_worst * px
     );
     println!(
-        "  at rest, after the burst   {rest_after:.6} deg  ({:.2} px)",
+        "  {:<27}{rest_after:.6} deg ({:.2} px)",
+        "at rest, after the burst",
         rest_after * px
     );
-    println!("  the aim, after the burst   {aim_after:.6} deg");
+    println!("  {:<27}{aim_after:.6} deg", "the aim, after the burst");
     // **Against the rest error, not against zero** (mutation M2 found this):
     // dropping the aim delta in `step_weapon_feel` leaves the camera perfectly
     // still, the error at its 0.0384 deg resting value, and `> 0.0` passes.
@@ -936,7 +944,7 @@ fn the_thirty_round_pattern_orders_ads_then_hip_then_moving() {
         speeds.truncate(30);
         blooms.truncate(30);
         println!(
-            "    (mean speed at the shots {:.3} m/s, mean bloom {:.4} deg)",
+            "  mean speed at the shots {:.3} m/s, mean bloom {:.4} deg",
             speeds.iter().sum::<f64>() / speeds.len().max(1) as f64,
             blooms.iter().sum::<f64>() / blooms.len().max(1) as f64
         );
@@ -952,16 +960,16 @@ fn the_thirty_round_pattern_orders_ads_then_hip_then_moving() {
     let (run_rms, run_worst, _) = pattern(false, false, 5.0);
     println!("=== thirty rounds at {PATTERN_M} m, radius on the wall ===");
     println!(
-        "  ADS + crouched + still  rms {:.4} m, worst {:.4} m",
-        ads_rms, ads_worst
+        "  {:<24}rms {:.4} m, worst {:.4} m",
+        "ADS + crouched + still", ads_rms, ads_worst
     );
     println!(
-        "  hip + still             rms {:.4} m, worst {:.4} m",
-        hip_rms, hip_worst
+        "  {:<24}rms {:.4} m, worst {:.4} m",
+        "hip + still", hip_rms, hip_worst
     );
     println!(
-        "  hip + sprinting         rms {:.4} m, worst {:.4} m",
-        run_rms, run_worst
+        "  {:<24}rms {:.4} m, worst {:.4} m",
+        "hip + sprinting", run_rms, run_worst
     );
     assert!(
         ads_rms > 0.0,
@@ -1103,15 +1111,18 @@ fn the_sway_is_zero_at_rest_and_grows_with_speed() {
     let speed = (v.x * v.x + v.z * v.z).sqrt();
     println!("=== the sway, millimetres of hold point ===");
     println!(
-        "  no clock, dead still   {:.6} mm",
+        "  {:<23}{:.6} mm",
+        "no clock, dead still",
         unbreathing.length() * 1000.0
     );
     println!(
-        "  breathing, still       {:.4} mm (clock {clock:.3} s)",
+        "  {:<23}{:.4} mm (clock {clock:.3} s)",
+        "breathing, still",
         breathing * 1000.0
     );
     println!(
-        "  breathing, {speed:.3} m/s      {:.4} mm",
+        "  {:<23}{:.4} mm",
+        format!("breathing, {speed:.3} m/s"),
         sprinting * 1000.0
     );
     assert!(
@@ -1462,10 +1473,17 @@ fn equipping_a_weapon_changes_the_arms_and_aiming_changes_them_again() {
     let aiming = angle(&r, clav);
     let aiming_upper = angle(&r, upper);
     println!("=== the right shoulder, degrees off its rest pose ===");
-    println!("  unarmed           clavicle {unarmed:.3}, upper arm {unarmed_upper:.3}");
-    println!("  carrying a rifle  clavicle {carrying:.3}, upper arm {carrying_upper:.3}");
     println!(
-        "  aiming it         clavicle {aiming:.3}, upper arm {aiming_upper:.3} (blend {ads:.3})"
+        "  {:<18}clavicle {unarmed:.3}, upper arm {unarmed_upper:.3}",
+        "unarmed"
+    );
+    println!(
+        "  {:<18}clavicle {carrying:.3}, upper arm {carrying_upper:.3}",
+        "carrying a rifle"
+    );
+    println!(
+        "  {:<18}clavicle {aiming:.3}, upper arm {aiming_upper:.3} (blend {ads:.3})",
+        "aiming it"
     );
     assert!(
         ads > 0.99,
@@ -1713,9 +1731,13 @@ fn the_overlay_leaves_the_legs_where_the_locomotion_put_them() {
     let (idle_shoulder, idle_foot) = run(false);
     println!("=== thirty steps after five seconds of settle ===");
     println!(
-        "  with the rifle picked up  shoulder {armed_shoulder:.4} deg, foot {armed_foot:.4} mm"
+        "  {:<26}shoulder {armed_shoulder:.4} deg, foot {armed_foot:.4} mm",
+        "with the rifle picked up"
     );
-    println!("  the same steps, unarmed   shoulder {idle_shoulder:.4} deg, foot {idle_foot:.4} mm");
+    println!(
+        "  {:<26}shoulder {idle_shoulder:.4} deg, foot {idle_foot:.4} mm",
+        "the same steps, unarmed"
+    );
     assert!(
         armed_shoulder > 20.0,
         "the overlay moved the shoulder {armed_shoulder:.4} deg - it is not reaching the pose and the foot arm below is vacuous"
