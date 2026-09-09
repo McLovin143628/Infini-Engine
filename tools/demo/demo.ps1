@@ -1266,10 +1266,20 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
 if ($armList.Count -gt 0) {
     Say "── WPN2a: the hero is armed with $($armList -join ', ') ──"
     Restore-PlayerFocus "the ballistics leg"
-    # Aim UP a little, so the rounds clear the ground and fly for the length of
-    # the shot rather than resolving inside their hitscan threshold against the
-    # pavement two metres away.
-    [InfInput]::Look(0, -140)
+    # Aim UP, so the rounds clear the street and fly for the length of the shot
+    # rather than resolving inside their hitscan threshold against a shop front
+    # twenty metres away. Session 2 of this wave aimed 140 counts up, stood
+    # wherever the camera leg had left it, and fired seven weapons into a
+    # building: seven shots, no round.
+    #
+    # UP TO THE CLAMP FIRST, then back down a fixed amount. `aim_forward` clamps
+    # the pitch at 89.9 degrees, so an over-large look up is a KNOWN elevation
+    # whatever the leg before this one left the aim at — and sessions 4 and 5 of
+    # this wave differed by 19 degrees of head pitch for exactly that reason,
+    # which is what made one of them miss the shotgun's threshold.
+    [InfInput]::Look(0, -900)
+    Start-Sleep -Milliseconds 300
+    [InfInput]::Look(0, 240)
     Start-Sleep -Milliseconds 400
     # ADS: the reticle is drawn only while aiming, and a HUD frame with no
     # reticle in it is a frame of a readout nobody was looking through.
@@ -1284,38 +1294,84 @@ if ($armList.Count -gt 0) {
     # class it never reached takes no frame and says so.
     for ($wi = 0; $wi -lt $armList.Count; $wi++) {
         $wid = $armList[$wi]
-        $onIt = Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped" -TimeoutS 0.6 `
-            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) }
+        # `[-1]` IS LOAD-BEARING and the loop has been getting it wrong. `Say`
+        # writes to the pipeline, so `Wait-ForHero` returns its own log lines
+        # AND its verdict; `$x = Wait-ForHero ...` binds a non-empty ARRAY,
+        # which is truthy whatever the predicate said. Session 2 of this wave
+        # cycled nothing at all because of it and photographed one weapon seven
+        # times. The COV1 cover leg already spells it `@(...)[-1]`; every
+        # capture in this leg does now.
+        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped" -TimeoutS 0.6 `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) })[-1]
+        # BOTH DIRECTIONS, because one notch is not one slot: the wheel axis
+        # scales to more than a single step, so a bag of seven can be walked
+        # past the row you want twelve times running. Session 3 of this wave
+        # missed `remington_870` exactly that way and said so rather than
+        # photographing something else.
         $spins = 0
-        while ((-not $onIt) -and ($spins -lt 12)) {
-            [InfInput]::Wheel(1)
+        while ((-not $onIt) -and ($spins -lt 24)) {
+            [InfInput]::Wheel($(if ($spins -lt 12) { 1 } else { -1 }))
             $spins++
-            $onIt = Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped (notch $spins)" -TimeoutS 0.8 `
-                -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) }
+            $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped (notch $spins)" -TimeoutS 0.8 `
+                -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) })[-1]
         }
         if (-not $onIt) {
             Say "WPN2a: the wheel never reached `"$wid`" in $spins notch(es) -- no frame for it"
             continue
         }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("8{0}-class-{1}-hud.png" -f $wi, $wid)) | ForEach-Object { Say $_ }
-        [InfInput]::LeftDown()
-        # The predicate names the WEAPON as well as the round, so a frame cannot
-        # be of somebody else's bullet.
-        $flew = Wait-ForHero -Csv $heroCsv -What "a round in flight ($wid)" -TimeoutS 5.0 `
-            -Predicate { param($c) ($c.Count -gt 22) -and ([int]$c[20] -gt 0) -and ($c[22].Trim() -eq $wid) } `
-            -Out (Join-Path $OutDir ("8{0}-class-{1}-in-flight.png" -f $wi, $wid))
+        # A semi-automatic weapon fires once per PRESS, so the trigger is
+        # pressed and released repeatedly rather than held: a held button on a
+        # Barrett is one round and a very long wait. Four attempts, and the
+        # predicate names the WEAPON as well as the round so a frame cannot be
+        # of somebody else's bullet.
+        $flew = $false
+        for ($t = 0; ($t -lt 4) -and (-not $flew); $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 250
+            [InfInput]::LeftUp()
+            $flew = @(Wait-ForHero -Csv $heroCsv -What "a round in flight ($wid, press $($t + 1))" -TimeoutS 1.6 `
+                -Predicate { param($c) ($c.Count -gt 22) -and ([int]$c[20] -gt 0) -and ($c[22].Trim() -eq $wid) } `
+                -Out (Join-Path $OutDir ("8{0}-class-{1}-in-flight.png" -f $wi, $wid)))[-1]
+        }
         $anyFlew = $anyFlew -or $flew
-        # A semi-automatic weapon fires once per PRESS, so the button is released
-        # and pressed again rather than held: a held trigger on a Barrett is one
-        # round and a very long wait.
-        [InfInput]::LeftUp(); Start-Sleep -Milliseconds 200
-        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 400
-        [InfInput]::LeftUp()
         Start-Sleep -Milliseconds 300
     }
-    # THE IMPACT: column 21 is latched by the pool when a round lands, so a
-    # non-zero one is a hit that has already happened and the distance it flew.
-    Wait-ForHero -Csv $heroCsv -What "a round that hit something" -TimeoutS 8.0 `
+    # THE IMPACT, and getting one is a design question rather than a timing one.
+    # Column 21 is latched by the POOL when a round lands, so only a PROJECTILE
+    # impact sets it — a shot that resolves inside its hitscan threshold sets
+    # nothing, which is right and is why three sessions of this wave fired down
+    # a street and photographed no impact at all: at 25 m of threshold, a shop
+    # front twenty metres away is the near half every time.
+    #
+    # So the impact is fired with the SNIPER, whose threshold is 10 m, along a
+    # LEVEL aim down the street: past ten metres everything is a round in
+    # flight, and a building a hundred metres away is what it arrives at.
+    $sn = "barrett_m82"
+    $onSn = @(Wait-ForHero -Csv $heroCsv -What "`"$sn`" equipped (for the impact)" -TimeoutS 0.6 `
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sn) })[-1]
+    $sp = 0
+    while ((-not $onSn) -and ($sp -lt 24)) {
+        [InfInput]::Wheel($(if ($sp -lt 12) { 1 } else { -1 }))
+        $sp++
+        $onSn = @(Wait-ForHero -Csv $heroCsv -What "`"$sn`" equipped (impact notch $sp)" -TimeoutS 0.8 `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sn) })[-1]
+    }
+    # LEVEL: down to the clamp, then back up by the clamp's own amount, for the
+    # reason the leg aimed up that way — an absolute elevation, not a relative
+    # one. 900 counts is past 89.9 degrees at the shipped sensitivity.
+    [InfInput]::Look(0, 900)
+    Start-Sleep -Milliseconds 300
+    [InfInput]::Look(0, -430)
+    Start-Sleep -Milliseconds 400
+    for ($t = 0; $t -lt 10; $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 250
+        [InfInput]::LeftUp(); Start-Sleep -Milliseconds 250
+        # Sweep the aim across the street between shots: one fixed heading can
+        # be pointed at the sky over a junction, and a round that leaves the
+        # partition hits nothing.
+        [InfInput]::Look(60, 0)
+    }
+    Wait-ForHero -Csv $heroCsv -What "a round that hit something" -TimeoutS 10.0 `
         -Predicate { param($c) ($c.Count -gt 21) -and ([double]$c[21] -gt 0.0) } `
         -Out (Join-Path $OutDir "88-impact.png") | Out-Null
     [InfInput]::RightUp()
