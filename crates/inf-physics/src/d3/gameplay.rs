@@ -700,6 +700,12 @@ fn fore_grip_m(def: &WeaponDef) -> f32 {
 
 /// How far in front of the character's chest an AIMED weapon is brought,
 /// metres.
+///
+/// **A CEILING since the WPN2b audit, not a fixed distance.** A rigged character
+/// holds its weapon at the reach its own animation is holding it at — see
+/// [`aim_hold_point`] — and this is the furthest that reach may be stretched to.
+/// It stays the fixed distance for a rig-less character, which is what it was
+/// written for at wave WPN1.
 pub const AIM_REACH_M: f64 = 0.42;
 
 /// **The smallest the aimed reach may be pulled to**, metres (wave WPN2b).
@@ -922,10 +928,6 @@ fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     if cm.rotation_mode != inf_ecs::components::RotationMode::Aiming {
         return None;
     }
-    let feet = feet_of(world, guid)?;
-    // The stand height is what the capsule was built from, so this tracks a
-    // 1.2 m character and a 2.4 m one without a second opinion about either.
-    let height = (cm.stand_half_height_m * 2.0).max(0.4);
     // The recoil spring and the sway, both in the AIM FRAME and both in metres.
     // Exactly zero — and every byte below identical to what it was before this
     // wave — for a character with no `WeaponFeel`, which is every character that
@@ -945,13 +947,79 @@ fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     };
     let right = DVec3::new(cy, 0.0, -sy);
     let up = right.cross(dir);
-    let reach = (AIM_REACH_M + offset.z).max(AIM_REACH_MIN_M);
-    let at = feet
-        + DVec3::Y * (height * SHOULDER_OF_HEIGHT)
-        + dir * reach
-        + right * offset.x
-        + up * offset.y;
+    // **THE ANCHOR AND THE REACH ARE THE RIG'S OWN** (WPN2b audit, carried 218
+    // and 227), and the capsule rule below is the fallback.
+    let (anchor, span) = match arm_anchor(world, guid) {
+        Some(pair) => pair,
+        None => {
+            let feet = feet_of(world, guid)?;
+            // The stand height is what the capsule was built from, so this
+            // tracks a 1.2 m character and a 2.4 m one without a second opinion
+            // about either.
+            let height = (cm.stand_half_height_m * 2.0).max(0.4);
+            (
+                feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT),
+                AIM_REACH_M,
+            )
+        }
+    };
+    let reach = (span + offset.z).max(AIM_REACH_MIN_M);
+    let at = anchor + dir * reach + right * offset.x + up * offset.y;
     at.is_finite().then_some(at)
+}
+
+/// **Where this character's weapon arm hangs from, and how far it is already
+/// reaching** — `(shoulder in world metres, reach in metres)`, or `None` for a
+/// character with no rig.
+///
+/// # The two carried items this closes, and why they are one item
+///
+/// Wave WPN2b measured both halves of the same defect and carried them
+/// separately. **227**: the hand had never arrived at the hold point — 126.74 mm
+/// short at a level aim and 274.65 mm at a 35-degree downward one — because
+/// [`AIM_REACH_M`] was measured forward from a shoulder LINE derived from the
+/// movement capsule (`SHOULDER_OF_HEIGHT` of the stand height) and a rig's own
+/// shoulder joint is neither at that height nor on that line, so the requested
+/// point sat outside the arm's reach envelope and `solve_arm` stopped where it
+/// could. **218**: an ALS prop pose set was invisible on an armed character,
+/// because a hand sent to a world point the arm cannot reach is an arm thrown
+/// straight at it and nothing the animation said about that arm survives.
+///
+/// They are one item because the second is what the first LOOKS like. An arm
+/// stretched at an unreachable point has one configuration and it is not a
+/// pose; an arm sent somewhere it can go keeps its own fold.
+///
+/// # The two numbers, and why each comes from where it does
+///
+/// * **The anchor is the arm chain's own first joint** — the upper arm, whose
+///   position is a function of the CLAVICLE and is therefore *not* written by
+///   `solve_arm` (`inf_anim::arm_chain` is upper arm / forearm / hand). So the
+///   overlay, which poses the clavicle, moves the anchor; the solver cannot.
+///   That is what makes this non-recursive.
+/// * **The reach is the base pose's own** — the distance from that joint to the
+///   hand **before any solve ran**, published by `apply_hand_ik` as
+///   [`inf_ecs::pose::HandIkReport::base_hand`]. It is a distance the animation
+///   has just demonstrated the arm can achieve, so a point at that distance is
+///   inside the envelope by construction — which is the whole of 227 — and it
+///   is the pose's own extension, which is the whole of 218: a carry pose that
+///   holds the weapon close keeps the elbow it authored, and one that holds it
+///   out keeps that.
+///
+/// Read off the SOLVED pose either number would be the solver measuring its own
+/// output: the reach would gain the recoil's pull-back every shot and never give
+/// it back, and an arm would curl up over a magazine.
+///
+/// The reach is clamped to `[AIM_REACH_MIN_M, AIM_REACH_M]`, which is what
+/// [`AIM_REACH_M`] is now: a **ceiling**. A character whose arms are hanging at
+/// its sides has a base reach of nearly its whole arm, and bringing a weapon up
+/// to an aim is not an excuse to lock the elbow.
+fn arm_anchor(world: &EcsWorld, guid: Uuid) -> Option<(DVec3, f64)> {
+    let report = inf_ecs::pose::hand_ik_report(world, guid)?;
+    let shoulder = report.shoulder[1]?.to_dvec3();
+    let hand = report.base_hand[1]?.to_dvec3();
+    let span = (hand - shoulder).length();
+    (shoulder.is_finite() && span.is_finite())
+        .then(|| (shoulder, span.clamp(AIM_REACH_MIN_M, AIM_REACH_M)))
 }
 
 /// **The posture a shot is fired from** (wave WPN2b) — `(stance, planar speed,

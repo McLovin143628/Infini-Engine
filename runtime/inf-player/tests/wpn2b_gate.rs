@@ -1515,61 +1515,39 @@ fn joint_pose(joint: u16, deg: f32) -> inf_anim::AnimClip {
     inf_anim::AnimClip::new("pose", vec![track])
 }
 
-/// **THE HAND GOES WHERE THE AIM SENDS IT** — and the number that matters is
-/// how far short of the hold point it lands, in millimetres.
+/// **THE HAND ARRIVES WHERE THE AIM SENDS IT** — and the number is how far
+/// short it lands, in millimetres, over five aim directions.
 ///
-/// Swept over five aim directions (level, up, down, left, right), and read
-/// twice each time: the REQUESTED hold point (`HandIk::reach[1]`, which
-/// `aim_hold_point` builds out of `weapon::aim_forward` and is therefore on the
-/// aim line by construction) and the SOLVED hand joint out of the evaluated
-/// pose. The distance between them is the IK's own reach error.
+/// # What this arm was, and what closing carried 227 made it
 ///
-/// # A finding, and it is why this arm is millimetres and not degrees
+/// Wave WPN2b measured this for the first time and it was **not true**: the
+/// hand landed **126.74 mm** short at a level aim, **274.65 mm** at a
+/// 35-degree downward one and 124.78 / 124.55 at 60 degrees left and right,
+/// arriving only on the one aim (35 degrees up) that happened to fall inside
+/// the arm's envelope. So the arm shipped as a TRIPWIRE pinned at 300 mm, with
+/// the fix named and carried.
 ///
-/// The first cut asked the clause's own question — "the joints follow the aim
-/// line within 2 degrees" — as the angle between the aim and the vector from
-/// the character to its hand, and there is no origin for which that is true.
-/// From the shoulder JOINT it is **50.96 deg** at a level aim and 70.94 at a
-/// 35-degree one, because the joint is twenty centimetres off to one side of a
-/// hand held in front of the chest. From the shoulder LINE — the point
-/// `aim_hold_point` measures its own reach from — it is **15.32 / 0.47 / 38.50 /
-/// 15.06 / 15.73 deg** over the five directions, and the systematic 15 degrees
-/// at a level aim is the arm hanging where a 1.8 m rig's arm hangs rather than
-/// where a 0.42 m reach in front of a 1.476 m shoulder line asks it to.
+/// The fix is `d3::gameplay::arm_anchor`, and the audit that ran it measures
+/// **0.00 mm at every one of the five**. The hold point is now anchored at the
+/// rig's OWN shoulder — the arm chain's first joint, whose position is a
+/// function of the clavicle and therefore not something `solve_arm` can move —
+/// and its reach is the reach the base pose was already holding that arm at, so
+/// the requested point is inside the envelope by construction. Before it, the
+/// point was `AIM_REACH_M` = 0.42 m in front of a shoulder LINE derived from
+/// the movement capsule, and a rig's shoulder joint is neither at that height
+/// nor on that line.
 ///
-/// So "the joints follow the aim line" is not a claim about an angle from any
-/// point on the body. What IS a claim, and what a player sees, is that the hand
-/// arrives where the hold point sent it — and THAT is measured here, and it is
-/// **not true either**:
+/// # The two ways this arm can go vacuous, and the two assertions against them
 ///
-/// | aim | how far short the hand lands |
-/// |---|---|
-/// | level | **126.74 mm** |
-/// | 35 deg up | **0.00 mm** |
-/// | 35 deg down | **274.65 mm** |
-/// | 60 deg left | **124.78 mm** |
-/// | 60 deg right | **124.55 mm** |
+/// A hold point that stopped reading the aim would send the hand to one place
+/// five times and every distance would be zero — so the five targets are
+/// asserted to be far apart FIRST. And a solver that had stopped writing
+/// anything would leave the hand wherever the animation put it, which is why
+/// the ceiling is 20 mm and not "under the old number".
 ///
-/// The hold point is `AIM_REACH_M` = 0.42 m in front of a shoulder LINE derived
-/// from the capsule (`SHOULDER_OF_HEIGHT` of the stand height), and the RIG's
-/// shoulder joint is neither at that height nor on that line — so at a level or
-/// downward aim the requested point is outside the arm's own reach envelope and
-/// `solve_arm` stops where it can. It is wave WPN1's geometry, not this wave's:
-/// both constants and the whole hold-point construction predate it, and this is
-/// the first time anything has measured what the ARM did about them. The
-/// weapon entity hangs off the hand socket, so what it costs is a muzzle about
-/// twelve centimetres off the aim line — the DIRECTION a round leaves along is
-/// `aim_forward` and is unaffected, which is why nothing has noticed.
-///
-/// Carried, with the fix named: `aim_hold_point` should measure its reach from
-/// the rig's own shoulder joint when the character has one, and fall back to
-/// the capsule rule for the rig-less heroes it was written for.
-///
-/// **This arm is therefore a TRIPWIRE pinned at what was measured**, not a claim
-/// that the hand arrives. It reds if the reach gets worse — which is what a
-/// change to `AIM_REACH_M`, to `SHOULDER_OF_HEIGHT`, or to the solver would do —
-/// and it reds if `aim_hold_point` stops reading the aim at all, because the
-/// five hold points would then be one point measured five times.
+/// **The mutation**: `aim_hold_point` ignoring `aim_pitch_deg` reds the spread
+/// assertion; `arm_anchor` answering `None` (the capsule rule, which is what
+/// shipped) puts the level aim back at 126.74 mm and reds the distance.
 #[test]
 fn the_hand_arrives_where_the_aim_sends_it() {
     let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
@@ -1620,8 +1598,156 @@ fn the_hand_arrives_where_the_aim_sends_it() {
         "the five aims sent the hand to points {far:.4} m apart - `aim_hold_point` is not reading the aim"
     );
     assert!(
-        worst < 300.0,
-        "the hand landed {worst:.2} mm from where the aim sent it, against the 274.65 this tripwire was pinned at - the reach got worse"
+        worst < 20.0,
+        "the hand landed {worst:.2} mm from where the aim sent it - the hold point is outside the arm's own envelope again (it was 274.65 mm before carried 227 was closed)"
+    );
+}
+
+/// **THE OVERLAY'S OWN ARM SURVIVES THE HAND IK** — carried 218, closed and
+/// measured on the joints of an armed, aiming character.
+///
+/// # What was wrong
+///
+/// `apply_weapon_overlay` writes the arms at pose construction and
+/// `apply_hand_ik` re-solves upper arm / forearm / hand among the corrections,
+/// so wave WPN2b measured an ALS prop pose set to be invisible on the arm chain
+/// of an armed character: the left upper arm read **90.000 deg unarmed, 90.000
+/// carrying and 81.407 aiming**, the overlay contributing nothing to any of
+/// them. The cause is the same one carried 227 names — a hand sent to a point
+/// outside its own reach envelope has exactly one configuration, the arm
+/// stretched at it, and no pose can show through that.
+///
+/// # What closes it
+///
+/// The hold point's REACH is now the base pose's own (`d3::gameplay::
+/// arm_anchor`, reading `HandIkReport::base_hand`, which `apply_hand_ik`
+/// publishes from the pose one line before it starts writing). So a pose set
+/// that folds the elbow keeps that fold through the solve: the aim decides
+/// which DIRECTION the arm points, which it must, and the animation decides how
+/// far the hand is from the shoulder, which is the part a viewer reads as "the
+/// arms have come in".
+///
+/// # What is read
+///
+/// The same rig twice, differing in ONE thing: whether its state machine
+/// carries an `overlay_m4a1` state at all. Both are armed, both are aiming,
+/// both go through the whole hand pass. The numbers are the ELBOW's angle off
+/// its rest pose in the FINAL pose — after `apply_hand_ik`, after the
+/// correction re-drive — and the hold point's own reach.
+///
+/// **The mutation**: `arm_anchor` answering `None` (the capsule rule, which is
+/// what shipped before this audit) puts both reaches at `AIM_REACH_M` and both
+/// elbows at whatever a stretched arm gives, and reds both comparisons.
+#[test]
+fn the_overlays_own_arm_survives_the_hand_ik() {
+    const IDLE: inf_anim::ClipRef = [0xd7; 16];
+    const CARRY: inf_anim::ClipRef = [0xd8; 16];
+
+    fn run(with_overlay: bool) -> (f64, f64, f64) {
+        let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
+        let skeleton = inf_anim::build_template(
+            inf_anim::BodyPlan::Biped,
+            &inf_anim::BodyParams {
+                height_m: 1.8,
+                ..Default::default()
+            },
+        )
+        .expect("the mannequin builds");
+        let elbow = skeleton
+            .role_index()
+            .first(inf_anim::BoneRoleKind::LowerArm, inf_anim::BoneSide::Right)
+            .expect("a right forearm");
+        // The pose set folds the ELBOW, which is the one joint of the three
+        // that changes how far the hand is from the shoulder — a rotation of
+        // the upper arm swings the whole assembly and leaves the distance
+        // exactly where it was.
+        r.clips.insert(CARRY, joint_pose(elbow, -110.0));
+        r.clips
+            .insert(IDLE, inf_anim::AnimClip::new("idle", Vec::new()));
+        let mut states = vec![inf_anim::SmState::clip("idle", IDLE)];
+        if with_overlay {
+            states.push(inf_anim::SmState {
+                name: inf_anim::als::OVERLAY_M4A1_STATE.into(),
+                motion: inf_anim::state_machine::Motion::Clip(CARRY),
+                looping: false,
+                speed: 1.0,
+                position: (0.0, 0.0),
+                on_enter: Vec::new(),
+                on_exit: Vec::new(),
+            });
+        }
+        r.rig = Some((
+            skeleton,
+            inf_anim::StateMachine {
+                states,
+                entry: 0,
+                ..Default::default()
+            },
+        ));
+        let e = r.world.entity_of(HERO).expect("the hero");
+        r.world.world_mut().entity_mut(e).insert((
+            inf_ecs::components::AnimStateMachine {
+                sm: Some(SM_GUID),
+                ..Default::default()
+            },
+            inf_ecs::components::SkeletalMesh {
+                mesh: None,
+                skeleton: Some(SKEL_GUID),
+            },
+        ));
+        r.world.mark_dirty();
+        r.arm(HERO, "rifle");
+        r.aim(HERO, 0.0, 0.0);
+        r.hold_aim(HERO, true);
+        for _ in 0..90 {
+            r.step();
+        }
+        let (rig, _) = r.rig.as_ref().expect("a rig");
+        let posed = inf_ecs::pose::evaluated_pose(&r.world, HERO).expect("a posed hero");
+        let a = glam::Quat::from_array(posed.pose.locals[elbow as usize].rotation);
+        let b =
+            glam::Quat::from_array(inf_anim::Pose::rest(&rig.skeleton).locals[elbow as usize].rotation);
+        let bend = f64::from(a.angle_between(b).to_degrees());
+        // The reach the hold point was built at, and how far the hand landed
+        // from it — both read off the world.
+        let report = inf_ecs::pose::hand_ik_report(&r.world, HERO).expect("a hand verdict");
+        let shoulder = report.shoulder[1].expect("a right shoulder").to_dvec3();
+        let want = r.hold().expect("an aiming character holds its weapon");
+        let hand = rig
+            .role_index()
+            .first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Right)
+            .expect("a right hand");
+        let to_world = inf_ecs::pose::model_to_world_of(&r.world, HERO).expect("a placement");
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &posed.pose);
+        let p = g[hand as usize].to_scale_rotation_translation().2;
+        let got =
+            to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)));
+        ((want - shoulder).length(), bend, (got - want).length() * 1000.0)
+    }
+
+    let (bare_reach, bare_bend, bare_mm) = run(false);
+    let (over_reach, over_bend, over_mm) = run(true);
+    println!("=== the overlay's own arm, measured after the hand IK ===");
+    println!(
+        "  {:<18}reach {bare_reach:.4} m, elbow {bare_bend:.3} deg, hand {bare_mm:.2} mm out",
+        "no overlay"
+    );
+    println!(
+        "  {:<18}reach {over_reach:.4} m, elbow {over_bend:.3} deg, hand {over_mm:.2} mm out",
+        "overlay_m4a1"
+    );
+    assert!(
+        bare_mm < 20.0 && over_mm < 20.0,
+        "the hand did not arrive: {bare_mm:.2} / {over_mm:.2} mm"
+    );
+    assert!(
+        (bare_reach - over_reach).abs() > 0.03,
+        "the overlay moved the aimed hold point {:.4} m - the reach is not the pose's own and the pose set is invisible on the arm again",
+        (bare_reach - over_reach).abs()
+    );
+    assert!(
+        (bare_bend - over_bend).abs() > 5.0,
+        "the elbow read {bare_bend:.3} deg without the overlay and {over_bend:.3} with it - the hand IK has overwritten the pose set (carried 218)"
     );
 }
 

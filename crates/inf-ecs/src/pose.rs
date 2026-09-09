@@ -453,6 +453,30 @@ pub struct HandIkReport {
     /// Bones the **correction re-drive** rewrote after the solves — see
     /// [`step_pose_evaluation`]'s writer list for why it runs at all.
     pub redriven: usize,
+    /// **Where the POSE put this hand before any solve ran**, world metres,
+    /// `[left, right]` (wave WPN2b audit, carried 218).
+    ///
+    /// The base pose — the locomotion, the weapon overlay, the aim sweep and the
+    /// breath — as it stood one line before [`apply_hand_ik`] started writing.
+    /// It is published because a caller that wants the IK to be a **correction**
+    /// to the animation rather than a replacement for it needs to know what the
+    /// animation said, and the only place that is knowable is here: the
+    /// evaluated pose a gate or a gameplay system reads afterwards is the pose
+    /// the solver produced, so measuring an arm's own extension off it would be
+    /// the solver measuring itself and the number would drift a little further
+    /// every step.
+    ///
+    /// `None` for a side this rig has no arm chain on.
+    pub base_hand: [Option<Vec3d>; 2],
+    /// **Where the arm hangs from**, world metres, `[left, right]` — the
+    /// `arm_chain`'s own first joint, which is the upper arm.
+    ///
+    /// Taken from the same pre-solve pose as [`base_hand`](Self::base_hand), and
+    /// for one more reason of its own: `arm_chain` is upper arm / forearm /
+    /// hand, so this joint's *position* is a function of the CLAVICLE and is not
+    /// written by [`solve_arm`] at all. A hold point anchored here is therefore
+    /// anchored to the body the overlay posed.
+    pub shoulder: [Option<Vec3d>; 2],
 }
 
 impl HandIkReport {
@@ -3058,6 +3082,36 @@ fn apply_hand_ik(
     // every quadruped and every rig whose hand is called something nobody
     // guessed — and which costs that side and nothing else.
     let chains = sides.map(|s| inf_anim::arm_chain(skeleton, roles, s));
+
+    // **THE BASE POSE'S OWN ARMS, BEFORE A SINGLE SOLVE** (wave WPN2b audit,
+    // carried 218) — the shoulder each arm hangs from and the hand the
+    // animation put on the end of it, in world metres.
+    //
+    // Read HERE and published on the report, because this is the only line in
+    // the engine where the un-corrected pose still exists: everything below
+    // rewrites the arm chains, and the evaluated pose a gameplay system reads
+    // next step is the solver's own output. A caller that anchors a hold point
+    // on the solver's output is measuring itself, and its number walks.
+    //
+    // One global pass for a character that asked for hands at all, which is an
+    // armed one and a grabbing one and nobody else.
+    if chains.iter().any(Option::is_some) {
+        let globals = inf_anim::global_transforms(skeleton, pose);
+        let at = |j: u16| -> Option<Vec3d> {
+            let m = globals.get(j as usize)?.w_axis.truncate();
+            let w = model_to_world.transform_point3(glam::DVec3::new(
+                f64::from(m.x),
+                f64::from(m.y),
+                f64::from(m.z),
+            ));
+            w.is_finite().then(|| Vec3d::new(w.x, w.y, w.z))
+        };
+        for (side, chain) in chains.iter().enumerate() {
+            let Some(chain) = chain else { continue };
+            report.shoulder[side] = at(chain[0]);
+            report.base_hand[side] = at(chain[2]);
+        }
+    }
 
     // Model space from world, checked rather than trusted: a target that is not
     // finite would reach `solve_chain`, which refuses it by name — but refusing
