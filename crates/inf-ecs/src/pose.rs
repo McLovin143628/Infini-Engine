@@ -2261,12 +2261,20 @@ fn overlay_of(
         .get::<crate::components::CharacterMovement>(entity);
     // The AUTHORED overlay wins, because a level that says a character is
     // injured knows something the inventory does not.
+    //
+    // Guarded on the string being NON-EMPTY, which is what every character in
+    // every level that has never authored one carries: without it the forty-row
+    // map is scanned once per posed character per step for a name that cannot
+    // match, which on a crowded street is forty thousand comparisons a frame
+    // spent proving nothing.
     if let Some(cm) = cm {
-        if let Some(named) = inf_anim::als::LOCOMOTION_MAP
-            .iter()
-            .find(|s| s.kind == inf_anim::als::SlotKind::Overlay && s.state == cm.overlay)
-        {
-            overlay = named.state;
+        if !cm.overlay.is_empty() {
+            if let Some(named) = inf_anim::als::LOCOMOTION_MAP
+                .iter()
+                .find(|s| s.kind == inf_anim::als::SlotKind::Overlay && s.state == cm.overlay)
+            {
+                overlay = named.state;
+            }
         }
     }
     let ads = guid

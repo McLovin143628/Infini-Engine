@@ -1180,10 +1180,23 @@ fn step_weapons(
         if def.is_melee() {
             release_feel(world, guid, entity);
         } else if stale || world.world().get::<WeaponFeel>(entity).is_none() {
-            world
-                .world_mut()
-                .entity_mut(entity)
-                .insert(WeaponFeel::new());
+            // **The CAMERA's borrowed blend speed survives the replace.** The
+            // springs and the blend are this weapon's and are reset with it, but
+            // `blend_speed_prior` is what the rig had before any weapon touched
+            // it — and a fresh `WeaponFeel` would capture the LAST weapon's ADS
+            // speed as the "prior" and hand that back when the character
+            // eventually disarms, leaving an authored camera permanently at a
+            // rifle's rate.
+            let prior = world
+                .world()
+                .get::<WeaponFeel>(entity)
+                .map(|f| f.blend_speed_prior)
+                .filter(|p| p.is_finite());
+            let mut fresh = WeaponFeel::new();
+            if let Some(prior) = prior {
+                fresh.blend_speed_prior = prior;
+            }
+            world.world_mut().entity_mut(entity).insert(fresh);
         }
         // The animation's own reload notify, taken exactly once — the P29.4
         // seam, and the reason the fixed step asks rather than the animation

@@ -669,6 +669,12 @@ if ($armList.Count -eq 0) {
 #
 #    (One-based here; `$c[..]` below is zero-based, as everywhere in this file.)
 #
+#    **THE GLOCK IS SEMI-AUTOMATIC**, and the first session of this wave learned
+#    it the hard way: the leg HELD the left button and got exactly one round, so
+#    three of its five frames never triggered. `automatic = false` on the
+#    registry's ten handguns means `try_fire` wants a fresh press per round, so a
+#    burst here is a sequence of CLICKS -- which is also what a player does.
+#
 #    It runs only when the sidearm leg above actually put the Glock in the hand,
 #    because every frame is of a weapon and a frame of an empty pair of hands
 #    captioned "the recoil" is worse than no frame.
@@ -692,39 +698,60 @@ if ($armList.Count -eq 0 -and $inHand) {
     if (-not $ads) { Say "WPN2b: the aim never arrived -- no ADS frame" }
 
     # (2) THE BURST, at three frames. A shot's climb peaks four steps and 66 ms
-    #     after the trigger, so these cannot be taken on a wall clock: each one
-    #     waits for `recoil_mm` to cross a threshold the one before it did not.
-    #     The trigger is HELD across all three, which is what makes it a burst.
-    [InfInput]::LeftDown()
-    $b1 = @(Wait-ForHero -Csv $heroCsv -What "the first round's kick" -TimeoutS 2.0 `
-        -Predicate { param($c) ($c.Count -gt 23) -and ([double]$c[23] -gt 5.0) } `
-        -Out (Join-Path $OutDir "92-burst-1.png"))[-1]
-    $b2 = @(Wait-ForHero -Csv $heroCsv -What "the burst climbing (the aim past 1.5 deg)" -TimeoutS 3.0 `
-        -Predicate { param($c) ($c.Count -gt 24) -and ([double]$c[24] -gt 1.5) } `
-        -Out (Join-Path $OutDir "93-burst-2.png"))[-1]
-    $b3 = @(Wait-ForHero -Csv $heroCsv -What "the burst at its top (the aim past 3 deg)" -TimeoutS 4.0 `
-        -Predicate { param($c) ($c.Count -gt 24) -and ([double]$c[24] -gt 3.0) } `
-        -Out (Join-Path $OutDir "94-burst-3.png"))[-1]
-    if (-not ($b1 -and $b2 -and $b3)) { Say "WPN2b: the burst never climbed -- $b1 / $b2 / $b3" }
+    #     after the trigger, so these cannot be taken on a wall clock: each frame
+    #     is armed on a column crossing a threshold the one before it did not.
+    #     The clicks keep coming while the waits run, which is what makes the
+    #     springs stack rather than settle between rounds.
+    $burst = @(
+        @{ n = "92-burst-1.png"; what = "the first round's kick";              col = 23; over = 5.0 },
+        @{ n = "93-burst-2.png"; what = "the burst climbing (the aim past 2 deg)"; col = 24; over = 2.0 },
+        @{ n = "94-burst-3.png"; what = "the burst at its top (the aim past 3.5 deg)"; col = 24; over = 3.5 }
+    )
+    $shotsFired = 0
+    foreach ($b in $burst) {
+        $got = $false
+        for ($t = 0; ($t -lt 8) -and (-not $got); $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 45; [InfInput]::LeftUp()
+            $shotsFired++
+            $col = $b.col; $over = $b.over
+            $got = @(Wait-ForHero -Csv $heroCsv -What $b.what -TimeoutS 0.5 `
+                -Predicate { param($c) ($c.Count -gt $col) -and ([double]$c[$col] -gt $over) } `
+                -Out (Join-Path $OutDir $b.n))[-1]
+        }
+        if (-not $got) { Say "WPN2b: $($b.what) never fired after $shotsFired rounds" }
+    }
 
     # (3) THE SPREAD, at the top of the magazine's own bloom. The cone widens
-    #     with every round; this waits for it to pass the base 1.20 deg the
-    #     registry authors for a pistol, which only a fired magazine can do.
-    $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past its base" -TimeoutS 5.0 `
-        -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.5) } `
-        -Out (Join-Path $OutDir "95-bloom.png"))[-1]
-    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.5 deg" }
-    [InfInput]::LeftUp()
+    #     with every round and decays between them, so this keeps firing until it
+    #     is a third above the 1.20 deg the registry authors for a pistol -- which
+    #     only a magazine emptied faster than the bloom decays can reach. The
+    #     button is up, so the cone here is the HIP cone.
     [InfInput]::RightUp()
-    Start-Sleep -Milliseconds 900
+    Start-Sleep -Milliseconds 200
+    $bloom = $false
+    for ($t = 0; ($t -lt 14) -and (-not $bloom); $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 45; [InfInput]::LeftUp()
+        $shotsFired++
+        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past 1.6 deg" -TimeoutS 0.4 `
+            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.6) } `
+            -Out (Join-Path $OutDir "95-bloom.png"))[-1]
+    }
+    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.6 deg over $shotsFired rounds" }
+    Say "WPN2b: $shotsFired rounds fired over the feel leg"
+    Start-Sleep -Milliseconds 1200
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "96-after-the-burst.png") | ForEach-Object { Say $_ }
 
-    # (4) THE SWAY, at a sprint, with the weapon still in the hand. The bob is
-    #     proportional to speed, so the frame waits for the hero to actually be
-    #     moving -- column 7 -- rather than for a key to have been pressed.
+    # (4) THE SWAY, at a sprint, with the weapon still in the hand. A sprint is
+    #     REFUSED while aiming (ALS's own `CanSprint`), so the leg waits for the
+    #     blend to fall back to zero before it presses anything -- the first
+    #     session held the right button through fourteen seconds of timeouts and
+    #     the hero never moved a metre. The frame waits for the hero to actually
+    #     be moving (column 7) rather than for a key to have been pressed.
+    @(Wait-ForHero -Csv $heroCsv -What "the aim released (the blend back to zero)" -TimeoutS 3.0 `
+        -Predicate { param($c) ($c.Count -gt 26) -and ([double]$c[26] -lt 0.02) }) | Out-Null
     [InfInput]::Down(0x2A)   # scancode: Left Shift
     [InfInput]::Down(0x11)   # scancode: W
-    $sway = @(Wait-ForHero -Csv $heroCsv -What "the hero sprinting with the sidearm out" -TimeoutS 4.0 `
+    $sway = @(Wait-ForHero -Csv $heroCsv -What "the hero sprinting with the sidearm out" -TimeoutS 5.0 `
         -Predicate { param($c) ($c.Count -gt 22) -and ([double]$c[6] -gt 4.0) -and ($c[22].Trim() -eq "glock_17") } `
         -Out (Join-Path $OutDir "97-sway-sprint.png"))[-1]
     if (-not $sway) { Say "WPN2b: the hero never reached a sprint with the weapon out" }
