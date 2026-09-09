@@ -1004,9 +1004,59 @@ impl HeroLog {
             .and_then(|g| inf_ecs::weapon::equipped_def(sim.world(), g))
             .map(|(id, _)| id)
             .unwrap_or_else(|| "-".to_string());
+        // **THE FEEL COLUMNS** (wave WPN2b), appended for the ballistics four's
+        // reason verbatim. Every one of them is a number a FRAME has to be
+        // triggered on, and none of them is derivable from the columns in front:
+        //
+        // * `recoil_mm` -- how far the hold-point spring has the weapon off the
+        //   aim line RIGHT NOW, millimetres. A shot's climb lasts four steps and
+        //   66 ms, so a frame of a burst cannot be taken on a wall clock.
+        // * `aim_recoil_deg` -- how far the AIM has been pushed off where the
+        //   player is pointing, degrees, positive up. That is the layer the
+        //   reticle follows, and it is what the burst table is made of.
+        // * `spread_deg` -- the whole cone the NEXT round would leave through,
+        //   after the bloom, the stance, the movement and the aim. What a
+        //   pattern frame is triggered on.
+        // * `ads` -- the aim-down-sights blend, `[0, 1]`. The ADS frames are
+        //   triggered on it and on the boom in column 13.
+        //
+        // All four are 0 for a character with no weapon, which is every session
+        // before this wave.
+        let feel = guid.and_then(|g| inf_ecs::feel::feel_of(sim.world(), g));
+        let recoil_mm = feel.map(|f| f.vm.position.length() * 1000.0).unwrap_or(0.0);
+        let aim_recoil_deg = feel.map(|f| f.applied_pitch_deg).unwrap_or(0.0);
+        let ads = feel.map(|f| f.ads_blend).unwrap_or(0.0);
+        let spread_deg = guid
+            .and_then(|g| {
+                let (_, def) = inf_ecs::weapon::equipped_def(sim.world(), g)?;
+                let e = sim.world().entity_of(g)?;
+                let bloom = sim
+                    .world()
+                    .world()
+                    .get::<inf_ecs::weapon::WeaponState>(e)
+                    .map(|s| s.spread_bloom_deg)
+                    .unwrap_or(0.0);
+                let cm = sim
+                    .world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)?;
+                let stance = match cm.mode {
+                    inf_ecs::components::MovementMode::Crouch => {
+                        inf_ecs::feel::ShotStance::Crouched
+                    }
+                    inf_ecs::components::MovementMode::Prone => inf_ecs::feel::ShotStance::Prone,
+                    _ => inf_ecs::feel::ShotStance::Standing,
+                };
+                let v = cm.runtime.velocity.to_dvec3();
+                let speed = (v.x * v.x + v.z * v.z).sqrt();
+                Some(inf_ecs::feel::resolved_cone_deg(
+                    &def, bloom, stance, speed, ads,
+                ))
+            })
+            .unwrap_or(0.0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1040,10 +1090,14 @@ impl HeroLog {
                 if cover.active { cover.peek } else { 0.0 },
                 rounds_live,
                 last_hit_m,
-                equipped
+                equipped,
+                recoil_mm,
+                aim_recoil_deg,
+                spread_deg,
+                ads
             ),
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

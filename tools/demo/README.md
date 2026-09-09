@@ -28,7 +28,7 @@ Useful switches:
 | `-OutDir <path>` | where the PNGs and the CSV go (default: a timestamped folder under the system temp dir) |
 | `-KeepOpen` | leave the editor running at the end |
 | `-Port <n>` | the WebView2 debug port (default 9222) |
-| `-PlayMode window` | drive "Play in New Window" instead of the embedded viewport. Needs the CDP path — a menu item has no coordinate to fall back to |
+| `-PlayMode window` | **the default since the CHAR1b.2 audit** — drive "Play in New Window" instead of the embedded viewport. Needs the CDP path, because a menu item has no coordinate to fall back to; `-PlayMode embedded` is the other way and is what the roadmap calls the preview |
 
 ## What it produces
 
@@ -37,10 +37,23 @@ Useful switches:
 02-pie-a.png      the running game
 03-pie-b.png      the same, two seconds later, with W held throughout
 hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pitch,
-                  state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder
-                  — seventeen columns, four rows a second. The last four are wave
-                  CHAR1c's and are APPENDED, so every index a script already reads
-                  keeps its meaning.
+                  state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
+                  cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
+                  recoil_mm,aim_recoil_deg,spread_deg,ads
+                  — TWENTY-SEVEN columns, four rows a second, and NO header line:
+                  every consumer filters on `^[0-9]`, and the `#` lines are the
+                  driver's own notes. Columns are only ever APPENDED, so every
+                  index a script already reads keeps its meaning: 14-17 are wave
+                  CHAR1c's (boom / fade / steer / holder), 18-20 are COV1's,
+                  21-23 are WPN2a's (rounds in flight, the last impact's flight
+                  distance, the equipped id) and 24-27 are WPN2b's (the
+                  hold-point spring in millimetres, the aim's own recoil offset
+                  in degrees, the whole cone the next round would leave through,
+                  and the aim-down-sights blend).
+
+                  The numbers above are ONE-based, which is how a person counts
+                  columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
+                  so `boom_m` is `$c[13]` and `ads` is `$c[26]`.
 demo.log          every step the driver took, with timings
 ```
 
