@@ -1032,13 +1032,23 @@ fn the_thirty_round_pattern_orders_ads_then_hip_then_moving() {
         ads_rms > 0.0,
         "every one of thirty rounds went through the same hole - there is no spread at all and this arm proves nothing"
     );
+    // **BY A MARGIN, not by a hair** (the WPN2b audit). `SPREAD_MOVE_MULT_MAX :=
+    // 1.0` makes the moving cone EQUAL to the standing one, and thirty rounds
+    // through two equal cones give two nearly equal groups -- so `hip < run` is
+    // then a coin flip on which noisy number came out larger, and it was
+    // measured to land the passing way. The measured ratios are 0.45 and 2.56,
+    // so the margins asserted here are less than half of what the layers
+    // actually buy and a mutation that collapses either one cannot sneak past on
+    // a rounding.
     assert!(
-        ads_rms < hip_rms,
-        "the aimed crouched group ({ads_rms:.4} m) is not tighter than the hip group ({hip_rms:.4} m)"
+        ads_rms < hip_rms * 0.7,
+        "the aimed crouched group ({ads_rms:.4} m) is {:.3} of the hip group ({hip_rms:.4} m) - the ADS and crouch multipliers are not biting",
+        ads_rms / hip_rms
     );
     assert!(
-        hip_rms < run_rms,
-        "the standing group ({hip_rms:.4} m) is not tighter than the sprinting one ({run_rms:.4} m)"
+        run_rms > hip_rms * 1.5,
+        "the sprinting group ({run_rms:.4} m) is {:.3} of the standing one ({hip_rms:.4} m) - the movement multiplier is not biting",
+        run_rms / hip_rms
     );
 }
 
