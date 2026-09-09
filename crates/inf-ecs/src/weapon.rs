@@ -567,8 +567,8 @@ impl WeaponDef {
         }
     }
 
-    /// **Whether a shot that missed inside [`hitscan_reach_m`] should mint a
-    /// round.**
+    /// **Whether a shot that missed inside
+    /// [`hitscan_reach_m`](Self::hitscan_reach_m) should mint a round.**
     ///
     /// Only a projectile, and only when the threshold left something to fly
     /// through — a pistol whose 30 m threshold covers its own range never mints

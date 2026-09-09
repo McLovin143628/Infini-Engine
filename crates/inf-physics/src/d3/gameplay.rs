@@ -143,7 +143,7 @@ pub struct WeaponHit {
     /// `Shot` act already on the record finally reaching somebody.
     pub arrived: bool,
     /// **Whether the hit point was on the target's head** (wave WPN2a) — the
-    /// sphere test in [`head_point`]'s own doc, already applied to
+    /// sphere test in `head_point`'s own doc, already applied to
     /// [`energy_j`](Self::energy_j).
     ///
     /// A record rather than a re-derivation: by the time a HUD, a gate or a
@@ -195,8 +195,8 @@ pub struct RoundReport {
     /// Rounds in flight after this step's advance.
     pub in_flight: u32,
     /// **Segment casts this step's flight spent** — the number
-    /// [`MAX_SHOT_RAYS_PER_STEP`] bounds, so the ceiling is a measurement
-    /// rather than an assertion about arithmetic.
+    /// `inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP` bounds, so the ceiling is
+    /// a measurement rather than an assertion about arithmetic.
     pub rays: u32,
     /// Rounds that ended on a hit this step.
     pub impacts: u32,
