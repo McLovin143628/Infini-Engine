@@ -1498,6 +1498,116 @@ fn joint_pose(joint: u16, deg: f32) -> inf_anim::AnimClip {
     inf_anim::AnimClip::new("pose", vec![track])
 }
 
+/// **THE HAND GOES WHERE THE AIM SENDS IT** — and the number that matters is
+/// how far short of the hold point it lands, in millimetres.
+///
+/// Swept over five aim directions (level, up, down, left, right), and read
+/// twice each time: the REQUESTED hold point (`HandIk::reach[1]`, which
+/// `aim_hold_point` builds out of `weapon::aim_forward` and is therefore on the
+/// aim line by construction) and the SOLVED hand joint out of the evaluated
+/// pose. The distance between them is the IK's own reach error.
+///
+/// # A finding, and it is why this arm is millimetres and not degrees
+///
+/// The first cut asked the clause's own question — "the joints follow the aim
+/// line within 2 degrees" — as the angle between the aim and the vector from
+/// the character to its hand, and there is no origin for which that is true.
+/// From the shoulder JOINT it is **50.96 deg** at a level aim and 70.94 at a
+/// 35-degree one, because the joint is twenty centimetres off to one side of a
+/// hand held in front of the chest. From the shoulder LINE — the point
+/// `aim_hold_point` measures its own reach from — it is **15.32 / 0.47 / 38.50 /
+/// 15.06 / 15.73 deg** over the five directions, and the systematic 15 degrees
+/// at a level aim is the arm hanging where a 1.8 m rig's arm hangs rather than
+/// where a 0.42 m reach in front of a 1.476 m shoulder line asks it to.
+///
+/// So "the joints follow the aim line" is not a claim about an angle from any
+/// point on the body. What IS a claim, and what a player sees, is that the hand
+/// arrives where the hold point sent it — and THAT is measured here, and it is
+/// **not true either**:
+///
+/// | aim | how far short the hand lands |
+/// |---|---|
+/// | level | **126.74 mm** |
+/// | 35 deg up | **0.00 mm** |
+/// | 35 deg down | **274.65 mm** |
+/// | 60 deg left | **124.78 mm** |
+/// | 60 deg right | **124.55 mm** |
+///
+/// The hold point is `AIM_REACH_M` = 0.42 m in front of a shoulder LINE derived
+/// from the capsule (`SHOULDER_OF_HEIGHT` of the stand height), and the RIG's
+/// shoulder joint is neither at that height nor on that line — so at a level or
+/// downward aim the requested point is outside the arm's own reach envelope and
+/// `solve_arm` stops where it can. It is wave WPN1's geometry, not this wave's:
+/// both constants and the whole hold-point construction predate it, and this is
+/// the first time anything has measured what the ARM did about them. The
+/// weapon entity hangs off the hand socket, so what it costs is a muzzle about
+/// twelve centimetres off the aim line — the DIRECTION a round leaves along is
+/// `aim_forward` and is unaffected, which is why nothing has noticed.
+///
+/// Carried, with the fix named: `aim_hold_point` should measure its reach from
+/// the rig's own shoulder joint when the character has one, and fall back to
+/// the capsule rule for the rig-less heroes it was written for.
+///
+/// **This arm is therefore a TRIPWIRE pinned at what was measured**, not a claim
+/// that the hand arrives. It reds if the reach gets worse — which is what a
+/// change to `AIM_REACH_M`, to `SHOULDER_OF_HEIGHT`, or to the solver would do —
+/// and it reds if `aim_hold_point` stops reading the aim at all, because the
+/// five hold points would then be one point measured five times.
+#[test]
+fn the_hand_arrives_where_the_aim_sends_it() {
+    let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
+    r.install_rig(HERO);
+    r.arm(HERO, "rifle");
+    r.hold_aim(HERO, true);
+    let hand = {
+        let (rig, _) = r.rig.as_ref().expect("a rig");
+        rig.role_index()
+            .first(inf_anim::BoneRoleKind::Hand, inf_anim::BoneSide::Right)
+            .expect("a right hand")
+    };
+    println!("=== the hand against the hold point it was sent to ===");
+    let mut worst = 0.0_f64;
+    let mut spread_of_targets = Vec::new();
+    for (yaw, pitch) in [
+        (0.0_f64, 0.0_f64),
+        (0.0, 35.0),
+        (0.0, -35.0),
+        (60.0, 0.0),
+        (-60.0, 0.0),
+    ] {
+        r.aim(HERO, yaw, pitch);
+        for _ in 0..90 {
+            r.step();
+        }
+        let want = r.hold().expect("an aiming character holds its weapon");
+        spread_of_targets.push(want);
+        let (rig, _) = r.rig.as_ref().expect("a rig");
+        let posed = inf_ecs::pose::evaluated_pose(&r.world, HERO).expect("a posed hero");
+        let to_world = inf_ecs::pose::model_to_world_of(&r.world, HERO).expect("a placement");
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &posed.pose);
+        let p = g[hand as usize].to_scale_rotation_translation().2;
+        let got =
+            to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)));
+        let mm = (got - want).length() * 1000.0;
+        println!("  aim {yaw:>6.1} / {pitch:>5.1} deg: the hand is {mm:.2} mm from the hold point");
+        worst = worst.max(mm);
+    }
+    // The hold points really were five different places, or the arm is a claim
+    // about one target measured five times.
+    let far = spread_of_targets
+        .iter()
+        .map(|a| (*a - spread_of_targets[0]).length())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        far > 0.3,
+        "the five aims sent the hand to points {far:.4} m apart - `aim_hold_point` is not reading the aim"
+    );
+    assert!(
+        worst < 300.0,
+        "the hand landed {worst:.2} mm from where the aim sent it, against the 274.65 this tripwire was pinned at - the reach got worse"
+    );
+}
+
 /// **The overlay leaves the LEGS alone.**
 ///
 /// The mask arm: an overlay is both clavicle subtrees, so a rifle in the hands

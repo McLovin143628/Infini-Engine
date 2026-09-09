@@ -722,21 +722,25 @@ if ($armList.Count -eq 0 -and $inHand) {
     }
 
     # (3) THE SPREAD, at the top of the magazine's own bloom. The cone widens
-    #     with every round and decays between them, so this keeps firing until it
-    #     is a third above the 1.20 deg the registry authors for a pistol -- which
-    #     only a magazine emptied faster than the bloom decays can reach. The
-    #     button is up, so the cone here is the HIP cone.
+    #     with every round and decays between them, and the threshold is what a
+    #     PISTOL can actually reach: the registry authors 1.20 deg for a Glock
+    #     and `feel::BLOOM_DECAY_PER_S`'s own inequality says a bloom grows only
+    #     while `D < rpm / 450`, so at 450 rpm a Glock gains 0.06 deg a round
+    #     against 0.036 of decay and a whole magazine adds about half a degree.
+    #     The first session asked for 1.6 and got 20 rounds and no frame, which
+    #     is the constant behaving exactly as its own doc says. The button is up,
+    #     so the cone here is the HIP cone.
     [InfInput]::RightUp()
     Start-Sleep -Milliseconds 200
     $bloom = $false
     for ($t = 0; ($t -lt 14) -and (-not $bloom); $t++) {
         [InfInput]::LeftDown(); Start-Sleep -Milliseconds 45; [InfInput]::LeftUp()
         $shotsFired++
-        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past 1.6 deg" -TimeoutS 0.4 `
-            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.6) } `
+        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past the registry's own 1.20 deg" -TimeoutS 0.35 `
+            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.30) } `
             -Out (Join-Path $OutDir "95-bloom.png"))[-1]
     }
-    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.6 deg over $shotsFired rounds" }
+    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.30 deg over $shotsFired rounds" }
     Say "WPN2b: $shotsFired rounds fired over the feel leg"
     Start-Sleep -Milliseconds 1200
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "96-after-the-burst.png") | ForEach-Object { Say $_ }
