@@ -548,3 +548,80 @@ fn a_bus_lowpass_filters_the_voices_that_play_on_it() {
     engine.drain(&[AudioCommand::Play(p)], &clip_stream(sound));
     assert_eq!(engine.filtered_clip_count(), 2);
 }
+
+/// **A MIXER EDIT MID-SESSION TAKES THE VOICES THAT ARE ALREADY PLAYING WITH
+/// IT** — wave WPN2c's audit, closing carried 235.
+///
+/// The carried item said a bus-cutoff change *"applies from the next `Play`"*
+/// and priced it at nothing because *"the mixer is loaded once at boot"*. The
+/// audit measured that premise and it is false:
+/// `editor::commands::sim::apply_mixer` live-applies the Audio Mixer panel's
+/// save into a RUNNING Simulate session ("so the panel's save is heard
+/// immediately"), and the one thing in the committed tree a bus filter reaches
+/// is a venue's music LOOP — which never reaches a next `Play`.
+///
+/// The four cases, in order: a filter arriving, the same edit twice, an edit
+/// that moves only a GAIN, and the filter lifting.
+///
+/// **Mutation → red:** `set_mixer` back to `resolved = …; refresh_all()` (the
+/// spelling this arm was written against) leaves the loop on the sound it
+/// started with and `filter_restarts` at 0.
+#[test]
+fn a_mixer_edit_refilters_the_loop_that_is_already_playing() {
+    let music = |cutoff: Option<f64>, volume: f64| MixerConfig {
+        schema_version: MIXER_SCHEMA_VERSION,
+        buses: vec![
+            MixerBus::new("master", None),
+            MixerBus {
+                name: "music".into(),
+                parent: Some("master".into()),
+                volume,
+                effects: cutoff
+                    .map(|c| vec![Effect::Lowpass { cutoff_hz: c }])
+                    .unwrap_or_default(),
+            },
+        ],
+    };
+    let mut engine = AudioEngine::disabled();
+    engine.set_mixer(music(None, 1.0));
+    let sound = test_sound();
+    let clip = Uuid::from_u128(0xD4);
+    // A venue's loop: looping, on the `music` bus, no cutoff of its own.
+    let mut loop_cmd = PlayCommand::new(7, clip, "music");
+    loop_cmd.looping = true;
+    engine.drain(&[AudioCommand::Play(loop_cmd)], &clip_stream(sound));
+    let started = engine.source_handle(7).expect("a voice");
+    assert_eq!(engine.effective_cutoff_hz(started), None);
+    assert_eq!(engine.filter_restarts(), 0);
+
+    // (1) THE PANEL PUTS A LOW-PASS ON THE MUSIC BUS while the loop plays.
+    engine.set_mixer(music(Some(500.0), 1.0));
+    let muffled = engine.source_handle(7).expect("still a voice");
+    assert_ne!(
+        started, muffled,
+        "the loop was not restarted, so it is still playing the unfiltered bytes"
+    );
+    assert_eq!(engine.filter_restarts(), 1);
+    assert_eq!(engine.effective_cutoff_hz(muffled), Some(500.0));
+
+    // (2) The same edit again is not a second restart.
+    engine.set_mixer(music(Some(500.0), 1.0));
+    assert_eq!(engine.filter_restarts(), 1);
+    assert_eq!(engine.source_handle(7), Some(muffled));
+
+    // (3) A GAIN edit is a knob on a playing voice and restarts nothing — which
+    //     is the half `refresh_all` has always done correctly.
+    engine.set_mixer(music(Some(500.0), 0.25));
+    assert_eq!(engine.filter_restarts(), 1);
+    assert_eq!(engine.source_handle(7), Some(muffled));
+    assert!(
+        (engine.effective_volume(muffled).unwrap() - 0.25).abs() < 1e-9,
+        "the gain edit did not reach the voice"
+    );
+
+    // (4) The filter lifts, and that is a restart too.
+    engine.set_mixer(music(None, 0.25));
+    assert_eq!(engine.filter_restarts(), 2);
+    let clear = engine.source_handle(7).expect("a voice");
+    assert_eq!(engine.effective_cutoff_hz(clear), None);
+}

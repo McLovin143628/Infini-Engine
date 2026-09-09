@@ -42,6 +42,23 @@ pub struct SoundData {
     pub(crate) inner: StaticSoundData,
 }
 
+/// **What it is, not what is in it** — a `Debug` that names the frame count and
+/// the rate rather than thirty-three thousand samples.
+///
+/// It exists because [`crate::AudioEngine`]'s per-voice state holds the
+/// UNFILTERED sound a voice started from (wave WPN2c's audit, closing carried
+/// 235: a mixer edit mid-session has to be able to re-filter the voices that
+/// are already playing, and the engine has no clip resolver outside `apply`),
+/// and that state derives `Debug`.
+impl core::fmt::Debug for SoundData {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SoundData")
+            .field("frames", &self.inner.num_frames())
+            .field("sample_rate", &self.inner.sample_rate)
+            .finish()
+    }
+}
+
 impl SoundData {
     /// Decode audio from an in-memory byte buffer (WAV/OGG/FLAC/MP3 — the format
     /// is detected from the contents). Takes ownership of the bytes so the decoded

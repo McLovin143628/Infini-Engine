@@ -175,6 +175,22 @@ struct Voice {
     /// **Which clip this voice is playing**, so a cutoff that changes under it
     /// can be re-applied without the caller re-issuing a `Play`.
     clip: Option<Uuid>,
+    /// **The UNFILTERED sound this voice started from** (wave WPN2c's audit,
+    /// closing carried 235).
+    ///
+    /// A cutoff can change under a live voice from three directions and the
+    /// engine can only ask the caller for bytes on ONE of them: `apply` carries
+    /// a resolver, and [`AudioEngine::set_mixer`] does not. Carried 235 read
+    /// that as "a mixer edit applies from the next `Play`" and priced it at
+    /// nothing because *"the mixer is loaded once at boot"* -- which the audit
+    /// measured to be false: `commands::sim::apply_mixer` live-applies the Audio
+    /// Mixer panel's save into a RUNNING Simulate session, so a bus cutoff can
+    /// move under a venue's LOOP, and a loop never reaches a next `Play`.
+    ///
+    /// Holding the sound is what makes the resolver unnecessary. It is cheap:
+    /// [`SoundData`] keeps its samples behind an `Arc`, so this is a pointer per
+    /// live voice, not a copy of the clip.
+    source_data: Option<SoundData>,
 }
 
 impl Voice {
@@ -302,10 +318,49 @@ impl AudioEngine {
     /// Install a named-bus [`MixerConfig`], re-fold its gains/cutoffs, and re-push
     /// every affected voice's mix. The command-queue path plays voices on named
     /// buses, so this is how gameplay volume/effect settings reach the engine.
+    ///
+    /// # A cutoff that moves takes its live voices with it
+    ///
+    /// Wave WPN2c's audit, closing carried 235. Gains have always been re-pushed
+    /// here (`refresh_all`), because a gain is a knob on a playing voice; a
+    /// cutoff is not -- this engine's filter runs over the frames before the
+    /// voice starts -- so a bus whose `Effect::Lowpass` changed used to apply
+    /// only to the NEXT `Play`. The carried item priced that at nothing on the
+    /// grounds that *"the mixer is loaded once at boot"*. It is not:
+    /// `commands::sim::apply_mixer` exists so that *"the Audio Mixer panel's
+    /// save is heard immediately in an active Simulate"*, and the one voice in
+    /// the committed tree that a bus filter reaches is a venue's music LOOP --
+    /// which never reaches a next `Play` at all.
+    ///
+    /// So every voice whose EFFECTIVE cutoff moved is restarted at the position
+    /// it had reached, exactly as an occlusion change already did, and
+    /// [`Self::filter_restarts`] counts it. A mixer edit that changes only gains
+    /// restarts nothing.
     pub fn set_mixer(&mut self, mixer: MixerConfig) {
+        // Read the cutoffs BEFORE the fold, and only for voices a source key
+        // owns: the direct API's have no clip to re-shape and nothing to key a
+        // filtered copy on.
+        let before: Vec<(u64, SoundHandle, Option<f64>)> = self
+            .sources
+            .iter()
+            .filter_map(|(src, h)| {
+                self.voices
+                    .get(&h.0)
+                    .map(|v| (*src, *h, v.cutoff_hz(self.voice_bus_cutoff(v))))
+            })
+            .collect();
         self.resolved = mixer.resolve();
         self.mixer = mixer;
         self.refresh_all();
+        for (source, handle, was) in before {
+            let now = self
+                .voices
+                .get(&handle.0)
+                .and_then(|v| v.cutoff_hz(self.voice_bus_cutoff(v)));
+            if now != was {
+                self.refilter(source, handle);
+            }
+        }
     }
 
     /// The folded linear gain for a named mixer bus (`1.0` for an unknown bus).
@@ -313,10 +368,17 @@ impl AudioEngine {
         self.resolved.get(name).map(|r| r.gain).unwrap_or(1.0)
     }
 
-    /// The folded (most-restrictive) lowpass cutoff for a named bus, if any. This
-    /// is a **device-side** DSP value: it is modelled + inspectable here, but only
-    /// audible on a `cpal` build once per-bus kira sub-tracks are wired (the
-    /// documented follow-up). `None` = no bus in the chain filters.
+    /// The folded (most-restrictive) lowpass cutoff for a named bus, if any.
+    /// `None` = no bus in the chain filters.
+    ///
+    /// **AUDIBLE since wave WPN2c**, and this doc is the one the audit found
+    /// still saying otherwise: it promised the value was *"modelled +
+    /// inspectable here, but only audible on a `cpal` build once per-bus kira
+    /// sub-tracks are wired"*, and the sub-tracks were never the answer.
+    /// `voice_bus_cutoff` reads THIS function, folds its answer with the
+    /// voice's own two cutoffs, and the winner is run over the clip's frames --
+    /// on every build, device or not, because the filter is ours and runs before
+    /// the voice starts. See [`crate::filter`].
     pub fn named_bus_lowpass_hz(&self, name: &str) -> Option<f64> {
         self.resolved.get(name).and_then(|r| r.cutoff_hz)
     }
@@ -457,6 +519,7 @@ impl AudioEngine {
                 // command queue's, which is where every shipped caller is.
                 play_lowpass_hz: None,
                 clip: None,
+                source_data: None,
                 occlusion_lowpass_hz: None,
             },
         )
@@ -485,6 +548,10 @@ impl AudioEngine {
             (Some(hz), None) => data.low_passed(hz),
             _ => data.clone(),
         };
+        // **The UNFILTERED sound, kept** -- see `Voice::source_data`. It is taken
+        // before the shadow below, because what a re-filter needs is what the
+        // caller handed in and not what this call decided to play.
+        voice.source_data = Some(data.clone());
         let data = &shaped;
         // Apply the occlusion hook up front for hook-driven voices.
         if voice.occlusion {
@@ -686,7 +753,7 @@ impl AudioEngine {
                         // a club's loop crossing its own doorway does, once per
                         // door.
                         if before != after {
-                            self.refilter(*source, h, resolve);
+                            self.refilter(*source, h);
                         }
                     }
                 }
@@ -705,17 +772,33 @@ impl AudioEngine {
         self.sources.get(&source).copied()
     }
 
-    /// **The cutoff a voice's own occlusion path put on it**, hertz (island
-    /// wave VEN1b), or `None` for a voice nothing filters.
+    /// **The cutoff a voice's own OCCLUSION path put on it**, hertz (island
+    /// wave VEN1b), or `None` when the occlusion model asked for no filter.
     ///
-    /// The per-VOICE twin of [`named_bus_lowpass_hz`](Self::named_bus_lowpass_hz)
-    /// and on exactly its terms: modelled and inspectable, audible once per-bus
-    /// kira sub-tracks are wired. A gate reads it to say a shut door muffled
-    /// rather than merely quietened.
+    /// One of the three inputs, not the answer: a gate reads it to say a shut
+    /// DOOR muffled rather than merely quietened, which is the claim VEN1b's
+    /// arms make. For what the voice is actually hearing -- the most restrictive
+    /// of the occlusion model's, the `Play`'s own and the bus's
+    /// `Effect::Lowpass` -- see [`Self::effective_cutoff_hz`]. (This doc used to
+    /// end *"modelled and inspectable, audible once per-bus kira sub-tracks are
+    /// wired"*; wave WPN2c made it audible without them.)
     pub fn effective_lowpass_hz(&self, handle: SoundHandle) -> Option<f64> {
         self.voices
             .get(&handle.0)
             .and_then(|v| v.occlusion_lowpass_hz)
+    }
+
+    /// **The cutoff this voice is actually being low-passed at**, hertz, or
+    /// `None` for a voice nothing filters (wave WPN2c's audit).
+    ///
+    /// The fold of all three -- the bus's `Effect::Lowpass`, the `Play`'s own
+    /// `lowpass_hz`, and the occlusion model's -- by the same
+    /// most-restrictive-wins rule the engine plays it at, so a gate can assert
+    /// what a listener hears rather than which of the three said it.
+    pub fn effective_cutoff_hz(&self, handle: SoundHandle) -> Option<f64> {
+        self.voices
+            .get(&handle.0)
+            .and_then(|v| v.cutoff_hz(self.voice_bus_cutoff(v)))
     }
 
     /// **The clip a voice should hear**, filtered if anything asked for it
@@ -794,6 +877,9 @@ impl AudioEngine {
                 occlusion_lowpass_hz: None,
                 play_lowpass_hz: p.lowpass_hz,
                 clip: Some(p.clip),
+                // Filled in by `play_voice`, which is the one place that has
+                // the decoded sound in its hand.
+                source_data: None,
             },
         ) else {
             return; // the backend refused it; `play_voice` counted that
@@ -841,19 +927,20 @@ impl AudioEngine {
     /// few milliseconds after a door opens are the filter settling. At 500 Hz
     /// that is about a third of a millisecond, which nobody hears; at 50 Hz it
     /// would be three, which still nobody hears.
-    fn refilter(
-        &mut self,
-        source: u64,
-        handle: SoundHandle,
-        resolve: &dyn Fn(Uuid) -> Option<SoundData>,
-    ) {
+    fn refilter(&mut self, source: u64, handle: SoundHandle) {
         let Some(voice) = self.voices.get(&handle.0).cloned() else {
             return;
         };
         let Some(clip) = voice.clip else {
             return;
         };
-        let Some(data) = resolve(clip) else {
+        // **The voice's OWN bytes, not the caller's resolver** (the WPN2c
+        // audit). The first spelling took a `&dyn Fn(Uuid) -> Option<SoundData>`
+        // and could therefore only be called from `apply`, which is exactly why
+        // `set_mixer` could not re-filter anything and carried 235 existed. A
+        // voice that cannot answer with its own sound is one the direct API
+        // started, and it has no clip either.
+        let Some(data) = voice.source_data.clone() else {
             return;
         };
         let at = self.backend.position(handle.0);
