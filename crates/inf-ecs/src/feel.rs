@@ -574,9 +574,28 @@ pub const BLOOM_MAX_DEG_PER_POINT: f64 = 0.45;
 
 /// **How fast the bloom decays**, in multiples of its own ceiling per second.
 ///
-/// 2.5 — a full bloom is gone 0.4 s after the trigger comes up, which is about
-/// the time it takes to re-aim.
-pub const BLOOM_DECAY_PER_S: f64 = 2.5;
+/// **0.8**, so a saturated bloom is gone 1.25 s after the trigger comes up. The
+/// first number tried was 2.5 and it was measured to be **wrong by
+/// construction**: the bloom has to GROW under sustained fire or it is not a
+/// bloom, and growth needs
+///
+/// ```text
+/// bloom_per_shot           >  decay_per_second * (60 / rpm)
+/// 0.06 * intensity         >  0.45 * intensity * D * (60 / rpm)
+/// D                        <  rpm / 450
+/// ```
+///
+/// At 2.5 that is satisfied by nothing this engine ships — a 600 rpm rifle
+/// needs `D < 1.333` — so a magazine emptied at the shipped rate ended with the
+/// bloom at zero, and `wpn2b_gate`'s own arm is what found it. 0.8 leaves
+/// headroom down to **360 rpm** (a slow pistol) and refuses to accumulate below
+/// it, which is correct: a marksman rifle fired once a second really is as
+/// accurate on the tenth round as on the first.
+///
+/// The measured equilibrium at the AR's 600 rpm and 3.8 intensity: +0.228 deg a
+/// round against −0.137 deg of decay between them, saturating at the 1.71 deg
+/// ceiling after nineteen rounds.
+pub const BLOOM_DECAY_PER_S: f64 = 0.8;
 
 /// **How much cone one more round of this weapon adds**, degrees.
 pub fn bloom_per_shot_deg(def: &WeaponDef) -> f64 {
