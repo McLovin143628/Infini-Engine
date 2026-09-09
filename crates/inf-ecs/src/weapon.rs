@@ -2310,7 +2310,11 @@ pub fn report_layers(
     // A non-finite gain is a definition somebody broke, not a silent silence:
     // it takes the authored 1.0, which is the refusal-is-a-value rule applied
     // to a number that reaches a mixer.
-    let gain = if gain.is_finite() { gain.clamp(0.0, 4.0) } else { 1.0 };
+    let gain = if gain.is_finite() {
+        gain.clamp(0.0, 4.0)
+    } else {
+        1.0
+    };
     // **Every layer is a [`report_source`]** with three fields moved. That is
     // deliberate rather than tidy: the bus, the spatialisation, the near field,
     // the distance model, the rolloff and the two flags are what "a gunshot's
@@ -3001,7 +3005,8 @@ pub fn health_state_bytes(world: &EcsWorld) -> Vec<u8> {
 pub fn destructible_positions(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
     use crate::components::{Destructible, GlobalTransform};
     let w = world.world();
-    let Some(mut q) = w.try_query_filtered::<(&Guid, &GlobalTransform), With<Destructible>>() else {
+    let Some(mut q) = w.try_query_filtered::<(&Guid, &GlobalTransform), With<Destructible>>()
+    else {
         return Vec::new();
     };
     let mut rows: Vec<(Uuid, DVec3)> = q.iter(w).map(|(g, t)| (g.0, t.translation())).collect();

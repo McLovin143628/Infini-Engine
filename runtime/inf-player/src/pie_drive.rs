@@ -1131,14 +1131,15 @@ impl HeroLog {
             .and_then(|g| {
                 let (_, def) = inf_ecs::weapon::equipped_def(sim.world(), g)?;
                 let e = sim.world().entity_of(g)?;
-                let st = sim
-                    .world()
-                    .world()
-                    .get::<inf_ecs::weapon::WeaponState>(e)?;
+                let st = sim.world().world().get::<inf_ecs::weapon::WeaponState>(e)?;
                 Some(format!(
                     "{:.2}{}",
                     st.lock_fraction(&def),
-                    if st.locked_on(&def).is_some() { "+" } else { "" }
+                    if st.locked_on(&def).is_some() {
+                        "+"
+                    } else {
+                        ""
+                    }
                 ))
             })
             .unwrap_or_else(|| "-".to_string());

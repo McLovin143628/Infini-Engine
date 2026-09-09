@@ -518,10 +518,7 @@ impl Attachments {
     /// the catalogue is a file.
     pub fn find_any(&self, id: &str) -> Option<u16> {
         let id = id.trim().to_ascii_lowercase();
-        self.rows
-            .iter()
-            .position(|r| r.id == id)
-            .map(|i| i as u16)
+        self.rows.iter().position(|r| r.id == id).map(|i| i as u16)
     }
 
     /// Every row that fits this class and slot, in catalogue order.
@@ -566,8 +563,12 @@ fn parse_row(
                 .map_err(|e| format!("attachment row {line:?} magazine: {e}"))?,
         ),
     };
-    let art = AttachmentArt::from_name(parts[10])
-        .ok_or_else(|| format!("attachment row {line:?} names an unknown art {:?}", parts[10]))?;
+    let art = AttachmentArt::from_name(parts[10]).ok_or_else(|| {
+        format!(
+            "attachment row {line:?} names an unknown art {:?}",
+            parts[10]
+        )
+    })?;
     let id = parts[0].trim().to_ascii_lowercase();
     if id.is_empty() {
         return Err(format!("attachment row {line:?} has no id"));
@@ -702,7 +703,11 @@ mod tests {
             )
             .expect("the AR's monolithic suppressor");
         let mag = cat
-            .find(WeaponClass::Ar, AttachmentSlot::Magazine, "45_round_extended_mag")
+            .find(
+                WeaponClass::Ar,
+                AttachmentSlot::Magazine,
+                "45_round_extended_mag",
+            )
             .expect("the AR's 45-round mag");
         let mut a = [NO_ATTACHMENT; ATTACHMENT_SLOTS];
         a[AttachmentSlot::Muzzle.index()] = supp;
@@ -713,24 +718,20 @@ mod tests {
         // The identity leaves a definition alone, byte for byte.
         let base = WeaponDef::default();
         assert_eq!(StatModifiers::IDENTITY.apply(&base), base);
-        assert_eq!(fold(&[NO_ATTACHMENT; ATTACHMENT_SLOTS]), StatModifiers::IDENTITY);
+        assert_eq!(
+            fold(&[NO_ATTACHMENT; ATTACHMENT_SLOTS]),
+            StatModifiers::IDENTITY
+        );
     }
 
     #[test]
     fn a_broken_row_is_refused_by_name() {
         assert!(Attachments::parse("[ar.muzzle]\nrows = [\"too|few\"]\n").is_err());
-        assert!(Attachments::parse(
-            "[nosuch.muzzle]\nrows = [\"a|A|1|1|1|0|1|1|1|-|-\"]\n"
-        )
-        .is_err());
-        assert!(Attachments::parse(
-            "[ar.nosuch]\nrows = [\"a|A|1|1|1|0|1|1|1|-|-\"]\n"
-        )
-        .is_err());
-        assert!(Attachments::parse(
-            "[ar.muzzle]\nrows = [\"a|A|1|1|1|0|1|1|1|-|hat\"]\n"
-        )
-        .is_err());
+        assert!(
+            Attachments::parse("[nosuch.muzzle]\nrows = [\"a|A|1|1|1|0|1|1|1|-|-\"]\n").is_err()
+        );
+        assert!(Attachments::parse("[ar.nosuch]\nrows = [\"a|A|1|1|1|0|1|1|1|-|-\"]\n").is_err());
+        assert!(Attachments::parse("[ar.muzzle]\nrows = [\"a|A|1|1|1|0|1|1|1|-|hat\"]\n").is_err());
         // And a good one is taken.
         let ok = Attachments::parse("[ar.muzzle]\nrows = [\"a|A|1|1|1|0|1|1|1|-|scope\"]\n")
             .expect("a well-formed row");

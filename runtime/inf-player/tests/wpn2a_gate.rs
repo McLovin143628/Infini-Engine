@@ -1426,7 +1426,11 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
     // eighty-eighth row and is not in this census because it is not a
     // projectile — see `CLASS_CENSUS`.
     assert_eq!(total, 87);
-    assert_eq!(taken, total + 1, "the M9 knife is the row this census omits");
+    assert_eq!(
+        taken,
+        total + 1,
+        "the M9 knife is the row this census omits"
+    );
 
     // The BY-NAME DOOR: every settable name takes a value and refuses a NaN,
     // for every row, which is what `set`/`names()` being one door means.

@@ -370,7 +370,10 @@ mod tests {
             "only {} keys were scraped out of the panel's reducer — the scrape              has stopped matching its source and this arm is vacuous",
             want.len()
         );
-        let missing: Vec<&String> = want.iter().filter(|k| !routed.contains(k.as_str())).collect();
+        let missing: Vec<&String> = want
+            .iter()
+            .filter(|k| !routed.contains(k.as_str()))
+            .collect();
         assert!(
             missing.is_empty(),
             "the inventory panel reads {} key(s) no `KeyCode` reaches, so they do              nothing in the shipped player: {missing:?}",

@@ -1772,6 +1772,14 @@ if ($armList.Count -gt 0) {
     #    shoulder -- and so the wave's own first-person rule is what the pixels
     #    show: the BODY is faded to nothing at a 0.2 m boom and the WEAPON is
     #    not. Column 13 is the boom and 14 is how much of the body is drawn.
+    # **LEVEL THE AIM FIRST.** The ballistics leg before this one leaves the look
+    # pitched up so its rounds clear the street, and a first-person camera reads
+    # the aim: session 2 of this wave took six mesh frames of the inside of a
+    # building. Down to the clamp, then back up by a fixed amount, which is an
+    # ABSOLUTE elevation rather than a relative one -- the recipe the ballistics
+    # leg uses for the same reason.
+    [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 300
+    [InfInput]::Look(0, -430); Start-Sleep -Milliseconds 400
     # **THE VIEW-MODE KEY IS A TOGGLE**, so one press is a coin flip: the leg
     # before this one may have left the camera in first person, in which case a
     # single G puts it back on the boom. Session 1 of this wave pressed once,

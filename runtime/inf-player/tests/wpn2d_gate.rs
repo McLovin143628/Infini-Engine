@@ -546,8 +546,16 @@ fn the_blast_falls_off_by_the_closed_form_at_five_distances() {
             "the falloff at {d} m is {got} and (1 - d/r)^2 is {want}"
         );
     }
-    assert_eq!(ballistics::blast_falloff(0.0, 1.0), 0.0, "no radius, no blast");
-    assert_eq!(ballistics::blast_falloff(10.0, 99.0), 0.0, "past the radius");
+    assert_eq!(
+        ballistics::blast_falloff(0.0, 1.0),
+        0.0,
+        "no radius, no blast"
+    );
+    assert_eq!(
+        ballistics::blast_falloff(10.0, 99.0),
+        0.0,
+        "past the radius"
+    );
 
     // 2. and the same numbers, as joules bodies lost.
     let mut r = Range::new(defs_with(&[("boom", def)]));
@@ -761,7 +769,9 @@ fn a_lock_holds_for_lock_s_and_releases_outside_the_cone() {
         air.world.propagate();
         // Aim UP at it: the Stinger's cone is eight degrees and a car twenty-six
         // metres up at forty out is thirty-three of them off the horizon.
-        let pitch = (alt - d3::gameplay::MUZZLE_HEIGHT_M).atan2(40.0).to_degrees();
+        let pitch = (alt - d3::gameplay::MUZZLE_HEIGHT_M)
+            .atan2(40.0)
+            .to_degrees();
         air.aim(HERO, 0.0, pitch);
         air.step();
     }
@@ -940,7 +950,10 @@ fn the_throw_verb_reaches_the_sim_from_the_key() {
         |_| (0.0, 0.0),
         0.2,
     );
-    assert!(intent.throw, "the throw action did not become a throw intent");
+    assert!(
+        intent.throw,
+        "the throw action did not become a throw intent"
+    );
     // 4. and the intent reaches the runtime edge the fixed step consumes.
     let mut r = Range::new(registry());
     inf_ecs::movement::apply_intent(&mut r.world, &intent);
@@ -1288,8 +1301,14 @@ fn a_punch_cannot_reach_through_a_wall() {
     assert!(open, "a punch at a body a metre away did not land at all");
     assert_eq!(open_blocked, 0, "an open swing was refused");
     assert!(open_casts > 0, "the LOS probe never ran");
-    assert!(!walled, "the punch went through the wall — carried WPN1 is open");
-    assert!(walled_blocked > 0, "the wall stopped it and nothing counted");
+    assert!(
+        !walled,
+        "the punch went through the wall — carried WPN1 is open"
+    );
+    assert!(
+        walled_blocked > 0,
+        "the wall stopped it and nothing counted"
+    );
 }
 
 /// **THE M9 IS A MELEE ITEM WITH ITS OWN REACH, AND ITS BLOW NAMES A SURFACE.**
@@ -1408,7 +1427,9 @@ fn the_fold_is_applied_through_the_one_weapon_def_door() {
     let mut r = Range::new(registry());
     r.arm(HERO, "m4a1");
     r.step();
-    let base = weapon::base_equipped_def(&r.world, HERO).expect("a rifle").1;
+    let base = weapon::base_equipped_def(&r.world, HERO)
+        .expect("a rifle")
+        .1;
     let bare_bytes = weapon::weapon_state_bytes(&r.world);
     let cat = attachment::catalogue();
     let supp = cat
@@ -1442,9 +1463,7 @@ fn the_fold_is_applied_through_the_one_weapon_def_door() {
         (folded.report_max_m - base.report_max_m * m.loudness_mult).abs() < 1e-6,
         "the reach did not take the loudness multiplier"
     );
-    assert!(
-        (folded.report_gain - base.report_gain * m.loudness_mult).abs() < 1e-6
-    );
+    assert!((folded.report_gain - base.report_gain * m.loudness_mult).abs() < 1e-6);
     assert!((folded.range_m - base.range_m * m.range_mult).abs() < 1e-6);
     assert!((folded.ads_time_ms - (base.ads_time_ms + m.ads_time_delta_ms)).abs() < 1e-6);
     // The trace moves…
@@ -1577,7 +1596,10 @@ fn an_extended_magazine_changes_the_readout() {
         )
         .expect("the AR's 45-round mag");
     assert_eq!(
-        cat.get(mag).expect("the row").modifiers.mag_capacity_override,
+        cat.get(mag)
+            .expect("the row")
+            .modifiers
+            .mag_capacity_override,
         Some(45)
     );
     assert!(weapon::equip_attachment(
@@ -1594,7 +1616,10 @@ fn an_extended_magazine_changes_the_readout() {
     assert_ne!(before, after, "the readout did not move");
     assert!(after.starts_with("45 / "), "the readout reads {after:?}");
     assert_eq!(
-        weapon::equipped_def(&r.world, HERO).expect("a rifle").1.magazine,
+        weapon::equipped_def(&r.world, HERO)
+            .expect("a rifle")
+            .1
+            .magazine,
         45
     );
 }
@@ -1734,7 +1759,10 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
     for (k, n) in &by_key {
         println!("  {k:>18}: {n} rows");
     }
-    println!("  rows with NO art (the primitive, and it says so): {}", bare.len());
+    println!(
+        "  rows with NO art (the primitive, and it says so): {}",
+        bare.len()
+    );
     for id in &bare {
         let def = defs.get(id).and_then(|i| i.weapon).expect("a weapon");
         assert!(
@@ -1770,7 +1798,11 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
         .iter()
         .map(|k| weapon::weapon_mesh_guid(k))
         .collect();
-    assert_eq!(ids.len(), weapon::WEAPON_MESH_KEYS.len(), "two keys collide");
+    assert_eq!(
+        ids.len(),
+        weapon::WEAPON_MESH_KEYS.len(),
+        "two keys collide"
+    );
 }
 
 /// **THE WEAPON IS DRAWN WITH ITS CLASS'S ART, AND IT FOLLOWS THE HAND** —
@@ -1796,7 +1828,10 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
         .copied()
         .expect("a mesh reference");
     let want = weapon::weapon_mesh_guid("SM_AR4");
-    println!("the M4A1 draws {:?}; the AR4's identity is {want}", mesh.asset);
+    println!(
+        "the M4A1 draws {:?}; the AR4's identity is {want}",
+        mesh.asset
+    );
     assert_eq!(mesh.asset, Some(want), "the rifle is still a cube");
     // A real mesh is drawn at 1:1 and the placeholder is stretched.
     let scale = r
@@ -1821,7 +1856,10 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
         .entity_of(d3::gameplay::equipped_weapon_guid(HERO))
         .expect("a weapon entity");
     let sm = s.world.world().get::<MeshRef>(se).copied().expect("a mesh");
-    assert_eq!(sm.asset, None, "the shotgun claims art the bundle has none of");
+    assert_eq!(
+        sm.asset, None,
+        "the shotgun claims art the bundle has none of"
+    );
     let ss = s
         .world
         .world()
@@ -1838,8 +1876,8 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
     // the holder's own MODEL origin, which is its FEET and not its capsule
     // centre. (Measuring against the entity transform is measuring the 0.9 m
     // offset between the two, which is what this arm's first draft did.)
-    let model = inf_ecs::pose::model_to_world(&r.world, r.world.entity_of(HERO).expect("hero"))
-        .translation;
+    let model =
+        inf_ecs::pose::model_to_world(&r.world, r.world.entity_of(HERO).expect("hero")).translation;
     let at = r
         .world
         .world()
@@ -1931,7 +1969,10 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_class_course() {
     }
     assert_eq!(ta.audio, tb.audio, "two cooks made different noises");
     assert_eq!(ta.audio, tp.audio, "PIE and shipping made different noises");
-    assert_eq!((ta.shots, ta.pellets, ta.blasts), (tp.shots, tp.pellets, tp.throws.max(ta.blasts)));
+    assert_eq!(
+        (ta.shots, ta.pellets, ta.blasts),
+        (tp.shots, tp.pellets, tp.throws.max(ta.blasts))
+    );
 }
 
 /// **A QUIET LEVEL FOLDS NOTHING NEW** — the half that keeps every trace
@@ -1957,7 +1998,10 @@ fn a_quiet_level_folds_nothing_this_wave_added() {
     let bytes = weapon::weapon_state_bytes(&r.world);
     let id_len = "m4a1".len();
     let want = 16 + 4 + id_len + 4 + 4 + 8 + 8 + 8 + 1;
-    println!("a carried M4A1 folds {} B; the pre-WPN2d row is {want} B", bytes.len());
+    println!(
+        "a carried M4A1 folds {} B; the pre-WPN2d row is {want} B",
+        bytes.len()
+    );
     assert_eq!(
         bytes.len(),
         want,
@@ -2133,7 +2177,10 @@ fn nothing_of_the_npc_firing_policy_leaked_in() {
     for _ in 0..120 {
         shots += r.step().shots;
     }
-    assert_eq!(shots, 0, "an armed NPC opened fire with no policy to tell it to");
+    assert_eq!(
+        shots, 0,
+        "an armed NPC opened fire with no policy to tell it to"
+    );
 }
 
 // ── the fixture plumbing (wpn2c_gate's, verbatim) ───────────────────────────
@@ -2142,14 +2189,9 @@ fn nothing_of_the_npc_firing_policy_leaked_in() {
 /// and its notify fires. Nothing here is posed (there is no rig in this
 /// fixture), which is what makes the notify the ONLY thing this call produces.
 fn pose_step(world: &mut EcsWorld) {
-    inf_ecs::pose::step_pose_evaluation(
-        world,
-        DT,
-        &|_| None,
-        &|_| None,
-        &|_| None,
-        &|_| Default::default(),
-    );
+    inf_ecs::pose::step_pose_evaluation(world, DT, &|_| None, &|_| None, &|_| None, &|_| {
+        Default::default()
+    });
 }
 
 fn sample_files() -> Vec<String> {

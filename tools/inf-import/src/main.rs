@@ -127,11 +127,10 @@ fn run(args: &[String]) -> Result<(), String> {
             // single flag would have to guess which.
             "--rebind-mesh" => {
                 let v = take(&mut i)?;
-                let (stem, key) = v.split_once('=').ok_or_else(|| {
-                    format!("--rebind-mesh wants <Stem>=<mesh-key>, got {v:?}")
-                })?;
-                opts.rebind_meshes
-                    .push((stem.to_string(), key.to_string()));
+                let (stem, key) = v
+                    .split_once('=')
+                    .ok_or_else(|| format!("--rebind-mesh wants <Stem>=<mesh-key>, got {v:?}"))?;
+                opts.rebind_meshes.push((stem.to_string(), key.to_string()));
             }
             "--no-meshes" => opts.meshes = false,
             "--character-lods" => {

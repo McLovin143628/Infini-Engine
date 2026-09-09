@@ -660,8 +660,7 @@ pub fn import_manifest(
                 report.asset_packs.push((want, mesh.pack.clone()));
                 report.advisories.push(format!(
                     "rebind: {} -> {stem}.inf_mesh at {}",
-                    mesh.key,
-                    want.0
+                    mesh.key, want.0
                 ));
             }
         }

@@ -1151,10 +1151,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
-                    kind: RoundKind::Bullet,
-                    fuse_left_s: 0.0,
-                    bounces: 0,
-                    guide: Uuid::nil(),
+            kind: RoundKind::Bullet,
+            fuse_left_s: 0.0,
+            bounces: 0,
+            guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         for i in 0..MAX_ROUNDS_IN_FLIGHT {
@@ -1179,10 +1179,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
-                    kind: RoundKind::Bullet,
-                    fuse_left_s: 0.0,
-                    bounces: 0,
-                    guide: Uuid::nil(),
+            kind: RoundKind::Bullet,
+            fuse_left_s: 0.0,
+            bounces: 0,
+            guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(!spawn_round(&mut w, r, MAX_SHOT_RAYS_PER_STEP));
@@ -1203,10 +1203,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
-                    kind: RoundKind::Bullet,
-                    fuse_left_s: 0.0,
-                    bounces: 0,
-                    guide: Uuid::nil(),
+            kind: RoundKind::Bullet,
+            fuse_left_s: 0.0,
+            bounces: 0,
+            guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));
@@ -1234,10 +1234,10 @@ mod tests {
             age_s: 0.0,
             first_segment: true,
             cracked: false,
-                    kind: RoundKind::Bullet,
-                    fuse_left_s: 0.0,
-                    bounces: 0,
-                    guide: Uuid::nil(),
+            kind: RoundKind::Bullet,
+            fuse_left_s: 0.0,
+            bounces: 0,
+            guide: Uuid::nil(),
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));

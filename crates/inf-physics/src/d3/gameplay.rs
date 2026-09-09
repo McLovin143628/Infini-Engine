@@ -888,7 +888,10 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
         // palm and flying through the air at the same time.
         let empty_hand = world.entity_of(guid).is_some_and(|e| {
             let w = world.world();
-            match (w.get::<weapon::WeaponState>(e), equipped_weapon(world, guid)) {
+            match (
+                w.get::<weapon::WeaponState>(e),
+                equipped_weapon(world, guid),
+            ) {
                 (Some(st), Some((id, def))) => st.item_id == id && !st.in_hand(&def),
                 _ => false,
             }
@@ -897,11 +900,11 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
             .then(|| equipped_weapon_item(world, guid))
             .flatten()
             .map(|(id, item)| {
-            let forward = item
-                .weapon
-                .as_ref()
-                .map(|w| w.muzzle_forward_m)
-                .unwrap_or_default();
+                let forward = item
+                    .weapon
+                    .as_ref()
+                    .map(|w| w.muzzle_forward_m)
+                    .unwrap_or_default();
                 (id, forward, inf_ecs::weapon::weapon_mesh_of(&item))
             });
         let weapon_guid = equipped_weapon_guid(guid);
@@ -1053,7 +1056,9 @@ fn step_accessories(world: &mut EcsWorld, owner: Uuid, weapon_guid: Uuid, barrel
             },
             Visibility::default(),
             AttachedTo::new(weapon_guid, "", offset),
-            inf_ecs::weapon::AccessoryMark { weapon: weapon_guid },
+            inf_ecs::weapon::AccessoryMark {
+                weapon: weapon_guid,
+            },
         ));
         if let Some(mut n) = world.world_mut().get_mut::<Name>(e) {
             let label = format!("Attachment: {}", slot.name());
@@ -1901,7 +1906,9 @@ fn step_weapons(
         };
         let pellets = def.pellet_count();
         if pellets == 1 {
-            let hit = resolve_shot(world, bridge, guid, &def, from, dir, shot_index, &ctx, report);
+            let hit = resolve_shot(
+                world, bridge, guid, &def, from, dir, shot_index, &ctx, report,
+            );
             if hit.loud {
                 inf_ecs::casing::note_shot_room(world, hit.indoors);
             }
@@ -1941,8 +1948,17 @@ fn step_weapons(
                 .wrapping_mul(u64::from(weapon::MAX_PELLETS))
                 .wrapping_add(u64::from(p));
             let pdir = weapon::shot_direction_with(&pellet_def, yaw, pitch, index, pattern_deg);
-            let mut hit =
-                resolve_shot(world, bridge, guid, &pellet_def, from, pdir, index, &ctx, report);
+            let mut hit = resolve_shot(
+                world,
+                bridge,
+                guid,
+                &pellet_def,
+                from,
+                pdir,
+                index,
+                &ctx,
+                report,
+            );
             // **ONE BANG PER PULL.** Only the first pellet is `loud`, because
             // `loud` is what both hosts' `weapon_report` fence queues four
             // layers off and what `panic_sources` coalesces on: eight loud
@@ -3825,8 +3841,7 @@ fn step_throws(world: &mut EcsWorld, report: &mut GameplayReport) {
         // `THROW_RELEASE_GRACE_S` AFTER the fraction the notify fires at, so on
         // a rigged character the notify always gets there first and the clock
         // never runs. That is what keeps path 1 from being decoration.
-        let notified =
-            inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::THROW_NOTIFY);
+        let notified = inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::THROW_NOTIFY);
         let by_clock = !notified && {
             let w = world.world();
             w.get::<CharacterMovement>(entity).is_some_and(|cm| {
