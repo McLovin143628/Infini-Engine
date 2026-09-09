@@ -135,9 +135,13 @@ const ANCHORS: [(&str, &[&str]); 8] = [
         "inf-ecs/src/ballistics.rs",
         &["fn advance_round(", "fn damage_curve_j("],
     ),
+    // `cast_ray_where(` and not `cast_ray_excluding(` since the WPN2a audit: the
+    // SHOT's two casts ask `CastTargets::AllSolid` now, and the older spelling
+    // survives in this file only as the WITNESS ray -- so anchoring on it would
+    // have gone on passing while the thing this gate is about moved out.
     (
         "d3/gameplay.rs",
-        &["fn step_rounds(", "cast_ray_excluding("],
+        &["fn step_rounds(", "cast_ray_where(", "fn shot_exclusions("],
     ),
 ];
 

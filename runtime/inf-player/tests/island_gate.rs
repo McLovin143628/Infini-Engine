@@ -144,6 +144,24 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
     let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
         inf_player::level::load_actor_classes_from_dir(content),
     )
+    // **THE PERSISTED BINDING MAP** (the WPN2a audit). `with_defaults` is a
+    // FALLBACK list; an entity's `ActorClass` names its class by ASSET GUID and
+    // only `with_bindings` can resolve that. Without it this host ran **no level
+    // Blueprint at all** while the pack host ran every one of them — and the two
+    // agreed for four waves because the island's only class was the wizard's
+    // character controller, which consumes footstep notifies and bumps a
+    // blueprint variable, neither of which is folded into `state_bytes`.
+    //
+    // The moment the island got a class that DOES something (WPN2a audit,
+    // carried 204: `island_author_class` spawns the sidearm on the kerb) the two
+    // hosts disagreed at step 0 — which is this function's own law, stated in
+    // its doc four paragraphs down and broken by the line that was missing:
+    // *two hosts compared for byte equality must be given the same world to
+    // disagree about, or the equality is between one real reading and one
+    // impoverished one.*
+    .with_bindings(inf_player::level::load_actor_classes_by_guid_from_dir(
+        content,
+    ))
     .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
         content,
     ))
@@ -466,10 +484,13 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     );
     assert_eq!(
         payload.classes.len(),
-        1,
-        "the hero's controller class must ride the wire — it is the `.inf_act` \
-         the recipe's `[content]` list copies and the one thing in the character \
-         that `level_dependencies` does NOT reach, so nothing else would notice"
+        2,
+        "the island's two classes must ride the wire — the hero's controller and \
+         the level's own author (WPN2a audit, carried 204: the class that defines \
+         the weapon registry and puts the sidearm on the kerb). Both are `.inf_act`s \
+         the recipe's `[content]` list copies and neither is something \
+         `level_dependencies` reaches, so nothing else would notice one going \
+         missing"
     );
 
     inf_player::sim_from_payload(&payload)

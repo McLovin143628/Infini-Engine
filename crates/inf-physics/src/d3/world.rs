@@ -1330,10 +1330,13 @@ impl PhysicsWorld3D {
         match self.colliders.get_mut(collider.0) {
             Some(c) => {
                 c.set_enabled(enabled);
-                // The membership does not change — this tree has always held
-                // disabled colliders and `QueryFilter` has always answered them
-                // — but the mark keeps the AABB honest if the shape moved with
-                // it.
+                // The membership does not change — this tree still HOLDS a
+                // disabled collider — but since the WPN2a audit the filtered
+                // query doors REFUSE one: `cast_ray_where` and
+                // `cast_shape_where` reject `!is_enabled()` in their predicate.
+                // Until then a parked capsule was a person-shaped hole in the
+                // air that a bullet stopped on, standing, where the body used to
+                // be. The mark keeps the AABB honest if the shape moved with it.
                 self.query_moved.push(collider.0);
                 true
             }
@@ -1451,8 +1454,31 @@ impl PhysicsWorld3D {
         self.ensure_query_pipeline();
         let ray = Ray::new(origin, dir);
         let predicate = |h: rapier3d_f64::geometry::ColliderHandle,
-                         _: &rapier3d_f64::geometry::Collider| {
-            !exclude.contains(&ColliderId3D(h))
+                         c: &rapier3d_f64::geometry::Collider| {
+            // **A PARKED COLLIDER IS NOT IN THE WAY** (wave WPN2a audit).
+            //
+            // `set_collider_enabled(_, false)` takes a collider out of the
+            // SIMULATION and its own doc has always said the query tree still
+            // answers it. Nothing had measured what that costs, because until
+            // this wave the only filtered ray that could reach one was a
+            // structural probe. Two things park a capsule in this engine — a
+            // driver in a seat (P29.7) and a character in a RAGDOLL, whose own
+            // capsule is switched off the moment its limbs are built — and both
+            // leave a person-shaped hole in the air, STANDING, exactly where the
+            // body used to be.
+            //
+            // Measured, on this audit's own ragdoll arm: a round fired at a body
+            // lying on the floor stopped on the parked capsule of the character
+            // it belonged to, 1.5 m up, and spent its joules there. The hit was
+            // "right" (the target lost 400 J) and the geometry was a ghost.
+            // `guid_of_ragdoll_collider` was dead code because of it.
+            //
+            // It is here rather than in the two `CastTargets` that need it
+            // because "the world has parked this" is not a CLASS of collider,
+            // it is a fact about one — and a caster asking what is in the way of
+            // a bullet, a wheel, a camera or a ledge probe wants the same
+            // answer about it.
+            c.is_enabled() && !exclude.contains(&ColliderId3D(h))
         };
         // `skip_dynamic` asks the BROAD PHASE to leave dynamic bodies out
         // entirely, which is not the same as "cast, then reject a dynamic hit".
@@ -1627,9 +1653,12 @@ impl PhysicsWorld3D {
         }
         let swept = shape.to_shared()?;
         self.ensure_query_pipeline();
+        // The ray door's rule, for the ray door's reason: a parked capsule is a
+        // person-shaped hole in the air and a clearance probe must not stop on
+        // one either. See `cast_ray_where`.
         let predicate = |h: rapier3d_f64::geometry::ColliderHandle,
-                         _: &rapier3d_f64::geometry::Collider| {
-            !exclude.contains(&ColliderId3D(h))
+                         c: &rapier3d_f64::geometry::Collider| {
+            c.is_enabled() && !exclude.contains(&ColliderId3D(h))
         };
         let base = match targets {
             CastTargets::All => QueryFilter::default(),

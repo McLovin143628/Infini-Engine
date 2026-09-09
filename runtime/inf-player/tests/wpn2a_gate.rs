@@ -1915,16 +1915,101 @@ fn a_round_into_a_body_on_the_floor_spends_its_joules() {
         Some(MovementMode::Ragdoll),
         "the target is not ragdolling"
     );
-    // Fire at it, level, and keep firing while it settles: a body on the floor
-    // is a moving target and the arm is about whether it can be hit at all.
+    // Let both bodies come to rest: this range's floor is 3 m below the muzzle
+    // line, so the hero falls to it and so does the ragdoll, and a shot fired
+    // while either is in the air is a shot at where they used to be.
+    for _ in 0..120 {
+        r.step();
+    }
+    let where_is = |r: &Range, g: Uuid| -> DVec3 {
+        r.world
+            .entity_of(g)
+            .and_then(|e| r.world.world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+            .expect("a transform")
+    };
+    let body = where_is(&r, TARGET);
+    let shooter = where_is(&r, HERO);
+    println!("the body came to rest at {body:?}; the shooter is at {shooter:?}");
+
+    // **WHICH DOOR NAMES THE LIMB.** The same cast the gameplay step makes,
+    // made here so the two lookups can be read apart: the ordinary
+    // collider-to-entity index knows nothing about a body the bridge attached
+    // itself, and `guid_of_ragdoll_collider` is the only thing that can turn
+    // that handle back into a person. Without this the arm would pass on a
+    // round that stopped on the PARKED CAPSULE of the character that is lying
+    // down — which is exactly what it did before this audit taught the query
+    // doors to refuse a disabled collider.
+    // The muzzle: the hero's transform is `feet + half + radius`, so the feet are
+    // 0.9 m under it and the muzzle `MUZZLE_HEIGHT_M` over those.
+    let from = DVec3::new(
+        shooter.x,
+        shooter.y - (CharacterMovement::default().stand_half_height_m + RADIUS) + MUZZLE_Y,
+        shooter.z,
+    );
+    // A body lying down is not at its own transform: aim just above the FLOOR
+    // under it, which is where a limb on the ground actually is. The range's
+    // floor is a slab centred at -3 with a half-extent of 0.5, so its top is
+    // -2.5.
+    let aim_at = DVec3::new(body.x, -2.5 + 0.15, body.z);
+    let dir = (aim_at - from).normalize();
+    {
+        // The shooter's own capsule is where the ray starts, so it goes in the
+        // exclusion set exactly as `shot_exclusions` puts it there.
+        let mut skip = BTreeSet::new();
+        skip.extend(r.bridge.collider_of(HERO));
+        let probe = r
+            .bridge
+            .world_mut()
+            .cast_ray_where(from, dir, 30.0, &skip, d3::CastTargets::AllSolid)
+            .expect("the probe found nothing at all where a body is lying");
+        let plain = r.bridge.guid_of_collider(probe.collider);
+        let via_ragdoll = r.bridge.guid_of_ragdoll_collider(probe.collider);
+        let own = r.bridge.collider_of(TARGET);
+        println!(
+            "the collider the shot will meet: {:?}; guid_of_collider = {plain:?}, \
+             guid_of_ragdoll_collider = {via_ragdoll:?}; the target's OWN capsule is \
+             {own:?} (enabled {:?})",
+            probe.collider,
+            own.and_then(|c| r.bridge.world().collider_enabled(c)),
+        );
+        assert_eq!(
+            plain, None,
+            "the ordinary collider index named it, so nothing in this arm depends \
+             on the ragdoll door"
+        );
+        assert_eq!(
+            via_ragdoll,
+            Some(TARGET),
+            "no door in this bridge can say whose limb that is"
+        );
+    }
+
+    // Fire at it. The aim is recomputed from where the body actually IS, because
+    // a body on the floor is not where its capsule used to stand.
     r.arm(HERO, "rifle");
-    r.aim(HERO, 0.0, -6.0);
+    let pitch = (dir.y / (dir.x * dir.x + dir.z * dir.z).sqrt())
+        .atan()
+        .to_degrees();
+    r.aim(HERO, 0.0, pitch);
     let mut spent = 0.0;
     let mut named = 0usize;
+    // **THE CAPSULE IS PARKED**, checked at the step the hit lands rather than
+    // once at the start: if it were live the shot could name the target through
+    // the ordinary collider index and this arm would say nothing about a
+    // ragdoll at all.
+    let mut capsule_live_at_the_hit = None;
     for _ in 0..90 {
         r.hold_trigger(HERO, true);
         let rep = r.step();
-        named += rep.hits.iter().filter(|h| h.target == Some(TARGET)).count();
+        let hits = rep.hits.iter().filter(|h| h.target == Some(TARGET)).count();
+        if hits > 0 && capsule_live_at_the_hit.is_none() {
+            capsule_live_at_the_hit = r
+                .bridge
+                .collider_of(TARGET)
+                .and_then(|c| r.bridge.world().collider_enabled(c));
+        }
+        named += hits;
         if let Some(h) = weapon::health_of(&r.world, TARGET) {
             spent = weapon::DEFAULT_VITALITY_J - h.joules;
         }
@@ -1934,12 +2019,18 @@ fn a_round_into_a_body_on_the_floor_spends_its_joules() {
     }
     println!(
         "a ragdolled body of {limbs} limbs was named by {named} hit(s) and lost \
-         {spent} J"
+         {spent} J; its own capsule at that step: enabled = {capsule_live_at_the_hit:?}"
     );
     assert!(
         named > 0,
-        "every round went through a body lying on the floor -- carried 200's \
+        "every round went through a body lying on the floor — carried 200's \
          ragdoll half is open"
+    );
+    assert_eq!(
+        capsule_live_at_the_hit,
+        Some(false),
+        "the ragdolling target's own capsule was still live when the round \
+         landed, so this arm cannot say the LIMB was hit"
     );
     assert!(
         spent > 0.0,

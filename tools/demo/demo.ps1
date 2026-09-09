@@ -605,6 +605,56 @@ function Restore-PlayerFocus([string]$why) {
 Say ("foreground after the click:  " + [InfInput]::Foreground())
 Say ("cursor while the game has the window: " + [InfInput]::CursorState())
 
+# ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
+#
+#    Carried 204, closed by the WPN2a audit. The island's level Blueprint
+#    (`island_author_class`) defines the eighty-five-row registry on `BeginPlay`
+#    and puts ONE `glock_17` on the kerb 1.4 m in front of where the hero spawns.
+#    This leg is the proof that a PLAYER can arm themselves: it runs only when
+#    `-ArmHero` was NOT given, because with the preview door set the hero is
+#    already holding something and the leg would prove nothing.
+#
+#    It is first, before any movement, because the pickup is at the spawn and a
+#    hero that has run down the street is out of the E key's 2.5 m reach.
+if ($armList.Count -eq 0) {
+    Say "-- SIDEARM: the pickup the island's own Blueprint put on the kerb --"
+    Restore-PlayerFocus "before the sidearm"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "08-sidearm-on-the-kerb.png") | ForEach-Object { Say $_ }
+    # E takes it into the BAG (`InteractVerb::PickUp`); the WHEEL brings it into
+    # the hand (`weapon_switch`). Both are shipped controls and neither is this
+    # script's own door. The trigger is column 23 -- what the sim says is in the
+    # hand -- so the frame cannot be of an empty pair of hands.
+    $inHand = $false
+    for ($k = 0; ($k -lt 10) -and (-not $inHand); $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # scancode: E
+        Start-Sleep -Milliseconds 250
+        [InfInput]::Wheel(1)
+        $inHand = @(Wait-ForHero -Csv $heroCsv -What "the island's sidearm in the hand (try $($k + 1))" -TimeoutS 1.2 `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq "glock_17") } `
+            -Out (Join-Path $OutDir "09-sidearm-in-hand.png"))[-1]
+    }
+    if ($inHand) {
+        # …and it FIRES. A Glock's hitscan threshold is 30 m, so a shot down a
+        # street past thirty metres is a round in flight and column 21 sees it.
+        [InfInput]::Look(0, -60)
+        Start-Sleep -Milliseconds 300
+        $fired = $false
+        for ($t = 0; ($t -lt 6) -and (-not $fired); $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 220
+            [InfInput]::LeftUp()
+            $fired = @(Wait-ForHero -Csv $heroCsv -What "the island's own sidearm fired (press $($t + 1))" -TimeoutS 1.4 `
+                -Predicate { param($c) ($c.Count -gt 22) -and ([int]$c[20] -gt 0) -and ($c[22].Trim() -eq "glock_17") } `
+                -Out (Join-Path $OutDir "10-sidearm-fired.png"))[-1]
+        }
+        if (-not $fired) { Say "SIDEARM: it is in the hand and no round left it" }
+        [InfInput]::Look(0, 60)
+    }
+    else {
+        Say "SIDEARM: ten taps of E and a wheel notch each, and the hand is still empty -- carried 204 is not closed on this build"
+    }
+    Start-Sleep -Milliseconds 400
+}
+
 # **FOUR NAMED FRAMES, not two anonymous ones** (wave CHAR1a.2). A wave that is
 # asked whether the idle looks right cannot answer with a picture of a run. The
 # order is idle → walk → run because it is also the order the locomotion machine
@@ -1291,6 +1341,11 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
 if ($armList.Count -gt 0) {
     Say "── WPN2a: the hero is armed with $($armList -join ', ') ──"
     Restore-PlayerFocus "the ballistics leg"
+    # **STAND UP FIRST** (the WPN2a audit). Every ballistics frame of wave WPN2a
+    # was taken of a CROUCHED hero -- column 6 reads `Crouch` in all seven of
+    # them -- because the leg before this one leaves the stance where it likes
+    # and this leg never asked. `Stand-Up` is the loop's own idempotent door.
+    Stand-Up "before the ballistics leg" | Out-Null
     # Aim UP, so the rounds clear the street and fly for the length of the shot
     # rather than resolving inside their hitscan threshold against a shop front
     # twenty metres away. Session 2 of this wave aimed 140 counts up, stood
