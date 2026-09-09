@@ -174,7 +174,13 @@ fn the_audio_command_log_cannot_grow_without_bound() {
     world.mark_dirty();
 
     let mut sim = RuntimeSim::new(world, vec![], DVec2::ZERO, 60.0);
-    let steps = inf_core::DEFAULT_LOG_CAPACITY + 512;
+    // **THE RING IS THE AUDIO ONE NOW** (wave WPN2c). This log was
+    // `inf_core::DEFAULT_LOG_CAPACITY` until a shot became four commands
+    // instead of one; at 8 192 a firefight of eight shooters evicted its own
+    // opening after 17.8 seconds, so the ceiling is `AUDIO_LOG_CAPACITY` and it
+    // is that ceiling this fixture has to overflow or it proves nothing.
+    let cap = inf_audio::AUDIO_LOG_CAPACITY;
+    let steps = cap + 512;
     for _ in 0..steps {
         sim.step_once(RuntimeInput::default());
     }
@@ -187,10 +193,10 @@ fn the_audio_command_log_cannot_grow_without_bound() {
         steps
     );
     assert!(
-        sim.audio_command_log().len() <= inf_core::DEFAULT_LOG_CAPACITY,
+        sim.audio_command_log().len() <= cap,
         "the retained window is {} commands, past the {} ceiling",
         sim.audio_command_log().len(),
-        inf_core::DEFAULT_LOG_CAPACITY
+        cap
     );
     // And the newest command survives: a ring that kept the head would be worse
     // than no ring, because the interesting end of a command stream is the end.

@@ -2046,9 +2046,22 @@ fn the_feel_section_is_empty_at_rest_and_appended_at_the_tail() {
         carried.len() > quiet.len(),
         "equipping a weapon folded nothing at all - the I6 ammunition section is missing and the arm above proves less than it says"
     );
+    // **THE TAIL IS TWO SECTIONS DEEP SINCE WAVE WPN2c**: the casing pool folds
+    // AFTER the feel, so a level that has just fired ends with the feel followed
+    // by the brass rather than with the feel alone. The rule this arm exists for
+    // is unchanged and is still what is asserted - nothing was inserted BEFORE
+    // the frozen sections, which is the move that would rewrite every committed
+    // hash in the tree - and both live sections are still exactly at the end.
+    let brass = inf_ecs::casing::casing_state_bytes(sim.world());
     assert!(
-        firing.ends_with(&part),
-        "the feel's bytes are not at the TAIL - a section inserted before the fourteen frozen ones moves every committed hash in the tree"
+        !brass.is_empty(),
+        "a hero that fired twice has ejected no brass, so the tail below would be the feel's by accident"
+    );
+    let mut tail = part.clone();
+    tail.extend_from_slice(&brass);
+    assert!(
+        firing.ends_with(&tail),
+        "the feel and the brass are not at the TAIL - a section inserted before the fourteen frozen ones moves every committed hash in the tree"
     );
     // …and it empties again once everything has settled.
     for _ in 0..600 {

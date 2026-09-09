@@ -1403,8 +1403,13 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
 
     // The BY-NAME DOOR: every settable name takes a value and refuses a NaN,
     // for every row, which is what `set`/`names()` being one door means.
+    // Twenty-four at wave WPN2a; twenty-SEVEN since WPN2c added the ejection
+    // port (`eject_offset_m`, `eject_dir_deg`, `eject_speed_mps`), which are
+    // settable by name for the same reason every other stat is: a project that
+    // wants its brass to leave a different side of the receiver must not have to
+    // fork the registry.
     let names = WeaponDef::names();
-    assert_eq!(names.len(), 24, "the door has {} names", names.len());
+    assert_eq!(names.len(), 27, "the door has {} names", names.len());
     let mut sorted = names.to_vec();
     sorted.sort_unstable();
     assert_eq!(sorted, names, "`names()` is not sorted");
