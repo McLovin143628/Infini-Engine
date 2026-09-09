@@ -581,6 +581,71 @@ fn a_round_dies_at_its_range_and_the_pool_empties() {
     );
 }
 
+/// **A round that outlives everything else dies of AGE** — the fourth death, and
+/// the only one the wave left unmeasured (the WPN2a audit's arm).
+///
+/// `ballistics::MAX_ROUND_LIFETIME_S` is eight seconds and its own doc names the
+/// round it exists for: *"a shot fired straight up on an unbounded band at a
+/// weapon whose range it never travels"*. Nothing reached it. The three arms
+/// beside this one kill their rounds at `range_m`, on a hit and on leaving the
+/// band, so raising the constant to a thousand seconds moved nothing at all —
+/// which is the shape a bound acquires just before somebody deletes it.
+///
+/// The round here has no drag and no gravity, a 20 km range and 900 m/s: eight
+/// seconds is 7 200 m, well short of the range, and this fixture's floor is
+/// three metres below a level muzzle line four kilometres long, so nothing is in
+/// the way either.
+///
+/// **Mutation → red:** `MAX_ROUND_LIFETIME_S = 1e9` leaves the round in the air
+/// and `expired` at zero.
+#[test]
+fn a_round_that_outlives_its_range_and_its_band_dies_of_age() {
+    let mut def = test_rifle();
+    def.range_m = weapon::MAX_RANGE_M;
+    def.drag_k = 0.0;
+    def.gravity_scale = 0.0;
+    let mut r = Range::new(defs_with("rifle", def));
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, 0.0);
+    r.hold_trigger(HERO, true);
+    assert_eq!(
+        r.step().rounds.spawned,
+        1,
+        "the shot did not become a round"
+    );
+    r.hold_trigger(HERO, false);
+    let mut expired = 0u32;
+    let mut steps = 0u32;
+    let mut furthest = 0.0_f64;
+    // Ten seconds of 60 Hz steps, which is two seconds past the ceiling.
+    for _ in 0..600 {
+        for round in r.rounds() {
+            furthest = furthest.max(round.travelled_m);
+        }
+        expired += r.step().rounds.expired;
+        steps += 1;
+        if r.rounds().is_empty() {
+            break;
+        }
+    }
+    let seconds = f64::from(steps) * DT;
+    println!(
+        "a dragless, weightless round on a 20 km range flew {furthest:.1} m and died \
+         after {seconds:.3} s (the ceiling is {} s); expired {expired}",
+        ballistics::MAX_ROUND_LIFETIME_S
+    );
+    assert_eq!(expired, 1, "the round did not die of old age");
+    assert!(
+        (seconds - ballistics::MAX_ROUND_LIFETIME_S).abs() < 0.05,
+        "it died after {seconds:.3} s and the ceiling is {} s",
+        ballistics::MAX_ROUND_LIFETIME_S
+    );
+    assert!(
+        furthest < def.range_m,
+        "it reached its range after all, so this is the range death again"
+    );
+}
+
 // ── (b) THE SEGMENT CAST AND THE SHOOTER ────────────────────────────────────
 
 /// **A round that leaves the active partition dies, and is counted.**
