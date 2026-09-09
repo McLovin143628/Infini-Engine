@@ -1894,9 +1894,14 @@ fn step_weapons(
         // consecutive counter indices, each carrying `damage_j / pellets` — so
         // the doc's per-pellet table comes back out of the registry's
         // whole-pull figure by division rather than by a second column.
+        // **THE PULL'S OWN CONTEXT**, resolved once for the whole pattern.
+        let ctx = {
+            let exclude = shot_exclusions(world, bridge, guid);
+            shot_context(world, bridge, from, &exclude, report)
+        };
         let pellets = def.pellet_count();
         if pellets == 1 {
-            let hit = resolve_shot(world, bridge, guid, &def, from, dir, shot_index, report);
+            let hit = resolve_shot(world, bridge, guid, &def, from, dir, shot_index, &ctx, report);
             if hit.loud {
                 inf_ecs::casing::note_shot_room(world, hit.indoors);
             }
@@ -1923,9 +1928,7 @@ fn step_weapons(
             // not throw: a silently shortened pattern is a shot the player fired
             // and nobody can account for. The bill is the step's own running
             // one, which `resolve_shot` keeps.
-            let bill = report.rounds.shot_rays as usize
-                + 1
-                + super::audio::ENCLOSURE_PROBE_RAYS;
+            let bill = report.rounds.shot_rays as usize + 1;
             if bill > inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP {
                 report.rounds.pellets_refused += u32::from(pellets - p);
                 break;
@@ -1938,7 +1941,8 @@ fn step_weapons(
                 .wrapping_mul(u64::from(weapon::MAX_PELLETS))
                 .wrapping_add(u64::from(p));
             let pdir = weapon::shot_direction_with(&pellet_def, yaw, pitch, index, pattern_deg);
-            let mut hit = resolve_shot(world, bridge, guid, &pellet_def, from, pdir, index, report);
+            let mut hit =
+                resolve_shot(world, bridge, guid, &pellet_def, from, pdir, index, &ctx, report);
             // **ONE BANG PER PULL.** Only the first pellet is `loud`, because
             // `loud` is what both hosts' `weapon_report` fence queues four
             // layers off and what `panic_sources` coalesces on: eight loud
@@ -2046,6 +2050,51 @@ fn hit_owner(bridge: &PhysicsBridge3D, collider: super::ColliderId3D) -> Option<
         .or_else(|| bridge.guid_of_ragdoll_collider(collider))
 }
 
+/// **What a TRIGGER PULL knows that a projectile does not** (wave WPN2d) — the
+/// room it was fired in, and how far the ear is.
+///
+/// Both are questions about where the MUZZLE is, and a shotgun's eight pellets
+/// leave one muzzle: computing them per pellet is six extra rays each for an
+/// identical answer, and it counts one pull as eight indoor shots. Measured by
+/// the gate's own cost arm before this existed: an eight-pellet pull spent **56
+/// casts** where it needs 14.
+///
+/// So it is resolved ONCE, by the fire path, and handed to every pellet. For a
+/// single-projectile weapon that is exactly the work `resolve_shot` did before
+/// this wave, in the same order, against the same exclusion set.
+struct ShotContext {
+    /// What the six-ray probe said about the muzzle's surroundings.
+    enclosure: super::audio::Enclosure,
+    /// How far the active listener is from the muzzle, or `INFINITY` when
+    /// nobody is listening — which makes the distant layer silent, the honest
+    /// answer rather than a zero that would make it loudest.
+    listener_m: f64,
+}
+
+/// Resolve a pull's [`ShotContext`], spending the probe's rays and counting
+/// them.
+fn shot_context(
+    world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    from: DVec3,
+    exclude: &BTreeSet<super::ColliderId3D>,
+    report: &mut GameplayReport,
+) -> ShotContext {
+    let enclosure = super::audio::enclosure_at(bridge.world_mut(), from, exclude);
+    report.rounds.probe_rays += super::audio::ENCLOSURE_PROBE_RAYS as u32;
+    report.rounds.shot_rays += super::audio::ENCLOSURE_PROBE_RAYS as u32;
+    if enclosure.indoors {
+        report.rounds.indoor_shots += 1;
+    }
+    let listener_m = inf_ecs::audio::active_listener_position(world)
+        .map(|p| (p - from).length())
+        .unwrap_or(f64::INFINITY);
+    ShotContext {
+        enclosure,
+        listener_m,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_shot(
     world: &mut EcsWorld,
@@ -2055,6 +2104,7 @@ fn resolve_shot(
     from: DVec3,
     dir: DVec3,
     shot_index: u64,
+    ctx: &ShotContext,
     report: &mut GameplayReport,
 ) -> WeaponHit {
     // The step's ray bill so far. The rounds already in the air are deliberately
@@ -2071,27 +2121,19 @@ fn resolve_shot(
     // pull is one shot and up to sixty-four casts, so the product was an
     // estimate that a pattern makes wrong by a factor of the pellet count — and
     // the ceiling is the thing the pellet loop refuses against. `shot_rays` is
-    // incremented here, once, by exactly what this call is about to spend, so
-    // the two readers of the bound cannot disagree about the bill.
-    report.rounds.shot_rays += 1 + super::audio::ENCLOSURE_PROBE_RAYS as u32;
+    // incremented here, once, by exactly what THIS call is about to spend — one
+    // cast — and the pull's own probe is counted by [`shot_context`], once, for
+    // the whole pattern.
+    report.rounds.shot_rays += 1;
     let rays_already = report.rounds.shot_rays as usize;
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
     let exclude = shot_exclusions(world, bridge, shooter);
-    // **THE ROOM** (wave WPN2c), before the shot's own cast, because the shot
-    // may consume the borrow and because the answer is about where the muzzle
-    // IS rather than about what it hit. Six rays; counted above.
-    let enclosure = super::audio::enclosure_at(bridge.world_mut(), from, &exclude);
-    report.rounds.probe_rays += super::audio::ENCLOSURE_PROBE_RAYS as u32;
-    if enclosure.indoors {
-        report.rounds.indoor_shots += 1;
-    }
-    // **HOW FAR THE EAR IS** (wave WPN2c). `INFINITY` on a level with no
-    // listener, which makes the distant layer silent — the honest answer to
-    // "nobody is listening" rather than a zero that would make it loudest.
-    let listener_m = inf_ecs::audio::active_listener_position(world)
-        .map(|p| (p - from).length())
-        .unwrap_or(f64::INFINITY);
+    // **THE ROOM AND THE EAR** (wave WPN2c) come in on the pull's own context
+    // since wave WPN2d: both are questions about where the MUZZLE is, and eight
+    // pellets leave one muzzle. See [`ShotContext`].
+    let enclosure = &ctx.enclosure;
+    let listener_m = ctx.listener_m;
     // A launcher's threshold is zero, and a zero-length cast is not a cast: skip
     // it rather than clamping it up to 0.1 m, which would put a rocket's first
     // ten centimetres inside a rule that has nothing to say about them.

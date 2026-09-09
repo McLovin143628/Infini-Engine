@@ -153,6 +153,23 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         //    does nothing — see `every_movement_action_the_intent_reads_is_bound`,
         //    which is the arm that says so.
         KeyCode::Tab => "Tab",
+        // ── WPN2d: the attachment bench's three keys ──
+        //
+        // **And the demo loop is what found their absence**, exactly as it found
+        // `KeyG`'s at CHAR1c: the inventory panel reads `BracketRight` /
+        // `BracketLeft` / `Backspace` to walk a weapon's rail and fit a part, the
+        // frontend would have offered them, every gate was green, and three
+        // synthetic presses in a shipped session fitted nothing — because this
+        // `match` answered `None` and the key stopped one function short of the
+        // panel.
+        //
+        // They are NOT in `default_map`: a panel key is read by the panel's own
+        // reducer off the raw code rather than bound to an action, so
+        // `every_key_the_default_map_binds_has_a_route` cannot see them. The arm
+        // that does is `every_key_the_inventory_panel_reads_has_a_route`.
+        KeyCode::BracketLeft => "BracketLeft",
+        KeyCode::BracketRight => "BracketRight",
+        KeyCode::Backspace => "Backspace",
         KeyCode::KeyI => "KeyI",
         KeyCode::KeyZ => "KeyZ",
         // I8b: the door bolt's own key, so `actions::LOCK` is reachable from a
@@ -263,6 +280,10 @@ mod tests {
         KeyCode::Enter,
         KeyCode::Escape,
         KeyCode::Backspace,
+        // WPN2d: the attachment bench's rail keys, which the inventory panel
+        // reads off the raw code and `default_map` never binds.
+        KeyCode::BracketLeft,
+        KeyCode::BracketRight,
     ];
 
     #[test]
@@ -302,6 +323,65 @@ mod tests {
     /// The candidate set below is the whole ALPHABET plus the named keys, so a
     /// binding on any letter is covered by construction rather than by
     /// somebody remembering to add a row.
+    /// **EVERY KEY THE INVENTORY PANEL READS HAS A ROUTE** (wave WPN2d).
+    ///
+    /// `every_key_the_default_map_binds_has_a_route` reads `default_map()`, and
+    /// a PANEL key is not in it: `inf_ui::inventory::handle` matches the raw
+    /// `KeyboardEvent.code` off the event rather than an action the map binds.
+    /// So the whole class was outside every arm in the tree — and the wave that
+    /// added three of them found out in a shipped session, where `]` was pressed
+    /// three times and fitted nothing.
+    ///
+    /// The list is the panel's own reducer, read from its source rather than
+    /// restated, so a key the panel grows tomorrow is covered by construction.
+    #[test]
+    fn every_key_the_inventory_panel_reads_has_a_route() {
+        const PANEL: &str = include_str!("../../../crates/inf-ui/src/inventory.rs");
+        let candidates = KEYCODE_CANDIDATES;
+        let routed: std::collections::BTreeSet<&'static str> = candidates
+            .iter()
+            .filter_map(|k| keycode_to_code(*k))
+            .collect();
+        // The reducer's arms are `"Code" =>` and `"A" | "B" =>` string
+        // literals inside the one `match code.as_str()`.
+        let body = {
+            let at = PANEL
+                .find("match code.as_str() {")
+                .expect("the panel's reducer is one `match` on the raw code");
+            &PANEL[at..]
+        };
+        let mut want: std::collections::BTreeSet<String> = Default::default();
+        for line in body.lines() {
+            let t = line.trim();
+            if !t.contains("=>") || !t.starts_with('"') {
+                continue;
+            }
+            let arms = &t[..t.find("=>").expect("an arm")];
+            for lit in arms.split('|') {
+                let lit = lit.trim().trim_matches('"');
+                if !lit.is_empty() && lit != "_" {
+                    want.insert(lit.to_string());
+                }
+            }
+        }
+        println!("the inventory panel reads: {want:?}");
+        assert!(
+            want.len() >= 8,
+            "only {} keys were scraped out of the panel's reducer — the scrape              has stopped matching its source and this arm is vacuous",
+            want.len()
+        );
+        let missing: Vec<&String> = want.iter().filter(|k| !routed.contains(k.as_str())).collect();
+        assert!(
+            missing.is_empty(),
+            "the inventory panel reads {} key(s) no `KeyCode` reaches, so they do              nothing in the shipped player: {missing:?}",
+            missing.len()
+        );
+        // ANTI-VACUITY: the three wave WPN2d added are really in the set.
+        for k in ["BracketLeft", "BracketRight", "Backspace"] {
+            assert!(want.contains(k), "the panel no longer reads `{k}`");
+        }
+    }
+
     #[test]
     fn every_key_the_default_map_binds_has_a_route() {
         use inf_input::{ActionSource, AxisSource};
@@ -588,6 +668,8 @@ mod tests {
                 "ROTATION_MODE" => a::ROTATION_MODE,
                 // COV1: take cover.
                 "COVER" => a::COVER,
+                // WPN2d: the throw.
+                "THROW" => a::THROW,
                 other => panic!(
                     "`MovementIntent::from_actions` reads `actions::{other}`, which \
                      this arm has never heard of — add it to `default_map` and to \

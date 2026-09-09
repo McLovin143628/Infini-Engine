@@ -1772,10 +1772,17 @@ if ($armList.Count -gt 0) {
     #    shoulder -- and so the wave's own first-person rule is what the pixels
     #    show: the BODY is faded to nothing at a 0.2 m boom and the WEAPON is
     #    not. Column 13 is the boom and 14 is how much of the body is drawn.
-    [InfInput]::Down(0x22); Start-Sleep -Milliseconds 120; [InfInput]::Up(0x22)   # G: first person
-    $fp = @(Wait-ForHero -Csv $heroCsv -What "a first-person seat with a gun in it" -TimeoutS 12 `
-        -Predicate { param($c) ($c.Count -gt 29) -and ([double]$c[13] -lt 0.35) -and ($c[29].Trim() -ne "-") } `
-        -Out (Join-Path $OutDir "90-first-person-weapon.png"))[-1]
+    # **THE VIEW-MODE KEY IS A TOGGLE**, so one press is a coin flip: the leg
+    # before this one may have left the camera in first person, in which case a
+    # single G puts it back on the boom. Session 1 of this wave pressed once,
+    # read a 3.03 m boom and took no frame. Press, look, press again.
+    $fp = $false
+    for ($v = 0; ($v -lt 3) -and (-not $fp); $v++) {
+        [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)   # G
+        $fp = @(Wait-ForHero -Csv $heroCsv -What "a first-person seat with a gun in it (press $($v + 1))" -TimeoutS 5 `
+            -Predicate { param($c) ($c.Count -gt 29) -and ([double]$c[13] -lt 0.35) -and ($c[29].Trim() -ne "-") } `
+            -Out (Join-Path $OutDir "90-first-person-weapon.png"))[-1]
+    }
     if (-not $fp) { Say "WPN2d: no first-person seat with a weapon -- no un-faded frame" }
     else {
         $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
@@ -1833,10 +1840,17 @@ if ($armList.Count -gt 0) {
         # The lock indicator, if a car is in the cone. It is not asserted: the
         # island's traffic is where it is, and a leg that DEMANDED a car in front
         # of it would fail on an empty street rather than say so.
-        $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something" -TimeoutS 4.0 `
-            -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
-            -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
-        if (-not $lk) { Say "WPN2d: nothing lockable was in the launcher's cone -- no lock frame" }
+        # SWEEP for one: the island's traffic is where it is, and a launcher
+        # pointed at one fixed heading is pointed at whatever happens to be
+        # there. Eight bearings, four seconds each.
+        $lk = $false
+        for ($b = 0; ($b -lt 8) -and (-not $lk); $b++) {
+            $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something (bearing $b)" -TimeoutS 3.0 `
+                -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
+                -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
+            if (-not $lk) { [InfInput]::Look(300, 0); Start-Sleep -Milliseconds 300 }
+        }
+        if (-not $lk) { Say "WPN2d: nothing lockable was in the launcher's cone over eight bearings -- no lock frame" }
         $boom = $false
         for ($t = 0; ($t -lt 4) -and (-not $boom); $t++) {
             [InfInput]::LeftDown(); Start-Sleep -Milliseconds 220

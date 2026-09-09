@@ -1097,16 +1097,28 @@ where
     let mut vmesh_paths: Vec<(Uuid, String)> = Vec::new();
     let mut stale_vmeshes: Vec<Uuid> = Vec::new();
     let mut seen_vmesh: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-    for &guid in doc.order() {
-        let Some(e) = world.entity_of(guid) else {
-            continue;
-        };
-        let Some(mesh) = world
-            .world()
-            .get::<inf_ecs::components::MeshRef>(e)
-            .and_then(|m| m.asset)
-        else {
-            continue;
+    // **THE MESHES NO ENTITY REFERENCES** (wave WPN2d) — the weapon art and the
+    // accessory art, on `engine_spawned_clips`' own terms one asset kind along.
+    // The walk below finds what the DOCUMENT names; a weapon in a character's
+    // hand is an entity the FIXED STEP spawns on a derived guid, so its mesh was
+    // on no wire and the hero held an invisible rifle.
+    let engine_meshes = inf_ecs::weapon::engine_spawned_meshes();
+    for &guid in doc.order().iter().chain(engine_meshes.iter()) {
+        // An engine-named mesh is an ASSET id and not an entity guid, so it goes
+        // straight to the resolver; a document entity is looked up first.
+        let mesh = match world.entity_of(guid) {
+            Some(e) => {
+                let Some(m) = world
+                    .world()
+                    .get::<inf_ecs::components::MeshRef>(e)
+                    .and_then(|m| m.asset)
+                else {
+                    continue;
+                };
+                m
+            }
+            None if engine_meshes.contains(&guid) => guid,
+            None => continue,
         };
         if !seen_vmesh.insert(mesh) {
             continue;

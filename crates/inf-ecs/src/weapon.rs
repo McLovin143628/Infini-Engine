@@ -1304,6 +1304,40 @@ pub fn attachment_mesh_guid(art: crate::attachment::AttachmentArt) -> Option<Uui
     Some(weapon_mesh_guid(key))
 }
 
+/// **EVERY MESH THE ENGINE ITSELF NAMES** (wave WPN2d) — the weapon art and
+/// the accessory art, sorted and deduplicated.
+///
+/// `crate::audio::engine_spawned_clips`' twin, for the reason that list exists:
+/// a cook closes a pack over what a level's ENTITIES reference and the PIE
+/// payload walks the document's own order, and the equipped-weapon entity is
+/// spawned by the FIXED STEP on a derived guid — so a mesh named by
+/// [`weapon_mesh_guid`] was invisible to both.
+///
+/// Measured in the shipped player before this existed: the hero held an M4A1
+/// whose `MeshRef.asset` was the AR4's committed identity and **drew nothing**,
+/// because its derived `.inf_vmesh` was on no wire. That is island carried 43
+/// one asset kind along, and this is the door the WPN2c audit prescribed for the
+/// whole class: *"a pack carries what the ENGINE names, not only what a document
+/// references."*
+///
+/// A mesh that is not in the project simply is not in the closure — the
+/// resolvers answer `None` and the pack is what it always was, which is what
+/// keeps a checkout without the licensed art building exactly as it did.
+pub fn engine_spawned_meshes() -> Vec<Uuid> {
+    let mut out: Vec<Uuid> = WEAPON_MESH_KEYS
+        .iter()
+        .map(|k| weapon_mesh_guid(k))
+        .collect();
+    for art in crate::attachment::AttachmentArt::ALL {
+        if let Some(id) = attachment_mesh_guid(art) {
+            out.push(id);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// **Which mesh asset this weapon draws as** — the one door
 /// `inf_physics::d3::gameplay::step_equipped_weapons` asks.
 ///

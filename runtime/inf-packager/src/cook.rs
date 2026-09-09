@@ -2213,6 +2213,17 @@ fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> V
                     .into_iter()
                     .map(AssetId),
             );
+            // **AND THE MESHES NO ENTITY REFERENCES** (wave WPN2d), on exactly
+            // the argument above: the equipped-weapon entity is spawned by the
+            // fixed step on a derived guid, so the art it draws is named by
+            // `inf_ecs::weapon::weapon_mesh_guid` and by nothing in the level.
+            // Measured before this line existed: the hero held an M4A1 bound to
+            // the AR4's committed identity and drew nothing at all.
+            deps.extend(
+                inf_ecs::weapon::engine_spawned_meshes()
+                    .into_iter()
+                    .map(AssetId),
+            );
             for e in &level.entities {
                 deps.extend(e.actor.map(AssetId));
                 // P13.4: a MeshRef.asset pulls its `.inf_mesh` into the closure, so
