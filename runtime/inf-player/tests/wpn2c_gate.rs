@@ -323,6 +323,17 @@ fn every_loud_shot_is_four_plays_on_four_salted_keys_in_a_pinned_order() {
         .into_iter()
         .map(|k| weapon::layer_source_key(key, k))
         .collect();
+    // **THE FOUR KEYS ARE FOUR**, asserted before anything is counted against
+    // them. Measured on this arm's own first draft: a mutation giving two
+    // layers the same salt left it GREEN, because `contains` matched every
+    // command on the shared key and the order check compared `want[3]` against
+    // itself. A set that is not a set makes every count below it a lie.
+    let uniq: BTreeSet<u64> = want.iter().copied().collect();
+    assert_eq!(
+        uniq.len(),
+        4,
+        "two of the four layers share a voice, so one of them is inaudible"
+    );
     let layered: Vec<&&inf_audio::PlayCommand> =
         plays.iter().filter(|p| want.contains(&p.source)).collect();
     println!(
@@ -1184,6 +1195,93 @@ fn the_cost_of_eight_shooters_is_measured_and_printed() {
         std::mem::size_of::<AudioCommand>(),
         inf_audio::AUDIO_LOG_CAPACITY
     );
+}
+
+// ── (j) THE TEN-SECOND COMMAND LOG ──────────────────────────────────────────
+
+/// **TEN SECONDS OF A FIREFIGHT, AS TEXT** — and the same weapon on the same
+/// level chooses a different TAIL depending on where it is standing.
+///
+/// The wave's own deliverable and its sharpest arm at once. It runs the shipped
+/// host on the committed gameplay level twice: once where the hero spawns,
+/// which is inside the PCG house the level grows, and once sixty metres away
+/// from it in the open. The command streams are printed in full and the tail
+/// clip is compared.
+///
+/// **Mutation → red:** `ENCLOSURE_INDOOR_HITS` to 1 or to 7 makes both places
+/// answer the same thing and the two streams carry the same tail.
+#[test]
+fn ten_seconds_of_a_firefight_indoors_and_out_choose_different_tails() {
+    let indoor_clip = weapon::report_clip(WeaponClass::Ar, ReportClip::IndoorTail);
+    let outdoor_clip = weapon::report_clip(WeaponClass::Ar, ReportClip::OutdoorTail);
+    let mut tails = Vec::new();
+    for (place, away) in [("INSIDE THE HOUSE", 0.0), ("OUT ON THE OPEN GROUND", 60.0)] {
+        let (log, shots) = firefight_log(away);
+        println!("\n=== TEN SECONDS, {place} ({shots} rounds) ===");
+        for (i, line) in log.iter().enumerate() {
+            println!("{i:5} {line}");
+        }
+        let saw_indoor = log.iter().any(|c| c.contains(&format!("{indoor_clip}")));
+        let saw_outdoor = log.iter().any(|c| c.contains(&format!("{outdoor_clip}")));
+        println!("--- {place}: indoor tail {saw_indoor}, outdoor tail {saw_outdoor}");
+        assert!(shots > 0, "{place}: nothing fired");
+        assert!(
+            saw_indoor != saw_outdoor,
+            "{place} played both tails or neither"
+        );
+        tails.push(saw_indoor);
+    }
+    assert_eq!(
+        tails,
+        vec![true, false],
+        "the same weapon on the same level chose the same tail inside a house \
+         and sixty metres away from it \u{2014} the probe is not reading the room"
+    );
+}
+
+/// Ten seconds of the fixture's hero holding the trigger, `away` metres from
+/// where it spawns. Answers the audio command stream as text and the rounds it
+/// took to make it.
+fn firefight_log(away: f64) -> (Vec<String>, u32) {
+    let mut sim = pie_sim();
+    let hero = inf_editor_core::samples::GAMEPLAY_HERO_GUID;
+    for _ in 0..40 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    if away != 0.0 {
+        let e = sim.world().entity_of(hero).expect("the hero");
+        let mut t = *sim
+            .world()
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform");
+        t.translation.x += away;
+        sim.world_mut().world_mut().entity_mut(e).insert(t);
+        sim.world_mut().mark_dirty();
+        for _ in 0..20 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+    }
+    assert_eq!(item::give(sim.world_mut(), hero, "m4a1", 1), 0);
+    assert!(d3::gameplay::equip_weapon(sim.world_mut(), hero, "m4a1"));
+    let before = sim.audio_command_log().len();
+    let mut shots = 0u32;
+    let mut state = inf_input::InputState::new(inf_input::default_map());
+    for i in 0..600 {
+        let events = [inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: i < 300,
+        }];
+        state.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state, DT));
+        shots += sim.gameplay().shots;
+    }
+    assert_eq!(sim.dropped_audio_commands(), 0);
+    let log = sim.audio_command_log()[before..]
+        .iter()
+        .map(|c| format!("{c:?}"))
+        .collect();
+    (log, shots)
 }
 
 // ── the fixture (wpn2a_gate's own helpers, one gate over) ───────────────────
