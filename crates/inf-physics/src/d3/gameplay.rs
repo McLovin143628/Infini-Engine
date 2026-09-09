@@ -703,7 +703,7 @@ fn fore_grip_m(def: &WeaponDef) -> f32 {
 ///
 /// **A CEILING since the WPN2b audit, not a fixed distance.** A rigged character
 /// holds its weapon at the reach its own animation is holding it at — see
-/// [`aim_hold_point`] — and this is the furthest that reach may be stretched to.
+/// `aim_hold_point` — and this is the furthest that reach may be stretched to.
 /// It stays the fixed distance for a rig-less character, which is what it was
 /// written for at wave WPN1.
 pub const AIM_REACH_M: f64 = 0.42;

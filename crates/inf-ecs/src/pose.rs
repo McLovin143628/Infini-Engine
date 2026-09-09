@@ -457,7 +457,7 @@ pub struct HandIkReport {
     /// `[left, right]` (wave WPN2b audit, carried 218).
     ///
     /// The base pose — the locomotion, the weapon overlay, the aim sweep and the
-    /// breath — as it stood one line before [`apply_hand_ik`] started writing.
+    /// breath — as it stood one line before `apply_hand_ik` started writing.
     /// It is published because a caller that wants the IK to be a **correction**
     /// to the animation rather than a replacement for it needs to know what the
     /// animation said, and the only place that is knowable is here: the
@@ -474,7 +474,7 @@ pub struct HandIkReport {
     /// Taken from the same pre-solve pose as [`base_hand`](Self::base_hand), and
     /// for one more reason of its own: `arm_chain` is upper arm / forearm /
     /// hand, so this joint's *position* is a function of the CLAVICLE and is not
-    /// written by [`solve_arm`] at all. A hold point anchored here is therefore
+    /// written by `solve_arm` at all. A hold point anchored here is therefore
     /// anchored to the body the overlay posed.
     pub shoulder: [Option<Vec3d>; 2],
 }
