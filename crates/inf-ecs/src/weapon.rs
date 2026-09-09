@@ -1198,7 +1198,7 @@ pub fn report_source() -> AudioSource {
 /// Four LAYERS play per shot ([`ReportLayerKind`]) and there are five clips,
 /// because the third layer is a *room*: a shot indoors and the same shot on the
 /// street are the same layer with different bytes, chosen by the enclosure
-/// probe (`inf_physics::d3::audio::enclosure_of`).
+/// probe (`inf_physics::d3::audio::enclosure_at`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReportClip {
     /// The mechanical snap — bolt, hammer, action. Five milliseconds or less.
@@ -1470,7 +1470,7 @@ pub struct ReportLayer {
 ///   shooter may have scrolled.
 /// * `indoors` — whether layer 3 is the room's tail or the street's. The
 ///   enclosure probe's verdict, taken at the muzzle on the step the trigger
-///   went down (`inf_physics::d3::audio::enclosure_of`).
+///   went down (`inf_physics::d3::audio::enclosure_at`).
 /// * `report_max_m` — wave WPN2a's per-weapon reach. The layers take
 ///   *fractions* of it rather than sharing it, which is what makes a gunshot
 ///   change shape with distance instead of only getting quieter.

@@ -112,11 +112,16 @@ pub enum AudioCommand {
     /// factor, pushed by the sim every step it changes.
     ///
     /// `lowpass_hz` is the cutoff the sim's occlusion model decided on, or
-    /// `None` for a path that only attenuates. It is **modelled and
-    /// inspectable, not yet audible** — `backend.rs` has no filter code and the
-    /// mixer's own `Effect::Lowpass` has been in the same state since P12 —
-    /// so it is carried here, where the two hosts' command streams are
-    /// compared, and read back through
+    /// `None` for a path that only attenuates. **It is audible since wave
+    /// WPN2c**: the engine folds it with the `Play`'s own cutoff and the bus's
+    /// `Effect::Lowpass`, low-passes the clip's frames, and RESTARTS a live
+    /// voice at the position it had reached when the winner changes — so a
+    /// door shutting on a club's loop muffles the loop that is already
+    /// playing. (Until then this doc said *"modelled and inspectable, not yet
+    /// audible — `backend.rs` has no filter code"*, which was true from VEN1b
+    /// to WPN2c and is what the audit found still written here.) It is still
+    /// carried on the COMMAND, where the two hosts' streams are compared, and
+    /// read back through
     /// [`AudioEngine::effective_lowpass_hz`](crate::AudioEngine::effective_lowpass_hz).
     SetOcclusion {
         /// The source, as [`PlayCommand::source`].

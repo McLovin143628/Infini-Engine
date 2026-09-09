@@ -8,9 +8,13 @@
 //! has folded its cutoff the whole time. Island wave VEN1b then added
 //! `AudioCommand::SetOcclusion { lowpass_hz }`, so a shut door decided a cutoff
 //! and put it in the command stream. **Neither of them ever changed a sample.**
-//! `backend.rs` has no filter code, kira's own `FilterBuilder` was never wired,
-//! and every doc in the crate says so in the same words: *modelled and
-//! inspectable, not audible*.
+//! `backend.rs` had no filter code, kira's own `FilterBuilder` was never wired,
+//! and every doc in the crate said so in the same words: *modelled and
+//! inspectable, not audible*. (Two of them still did after this module landed —
+//! [`crate::AudioEngine::named_bus_lowpass_hz`] and
+//! [`crate::AudioCommand::SetOcclusion`] — which is what the wave's audit
+//! found: a module that makes a claim true has to go and unsay the places that
+//! say it is false.)
 //!
 //! # Why the fix is here and not in kira
 //!
