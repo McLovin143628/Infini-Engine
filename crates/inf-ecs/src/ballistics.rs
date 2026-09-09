@@ -193,10 +193,20 @@ pub struct Round {
     pub travelled_m: f64,
     /// How long it has been alive, seconds.
     pub age_s: f64,
-    /// **Whether the next segment is its first.** The shooter's own collider is
-    /// excluded on segment 0 only, which is where the round is a hand's breadth
-    /// from the body that fired it; a round that comes back at its shooter after
-    /// a ricochet (which nothing in this engine produces yet) should hit them.
+    /// **Whether this body is still CLEARING the thing that launched it** — the
+    /// window inside which the shooter's own colliders are excluded.
+    ///
+    /// It was *"the first sub-step"* until wave WPN2d, and that was a rule about
+    /// bullets wearing a rule about distance: one sub-step of a 900 m/s round is
+    /// 3.75 m, which is well clear of the body that fired it, and one sub-step of
+    /// a 16 m/s **grenade** is seven centimetres, which is still inside it.
+    /// Measured: a G67 thrown from a 1.75 m capsule detonated on its own thrower
+    /// 33 ms after leaving the hand, at (0.00, 1.45, 0.06).
+    ///
+    /// So the window is [`SHOOTER_CLEARANCE_S`] of flight rather than one
+    /// sub-step. A round that comes back at its shooter after a ricochet (which
+    /// nothing in this engine produces yet) still hits them, because a ricochet
+    /// takes longer than that.
     pub first_segment: bool,
     /// **Whether this round has already cracked past the listener** (wave
     /// WPN2c) — a latch, so a round that spends four sub-steps inside
@@ -277,6 +287,20 @@ impl RoundKind {
         self == RoundKind::Thrown
     }
 }
+
+/// **How long a body is still clearing whatever launched it**, seconds.
+///
+/// Fifteen hundredths. In that window a 900 m/s rifle round is 135 m out, a
+/// 115 m/s rocket is 17 m out and a 16 m/s grenade is 2.4 m out — every one of
+/// them past the capsule that launched it, which is the only thing the window is
+/// for. It is a TIME and not a distance because the alternative is a distance
+/// from a spawn point the round would have to carry, and one more `f64` on a
+/// struct the trace folds is a byte a second host can disagree about.
+///
+/// It is long enough to matter and short enough to be impossible to exploit: a
+/// ricochet that came back at its shooter inside 150 ms would have to be off
+/// something less than a metre away.
+pub const SHOOTER_CLEARANCE_S: f64 = 0.15;
 
 /// **The most times a thrown body may bounce** before it settles.
 ///

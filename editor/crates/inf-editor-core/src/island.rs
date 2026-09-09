@@ -186,11 +186,18 @@ pub const ISLAND_CLASS_COURSE: [&str; 9] = [
 /// partition cell and one screen.
 pub const ISLAND_COURSE_SPACING_M: f64 = 0.8;
 
-/// **Where the course starts**, metres from the hero's own start — one metre to
-/// the LEFT of the sidearm and the same 1.4 m ahead, so the sidearm keeps the
-/// spot directly in front of the player it has had since wave WPN2a's audit and
-/// the course runs off to the right of it.
-pub const ISLAND_COURSE_OFFSET_M: (f64, f64, f64) = (-1.0, 0.4, 1.4);
+/// **Where the course starts**, metres from the hero's own start.
+///
+/// **1.2 m to the RIGHT** of the sidearm and the same 1.4 m ahead, so the
+/// sidearm keeps the spot directly in front of the player it has had since wave
+/// WPN2a's audit and the course runs away from it. The 1.2 m is a measurement
+/// rather than a taste: the course's own spacing is
+/// [`ISLAND_COURSE_SPACING_M`] (0.8 m) and a course that STRADDLED the sidearm
+/// would put two pickups 0.2 m apart — which `inf_ecs::interact::resolve`
+/// resolves by distance, so the E key would pick whichever the player's own
+/// millimetres favoured. Measured: it did, and `wpn2a_gate`'s own island arm
+/// caught it.
+pub const ISLAND_COURSE_OFFSET_M: (f64, f64, f64) = (1.2, 0.4, 1.4);
 
 /// **THE ISLAND'S OWN LEVEL BLUEPRINT** (wave WPN2a audit) — the door that
 /// closes carried 204.

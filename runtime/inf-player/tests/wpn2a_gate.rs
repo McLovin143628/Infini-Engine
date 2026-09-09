@@ -1434,9 +1434,12 @@ fn the_registry_is_the_docs_own_eighty_five_rows() {
     // port (`eject_offset_m`, `eject_dir_deg`, `eject_speed_mps`), which are
     // settable by name for the same reason every other stat is: a project that
     // wants its brass to leave a different side of the receiver must not have to
-    // fork the registry.
+    // fork the registry. **FORTY-TWO since wave WPN2d**, which added the pattern
+    // (`pellets`, `cone_deg`), the blast, the sustainer motor, the four lock
+    // fields, the fuse and the two bounce numbers, `throwable` and
+    // `report_gain` — every one of them through this same one door.
     let names = WeaponDef::names();
-    assert_eq!(names.len(), 27, "the door has {} names", names.len());
+    assert_eq!(names.len(), 42, "the door has {} names", names.len());
     let mut sorted = names.to_vec();
     sorted.sort_unstable();
     assert_eq!(sorted, names, "`names()` is not sorted");
@@ -2388,15 +2391,28 @@ fn the_island_puts_a_registry_weapon_on_the_kerb_and_the_hero_picks_it_up() {
     // ── the kerb ────────────────────────────────────────────────────────────
     let on_the_kerb = pickups(sim.world());
     println!("the island's pickups after 30 steps: {on_the_kerb:?}");
-    let (pickup_guid, pickup_id, pickup_at) = on_the_kerb
-        .into_iter()
-        .next()
-        .expect("the island spawned no pickup at all -- carried 204 is open");
+    // **TEN PICKUPS SINCE WAVE WPN2d**, not one: the sidearm the WPN2a audit put
+    // dead ahead of the player, and the nine-row CLASS COURSE beside it. So this
+    // arm names the sidearm rather than taking whatever sorts first, and the
+    // course is asserted below.
     assert_eq!(
-        pickup_id,
-        inf_editor_core::island::ISLAND_SIDEARM_ID,
-        "the island put a `{pickup_id}` on the kerb"
+        on_the_kerb.len(),
+        1 + inf_editor_core::island::ISLAND_CLASS_COURSE.len(),
+        "the island's kerb holds {} pickups and the sidearm plus the course is {}",
+        on_the_kerb.len(),
+        1 + inf_editor_core::island::ISLAND_CLASS_COURSE.len()
     );
+    for id in inf_editor_core::island::ISLAND_CLASS_COURSE {
+        assert!(
+            on_the_kerb.iter().any(|(_, got, _)| got == id),
+            "the class course names `{id}` and the kerb does not carry one"
+        );
+    }
+    let (pickup_guid, pickup_id, pickup_at) = on_the_kerb
+        .iter()
+        .find(|(_, id, _)| id == inf_editor_core::island::ISLAND_SIDEARM_ID)
+        .cloned()
+        .expect("the island spawned no sidearm at all -- carried 204 is open");
     // It is a REGISTRY row, with the registry's own numbers — not a definition
     // the island invented.
     let def = item::item_defs(sim.world())

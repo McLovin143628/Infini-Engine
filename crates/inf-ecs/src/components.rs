@@ -1878,6 +1878,16 @@ pub struct MovementRuntime {
     /// movement step, and read by the pose step's `apply_throw` — the same three
     /// places, in the same order, as the ragdoll's own clock.
     pub throw_s: f64,
+    /// **How long the running throw's clip is**, seconds; `0` is no throw (wave
+    /// WPN2d).
+    ///
+    /// Written by [`crate::anim_bridge::start_throw`] beside
+    /// [`throw_s`](Self::throw_s), and it exists for one reason: the GAMEPLAY
+    /// step has to know where in the clip the hand lets go, and the gameplay
+    /// step has no clip. With the total beside the remainder, elapsed is
+    /// subtraction and the release fraction is the clip's own
+    /// `inf_anim::THROW_RELEASE_FRAC`.
+    pub throw_total_s: f64,
     /// Whether the running throw is **overhand** (`true`) or underhand.
     pub throw_over: bool,
 

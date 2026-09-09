@@ -318,6 +318,10 @@ pub struct RoundReport {
     /// counter on the guidance, so "a missile flew" and "a missile followed
     /// something" are different facts.
     pub guided: u32,
+    /// **Thrown bodies that came to REST** this step (wave WPN2d) — out of
+    /// bounces, with a fuse still running. The counter that tells a grenade
+    /// lying on a pavement from one that has gone off.
+    pub settled: u32,
 }
 
 /// **What the brass did in one fixed step** (wave WPN2c).
@@ -878,14 +882,28 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
         // override if it names one and the class -> art table's derived identity
         // otherwise. `None` is a shotgun, a launcher, or a project whose art is
         // not on this machine, and it draws the primitive it always drew.
-        let want = equipped_weapon_item(world, guid).map(|(id, item)| {
+        // **A THROWN GRENADE IS NOT IN THE HAND** (wave WPN2d) — the entity
+        // leaves the world for the frames the body is in the air, which is what
+        // `WeaponState::in_hand` says and what stops a grenade being drawn in a
+        // palm and flying through the air at the same time.
+        let empty_hand = world.entity_of(guid).is_some_and(|e| {
+            let w = world.world();
+            match (w.get::<weapon::WeaponState>(e), equipped_weapon(world, guid)) {
+                (Some(st), Some((id, def))) => st.item_id == id && !st.in_hand(&def),
+                _ => false,
+            }
+        });
+        let want = (!empty_hand)
+            .then(|| equipped_weapon_item(world, guid))
+            .flatten()
+            .map(|(id, item)| {
             let forward = item
                 .weapon
                 .as_ref()
                 .map(|w| w.muzzle_forward_m)
                 .unwrap_or_default();
-            (id, forward, inf_ecs::weapon::weapon_mesh_of(&item))
-        });
+                (id, forward, inf_ecs::weapon::weapon_mesh_of(&item))
+            });
         let weapon_guid = equipped_weapon_guid(guid);
         let existing = world.entity_of(weapon_guid);
         match (want, existing) {
@@ -1242,7 +1260,20 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
             .filter(|(amount, _, _)| *amount > 0.0);
 
         // -- the weapon --
-        let armed = equipped_weapon(world, guid);
+        //
+        // **A THROWN GRENADE IS NOT IN THE HAND** (wave WPN2d): a character who
+        // has just thrown their last one is holding nothing until they take
+        // another out, and posing a hand around a body that is in the air would
+        // be the same grenade in two places. `WeaponState::in_hand` is the one
+        // door `step_equipped_weapons` asks the same question through, so the
+        // drawn entity and the pose cannot disagree.
+        let armed = equipped_weapon(world, guid).filter(|(id, def)| {
+            world
+                .entity_of(guid)
+                .and_then(|e| world.world().get::<WeaponState>(e))
+                .map(|st| st.item_id != *id || st.in_hand(def))
+                .unwrap_or(true)
+        });
         if let Some((_, def)) = armed.as_ref() {
             req.grip[1] = Some(HandGrip {
                 name: inf_anim::GRIP_RIFLE.to_string(),
@@ -2461,6 +2492,29 @@ fn step_casing_entities(world: &mut EcsWorld) {
 /// through the **same** `apply_hit` door with the round's remaining energy, so a
 /// projectile kill spends its joules, staggers, panics the street and is
 /// witnessed exactly as a hitscan kill is.
+/// **Where a guided round should be aiming**, for anything (wave WPN2d).
+///
+/// [`strike_point`] is a CHARACTER's — it is `feet_of` plus a height, and
+/// `feet_of` reads `CharacterMovement`. The only things this engine's lock can
+/// acquire are VEHICLES, which have none, so a door that asked `strike_point`
+/// answered `None` for every target a lock can hold and a guided missile flew
+/// exactly as straight as a dumb one. Measured, by the arm that found it: 5.11 m
+/// from a stationary car either way.
+///
+/// So: a character's own strike point when it has one, and the entity's world
+/// transform otherwise — which is a car's centre, a helicopter's, and a crate's.
+fn target_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+    if let Some(p) = strike_point(world, guid) {
+        return Some(p);
+    }
+    let e = world.entity_of(guid)?;
+    world
+        .world()
+        .get::<inf_ecs::components::GlobalTransform>(e)
+        .map(|g| g.translation())
+        .filter(|p| p.is_finite())
+}
+
 fn step_rounds(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -2486,7 +2540,7 @@ fn step_rounds(
     let guides: std::collections::BTreeMap<Uuid, DVec3> = live
         .iter()
         .filter(|r| !r.guide.is_nil())
-        .filter_map(|r| strike_point(world, r.guide).map(|p| (r.guide, p)))
+        .filter_map(|r| target_point(world, r.guide).map(|p| (r.guide, p)))
         .collect();
     // **WHERE THE EAR IS** (wave WPN2c) — resolved ONCE for the whole pool
     // rather than per round per sub-step, which is up to 256 walks of the world
@@ -2502,6 +2556,31 @@ fn step_rounds(
         let mut alive = true;
         for _ in 0..PROJECTILE_SUB_STEPS {
             let prev = r.at;
+            // **THE FUSE** (wave WPN2d) — the `KICK_FUSE_S` pattern: a clock that
+            // counts DOWN and fires when it reaches zero, so a body with no fuse
+            // carries a zero and this is one comparison.
+            //
+            // It is at the TOP of the sub-step, before the cast, and that is a
+            // correction rather than a taste: at the bottom it was skipped by
+            // every `continue` the loop has — a bounce and a settle — so a
+            // grenade that came to rest on a pavement STOPPED COUNTING. Measured
+            // by the arm that found it: a three-second fuse ran 3.317 s, which
+            // is three seconds plus the time the body spent lying still.
+            //
+            // A grenade whose fuse runs out in mid-air goes off in mid-air, and
+            // one that has landed goes off where it landed, because `r.at` is
+            // wherever the last sub-step left it.
+            if r.def.fuse_s > 0.0 {
+                r.fuse_left_s -= sub_dt;
+                if r.fuse_left_s <= 0.0 {
+                    report.rounds.fused += 1;
+                    if r.def.has_blast() {
+                        blasts.push((r.shooter, r.at, r.def));
+                    }
+                    alive = false;
+                    break;
+                }
+            }
             // **THE GUIDANCE** (wave WPN2d), before the integrator, because what
             // it changes is the velocity the integrator is about to use. A round
             // with no guide is one map lookup that misses on an empty map.
@@ -2576,6 +2655,27 @@ fn step_rounds(
                     // It settles when it has bounced `MAX_BOUNCES` times or is
                     // slower than `SETTLE_SPEED_MPS`, which is a body rolling
                     // rather than bouncing — and this engine has no rolling.
+                    // **A GRENADE THAT HAS STOPPED ROLLING WAITS FOR ITS
+                    // FUSE.** A thrown body out of bounces is not a body that
+                    // explodes on its next contact — it is a body lying on the
+                    // ground, and what makes it go off is the clock. Measured by
+                    // the arm that found it: a G67 with a three-second fuse went
+                    // off at 2.45 s, on its fifth contact with a pavement.
+                    //
+                    // A thrown body with NO fuse (the thrown knife) falls
+                    // through to the impact below, which is what a knife does.
+                    if r.kind.bounces()
+                        && r.bounces >= inf_ecs::ballistics::MAX_BOUNCES
+                        && r.def.fuse_s > 0.0
+                    {
+                        r.at = point + h.normal * BOUNCE_OFFSET_M;
+                        r.velocity = DVec3::ZERO;
+                        r.travelled_m += h.toi;
+                        r.age_s += sub_dt;
+                        r.first_segment = false;
+                        report.rounds.settled += 1;
+                        continue;
+                    }
                     if r.kind.bounces() && r.bounces < inf_ecs::ballistics::MAX_BOUNCES {
                         let after = inf_ecs::ballistics::bounce_velocity(
                             r.velocity,
@@ -2593,7 +2693,7 @@ fn step_rounds(
                         };
                         r.travelled_m += h.toi;
                         r.age_s += sub_dt;
-                        r.first_segment = false;
+                        r.first_segment = r.age_s < inf_ecs::ballistics::SHOOTER_CLEARANCE_S;
                         continue;
                     }
                     let flight = r.travelled_m + h.toi;
@@ -2652,30 +2752,14 @@ fn step_rounds(
                     break;
                 }
             }
-            // **THE FUSE** (wave WPN2d) — the `KICK_FUSE_S` pattern: a clock
-            // that counts DOWN and fires when it reaches zero, so a body with
-            // no fuse carries a zero and this line is one comparison.
-            //
-            // It is checked AFTER the segment cast and BEFORE the range and
-            // lifetime tests, which is the honest order: a grenade whose fuse
-            // runs out in mid-air goes off in mid-air, and one that has landed
-            // goes off where it landed.
-            if r.def.fuse_s > 0.0 {
-                r.fuse_left_s -= sub_dt;
-                if r.fuse_left_s <= 0.0 {
-                    report.rounds.fused += 1;
-                    if r.def.has_blast() {
-                        blasts.push((r.shooter, next, r.def));
-                    }
-                    alive = false;
-                    break;
-                }
-            }
             r.at = next;
             r.velocity = v;
             r.travelled_m += len;
             r.age_s += sub_dt;
-            r.first_segment = false;
+            // **Still clearing the thing that launched it?** A TIME and not a
+            // sub-step count since wave WPN2d — see `Round::first_segment` for
+            // the grenade that detonated on its own thrower.
+            r.first_segment = r.age_s < inf_ecs::ballistics::SHOOTER_CLEARANCE_S;
             if r.travelled_m >= r.def.range_m.clamp(0.1, SHOT_MAX_RANGE_M)
                 || r.age_s >= MAX_ROUND_LIFETIME_S
                 || !r.at.is_finite()
@@ -3357,7 +3441,7 @@ fn apply_blast(
     // order: every character, then every destructible.
     let mut candidates: Vec<(Uuid, DVec3)> = Vec::new();
     for guid in gunners(world) {
-        if let Some(p) = strike_point(world, guid) {
+        if let Some(p) = target_point(world, guid) {
             if (p - at).length() <= radius {
                 candidates.push((guid, p));
             }
@@ -3428,6 +3512,29 @@ fn apply_blast(
         radius_m: radius,
         hurt,
     });
+}
+
+/// **Spend a blast, for a gate** (wave WPN2d) — [`apply_blast`], by a public
+/// name.
+///
+/// The pass itself runs inside `step_rounds`, where the pool's borrow is live,
+/// so a gate that wanted to measure a blast's falloff would otherwise have to
+/// fly a rocket at a wall and infer the epicentre from where it stopped. This
+/// door lets it name the point and read the joules — which is the difference
+/// between a gate that measures the CURVE and one that measures a landing.
+///
+/// It is the same function, not a copy: there is exactly one blast sweep in this
+/// engine and this is a `pub` alias for it.
+pub fn blast_for_test(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    shooter: Uuid,
+    at: DVec3,
+    def: &WeaponDef,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    apply_blast(world, bridge, shooter, at, def, dt, report);
 }
 
 /// **HOLD A LOCK** (wave WPN2d) — the launcher's target selection, once per
@@ -3659,10 +3766,36 @@ fn step_throws(world: &mut EcsWorld, report: &mut GameplayReport) {
                 }
             }
         }
-        // **THE RELEASE**, on the clip's notify. Consumed exactly once per
-        // firing, by whoever gets there first — which is this, and there is one
-        // consumer of a throw.
-        if !inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::THROW_NOTIFY) {
+        // **THE RELEASE.** Two paths, both armed, exactly as a reload's are
+        // (`WeaponState::reload_left_s`: *"the ceiling, not the schedule"*).
+        //
+        // 1. **The clip's own notify** — fired by the pose step when the throw
+        //    additive crosses `inf_anim::THROW_RELEASE_FRAC`, consumed here
+        //    exactly once. This is the authority whenever there IS a clip.
+        // 2. **The character's own clock**, for a character with no rig — every
+        //    headless run, every crowd agent the sim has tiered out of posing,
+        //    and every level committed before CHAR1b.2 imported the additives.
+        //    A throw that only released on a notify would be a verb that did
+        //    nothing at all on those, which is the reader-that-lies this door's
+        //    own `start_throw` doc refused to ship.
+        //
+        // The clock is the CEILING and not the schedule: it fires
+        // `THROW_RELEASE_GRACE_S` AFTER the fraction the notify fires at, so on
+        // a rigged character the notify always gets there first and the clock
+        // never runs. That is what keeps path 1 from being decoration.
+        let notified =
+            inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::THROW_NOTIFY);
+        let by_clock = !notified && {
+            let w = world.world();
+            w.get::<CharacterMovement>(entity).is_some_and(|cm| {
+                let total = cm.runtime.throw_total_s;
+                total > 0.0
+                    && cm.runtime.throw_s > 0.0
+                    && (total - cm.runtime.throw_s)
+                        >= total * inf_anim::THROW_RELEASE_FRAC + THROW_RELEASE_GRACE_S
+            })
+        };
+        if !notified && !by_clock {
             continue;
         }
         let Some((from, yaw, pitch, _)) = muzzle_of(world, guid) else {
@@ -3699,9 +3832,20 @@ fn step_throws(world: &mut EcsWorld, report: &mut GameplayReport) {
         // after the body left would be a hand throwing nothing.
         if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
             cm.runtime.throw_s = 0.0;
+            cm.runtime.throw_total_s = 0.0;
         }
     }
 }
+
+/// **How long after the clip's release point a rig-less throw lets go**,
+/// seconds (wave WPN2d).
+///
+/// Two fixed steps, 33 ms. It is a GRACE and not a delay: the notify path fires
+/// one step after the crossing (the pose step runs after the gameplay step), so
+/// two steps is the first moment at which "the notify did not come" is a fact
+/// rather than a race — and it keeps the whole release inside the two-frame
+/// budget either way.
+pub const THROW_RELEASE_GRACE_S: f64 = 2.0 / 60.0;
 
 /// **The aim pitch below which a throw goes underhand**, degrees.
 ///

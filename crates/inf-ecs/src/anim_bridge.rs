@@ -789,6 +789,7 @@ pub fn start_throw(world: &mut EcsWorld, guid: Uuid, overhand: bool, duration_s:
         return false;
     };
     cm.runtime.throw_s = duration_s;
+    cm.runtime.throw_total_s = duration_s;
     cm.runtime.throw_over = overhand;
     true
 }

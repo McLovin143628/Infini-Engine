@@ -2487,9 +2487,16 @@ fn every_row_in_the_registry_can_bloom_at_its_own_rate() {
     // The count is pinned so a re-price that quietly moved it has to say so: it
     // was 35 of 45 at the shipped D = 0.8 and is 28 at 0.6, because seven semi
     // rows sit between the old 360 rpm floor and the new 270.
+    //
+    // **Forty-eight semis, thirty-one of them below the floor, since wave
+    // WPN2d** — the three rows section 8 of `weapons.toml` adds (the G67 at
+    // 40 rpm, the thrown knife at 70 and the M9 at 110) are all semi-automatic
+    // and all below 270 rpm, which is what a grenade, a thrown knife and a
+    // combat knife are: things you use once and then use again, not things you
+    // hold a trigger on.
     assert_eq!(
         (autos, semis, semi_cannot),
-        (40, 45, 28),
+        (40, 48, 31),
         "the registry's automatic / semi split or the semi rows that cannot bloom has moved"
     );
     // …and the margin is real: a floor every automatic row clears by a mile is

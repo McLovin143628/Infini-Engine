@@ -1200,6 +1200,12 @@ pub fn weapon_mesh_key(id: &str, def: &WeaponDef) -> Option<&'static str> {
     // A THROWABLE and a MELEE weapon are decided by what they ARE, before any
     // class rule: a thrown knife is a `Melee` definition that flies, and the
     // grenade is not in any of the doc's seven tables at all.
+    // A knife is a knife whether it is swung or thrown, and the bundle has one:
+    // the NAME decides before the verb does, because `SM_M9_Knife` is what a
+    // thrown knife looks like in the air and a grenade is not.
+    if id.contains("knife") {
+        return Some("SM_M9_KNIFE");
+    }
     if def.throwable {
         return Some("SM_G67");
     }
@@ -2375,6 +2381,20 @@ impl WeaponState {
     /// Whether a reload is running.
     pub fn reloading(&self) -> bool {
         self.reload_left_s > 0.0
+    }
+
+    /// **Whether this weapon is actually IN THE HAND** (wave WPN2d).
+    ///
+    /// Everything is, except a **throwable with an empty magazine**: a character
+    /// who has just thrown their last grenade is holding nothing until they take
+    /// another one out, and drawing one in their hand — and posing a hand around
+    /// it — would be a grenade that is in two places at once, one of them in the
+    /// air. A rifle with an empty magazine is still a rifle.
+    ///
+    /// The def comes in because "throwable" is the weapon's and the count is the
+    /// state's: one door, so the drawn entity and the hand pose cannot disagree.
+    pub fn in_hand(&self, def: &WeaponDef) -> bool {
+        !def.throwable || self.magazine > 0
     }
 
     /// **Whether anything is bolted on** (wave WPN2d) — the question the fold
