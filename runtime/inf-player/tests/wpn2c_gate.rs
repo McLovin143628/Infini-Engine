@@ -1422,6 +1422,110 @@ fn a_cooked_pack_carries_every_clip_the_engine_names() {
     );
 }
 
+/// **THE BRASS REACHES THE RENDERER**, read off the shipped projector's own
+/// output rather than off the ECS.
+///
+/// # Why the entity arm is not this arm (wave WPN2c's audit)
+///
+/// `every_live_casing_is_an_entity_and_every_dead_one_is_not` proves the pool
+/// and the WORLD agree: one entity per casing, at the pool's own position, with
+/// a `MeshRef` on it. It cannot prove the entity is DRAWN — the shipped player
+/// projects with `render::project_scene`, and between an entity and an instance
+/// there is a `ComputedVisibility` read, a `GlobalTransform` read that falls
+/// back to the ORIGIN when it is missing, and a branch per component kind. The
+/// audit went looking for brass in the pixels of an island session with nine
+/// casings live and could not find any, which is a question the ECS cannot
+/// answer either way.
+///
+/// So this drives the same `project_scene` a dozen gates drive, and matches the
+/// projected instances against the pool by POSITION. It is the arm that would
+/// have caught a projector that dropped them or drew them at the world origin.
+///
+/// **Mutation → red:** `step_casing_entities` returning early (no entity, so no
+/// instance); a `MeshRef` the projector has no branch for.
+#[test]
+fn every_live_casing_is_an_instance_the_renderer_draws() {
+    let mut sim = pie_sim();
+    for _ in 0..40 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let hero = inf_editor_core::samples::GAMEPLAY_HERO_GUID;
+    assert_eq!(item::give(sim.world_mut(), hero, "m4a1", 1), 0);
+    assert!(d3::gameplay::equip_weapon(sim.world_mut(), hero, "m4a1"));
+    let mut state = inf_input::InputState::new(inf_input::default_map());
+    for i in 0..120 {
+        let events = [inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: i < 60,
+        }];
+        state.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state, DT));
+    }
+    let live = casing::casing_pool(sim.world())
+        .map(|p| p.casings.clone())
+        .unwrap_or_default();
+    assert!(!live.is_empty(), "the burst left no brass to look for");
+
+    let mut scene = inf_render::RenderScene::default();
+    inf_player::render::project_scene(
+        &mut scene,
+        &sim,
+        0.0,
+        &inf_player::vmesh::VmeshRegistry::new(),
+    );
+    // A casing's instance is the one within a millimetre of where the pool says
+    // it is. Position rather than scale or colour, because position is the thing
+    // a projector gets wrong silently: a missing `GlobalTransform` draws at the
+    // world ORIGIN and every other field still looks right.
+    let mut missed: Vec<String> = Vec::new();
+    let mut at_origin = 0usize;
+    for c in &live {
+        let hit = scene
+            .instances
+            .iter()
+            .any(|i| (i.translation - c.at).length() < 1e-3);
+        if !hit {
+            let near_origin = scene
+                .instances
+                .iter()
+                .any(|i| i.translation.length() < 1e-6 && i.scale.z < 0.05);
+            if near_origin {
+                at_origin += 1;
+            }
+            missed.push(format!("{:?}", c.at));
+        }
+    }
+    println!(
+        "{} live casings, {} projected instances in the scene, {} casings with no \
+         instance at their position ({at_origin} of them with a candidate at the origin)",
+        live.len(),
+        scene.instances.len(),
+        missed.len()
+    );
+    assert!(
+        missed.is_empty(),
+        "{} of {} live casings are not drawn where the pool says they are: {missed:?}",
+        missed.len(),
+        live.len()
+    );
+    // …and the instance really is casing-sized, so "drawn" is not "drawn as a
+    // placeholder cube the size of a car".
+    let c = &live[0];
+    let inst = scene
+        .instances
+        .iter()
+        .find(|i| (i.translation - c.at).length() < 1e-3)
+        .expect("checked above");
+    assert!(
+        (f64::from(inst.scale.z) - casing::CASING_LENGTH_M).abs() < 1e-6
+            && (f64::from(inst.scale.x) - casing::CASING_RADIUS_M * 2.0).abs() < 1e-6,
+        "a casing is drawn at {:?}, not {} x {} m",
+        inst.scale,
+        casing::CASING_RADIUS_M * 2.0,
+        casing::CASING_LENGTH_M
+    );
+}
+
 struct Course {
     trace: Vec<Vec<u8>>,
     audio: Vec<String>,

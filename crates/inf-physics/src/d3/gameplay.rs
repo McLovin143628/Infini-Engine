@@ -1936,8 +1936,11 @@ fn step_casings(
 ///
 /// Inert on every level that has never fired: one absent-resource read.
 fn step_casing_entities(world: &mut EcsWorld) {
-    use inf_ecs::casing::{casing_guid, CasingMark, CasingPool, CASING_LENGTH_M, CASING_RADIUS_M};
-    use inf_ecs::components::{MeshRef, Primitive, Transform, Visibility};
+    use inf_ecs::casing::{
+        casing_guid, CasingMark, CasingPool, CASING_COLOR, CASING_LENGTH_M, CASING_RADIUS_M,
+        CASING_ROUGHNESS,
+    };
+    use inf_ecs::components::{Material, MeshRef, Primitive, Transform, Visibility};
     if world.world().get_resource::<CasingPool>().is_none() {
         return;
     }
@@ -1980,6 +1983,22 @@ fn step_casing_entities(world: &mut EcsWorld) {
                 // through `MeshRef::asset`, which is one field and no schema.
                 primitive: Primitive::Cylinder,
                 asset: None,
+            },
+            // **AND IT IS BRASS** (the wave's audit). Without a `Material` the
+            // projector's default is a white dielectric, and a white cylinder is
+            // the one thing a shell casing is not -- measured by rendering the
+            // shipped projector at half a metre and looking at it. See
+            // `inf_ecs::casing::CASING_COLOR`.
+            Material {
+                base_color: inf_ecs::math::Color::new(
+                    CASING_COLOR[0],
+                    CASING_COLOR[1],
+                    CASING_COLOR[2],
+                    1.0,
+                ),
+                metallic: 1.0,
+                roughness: CASING_ROUGHNESS,
+                ..Default::default()
             },
             Visibility::default(),
             CasingMark,

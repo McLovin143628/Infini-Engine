@@ -95,6 +95,29 @@ pub const CASING_LENGTH_M: f64 = 0.019;
 /// How fat a shell is, metres. The draw's `X`/`Y` scale.
 pub const CASING_RADIUS_M: f64 = 0.005;
 
+/// **What brass looks like** (wave WPN2c's audit) — the casing's own material.
+///
+/// The wave drew the shell with a `MeshRef` and no [`crate::components::Material`],
+/// so it took the projector's default: a white dielectric. Rendered at half a
+/// metre it is unmistakably a small WHITE cylinder, which is the one thing a
+/// shell casing is not, and on a grey road it is also the hardest colour to
+/// pick out.
+///
+/// Cartridge brass is 70/30 copper-zinc; its normal-incidence reflectance is
+/// about `(0.72, 0.55, 0.20)` in linear sRGB. It is a METAL, so the base colour
+/// IS the specular colour and the roughness is what makes a case that has been
+/// through a chamber look like one rather than like a mirror.
+///
+/// A runtime component on a runtime entity: no schema, no asset, nothing
+/// serialized, and the day the per-calibre `SM_Shell_*` art arrives
+/// (`MeshRef::asset`, carried 237) it brings its own material and this becomes
+/// the fallback it always was.
+pub const CASING_COLOR: [f32; 3] = [0.72, 0.55, 0.20];
+
+/// How rough a fired case is — 0.35, a metal that has been handled rather than
+/// polished. See [`CASING_COLOR`].
+pub const CASING_ROUGHNESS: f32 = 0.35;
+
 /// **How many bytes one casing folds into the trace** — 16 for the shooter's
 /// guid, thirteen f64 for the three vectors plus the age, and one for the
 /// contact count. Named so the fold and the arm that measures it cannot
