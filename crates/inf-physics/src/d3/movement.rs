@@ -373,8 +373,34 @@ fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
     // is a component the sim owns and the camera reads, it is not in
     // `sim_snapshot` and it never reaches `state_bytes`. The ruling this wave
     // honours is about the aim, and the aim is untouched by it.
+    // **THE SOLVE IS CACHED** (WPN2b audit). `blend_speed_for_ads` is fifty-eight
+    // halvings, each with a pow-by-squaring, and its own doc said it *"runs once
+    // per equip, not once per step"* while this line ran it every step for every
+    // armed character. It runs on the step a feel is installed and never again,
+    // which is what the doc claimed: a feel is installed on equip and REPLACED
+    // on a weapon change, so a different `ads_time_ms` gets a different solve.
+    let want = {
+        let cached = world
+            .world()
+            .get::<inf_ecs::feel::WeaponFeel>(entity)
+            .map(|f| f.ads_speed)
+            .filter(|s| s.is_finite());
+        match cached {
+            Some(s) => s,
+            None if ads_time_s > 0.0 => {
+                let s = inf_ecs::feel::blend_speed_for_ads(ads_time_s, dt);
+                if let Some(mut f) = world
+                    .world_mut()
+                    .get_mut::<inf_ecs::feel::WeaponFeel>(entity)
+                {
+                    f.ads_speed = s;
+                }
+                s
+            }
+            None => f64::NAN,
+        }
+    };
     if ads_time_s > 0.0 {
-        let want = inf_ecs::feel::blend_speed_for_ads(ads_time_s, dt);
         let now = inf_ecs::camera::camera_rig_value(world, guid, inf_ecs::feel::ADS_BLEND_RIG_KEY);
         if now != Some(want) {
             if let Some(mut f) = world
@@ -407,6 +433,7 @@ fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
     let input = inf_ecs::feel::FeelInputs {
         aiming,
         ads_time_s,
+        ads_speed: want,
         speed_mps,
         breath,
         clock_s,
@@ -423,10 +450,46 @@ fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
     if out.aim_pitch_delta_deg == 0.0 && out.aim_yaw_delta_deg == 0.0 {
         return;
     }
-    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
-        cm.runtime.aim_pitch_deg =
-            (cm.runtime.aim_pitch_deg + out.aim_pitch_delta_deg).clamp(-89.0, 89.0);
+    // **WHAT THE CLAMP REFUSED IS STILL OWED** (WPN2b audit, carried 221).
+    //
+    // `advance_feel` sets `applied_pitch_deg` to the spring's position and hands
+    // back the difference, on the understanding that the aim TOOK it. At the
+    // movement runtime's own +-89 degree ceiling it does not: the delta is
+    // clamped away, `applied` records it anyway, and the spring's recovery then
+    // subtracts a climb the aim never received.
+    //
+    // Measured before this: a five-round burst fired at 88.5 degrees left the
+    // aim **7.115624 degrees BELOW where the player left it**, permanently --
+    // the whole of the burst's 7.6 degree climb, minus the half a degree the
+    // ceiling allowed. Carried 221 called it "the recoil is not given back";
+    // it is worse than that, because the recovery is a subtraction and the
+    // clamp only bounds the addition, so the pair STEALS aim.
+    //
+    // The unspent part is handed back to `applied_pitch_deg`, which is exactly
+    // "how much of the spring the aim is currently holding". The next step's
+    // delta re-offers it, the recovery gives back only what was taken, and the
+    // identity has no exception left: a burst at the ceiling now pushes the aim
+    // to 89 and returns it to 88.5.
+    //
+    // The yaw needs none of this: `wrap_deg` is a wrap and not a clamp, so it
+    // never refuses anything.
+    let unspent = {
+        let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
+            return;
+        };
+        let want = cm.runtime.aim_pitch_deg + out.aim_pitch_delta_deg;
+        let got = want.clamp(-89.0, 89.0);
+        cm.runtime.aim_pitch_deg = got;
         cm.runtime.aim_yaw_deg = wrap_deg(cm.runtime.aim_yaw_deg + out.aim_yaw_delta_deg);
+        want - got
+    };
+    if unspent != 0.0 {
+        if let Some(mut f) = world
+            .world_mut()
+            .get_mut::<inf_ecs::feel::WeaponFeel>(entity)
+        {
+            f.applied_pitch_deg -= unspent;
+        }
     }
 }
 

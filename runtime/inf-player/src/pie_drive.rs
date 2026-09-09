@@ -1096,8 +1096,22 @@ impl HeroLog {
                 spread_deg,
                 ads
             ),
+            // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
+            //
+            // It used to sit one field to the right -- five commas after the
+            // frame instead of four -- which put the word at index 6, the
+            // SPEED column, and left index 5, the MODE, empty. Every predicate
+            // in `tools/demo/demo.ps1` reads the mode at `$c[5]`, so a
+            // hero-less row was a blank mode rather than a named one, and a
+            // driver waiting for a mode could not tell "the hero has not
+            // spawned yet" from "this column is missing". Pre-existing since
+            // wave FIX1 and harmless only because no predicate happened to
+            // match either spelling.
+            //
+            // The row is still 27 fields wide, which the gate asserts against
+            // the armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,,no-hero,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

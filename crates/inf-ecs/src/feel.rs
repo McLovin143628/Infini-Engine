@@ -587,15 +587,34 @@ pub const BLOOM_MAX_DEG_PER_POINT: f64 = 0.45;
 ///
 /// At 2.5 that is satisfied by nothing this engine ships — a 600 rpm rifle
 /// needs `D < 1.333` — so a magazine emptied at the shipped rate ended with the
-/// bloom at zero, and `wpn2b_gate`'s own arm is what found it. 0.8 leaves
-/// headroom down to **360 rpm** (a slow pistol) and refuses to accumulate below
-/// it, which is correct: a marksman rifle fired once a second really is as
-/// accurate on the tenth round as on the first.
+/// bloom at zero, and `wpn2b_gate`'s own arm is what found it.
+///
+/// # 0.8 was measured against the wrong sentence (WPN2b audit, carried 226)
+///
+/// The first re-price said *"0.8 leaves headroom down to 360 rpm (a slow
+/// pistol)"*. Read over the eighty-five rows instead of over a sentence, that
+/// is **thirty-six rows below the floor** — and the row that matters is the
+/// **AA-12 at 300 rpm**, which is a FULL-AUTOMATIC shotgun. A weapon a player
+/// holds the trigger down on and which never blooms is the exact case this
+/// constant exists to prevent, and it was the one weapon in the catalogue that
+/// had it.
+///
+/// **0.6** is priced against the slowest AUTOMATIC row in the file rather than
+/// against an adjective: it needs 270 rpm and the slowest automatic is 300, so
+/// every one of the forty automatic rows accumulates bloom at its own cyclic
+/// rate. The thirty-five SEMI-automatic rows below the floor keep the behaviour
+/// the first re-price described and is right for them — a bolt-action at 40 rpm
+/// really is as accurate on the tenth round as on the first, and a trigger
+/// finger, not a cycle, is what limits the rest. `wpn2b_gate::
+/// every_row_in_the_registry_can_bloom_at_its_own_rate` asserts the partition
+/// over the rows themselves.
+///
+/// A saturated bloom is gone **1.67 s** after the trigger comes up.
 ///
 /// The measured equilibrium at the AR's 600 rpm and 3.8 intensity: +0.228 deg a
-/// round against −0.137 deg of decay between them, saturating at the 1.71 deg
-/// ceiling after nineteen rounds.
-pub const BLOOM_DECAY_PER_S: f64 = 0.8;
+/// round against −0.103 deg of decay between them, saturating at the 1.71 deg
+/// ceiling.
+pub const BLOOM_DECAY_PER_S: f64 = 0.6;
 
 /// **How much cone one more round of this weapon adds**, degrees.
 pub fn bloom_per_shot_deg(def: &WeaponDef) -> f64 {
@@ -691,6 +710,15 @@ pub const ADS_MOVE_SPEED_MULT: f64 = 0.55;
 /// world against the same 0.3 deg.
 pub const ADS_BLEND_REACH: f64 = 0.98;
 
+/// **How close to its target an ADS blend has to get before it is snapped**
+/// (WPN2b audit) — a billionth, [`SPRING_REST_M`]'s reason verbatim.
+///
+/// The blend is exponential since carried 223 was closed, and an exponential
+/// never arrives; `WeaponFeel::at_rest` needs `ads_blend == 0.0` **exactly**,
+/// because that is what decides whether this shooter's 160 bytes are folded at
+/// all.
+pub const ADS_BLEND_REST: f64 = 1.0e-9;
+
 /// **The camera rig value an ADS time is spent through** — the name
 /// `crate::camera::set_camera_rig_value` takes.
 pub const ADS_BLEND_RIG_KEY: &str = "state_blend_speed";
@@ -711,6 +739,12 @@ pub const ADS_BLEND_RIG_KEY: &str = "state_blend_speed";
 ///
 /// Answers a snap (`1 / dt`, which `interp_to` clamps to "arrive this step") for
 /// an ADS time at or under one step.
+///
+/// **Once per equip is a claim about the CALLER**, and it was false until the
+/// WPN2b audit: `d3::movement::step_weapon_feel` called this every step for
+/// every armed character, because it needed the answer to compare against the
+/// rig's current value. The answer is cached on [`WeaponFeel::ads_speed`] now,
+/// and a feel is installed on equip and replaced on a weapon change.
 pub fn blend_speed_for_ads(ads_s: f64, dt: f64) -> f64 {
     if !dt.is_finite() || dt <= 0.0 {
         return 0.0;
@@ -863,6 +897,24 @@ pub struct WeaponFeel {
     /// ADS took it, so putting the weapon away gives back exactly what was
     /// there. `NaN` means "not taken".
     pub blend_speed_prior: f64,
+    /// **This weapon's solved blend speed**, cached — `NaN` means "not solved
+    /// yet" (WPN2b audit).
+    ///
+    /// [`blend_speed_for_ads`]'s own doc says the bisection *"runs once per
+    /// equip, not once per step"*. It did not: `step_weapon_feel` called it
+    /// every step for every armed character, because it needed the answer to
+    /// compare against the rig's current value. Fifty-eight halvings, each with
+    /// a pow-by-squaring over up to twelve squarings, per shooter per step.
+    ///
+    /// It is solved here instead — once, on the step a feel is installed, and a
+    /// feel is installed on equip and replaced on a weapon change, which is
+    /// exactly what the doc claimed.
+    ///
+    /// **Not folded into the trace and not part of [`at_rest`](Self::at_rest)**,
+    /// for [`blend_speed_prior`](Self::blend_speed_prior)'s reason: it is a
+    /// derived function of `ads_time_ms` and the fixed step, both of which are
+    /// already the same on both hosts, and it is about a camera.
+    pub ads_speed: f64,
 }
 
 impl WeaponFeel {
@@ -870,6 +922,7 @@ impl WeaponFeel {
     pub fn new() -> Self {
         Self {
             blend_speed_prior: f64::NAN,
+            ads_speed: f64::NAN,
             ..Default::default()
         }
     }
@@ -915,6 +968,10 @@ pub struct FeelInputs {
     pub aiming: bool,
     /// The equipped weapon's `ads_time_ms`, in seconds. Zero means "snap".
     pub ads_time_s: f64,
+    /// **The solved blend speed** for [`ads_time_s`](Self::ads_time_s) at this
+    /// fixed step — [`WeaponFeel::ads_speed`], handed in so the bisection is not
+    /// re-run inside the step.
+    pub ads_speed: f64,
     /// Planar speed, m/s — the bob's amplitude.
     pub speed_mps: f64,
     /// `1.0` for a character whose animation clock is running, `0.0` otherwise —
@@ -1003,21 +1060,37 @@ pub fn advance_feel(feel: &mut WeaponFeel, input: &FeelInputs, dt: f64) -> FeelS
         input.breath,
         (feel.look_lag_x, feel.look_lag_y),
     );
-    // The ADS blend, LINEAR over the weapon's own `ads_time_ms` — the pose's
-    // half of the aim. (The camera's half is the rig's `state_blend_speed`,
-    // which is exponential because `interp_to` is; the two agree at the moment
-    // `blend_speed_for_ads` solves for and nowhere else, which is stated rather
-    // than pretended.)
-    let rate = if input.ads_time_s.is_finite() && input.ads_time_s > dt {
-        dt / input.ads_time_s
+    // **THE ADS BLEND, ON THE CAMERA'S OWN CURVE** (WPN2b audit, carried 223).
+    //
+    // It was LINEAR over the weapon's `ads_time_ms` and the camera's half is
+    // exponential, because `camera::interp_to` is. The wave stated that the two
+    // agree at the one moment `blend_speed_for_ads` solves for and nowhere else,
+    // and did not measure how far apart they get: **0.4749 of the travel**, with
+    // the field of view crossing half way on frame 2 and the shoulder on frame
+    // 8. That is a field that snaps while a shoulder eases, which is the thing a
+    // player reads as the aim and the body being two different actions.
+    //
+    // So the pose takes the camera's curve rather than the camera taking the
+    // pose's: `interp_to`'s own `x += (target - x) * speed * dt`, at the same
+    // solved speed the rig is given, so the two are ONE curve and agree at every
+    // step. The wave's other two options were a linear `interp_to` (which
+    // everything in the camera uses) and an exponential pose blend with no
+    // arrival time; this is the third, and it keeps the arrival time, because
+    // `blend_speed_for_ads` is solved against [`ADS_BLEND_REACH`] either way.
+    //
+    // An exponential never arrives, so it is SNAPPED at the end — `Spring1::
+    // settle`'s rule, for `Spring1::settle`'s reason: `ads_blend == 0.0` exactly
+    // is what makes [`WeaponFeel::at_rest`] reachable, and a trace section whose
+    // length depended on an epsilon would be a trace nobody could compare.
+    let target = f64::from(u8::from(input.aiming));
+    let a = if input.ads_speed.is_finite() {
+        (input.ads_speed * dt).clamp(0.0, 1.0)
     } else {
         1.0
     };
-    let target = f64::from(u8::from(input.aiming));
-    if feel.ads_blend < target {
-        feel.ads_blend = (feel.ads_blend + rate).min(target);
-    } else if feel.ads_blend > target {
-        feel.ads_blend = (feel.ads_blend - rate).max(target);
+    feel.ads_blend += (target - feel.ads_blend) * a;
+    if (feel.ads_blend - target).abs() < ADS_BLEND_REST {
+        feel.ads_blend = target;
     }
     out
 }
@@ -1311,6 +1384,7 @@ mod tests {
             &FeelInputs {
                 aiming: false,
                 ads_time_s: 0.2,
+                ads_speed: blend_speed_for_ads(0.2, DT),
                 speed_mps: 0.0,
                 breath: 0.0,
                 clock_s: 0.0,
@@ -1334,6 +1408,7 @@ mod tests {
         let input = FeelInputs {
             aiming: false,
             ads_time_s: 0.2,
+            ads_speed: blend_speed_for_ads(0.2, DT),
             speed_mps: 0.0,
             breath: 0.0,
             clock_s: 0.0,

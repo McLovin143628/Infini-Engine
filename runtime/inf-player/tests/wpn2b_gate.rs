@@ -2299,3 +2299,556 @@ fn the_gate_names_the_constants_it_is_about() {
     let _ = BTreeSet::<u8>::new();
     let _ = RotationMode::Aiming;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE THREE THINGS WAVE WPN2b CARRIED INSTEAD OF ASSERTING (the audit's arms)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **The aim gives back everything it took, and the pitch clamp is the ONE
+/// exception** — carried 221, asserted rather than described.
+///
+/// `advance_feel` answers a delta and `step_weapon_feel` adds it to
+/// `aim_pitch_deg`, so the sum of the deltas over a burst and its settle is the
+/// spring's final position, which is zero. `step_weapon_feel` then clamps the
+/// result to the movement runtime's own `±89°`, and an aim already at the
+/// ceiling cannot take the kick — so it cannot give it back either, and the
+/// identity has an exception nothing measured.
+///
+/// It is measured here, in both directions: away from the ceiling the aim
+/// returns EXACTLY, and at the ceiling the residual is bounded by the profile's
+/// own peak, which is the most a clamp can ever eat. An unbounded residual would
+/// be a weapon that permanently moved a player's aim.
+#[test]
+fn the_aim_recoil_is_given_back_and_the_clamp_is_the_only_exception() {
+    let burst_from = |pitch: f64| -> (f64, f64) {
+        let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
+        r.arm(HERO, "rifle");
+        r.aim(HERO, 0.0, pitch);
+        for _ in 0..20 {
+            r.step();
+        }
+        let before = r.aim_pitch();
+        r.hold_trigger(HERO, true);
+        let mut rounds = 0;
+        let mut step = 0;
+        while rounds < 5 && step < 60 {
+            rounds += r.step().shots;
+            step += 1;
+        }
+        r.hold_trigger(HERO, false);
+        let mut peak = 0.0_f64;
+        for _ in 0..600 {
+            r.step();
+            peak = peak.max(r.aim_pitch() - before);
+        }
+        (r.aim_pitch() - before, peak)
+    };
+    let (level_residual, level_peak) = burst_from(0.0);
+    let (clamped_residual, clamped_peak) = burst_from(88.5);
+    let profile = RecoilProfile::of(&test_rifle());
+    let one_peak = profile.peaks(test_rifle().spread_seed, 1).1;
+    println!("=== the sum of the deltas, and what the +-89 deg clamp eats ===");
+    println!(
+        "  {:<26}peak {level_peak:.6} deg, residual {level_residual:.9} deg",
+        "aiming level"
+    );
+    println!(
+        "  {:<26}peak {clamped_peak:.6} deg, residual {clamped_residual:.9} deg",
+        "aiming 88.5 deg up"
+    );
+    println!("  {:<26}{one_peak:.6} deg", "one round's own peak");
+    // Away from the ceiling the identity is exact.
+    assert!(
+        level_residual.abs() < 1.0e-9,
+        "a level burst left {level_residual:.12} deg of aim behind it - the sum of the deltas is not zero"
+    );
+    // The clamp really did bite, or this arm is the row above it twice.
+    assert!(
+        clamped_peak < level_peak * 0.9,
+        "the aim climbed {clamped_peak:.4} deg from 88.5 against {level_peak:.4} from level - the clamp never engaged and the exception is untested"
+    );
+    // **AND THE IDENTITY HOLDS AT THE CEILING TOO** (WPN2b audit, carried 221
+    // closed). Before `step_weapon_feel` handed the unspent part back to
+    // `applied_pitch_deg`, this row read **-7.115624 deg**: the clamp refused
+    // the burst's climb, `applied` recorded it anyway, and the spring's
+    // recovery subtracted a climb the aim never received. A player firing near
+    // the vertical limit had their aim dragged seven degrees down and left
+    // there.
+    assert!(
+        clamped_residual.abs() < 1.0e-9,
+        "a burst fired at the pitch ceiling left {clamped_residual:.12} deg of aim behind it - the clamp is eating the recovery, so the pair STEALS aim (it was -7.115624 before carried 221 was closed)"
+    );
+    // …and the exception the identity used to have was worth at least a round,
+    // so this is not a claim about a clamp that never engaged.
+    assert!(
+        level_peak - clamped_peak > one_peak,
+        "the clamp swallowed {:.4} deg against one round's own {one_peak:.4} - it barely engaged and the assertion above is the level row twice",
+        level_peak - clamped_peak
+    );
+}
+
+/// **Every row in the registry can actually bloom** — carried 226, asserted over
+/// all eighty-five rows instead of stated in a constant's doc.
+///
+/// `BLOOM_DECAY_PER_S`'s own doc derives the inequality a bloom needs in order
+/// to GROW under sustained fire at the weapon's own rate:
+///
+/// ```text
+/// bloom_per_shot     >  decay_per_second * (60 / rpm)
+/// 0.06 * intensity   >  0.45 * intensity * D * (60 / rpm)
+/// D                  <  rpm / 450
+/// ```
+///
+/// The shipped `D` is 0.8, which needs 360 rpm. Nothing enforced it, so a row
+/// authored below that rate would accumulate no bloom at all — correctly, by
+/// the arithmetic, and silently. This is the arm that says so out loud.
+#[test]
+fn every_row_in_the_registry_can_bloom_at_its_own_rate() {
+    let mut defs = item::ItemDefs::default();
+    let rows = defs
+        .merge_toml(weapon::WEAPON_REGISTRY_TOML)
+        .expect("the registry parses");
+    assert_eq!(rows, 85, "the registry is not eighty-five rows");
+    let floor = feel::BLOOM_DECAY_PER_S * 450.0;
+    let mut slowest_auto = (f64::MAX, String::new());
+    let mut auto_cannot: Vec<String> = Vec::new();
+    let (mut autos, mut semis, mut semi_cannot) = (0usize, 0usize, 0usize);
+    for (id, item) in defs.0.iter() {
+        let w = item.weapon.expect("a weapon row");
+        let blooms = feel::BLOOM_DECAY_PER_S < w.rounds_per_minute / 450.0;
+        if w.automatic {
+            autos += 1;
+            if w.rounds_per_minute < slowest_auto.0 {
+                slowest_auto = (w.rounds_per_minute, id.clone());
+            }
+            if !blooms {
+                auto_cannot.push(format!("{id} at {:.0} rpm", w.rounds_per_minute));
+            }
+        } else {
+            semis += 1;
+            semi_cannot += usize::from(!blooms);
+        }
+    }
+    println!(
+        "=== the bloom's own inequality over {rows} rows: D = {:.2} needs {floor:.0} rpm ===",
+        feel::BLOOM_DECAY_PER_S
+    );
+    println!("  {autos} automatic rows, {} of which cannot bloom", auto_cannot.len());
+    println!("  {semis} semi-automatic rows, {semi_cannot} of which cannot bloom");
+    println!(
+        "  the slowest AUTOMATIC row is {} at {:.0} rpm",
+        slowest_auto.1, slowest_auto.0
+    );
+    // **Every AUTOMATIC row blooms.** A bloom is what punishes holding a trigger
+    // down, so a weapon that can be held down and never blooms is the defect
+    // this constant exists to prevent. At the shipped 0.8 exactly one row failed
+    // this — the AA-12, a full-automatic shotgun at 300 rpm — and nothing said
+    // so; the constant's doc named "360 rpm (a slow pistol)" as the floor and
+    // never counted the rows below it.
+    assert!(
+        auto_cannot.is_empty(),
+        "these AUTOMATIC rows accumulate no bloom at their own cyclic rate, silently: {auto_cannot:?}"
+    );
+    // **The semi-automatic rows below the floor are a stated BOUND, not a bug.**
+    // A bolt-action at 40 rpm really is as accurate on its tenth round as on its
+    // first, and what limits the rest is a trigger finger rather than a cycle.
+    // The count is pinned so a re-price that quietly moved it has to say so: it
+    // was 35 of 45 at the shipped D = 0.8 and is 28 at 0.6, because seven semi
+    // rows sit between the old 360 rpm floor and the new 270.
+    assert_eq!(
+        (autos, semis, semi_cannot),
+        (40, 45, 28),
+        "the registry's automatic / semi split or the semi rows that cannot bloom has moved"
+    );
+    // …and the margin is real: a floor every automatic row clears by a mile is
+    // a claim about nothing.
+    assert!(
+        slowest_auto.0 < floor * 2.0,
+        "the slowest automatic weapon fires at {:.0} rpm against a {floor:.0} rpm floor - every automatic row clears it by more than a factor of two and this arm cannot fail",
+        slowest_auto.0
+    );
+}
+
+/// **The hero log's two branches and the demo README agree** — carried 224 and
+/// 225, as a check rather than a paragraph.
+///
+/// A source arm. `hero.csv` has no header line, so its columns are a contract
+/// between `pie_drive.rs`'s two format strings, `tools/demo/demo.ps1`'s `$c[..]`
+/// indices and `tools/demo/README.md`'s list — and nothing compared the three.
+/// The README was two waves stale before wave WPN2b and the hero-less row wrote
+/// its own name into the SPEED column for four waves.
+#[test]
+fn the_hero_log_and_its_readme_agree() {
+    const DRIVE: &str = include_str!("../src/pie_drive.rs");
+    const README: &str = include_str!("../../../tools/demo/README.md");
+    const PS1: &str = include_str!("../../../tools/demo/demo.ps1");
+
+    // The two format strings, by the shape only they have.
+    let fmt_of = |needle: &str| -> String {
+        let at = DRIVE
+            .find(needle)
+            .unwrap_or_else(|| panic!("`pie_drive.rs` has no row containing {needle:?}"));
+        let start = DRIVE[..at].rfind('"').expect("an opening quote") + 1;
+        let end = at + DRIVE[at..].find("\\n\"").expect("a row ends in a newline");
+        DRIVE[start..end].to_string()
+    };
+    let armed = fmt_of("{:.3},{},{:.4},{:.4},{:.4},{},");
+    let bare = fmt_of(",no-hero,");
+    let width = |f: &str| f.split(',').count();
+    println!("=== hero.csv, the contract nothing was comparing ===");
+    println!("  the armed row is {} fields", width(&armed));
+    println!("  the hero-less row is {} fields", width(&bare));
+    assert_eq!(
+        width(&armed),
+        width(&bare),
+        "the two hero.csv rows are different widths, so a consumer cannot index either"
+    );
+    // **`no-hero` is the MODE**, which is index 5 zero-based — carried 224.
+    let idx = bare
+        .split(',')
+        .position(|f| f == "no-hero")
+        .expect("the hero-less row names itself");
+    println!("  `no-hero` sits at index {idx} (the mode column)");
+    assert_eq!(
+        idx, 5,
+        "`no-hero` is at index {idx} and the mode column is 5 - a hero-less row is writing into the speed column"
+    );
+    assert!(
+        PS1.contains("$c[5]"),
+        "`demo.ps1` no longer reads the mode at `$c[5]`, so index 5 is not the mode any more"
+    );
+    // **The README counts the same columns** — carried 225.
+    let n = width(&armed);
+    assert_eq!(n, 27, "the row is {n} fields and this arm's word is 27");
+    assert!(
+        README.contains("TWENTY-SEVEN") || README.contains("twenty-seven"),
+        "`tools/demo/README.md` does not say how many columns hero.csv has"
+    );
+    for col in ["recoil_mm", "aim_recoil_deg", "spread_deg", "ads", "equipped"] {
+        assert!(
+            README.contains(col),
+            "`tools/demo/README.md` does not document the `{col}` column"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FOUR BOUNDS WAVE WPN2b STATED AND DID NOT MEASURE (the audit's numbers)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **What one `state_blend_speed` costs every OTHER settings blend** — carried
+/// 219, measured.
+///
+/// `blend_speed_for_ads` writes the weapon's own ADS time into the rig's ONE
+/// `state_blend_speed`, and `CameraSettings::interp` takes one speed for the
+/// whole struct. So an armed character's camera settles faster on EVERY settings
+/// blend — a gait change, a crouch, a mode change — and not only on the aim. The
+/// wave stated that and left it unpriced.
+///
+/// **The price is read off the rig and converted, not timed on a running hero.**
+/// Two earlier cuts of this arm timed a gait change in the world and both
+/// measured the wrong thing: `cam.pose.position.length()` is the camera's WORLD
+/// position and moved 17.5262 m in both runs, which is the hero running down the
+/// street; and the field of view does not move on a gait change at all
+/// (0.0000 deg), because the tuning's gait blocks differ in the ARM. What is
+/// left after those two is a boom whose settle is dominated by the character's
+/// own acceleration — 378 frames unarmed against 405 armed, which says nothing
+/// about a blend speed.
+///
+/// The blend speed itself is exact: `interp_to` moves `a = speed * dt` of the
+/// remaining distance a step, so a blend is 98 % home after
+/// `ln(0.02) / ln(1 - a)` steps, whatever it is blending.
+#[test]
+fn one_blend_speed_makes_every_settings_blend_the_weapons() {
+    let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
+    r.aim(HERO, 0.0, 0.0);
+    for _ in 0..10 {
+        r.step();
+    }
+    let unarmed = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY);
+    r.arm(HERO, "rifle");
+    for _ in 0..10 {
+        r.step();
+    }
+    let armed = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY)
+        .expect("an armed character's rig carries the weapon's blend speed");
+    let default = inf_ecs::camera::CameraTuning::default().state_blend_speed;
+    // Frames to 98 % of ANY settings blend, at each speed.
+    let frames = |speed: f64| -> f64 {
+        let a = (speed * DT).clamp(1.0e-9, 1.0 - 1.0e-9);
+        (0.02_f64).ln() / (1.0 - a).ln()
+    };
+    println!("=== carried 219: the rig's ONE `state_blend_speed` ===");
+    println!(
+        "  {:<28}{default:.4}  ({:.1} frames to 98 % of any settings blend)",
+        "unarmed (the rig default)",
+        frames(default)
+    );
+    println!(
+        "  {:<28}{armed:.4}  ({:.1} frames)",
+        "carrying a 240 ms rifle",
+        frames(armed)
+    );
+    println!(
+        "  so an armed character's gait change, crouch and mode change all settle {:.2}x faster",
+        frames(default) / frames(armed)
+    );
+    assert_eq!(
+        unarmed, None,
+        "an unarmed character's rig already carries a `state_blend_speed`, so the comparison below is not about a weapon"
+    );
+    assert!(
+        armed > default,
+        "an armed character's blend speed is {armed:.4} against the rig default {default:.4} - the weapon's ADS time is not reaching the rig"
+    );
+    // The wave's sentence, as a number: it is FASTER, and by how much.
+    assert!(
+        frames(armed) < frames(default) * 0.7,
+        "an armed character's settings blends take {:.1} frames against {:.1} - the effect the wave carried is not there and 219 wants rewriting",
+        frames(armed),
+        frames(default)
+    );
+    // …and it is BOUNDED: a settings blend that arrives in one step is a snap,
+    // which would be a worse defect than the one carried.
+    assert!(
+        frames(armed) > 3.0,
+        "an armed character's settings blends arrive in {:.1} frames - the weapon's ADS time has turned every camera change into a snap",
+        frames(armed)
+    );
+    // And the weapon really is what is doing it: putting it away gives the rig
+    // back exactly what was there.
+    r.arm(HERO, "");
+    for _ in 0..10 {
+        r.step();
+    }
+    let after = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY);
+    println!("  {:<28}{after:?}", "after putting it away");
+    assert!(
+        after.is_none() || after == Some(default),
+        "disarming left the rig at {after:?} - a weapon has edited this character's camera for the rest of the session"
+    );
+}
+
+/// **The bloom decays while a SECOND weapon is held** — carried 222, measured.
+///
+/// `decay_bloom` runs every step for whatever is equipped, so the bloom on the
+/// weapon a character put away is frozen where it was — and the bloom on the one
+/// it is holding decays. Switching away and back therefore finds the first
+/// weapon's bloom exactly where it was left, because `WeaponState` (and the
+/// bloom on it) is replaced when the equipped id changes.
+///
+/// That is stronger than the carried item guessed ("switching to a second weapon
+/// and back finds the first one's bloom decayed by the time away"), and it is a
+/// different behaviour: the magazine does not cool, it is a NEW magazine.
+#[test]
+fn a_weapon_switch_resets_the_bloom_rather_than_ageing_it() {
+    let mut r = Range::new(defs_with(&[("rifle", test_rifle()), ("pistol", test_pistol())]));
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, 0.0);
+    for _ in 0..10 {
+        r.step();
+    }
+    r.hold_trigger(HERO, true);
+    for _ in 0..60 {
+        r.step();
+    }
+    r.hold_trigger(HERO, false);
+    let bloomed = r.bloom();
+    assert!(bloomed > 0.0, "the rifle never bloomed");
+    // Two steps of decay, so "frozen" and "decaying" are distinguishable.
+    r.step();
+    r.step();
+    let after_two_steps = r.bloom();
+    // Away to the pistol for a second, and back.
+    r.arm(HERO, "pistol");
+    for _ in 0..60 {
+        r.step();
+    }
+    let pistol_bloom = r.bloom();
+    r.arm(HERO, "rifle");
+    r.step();
+    let back = r.bloom();
+    println!("=== carried 222: the bloom across a weapon switch ===");
+    println!("  {:<28}{bloomed:.4} deg", "the rifle, after a burst");
+    println!("  {:<28}{after_two_steps:.4} deg", "…two steps later");
+    println!("  {:<28}{pistol_bloom:.4} deg", "the pistol, one second in");
+    println!("  {:<28}{back:.4} deg", "the rifle again");
+    assert!(
+        after_two_steps < bloomed,
+        "the bloom did not decay at all with the trigger up"
+    );
+    assert_eq!(
+        pistol_bloom, 0.0,
+        "the pistol was handed the rifle's bloom - `WeaponState` is not being replaced on a switch"
+    );
+    assert_eq!(
+        back, 0.0,
+        "coming back to the rifle found {back:.4} deg of bloom - the state survived a switch, so a player can park a hot magazine"
+    );
+}
+
+/// **The pose's ADS blend and the camera's are ONE curve** — carried 223,
+/// measured and then closed.
+///
+/// The pose's blend was LINEAR over the weapon's `ads_time_ms` and the camera's
+/// is exponential, because `camera::interp_to` is. `blend_speed_for_ads` solves
+/// for the moment they agree — 98 % of the way home after `ads_time_ms` — and
+/// the wave stated that they agree nowhere else without measuring how far apart
+/// they get. Measured here first: **0.4749 of the travel**, with the field of
+/// view crossing half way on frame **2** and the shoulder on frame **8**. A
+/// field that snaps while a shoulder eases is the aim and the body reading as
+/// two different actions.
+///
+/// `advance_feel` takes the CAMERA's curve now, at the same solved speed the rig
+/// is given, so the two are one exponential. What is left is the camera's own
+/// one-frame lag: **0.2438** of the travel and **1** frame between the
+/// crossings. It is not zero and it cannot be — the rig's value is written on
+/// the step the aim begins and `interp_to` spends it on the step after — which
+/// is why this arm is a bound and not an equality.
+#[test]
+fn the_pose_blend_and_the_cameras_travel_apart_in_the_middle() {
+    let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
+    r.arm(HERO, "rifle");
+    r.aim(HERO, 0.0, 0.0);
+    let mut cam = inf_ecs::camera::LocomotionCamera::default();
+    let step = |r: &mut Range, cam: &mut inf_ecs::camera::LocomotionCamera| {
+        r.bridge.sync_from_world(&r.world);
+        d3::step_character_movement(&mut r.world, &mut r.bridge, DT);
+        d3::step_gameplay(&mut r.world, &mut r.bridge, DT);
+        r.bridge.step(DT);
+        r.bridge.write_back_into(&mut r.world);
+        r.world.propagate();
+        d3::step_camera_with_requests(&mut r.world, &mut r.bridge, cam, HERO, DT);
+    };
+    for _ in 0..120 {
+        step(&mut r, &mut cam);
+    }
+    let hip_fov = cam.pose.fov_deg;
+    let aim_fov = inf_ecs::camera::CameraTuning::default().aiming.walk.fov_deg;
+    let half_fov = (hip_fov + aim_fov) * 0.5;
+    r.hold_aim(HERO, true);
+    let (mut pose_half, mut cam_half, mut worst) = (None, None, 0.0_f64);
+    for i in 0..120u32 {
+        step(&mut r, &mut cam);
+        let blend = r.feel(HERO).map(|f| f.ads_blend).unwrap_or(0.0);
+        let travelled = (hip_fov - cam.pose.fov_deg) / (hip_fov - aim_fov);
+        worst = worst.max((blend - travelled).abs());
+        if pose_half.is_none() && blend >= 0.5 {
+            pose_half = Some(i);
+        }
+        if cam_half.is_none() && cam.pose.fov_deg <= half_fov {
+            cam_half = Some(i);
+        }
+    }
+    let (p, c) = (
+        pose_half.expect("the pose blend passed half way"),
+        cam_half.expect("the field passed half way"),
+    );
+    println!("=== carried 223: the linear pose blend against the exponential camera ===");
+    println!("  the pose crossed half at frame {p}, the field at frame {c}");
+    println!(
+        "  the worst disagreement over the whole blend is {:.4} of the travel",
+        worst
+    );
+    // The blend really ran, or this arm is two zeroes agreeing.
+    assert!(
+        p > 0 && c > 0 && p < 30 && c < 30,
+        "the halves crossed at frames {p} and {c} - the aim never blended and there is nothing here to compare"
+    );
+    // …and the disagreement is bounded: an exponential that led its linear twin
+    // by more than a third of the travel would be a shoulder arriving in a
+    // different second from the field of view.
+    assert!(
+        worst < 0.30,
+        "the two blends disagreed by {worst:.4} of the travel against the 0.2438 this arm was pinned at (and the 0.4749 the linear blend gave) - the shoulder and the field are arriving in different halves of the aim again"
+    );
+    assert!(
+        (p as i64 - c as i64).unsigned_abs() <= 2,
+        "the two halves crossed {} frames apart - they were 6 apart before carried 223 was closed",
+        (p as i64 - c as i64).unsigned_abs()
+    );
+}
+
+/// **What the sway does when the animation clock RESETS** — carried 220,
+/// measured and BOUNDED rather than described.
+///
+/// `SmRuntime::state_time` is set to the new state's entry offset — zero, unless
+/// a caller asked for the state by name — on every transition
+/// (`state_machine.rs`'s own `*play = Play { … state_time: entry_s … }`). The
+/// sway's phase is that clock, so a character changing gait snaps its hold point
+/// to phase zero in one step.
+///
+/// It is a real discontinuity and this is what it is worth, as a pure function
+/// of the two speeds either side of the change:
+///
+/// | transition | worst jump |
+/// |---|---|
+/// | idle → walk | 6.000 mm |
+/// | walk → run | 32.156 mm |
+/// | run → sprint | 73.559 mm |
+/// | sprint → stop | **91.441 mm** |
+///
+/// At the demo's own aiming boom (2.0749 m, a 55 degree field over a 730 px
+/// window) 91.441 mm is **31 pixels**, in one frame. It is visible.
+///
+/// **It is not fixed here, and the reason is the ONE CLOCK.** The breath additive
+/// samples the same accumulator and snaps with it (6 mm, 2 px), so the two stay
+/// in phase with each other and clause 4's requirement is met; moving the sway
+/// to a clock that does not reset without moving the breath would put a chest
+/// and a pair of hands on different phases, which is the thing the requirement
+/// exists to forbid. The fix is therefore ONE change to both: a `total_s` beside
+/// `state_time` on `SmRuntime` — schema-free, because that struct is
+/// `#[serde(skip)]` + `#[reflect(ignore)]` on `AnimStateMachine` — advanced on
+/// the same line and never reset, published on `AnimStateInfo`, and read by both
+/// `apply_breath` and `step_weapon_feel`. It re-blesses every committed pose
+/// trace of a character whose machine has transitioned, which is why it is a
+/// wave and not an audit paragraph.
+///
+/// This arm is the tripwire: the jump is pinned at what it is, so a change that
+/// makes it worse reds, and a change that fixes it reds too and gets rewritten.
+#[test]
+fn the_sway_snaps_when_the_animation_clock_resets() {
+    // The state machine really does reset the clock — the source half, because
+    // no measurement of the sway can distinguish "the clock resets" from "this
+    // fixture never transitioned".
+    const SM: &str = include_str!("../../../crates/inf-anim/src/state_machine.rs");
+    assert!(
+        SM.contains("state_time: entry_s,"),
+        "`state_machine.rs` no longer sets the new state's clock from the entry offset - carried 220's mechanism has moved"
+    );
+    let worst_jump = |speed_before: f64, speed_after: f64| -> f64 {
+        let after = feel::sway_offset(0.0, speed_after, 1.0, (0.0, 0.0));
+        let mut worst = 0.0_f64;
+        for i in 0..20_000 {
+            let t = f64::from(i) * 1.0e-3;
+            worst = worst.max((feel::sway_offset(t, speed_before, 1.0, (0.0, 0.0)) - after).length());
+        }
+        worst
+    };
+    let rows = [
+        ("idle -> walk", 0.0, 1.5),
+        ("walk -> run", 1.5, 3.6),
+        ("run -> sprint", 3.6, 5.85),
+        ("sprint -> stop", 5.85, 0.0),
+    ];
+    println!("=== carried 220: the hold point when `state_time` resets to zero ===");
+    let mut worst = 0.0_f64;
+    for (what, a, b) in rows {
+        let mm = worst_jump(a, b) * 1000.0;
+        println!("  {what:<16}{mm:8.3} mm");
+        worst = worst.max(mm);
+    }
+    // Pinned at what it is. The bob is bounded by `SWAY_MAX_M` and the breath by
+    // `SWAY_BREATH_M`, so this number cannot exceed their sum by construction —
+    // which is what makes it a bound and not just a reading.
+    let ceiling = (feel::SWAY_MAX_M + feel::SWAY_BREATH_M) * 1000.0;
+    println!("  {:<16}{ceiling:8.3} mm", "the ceiling");
+    assert!(
+        worst > 50.0,
+        "the worst clock-reset jump is {worst:.3} mm - it has been fixed, and this arm and carried 220 both want rewriting"
+    );
+    assert!(
+        worst <= ceiling,
+        "the worst clock-reset jump is {worst:.3} mm against a {ceiling:.3} mm ceiling made of the sway's own two amplitudes"
+    );
+}

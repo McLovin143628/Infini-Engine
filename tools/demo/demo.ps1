@@ -697,50 +697,85 @@ if ($armList.Count -eq 0 -and $inHand) {
         -Out (Join-Path $OutDir "91-ads.png"))[-1]
     if (-not $ads) { Say "WPN2b: the aim never arrived -- no ADS frame" }
 
-    # (2) THE BURST, at three frames. A shot's climb peaks four steps and 66 ms
-    #     after the trigger, so these cannot be taken on a wall clock: each frame
-    #     is armed on a column crossing a threshold the one before it did not.
-    #     The clicks keep coming while the waits run, which is what makes the
-    #     springs stack rather than settle between rounds.
+    # (2) THE BURST, at three frames — AT THE WEAPON'S OWN RATE (WPN2b audit).
+    #
+    #     A shot's climb peaks four steps and 66 ms after the trigger, so these
+    #     cannot be taken on a wall clock: each frame is armed on a column
+    #     crossing a threshold the one before it did not.
+    #
+    #     **AND THE ROUNDS HAVE TO STACK, or the frames are three samples of a
+    #     plateau.** The first cut of this leg clicked once and then blocked in
+    #     a half-second `Wait-ForHero` before clicking again — about two rounds
+    #     a second against the Glock's own 450 rpm — and a 2.5-recoil spring is
+    #     home in a third of a second, so nothing ever accumulated. Measured on
+    #     that session: the three frames came out at aim **3.2014 / 3.2723 /
+    #     3.6925 deg** and hold points of **88.037 / 89.159 / 70.221 mm**, so
+    #     the "top of the burst" frame had a fifth LESS recoil than the first
+    #     one and the arm was 2 px LOWER against the head. The captions said
+    #     "the arm is visibly higher"; the pixels and the CSV both said
+    #     otherwise. It is the same defect the refused bloom frame already
+    #     named — a Glock clicked at the harness rate cannot bloom — applied to
+    #     the recoil, which the wave did not notice because a recoil frame
+    #     always looks like a recoil frame.
+    #
+    #     So the clicks come first and the waits are SHORT: one round every
+    #     ~140 ms, which is the registry's own 450 rpm, with a 0.10 s look at
+    #     the CSV between them. The three thresholds are then crossed by a
+    #     spring that is genuinely stacking.
     $burst = @(
-        @{ n = "92-burst-1.png"; what = "the first round's kick";              col = 23; over = 5.0 },
-        @{ n = "93-burst-2.png"; what = "the burst climbing (the aim past 2 deg)"; col = 24; over = 2.0 },
-        @{ n = "94-burst-3.png"; what = "the burst at its top (the aim past 3.5 deg)"; col = 24; over = 3.5 }
+        @{ n = "92-burst-1.png"; what = "the first round's kick";                     col = 23; over = 5.0 },
+        @{ n = "93-burst-2.png"; what = "the burst climbing (the aim past 4 deg)";    col = 24; over = 4.0 },
+        @{ n = "94-burst-3.png"; what = "the burst at its top (the aim past 5.5 deg)"; col = 24; over = 5.5 }
     )
     $shotsFired = 0
-    foreach ($b in $burst) {
-        $got = $false
-        for ($t = 0; ($t -lt 8) -and (-not $got); $t++) {
-            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 45; [InfInput]::LeftUp()
-            $shotsFired++
-            $col = $b.col; $over = $b.over
-            $got = @(Wait-ForHero -Csv $heroCsv -What $b.what -TimeoutS 0.5 `
-                -Predicate { param($c) ($c.Count -gt $col) -and ([double]$c[$col] -gt $over) } `
-                -Out (Join-Path $OutDir $b.n))[-1]
-        }
-        if (-not $got) { Say "WPN2b: $($b.what) never fired after $shotsFired rounds" }
+    $stage = 0
+    # 24 rounds is a Glock magazine and a half at 450 rpm — about 3.4 seconds.
+    for ($t = 0; ($t -lt 24) -and ($stage -lt $burst.Count); $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 40; [InfInput]::LeftUp()
+        $shotsFired++
+        $b = $burst[$stage]
+        $col = $b.col; $over = $b.over
+        # 100 ms, so the whole cycle is ~140 ms = 428 rpm. Long enough for the
+        # 4 Hz hero log to have written a row roughly every third click, short
+        # enough that the spring never comes home between rounds.
+        $got = @(Wait-ForHero -Csv $heroCsv -What $b.what -TimeoutS 0.10 `
+            -Predicate { param($c) ($c.Count -gt $col) -and ([double]$c[$col] -gt $over) } `
+            -Out (Join-Path $OutDir $b.n))[-1]
+        if ($got) { $stage++ }
+    }
+    for ($i = $stage; $i -lt $burst.Count; $i++) {
+        Say "WPN2b: $($burst[$i].what) never fired after $shotsFired rounds"
     }
 
-    # (3) THE SPREAD, at the top of the magazine's own bloom. The cone widens
-    #     with every round and decays between them, and the threshold is what a
-    #     PISTOL can actually reach: the registry authors 1.20 deg for a Glock
-    #     and `feel::BLOOM_DECAY_PER_S`'s own inequality says a bloom grows only
-    #     while `D < rpm / 450`, so at 450 rpm a Glock gains 0.06 deg a round
-    #     against 0.036 of decay and a whole magazine adds about half a degree.
-    #     The first session asked for 1.6 and got 20 rounds and no frame, which
-    #     is the constant behaving exactly as its own doc says. The button is up,
-    #     so the cone here is the HIP cone.
+    # (3) THE SPREAD, at the top of the magazine's own bloom — AT THE WEAPON'S
+    #     OWN RATE (WPN2b audit). The cone widens with every round and decays
+    #     between them, so a bloom grows only while the rounds come faster than
+    #     the decay: `feel::BLOOM_DECAY_PER_S`'s own inequality, `D < rpm / 450`.
+    #
+    #     TWO things had to change for this frame to exist. The constant was
+    #     0.8, which needs 360 rpm — thirty-six of the registry's eighty-five
+    #     rows are below that, including the AA-12, which is a FULL-AUTOMATIC
+    #     shotgun; it is 0.6 now, priced against the slowest automatic row in
+    #     the file. And this leg clicked once every ~400 ms, which is 150 rpm
+    #     against the Glock's 450 — so its own decay outran it and the wave
+    #     reported "the cone never bloomed past 1.6 deg over 20 rounds" as the
+    #     constant behaving correctly. It was half that and half this.
+    #
+    #     At 450 rpm a 2.5-recoil Glock gains 0.150 deg a round against 0.095 of
+    #     decay and saturates at 1.125 deg over its own 1.20 base, so 1.60 is a
+    #     third of the way up a real bloom. The button is up, so the cone here is
+    #     the HIP cone.
     [InfInput]::RightUp()
     Start-Sleep -Milliseconds 200
     $bloom = $false
-    for ($t = 0; ($t -lt 14) -and (-not $bloom); $t++) {
-        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 45; [InfInput]::LeftUp()
+    for ($t = 0; ($t -lt 20) -and (-not $bloom); $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 40; [InfInput]::LeftUp()
         $shotsFired++
-        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past the registry's own 1.20 deg" -TimeoutS 0.35 `
-            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.30) } `
+        $bloom = @(Wait-ForHero -Csv $heroCsv -What "the cone bloomed past 1.60 deg (the registry's own base is 1.20)" -TimeoutS 0.10 `
+            -Predicate { param($c) ($c.Count -gt 25) -and ([double]$c[25] -gt 1.60) } `
             -Out (Join-Path $OutDir "95-bloom.png"))[-1]
     }
-    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.30 deg over $shotsFired rounds" }
+    if (-not $bloom) { Say "WPN2b: the cone never bloomed past 1.60 deg over $shotsFired rounds" }
     Say "WPN2b: $shotsFired rounds fired over the feel leg"
     Start-Sleep -Milliseconds 1200
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "96-after-the-burst.png") | ForEach-Object { Say $_ }
