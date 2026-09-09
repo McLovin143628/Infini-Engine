@@ -37485,3 +37485,145 @@ ARM is overwritten by the hand IK — `solve_arm` runs after the overlay and
 writes the whole arm chain, so what survives is the CLAVICLE; closing that means
 the hold point becoming an offset from the overlay's own hand rather than a
 world point, which is a change to `HandIk` and not to this wave.
+
+## WAVE WPN2c — SOUND AND BRASS (2026-09-09)
+
+**A GUNSHOT IS FOUR COMMANDS.** The research doc's own stack — transient, body,
+room tail, distant crack — as four `Play`s inside the `weapon_report` MIRROR
+fence, one Ring-0 description (`inf_ecs::weapon::report_layers`) rather than
+sixteen constants in two host-side loops. Measured on the fixture's own M4A1
+through the shipped input path: **30 rounds → 120 layer commands**, in the
+pinned order, on four keys, naming four clips.
+
+The layers do NOT share a reach, and that is the whole of why a gunshot changes
+shape with distance rather than only getting quieter: the transient carries
+**12 %** of the weapon's report range (you hear a rifle's bolt beside you and
+not three streets away, where the bang is still perfectly audible), the indoor
+tail **25 %**, and the body and the outdoor tail all of it. The distant layer is
+the other way round — silent inside **150 m**, full at **300 m**, with its near
+field at the onset — because what it models is what is LEFT at a distance.
+
+**THE SALT CLOSES WPN1's CARRIED COLLISION.** A report has been keyed on
+`guid_source_key(shooter)` since wave WPN1, which is the shooter's own emitter
+namespace, and `report_source`'s doc has carried the consequence: a character
+with an autoplay `AudioSource` would lose its voice to its own gunshot and never
+get it back, because the autoplay walk starts a source once. Four layers need
+four keys anyway — a source is one voice and a second `Play` replaces it — so
+the four salts close the carried item in the change that needed it closed. The
+gate asserts none of the four is the bare shooter key.
+
+**THE ENCLOSURE PROBE**, six rays out from the muzzle, indoors at four hits
+inside eight metres. Measured: **1 hit** on open ground (the floor) and **6** in
+a closed room, so the doc's threshold of four sits exactly in the gap — a street
+between two buildings reaches three. It is SIM state, taken on the step the
+trigger goes down and riding `WeaponHit::indoors` into both hosts, because a
+value two hosts each computed for themselves is a value they can disagree about.
+
+Its rays are **on the bill**: a loud shot now costs **seven** casts (one shot,
+six probe) and `MAX_SHOT_RAYS_PER_STEP` is priced against the larger number
+rather than a sixth of it. At eight shooters that is **222.2 rays a step against
+a ceiling of 256** — close, deliberately, because a bound nothing reaches is a
+bound nobody has tested.
+
+**A finding the gate's own first draft produced:** a probe cast without
+excluding its shooter answers **six hits on an open field**, because a ray that
+starts inside a solid collider hits it immediately in every direction. The
+shipped path never had it (`resolve_shot` passes `shot_exclusions`); the arm did,
+and it is why the hit COUNT is measured beside the verdict rather than trusted.
+
+**THIRTY-SIX CLIPS, MADE OF ARITHMETIC.** `inf_audio::synth` writes WAV bytes
+with **no `sin`, no `exp`, no `powf`** — a parabolic sine, a one-pole decay,
+counter-based splitmix noise — because these bytes are COMMITTED and a generator
+that leaned on the host's libm would write different files on Windows and on the
+CI runner. The envelopes are measured off the samples rather than asserted about
+the parameters: transient ≤ 5 ms, body 0.20-0.55 s with its fundamental inside
+the doc's 40-80 Hz band (measured by zero crossings: 78.0 authored / 77.8
+measured for a pistol, 40.0 / 40.2 for a launcher), indoor tail 0.3000 s,
+outdoor tail 1.5000 s, crack 2.0 ms. The whole library is **773 KiB**.
+
+Wave WPN1's `WEAPON_REPORT_CLIP` **is** the assault rifle's body layer, so the
+one `.inf_audio` this tree has committed since WPN1 keeps its GUID and its file
+name; its bytes go from 800 samples of a linear ramp at 8 kHz to 6 615 samples
+of a 58 Hz gunshot body at 22 050.
+
+**THE LOW-PASS IS AUDIBLE, AFTER FOUR PHASES.** `Effect::Lowpass` has been in
+the mixer config since P12.3 and folded by `resolve` the whole time; VEN1b added
+`SetOcclusion { lowpass_hz }`; **neither ever changed a sample**. It does now:
+`inf_audio::filter`'s one-pole runs over the decoded frames before a voice
+starts, cached by (clip, cutoff), and a live voice whose cutoff changes is
+restarted at the position it had reached.
+
+The coefficient is **solved, not approximated**, and the reason is a
+measurement. The textbook RC discretisation `dt/(RC + dt)` puts a filter's real
+half-power point BELOW the frequency it names, by an error that grows with
+`f/rate`: **−2.7 %** at 200 Hz, **−6.4 %** at 500, **−8.6 %** at 700 and
+**−15.9 %** at 1 500. A cutoff sixteen per cent wrong is a suggestion. The exact
+root of `a² + 2aC − 2C = 0` gives **0.00 % at every cutoff and −3.010 dB at each
+of them**, measured by a DFT of the filter's own impulse response — and it needs
+a cosine, which `libm` may not agree with itself about, so it is a polynomial
+accurate to **2.4 × 10⁻¹¹** over `[0, π]`.
+
+**THE SUPERSONIC CRACK** is measured against the round's SEGMENT and not its
+position, because at 900 m/s a round crosses 3.75 m in a sub-step and 15 m in a
+fixed step — a point test never lands inside four metres of an ear. Measured:
+2 m passes crack (at **2.46 m**, placed at the closest point beside the ear
+rather than at the muzzle forty metres back), 10 m do not, and the AS VAL at
+295 m/s never does, by physics rather than by a flag. The latch is folded into
+the round's trace bytes (**81 → 82**) because it is a latch over history rather
+than a function of the positions beside it.
+
+**THE BRASS IS A RING, NOT A REFUSAL**, and the difference is the point:
+`spawn_round` refuses and counts, because a round that was never minted is a
+shot somebody fired that hurt nobody; a casing is decoration with a physics body
+and the honest failure for the hundred-and-twenty-ninth is that the oldest
+disappears. Gravity, one bounce at **e = 0.3**, settle on the second contact,
+eight-second lifetime, one pitch-randomised metal one-shot per FIRST contact,
+drawn as a small cylinder on a derived guid through the instanced primitive path.
+
+Measured: one rifle at 600 rpm keeps **69** cases on the ground and **cannot
+fill the ring** — the ceiling is a two-shooter fact, so the arm that proves it is
+four rifles (**688 ejected, 560 recycled, peak 128**). Its bytes are **121 a
+casing**, appended at the trace's TAIL, and **empty when the pool is**.
+
+**WHO IS LISTENING** is now one Ring-0 rule both hosts and the fixed step call.
+It used to be a private copy in each host that only happened to agree; the third
+reader — a shot's distance to the ear, which decides the distant layer — is
+inside the fixed step, where neither host's copy can be called, and would have
+been the one that drifted.
+
+**CARRIED 43 IS CLOSED.** `cook::asset_deps` closes a pack over what a level's
+entities REFERENCE and the PIE payload walks `AudioSource.clip`, so a sound the
+FIXED STEP decides to play — naming its clip by a Ring-0 constant — was invisible
+to both: the cooked island pack contained no `.inf_audio` at all, the venue's
+music was silent in every shipped build, and nothing said so, because a `Play`
+whose clip does not resolve is silence with no error. This wave would have made
+it thirty-six times worse. `inf_ecs::audio::engine_spawned_clips` is the list the
+carried item prescribes, read by the cook and by the payload builder through one
+door.
+
+**THE AUDIO LOG WAS RE-PRICED.** Eight shooters at 600 rpm is 460 commands a
+second with the layers, the brass and the listener, so the old 8 192 ceiling
+evicted after **17.8 s** and the wave's own arm asks for 120. **65 536** buys
+142 s, and costs 10.5 MiB at 160 bytes a command — measured, not estimated, and
+stated rather than hidden. The arm reads **8 232 rounds, 48 312 commands, 0
+dropped** over two minutes.
+
+**THE COST**, eight shooters bursting with the ring full: **174.3 µs** for the
+whole gameplay phase, 6.7 audio commands a step, 66.3 casing rays a step, peak
+128 casings.
+
+`wpn2c_gate` is **15 arms**, and its own first drafts found five things: a probe
+that counted its shooter, a crack arm that fired a burst and read four cracks
+where it asserted one, a ring one shooter cannot fill, a thirty-round burst that
+was only two seconds long, and a two-minute firefight with one minute of
+ammunition. Every one is fixed with the measurement written beside it.
+
+**WHAT IS NOT HERE.** A muzzle-flash LIGHT is refused with a number: `MAX_LIGHTS`
+is 16, the projection is first-N with no priority and the sun is `lights[0]`, so
+a flash spawned on a lit street either vanishes or pushes an authored light out
+and nothing reports either. It is PAR0's, and the `debug.line` flash wave WPN1
+drew stays. The editor still has no tracer twin (WPN1's carried item). A casing
+has no per-calibre clip — one metal one-shot serves every class and the pitch
+hash is the difference — and no per-calibre mesh; `MeshRef.asset` is the door and
+the art is WPN2d's. Shotgun cones, launchers, attachments and real weapon meshes
+are WPN2d's untouched.

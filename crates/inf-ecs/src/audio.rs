@@ -71,10 +71,84 @@ pub fn active_listener_position(world: &EcsWorld) -> Option<DVec3> {
     active_listener_pose(world).map(|(_, p)| p)
 }
 
+/// **Every clip this ENGINE plays without a level naming it** (wave WPN2c) —
+/// the door island-progress carried item 43 prescribes, built at last.
+///
+/// # The defect, in one sentence
+///
+/// `runtime_packager::cook::asset_deps` closes a pack over the assets a level's
+/// entities REFERENCE, and the PIE payload builder walks `doc.order()` for
+/// `AudioSource.clip` — so a sound that a *fixed step* decides to play, naming
+/// its clip by a Ring-0 constant, is invisible to both. Measured at island wave
+/// I8b and written up as carried 43: **the cooked island pack contains no
+/// `.inf_audio` at all**, so the venue's music is silent in a shipped build and
+/// nobody noticed, because a `Play` whose clip does not resolve is silence with
+/// no error.
+///
+/// Wave WPN2c would have made it thirty-six times worse: every gunshot is four
+/// commands naming four engine constants, and every one of them would have been
+/// silent in a cooked build while sounding perfectly in the editor.
+///
+/// # The rule
+///
+/// A clip belongs on this list when the SIM names it and no component does.
+/// That is the whole test, and it is why the list is here rather than in a
+/// manifest: the constants are Ring-0, the systems that play them are Ring-0,
+/// and a wire field would be a fourth place for the same fact.
+///
+/// Ordered and deduplicated, so a pack's dependency closure is deterministic.
+pub fn engine_spawned_clips() -> Vec<Uuid> {
+    let mut out = vec![
+        // Island wave VEN1b: a venue's music is played by an emitter
+        // `sync_venue_audio` SPAWNS from a `PcgVolume`, so no authored entity
+        // ever carries the clip.
+        crate::venue::VENUE_MUSIC_CLIP,
+        // Wave WPN2c: the brass.
+        crate::weapon::CASING_CLIP,
+    ];
+    // Wave WPN1 + WPN2c: thirty-six report clips, five per class, built by
+    // `report_clip` — including WPN1's own `WEAPON_REPORT_CLIP`, which is the
+    // assault rifle's body layer.
+    for class in crate::weapon::WeaponClass::ALL {
+        for clip in crate::weapon::ReportClip::ALL {
+            out.push(crate::weapon::report_clip(class, clip));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::math::Vec3d;
+
+    /// **CARRIED 43'S DOOR** — every clip the engine plays without a level
+    /// naming it, so a cook and a PIE payload can close over them.
+    #[test]
+    fn the_engine_names_thirty_seven_clips_no_component_ever_references() {
+        let clips = active_test_clips();
+        assert_eq!(
+            clips.len(),
+            37,
+            "thirty-six report clips plus the casing plus the venue loop"
+        );
+        let uniq: std::collections::BTreeSet<Uuid> = clips.iter().copied().collect();
+        assert_eq!(uniq.len(), clips.len(), "the list has a duplicate");
+        // Sorted, so a pack's dependency closure is deterministic.
+        let mut sorted = clips.clone();
+        sorted.sort();
+        assert_eq!(clips, sorted);
+        // The two the tree has committed the longest are on it.
+        assert!(clips.contains(&crate::weapon::WEAPON_REPORT_CLIP));
+        assert!(clips.contains(&crate::venue::VENUE_MUSIC_CLIP));
+        assert!(clips.contains(&crate::weapon::CASING_CLIP));
+    }
+
+    fn active_test_clips() -> Vec<Uuid> {
+        engine_spawned_clips()
+    }
 
     #[test]
     fn the_listener_is_the_lowest_guid_that_is_active_and_nothing_otherwise() {
@@ -91,6 +165,12 @@ mod tests {
                 .entity_mut(e)
                 .insert((t, AudioListener { active: true }));
         }
+        // **The pose comes off `GlobalTransform` when there is one**, and a
+        // freshly spawned entity has an identity one until the transform pass
+        // has run — measured on this test's own first draft, which read the ear
+        // at the origin. That is the host behaviour too, and it is why this is
+        // called after the propagate step in both of them.
+        crate::transform::propagate(w.world_mut());
         let (g, p) = active_listener_pose(&w).expect("an ear");
         assert_eq!(g, lo);
         assert!((p.x + 4.0).abs() < 1e-12);

@@ -1235,6 +1235,19 @@ where
     // carries it once.
     let mut audio: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut seen_audio: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // **THE CLIPS NO ENTITY REFERENCES** (wave WPN2c, closing island carried
+    // 43) — the same Ring-0 list `runtime_packager::cook::asset_deps` reads, so
+    // a preview and a cooked build carry the same sounds. The walk below finds
+    // what the DOCUMENT names; a gunshot's four layers and a venue's loop are
+    // named by the fixed step and by nothing else.
+    for clip in inf_ecs::audio::engine_spawned_clips() {
+        if !seen_audio.insert(clip) {
+            continue;
+        }
+        if let Some(bytes) = resolve_bytes(clip) {
+            audio.push((clip, bytes));
+        }
+    }
     for &guid in doc.order() {
         let Some(e) = world.entity_of(guid) else {
             continue;

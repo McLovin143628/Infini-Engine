@@ -2195,6 +2195,24 @@ fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> V
                 return Vec::new();
             };
             let mut deps: Vec<AssetId> = Vec::new();
+            // **THE CLIPS NO ENTITY REFERENCES** (wave WPN2c, closing island
+            // carried 43). Everything below this line walks what a level's
+            // entities NAME, and a sound the fixed step decides to play names
+            // its clip by a Ring-0 constant instead — so the cooked island pack
+            // contained no `.inf_audio` at all, the venue's music was silent in
+            // every shipped build, and nothing said so because a `Play` whose
+            // clip does not resolve is silence with no error.
+            //
+            // One door for the whole class rather than an edge per constant:
+            // `inf_ecs::audio::engine_spawned_clips` is the list, the PIE
+            // payload builder reads the same one, and a clip that is not in the
+            // project simply is not in the closure — `db.get` answers `None`
+            // and the pack is what it always was.
+            deps.extend(
+                inf_ecs::audio::engine_spawned_clips()
+                    .into_iter()
+                    .map(AssetId),
+            );
             for e in &level.entities {
                 deps.extend(e.actor.map(AssetId));
                 // P13.4: a MeshRef.asset pulls its `.inf_mesh` into the closure, so

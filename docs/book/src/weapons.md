@@ -119,12 +119,50 @@ reads them yet.
 **Shotgun pellets** — a shotgun fires one ray carrying the whole shell's energy, not eight.
 **Launcher blast** — a rocket spends its direct damage on what it hits and has no radius.
 **Burst fire** — the engine has automatic and semi-automatic, so the three-round-burst weapons are
-authored as automatic at their listed rate. **Attachments**, **recoil springs and sway**, the
-**four-layer gunshot** and **shell casings** are all later waves of the same arc. And a round
+authored as automatic at their listed rate. **Attachments** are a later wave of the same arc.
+**Recoil springs and sway** arrived in wave WPN2b, and the **four-layer gunshot**, the
+**supersonic crack** and **shell casings** in wave WPN2c — see below. And a round
 **cannot hurt a vehicle** — but it does now **stop at one**: since this wave's audit both halves of
 the hybrid cast against every solid body rather than static and kinematic geometry only, so a round
 ends in a parked car (which spends nothing, having no health and nothing to break) and a body lying
 on the floor can be hit.
+
+### What a gunshot sounds like
+
+Every loud shot is **four sounds**, not one, and they are queued in the order you hear them:
+
+| layer | what it is | how far it carries |
+|---|---|---|
+| transient | the bolt, the hammer, the action | 12 % of the weapon's report range |
+| body | the bang, 40-80 Hz depending on the class | the whole range |
+| tail | the room's own reflection | the whole range outdoors, a quarter of it indoors |
+| distant | what is left of the shot a long way off | silent inside 150 m, full past 300 m |
+
+Which TAIL plays is decided by an **enclosure probe**: six rays out from the muzzle on the step the
+trigger goes down, and four or more of them finding something inside eight metres means you are
+inside. A street has the ground and at most two walls; a room has six surfaces. The indoor tail is
+a fifth as long as the outdoor one and is low-passed at 3.5 kHz, so a shot fired in a stairwell
+really does sound like a shot fired in a stairwell.
+
+A **supersonic round** — anything faster than 343 m/s, which is most of the registry but not the
+AS VAL — makes a separate **crack** when it passes within four metres of you. It is measured
+against the round's whole segment rather than its position, because at 900 m/s a bullet crosses
+fifteen metres in a single fixed step.
+
+Each weapon **class** has its own five clips. They are generated rather than recorded, from
+arithmetic with no random numbers in it, and they live in `samples/weapon-audio/`; swapping in a
+real recorded pack is a matter of putting different WAV bytes behind the same GUIDs.
+
+### The brass
+
+A shot **ejects a case** out of the weapon's own port, which falls under gravity, **bounces once**
+at a restitution of 0.3, makes one pitch-randomised metallic noise on that first contact, and
+settles on the second. Cases live for eight seconds and there are at most 128 of them at a time:
+the pool is a **ring**, so the hundred-and-twenty-ninth case recycles the oldest rather than
+failing to exist. One rifle at 600 rpm keeps about 69 on the ground; a firefight fills the ring.
+
+The shape a case is drawn as is a small cylinder. `MeshRef.asset` takes a real shell mesh with no
+schema change, which is where imported art goes.
 
 ### Getting a weapon in the showcase
 

@@ -2534,9 +2534,9 @@ fn the_hero_log_and_its_readme_agree() {
     );
     // **The README counts the same columns** — carried 225.
     let n = width(&armed);
-    assert_eq!(n, 27, "the row is {n} fields and this arm's word is 27");
+    assert_eq!(n, 29, "the row is {n} fields and this arm's word is 29");
     assert!(
-        README.contains("TWENTY-SEVEN") || README.contains("twenty-seven"),
+        README.contains("TWENTY-NINE") || README.contains("twenty-nine"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2545,6 +2545,9 @@ fn the_hero_log_and_its_readme_agree() {
         "spread_deg",
         "ads",
         "equipped",
+        // Wave WPN2c's two.
+        "casings",
+        "tail",
     ] {
         assert!(
             README.contains(col),

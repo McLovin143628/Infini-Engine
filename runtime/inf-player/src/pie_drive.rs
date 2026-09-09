@@ -839,9 +839,11 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// own — a camera that drifts looks the same as a character that walks. A
 /// windowed PIE session appends
 /// `t,frame,x,y,z,mode,speed,camera_pull,aim_yaw,head_yaw,head_pitch,anim_state,foot_mm`
-/// — plus the camera's four (CHAR1c), the cover's three (COV1) and the
+/// — plus the camera's four (CHAR1c), the cover's three (COV1), the
 /// ballistics' three (WPN2a: rounds in flight, how far the last round that hit
-/// something had flown, and WHAT IS IN THE HAND) — here four times a second, and the script prints the
+/// something had flown, and WHAT IS IN THE HAND), the feel's four (WPN2b) and
+/// the sound's two (WPN2c: casings live, and which TAIL the last shot chose) —
+/// here four times a second, and the script prints the
 /// first and last lines beside its frames. **Columns are only ever APPENDED**,
 /// so every index a script already reads keeps its meaning.
 ///
@@ -858,10 +860,26 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 /// frame. It is an instrument, not a feature, and it deliberately does not go
 /// through `tracing` — the `--pie` entry installs no subscriber, because one that
 /// teed to stdout would corrupt the protocol stream.
-#[derive(Default)]
 pub struct HeroLog {
     file: Option<std::fs::File>,
     accum: f64,
+    /// **Which tail the last loud shot chose** (wave WPN2c) — `"indoor"`,
+    /// `"outdoor"`, or `"-"` before anything has been fired.
+    ///
+    /// Latched on every tick rather than sampled at the write, because the
+    /// write is four times a second and a shot is a fixed step. See
+    /// [`HeroLog::tick`].
+    last_tail: &'static str,
+}
+
+impl Default for HeroLog {
+    fn default() -> Self {
+        Self {
+            file: None,
+            accum: 0.0,
+            last_tail: "-",
+        }
+    }
 }
 
 impl HeroLog {
@@ -876,7 +894,7 @@ impl HeroLog {
         match std::fs::File::create(&path) {
             Ok(file) => Self {
                 file: Some(file),
-                accum: 0.0,
+                ..Self::default()
             },
             Err(e) => {
                 eprintln!("inf-player: cannot open the hero log at {path}: {e}");
@@ -910,6 +928,28 @@ impl HeroLog {
         let Some(file) = self.file.as_mut() else {
             return;
         };
+        // **THE TAIL LATCH, BEFORE THE RATE GATE** (wave WPN2c). Which tail a
+        // shot chose is a per-STEP fact and this file is written four times a
+        // second, so a column sampled at the write would miss fourteen shots in
+        // fifteen. The latch is updated on every tick and only the WRITE is
+        // rate-limited, which is the same shape `last_hit_m` has one pool over
+        // — except that one latches in the sim and this one cannot, because
+        // which tail played is a property of a command and not of the world.
+        //
+        // The honest bound: a tick is a FRAME and the shot is a fixed STEP, so
+        // on a machine running below 60 fps this misses shots. It is a caption
+        // for a screenshot, not a gate's evidence — `wpn2c_gate` reads the
+        // command stream.
+        {
+            let g = sim.gameplay();
+            if g.shots > 0 {
+                self.last_tail = if g.rounds.indoor_shots > 0 {
+                    "indoor"
+                } else {
+                    "outdoor"
+                };
+            }
+        }
         self.accum += dt;
         if self.accum < HERO_LOG_PERIOD_S {
             return;
@@ -994,6 +1034,12 @@ impl HeroLog {
         let pool = inf_ecs::ballistics::round_pool(sim.world());
         let rounds_live = pool.map(|p| p.rounds.len()).unwrap_or(0);
         let last_hit_m = pool.map(|p| p.last_flight_m).unwrap_or(0.0);
+        // **THE BRASS** (wave WPN2c) — how many casings exist right now, which
+        // is what a frame of brass on the ground has to be triggered on: they
+        // fall in under a second and live for eight, so a leg that fired and
+        // then looked would photograph an empty floor if it read anything else.
+        // Zero on a level that has never fired.
+        let casings_live = inf_ecs::casing::casings_live(sim.world());
         // **WHAT IS ACTUALLY IN THE HAND** (wave WPN2a), and it is here because
         // a frame was captioned wrongly without it: the demo loop cycles weapons
         // with the scroll wheel and named each frame after the id it MEANT to
@@ -1056,7 +1102,7 @@ impl HeroLog {
             .unwrap_or(0.0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1094,7 +1140,9 @@ impl HeroLog {
                 recoil_mm,
                 aim_recoil_deg,
                 spread_deg,
-                ads
+                ads,
+                casings_live,
+                self.last_tail
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1111,7 +1159,7 @@ impl HeroLog {
             // The row is still 27 fields wide, which the gate asserts against
             // the armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

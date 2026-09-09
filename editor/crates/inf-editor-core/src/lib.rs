@@ -103,6 +103,9 @@ pub mod thumbnail;
 // P29.5 pillar S4: the queue a live tuning edit lands on, drained at the top of
 // the next fixed step. Ring 1 ONLY -- the shipped player has no such door.
 pub mod tuning;
+// WPN2c: the generated gunshot library, committed under
+// `samples/weapon-audio/` and bound by both island recipes.
+pub mod weapon_audio;
 /// Island wave VEH1a: the one door that authors a car — geometry, wheels, a
 /// drawn body and the class it is tuned with, from one `VehicleDef`.
 pub mod vehicle;

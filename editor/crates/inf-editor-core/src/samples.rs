@@ -10120,8 +10120,24 @@ pub const GAMEPLAY_REPORT_FILE: &str = "Report.inf_audio";
 /// pretending to be. What it makes true is the thing the wave needs true: the
 /// `Play` a shot issues **names a clip that resolves**.
 pub fn gameplay_report_asset() -> inf_audio::AudioAsset {
-    inf_audio::AudioAsset::from_encoded(tone_wav(800, 8000), inf_audio::AudioFormat::Wav)
-        .expect("tone wav decodes")
+    // **The assault rifle's BODY layer** (wave WPN2c). It used to be eight
+    // hundred samples of a linear ramp at 8 kHz, and its own doc said so: *"it
+    // is not a gunshot and is not pretending to be. What it makes true is the
+    // thing the wave needs true: the `Play` a shot issues names a clip that
+    // resolves."* Wave WPN2c makes it a gunshot's low end — a 58 Hz parabolic
+    // fundamental with a noise attack under an exponential decay, three tenths
+    // of a second at 22 050 Hz — and it keeps its GUID, which is what lets the
+    // one clip this tree has committed since WPN1 stay where it is while the
+    // other thirty-five arrive as a library.
+    let (class, layer) = (
+        inf_ecs::weapon::WeaponClass::Ar,
+        inf_ecs::weapon::ReportClip::Body,
+    );
+    inf_audio::AudioAsset::from_encoded(
+        inf_audio::synth::report_wav(class.index(), layer.index()),
+        inf_audio::AudioFormat::Wav,
+    )
+    .expect("a generated clip decodes")
 }
 
 /// One `House`, grown on the volume's own datum — the level carries no terrain,
@@ -10606,6 +10622,15 @@ pub fn ground_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../samples")
         .join(crate::ground::GROUND_FOLDER)
+}
+
+/// The repo-root `samples/weapon-audio/` directory — the gunshot library
+/// (wave WPN2c). Beside [`ground_dir`] and for its reason: a gunshot belongs to
+/// whatever fires one, not to a sample level.
+pub fn weapon_audio_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../samples")
+        .join(crate::weapon_audio::WEAPON_AUDIO_FOLDER)
 }
 
 /// What the committed starter character is called -- the prefix on every one of
@@ -11574,6 +11599,12 @@ mod tests {
             // blocks bound to nothing.
             crate::settlement::write_settlement_library(&crate::settlement::settlement_dir())
                 .expect("regenerate the settlement zone library");
+            // …and before the island for the fourth time (wave WPN2c): both
+            // island recipes name every file of the gunshot library, and a
+            // recipe written against a stale one copies files that are not
+            // there.
+            crate::weapon_audio::write_weapon_audio_library(&weapon_audio_dir())
+                .expect("regenerate the gunshot library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::heist::write_heist().expect("regenerate the harbour heist mission");
@@ -12428,6 +12459,49 @@ mod tests {
             eprintln!("SKIP: the ground library has not been blessed yet");
         }
 
+        // **The gunshot library (wave WPN2c).** The file SET and the bytes, on
+        // the settlement library's own terms and for a sharper version of its
+        // reason: every one of these thirty-five files is named by a GUID an
+        // ENGINE CONSTANT computes, so an extra file here is a second file
+        // claiming one id and a missing one is a `Play` that resolves to
+        // silence with nothing to say about it.
+        let wdir = weapon_audio_dir();
+        if wdir.join(crate::weapon_audio::CASING_FILE).exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&wdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "README.md")
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::weapon_audio::weapon_audio_files(),
+                "the committed gunshot library is not the file SET the \
+                 generator writes"
+            );
+            for clip in crate::weapon_audio::weapon_audio_clips() {
+                let p = wdir.join(&clip.file);
+                let want = inf_asset::encode(&clip.asset).expect("the clip encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator — the synthesizer \
+                     is arithmetic, so this is a real change and not a platform",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(
+                    side.guid.0, clip.guid,
+                    "{}'s committed GUID is not the one `report_clip` computes, \
+                     so every `Play` that names it resolves to nothing",
+                    clip.file
+                );
+            }
+        }
+
         // **The settlement zone library (wave I8a).** Every file, and the file
         // SET as well as the bytes — for the ground library's own reason: an
         // extra `.inf_pcg` here is one the asset scan promotes under a minted
@@ -12688,6 +12762,60 @@ mod tests {
                 "{recipe}'s `[content]` list is not the settlement zone library — \
                  a missing entry is a district bound to a document nothing can \
                  resolve, which evaluates to nothing and says nothing"
+            );
+        }
+    }
+
+    /// **BOTH ISLAND RECIPES NAME THE WHOLE GUNSHOT LIBRARY** (wave WPN2c).
+    ///
+    /// `both_island_recipes_name_the_whole_settlement_library`'s argument, with
+    /// a sharper edge: a settlement zone that is not copied is a district bound
+    /// to nothing, and a REPORT CLIP that is not copied is a `Play` that
+    /// resolves to silence — and the command still goes out, so nothing at all
+    /// says so. `crates/inf-island/src/build.rs`'s `write_content` is the only
+    /// thing that ever copies these files out of the repository.
+    #[test]
+    fn both_island_recipes_name_the_whole_gunshot_library() {
+        let dir = weapon_audio_dir();
+        if !dir.join(crate::weapon_audio::CASING_FILE).exists() {
+            eprintln!("SKIP: the gunshot library has not been blessed yet");
+            return;
+        }
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("no {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "README.md")
+            .collect();
+        on_disk.sort();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples");
+        for recipe in ["island/island.toml", "island-fixture/island.toml"] {
+            let path = root.join(recipe);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
+            let mut named: Vec<String> = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim().trim_start_matches('"').trim_end_matches(',');
+                    let l = l.trim_end_matches('"');
+                    l.strip_prefix("../weapon-audio/").map(str::to_string)
+                })
+                .collect();
+            named.sort();
+            assert_eq!(
+                named, on_disk,
+                "{recipe}'s `[content]` list is not the gunshot library — a \
+                 missing entry is a layer of every gunshot that resolves to \
+                 nothing, and a `Play` that resolves to nothing is silent and \
+                 says so nowhere"
+            );
+            // …and the ONE clip that is not in the library: wave WPN1's own,
+            // which lives beside the gameplay fixture and keeps its GUID.
+            assert!(
+                text.contains("../phase30-gameplay/Report.inf_audio"),
+                "{recipe} does not name the engine's committed gunshot, so the \
+                 body layer of every rifle shot on the island is silent"
             );
         }
     }

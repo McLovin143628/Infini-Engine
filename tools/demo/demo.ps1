@@ -829,6 +829,45 @@ if ($armList.Count -eq 0 -and $inHand) {
     [InfInput]::Up(0x2A)
     Start-Sleep -Milliseconds 600
     Restore-PlayerFocus "after the feel leg"
+    # ------------------------------------------------------------------ WPN2c
+    # (5) THE SOUND AND THE BRASS. Two things a screenshot can carry: casings on
+    #     the ground, and WHICH TAIL the shot chose. Column 28 is how many
+    #     casings exist right now and column 29 is `indoor` / `outdoor` / `-`;
+    #     both are ZERO-based `$c[27]` and `$c[28]`.
+    #
+    #     The brass is why the trigger for the first frame is `casings -gt 0`
+    #     rather than a sleep: a case is in the air for well under a second and
+    #     on the ground for eight, so a leg that fired and then looked would
+    #     photograph either an empty floor or a blur, depending on the machine.
+    Say "WPN2c: a burst for the brass"
+    $brassFired = 0
+    for ($t = 0; $t -lt 8; $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 40; [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 95
+        $brassFired++
+    }
+    $air = @(Wait-ForHero -Csv $heroCsv -What "brass in the air ($brassFired rounds fired)" -TimeoutS 2.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "98-brass-in-the-air.png"))[-1]
+    if (-not $air) { Say "WPN2c: no casing was ever live -- no brass frame" }
+    # …and the TAIL the street chose. Six rays from the muzzle, four of them
+    # hitting inside eight metres is indoors; on a street the ground and at most
+    # two walls answer, so this must read `outdoor`.
+    $tail = @(Wait-ForHero -Csv $heroCsv -What "the street's own tail" -TimeoutS 2.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ($c[28].Trim() -eq "outdoor") } `
+        -Out (Join-Path $OutDir "99-outdoor-tail.png"))[-1]
+    if (-not $tail) { Say "WPN2c: the enclosure probe never called the street outdoors" }
+    # The brass settles and stays for eight seconds: this frame is the floor.
+    Start-Sleep -Milliseconds 1400
+    [InfInput]::Look(0, 320)   # look down at the ground
+    Start-Sleep -Milliseconds 500
+    $floor = @(Wait-ForHero -Csv $heroCsv -What "brass on the ground" -TimeoutS 2.0 `
+        -Predicate { param($c) ($c.Count -gt 28) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "100-brass-on-the-ground.png"))[-1]
+    if (-not $floor) { Say "WPN2c: the brass was gone before the floor frame" }
+    [InfInput]::Look(0, -320)
+    Start-Sleep -Milliseconds 400
+    Restore-PlayerFocus "after the brass leg"
 }
 
 # **FOUR NAMED FRAMES, not two anonymous ones** (wave CHAR1a.2). A wave that is
