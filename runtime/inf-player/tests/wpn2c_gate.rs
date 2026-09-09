@@ -803,6 +803,94 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
     );
 }
 
+/// **THE DISTANT LAYER IS AUDIBLE WHERE IT IS LOUDEST** — read off the shipped
+/// command's own `Attenuation`, not off the layer that produced it.
+///
+/// # What this caught (wave WPN2c's audit)
+///
+/// The distant layer shipped with the BODY's `max_distance` — the weapon's own
+/// `report_max_m`, 320 m for an M4A1 — and `Attenuation::gain` is **zero at and
+/// past `max_distance`**. So the layer that exists to be the thing you hear a
+/// long way off reached full command volume at `DISTANT_FULL_M` (300 m) and was
+/// culled at 320; it was silent at the four hundred metres its own constant's
+/// doc names as the case it is for; and `the_distant_layer_is_a_function_of_
+/// where_the_listener_is` asserted its `volume` at 600 m on a 600 m sniper —
+/// a command the engine plays at gain zero. Every one of those assertions is
+/// about the COMMAND. This one is about the sound.
+///
+/// It reads the `Attenuation` **out of the queued `PlayCommand`**, so it owes
+/// nothing to a re-derivation of how a host maps an `AudioSource` onto one.
+///
+/// **Mutation → red:** the distant layer back to `max` (its gain at 400 m is
+/// 0.0); `DISTANT_REACH_MULT` to 1.0 (the same).
+#[test]
+fn the_distant_layer_is_audible_at_the_range_it_is_written_for() {
+    let mut sim = pie_sim();
+    for _ in 0..40 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let hero = inf_editor_core::samples::GAMEPLAY_HERO_GUID;
+    assert_eq!(item::give(sim.world_mut(), hero, "m4a1", 1), 0);
+    assert!(d3::gameplay::equip_weapon(sim.world_mut(), hero, "m4a1"));
+    let before = sim.audio_command_log().len();
+    let mut state = inf_input::InputState::new(inf_input::default_map());
+    for i in 0..60 {
+        let events = [inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: i < 3,
+        }];
+        state.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state, DT));
+    }
+    let key = |k| weapon::layer_source_key(hero.as_u128() as u64, k);
+    let plays: Vec<&inf_audio::PlayCommand> = sim.audio_command_log()[before..]
+        .iter()
+        .filter_map(|c| match c {
+            AudioCommand::Play(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let of = |k| {
+        *plays
+            .iter()
+            .find(|p| p.source == key(k))
+            .unwrap_or_else(|| panic!("no {k:?} layer in the stream"))
+    };
+    let (body, distant) = (of(ReportLayerKind::Body), of(ReportLayerKind::Distant));
+    println!(
+        "the m4a1's body reaches {:.0} m, its distant layer {:.0} m; \
+         spatial gain at 300 / 400 / 1000 m: body {:.4} / {:.4} / {:.4}, \
+         distant {:.4} / {:.4} / {:.4}",
+        body.attenuation.max_distance,
+        distant.attenuation.max_distance,
+        body.attenuation.gain(300.0),
+        body.attenuation.gain(400.0),
+        body.attenuation.gain(1000.0),
+        distant.attenuation.gain(300.0),
+        distant.attenuation.gain(400.0),
+        distant.attenuation.gain(1000.0),
+    );
+    // The layer's ramp reaches full at 300 m, so it must still be audible there
+    // and past it -- and at the 400 m its own cutoff constant is written for.
+    assert!(
+        distant.attenuation.gain(weapon::DISTANT_FULL_M) > 0.0,
+        "the distant layer is culled at the range its own ramp reaches full"
+    );
+    assert!(
+        distant.attenuation.gain(400.0) > 0.0,
+        "a rifle at four hundred metres is silent, which is the one case this \
+         layer exists for"
+    );
+    // …and it out-reaches the gun's own report, which the BODY does not.
+    assert!(distant.attenuation.max_distance > body.attenuation.max_distance);
+    assert_eq!(
+        body.attenuation.gain(400.0),
+        0.0,
+        "the body layer is supposed to be gone by 400 m -- if it is not, the \
+         distant layer is not carrying anything the body was not"
+    );
+}
+
 // ── (e) THE SUPERSONIC CRACK ────────────────────────────────────────────────
 
 /// **A ROUND CRACKS PAST YOUR HEAD AND NOT PAST THE NEXT STREET.**
@@ -816,18 +904,44 @@ fn the_report_carries_its_cutoffs_all_the_way_to_the_command() {
 /// jumps 3.75 m a sub-step and never lands inside four metres of the ear).
 #[test]
 fn a_supersonic_round_cracks_within_four_metres_and_a_subsonic_one_never_does() {
+    // **BOTH MUZZLE SPEEDS ARE THE REGISTRY'S OWN** (the wave's audit).
+    // `fc103339` made this point about the AS VAL -- "an arm that names a weapon
+    // and then invents its muzzle speed proves something about a number nobody
+    // ships" -- and left an invented `900.0` for the M4A1 in the two rows above
+    // it; `weapons.toml` says **910**. The ten metres a second change none of
+    // the verdicts here, which is exactly why nothing caught it, and that is the
+    // argument for reading the file rather than agreeing with it.
+    let mut registry = ItemDefs::default();
+    registry
+        .merge_toml(weapon::WEAPON_REGISTRY_TOML)
+        .expect("the shipped weapon registry parses");
+    let v0_of = |id: &str| -> f64 {
+        registry
+            .get(id)
+            .and_then(|d| d.weapon.as_ref())
+            .map(|w| w.muzzle_speed_mps)
+            .unwrap_or_else(|| panic!("{id} is not in the shipped registry"))
+    };
+    let (m4a1, as_val) = (v0_of("m4a1"), v0_of("as_val"));
+    // The registry has weapons on both sides of the speed of sound ON PURPOSE,
+    // and that is the premise this arm rests on rather than an accident of two
+    // rows: an AS VAL authored 1 m/s faster would make the third case vacuous.
+    assert!(
+        m4a1 > SPEED_OF_SOUND_MPS && as_val < SPEED_OF_SOUND_MPS,
+        "the registry's M4A1 ({m4a1} m/s) and AS VAL ({as_val} m/s) are no longer \
+         on opposite sides of {SPEED_OF_SOUND_MPS} m/s"
+    );
     println!("{:14} {:>6} {:>6} {:>9}", "weapon", "v0", "miss", "cracks");
     for (name, v0, miss, want) in [
-        ("m4a1", 900.0, 2.0, true),
-        ("m4a1", 900.0, 10.0, false),
+        ("m4a1", m4a1, 2.0, true),
+        ("m4a1", m4a1, 10.0, false),
         // The AS VAL is deliberately subsonic; it is silent by physics.
         // 330 m/s is the REGISTRY's own number for it
         // (`weapons.toml`, `[as_val.weapon] muzzle_speed_mps`), not a
-        // convenient one: an arm that names a weapon and then invents its
-        // muzzle speed proves something about a number nobody ships. It is
-        // 13 m/s under the speed of sound, which is the margin the row was
-        // authored with and the margin this arm is entitled to assert.
-        ("as_val", 330.0, 2.0, false),
+        // convenient one. It is 13 m/s under the speed of sound, which is the
+        // margin the row was authored with and the margin this arm is entitled
+        // to assert.
+        ("as_val", as_val, 2.0, false),
     ] {
         let mut def = test_rifle();
         def.muzzle_speed_mps = v0;

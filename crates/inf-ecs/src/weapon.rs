@@ -1374,6 +1374,38 @@ pub const DISTANT_ONSET_M: f64 = 150.0;
 /// heard across a square swells rather than switching on.
 pub const DISTANT_FULL_M: f64 = 300.0;
 
+/// **How much further than the weapon's own report reach the DISTANT layer
+/// carries**, as a multiple (wave WPN2c's audit).
+///
+/// # The defect this closes
+///
+/// The first spelling gave the distant layer the same `max_distance` as the
+/// BODY — the weapon's own `report_max_m`, 320 m for an M4A1 — and
+/// [`crate::components::DistanceModel::Inverse`] is *zero at and past
+/// `max_distance`*. So the layer whose entire purpose is to be the thing you
+/// hear a long way off:
+///
+/// * reached full COMMAND volume at [`DISTANT_FULL_M`] (300 m) and was CULLED
+///   twenty metres later;
+/// * was silent at the four hundred metres [`DISTANT_LOWPASS_HZ`]'s own doc
+///   names as the case it exists for, and which the gate's own cutoff arm
+///   passes as `listener_m`;
+/// * and its own unit test asserted the COMMAND's `volume` at 600 m on a
+///   600 m-reach sniper — a command the engine plays at gain **zero**. The
+///   report was right and the world was silent, which is what "assert the world,
+///   not the report" means one layer down.
+///
+/// Four, so an M4A1's thump carries 1 280 m and a sniper's 2 400 m, which is the
+/// order a rifle report really travels and leaves the doc's 400 m case well
+/// inside. It is a MULTIPLE where the other three layers take FRACTIONS
+/// ([`TRANSIENT_REACH_FRACTION`], [`INDOOR_TAIL_REACH_FRACTION`]) because that
+/// is the same claim from the other end: the four layers do not share a reach,
+/// and this is the one that out-reaches the gun.
+///
+/// The command still goes out at every range — the queue's SHAPE is unchanged
+/// and so is every count any gate reads.
+pub const DISTANT_REACH_MULT: f64 = 4.0;
+
 /// **The cutoff air puts on a gunshot heard from far away**, hertz.
 ///
 /// Seven hundred. This is the wave's own consumer for the low-pass that has
@@ -1538,7 +1570,10 @@ pub fn report_layers(
     let mut distant = base(
         report_clip(class, ReportClip::Crack),
         REPORT_VOLUME * distant_gain(listener_m),
-        max,
+        // **The one layer that out-reaches the gun** — see
+        // [`DISTANT_REACH_MULT`]. At `max` it was culled twenty metres after
+        // its own ramp reached full.
+        (max * DISTANT_REACH_MULT).min(MAX_RANGE_M),
     );
     // The distant layer is at full volume until the onset and then falls off,
     // which is the opposite way round from the other three: what it models is
@@ -2496,6 +2531,26 @@ mod tests {
         // …and it is filtered, which is what makes it a thump.
         assert_eq!(far[3].lowpass_hz, Some(DISTANT_LOWPASS_HZ));
         assert!((far[3].source.min_distance - DISTANT_ONSET_M).abs() < 1e-12);
+        // **AND IT CAN BE HEARD WHERE IT IS FULL** (the audit). This test used
+        // to stop at the line above: it asserted the COMMAND's volume at 600 m
+        // on a 600 m-reach sniper and never noticed that `Inverse` is zero AT
+        // `max_distance`, so the loudest thing it was asserting was silent.
+        // The distant layer out-reaches the gun by `DISTANT_REACH_MULT`.
+        assert!(
+            far[3].source.max_distance > far[1].source.max_distance,
+            "the distant layer does not out-reach the body it is the far half of"
+        );
+        assert!(
+            far[3].source.max_distance > DISTANT_FULL_M * 2.0,
+            "the ramp reaches full at {DISTANT_FULL_M} m and the layer is culled at {}",
+            far[3].source.max_distance
+        );
+        // The doc's own case: an M4A1 (320 m of report) heard at 400 m.
+        let m4a1 = report_layers(WeaponClass::Ar, false, 320.0, 400.0, 0);
+        assert!(m4a1[3].source.max_distance > 400.0);
+        // …and the clamp holds for a weapon at the range ceiling.
+        let huge = report_layers(WeaponClass::Sniper, false, MAX_RANGE_M, 400.0, 0);
+        assert!((huge[3].source.max_distance - MAX_RANGE_M).abs() < 1e-9);
     }
 
     /// **THE BODY'S PITCH IS THE COUNTER HASH** (wave WPN2c) — the doc's

@@ -888,6 +888,14 @@ if ($armList.Count -eq 0 -and $inHand) {
     #     brass. A leg with no control frame cannot tell "the casings are drawn"
     #     from "the road has speckles in its texture", and this road does.
     Say "WPN2c-AUDIT: the brass, close enough to see"
+    # **RELOAD FIRST**, for the reason the bloom burst above already carries and
+    # this leg then met on its own first run: a Glock holds seventeen, the legs
+    # before this one spend all of them and the one reload the feel leg does, and
+    # a leg that clicks an empty magazine ten times photographs an empty road and
+    # reports "the brass was gone". Measured: 10 clicks, 0 casings, 0 shots.
+    Restore-PlayerFocus "before the close-up"
+    [InfInput]::Down(0x13); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x13)   # R
+    Start-Sleep -Milliseconds 1700
     [InfInput]::Down(0x22); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x22)   # G: first person
     $fp = @(Wait-ForHero -Csv $heroCsv -What "the first-person seat" -TimeoutS 5.0 `
         -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -lt 0.4) })[-1]
