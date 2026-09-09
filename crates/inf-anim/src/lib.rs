@@ -120,7 +120,10 @@ pub use als::{
     build_locomotion_graph, LocoBindReport, LocoMode, LocoSlot, SlotKind, LOCOMOTION_MAP,
 };
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
-pub use authored::{author_clips, can_author, AuthorError, AUTHORED_CLIPS};
+pub use authored::{
+    author_clips, can_author, AuthorError, AUTHORED_CLIPS, THROW_OVER_S, THROW_RELEASE_FRAC,
+    THROW_UNDER_S,
+};
 pub use blend_space::{
     blend_leader, blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d,
     weights_2d, BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,

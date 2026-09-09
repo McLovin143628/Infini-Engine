@@ -1603,6 +1603,34 @@ pub fn step_pose_evaluation<'c>(
                         // component read before a clip is looked at.
                         if let Some((over, t)) = throw_of(world, entity) {
                             apply_throw(asset, &mut pose, machine, &clips, over, t);
+                            // **THE RELEASE NOTIFY** (wave WPN2d). The step that
+                            // has the CLIP is the only one that can say where
+                            // the hand lets go, so this is where the notify
+                            // fires — `inf_anim::THROW_RELEASE_FRAC` of the
+                            // clip's own duration, crossed exactly once because
+                            // the crossing is tested against the PREVIOUS step's
+                            // phase rather than against the current one.
+                            //
+                            // `t` is what is LEFT, so elapsed is `dur - t` and
+                            // last step's elapsed is `dur - t - dt`.
+                            // `crate::weapon::THROW_NOTIFY` is consumed by
+                            // `inf_physics::d3::gameplay::step_throws` on the
+                            // NEXT fixed step (pose is phase 21, gameplay is
+                            // 15), which is the one-step latency that function's
+                            // own doc states and prices.
+                            let dur = if over {
+                                inf_anim::THROW_OVER_S
+                            } else {
+                                inf_anim::THROW_UNDER_S
+                            };
+                            let release = dur * inf_anim::THROW_RELEASE_FRAC;
+                            let now = dur - t;
+                            if now >= release && now - dt < release {
+                                fired_events
+                                    .entry(guid)
+                                    .or_default()
+                                    .push(crate::weapon::THROW_NOTIFY.to_string());
+                            }
                         }
                         // ── **THE PEEK'S LEAN** (wave COV1) ──
                         //

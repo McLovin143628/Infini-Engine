@@ -1856,6 +1856,15 @@ pub struct MovementRuntime {
     /// cover key" while in cover means *the other one*, exactly as the rotation
     /// mode key cycles rather than sets.
     pub press_cover: bool,
+    /// **Edge: throw the equipped throwable** (wave WPN2d) — the `throw` action.
+    ///
+    /// An EDGE and never a level, deliberately: a held trigger empties a
+    /// magazine and a held throw key would empty a bandolier, and every game
+    /// alive throws one grenade per press. The step that consumes it
+    /// (`inf_physics::d3::gameplay::step_throws`) takes it whether or not it can
+    /// honour it, which is `press_attack`'s own law — a press made with a rifle
+    /// in hand must not survive into the step a grenade is equipped.
+    pub press_throw: bool,
     /// **How much of a throw is left to play**, seconds; `0` is no throw (wave
     /// CHAR1b.2).
     ///

@@ -54,6 +54,24 @@ use super::ecs::PhysicsBridge3D;
 /// did nothing on those would be the dead-key defect I5 spent a wave on.
 pub const KICK_FUSE_S: f64 = 0.35;
 
+/// **How wide the box a melee swing sweeps is**, metres (half-extent) -- wave
+/// WPN2d's line-of-sight probe.
+///
+/// Twelve centimetres, so a 24 cm box: a fist is about 10 cm across and a knife
+/// held in one is about that with the hand round it. It is a bound on what can
+/// slip THROUGH: a ray between two capsule axes threads a half-open door that an
+/// arm does not fit through, and this is the width that stops it.
+pub const MELEE_BOX_HALF_M: f64 = 0.12;
+
+/// **How many bodies one blast may spend joules on**, per explosion.
+///
+/// Thirty-two. `MAX_PANIC_SOURCES`' own kind of number: a cost bound, so a
+/// rocket into a crowd costs a constant rather than a function of how many
+/// people were standing there. It is four times the eight-shooter firefight the
+/// audio eviction table prices, and what it refuses is COUNTED
+/// (`RoundReport::blast_targets_refused`).
+pub const MAX_BLAST_TARGETS: usize = 32;
+
 /// How far a hitscan shot may reach before the engine stops looking, metres —
 /// the bound on `WeaponDef::range_m`, applied at the cast.
 pub const SHOT_MAX_RANGE_M: f64 = weapon::MAX_RANGE_M;
@@ -267,6 +285,39 @@ pub struct RoundReport {
     /// inside a building" are different facts, and a gate that could not tell
     /// them apart would certify a probe that always answered `false`.
     pub indoor_shots: u32,
+    /// **Casts the SHOT half spent this step** (wave WPN2d) — one per pellet
+    /// plus its pull's enclosure probe, counted as they are spent rather than
+    /// estimated from `shots`.
+    ///
+    /// It exists because a shotgun broke the estimate: a pull is one `shots` and
+    /// up to `MAX_PELLETS` casts, so `shots × 7` was wrong by the pattern's own
+    /// size — and this is the number the pellet loop refuses against and the
+    /// number `ballistics::spawn_round` prices a round's flight against.
+    pub shot_rays: u32,
+    /// **Pellets thrown this step** (wave WPN2d) — the engagement counter that
+    /// tells "a shotgun fired" from "a rifle fired".
+    pub pellets: u32,
+    /// **Pellets REFUSED this step** because the pull would have crossed
+    /// `inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP` — the value the law asks
+    /// for, on `refused`'s own terms. A silently shortened pattern is a shot
+    /// the player fired and nobody can account for.
+    pub pellets_refused: u32,
+    /// **Casts a blast's line-of-sight sweep spent** this step (wave WPN2d) —
+    /// one per candidate inside the radius that is more than a millimetre from
+    /// the epicentre.
+    pub blast_rays: u32,
+    /// **Bodies a wall saved** this step — candidates inside a blast's radius
+    /// whose line of sight the sweep found blocked. The engagement counter that
+    /// tells a blast which honours cover from one that does not.
+    pub blast_shadowed: u32,
+    /// **Bounces thrown bodies made** this step (wave WPN2d).
+    pub bounces: u32,
+    /// **Rounds that went off on their FUSE** this step, rather than on impact.
+    pub fused: u32,
+    /// **Sub-steps a guided round steered on** this step — the engagement
+    /// counter on the guidance, so "a missile flew" and "a missile followed
+    /// something" are different facts.
+    pub guided: u32,
 }
 
 /// **What the brass did in one fixed step** (wave WPN2c).
@@ -294,6 +345,45 @@ pub struct CasingReport {
     /// **First contacts this step** — one landing sound each, built into a
     /// `Play` by both hosts inside the `casing_bounce` MIRROR fence.
     pub bounces: Vec<CasingBounce>,
+}
+
+/// **One explosion**, as the hosts have to hear it (wave WPN2d).
+///
+/// Carried rather than counted, on `CasingBounce`'s own terms: a blast is a
+/// SOUND at a place, and the `weapon_blast` MIRROR fence in both hosts turns
+/// this into one `Play` at `at`. The joules it spent are already gone through
+/// `apply_hit` by the time a host sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlastEvent {
+    /// Who fired the thing that went off — the source key the boom is salted
+    /// off, so two rockets landing together are two voices.
+    pub shooter: Uuid,
+    /// Where it went off, world metres.
+    pub at: DVec3,
+    /// How far it reached, metres — the weapon's own `blast_radius_m`, carried
+    /// so a debug draw and a gate read the radius that was actually spent
+    /// rather than looking the weapon up again.
+    pub radius_m: f64,
+    /// **Bodies it spent joules on** — the engagement counter, so "a rocket
+    /// landed" and "a rocket hurt somebody" are different facts.
+    pub hurt: u32,
+}
+
+/// **One melee blow landing** (wave WPN2d) — what a host turns into a
+/// surface-chosen contact one-shot.
+///
+/// `CasingBounce`'s shape exactly, and for its reason: which clip a blow plays
+/// is a question about the WORLD (was it a body?) and the answer is decided in
+/// the fixed step, where both hosts get it from the same place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeleeImpact {
+    /// Who swung.
+    pub shooter: Uuid,
+    /// Where the blow landed, world metres.
+    pub at: DVec3,
+    /// What it landed on — the two-way stub
+    /// (`inf_ecs::weapon::ImpactSurface`); VEH3a's per-surface table extends it.
+    pub surface: inf_ecs::weapon::ImpactSurface,
 }
 
 /// **One casing hitting the ground for the first time** — what a host turns
@@ -389,6 +479,31 @@ pub struct GameplayReport {
     /// and `knockdowns` says the mode table let go — and a course where they are
     /// equal is a course where every punch is a rifle round.
     pub knockdowns: u32,
+    /// **Explosions this step** (wave WPN2d), in the order they went off — the
+    /// list both hosts' `weapon_blast` MIRROR fence turns into `Play`s.
+    pub blasts: Vec<BlastEvent>,
+    /// **Melee blows that landed** this step (wave WPN2d) — the list both hosts'
+    /// `melee_impact` MIRROR fence turns into a surface-chosen `Play`.
+    pub melee_impacts: Vec<MeleeImpact>,
+    /// **Swings a wall stopped** this step (wave WPN2d) — the engagement
+    /// counter on the box cast, so "the LOS test ran" and "somebody was refused
+    /// a punch through a wall" are different facts. Wave WPN1's carried "no line
+    /// of sight" defect is what it measures being closed.
+    pub swings_blocked: u32,
+    /// **Casts the melee LOS test spent** this step — one shape cast per swing
+    /// that found a body in reach, and none at all for a swing that found
+    /// nobody.
+    pub melee_casts: u32,
+    /// **Throws released this step** (wave WPN2d) — a body actually left a hand,
+    /// which is a different fact from a throw animation starting.
+    pub throws: u32,
+    /// **Locks held this step** (wave WPN2d) — shooters whose launcher had a
+    /// target in its cone, whether or not the hold is complete yet.
+    pub locks_held: u32,
+    /// **Locks that completed** this step — `lock_held_s` reached the weapon's
+    /// own `lock_s`. The subset of [`locks_held`](Self::locks_held) a HUD draws
+    /// as locked and a round leaves guided on.
+    pub locks_complete: u32,
     /// Every shot that landed, in `Guid` order of the shooter.
     pub hits: Vec<WeaponHit>,
     /// Energy owed to the P22 damage door: `(destructible entity, joules)`.
@@ -476,8 +591,21 @@ pub fn step_gameplay(
     //     step the trigger went down and MOVES on the next, which is what a
     //     body leaving a port does. Inert on every level that has never fired.
     step_casings(world, bridge, dt, &mut report);
+    // 1d. **What every launcher is pointing at** (wave WPN2d). BEFORE the
+    //     trigger, because a round fired this step leaves on the lock the
+    //     player was holding when they pulled — and a lock resolved after the
+    //     shot would give the round a target it did not have. Inert on every
+    //     level with no vehicles and on every character without a launcher: one
+    //     absent-query read.
+    step_locks(world, bridge, dt, &mut report);
     // 2. Every character with a weapon: the trigger, the reload, the clocks.
     step_weapons(world, bridge, dt, &mut report);
+    // 2b. **The throw** (wave WPN2d) — the press, and the release on the clip's
+    //     own notify. AFTER `step_weapons` because it shares the magazine and
+    //     the clock that step installs, and because a character who scrolled to
+    //     a grenade this step must have its `WeaponState` before it can spend
+    //     one. Inert for every character with nothing throwable equipped.
+    step_throws(world, &mut report);
     // 3. Every pending kick: the notify, or the fuse.
     step_kicks(world, dt, &mut report);
     // 3b. **The equipped weapon is an entity** (SK1b) — spawned, moved by the
@@ -1492,6 +1620,9 @@ fn step_weapons(
         // thrown out of the weapon's own ejection port. A melee weapon ejects
         // nothing (a fist has no port), and neither does one whose port speed is
         // zero, which is how a definition opts out without a flag.
+        //
+        // **One case per PULL, not per pellet** (wave WPN2d): a shotgun throws
+        // eight pellets out of one shell and ejects one shell.
         if !def.is_melee() && def.eject_speed_mps > 0.0 {
             let port = inf_ecs::casing::eject_point(from, &def, yaw);
             let throw = inf_ecs::casing::eject_velocity(&def, yaw);
@@ -1500,22 +1631,89 @@ fn step_weapons(
                 report.casings.ejected += 1;
             }
         }
-        let hit = if def.is_melee() {
-            resolve_swing(world, guid, &def, from, dir, yaw)
-        } else {
-            resolve_shot(world, bridge, guid, &def, from, dir, shot_index, report)
-        };
-        // **WHICH ROOM THIS SHOT WAS FIRED IN** (wave WPN2c) — a diagnostic on
-        // the casing pool, so `hero.csv` can caption a frame with the tail the
-        // shot chose. It is written HERE, once per loud shot, rather than
-        // latched host-side off `GameplayReport::shots`: a frame may run more
-        // than one fixed step and the report is replaced by each of them, so a
-        // host-side latch misses every shot but the last of its frame.
-        if hit.loud {
-            inf_ecs::casing::note_shot_room(world, hit.indoors);
+        if def.is_melee() {
+            let hit = resolve_swing(world, bridge, guid, &def, from, dir, yaw, report);
+            // **THE CONTACT** (wave WPN2d) — only when the blow LANDED, and by
+            // what it landed on. A swing at thin air makes no noise, which is
+            // what `hit.target` being `None` means.
+            if hit.target.is_some() {
+                report.melee_impacts.push(MeleeImpact {
+                    shooter: guid,
+                    at: hit.to,
+                    surface: inf_ecs::weapon::ImpactSurface::of(hit.on_flesh),
+                });
+            }
+            apply_hit(world, &hit, dt, report);
+            report.hits.push(hit);
+            continue;
         }
-        apply_hit(world, &hit, dt, report);
-        report.hits.push(hit);
+        // **THE PATTERN** (wave WPN2d) — the doc section 5's *"multi-raycast
+        // cone spread"*. `pellets` is 1 for every weapon that is not a shotgun,
+        // so this loop runs once and casts exactly the ray it cast before this
+        // wave, along exactly the direction `shot_direction_with` gave it above.
+        //
+        // Above one it is N casts through the weapon's OWN `cone_deg` at N
+        // consecutive counter indices, each carrying `damage_j / pellets` — so
+        // the doc's per-pellet table comes back out of the registry's
+        // whole-pull figure by division rather than by a second column.
+        let pellets = def.pellet_count();
+        if pellets == 1 {
+            let hit = resolve_shot(world, bridge, guid, &def, from, dir, shot_index, report);
+            if hit.loud {
+                inf_ecs::casing::note_shot_room(world, hit.indoors);
+            }
+            apply_hit(world, &hit, dt, report);
+            report.hits.push(hit);
+            continue;
+        }
+        // A pellet is the weapon with its joules divided. Building a def rather
+        // than passing a scale keeps ONE damage door: `resolve_shot` asks
+        // `damage_at`, `damage_at` asks the curve, and the curve is evaluated at
+        // the pellet's own distance exactly as it is for a bullet.
+        let mut pellet_def = def;
+        pellet_def.damage_j = def.pellet_damage_j();
+        // The pattern's own cone. A row that names none takes the resolved pull
+        // cone, which is what a slug is: one projectile, no pattern.
+        let pattern_deg = if def.cone_deg > 0.0 {
+            def.cone_deg
+        } else {
+            cone_deg
+        };
+        for p in 0..pellets {
+            // **THE CEILING, REFUSED WITH A VALUE** (the law). A pull that would
+            // cross `MAX_SHOT_RAYS_PER_STEP` stops here and COUNTS what it did
+            // not throw: a silently shortened pattern is a shot the player fired
+            // and nobody can account for. The bill is the step's own running
+            // one, which `resolve_shot` keeps.
+            let bill = report.rounds.shot_rays as usize
+                + 1
+                + super::audio::ENCLOSURE_PROBE_RAYS;
+            if bill > inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP {
+                report.rounds.pellets_refused += u32::from(pellets - p);
+                break;
+            }
+            // Consecutive counter indices, strided by the pellet bound so two
+            // pulls of a 64-pellet weapon can never draw the same pair of
+            // uniforms — the counter hash is a function of (seed, index) and
+            // nothing else, which is what makes a pattern replay.
+            let index = shot_index
+                .wrapping_mul(u64::from(weapon::MAX_PELLETS))
+                .wrapping_add(u64::from(p));
+            let pdir = weapon::shot_direction_with(&pellet_def, yaw, pitch, index, pattern_deg);
+            let mut hit = resolve_shot(world, bridge, guid, &pellet_def, from, pdir, index, report);
+            // **ONE BANG PER PULL.** Only the first pellet is `loud`, because
+            // `loud` is what both hosts' `weapon_report` fence queues four
+            // layers off and what `panic_sources` coalesces on: eight loud
+            // pellets would be thirty-two commands and eight witness sources for
+            // one trigger pull.
+            hit.loud = p == 0;
+            if hit.loud {
+                inf_ecs::casing::note_shot_room(world, hit.indoors);
+            }
+            report.rounds.pellets += 1;
+            apply_hit(world, &hit, dt, report);
+            report.hits.push(hit);
+        }
     }
 }
 
@@ -1621,18 +1819,24 @@ fn resolve_shot(
     shot_index: u64,
     report: &mut GameplayReport,
 ) -> WeaponHit {
-    // The step's ray bill so far: **one cast per shot fired here**, and nothing
-    // else. The rounds already in the air are deliberately NOT counted —
-    // `spawn_round` counts them itself, off the pool it is about to push into.
-    // Counting them in both places halved the effective bound: measured, at
-    // eight shooters and 900 rpm the pool peaked at **32** rounds against a
-    // stated ceiling of 64 and refused 301 spawns.
+    // The step's ray bill so far. The rounds already in the air are deliberately
+    // NOT counted — `spawn_round` counts them itself, off the pool it is about
+    // to push into. Counting them in both places halved the effective bound:
+    // measured, at eight shooters and 900 rpm the pool peaked at **32** rounds
+    // against a stated ceiling of 64 and refused 301 spawns.
+    //
     // **Seven, not one** (wave WPN2c). The enclosure probe below casts
     // `ENCLOSURE_PROBE_RAYS` more per shot, and a ceiling that did not know
-    // about them would be a ceiling on a sixth of the real bill. So the step's
-    // ray count is the shot's cast plus its probe's, per shot fired so far, and
-    // the pool's spawn refusal is priced against the larger number.
-    let rays_already = report.shots as usize * (1 + super::audio::ENCLOSURE_PROBE_RAYS);
+    // about them would be a ceiling on a sixth of the real bill.
+    //
+    // **It is a RUNNING COUNT since wave WPN2d, not `shots × 7`.** A shotgun
+    // pull is one shot and up to sixty-four casts, so the product was an
+    // estimate that a pattern makes wrong by a factor of the pellet count — and
+    // the ceiling is the thing the pellet loop refuses against. `shot_rays` is
+    // incremented here, once, by exactly what this call is about to spend, so
+    // the two readers of the bound cannot disagree about the bill.
+    report.rounds.shot_rays += 1 + super::audio::ENCLOSURE_PROBE_RAYS as u32;
+    let rays_already = report.rounds.shot_rays as usize;
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
     let exclude = shot_exclusions(world, bridge, shooter);
@@ -1706,6 +1910,26 @@ fn resolve_shot(
             // **The far half.** Nothing inside the threshold; if this weapon
             // flies, a round leaves here.
             if def.spawns_a_round() {
+                // **WHAT KIND OF BODY** (wave WPN2d). A weapon with a motor or a
+                // blast is a ROCKET — the two are the same thing from the pool's
+                // side, an accelerating body that goes off — and everything else
+                // is the bullet wave WPN2a minted. A THROWN body never comes
+                // through here at all: `step_throws` is its door, because it
+                // leaves a hand rather than a barrel.
+                let kind = if def.accel_mps2 > 0.0 || def.has_blast() {
+                    inf_ecs::ballistics::RoundKind::Rocket
+                } else {
+                    inf_ecs::ballistics::RoundKind::Bullet
+                };
+                // **THE LOCK IT LEAVES ON.** Read once, at the muzzle, and never
+                // re-acquired: the lock a player earned is the one that gets
+                // spent, and a missile that could pick a new target mid-air is a
+                // different weapon.
+                let guide = world
+                    .entity_of(shooter)
+                    .and_then(|e| world.world().get::<weapon::WeaponState>(e))
+                    .and_then(|st| st.locked_on(def))
+                    .unwrap_or_else(Uuid::nil);
                 let round = inf_ecs::ballistics::Round {
                     shooter,
                     at: from + dir * reach,
@@ -1714,10 +1938,10 @@ fn resolve_shot(
                     age_s: 0.0,
                     first_segment: true,
                     cracked: false,
-                    kind: inf_ecs::ballistics::RoundKind::Bullet,
-                    fuse_left_s: 0.0,
+                    kind,
+                    fuse_left_s: def.fuse_s,
                     bounces: 0,
-                    guide: Uuid::nil(),
+                    guide,
                     def: *def,
                 };
                 if inf_ecs::ballistics::spawn_round(world, round, rays_already) {
@@ -2047,16 +2271,44 @@ fn step_rounds(
         return;
     }
     let sub_dt = dt / f64::from(PROJECTILE_SUB_STEPS);
+    // **WHERE EVERY GUIDE IS** (wave WPN2d), resolved ONCE for the whole pool
+    // rather than per round per sub-step — the ear's own argument: a target
+    // cannot move inside a fixed step, and up to 256 world walks for a position
+    // that cannot change is 256 walks too many. Empty on every level where
+    // nothing in the air is guided, which is every level before this wave.
+    let guides: std::collections::BTreeMap<Uuid, DVec3> = live
+        .iter()
+        .filter(|r| !r.guide.is_nil())
+        .filter_map(|r| strike_point(world, r.guide).map(|p| (r.guide, p)))
+        .collect();
     // **WHERE THE EAR IS** (wave WPN2c) — resolved ONCE for the whole pool
     // rather than per round per sub-step, which is up to 256 walks of the world
     // for a number that cannot change inside a fixed step.
     let ear = inf_ecs::audio::active_listener_position(world);
     let mut survivors: Vec<inf_ecs::ballistics::Round> = Vec::with_capacity(live.len());
     let mut landed: Vec<(WeaponHit, f64)> = Vec::new();
+    // **What went off, and where** (wave WPN2d) — collected inside the flight
+    // loop and spent below it, because the pool's borrow is live in there and
+    // `apply_blast` writes to the world.
+    let mut blasts: Vec<(Uuid, DVec3, WeaponDef)> = Vec::new();
     for mut r in live {
         let mut alive = true;
         for _ in 0..PROJECTILE_SUB_STEPS {
             let prev = r.at;
+            // **THE GUIDANCE** (wave WPN2d), before the integrator, because what
+            // it changes is the velocity the integrator is about to use. A round
+            // with no guide is one map lookup that misses on an empty map.
+            if let Some(target) = guides.get(&r.guide) {
+                let bearing =
+                    inf_ecs::ballistics::guidance_bearing(r.at, *target, r.def.top_attack);
+                r.velocity = inf_ecs::ballistics::guide_velocity(
+                    r.velocity,
+                    bearing,
+                    inf_ecs::ballistics::GUIDANCE_TURN_DPS,
+                    sub_dt,
+                );
+                report.rounds.guided += 1;
+            }
             let (next, v) = inf_ecs::ballistics::advance_round(r.at, r.velocity, &r.def, sub_dt);
             let seg = next - prev;
             let len = seg.length();
@@ -2106,6 +2358,37 @@ fn step_rounds(
                 );
                 if let Some(h) = hit {
                     let point = prev + (seg / len) * h.toi;
+                    // **A THROWN BODY BOUNCES** (wave WPN2d) instead of ending
+                    // here — the doc section 5's *"bounce elasticity"*. The
+                    // normal half of its velocity is reflected and scaled by
+                    // `restitution`, the tangent half is scrubbed by
+                    // `bounce_friction`, and it carries on from the contact
+                    // point pushed a hair off the surface so the next segment
+                    // does not start inside what it just hit.
+                    //
+                    // It settles when it has bounced `MAX_BOUNCES` times or is
+                    // slower than `SETTLE_SPEED_MPS`, which is a body rolling
+                    // rather than bouncing — and this engine has no rolling.
+                    if r.kind.bounces() && r.bounces < inf_ecs::ballistics::MAX_BOUNCES {
+                        let after = inf_ecs::ballistics::bounce_velocity(
+                            r.velocity,
+                            h.normal,
+                            r.def.restitution,
+                            r.def.bounce_friction,
+                        );
+                        r.bounces += 1;
+                        report.rounds.bounces += 1;
+                        r.at = point + h.normal * BOUNCE_OFFSET_M;
+                        r.velocity = if after.length() < inf_ecs::ballistics::SETTLE_SPEED_MPS {
+                            DVec3::ZERO
+                        } else {
+                            after
+                        };
+                        r.travelled_m += h.toi;
+                        r.age_s += sub_dt;
+                        r.first_segment = false;
+                        continue;
+                    }
                     let flight = r.travelled_m + h.toi;
                     let target = hit_owner(bridge, h.collider);
                     let on_flesh = target.is_some_and(|g| is_flesh(world, g));
@@ -2151,6 +2434,32 @@ fn step_rounds(
                         flight,
                     ));
                     report.rounds.impacts += 1;
+                    // **THE BLAST**, at the point the body arrived (wave WPN2d).
+                    // Recorded here and spent below the loop, because
+                    // `apply_blast` needs `&mut EcsWorld` and the pool's own
+                    // borrow is live inside it.
+                    if r.def.has_blast() {
+                        blasts.push((r.shooter, point, r.def));
+                    }
+                    alive = false;
+                    break;
+                }
+            }
+            // **THE FUSE** (wave WPN2d) — the `KICK_FUSE_S` pattern: a clock
+            // that counts DOWN and fires when it reaches zero, so a body with
+            // no fuse carries a zero and this line is one comparison.
+            //
+            // It is checked AFTER the segment cast and BEFORE the range and
+            // lifetime tests, which is the honest order: a grenade whose fuse
+            // runs out in mid-air goes off in mid-air, and one that has landed
+            // goes off where it landed.
+            if r.def.fuse_s > 0.0 {
+                r.fuse_left_s -= sub_dt;
+                if r.fuse_left_s <= 0.0 {
+                    report.rounds.fused += 1;
+                    if r.def.has_blast() {
+                        blasts.push((r.shooter, next, r.def));
+                    }
                     alive = false;
                     break;
                 }
@@ -2196,7 +2505,23 @@ fn step_rounds(
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
     }
+    // **THE BLASTS**, after the direct impacts, so a rocket's direct joules are
+    // spent on what it struck before its radius damage reaches the same body —
+    // the doc's *"direct + blast split"*, in the order the two halves happen.
+    for (shooter, at, def) in blasts {
+        apply_blast(world, bridge, shooter, at, &def, dt, report);
+    }
 }
+
+/// **How far off a surface a bounced body restarts**, metres.
+///
+/// A millimetre. The contact point is ON the collider, so the next segment would
+/// begin inside it and stop at zero distance for ever; pushing off along the
+/// contact normal by the smallest distance that is not a rounding error is what
+/// makes a bounce a bounce rather than a stall. It is deliberately not the
+/// body's own radius, because a thrown body in this engine has no radius: it is
+/// a segment, and this is the segment's start.
+pub const BOUNCE_OFFSET_M: f64 = 0.001;
 
 /// **How far away an act can be seen**, metres.
 ///
@@ -2611,28 +2936,54 @@ fn strike_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
 /// `inf_math::patan2_64` and the boundary epsilon that exists because of it (the
 /// P14 law), so a swing lands identically on two machines.
 ///
-/// # What it does NOT do
+/// # THE LINE OF SIGHT (wave WPN2d) — one box cast, and only when there is
+/// something to hit
 ///
-/// * **No line of sight.** A body on the far side of a shut door within reach is
-///   hit. The reach is 1.2 m and a leaf is 5 cm thick, so this is reachable in
-///   principle, and closing it is one `cast_ray_excluding` per candidate — which
-///   this function deliberately does not spend on a press that resolves at most
-///   one target. Carried by name.
-/// * **No cleave.** The nearest body in the arc takes the blow and nobody else
-///   does, which is `resolve`'s own rule (*"the first of two equals wins"*). A
-///   swing that hit everything in its cone is a different weapon and would want
-///   its own `WeaponDef` field.
+/// Wave WPN1 carried *"no line of sight: a body on the far side of a shut door
+/// within reach is hit"* by name. This closes it, and the shape of the fix is
+/// the whole point: the reach and the cone are STILL resolved by
+/// `inf_ecs::interact::resolve` — one door, unchanged, so a punch still cannot
+/// land on somebody the E-key prompt calls unreachable — and what this adds is a
+/// second question asked only of the body that door already chose. *Is there a
+/// wall in the way?*
+///
+/// The probe is the doc section 5's own *"short box-cast or sphere-cast"*: a
+/// [`MELEE_BOX_HALF_M`] box swept from the strike point to the target's own,
+/// through `CastTargets::AllSolid` minus everything the shooter is
+/// ([`shot_exclusions`]). If the first thing the box meets is not the target,
+/// the swing is a MISS and [`GameplayReport::swings_blocked`] counts it.
+///
+/// A BOX rather than a ray because a fist is not a point: a ray between two
+/// capsule axes threads a door frame that an arm does not fit through, and the
+/// half-extent is the width of what is swinging.
+///
+/// It costs **one cast per swing that found a body**, and nothing at all for a
+/// swing that found nobody — which is the reason wave WPN1 gave for not
+/// spending one per candidate, honoured: the cast is downstream of the
+/// resolution, not inside it.
+///
+/// # What it still does NOT do
+///
+/// * **No cleave**, and that is a decision rather than an omission (wave WPN2d
+///   restates it deliberately). The nearest body in the arc takes the blow and
+///   nobody else does, which is `resolve`'s own rule (*"the first of two equals
+///   wins"*). A swing that hit everything in its cone needs a `WeaponDef` field
+///   to say so, a second resolution that answers a LIST rather than a body, and
+///   a cast per body it answers — three changes to buy a verb no weapon in the
+///   registry has. The M9 knife is a single-target weapon and says so.
 ///
 /// `O(characters)`, over the same walk [`gunners`] already makes — and only on
 /// the steps a swing actually leaves, which at [`weapon::FIST_RPM`] is at most
 /// one and a half a second.
 fn resolve_swing(
     world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
     shooter: Uuid,
     def: &WeaponDef,
     from: DVec3,
     dir: DVec3,
     yaw_deg: f64,
+    report: &mut GameplayReport,
 ) -> WeaponHit {
     use inf_ecs::interact::{InteractCandidate, InteractVerb};
     let reach = def.reach_m();
@@ -2660,7 +3011,46 @@ fn resolve_swing(
     }
     // `gunners` is already `Guid`-ordered, so ties break on the guid — two
     // bodies at exactly one distance answer the same one on both hosts.
-    match inf_ecs::interact::resolve(&candidates, from, yaw_deg) {
+    // **THE LINE OF SIGHT** (wave WPN2d). Only for the body the shared door
+    // already chose, and only when it chose one.
+    let chosen = inf_ecs::interact::resolve(&candidates, from, yaw_deg).filter(|hit| {
+        report.melee_casts += 1;
+        let to = hit.position - from;
+        let span = to.length();
+        if span <= 1e-6 {
+            return true;
+        }
+        let exclude = shot_exclusions(world, bridge, shooter);
+        let blocker = bridge.world_mut().cast_shape_where(
+            &super::ColliderShape3D::Box {
+                half_extents: DVec3::splat(MELEE_BOX_HALF_M),
+            },
+            from,
+            glam::DQuat::IDENTITY,
+            to / span,
+            span,
+            &exclude,
+            super::CastTargets::AllSolid,
+        );
+        match blocker {
+            // The box starts inside something the shooter is not — a swing from
+            // inside a wall — which is not a hit on the target and is not a
+            // reason to refuse one either: `started_penetrating`'s own doc says
+            // the witness point is unreliable, so the honest answer is to let
+            // the reach-and-cone door's verdict stand.
+            Some(h) if h.started_penetrating => true,
+            Some(h) => {
+                let who = hit_owner(bridge, h.collider);
+                let clear = who == Some(hit.guid);
+                if !clear {
+                    report.swings_blocked += 1;
+                }
+                clear
+            }
+            None => true,
+        }
+    });
+    match chosen {
         Some(hit) => WeaponHit {
             shooter,
             target: Some(hit.guid),
@@ -2710,6 +3100,408 @@ fn resolve_swing(
         },
     }
 }
+
+/// **SPEND A BLAST** (wave WPN2d) — the doc section 5's radius damage, through
+/// the one door every other joule in this engine leaves by.
+///
+/// # It is a sweep over BODIES and DESTRUCTIBLES, and it costs one ray each
+///
+/// Every character (`gunners`) and every entity carrying `Destructible` within
+/// `blast_radius_m` of `at` is a candidate, in `Guid` order. Each one gets:
+///
+/// 1. a **falloff** — `inf_ecs::ballistics::blast_damage_j`, which is
+///    `(1 − d/r)²` of `blast_damage_j`, exact at both ends;
+/// 2. a **line of sight** — one `cast_ray_where` from the epicentre toward the
+///    candidate through `CastTargets::AllSolid`. If the first thing the ray
+///    meets is not the candidate, the wall took the blast and the body did not.
+///    That is `resolve_swing`'s own rule one verb along, and it is what stops a
+///    grenade in a stairwell killing everybody in the building;
+/// 3. the joules, through **`apply_hit`** — the same door a bullet spends
+///    through, so a blast kill staggers, panics the street, is witnessed and
+///    reaches the P22 destructible door exactly as a rifle round does.
+///
+/// Bounded by [`MAX_BLAST_TARGETS`], which is a COST bound: the candidates are
+/// already inside the radius, so what it refuses is the thirty-third body in a
+/// crowd around one rocket, and it is counted.
+///
+/// # The direct hit is NOT here
+///
+/// A rocket that struck a wall has already spent `damage_j` on that wall through
+/// `apply_hit`, in the caller — the doc's *"direct + blast split"*. This is the
+/// second half, and it never double-spends on the thing that was struck: the
+/// impact point is at distance zero from itself only if the struck entity is
+/// also a blast candidate, and it is, deliberately, because a body a rocket hits
+/// squarely should take both. `WeaponHit::energy_j` and the blast's own joules
+/// are two different quantities from two different fields.
+fn apply_blast(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    shooter: Uuid,
+    at: DVec3,
+    def: &WeaponDef,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    if !def.has_blast() || !at.is_finite() {
+        return;
+    }
+    let radius = def.blast_radius_m;
+    // The candidates, in `Guid` order so two hosts spend the joules in one
+    // order: every character, then every destructible.
+    let mut candidates: Vec<(Uuid, DVec3)> = Vec::new();
+    for guid in gunners(world) {
+        if let Some(p) = strike_point(world, guid) {
+            if (p - at).length() <= radius {
+                candidates.push((guid, p));
+            }
+        }
+    }
+    candidates.extend(
+        weapon::destructible_positions(world)
+            .into_iter()
+            .filter(|(_, p)| (*p - at).length() <= radius),
+    );
+    candidates.sort_by_key(|(g, _)| *g);
+    candidates.dedup_by_key(|(g, _)| *g);
+    let mut hurt = 0u32;
+    for (target, point) in candidates.into_iter().take(MAX_BLAST_TARGETS) {
+        let span = point - at;
+        let distance = span.length();
+        let joules = inf_ecs::ballistics::blast_damage_j(def, distance);
+        if joules <= 0.0 {
+            continue;
+        }
+        // The line of sight. A candidate a hand's breadth from the epicentre is
+        // exposed by construction; anything further is asked.
+        if distance > 1e-3 {
+            report.rounds.blast_rays += 1;
+            let exclude = std::collections::BTreeSet::new();
+            let seen = bridge.world_mut().cast_ray_where(
+                at,
+                span / distance,
+                distance,
+                &exclude,
+                super::CastTargets::AllSolid,
+            );
+            if let Some(h) = seen {
+                if hit_owner(bridge, h.collider) != Some(target) {
+                    report.rounds.blast_shadowed += 1;
+                    continue;
+                }
+            }
+        }
+        let on_flesh = is_flesh(world, target);
+        let hit = WeaponHit {
+            shooter,
+            target: Some(target),
+            from: at,
+            to: point,
+            energy_j: joules,
+            on_flesh,
+            // **QUIET.** The bang is the `BlastEvent` below, played once by both
+            // hosts; a loud hit per body would be one gunshot clip per person in
+            // the radius, from the wrong place, panicking the street N times.
+            loud: false,
+            arrived: true,
+            headshot: false,
+            report_max_m: def.report_max_m,
+            report_gain: def.report_gain,
+            class: def.audio_class(),
+            indoors: false,
+            listener_m: f64::INFINITY,
+            shot_index: 0,
+        };
+        apply_hit(world, &hit, dt, report);
+        report.hits.push(hit);
+        hurt += 1;
+    }
+    report.blasts.push(BlastEvent {
+        shooter,
+        at,
+        radius_m: radius,
+        hurt,
+    });
+}
+
+/// **HOLD A LOCK** (wave WPN2d) — the launcher's target selection, once per
+/// armed character per step.
+///
+/// # It is SIM STATE, and it lives on the weapon
+///
+/// `WeaponState::lock_target` and `lock_held_s` are what a lock IS: the target,
+/// and how long it has been inside the cone. Both are folded into
+/// `weapon_state_bytes` (only while a lock is being held), because a lock
+/// decides whether the round that leaves is guided — so two hosts that
+/// disagreed about it would fire two different missiles.
+///
+/// # The rule
+///
+/// A weapon that [`WeaponDef::can_lock`] scans for the nearest entity carrying
+/// `inf_ecs::components::Vehicle` inside `lock_cone_deg` of the aim line and
+/// inside `range_m`. `lock_air_only` (the Stinger's rule) refuses anything that
+/// is not airborne — measured as `MIN_AIRBORNE_M` above the shooter's own feet,
+/// because this engine has no "is flying" flag and altitude is the honest
+/// question. The hold accumulates while the SAME target stays in the cone and
+/// **resets the instant it leaves**, which is the arm a gate mutates.
+fn step_locks(
+    world: &mut EcsWorld,
+    bridge: &PhysicsBridge3D,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    use inf_ecs::components::{CharacterMovement, GlobalTransform};
+    // **`PhysicsBridge3D::vehicle_guids` is the door**, and it is the same one
+    // the E-key prompt asks (`d3::interact::vehicle_candidates`): what counts as
+    // a vehicle in this engine is what the bridge built a rig for, and a second
+    // spelling of it here would be a lock that could acquire something the game
+    // does not think is a car. Empty on every level with no vehicles, which is
+    // most of them, and the whole pass then costs one allocation.
+    let mut targets: Vec<(Uuid, DVec3)> = bridge
+        .vehicle_guids()
+        .into_iter()
+        .filter_map(|chassis| {
+            let e = world.entity_of(chassis)?;
+            let t = world.world().get::<GlobalTransform>(e)?;
+            Some((chassis, t.translation()))
+        })
+        .collect();
+    targets.sort_by_key(|(g, _)| *g);
+    if targets.is_empty() {
+        // Nothing to lock onto. A launcher already holding a lock keeps it for
+        // this step rather than being cleared by an empty world -- which cannot
+        // happen, because a target that despawned is a target the sweep below
+        // would not find either. Stated so the early return is a decision.
+        return;
+    }
+    for guid in gunners(world) {
+        let Some(entity) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some((_, def)) = weapon::equipped_def(world, guid) else {
+            continue;
+        };
+        if !def.can_lock() {
+            // A weapon that cannot lock must not leave a stale one behind: the
+            // bytes are folded whenever the target is non-nil, so a launcher
+            // put away with a lock on it would go on folding it for ever.
+            if let Some(mut st) = world.world_mut().get_mut::<weapon::WeaponState>(entity) {
+                if !st.lock_target.is_nil() || st.lock_held_s != 0.0 {
+                    st.lock_target = Uuid::nil();
+                    st.lock_held_s = 0.0;
+                }
+            }
+            continue;
+        }
+        let (yaw, pitch) = {
+            let w = world.world();
+            match w.get::<CharacterMovement>(entity) {
+                Some(cm) => (cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg),
+                None => continue,
+            }
+        };
+        let Some(feet) = feet_of(world, guid) else {
+            continue;
+        };
+        let eye = feet + DVec3::Y * MUZZLE_HEIGHT_M;
+        let aim = weapon::aim_forward(yaw, pitch);
+        let half = (def.lock_cone_deg * 0.5).clamp(0.0, 180.0);
+        let reach = def.reach_m();
+        // The nearest thing in the cone. `pacos64` for the P14 reason: this
+        // answer reaches `weapon_state_bytes`.
+        let mut best: Option<(Uuid, f64)> = None;
+        for (target, at) in &targets {
+            let span = *at - eye;
+            let distance = span.length();
+            if distance <= 1e-6 || distance > reach {
+                continue;
+            }
+            if def.lock_air_only && at.y - feet.y < MIN_AIRBORNE_M {
+                continue;
+            }
+            let cos = (span / distance).dot(aim).clamp(-1.0, 1.0);
+            let off = inf_math::pacos64(cos).to_degrees();
+            if off > half {
+                continue;
+            }
+            if best.is_none_or(|(_, d)| distance < d) {
+                best = Some((*target, distance));
+            }
+        }
+        let Some(mut st) = world.world_mut().get_mut::<weapon::WeaponState>(entity) else {
+            continue;
+        };
+        match best {
+            Some((target, _)) => {
+                if st.lock_target == target {
+                    st.lock_held_s = (st.lock_held_s + dt).min(def.lock_s);
+                } else {
+                    st.lock_target = target;
+                    st.lock_held_s = 0.0;
+                }
+                report.locks_held += 1;
+                if st.lock_held_s >= def.lock_s {
+                    report.locks_complete += 1;
+                }
+            }
+            None => {
+                // **It releases outside the cone**, and it releases to NOTHING
+                // rather than decaying: a lock is a fact about what the player
+                // is pointing at, and a half-remembered one would fire a
+                // missile at a car that has driven behind a building.
+                st.lock_target = Uuid::nil();
+                st.lock_held_s = 0.0;
+            }
+        }
+    }
+}
+
+/// **How high above its own feet a thing has to be for a Stinger to see it**,
+/// metres.
+///
+/// Six. This engine has no "is airborne" flag — `Vehicle` is a car, a boat and a
+/// helicopter — and altitude is the honest question a shoulder-fired
+/// anti-aircraft launcher asks. Six metres is above a lorry and below any
+/// helicopter that is flying rather than parked.
+pub const MIN_AIRBORNE_M: f64 = 6.0;
+
+/// **THROW SOMETHING** (wave WPN2d) — the throw verb, the clip's own notify, and
+/// the body that leaves the hand.
+///
+/// # Two steps, and the notify between them
+///
+/// 1. **The press.** A character holding a `throwable` weapon whose throw key
+///    went down starts the CHAR1b.2 additive through
+///    `inf_ecs::anim_bridge::start_throw` — overhand or underhand by the aim
+///    pitch, because a grenade lobbed at a roof and one rolled under a car are
+///    two different animations and the player has already said which by where
+///    they are pointing.
+/// 2. **The release**, on the clip's own notify (`weapon::THROW_NOTIFY`, fired
+///    by the pose step when the additive crosses
+///    `inf_anim::THROW_RELEASE_FRAC`). The pose step runs at `STEP_PHASES` 21
+///    and this at 15, so the notify is consumed on the step AFTER it fires —
+///    ONE fixed step, 16.7 ms, which is the same one-step latency `muzzle_of`
+///    states and is inside the two-frame budget the brief asks for.
+///
+/// The body leaves from the hand's own socket when the rig publishes one and
+/// from the muzzle rule when it does not — `muzzle_of`'s two answers, reused.
+///
+/// A throw spends a round from the magazine through `weapon::try_fire`, so a
+/// character with no grenades left throws nothing and the readout says why.
+fn step_throws(world: &mut EcsWorld, report: &mut GameplayReport) {
+    use inf_ecs::components::CharacterMovement;
+    for guid in gunners(world) {
+        let Some(entity) = world.entity_of(guid) else {
+            continue;
+        };
+        // **The edge is TAKEN whether or not it is honoured** — `step_weapons`'
+        // own law, for its own reason: a press made with a rifle in hand must
+        // not survive into the step a grenade is equipped.
+        let pressed = {
+            let w = world.world_mut();
+            match w.get_mut::<CharacterMovement>(entity) {
+                Some(mut cm) => {
+                    let out = cm.runtime.press_throw;
+                    cm.runtime.press_throw = false;
+                    out
+                }
+                None => false,
+            }
+        };
+        let Some((item_id, def)) = weapon::equipped_def(world, guid) else {
+            continue;
+        };
+        if !def.throwable {
+            continue;
+        }
+        if pressed {
+            let (pitch, throwing) = {
+                let w = world.world();
+                match w.get::<CharacterMovement>(entity) {
+                    Some(cm) => (cm.runtime.aim_pitch_deg, cm.runtime.throw_s > 0.0),
+                    None => (0.0, false),
+                }
+            };
+            // One throw at a time: a second press mid-animation is a press the
+            // arm cannot honour.
+            if !throwing {
+                // The magazine is spent HERE, on the press, rather than at the
+                // release — a pin pulled is a grenade gone, and a character who
+                // died mid-throw has still used one.
+                let spent = {
+                    let w = world.world_mut();
+                    match w.get_mut::<weapon::WeaponState>(entity) {
+                        Some(mut st) if st.item_id == item_id => {
+                            weapon::try_fire(&def, &mut st, true) == weapon::FireVerdict::Fired
+                        }
+                        _ => false,
+                    }
+                };
+                if spent {
+                    // **Overhand above the horizon, underhand below it.** The
+                    // split is at −10° rather than at 0 because a flat throw is
+                    // an overhand one: an underhand lob is something you do at
+                    // your own feet.
+                    let overhand = pitch > UNDERHAND_PITCH_DEG;
+                    let seconds = if overhand {
+                        inf_anim::THROW_OVER_S
+                    } else {
+                        inf_anim::THROW_UNDER_S
+                    };
+                    inf_ecs::anim_bridge::start_throw(world, guid, overhand, seconds);
+                    inf_ecs::anim_bridge::set_anim_trigger(world, guid, weapon::THROW_TRIGGER);
+                }
+            }
+        }
+        // **THE RELEASE**, on the clip's notify. Consumed exactly once per
+        // firing, by whoever gets there first — which is this, and there is one
+        // consumer of a throw.
+        if !inf_ecs::anim_bridge::consume_anim_notify(world, guid, weapon::THROW_NOTIFY) {
+            continue;
+        }
+        let Some((from, yaw, pitch, _)) = muzzle_of(world, guid) else {
+            continue;
+        };
+        let dir = weapon::aim_forward(yaw, pitch);
+        let round = inf_ecs::ballistics::Round {
+            shooter: guid,
+            at: from,
+            velocity: dir * def.muzzle_speed_mps.max(0.1),
+            travelled_m: 0.0,
+            age_s: 0.0,
+            first_segment: true,
+            cracked: false,
+            kind: inf_ecs::ballistics::RoundKind::Thrown,
+            fuse_left_s: def.fuse_s,
+            bounces: 0,
+            guide: Uuid::nil(),
+            def,
+        };
+        if inf_ecs::ballistics::spawn_round(world, round, report.rounds.shot_rays as usize) {
+            report.rounds.spawned += 1;
+            report.throws += 1;
+            // **THE HAND LETS GO.** The weapon entity leaves the world on the
+            // next `step_equipped_weapons` when the magazine empties; what has
+            // to happen THIS step is that the hand stops holding it, or the IK
+            // pass drags a grenade that is already in the air back onto the
+            // palm. `set_hand_ik` with no weapon hold is the door.
+            inf_ecs::pose::set_hand_ik(world, guid, inf_ecs::pose::HandIk::default());
+        } else {
+            report.rounds.refused += 1;
+        }
+        // The clock is stopped either way: an animation that went on playing
+        // after the body left would be a hand throwing nothing.
+        if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+            cm.runtime.throw_s = 0.0;
+        }
+    }
+}
+
+/// **The aim pitch below which a throw goes underhand**, degrees.
+///
+/// Minus ten. A flat throw is an overhand one — an underhand lob is what you do
+/// at your own feet — so the split is a little below the horizon rather than on
+/// it.
+pub const UNDERHAND_PITCH_DEG: f64 = -10.0;
 
 /// **Is this thing a body?** — the question a round asks about what it hit
 /// (wave WPN1).

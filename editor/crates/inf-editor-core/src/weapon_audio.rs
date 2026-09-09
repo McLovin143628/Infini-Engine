@@ -29,13 +29,19 @@
 use uuid::Uuid;
 
 use inf_audio::{AudioAsset, AudioFormat};
-use inf_ecs::weapon::{report_clip, ReportClip, WeaponClass, CASING_CLIP, WEAPON_REPORT_CLIP};
+use inf_ecs::weapon::{
+    melee_impact_clip, report_clip, ImpactSurface, ReportClip, WeaponClass, BLAST_CLIP,
+    CASING_CLIP, WEAPON_REPORT_CLIP,
+};
 
 /// The folder under `samples/` this library lives in.
 pub const WEAPON_AUDIO_FOLDER: &str = "weapon-audio";
 
 /// **The file the casing's metal one-shot lives in.**
 pub const CASING_FILE: &str = "Casing_Drop.inf_audio";
+
+/// **The file the blast's boom lives in** (wave WPN2d).
+pub const BLAST_FILE: &str = "Blast.inf_audio";
 
 /// **What one committed clip is** — the file it lives in, the GUID that names
 /// it, and the payload.
@@ -53,7 +59,7 @@ pub struct WeaponClip {
 ///
 /// The assault rifle's body is skipped; see this module's own header.
 pub fn weapon_audio_clips() -> Vec<WeaponClip> {
-    let mut out = Vec::with_capacity(35);
+    let mut out = Vec::with_capacity(39);
     for class in WeaponClass::ALL {
         for clip in ReportClip::ALL {
             let guid = report_clip(class, clip);
@@ -79,6 +85,27 @@ pub fn weapon_audio_clips() -> Vec<WeaponClip> {
         asset: AudioAsset::from_encoded(inf_audio::synth::casing_wav(), AudioFormat::Wav)
             .expect("a generated clip decodes"),
     });
+    // **Wave WPN2d's three**: the blast, and one melee impact per surface. They
+    // are here rather than in a library of their own for the reason this module
+    // exists -- a gunshot belongs to whatever fires one, and so does the bang
+    // its rocket makes and the sound its knife makes landing.
+    out.push(WeaponClip {
+        file: BLAST_FILE.to_string(),
+        guid: BLAST_CLIP,
+        asset: AudioAsset::from_encoded(inf_audio::synth::blast_wav(), AudioFormat::Wav)
+            .expect("a generated clip decodes"),
+    });
+    for surface in ImpactSurface::ALL {
+        out.push(WeaponClip {
+            file: format!("Melee_{}.inf_audio", capitalised(surface.name())),
+            guid: melee_impact_clip(surface),
+            asset: AudioAsset::from_encoded(
+                inf_audio::synth::melee_impact_wav(surface.index()),
+                AudioFormat::Wav,
+            )
+            .expect("a generated clip decodes"),
+        });
+    }
     out
 }
 

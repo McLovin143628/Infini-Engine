@@ -696,6 +696,67 @@ fn both_hosts_crack_and_drop_brass_the_same_way() {
     }
 }
 
+/// **A BLAST AND A BLOW LAND THE SAME WAY ON BOTH HOSTS** (wave WPN2d).
+///
+/// `both_hosts_crack_and_drop_brass_the_same_way`'s argument, one wave along and
+/// with one addition that matters more than either of the two above it: a melee
+/// contact's CLIP is chosen by what the blow landed on, so this is the first
+/// fence where the two hosts have to agree about a decision rather than about a
+/// literal. If one of them read `hit.on_flesh` and the other asked the world
+/// again, they would sound different on exactly the frames where a body moved.
+#[test]
+fn both_hosts_blast_and_land_a_blow_the_same_way() {
+    for (fence, floor) in [("weapon_blast", 300usize), ("melee_impact", 300)] {
+        let editor = fenced(&read(EDITOR), fence, "the editor SimSession");
+        let player = fenced(&read(PLAYER), fence, "the shipped RuntimeSim");
+        assert!(
+            editor.len() > floor,
+            "the `{fence}` fence is {} chars — an empty fence would make this              gate vacuous",
+            editor.len()
+        );
+        assert_eq!(
+            editor, player,
+            "`{fence}` has drifted between the editor's Simulate and the shipped              player. A preview that made a different noise from the shipped              build is a bug no compiler and no screenshot finds"
+        );
+    }
+    let editor = read(EDITOR);
+    let blast = fenced(&editor, "weapon_blast", "the editor SimSession");
+    let melee = fenced(&editor, "melee_impact", "the editor SimSession");
+    for (haystack, needle, why) in [
+        (
+            &blast,
+            "inf_ecs::weapon::blast_source()",
+            "the clip, the bus, the volume and the reach are ONE Ring-0              description — a blast written out twice in two host loops is four              numbers to keep in step",
+        ),
+        (
+            &blast,
+            "inf_ecs::weapon::blast_source_key(guid_source_key(blast.shooter))",
+            "one boom voice per shooter, SALTED: an unsalted key would take the              shooter's own gunshot body layer, which is the collision wave WPN2c              spent a commit closing",
+        ),
+        (
+            &blast,
+            "src.spatial.then_some(blast.at)",
+            "a blast is heard where it went off, which is where the round              arrived and not where it was fired from",
+        ),
+        (
+            &melee,
+            "inf_ecs::weapon::melee_impact_source(impact.surface)",
+            "the SURFACE chooses the clip, and the surface was decided in the              fixed step: a host that asked the world again would sound              different on exactly the frames where a body moved",
+        ),
+        (
+            &melee,
+            "inf_ecs::weapon::melee_source_key(guid_source_key(impact.shooter))",
+            "one contact voice per swinger, salted off the report's own keys",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            haystack.contains(&n),
+            "the WPN2d audio no longer carries `{needle}`: {why}"
+        );
+    }
+}
+
 /// **THE GUNSHOT IS THE SAME NOISE ON BOTH HOSTS** (wave WPN1).
 ///
 /// The report is a *command*, not an entity: there is nothing in the world to

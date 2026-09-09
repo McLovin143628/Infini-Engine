@@ -105,6 +105,13 @@ pub fn engine_spawned_clips() -> Vec<Uuid> {
         crate::venue::VENUE_MUSIC_CLIP,
         // Wave WPN2c: the brass.
         crate::weapon::CASING_CLIP,
+        // Wave WPN2d: the blast, and the two melee-impact surfaces. Named here
+        // for the reason this list exists at all -- the WPN2c audit's finding
+        // that a clip a FIXED STEP plays and no authored entity carries ships
+        // in no pack and is silence with no error.
+        crate::weapon::BLAST_CLIP,
+        crate::weapon::melee_impact_clip(crate::weapon::ImpactSurface::Flesh),
+        crate::weapon::melee_impact_clip(crate::weapon::ImpactSurface::Hard),
     ];
     // Wave WPN1 + WPN2c: thirty-six report clips, five per class, built by
     // `report_clip` — including WPN1's own `WEAPON_REPORT_CLIP`, which is the
@@ -127,12 +134,12 @@ mod tests {
     /// **CARRIED 43'S DOOR** — every clip the engine plays without a level
     /// naming it, so a cook and a PIE payload can close over them.
     #[test]
-    fn the_engine_names_thirty_seven_clips_no_component_ever_references() {
+    fn the_engine_names_forty_clips_no_component_ever_references() {
         let clips = active_test_clips();
         assert_eq!(
             clips.len(),
-            37,
-            "thirty-six report clips plus the casing plus the venue loop"
+            40,
+            "thirty-six report clips, the casing, the venue loop, and wave              WPN2d's blast plus its two melee surfaces"
         );
         let uniq: std::collections::BTreeSet<Uuid> = clips.iter().copied().collect();
         assert_eq!(uniq.len(), clips.len(), "the list has a duplicate");
@@ -144,6 +151,14 @@ mod tests {
         assert!(clips.contains(&crate::weapon::WEAPON_REPORT_CLIP));
         assert!(clips.contains(&crate::venue::VENUE_MUSIC_CLIP));
         assert!(clips.contains(&crate::weapon::CASING_CLIP));
+        // Wave WPN2d's three. They are here for the reason this list exists:
+        // the WPN2c audit found the engine shipping a cooked pack with no
+        // `.inf_audio` in it at all, and a clip a FIXED STEP plays and no
+        // authored entity carries is silence with no error.
+        assert!(clips.contains(&crate::weapon::BLAST_CLIP));
+        for surface in crate::weapon::ImpactSurface::ALL {
+            assert!(clips.contains(&crate::weapon::melee_impact_clip(surface)));
+        }
     }
 
     fn active_test_clips() -> Vec<Uuid> {

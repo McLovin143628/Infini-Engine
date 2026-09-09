@@ -65,6 +65,36 @@ use crate::skeleton::Skeleton;
 /// root as 164 `ALS_*` sequences and **nothing here is ALS's**. A reader who
 /// meets `INF_Swim_Tread` in a machine, a pack or an advisory should not have to
 /// look it up to know who wrote it.
+/// **How long the overhand throw plays**, seconds — the clip's own duration
+/// (wave CHAR1b.2 authored it; wave WPN2d names it).
+///
+/// Named beside the generator rather than read off a loaded asset because the
+/// GAMEPLAY step has to start the additive's clock with it and the gameplay step
+/// has no clip: `inf_ecs::anim_bridge::start_throw` takes a duration precisely
+/// so the two cannot disagree, and this is the number it takes. `throw()` below
+/// is where it is spent.
+pub const THROW_OVER_S: f64 = 0.85;
+
+/// **How long the underhand throw plays**, seconds. See [`THROW_OVER_S`].
+pub const THROW_UNDER_S: f64 = 0.75;
+
+/// **How far into a throw the hand lets go**, as a fraction of the clip (wave
+/// WPN2d).
+///
+/// Three fifths. It is read off the clip's OWN shape rather than chosen: the
+/// overhand throw sweeps its shoulder from -80 deg to +110 deg and extends its
+/// elbow from 100 deg to 10 deg over the whole clip, so the forearm is pointing
+/// down-range and nearly straight at about 60 % of it — before that the hand is
+/// still behind the head, and after it the arm is following through on an empty
+/// palm. The underhand clip's sweep (+50 deg to -70 deg) crosses its own release
+/// at the same fraction, which is why there is one number and not two.
+///
+/// It is a FRACTION rather than a time so the two clips share it, and it is here
+/// beside the generator that draws the arms for the same reason the durations
+/// are: the notify has to fire where the animation actually releases, and the
+/// only thing that knows where that is is the thing that authored the sweep.
+pub const THROW_RELEASE_FRAC: f64 = 0.60;
+
 pub const AUTHORED_CLIPS: &[&str] = &[
     "INF_Slide",
     "INF_Throw_Over",
@@ -862,7 +892,9 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// fight the walk it is layered over.
 fn throw(r: &Rig, over: bool) -> AnimClip {
     let n = 10;
-    let dur = if over { 0.85 } else { 0.75 };
+    // The two durations are named constants, so the fixed step's own clock
+    // (`anim_bridge::start_throw`) and the clip it drives cannot disagree.
+    let dur = if over { THROW_OVER_S } else { THROW_UNDER_S };
     let times = times_of(dur, n);
     let (from, to) = if over { (-80.0, 110.0) } else { (50.0, -70.0) };
     let (elbow_from, elbow_to) = if over { (100.0, 10.0) } else { (60.0, 5.0) };

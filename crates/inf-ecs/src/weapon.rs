@@ -1538,6 +1538,32 @@ pub const FIRE_TRIGGER: &str = "weapon_fire";
 /// The animation trigger a reload arms.
 pub const RELOAD_TRIGGER: &str = "weapon_reload";
 
+/// **The animation notify a throw RELEASES on** (wave WPN2d).
+///
+/// One name, exported, for [`RELOAD_NOTIFY`]'s reason verbatim: the pose step
+/// fires it when the throw additive crosses
+/// [`inf_anim::THROW_RELEASE_FRAC`](inf_anim::THROW_RELEASE_FRAC) and
+/// `inf_physics::d3::gameplay::step_throws` consumes it, and a notify spelled
+/// twice is a grenade that never leaves the hand on exactly the rigs that spell
+/// it the other way.
+///
+/// # The one step between them, stated
+///
+/// The pose step is `STEP_PHASES` 21 and the gameplay step is 15, so a notify
+/// fired at step N is consumed at step N+1 — **one fixed step, 16.7 ms**. That
+/// is `muzzle_of`'s own one-step latency, deliberately, and the alternative
+/// (firing it from the gameplay step, which has the clock but not the clip)
+/// would put the release frame in the one place that cannot see the animation.
+pub const THROW_NOTIFY: &str = "weapon_throw_release";
+
+/// **The animation trigger a throw arms** (wave WPN2d) — a P29-style one-shot
+/// beside [`FIRE_TRIGGER`], armed whether or not a state machine is listening.
+///
+/// The additive itself is started by `crate::anim_bridge::start_throw`, which is
+/// the CHAR1b.2 door; this is for a machine that wants to know as well — a
+/// character that ducks behind cover to throw, say.
+pub const THROW_TRIGGER: &str = "weapon_throw";
+
 /// **The animation trigger a melee swing arms** (wave WPN1).
 ///
 /// Its own name rather than [`FIRE_TRIGGER`]: a rig that played `weapon_fire`
@@ -1794,6 +1820,129 @@ pub fn report_clip(class: WeaponClass, clip: ReportClip) -> Uuid {
 /// different. It sits outside the class table because it is not a layer of a
 /// report.
 pub const CASING_CLIP: Uuid = Uuid::from_u128(REPORT_CLIP_BASE | 0x00f0);
+
+/// **The clip a blast plays** (wave WPN2d) — one for every explosion, on
+/// [`CASING_CLIP`]'s own terms: the table's `0x00f_` tail is where a clip that
+/// belongs to no CLASS lives, because `report_clip`'s arithmetic uses
+/// `class << 8` and no class reaches `0xf0`.
+pub const BLAST_CLIP: Uuid = Uuid::from_u128(REPORT_CLIP_BASE | 0x00f1);
+
+/// **What a melee blow landed on** (wave WPN2d) — the two-way surface stub the
+/// impact clip is chosen by.
+///
+/// Two, deliberately, and named as a stub rather than as a design: the honest
+/// per-surface table is VEH3a's (it needs a material tag per collider, which
+/// this engine does not have — `Collider3D::friction` exists and the tyre model
+/// has never read it), and what a blow can tell TODAY is whether what it hit
+/// was a body, which `apply_hit`'s own `is_flesh` already answers. VEH3a
+/// extends this by adding variants; nothing here has to move.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ImpactSurface {
+    /// A person. `inf_physics::d3::gameplay::is_flesh` answered `true`.
+    Flesh,
+    /// Everything else — a wall, a car, the ground, a lamp post.
+    #[default]
+    Hard,
+}
+
+impl ImpactSurface {
+    /// Both, in the order [`index`](Self::index) answers.
+    pub const ALL: [ImpactSurface; 2] = [ImpactSurface::Flesh, ImpactSurface::Hard];
+
+    /// Its position in [`ALL`](Self::ALL) — the number the generator indexes its
+    /// cutoff table by and the number the clip GUID is built from.
+    pub fn index(self) -> u8 {
+        match self {
+            ImpactSurface::Flesh => 0,
+            ImpactSurface::Hard => 1,
+        }
+    }
+
+    /// The name a file and a report spell it with.
+    pub fn name(self) -> &'static str {
+        match self {
+            ImpactSurface::Flesh => "flesh",
+            ImpactSurface::Hard => "hard",
+        }
+    }
+
+    /// Which surface a hit landed on — the ONE mapping, so the clip a gate
+    /// expects and the clip a host queues cannot disagree.
+    pub fn of(on_flesh: bool) -> Self {
+        if on_flesh {
+            ImpactSurface::Flesh
+        } else {
+            ImpactSurface::Hard
+        }
+    }
+}
+
+/// **The clip a melee impact plays** on a surface (wave WPN2d) —
+/// `0x00f2 + index`, on [`BLAST_CLIP`]'s own arithmetic.
+pub fn melee_impact_clip(surface: ImpactSurface) -> Uuid {
+    Uuid::from_u128(REPORT_CLIP_BASE | 0x00f2 | u128::from(surface.index()))
+}
+
+/// **The source a blast's boom is played from** (wave WPN2d).
+///
+/// [`report_source`]'s numbers with the reach and the near field opened up,
+/// because an explosion is the loudest thing in this engine: a blast is heard
+/// four times as far as the assault rifle whose report `REPORT_MAX_M` sizes,
+/// and its near field is the radius rather than three metres, so standing
+/// inside the fireball is not louder than standing at its edge.
+pub fn blast_source() -> AudioSource {
+    let mut s = report_source();
+    s.clip = Some(BLAST_CLIP);
+    s.volume = 1.0;
+    s.min_distance = 8.0;
+    s.max_distance = (REPORT_MAX_M * 4.0).min(MAX_RANGE_M);
+    s
+}
+
+/// **The source a melee impact is played from** (wave WPN2d).
+///
+/// A contact, not a report: it reaches [`MELEE_IMPACT_MAX_M`] and no further,
+/// and it is never `loud` in `WeaponHit`'s sense — a punch does not panic a
+/// street, which is the rule `resolve_swing` has followed since wave WPN1.
+pub fn melee_impact_source(surface: ImpactSurface) -> AudioSource {
+    let mut s = report_source();
+    s.clip = Some(melee_impact_clip(surface));
+    s.volume = 0.7;
+    s.min_distance = 1.0;
+    s.max_distance = MELEE_IMPACT_MAX_M;
+    s
+}
+
+/// **The salt a blast's boom is keyed with** (wave WPN2d).
+///
+/// `LAYER_SALTS`' own construction and its own reason: a blast played on the
+/// shooter's bare key would take the voice of that shooter's own gunshot body
+/// layer, and a rocket that silenced its own report on landing is the collision
+/// wave WPN2c spent a commit closing one namespace over.
+const BLAST_SALT: u64 = 0x424c_4153_545f_5750;
+
+/// **The salt a melee contact is keyed with** (wave WPN2d). See
+/// [`BLAST_SALT`].
+const MELEE_SALT: u64 = 0x4d45_4c45_455f_5750;
+
+/// **The source key a shooter's blasts play on** — salted off the shooter, so
+/// two rockets landing on one step are one voice that restarts rather than two
+/// stacked, on `crack_source_key`'s own reasoning.
+pub fn blast_source_key(shooter_key: u64) -> u64 {
+    shooter_key ^ BLAST_SALT
+}
+
+/// **The source key a shooter's melee contacts play on.** See
+/// [`blast_source_key`].
+pub fn melee_source_key(shooter_key: u64) -> u64 {
+    shooter_key ^ MELEE_SALT
+}
+
+/// **How far a melee impact carries**, metres.
+///
+/// Twenty-five. A punch is not a gunshot: `REPORT_MAX_M` is 250 m and a fist
+/// landing is audible across a room and along a pavement, which is this.
+pub const MELEE_IMPACT_MAX_M: f64 = 25.0;
 
 /// **Which of the four layers a `Play` is** (wave WPN2c) — the doc section 4's
 /// stack, in the order the queue carries them.
@@ -2709,6 +2858,27 @@ pub fn health_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.push(u8::from(h.dead));
     }
     out
+}
+
+/// **Every destructible in the world, and where it is** (wave WPN2d) — in
+/// `Guid` order.
+///
+/// The blast sweep's other half of the candidate list. It is HERE and not in
+/// `inf_physics::d3::gameplay` for the reason `inf-physics` does not name
+/// `bevy_ecs` anywhere: a filtered query is this crate's business, and the
+/// physics crate asks the world model rather than reaching into it.
+///
+/// **Empty on a level with no destructibles**, which is one absent-query read
+/// and is the whole of what it costs a level that has never spawned one.
+pub fn destructible_positions(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
+    use crate::components::{Destructible, GlobalTransform};
+    let w = world.world();
+    let Some(mut q) = w.try_query_filtered::<(&Guid, &GlobalTransform), With<Destructible>>() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(Uuid, DVec3)> = q.iter(w).map(|(g, t)| (g.0, t.translation())).collect();
+    rows.sort_by_key(|(g, _)| *g);
+    rows
 }
 
 /// **The weapon trace bytes**, in `Guid` order — the ammunition clock is sim

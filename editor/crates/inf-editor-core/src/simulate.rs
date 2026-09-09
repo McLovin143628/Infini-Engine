@@ -1643,9 +1643,14 @@ impl SimSession {
         // that is the order they happen in.
         let cracks = std::mem::take(&mut report.cracks);
         let bounces = std::mem::take(&mut report.casings.bounces);
-        self.fire_pool_audio(&cracks, &bounces);
+        // …and what wave WPN2d added to it: an explosion, and a blow landing.
+        let blasts = std::mem::take(&mut report.blasts);
+        let melee = std::mem::take(&mut report.melee_impacts);
+        self.fire_pool_audio(&cracks, &bounces, &blasts, &melee);
         report.cracks = cracks;
         report.casings.bounces = bounces;
+        report.blasts = blasts;
+        report.melee_impacts = melee;
         self.gameplay = report;
         // 3. Solver.
         self.bridge.step(dt);
@@ -2364,8 +2369,10 @@ impl SimSession {
         &mut self,
         cracks: &[inf_ecs::ballistics::Crack],
         bounces: &[inf_physics::d3::gameplay::CasingBounce],
+        blasts: &[inf_physics::d3::gameplay::BlastEvent],
+        melee: &[inf_physics::d3::gameplay::MeleeImpact],
     ) {
-        if cracks.is_empty() && bounces.is_empty() {
+        if cracks.is_empty() && bounces.is_empty() && blasts.is_empty() && melee.is_empty() {
             return;
         }
         let audio_cmds = &mut self.audio_cmds;
@@ -2405,6 +2412,40 @@ impl SimSession {
             audio_cmds.push(AudioCommand::Play(cmd));
         }
         // MIRROR-END casing_bounce
+        // MIRROR-BEGIN weapon_blast
+        for blast in blasts {
+            // **ONE BOOM PER EXPLOSION**, keyed on the shooter and salted, so
+            // two rockets landing on one step are one voice that restarts
+            // rather than two stacked — `crack_source_key`'s own rule — and so
+            // a launcher's own gunshot layers are not evicted by the thing it
+            // fired. The joules are already spent by the time this runs; what
+            // is left is the noise, at the place it happened.
+            let src = inf_ecs::weapon::blast_source();
+            let cmd = play_command_for(
+                inf_ecs::weapon::blast_source_key(guid_source_key(blast.shooter)),
+                &src,
+                src.spatial.then_some(blast.at),
+            );
+            audio_cmds.push(AudioCommand::Play(cmd));
+        }
+        // MIRROR-END weapon_blast
+        // MIRROR-BEGIN melee_impact
+        for impact in melee {
+            // **THE SURFACE CHOOSES THE CLIP** — the two-way stub
+            // (`inf_ecs::weapon::ImpactSurface`), decided in the fixed step
+            // where both hosts read it off the same world. A blow on a body is
+            // a dull thud and a blow on anything else is a sharp one, which is
+            // the whole difference this wave models; VEH3a's per-surface table
+            // extends it by adding variants and nothing here moves.
+            let src = inf_ecs::weapon::melee_impact_source(impact.surface);
+            let cmd = play_command_for(
+                inf_ecs::weapon::melee_source_key(guid_source_key(impact.shooter)),
+                &src,
+                src.spatial.then_some(impact.at),
+            );
+            audio_cmds.push(AudioCommand::Play(cmd));
+        }
+        // MIRROR-END melee_impact
     }
 
     /// Drain the FIFO dispatch queue (Wave 3): for each popped `(target, name)`,

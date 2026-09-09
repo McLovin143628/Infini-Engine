@@ -608,6 +608,28 @@ pub fn default_map() -> InputMap {
         // `handbrake`), and the d-pad is the one cluster this table has never
         // used. A player who wants it on a bumper rebinds it.
         .bind_button("cover", GamepadButton::DPadDown)
+        // ── wave WPN2d: THROW ──
+        //
+        // Bound by LITERAL for `cover`'s reason: the name lives in
+        // `inf_ecs::movement::actions` because the movement intent reads it, and
+        // this crate must not depend on the world model.
+        //
+        // **`KeyB`**, and the reasoning is `cover`'s run down to what is left.
+        // Every shooter alive puts a lethal on G; G is `view_mode` since CHAR1c
+        // and T is `cover` since COV1, and MOVING a bound control is a wave's
+        // decision rather than a side effect of adding one. B is the free letter
+        // nearest the verb.
+        .bind_key("throw", "KeyB")
+        // **The middle mouse button** -- the one mouse control this table has
+        // never used, and where several shooters put a quick-throw. Left is
+        // `attack` and right is `aim`; nothing else has ever wanted the wheel
+        // click, and `weapon_switch` reads the wheel's AXIS rather than its
+        // button.
+        .bind_mouse("throw", MouseButton::Middle)
+        // **The D-pad's up**, the twin of `cover` on its down. Every face
+        // button, bumper, trigger and stick click is spoken for; the d-pad's
+        // other three arms are what this table has left.
+        .bind_button("throw", GamepadButton::DPadUp)
         // ── P29.7: the three the vehicle and flight seams read ──
         //
         // `interact` is E, which is every game's enter-a-vehicle key; it shares

@@ -105,6 +105,24 @@ pub mod actions {
     /// would be a control whose meaning the player cannot predict — which is
     /// exactly the `KeyE`-ascend defect I5 fixed.
     pub const COVER: &str = "cover";
+    /// **Edge: throw what is equipped** (wave WPN2d).
+    ///
+    /// **The first key this engine has ever bound to a throw**, and it is
+    /// deliberately its own rather than folded onto `attack`: a grenade you
+    /// throw by holding the fire button is a grenade you throw by accident, and
+    /// the arbitration `attack` already carries (kick, then punch, then fire) is
+    /// three verbs on one button before a fourth arrives.
+    ///
+    /// **`KeyB`.** `COVER`'s own rule -- the first letter this table had not
+    /// spoken for that a player would guess -- run down to what is left: every
+    /// game alive puts a lethal on **G**, which is `view_mode` since CHAR1c, and
+    /// the runner-up **T** is `cover` since COV1. Moving either would be a
+    /// wave's decision rather than a side effect of adding one, so the throw
+    /// takes the free letter nearest the verb (B for the thing you lob) and
+    /// says so. The **middle mouse button** is the second binding, which is
+    /// where several shooters put a quick-throw and which is the one mouse
+    /// control this table has never used.
+    pub const THROW: &str = "throw";
     /// Edge: **cycle the rotation mode** — velocity-direction ↔ looking-direction
     /// (wave CHAR1c).
     ///
@@ -1235,6 +1253,9 @@ pub struct MovementIntent {
     pub dive: bool,
     /// Edge: **take cover, or leave it** (wave COV1). See [`actions::COVER`].
     pub cover: bool,
+    /// Edge: **throw the equipped throwable** (wave WPN2d). See
+    /// [`actions::THROW`].
+    pub throw: bool,
     /// Edge: enter/exit a vehicle (P29.7).
     pub interact: bool,
     /// Edge: lock or unlock the door in reach (island wave I8b).
@@ -1343,6 +1364,10 @@ impl MovementIntent {
             // stance key needs has no analogue here, because one press means
             // "the other one" in both directions.
             cover: pressed(actions::COVER),
+            // Wave WPN2d. A plain edge, on `cover`'s own reasoning: one press is
+            // one grenade, and there is nothing for a click-versus-hold
+            // discrimination to mean.
+            throw: pressed(actions::THROW),
             interact: pressed(actions::INTERACT),
             lock: pressed(actions::LOCK),
             fly: pressed(actions::FLY),
@@ -1422,6 +1447,7 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_dive |= intent.dive;
         // Wave COV1, and an edge for the reason every edge above is one.
         rt.press_cover |= intent.cover;
+        rt.press_throw |= intent.throw;
         rt.press_interact |= intent.interact;
         rt.press_lock |= intent.lock;
         rt.press_fly |= intent.fly;

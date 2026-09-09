@@ -404,6 +404,85 @@ pub fn casing_wav() -> Vec<u8> {
     wav_bytes(&casing_pcm(), SYNTH_RATE)
 }
 
+/// **How long a blast rings**, seconds (wave WPN2d).
+///
+/// One and eight tenths -- longer than the outdoor gunshot tail (1.5 s),
+/// because an explosion is the one thing in this engine that is louder than a
+/// rifle and the ear reads "bigger" as "rings longer" before it reads it as
+/// "starts louder".
+pub const BLAST_S: f64 = 1.80;
+
+/// **The blast's fundamental**, hertz. Thirty-five: an octave below the
+/// launcher class's own body row, which is as low as a 22 050 Hz clip can carry
+/// four cycles of before its own decay eats it.
+pub const BLAST_FUNDAMENTAL_HZ: f64 = 35.0;
+
+/// **How long a melee impact lasts**, seconds (wave WPN2d). Ninety
+/// milliseconds, which is a contact rather than a ring.
+pub const MELEE_IMPACT_S: f64 = 0.09;
+
+/// **The two melee surfaces' cutoffs**, hertz -- flesh, then everything else.
+///
+/// A body is a dull thud (a 900 Hz low-pass over a short noise burst) and a
+/// wall is a sharp clack (a 6 kHz one over the same burst), which is the whole
+/// of the two-way surface stub: one generator, one number, two clips.
+pub const MELEE_CUTOFF_HZ: [f64; 2] = [900.0, 6_000.0];
+
+/// **The blast's PCM** -- a very low body under a long decay with a broadband
+/// noise front, which is what an explosion is: a pressure step and then a room
+/// full of it.
+pub fn blast_pcm() -> Vec<f64> {
+    let n = samples_for(BLAST_S);
+    let k = decay_per_sample(BLAST_S / 5.5, SYNTH_RATE);
+    // The noise front dies in a tenth of the body's time: a bang, then a boom.
+    let kn = decay_per_sample(BLAST_S / 55.0, SYNTH_RATE);
+    let step = BLAST_FUNDAMENTAL_HZ / f64::from(SYNTH_RATE);
+    let mut lp = OnePole::new(2_400.0, SYNTH_RATE);
+    let mut phase = 0.0f64;
+    let mut env = 1.0;
+    let mut front = 1.0;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let tone = psine(phase);
+        let noise = lp.step(pnoise(0x5750_4e32_0000_00f1, i as u64)) * front;
+        out.push(tone * env * 0.7 + noise * 0.6);
+        phase += step;
+        env *= k;
+        front *= kn;
+    }
+    normalize(out)
+}
+
+/// **A melee impact's PCM**, by surface index (`0` flesh, `1` everything else).
+///
+/// One generator and one number, deliberately: the difference between hitting a
+/// person and hitting a wall is how much high end survives the contact, and a
+/// second hand-written clip would be a second thing to keep in step. VEH3a's
+/// per-surface table extends this by adding rows, not by adding generators.
+pub fn melee_impact_pcm(surface: u8) -> Vec<f64> {
+    let cutoff = MELEE_CUTOFF_HZ[(surface as usize).min(MELEE_CUTOFF_HZ.len() - 1)];
+    let n = samples_for(MELEE_IMPACT_S);
+    let k = decay_per_sample(MELEE_IMPACT_S / 7.0, SYNTH_RATE);
+    let mut lp = OnePole::new(cutoff, SYNTH_RATE);
+    let mut env = 1.0;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(lp.step(pnoise(0x5750_4e32_0000_00f2 + u64::from(surface), i as u64)) * env);
+        env *= k;
+    }
+    normalize(out)
+}
+
+/// **The blast's WAV bytes.**
+pub fn blast_wav() -> Vec<u8> {
+    wav_bytes(&blast_pcm(), SYNTH_RATE)
+}
+
+/// **A melee impact's WAV bytes**, by surface index.
+pub fn melee_impact_wav(surface: u8) -> Vec<u8> {
+    wav_bytes(&melee_impact_pcm(surface), SYNTH_RATE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
