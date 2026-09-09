@@ -166,6 +166,33 @@ PACKS = [
         ],
     },
     {
+        # **THE BRASS** (wave WPN2c's audit, carried 237). Nine empty shell
+        # casings, one per calibre, which is the art the casing pool's committed
+        # 19 mm cylinder stands in for. The wave carried the item saying the art
+        # "did NOT cross"; the audit measured why, and it is this list: the pack
+        # had no entry here at all, so the bridge was never pointed at it.
+        #
+        # `ship` is FALSE and that is not a formality: this is a Marketplace/Fab
+        # pack whose terms nobody in this project has read, so the meshes may be
+        # imported LOCALLY as a stand-in and may never be committed to the engine
+        # repository or cooked into a shipped pack. `MeshRef.asset` is the door
+        # they arrive through and it is one field with no schema; what does NOT
+        # exist yet is the CLASS -> MESH table (`inf_ecs::casing::casing_source`
+        # takes a `WeaponClass` and deliberately ignores it), so the art crossing
+        # is necessary and not sufficient.
+        "name": "FPS_Weapon_Bundle",
+        "license": "unknown - Unreal Marketplace / Fab pack in this project. "
+                   "Verify on its Fab page before shipping. LOCAL-ONLY: never "
+                   "committed to the engine repository, never cooked into a "
+                   "shipped pack.",
+        "ship": False,
+        "select": [
+            {"prefix": "/Game/FPS_Weapon_Bundle/Weapons/Meshes/Ammunition",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_Shell_.*_Empty$",
+             "limit": 16},
+        ],
+    },
+    {
         "name": "AdvancedRealisticGlass",
         "license": "unknown - Unreal Marketplace / Fab pack in this project. "
                    "Verify on its Fab page before shipping.",
