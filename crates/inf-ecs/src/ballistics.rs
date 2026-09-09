@@ -74,6 +74,7 @@ use bevy_ecs::prelude::Resource;
 use glam::DVec3;
 use uuid::Uuid;
 
+use crate::components::{AudioSource, DistanceModel};
 use crate::weapon::WeaponDef;
 use crate::world::EcsWorld;
 
@@ -197,6 +198,17 @@ pub struct Round {
     /// from the body that fired it; a round that comes back at its shooter after
     /// a ricochet (which nothing in this engine produces yet) should hit them.
     pub first_segment: bool,
+    /// **Whether this round has already cracked past the listener** (wave
+    /// WPN2c) — a latch, so a round that spends four sub-steps inside
+    /// [`CRACK_RADIUS_M`] makes ONE noise rather than four.
+    ///
+    /// It is FOLDED into [`round_state_bytes`], which is what makes the trace
+    /// grow from 81 bytes a round to 82 and is stated as the cause when a
+    /// committed trace moves. Folding it is not optional: it is a latch over
+    /// history rather than a function of the positions beside it, so two hosts
+    /// that disagreed about it would agree about every number the trace carried
+    /// and one of them would crack twice.
+    pub cracked: bool,
     /// The weapon that fired it.
     pub def: WeaponDef,
 }
@@ -281,8 +293,11 @@ pub fn clear_rounds(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<RoundPool>();
 }
 
-/// **The rounds' trace bytes** — 81 a round (16 guid + six f64 + two f64 + one
-/// flag), in flight order, and **empty when nothing is flying**.
+/// **The rounds' trace bytes** — 82 a round (16 guid + six f64 + two f64 + two
+/// flags), in flight order, and **empty when nothing is flying**.
+///
+/// It was 81 until wave WPN2c added [`Round::cracked`]; see that field for why
+/// a latch has to be folded.
 ///
 /// Empty is the load-bearing half: it is what keeps every trace committed before
 /// this wave byte-identical, and it is why the counters above are not in here.
@@ -295,7 +310,7 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
     if pool.rounds.is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(pool.rounds.len() * 81);
+    let mut out = Vec::with_capacity(pool.rounds.len() * ROUND_TRACE_BYTES);
     for r in &pool.rounds {
         out.extend_from_slice(r.shooter.as_bytes());
         for v in [
@@ -311,9 +326,18 @@ pub fn round_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(&r.travelled_m.to_bits().to_le_bytes());
         out.extend_from_slice(&r.age_s.to_bits().to_le_bytes());
         out.push(u8::from(r.first_segment));
+        out.push(u8::from(r.cracked));
     }
     out
 }
+
+/// **How many bytes one round folds into the trace** — 16 for the shooter's
+/// guid, eight f64 for the two vectors and the two scalars, and two flags.
+///
+/// Named because the fold and the arm that measures it must not be able to
+/// disagree about the arithmetic, which is a mistake this wave made once
+/// already one module over.
+pub const ROUND_TRACE_BYTES: usize = 16 + 8 * 8 + 2;
 
 // ── the flight ──────────────────────────────────────────────────────────────
 
@@ -424,6 +448,152 @@ pub fn is_headshot(point: DVec3, head: DVec3, body_radius_m: f64) -> bool {
     }
     let across = (d.x * d.x + d.z * d.z).sqrt();
     d.y.abs() <= HEAD_RADIUS_M && across <= body_radius_m.max(0.0) + HEAD_RADIUS_M
+}
+
+// ── the supersonic crack (wave WPN2c) ───────────────────────────────────────
+
+/// **The speed of sound**, m/s — the research doc section 4's own 343.
+///
+/// A round slower than this makes no crack, and that is not a tuning knob: a
+/// sonic boom is what a body faster than its own pressure wave leaves behind,
+/// and a subsonic round leaves nothing. The registry has weapons on both sides
+/// of it on purpose — the AS VAL is 295 m/s and is silent by physics rather
+/// than by a flag.
+pub const SPEED_OF_SOUND_MPS: f64 = 343.0;
+
+/// **How close a supersonic round must pass to be heard cracking**, metres —
+/// the doc's own four.
+///
+/// It is a distance from the LISTENER to the round's path, not to the round: a
+/// crack is heard where the shock cone crosses an ear, and at 900 m/s a round
+/// covers fifteen metres in a fixed step, so a point test would miss almost
+/// every one of them. See [`point_to_segment_m`].
+pub const CRACK_RADIUS_M: f64 = 4.0;
+
+/// **The volume a crack is played at.** Full: it is the loudest thing a person
+/// who is being shot at hears, and it is the whole point of the effect.
+pub const CRACK_VOLUME: f64 = 1.0;
+
+/// Metres inside which a crack is at full volume — one, because within four of
+/// the path it is essentially at the ear.
+pub const CRACK_MIN_M: f64 = 1.0;
+
+/// **Metres past which a crack is silent.** Twenty: it is a local event by
+/// construction ([`CRACK_RADIUS_M`] is four), and this exists so the spatial
+/// model has a curve rather than a cliff.
+pub const CRACK_MAX_M: f64 = 20.0;
+
+/// **The salt a crack's audio source key carries**, so a round cracking past
+/// somebody does not take its shooter's report layers' voices.
+pub const CRACK_SALT: u64 = 0x5750_4e32_0000_0005;
+
+/// **One round going past an ear** — what a host turns into a `Play`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crack {
+    /// **What kind of gun fired it** — which class's N-wave plays.
+    ///
+    /// On the crack rather than looked up from the shooter, for
+    /// `WeaponHit::class`'s reason exactly: the round has been in the air for up
+    /// to eight seconds and the shooter may have scrolled twice.
+    pub class: crate::weapon::WeaponClass,
+    /// Who fired the round. The source key is derived from it and
+    /// [`CRACK_SALT`], so one shooter's rounds are one crack voice.
+    pub shooter: Uuid,
+    /// **The closest point on the round's own segment to the listener** — where
+    /// the crack is heard from, which is beside the ear rather than at the
+    /// muzzle or at whatever the round eventually hits.
+    pub at: DVec3,
+    /// How fast the round was going, m/s. Above [`SPEED_OF_SOUND_MPS`] by
+    /// construction; carried so a log can show the margin.
+    pub speed_mps: f64,
+    /// How far the path passed from the listener, metres. At most
+    /// [`CRACK_RADIUS_M`].
+    pub miss_m: f64,
+}
+
+/// **How close a segment passes to a point**, metres — the research doc's own
+/// `check_supersonic_crack`, as a pure function.
+///
+/// Answers `(distance, closest point on the segment)`. A degenerate segment
+/// answers the distance to its start, which is the right answer for a round
+/// that did not move.
+///
+/// Portable: one dot product, one clamp and one length. No trigonometry, so it
+/// is bit-identical on every target — which it has to be, because the crack it
+/// decides is a command two hosts are compared on.
+pub fn point_to_segment_m(point: DVec3, a: DVec3, b: DVec3) -> (f64, DVec3) {
+    let seg = b - a;
+    let len2 = seg.length_squared();
+    if !(len2 > 0.0) || !point.is_finite() {
+        return ((point - a).length(), a);
+    }
+    let t = ((point - a).dot(seg) / len2).clamp(0.0, 1.0);
+    let closest = a + seg * t;
+    ((point - closest).length(), closest)
+}
+
+/// **Does this segment of this round crack past this listener?**
+///
+/// The doc's rule exactly: faster than sound, and passing within
+/// [`CRACK_RADIUS_M`] of the ear. `None` for everything else, including for a
+/// level with no listener — a crack nobody is standing near is a sound nobody
+/// makes.
+pub fn crack_for(
+    shooter: Uuid,
+    class: crate::weapon::WeaponClass,
+    prev: DVec3,
+    next: DVec3,
+    speed_mps: f64,
+    listener: Option<DVec3>,
+) -> Option<Crack> {
+    if !(speed_mps > SPEED_OF_SOUND_MPS) {
+        return None;
+    }
+    let ear = listener?;
+    let (miss_m, at) = point_to_segment_m(ear, prev, next);
+    if miss_m > CRACK_RADIUS_M {
+        return None;
+    }
+    Some(Crack {
+        class,
+        shooter,
+        at,
+        speed_mps,
+        miss_m,
+    })
+}
+
+/// **The `AudioSource` a supersonic crack plays** — one Ring-0 description, on
+/// `crate::weapon::report_source`'s own terms and for its reason.
+///
+/// The clip is the class's own N-wave ([`crate::weapon::ReportClip::Crack`]) —
+/// the same two milliseconds the report's fourth layer plays, because they are
+/// the same physical event heard from two places: the fourth layer is the shot
+/// heard from far away, and this is the round heard from beside its path.
+pub fn crack_source(class: crate::weapon::WeaponClass) -> AudioSource {
+    AudioSource {
+        clip: Some(crate::weapon::report_clip(
+            class,
+            crate::weapon::ReportClip::Crack,
+        )),
+        bus: crate::weapon::REPORT_BUS.to_string(),
+        volume: CRACK_VOLUME,
+        pitch: 1.0,
+        looping: false,
+        spatial: true,
+        min_distance: CRACK_MIN_M,
+        max_distance: CRACK_MAX_M,
+        distance_model: DistanceModel::Inverse,
+        rolloff: crate::weapon::REPORT_ROLLOFF,
+        occlusion: false,
+        autoplay: false,
+    }
+}
+
+/// **The source key a shooter's cracks play on** — salted off the shooter, so a
+/// burst going past somebody is one voice that restarts rather than forty.
+pub fn crack_source_key(shooter_key: u64) -> u64 {
+    shooter_key ^ CRACK_SALT
 }
 
 #[cfg(test)]
@@ -593,6 +763,7 @@ mod tests {
             travelled_m: 25.0,
             age_s: 0.0,
             first_segment: true,
+            cracked: false,
             def: WeaponDef::default(),
         };
         for i in 0..MAX_ROUNDS_IN_FLIGHT {
@@ -616,6 +787,7 @@ mod tests {
             travelled_m: 25.0,
             age_s: 0.0,
             first_segment: true,
+            cracked: false,
             def: WeaponDef::default(),
         };
         assert!(!spawn_round(&mut w, r, MAX_SHOT_RAYS_PER_STEP));
@@ -635,10 +807,11 @@ mod tests {
             travelled_m: 25.0,
             age_s: 0.0,
             first_segment: true,
+            cracked: false,
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));
-        assert_eq!(round_state_bytes(&w).len(), 81);
+        assert_eq!(round_state_bytes(&w).len(), ROUND_TRACE_BYTES);
         // …and a pool that has emptied folds nothing again.
         w.world_mut().resource_mut::<RoundPool>().rounds.clear();
         assert!(
@@ -661,6 +834,7 @@ mod tests {
             travelled_m: 25.0,
             age_s: 0.0,
             first_segment: true,
+            cracked: false,
             def: WeaponDef::default(),
         };
         assert!(spawn_round(&mut w, r, 0));

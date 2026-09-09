@@ -53,6 +53,24 @@ pub struct PlayCommand {
     /// Extra obstruction gain in `[0, 1]` the caller (the sim's occlusion
     /// raycast) supplies; `1.0` = unobstructed. The engine multiplies it in.
     pub occlusion_gain: f64,
+    /// **The low-pass cutoff this voice is born with**, hertz, or `None` for a
+    /// voice nothing filters (wave WPN2c).
+    ///
+    /// [`AudioCommand::SetOcclusion`]'s own doc used to say a `Play` carries no
+    /// cutoff *"because the model that decides one re-evaluates every step"*.
+    /// That is true of a DOOR and false of a one-shot: a gunshot heard four
+    /// hundred metres away is a thump because a few hundred metres of air is a
+    /// low-pass, and that cutoff is decided once, at the muzzle, and never
+    /// changes for the thirty milliseconds the sound exists. So a one-shot's
+    /// filter belongs on the command that starts it, and a loop's still belongs
+    /// on the per-step one.
+    ///
+    /// **It is audible** — see [`crate::mixer::Effect::Lowpass`] and
+    /// `SoundData::low_passed`: the engine filters the decoded frames through
+    /// its own one-pole before the voice starts, so this is a sound and not a
+    /// number in a log. `None` is the whole of the pre-WPN2c behaviour, which is
+    /// what keeps every committed command stream comparing equal.
+    pub lowpass_hz: Option<f64>,
 }
 
 impl PlayCommand {
@@ -68,6 +86,7 @@ impl PlayCommand {
             position: None,
             attenuation: Attenuation::default(),
             occlusion_gain: 1.0,
+            lowpass_hz: None,
         }
     }
 }
@@ -143,6 +162,44 @@ pub enum AudioCommand {
     /// Update the listener pose (position + orientation) for spatial mixing.
     SetListener(Listener),
 }
+
+/// **How many commands a host's audio log keeps** (wave WPN2c) — the ring the
+/// two hosts' `audio_log`s are built with, and the reason it is not
+/// `inf_core::DEFAULT_LOG_CAPACITY` any more.
+///
+/// # The arithmetic, with its population named
+///
+/// The default was 8 192, priced at island wave VEN1b against a ONE-layer
+/// gunshot: one shooter at 600 rpm reached the first eviction after 819 s and
+/// eight shooters after 102 s. This wave multiplies the rate by four and adds
+/// two more emitters, so the same firefight is:
+///
+/// ```text
+///   8 shooters x 600 rpm  =  80 shots/s
+///   x 4 layers            = 320 Play/s
+///   + one casing bounce per shot     =  80/s
+///   + one SetListener per fixed step =  60/s
+///                                    -------
+///                                      460/s
+/// ```
+///
+/// The gate arm this wave owes is `dropped == 0` over **120 s at eight
+/// shooters**, which is 55 200 commands, so 8 192 would have evicted after
+/// **17.8 s** and every arm that reads the head of the stream would have been
+/// reading a tail. Sixty-five thousand five hundred and thirty-six is the next
+/// power of two above the arm, and it buys a **142 s** horizon at that rate.
+///
+/// # What it costs, measured
+///
+/// An `AudioCommand` is 152 bytes on a 64-bit target (`wpn2c_gate` prints
+/// `size_of` beside this number rather than trusting it), so the ring is a
+/// **9.5 MiB** ceiling in the shipped player, reached only by a session that
+/// actually issues that many commands — the `Vec` grows to what is pushed. A
+/// quiet hour of walking around is 60 SetListeners a second, which reaches the
+/// ceiling in 18 minutes and stays there. That is the honest price of a log the
+/// gates read, and the alternative — a small ring in the player and a large one
+/// in a test — would mean the gates were not reading what ships.
+pub const AUDIO_LOG_CAPACITY: usize = 65_536;
 
 /// A tiny ordered queue of [`AudioCommand`]s. The sim pushes; the host drains.
 /// Deterministic by construction (a `Vec`, drained in order).

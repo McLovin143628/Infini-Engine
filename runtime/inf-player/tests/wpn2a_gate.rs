@@ -1551,6 +1551,7 @@ fn an_empty_pool_changes_no_trace_and_a_round_changes_every_one() {
         travelled_m: 25.0,
         age_s: 0.0,
         first_segment: true,
+        cracked: false,
         def: WeaponDef::default(),
     };
     assert!(ballistics::spawn_round(sim.world_mut(), r, 0));

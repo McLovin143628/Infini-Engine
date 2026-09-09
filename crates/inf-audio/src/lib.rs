@@ -57,14 +57,17 @@
 mod backend;
 pub mod command;
 mod engine;
+pub mod filter;
 pub mod mixer;
 mod sound;
 pub mod spatial;
+pub mod synth;
 
 pub mod asset;
 
 pub use asset::{AudioAsset, AudioFormat, AudioImportSettings, BusChoice};
-pub use command::{AudioCommand, AudioCommandQueue, PlayCommand};
+pub use command::{AudioCommand, AudioCommandQueue, PlayCommand, AUDIO_LOG_CAPACITY};
+pub use filter::OnePole;
 pub use engine::{AudioEngine, Bus, BusRef, OcclusionHook, PlaySettings, SoundHandle};
 pub use mixer::{Effect, MixerConfig, ResolvedBus};
 pub use sound::{DecodeError, SoundData};

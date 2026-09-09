@@ -176,6 +176,35 @@ pub struct WeaponHit {
     /// the noise is a property of the shot and not of whatever is in the hand
     /// afterwards.
     pub loud: bool,
+    /// **What kind of gun made the noise** (wave WPN2c) — the five clips a
+    /// report is built from are chosen by it.
+    ///
+    /// On the shot for [`loud`](Self::loud)'s reason, third time: what a gunshot
+    /// SOUNDS like is a property of the shot, and by the time the audio fence
+    /// runs the shooter may have scrolled to a pistol.
+    pub class: inf_ecs::weapon::WeaponClass,
+    /// **Whether the muzzle was inside** (wave WPN2c) — the enclosure probe's
+    /// verdict, taken at the muzzle on the step the trigger went down.
+    ///
+    /// It decides which of the two tail clips layer 3 plays. It is taken HERE
+    /// and not in the hosts because it costs six raycasts against a physics
+    /// world, and a value two hosts each computed for themselves is a value they
+    /// can disagree about. See `super::audio::enclosure_at`.
+    pub indoors: bool,
+    /// **How far the listener was from the muzzle**, metres, or `f64::INFINITY`
+    /// on a level with nobody listening (wave WPN2c).
+    ///
+    /// The distant layer's volume is a function of it. Sim-side for `indoors`'
+    /// reason: each host has its own `active_listener`, and the two agreeing was
+    /// a coincidence rather than a fence — see `inf_ecs::audio`.
+    pub listener_m: f64,
+    /// **Which round of the magazine this was** (wave WPN2c) — the counter the
+    /// body layer's pitch jitter is drawn from.
+    ///
+    /// The doc's `rand_pitch(0.98, 1.02)` with no RNG behind it: a fixed step
+    /// holds no random state, so the n-th round's pitch comes off
+    /// [`inf_ecs::weapon::shot_uniforms`] and is the same in a replay.
+    pub shot_index: u64,
 }
 
 /// **What the projectile pool did in one fixed step** (wave WPN2a).
@@ -214,6 +243,63 @@ pub struct RoundReport {
     /// never had one, and every headshot on it would be tested against a
     /// number instead of a bone.
     pub heads_without_a_socket: u32,
+    /// **Casts the enclosure probe spent this step** (wave WPN2c) — six per
+    /// loud trigger pull, and the reason the ray ceiling is priced at seven a
+    /// shot rather than one.
+    ///
+    /// Its own counter beside [`rays`](Self::rays) because the two are bounded
+    /// by the same ceiling and spent by different things: a gate that saw only
+    /// the total could not say which half was about to cross it.
+    pub probe_rays: u32,
+    /// **Loud shots the probe called INDOORS this step** — an engagement
+    /// counter, on `crowd_doors`' terms: "the probe ran" and "somebody fired
+    /// inside a building" are different facts, and a gate that could not tell
+    /// them apart would certify a probe that always answered `false`.
+    pub indoor_shots: u32,
+}
+
+/// **What the brass did in one fixed step** (wave WPN2c).
+///
+/// Engagement counters on [`RoundReport`]'s own terms, plus one list: a bounce
+/// is a SOUND, and the hosts need to know where and at what pitch, so it is
+/// carried rather than counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CasingReport {
+    /// Casings ejected this step — one per round that left a barrel.
+    pub ejected: u32,
+    /// Casings alive after this step's fall.
+    pub live: u32,
+    /// **Casts the fall spent** — one per AIRBORNE casing. A settled one costs
+    /// nothing, which is the whole reason the ring can be a hundred and
+    /// twenty-eight deep.
+    pub rays: u32,
+    /// Casings that came to rest this step.
+    pub settled: u32,
+    /// Casings that aged out this step.
+    pub expired: u32,
+    /// **Casings recycled over the session** because the ring was full — the
+    /// pool's own running total, surfaced so a gate can say the ring wrapped.
+    pub recycled: u64,
+    /// **First contacts this step** — one landing sound each, built into a
+    /// `Play` by both hosts inside the `casing_bounce` MIRROR fence.
+    pub bounces: Vec<CasingBounce>,
+}
+
+/// **One casing hitting the ground for the first time** — what a host turns
+/// into a pitch-randomised metallic one-shot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CasingBounce {
+    /// The casing's own derived entity guid — the source key its voice is
+    /// salted off, so two casings landing together are two voices.
+    pub casing: Uuid,
+    /// Where it hit, world metres.
+    pub at: DVec3,
+    /// The note it landed on, from the counter hash
+    /// (`inf_ecs::casing::bounce_pitch`).
+    pub pitch: f64,
+    /// What kind of gun threw it. Carried for the day the clip is per-calibre;
+    /// today one clip serves every class and the pitch is the difference.
+    pub class: inf_ecs::weapon::WeaponClass,
 }
 
 /// What one fixed step of gameplay did.
@@ -231,6 +317,16 @@ pub struct GameplayReport {
     pub npc_cover: super::cover::NpcCoverReport,
     /// Rounds fired this step.
     pub shots: u32,
+    /// **What the brass did** this step (wave WPN2c).
+    pub casings: CasingReport,
+    /// **Rounds that went supersonically past the listener** this step (wave
+    /// WPN2c) — one per round, ever, because [`inf_ecs::ballistics::Round`]
+    /// latches it.
+    ///
+    /// A list rather than a count for [`CasingReport::bounces`]' reason: each
+    /// one is a `Play` at a place, and the place is the closest point on the
+    /// round's own segment to the ear rather than the muzzle it left.
+    pub cracks: Vec<inf_ecs::ballistics::Crack>,
     /// **What the projectile pool did this step** (wave WPN2a) — every field an
     /// engagement counter, and every one of them zero on a level that has never
     /// fired a round, which is what tells "the pass ran" from "something flew".
@@ -364,6 +460,11 @@ pub fn step_gameplay(
     //     Inert on every level that has never fired a round: one absent-resource
     //     read.
     step_rounds(world, bridge, &band, dt, &mut report);
+    // 1c. **Every casing already on the way down** (wave WPN2c), on 1b's
+    //     argument verbatim: a case ejected this step leaves the port on the
+    //     step the trigger went down and MOVES on the next, which is what a
+    //     body leaving a port does. Inert on every level that has never fired.
+    step_casings(world, bridge, dt, &mut report);
     // 2. Every character with a weapon: the trigger, the reload, the clocks.
     step_weapons(world, bridge, dt, &mut report);
     // 3. Every pending kick: the notify, or the fuse.
@@ -373,6 +474,11 @@ pub fn step_gameplay(
     //     After the weapon step, because that is where a scroll wheel changes
     //     what is equipped.
     step_equipped_weapons(world);
+    // 3b-ii. **The brass, as things you can see** (wave WPN2c). Beside the
+    //     equipped weapon and on its doctrine: a derived guid, a runtime
+    //     entity, no schema. AFTER the weapon step so a case ejected this step
+    //     is drawn on the step it was thrown.
+    step_casing_entities(world);
     // 3c. **The hands** (SK1c) — one request per character, composed from what
     //     it is holding and what it just pressed E on. After the weapon entity
     //     exists (so a hold and a spawn cannot disagree about the same step) and
@@ -1371,10 +1477,22 @@ fn step_weapons(
             report.muzzles_without_a_socket += 1;
         }
         let dir = weapon::shot_direction_with(&def, yaw, pitch, shot_index, cone_deg);
+        // **THE BRASS** (wave WPN2c) — one case per round that leaves a barrel,
+        // thrown out of the weapon's own ejection port. A melee weapon ejects
+        // nothing (a fist has no port), and neither does one whose port speed is
+        // zero, which is how a definition opts out without a flag.
+        if !def.is_melee() && def.eject_speed_mps > 0.0 {
+            let port = inf_ecs::casing::eject_point(from, &def, yaw);
+            let throw = inf_ecs::casing::eject_velocity(&def, yaw);
+            if inf_ecs::casing::eject_casing(world, guid, def.audio_class(), port, throw).is_some()
+            {
+                report.casings.ejected += 1;
+            }
+        }
         let hit = if def.is_melee() {
             resolve_swing(world, guid, &def, from, dir, yaw)
         } else {
-            resolve_shot(world, bridge, guid, &def, from, dir, report)
+            resolve_shot(world, bridge, guid, &def, from, dir, shot_index, report)
         };
         apply_hit(world, &hit, dt, report);
         report.hits.push(hit);
@@ -1472,6 +1590,7 @@ fn hit_owner(bridge: &PhysicsBridge3D, collider: super::ColliderId3D) -> Option<
         .or_else(|| bridge.guid_of_ragdoll_collider(collider))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_shot(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -1479,6 +1598,7 @@ fn resolve_shot(
     def: &WeaponDef,
     from: DVec3,
     dir: DVec3,
+    shot_index: u64,
     report: &mut GameplayReport,
 ) -> WeaponHit {
     // The step's ray bill so far: **one cast per shot fired here**, and nothing
@@ -1487,10 +1607,30 @@ fn resolve_shot(
     // Counting them in both places halved the effective bound: measured, at
     // eight shooters and 900 rpm the pool peaked at **32** rounds against a
     // stated ceiling of 64 and refused 301 spawns.
-    let rays_already = report.shots as usize;
+    // **Seven, not one** (wave WPN2c). The enclosure probe below casts
+    // `ENCLOSURE_PROBE_RAYS` more per shot, and a ceiling that did not know
+    // about them would be a ceiling on a sixth of the real bill. So the step's
+    // ray count is the shot's cast plus its probe's, per shot fired so far, and
+    // the pool's spawn refusal is priced against the larger number.
+    let rays_already =
+        report.shots as usize * (1 + super::audio::ENCLOSURE_PROBE_RAYS);
     let range = def.range_m.clamp(0.1, SHOT_MAX_RANGE_M);
     let reach = def.hitscan_reach_m().clamp(0.0, range);
     let exclude = shot_exclusions(world, bridge, shooter);
+    // **THE ROOM** (wave WPN2c), before the shot's own cast, because the shot
+    // may consume the borrow and because the answer is about where the muzzle
+    // IS rather than about what it hit. Six rays; counted above.
+    let enclosure = super::audio::enclosure_at(bridge.world_mut(), from, &exclude);
+    report.rounds.probe_rays += super::audio::ENCLOSURE_PROBE_RAYS as u32;
+    if enclosure.indoors {
+        report.rounds.indoor_shots += 1;
+    }
+    // **HOW FAR THE EAR IS** (wave WPN2c). `INFINITY` on a level with no
+    // listener, which makes the distant layer silent — the honest answer to
+    // "nobody is listening" rather than a zero that would make it loudest.
+    let listener_m = inf_ecs::audio::active_listener_position(world)
+        .map(|p| (p - from).length())
+        .unwrap_or(f64::INFINITY);
     // A launcher's threshold is zero, and a zero-length cast is not a cast: skip
     // it rather than clamping it up to 0.1 m, which would put a rocket's first
     // ten centimetres inside a rule that has nothing to say about them.
@@ -1536,6 +1676,10 @@ fn resolve_shot(
                 arrived: false,
                 headshot,
                 report_max_m: def.report_max_m,
+                class: def.audio_class(),
+                indoors: enclosure.indoors,
+                listener_m,
+                shot_index,
             }
         }
         None => {
@@ -1549,6 +1693,7 @@ fn resolve_shot(
                     travelled_m: reach,
                     age_s: 0.0,
                     first_segment: true,
+                    cracked: false,
                     def: *def,
                 };
                 if inf_ecs::ballistics::spawn_round(world, round, rays_already) {
@@ -1568,6 +1713,10 @@ fn resolve_shot(
                 arrived: false,
                 headshot: false,
                 report_max_m: def.report_max_m,
+                class: def.audio_class(),
+                indoors: enclosure.indoors,
+                listener_m,
+                shot_index,
             }
         }
     }
@@ -1655,6 +1804,181 @@ fn head_hit(world: &EcsWorld, target: Uuid, point: DVec3, no_socket: &mut u32) -
 ///
 /// # The segment cast
 ///
+/// **Every casing in the air** (wave WPN2c) — gravity, one bounce, and a
+/// settle.
+///
+/// # Where the cost is, and where it is not
+///
+/// One raycast per **airborne** casing per step and nothing at all for one that
+/// has settled: a floor covered in brass is an age increment each. That is the
+/// whole reason the lifetime can be eight seconds and the ring a hundred and
+/// twenty-eight — at eight shooters and 600 rpm the pool is full and almost all
+/// of it is already down.
+///
+/// # The shooter is excluded for the casing's whole flight
+///
+/// A casing is born at the muzzle, which on a character with no rig is *inside*
+/// its own capsule (`muzzle_of`'s height fallback), so a first ray that could
+/// see the shooter would bounce every case off its owner's chest. The exclusion
+/// set is built once per shooter per step rather than once per casing, because
+/// eight shooters can own a hundred and twenty-eight casings between them.
+///
+/// Inert on every level that has never fired: one absent-resource read.
+fn step_casings(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
+    use inf_ecs::casing::{
+        advance_casing, bounce_pitch, bounce_velocity, casing_guid, CasingPool,
+        CASING_CONTACT_EPS_M, CASING_LIFETIME_S,
+    };
+    if world.world().get_resource::<CasingPool>().is_none() {
+        return;
+    }
+    let live: Vec<inf_ecs::casing::Casing> =
+        world.world().resource::<CasingPool>().casings.to_vec();
+    if live.is_empty() {
+        return;
+    }
+    let mut excludes: std::collections::BTreeMap<Uuid, BTreeSet<super::ColliderId3D>> =
+        std::collections::BTreeMap::new();
+    let mut survivors: Vec<inf_ecs::casing::Casing> = Vec::with_capacity(live.len());
+    for mut c in live {
+        c.age_s += dt;
+        if c.age_s >= CASING_LIFETIME_S || !c.at.is_finite() {
+            report.casings.expired += 1;
+            continue;
+        }
+        if !c.settled() {
+            let prev = c.at;
+            let (next, v) = advance_casing(c.at, c.velocity, dt);
+            let seg = next - prev;
+            let len = seg.length();
+            let mut landed = false;
+            if len > 1e-9 {
+                let exclude = excludes
+                    .entry(c.shooter)
+                    .or_insert_with(|| shot_exclusions(world, bridge, c.shooter));
+                report.casings.rays += 1;
+                if let Some(h) = bridge.world_mut().cast_ray_where(
+                    prev,
+                    seg / len,
+                    len,
+                    exclude,
+                    super::CastTargets::AllSolid,
+                ) {
+                    landed = true;
+                    c.contacts = c.contacts.saturating_add(1);
+                    c.at = h.point + h.normal.normalize_or_zero() * CASING_CONTACT_EPS_M;
+                    c.velocity = bounce_velocity(v, h.normal);
+                    // **ONE SOUND PER CASING**, on its FIRST contact. The second
+                    // is where it stops and is not a bounce; a third would be
+                    // the skitter this pool deliberately does not simulate.
+                    if c.contacts == 1 {
+                        report.casings.bounces.push(CasingBounce {
+                            casing: casing_guid(c.shooter, c.seq),
+                            at: h.point,
+                            pitch: bounce_pitch(c.seq),
+                            class: c.class,
+                        });
+                    }
+                    if c.settled() {
+                        c.velocity = DVec3::ZERO;
+                        c.spin_deg_s = DVec3::ZERO;
+                        report.casings.settled += 1;
+                    }
+                }
+            }
+            if !landed {
+                c.at = next;
+                c.velocity = v;
+            }
+            c.angle_deg += c.spin_deg_s * dt;
+        }
+        survivors.push(c);
+    }
+    let mut pool = world.world_mut().resource_mut::<CasingPool>();
+    pool.casings = survivors;
+    pool.bounced += report.casings.bounces.len() as u64;
+    pool.settled += u64::from(report.casings.settled);
+    pool.expired += u64::from(report.casings.expired);
+    report.casings.live = pool.casings.len() as u32;
+    report.casings.recycled = pool.recycled;
+}
+
+/// **The brass, as things you can see** (wave WPN2c) — one entity per live
+/// casing, on `step_equipped_weapons`' doctrine exactly.
+///
+/// # Why entities and not a scatter batch
+///
+/// The P22.4 GPU scatter path keys a batch on a **content hash of its packed
+/// instances**, so a batch whose instances move re-uploads every step — which
+/// is why the rubble it was built for is frozen at its rest pose. Tumbling
+/// brass has no rest pose. The per-`MeshRef` instanced path does what is
+/// wanted for free: the renderer buckets by `(blend, primitive)` and issues one
+/// `draw_indexed` per bucket, so a hundred and twenty-eight cylinders are one
+/// draw call.
+///
+/// The guid is DERIVED (`casing_guid`), so both hosts spawn the same entity for
+/// the same casing on the same step; the entity appears in the trace as a
+/// transform row, which is the honest cost and is the same one the equipped
+/// weapon pays.
+///
+/// Inert on every level that has never fired: one absent-resource read.
+fn step_casing_entities(world: &mut EcsWorld) {
+    use inf_ecs::casing::{casing_guid, CasingMark, CasingPool, CASING_LENGTH_M, CASING_RADIUS_M};
+    use inf_ecs::components::{MeshRef, Primitive, Transform, Visibility};
+    if world.world().get_resource::<CasingPool>().is_none() {
+        return;
+    }
+    let live: Vec<(Uuid, DVec3, DVec3)> = world
+        .world()
+        .resource::<CasingPool>()
+        .casings
+        .iter()
+        .map(|c| (casing_guid(c.shooter, c.seq), c.at, c.angle_deg))
+        .collect();
+    let want: BTreeSet<Uuid> = live.iter().map(|(g, _, _)| *g).collect();
+    // Anything marked as brass that the pool no longer holds is gone.
+    let stale: Vec<Uuid> = inf_ecs::casing::drawn_casings(world)
+        .into_iter()
+        .filter(|g| !want.contains(g))
+        .collect();
+    for g in stale {
+        if let Some(e) = world.entity_of(g) {
+            world.despawn(e);
+        }
+    }
+    for (g, at, angle) in live {
+        let e = match world.entity_of(g) {
+            Some(e) => e,
+            None => world.spawn_with_guid(g, "Brass", None),
+        };
+        let mut t = Transform::IDENTITY;
+        t.translation = inf_ecs::math::Vec3d::new(at.x, at.y, at.z);
+        t.rotation = inf_ecs::math::Vec3d::new(angle.x, angle.y, angle.z);
+        t.scale = inf_ecs::math::Vec3d::new(
+            CASING_RADIUS_M * 2.0,
+            CASING_RADIUS_M * 2.0,
+            CASING_LENGTH_M,
+        );
+        world.world_mut().entity_mut(e).insert((
+            t,
+            MeshRef {
+                // A tiny cylinder is the committed fallback the brief names.
+                // The UE `SM_Shell_*_Empty` art is LOCAL-ONLY and reaches this
+                // through `MeshRef::asset`, which is one field and no schema.
+                primitive: Primitive::Cylinder,
+                asset: None,
+            },
+            Visibility::default(),
+            CasingMark,
+        ));
+    }
+}
+
 /// [`inf_ecs::ballistics::PROJECTILE_SUB_STEPS`] per fixed step, and each
 /// sub-step is a cast from the previous position to the next one through the
 /// **same** `cast_ray_excluding` door the instant ray uses — never a test of the
@@ -1679,6 +2003,10 @@ fn step_rounds(
         return;
     }
     let sub_dt = dt / f64::from(PROJECTILE_SUB_STEPS);
+    // **WHERE THE EAR IS** (wave WPN2c) — resolved ONCE for the whole pool
+    // rather than per round per sub-step, which is up to 256 walks of the world
+    // for a number that cannot change inside a fixed step.
+    let ear = inf_ecs::audio::active_listener_position(world);
     let mut survivors: Vec<inf_ecs::ballistics::Round> = Vec::with_capacity(live.len());
     let mut landed: Vec<(WeaponHit, f64)> = Vec::new();
     for mut r in live {
@@ -1688,6 +2016,29 @@ fn step_rounds(
             let (next, v) = inf_ecs::ballistics::advance_round(r.at, r.velocity, &r.def, sub_dt);
             let seg = next - prev;
             let len = seg.length();
+            // **THE SUPERSONIC CRACK** (wave WPN2c) — the doc section 4's own
+            // rule, on the SEGMENT rather than on the point: a 900 m/s round
+            // covers fifteen metres in a fixed step, so a point test would miss
+            // almost every pass. Latched on the round, so four sub-steps inside
+            // four metres of an ear is one noise.
+            //
+            // It is decided here rather than host-side because it needs the
+            // round's own segment, which only exists inside this loop, and
+            // because a value two hosts each computed for themselves is a value
+            // they can disagree about.
+            if !r.cracked {
+                if let Some(c) = inf_ecs::ballistics::crack_for(
+                    r.shooter,
+                    r.def.audio_class(),
+                    prev,
+                    next,
+                    r.velocity.length(),
+                    ear,
+                ) {
+                    report.cracks.push(c);
+                    r.cracked = true;
+                }
+            }
             report.rounds.rays += 1;
             if len > 1e-6 {
                 // **Segment 0 only.** A round leaves a hand's breadth from the
@@ -1741,6 +2092,16 @@ fn step_rounds(
                             arrived: true,
                             headshot,
                             report_max_m: r.def.report_max_m,
+                            // **A quiet hit reaches no report layer**, so these
+                            // four are carried for completeness rather than
+                            // read: `fire_weapon_audio` builds a stack only
+                            // under `hit.loud`. The class is still the round's
+                            // OWN weapon's, because the day an arrival makes a
+                            // noise it will be that weapon's noise.
+                            class: r.def.audio_class(),
+                            indoors: false,
+                            listener_m: f64::INFINITY,
+                            shot_index: 0,
                         },
                         flight,
                     ));
@@ -2273,6 +2634,14 @@ fn resolve_swing(
             // where a melee hit grows a point.
             headshot: false,
             report_max_m: def.report_max_m,
+            // A swing is never loud (see `loud` above), so no report layer ever
+            // reads these. A fist names no class and its band answers `Pistol`
+            // on a zero-length barrel, which is as meaningless as it is
+            // harmless: nothing plays it.
+            class: def.audio_class(),
+            indoors: false,
+            listener_m: f64::INFINITY,
+            shot_index: 0,
         },
         None => WeaponHit {
             shooter,
@@ -2287,6 +2656,10 @@ fn resolve_swing(
             arrived: false,
             headshot: false,
             report_max_m: def.report_max_m,
+            class: def.audio_class(),
+            indoors: false,
+            listener_m: f64::INFINITY,
+            shot_index: 0,
         },
     }
 }

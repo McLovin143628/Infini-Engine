@@ -107,14 +107,30 @@ impl Backend {
         panning: f64,
         rate: f64,
         looping: bool,
+        start_s: f64,
     ) -> bool {
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
-            return inner.play(id, data, gain, panning, rate, looping);
+            return inner.play(id, data, gain, panning, rate, looping, start_s);
         }
         // No live device: track the voice so the reap seam can complete it.
         self.null_voices.insert(id, looping);
         true
+    }
+
+    /// **Where a live voice has got to**, seconds — zero with no device, which
+    /// is the only honest answer when nothing is actually playing (wave WPN2c).
+    ///
+    /// One caller: re-filtering a voice whose cutoff changed under it restarts
+    /// the sound, and restarting a two-minute club loop at zero because
+    /// somebody opened a door would be worse than the muffling it buys.
+    #[allow(unused_variables)]
+    pub(crate) fn position(&self, id: VoiceId) -> f64 {
+        #[cfg(feature = "cpal")]
+        if let Some(inner) = self.inner.as_ref() {
+            return inner.position(id);
+        }
+        0.0
     }
 
     /// Push updated mix parameters onto a live voice. No-op when disabled or the
@@ -235,6 +251,7 @@ mod cpal_impl {
             panning: f64,
             rate: f64,
             looping: bool,
+            start_s: f64,
         ) -> bool {
             let mut sound = data
                 .inner
@@ -242,6 +259,9 @@ mod cpal_impl {
                 .volume(to_decibels(gain))
                 .panning(Panning(panning as f32))
                 .playback_rate(PlaybackRate(rate));
+            if start_s > 0.0 {
+                sound = sound.start_position(start_s);
+            }
             if looping {
                 // Loop the whole clip (from 0 s to the end).
                 sound = sound.loop_region(0.0..);
@@ -260,6 +280,10 @@ mod cpal_impl {
                 }
                 Err(_) => false,
             }
+        }
+
+        pub(super) fn position(&self, id: VoiceId) -> f64 {
+            self.voices.get(&id).map(|h| h.position()).unwrap_or(0.0)
         }
 
         pub(super) fn set_params(&mut self, id: VoiceId, gain: f64, panning: f64, rate: f64) {

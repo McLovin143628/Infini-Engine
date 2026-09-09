@@ -2436,6 +2436,10 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
             arrived: false,
             headshot: false,
             report_max_m: inf_ecs::weapon::REPORT_MAX_M,
+            class: inf_ecs::weapon::WeaponClass::Ar,
+            indoors: false,
+            listener_m: f64::INFINITY,
+            shot_index: 0,
         })
         .collect();
     let n = d3::gameplay::panic_sources_for(&hits);

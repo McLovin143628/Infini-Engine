@@ -2876,7 +2876,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 15] = [
+    const SECTIONS: [&str; 16] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2932,6 +2932,14 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // carries those — and would only diverge one step later, when the
         // velocity nobody was comparing turned into a position somebody was.
         "feel::feel_state_bytes",
+        // WPN2c, pinned in the SAME commit that folds it. Its absence would be
+        // invisible for the two reasons above and one of its own: the draw pass
+        // reconciles a set of ENTITIES against this pool every step, so a host
+        // that stopped folding it would still spawn and despawn brass off a
+        // pool nothing was comparing — and the divergence would surface in the
+        // snapshot section, fifteen rows earlier, wearing a transform as its
+        // symptom.
+        "casing::casing_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

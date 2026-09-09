@@ -1191,6 +1191,385 @@ pub fn report_source() -> AudioSource {
     }
 }
 
+// ── the four layers (wave WPN2c) ────────────────────────────────────────────
+
+/// **The five clips one weapon class owns** — the research doc §4's stack, as
+/// files.
+///
+/// Four LAYERS play per shot ([`ReportLayerKind`]) and there are five clips,
+/// because the third layer is a *room*: a shot indoors and the same shot on the
+/// street are the same layer with different bytes, chosen by the enclosure
+/// probe (`inf_physics::d3::audio::enclosure_of`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReportClip {
+    /// The mechanical snap — bolt, hammer, action. Five milliseconds or less.
+    Transient,
+    /// The explosive core, 40-80 Hz. The loudest thing this engine makes.
+    Body,
+    /// A tight room's reflection, 0.3 s.
+    IndoorTail,
+    /// A street's reflection, 1.5 s.
+    OutdoorTail,
+    /// The distant N-wave, 2 ms — both the fourth layer and the supersonic
+    /// crack a round makes going past an ear.
+    Crack,
+}
+
+impl ReportClip {
+    /// Every clip kind, in the order the GUID table is built in.
+    pub const ALL: [ReportClip; 5] = [
+        ReportClip::Transient,
+        ReportClip::Body,
+        ReportClip::IndoorTail,
+        ReportClip::OutdoorTail,
+        ReportClip::Crack,
+    ];
+
+    /// Its index, zero to four — the low nibble of its GUID.
+    pub fn index(self) -> u8 {
+        Self::ALL
+            .iter()
+            .position(|c| *c == self)
+            .expect("ALL contains every variant") as u8
+    }
+
+    /// The file stem a generated clip is committed under, as in
+    /// `Report_Ar_Body.inf_audio`.
+    pub fn file_stem(self) -> &'static str {
+        match self {
+            ReportClip::Transient => "Transient",
+            ReportClip::Body => "Body",
+            ReportClip::IndoorTail => "IndoorTail",
+            ReportClip::OutdoorTail => "OutdoorTail",
+            ReportClip::Crack => "Crack",
+        }
+    }
+}
+
+/// **The base of the thirty-five generated clip GUIDs** (wave WPN2c).
+///
+/// `0x5750_4e32` is `"WPN2"`, one after [`WEAPON_REPORT_CLIP`]'s `"WPN1"`, on
+/// exactly its argument: an asset an engine constant names by id must have the
+/// same id every time or the committed bytes are a different set of files on
+/// every build.
+pub const REPORT_CLIP_BASE: u128 = 0x5750_4e32_0000_0000;
+
+/// **Which `.inf_audio` a class plays for a layer** — the thirty-five-entry
+/// table, as arithmetic rather than as thirty-five constants.
+///
+/// `base | class << 8 | clip`, so a GUID is readable: `…0201` is class 2, the
+/// assault rifle, clip 1, the body.
+///
+/// # The one fixed point
+///
+/// Wave WPN1's [`WEAPON_REPORT_CLIP`] **is** the assault rifle's body layer.
+/// It is the clip this engine has named since WPN1, the one `.inf_audio` the
+/// `samples/phase30-gameplay` fixture commits and the one that fixture's own
+/// rifle fires — so it keeps its GUID and the table is built around it rather
+/// than orphaning a committed file. Everything else is derived. The special
+/// case lives here, in the one function that knows the table, rather than at
+/// the call sites that ask it.
+pub fn report_clip(class: WeaponClass, clip: ReportClip) -> Uuid {
+    if class == WeaponClass::Ar && clip == ReportClip::Body {
+        return WEAPON_REPORT_CLIP;
+    }
+    Uuid::from_u128(REPORT_CLIP_BASE | (u128::from(class.index()) << 8) | u128::from(clip.index()))
+}
+
+/// **The metal one-shot a shell casing makes when it lands** (wave WPN2c) —
+/// the doc section 3's `casing_drop_metal_01.wav`, pitch-randomised per casing.
+///
+/// One clip for every calibre: what a brass case sounds like on concrete is a
+/// property of the concrete, and the pitch hash is what makes two of them
+/// different. It sits outside the class table because it is not a layer of a
+/// report.
+pub const CASING_CLIP: Uuid = Uuid::from_u128(REPORT_CLIP_BASE | 0x00f0);
+
+/// **Which of the four layers a `Play` is** (wave WPN2c) — the doc section 4's
+/// stack, in the order the queue carries them.
+///
+/// The order is the contract: a queue is ordered, and a gate that compares two
+/// command streams cannot tell an ordering it never asserted. It is also the
+/// order a person hears them in — the snap before the boom before the room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReportLayerKind {
+    /// Layer 1 — the mechanical punch.
+    Transient,
+    /// Layer 2 — the explosive body.
+    Body,
+    /// Layer 3 — the environment tail, indoor or outdoor.
+    Tail,
+    /// Layer 4 — the distant crack, silent until the listener is far enough
+    /// away for it to be the thing they hear.
+    Distant,
+}
+
+impl ReportLayerKind {
+    /// The four, in queue order.
+    pub const ALL: [ReportLayerKind; 4] = [
+        ReportLayerKind::Transient,
+        ReportLayerKind::Body,
+        ReportLayerKind::Tail,
+        ReportLayerKind::Distant,
+    ];
+
+    /// Its index, zero to three.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|k| *k == self)
+            .expect("ALL contains every variant")
+    }
+}
+
+/// **The four salts a shooter's source keys are spread over** (wave WPN2c).
+///
+/// # What this closes
+///
+/// Since wave WPN1 a report has been keyed on `guid_source_key(shooter)`, and
+/// [`report_source`]'s own doc has carried the defect that follows: that is the
+/// **shooter's own emitter namespace**, so a character carrying an autoplay
+/// `AudioSource` would have its voice replaced by its own gunshot — and the
+/// autoplay walk starts a source once, so it would never come back. Nothing in
+/// the committed tree does it, which is why it was carried rather than fixed.
+///
+/// Four layers need four keys anyway — one voice per key, replace on re-`Play`,
+/// so four layers that shared a key would be one layer — and the cheapest four
+/// keys that do not collide with the shooter are four salts. So the carried
+/// item is closed by the change that needed it closed.
+///
+/// The values are not arbitrary: each is the same `"WPN2"` stamp the clip GUIDs
+/// carry, so a key seen in a log says where it came from; and no entity guid's
+/// low 64 bits can collide with one more often than with any other 64-bit
+/// value, which is the bound `guid_source_key` itself has always had.
+pub const LAYER_SALTS: [u64; 4] = [
+    0x5750_4e32_0000_0001,
+    0x5750_4e32_0000_0002,
+    0x5750_4e32_0000_0003,
+    0x5750_4e32_0000_0004,
+];
+
+/// **The source key one layer of one shooter's report plays on** (wave WPN2c).
+///
+/// The shooter's key exclusive-or'd with the layer's salt, so the four are
+/// distinct from each other and from the shooter's own emitter key — and a
+/// barrel is still ONE voice per layer: a second round restarts each of the
+/// four rather than stacking, which is what keeps a 600 rpm burst from being
+/// forty live voices a second.
+pub fn layer_source_key(shooter_key: u64, kind: ReportLayerKind) -> u64 {
+    shooter_key ^ LAYER_SALTS[kind.index()]
+}
+
+/// **Metres past which the DISTANT layer is the one you hear.**
+///
+/// A hundred and fifty — the research doc's own `dist / 150.0` in
+/// `process_gunshot`. Inside it the distant layer is silent, its volume
+/// literally `0.0`, and the command still goes out: the command stream is the
+/// contract, and a layer that vanished from the queue at 149 m and appeared at
+/// 151 m would make the count a function of where the player is standing.
+pub const DISTANT_ONSET_M: f64 = 150.0;
+
+/// **Metres at which the DISTANT layer is at full volume.**
+///
+/// Three hundred — twice the onset, so the ramp is one onset wide and a shot
+/// heard across a square swells rather than switching on.
+pub const DISTANT_FULL_M: f64 = 300.0;
+
+/// **The cutoff air puts on a gunshot heard from far away**, hertz.
+///
+/// Seven hundred. This is the wave's own consumer for the low-pass that has
+/// been modelled-not-applied since P12: a rifle at four hundred metres is a
+/// *thump*, and the reason is that a few hundred metres of air is a low-pass.
+/// It rides the emitter's own `lowpass_hz` rather than a bus effect, because it
+/// is a property of one voice and not of the mix.
+pub const DISTANT_LOWPASS_HZ: f64 = 700.0;
+
+/// **The cutoff a room puts on its own tail**, hertz.
+///
+/// Three thousand five hundred — a concrete room's reflection has lost its top
+/// end by the time it comes back, which is most of the difference between
+/// "inside" and "outside" once the two decay lengths already differ.
+pub const INDOOR_TAIL_LOWPASS_HZ: f64 = 3500.0;
+
+/// The transient's base volume — just under the body's, because a bolt is not
+/// the bang.
+pub const TRANSIENT_VOLUME: f64 = 0.85;
+
+/// **How much of a weapon's report range the TRANSIENT carries**, as a
+/// fraction.
+///
+/// Twelve per cent. A mechanical snap is a near-field sound: you hear the
+/// action of a rifle fired beside you and you do not hear it three streets
+/// away, where the same shot is still perfectly audible as a bang. So the four
+/// layers do not share a reach, and this is the number that makes a gunshot
+/// change SHAPE with distance rather than merely get quieter.
+pub const TRANSIENT_REACH_FRACTION: f64 = 0.12;
+
+/// The indoor tail's base volume — the doc section 4's own `0.8`.
+pub const INDOOR_TAIL_VOLUME: f64 = 0.8;
+
+/// **How much of a weapon's report range the INDOOR tail carries.**
+///
+/// A quarter. A room's reflection belongs to the room, and it does not leave
+/// through the walls at the range the shot itself does.
+pub const INDOOR_TAIL_REACH_FRACTION: f64 = 0.25;
+
+/// The outdoor tail's base volume — the doc section 4's own `0.7`.
+pub const OUTDOOR_TAIL_VOLUME: f64 = 0.7;
+
+/// **How far the body layer's pitch may wander**, as a fraction.
+///
+/// Two per cent — the doc's `rand_pitch(0.98, 1.02)`, drawn from
+/// [`shot_uniforms`] rather than from an RNG because a fixed step holds no
+/// random state (the P14 law). The n-th round of a magazine has the same pitch
+/// in a replay, in a PIE preview and in a shipped build.
+pub const BODY_PITCH_JITTER: f64 = 0.02;
+
+/// **How loud the DISTANT layer is** for a listener this far from the muzzle —
+/// zero inside [`DISTANT_ONSET_M`], full at [`DISTANT_FULL_M`], linear between.
+pub fn distant_gain(listener_m: f64) -> f64 {
+    if !listener_m.is_finite() {
+        return 0.0;
+    }
+    let t = (listener_m - DISTANT_ONSET_M) / (DISTANT_FULL_M - DISTANT_ONSET_M);
+    t.clamp(0.0, 1.0)
+}
+
+/// **One layer of a shot**, ready to be queued.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportLayer {
+    /// Which of the four this is — the salt its source key is taken from.
+    pub kind: ReportLayerKind,
+    /// The emitter description, on [`report_source`]'s own terms.
+    pub source: AudioSource,
+    /// **The cutoff this layer is born with**, hertz, or `None`.
+    ///
+    /// It is HERE and not on [`crate::components::AudioSource`], and the reason
+    /// is a house law rather than a preference: `AudioSource` is a scene
+    /// component and the `.inf_lvl` payload is **bincode**, which is
+    /// positional, so growing it is a wire-format change and a schema bump.
+    /// This wave moves no schema. The cutoff rides the LAYER, which is a Ring-0
+    /// description nothing serializes, and reaches the device through
+    /// `inf_audio::PlayCommand::lowpass_hz`.
+    pub lowpass_hz: Option<f64>,
+}
+
+/// **THE FOUR LAYERS OF ONE GUNSHOT** (wave WPN2c) — the research doc section
+/// 4's stack, as the four `Play`s both hosts queue inside the `weapon_report`
+/// MIRROR fence.
+///
+/// One place, for [`report_source`]'s reason exactly and one more: four layers
+/// written out twice in two host-side loops is four clips, four volumes, four
+/// reaches and four keys that have to be compared character for character to
+/// stay in step, and the fence is what proves they are.
+///
+/// # What each argument decides
+///
+/// * `class` — which five clips ([`report_clip`]). It is the weapon's own
+///   [`WeaponDef::audio_class`], carried on the shot rather than looked up
+///   afterwards, for `WeaponHit::loud`'s reason: by the time this runs the
+///   shooter may have scrolled.
+/// * `indoors` — whether layer 3 is the room's tail or the street's. The
+///   enclosure probe's verdict, taken at the muzzle on the step the trigger
+///   went down (`inf_physics::d3::audio::enclosure_of`).
+/// * `report_max_m` — wave WPN2a's per-weapon reach. The layers take
+///   *fractions* of it rather than sharing it, which is what makes a gunshot
+///   change shape with distance instead of only getting quieter.
+/// * `listener_m` — how far the listener is from the muzzle, so layer 4 knows
+///   whether it is the thing being heard. Computed sim-side, so both hosts get
+///   the same number from the same world rather than each asking its own engine.
+/// * `shot_index` — the round's own counter, for the body's pitch jitter.
+///
+/// # Every layer is a command, always
+///
+/// Four `Play`s per loud shot, whatever the numbers say. A layer whose volume
+/// is zero is still queued, because the command stream is the contract and a
+/// count that changed with where the player stood would make every gate that
+/// reads it a claim about a camera.
+pub fn report_layers(
+    class: WeaponClass,
+    indoors: bool,
+    report_max_m: f64,
+    listener_m: f64,
+    shot_index: u64,
+) -> [ReportLayer; 4] {
+    let max = report_max_m.clamp(1.0, MAX_RANGE_M);
+    // **Every layer is a [`report_source`]** with three fields moved. That is
+    // deliberate rather than tidy: the bus, the spatialisation, the near field,
+    // the distance model, the rolloff and the two flags are what "a gunshot's
+    // emitter" MEANS, they are argued for one at a time in that function's own
+    // doc, and four literals here would be four places for them to drift.
+    let base = |clip: Uuid, volume: f64, max_distance: f64| {
+        let mut s = report_source();
+        s.clip = Some(clip);
+        s.volume = volume;
+        s.max_distance = max_distance;
+        s
+    };
+    // The body's pitch, from the counter hash rather than from an RNG.
+    let (u, _) = shot_uniforms(LAYER_SALTS[1], shot_index);
+    let pitch = 1.0 + (u - 0.5) * 2.0 * BODY_PITCH_JITTER;
+
+    let transient = base(
+        report_clip(class, ReportClip::Transient),
+        TRANSIENT_VOLUME,
+        (max * TRANSIENT_REACH_FRACTION).max(REPORT_MIN_M + 1.0),
+    );
+    let mut body = base(report_clip(class, ReportClip::Body), REPORT_VOLUME, max);
+    body.pitch = pitch;
+    let (tail, tail_cutoff) = if indoors {
+        (
+            base(
+                report_clip(class, ReportClip::IndoorTail),
+                INDOOR_TAIL_VOLUME,
+                (max * INDOOR_TAIL_REACH_FRACTION).max(REPORT_MIN_M + 1.0),
+            ),
+            Some(INDOOR_TAIL_LOWPASS_HZ),
+        )
+    } else {
+        (
+            base(
+                report_clip(class, ReportClip::OutdoorTail),
+                OUTDOOR_TAIL_VOLUME,
+                max,
+            ),
+            None,
+        )
+    };
+    let mut distant = base(
+        report_clip(class, ReportClip::Crack),
+        REPORT_VOLUME * distant_gain(listener_m),
+        max,
+    );
+    // The distant layer is at full volume until the onset and then falls off,
+    // which is the opposite way round from the other three: what it models is
+    // the sound that is LEFT at a distance, so its near field is the distance
+    // at which it starts to exist at all.
+    distant.min_distance = DISTANT_ONSET_M;
+    [
+        ReportLayer {
+            kind: ReportLayerKind::Transient,
+            source: transient,
+            lowpass_hz: None,
+        },
+        ReportLayer {
+            kind: ReportLayerKind::Body,
+            source: body,
+            lowpass_hz: None,
+        },
+        ReportLayer {
+            kind: ReportLayerKind::Tail,
+            source: tail,
+            lowpass_hz: tail_cutoff,
+        },
+        ReportLayer {
+            kind: ReportLayerKind::Distant,
+            source: distant,
+            lowpass_hz: Some(DISTANT_LOWPASS_HZ),
+        },
+    ]
+}
+
 impl WeaponState {
     /// A full magazine of `def`.
     pub fn full(item_id: &str, def: &WeaponDef) -> Self {
@@ -1993,6 +2372,155 @@ mod tests {
         // nothing can hurt.
         assert_eq!(Health::new(f64::NAN).capacity_j, DEFAULT_VITALITY_J);
         assert_eq!(Health::new(0.0).capacity_j, DEFAULT_VITALITY_J);
+    }
+
+    /// **THE THIRTY-FIVE CLIPS** (wave WPN2c) — one GUID per class per layer,
+    /// all distinct, and wave WPN1's own clip is still one of them.
+    #[test]
+    fn every_class_names_five_distinct_clips_and_wpn1s_gunshot_is_one_of_them() {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in WeaponClass::ALL {
+            for k in ReportClip::ALL {
+                assert!(
+                    seen.insert(report_clip(c, k)),
+                    "{} {} collides with another clip",
+                    c.name(),
+                    k.file_stem()
+                );
+            }
+        }
+        assert_eq!(seen.len(), 35);
+        // The one fixed point: WPN1's committed gunshot IS the rifle's body.
+        assert_eq!(
+            report_clip(WeaponClass::Ar, ReportClip::Body),
+            WEAPON_REPORT_CLIP
+        );
+        // …and the casing's own clip is outside the table.
+        assert!(!seen.contains(&CASING_CLIP));
+    }
+
+    /// **THE FOUR SALTED KEYS** (wave WPN2c) — the close of wave WPN1's carried
+    /// emitter-namespace collision.
+    ///
+    /// Four layers on one key would be one layer (one voice per key, replace on
+    /// re-`Play`), and the shooter's own key is its emitter namespace.
+    #[test]
+    fn the_four_layers_key_off_the_shooter_without_colliding_with_it() {
+        let shooter = 0x1234_5678_9abc_def0u64;
+        let keys: Vec<u64> = ReportLayerKind::ALL
+            .into_iter()
+            .map(|k| layer_source_key(shooter, k))
+            .collect();
+        let uniq: std::collections::BTreeSet<u64> = keys.iter().copied().collect();
+        assert_eq!(uniq.len(), 4, "two layers share a voice: {keys:?}");
+        assert!(
+            !uniq.contains(&shooter),
+            "a layer took the shooter's own emitter key back"
+        );
+        // The salt is recoverable, which is what makes a key in a log readable.
+        for k in ReportLayerKind::ALL {
+            assert_eq!(layer_source_key(shooter, k) ^ shooter, LAYER_SALTS[k.index()]);
+        }
+        assert_eq!(ReportLayerKind::ALL.len(), LAYER_SALTS.len());
+    }
+
+    /// **FOUR LAYERS PER SHOT, IN ORDER** (wave WPN2c) — and the third one is
+    /// the room.
+    #[test]
+    fn a_gunshot_is_four_layers_and_the_third_is_the_room() {
+        let out = report_layers(WeaponClass::Ar, false, 320.0, 10.0, 0);
+        assert_eq!(
+            out.iter().map(|l| l.kind).collect::<Vec<_>>(),
+            ReportLayerKind::ALL.to_vec(),
+            "the queue order is the contract"
+        );
+        // Outdoors: the long tail, unfiltered, at the weapon's own reach.
+        assert_eq!(
+            out[2].source.clip,
+            Some(report_clip(WeaponClass::Ar, ReportClip::OutdoorTail))
+        );
+        assert_eq!(out[2].lowpass_hz, None);
+        assert!((out[2].source.max_distance - 320.0).abs() < 1e-9);
+        // Indoors: the short tail, filtered, at a quarter of the reach.
+        let inside = report_layers(WeaponClass::Ar, true, 320.0, 10.0, 0);
+        assert_eq!(
+            inside[2].source.clip,
+            Some(report_clip(WeaponClass::Ar, ReportClip::IndoorTail))
+        );
+        assert_eq!(inside[2].lowpass_hz, Some(INDOOR_TAIL_LOWPASS_HZ));
+        assert!((inside[2].source.max_distance - 320.0 * 0.25).abs() < 1e-9);
+        // The other three layers do not notice the room at all.
+        for i in [0usize, 1, 3] {
+            assert_eq!(out[i].source, inside[i].source, "layer {i} changed indoors");
+        }
+        // The transient is a near-field sound and the body is not: the stack
+        // changes SHAPE with distance rather than merely getting quieter.
+        assert!(out[0].source.max_distance < out[1].source.max_distance / 4.0);
+        assert!((out[1].source.max_distance - 320.0).abs() < 1e-9);
+        // Every layer is spatial, on `sfx`, and one-shot.
+        for l in &out {
+            assert!(l.source.spatial && !l.source.looping);
+            assert_eq!(l.source.bus, REPORT_BUS);
+            assert!(!l.source.occlusion && !l.source.autoplay);
+        }
+    }
+
+    /// **THE DISTANT LAYER IS SILENT NEXT TO YOU AND LOUD ACROSS A SQUARE** —
+    /// and it is a command either way.
+    #[test]
+    fn the_distant_layer_is_a_function_of_where_the_listener_is() {
+        for (m, want) in [
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (DISTANT_ONSET_M, 0.0),
+            (225.0, 0.5),
+            (DISTANT_FULL_M, 1.0),
+            (5000.0, 1.0),
+        ] {
+            assert!(
+                (distant_gain(m) - want).abs() < 1e-12,
+                "{m} m gave {}",
+                distant_gain(m)
+            );
+        }
+        assert_eq!(distant_gain(f64::NAN), 0.0);
+        // A layer whose volume is zero is STILL a command: the count must not
+        // be a function of where the player is standing.
+        let near = report_layers(WeaponClass::Sniper, false, 600.0, 5.0, 0);
+        let far = report_layers(WeaponClass::Sniper, false, 600.0, 600.0, 0);
+        assert_eq!(near.len(), far.len());
+        assert_eq!(near[3].source.volume, 0.0);
+        assert!((far[3].source.volume - REPORT_VOLUME).abs() < 1e-12);
+        // …and it is filtered, which is what makes it a thump.
+        assert_eq!(far[3].lowpass_hz, Some(DISTANT_LOWPASS_HZ));
+        assert!((far[3].source.min_distance - DISTANT_ONSET_M).abs() < 1e-12);
+    }
+
+    /// **THE BODY'S PITCH IS THE COUNTER HASH** (wave WPN2c) — the doc's
+    /// `rand_pitch(0.98, 1.02)` with no RNG behind it.
+    #[test]
+    fn the_body_layers_pitch_wanders_by_the_shot_index_and_nothing_else() {
+        let mut seen = std::collections::BTreeSet::new();
+        for shot in 0..64u64 {
+            let l = report_layers(WeaponClass::Smg, false, 240.0, 10.0, shot);
+            let p = l[1].source.pitch;
+            assert!(
+                (p - 1.0).abs() <= BODY_PITCH_JITTER + 1e-12,
+                "shot {shot} pitched {p}"
+            );
+            // The other three layers are unpitched: a bolt and a room do not
+            // change note with the round count.
+            for i in [0usize, 2, 3] {
+                assert!((l[i].source.pitch - 1.0).abs() < 1e-12);
+            }
+            seen.insert(p.to_bits());
+        }
+        assert!(seen.len() > 50, "the pitch barely moves: {} values", seen.len());
+        // Deterministic: the same round is the same note in a replay.
+        assert_eq!(
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1].source.pitch,
+            report_layers(WeaponClass::Smg, false, 240.0, 10.0, 17)[1].source.pitch
+        );
     }
 
     /// **THE CLASS DOOR** (wave WPN2c) — a string key beside `kind`, refused by

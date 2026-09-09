@@ -52,7 +52,7 @@ use inf_blueprint::{
 };
 use inf_core::BoundedLog;
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
+    AnimPlayer, AnimStateMachine, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, ColliderShape2DKind, Destructible, DistanceModel,
     GlobalTransform, RootMotion, RootMotionMode, SkeletalMesh, Terrain, Transform, VoxelVolume,
 };
@@ -659,7 +659,7 @@ impl SimSession {
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
-            audio_log: BoundedLog::default(),
+            audio_log: BoundedLog::new(inf_audio::AUDIO_LOG_CAPACITY),
             steps: 0,
             debug: BTreeMap::new(),
             debug_events: Vec::new(),
@@ -1638,6 +1638,14 @@ impl SimSession {
         let hits = std::mem::take(&mut report.hits);
         self.fire_weapon_audio(doc.world(), &hits);
         report.hits = hits;
+        // …and what the POOL sounded like (wave WPN2c): a round going past an
+        // ear, and its brass landing. After the report's own noises, because
+        // that is the order they happen in.
+        let cracks = std::mem::take(&mut report.cracks);
+        let bounces = std::mem::take(&mut report.casings.bounces);
+        self.fire_pool_audio(&cracks, &bounces);
+        report.cracks = cracks;
+        report.casings.bounces = bounces;
         self.gameplay = report;
         // 3. Solver.
         self.bridge.step(dt);
@@ -2265,38 +2273,60 @@ impl SimSession {
         let audio_cmds = &mut self.audio_cmds;
         // MIRROR-BEGIN weapon_report
         for hit in hits {
-            // **THE REPORT** (wave WPN1) — one shot at the shooter's own muzzle,
-            // whether or not the round found anything. It is FIRST, because a
-            // gunshot is heard before its impact is and the queue is ordered.
+            // **THE REPORT** (wave WPN1, four layers since WPN2c) — the shot at
+            // the shooter's own muzzle, whether or not the round found anything.
+            // It is FIRST, because a gunshot is heard before its impact is and
+            // the queue is ordered.
             //
-            // Keyed on the SHOOTER, so a barrel has one voice: a second round
-            // restarts it rather than stacking, which is what a barrel does and
-            // what keeps a 600 rpm burst from being 10 live voices a second.
-            // The clip is the engine's own (`inf_ecs::weapon::report_source`)
-            // rather than a slot on `WeaponDef`, on the impact's own P22 §5
-            // reasoning one field along.
+            // **FOUR COMMANDS, NOT ONE** (the research doc section 4's stack):
+            // the mechanical transient, the explosive body, the room's tail
+            // (indoor or outdoor, by the enclosure probe's verdict on the shot)
+            // and the distant crack. They are one Ring-0 description
+            // (`inf_ecs::weapon::report_layers`) rather than four literals here,
+            // for `report_source`'s reason exactly: four clips, four volumes,
+            // four reaches and four keys written out twice in two host-side
+            // loops is four things to keep in step, and this fence is what
+            // proves they are.
+            //
+            // Each layer is keyed on the SHOOTER **salted by the layer**, so a
+            // barrel is one voice PER LAYER — a second round restarts each of
+            // the four rather than stacking — and the salt is also what closes
+            // wave WPN1's carried defect: the bare shooter key is the shooter's
+            // own emitter namespace, and a character carrying an autoplay
+            // `AudioSource` would have had its voice replaced by its own
+            // gunshot and never got it back.
+            //
+            // The RANGE is still the weapon's (wave WPN2a) and the layers take
+            // FRACTIONS of it, which is what makes a gunshot change shape with
+            // distance instead of only getting quieter. What a shot sounds like
+            // is still decided by its class and never by a clip slot on a
+            // `WeaponDef` — P22 §5's refusal stands.
             //
             // **Only a LOUD attack**: a punch is an attack that goes through
             // this same list, and a fist that fired a rifle's clip would be the
             // funniest defect in the engine.
             if hit.loud {
-                // **The RANGE is the weapon's** (wave WPN2a). `REPORT_MAX_M`'s
-                // own doc calls a gunshot "the one emitter whose range is the
-                // gameplay", and a .50 BMG and a suppressed .380 do not empty
-                // the same number of streets. It rides `WeaponHit` for the
-                // reason `loud` does — what made the noise is a property of the
-                // shot, not of whatever is in the hand when it lands — and it is
-                // the weapon's RANGE and not its CLIP, because P22 §5's refusal
-                // of a per-weapon sound slot stands: what a bullet SOUNDS like
-                // is decided by what it hit.
-                let mut report = inf_ecs::weapon::report_source();
-                report.max_distance = hit.report_max_m;
-                let cmd = play_command_for(
-                    guid_source_key(hit.shooter),
-                    &report,
-                    report.spatial.then_some(hit.from),
-                );
-                audio_cmds.push(AudioCommand::Play(cmd));
+                for layer in inf_ecs::weapon::report_layers(
+                    hit.class,
+                    hit.indoors,
+                    hit.report_max_m,
+                    hit.listener_m,
+                    hit.shot_index,
+                ) {
+                    let mut cmd = play_command_for(
+                        inf_ecs::weapon::layer_source_key(
+                            guid_source_key(hit.shooter),
+                            layer.kind,
+                        ),
+                        &layer.source,
+                        layer.source.spatial.then_some(hit.from),
+                    );
+                    // The cutoff a room or four hundred metres of air puts on
+                    // this layer. Audible since wave WPN2c — the engine
+                    // low-passes the clip's frames before the voice starts.
+                    cmd.lowpass_hz = layer.lowpass_hz;
+                    audio_cmds.push(AudioCommand::Play(cmd));
+                }
             }
             // **THE IMPACT** — the target's own emitter, at the hit.
             let Some(target) = hit.target else {
@@ -2310,6 +2340,66 @@ impl SimSession {
             audio_cmds.push(AudioCommand::Play(cmd));
         }
         // MIRROR-END weapon_report
+    }
+
+    /// **What the pool sounded like** (wave WPN2c) — the two noises a round and
+    /// its brass make after the trigger, through the P12 command queue.
+    ///
+    /// MIRROR of the other host's, character for character, for
+    /// `fire_weapon_audio`'s reason exactly. Two fences rather than one because
+    /// they are two different events that happen to arrive on the same report:
+    /// a CRACK is a round going past an ear at more than the speed of sound, and
+    /// a BOUNCE is a piece of brass hitting the floor, and a gate that could not
+    /// tell them apart could not say which one had stopped working.
+    ///
+    /// Both lists are empty on every step nothing was fired on, and on every
+    /// level that has never fired the report's own fields are empty vectors that
+    /// allocate nothing.
+    fn fire_pool_audio(
+        &mut self,
+        cracks: &[inf_ecs::ballistics::Crack],
+        bounces: &[inf_physics::d3::gameplay::CasingBounce],
+    ) {
+        if cracks.is_empty() && bounces.is_empty() {
+            return;
+        }
+        let audio_cmds = &mut self.audio_cmds;
+        // MIRROR-BEGIN supersonic_crack
+        for crack in cracks {
+            // **ONE VOICE PER SHOOTER**, salted off the report's four
+            // (`inf_ecs::ballistics::crack_source_key`): a burst going past
+            // somebody is one crack that restarts rather than forty stacked, on
+            // exactly the reasoning the report's own layers use. Positioned at
+            // the CLOSEST POINT on the round's segment to the ear, not at the
+            // muzzle it left and not at whatever it eventually hits — a crack is
+            // heard where the shock cone crosses you.
+            let src = inf_ecs::ballistics::crack_source(crack.class);
+            let cmd = play_command_for(
+                inf_ecs::ballistics::crack_source_key(guid_source_key(crack.shooter)),
+                &src,
+                src.spatial.then_some(crack.at),
+            );
+            audio_cmds.push(AudioCommand::Play(cmd));
+        }
+        // MIRROR-END supersonic_crack
+        // MIRROR-BEGIN casing_bounce
+        for bounce in bounces {
+            // **ONE SOUND PER CASING, ON ITS FIRST CONTACT** — the second
+            // contact is where it stops and is not a bounce. The key is the
+            // casing's OWN derived entity guid, salted, so two cases landing on
+            // the same step are two voices; and the PITCH is the counter hash on
+            // its ordinal, which is what stops a floor of brass sounding like
+            // one sample played a hundred times.
+            let src = inf_ecs::casing::casing_source(bounce.class);
+            let mut cmd = play_command_for(
+                inf_ecs::casing::casing_source_key(bounce.casing),
+                &src,
+                src.spatial.then_some(bounce.at),
+            );
+            cmd.pitch = bounce.pitch;
+            audio_cmds.push(AudioCommand::Play(cmd));
+        }
+        // MIRROR-END casing_bounce
     }
 
     /// Drain the FIFO dispatch queue (Wave 3): for each popped `(target, name)`,
@@ -2486,6 +2576,11 @@ impl SimSession {
                             inf_ecs::dispatch::SIREN_MAX_DISTANCE_M,
                         ),
                         occlusion_gain: 1.0,
+                        // A siren is not filtered by anything: it is heard
+                        // through open air, and the doorway model that could
+                        // muffle it addresses a live voice per step rather
+                        // than the command that starts one.
+                        lowpass_hz: None,
                     }));
                 }
                 inf_ecs::dispatch::SirenCue::Move { source, at } => {
@@ -2755,25 +2850,13 @@ fn emitter_position(world: &EcsWorld, guid: Uuid) -> DVec3 {
 /// posed at the entity's world position (default orientation — orientation from the
 /// transform basis is a documented P12.3 follow-up).
 fn active_listener(world: &EcsWorld) -> Option<Listener> {
-    let mut best: Option<(Uuid, DVec3)> = None;
-    for e in world.world().iter_entities() {
-        let Some(al) = e.get::<AudioListener>() else {
-            continue;
-        };
-        if !al.active {
-            continue;
-        }
-        let guid = e.get::<Guid>().map(|g| g.0).unwrap_or_else(Uuid::nil);
-        let pos = e
-            .get::<GlobalTransform>()
-            .map(|g| g.translation())
-            .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
-            .unwrap_or(DVec3::ZERO);
-        if best.as_ref().map(|(g, _)| guid < *g).unwrap_or(true) {
-            best = Some((guid, pos));
-        }
-    }
-    best.map(|(_, position)| Listener {
+    // **ONE RULE, IN RING 0** (wave WPN2c). This walk used to be written out
+    // here and again in the other host, and a THIRD reader arrived with the
+    // four-layer report: the distant layer's volume and the supersonic crack
+    // are both functions of where the ear is, and both are decided inside the
+    // fixed step where neither host's private copy can be called. Two copies
+    // that only happened to agree would have become three.
+    inf_ecs::audio::active_listener_pose(world).map(|(_, position)| Listener {
         position,
         ..Listener::default()
     })
@@ -2792,6 +2875,11 @@ fn play_command_for(source_key: u64, src: &AudioSource, position: Option<DVec3>)
         position,
         attenuation: attenuation_of(src),
         occlusion_gain: 1.0,
+        // **Unfiltered by default** (wave WPN2c). A cutoff is a property of the
+        // thing being played, so the call sites that know of one -- the report's
+        // indoor tail and its distant layer -- set it after this builds the
+        // command, and everything else stays exactly what it was.
+        lowpass_hz: None,
     }
 }
 

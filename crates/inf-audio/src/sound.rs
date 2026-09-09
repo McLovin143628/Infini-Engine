@@ -69,6 +69,47 @@ impl SoundData {
         self.inner.duration().as_secs_f64()
     }
 
+    /// **A copy of this sound with a one-pole low-pass over its frames**
+    /// (wave WPN2c) — the whole of how a cutoff becomes audible in this engine.
+    ///
+    /// # Why the samples and not a track effect
+    ///
+    /// See [`crate::filter`]: the cutoffs this engine decides are per VOICE (a
+    /// shut door muffles one loop; a distant gunshot layer muffles one shot),
+    /// and kira expresses a filter as a per-TRACK effect, so the alternative was
+    /// a sub-track created and destroyed per one-shot at hundreds a second.
+    /// Filtering the decoded frames once, before the voice starts, costs one
+    /// pass over the clip and then nothing, works identically with and without a
+    /// device, and is the only shape a headless test can measure.
+    ///
+    /// The filter is run **per channel**, so a stereo clip keeps its image.
+    /// A cutoff at or above Nyquist is a pass-through and this is then a clone.
+    ///
+    /// It is not free: a 1.5 s tail at 22 050 Hz is 33 000 multiply-adds, which
+    /// is why [`crate::AudioEngine`] caches the result by (clip, cutoff) rather
+    /// than filtering the same tail on every shot.
+    pub fn low_passed(&self, cutoff_hz: f64) -> Self {
+        let rate = self.inner.sample_rate;
+        let a = crate::filter::OnePole::alpha(cutoff_hz, rate);
+        if a >= 1.0 {
+            return self.clone();
+        }
+        let mut l = crate::filter::OnePole::new(cutoff_hz, rate);
+        let mut r = crate::filter::OnePole::new(cutoff_hz, rate);
+        let frames: Vec<kira::Frame> = self
+            .inner
+            .frames
+            .iter()
+            .map(|f| kira::Frame {
+                left: l.step(f64::from(f.left)) as f32,
+                right: r.step(f64::from(f.right)) as f32,
+            })
+            .collect();
+        let mut inner = self.inner.clone();
+        inner.frames = frames.into();
+        Self { inner }
+    }
+
     /// The sound's sample rate in hertz, derived from its frame count and
     /// duration (`0` if the duration is degenerate). Used to record `.inf_audio`
     /// metadata at import.

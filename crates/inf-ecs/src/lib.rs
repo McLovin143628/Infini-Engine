@@ -16,12 +16,19 @@ pub mod anim;
 // movement step share.
 pub mod anim_bridge;
 pub mod attach;
+// WPN2c: who is listening. One Ring-0 rule, called by both hosts AND by the
+// fixed step, replacing two private copies that only happened to agree.
+pub mod audio;
 // IB-2a: which static structural colliders a fixed step may hold. Sim-side by
 // construction — its anchors are `StreamingSource` entities, never a camera.
 pub mod ballistics;
 pub mod band;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).
+// WPN2c: the brass. A bounded RING of shell casings -- the doc's own shape,
+// and deliberately not `ballistics`' refuse-and-count pool: a casing that
+// cannot be afforded should vanish, not fail to exist.
+pub mod casing;
 pub mod camera;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;

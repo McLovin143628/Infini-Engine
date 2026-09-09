@@ -616,6 +616,86 @@ fn both_audio_steps_hear_the_same_doorway() {
     }
 }
 
+/// **THE POOL'S TWO NOISES ARE THE SAME NOISES ON BOTH HOSTS** (wave WPN2c).
+///
+/// A supersonic crack and a landing shell casing are both COMMANDS, exactly as
+/// the report is: there is nothing in the world to compare, so the only thing
+/// that can keep the two hosts saying the same thing about them is the source
+/// text. Two fences rather than one because they are two events that happen to
+/// arrive on the same report, and a gate that could not tell them apart could
+/// not say which one had stopped working.
+#[test]
+fn both_hosts_crack_and_drop_brass_the_same_way() {
+    for (fence, floor) in [("supersonic_crack", 300usize), ("casing_bounce", 300)] {
+        let editor = fenced(&read(EDITOR), fence, "the editor SimSession");
+        let player = fenced(&read(PLAYER), fence, "the shipped RuntimeSim");
+        assert!(
+            editor.len() > floor,
+            "the `{fence}` fence is {} chars — an empty fence would make this \
+             gate vacuous",
+            editor.len()
+        );
+        assert_eq!(
+            editor, player,
+            "`{fence}` has drifted between the editor's Simulate and the shipped \
+             player. A preview that made a different noise from the shipped \
+             build is a bug no compiler and no screenshot finds"
+        );
+    }
+    let editor = read(EDITOR);
+    let crack = fenced(&editor, "supersonic_crack", "the editor SimSession");
+    let brass = fenced(&editor, "casing_bounce", "the editor SimSession");
+    for (haystack, needle, why) in [
+        (
+            &crack,
+            "inf_ecs::ballistics::crack_source(crack.class)",
+            "the clip, the bus, the volume and the reach are ONE Ring-0 \
+             description, and the class is the ROUND's — a crack taken from \
+             whatever is in the shooter's hands eight seconds later would be a \
+             different gun's",
+        ),
+        (
+            &crack,
+            "inf_ecs::ballistics::crack_source_key(guid_source_key(crack.shooter))",
+            "one crack voice per shooter, salted off the report's four: a burst \
+             going past somebody is one noise that restarts rather than forty \
+             stacked, and an unsalted key would take a report layer's voice",
+        ),
+        (
+            &crack,
+            "src.spatial.then_some(crack.at)",
+            "a crack is heard where the shock cone crosses the ear — the \
+             closest point on the round's own segment — and NOT at the muzzle \
+             it left or at whatever it eventually hits",
+        ),
+        (
+            &brass,
+            "inf_ecs::casing::casing_source(bounce.class)",
+            "the landing is one Ring-0 description too, on the crack's terms",
+        ),
+        (
+            &brass,
+            "inf_ecs::casing::casing_source_key(bounce.casing)",
+            "the key is the CASING's own derived guid, salted, so two cases \
+             landing on the same step are two voices rather than one that \
+             replaced the other",
+        ),
+        (
+            &brass,
+            "cmd.pitch=bounce.pitch",
+            "the pitch is the counter hash on the casing's ordinal — the doc's \
+             own pitch randomisation, and the whole of what stops a floor of \
+             brass sounding like one sample played a hundred times",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            haystack.contains(&n),
+            "the pool audio no longer carries `{needle}`: {why}"
+        );
+    }
+}
+
 /// **THE GUNSHOT IS THE SAME NOISE ON BOTH HOSTS** (wave WPN1).
 ///
 /// The report is a *command*, not an entity: there is nothing in the world to
@@ -641,20 +721,49 @@ fn both_hosts_report_a_gunshot_the_same_way() {
     );
     for (needle, why) in [
         (
-            "inf_ecs::weapon::report_source()",
-            "the clip, the bus, the volume and the reach are ONE Ring-0 \
-             description — the `venue_music_source` shape, and the alternative \
-             is four constants in two host-side loops that have to be compared \
-             character for character to stay in step",
+            "inf_ecs::weapon::report_layers(",
+            "the four clips, four volumes, four reaches and four keys are ONE \
+             Ring-0 description — the `venue_music_source` shape, and the \
+             alternative is sixteen constants in two host-side loops that have \
+             to be compared character for character to stay in step",
         ),
         (
             "guid_source_key(hit.shooter)",
-            "the report is keyed on the SHOOTER, so a barrel has one voice: \
-             keyed per shot a 600 rpm burst is ten live voices a second, and \
-             keyed on the target a miss would be silent",
+            "the report is keyed on the SHOOTER, so a barrel has one voice per \
+             layer: keyed per shot a 600 rpm burst is forty live voices a \
+             second, and keyed on the target a miss would be silent",
         ),
         (
-            "report.spatial.then_some(hit.from)",
+            "inf_ecs::weapon::layer_source_key(",
+            "…and the shooter's key is SALTED per layer (wave WPN2c). Four \
+             layers on one key would be one layer, because a source is one \
+             voice and a second `Play` replaces it; and the bare shooter key is \
+             the shooter's own emitter namespace, which is wave WPN1's carried \
+             defect and is closed by this salt",
+        ),
+        (
+            "hit.indoors",
+            "which of the two tail clips plays is the ENCLOSURE PROBE's \
+             verdict, taken in the fixed step at the muzzle — a host that \
+             decided it for itself would be six raycasts two hosts could \
+             disagree about",
+        ),
+        (
+            "hit.listener_m",
+            "the distant layer's volume is how far the ear is from the muzzle, \
+             and it is measured in the SIM: each host has its own \
+             `active_listener`, and the two agreeing was a coincidence rather \
+             than a fence",
+        ),
+        (
+            "cmd.lowpass_hz=layer.lowpass_hz",
+            "the cutoff a room or four hundred metres of air puts on a layer \
+             rides the command that starts the voice — audible since wave \
+             WPN2c, and a fence that dropped it would leave the indoor tail \
+             sounding exactly like the outdoor one",
+        ),
+        (
+            "layer.source.spatial.then_some(hit.from)",
             "a report is heard at the MUZZLE and the impact at the hit — the \
              two positions are the whole difference between the two commands, \
              and a report at `hit.to` would put a miss's noise 400 m away",

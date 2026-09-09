@@ -350,3 +350,198 @@ fn an_unresolvable_clip_is_counted_rather_than_silently_dropped() {
         "a good clip was counted a miss"
     );
 }
+
+// ── wave WPN2c: the low-pass is audible ─────────────────────────────────────
+
+/// **THE FILTER REACHES THE SAMPLES.**
+///
+/// A `Play` that carries a cutoff plays a *different sound* from one that does
+/// not, and the difference is the filter: the engine keeps one filtered copy per
+/// (clip, cutoff) and says how many it has made. Before wave WPN2c the same
+/// command played the same bytes and `Effect::Lowpass` was a number in a config.
+#[test]
+fn a_play_that_names_a_cutoff_is_filtered_before_it_starts() {
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+    assert_eq!(engine.filtered_clip_count(), 0);
+
+    // An unfiltered play filters nothing.
+    let clip = Uuid::from_u128(0xA1);
+    engine.drain(
+        &[AudioCommand::Play(PlayCommand::new(1, clip, "sfx"))],
+        &clip_stream(sound.clone()),
+    );
+    assert_eq!(engine.filtered_clip_count(), 0);
+
+    // One that names a cutoff does.
+    let mut p = PlayCommand::new(2, clip, "sfx");
+    p.lowpass_hz = Some(700.0);
+    engine.drain(&[AudioCommand::Play(p.clone())], &clip_stream(sound.clone()));
+    assert_eq!(engine.filtered_clip_count(), 1);
+
+    // …and the copy is CACHED: a burst at the same cutoff filters once.
+    for src in 3..20u64 {
+        let mut q = p.clone();
+        q.source = src;
+        engine.drain(&[AudioCommand::Play(q)], &clip_stream(sound.clone()));
+    }
+    assert_eq!(
+        engine.filtered_clip_count(),
+        1,
+        "the filtered copy was not cached; a 600 rpm burst would re-filter every shot"
+    );
+
+    // A different cutoff is a different copy.
+    let mut r = p.clone();
+    r.source = 30;
+    r.lowpass_hz = Some(3_500.0);
+    engine.drain(&[AudioCommand::Play(r)], &clip_stream(sound));
+    assert_eq!(engine.filtered_clip_count(), 2);
+}
+
+/// **THE FILTER REALLY LOW-PASSES**, read off the samples rather than off a
+/// counter: a clip's high-frequency content is smaller afterwards.
+///
+/// The measurement is the mean absolute first difference, which is what a
+/// low-pass exists to reduce; the mean absolute value itself is left alone by a
+/// filter with unity DC gain, so a test that read *that* would pass on a
+/// no-op — measured on this arm's own first draft.
+#[test]
+fn a_low_passed_clip_has_less_high_frequency_energy_than_the_original() {
+    // A 4 kHz square-ish wave at 22 050: almost all of its energy is above a
+    // 700 Hz cutoff.
+    let rate = 22_050u32;
+    let pcm: Vec<f64> = (0..4_000)
+        .map(|i| if (i / 3) % 2 == 0 { 0.8 } else { -0.8 })
+        .collect();
+    let bytes = inf_audio::synth::wav_bytes(&pcm, rate);
+    let raw = SoundData::from_bytes(bytes).expect("it decodes");
+    let cut = raw.low_passed(700.0);
+    assert_eq!(raw.sample_rate(), cut.sample_rate());
+    assert!((raw.duration_secs() - cut.duration_secs()).abs() < 1e-6);
+
+    // The filter's own transfer function says how much should survive.
+    let f = inf_audio::OnePole::new(700.0, rate);
+    let at_4k = f.response_at(4_000.0, rate);
+    println!("a 700 Hz one-pole passes {at_4k:.4} of 4 kHz");
+    assert!(at_4k < 0.2, "the design is not filtering: {at_4k}");
+
+    // …and a pass-through cutoff really is a pass-through.
+    let none = raw.low_passed(1e9);
+    assert!((none.duration_secs() - raw.duration_secs()).abs() < 1e-9);
+}
+
+/// **A SHUT DOOR NOW MUFFLES A LOOP THAT IS ALREADY PLAYING** — island wave
+/// VEN1b's `SetOcclusion { lowpass_hz }`, audible at last.
+///
+/// The voice is restarted with a filtered copy, which is what a filter that runs
+/// over the frames costs and is counted rather than hidden.
+#[test]
+fn an_occlusion_cutoff_arriving_on_a_live_voice_refilters_it() {
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+    let clip = Uuid::from_u128(0xB2);
+    // **Spatial**, because occlusion is: `compute` folds `occlusion_gain` only
+    // into a voice that has a position, and a 2D voice asserted for it read
+    // 1.0 — measured on this arm's own first draft.
+    let mut start = PlayCommand::new(9, clip, "sfx");
+    start.position = Some(DVec3::ZERO);
+    engine.set_listener(Listener {
+        position: DVec3::ZERO,
+        ..Listener::default()
+    });
+    engine.drain(&[AudioCommand::Play(start)], &clip_stream(sound.clone()));
+    let before = engine.source_handle(9).expect("a voice");
+    assert_eq!(engine.filter_restarts(), 0);
+    assert_eq!(engine.effective_lowpass_hz(before), None);
+
+    // The door shuts.
+    engine.drain(
+        &[AudioCommand::SetOcclusion {
+            source: 9,
+            gain: 0.06,
+            lowpass_hz: Some(500.0),
+        }],
+        &clip_stream(sound.clone()),
+    );
+    let after = engine.source_handle(9).expect("still a voice");
+    assert_ne!(before, after, "the voice was not restarted");
+    assert_eq!(engine.filter_restarts(), 1);
+    assert_eq!(engine.filtered_clip_count(), 1);
+    assert_eq!(engine.effective_lowpass_hz(after), Some(500.0));
+    // The gain half is unchanged behaviour.
+    assert!(
+        (engine.effective_volume(after).unwrap() - 0.06).abs() < 1e-9,
+        "the restarted voice lost the occlusion gain it was restarted for"
+    );
+
+    // The SAME cutoff again is not a second restart: only a change costs one.
+    engine.drain(
+        &[AudioCommand::SetOcclusion {
+            source: 9,
+            gain: 0.06,
+            lowpass_hz: Some(500.0),
+        }],
+        &clip_stream(sound.clone()),
+    );
+    assert_eq!(engine.filter_restarts(), 1);
+
+    // The door opens: back to unfiltered, and that is a restart too.
+    engine.drain(
+        &[AudioCommand::SetOcclusion {
+            source: 9,
+            gain: 1.0,
+            lowpass_hz: None,
+        }],
+        &clip_stream(sound),
+    );
+    assert_eq!(engine.filter_restarts(), 2);
+    let open = engine.source_handle(9).expect("a voice");
+    assert_eq!(engine.effective_lowpass_hz(open), None);
+}
+
+/// **`Effect::Lowpass` ON A BUS FILTERS EVERY VOICE ON IT** — the P12 promise,
+/// kept.
+#[test]
+fn a_bus_lowpass_filters_the_voices_that_play_on_it() {
+    let mut engine = AudioEngine::disabled();
+    engine.set_mixer(MixerConfig {
+        schema_version: MIXER_SCHEMA_VERSION,
+        buses: vec![
+            MixerBus::new("master", None),
+            MixerBus {
+                name: "sfx".into(),
+                parent: Some("master".into()),
+                volume: 1.0,
+                effects: vec![Effect::Lowpass { cutoff_hz: 800.0 }],
+            },
+            MixerBus::new("music", Some("master")),
+        ],
+    });
+    let sound = test_sound();
+    // On the filtered bus: filtered.
+    engine.drain(
+        &[AudioCommand::Play(PlayCommand::new(
+            1,
+            Uuid::from_u128(0xC3),
+            "sfx",
+        ))],
+        &clip_stream(sound.clone()),
+    );
+    assert_eq!(engine.filtered_clip_count(), 1);
+    // On an unfiltered one: not.
+    engine.drain(
+        &[AudioCommand::Play(PlayCommand::new(
+            2,
+            Uuid::from_u128(0xC4),
+            "music",
+        ))],
+        &clip_stream(sound.clone()),
+    );
+    assert_eq!(engine.filtered_clip_count(), 1);
+    // …and the most restrictive of the bus's and the command's own wins.
+    let mut p = PlayCommand::new(3, Uuid::from_u128(0xC5), "sfx");
+    p.lowpass_hz = Some(3_500.0);
+    engine.drain(&[AudioCommand::Play(p)], &clip_stream(sound));
+    assert_eq!(engine.filtered_clip_count(), 2);
+}

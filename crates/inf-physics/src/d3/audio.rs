@@ -366,6 +366,106 @@ pub fn portal_of_in(
     })
 }
 
+// ── the enclosure probe (wave WPN2c) ────────────────────────────────────────
+
+/// **How many rays the enclosure probe casts** — the research doc section 4's
+/// *"cast rays outward from the player to detect surrounding surfaces"*.
+///
+/// Six, along the world axes. Not a hemisphere, not a cone, not the aim
+/// direction: what the probe is asking is *"am I in a box"*, and six axes is
+/// the cheapest question that can tell a room from a street. They are WORLD
+/// axes rather than the shooter's, deliberately — a player who turns round
+/// inside a room must not change what the room sounds like.
+pub const ENCLOSURE_PROBE_RAYS: usize = 6;
+
+/// **How far each probe ray reaches**, metres — the doc's own eight.
+///
+/// Eight metres is a room and is not a street. A ray that finds nothing inside
+/// it has found something far enough away that its reflection arrives as a
+/// separate echo rather than as a tail, which is exactly the distinction the
+/// two tail clips are.
+pub const ENCLOSURE_PROBE_M: f64 = 8.0;
+
+/// **How many of the six must hit for a shot to be INDOORS** — the doc's own
+/// four.
+///
+/// Four of six, and the number is load-bearing rather than round. Standing on
+/// open ground, ONE ray always hits: the one pointing down. On a street between
+/// two buildings, three do — the ground and two walls. In a room, all six do:
+/// four walls, a ceiling and a floor. So three is the highest an outdoor place
+/// reaches and four is the lowest an indoor one does, and the threshold sits in
+/// the gap.
+pub const ENCLOSURE_INDOOR_HITS: usize = 4;
+
+/// **The six directions**, in the order the probe casts them, so a hit count is
+/// reproducible and a mutation of the order is visible in a trace.
+pub const ENCLOSURE_DIRS: [DVec3; ENCLOSURE_PROBE_RAYS] = [
+    DVec3::new(1.0, 0.0, 0.0),
+    DVec3::new(-1.0, 0.0, 0.0),
+    DVec3::new(0.0, 1.0, 0.0),
+    DVec3::new(0.0, -1.0, 0.0),
+    DVec3::new(0.0, 0.0, 1.0),
+    DVec3::new(0.0, 0.0, -1.0),
+];
+
+/// **What the probe found** — the count, and the verdict it implies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Enclosure {
+    /// How many of the six rays hit something inside [`ENCLOSURE_PROBE_M`].
+    pub hits: u8,
+    /// Whether that is [`ENCLOSURE_INDOOR_HITS`] or more.
+    pub indoors: bool,
+}
+
+/// **Is this point inside?** (wave WPN2c) — six rays out, the doc's rule, and
+/// the whole of what chooses a gunshot's tail.
+///
+/// # It is SIM state, and the ray bill is real
+///
+/// This runs inside the fixed step, at the muzzle, on the step the trigger went
+/// down, and its verdict rides `WeaponHit::indoors` into both hosts' audio
+/// fence — so two hosts cannot disagree about whether a shot was indoors, and a
+/// replay reproduces the tail. It costs [`ENCLOSURE_PROBE_RAYS`] casts per loud
+/// shot, and those casts are counted against
+/// [`inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP`] beside the shot's own: a
+/// firefight's ray bill is seven per trigger pull now, not one, and the pool's
+/// spawn refusal is priced against the larger number rather than pretending the
+/// probe is free.
+///
+/// # `AllSolid`, and the shooter excluded
+///
+/// The same targets a shot itself uses (the WPN2a audit's closure of carried
+/// 200): a parked car is a wall for this purpose and a trigger volume is not.
+/// The shooter's own colliders are excluded because a probe standing inside its
+/// own capsule would count six hits in an open field.
+pub fn enclosure_at(
+    physics: &mut PhysicsWorld3D,
+    at: DVec3,
+    exclude: &std::collections::BTreeSet<super::ColliderId3D>,
+) -> Enclosure {
+    let mut hits = 0u8;
+    if at.is_finite() {
+        for dir in ENCLOSURE_DIRS {
+            if physics
+                .cast_ray_where(
+                    at,
+                    dir,
+                    ENCLOSURE_PROBE_M,
+                    exclude,
+                    super::CastTargets::AllSolid,
+                )
+                .is_some()
+            {
+                hits += 1;
+            }
+        }
+    }
+    Enclosure {
+        hits,
+        indoors: usize::from(hits) >= ENCLOSURE_INDOOR_HITS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
