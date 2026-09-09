@@ -121,5 +121,16 @@ reads them yet.
 **Burst fire** — the engine has automatic and semi-automatic, so the three-round-burst weapons are
 authored as automatic at their listed rate. **Attachments**, **recoil springs and sway**, the
 **four-layer gunshot** and **shell casings** are all later waves of the same arc. And a round
-**cannot hurt a vehicle**: a shot's cast sees static and kinematic geometry only, which is why a
-hitscan could not either.
+**cannot hurt a vehicle** — but it does now **stop at one**: since this wave's audit both halves of
+the hybrid cast against every solid body rather than static and kinematic geometry only, so a round
+ends in a parked car (which spends nothing, having no health and nothing to break) and a body lying
+on the floor can be hit.
+
+### Getting a weapon in the showcase
+
+The island puts one **Glock 17** on the kerb 1.4 m in front of where you spawn. Walk up to it,
+press **E**, and turn the **scroll wheel** to bring it into your hands; the left mouse button fires
+it. That is the level's own Blueprint doing it — `island_author_class` defines the whole
+eighty-five-row registry on `BeginPlay` and spawns the one pickup — so nothing about it is a
+developer switch. Every other row of the registry is reachable to a level that calls the same
+`item.define` node, which is what `samples/phase30-gameplay` does.

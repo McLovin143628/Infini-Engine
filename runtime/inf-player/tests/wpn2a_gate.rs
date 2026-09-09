@@ -1983,6 +1983,258 @@ fn pie_sim() -> inf_player::runtime_sim::RuntimeSim {
         .sim
 }
 
+// ── (j) THE ISLAND'S OWN WEAPON DOOR (the WPN2a audit's closure of 204) ──────
+
+/// **THE ISLAND ARMS ITSELF, WITH NO ENV VAR** — carried 204, closed and
+/// measured on the committed island level.
+///
+/// Wave WPN2a's registry reached a LEVEL through the `phase30-gameplay`
+/// fixture's `item.define` node, and reached the ISLAND through
+/// `INF_PIE_ARM_HERO` — a dev-only preview env var read by the demo loop. A
+/// player who booted the showcase had no weapon and no way to get one. The
+/// island now carries a level Blueprint of its own
+/// (`inf_editor_core::island::island_author_class`) which defines the registry
+/// and puts one sidearm on the kerb the hero starts beside.
+///
+/// **Everything below goes through a SHIPPED door.** The level is the committed
+/// `IslandFixture.inf_lvl`, loaded by the player's own loose loader; the pickup
+/// is spawned by the level's own `BeginPlay`; the E key is
+/// `RuntimeInput::with_down(["interact"])`, which is the same
+/// `MovementIntent::from_actions` the window host feeds; the trigger is
+/// `["attack"]`. No `INF_PIE_*` is read and no component is written by hand
+/// except the aim, which is the mouse.
+///
+/// **Mutation → red:** dropping the `item.spawn_pickup` call from the class
+/// leaves `on_the_kerb` `None`; dropping the `item.define` call in front of it
+/// makes `spawn_pickup` refuse the id and does the same.
+#[test]
+fn the_island_puts_a_registry_weapon_on_the_kerb_and_the_hero_picks_it_up() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let content = island_fixture_project(tmp.path());
+    assert!(
+        content.join("IslandFixtureAuthor.inf_act").is_file(),
+        "the recipe's `[content]` list does not carry the island's own author \
+         class, so a BUILT project has no weapon catalogue"
+    );
+    let mut sim = island_fixture_sim(&content);
+    // Settle: the class's `BeginPlay` runs on the entity's first tick.
+    for _ in 0..30 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a hero");
+
+    // ── the kerb ────────────────────────────────────────────────────────────
+    let on_the_kerb = pickups(sim.world());
+    println!("the island's pickups after 30 steps: {on_the_kerb:?}");
+    let (pickup_guid, pickup_id, pickup_at) = on_the_kerb
+        .into_iter()
+        .next()
+        .expect("the island spawned no pickup at all -- carried 204 is open");
+    assert_eq!(
+        pickup_id,
+        inf_editor_core::island::ISLAND_SIDEARM_ID,
+        "the island put a `{pickup_id}` on the kerb"
+    );
+    // It is a REGISTRY row, with the registry's own numbers — not a definition
+    // the island invented.
+    let def = item::item_defs(sim.world())
+        .and_then(|d| d.get(&pickup_id))
+        .and_then(|d| d.weapon)
+        .expect("the sidearm on the kerb is not a weapon in the level's catalogue");
+    assert_eq!(def.kind, ShotKind::Projectile);
+    assert_eq!(def.damage_j, 30.0 * weapon::JOULES_PER_HIT_POINT);
+    assert_eq!(def.magazine, 17, "the doc's Glock 17 carries seventeen");
+    // …and it is in REACH of where the hero actually stands.
+    let feet = hero_feet(sim.world(), hero).expect("the hero has feet");
+    let reach = (pickup_at - feet).length();
+    println!(
+        "the sidearm `{pickup_id}` ({pickup_guid}) lies {reach:.2} m from the hero's feet \
+         (the E key's own reach is {:.1} m)",
+        inf_ecs::interact::DEFAULT_REACH_M
+    );
+    assert!(
+        reach < inf_ecs::interact::DEFAULT_REACH_M,
+        "the sidearm is {reach:.2} m away and the E key reaches {:.1} m",
+        inf_ecs::interact::DEFAULT_REACH_M
+    );
+
+    // ── the E key ───────────────────────────────────────────────────────────
+    assert!(
+        weapon::equipped_def(sim.world(), hero).is_none(),
+        "the hero starts the level already holding something"
+    );
+    let mut in_the_bag = 0u32;
+    for i in 0..40 {
+        let input = if i % 4 == 0 {
+            inf_player::runtime_sim::RuntimeInput::with_down(["interact"])
+        } else {
+            inf_player::runtime_sim::RuntimeInput::default()
+        };
+        sim.step_once(input);
+        in_the_bag = item::inventory_of(sim.world(), hero)
+            .map(|inv| inv.count_of(&pickup_id))
+            .unwrap_or(0);
+        if in_the_bag > 0 {
+            break;
+        }
+    }
+    println!("after the E key the hero's bag holds {in_the_bag} x `{pickup_id}`");
+    assert_eq!(
+        in_the_bag, 1,
+        "the hero pressed the shipped interact key beside a pickup for forty steps and \
+         the bag is still empty"
+    );
+    assert!(
+        sim.world().entity_of(pickup_guid).is_none(),
+        "the pickup is still lying there after it was taken"
+    );
+
+    // -- the wheel --------------------------------------------------------
+    //
+    // Picking a weapon up puts it in the BAG; equipping it is the shipped
+    // `weapon_switch` verb, which is the scroll wheel and reaches the intent as
+    // an axis. Deliberately not a component write: the whole claim is that every
+    // step of this is a control a player has.
+    let mut equipped = None;
+    for _ in 0..40 {
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default().axis_at("weapon_switch", 1.0),
+        );
+        if let Some(d) = weapon::equipped_def(sim.world(), hero) {
+            equipped = Some(d);
+            break;
+        }
+    }
+    let held = equipped.expect(
+        "the hero turned the shipped weapon wheel for forty steps with a pistol in the \
+         bag and is holding nothing",
+    );
+    assert_eq!(
+        held.1.magazine, def.magazine,
+        "a different weapon was equipped"
+    );
+
+    // ── the trigger ─────────────────────────────────────────────────────────
+    //
+    // Aimed level and a touch up, so the shot leaves the muzzle rather than
+    // into the kerb the hero is standing on.
+    {
+        let e = sim.world().entity_of(hero).expect("the hero");
+        let mut cm = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("a character");
+        cm.runtime.aim_pitch_deg = 6.0;
+    }
+    let mut shots = 0u32;
+    for _ in 0..40 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::with_down(["attack"]));
+        shots += sim.gameplay().shots;
+        if shots > 0 {
+            break;
+        }
+    }
+    println!(
+        "the hero fired {shots} shot(s) of a `{pickup_id}` on the island through the \
+         window's own input door, with no environment variable set"
+    );
+    assert!(
+        shots > 0,
+        "the hero held the shipped attack key for forty steps with a registry weapon \
+         equipped and fired nothing"
+    );
+}
+
+/// Every `ItemPickup` in the world, as `(guid, id, world position)`.
+fn pickups(world: &EcsWorld) -> Vec<(Uuid, String, DVec3)> {
+    let mut out = Vec::new();
+    let w = world.world();
+    for (guid, pickup, t) in w
+        .iter_entities()
+        .filter_map(|e| {
+            Some((
+                e.get::<inf_ecs::components::Guid>()?,
+                e.get::<inf_ecs::item::ItemPickup>()?,
+                e.get::<Transform>()?,
+            ))
+        })
+        .collect::<Vec<_>>()
+    {
+        out.push((guid.0, pickup.id.clone(), t.translation.to_dvec3()));
+    }
+    out.sort_by_key(|(g, _, _)| *g);
+    out
+}
+
+/// Where a character's feet are, from its transform and its own capsule.
+fn hero_feet(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+    let e = world.entity_of(guid)?;
+    let w = world.world();
+    let cm = w.get::<CharacterMovement>(e)?;
+    let t = w.get::<Transform>(e)?;
+    let radius = w.get::<Collider3D>(e).map(|c| c.radius).unwrap_or(RADIUS);
+    Some(t.translation.to_dvec3() - DVec3::Y * (cm.half_height_for(cm.mode) + radius))
+}
+
+/// **Build the CI-scale island the way `inf island build` does** and answer its
+/// `Content` — `island_gate::build_project`'s own door, so this arm also proves
+/// the recipe's `[content]` list carries the author class into a real project.
+///
+/// It is a build rather than a read of `samples/island-fixture` for one reason
+/// the first draft of this arm found the hard way: the committed folder ships no
+/// `.inf_terrain` (it is derived, and gitignored), so a hero loaded off it FALLS
+/// FOR EVER — and a character in `FallFree` never takes the interact edge, which
+/// `step_one` only reads on a grounded step. The arm read "the bag is empty" and
+/// the cause was that there was no ground.
+fn island_fixture_project(tmp: &Path) -> PathBuf {
+    let recipe =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island-fixture/island.toml");
+    let recipe = inf_island::IslandRecipe::load(&recipe).expect("the fixture recipe loads");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let proj = tmp.join("island");
+    ProjectManifest::new(&recipe.name, "blank-3d")
+        .save(&proj)
+        .expect("the project scaffolds");
+    let content = proj.join("Content");
+    inf_island::write_content(&build, &content).expect("the island's content writes");
+    content
+}
+
+/// The built island fixture, in the SHIPPING host's own loose loader —
+/// `island_gate::loose_sim`'s shape, cut to what this arm reads.
+fn island_fixture_sim(content: &Path) -> inf_player::runtime_sim::RuntimeSim {
+    let source = inf_player::level::DevDirLevelSource::new(content.join("IslandFixture.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    // **The persisted binding map**, which is how an `ActorClass` on an entity
+    // finds its class: `with_defaults` alone is a FALLBACK list, and the island's
+    // author entity names its class by asset GUID.
+    .with_bindings(inf_player::level::load_actor_classes_by_guid_from_dir(
+        content,
+    ))
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the island fixture loads");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    sim
+}
+
 /// A tiny guard so the unused-import lint cannot fire on a set this file grows.
 #[test]
 fn the_gate_names_the_constants_it_is_about() {

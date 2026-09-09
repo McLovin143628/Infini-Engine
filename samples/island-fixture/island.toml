@@ -30,6 +30,9 @@ content = [
   "IslandFixture.inf_lvl.toml",
   "IslandFixtureCover.inf_pcg",
   "IslandFixtureCover.inf_pcg.toml",
+  # The ISLAND AUTHOR class (wave WPN2a audit) -- see the full island's recipe.
+  "IslandFixtureAuthor.inf_act",
+  "IslandFixtureAuthor.inf_act.toml",
   # The STARTER CHARACTER (SK1c) -- the island's hero IS it, so the level's
   # `SkeletalMesh`, `AnimStateMachine` and `ActorClass` name these GUIDs and a
   # project built without them boots a hero with no rig. They live with the

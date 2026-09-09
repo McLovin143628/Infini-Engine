@@ -107,6 +107,108 @@ fn car_paint(site: usize) -> inf_ecs::math::Color {
 /// of `x` must raise the start by exactly `x` and move nothing else.
 pub const START_LIFT_M: f64 = 0.0;
 
+/// **The registry row that lies on the kerb where the hero starts** (wave WPN2a
+/// audit, closing carried 204).
+///
+/// A Glock 17 — the first row of the research doc's own first table, and the
+/// shape the reference game uses: you start with nothing and there is a pistol
+/// on the ground. It is a `weapons.toml` id and nothing else, so changing which
+/// weapon the island opens with is one string.
+pub const ISLAND_SIDEARM_ID: &str = "glock_17";
+
+/// Where it lies, metres from [the hero's own start](inf_island::IslandDesign::start).
+///
+/// **1.4 m along +Z and 0.4 m up**, and every part of that is a measurement.
+///
+/// `+Z` because that is yaw zero (`inf_ecs::movement::planar_yaw_deg`'s own
+/// convention) and a character's aim starts there, so the sidearm is DEAD AHEAD
+/// of where the player is looking when the level opens: the E key resolves
+/// inside `inf_ecs::interact::DEFAULT_VIEW_CONE_DEG` (90 degrees), so a pickup
+/// beside the hero is one it is told nothing about. 1.4 m is inside
+/// `DEFAULT_REACH_M` (2.5 m from the feet) and clear of the capsule the hero
+/// spawns inside. The height is `samples/phase30-gameplay`'s own
+/// rifle-on-the-floor number, so a pickup on the island sits where a pickup in
+/// the fixture does.
+pub const ISLAND_SIDEARM_OFFSET_M: (f64, f64, f64) = (0.0, 0.4, 1.4);
+
+/// **THE ISLAND'S OWN LEVEL BLUEPRINT** (wave WPN2a audit) — the door that
+/// closes carried 204.
+///
+/// Wave WPN2a shipped an eighty-five-row weapon registry that reached a LEVEL
+/// through `phase30-gameplay`'s `item.define` node and reached the ISLAND
+/// through `INF_PIE_ARM_HERO`, a dev-only preview env var. So a player who
+/// booted the showcase had no weapon at all and no way to get one, which the
+/// showcase mandate ("all controls work") does not allow.
+///
+/// # Why a class of the island's own, and not the wizard's
+///
+/// The only `ActorClass` on this level was the STARTER CHARACTER's controller,
+/// which is shared by `samples/starter-character`, `starter-character-f`,
+/// `character-demo` and every character the New Character wizard has ever
+/// emitted. Putting a weapon catalogue in there would arm all of them. This is
+/// one class, on one entity, owned by this generator — `gameplay_controller`'s
+/// shape exactly, one level along.
+///
+/// # What it does, and deliberately does not
+///
+/// `BeginPlay`, twice: `item.define` with
+/// [`inf_ecs::weapon::WEAPON_REGISTRY_TOML`] — the same `&str` the fixture
+/// defines, so the island's numbers are the registry's numbers and not a copy —
+/// and `item.spawn_pickup` with [`ISLAND_SIDEARM_ID`] on the kerb. It does
+/// **not** give the hero anything: a weapon that is simply in your hands when
+/// the level opens is not a door the player can see working, and the whole
+/// point of closing carried 204 is that the pickup, the prompt, the E key and
+/// the equip are the shipped verbs (`inf_ecs::interact::InteractVerb::PickUp`,
+/// island wave I6's).
+///
+/// The registry rides this class's bytes, which is carried 202's cost paid a
+/// second time and stated in the same words: a runtime-editable catalogue is an
+/// asset kind and a scene bump, and VEH3a's schema window is where that trade is
+/// revisited.
+pub fn island_author_class(name: &str, sidearm_at: DVec3) -> inf_blueprint::BlueprintClass {
+    use inf_blueprint::{
+        BlueprintClass, BlueprintFn, EventBinding, EventKind, Expr, Lit, Stmt, Ty,
+    };
+    let f = |v: f64| Expr::Lit(Lit::Float(v));
+    let str_lit = |v: &str| Expr::Lit(Lit::Str(v.into()));
+    let call = |path: &[&str], args: Vec<Expr>| {
+        Stmt::ExprStmt(Expr::Call {
+            path: path.iter().map(|p| (*p).to_string()).collect(),
+            args,
+        })
+    };
+    let mut class = BlueprintClass::new(
+        &format!("act:{}-author", inf_island::slug(name).to_lowercase()),
+        "Island Author",
+    );
+    class.events = vec![EventBinding {
+        event: EventKind::BeginPlay,
+        body: BlueprintFn {
+            id: "begin".into(),
+            name: "begin".into(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: vec![
+                call(
+                    &["item", "define"],
+                    vec![str_lit(inf_ecs::weapon::WEAPON_REGISTRY_TOML)],
+                ),
+                call(
+                    &["item", "spawn_pickup"],
+                    vec![
+                        str_lit(ISLAND_SIDEARM_ID),
+                        f(sidearm_at.x),
+                        f(sidearm_at.y),
+                        f(sidearm_at.z),
+                        Expr::Lit(Lit::Int(1)),
+                    ],
+                ),
+            ],
+        },
+    }];
+    class
+}
+
 /// How tall the island's hero is, metres — **the starter character's own
 /// height**, not a number this file chose (SK1c).
 ///
@@ -350,6 +452,15 @@ pub fn ocean_guid(name: &str) -> Uuid {
 pub fn hero_guid(name: &str) -> Uuid {
     derived(name, "island.hero")
 }
+/// **The quartermaster** (wave WPN2a audit) — the entity whose Blueprint puts
+/// the island's own weapon catalogue and its one sidearm into the world.
+pub fn quartermaster_guid(name: &str) -> Uuid {
+    derived(name, "island.quartermaster")
+}
+/// The `.inf_act` [`quartermaster_guid`] binds.
+pub fn quartermaster_actor_guid(name: &str) -> Uuid {
+    derived(name, "island.quartermaster.act")
+}
 /// Lake `i`.
 pub fn lake_guid(name: &str, i: usize) -> Uuid {
     derived(name, &format!("island.lake.{i}"))
@@ -467,8 +578,9 @@ fn island_ground_layers() -> [inf_ecs::components::TerrainLayer; 4] {
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
-        AlwaysLoaded, AudioListener, Light, LightKind, MeshRef, PcgVolume, SkyAtmosphere, Spline,
-        SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
+        ActorClass, AlwaysLoaded, AudioListener, Light, LightKind, MeshRef, PcgVolume,
+        SkyAtmosphere, Spline, SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform,
+        WaterBody, WaterKind,
     };
     use inf_ecs::math::{Color, Vec2d, Vec3d};
 
@@ -1284,6 +1396,32 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // (`AudioListener` is a scene-v6 component: placing one moves no schema.)
     insert!(doc, hero, AudioListener { active: true });
 
+    // ── the quartermaster ────────────────────────────────────────────────────
+    //
+    // **THE ISLAND'S OWN LEVEL BLUEPRINT** (wave WPN2a audit, carried 204). One
+    // empty entity carrying one `ActorClass`, whose `BeginPlay` defines the
+    // eighty-five-row weapon registry and puts ONE sidearm on the kerb the hero
+    // starts beside. See `island_author_class` for why it is a class of this
+    // level's own rather than a line in the wizard's shared controller.
+    //
+    // `AlwaysLoaded`, for the sun's reason: an entity binned into a partition
+    // cell that has not activated has not run its `BeginPlay`, and a weapon
+    // catalogue that appears when you walk back towards the origin is a defect
+    // nobody would find twice.
+    let qm = quartermaster_guid(name);
+    doc.create_with_guid(qm, SpawnKind::Empty, "Quartermaster", None);
+    insert!(
+        doc,
+        qm,
+        Transform {
+            translation: Vec3d::from_dvec3(feet),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        },
+    );
+    insert!(doc, qm, ActorClass(quartermaster_actor_guid(name)));
+    insert!(doc, qm, AlwaysLoaded);
+
     doc.world_mut().propagate();
     doc.mark_saved();
     doc
@@ -1317,6 +1455,28 @@ pub fn write_island_level(
         &island_street_spans(design),
     )
     .map_err(|e| format!("write the island's street layer: {e}"))?;
+
+    // **THE AUTHOR CLASS** (wave WPN2a audit, carried 204) — written here, beside
+    // the level, for the `.inf_pcg`'s reason: it is derived from the same design
+    // the level is and by the same generator, so a recipe that moves the start
+    // moves the sidearm with it and no second door has to be told.
+    let feet = design.start(START_LIFT_M);
+    let sidearm_at = feet
+        + DVec3::new(
+            ISLAND_SIDEARM_OFFSET_M.0,
+            ISLAND_SIDEARM_OFFSET_M.1,
+            ISLAND_SIDEARM_OFFSET_M.2,
+        );
+    let act = crate::samples::encode_actor(&island_author_class(name, sidearm_at))?;
+    let ap = dir.join(format!("{slug}Author.inf_act"));
+    std::fs::write(&ap, &act).map_err(|e| format!("write {}: {e}", ap.display()))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(quartermaster_actor_guid(name)),
+        inf_asset::AssetKind::Blueprint,
+        inf_asset::ContentHash::of(&act),
+    )
+    .save(&ap)
+    .map_err(|e| format!("write the .inf_act sidecar: {e}"))?;
 
     let bytes = inf_asset::encode(&island_cover_payload(design.recipe.seed_for("cover")))
         .map_err(|e| format!("encode the island's .inf_pcg: {e}"))?;

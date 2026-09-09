@@ -686,7 +686,31 @@ pub fn pick_up(world: &mut EcsWorld, character: Uuid, target: Uuid) -> PickUpVer
         return PickUpVerdict::NoInventory;
     };
     if world.world().get::<Inventory>(character_entity).is_none() {
-        return PickUpVerdict::NoInventory;
+        // **A CHARACTER with no bag gets one on the first thing it picks up**
+        // (wave WPN2a audit). [`give`] four lines up has always inserted an
+        // `Inventory::default()` for a character that had none, and this door
+        // refused instead -- so a character who had never been GIVEN anything
+        // could never PICK UP anything, and the E key on a weapon lying on the
+        // ground did nothing at all with no message anywhere. That is what the
+        // island's own kerb sidearm found: two spellings of "this character has
+        // nowhere to put it", one of which was a refusal and one of which was
+        // not.
+        //
+        // It is `apply_hit`'s lazy-`Health` doctrine one door along, with the
+        // same bound: only a CHARACTER. A crate, a door leaf or a bare entity
+        // that reaches this door still answers [`PickUpVerdict::NoInventory`],
+        // because a thing with no body is not a thing with an empty bag.
+        if world
+            .world()
+            .get::<crate::components::CharacterMovement>(character_entity)
+            .is_none()
+        {
+            return PickUpVerdict::NoInventory;
+        }
+        world
+            .world_mut()
+            .entity_mut(character_entity)
+            .insert(Inventory::default());
     }
     let defs = item_defs(world).cloned().unwrap_or_default();
     let left = {

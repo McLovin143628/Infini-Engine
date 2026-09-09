@@ -42,6 +42,13 @@ content = [
   "VancouverIsland.inf_lvl.toml",
   "VancouverIslandCover.inf_pcg",
   "VancouverIslandCover.inf_pcg.toml",
+  # The ISLAND AUTHOR class (wave WPN2a audit) -- the level's own Blueprint,
+  # whose BeginPlay defines the eighty-five-row weapon registry and puts one
+  # sidearm on the kerb the hero starts beside. Without it a player who boots
+  # the showcase has no weapon and no way to get one (carried 204). Generated
+  # beside the level by the same door.
+  "VancouverIslandAuthor.inf_act",
+  "VancouverIslandAuthor.inf_act.toml",
   # The STARTER CHARACTER (SK1c) -- the island's hero IS it, so the level's
   # `SkeletalMesh`, `AnimStateMachine` and `ActorClass` name these GUIDs and a
   # project built without them boots a hero with no rig. They live with the

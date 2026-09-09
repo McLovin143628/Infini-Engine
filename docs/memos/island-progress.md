@@ -37314,6 +37314,40 @@ sway, spread state, the four-layer gunshot and the casing pool. Every one of
 them is a later wave of this arc and every one is named in `weapons.toml` itself
 rather than only in a report.
 
+**THE ISLAND ARMS ITSELF** (the WPN2a audit's closure of carried 204). The
+wave's registry reached a LEVEL through `phase30-gameplay`'s `item.define` node
+and reached the ISLAND through `INF_PIE_ARM_HERO`, a dev-only preview env var —
+so a player who booted the showcase had no weapon and no way to get one, which
+the showcase mandate does not allow. The island now carries a level Blueprint of
+its own (`inf_editor_core::island::island_author_class`, on a `Quartermaster`
+entity, `AlwaysLoaded`): `BeginPlay` defines the eighty-five rows through the
+same `item.define` node the fixture uses and spawns ONE `glock_17` 1.4 m along
++Z from the hero's start — dead ahead of yaw zero, because the E key resolves
+inside a 90-degree view cone and a pickup beside you is one you are told nothing
+about. It is a class of the LEVEL's own and not a line in the wizard's shared
+controller, which is bound to every character the New Character wizard has ever
+emitted.
+
+It found one defect on the way in, and it is the kind that hides for ever:
+**`item::give` created an inventory for a character that had none and
+`item::pick_up` refused**, so a character who had never been GIVEN anything
+could never PICK UP anything — the E key on a weapon lying on the ground did
+nothing, silently, on any level whose Blueprint had not remembered
+`give_inventory`. `pick_up` now inserts an `Inventory::default()` for a
+CHARACTER, on `apply_hit`'s lazy-`Health` doctrine; anything that is not a
+character still answers `NoInventory`.
+
+Measured, in `wpn2a_gate::the_island_puts_a_registry_weapon_on_the_kerb_and_the_
+hero_picks_it_up`, over a fixture island BUILT by `inf island build`'s own door:
+the sidearm lies **1.45 m** from the hero's feet, the shipped `interact` action
+puts **1** in the bag and despawns it, the shipped `weapon_switch` axis equips
+it, and the shipped `attack` action fires **1** shot — with no environment
+variable set. (The arm builds the island rather than reading
+`samples/island-fixture` because the committed folder ships no `.inf_terrain`:
+a hero loaded off it falls for ever, and a character in `FallFree` never takes
+the interact edge. The first draft read "the bag is empty" and the cause was
+that there was no ground.)
+
 **A ROUND STOPS AT A CAR, AND AT A BODY ON THE FLOOR** (the WPN2a audit's
 closure of carried 200). The wave shipped both halves of the hybrid casting
 through `cast_ray_excluding`, which is `CastTargets::Fixed`, so a bullet passed
