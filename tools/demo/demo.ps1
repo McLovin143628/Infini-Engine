@@ -57,6 +57,20 @@ param(
     # wizard has ever made -- so a weapon catalogue in there would arm all of
     # them. The phase30 fixture is where the registry reaches a LEVEL.
     [string]$ArmHero = "",
+    # **HOW LONG THE PLAYER HOLDS EACH ONE**, seconds (carried 209). Any value
+    # above zero turns `-ArmHero` into a ROTATION: the player equips each id in
+    # turn through `equip_weapon` -- the ECS door -- and wraps for ever, so this
+    # leg never touches the scroll wheel again. `weapon_switch` is a RATE (a
+    # 120-count notch is divided by the frame time and the movement step cycles
+    # one slot per step while the sign is non-zero), so one notch is not one
+    # slot: wave WPN2a spun up to twenty-four notches per class, reversed half
+    # way, and STILL had a session that never reached `remington_870`.
+    #
+    # Fourteen seconds is a measurement, not a guess: the per-weapon work here
+    # is one HUD frame plus up to four trigger presses at 250 ms down and 1.6 s
+    # of waiting, which is about ten seconds, and the leg has to finish inside
+    # the dwell or it photographs the next weapon's magazine.
+    [double]$ArmDwellS = 14.0,
     [int]$BootWaitS = 60,
     [int]$PieWaitS = 240,
     [int]$LoadSettleS = 20,
@@ -260,8 +274,17 @@ $armList = @()
 if ($ArmHero -ne "") {
     $armList = @($ArmHero.Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
     if ($armList.Count -gt 0) {
-        $env:INF_PIE_ARM_HERO = ($armList -join ";")
-        Say "arm hero: $($armList -join ', ')"
+        # `id@dwell` per entry when a dwell is asked for: the player then
+        # ROTATES through the list with `equip_weapon` instead of leaving this
+        # leg to guess with the wheel (carried 209).
+        if ($ArmDwellS -gt 0) {
+            $env:INF_PIE_ARM_HERO = (($armList | ForEach-Object { "$_@$ArmDwellS" }) -join ";")
+            Say "arm hero: $($armList -join ', ') -- rotating every $ArmDwellS s through the ECS door"
+        }
+        else {
+            $env:INF_PIE_ARM_HERO = ($armList -join ";")
+            Say "arm hero: $($armList -join ', ')"
+        }
     }
 }
 if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction SilentlyContinue }
@@ -652,15 +675,15 @@ Start-Sleep -Milliseconds 900
 # `idle` in four sessions out of five while the crouch states were 69 rows of the
 # same log. The crouch click also fires on RELEASE and is swallowed outright
 # about one session in three, so the tap is RETRIED here rather than trusted.
-$gotCrouch = Wait-ForHero -Csv $heroCsv -What "a crouch" -TimeoutS 2.5 `
+$gotCrouch = @(Wait-ForHero -Csv $heroCsv -What "a crouch" -TimeoutS 2.5 `
     -Predicate { param($c) $c[5] -eq "Crouch" } `
-    -Out (Join-Path $OutDir "14-crouch.png")
+    -Out (Join-Path $OutDir "14-crouch.png"))[-1]
 if (-not $gotCrouch) {
     Say "the crouch tap was swallowed; tapping C again"
     [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
-    $gotCrouch = Wait-ForHero -Csv $heroCsv -What "a crouch (2nd tap)" -TimeoutS 3.0 `
+    $gotCrouch = @(Wait-ForHero -Csv $heroCsv -What "a crouch (2nd tap)" -TimeoutS 3.0 `
         -Predicate { param($c) $c[5] -eq "Crouch" } `
-        -Out (Join-Path $OutDir "14-crouch.png")
+        -Out (Join-Path $OutDir "14-crouch.png"))[-1]
 }
 Say "CROUCH-WALK: W held while crouched"
 [InfInput]::Down(0x11); Start-Sleep -Milliseconds 900
@@ -774,9 +797,9 @@ Say "SLIDE: Shift+W up to speed, then C while still sprinting"
 Start-Sleep -Milliseconds 2600
 [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x2E)
 Start-Sleep -Milliseconds 260
-if (Wait-ForHero -Csv $heroCsv -What "the slide" -TimeoutS 3.0 `
+if (@(Wait-ForHero -Csv $heroCsv -What "the slide" -TimeoutS 3.0 `
         -Predicate { param($c) $c[5] -eq "Slide" } `
-        -Out (Join-Path $OutDir "32-slide.png")) {
+        -Out (Join-Path $OutDir "32-slide.png"))[-1]) {
     Wait-ForHero -Csv $heroCsv -What "the slide, later in it" -TimeoutS 1.5 `
         -Predicate { param($c) $c[5] -eq "Slide" } `
         -Out (Join-Path $OutDir "33-sliding.png") | Out-Null
@@ -832,8 +855,8 @@ Start-Sleep -Milliseconds 1400
 function Stand-Up([string]$why) {
     Say "STAND UP ($why)"
     for ($k = 0; $k -lt 4; $k++) {
-        $standing = Wait-ForHero -Csv $heroCsv -What "a standing hero ($why)" -TimeoutS 1.5 `
-            -Predicate { param($c) ($c[5] -eq "Grounded") -and ($c[11] -notmatch "^(crouch|prone|slide)") }
+        $standing = @(Wait-ForHero -Csv $heroCsv -What "a standing hero ($why)" -TimeoutS 1.5 `
+            -Predicate { param($c) ($c[5] -eq "Grounded") -and ($c[11] -notmatch "^(crouch|prone|slide)") })[-1]
         if ($standing) { return $true }
         [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x2E)   # scancode: C
         Start-Sleep -Milliseconds 500
@@ -853,9 +876,9 @@ $gotCar = $false
 # away from it. So the hunt presses first and walks second.
 for ($k = 0; $k -lt 25 -and -not $gotCar; $k++) {
     [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # scancode: E
-    $gotCar = Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 0.9 `
+    $gotCar = @(Wait-ForHero -Csv $heroCsv -What "the drive camera blending" -TimeoutS 0.9 `
         -Predicate { param($c) ($c.Count -gt 13) -and ($c[5] -eq "Driving") -and ([double]$c[13] -gt 4.0) } `
-        -Out (Join-Path $OutDir "69-camera-vehicle-blend.png")
+        -Out (Join-Path $OutDir "69-camera-vehicle-blend.png"))[-1]
     if (-not $gotCar -and $k -ge 5) {
         [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)
     }
@@ -888,9 +911,9 @@ Wait-ForHero -Csv $heroCsv -What "the hero at rest with a full boom" -TimeoutS 8
 # actually has a wall.
 Say "CAMERA: backing into a wall — the boom clips and the body fades"
 [InfInput]::Down(0x1F)   # scancode: S
-$gotWall = Wait-ForHero -Csv $heroCsv -What "a clipped boom" -TimeoutS 8.0 `
+$gotWall = @(Wait-ForHero -Csv $heroCsv -What "a clipped boom" -TimeoutS 8.0 `
     -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[7] -gt 0.8) } `
-    -Out (Join-Path $OutDir "61-camera-against-a-wall.png")
+    -Out (Join-Path $OutDir "61-camera-against-a-wall.png"))[-1]
 if ($gotWall) {
     # …and again, shorter, where the near fade has actually engaged. It is
     # allowed to miss and to say so: a street with nothing tall behind it never
@@ -985,9 +1008,9 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
         $mantled = $false
         for ($k = 0; $k -lt 10 -and -not $mantled; $k++) {
             [InfInput]::Down(0x39); Start-Sleep -Milliseconds 60; [InfInput]::Up(0x39)
-            $mantled = Wait-ForHero -Csv $heroCsv -What "a mantle" -TimeoutS 1.2 `
+            $mantled = @(Wait-ForHero -Csv $heroCsv -What "a mantle" -TimeoutS 1.2 `
                 -Predicate { param($c) $c[11] -match "^mantle" } `
-                -Out (Join-Path $OutDir "41-mantling.png")
+                -Out (Join-Path $OutDir "41-mantling.png"))[-1]
         }
         if (-not $mantled) { Say "NO MANTLE reached from the ledge placement in ten jump taps" }
         Start-Sleep -Milliseconds 700
@@ -1260,9 +1283,11 @@ Say "PLACEMENTS: waiting for the player to apply $SpawnAt"
 #    the air right now and 21 is how far the last one that hit something had
 #    flown. A frame taken on `rounds > 0` is a frame with a bullet in it.
 #
-#    One session, one weapon of each CLASS: the player put the whole list in the
-#    hero's bag and equipped the first, and the wheel cycles the rest in through
-#    the shipped `weapon_switch` verb.
+#    One session, one weapon of each CLASS: the player puts the whole list in the
+#    hero's bag and ROTATES through it with `equip_weapon` -- the ECS door --
+#    holding each for `-ArmDwellS` seconds, so this leg waits for the hand to
+#    hold what it wants rather than spinning a wheel whose notch is not a slot
+#    (carried 209, closed by the WPN2a audit).
 if ($armList.Count -gt 0) {
     Say "── WPN2a: the hero is armed with $($armList -join ', ') ──"
     Restore-PlayerFocus "the ballistics leg"
@@ -1287,36 +1312,28 @@ if ($armList.Count -gt 0) {
     Start-Sleep -Milliseconds 700
     $anyFlew = $false
     # **THE FRAME IS NAMED BY WHAT IS IN THE HAND, NOT BY WHAT WAS ASKED FOR.**
-    # The first session of this wave cycled with the wheel and named every frame
+    # The first session of wave WPN2a cycled with the wheel and named every frame
     # after the id it MEANT to equip; the HUD in the pixels showed a different
     # magazine, because one notch of a wheel is not one slot of a bag. Column 22
-    # is what the sim says is equipped, so the leg CYCLES UNTIL IT MATCHES and a
-    # class it never reached takes no frame and says so.
+    # is what the sim says is equipped, so the leg WAITS FOR IT and a class the
+    # rotation never brought round takes no frame and says so.
     for ($wi = 0; $wi -lt $armList.Count; $wi++) {
         $wid = $armList[$wi]
-        # `[-1]` IS LOAD-BEARING and the loop has been getting it wrong. `Say`
-        # writes to the pipeline, so `Wait-ForHero` returns its own log lines
-        # AND its verdict; `$x = Wait-ForHero ...` binds a non-empty ARRAY,
-        # which is truthy whatever the predicate said. Session 2 of this wave
-        # cycled nothing at all because of it and photographed one weapon seven
-        # times. The COV1 cover leg already spells it `@(...)[-1]`; every
-        # capture in this leg does now.
-        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped" -TimeoutS 0.6 `
+        # **THE ROTATION, NOT THE WHEEL** (carried 209, closed by the WPN2a
+        # audit). The player holds each id for `-ArmDwellS` seconds and equips
+        # the next through `equip_weapon`, so this leg WAITS for the hand to
+        # hold what it wants instead of spinning a wheel whose notch is not a
+        # slot. The window is a whole cycle plus a dwell, because the leg can
+        # arrive at any point in the rotation.
+        #
+        # `[-1]` IS LOAD-BEARING. `Say` writes to the pipeline, so `Wait-ForHero`
+        # returns its own log lines AND its verdict; `$x = Wait-ForHero ...`
+        # binds a non-empty ARRAY, which is truthy whatever the predicate said.
+        $cycleS = [math]::Max(4.0, $ArmDwellS) * ($armList.Count + 1)
+        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" in the hand" -TimeoutS $cycleS `
             -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) })[-1]
-        # BOTH DIRECTIONS, because one notch is not one slot: the wheel axis
-        # scales to more than a single step, so a bag of seven can be walked
-        # past the row you want twelve times running. Session 3 of this wave
-        # missed `remington_870` exactly that way and said so rather than
-        # photographing something else.
-        $spins = 0
-        while ((-not $onIt) -and ($spins -lt 24)) {
-            [InfInput]::Wheel($(if ($spins -lt 12) { 1 } else { -1 }))
-            $spins++
-            $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" equipped (notch $spins)" -TimeoutS 0.8 `
-                -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $wid) })[-1]
-        }
         if (-not $onIt) {
-            Say "WPN2a: the wheel never reached `"$wid`" in $spins notch(es) -- no frame for it"
+            Say "WPN2a: the rotation never put `"$wid`" in the hand inside $cycleS s -- no frame for it"
             continue
         }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("8{0}-class-{1}-hud.png" -f $wi, $wid)) | ForEach-Object { Say $_ }
@@ -1334,28 +1351,22 @@ if ($armList.Count -gt 0) {
                 -Out (Join-Path $OutDir ("8{0}-class-{1}-in-flight.png" -f $wi, $wid)))[-1]
         }
         $anyFlew = $anyFlew -or $flew
-        Start-Sleep -Milliseconds 300
     }
     # THE IMPACT, and getting one is a design question rather than a timing one.
     # Column 21 is latched by the POOL when a round lands, so only a PROJECTILE
-    # impact sets it — a shot that resolves inside its hitscan threshold sets
-    # nothing, which is right and is why three sessions of this wave fired down
+    # impact sets it -- a shot that resolves inside its hitscan threshold sets
+    # nothing, which is right and is why three sessions of wave WPN2a fired down
     # a street and photographed no impact at all: at 25 m of threshold, a shop
     # front twenty metres away is the near half every time.
     #
     # So the impact is fired with the SNIPER, whose threshold is 10 m, along a
     # LEVEL aim down the street: past ten metres everything is a round in
-    # flight, and a building a hundred metres away is what it arrives at.
+    # flight, and a building a hundred metres away is what it arrives at. The
+    # rotation brings it round again; this waits for it rather than spinning.
     $sn = "barrett_m82"
-    $onSn = @(Wait-ForHero -Csv $heroCsv -What "`"$sn`" equipped (for the impact)" -TimeoutS 0.6 `
+    $onSn = @(Wait-ForHero -Csv $heroCsv -What "`"$sn`" in the hand (for the impact)" -TimeoutS ([math]::Max(4.0, $ArmDwellS) * ($armList.Count + 1)) `
         -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sn) })[-1]
-    $sp = 0
-    while ((-not $onSn) -and ($sp -lt 24)) {
-        [InfInput]::Wheel($(if ($sp -lt 12) { 1 } else { -1 }))
-        $sp++
-        $onSn = @(Wait-ForHero -Csv $heroCsv -What "`"$sn`" equipped (impact notch $sp)" -TimeoutS 0.8 `
-            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sn) })[-1]
-    }
+    if (-not $onSn) { Say "WPN2a: the rotation never brought `"$sn`" back for the impact leg" }
     # LEVEL: down to the clamp, then back up by the clamp's own amount, for the
     # reason the leg aimed up that way — an absolute elevation, not a relative
     # one. 900 counts is past 89.9 degrees at the shipped sensitivity.

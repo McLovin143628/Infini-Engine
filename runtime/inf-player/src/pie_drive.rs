@@ -492,6 +492,29 @@ pub use inf_runtime::pie::WEAR_CLOTH_ENV;
 /// It merges the registry through `ItemDefs::merge_toml`, which is the SAME
 /// door the `item.define` node calls, so what the loop photographs is what a
 /// level would define.
+///
+/// # `id@dwell` — the rotation, and why the wheel could not do this (carried 209)
+///
+/// An entry may carry a **dwell in seconds** (`glock_17@8`). When any entry
+/// does, the list becomes a **rotation**: the door equips each id in turn
+/// through [`inf_physics::d3::gameplay::equip_weapon`] — the ECS door, the same
+/// one the `item.equip` node and the gate use — and wraps for ever.
+///
+/// It exists because `weapon_switch` is a **rate**: the wheel is a delta source,
+/// `axis_snapshot` divides a 120-count notch by the frame time, and the movement
+/// step cycles ONE SLOT PER STEP while the sign is non-zero. So one notch of a
+/// wheel is not one slot of a bag, and a scripted leg that wanted a *particular*
+/// weapon in the hand had to spin and check, spin and check — twenty-four
+/// notches, reversing half way, and wave WPN2a still had a session that never
+/// reached `remington_870`. A rotation is a *schedule*, so a leg that arrives at
+/// any time at all sees every weapon inside one cycle and waits for the one it
+/// wants; and because it wraps, it does not care WHEN the leg starts, which no
+/// absolute schedule could survive (the ballistics leg begins several minutes
+/// into a session, and how many minutes depends on how long the streaming took).
+///
+/// **It is still a preview-only door.** The rotation is the demo loop's
+/// instrument, exactly as `INF_PIE_SPAWN_AT` is; no gate reads it and no level
+/// contains it.
 pub const ARM_HERO_ENV: &str = "INF_PIE_ARM_HERO";
 
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
@@ -513,10 +536,14 @@ pub struct SpawnOverride {
     /// every entry written before the COV1 audit.
     at: Vec<([f64; 3], f64, Option<f64>)>,
     cloth: Option<Uuid>,
-    /// The registry ids [`ARM_HERO_ENV`] named, and whether they have been
-    /// given.
-    weapons: Vec<String>,
+    /// The registry ids [`ARM_HERO_ENV`] named, with each one's **dwell** in
+    /// seconds when it named one, and whether they have been given.
+    weapons: Vec<(String, Option<f64>)>,
     weapon_done: bool,
+    /// Which id the rotation is holding, and when it hands over. Both are `0`
+    /// on a list that named no dwell, which never rotates.
+    equip_at: usize,
+    equip_next_s: f64,
     accum: f64,
     next: usize,
     cloth_done: bool,
@@ -573,18 +600,32 @@ impl SpawnOverride {
         // A malformed value is a refusal with a reason on stderr, exactly as the
         // placement's is: the whole point of the door is that the operator finds
         // out whether it took.
-        let mut weapons: Vec<String> = Vec::new();
+        let mut weapons: Vec<(String, Option<f64>)> = Vec::new();
         if let Ok(v) = std::env::var(ARM_HERO_ENV) {
             let mut defs = inf_ecs::item::ItemDefs::default();
             match defs.merge_toml(inf_ecs::weapon::WEAPON_REGISTRY_TOML) {
                 Ok(_) => {
                     for entry in v.split(';') {
-                        let id = inf_ecs::item::canonical_id(entry);
+                        // `id` or `id@dwell_seconds` — the placement's own
+                        // `x,y,z@s` shape, one door along.
+                        let (name, dwell) = match entry.split_once('@') {
+                            Some((n, d)) => match d.trim().parse::<f64>() {
+                                Ok(d) if d.is_finite() && d > 0.0 => (n, Some(d)),
+                                _ => {
+                                    eprintln!(
+                                        "inf-player: {ARM_HERO_ENV} entry `{entry}` has no readable dwell; treating it as `{n}`"
+                                    );
+                                    (n, None)
+                                }
+                            },
+                            None => (entry, None),
+                        };
+                        let id = inf_ecs::item::canonical_id(name);
                         if id.is_empty() {
                             continue;
                         }
                         if defs.get(&id).is_some_and(|d| d.weapon.is_some()) {
-                            weapons.push(id);
+                            weapons.push((id, dwell));
                         } else {
                             eprintln!(
                                 "inf-player: {ARM_HERO_ENV} entry `{entry}` is not a weapon in the registry"
@@ -608,6 +649,26 @@ impl SpawnOverride {
         self.at.len().saturating_sub(self.next)
     }
 
+    /// Whether [`ARM_HERO_ENV`]'s list named a dwell, and therefore rotates.
+    fn rotates(&self) -> bool {
+        self.weapons.len() > 1 && self.weapons.iter().any(|(_, d)| d.is_some())
+    }
+
+    /// How long entry `i` is held, seconds — its own dwell, or the nearest one
+    /// named before it, or the list's first. A list that names one dwell means
+    /// that dwell for all of them, which is what an operator writing
+    /// `a@8;b;c` plainly means.
+    fn dwell(&self, i: usize) -> f64 {
+        self.weapons
+            .iter()
+            .take(i + 1)
+            .rev()
+            .find_map(|(_, d)| *d)
+            .or_else(|| self.weapons.iter().find_map(|(_, d)| *d))
+            .unwrap_or(0.0)
+            .clamp(0.0, 600.0)
+    }
+
     /// Apply whichever placement is due, at most one per frame. Returns a line
     /// for the hero log when one fires, so a frame taken afterwards can be read
     /// against a record of where the hero was put.
@@ -616,6 +677,7 @@ impl SpawnOverride {
         if done
             && (self.cloth.is_none() || self.cloth_done)
             && (self.weapons.is_empty() || self.weapon_done)
+            && !self.rotates()
         {
             return None;
         }
@@ -626,7 +688,11 @@ impl SpawnOverride {
         let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
         let wear = self.cloth.filter(|_| !self.cloth_done);
         let arm = (!self.weapon_done && !self.weapons.is_empty()).then(|| self.weapons.clone());
-        if due.is_none() && wear.is_none() && arm.is_none() {
+        // The rotation's own clock (carried 209). It is checked BEFORE the
+        // early return, because a rotation is the only thing this door does
+        // that is not one-shot.
+        let rotate = self.rotates() && self.weapon_done && self.accum >= self.equip_next_s;
+        if due.is_none() && wear.is_none() && arm.is_none() && !rotate {
             return None;
         }
         let hero = inf_ecs::movement::camera_subject(sim.world())?;
@@ -716,20 +782,47 @@ impl SpawnOverride {
                 inf_ecs::item::give_inventory(w, hero, ids.len().max(6));
             }
             let mut given: Vec<&str> = Vec::new();
-            for id in &ids {
+            for (id, _) in &ids {
                 if inf_ecs::item::give(w, hero, id, 1) == 0 {
                     given.push(id.as_str());
                 }
             }
             let equipped = ids
                 .first()
-                .is_some_and(|id| inf_physics::d3::gameplay::equip_weapon(w, hero, id));
+                .is_some_and(|(id, _)| inf_physics::d3::gameplay::equip_weapon(w, hero, id));
             self.weapon_done = true;
+            self.equip_at = 0;
+            self.equip_next_s = self.accum + self.dwell(0);
             if !said.is_empty() {
                 said.push_str("; ");
             }
             said.push_str(&format!(
                 "{ARM_HERO_ENV} merged {taken} registry row(s) and gave the hero {given:?} (equipped the first: {equipped})"
+            ));
+            if self.rotates() {
+                said.push_str(&format!(
+                    "; rotating every {:.1} s through {} weapon(s) via `equip_weapon`",
+                    self.dwell(0),
+                    ids.len()
+                ));
+            }
+        }
+        // **THE ROTATION** (carried 209). One `equip_weapon` — the ECS door —
+        // per dwell, wrapping for ever, so a scripted leg that arrives at any
+        // time sees every weapon inside one cycle and never touches the wheel.
+        if rotate {
+            let n = self.weapons.len();
+            self.equip_at = (self.equip_at + 1) % n;
+            let (id, _) = self.weapons[self.equip_at].clone();
+            let ok = inf_physics::d3::gameplay::equip_weapon(sim.world_mut(), hero, &id);
+            self.equip_next_s = self.accum + self.dwell(self.equip_at);
+            if !said.is_empty() {
+                said.push_str("; ");
+            }
+            said.push_str(&format!(
+                "{ARM_HERO_ENV} rotation equipped `{id}` ({}/{n}, ok {ok}) at t={:.1}s",
+                self.equip_at + 1,
+                self.accum
             ));
         }
         (!said.is_empty()).then_some(said)
