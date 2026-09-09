@@ -851,18 +851,11 @@ fn the_camera_has_no_per_shot_input() {
     // cut" in that file and banning it would ban the camera's own feature. What
     // is banned is every spelling of a WEAPON.
     let step: String = STEP
-        .replace(
-            "
-", "
-",
-        )
+        .replace("\r\n", "\n")
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
-        .join(
-            "
-",
-        );
+        .join("\n");
     for (what, code) in [("inf-ecs/src/camera.rs", &code), ("d3/camera.rs", &step)] {
         for banned in ["recoil", "WeaponFeel", "weapon::", "WeaponState", "feel::"] {
             assert!(
