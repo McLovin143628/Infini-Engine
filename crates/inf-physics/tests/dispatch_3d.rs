@@ -1136,6 +1136,7 @@ fn a_witnessed_shot_is_a_crime_a_burst_is_one_and_an_act_is_read_once() {
         observers: Vec::new(),
         actor_look: 0,
         actor_vehicle: None,
+        heard_by: 0,
     };
     let corner = DVec3::new(150.0, 0.0, 50.0);
 
@@ -1274,6 +1275,7 @@ fn a_serious_file_pulls_a_second_car_and_a_petty_one_does_not() {
                 observers: vec![PATIENT],
                 actor_look: 0,
                 actor_vehicle: None,
+                heard_by: 0,
             },
         );
         let mut most = 0usize;

@@ -2233,6 +2233,46 @@ pub const INDOOR_TAIL_VOLUME: f64 = 0.8;
 /// through the walls at the range the shot itself does.
 pub const INDOOR_TAIL_REACH_FRACTION: f64 = 0.25;
 
+/// **How far away a gunshot can be HEARD**, metres (wave WPN2e audit) — the
+/// ears channel's whole radius, as one function of the two facts the shot
+/// already carries.
+///
+/// # Why it is this number and not another one
+///
+/// `report_max_m` is the reach of the **body** layer — the bang — and the body
+/// layer is the one a person three streets away actually hears
+/// ([`report_layers`]: the transient carries [`TRANSIENT_REACH_FRACTION`] of it
+/// and the distant crack carries [`DISTANT_REACH_MULT`] times it, but the
+/// distant layer is a *thump* at 700 Hz and the transient is a near-field
+/// mechanical snap). So the honest answer to *"could somebody standing there
+/// have heard that and called it in"* is the body layer's own reach, which is
+/// what wave WPN1 wrote [`REPORT_MAX_M`] to be.
+///
+/// # The enclosure rule, and it is the audio system's own
+///
+/// A shot fired INSIDE is muffled on the way out, and this engine already has a
+/// number for that: [`INDOOR_TAIL_REACH_FRACTION`], a quarter, which is how much
+/// of the report range a room keeps to itself. The verdict is the enclosure
+/// probe's — `inf_physics::d3::audio::enclosure_at`, taken at the muzzle on the
+/// step the trigger went down and carried on the hit — so hearing and the tail
+/// a listener hears cannot disagree about whether a shot was indoors, and the
+/// ears channel spends **no rays of its own**: the six the probe cost were spent
+/// by the audio pass and are already counted against
+/// [`crate::ballistics::MAX_SHOT_RAYS_PER_STEP`].
+///
+/// Sound is not a line of sight and this deliberately casts nothing per
+/// listener: a gunshot goes round a corner, which is the entire reason the ears
+/// channel exists — the island's own crowd could SEE none of seventeen gunshots
+/// and would have heard every one of them.
+pub fn audible_radius_m(report_max_m: f64, indoors: bool) -> f64 {
+    let max = report_max_m.clamp(1.0, MAX_RANGE_M);
+    if indoors {
+        (max * INDOOR_TAIL_REACH_FRACTION).max(REPORT_MIN_M)
+    } else {
+        max
+    }
+}
+
 /// The outdoor tail's base volume — the doc section 4's own `0.7`.
 pub const OUTDOOR_TAIL_VOLUME: f64 = 0.7;
 

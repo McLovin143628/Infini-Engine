@@ -243,6 +243,7 @@ impl Beat {
                     observers: vec![civilian_guid(90)],
                     actor_look: look,
                     actor_vehicle: None,
+                    heard_by: 0,
                 },
                 None,
             )
@@ -1566,6 +1567,437 @@ fn a_non_fatal_round_raises_an_act_of_its_own() {
 /// **Mutation → red:** dropping `killed.contains(&target)` from the bucket's
 /// refusal (the death step also files a wounding); dropping
 /// `weapon::is_downed(world, target)` (the corpse is wounded once per round).
+/// **A GUNSHOT DOES NOT HAVE TO BE SEEN** (wave WPN2e audit) -- the EARS
+/// channel, and the closure of this arc's link 1.
+///
+/// # What the wave measured, and why it was not a level-design fact
+///
+/// `the_islands_own_chain_from_a_gunshot_to_an_engaged_officer` found seventeen
+/// gunshots at the showcase spawn recorded as seventeen acts with **zero**
+/// observers -- the nearest crowd agent is 117 m away with a city block in the
+/// way -- so `crime::report_act` refused every one and the town never opened a
+/// file. The wave carried that as *"the island lacks somebody to see"*.
+///
+/// It is not a level-design fact. **You do not have to see a gunshot.** What was
+/// missing is a channel, and this arm is it.
+///
+/// # What it reads, all of it the world
+///
+/// The witness log's own acts (`observers`, `heard_by`), the ledger's own heat,
+/// the ledger's own EVIDENCE table, `Profile::last_seen` before and after the
+/// shooter moves, and `GameplayReport::rounds.shot_rays` -- the named ray budget
+/// the ears channel must not touch.
+///
+/// # The five claims
+///
+/// 1. a listener **beyond the witness radius** and with a wall in the way hears
+///    a shot that nobody could possibly have seen, and it opens a file;
+/// 2. it is worth **less than sight**: `ActKind::heard_heat` is one against
+///    `heat`'s two, so the same burst brings a lower rung;
+/// 3. it files **no description at all** -- the evidence table stays empty, so
+///    nothing on the recognition path can match on a file opened by ear. That is
+///    *"a lower evidence weight"* as a mechanism rather than as an adjective;
+/// 4. it never moves `Profile::last_seen`. The shooter walks twenty metres and
+///    fires again, and the place the police are searching does not move --
+///    EMS3's law, intact, with hearing on top of it;
+/// 5. it spends **zero rays**. The whole run's `shot_rays` is identical with the
+///    listener present and absent, because sound is not a line of sight.
+///
+/// **The mutations**: return `0.0` from `weapon::audible_radius_m` (claim 1 goes
+/// red, and the control below stays green -- which is what tells the two apart);
+/// make `heard_heat` answer `2` (claim 2); file the outfit in `report_heard`
+/// (claim 3); write `last_seen` in `report_heard` (claim 4).
+#[test]
+fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
+    // A listener at 200 m: outside `WITNESS_RADIUS_M` (120 m) and inside a
+    // `glock_17`'s own report range, with a wall between it and the muzzle.
+    const FAR_M: f64 = 200.0;
+
+    let run = |listener: Option<f64>| -> (usize, usize, u32, u32, u32, DVec3, DVec3) {
+        let mut beat = Beat::new();
+        slab(
+            &mut beat.world,
+            wall_guid(1),
+            "Wall",
+            DVec3::new(0.0, 1.5, 12.0),
+            Vec3d::new(30.0, 1.5, 0.5),
+        );
+        if let Some(d) = listener {
+            beat.civilian(1, DVec3::new(0.0, 0.0, d));
+        }
+        beat.resync();
+        beat.arm(HERO, "glock_17");
+        beat.aim(HERO, 0.0, 0.0);
+        let mut rays = 0u32;
+        for i in 0..240 {
+            beat.top_up(HERO);
+            beat.hold_trigger(HERO, i % 4 == 0);
+            let r = beat.step();
+            rays += r.rounds.shot_rays;
+        }
+        let first_seen = crime::profile_of(&beat.world, HERO)
+            .map(|f| f.last_seen())
+            .unwrap_or(DVec3::ZERO);
+        // …and now the shooter WALKS, and fires again from somewhere else.
+        if let Some(e) = beat.world.entity_of(HERO) {
+            if let Some(mut t) = beat.world.world_mut().get_mut::<Transform>(e) {
+                t.translation = Vec3d::new(20.0, 0.0, 0.0);
+            }
+        }
+        beat.resync();
+        for i in 0..240 {
+            beat.top_up(HERO);
+            beat.hold_trigger(HERO, i % 4 == 0);
+            let r = beat.step();
+            rays += r.rounds.shot_rays;
+        }
+        let acts = inf_ecs::witness::witnessed(&beat.world);
+        let seen = acts.iter().filter(|a| !a.observers.is_empty()).count();
+        let heard = acts.iter().filter(|a| a.heard_by > 0).count();
+        let heat = crime::heat_of(&beat.world, HERO);
+        let evidence = crime::profile_of(&beat.world, HERO)
+            .map(|f| f.evidence.len())
+            .unwrap_or(0) as u32;
+        let moved_seen = crime::profile_of(&beat.world, HERO)
+            .map(|f| f.last_seen())
+            .unwrap_or(DVec3::ZERO);
+        (seen, heard, heat, evidence, rays, first_seen, moved_seen)
+    };
+
+    let (seen, heard, heat, evidence, rays, first, after) = run(Some(FAR_M));
+    let (c_seen, c_heard, c_heat, _, control_rays, _, _) = run(None);
+    println!("\n=== A GUNSHOT NOBODY SAW ===");
+    println!(
+        "  a listener at {FAR_M:.0} m, behind a wall, outside the {:.0} m witness radius:",
+        d3::gameplay::WITNESS_RADIUS_M
+    );
+    println!(
+        "    acts SEEN {seen} / acts HEARD {heard}; heat {heat}, rung {}",
+        Response::for_heat(heat).name()
+    );
+    println!("    the file's evidence channels: {evidence}");
+    println!("    last_seen {first:?} -> {after:?} after the shooter walked 20 m");
+    println!(
+        "  the CONTROL, nobody within earshot: acts SEEN {c_seen} / HEARD {c_heard}, heat {c_heat}"
+    );
+    println!("  shot rays: {rays} with a listener, {control_rays} without");
+
+    // (1) heard, and filed.
+    assert_eq!(
+        seen, 0,
+        "the listener is inside the witness radius after all - the fixture is not testing hearing"
+    );
+    assert!(
+        heard > 0,
+        "a gunshot 200 m from a pedestrian was heard by nobody"
+    );
+    assert!(heat > 0, "{heard} heard gunshots opened no file");
+    // …and the CONTROL: with nobody in earshot, nothing at all.
+    assert_eq!(c_heard, 0, "an empty street heard {c_heard} gunshots");
+    assert_eq!(c_heat, 0, "an empty street opened a file");
+
+    // (2) worth LESS than sight. The same acts, filed by `report_act`, would be
+    //     worth `ActKind::Shot::heat`; by ear they are worth `heard_heat`.
+    assert!(
+        ActKind::Shot.heard_heat() < ActKind::Shot.heat(),
+        "hearing a shot is worth as much as watching one"
+    );
+    assert_eq!(ActKind::Shot.heard_heat(), 1);
+    // …and nothing but a gunshot is heard at all.
+    for kind in [
+        ActKind::Killed,
+        ActKind::Wounded,
+        ActKind::Carjack,
+        ActKind::Assault,
+    ] {
+        assert_eq!(kind.heard_heat(), 0, "{} makes a noise now", kind.name());
+    }
+
+    // (3) NO DESCRIPTION. You cannot describe somebody you only heard.
+    assert_eq!(
+        evidence, 0,
+        "a file opened by ear carries {evidence} description channel(s) - a hearer described somebody"
+    );
+
+    // (4) `last_seen` NEVER MOVES. EMS3's law: only a witness or a recognition
+    //     may write it, and hearing is neither.
+    assert_eq!(
+        first, after,
+        "the shooter walked 20 m, fired, and the place the police are searching MOVED - hearing wrote `last_seen`"
+    );
+
+    // (5) ZERO RAYS. The named budget is `MAX_SHOT_RAYS_PER_STEP`, and the ears
+    //     channel does not draw on it or on any other.
+    assert_eq!(
+        rays,
+        control_rays,
+        "the ears channel spent {} ray(s) - sound is not a line of sight",
+        rays.saturating_sub(control_rays)
+    );
+}
+
+/// **A SHOT FIRED INSIDE IS NOT HEARD ACROSS THE ISLAND** -- the enclosure rule,
+/// in the world (wave WPN2e audit).
+///
+/// The ears channel's radius is `inf_ecs::weapon::audible_radius_m`, which is the
+/// weapon's own report range QUARTERED when the enclosure probe said the muzzle
+/// was inside ([`inf_ecs::weapon::INDOOR_TAIL_REACH_FRACTION`], the audio
+/// system's own number for how much of a report a room keeps to itself). This
+/// arm builds the room out of slabs and reads the verdict off the shot itself.
+///
+/// **The mutation**: ignore `indoors` in `audible_radius_m` and the far listener
+/// hears the indoor shot, which is a gunshot in a basement bringing a police car
+/// four streets away.
+#[test]
+fn a_shot_fired_indoors_is_heard_a_quarter_as_far() {
+    let outdoors = inf_ecs::weapon::audible_radius_m(weapon::REPORT_MAX_M, false);
+    let indoors = inf_ecs::weapon::audible_radius_m(weapon::REPORT_MAX_M, true);
+    assert_eq!(outdoors, weapon::REPORT_MAX_M);
+    assert!(
+        (indoors - weapon::REPORT_MAX_M * inf_ecs::weapon::INDOOR_TAIL_REACH_FRACTION).abs() < 1e-9
+    );
+
+    // A ROOM: six slabs, so the probe's six axial rays all hit inside
+    // `ENCLOSURE_PROBE_M`. `ENCLOSURE_INDOOR_HITS` is four of six.
+    let mut beat = Beat::new();
+    for (i, (at, half)) in [
+        (DVec3::new(0.0, 1.5, 4.0), Vec3d::new(6.0, 3.0, 0.3)),
+        (DVec3::new(0.0, 1.5, -4.0), Vec3d::new(6.0, 3.0, 0.3)),
+        (DVec3::new(4.0, 1.5, 0.0), Vec3d::new(0.3, 3.0, 6.0)),
+        (DVec3::new(-4.0, 1.5, 0.0), Vec3d::new(0.3, 3.0, 6.0)),
+        (DVec3::new(0.0, 4.0, 0.0), Vec3d::new(6.0, 0.3, 6.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        slab(&mut beat.world, wall_guid(20 + i), "Room", at, half);
+    }
+    // One listener just outside the indoor radius, one well inside it.
+    let near = beat.civilian(2, DVec3::new(0.0, 0.0, 40.0));
+    let far = beat.civilian(3, DVec3::new(0.0, 0.0, 100.0));
+    beat.resync();
+    beat.arm(HERO, "glock_17");
+    beat.aim(HERO, 0.0, 0.0);
+    let mut indoors_seen = 0u32;
+    for i in 0..120 {
+        beat.top_up(HERO);
+        beat.hold_trigger(HERO, i % 4 == 0);
+        let r = beat.step();
+        indoors_seen += r.hits.iter().filter(|h| h.loud && h.indoors).count() as u32;
+    }
+    let acts = inf_ecs::witness::witnessed(&beat.world).to_vec();
+    let heard: Vec<u8> = acts.iter().map(|a| a.heard_by).collect();
+    let any = heard.iter().copied().max().unwrap_or(0);
+    println!("\n=== A SHOT FIRED INDOORS ===");
+    println!("  audible radius: {outdoors:.1} m outdoors, {indoors:.1} m indoors");
+    println!("  loud shots the enclosure probe called INDOORS: {indoors_seen}");
+    println!(
+        "  listeners: one at 40 m ({near}), one at 100 m ({far}); the most any act was heard by: {any}"
+    );
+    assert!(
+        indoors_seen > 0,
+        "the room is not a room - the enclosure probe called every shot outdoors, so this arm measures nothing"
+    );
+    assert_eq!(
+        any, 1,
+        "an indoor shot reached {any} listener(s); the one at 40 m is inside {indoors:.1} m and the one at 100 m is not"
+    );
+}
+
+/// **AN OFFICER RELOADS** (wave WPN2e audit, closing carried 274).
+///
+/// # What the wave shipped
+///
+/// `weapon::try_reload` has existed since wave I6 with exactly one caller: a
+/// PLAYER's `press_reload`. So a police officer's magazine emptied and the
+/// officer stopped firing for the rest of the session — which reads on screen as
+/// trigger discipline and is a man standing in a firefight holding an empty gun.
+/// The wave's own report says so, and its fixtures top magazines up by hand and
+/// say why.
+///
+/// # What this reads — the world, and nothing tops anything up
+///
+/// A `Swat` street, one officer at fourteen metres, a hero it may fire on sight,
+/// and sixty seconds — which is far longer than a `glock_17`'s seventeen rounds
+/// can cover. Then:
+///
+/// * the rounds that actually left the barrel (`GameplayReport::shots`) against
+///   the magazine size — **more than a magazine means it reloaded**;
+/// * `EngageStats::reloads`, the counter the policy writes when it presses;
+/// * the officer's own `WeaponState::reserve`, which is where the rounds came
+///   from — a magazine that refilled from nowhere would leave it untouched.
+///
+/// **The mutation**: delete the `needs_a_reload` branch in `step_engage`. The
+/// officer fires exactly one magazine and goes silent for the rest of the run —
+/// `reloads` 0, `shots` capped at the magazine, `reserve` unmoved.
+#[test]
+fn an_officer_whose_magazine_empties_reloads_and_goes_on_firing() {
+    let mut beat = Beat::new();
+    let officer = beat.officer(0, DVec3::new(0.0, 0.0, 14.0));
+    // A witness twelve metres to one side, outside the discipline cone: without
+    // one the file goes cold in three seconds (`TRAIL_STALE_STEPS`) and the
+    // whole policy stops — `an_officer_under_fire_takes_cover_and_fires_from_it`
+    // measured the same thing and says so.
+    beat.civilian(50, DVec3::new(12.0, 0.0, 4.0));
+    beat.resync();
+    beat.file_on_hero(Response::Swat, DVec3::ZERO);
+    beat.arm(officer, "glock_17");
+    // …and the hero holds an AUTOMATIC weapon down, which is what keeps the file
+    // being refreshed: the witness sees each burst. The officer's own magazine is
+    // never touched — that is the whole measurement.
+    beat.arm(HERO, "m4a1");
+    beat.aim(HERO, 0.0, 0.0);
+    beat.hold_trigger(HERO, true);
+    let magazine = weapon::equipped_def(&beat.world, officer)
+        .map(|(_, d)| d.magazine)
+        .unwrap_or(0);
+    let reserve_before = beat
+        .world
+        .entity_of(officer)
+        .and_then(|e| beat.world.world().get::<weapon::WeaponState>(e))
+        .map(|st| st.reserve)
+        .unwrap_or(0);
+    let mut rounds = 0u32;
+    let mut reloads = 0u64;
+    let mut ran_dry = 0u32;
+    for _ in 0..3_600 {
+        beat.top_up(HERO);
+        let r = beat.step();
+        rounds += r.hits.iter().filter(|h| h.shooter == officer).count() as u32;
+        reloads += r.engage.reloads as u64;
+        let mag = beat
+            .world
+            .entity_of(officer)
+            .and_then(|e| beat.world.world().get::<weapon::WeaponState>(e))
+            .map(|st| st.magazine)
+            .unwrap_or(0);
+        if mag == 0 {
+            ran_dry += 1;
+        }
+    }
+    let reserve_after = beat
+        .world
+        .entity_of(officer)
+        .and_then(|e| beat.world.world().get::<weapon::WeaponState>(e))
+        .map(|st| st.reserve)
+        .unwrap_or(0);
+    println!("\n=== AN OFFICER THAT RUNS DRY ===");
+    println!("  a `glock_17` holds {magazine} and the officer fired {rounds} round(s) over 60 s");
+    println!(
+        "  the policy asked for {reloads} reload(s); the magazine read empty on {ran_dry} step(s)"
+    );
+    println!("  the reserve went {reserve_before} -> {reserve_after}");
+    assert!(
+        rounds > magazine,
+        "the officer fired {rounds} rounds out of a {magazine}-round magazine, so it never reloaded"
+    );
+    assert!(
+        reloads > 0,
+        "{rounds} rounds left the barrel and the policy asked for no reload at all"
+    );
+    assert!(
+        reserve_after < reserve_before,
+        "the reserve did not move ({reserve_before} -> {reserve_after}), so the magazine refilled from nowhere"
+    );
+}
+
+/// **A TOWN THAT COOLS DOWN PUTS THE WEAPONS AWAY** (wave WPN2e audit, closing
+/// carried 276).
+///
+/// # What the carry said, and what was actually true
+///
+/// The wave carried *"`Posture::Warn` NEVER HOLSTERS … putting it away again
+/// needs an `unequip` door `inf_ecs::item` does not have — there is
+/// `Inventory::equip` and no inverse"*. **`Inventory::unequip` has existed since
+/// wave I6.** What was missing is the `d3::gameplay` door beside
+/// `equip_weapon`, and the caller.
+///
+/// The moment is not the `Warn` rung — a patrol with its weapon out and pointed
+/// at you is the whole of what one star buys — it is the town going **cold**.
+/// `arm_crew` hands a weapon out at arrival and nothing ever took one back, so
+/// an officer that answered one call carried a rifle for the rest of the
+/// session on a street where nobody was wanted any more.
+///
+/// # What it reads
+///
+/// `weapon::equipped_def` on the officer's own body, before and after — the
+/// world, not the ledger — and `EngageStats::holstered` beside it.
+///
+/// **The mutation**: delete the `unequip_weapon` call in `step_engage`'s cold
+/// branch and the officer is still carrying the Glock at the end.
+#[test]
+fn a_town_that_goes_cold_takes_the_weapons_back() {
+    let mut beat = Beat::new();
+    let officer = beat.officer(0, DVec3::new(0.0, 0.0, 14.0));
+    beat.civilian(50, DVec3::new(14.0, 0.0, 7.0));
+    beat.resync();
+    beat.file_on_hero(Response::Swat, DVec3::ZERO);
+    beat.arm(officer, "glock_17");
+    for _ in 0..120 {
+        beat.step();
+    }
+    let armed_while_hot = weapon::equipped_def(&beat.world, officer).map(|(id, _)| id.to_string());
+    assert_eq!(
+        armed_while_hot,
+        Some("glock_17".to_string()),
+        "the fixture's officer is not armed, so there is nothing to put away"
+    );
+    // **The town cools down.** `clear_crime` is the Simulate twin and the only
+    // door that closes a file without waiting out `HEAT_DECAY_STEPS` — a heat of
+    // 6 takes six minutes of fixed steps to bleed off, which is a gate nobody
+    // runs. What the policy sees is identical: `crime::wanted` is empty.
+    //
+    // **The witness log goes with it**, and that is a measurement rather than
+    // tidiness: `clear_crime` drops `seen_act_step` too, so the very next
+    // `file_new_acts` re-reads the whole log from step zero — and with this
+    // audit's EARS channel the officer's own earlier gunshots have a hearer, so
+    // the town would re-open a file **on the officer** and never be cold at all.
+    // Both resources are the pair `SimSession` clears together.
+    crime::clear_crime(&mut beat.world);
+    inf_ecs::witness::clear_witness(&mut beat.world);
+    let mut holstered = 0u64;
+    for _ in 0..120 {
+        let r = beat.step();
+        holstered += r.engage.holstered as u64;
+    }
+    let after = weapon::equipped_def(&beat.world, officer).map(|(id, _)| id.to_string());
+    // …and the weapon ENTITY goes with it, which is `step_equipped_weapons`'
+    // own rule and the reason this is one field rather than three.
+    let weapon_entity = beat
+        .world
+        .entity_of(d3::gameplay::equipped_weapon_guid(officer))
+        .is_some();
+    println!("\n=== A TOWN THAT COOLS DOWN ===");
+    println!("  while wanted: the officer carries {armed_while_hot:?}");
+    println!(
+        "  once cold   : it carries {after:?}; {holstered} holster(s); the weapon entity {}",
+        if weapon_entity {
+            "is STILL in the world"
+        } else {
+            "is gone"
+        }
+    );
+    assert_eq!(
+        after, None,
+        "the town went cold and the officer is still holding a weapon"
+    );
+    assert!(holstered > 0, "the weapon went away and nothing counted it");
+    assert!(
+        !weapon_entity,
+        "the weapon is unequipped and its entity is still in the world"
+    );
+    // …and the item is STILL IN THE INVENTORY: holstering is not dropping.
+    assert!(
+        beat.world
+            .entity_of(officer)
+            .and_then(|e| beat.world.world().get::<inf_ecs::item::Inventory>(e))
+            .map(|inv| inv.count_of("glock_17"))
+            .unwrap_or(0)
+            > 0,
+        "the officer's holstered sidearm left its inventory — that is dropping, not holstering"
+    );
+}
+
 #[test]
 fn a_killing_is_filed_against_the_shooter_and_a_corpse_is_not_also_wounded() {
     let mut b = Beat::new();
@@ -1922,6 +2354,7 @@ fn shootout(mut sim: inf_player::runtime_sim::RuntimeSim) -> Course {
                     observers: vec![chassis_guid(9)],
                     actor_look: inf_ecs::witness::look_digest(w, hero),
                     actor_vehicle: None,
+                    heard_by: 0,
                 },
                 None,
             )
@@ -2407,6 +2840,10 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
     let acts = inf_ecs::witness::witnessed(sim.world()).to_vec();
     let witnessed = acts.len();
     let with_observers = acts.iter().filter(|a| !a.observers.is_empty()).count();
+    // **THE EARS CHANNEL** (wave WPN2e audit). The link that was missing: on this
+    // island a gunshot is SEEN by nobody and HEARD by the same crowd that could
+    // not see it.
+    let with_hearers = acts.iter().filter(|a| a.heard_by > 0).count();
     let clock = inf_ecs::traffic::steps(sim.world());
     let candidates =
         inf_ecs::witness::candidates_near(sim.world(), at, d3::gameplay::WITNESS_RADIUS_M);
@@ -2462,7 +2899,7 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
     );
     println!("  {:<29}: {shots} rounds", "1. the hero fired");
     println!(
-        "  {:<29}: {witnessed} ({kinds:?}); {with_observers} of them have an OBSERVER",
+        "  {:<29}: {witnessed} ({kinds:?}); {with_observers} of them have an OBSERVER, {with_hearers} a HEARER",
         "2. acts recorded"
     );
     println!(
@@ -2600,6 +3037,22 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
     assert!(
         shots > 0,
         "the island's own sidearm fired nothing through the shipped input path"
+    );
+    // **LINK 1, CLOSED** (wave WPN2e audit). The wave measured seventeen gunshots
+    // at the spawn with ZERO observers and zero files, and carried it as a
+    // level-design fact. It is not: a gunshot does not need to be seen. With the
+    // ears channel the same seventeen shots are HEARD by the same crowd that
+    // could not see them, and the town opens a file on the player's own gunfire.
+    //
+    // **The mutation**: return 0.0 from `weapon::audible_radius_m` and both of
+    // these go red, with the observer count still at zero beside them.
+    assert!(
+        with_hearers > 0,
+        "{witnessed} gunshots at the island's own spawn were heard by nobody - the ears channel is not reaching the crowd"
+    );
+    assert!(
+        heat > 0,
+        "{with_hearers} HEARD gunshots opened no file on the shipped island"
     );
     // …and the CONTROL, which is the half that tells a content fact from an
     // engine one: with somebody standing close enough to see, the shipped
@@ -2803,6 +3256,194 @@ fn walk_skeletons(root: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// **A DISPATCHED UNIT REACHES THE SCENE** (wave WPN2e audit) -- link 2 of this
+/// arc's island chain, diagnosed and closed.
+///
+/// The wave measured a dispatched unit closing to **93 m and stopping**, over
+/// three minutes, against an `ON_SCENE_M` of 12, and carried it as EMS1/EMS2
+/// ground. This arm drives the same road with the instrument on: per unit, every
+/// ten seconds, its state, how far it still is from the incident it is on, how
+/// much of its own route is left, and how fast it is going -- so a stop can be
+/// told apart from a route that ends in the wrong place.
+///
+/// **What it reads**: `DispatchRes::runs` (the state and the `NavPath`), the
+/// incident's own `at`, and the chassis' `Transform` -- the world, not a report.
+#[test]
+fn a_dispatched_unit_reaches_a_warm_file_on_the_island() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = island_sim(&content);
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..1200 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    {
+        let defs = inf_ecs::item::item_defs_mut(sim.world_mut());
+        if defs.is_empty() {
+            defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
+                .expect("the shipped registry parses");
+        }
+    }
+    item::give(sim.world_mut(), hero, "glock_17", 1);
+    d3::gameplay::equip_weapon(sim.world_mut(), hero, "glock_17");
+    // Fire, through the shipped input path, until the town has a file. With the
+    // ears channel the island's own crowd HEARS it; nothing here injects one.
+    let mut state = inf_input::InputState::new(inf_input::default_map());
+    let mut shots = 0u32;
+    for i in 0..900 {
+        {
+            let w = sim.world_mut();
+            if let Some((_, def)) = weapon::equipped_def(w, hero) {
+                if let Some(e) = w.entity_of(hero) {
+                    if let Some(mut st) = w.world_mut().get_mut::<weapon::WeaponState>(e) {
+                        st.magazine = def.magazine;
+                    }
+                }
+            }
+        }
+        let events: Vec<inf_input::InputEvent> = vec![inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: (i / 15) % 2 == 0,
+        }];
+        state.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state, DT));
+        shots += sim.gameplay().shots;
+    }
+    let heat = crime::heat_of(sim.world(), hero);
+    println!("\n=== THE DRIVE, ON THE ISLAND ===");
+    println!(
+        "  the hero fired {shots} rounds; the file is at heat {heat} ({})",
+        Response::for_heat(heat).name()
+    );
+    assert!(
+        heat > 0,
+        "no file opened on the island, so there is nothing to drive to"
+    );
+
+    let mut best = f64::INFINITY;
+    let mut arrived_at: Option<f64> = None;
+    let mut escorted = 0usize;
+    for step in 0..10_800u32 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let Some(res) = dispatch::dispatch_of(sim.world()) else {
+            continue;
+        };
+        let runs: Vec<(Uuid, UnitState, Option<Uuid>, Option<(f64, f64)>)> = res
+            .runs
+            .iter()
+            .map(|(chassis, run)| {
+                (
+                    *chassis,
+                    run.state,
+                    run.incident,
+                    run.path.as_ref().map(|p| (p.length_m(), 0.0)),
+                )
+            })
+            .collect();
+        let incidents: BTreeMap<Uuid, DVec3> =
+            res.incidents.iter().map(|(g, i)| (*g, i.at)).collect();
+        let mut line: Vec<String> = Vec::new();
+        for (chassis, ustate, incident, path) in runs {
+            let here = sim
+                .world()
+                .entity_of(chassis)
+                .and_then(|e| sim.world().world().get::<Transform>(e))
+                .map(|t| t.translation.to_dvec3());
+            let (Some(here), Some(target)) = (here, incident.and_then(|g| incidents.get(&g)))
+            else {
+                continue;
+            };
+            let d = (here - *target).length();
+            if ustate == UnitState::EnRoute || ustate == UnitState::OnScene {
+                best = best.min(d);
+                if d <= dispatch::ON_SCENE_M && arrived_at.is_none() {
+                    arrived_at = Some(f64::from(step) / 60.0);
+                }
+            }
+            if step % 900 == 0 {
+                let left = dispatch::dispatch_of(sim.world())
+                    .and_then(|r| r.runs.get(&chassis).cloned())
+                    .and_then(|r| r.path.map(|p| p.length_m() - p.project(here).s_m))
+                    .unwrap_or(f64::NAN);
+                let _route = path.map(|(l, _)| l).unwrap_or(f64::NAN);
+                // **WHY IT IS OR IS NOT MOVING**, off the world: does the chassis
+                // have a rapier body at all, is its crew in its seat, and what
+                // stick is the crew holding.
+                let crew = dispatch::crew_guid(chassis);
+                let body = sim.bridge3d().body_of(chassis).is_some();
+                let ent = sim.world().entity_of(chassis).is_some();
+                let is_vehicle = sim.bridge3d().vehicle_guids().contains(&chassis);
+                let speed = sim
+                    .bridge3d()
+                    .body_of(chassis)
+                    .and_then(|b| sim.bridge3d().world().body_linvel(b))
+                    .map(|v| v.length())
+                    .unwrap_or(f64::NAN);
+                let wheels = inf_ecs::vehicle::rig_of(sim.world(), chassis)
+                    .map(|r| r.wheels.len())
+                    .unwrap_or(0);
+                let out = sim
+                    .vehicles()
+                    .iter()
+                    .find(|v| v.chassis == chassis)
+                    .copied();
+                let grounded = out.map(|o| o.wheels_grounded).unwrap_or(99);
+                let load = out.map(|o| o.load_n).unwrap_or(f64::NAN);
+                let revs = out.map(|o| o.revs).unwrap_or(f64::NAN);
+                let hb = sim
+                    .world()
+                    .entity_of(crew)
+                    .and_then(|e| sim.world().world().get::<CharacterMovement>(e))
+                    .map(|cm| (cm.runtime.want_handbrake, cm.mode))
+                    .unwrap_or((false, MovementMode::Grounded));
+                let seated = sim
+                    .world()
+                    .entity_of(crew)
+                    .and_then(|e| sim.world().world().get::<CharacterMovement>(e))
+                    .map(|cm| cm.runtime.seat.vehicle == chassis)
+                    .unwrap_or(false);
+                let stick = sim
+                    .world()
+                    .entity_of(crew)
+                    .and_then(|e| sim.world().world().get::<CharacterMovement>(e))
+                    .map(|cm| cm.runtime.intent_move)
+                    .unwrap_or_default();
+                line.push(format!(
+                    "{:?} d={d:.0} left={left:.0} y={:.1} ent={ent} body={body} seat={seated} mode={:?} hb={} stick=({:.2},{:.2}) veh={is_vehicle} wheels={wheels}/{grounded} load={load:.0}N revs={revs:.2} v={speed:.2}",
+                    ustate, here.y, hb.1, hb.0, stick.x, stick.y
+                ));
+            }
+        }
+        escorted += sim.dispatch_stats().escorted;
+        if step % 900 == 0 && !line.is_empty() {
+            println!(
+                "  t={:>5.0} s escorted={escorted} steered={} {}",
+                f64::from(step) / 60.0,
+                sim.dispatch_stats().steered,
+                line.join("\n              ")
+            );
+        }
+    }
+    println!(
+        "  the nearest responder got within {best:.0} m of the incident (`ON_SCENE_M` {:.0}); first on scene at {}",
+        dispatch::ON_SCENE_M,
+        arrived_at
+            .map(|t| format!("{t:.1} s"))
+            .unwrap_or_else(|| "never".to_string())
+    );
+    assert!(
+        arrived_at.is_some(),
+        "no dispatched unit reached within {:.0} m of a warm file in three minutes; the nearest got to {best:.0} m",
+        dispatch::ON_SCENE_M
+    );
 }
 
 // ── the island, loosely (cov1_gate's `loose_sim`, verbatim) ─────────────────

@@ -74,6 +74,15 @@ pub struct DispatchStats {
     pub arrived: usize,
     /// Resolved on this step.
     pub resolved: usize,
+    /// **Steps a unit was put back on its own route** (wave WPN2e audit) — the
+    /// escort, and it is an engagement counter rather than a flag: a level where
+    /// every unit drives reads **zero** here for ever, and a level where the PCG
+    /// parked a cruiser inside a wall reads the number of steps it was dragged
+    /// out of it.
+    ///
+    /// See [`inf_ecs::dispatch::ESCORT_LAG_M`] for the measurement that made it
+    /// necessary and for why it cannot fire on a unit that is driving.
+    pub escorted: usize,
     /// Units steered on this step — the falsifier for the whole clause: a
     /// dispatcher that assigned everything and drove nothing reads zero here.
     pub steered: usize,
@@ -777,6 +786,22 @@ fn run_units(
                 // incident inside a building is forty metres from the nearest
                 // lane, and a unit that only tested the distance would sit at
                 // the end of its own route for ever.
+                // ── **A UNIT THAT CANNOT DRIVE ITS ROUTE IS PUT BACK ON IT**
+                //    (wave WPN2e audit, closing this arc's link 2).
+                //
+                //    Where the route says it should be by now, against where it
+                //    is. A unit that is driving is three times faster than this
+                //    schedule and never triggers it; a unit wedged in the block
+                //    the PCG parked it in is dragged along its own route at
+                //    `ESCORT_SPEED_MPS` until it catches up. See
+                //    `inf_ecs::dispatch::ESCORT_LAG_M` for the measurement.
+                //
+                //    It writes the CHASSIS and nothing else: the crew rides the
+                //    seat, whose pose is derived from the chassis, and the
+                //    velocities are zeroed so the physics the unit hands back to
+                //    is not carrying whatever the wheels had built up grinding
+                //    against a wall.
+                let here = escort(world, bridge, chassis, &run, step, dt, stats).unwrap_or(here);
                 let out_of_road = run.path.as_ref().is_some_and(|p| {
                     let left = p.length_m() - p.project(here).s_m;
                     left.is_finite() && left <= dispatch::PATH_END_M
@@ -987,6 +1012,121 @@ fn steer(
     false
 }
 
+/// **Put a unit that is not moving back on its own route** (wave WPN2e audit) —
+/// the escort, and the answer to *"a dispatched cruiser never reaches the
+/// scene"*.
+///
+/// # What it reads, and what it writes
+///
+/// It reads the run's own [`inf_nav::NavPath`], the step the unit went
+/// `EnRoute` on, and where the chassis actually is. It writes the chassis body's
+/// translation and rotation, and zeroes its velocities.
+///
+/// **It is a pure function of `(since_step, step, path, position)`** — there is
+/// no timer, no latch and nothing stored, so two hosts compute the same answer
+/// and a replay reproduces it. That is why the trigger is a LAG against a
+/// schedule rather than a stuck-counter.
+///
+/// # When it does nothing at all, which is nearly always
+///
+/// A unit under way runs at [`RESPONSE_SPEED_FACTOR`] × the town's limit —
+/// 11.7 m/s on the island — against a schedule of
+/// [`inf_ecs::dispatch::ESCORT_SPEED_MPS`] 4 m/s, so a healthy unit is a
+/// kilometre AHEAD of it inside two minutes and this returns `None` on every
+/// step of every level where the drive works. `DispatchStats::escorted` is the
+/// counter that says so.
+///
+/// Answers the position it moved the chassis to, or `None` when it left it
+/// alone.
+#[allow(clippy::too_many_arguments)]
+fn escort(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    chassis: Uuid,
+    run: &UnitRun,
+    step: u64,
+    dt: f64,
+    stats: &mut DispatchStats,
+) -> Option<DVec3> {
+    let path = run.path.as_ref()?;
+    let total = path.length_m();
+    if !(total > 0.0) || !dt.is_finite() || dt <= 0.0 {
+        return None;
+    }
+    let body = bridge.body_of(chassis)?;
+    let here = bridge.world().body_translation(body)?;
+    let s_now = path.project(here).s_m;
+    // Where the schedule says it should be. `since_step` is the step the unit
+    // was assigned on, which is exactly when the route was built.
+    let due = step.saturating_sub(run.since_step) as f64 * dt * dispatch::ESCORT_SPEED_MPS;
+    // **BEHIND, AND NOT MOVING.** Both halves, and the second is what keeps this
+    // off a unit that is merely taking the long way round — see
+    // `inf_ecs::dispatch::ESCORT_STALL_MPS`. The speed is the chassis' own rapier
+    // velocity.
+    let speed = bridge
+        .world()
+        .body_linvel(body)
+        .map(|v| v.length())
+        .unwrap_or(0.0);
+    let fire = due - s_now > dispatch::ESCORT_LAG_M && speed < dispatch::ESCORT_STALL_MPS;
+    // ── **THE COLLIDER FOLLOWS THE ESCORT**, and without this line the escort
+    //    does nothing at all -- measured, and it is the finding inside the
+    //    finding. A wedged chassis is wedged because the SOLVER owns its
+    //    position: the first cut of this function wrote the body pose sixty
+    //    times a second and read it back correct every time, and the contact
+    //    solver put it back inside the same 0.1 m pocket on the same step. The
+    //    trace is in the audit report.
+    //
+    //    So an escorted unit is not in the collision world. It is the same door
+    //    a SEATED CHARACTER goes through (`super::vehicle::park_collider`, which
+    //    is why a passenger does not collide with the car it is riding in), and
+    //    it is a bridge operation rather than a component write: the author's
+    //    `RigidBody3D` is never touched, so an editor Simulate session cannot
+    //    save a police car as something it was not.
+    //
+    //    It is restored the moment the unit catches up, and by `arrive` and
+    //    `park` at both ends of a run -- a disabled collider with no release is
+    //    the leak-with-a-deadline this house names.
+    super::vehicle::park_collider(bridge, chassis, fire);
+    if !fire {
+        return None;
+    }
+    // One step of the schedule, and never a jump: the unit is DRAGGED along the
+    // route it was given, so a viewer sees a car driving badly rather than a car
+    // teleporting.
+    // **Twice the schedule**, so the lag CLOSES and the escort ends — see
+    // `inf_ecs::dispatch::ESCORT_DRAG_MPS`. Never past where the schedule says
+    // the unit should be, so a nudge cannot overtake the dispatcher's own clock.
+    let s_next = (s_now + dispatch::ESCORT_DRAG_MPS * dt).min(total).min(due);
+    let at = path.position_at(s_next);
+    if !at.is_finite() {
+        return None;
+    }
+    let dir = path.direction_at(s_next);
+    let yaw_deg = traffic::yaw_of_dir(dir);
+    let rot = glam::DQuat::from_rotation_y(yaw_deg.to_radians());
+    let w = bridge.world_mut();
+    w.set_body_translation(body, at);
+    w.set_body_rotation(body, rot);
+    // **The velocities go to zero**, both of them. A chassis that has spent
+    // three minutes grinding at full lock against a wall is carrying an angular
+    // velocity and a suspension load that would throw it off the road the
+    // instant it was free of the geometry.
+    w.set_body_linvel(body, DVec3::ZERO);
+    w.set_body_angvel(body, DVec3::ZERO);
+    // …and the document follows the body, so everything that reads a `Transform`
+    // — the crew's seat, the recognition pass, the siren — sees the same place
+    // this step rather than one step later.
+    if let Some(e) = world.entity_of(chassis) {
+        if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+            t.translation = inf_ecs::math::Vec3d::from_dvec3(at);
+            t.rotation.y = yaw_deg;
+        }
+    }
+    stats.escorted += 1;
+    Some(at)
+}
+
 /// How much faster than the sign a responding unit drives.
 ///
 /// **1.4.** The island's streets are signed at 30 km/h, so a unit under way runs
@@ -1029,6 +1169,9 @@ fn arrive(
         }
     }
     handbrake(bridge, chassis);
+    // **The escort's release** (wave WPN2e audit) — a unit that arrived while it
+    // was being escorted is back in the collision world the instant it stops.
+    super::vehicle::park_collider(bridge, chassis, false);
     // The crew stands `SCENE_STAND_M` from ITS OWN VEHICLE, on the line toward
     // the incident — which is where somebody who has just got out of that
     // vehicle is. See `SCENE_STAND_M` for why it is not measured from the
@@ -1226,6 +1369,8 @@ fn park(
         run.path = None;
     }
     handbrake(bridge, chassis);
+    // The escort's other release — see `arrive`.
+    super::vehicle::park_collider(bridge, chassis, false);
     dispatch::set_responder(world, crew, false);
     if let Some(e) = world.entity_of(crew) {
         super::vehicle::park_collider(bridge, crew, false);

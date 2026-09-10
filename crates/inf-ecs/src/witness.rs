@@ -168,6 +168,37 @@ impl ActKind {
             ActKind::Carjack | ActKind::Assault => 1,
         }
     }
+
+    /// **How much heat this act adds to whoever did it when it was only HEARD**
+    /// (wave WPN2e audit) — the ears channel's own weight, and it is deliberately
+    /// lower than [`heat`](Self::heat).
+    ///
+    /// # Why a gunshot and nothing else
+    ///
+    /// This is a rule about NOISE. A gunshot is the one act in this enum that
+    /// makes any: [`Assault`](Self::Assault) exists precisely because a fist is
+    /// quiet ("the only people who know about a punch are the ones who saw it"),
+    /// [`Carjack`](Self::Carjack) is somebody being pulled out of a door,
+    /// [`Wounded`](Self::Wounded) is a round *arriving* — which is the quiet half
+    /// of a pull that was already heard — and [`Killed`](Self::Killed) is a body
+    /// going down. Every one of those answers **zero**, which is the ears channel
+    /// refusing to file them at all.
+    ///
+    /// # Why ONE and not two
+    ///
+    /// A seen gunshot is worth two and brings a `Patrol`; a heard one is worth
+    /// one, so a **single** shot nobody saw is a call and not yet a car, and it
+    /// takes two of them to reach the rung one witnessed shot reaches on its own.
+    /// That gap is the whole of *"a lower evidence weight than sight"*: hearing
+    /// gunfire tells a town that somebody is shooting and does not tell it who,
+    /// which is why [`crate::crime::report_heard`] files **no description** with
+    /// it either.
+    pub fn heard_heat(self) -> u32 {
+        match self {
+            ActKind::Shot => 1,
+            ActKind::Killed | ActKind::Wounded | ActKind::Carjack | ActKind::Assault => 0,
+        }
+    }
 }
 
 /// **One thing somebody did, and who could see it.**
@@ -223,6 +254,28 @@ pub struct WitnessedAct {
     /// **The vehicle the actor was in**, if any — the other half of a
     /// description, and the one the reference's wanted system keys on.
     pub actor_vehicle: Option<Uuid>,
+    /// **How many people were close enough to HEAR it** (wave WPN2e audit) — the
+    /// ears channel, and the count is the engagement counter rather than a flag.
+    ///
+    /// Bounded by [`MAX_OBSERVERS`] because it comes off the same
+    /// [`candidates_near`] walk [`observers`](Self::observers) does — one answer
+    /// in this engine to *"who is standing near here"* — so an eight here means
+    /// "at least eight" and a zero means nobody at all.
+    ///
+    /// # It is NOT the observer list, and the difference is the point
+    ///
+    /// An observer is behind a line-of-sight ray and a `WITNESS_RADIUS_M` of
+    /// 120 m; a hearer is behind neither. Sound goes round corners, so hearing
+    /// casts **no ray**, and its radius is
+    /// [`crate::weapon::audible_radius_m`] of the shot's own report range
+    /// through the enclosure verdict the shot already carries — 250 m for a
+    /// pistol on a street, a quarter of that for one fired inside.
+    ///
+    /// Measured on the shipped island: seventeen gunshots at the showcase spawn
+    /// were **seen by nobody** (the nearest crowd agent is 117 m away and there
+    /// is a city block in the way) and *heard* by three. `crate::crime` files a
+    /// heard act at [`ActKind::heard_heat`] and with no description at all.
+    pub heard_by: u8,
 }
 
 /// **The log** — a bounded ring of what has been seen.
@@ -372,8 +425,14 @@ pub fn look_digest(world: &EcsWorld, actor: Uuid) -> u64 {
 /// Bytes one act folds into [`witness_state_bytes`].
 ///
 /// `actor (16) | kind (1) | at.x/y/z (24) | step (8) | look (8) | vehicle (16) |
-/// observers (1 count + 16 each)`, so an act with no observers is 74.
-pub const ACT_TRACE_BYTES: usize = 74;
+/// heard (1) | observers (1 count + 16 each)`, so an act with no observers is 75.
+///
+/// The `heard` byte is wave WPN2e audit's ears channel. It is folded for
+/// [`WitnessedAct::observers`]' own reason one sense along: it is a fact about
+/// the world produced by a walk over the crowd's positions, two hosts could
+/// answer it differently if one of them had streamed an agent the other had
+/// not, and what it decides is whether a criminal file opens at all.
+pub const ACT_TRACE_BYTES: usize = 75;
 
 /// **What the street saw, as bytes** — the section a replay trace folds (wave
 /// EMS3).
@@ -412,6 +471,8 @@ pub fn witness_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(&a.step.to_le_bytes());
         out.extend_from_slice(&a.actor_look.to_le_bytes());
         out.extend_from_slice(a.actor_vehicle.unwrap_or(Uuid::nil()).as_bytes());
+        // The ears channel (wave WPN2e audit) — see `ACT_TRACE_BYTES`.
+        out.push(a.heard_by.min(MAX_OBSERVERS as u8));
         // A `u8` count, because the list is bounded at `MAX_OBSERVERS` = 8 and a
         // length that cannot be trusted is a length a reader has to case-split.
         out.push(a.observers.len().min(MAX_OBSERVERS) as u8);
@@ -505,6 +566,7 @@ mod tests {
             observers: Vec::new(),
             actor_look: 0,
             actor_vehicle: None,
+            heard_by: 0,
         };
         for n in 0..MAX_WITNESSED_ACTS as u64 {
             record_act(&mut w, act(n));
@@ -650,6 +712,7 @@ mod tests {
             observers: obs,
             actor_look: 0xabcd,
             actor_vehicle: Some(guid(9)),
+            heard_by: 0,
         };
         record_act(&mut w, act(vec![guid(2), guid(3)]));
         let two = witness_state_bytes(&w);

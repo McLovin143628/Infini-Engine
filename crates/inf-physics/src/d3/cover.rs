@@ -822,6 +822,7 @@ pub fn step_npc_cover(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     sources: &[DVec3],
+    shooters: &std::collections::BTreeSet<uuid::Uuid>,
     radius_m: f64,
     step: u64,
     dt: f64,
@@ -853,6 +854,32 @@ pub fn step_npc_cover(
             res.units.remove(&unit);
             continue;
         };
+        // ── **A UNIT IS NOT FIRED UPON BY ITS OWN WEAPON** (wave WPN2e audit,
+        //    closing carried 279).
+        //
+        //    `inf_ecs::cover::under_fire`'s own doc has said *"a responder inside
+        //    `radius_m` of a place this step's gunfire came from, **that it did
+        //    not fire itself**"* since wave COV1, and this caller did not make
+        //    the exclusion: `panic_sources` coalesces every LOUD shot in the step
+        //    and a shot's source is its own muzzle, so an officer that pulled a
+        //    trigger stood zero metres from a place gunfire came from and took
+        //    cover from itself.
+        //
+        //    Wave WPN2e found it, fixed its OWN reader (`d3::engage::
+        //    note_incoming`) and left this half alone because fixing it moves
+        //    COV1's measured duty cycle. It does, and the number COV1 measured
+        //    was measuring the wrong thing: an officer diving behind a wall from
+        //    the round it just fired is a defect a player can see.
+        //
+        //    The shooter set is the step's own `WeaponHit::shooter` list, handed
+        //    down from `super::gameplay::step_gameplay` — the same set
+        //    `note_incoming` gets, so the two readers of one fact cannot disagree.
+        if shooters.contains(&unit) {
+            if mode_of(world, unit) != Some(MovementMode::Cover) {
+                res.units.remove(&unit);
+            }
+            continue;
+        }
         let threat = inf_ecs::cover::under_fire(
             Vec3d::from_dvec3(here),
             &sources

@@ -1915,7 +1915,8 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     let mut quiet: inf_physics::d3::NpcCoverReport = Default::default();
     for i in 0..600 {
         b.sync_from_world(&w);
-        let r = inf_physics::d3::step_npc_cover(&mut w, &mut b, &[], 45.0, i, DT);
+        let r =
+            inf_physics::d3::step_npc_cover(&mut w, &mut b, &[], &Default::default(), 45.0, i, DT);
         quiet.probes += r.probes;
         quiet.under_fire += r.under_fire;
         quiet.considered = r.considered;
@@ -1944,7 +1945,15 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     let mut probes = 0u32;
     for i in 0..900u64 {
         b.sync_from_world(&w);
-        let r = inf_physics::d3::step_npc_cover(&mut w, &mut b, &[source], 45.0, i, DT);
+        let r = inf_physics::d3::step_npc_cover(
+            &mut w,
+            &mut b,
+            &[source],
+            &Default::default(),
+            45.0,
+            i,
+            DT,
+        );
         probes += r.probes;
         if r.peeking > 0 {
             peeked += 1;
@@ -2034,7 +2043,15 @@ fn an_officer_under_fire_takes_cover_and_one_that_is_not_probes_nothing() {
     let mut civ_covered = 0usize;
     for i in 0..600u64 {
         b.sync_from_world(&w);
-        inf_physics::d3::step_npc_cover(&mut w, &mut b, &[source], 45.0, i, DT);
+        inf_physics::d3::step_npc_cover(
+            &mut w,
+            &mut b,
+            &[source],
+            &Default::default(),
+            45.0,
+            i,
+            DT,
+        );
         inf_physics::d3::step_character_movement(&mut w, &mut b, DT);
         let e = w.entity_of(CIVILIAN).unwrap();
         if w.world().get::<CharacterMovement>(e).unwrap().mode == MovementMode::Cover {
@@ -2175,6 +2192,7 @@ fn swat_takes_the_high_cover_and_a_patrol_takes_the_nearest() {
                     observers: vec![SEEN_BY],
                     actor_look: 0,
                     actor_vehicle: None,
+                    heard_by: 0,
                 };
                 let _ = inf_ecs::crime::report_act(&mut w, &act, None);
             }
@@ -2188,7 +2206,15 @@ fn swat_takes_the_high_cover_and_a_patrol_takes_the_nearest() {
         let mut swat_high = 0usize;
         for i in 0..900u64 {
             b.sync_from_world(&w);
-            let r = inf_physics::d3::step_npc_cover(&mut w, &mut b, &[source], 45.0, i, DT);
+            let r = inf_physics::d3::step_npc_cover(
+                &mut w,
+                &mut b,
+                &[source],
+                &Default::default(),
+                45.0,
+                i,
+                DT,
+            );
             swat_high += r.swat_high;
             inf_physics::d3::step_character_movement(&mut w, &mut b, DT);
         }

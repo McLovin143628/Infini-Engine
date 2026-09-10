@@ -933,6 +933,82 @@ pub const SCENE_STAND_M: f64 = 4.0;
 /// as close to the end of a lane as a vehicle that stops behind things can get.
 pub const PATH_END_M: f64 = 6.0;
 
+/// **How far behind its own schedule a responding unit may fall before the
+/// dispatcher puts it back on its route**, metres (wave WPN2e audit, closing
+/// this arc's link 2).
+///
+/// # The measurement that made it necessary
+///
+/// On the shipped island, a dispatched cruiser **does not move at all**. Wave
+/// WPN2e measured "closed to 93 m and stopped"; this audit instrumented the
+/// drive and found the number was not a route that ended early — the units were
+/// stationary from the first step to the last:
+///
+/// ```text
+/// t=  0 s EnRoute d=220 left=304 ent=true body=true seat=true mode=Driving
+///         hb=false stick=(-1.00,1.00) veh=true wheels=4/4 load=24282N v=0.00
+/// t=  0 s EnRoute d=375 left=639 ent=true body=true seat=true mode=Driving
+///         hb=false stick=( 1.00,1.00) veh=true wheels=4/2 load=57600N v=0.00
+/// ```
+///
+/// Every link of the chain is present — the entity, the rapier body, the seated
+/// driver, the vehicle rig, four wheels, the handbrake off and the stick at full
+/// throttle — and the car is doing 0.00 m/s at **full lock**, with the second
+/// unit carrying **57 600 N** of suspension load on two of four wheels. That is
+/// a vehicle wedged in the geometry of the station block the PCG parked it in.
+/// It is not the firing policy's, not the dispatcher's routing, and not a
+/// distance: it is a car that cannot get off its own apron.
+///
+/// # Why a lag and not a stuck-timer
+///
+/// A timer needs per-unit memory, and memory in a resource is state two hosts
+/// can disagree about. This is a **pure function of `(since_step, step, path)`**
+/// — where the route says the unit should be by now against where it actually
+/// is — so a host that joined the trace mid-way computes the same answer, and
+/// there is nothing to store, replay or clear.
+///
+/// **Twenty-five metres**, against a real drive's own 11.7 m/s
+/// ([`crate::traffic::street_speed_mps`] × [`RESPONSE_SPEED_FACTOR`]): a unit
+/// that is driving is three times faster than the schedule below and never falls
+/// behind it, so nothing that works is touched. A unit that stops for a queue,
+/// a corner or a light gets six seconds of slack before the dispatcher helps.
+///
+/// [`RESPONSE_SPEED_FACTOR`]: inf_physics::d3::RESPONSE_SPEED_FACTOR
+pub const ESCORT_LAG_M: f64 = 25.0;
+
+/// **How fast the dispatcher's own schedule advances**, m/s — see
+/// [`ESCORT_LAG_M`].
+///
+/// **Four**, which is a third of what a unit under way really does
+/// (11.7 m/s = the town's limit × [`RESPONSE_SPEED_FACTOR`]). A unit that is
+/// driving runs away from this schedule and is never behind it.
+///
+/// [`RESPONSE_SPEED_FACTOR`]: inf_physics::d3::RESPONSE_SPEED_FACTOR
+pub const ESCORT_SPEED_MPS: f64 = 4.0;
+
+/// **How fast a unit being escorted is dragged along its route**, m/s.
+///
+/// **Eight — twice the schedule**, and the factor of two is the whole design:
+/// the escort CATCHES THE UNIT UP and then lets go. At the same speed as the
+/// schedule the lag would never close and a unit escorted once would be
+/// escorted for the rest of its run; at twice it closes at 4 m/s, so a nudge
+/// lasts about six seconds and the unit is handed back to the physics that was
+/// driving it. A unit that is genuinely wedged simply falls behind again and is
+/// nudged again, which is the behaviour a player sees: a police car that gets
+/// unstuck rather than one that slides all the way to the scene.
+pub const ESCORT_DRAG_MPS: f64 = 8.0;
+
+/// **How slow a unit has to be going to count as STUCK**, m/s.
+///
+/// **Half a metre a second.** The other half of the escort's trigger, and it is
+/// what keeps the rule off a unit that is merely taking the long way round: a
+/// cruiser doing 11 m/s down a diversion is behind the schedule and is *driving*,
+/// and dragging it would be the dispatcher overruling a road. Only a unit that
+/// is both **behind** and **not moving** is one the world has stopped.
+///
+/// It is read off the chassis' own rapier velocity — the world, not a report.
+pub const ESCORT_STALL_MPS: f64 = 0.5;
+
 /// How much of a fire's intensity one appliance puts out per second.
 ///
 /// A fifth, so a full-intensity fire takes **five seconds of a crew on scene**

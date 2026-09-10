@@ -187,6 +187,7 @@ impl Beat {
                 observers: vec![WITNESS],
                 actor_look: look,
                 actor_vehicle: Some(GETAWAY),
+                heard_by: 0,
             },
         );
         let filed = crime::file_new_acts(&mut self.world);

@@ -770,6 +770,7 @@ fn the_recognition_table_at_the_checkpoint() {
         observers: vec![WITNESS],
         actor_look: Appearance { outfit: 2 }.digest(),
         actor_vehicle: Some(GETAWAY),
+        heard_by: 0,
     };
     crime::report_act(&mut w, &act, Some(0x1234)).expect("a file");
     let file = crime::profile_of(&w, HERO).expect("a file").clone();

@@ -124,6 +124,25 @@ pub struct EngageStats {
     /// Units a round came past this step — what [`Posture::ReturnFire`] reads
     /// next step. Written by [`note_incoming`].
     pub incoming: usize,
+    /// **Reloads the policy asked for** (wave WPN2e audit, carried 274) — units
+    /// whose magazine was empty on a step they had a target and a clear shot.
+    ///
+    /// Its own counter because it measures a behaviour a player can see: an
+    /// officer that runs dry and reloads is trigger discipline, and one that
+    /// runs dry and stops for ever is a man holding an empty gun. Zero on every
+    /// firefight short enough that nobody empties a magazine.
+    pub reloads: usize,
+    /// Shots refused because the weapon was empty or being reloaded — the other
+    /// half of the same fact, and what tells "the officers are reloading" from
+    /// "the officers have stopped".
+    pub empty_holds: usize,
+    /// **Weapons put AWAY because the town went cold** (wave WPN2e audit,
+    /// carried 276) — [`arm_crew`]'s inverse, counted.
+    ///
+    /// Zero on every step but the one a level's last file closes on, which is
+    /// what makes it an engagement counter rather than a flag: a town that never
+    /// cools down reads zero for ever, and so does one that never heated up.
+    pub holstered: usize,
     /// **Triggers the pass CLOSED on a unit it did not engage** — units that
     /// were firing and have stopped.
     ///
@@ -168,6 +187,20 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             for unit in firing {
                 if super::gameplay::npc_set_trigger(world, unit, false) {
                     stats.released += 1;
+                }
+                // **…AND IT PUTS THE WEAPON AWAY** (wave WPN2e audit, closing
+                // carried 276). `arm_crew` hands a weapon out at arrival and
+                // until now nothing ever took one back, so an officer that
+                // answered one call kept a rifle in its hand for the rest of the
+                // session — on a street where nobody is wanted any more.
+                //
+                // A town that goes COLD is the moment, and it is the same moment
+                // the trigger comes down for the same reason: this is the last
+                // step the policy will ever visit these units. The item stays in
+                // the inventory (see `unequip_weapon`), so a town that heats up
+                // again re-arms at the next arrival with the magazine it had.
+                if super::gameplay::unequip_weapon(world, unit) {
+                    stats.holstered += 1;
                 }
             }
             world.world_mut().insert_resource(EngageRes::default());
@@ -226,6 +259,10 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
     // Units the pass looked at and decided NOT to engage — their triggers come
     // down below.
     let mut release: Vec<Uuid> = Vec::new();
+    // Units that ran dry this step — their reload press goes in beside the
+    // releases, after the ledger write, on the same "no world writes inside the
+    // read walk" rule.
+    let mut reload: Vec<Uuid> = Vec::new();
     for (officer, _class) in &officers {
         let Some(eye) = super::crime::eye_of(world, *officer) else {
             release.push(*officer);
@@ -348,6 +385,25 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             stats.cadence_holds += 1;
             hold = true;
         }
+        // ── **AN EMPTY MAGAZINE IS A RELOAD, NOT A SILENCE** (wave WPN2e audit,
+        //    closing carried 274).
+        //
+        //    Asked LAST, so the counter means what it says: a unit that was
+        //    holding for a friendly or for its cadence anyway is not also
+        //    counted as reloading. The press is an EDGE `super::gameplay::
+        //    step_weapons` takes on the very next line of `step_gameplay`, so
+        //    the reload starts on the step the policy asked for it.
+        //
+        //    `try_reload` is what decides whether anything happens — already
+        //    reloading, already full, or nothing left in reserve are all its
+        //    refusals — so this asks only the question the policy owns: is this
+        //    weapon empty, and is there anything to put in it.
+        if !hold && needs_a_reload(world, *officer) {
+            reload.push(*officer);
+            stats.reloads += 1;
+            stats.empty_holds += 1;
+            hold = true;
+        }
         let blind = blind_out.is_some();
         decisions.push((*officer, suspect, !hold, blind));
         let slot = res.units.entry(*officer).or_default();
@@ -368,6 +424,13 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
         if super::gameplay::npc_set_trigger(world, unit, false) {
             stats.released += 1;
         }
+    }
+    // **THE RELOAD**, and the trigger comes down with it: a character holding a
+    // trigger through its own reload would fire on the step the magazine lands
+    // whether or not the policy's cadence window was open.
+    for unit in reload {
+        super::gameplay::npc_set_trigger(world, unit, false);
+        super::gameplay::npc_press_reload(world, unit);
     }
     for (officer, suspect, trigger, blind) in decisions {
         // **BLIND FIRE WRITES THE TRIGGER AND NOTHING ELSE.** `npc_aim_at`
@@ -395,6 +458,28 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
         }
     }
     stats
+}
+
+/// **Is this unit's weapon empty, with something to put in it** (wave WPN2e
+/// audit, carried 274)?
+///
+/// The policy's own half of the reload question. Everything else —
+/// already reloading, already full, nothing in reserve — is
+/// [`inf_ecs::weapon::try_reload`]'s, and asking it twice would be two answers
+/// to one question.
+///
+/// A weapon that is empty **and** has an empty reserve answers `false`: there is
+/// nothing to reload with, so the officer really has stopped firing, and a
+/// policy that pressed reload sixty times a second at an empty pouch would be
+/// counting a behaviour that never happens.
+fn needs_a_reload(world: &EcsWorld, unit: Uuid) -> bool {
+    let Some(entity) = world.entity_of(unit) else {
+        return false;
+    };
+    world
+        .world()
+        .get::<inf_ecs::weapon::WeaponState>(entity)
+        .is_some_and(|st| st.magazine == 0 && st.reserve > 0 && !st.reloading())
 }
 
 /// **Every police unit that is out of its station AND has a weapon**, in `Guid`

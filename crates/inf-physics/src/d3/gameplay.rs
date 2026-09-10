@@ -688,10 +688,16 @@ pub fn step_gameplay(
     //     Inert on every step nothing was fired on: the source list is empty,
     //     the pass does not enter its loop, and `probes` is zero.
     let sources = panic_sources(&report.hits);
+    // **Who pulled a trigger this step**, gathered BEFORE the cover pass because
+    // both readers of the coalesced source list need it: a responder is not
+    // fired upon by its own weapon, in the cover pass (wave WPN2e audit, carried
+    // 279) or in the return-fire memory below.
+    let shooters: BTreeSet<Uuid> = report.hits.iter().map(|h| h.shooter).collect();
     report.npc_cover = super::cover::step_npc_cover(
         world,
         bridge,
         &sources,
+        &shooters,
         PANIC_RADIUS_M,
         inf_ecs::traffic::steps(world),
         dt,
@@ -706,7 +712,6 @@ pub fn step_gameplay(
     //
     //     Inert on every step nothing was fired on: the list is empty and the
     //     call returns before it touches the ledger.
-    let shooters: BTreeSet<Uuid> = report.hits.iter().map(|h| h.shooter).collect();
     report.engage.incoming = super::engage::note_incoming(
         world,
         &sources,
@@ -3246,7 +3251,12 @@ fn step_witness(
     // victim's own capsule: without excluding it every ray to one of them stops
     // a capsule-radius short of its target and the act is witnessed by nobody.
     // `Uuid::nil()` when the position is not on a body.
-    let mut acts: Vec<(ActKind, Uuid, DVec3, Uuid)> = Vec::new();
+    // …and the FIFTH element is **how far away this act could be HEARD**, metres
+    // (wave WPN2e audit) — zero for every act that makes no noise, which is all
+    // of them except a gunshot. See `inf_ecs::weapon::audible_radius_m`: it is
+    // the shot's own report range through the enclosure verdict the shot already
+    // carries, so the ears channel spends NO rays of its own.
+    let mut acts: Vec<(ActKind, Uuid, DVec3, Uuid, f64)> = Vec::new();
     for guid in killed {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
@@ -3278,7 +3288,7 @@ fn step_witness(
             .find(|h| h.target == Some(*guid))
             .map(|h| h.shooter)
             .unwrap_or_else(Uuid::nil);
-        acts.push((ActKind::Killed, killer, at, *guid));
+        acts.push((ActKind::Killed, killer, at, *guid, 0.0));
     }
     // **A ROUND LANDED ON SOMEBODY AND THEY LIVED** (wave WPN2e, closing the
     // WPN2a audit's carried item 205).
@@ -3316,13 +3326,22 @@ fn step_witness(
         if killed.contains(&target) || weapon::is_downed(world, target) {
             continue;
         }
-        acts.push((ActKind::Wounded, hit.shooter, hit.to, target));
+        acts.push((ActKind::Wounded, hit.shooter, hit.to, target, 0.0));
     }
     for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;
         }
-        acts.push((ActKind::Shot, hit.shooter, hit.from, hit.shooter));
+        // **THE ONE ACT THAT MAKES A NOISE.** The radius is the weapon's own
+        // report range, quartered when the enclosure probe said the muzzle was
+        // inside — the audio system's own numbers, read a second way.
+        acts.push((
+            ActKind::Shot,
+            hit.shooter,
+            hit.from,
+            hit.shooter,
+            weapon::audible_radius_m(hit.report_max_m, hit.indoors),
+        ));
     }
     // **THE QUIET CRIME** (wave EMS3) — a swing or a kick that landed on
     // somebody. `loud` is false for a fist by WPN1's own definition, so an
@@ -3349,6 +3368,7 @@ fn step_witness(
             hit.shooter,
             hit.to,
             hit.target.unwrap_or_else(Uuid::nil),
+            0.0,
         ));
     }
     // **…and everything a phase earlier in this step raised** (wave EMS3) — the
@@ -3364,13 +3384,39 @@ fn step_witness(
         // A raised act names a PLACE and not a body — `carjack::door_point` is
         // beside a car rather than inside anybody — so there is no third
         // collider to let the ray through.
-        acts.push((kind, actor, at, Uuid::nil()));
+        acts.push((kind, actor, at, Uuid::nil(), 0.0));
     }
     if acts.is_empty() {
         return 0;
     }
     let mut recorded = 0u32;
-    for (kind, actor, at, subject) in acts {
+    for (kind, actor, at, subject, audible_m) in acts {
+        // ── **THE EARS CHANNEL** (wave WPN2e audit). Who was close enough to
+        //    HEAR it, before anybody is asked what they could SEE.
+        //
+        //    It costs one more `O(agents)` walk on the steps a gunshot happened
+        //    on and **NOT ONE RAY**: sound is not a line of sight, which is the
+        //    entire reason this exists. Measured on the shipped island, the
+        //    island's own crowd could see NONE of seventeen gunshots at the
+        //    spawn — the nearest agent is 117 m away with a city block in the
+        //    way — and heard every one of them.
+        //
+        //    The same `candidates_near` door the observers below use, so there
+        //    is one answer in this engine to "who is standing near here", and
+        //    the count is bounded by `MAX_OBSERVERS` for its reason.
+        //
+        //    A person who is about to be named as an OBSERVER is not counted
+        //    twice: `crime::file_new_acts` files by sight when there is a
+        //    sighting and by ear only when there is not.
+        let heard_by = if audible_m > 0.0 {
+            inf_ecs::witness::candidates_near(world, at, audible_m)
+                .into_iter()
+                .filter(|(guid, _)| *guid != actor && !killed.contains(guid))
+                .count()
+                .min(usize::from(u8::MAX)) as u8
+        } else {
+            0
+        };
         let candidates = inf_ecs::witness::candidates_near(world, at, WITNESS_RADIUS_M);
         let mut observers: Vec<Uuid> = Vec::new();
         for (guid, feet) in candidates {
@@ -3426,6 +3472,7 @@ fn step_witness(
                 observers,
                 actor_look: inf_ecs::witness::look_digest(world, actor),
                 actor_vehicle: inf_ecs::witness::actor_vehicle(world, actor),
+                heard_by,
             },
         );
         recorded += 1;
@@ -4628,6 +4675,97 @@ pub fn npc_set_trigger(world: &mut EcsWorld, shooter: Uuid, hold: bool) -> bool 
     let was = cm.runtime.want_attack;
     cm.runtime.want_attack = hold;
     was != hold
+}
+
+/// **AN NPC RELOADS** (wave WPN2e audit, closing carried 274) — the third and
+/// last door that authors a character's weapon intent for them.
+///
+/// # The hole it fills
+///
+/// `weapon::try_reload` has existed since wave I6 and the only thing that ever
+/// pressed it is a **player's** `press_reload`. So an officer's magazine emptied
+/// and the officer simply stopped firing — which reads on screen as trigger
+/// discipline and is a man standing in a firefight holding an empty gun. Wave
+/// WPN2e's own report carries it: *"`weapon::try_reload` is the door and the
+/// policy is the caller that does not exist"*, and its fixtures top magazines up
+/// by hand and say why.
+///
+/// # Why the EDGE and not the level
+///
+/// [`npc_set_trigger`] writes `want_attack`, which is a LEVEL and needed its own
+/// release. `press_reload` is an **edge**: [`step_weapons`] takes it and clears
+/// it in the same breath (the "edges are TAKEN here" law), so a press cannot
+/// survive into a step that did not mean it and there is nothing to lower. One
+/// call, one reload.
+///
+/// It is a door rather than a write at the call site for [`npc_aim_at`]'s
+/// reason: a divergence in what a character wanted to do is findable only while
+/// there is one place per intent that authors it.
+///
+/// Refuses a shooter that is not there and one that is player-controlled — a
+/// policy must never press a player's keys — and answers whether the press was
+/// actually made, so a caller counts reloads rather than visits.
+pub fn npc_press_reload(world: &mut EcsWorld, shooter: Uuid) -> bool {
+    let Some(entity) = world.entity_of(shooter) else {
+        return false;
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
+        return false;
+    };
+    if cm.player_controlled {
+        return false;
+    }
+    cm.runtime.press_reload = true;
+    true
+}
+
+/// **PUT IT AWAY** (wave WPN2e audit, closing carried 276) — [`equip_weapon`]'s
+/// inverse, and the door a firing policy holsters through.
+///
+/// # The carry said this door did not exist. It half did.
+///
+/// Wave WPN2e carried *"putting it away again needs an `unequip` door
+/// `inf_ecs::item` does not have — there is `Inventory::equip` and no
+/// inverse"*. [`inf_ecs::item::Inventory::unequip`] has existed since wave I6;
+/// what was missing is a **`d3::gameplay` door**, which is where the rest of the
+/// consequences live: the weapon ENTITY, its accessories and the muzzle that
+/// resolves off it.
+///
+/// Those cost nothing here, and that is the point of putting it beside
+/// `equip_weapon` rather than calling `unequip` at a policy's call site:
+/// [`step_equipped_weapons`] already despawns a character's weapon entity and
+/// its accessories on the step nothing is equipped ("a holstered character is
+/// byte-identical to one that never had a weapon"), so this writes ONE field and
+/// the world catches up on the next line of the same step.
+///
+/// **The item stays in the inventory.** Holstering is not dropping: a unit that
+/// puts its sidearm away still has it, and `equip_weapon` puts it back in its
+/// hand with the magazine it had — which is what makes a town that cools down
+/// and heats up again cost nothing.
+///
+/// Refuses a character that is not there and one that is player-controlled — a
+/// policy must never disarm a player — and answers whether anything CHANGED, so
+/// a caller counts holsters rather than visits.
+pub fn unequip_weapon(world: &mut EcsWorld, character: Uuid) -> bool {
+    let Some(entity) = world.entity_of(character) else {
+        return false;
+    };
+    if world
+        .world()
+        .get::<CharacterMovement>(entity)
+        .is_some_and(|cm| cm.player_controlled)
+    {
+        return false;
+    }
+    let Some(mut inv) = world.world_mut().get_mut::<Inventory>(entity) else {
+        return false;
+    };
+    if inv.equipped.is_none() {
+        return false;
+    }
+    inv.unequip();
+    world.mark_dirty();
+    true
 }
 
 /// Give `character` an equipped weapon by item id — the door a Blueprint and a

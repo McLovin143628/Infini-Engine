@@ -274,8 +274,11 @@ fn stage(world: &mut EcsWorld) -> Vec<(&'static str, Uuid)> {
 struct Run {
     /// Per-incident: which unit went, what state it ended in, how long it took.
     outcome: BTreeMap<&'static str, (Option<Uuid>, IncidentState, Option<u64>)>,
-    /// Every unit's final state.
-    units: BTreeMap<Uuid, UnitState>,
+    /// Every unit's final state, and **the step it entered it on** — see the
+    /// on-scene assertion for why the second half had to be added.
+    units: BTreeMap<Uuid, (UnitState, u64)>,
+    /// The last step of the run, so an on-scene unit's dwell can be measured.
+    last_step: u64,
     /// Units still running hot on the last step — the ambient feed's own tail.
     hot_at_end: usize,
     /// Summed counters over the run.
@@ -331,6 +334,7 @@ fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
     let mut run = Run {
         outcome: BTreeMap::new(),
         units: BTreeMap::new(),
+        last_step: 0,
         hot_at_end: 0,
         assigned: 0,
         arrived: 0,
@@ -371,6 +375,7 @@ fn editor_run(with_fleet: bool) -> Run {
     let mut run = Run {
         outcome: BTreeMap::new(),
         units: BTreeMap::new(),
+        last_step: 0,
         hot_at_end: 0,
         assigned: 0,
         arrived: 0,
@@ -427,8 +432,9 @@ fn finish(run: &mut Run, world: &EcsWorld) {
     let Some(res) = dispatch::dispatch_of(world) else {
         return;
     };
+    run.last_step = inf_ecs::traffic::steps(world);
     for (chassis, r) in &res.runs {
-        run.units.insert(*chassis, r.state);
+        run.units.insert(*chassis, (r.state, r.since_step));
     }
     run.hot_at_end = res.runs.values().filter(|r| r.state.running_hot()).count();
 }
@@ -481,15 +487,40 @@ fn three_emergencies_bring_three_services_and_send_them_home() {
     }
     // …and everybody is home — or out on something this town produced by
     // itself, which is the ambient feed and not a stuck unit. What is refused is
-    // a unit that finished the run `OnScene`: that is a crew standing at an
-    // incident nobody ever closed.
-    for (chassis, state) in &run.units {
-        assert_ne!(
-            *state,
-            UnitState::OnScene,
-            "unit {chassis} finished the run standing at a scene that never \
-             closed"
+    // a crew **standing at a scene that never closes**.
+    //
+    // **RE-BLESSED, WITH ITS CAUSE** (wave WPN2e audit). This used to refuse
+    // `OnScene` outright, and it passed for a reason it did not mean: on this
+    // fixture the ambient feed's own late calls were answered by units that were
+    // *still driving* when the run stopped, so nobody was ever on a scene at the
+    // last step. The audit's escort (`inf_ecs::dispatch::ESCORT_LAG_M`) made a
+    // unit that could not get off its own apron actually ARRIVE, and an ambient
+    // incident opened in the last seconds of a 250-second run is answered by a
+    // crew that is legitimately still working it: a crime takes
+    // `SECURE_S` 10 s, a casualty `STABILIZE_S` 6 s and a fire at full intensity
+    // 5 s.
+    //
+    // So the refusal is now what the sentence above always meant — a scene a
+    // crew has been standing at for longer than any service takes — and it is
+    // STRICTER than the old one for the case that matters: a unit parked for
+    // ever at an incident nobody can close now fails at 30 s rather than
+    // surviving as long as it kept driving.
+    let longest_s = dispatch::SECURE_S
+        .max(dispatch::STABILIZE_S)
+        .max(1.0 / dispatch::SUPPRESSION_PER_S);
+    let stuck_s = longest_s * 3.0;
+    for (chassis, (state, since)) in &run.units {
+        if *state != UnitState::OnScene {
+            continue;
+        }
+        let dwell_s = run.last_step.saturating_sub(*since) as f64 / 60.0;
+        assert!(
+            dwell_s < stuck_s,
+            "unit {chassis} has been standing at a scene for {dwell_s:.1} s, \
+             and the longest thing any service does takes {longest_s:.1} s — \
+             that is a scene nobody ever closed"
         );
+        println!("  one unit is still working a scene, {dwell_s:.1} s in");
     }
     // ARMED: the counters say the whole lifecycle ran, not just its ends.
     println!(

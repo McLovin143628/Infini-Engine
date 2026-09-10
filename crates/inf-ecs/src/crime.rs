@@ -491,6 +491,15 @@ pub struct CrimeRes {
     pub opened: u64,
     /// Recognitions over the session.
     pub sightings: u64,
+    /// **Acts filed by EAR over the session** (wave WPN2e audit) — the ears
+    /// channel's engagement counter. A gate that could not tell "the town heard
+    /// the gunfire and shrugged" from "nobody was in earshot" would certify a
+    /// no-op.
+    pub heard: u64,
+    /// Of those, the ones that OPENED a file nothing had seen — the number that
+    /// says the ears channel is load-bearing on this level rather than
+    /// decorative.
+    pub heard_opened: u64,
     /// Files that went cold and were dropped.
     pub cleared: u64,
     /// Acts already turned into evidence, by the step they happened on — so the
@@ -611,6 +620,97 @@ pub fn report_act(world: &mut EcsWorld, act: &WitnessedAct, vehicle: Option<u64>
     if fresh {
         res.opened = res.opened.saturating_add(1);
     }
+    evict_coldest(&mut res, act.step);
+    world.world_mut().insert_resource(res);
+    Some(heat)
+}
+
+/// **SOMEBODY HEARD IT** (wave WPN2e audit) — the EARS channel, and the third
+/// and last door that can put heat on a file.
+///
+/// # The hole it fills, measured on the shipped island
+///
+/// [`report_act`] refuses an act nobody SAW, and on the showcase island nobody
+/// sees anything: seventeen gunshots at the spawn recorded seventeen acts with
+/// **zero** observers, because the nearest crowd agent is 117 m away with a city
+/// block in between. So the player could empty a magazine into the street and
+/// the town would not open a file, would not raise a star, and would never send
+/// the car this arc spent five waves teaching to shoot back.
+///
+/// A gunshot is not a thing you have to see.
+///
+/// # What it is allowed to do, and the two things it is not
+///
+/// **Heat, and only heat.** A hearer:
+///
+/// * adds [`crate::witness::ActKind::heard_heat`] — ONE for a shot, against the
+///   two a seen one is worth, so a single shot nobody saw is a call and not yet
+///   a car;
+/// * files **no description**. You cannot describe somebody you only heard, so
+///   [`Channel::Outfit`] and [`Channel::Vehicle`] are not touched — which means
+///   [`crate::crime::match_score`] has nothing to match on and a file opened by
+///   ear cannot get anybody recognised. That is *"a lower evidence weight than
+///   sight"* as a mechanism rather than as an adjective;
+/// * **does not move [`Profile::last_seen`]**. That field is what the police
+///   drive to and what [`crate::engage::may_engage`] measures its range against,
+///   and it stays what its name says: a place a person actually SAW the suspect.
+///   A file that already exists keeps whatever position it had; a file this
+///   opens is anchored at the shot itself — which is public, it is where the
+///   noise came from, and it is the only address hearing can honestly give.
+///
+/// So hearing gets the police into the street and **sight is what keeps them on
+/// you**: the trail an ear laid goes stale in
+/// [`crate::engage::TRAIL_STALE_STEPS`] (three seconds) and nothing but a
+/// witness or a recognition renews it. EMS3's evasion clause is untouched.
+///
+/// # No transform is read anywhere in here
+///
+/// The position is [`crate::witness::WitnessedAct::at`], which for a shot is its
+/// own muzzle, put there by the weapon step. Nothing in this function can reach
+/// a body's `Transform`, which is the same shape [`report_act`] has.
+///
+/// Answers the file's heat afterwards, or `None` for every refusal — a nil
+/// actor, a non-finite place, an act nobody heard, or an act whose kind makes no
+/// noise.
+pub fn report_heard(world: &mut EcsWorld, act: &WitnessedAct) -> Option<u32> {
+    if act.heard_by == 0 || !act.at.is_finite() || act.actor.is_nil() {
+        return None;
+    }
+    let worth = act.kind.heard_heat();
+    if worth == 0 {
+        return None;
+    }
+    let mut res = world
+        .world_mut()
+        .remove_resource::<CrimeRes>()
+        .unwrap_or_default();
+    let mut opened = false;
+    let file = res.profiles.entry(act.actor).or_insert_with(|| {
+        opened = true;
+        Profile {
+            heat: 0,
+            evidence: BTreeMap::new(),
+            opened_step: act.step,
+            sightings: 0,
+            decayed_step: act.step,
+            // **The shot's own place, and only when the file is new.** See the
+            // header: hearing may give a file its first address and may never
+            // move one, because moving it is what a witness is for.
+            last_seen: act.at,
+            last_seen_step: act.step,
+        }
+    });
+    file.heat = file.heat.saturating_add(worth);
+    // **The clock stops**, exactly as a sighting stops it (see `sight`): a town
+    // being shot at every second is not a town whose file is going cold. It is
+    // the heat that is being renewed and not the position.
+    file.decayed_step = act.step;
+    let heat = file.heat;
+    if opened {
+        res.opened = res.opened.saturating_add(1);
+        res.heard_opened = res.heard_opened.saturating_add(1);
+    }
+    res.heard = res.heard.saturating_add(1);
     evict_coldest(&mut res, act.step);
     world.world_mut().insert_resource(res);
     Some(heat)
@@ -800,7 +900,12 @@ pub fn file_new_acts(world: &mut EcsWorld) -> usize {
     // Bounded by `MAX_WITNESSED_ACTS`, and empty on every step nothing happened.
     let fresh: Vec<WitnessedAct> = crate::witness::witnessed(world)
         .iter()
-        .filter(|a| a.step > seen && !a.observers.is_empty())
+        // **Seen OR heard** (wave WPN2e audit). An act with an observer is
+        // filed by `report_act`, at full weight and with a description; one with
+        // no observer and a hearer is filed by `report_heard`, at
+        // `ActKind::heard_heat` and with none. An act that was neither seen nor
+        // heard is still not a crime anybody in this town knows about.
+        .filter(|a| a.step > seen && (!a.observers.is_empty() || a.heard_by > 0))
         .cloned()
         .collect();
     if fresh.is_empty() {
@@ -813,7 +918,16 @@ pub fn file_new_acts(world: &mut EcsWorld) -> usize {
         let vehicle = act
             .actor_vehicle
             .and_then(|chassis| vehicle_digest(world, chassis));
-        if report_act(world, &act, vehicle).is_some() {
+        // Sight outranks hearing and is never doubled with it: a shot somebody
+        // watched is already worth more than one they only heard, and adding
+        // both would make being seen cost three rather than two.
+        let by_sight = !act.observers.is_empty();
+        let filed_one = if by_sight {
+            report_act(world, &act, vehicle).is_some()
+        } else {
+            report_heard(world, &act).is_some()
+        };
+        if filed_one {
             filed += 1;
         }
     }
@@ -920,6 +1034,7 @@ mod tests {
             observers: vec![guid(0xbeef)],
             actor_look: look,
             actor_vehicle: None,
+            heard_by: 0,
         }
     }
 
