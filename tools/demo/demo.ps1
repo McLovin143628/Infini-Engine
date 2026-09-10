@@ -1768,6 +1768,28 @@ if ($armList.Count -gt 0) {
     Stand-Up "before the classes leg" | Out-Null
     $cycleS = [math]::Max(4.0, $ArmDwellS) * ($armList.Count + 1)
 
+    # **A FRAME OF A CORPSE IS NOT A FRAME OF A WEAPON IN A HAND** (WPN2d
+    # audit). Every predicate in this leg used to ask only WHICH weapon was
+    # equipped, and the equipped id keeps its value on a dead character. Wave
+    # WPN2d's session 3 took all seven of its mesh frames of a hero that had
+    # blown itself up with its own launcher at 2.204 m -- the RPG-7 spends
+    # 4 000 J over an 8 m radius, so at 2.204 m it owes 2 099.6 J against a
+    # 2 000 J hero -- and had been ragdolling for 130 s by then, 33 to 48 m
+    # above the street. The captions said "an unmistakable AR-15 in the hero's
+    # hands"; the pixels were a corpse against the sky.
+    #
+    # So every frame below asks the MODE as well, and the leg says out loud
+    # when there is nothing worth photographing. `$alive` is the clause; it is
+    # spelled once here and pasted into each predicate because a PowerShell
+    # scriptblock parameter cannot be composed at the call site.
+    $heroRow = { @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",") }
+    $rowNow = & $heroRow
+    if ($rowNow[5].Trim() -eq "Ragdoll") {
+        Say "WPN2d: THE HERO IS RAGDOLLING -- it is dead or knocked down, and every"
+        Say "       frame this leg would take is a photograph of a corpse. Nothing"
+        Say ("       here is taken. mode={0} y={1} foot_mm={2} holder={3}" -f $rowNow[5], $rowNow[3], $rowNow[12], $rowNow[16])
+    }
+
     # 1. FIRST PERSON, so the mesh is the frame rather than thirty pixels over a
     #    shoulder -- and so the wave's own first-person rule is what the pixels
     #    show: the BODY is faded to nothing at a 0.2 m boom and the WEAPON is
@@ -1788,27 +1810,52 @@ if ($armList.Count -gt 0) {
     for ($v = 0; ($v -lt 3) -and (-not $fp); $v++) {
         [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)   # G
         $fp = @(Wait-ForHero -Csv $heroCsv -What "a first-person seat with a gun in it (press $($v + 1))" -TimeoutS 5 `
-            -Predicate { param($c) ($c.Count -gt 29) -and ([double]$c[13] -lt 0.35) -and ($c[29].Trim() -ne "-") } `
+            -Predicate { param($c) ($c.Count -gt 29) -and ([double]$c[13] -lt 0.35) -and ($c[29].Trim() -ne "-") -and ($c[5].Trim() -ne "Ragdoll") } `
             -Out (Join-Path $OutDir "90-first-person-weapon.png"))[-1]
     }
     if (-not $fp) { Say "WPN2d: no first-person seat with a weapon -- no un-faded frame" }
     else {
-        $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        $row = & $heroRow
         Say ("WPN2d: at boom {0} m the body draws {1} and the {2} in the hand does not fade" -f $row[13], $row[14], $row[29])
     }
+
+    # **AND BACK OUT TO THE BOOM FOR THE CLASS FRAMES** (WPN2d audit). A
+    # first-person frame is the right picture of the FADE RULE and the wrong
+    # picture of a mesh: what "the class's own art is in the hero's hands" needs
+    # is the hands in the frame. The wave took its seven class frames in
+    # whatever seat the first-person attempt happened to leave behind, which
+    # since the toggle never took was the third-person boom -- correct by
+    # accident. This asks for it.
+    if ($fp) {
+        for ($v = 0; $v -lt 3; $v++) {
+            $row = & $heroRow
+            if ([double]$row[13] -gt 1.5) { break }
+            [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)   # G
+            Start-Sleep -Milliseconds 600
+        }
+        $row = & $heroRow
+        Say ("WPN2d: back on the boom at {0} m for the class frames" -f $row[13])
+    }
+    # **LEVEL THE AIM AGAIN**, so the class frames look down the street rather
+    # than at the sky the first-person leg was pitched at.
+    [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 300
+    [InfInput]::Look(0, -440); Start-Sleep -Milliseconds 400
 
     # 2. ONE FRAME PER CLASS, in first person, waiting for the CLASS column
     #    rather than for a filename. A class the rotation never brings round
     #    takes no frame and says so.
     $seen = @()
     foreach ($wid in $armList) {
-        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" in the hand (the mesh)" -TimeoutS $cycleS `
-            -Predicate { param($c) ($c.Count -gt 29) -and ($c[22].Trim() -eq $wid) })[-1]
-        if (-not $onIt) { Say "WPN2d: the rotation never brought `"$wid`" round for its mesh frame"; continue }
-        $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" in the hand (the mesh), on a hero that is on its feet" -TimeoutS $cycleS `
+            -Predicate { param($c) ($c.Count -gt 29) -and ($c[22].Trim() -eq $wid) -and ($c[5].Trim() -ne "Ragdoll") -and ($c[16].Trim() -eq "gameplay") })[-1]
+        if (-not $onIt) { Say "WPN2d: no `"$wid`" in a living hand inside $cycleS s -- no mesh frame"; continue }
+        $row = & $heroRow
         $cls = $row[29].Trim()
         & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("91-mesh-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
-        Say ("WPN2d: {0} is class `"{1}`", attach {2}" -f $wid, $cls, $row[30])
+        # The row the caption has to be read against: what is in the hand, what
+        # the hero is doing, how far off the ground its feet are, and who is
+        # holding the camera.
+        Say ("WPN2d: {0} is class `"{1}`", attach {2}; mode {3}, foot_mm {4}, boom {5}, holder {6}" -f $wid, $cls, $row[30], $row[5], $row[12], $row[13], $row[16])
         $seen += $cls
     }
     Say ("WPN2d: classes photographed -> " + (($seen | Select-Object -Unique) -join ", "))
@@ -1818,7 +1865,7 @@ if ($armList.Count -gt 0) {
     #    column 20, on the shotgun.
     $sg = "remington_870"
     $onSg = @(Wait-ForHero -Csv $heroCsv -What "the shotgun in the hand" -TimeoutS $cycleS `
-        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sg) })[-1]
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $sg) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
     if ($onSg) {
         [InfInput]::Look(0, -900); Start-Sleep -Milliseconds 250
         [InfInput]::Look(0, 250);  Start-Sleep -Milliseconds 300
@@ -1840,25 +1887,11 @@ if ($armList.Count -gt 0) {
     #    rocket is still flying, and the one after it is the bang.
     $rl = "rpg_7"
     $onRl = @(Wait-ForHero -Csv $heroCsv -What "the launcher in the hand" -TimeoutS $cycleS `
-        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $rl) })[-1]
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $rl) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
     if ($onRl) {
         [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
         [InfInput]::Look(0, -420); Start-Sleep -Milliseconds 300
         [InfInput]::RightDown(); Start-Sleep -Milliseconds 400
-        # The lock indicator, if a car is in the cone. It is not asserted: the
-        # island's traffic is where it is, and a leg that DEMANDED a car in front
-        # of it would fail on an empty street rather than say so.
-        # SWEEP for one: the island's traffic is where it is, and a launcher
-        # pointed at one fixed heading is pointed at whatever happens to be
-        # there. Eight bearings, four seconds each.
-        $lk = $false
-        for ($b = 0; ($b -lt 8) -and (-not $lk); $b++) {
-            $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something (bearing $b)" -TimeoutS 3.0 `
-                -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
-                -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
-            if (-not $lk) { [InfInput]::Look(300, 0); Start-Sleep -Milliseconds 300 }
-        }
-        if (-not $lk) { Say "WPN2d: nothing lockable was in the launcher's cone over eight bearings -- no lock frame" }
         $boom = $false
         for ($t = 0; ($t -lt 4) -and (-not $boom); $t++) {
             [InfInput]::LeftDown(); Start-Sleep -Milliseconds 220
@@ -1877,12 +1910,54 @@ if ($armList.Count -gt 0) {
         if (-not $boom) { Say "WPN2d: no rocket ever arrived -- no blast frame" }
     } else { Say "WPN2d: the rotation never brought the launcher round" }
 
+    # 4b. THE LOCK, AND THE ONLY TWO ROWS IN THE REGISTRY THAT HAVE ONE (WPN2d
+    #     audit). The wave swept eight bearings in each of two sessions with the
+    #     RPG-7 in its hands and wrote down "nothing lockable was in the
+    #     launcher's cone". The RPG-7 has no `lock_s` and no `lock_cone_deg`:
+    #     `fim_92_stinger` and `javelin_fgm148` are the whole of the lock in
+    #     `weapons.toml`, so that leg could not have produced a lock with
+    #     anything in front of it. It also swept while pitched about 32 deg UP
+    #     -- the elevation the leg above takes so its rocket clears the street --
+    #     and a car is on the ground, outside a 10 deg cone.
+    #
+    #     So: a launcher that can lock, aimed LEVEL, swept for a car.
+    $lockers = @($armList | Where-Object { $_ -eq "javelin_fgm148" -or $_ -eq "fim_92_stinger" })
+    if ($lockers.Count -eq 0) {
+        Say "WPN2d: no locking launcher in -ArmHero (only javelin_fgm148 and fim_92_stinger have a lock) -- no lock frame"
+    } else {
+        $lw = $lockers[0]
+        $onLk = @(Wait-ForHero -Csv $heroCsv -What "`"$lw`" in the hand (the lock)" -TimeoutS $cycleS `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $lw) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
+        if (-not $onLk) { Say "WPN2d: the rotation never brought `"$lw`" round for the lock" }
+        else {
+            # Level, and a touch below: a car sits at the hero's own feet height
+            # and the reticle is at 1.65 m.
+            [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
+            [InfInput]::Look(0, -400); Start-Sleep -Milliseconds 300
+            [InfInput]::RightDown(); Start-Sleep -Milliseconds 400
+            $lk = $false
+            for ($b = 0; ($b -lt 16) -and (-not $lk); $b++) {
+                $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something (bearing $b)" -TimeoutS 2.5 `
+                    -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
+                    -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
+                if (-not $lk) { [InfInput]::Look(150, 0); Start-Sleep -Milliseconds 250 }
+            }
+            [InfInput]::RightUp()
+            if ($lk) {
+                $row = & $heroRow
+                Say ("WPN2d: the lock indicator reads {0} with `"{1}`" up" -f $row[31], $lw)
+            } else {
+                Say "WPN2d: nothing lockable was in the cone over sixteen level bearings -- no lock frame"
+            }
+        }
+    }
+
     # 5. THE THROW. `KeyB` is the first key this engine has ever bound to one.
     #    The arc is drawn while AIMING with a throwable, so the frame before the
     #    press is the arc and the frame after the fuse is the detonation.
     $gr = "g67_grenade"
     $onGr = @(Wait-ForHero -Csv $heroCsv -What "the grenade in the hand" -TimeoutS $cycleS `
-        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $gr) })[-1]
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $gr) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
     if ($onGr) {
         [InfInput]::Look(0, -900); Start-Sleep -Milliseconds 250
         [InfInput]::Look(0, 300);  Start-Sleep -Milliseconds 300
@@ -1907,7 +1982,7 @@ if ($armList.Count -gt 0) {
     #    swing, and the class column is what says a knife is in the hand.
     $kn = "m9_knife"
     $onKn = @(Wait-ForHero -Csv $heroCsv -What "the knife in the hand" -TimeoutS $cycleS `
-        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $kn) })[-1]
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $kn) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
     if ($onKn) {
         [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
         [InfInput]::Look(0, -430); Start-Sleep -Milliseconds 300
@@ -1922,7 +1997,7 @@ if ($armList.Count -gt 0) {
     #    pressed.
     $ar = "m4a1"
     $onAr = @(Wait-ForHero -Csv $heroCsv -What "the rifle in the hand (for the bench)" -TimeoutS $cycleS `
-        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $ar) })[-1]
+        -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $ar) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
     if ($onAr) {
         [InfInput]::Down(0x17); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x17)   # I: the panel
         Start-Sleep -Milliseconds 400
