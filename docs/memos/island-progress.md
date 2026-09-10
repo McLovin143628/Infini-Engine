@@ -38079,3 +38079,50 @@ thing they share is a cone test that stops one shooting the other. There is no
 which reads as trigger discipline and is not. And an officer's aim, once the
 suspect is out of sight, goes to the PLACE the gunfire came from and stays there;
 a search pattern is EMS3's `last_seen` and a wave of its own.
+
+### What the closing hygiene found, after the gate was already green
+
+Four defects landed **after** twenty green arms, and all four are worth the
+sentence because none of them is the kind a test suite finds by passing.
+
+* **The packager's own sweep read this wave's gate and was right eight times.**
+  `no_string_literal_in_the_workspace_carries_an_eaten_continuation` flagged one
+  genuine eaten `\`-continuation — an assertion message a Python heredoc had
+  joined, leaving a run of ten spaces mid-sentence — and seven fixed-column
+  report tables whose alignment is runs of spaces inside a literal. The tables
+  are the collision the sweep's own doc describes and there is an allowlist for
+  exactly that, keyed on the enclosing function. **It was not used.** The same
+  doc records why: *"an allowlist entry is a blind spot with a name on it; prefer
+  retiring the reason to widening the list"* — and the SCRIPT1b wave that took
+  an entry back out did so because two real defects had been written inside an
+  allowlisted function where the sweep could not see them. So the reason was
+  retired instead: the ladder's header now uses the widths its own rows already
+  used, and the island chain's labels are padded with `{:<29}`. Byte-identical
+  output, no hole.
+* **`clippy -D warnings` found five**, all in this wave's code, and one of them
+  was an inconsistency as well as a lint: `note_incoming` spelled
+  `or_insert_with(UnitEngagement::default)` while the same file's other entry
+  call already said `or_default()`. A constant-versus-constant assertion in
+  `inf_ecs::engage`'s tests moved into a `const` block, where it is checked at
+  compile time and a filtered test run cannot skip it.
+* **THE DEMO LEG THIS WAVE WROTE HAD THREE FAULTS, AND ONLY RUNNING IT FOUND
+  THEM.** `Wait-ForHero` returns a **boolean** — whether the predicate fired,
+  not the row that fired it — and the leg indexed it, so `$armed[22].Trim()`
+  printed *"you cannot call a method on a null-valued expression"* in red in the
+  middle of an otherwise clean session. Worse, the leg's closing summary built
+  its rows with `ForEach-Object { $_.Split(",") }`, which **unrolls**: the
+  `Where-Object { $_.Count -gt 33 }` behind it was testing a single string's
+  `.Count`, `$rowsE` was always empty, and the entire *"what the session's own
+  columns say about the shootout"* block **printed nothing at all, silently, in
+  two full sessions**. A report that cannot fail is the shape this campaign
+  keeps catching (P22's *gates must falsify*, EMS2's *engagement counters over
+  flags*), and it is worth noticing that it landed in a wave whose own gate arm
+  exists to stop precisely this. The unary comma keeps a split row one object.
+
+**The relaunch, after the fix**, `-SkipBuild` on binaries built from this tree:
+`SHOOTOUT: firing glock_17 in the street to open a file`, then `peak engaged
+units : 0`, `peak incoming rounds: 0`, `peak casings alive : 23`, `shootout
+frames : 1 of 6`, **HERO MOVED 154.039 m over 1 226 samples**, 56 frames, exit
+0, no errors. The zeros are the island content gap the table above measures —
+what changed is that the leg can now say so out loud instead of printing
+nothing.
