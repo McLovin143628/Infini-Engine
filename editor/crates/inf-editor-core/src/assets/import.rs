@@ -465,8 +465,16 @@ fn import_mesh_container(
         let derived = super::anim_derive::derive_in_place(
             &clip.name,
             &mut payload,
-            rig.map(|sk| inf_anim::SkeletonAsset::new(sk.skeleton.clone()))
-                .as_ref(),
+            // Sockets derived from the rig's own joint names (wave WPN2d
+            // audit) -- see `inf_anim::sockets::derive_sockets`: an empty socket
+            // table is what put an equipped weapon inside a character's pelvis.
+            rig.map(|sk| {
+                inf_anim::SkeletonAsset::with_sockets(
+                    sk.skeleton.clone(),
+                    inf_anim::sockets::derive_sockets(&sk.skeleton),
+                )
+            })
+            .as_ref(),
             &inf_anim::DeriveOptions::default(),
         );
         advisories.extend(raise(

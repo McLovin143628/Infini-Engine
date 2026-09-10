@@ -1844,14 +1844,21 @@ if ($armList.Count -gt 0) {
     # since the toggle never took was the third-person boom -- correct by
     # accident. This asks for it.
     if ($fp) {
-        for ($v = 0; $v -lt 3; $v++) {
-            $row = & $heroRow
-            if ([double]$row[13] -gt 1.5) { break }
+        # **WAIT FOR THE BOOM, DO NOT COUNT PRESSES** (WPN2d audit, third
+        # session). The arm blends out of the seat over about a second, so a
+        # loop that pressed G, slept 600 ms and read a boom of 0.2 pressed it
+        # again -- and a toggle pressed an odd number of times is back where it
+        # started. Measured: the third session took every class frame at a
+        # 0.17 m boom, which is the seat, not the boom.
+        $back = $false
+        for ($v = 0; ($v -lt 3) -and (-not $back); $v++) {
             [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)   # G
-            Start-Sleep -Milliseconds 600
+            $back = @(Wait-ForHero -Csv $heroCsv -What "the boom back out (press $($v + 1))" -TimeoutS 4 `
+                -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -gt 1.5) })[-1]
         }
         $row = & $heroRow
-        Say ("WPN2d: back on the boom at {0} m for the class frames" -f $row[13])
+        if ($back) { Say ("WPN2d: back on the boom at {0} m for the class frames" -f $row[13]) }
+        else { Say ("WPN2d: the boom never came back out -- the class frames are at {0} m" -f $row[13]) }
     }
     # **LEVEL THE AIM AGAIN**, so the class frames look down the street rather
     # than at the sky the first-person leg was pitched at.

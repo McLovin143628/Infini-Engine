@@ -1028,7 +1028,16 @@ pub fn import_manifest(
         // derivation measured against the donor would name the wrong joints.
         // A refusal costs this clip its channels and nothing else.
         let mut payload = payload;
-        let target_rig = inf_anim::SkeletonAsset::new(target.skeleton.clone());
+        // **THE SOCKETS AN IMPORTED RIG CAN STILL PUBLISH** (wave WPN2d audit).
+        // `SkeletonAsset::new` leaves the socket table EMPTY, and until this line
+        // every rig this bridge has ever written did -- so `hand_r` did not
+        // resolve, `inf_ecs::attach` used its origin fallback, and an equipped
+        // weapon was drawn inside the character's pelvis. See
+        // `inf_anim::sockets::derive_sockets`.
+        let target_rig = inf_anim::SkeletonAsset::with_sockets(
+            target.skeleton.clone(),
+            inf_anim::sockets::derive_sockets(&target.skeleton),
+        );
         let derived = super::anim_derive::derive_in_place(
             &c.key,
             &mut payload,

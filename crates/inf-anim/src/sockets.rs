@@ -78,6 +78,78 @@ pub fn find_socket<'a>(sockets: &'a [Socket], name: &str) -> Option<&'a Socket> 
     sockets.iter().find(|s| s.name == name)
 }
 
+/// **The socket names this ENGINE asks for, and the joint each one rides**
+/// (wave WPN2d audit).
+///
+/// The same twelve `crate::manny` publishes -- this engine's own six plus the
+/// ALS spellings -- moved here because they are not the mannequin's private
+/// business: `inf_physics::d3::gameplay::WEAPON_SOCKET` is `"hand_r"`,
+/// `inf_ecs::attach` composes against `hand_l` / `foot_r` / `head` / `back`, and
+/// a rig that does not publish them gets the documented ORIGIN fallback --
+/// which for a weapon means a rifle drawn inside the character's pelvis.
+///
+/// See [`derive_sockets`] for why a list the importer can read is the fix.
+pub const ENGINE_SOCKETS: [(&str, &str); 12] = [
+    ("hand_l", "hand_l"),
+    ("hand_r", "hand_r"),
+    ("foot_l", "foot_l"),
+    ("foot_r", "foot_r"),
+    ("head", "head"),
+    ("back", "spine_05"),
+    ("hand_l_socket", "hand_l"),
+    ("hand_r_socket", "hand_r"),
+    ("FX_Foot_L", "foot_l"),
+    ("FX_Foot_R", "foot_r"),
+    ("head_socket", "head"),
+    ("root_socket", "root"),
+];
+
+/// **The sockets a skeleton that authors none can still publish** (wave WPN2d
+/// audit) -- every [`ENGINE_SOCKETS`] entry whose joint this skeleton actually
+/// has, at that joint's own frame.
+///
+/// # Why this exists
+///
+/// A `SkeletonAsset` built by `SkeletonAsset::new` carries an EMPTY socket
+/// table, and that is what both importers build --
+/// `editor/crates/inf-editor-core/src/assets/ue_import.rs` and
+/// `.../assets/import.rs`. Only `crate::manny` and `crate::template` ever
+/// authored sockets. So every rig this engine has ever IMPORTED -- the
+/// mannequins, the MetaHumans, the island's own hero -- publishes none, and
+/// `inf_ecs::pose::EvaluatedPose::socket` answers `None` for all of them.
+///
+/// The consequences are silent and total, and wave WPN2d's audit photographed
+/// both: `inf_ecs::attach::update_attachments` falls back to the target's
+/// ORIGIN, so an equipped weapon is drawn inside the character's pelvis rather
+/// than in its hand (nine class frames of a live hero on the island, and no
+/// weapon visible in any of them); and `muzzle_of` falls back to
+/// `MUZZLE_HEIGHT_M`, which `GameplayReport::muzzles_without_a_socket` was
+/// minted to count and which nothing on the island reads.
+///
+/// A UE-family rig -- which is every rig this bridge imports -- names its joints
+/// `hand_r`, `hand_l`, `foot_r`, `foot_l`, `head`, `spine_05`. Those are exactly
+/// the joints [`ENGINE_SOCKETS`] maps to. So the socket table an importer could
+/// not find is one it can DERIVE, once, at import time, from the names the rig
+/// already has.
+///
+/// Import-time and not per-step, deliberately: a runtime fallback would be
+/// twelve name lookups over a hundred and sixty joints per character per fixed
+/// step, and it would change what the FIXED STEP computes for a muzzle, which
+/// is a trace. This changes an asset.
+pub fn derive_sockets(skeleton: &Skeleton) -> Vec<Socket> {
+    let mut out: Vec<Socket> = Vec::new();
+    for (name, joint) in ENGINE_SOCKETS {
+        let Some(index) = skeleton.joints().iter().position(|j| j.name == joint) else {
+            continue;
+        };
+        let Ok(index) = u16::try_from(index) else {
+            continue;
+        };
+        out.push(Socket::new(name, index));
+    }
+    out
+}
+
 /// Every socket's model-space transform for one pose, as `(name, matrix)` pairs
 /// **sorted by name**.
 ///

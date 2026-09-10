@@ -3023,3 +3023,187 @@ fn the_previewed_throw_arc_is_the_flights_own_arithmetic() {
         "the preview covered {span:.2} m — this arm is comparing two nothings"
     );
 }
+
+/// **THE WEAPON IS IN THE PELVIS, NOT THE HAND, ON EVERY IMPORTED RIG** (wave
+/// WPN2d audit).
+///
+/// Clause 6's headline is "a real mesh in the hand", and nine class frames of a
+/// LIVE hero on the island show no weapon at all — while the wave's own frame of
+/// a RAGDOLL shows the rifle plainly, at the body's midsection, because a
+/// ragdoll's limbs move away from the entity origin and the weapon does not.
+///
+/// The chain is four lines of code and each one is documented as correct:
+///
+/// 1. `SkeletonAsset::new` leaves the socket table EMPTY, and both importers
+///    build one that way — `assets/ue_import.rs` (the UE bridge, which is how
+///    the mannequins, the MetaHumans and the island's hero arrived) and
+///    `assets/import.rs`. Only `inf_anim::manny` and `inf_anim::template` ever
+///    authored sockets, which is why every rigged FIXTURE in this tree —
+///    `weapon_hands_gate`'s `build_manny` included — has them and no imported
+///    asset does.
+/// 2. `EvaluatedPose::socket("hand_r")` searches the authored table only. No
+///    table, no answer.
+/// 3. `inf_ecs::attach`'s documented ORIGIN fallback then places the weapon at
+///    the character's own origin — "right because the alternative is a weapon
+///    that vanishes to the world origin the moment a rig is unbound".
+/// 4. …which is inside the pelvis of a standing character, so nothing is drawn
+///    in the hand and nothing is missing either. It is silent.
+///
+/// The same `None` also sends every shot back to `MUZZLE_HEIGHT_M`, which is
+/// exactly what `GameplayReport::muzzles_without_a_socket` was minted to count
+/// and what nothing on the island reads.
+///
+/// **What this arm reads**: where a follower actually LANDS, in world space,
+/// through `update_attachments`, for the same rig with and without a socket
+/// table — and that `inf_anim::sockets::derive_sockets` is what turns the second
+/// back into the first.
+///
+/// **The mutation**: make `derive_sockets` return `Vec::new()` — the weapon goes
+/// back into the pelvis and this arm reds on a gap of zero.
+#[test]
+fn an_imported_rigs_weapon_hangs_at_its_origin_until_its_sockets_are_derived() {
+    use inf_ecs::components::{AnimStateMachine, AttachedTo, SkeletalMesh};
+
+    const RIGGED: Uuid = Uuid::from_u128(0x2D00_0900);
+    const FOLLOWER: Uuid = Uuid::from_u128(0x2D00_0901);
+    const SKEL: Uuid = Uuid::from_u128(0x2D00_0902);
+    const SM: Uuid = Uuid::from_u128(0x2D00_0903);
+    const CLIP: inf_anim::ClipRef = [0x2d; 16];
+
+    // A mannequin, which is the only kind of rig in this tree that publishes
+    // sockets — and the same rig with the table taken away, which is what every
+    // IMPORTED rig is.
+    let authored = inf_anim::build_manny(&inf_anim::BodyParams {
+        height_m: 1.8,
+        ..Default::default()
+    })
+    .expect("the mannequin builds");
+    assert!(
+        authored.sockets.iter().any(|s| s.name == "hand_r"),
+        "the mannequin stopped publishing the weapon socket"
+    );
+    let imported = inf_anim::SkeletonAsset::new(authored.skeleton.clone());
+    assert!(
+        imported.sockets.is_empty(),
+        "`SkeletonAsset::new` authors sockets now — this arm's premise moved"
+    );
+    // …and what the importer can derive from the joint names it already has.
+    let derived = inf_anim::SkeletonAsset::with_sockets(
+        authored.skeleton.clone(),
+        inf_anim::sockets::derive_sockets(&authored.skeleton),
+    );
+
+    // Where does the weapon land? One world, three rigs, one measurement.
+    let landed = |rig: &inf_anim::SkeletonAsset| -> DVec3 {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(RIGGED, "Rigged", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, 1.0, 0.0);
+        world.world_mut().entity_mut(e).insert((
+            t,
+            CharacterMovement::default(),
+            AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            SkeletalMesh {
+                mesh: Some(Uuid::from_u128(1)),
+                skeleton: Some(SKEL),
+            },
+        ));
+        let f = world.spawn_with_guid(FOLLOWER, "Weapon", None);
+        world.world_mut().entity_mut(f).insert((
+            Transform::IDENTITY,
+            AttachedTo::new(RIGGED, d3::gameplay::WEAPON_SOCKET, Vec3d::ZERO),
+        ));
+        world.mark_dirty();
+        world.propagate();
+
+        let machine = inf_anim::StateMachine {
+            states: vec![inf_anim::SmState::clip("idle", CLIP)],
+            entry: 0,
+            ..Default::default()
+        };
+        let clip = inf_anim::AnimClip::new("pose", Vec::new());
+        let machines = |g: Uuid| (g == SM).then_some(&machine);
+        let skels = |g: Uuid| (g == SKEL).then_some(rig);
+        let clips = |c: inf_anim::ClipRef| (c == CLIP).then_some(&clip);
+        let vars = |_: Uuid| std::collections::BTreeMap::new();
+        inf_ecs::pose::step_pose_evaluation(&mut world, DT, &machines, &skels, &clips, &vars);
+        inf_ecs::attach::update_attachments(&mut world);
+        world.propagate();
+        let fe = world.entity_of(FOLLOWER).expect("the weapon");
+        world
+            .world()
+            .get::<Transform>(fe)
+            .expect("a transform")
+            .translation
+            .to_dvec3()
+    };
+
+    let origin = DVec3::new(0.0, 1.0, 0.0);
+    let with_table = landed(&authored);
+    let no_table = landed(&imported);
+    let with_derived = landed(&derived);
+    println!(
+        "the weapon lands at: authored ({:.3}, {:.3}, {:.3}), imported ({:.3}, \
+         {:.3}, {:.3}), derived ({:.3}, {:.3}, {:.3}); the holder's origin is \
+         ({:.3}, {:.3}, {:.3})",
+        with_table.x,
+        with_table.y,
+        with_table.z,
+        no_table.x,
+        no_table.y,
+        no_table.z,
+        with_derived.x,
+        with_derived.y,
+        with_derived.z,
+        origin.x,
+        origin.y,
+        origin.z
+    );
+
+    // **The defect, measured**: a rig with no socket table puts the weapon on
+    // the holder's own body axis rather than in its hand. Measured here at
+    // (0.000, 0.400, 0.000) against a holder origin of (0.000, 1.000, 0.000) --
+    // inside the pelvis of a 1.8 m character whose feet are at 0.1.
+    let sunk = (no_table - origin).length();
+    assert!(
+        sunk < 1.0 && no_table.x.abs() < 0.05 && no_table.z.abs() < 0.05,
+        "an imported rig no longer lands on the holder's own axis - this arm's \
+         premise moved ({no_table:?}, {sunk:.4} m from the origin)"
+    );
+    // **The hand is somewhere else**, and by a distance a person can see.
+    let miss = (with_table - no_table).length();
+    assert!(
+        miss > 1.0,
+        "the hand and the fallback are {miss:.4} m apart - this arm cannot tell \
+         a hand from a pelvis"
+    );
+    // **And the derivation puts it back in the hand**, exactly.
+    assert!(
+        (with_derived - with_table).length() < 1e-9,
+        "the derived socket landed {:.4} m from the authored one",
+        (with_derived - with_table).length()
+    );
+
+    // **AND BOTH IMPORTERS GO THROUGH IT.** A source pin, for
+    // `nothing_of_the_npc_firing_policy_leaked_in`'s reason: an importer's
+    // asset-writing path has no seam a gate can drive.
+    for (what, path) in [
+        ("the UE bridge", "assets/ue_import.rs"),
+        ("the glTF importer", "assets/import.rs"),
+    ] {
+        let src = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../editor/crates/inf-editor-core/src")
+                .join(path),
+        )
+        .expect("the importer's source");
+        assert!(
+            src.contains("derive_sockets"),
+            "{what} writes a skeleton with no socket table, so every character it \
+             imports carries its weapon in its pelvis"
+        );
+    }
+}
