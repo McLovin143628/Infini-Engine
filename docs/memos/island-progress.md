@@ -38433,3 +38433,177 @@ whether `SCENE_PAYLOAD_VERSION` moves at all; and nothing at all for
 `aim_blend_speed`, which is already free. The window opens on the ruling and not
 before.
 
+### THE WINDOW, SPENT (scene v28, `8c9ab805`)
+
+`VehicleClass` **62 → 100** `f64`, the v27 rung repeated exactly: the pre-v28
+component freezes as `VehicleClassV27`, the record as `EntityRecordV27`, the file
+as `SceneFileV27`, and **no new generic parameter and no re-declared
+forty-eight-field record was needed** — for the third time. The thirty-eight
+append at the component's **tail**, sorted among themselves, so every v25 and v27
+field keeps the offset it has.
+
+**The cost, measured on the re-blessed content rather than derived**: the 24
+committed levels grow by exactly **8 816 bytes**, which is exactly **29 × 304** —
+the island +7 904 (26 cars), the island fixture +912 (3), the other 22 levels
+zero. No new record slot landed, so every non-vehicle entity in every level is
+byte-unchanged but for its schema byte. `ScenePayload` stays **13** (the VEH2a
+precedent, verified: its own v27 bump left the payload at 12).
+`EXPECTED_LEVELS` **24**. Goldens **64**, none blessed.
+
+Three sentinels, each stated where it lives. `pacejka_*_b/c/e = 0` **derives**
+that axis's curve from the two knobs the eleven shipped catalogue rows actually
+authored, so none of them is silently re-tuned by a default triple;
+`fuel_cut_rpm = 0` means the redline; `turbo_boost_max`, `wing_area_m2`,
+`wing_aspect_ratio`, `sail_area_m2` and `planing_speed_mps` at 0 mean naturally
+aspirated, no wing, no sail and a displacement hull. `wing_area_m2 > 0` is also
+the **discriminator**: the part recogniser's collider-shape space is exhausted,
+so a fixed wing is a wheeled chassis whose class carries a wing.
+
+**No committed trace moved in that commit** — nothing read a new field, they
+landed at their Ring-0 defaults, and the island gate was green on all 27 arms.
+
+### THE MODEL — Pacejka, the surface, the heat, the normal
+
+`tyre_force_n` becomes the neutral context of one door, `tyre_force_with`, and
+the curve inside the friction ellipse becomes
+`D·sin(C·atan(Bx − E(Bx − atan Bx)))`. **The ellipse is unchanged**: both slips
+normalised by their own peaks, combined into one magnitude, split back along the
+slip direction.
+
+The conversion that keeps the eleven shipped rows: **C** from where the curve
+settles (`sin(C·π/2) = slide_frac`, the FAR branch), **E** from the rise
+stiffness (`2·rise_bias − 1`, so VEH2a's straight-line 0.5 maps to a pure sine
+shoulder), and **B** *solved* — twelve fixed Newton steps, never a convergence
+test — so the peak lands on the authored slip whatever C and E turned out to be.
+The curve is then normalised by its own value there, so it peaks at exactly 1.0
+at exactly the authored slip. Both halves constructed, not hoped for.
+
+**THE FEEL TABLE IS UNMOVED, TO THE PRINTED DIGIT**, measured at `HEAD~4` and at
+`HEAD` with the whole world wired in:
+
+| row | 0–100 km/h | stop | top speed |
+|---|---|---|---|
+| sports (1 374 kg) | **3.98 s** | 31.1 m | 60.9 m/s of a 62 limiter |
+| sedan (1 185 kg) | **7.37 s** | 36.4 m | 33.6 of 34 |
+| suv (2 098 kg) | **7.40 s** | 40.7 m | 44.8 of 46 |
+| van (3 296 kg) | **17.43 s** | 50.4 m | 31.1 of 32 |
+| truck (2 341 kg) | **6.75 s** (0–78) | 32.7 m | 26.8 of 27 |
+
+0.00 % against the ruling's 5 % band. And that is *also* what a wave that forgot
+to wire its model up would produce, so the two facts are separated by an arm of
+its own: `the_magic_formula_is_not_the_old_curve_wearing_its_name` finds the two
+shapes **0.2127 of peak grip apart at 0.34 × the peak slip** and **exactly 0.0**
+apart at the peak. Those five rows brake within a couple of percent of peak slip,
+which is why the table held.
+
+**THE SURFACE.** `Collider3D::friction` has existed since P12.1 and no wheel had
+ever read it. A sedan braking from 100 km/h now stops in **asphalt 36.9 m, gravel
+78.7 m, grass 83.6 m, mud 151.3 m** — and the compound row says what one grip
+scalar never could: on the same grass, road tyres **83.6 m** and off-road tyres
+**63.0 m**.
+
+**THE HEAT.** A five-second drag burnout (10 kN sliding at 30 m/s, 300 kW) takes
+a tyre to **119 °C**; thirty seconds of running at 30 m/s brings it back to 29; a
+ten-second hard launch costs no grip at all.
+
+**FOUR CASTS A TYRE** at the footprint corners, the wheel riding on the SHORTEST
+ray and working against the four normals' average — the bilinear smoothing the
+15.69° cell-diagonal snap has been waiting for since P29.7, applied at the wheel
+rather than to the heightfield.
+
+**AND P29.7's TRIPWIRE FIRED, ON PURPOSE.**
+`the_snapped_normal_reaches_no_force_in_the_model` has proved since P29.7 that
+600 steps are bit-identical with every contact normal replaced by garbage, and
+its own commit says it goes red the day a class reads the normal. It is now
+`a_garbage_contact_normal_changes_the_trace`, and the number is **37.57 m apart
+after 600 steps** over 2 309 scrambled contacts. What reads it is the effective
+camber, `static + asin(n · right)` — so an upright wheel on a cambered road is
+still a cambered wheel and the term survives the `camber_deg = 0` every committed
+level authors. The SUSPENSION still pushes along the chassis up, unchanged and
+deliberate.
+
+### THE SUBSTEP DECISION — the honest N is ONE
+
+The loop is **built**: N solves at `dt/N` with the chassis advanced locally
+between them, the body integrated once by rapier from the averaged force, and the
+casts NOT repeated. `tyre_substeps` is a per-class tunable on the v28 wire.
+
+And the shipped default is **1**, because that is what the measurement says:
+
+* **the feel table moves at N = 4** — the sports row's 0–100 goes 3.98 s → **6.77**,
+  a 70 % regression on the number the arc is judged on;
+* **it costs 2 × the step** — 0.9138 ms at 64 cars against 0.4454, on a budget of
+  0.5;
+* **and the reason the doc asks for 300–400 Hz does not apply here.** That band
+  exists for models that INTEGRATE the sticking case; this one solves it exactly
+  (P29.7 measured the alternative at 1 084 N of phantom drag where equilibrium is
+  159). Sub-stepping an exact solve buys accuracy the exact solve already had.
+
+`the_substep_loop_runs_and_the_shipped_n_is_one` pins it and is built to
+falsify — the anti-vacuity half measures a sub-stepped car and a single-stepped
+one **6.650 m apart after 600 steps** of a full-throttle turn, 9.23 m/s against
+11.49, both still driving.
+
+### THE BUDGET
+
+| | µs a car | ms a step at 64 | world queries a step at 64 |
+|---|---|---|---|
+| VEH2a (recorded) | 1.30 | 0.0830 | 256 |
+| **VEH3a, shipped** | **6.96** | **0.4454** | 1 024 |
+| VEH3a at N = 4 | 14.28 | 0.9138 | 1 024 |
+| the curve resolved per force (rejected) | 16.88 | 1.0803 | 1 024 |
+
+Inside `VEHICLE_STEP_BUDGET_MS` 0.5 at 64 cars **in a dev build**, where VEH2a's
+own comparison number was 0.083.
+
+### FOUR THINGS MEASUREMENT CHANGED, each written the obvious way first
+
+1. **The `C` inversion took the near branch.** `sin(C·π/2) = slide_frac` has two
+   solutions and only the far one means anything; the near one gives `C ≈ 1.1`,
+   whose asymptote is **0.99** — measured as an anti-lock system that *lengthened*
+   the stop.
+2. **`E = 2·rise_bias − 0.5` drove the solved `B` to 87**, a tyre so peaky that
+   ABS gained 2.5 % over a locked wheel where it used to gain 8.
+3. **A collider's `friction` is not a surface identity** — it is the solver's
+   box-on-box Coulomb coefficient. Nearest-matching the feel fixture's 0.9 to
+   concrete cost the sports row five per cent of its grip, and five per cent took
+   its 0–100 from **3.98 s to 10.70**: a car whose drive force sits just inside
+   its traction limit falls out of it and traction control throttles the launch.
+   The mapping is banded now — `≥ 0.85` is a sealed surface, which is where every
+   value in committed content lands.
+4. **`tyre_heat_rate = 0.9` was dialled in and a car cooked its own tyres
+   accelerating**, to the 250 °C ceiling, giving back 41 % of its grip. Derived
+   from thermal mass it is **0.07**. And the loss is ONE-SIDED, also measured: a
+   two-sided window spawns every car in the world at **0.84** of its grip and took
+   ABS from 0.55 of a stop locked to 0.89.
+
+### CARRIED (VEH3a)
+
+1. **`veh3a_gate.rs` does not exist.** Nine arms are distributed across the files
+   that own their fixtures, all green and all built to falsify; the consolidation,
+   the mutation-verification sweep and the engagement counters are **not done**.
+2. **No frames, and the editor was not relaunched.** The drive with the
+   temperature HUD row, the kerb and the burnout is not built.
+3. **The telemetry HUD row is not drawn.** `WheelState` publishes `temp_c`,
+   `mu_surface` and `surface`; nothing reads them into a readout.
+4. **The terrain heightfield answers asphalt** — `surface_under` reads a hit
+   collider's friction and the terrain carries none, so the island's grass verges
+   are not soft. The honest door is the P19 biome map read at the contact point.
+5. **Wetness is always 0** — `surface_mu`'s third argument exists and every caller
+   passes a dry world.
+6. **The kerb-mount spike was not measured** (a wheel on a 12 cm kerb at 30 km/h,
+   before and after the four casts).
+7. **The sub-step chassis advance is linear only** — the angular half needs the
+   body's inertia tensor, which is on rapier's side of the seam.
+8. **`TYRE_AMBIENT_C` is a constant, 20 °C.**
+9. **31 of the 38 tunables have no consumer yet** — every VEH3b/c/e/g row. That is
+   the one-window law working, and each is named with its wave in the ladder rung.
+
+### WHAT VEH3b INHERITS
+
+`flywheel_inertia_kgm2`, `clutch_torque_nm`, `clutch_engage_s`, `fuel_cut_rpm`
+(with `VehicleTuning::fuel_cut()` already resolving its sentinel),
+`turbo_boost_max/spool_s/lag_s` and the six LSD numbers are **on the wire and
+authorable today**. `TyreCurves` is the pattern for anything else expensive: a
+derivation placed at the innermost call site is a derivation run at the innermost
+rate, and that cost 16.88 µs a car before it was hoisted.
