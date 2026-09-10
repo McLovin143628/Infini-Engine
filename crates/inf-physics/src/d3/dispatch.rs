@@ -1050,7 +1050,7 @@ fn escort(
 ) -> Option<DVec3> {
     let path = run.path.as_ref()?;
     let total = path.length_m();
-    if !(total > 0.0) || !dt.is_finite() || dt <= 0.0 {
+    if !total.is_finite() || total <= 0.0 || !dt.is_finite() || dt <= 0.0 {
         return None;
     }
     let body = bridge.body_of(chassis)?;

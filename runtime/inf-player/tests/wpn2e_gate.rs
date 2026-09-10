@@ -3638,6 +3638,9 @@ fn walk_skeletons(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// One row of the drive trace: `(chassis, state, incident, route length)`.
+type UnitRow = (Uuid, UnitState, Option<Uuid>, Option<f64>);
+
 /// **A DISPATCHED UNIT REACHES THE SCENE** (wave WPN2e audit) -- link 2 of this
 /// arc's island chain, diagnosed and closed.
 ///
@@ -3716,7 +3719,7 @@ fn a_dispatched_unit_reaches_a_warm_file_on_the_island() {
         let Some(res) = dispatch::dispatch_of(sim.world()) else {
             continue;
         };
-        let runs: Vec<(Uuid, UnitState, Option<Uuid>, Option<(f64, f64)>)> = res
+        let runs: Vec<UnitRow> = res
             .runs
             .iter()
             .map(|(chassis, run)| {
@@ -3724,7 +3727,7 @@ fn a_dispatched_unit_reaches_a_warm_file_on_the_island() {
                     *chassis,
                     run.state,
                     run.incident,
-                    run.path.as_ref().map(|p| (p.length_m(), 0.0)),
+                    run.path.as_ref().map(|p| p.length_m()),
                 )
             })
             .collect();
@@ -3753,7 +3756,7 @@ fn a_dispatched_unit_reaches_a_warm_file_on_the_island() {
                     .and_then(|r| r.runs.get(&chassis).cloned())
                     .and_then(|r| r.path.map(|p| p.length_m() - p.project(here).s_m))
                     .unwrap_or(f64::NAN);
-                let _route = path.map(|(l, _)| l).unwrap_or(f64::NAN);
+                let _route = path.unwrap_or(f64::NAN);
                 // **WHY IT IS OR IS NOT MOVING**, off the world: does the chassis
                 // have a rapier body at all, is its crew in its seat, and what
                 // stick is the crew holding.
