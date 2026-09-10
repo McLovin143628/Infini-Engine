@@ -2139,7 +2139,13 @@ if (-not $armed) {
     Say "SHOOTOUT: nothing in the hand, so there is no crime to commit -- skipped"
 }
 else {
-    Say ("SHOOTOUT: firing {0} in the street to open a file" -f $armed[22].Trim())
+    # `Wait-ForHero` returns a BOOLEAN -- it says whether the predicate fired,
+    # not which row fired it -- so the row has to be read back from the CSV. The
+    # first cut of this leg indexed the boolean, and `$armed[22].Trim()` threw
+    # "you cannot call a method on a null-valued expression" into the middle of
+    # an otherwise clean session.
+    $armedRow = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+    Say ("SHOOTOUT: firing {0} in the street to open a file" -f $armedRow[22].Trim())
     # 2. THE CRIME. A loud shot is worth two heat and `Response::for_heat` puts
     #    three at `MultiUnit` and six at `Swat`, so a handful of trigger pulls is
     #    a tactical response -- IF somebody saw them. The island's own crowd is
@@ -2165,7 +2171,8 @@ else {
         -Out (Join-Path $OutDir "A2-officer-aiming.png"))[-1]
     if ($engaged) {
         $shootFrames++
-        Say ("SHOOTOUT: {0} unit(s) engaged" -f $engaged[32])
+        $engRow = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        Say ("SHOOTOUT: {0} unit(s) engaged" -f $engRow[32])
         # 4. THE HERO UNDER FIRE. `incoming` counts rounds in the air that the
         #    hero did not fire, which is what "they are shooting back" is.
         $incoming = @(Wait-ForHero -Csv $heroCsv -What "rounds in the air the hero did not fire (col 34)" -TimeoutS 40.0 `
@@ -2214,8 +2221,13 @@ else {
 
     # What the session's own columns say about the shootout, quoted.
     if (Test-Path $heroCsv) {
+        # THE UNARY COMMA IS LOAD-BEARING: `ForEach-Object { $_.Split(",") }`
+        # emits the array's ELEMENTS, one per field, so the `Where-Object` below
+        # would test a single string's `.Count` (1) and this summary printed
+        # nothing at all -- silently -- for two whole sessions. `, $_.Split(",")`
+        # emits the row as ONE object.
         $rowsE = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
-            ForEach-Object { $_.Split(",") } | Where-Object { $_.Count -gt 33 })
+            ForEach-Object { , $_.Split(",") } | Where-Object { $_.Count -gt 33 })
         if ($rowsE.Count -gt 0) {
             $peakEng = ($rowsE | ForEach-Object { [int]$_[32] } | Measure-Object -Maximum).Maximum
             $peakInc = ($rowsE | ForEach-Object { [int]$_[33] } | Measure-Object -Maximum).Maximum
