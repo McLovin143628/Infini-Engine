@@ -1813,14 +1813,20 @@ fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
 /// in the world (wave WPN2e audit).
 ///
 /// The ears channel's radius is `inf_ecs::weapon::audible_radius_m`, which is the
-/// weapon's own report range QUARTERED when the enclosure probe said the muzzle
-/// was inside ([`inf_ecs::weapon::INDOOR_TAIL_REACH_FRACTION`], the audio
+/// weapon's own report range QUARTERED when the enclosure probe found a CEILING
+/// over the muzzle ([`inf_ecs::weapon::INDOOR_TAIL_REACH_FRACTION`], the audio
 /// system's own number for how much of a report a room keeps to itself). This
-/// arm builds the room out of slabs and reads the verdict off the shot itself.
+/// arm builds the room out of slabs — five of them, including a lid — and reads
+/// the verdict off the shot itself.
 ///
-/// **The mutation**: ignore `indoors` in `audible_radius_m` and the far listener
-/// hears the indoor shot, which is a gunshot in a basement bringing a police car
-/// four streets away.
+/// **The ceiling and not `Enclosure::indoors`**, and that is a measurement: on
+/// the shipped island **566 of 1 270 samples of an outdoor walk read `indoor`**,
+/// because a kerb, a parked car and a shopfront are four hits inside eight
+/// metres with nothing overhead. See `d3::audio::Enclosure::roofed`.
+///
+/// **The mutation**: ignore the roof in `audible_radius_m` and the listener at
+/// 100 m hears a shot fired in a sealed room, which is a gunshot in a basement
+/// bringing a police car four streets away.
 #[test]
 fn a_shot_fired_indoors_is_heard_a_quarter_as_far() {
     let outdoors = inf_ecs::weapon::audible_radius_m(weapon::REPORT_MAX_M, false);
@@ -1856,20 +1862,20 @@ fn a_shot_fired_indoors_is_heard_a_quarter_as_far() {
         beat.top_up(HERO);
         beat.hold_trigger(HERO, i % 4 == 0);
         let r = beat.step();
-        indoors_seen += r.hits.iter().filter(|h| h.loud && h.indoors).count() as u32;
+        indoors_seen += r.hits.iter().filter(|h| h.loud && h.roofed).count() as u32;
     }
     let acts = inf_ecs::witness::witnessed(&beat.world).to_vec();
     let heard: Vec<u8> = acts.iter().map(|a| a.heard_by).collect();
     let any = heard.iter().copied().max().unwrap_or(0);
     println!("\n=== A SHOT FIRED INDOORS ===");
     println!("  audible radius: {outdoors:.1} m outdoors, {indoors:.1} m indoors");
-    println!("  loud shots the enclosure probe called INDOORS: {indoors_seen}");
+    println!("  loud shots the enclosure probe found a CEILING over: {indoors_seen}");
     println!(
         "  listeners: one at 40 m ({near}), one at 100 m ({far}); the most any act was heard by: {any}"
     );
     assert!(
         indoors_seen > 0,
-        "the room is not a room - the enclosure probe called every shot outdoors, so this arm measures nothing"
+        "the room has no ceiling the probe can find, so this arm measures nothing"
     );
     assert_eq!(
         any, 1,

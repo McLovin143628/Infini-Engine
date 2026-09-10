@@ -413,7 +413,66 @@ pub const ENCLOSURE_DIRS: [DVec3; ENCLOSURE_PROBE_RAYS] = [
 pub struct Enclosure {
     /// How many of the six rays hit something inside [`ENCLOSURE_PROBE_M`].
     pub hits: u8,
+    /// **Whether the ray pointing UP hit anything** (wave WPN2e audit) — the
+    /// ceiling, and the ears channel's own half of the enclosure question.
+    ///
+    /// # The measurement that made it necessary
+    ///
+    /// [`ENCLOSURE_INDOOR_HITS`]' own doc reasons that *"three is the highest an
+    /// outdoor place reaches and four is the lowest an indoor one does"*: the
+    /// ground, and two walls in a street. The island says otherwise. Driving the
+    /// shipped game and logging the probe at 4 Hz, **566 of 1 270 samples on an
+    /// outdoor island read `indoor`** — 45 % of a walk down a street — because a
+    /// kerb, a parked car, a shopfront and a lamp standard are four hits inside
+    /// eight metres with nothing whatever overhead.
+    ///
+    /// For a reverb tail that is a wrong noise. For the WPN2e audit's ears
+    /// channel it is a gunshot NOBODY HEARS: the audible radius is quartered to
+    /// 62.5 m and the island's nearest crowd agent is 117 m from the spawn. The
+    /// demo loop's own shootout leg measured it — `peak engaged units : 0`, with
+    /// the hero's enclosure column reading `indoor` on the step it fired.
+    ///
+    /// So the ears channel asks the question that cannot be wrong in that
+    /// direction. A shot under a ceiling is muffled on its way out; a shot with
+    /// the sky above it is not, however much street furniture is standing round
+    /// it.
+    pub roofed: bool,
     /// Whether that is [`ENCLOSURE_INDOOR_HITS`] or more.
+    ///
+    /// **This is the TAIL's question and it is deliberately not the ears
+    /// channel's** — see [`roofed`](Self::roofed).
+    ///
+    /// # The count alone is not "indoors", measured on the shipped island
+    ///
+    /// [`ENCLOSURE_INDOOR_HITS`]' own doc reasons that *"three is the highest an
+    /// outdoor place reaches and four is the lowest an indoor one does"*: the
+    /// ground, and two walls in a street. The island says otherwise. Driving the
+    /// shipped game and logging the probe at 4 Hz, **566 of 1 270 samples on an
+    /// outdoor island read `indoor`** — 45 % of a walk down a street — because a
+    /// kerb, a parked car, a shopfront and a lamp standard are four hits inside
+    /// eight metres without a roof anywhere near.
+    ///
+    /// It cost more than a reverb tail. The WPN2e audit's ears channel keys a
+    /// gunshot's audible radius on this verdict
+    /// ([`inf_ecs::weapon::audible_radius_m`]), so a shot fired in the open
+    /// street was being quartered to 62.5 m — and on the island, where the
+    /// nearest crowd agent is 117 m from the spawn, that is a gunshot nobody
+    /// hears. The demo loop's own shootout leg measured it: `peak engaged units
+    /// : 0`, with the enclosure column reading `indoor` on the step the hero
+    /// fired.
+    ///
+    /// **The count is left exactly as wave WPN2c wrote it**, and the reason is a
+    /// second measurement: the `phase30-gameplay` fixture's own PCG house has no
+    /// ceiling collider within [`ENCLOSURE_PROBE_M`] of a standing character, so
+    /// a rule that required one would call the inside of a house the outdoors
+    /// and take two `wpn2c_gate` arms with it. The probe cannot tell a furnished
+    /// street from a roofless room with six axial rays, and pretending otherwise
+    /// would move a shipped audio behaviour on a guess.
+    ///
+    /// What changes instead is that the **ears channel does not read this
+    /// field**. It reads [`roofed`](Self::roofed), which is the half of the
+    /// question that is never wrong in the direction that matters: you cannot be
+    /// indoors with the sky above you.
     pub indoors: bool,
 }
 
@@ -444,6 +503,7 @@ pub fn enclosure_at(
     exclude: &std::collections::BTreeSet<super::ColliderId3D>,
 ) -> Enclosure {
     let mut hits = 0u8;
+    let mut roofed = false;
     if at.is_finite() {
         for dir in ENCLOSURE_DIRS {
             if physics
@@ -457,11 +517,19 @@ pub fn enclosure_at(
                 .is_some()
             {
                 hits += 1;
+                // The ray pointing UP is the ceiling — see `Enclosure::indoors`.
+                // It is `ENCLOSURE_DIRS[2]` and it is compared rather than
+                // indexed, so re-ordering the array cannot silently change which
+                // ray is the roof.
+                if dir == DVec3::Y {
+                    roofed = true;
+                }
             }
         }
     }
     Enclosure {
         hits,
+        roofed,
         indoors: usize::from(hits) >= ENCLOSURE_INDOOR_HITS,
     }
 }

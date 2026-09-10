@@ -2470,6 +2470,7 @@ fn the_panic_pass_walks_a_thousand_agents_once_and_bounds_its_sources() {
             report_gain: 1.0,
             class: inf_ecs::weapon::WeaponClass::Ar,
             indoors: false,
+            roofed: false,
             listener_m: f64::INFINITY,
             shot_index: 0,
         })

@@ -212,6 +212,15 @@ pub struct WeaponHit {
     /// SOUNDS like is a property of the shot, and by the time the audio fence
     /// runs the shooter may have scrolled to a pistol.
     pub class: inf_ecs::weapon::WeaponClass,
+    /// **Whether there was a CEILING over the muzzle** (wave WPN2e audit) — the
+    /// enclosure probe's up-ray, and the ears channel's own half of its verdict.
+    ///
+    /// Carried on the hit for [`indoors`](Self::indoors)' reason exactly: the
+    /// probe runs once, inside the fixed step, at the muzzle, on the step the
+    /// trigger went down, so two hosts cannot disagree about it and a replay
+    /// reproduces it. See `super::audio::Enclosure::roofed` for why the ears
+    /// channel asks this and not `indoors`.
+    pub roofed: bool,
     /// **Whether the muzzle was inside** (wave WPN2c) — the enclosure probe's
     /// verdict, taken at the muzzle on the step the trigger went down.
     ///
@@ -2340,6 +2349,7 @@ fn resolve_shot(
                 report_gain: def.report_gain,
                 class: def.audio_class(),
                 indoors: enclosure.indoors,
+                roofed: enclosure.roofed,
                 listener_m,
                 shot_index,
             }
@@ -2402,6 +2412,7 @@ fn resolve_shot(
                 report_gain: def.report_gain,
                 class: def.audio_class(),
                 indoors: enclosure.indoors,
+                roofed: enclosure.roofed,
                 listener_m,
                 shot_index,
             }
@@ -2935,6 +2946,7 @@ fn step_rounds(
                             // noise it will be that weapon's noise.
                             class: r.def.audio_class(),
                             indoors: false,
+                            roofed: false,
                             listener_m: f64::INFINITY,
                             shot_index: 0,
                         },
@@ -3340,7 +3352,7 @@ fn step_witness(
             hit.shooter,
             hit.from,
             hit.shooter,
-            weapon::audible_radius_m(hit.report_max_m, hit.indoors),
+            weapon::audible_radius_m(hit.report_max_m, hit.roofed),
         ));
     }
     // **THE QUIET CRIME** (wave EMS3) — a swing or a kick that landed on
@@ -3648,6 +3660,7 @@ fn resolve_swing(
             // harmless: nothing plays it.
             class: def.audio_class(),
             indoors: false,
+            roofed: false,
             listener_m: f64::INFINITY,
             shot_index: 0,
         },
@@ -3667,6 +3680,7 @@ fn resolve_swing(
             report_gain: def.report_gain,
             class: def.audio_class(),
             indoors: false,
+            roofed: false,
             listener_m: f64::INFINITY,
             shot_index: 0,
         },
@@ -3780,6 +3794,7 @@ fn apply_blast(
             report_gain: def.report_gain,
             class: def.audio_class(),
             indoors: false,
+            roofed: false,
             listener_m: f64::INFINITY,
             shot_index: 0,
         };
