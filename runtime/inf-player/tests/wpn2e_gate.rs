@@ -582,7 +582,10 @@ fn an_arriving_police_crew_is_issued_a_weapon_and_a_cold_town_issues_none() {
 fn the_ladder_is_three_behaviours_on_one_street() {
     // A tidy row for the report, and the numbers the design rests on.
     println!("=== the response ladder, as behaviour ===");
-    println!("  rung         posture         aimed  warned  trigger  npc shots");
+    println!(
+        "  {:<11}  {:<14}  {:>5}  {:>6}  {:>7}  {:>9}",
+        "rung", "posture", "aimed", "warned", "trigger", "npc shots"
+    );
     let mut rows: Vec<(Response, Tally, u64, u64)> = Vec::new();
     for rung in [Response::Patrol, Response::MultiUnit, Response::Swat] {
         let mut b = Beat::new();
@@ -1628,7 +1631,7 @@ fn a_killing_is_filed_against_the_shooter_and_a_corpse_is_not_also_wounded() {
     );
     assert!(
         on_corpse > 0,
-        "not one round reached the corpse, so the refusal below is vacuous —          `guid_of_ragdoll_collider` is what makes a body on the floor hittable"
+        "not one round reached the corpse, so the refusal below is vacuous — `guid_of_ragdoll_collider` is what makes a body on the floor hittable"
     );
     // The log is a ring of 256 and this run fired far more than that, so the
     // comparison is against ZERO woundings in the current window rather than
@@ -2457,24 +2460,29 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
         "\n=== THE ISLAND'S CHAIN, from ({:.0}, {:.0}) ===",
         at.x, at.z
     );
-    println!("  1. the hero fired            : {shots} rounds");
+    println!("  {:<29}: {shots} rounds", "1. the hero fired");
     println!(
-        "  2. acts recorded             : {witnessed} ({kinds:?}); {with_observers} of them have an OBSERVER"
+        "  {:<29}: {witnessed} ({kinds:?}); {with_observers} of them have an OBSERVER",
+        "2. acts recorded"
     );
     println!(
         "     the crowd within {:.0} m : {near} agents at {ranges:?}; the traffic clock reads {clock}",
         d3::gameplay::WITNESS_RADIUS_M
     );
     println!(
-        "  3. files open                : {} (the hero's heat {heat}, rung {})",
+        "  {:<29}: {} (the hero's heat {heat}, rung {})",
+        "3. files open",
         crime::wanted(sim.world()).len(),
         Response::for_heat(heat).name()
     );
-    println!("  4. police units in the fleet : {police}");
-    println!("  5. assignments made          : {peak_assigned} (unanswered {unanswered})");
-    println!("  6. units on scene            : {peak_on_scene}");
-    println!("  7. crews carrying a weapon   : {peak_armed}");
-    println!("  8. units ENGAGED             : {peak_engaged}");
+    println!("  {:<29}: {police}", "4. police units in the fleet");
+    println!(
+        "  {:<29}: {peak_assigned} (unanswered {unanswered})",
+        "5. assignments made"
+    );
+    println!("  {:<29}: {peak_on_scene}", "6. units on scene");
+    println!("  {:<29}: {peak_armed}", "7. crews carrying a weapon");
+    println!("  {:<29}: {peak_engaged}", "8. units ENGAGED");
     // ── THE CONTROL, and it is what tells a CONTENT fact from an ENGINE one.
     //
     // Put a pedestrian eight metres away — a distance the island's own crowd
