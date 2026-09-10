@@ -176,7 +176,16 @@ other half of a firefight.
 | the escalation is real | `wpn2e_gate::a_hit_officer_staggers_a_civilian_flees_and_the_heat_rises` | heat **2 → 60**, stars **1 → 5**, 3 staggers, a civilian flees, the officer loses joules |
 | the hero is shot back at | `wpn2e_gate::the_hero_under_fire_takes_the_lazy_health_path_and_the_hud_reacts` | the hero carries **no `Health` component at all** until the first round lands |
 | **PIE == shipping == two cooks** | `wpn2e_gate::pie_equals_shipping_and_two_cooks_agree_over_the_shootout_course` | 420 traced steps, byte-identical on three hosts; hero **30** rounds, officers **14**, **331** engage rays, **268** refused shots |
-| the cost | `wpn2e_gate::a_firefight_is_inside_the_weapon_budget` + `wpn2e_gate::the_firing_policy_is_inside_the_npc_budget_at_a_thousand_agents` | a nine-shooter firefight **126.9 µs** against 1.5 ms; the policy at **1 000 agents 84.0 µs** against 1.0 ms |
+| the cost | `wpn2e_gate::a_firefight_is_inside_the_weapon_budget` + `wpn2e_gate::the_firing_policy_is_inside_the_npc_budget_at_a_thousand_agents` | a nine-shooter firefight **126.9 µs** against 1.5 ms (the audit re-timed it at **101.6 µs**); the policy at **1 000 agents 84.0 µs** against 1.0 ms (audit: **70.3 µs**) |
+| a gunshot is **HEARD**, not only seen | `wpn2e_gate::a_gunshot_nobody_saw_is_still_heard_and_opens_a_file` | a listener 200 m away behind a wall, outside the 120 m witness radius: **0 acts seen, 40 heard**, heat 39, and the file carries **0 description channels**. `weapon::audible_radius_m` is the report's own range (250 m) through the enclosure verdict; **0 extra rays** — 280 shot rays with the listener and 280 without |
+| …and a shot fired INSIDE is muffled | `wpn2e_gate::a_shot_fired_indoors_is_heard_a_quarter_as_far` | 250.0 m outdoors against **62.5 m** indoors (`INDOOR_TAIL_REACH_FRACTION`), measured on a room built out of slabs the enclosure probe calls a room |
+| hearing never moves `last_seen` | the same arm | the shooter walks 20 m and fires again and the place the police are searching **does not move** — hearing gets them into the street, sight is what keeps them on you |
+| an officer **reloads** | `wpn2e_gate::an_officer_whose_magazine_empties_reloads_and_goes_on_firing` | **37 rounds out of a 17-round magazine** over 60 s, 2 reloads, reserve 68 → 34 |
+| …and a cold town takes the weapons back | `wpn2e_gate::a_town_that_goes_cold_takes_the_weapons_back` | the officer carries `glock_17` while wanted and `None` once cold; the weapon entity is gone and the item is still in the inventory |
+| the trigger comes down when the policy stops looking | `wpn2e_gate::an_officer_the_policy_stops_visiting_stops_firing` | caught with the trigger DOWN, then a wall goes up: **1 round then, 0 after, 1 release** |
+| an officer is not fired upon by its own weapon | `wpn2e_gate::an_officer_that_fires_is_not_fired_upon_by_its_own_weapon` | 7 rounds fired, **0 steps under fire, 0 steps in cover** on a street where the only gunfire is its own |
+| a rig that authors no sockets gets them at LOAD | `wpn2e_gate::the_islands_own_hero_carries_its_weapon_in_its_hand` | 104 island `.inf_skel` decoded, 92 with a `hand_r` joint, **92 publishing a `hand_r` socket**; the weapon entity **0.387 m from the character origin and 0.000 m from the hand** |
+| a dispatched unit reaches the scene | `wpn2e_gate::a_dispatched_unit_reaches_a_warm_file_on_the_island` | on the shipped island, **12 m at 62.6 s** against an `ON_SCENE_M` of 12 — it was 170 m and never |
 
 ---
 
@@ -203,16 +212,26 @@ officer has a drawing animation and a holster; ours has a rifle that appears in
 its hand on the step it arrives. The reference's shot has a muzzle flash and an
 impact puff; ours has a sound and a hole. Both are named below.
 
-**…and on the SHIPPED island the chain does not run at all**, which is worth
-saying in a parity memo rather than only in a ledger.
-`wpn2e_gate::the_islands_own_chain_from_a_gunshot_to_an_engaged_officer`
-measures it: seventeen gunshots at the showcase spawn record seventeen acts and
-**none of them has an observer**, because the nearest crowd agent is **117 m**
-away. One pedestrian two metres away opens a file at **heat 20** on the first
-burst — so the chain works and the island lacks somebody close enough to see. And
-with that warm file, a dispatched unit closes to **93 m and stops**, over three
-minutes, against an `ON_SCENE_M` of 12. Both are level-design facts on EMS1/EMS2
-ground; neither is in the firing policy, which is certified on fixtures.
+**…and the SHIPPED island's chain stopped twice, and both stops are closed** (the
+WPN2e audit). `wpn2e_gate::the_islands_own_chain_from_a_gunshot_to_an_engaged_officer`
+measures the whole thing:
+
+| link | wave WPN2e | after the audit |
+|---|---|---|
+| acts recorded at the spawn | 17 | 17 |
+| …with an OBSERVER | **0** (nearest crowd agent 117 m) | 0 |
+| …with a HEARER | — | **16** |
+| files open | **0**, heat 0, rung `cold` | **1**, heat 12, rung `swat` |
+| assignments over three minutes | 3 | **8** |
+| units on scene | **0** | **2** |
+| crews carrying a weapon | 0 | **1** |
+| units **ENGAGED** | **0** | **1** |
+| nearest responder | **93 m** | **2 m** |
+
+Neither stop was a level-design fact. The first was a missing **channel** — you
+do not have to see a gunshot — and the second was a cruiser wedged in the
+geometry of the station block the PCG parked it in, at full throttle, doing
+0.00 m/s (`inf_ecs::dispatch::ESCORT_LAG_M` carries the trace).
 
 **`police-bike/` — the brawl.** The reference shows an officer closing to melee,
 a struggle, and bystanders scattering. Here: the melee door exists and is
@@ -280,11 +299,24 @@ Every one of these is a real gap, and each names the wave that owns it.
   resolves against one body.
 * **No squad.** Two officers at one scene each decide alone. The only thing they
   share is a cone test that stops one shooting the other.
-* **No reload in the firing policy.** An officer's magazine empties and it stops
-  firing, which reads as trigger discipline and is not.
+* ~~**No reload in the firing policy.**~~ **CLOSED by the WPN2e audit** —
+  `gameplay::npc_press_reload` and the policy's own `needs_a_reload`. Measured:
+  37 rounds out of a 17-round magazine.
+* ~~**A weapon issued at arrival is never taken back.**~~ **CLOSED by the WPN2e
+  audit** — `gameplay::unequip_weapon`, called when the town goes cold.
 * **No search pattern.** When a suspect breaks line of sight the officer's aim
   stays on the place the gunfire came from. `last_seen` is EMS3's and moving a
   unit along it is a wave of its own.
-* **The island's own hero carries its weapon in its pelvis** until its skeleton
-  is re-imported (WPN2d audit, carried 266) — one import run closes it, and it
-  is why frames of the shipped game show empty hands.
+* **A unit with no line of sight and NO COVER still does nothing** (carried 278,
+  judged and not closed by the WPN2e audit). Blind fire is available from cover
+  and only from cover, which is right — a unit standing in the open with a wall
+  between it and a suspect is not suppressing anything, it is shooting a wall —
+  so what is missing is not a shot but a MOVE. `step_npc_cover` walks it to cover
+  when it finds any, and COV1's carried 193 is the case where it will not.
+* ~~**The island's own hero carries its weapon in its pelvis**~~ **CLOSED by the
+  WPN2e audit, and not by the re-import the carry prescribed.** Wave WPN2d fixed
+  the two IMPORTERS, which touches a rig somebody re-imports and leaves every
+  `.inf_skel` already on disk exactly as broken — measured, **0 of the island's
+  104 rigs published a socket table**. `SkeletonAsset::migrate` derives one at
+  DECODE, in the one door both hosts read a rig through, and only for a rig that
+  authors none.

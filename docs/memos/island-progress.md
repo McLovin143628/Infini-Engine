@@ -38126,3 +38126,56 @@ frames : 1 of 6`, **HERO MOVED 154.039 m over 1 226 samples**, 56 frames, exit
 0, no errors. The zeros are the island content gap the table above measures —
 what changed is that the leg can now say so out loud instead of printing
 nothing.
+
+---
+
+## WAVE WPN2e — THE AUDIT (2026-09-10)
+
+The wave's own arm measured the island's wanted chain stopping twice and carried
+both as level-design facts on EMS ground. **Neither was**, and the third carry —
+the hero's weapon in its pelvis — was not a re-import either.
+
+| link | wave WPN2e | after the audit |
+|---|---|---|
+| acts recorded at the spawn | 17 | 17 |
+| …with an OBSERVER | **0** (nearest crowd agent 117 m) | 0 |
+| …with a HEARER | — | **16** |
+| files open | **0**, heat 0, rung `cold` | **1**, heat 12, rung `swat` |
+| assignments over three minutes | 3 | **8** |
+| units on scene | **0** | **2** |
+| crews carrying a weapon | 0 | **1** |
+| units **ENGAGED** | **0** | **1** |
+| nearest responder reached | **93 m** | **2 m** |
+| the hero's weapon | at the character ORIGIN | **0.000 m from the hand socket** |
+
+**(1) THE EARS.** A gunshot does not have to be seen. `weapon::audible_radius_m`
+is the report's own range (250 m, a quarter of that from inside — the audio
+system's `INDOOR_TAIL_REACH_FRACTION`), `WitnessedAct::heard_by` comes off the
+same `candidates_near` walk the observers do, and `crime::report_heard` may add
+`ActKind::heard_heat` — **one**, against the two a seen shot is worth — and
+nothing else. No description, so nothing on the recognition path can match on a
+file opened by ear; no `last_seen`, so hearing gets the police into the street
+and SIGHT is what keeps them on you. **No rays**: 280 shot rays with a listener
+and 280 without.
+
+**(2) THE DRIVE.** The cruisers were not 93 m short of anything. Instrumented,
+they were **stationary from the first step to the last**, at full throttle, with
+a body, a seated driver, four wheels, the handbrake off and **57 600 N** of
+suspension load on two of four wheels — wedged in the geometry of the station
+block the PCG parked them in. `d3::dispatch::escort` drags a unit that is both
+25 m behind its own route's schedule AND under 0.5 m/s along that route at twice
+the schedule until it catches up. It is a pure function of
+`(since_step, step, path, position)`; a unit that is DRIVING is three times
+faster than the schedule and never triggers it (`DispatchStats::escorted` reads
+zero on every level where the drive works).
+
+**(3) THE SOCKETS.** `SkeletonAsset::migrate` derives the table for a rig that
+authors none, inside `inf_asset::decode` — the one door both hosts read an
+`.inf_skel` through. Measured before: **0 of the island's 104 rigs** published a
+socket table. After: 92 of the 92 that have a `hand_r` joint.
+
+**THE ISLAND'S OWN REMAINING BOUND**, recorded rather than fixed: an escorted
+cruiser is off the ground while it is being dragged (`wheels 4/0, load 0 N`), so
+for those seconds it is a car sliding along a road rather than driving on it. It
+is on the road, on its own route, at 8 m/s, and it hands back to the physics that
+was driving it the moment it catches up.
