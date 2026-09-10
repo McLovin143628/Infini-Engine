@@ -1138,7 +1138,6 @@ fn the_committed_table_less_sample_ragdolls_into_one_connected_body() {
     }
 }
 
-
 /// **A CORPSE DOES NOT CLIMB INTO THE SKY** (wave WPN2d audit).
 ///
 /// Wave WPN2d's session 3 photographed seven frames captioned "the mesh in the

@@ -1739,7 +1739,10 @@ fn a_suppressor_is_quieter_in_the_command_and_not_in_a_table() {
         "the WeaponHit the command is built from: reach {reach_bare:.1} -> \
          {reach_can:.1} m, gain {gain_bare:.4} -> {gain_can:.4}"
     );
-    assert!(loud_bare && loud_can, "a rifle shot has to be loud to be heard");
+    assert!(
+        loud_bare && loud_can,
+        "a rifle shot has to be loud to be heard"
+    );
     assert!(
         reach_can < reach_bare,
         "the hit the command is built from carries as far with a can on: \
@@ -1999,10 +2002,12 @@ fn the_bench_round_trips_through_the_panels_own_verb() {
         bare.report_max_m
     );
     // …and `delta: 0` strips it, through the same door.
-    assert!(sim.apply_inventory_verb(inf_ui::InventoryVerb::CycleAttachment {
-        slot: muzzle,
-        delta: 0
-    }));
+    assert!(
+        sim.apply_inventory_verb(inf_ui::InventoryVerb::CycleAttachment {
+            slot: muzzle,
+            delta: 0
+        })
+    );
     let stripped = weapon::equipped_def(sim.world(), HERO).expect("a rifle").1;
     assert!(
         (stripped.report_max_m - bare.report_max_m).abs() < 1e-9,
@@ -2508,7 +2513,10 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         "one blast over 30 bodies: {us:.1} us, {} hurt, {} rays, {} shadowed",
         report.blasts[0].hurt, report.rounds.blast_rays, report.rounds.blast_shadowed
     );
-    assert_eq!(report.blasts[0].hurt, 30, "the sweep did not reach 30 bodies");
+    assert_eq!(
+        report.blasts[0].hurt, 30,
+        "the sweep did not reach 30 bodies"
+    );
     // `blast_rays <= MAX_BLAST_TARGETS` was this arm's only bound and it is
     // VACUOUS FOR EVERY INPUT: `apply_blast` walks
     // `candidates.into_iter().take(MAX_BLAST_TARGETS)` and only counts a ray
@@ -2783,7 +2791,6 @@ fn pie_sim() -> inf_player::runtime_sim::RuntimeSim {
         .sim
 }
 
-
 // ── the audit's own arms ────────────────────────────────────────────────────
 
 /// **THE FIRST-PERSON SEAT, AND THE RIG THAT AIMING DOWN SIGHTS GAVE THE HERO**
@@ -2929,10 +2936,9 @@ fn the_first_person_seat_survives_the_weapon_that_aims_down_its_sights() {
     // is a source pin for the reason `nothing_of_the_npc_firing_policy_leaked_in`
     // is one — the branch lives inside the window's event loop and there is no
     // seam to drive it from a test.
-    let window = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
-    )
-    .expect("the player's window source");
+    let window =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"))
+            .expect("the player's window source");
     let branch = window
         .split("actions::VIEW_MODE")
         .nth(1)
@@ -2944,7 +2950,6 @@ fn the_first_person_seat_survives_the_weapon_that_aims_down_its_sights() {
          so the next fixed step undoes it"
     );
 }
-
 
 /// **THE PREVIEWED ARC IS THE FLIGHT'S OWN ARITHMETIC** (wave WPN2d audit).
 ///
@@ -2986,8 +2991,7 @@ fn the_previewed_throw_arc_is_the_flights_own_arithmetic() {
     assert!(
         (sub_dt
             - ballistics::THROW_ARC_S
-                / (ballistics::THROW_ARC_POINTS as f64
-                    * ballistics::THROW_ARC_SUB_STEPS as f64))
+                / (ballistics::THROW_ARC_POINTS as f64 * ballistics::THROW_ARC_SUB_STEPS as f64))
             .abs()
             < 1e-15,
         "the preview's sub-step is not the flight's: {sub_dt}"
