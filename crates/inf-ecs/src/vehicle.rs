@@ -3801,12 +3801,20 @@ pub fn shift_target(
 /// The falling branch is the whole point and is what P29.7's model could not
 /// have: past the peak a tyre grips **less**, so a slide is something a driver
 /// has to correct rather than a state the car settles into comfortably.
-/// **The magic formula's four coefficients for one axis** (wave VEH3a).
+/// **The magic formula's coefficients for one axis** (wave VEH3a).
 ///
 /// `D` is not here: it is the peak friction, and this engine already computes it
-/// as `load_sensitive_mu(µ_class × µ_surface)` at the contact — a copy of it on
-/// the class would be a second source of truth for the grip the tyre already
-/// reads two other ways.
+/// as `load_sensitive_mu(µ_class × µ_surface × heat)` at the contact — a copy of
+/// it on the class would be a second source of truth for the grip the tyre
+/// already reads three other ways.
+///
+/// The curve this exposes is **normalised**: it peaks at exactly `1.0`, at
+/// exactly the axis's own peak slip. Both halves of that are constructed rather
+/// than hoped for — `B` is solved so the peak LANDS on the authored slip, and the
+/// result is divided by its own value there so the peak IS one. Without the
+/// first, an authored `tyre_lat_peak_slip` would be a suggestion; without the
+/// second, the friction circle's "combined magnitude never exceeds the peak"
+/// would hold only to the accuracy of a portable sine.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pacejka {
     /// Stiffness — how fast the curve rises out of zero slip.
@@ -3815,7 +3823,28 @@ pub struct Pacejka {
     pub c: f64,
     /// Curvature — how sharp the peak is; `0` is a pure sine shoulder.
     pub e: f64,
+    /// The slip this curve peaks at — the axis's own `tyre_*_peak_slip`.
+    peak_x: f64,
+    /// `1 / raw(peak_x)`, so [`curve`](Self::curve) peaks at exactly one.
+    norm: f64,
 }
+
+/// How many Newton steps solve `B`. A **fixed** count, not a convergence test:
+/// a loop that stops when it is happy runs a different number of times on two
+/// machines, and this number reaches a committed trace.
+const PACEJKA_SOLVE_STEPS: usize = 12;
+
+/// The stiffest `B` the solver may answer.
+///
+/// A bound rather than a target, and it is wide on purpose: `E` near one makes
+/// the inner term saturate, so a sharp-rising tyre with a low `C` legitimately
+/// needs a large `B` to put its peak where the class says it is. A clamp that
+/// bit would leave the curve still RISING at the authored peak slip, which the
+/// normalisation would then turn into a tyre with more than its own grip past
+/// that slip — measured at 1.015 × the peak before this ceiling was raised, and
+/// pinned at `curve(x) <= 1` by `the_magic_formula_peaks_where_the_class_says_
+/// it_does`.
+const PACEJKA_B_MAX: f64 = 400.0;
 
 impl Pacejka {
     /// Resolve an axis's authored coefficients, deriving any that are the `0`
@@ -3833,70 +3862,142 @@ impl Pacejka {
     ///
     /// The derivation, from the shape both forms share:
     ///
-    /// * **C** comes from where the curve settles. `tyre_curve` falls from its
+    /// * **C** comes from where the curve settles. [`tyre_curve`] falls from its
     ///   peak to `slide_frac` and stays there, and the magic formula's own
     ///   plateau is `sin(C·π/2)` of its peak, so
-    ///   `C = 2/π · asin(slide_frac)` — clamped to `[1.1, 2.0]`, the band real
-    ///   tyre data lives in.
-    /// * **B** comes from where the peak is. The formula peaks where
-    ///   `C·atan(Bx − E(Bx − atan Bx)) = π/2`; with the `E` below that is
-    ///   `B ≈ tan(π / (2C)) / peak_slip`, so a tyre whose peak slip an author
-    ///   moved keeps peaking there.
-    /// * **E** comes from the rise stiffness. `rise_bias` above 0.5 is a curve
-    ///   that gets to its peak early, which is exactly what `E` toward 1 does:
-    ///   `E = clamp(2·rise_bias − 0.5, 0.0, 0.99)`. `0.5` (straight lines) maps
-    ///   to `0.5`, the middle of the real range.
+    ///   `C = 2 − (2/π)·asin(slide_frac)` — the FAR branch, clamped to
+    ///   `[1.1, 2.0]`, the band real tyre data lives in.
+    /// * **E** comes from the rise stiffness. A `rise_bias` above 0.5 is a curve
+    ///   that gets to its peak early, which is what `E` toward 1 does:
+    ///   `E = clamp(2·rise_bias − 1, −1, 0.97)`. `0.5` — [`tyre_curve`]'s
+    ///   straight-line shape — maps to **0**, a pure sine shoulder, which is the
+    ///   honest neutral: it is the only value that adds no curvature of its own.
+    ///   Mapping `0.5` to the middle of `[0, 1]` instead was tried first and
+    ///   measured: it drives the solved `B` to 87 on the default row, a tyre so
+    ///   peaky that ABS gains only 2.5 % over a locked wheel where it used to
+    ///   gain 8 (`abs_keeps_the_wheel_out_of_lockup_and_stops_shorter_for_it`).
+    /// * **B** is then **solved**, not approximated, so the peak lands on
+    ///   `peak_slip` whatever `C` and `E` turned out to be — see
+    ///   [`solve_b`](Self::solve_b).
     ///
     /// Every clamp is stated because a derived coefficient outside its band is a
     /// curve that is no longer monotone up to its peak, and a non-monotone tyre
     /// is a car that gains grip by sliding harder.
     pub fn resolve(b: f64, c: f64, e: f64, peak_slip: f64, rise_bias: f64) -> Self {
-        let slide = TYRE_SLIDE_PLATEAU_REF;
         let c_out = if c > 0.0 {
             c
         } else {
             // asin through the portable acos: asin(x) = π/2 − acos(x).
-            let asin = std::f64::consts::FRAC_PI_2 - inf_math::pacos64(slide.clamp(0.0, 1.0));
-            (2.0 / std::f64::consts::PI * asin).clamp(1.1, 2.0)
+            let asin = std::f64::consts::FRAC_PI_2
+                - inf_math::pacos64(TYRE_SLIDE_PLATEAU_REF.clamp(0.0, 1.0));
+            // **The far branch.** `sin(C·π/2) = slide_frac` has two solutions in
+            // `C`, and the one that means anything is past the peak: a curve
+            // whose plateau is BELOW its peak has `C·π/2 ∈ (π/2, π)`, so
+            // `C = 2 − (2/π)·asin(slide_frac)`. The near branch reads as the same
+            // algebra and produces `C ≈ 1.1`, whose asymptote is `sin(1.73) =
+            // 0.99` — a tyre that keeps 99 % of its grip while sliding, which is
+            // a locked wheel that stops shorter than an anti-lock one. Measured
+            // exactly that way before this line was right.
+            (2.0 - 2.0 / std::f64::consts::PI * asin).clamp(1.1, 2.0)
         };
         let peak = if peak_slip.is_finite() && peak_slip > 1e-4 {
             peak_slip
         } else {
             0.12
         };
-        let b_out = if b > 0.0 {
-            b
-        } else {
-            // tan(π / 2C) through the portable pair, so the derived stiffness is
-            // bit-identical on two machines (P14's law reaches this because the
-            // number lands in a committed trace).
-            let a = std::f64::consts::PI / (2.0 * c_out);
-            let t = inf_math::psin64(a) / inf_math::pcos64(a).max(1e-6);
-            (t / peak).clamp(2.0, 40.0)
-        };
         let e_out = if e > 0.0 {
             e
         } else {
-            (2.0 * rise_bias - 0.5).clamp(0.0, 0.99)
+            (2.0 * rise_bias - 1.0).clamp(-1.0, 0.97)
         };
+        let b_out = if b > 0.0 {
+            b
+        } else {
+            Self::solve_b(c_out, e_out, peak)
+        };
+        Self::new(b_out, c_out, e_out, peak)
+    }
+
+    /// Build a curve from explicit coefficients and the slip it should peak at.
+    pub fn new(b: f64, c: f64, e: f64, peak_x: f64) -> Self {
+        let peak = if peak_x.is_finite() && peak_x > 1e-6 {
+            peak_x
+        } else {
+            0.12
+        };
+        let raw = Self::raw(b, c, e, peak);
         Self {
-            b: b_out,
-            c: c_out,
-            e: e_out,
+            b,
+            c,
+            e,
+            peak_x: peak,
+            norm: if raw.abs() > 1e-9 { 1.0 / raw } else { 1.0 },
         }
     }
 
-    /// **The magic formula**, normalised: `sin(C·atan(Bx − E(Bx − atan Bx)))`.
+    /// The same curve with a different stiffness, re-normalised — what tyre heat
+    /// does to `B` without also moving where the peak is or how tall it is
+    /// (that is `D`'s job, and heat multiplies it separately).
+    pub fn with_b(self, b: f64) -> Self {
+        Self::new(b, self.c, self.e, self.peak_x)
+    }
+
+    /// **Solve `B` so the curve peaks at `peak_x`.**
     ///
-    /// `D` is applied by the caller, which is what keeps the load-sensitive µ and
-    /// the surface µ in one place. Portable throughout —
-    /// [`inf_math::patan2_64`] and [`inf_math::psin64`] — because this number
-    /// reaches a committed trace and `f32`/`f64` std trig is not bit-portable
-    /// (P14's fourth law).
+    /// `sin(C·atan(u))` is maximal where `C·atan(u) = π/2`, i.e. where the inner
+    /// term `u = Bx − E(Bx − atan Bx)` equals `T = tan(π / 2C)`. That is a
+    /// transcendental equation in `B`; Newton solves it in a handful of steps
+    /// from the exact `E = 0` answer `B = T/x`, and the derivative is closed
+    /// form:
+    ///
+    /// ```text
+    ///   g(B)  = Bx − E(Bx − atan Bx) − T
+    ///   g'(B) = x · (1 − E + E / (1 + (Bx)²))
+    /// ```
+    ///
+    /// A FIXED twelve steps, never a convergence test: a loop that stops when it
+    /// is satisfied runs a different number of times on two machines, and this
+    /// number reaches a committed trace. The atan is
+    /// [`inf_math::patan2_64`] for the same reason.
+    pub fn solve_b(c: f64, e: f64, peak_x: f64) -> f64 {
+        let a = std::f64::consts::PI / (2.0 * c.clamp(1.05, 2.5));
+        let t = inf_math::psin64(a) / inf_math::pcos64(a).max(1e-6);
+        let x = peak_x.max(1e-4);
+        let mut b = (t / x).clamp(1.0, PACEJKA_B_MAX);
+        for _ in 0..PACEJKA_SOLVE_STEPS {
+            let bx = b * x;
+            let g = bx - e * (bx - inf_math::patan2_64(bx, 1.0)) - t;
+            let dg = x * (1.0 - e + e / (1.0 + bx * bx));
+            if !(dg.is_finite() && dg.abs() > 1e-12) {
+                break;
+            }
+            b = (b - g / dg).clamp(1.0, PACEJKA_B_MAX);
+        }
+        b
+    }
+
+    /// The magic formula's raw shape, un-normalised:
+    /// `sin(C·atan(Bx − E(Bx − atan Bx)))`.
+    ///
+    /// Portable throughout — [`inf_math::patan2_64`] and [`inf_math::psin64`] —
+    /// because this number reaches a committed trace and std trig is not
+    /// bit-portable (P14's fourth law).
+    fn raw(b: f64, c: f64, e: f64, x: f64) -> f64 {
+        let bx = b * x;
+        let inner = bx - e * (bx - inf_math::patan2_64(bx, 1.0));
+        inf_math::psin64(c * inf_math::patan2_64(inner, 1.0))
+    }
+
+    /// **The magic formula**, normalised to peak at exactly `1.0` at this axis's
+    /// own peak slip. `D` is applied by the caller, which is what keeps the
+    /// load-sensitive µ, the surface µ and the heat factor in one place.
     pub fn curve(&self, x: f64) -> f64 {
-        let bx = self.b * x;
-        let inner = bx - self.e * (bx - inf_math::patan2_64(bx, 1.0));
-        inf_math::psin64(self.c * inf_math::patan2_64(inner, 1.0))
+        Self::raw(self.b, self.c, self.e, x) * self.norm
+    }
+
+    /// Where this curve peaks — the authored slip, by construction.
+    pub fn peak_slip(&self) -> f64 {
+        self.peak_x
     }
 }
 
@@ -3951,6 +4052,297 @@ pub fn load_sensitive_mu(mu: f64, load_n: f64, static_load_n: f64, sensitivity: 
     mu * k
 }
 
+/// **What a wheel is standing on** (wave VEH3a) — the six surfaces the driving
+/// research names, and nothing else.
+///
+/// A surface is a property of the WORLD, not of a car, so it reaches the tyre as
+/// a lookup at the contact rather than as a field on the class: the hit
+/// collider's own `Collider3D::friction` for module geometry (kerbs, bridges,
+/// road ribbons) and the biome/road mask under the contact point for the terrain
+/// heightfield. What the class carries is which *compound* answers back
+/// ([`VehicleTuning::tyre_surface_set`]).
+///
+/// There is deliberately no `Ice` and no `Water`: an enum arm with no producer
+/// is a reserved slot, and the P17 weather state's contribution is **wetness**,
+/// a continuous multiplier, not a seventh surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurfaceClass {
+    /// Sealed road. The reference: every µ below is a fraction of this one.
+    #[default]
+    Asphalt,
+    /// Pavement, bridge decks, hard standing.
+    Concrete,
+    /// Loose stone — the surface a rally row is built for.
+    Gravel,
+    /// Turf, verges, parkland.
+    Grass,
+    /// Beach and dune.
+    Sand,
+    /// Wet soil and the churn a heavy vehicle leaves in it.
+    Mud,
+}
+
+/// How many surfaces the table has — the arity a compound row must cover.
+pub const SURFACE_COUNT: usize = 6;
+
+/// How many tyre compounds the table has ([`VehicleTuning::tyre_surface_set`]).
+pub const COMPOUND_COUNT: usize = 4;
+
+/// What full wetness does to grip — the research doc's own `× 0.7`.
+pub const SURFACE_WET_MULT: f64 = 0.7;
+
+impl SurfaceClass {
+    /// Every surface, in index order — the door enumerated rather than restated
+    /// (the P29.6 A14 defect, met at this shape).
+    pub fn all() -> [SurfaceClass; SURFACE_COUNT] {
+        [
+            SurfaceClass::Asphalt,
+            SurfaceClass::Concrete,
+            SurfaceClass::Gravel,
+            SurfaceClass::Grass,
+            SurfaceClass::Sand,
+            SurfaceClass::Mud,
+        ]
+    }
+
+    /// This surface's index — what a `WheelState` publishes and a trace carries.
+    pub fn index(self) -> usize {
+        match self {
+            SurfaceClass::Asphalt => 0,
+            SurfaceClass::Concrete => 1,
+            SurfaceClass::Gravel => 2,
+            SurfaceClass::Grass => 3,
+            SurfaceClass::Sand => 4,
+            SurfaceClass::Mud => 5,
+        }
+    }
+
+    /// The inverse. Out of range is [`Asphalt`](SurfaceClass::Asphalt), because a
+    /// refusal is a value and a car on an unknown surface should drive, not
+    /// float.
+    pub fn from_index(i: usize) -> Self {
+        Self::all().get(i).copied().unwrap_or(SurfaceClass::Asphalt)
+    }
+
+    /// This surface's name, for a HUD row and a log line.
+    pub fn name(self) -> &'static str {
+        match self {
+            SurfaceClass::Asphalt => "asphalt",
+            SurfaceClass::Concrete => "concrete",
+            SurfaceClass::Gravel => "gravel",
+            SurfaceClass::Grass => "grass",
+            SurfaceClass::Sand => "sand",
+            SurfaceClass::Mud => "mud",
+        }
+    }
+
+    /// **The dry µ of this surface**, as a fraction of asphalt's — the research
+    /// doc's table, unchanged: asphalt 1.00, concrete 0.95, gravel 0.60, grass
+    /// 0.55, sand 0.45, mud 0.35.
+    pub fn dry_mu(self) -> f64 {
+        match self {
+            SurfaceClass::Asphalt => 1.00,
+            SurfaceClass::Concrete => 0.95,
+            SurfaceClass::Gravel => 0.60,
+            SurfaceClass::Grass => 0.55,
+            SurfaceClass::Sand => 0.45,
+            SurfaceClass::Mud => 0.35,
+        }
+    }
+
+    /// Whether this surface throws material — what the audio and the particle
+    /// waves read off a contact instead of re-deciding it.
+    pub fn is_loose(self) -> bool {
+        matches!(
+            self,
+            SurfaceClass::Gravel | SurfaceClass::Sand | SurfaceClass::Mud
+        )
+    }
+}
+
+/// **How a compound answers a surface** (wave VEH3a) — the row
+/// [`VehicleTuning::tyre_surface_set`] selects, as a multiplier on
+/// [`SurfaceClass::dry_mu`].
+///
+/// This is what makes a rally row and a road row different cars off the tarmac,
+/// which one grip scalar could never express: a road tyre is best on asphalt and
+/// gives up in mud, an off-road tyre trades a little tarmac for a lot of dirt,
+/// and a slick is the extreme of the first with a wet penalty to match.
+///
+/// Rows: `0` road, `1` all-terrain, `2` off-road, `3` slick. An unknown index is
+/// road — a refusal is a value.
+pub fn compound_factor(compound: usize, surface: SurfaceClass) -> f64 {
+    const TABLE: [[f64; SURFACE_COUNT]; COMPOUND_COUNT] = [
+        // asphalt concrete gravel grass sand  mud
+        [1.00, 1.00, 0.80, 0.82, 0.75, 0.72], // road
+        [0.97, 0.97, 0.95, 0.96, 0.92, 0.90], // all-terrain
+        [0.92, 0.93, 1.12, 1.10, 1.08, 1.15], // off-road
+        [1.10, 1.08, 0.62, 0.66, 0.55, 0.50], // slick
+    ];
+    TABLE[compound.min(COMPOUND_COUNT - 1)][surface.index()]
+}
+
+/// How much MORE than the standing `× 0.7` a compound loses when the surface is
+/// wet — `0` for everything but a slick, which has no grooves to clear water.
+fn compound_wet_penalty(compound: usize) -> f64 {
+    if compound.min(COMPOUND_COUNT - 1) == 3 {
+        0.18
+    } else {
+        0.0
+    }
+}
+
+/// **The µ multiplier at a contact** (wave VEH3a): the surface, the compound and
+/// the weather, in one function so the tyre, the audio and the HUD cannot
+/// disagree about how much grip a patch of ground has.
+///
+/// `wetness` is the P17 weather state's `[0, 1]`. Dry asphalt under a road tyre
+/// is exactly `1.0`, which is what every vehicle in this repository drove on
+/// before this wave — so a level with no surface data is byte-unchanged by
+/// construction rather than by a branch.
+pub fn surface_mu(surface: SurfaceClass, compound: f64, wetness: f64) -> f64 {
+    let row = if compound.is_finite() && compound >= 0.0 {
+        (compound.round() as i64).clamp(0, COMPOUND_COUNT as i64 - 1) as usize
+    } else {
+        0
+    };
+    let w = if wetness.is_finite() {
+        wetness.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let wet = 1.0 - w * (1.0 - SURFACE_WET_MULT + compound_wet_penalty(row));
+    (surface.dry_mu() * compound_factor(row, surface) * wet).max(0.02)
+}
+
+/// **What a tyre's temperature does to its grip** (wave VEH3a).
+///
+/// Peaks at [`VehicleTuning::tyre_optimum_c`] and falls away on both sides —
+/// cold rubber has not keyed to the road and hot rubber is greasy — at
+/// [`VehicleTuning::tyre_heat_grip_loss`] per 100 °C of error. Clamped at
+/// `0.35`, because a tyre that has lost two thirds of its grip is a car that
+/// cannot be recovered and this model is not a tyre-destruction simulator.
+///
+/// The research doc's own sentence is *overheated tires lose linear grip*, so
+/// this factor scales the whole magic-formula peak **and** its stiffness (see
+/// [`tyre_force_with`]) rather than only the peak: a cooked tyre goes greasy,
+/// not merely weak.
+pub fn heat_grip_factor(tuning: &VehicleTuning, temp_c: f64) -> f64 {
+    if !temp_c.is_finite() {
+        return 1.0;
+    }
+    let err = (temp_c - tuning.tyre_optimum_c).abs() / 100.0;
+    let loss = if tuning.tyre_heat_grip_loss.is_finite() {
+        tuning.tyre_heat_grip_loss.max(0.0)
+    } else {
+        0.0
+    };
+    (1.0 - loss * err).clamp(0.35, 1.0)
+}
+
+/// **A tyre's temperature, one step on** (wave VEH3a).
+///
+/// Heating is the slip POWER — the friction force times the sliding speed, which
+/// is the energy actually going into the rubber — at
+/// [`VehicleTuning::tyre_heat_rate`] degrees per second per kilowatt. Cooling is
+/// Newton's law toward `ambient_c` at [`VehicleTuning::tyre_cool_rate`] per
+/// second, scaled by the air moving over the tyre: a lap cools what a burnout
+/// heated, and a stationary car cools slowly.
+///
+/// Bounded at both ends so a divergent step cannot produce a NaN two frames
+/// later: `[ambient, 250 °C]`.
+pub fn tyre_temperature_step(
+    tuning: &VehicleTuning,
+    temp_c: f64,
+    slip_power_w: f64,
+    speed_mps: f64,
+    ambient_c: f64,
+    dt: f64,
+) -> f64 {
+    if !(dt.is_finite() && dt > 0.0) {
+        return temp_c;
+    }
+    let t = if temp_c.is_finite() {
+        temp_c
+    } else {
+        ambient_c
+    };
+    let amb = if ambient_c.is_finite() {
+        ambient_c
+    } else {
+        20.0
+    };
+    let power_kw = if slip_power_w.is_finite() {
+        (slip_power_w.abs() / 1000.0).min(500.0)
+    } else {
+        0.0
+    };
+    let heat = tuning.tyre_heat_rate.max(0.0) * power_kw;
+    // The airflow term: standing still a tyre still convects, and at 20 m/s it
+    // sheds about three times as fast. A ratio rather than a second coefficient,
+    // because how fast air carries heat away is a property of air.
+    let flow = 1.0 + speed_mps.abs().min(80.0) / 10.0;
+    let cool = tuning.tyre_cool_rate.max(0.0) * flow * (t - amb);
+    (t + (heat - cool) * dt).clamp(amb, 250.0)
+}
+
+/// **What a contact patch knows that the class does not** (wave VEH3a).
+///
+/// The three things the tyre model reads off the WORLD rather than off the car:
+/// how much grip this ground has, how hot the rubber is, and how far from
+/// upright the wheel is standing. Bundled rather than passed as three arguments
+/// so a caller cannot supply two of them and silently default the third.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TyreContext {
+    /// The µ multiplier at this contact — [`surface_mu`]'s answer. `1.0` is dry
+    /// asphalt under a road tyre.
+    pub mu_surface: f64,
+    /// The grip multiplier this tyre's temperature is worth —
+    /// [`heat_grip_factor`]'s answer. `1.0` is a tyre at its optimum.
+    pub heat_grip: f64,
+    /// **The EFFECTIVE camber**, degrees: the class's static
+    /// [`VehicleTuning::camber_deg`] plus the contact plane's own inclination.
+    ///
+    /// This is the number that makes `WheelContact::normal` reach a force. An
+    /// upright wheel on a cambered road is still a cambered wheel, which is why
+    /// the term survives a `camber_deg` of zero and why the standing tripwire
+    /// `the_snapped_normal_reaches_no_force_in_the_model` had to be re-stated.
+    pub camber_deg: f64,
+}
+
+impl TyreContext {
+    /// Dry asphalt, a tyre at its optimum, an upright wheel — **exactly what
+    /// every vehicle in this repository drove on before wave VEH3a**, so the
+    /// wrapper below is the neutral context rather than a second model.
+    pub const NEUTRAL: Self = Self {
+        mu_surface: 1.0,
+        heat_grip: 1.0,
+        camber_deg: 0.0,
+    };
+}
+
+impl Default for TyreContext {
+    fn default() -> Self {
+        Self::NEUTRAL
+    }
+}
+
+/// How much lateral slip one degree of camber is worth — camber thrust as an
+/// equivalent slip-angle shift, which is the standard way a Pacejka model takes
+/// camber without a fifth coefficient per axis.
+///
+/// 0.012 of a tangent per degree: two degrees of camber is worth about
+/// 0.024 of lateral slip, which against a 0.16 peak is a sixth of the way to
+/// peak grip — the order a real tyre gives.
+const CAMBER_THRUST_PER_DEG: f64 = 0.012;
+
+/// How much peak grip a cambered wheel loses, per degree away from upright.
+///
+/// The contact patch narrows as the wheel leans, and the loss is second-order:
+/// small angles are nearly free, which is why road cars run a little negative
+/// camber and gain more in cornering than they lose in a straight line.
+const CAMBER_GRIP_LOSS_PER_DEG2: f64 = 0.0006;
+
 /// **The friction circle** — one contact's ground force, newtons, in the wheel's
 /// own `(forward, right)` frame.
 ///
@@ -3976,6 +4368,54 @@ pub fn tyre_force_n(
     slip_ratio: f64,
     slip_lat: f64,
 ) -> (f64, f64) {
+    tyre_force_with(
+        tuning,
+        load_n,
+        static_load_n,
+        slip_ratio,
+        slip_lat,
+        TyreContext::NEUTRAL,
+    )
+}
+
+/// **The friction circle, with the world in it** (wave VEH3a) — the one door,
+/// and [`tyre_force_n`] above is this function at [`TyreContext::NEUTRAL`].
+///
+/// # The magic formula, at last
+///
+/// The curve evaluated at the combined slip is Pacejka's
+/// `D·sin(C·atan(Bx − E(Bx − atan Bx)))` ([`Pacejka::curve`]) instead of the
+/// bias-shaped rise and linear fall [`tyre_curve`] gave. The **ellipse is
+/// unchanged**: both slips are still normalized by their own peaks, combined
+/// into one magnitude, and split back along the slip direction, so pure
+/// longitudinal slip still reproduces the longitudinal curve exactly and the two
+/// axes still cannot each hold their whole grip at once.
+///
+/// The combined magnitude is fed to each axis **at that axis's own scale**
+/// (`s · peak`), which is what keeps the peak at `s = 1` on both — the property
+/// [`tyre_curve`] had by construction and the magic formula has because
+/// [`Pacejka::resolve`] derives `B` from the peak slip.
+///
+/// # What the world contributes
+///
+/// * `mu_surface` multiplies **D**, exactly as the research doc says it should:
+///   *surface friction coefficient (µ) dynamically modifies parameter D*. It
+///   arrives already combined with the compound row ([`surface_mu`]).
+/// * `heat_grip` multiplies **D and B together**, because the doc's sentence is
+///   that heat *shifts B and D* — a cooked tyre is greasy, which is a lower peak
+///   AND a lazier rise, not merely a weaker one.
+/// * `camber_deg` enters twice: as **camber thrust**, a lateral slip offset that
+///   makes a leaning wheel generate side force at zero slip angle, and as a
+///   small second-order peak loss, because the patch narrows as the wheel leans.
+///   This is the term through which `WheelContact::normal` reaches a force.
+pub fn tyre_force_with(
+    tuning: &VehicleTuning,
+    load_n: f64,
+    static_load_n: f64,
+    slip_ratio: f64,
+    slip_lat: f64,
+    ctx: TyreContext,
+) -> (f64, f64) {
     if !(load_n.is_finite() && load_n > 0.0) || !slip_ratio.is_finite() || !slip_lat.is_finite() {
         return (0.0, 0.0);
     }
@@ -3989,25 +4429,53 @@ pub fn tyre_force_n(
     } else {
         1e-4
     };
-    let (sx, sy) = (slip_ratio / px, slip_lat / py);
+    // CAMBER THRUST as an equivalent slip-angle shift. A wheel leaning to the
+    // left pulls the car left, which in this frame is a NEGATIVE lateral force,
+    // and the sign convention below turns a positive `sy` into one — so the
+    // thrust adds to `slip_lat` with the camber's own sign.
+    let camber = if ctx.camber_deg.is_finite() {
+        ctx.camber_deg.clamp(-20.0, 20.0)
+    } else {
+        0.0
+    };
+    let lat = slip_lat + camber * CAMBER_THRUST_PER_DEG;
+    let (sx, sy) = (slip_ratio / px, lat / py);
     let s = (sx * sx + sy * sy).sqrt();
     if s < 1e-12 {
         return (0.0, 0.0);
     }
+    // The world's two multipliers on D, and heat's second one on B.
+    let mu_world = if ctx.mu_surface.is_finite() {
+        ctx.mu_surface.max(0.0)
+    } else {
+        1.0
+    };
+    let heat = if ctx.heat_grip.is_finite() {
+        ctx.heat_grip.clamp(0.05, 2.0)
+    } else {
+        1.0
+    };
+    let camber_loss = (1.0 - CAMBER_GRIP_LOSS_PER_DEG2 * camber * camber).max(0.5);
+    let world = mu_world * heat * camber_loss;
+
     let mu_x = load_sensitive_mu(
-        tuning.longitudinal_grip,
+        tuning.longitudinal_grip * world,
         load_n,
         static_load_n,
         tuning.tyre_load_sensitivity,
     );
     let mu_y = load_sensitive_mu(
-        tuning.lateral_grip,
+        tuning.lateral_grip * world,
         load_n,
         static_load_n,
         tuning.tyre_load_sensitivity,
     );
-    let fx_mag = mu_x * load_n * tyre_curve(s, tuning.tyre_long_rise_bias, tuning.tyre_slide_frac);
-    let fy_mag = mu_y * load_n * tyre_curve(s, tuning.tyre_lat_rise_bias, tuning.tyre_slide_frac);
+    // Heat softens the STIFFNESS as well as the peak. `heat` is at most 1.0 for
+    // a tyre off its optimum, so this can only ever make the rise lazier.
+    let long = tuning.pacejka_long().with_b(tuning.pacejka_long().b * heat);
+    let lat_c = tuning.pacejka_lat().with_b(tuning.pacejka_lat().b * heat);
+    let fx_mag = mu_x * load_n * long.curve(s * px);
+    let fy_mag = mu_y * load_n * lat_c.curve(s * py);
     // A positive slip RATIO is the wheel outrunning the road, which pushes the
     // car FORWARD; a positive lateral slip is the patch sliding right, which the
     // tyre resists to the LEFT. The two conventions differ by a sign and it is
@@ -7159,6 +7627,293 @@ mod tests {
             total(0.22, 0.0) - total(0.22, 1_500.0),
             total(0.22, 0.0)
         );
+    }
+
+    /// **THE MAGIC FORMULA PEAKS WHERE THE CLASS SAYS IT DOES, AND NEVER ABOVE
+    /// ONE** (wave VEH3a).
+    ///
+    /// Both halves are constructed rather than hoped for, and both have a
+    /// measured failure behind them:
+    ///
+    /// * `B` is **solved** so the peak lands on the authored slip. Before it was,
+    ///   a `B` clamped at 200 left the curve still RISING at the peak slip, and
+    ///   the normalisation then handed the tyre **1.015 ×** its own grip a little
+    ///   past it — the two-box defect, in miniature, through a different door.
+    /// * `C` takes the **far** branch of `sin(C·π/2) = slide_frac`. The near one
+    ///   is the same algebra and gives `C ≈ 1.1`, whose asymptote is 0.99: a
+    ///   locked wheel keeping 99 % of its grip, measured as an anti-lock system
+    ///   that *lengthened* the stop.
+    #[test]
+    fn the_magic_formula_peaks_where_the_class_says_it_does() {
+        // Every shipped rise/peak combination, plus the extremes an author can
+        // reach through the by-name door.
+        for peak in [0.06, 0.12, 0.145, 0.16, 0.205, 0.4] {
+            for rise in [0.05, 0.5, 0.72, 0.74, 0.83, 0.95] {
+                let p = Pacejka::resolve(0.0, 0.0, 0.0, peak, rise);
+                assert!(
+                    (p.curve(peak) - 1.0).abs() < 1e-12,
+                    "peak {peak} rise {rise}: the curve is {} at its own peak slip",
+                    p.curve(peak)
+                );
+                // …and nowhere else is it higher. Swept rather than argued.
+                let mut worst = 0.0f64;
+                for i in 0..=4000 {
+                    let x = i as f64 * peak * 8.0 / 4000.0;
+                    worst = worst.max(p.curve(x));
+                }
+                assert!(
+                    worst <= 1.0 + 1e-9,
+                    "peak {peak} rise {rise}: the curve reaches {worst} somewhere, \
+                     which is a tyre with more grip than it has"
+                );
+                // The plateau really is the authored slide fraction, which is the
+                // whole reason `C` exists.
+                let far = p.curve(peak * 40.0);
+                assert!(
+                    (far - TYRE_SLIDE_PLATEAU_REF).abs() < 0.05,
+                    "peak {peak} rise {rise}: a fully sliding tyre keeps {far} of \
+                     its peak, not {TYRE_SLIDE_PLATEAU_REF}"
+                );
+                // Monotone up to the peak: a tyre that gains grip by sliding
+                // harder is the defect this shape exists to not have.
+                let mut last = -1.0;
+                for i in 0..=200 {
+                    let v = p.curve(i as f64 * peak / 200.0);
+                    assert!(v >= last - 1e-12, "peak {peak} rise {rise} is not monotone");
+                    last = v;
+                }
+            }
+        }
+    }
+
+    /// **THE CURVE REALLY CHANGED** (wave VEH3a) — the anti-vacuity arm for the
+    /// feel table.
+    ///
+    /// The VEH2a feel table is reproduced to the *printed digit* by this wave
+    /// (sports 3.98 / sedan 7.37 / suv 7.40 / van 17.43 / truck 6.75, and every
+    /// braking distance), which is the conversion working — and which would ALSO
+    /// be what a wave that forgot to wire its new model up would produce. So the
+    /// two facts are separated here:
+    ///
+    /// * near the peak the two shapes agree, **because the conversion pins the
+    ///   peak's place and its height**, and that is why the feel table did not
+    ///   move: those five rows brake within a couple of percent of peak slip;
+    /// * away from the peak they differ by a wide margin, which is what the
+    ///   magic formula was landed for.
+    #[test]
+    fn the_magic_formula_is_not_the_old_curve_wearing_its_name() {
+        let t = VehicleTuning::default();
+        let p = t.pacejka_long();
+        let peak = t.tyre_long_peak_slip;
+
+        let at = |mult: f64| {
+            let s = mult;
+            (
+                tyre_curve(s, t.tyre_long_rise_bias, t.tyre_slide_frac),
+                p.curve(s * peak),
+            )
+        };
+        // At the peak the two are the same number, on purpose.
+        let (old_at_peak, new_at_peak) = at(1.0);
+        assert!(
+            (old_at_peak - new_at_peak).abs() < 1e-9,
+            "the two shapes disagree at the peak ({old_at_peak} vs {new_at_peak}), \
+             so the conversion does not preserve what it was built to preserve"
+        );
+
+        // Away from it they are different curves. A quarter of the way up is the
+        // regime a car spends most of its life in.
+        let mut worst = 0.0f64;
+        let mut worst_at = 0.0f64;
+        for i in 1..=400 {
+            let m = i as f64 * 3.0 / 400.0;
+            let (o, n) = at(m);
+            if (o - n).abs() > worst {
+                worst = (o - n).abs();
+                worst_at = m;
+            }
+        }
+        assert!(
+            worst > 0.05,
+            "the widest gap between the old shape and the magic formula is {worst} \
+             at {worst_at} × peak slip — that is the same curve with a new name, \
+             and this wave did not land a tyre model"
+        );
+        println!(
+            "SHAPE: the old curve and the magic formula differ by at most \
+             {worst:.4} of peak grip, at {worst_at:.2} x the peak slip; at the \
+             peak itself they agree to {:.1e}",
+            (old_at_peak - new_at_peak).abs()
+        );
+    }
+
+    /// **THE SURFACE TABLE IS THE RESEARCH DOC'S** (wave VEH3a), and a compound
+    /// really changes what a surface is worth.
+    #[test]
+    fn the_surface_table_says_what_the_research_says() {
+        // The doc's own numbers, restated here rather than read from the type —
+        // a table computed from the thing it checks agrees with anything.
+        for (surface, mu) in [
+            (SurfaceClass::Asphalt, 1.00),
+            (SurfaceClass::Concrete, 0.95),
+            (SurfaceClass::Gravel, 0.60),
+            (SurfaceClass::Grass, 0.55),
+            (SurfaceClass::Sand, 0.45),
+            (SurfaceClass::Mud, 0.35),
+        ] {
+            assert_eq!(surface.dry_mu(), mu, "{}", surface.name());
+            // A road tyre on a SEALED surface is exactly that surface's own µ,
+            // so a level with no compound authored drives on the doc's table.
+            // Off the seal it is less, which is the compound row doing its job
+            // rather than the table failing to.
+            if matches!(surface, SurfaceClass::Asphalt | SurfaceClass::Concrete) {
+                assert_eq!(surface_mu(surface, 0.0, 0.0), mu);
+            } else {
+                assert!(
+                    surface_mu(surface, 0.0, 0.0) < mu,
+                    "a road tyre on {} got the bare surface µ",
+                    surface.name()
+                );
+            }
+        }
+        // Dry asphalt under a road tyre is EXACTLY one — what every vehicle in
+        // this repository drove on before this wave.
+        assert_eq!(surface_mu(SurfaceClass::Asphalt, 0.0, 0.0), 1.0);
+
+        // Wet is the doc's × 0.7 for everything but a slick, which is worse.
+        assert!((surface_mu(SurfaceClass::Asphalt, 0.0, 1.0) - SURFACE_WET_MULT).abs() < 1e-12);
+        assert!(
+            surface_mu(SurfaceClass::Asphalt, 3.0, 1.0)
+                < surface_mu(SurfaceClass::Asphalt, 0.0, 1.0),
+            "a slick in the wet must be worse than a road tyre in the wet"
+        );
+
+        // THE CLAIM the compound row exists for: an off-road tyre beats a road
+        // tyre in mud and loses to it on asphalt. One grip scalar cannot say this.
+        let road_mud = surface_mu(SurfaceClass::Mud, 0.0, 0.0);
+        let off_mud = surface_mu(SurfaceClass::Mud, 2.0, 0.0);
+        let road_tar = surface_mu(SurfaceClass::Asphalt, 0.0, 0.0);
+        let off_tar = surface_mu(SurfaceClass::Asphalt, 2.0, 0.0);
+        assert!(off_mud > road_mud * 1.3, "{off_mud} vs {road_mud} in mud");
+        assert!(off_tar < road_tar, "{off_tar} vs {road_tar} on tarmac");
+
+        // Indices round-trip, and an unknown one is a refusal that still drives.
+        for su in SurfaceClass::all() {
+            assert_eq!(SurfaceClass::from_index(su.index()), su);
+        }
+        assert_eq!(SurfaceClass::from_index(99), SurfaceClass::Asphalt);
+        assert_eq!(surface_mu(SurfaceClass::Mud, f64::NAN, f64::NAN), road_mud);
+    }
+
+    /// **A BURNOUT HEATS A TYRE AND A LAP COOLS IT, AND HEAT COSTS GRIP**
+    /// (wave VEH3a).
+    #[test]
+    fn tyre_heat_rises_with_slip_power_and_falls_with_air() {
+        let t = VehicleTuning::default();
+        let ambient = 20.0;
+
+        // A burnout: 4 kN of friction sliding at 15 m/s is 60 kW into the rubber.
+        let mut temp = ambient;
+        for _ in 0..120 {
+            temp = tyre_temperature_step(&t, temp, 4_000.0 * 15.0, 2.0, ambient, 1.0 / 60.0);
+        }
+        assert!(
+            temp > 90.0,
+            "two seconds of burnout took the tyre to {temp} °C"
+        );
+        let hot = temp;
+
+        // …and a lap at speed with no slip brings it back down.
+        for _ in 0..(60 * 30) {
+            temp = tyre_temperature_step(&t, temp, 0.0, 30.0, ambient, 1.0 / 60.0);
+        }
+        assert!(
+            temp < hot - 30.0,
+            "thirty seconds of running cooled {hot} °C to {temp} °C"
+        );
+        assert!(temp >= ambient, "a tyre cooled below the air around it");
+
+        // GRIP: peaks at the optimum and falls off both sides.
+        let at_opt = heat_grip_factor(&t, t.tyre_optimum_c);
+        assert_eq!(at_opt, 1.0);
+        assert!(heat_grip_factor(&t, t.tyre_optimum_c + 100.0) < at_opt);
+        assert!(heat_grip_factor(&t, t.tyre_optimum_c - 60.0) < at_opt);
+        // …and a cooked tyre really loses force, through the one door.
+        let cold = TyreContext {
+            heat_grip: heat_grip_factor(&t, ambient),
+            ..TyreContext::NEUTRAL
+        };
+        let (fx_hot, _) = tyre_force_with(&t, 3_000.0, 3_000.0, 0.12, 0.0, TyreContext::NEUTRAL);
+        let (fx_cold, _) = tyre_force_with(&t, 3_000.0, 3_000.0, 0.12, 0.0, cold);
+        assert!(
+            fx_cold < fx_hot * 0.95,
+            "a tyre {} °C off its optimum pulled {fx_cold} N against {fx_hot} N",
+            t.tyre_optimum_c - ambient
+        );
+        // A bounded model: no step can produce a NaN or run away.
+        assert!(tyre_temperature_step(&t, f64::NAN, 1e12, 1e9, ambient, 1.0 / 60.0).is_finite());
+    }
+
+    /// **CAMBER IS THE DOOR THE CONTACT NORMAL REACHES A FORCE THROUGH**
+    /// (wave VEH3a).
+    ///
+    /// A leaning wheel makes side force at zero slip angle — camber thrust — and
+    /// loses a little peak grip for it. The tripwire this re-opens on purpose is
+    /// `the_snapped_normal_reaches_no_force_in_the_model`, which has proved since
+    /// P29.7 that a garbage contact normal changes nothing; the *effective*
+    /// camber is the static angle plus the contact plane's own inclination, so
+    /// the day that arm goes red is the day this term started working.
+    #[test]
+    fn camber_makes_side_force_at_zero_slip_angle() {
+        let t = VehicleTuning::default();
+        let (load, stat) = (3_000.0, 3_000.0);
+        let upright = tyre_force_with(&t, load, stat, 0.0, 0.0, TyreContext::NEUTRAL);
+        assert_eq!(
+            upright,
+            (0.0, 0.0),
+            "an upright wheel at no slip pushes nothing"
+        );
+
+        let leaning = |deg: f64| {
+            tyre_force_with(
+                &t,
+                load,
+                stat,
+                0.0,
+                0.0,
+                TyreContext {
+                    camber_deg: deg,
+                    ..TyreContext::NEUTRAL
+                },
+            )
+            .1
+        };
+        let left = leaning(-4.0);
+        let right = leaning(4.0);
+        assert!(left.abs() > 100.0, "four degrees of camber made {left} N");
+        assert!(
+            left * right < 0.0,
+            "camber thrust did not change sign with the lean ({left} / {right})"
+        );
+        // …and it costs a little peak grip, second order, so a road car's half
+        // degree is nearly free and a broken suspension is not.
+        let peak = |deg: f64| {
+            tyre_force_with(
+                &t,
+                load,
+                stat,
+                0.12,
+                0.0,
+                TyreContext {
+                    camber_deg: deg,
+                    ..TyreContext::NEUTRAL
+                },
+            )
+            .0
+        };
+        let flat = peak(0.0);
+        assert!(peak(0.5) > flat * 0.999, "half a degree cost real grip");
+        assert!(peak(15.0) < flat * 0.9, "fifteen degrees cost nothing");
     }
 
     /// **THE FRICTION CIRCLE, and the two boxes that died for it.**
