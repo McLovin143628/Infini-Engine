@@ -4708,7 +4708,7 @@ pub fn npc_set_trigger(world: &mut EcsWorld, shooter: Uuid, hold: bool) -> bool 
 /// # Why the EDGE and not the level
 ///
 /// [`npc_set_trigger`] writes `want_attack`, which is a LEVEL and needed its own
-/// release. `press_reload` is an **edge**: [`step_weapons`] takes it and clears
+/// release. `press_reload` is an **edge**: `step_weapons` takes it and clears
 /// it in the same breath (the "edges are TAKEN here" law), so a press cannot
 /// survive into a step that did not mean it and there is nothing to lower. One
 /// call, one reload.
@@ -4748,7 +4748,7 @@ pub fn npc_press_reload(world: &mut EcsWorld, shooter: Uuid) -> bool {
 ///
 /// Those cost nothing here, and that is the point of putting it beside
 /// `equip_weapon` rather than calling `unequip` at a policy's call site:
-/// [`step_equipped_weapons`] already despawns a character's weapon entity and
+/// `step_equipped_weapons` already despawns a character's weapon entity and
 /// its accessories on the step nothing is equipped ("a holstered character is
 /// byte-identical to one that never had a weapon"), so this writes ONE field and
 /// the world catches up on the next line of the same step.

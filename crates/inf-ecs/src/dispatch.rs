@@ -968,22 +968,18 @@ pub const PATH_END_M: f64 = 6.0;
 /// there is nothing to store, replay or clear.
 ///
 /// **Twenty-five metres**, against a real drive's own 11.7 m/s
-/// ([`crate::traffic::street_speed_mps`] × [`RESPONSE_SPEED_FACTOR`]): a unit
+/// ([`crate::traffic::street_speed_mps`] x `d3::dispatch::RESPONSE_SPEED_FACTOR` -- a code span and not a link, because Ring 0 may not link downhill): a unit
 /// that is driving is three times faster than the schedule below and never falls
 /// behind it, so nothing that works is touched. A unit that stops for a queue,
 /// a corner or a light gets six seconds of slack before the dispatcher helps.
-///
-/// [`RESPONSE_SPEED_FACTOR`]: inf_physics::d3::RESPONSE_SPEED_FACTOR
 pub const ESCORT_LAG_M: f64 = 25.0;
 
 /// **How fast the dispatcher's own schedule advances**, m/s — see
 /// [`ESCORT_LAG_M`].
 ///
 /// **Four**, which is a third of what a unit under way really does
-/// (11.7 m/s = the town's limit × [`RESPONSE_SPEED_FACTOR`]). A unit that is
+/// (11.7 m/s = the town's limit x `d3::dispatch::RESPONSE_SPEED_FACTOR`). A unit that is
 /// driving runs away from this schedule and is never behind it.
-///
-/// [`RESPONSE_SPEED_FACTOR`]: inf_physics::d3::RESPONSE_SPEED_FACTOR
 pub const ESCORT_SPEED_MPS: f64 = 4.0;
 
 /// **How fast a unit being escorted is dragged along its route**, m/s.
