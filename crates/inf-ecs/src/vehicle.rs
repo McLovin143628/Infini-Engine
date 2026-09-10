@@ -813,10 +813,15 @@ pub struct VehicleTuning {
     pub tyre_optimum_c: f64,
     /// How many inner tyre/suspension solves run per fixed step (wave VEH3a).
     ///
-    /// The doc asks for 300-400 Hz where this engine's stick/slip split is
-    /// stable at 60 without one; `4` is 240 Hz. Clamped to `1..=8` by
-    /// [`substeps`](Self::substeps), because a solver count an author typed as
-    /// `0` is a division by zero two call sites down.
+    /// The research doc asks for 300–400 Hz where this engine's stick/slip split
+    /// is stable at 60 without one, and clause 5 of the wave was told to measure
+    /// before believing either. **The default is 1**, and the loop is built,
+    /// present and reachable — the numbers are in
+    /// [`substeps`](Self::substeps)'s own doc and in the wave's ledger.
+    ///
+    /// Clamped to `1..=`[`MAX_SUBSTEPS`], because a solver count an author typed
+    /// as `0` is a division by zero two call sites down and one typed as `40` is
+    /// forty times the ray budget.
     pub tyre_substeps: f64,
     /// Which compound row of the surface table this tyre answers from
     /// (wave VEH3a): `0` road, `1` all-terrain, `2` off-road, `3` slick.
@@ -1001,7 +1006,7 @@ impl Default for VehicleTuning {
             tyre_heat_grip_loss: 0.25,
             tyre_heat_rate: 0.07,
             tyre_optimum_c: 85.0,
-            tyre_substeps: 4.0,
+            tyre_substeps: 1.0,
             tyre_surface_set: 0.0,
             wing_area_m2: 0.0,
             wing_aspect_ratio: 0.0,
@@ -3350,6 +3355,22 @@ pub trait Vehicle: Send + Sync + 'static {
     /// suspension answers `0.0` and gets a ray from the wheel centre.
     fn suspension_rest_m(&self) -> f64;
 
+    /// **How many inner solves this class wants per fixed step** (wave VEH3a),
+    /// `1..=`[`MAX_SUBSTEPS`].
+    ///
+    /// On the trait for [`suspension_rest_m`](Self::suspension_rest_m)'s reason:
+    /// the fixed-step door runs the loop and only the class knows how finely it
+    /// wants to be integrated. It is NOT a second name list — the number itself
+    /// travels the one `set(name, f64)` door as `tyre_substeps`, and this reads
+    /// it.
+    ///
+    /// The default is **1**, i.e. no inner loop, which is what a hull and a
+    /// rotorcraft want: neither has a stick/slip tyre and neither is what the
+    /// research doc's 300–400 Hz is about.
+    fn substeps(&self) -> usize {
+        1
+    }
+
     /// **The step**: given the chassis state and this step's contacts, append the
     /// forces to apply. Pure — no world, no physics types, no allocation beyond
     /// `out`.
@@ -4751,6 +4772,10 @@ impl Vehicle for RaycastVehicle {
 
     fn suspension_rest_m(&self) -> f64 {
         self.tuning.rest_length_m
+    }
+
+    fn substeps(&self) -> usize {
+        self.tuning.substeps()
     }
 
     /// **Revs are the engine's own rpm** between idle and the redline (island

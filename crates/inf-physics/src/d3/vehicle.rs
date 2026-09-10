@@ -52,7 +52,7 @@ use uuid::Uuid;
 
 use inf_ecs::components::{Collider3D, Transform};
 use inf_ecs::math::Vec3d;
-use inf_ecs::vehicle::{ChassisState, SurfaceClass, WheelContact, WheelForce};
+use inf_ecs::vehicle::{ChassisState, SurfaceClass, WheelContact, WheelForce, MAX_SUBSTEPS};
 use inf_ecs::EcsWorld;
 
 use super::query::CastTargets;
@@ -367,7 +367,73 @@ fn step_one(
             state.contact = hit.map(|(c, _)| c);
             state.surface = class;
         }
-        v.solve(state, dt, forces);
+        // ── THE INNER LOOP (wave VEH3a clause 5) ────────────────────────
+        //
+        // The research doc asks for the tyre solve at 300–400 Hz where this
+        // engine's stick/slip split is stable at 60 without one. `tyre_substeps`
+        // is that N, per class, clamped to `1..=8` by
+        // `VehicleTuning::substeps`.
+        //
+        // **What sub-steps and what does not.** The tyre and the suspension
+        // solve N times at `dt / N`, so a wheel's angular velocity, its slip and
+        // its temperature are integrated at 240 Hz by default. The CASTS are not
+        // repeated: a contact patch moves at most a few centimetres inside one
+        // 16.7 ms step, and re-casting would multiply the wave's four rays a
+        // wheel by N again — 64 rays a car a step — for a contact that has
+        // barely moved. The chassis body is integrated ONCE, by rapier, from the
+        // averaged force, which is what keeps the solver's own contract intact.
+        //
+        // Between sub-steps the chassis state is advanced LOCALLY by the force
+        // the previous sub-step produced, so the second sub-step sees the
+        // velocity the first one earned rather than the one the step began with.
+        // Without that the loop is N identical solves and buys nothing at all.
+        let substeps = v.substeps().clamp(1, MAX_SUBSTEPS);
+        if substeps == 1 {
+            v.solve(state, dt, forces);
+        } else {
+            let sub_dt = dt / substeps as f64;
+            let inv_mass = if state.mass_kg > 0.0 {
+                1.0 / state.mass_kg
+            } else {
+                0.0
+            };
+            let mut running = state;
+            let mut sub: Vec<WheelForce> = Vec::new();
+            let mut sum: Vec<WheelForce> = Vec::new();
+            for i in 0..substeps {
+                sub.clear();
+                v.solve(running, sub_dt, &mut sub);
+                if i == 0 {
+                    sum = sub.clone();
+                } else {
+                    // The forces of the i-th sub-step are added at the i-th
+                    // sub-step's own contact points; the average below is over
+                    // however many each sub-step produced, so a wheel that left
+                    // the ground part-way through contributes for the part it was
+                    // on it. Lengths agree by construction (one force per
+                    // grounded wheel, and the contacts are fixed for the step).
+                    for (a, b) in sum.iter_mut().zip(sub.iter()) {
+                        a.force += b.force;
+                    }
+                }
+                // Advance the LOCAL chassis by what this sub-step earned. Linear
+                // only: the angular half needs the body's inertia tensor, which
+                // lives in rapier and is not on this side of the seam, and the
+                // yaw a car develops inside 4 ms is small next to the linear
+                // velocity change. Stated rather than hidden.
+                if i + 1 < substeps {
+                    let net: DVec3 = sub.iter().map(|f| f.force).sum();
+                    running.linvel += net * inv_mass * sub_dt;
+                    running.position += running.linvel * sub_dt;
+                }
+            }
+            let inv_n = 1.0 / substeps as f64;
+            forces.clear();
+            forces.extend(sum.into_iter().map(|f| WheelForce {
+                point: f.point,
+                force: f.force * inv_n,
+            }));
+        }
         let grounded = v.wheels().iter().filter(|w| w.contact.is_some()).count();
         let load_n = v.wheels().iter().map(|w| w.load_n).sum::<f64>();
         let poses: Vec<(Uuid, Vec3d, f64, f64, f64)> = v

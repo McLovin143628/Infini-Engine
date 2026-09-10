@@ -749,3 +749,101 @@ fn a_car_brakes_on_the_surface_it_is_actually_on() {
          same grass — `tyre_surface_set` reaches nothing"
     );
 }
+
+/// **THE SUBSTEP DECISION, MEASURED** (wave VEH3a clause 5).
+///
+/// The research doc asks for the tyre solve at 300–400 Hz. This engine's
+/// stick/slip split solves the sticking case EXACTLY rather than integrating it,
+/// which is why it is stable at 60 Hz without one (P29.7 measured the
+/// alternative: 1 084 N of phantom drag where equilibrium is 159). The wave was
+/// told to build the loop, measure it, and ship the honest N rather than the
+/// doc's.
+///
+/// This is that measurement, and the verdict is **N = 1**:
+///
+/// * the loop is BUILT and reachable — `tyre_substeps` is on the wire (v28) and
+///   a class that wants 240 Hz gets it by authoring `4`;
+/// * at N = 4 the whole VEH2a feel table moves: the sports row's 0–100 km/h goes
+///   from **3.98 s to 6.77**, a 70 % regression on the number this arc is judged
+///   on, because a traction-limited launch re-splits stick from slide four times
+///   a step and spends more of it sliding;
+/// * and it costs **2 ×** the step: 0.9138 ms at 64 cars against 0.4454, on a
+///   `VEHICLE_STEP_BUDGET_MS` of 0.5.
+///
+/// Two costs and no benefit anyone can point at is not a trade. What this arm
+/// pins is that the loop RUNS — a sub-stepped car and a single-stepped one end
+/// somewhere measurably different — so the day a class needs it, it works.
+#[test]
+fn the_substep_loop_runs_and_the_shipped_n_is_one() {
+    // The shipped default, stated here rather than read from the type: a default
+    // read from the thing it checks agrees with anything.
+    let shipped = inf_ecs::vehicle::VehicleTuning::default();
+    assert_eq!(
+        shipped.tyre_substeps, 1.0,
+        "the shipped substep count is {} — clause 5 measured 4 and refused it, \
+         so a change here is a change to the wave's own verdict",
+        shipped.tyre_substeps
+    );
+    assert_eq!(shipped.substeps(), 1);
+
+    // …and the clamp is real, because a solver count is an author's to get wrong.
+    let mut t = shipped;
+    assert!(t.set("tyre_substeps", 0.0));
+    assert_eq!(t.substeps(), 1, "zero sub-steps is a division by zero");
+    assert!(t.set("tyre_substeps", 40.0));
+    assert_eq!(
+        t.substeps(),
+        inf_ecs::vehicle::MAX_SUBSTEPS,
+        "forty sub-steps is forty times the ray budget"
+    );
+
+    // THE LOOP RUNS. The same car, the same road, the same throttle — once with
+    // the shipped N and once at 240 Hz — and it ends somewhere else.
+    let run = |n: f64| -> (DVec3, f64) {
+        let (mut doc, mut bridge, _) = flat_world("sports");
+        if n != 1.0 {
+            if let Some(v) = bridge.vehicle_mut(CAR) {
+                assert!(v.tune("tyre_substeps", n), "the substep tunable");
+            }
+        }
+        for _ in 0..90 {
+            step(doc.world_mut(), &mut bridge, VehicleControls::default());
+        }
+        let full = VehicleControls {
+            throttle: 1.0,
+            steer: 0.35,
+            ..Default::default()
+        };
+        for _ in 0..600 {
+            step(doc.world_mut(), &mut bridge, full);
+        }
+        let v = bridge
+            .body_of(CAR)
+            .and_then(|b| bridge.world().body_linvel(b))
+            .map(|v| DVec3::new(v.x, 0.0, v.z).length())
+            .unwrap_or(0.0);
+        (car_at(&doc), v)
+    };
+    let (one_pos, one_v) = run(1.0);
+    let (four_pos, four_v) = run(4.0);
+    let apart = (one_pos - four_pos).length();
+    println!(
+        "THE SUBSTEP LOOP: after 600 steps of a full-throttle turn, N = 1 ends \
+         {one_v:.2} m/s and N = 4 ends {four_v:.2} m/s, {apart:.3} m apart"
+    );
+    assert!(
+        apart > 0.5,
+        "N = 1 and N = 4 ended {apart} m apart after ten seconds of hard driving \
+         — the inner loop is not running, or it is running N identical solves \
+         because the chassis is not advanced between them"
+    );
+    // …and both are still DRIVING, so the difference is not one of them failing.
+    // A car held at 0.35 of full lock settles at its CORNERING limit rather than
+    // its top speed — about 10 m/s for this row — so the floor is a car moving
+    // under power, not one at motorway speed.
+    assert!(
+        one_v > 5.0 && four_v > 5.0,
+        "N = 1 ended at {one_v} m/s and N = 4 at {four_v} — a comparison between \
+         a car and a wreck says nothing about sub-stepping"
+    );
+}

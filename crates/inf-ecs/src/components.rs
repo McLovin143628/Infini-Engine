@@ -3124,10 +3124,15 @@ pub struct VehicleClass {
     pub tyre_optimum_c: f64,
     /// How many inner tyre/suspension solves run per fixed step (wave VEH3a).
     ///
-    /// The doc asks for 300-400 Hz where this engine's stick/slip split is
-    /// stable at 60 without one; `4` is 240 Hz. Clamped to `1..=8` by
-    /// [`substeps`](crate::vehicle::VehicleTuning::substeps), because a solver count an author typed as
-    /// `0` is a division by zero two call sites down.
+    /// The research doc asks for 300–400 Hz where this engine's stick/slip split
+    /// is stable at 60 without one, and clause 5 of the wave was told to measure
+    /// before believing either. **The default is 1**, and the loop is built,
+    /// present and reachable — the numbers are in
+    /// [`substeps`](crate::vehicle::VehicleTuning::substeps)'s own doc and in the wave's ledger.
+    ///
+    /// Clamped to `1..=`[`MAX_SUBSTEPS`](crate::vehicle::MAX_SUBSTEPS), because a solver count an author typed
+    /// as `0` is a division by zero two call sites down and one typed as `40` is
+    /// forty times the ray budget.
     pub tyre_substeps: f64,
     /// Which compound row of the surface table this tyre answers from
     /// (wave VEH3a): `0` road, `1` all-terrain, `2` off-road, `3` slick.
