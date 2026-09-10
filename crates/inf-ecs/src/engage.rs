@@ -272,6 +272,44 @@ pub fn fire_window(unit: Uuid, step: u64) -> bool {
     (step.wrapping_add(phase)) % ENGAGE_PERIOD_STEPS < ENGAGE_BURST_STEPS
 }
 
+// ── what a crew carries ─────────────────────────────────────────────────────
+
+/// **What a police crew is issued when it gets out of the car**, best first.
+///
+/// A LIST and not an id, because two levels in this repository define two
+/// different catalogues and a policy that named one of them would arm nobody on
+/// the other: the island's own registry opens with `glock_17`
+/// (`inf_editor_core::island::ISLAND_SIDEARM_ID`) and the `phase30-gameplay`
+/// fixture defines three rows of which `pistol` is one
+/// (`GAMEPLAY_ITEMS_TOML`). The applier walks this list and takes the first row
+/// the level actually defines, so the same policy arms an officer on both and
+/// arms nobody on a level with no weapons at all — which is a refusal and not a
+/// crash.
+pub const POLICE_SIDEARM_IDS: [&str; 2] = ["glock_17", "pistol"];
+
+/// **What a SWAT-grade response is issued instead** — see
+/// [`POLICE_SIDEARM_IDS`] for why it is a list.
+///
+/// EMS3's carried item — *"Swat is a COUNT not a crew"* — becoming the second
+/// behaviour it implies: at the top rung the town sends everything it has AND
+/// what gets out of the van is carrying a rifle. It is the same ladder
+/// [`prefers_high`](crate::cover::prefers_high) reads for cover, answered for
+/// the weapon.
+pub const SWAT_RIFLE_IDS: [&str; 2] = ["m4a1", "rifle"];
+
+/// Which list this rung of the ladder issues from.
+///
+/// `Cold` issues nothing at all: a town where nobody is wanted does not arm its
+/// patrols, so a level that never has a crime never equips a weapon and every
+/// trace committed before this wave steps the bytes it stepped before.
+pub fn crew_weapon_ids(response: Response) -> &'static [&'static str] {
+    match response {
+        Response::Cold => &[],
+        Response::Patrol | Response::MultiUnit => &POLICE_SIDEARM_IDS,
+        Response::Swat => &SWAT_RIFLE_IDS,
+    }
+}
+
 // ── the geometry ────────────────────────────────────────────────────────────
 
 /// **Is `other` inside the cone from `from` toward `at`** — the friendly-fire
@@ -330,7 +368,23 @@ pub fn may_engage(
     trail_age: u64,
     line_of_sight: bool,
 ) -> bool {
-    if !posture.aims() || !line_of_sight || trail_age > TRAIL_STALE_STEPS {
+    line_of_sight && worth_a_ray(posture, unit_at, last_seen, trail_age)
+}
+
+/// **Everything [`may_engage`] asks EXCEPT the ray** — the pre-filter that
+/// decides whether a pair is worth spending one of
+/// [`NPC_ENGAGE_RAYS_PER_STEP`] on.
+///
+/// It exists so the applier never has to pass a *placeholder* line-of-sight
+/// value into [`may_engage`] before it has cast anything. That sounds like a
+/// nicety and is not: a `may_engage(.., true)` at a call site above the ray is
+/// exactly the mutation the law arm makes to prove the law, and a call site that
+/// contained one by design would make the mutation invisible.
+///
+/// Everything else is here — the posture, the trail's age, and the range
+/// measured against the **remembered** position rather than the real one.
+pub fn worth_a_ray(posture: Posture, unit_at: Vec3d, last_seen: Vec3d, trail_age: u64) -> bool {
+    if !posture.aims() || trail_age > TRAIL_STALE_STEPS {
         return false;
     }
     let d = ((last_seen.x - unit_at.x).powi(2)

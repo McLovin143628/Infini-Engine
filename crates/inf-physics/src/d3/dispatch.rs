@@ -1052,6 +1052,21 @@ fn arrive(
                 a.posture_t = 0.0;
             }
         }
+        // ── **AND ITS WEAPON** (wave WPN2e) — the first shipped caller of
+        //    `gameplay::equip_weapon`, and the only one.
+        //
+        //    HERE and not at `ensure_crew`, because arriving is the moment a
+        //    crew stops being a driver and starts being an officer standing in
+        //    the street: a body in a seat with a rifle in its hands is a hand-IK
+        //    problem nobody asked for, and an officer that drew its weapon in
+        //    the station would have done so on a level where nothing has
+        //    happened.
+        //
+        //    `arm_crew` refuses everything that is not police, refuses a `Cold`
+        //    town, and refuses a level whose catalogue holds no weapon it knows
+        //    — so a fire crew arrives empty-handed and every level committed
+        //    before this wave equips nothing at all.
+        super::engage::arm_crew(world, crew, kind);
     }
 }
 

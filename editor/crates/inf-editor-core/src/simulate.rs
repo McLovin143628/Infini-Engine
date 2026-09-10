@@ -596,6 +596,11 @@ impl SimSession {
         // fills and the author never authored, and a second run that began with
         // run 1's officers still on duty could not frighten them.
         inf_ecs::dispatch::clear_dispatch(doc.world_mut());
+        // WPN2e: and who the police were pointing a weapon at, for the same
+        // reason a third time -- the engagement ledger is a resource this
+        // session filled, and a second run that began with run 1's officers
+        // already on a target would open fire before anybody had done anything.
+        inf_ecs::engage::clear_engage(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
         // WPN2a: and every round still in the air, for `clear_crowd`'s reason
         // exactly — a bullet the author fired in run 1 and stopped watching is
@@ -1047,6 +1052,11 @@ impl SimSession {
         // fills and the author never authored, and a second run that began with
         // run 1's officers still on duty could not frighten them.
         inf_ecs::dispatch::clear_dispatch(doc.world_mut());
+        // WPN2e: and who the police were pointing a weapon at, for the same
+        // reason a third time -- the engagement ledger is a resource this
+        // session filled, and a second run that began with run 1's officers
+        // already on a target would open fire before anybody had done anything.
+        inf_ecs::engage::clear_engage(doc.world_mut());
         inf_ecs::traffic::clear_carriageway(doc.world_mut());
         // WPN2a: and every round still in the air, for `clear_crowd`'s reason
         // exactly — a bullet the author fired in run 1 and stopped watching is

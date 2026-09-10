@@ -420,6 +420,9 @@ pub struct GameplayReport {
     /// **What the NPC cover pass did** (wave COV1) — every field an engagement
     /// counter, and `probes` zero on a step with no gunfire.
     pub npc_cover: super::cover::NpcCoverReport,
+    /// **What the NPC firing policy did** (wave WPN2e) — every field an
+    /// engagement counter, and `rays` zero on a step where nobody is wanted.
+    pub engage: super::engage::EngageStats,
     /// Rounds fired this step.
     pub shots: u32,
     /// **What the brass did** this step (wave WPN2c).
@@ -602,6 +605,25 @@ pub fn step_gameplay(
     //     level with no vehicles and on every character without a launcher: one
     //     absent-query read.
     step_locks(world, bridge, dt, &mut report);
+    // 1e. **WHO THE POLICE ARE POINTING A WEAPON AT** (wave WPN2e) — the firing
+    //     policy, and the first shipped caller of `npc_aim_at`.
+    //
+    //     IMMEDIATELY BEFORE the trigger, and that ordering is the whole reason
+    //     an officer's decision and its round are one step rather than two:
+    //     `npc_aim_at` writes `MovementRuntime::want_attack` as a LEVEL, and
+    //     `step_weapons` on the next line is the very next thing that reads it.
+    //     Below the cover pass would have been a step of latency on every shot.
+    //
+    //     It reads the cover state the MOVEMENT step wrote this step (phase 8,
+    //     seven phases earlier), so the peek an officer fires through is the
+    //     lean its capsule is actually in rather than the one `step_npc_cover`
+    //     will ask for at the bottom of this phase.
+    //
+    //     **Inert on every level where nobody is wanted**: one `wanted` call
+    //     over an absent ledger, and a return before the duty roster is
+    //     gathered. `report.engage.rays` is zero, which is the budget arm's own
+    //     number.
+    report.engage = super::engage::step_engage(world, bridge, inf_ecs::traffic::steps(world));
     // 2. Every character with a weapon: the trigger, the reload, the clocks.
     step_weapons(world, bridge, dt, &mut report);
     // 2b. **The throw** (wave WPN2d) — the press, and the release on the clip's
@@ -656,13 +678,30 @@ pub fn step_gameplay(
     //
     //     Inert on every step nothing was fired on: the source list is empty,
     //     the pass does not enter its loop, and `probes` is zero.
+    let sources = panic_sources(&report.hits);
     report.npc_cover = super::cover::step_npc_cover(
         world,
         bridge,
-        &panic_sources(&report.hits),
+        &sources,
         PANIC_RADIUS_M,
         inf_ecs::traffic::steps(world),
         dt,
+    );
+    // 3b-ii. **…AND THEY REMEMBER BEING SHOT AT** (wave WPN2e). Beside the cover
+    //     pass and on the SAME coalesced source list, because they are the same
+    //     fact seen from two sides: the responders that take cover are the
+    //     responders that have been fired upon, and `Posture::ReturnFire` is the
+    //     other thing that reads it. Sharing the list is what keeps the cost
+    //     bound one bound rather than two — `panic_sources` is already capped at
+    //     `MAX_PANIC_SOURCES`.
+    //
+    //     Inert on every step nothing was fired on: the list is empty and the
+    //     call returns before it touches the ledger.
+    report.engage.incoming = super::engage::note_incoming(
+        world,
+        &sources,
+        PANIC_RADIUS_M,
+        inf_ecs::traffic::steps(world),
     );
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
@@ -2060,7 +2099,7 @@ fn shot_exclusions(
 /// The scan is over `ragdoll_count()` entries and runs only when the index
 /// misses, which is a hit on terrain, a structure or a limb — and the map is
 /// empty on every level where nobody is down.
-fn hit_owner(bridge: &PhysicsBridge3D, collider: super::ColliderId3D) -> Option<Uuid> {
+pub(super) fn hit_owner(bridge: &PhysicsBridge3D, collider: super::ColliderId3D) -> Option<Uuid> {
     bridge
         .guid_of_collider(collider)
         .or_else(|| bridge.guid_of_ragdoll_collider(collider))
@@ -3266,7 +3305,7 @@ fn step_witness(
 /// at chest height, so the vertical term cancels between two characters of the
 /// same size and a punch at a metre is a punch at a metre rather than
 /// `sqrt(1² + 1.4²)`.
-fn strike_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+pub(super) fn strike_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     Some(feet_of(world, guid)? + DVec3::Y * MUZZLE_HEIGHT_M)
 }
 

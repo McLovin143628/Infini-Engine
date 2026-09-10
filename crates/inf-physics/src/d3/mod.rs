@@ -34,6 +34,10 @@ pub mod door;
 // handed. The rules are `inf_ecs::dispatch`.
 pub mod dispatch;
 mod ecs;
+// WPN2e: the NPC FIRING POLICY, applied -- the first shipped caller of
+// `gameplay::npc_aim_at` and `gameplay::equip_weapon`. The rules are
+// `inf_ecs::engage`.
+pub mod engage;
 mod events;
 pub mod fracture;
 // I6 gameplay: the one fixed-step pass both hosts run for doors, weapons and

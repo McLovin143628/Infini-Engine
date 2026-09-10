@@ -2636,14 +2636,29 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// (i) NOTHING OF WPN2e
+// (i) THE TRIGGER HAS EXACTLY ONE AUTHOR
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// **NO NPC FIRES ON ITS OWN** — the WPN2e boundary, asserted rather than
-/// assumed.
+/// **`npc_aim_at` HAS ONE CALLER, AND IT IS THE FIRING POLICY** — this arm's
+/// WPN2e form.
+///
+/// Until wave WPN2e it read *"no NPC fires on its own"*, which was true and is
+/// no longer: `d3::engage::step_engage` is the door that wave built, and the
+/// boundary this arm exists to hold **moved with it rather than being retired**.
+/// One author is the property that made the old spelling worth having and is the
+/// property that still matters: `inf_ecs::movement::apply_intent` writes an
+/// intent onto player-controlled characters and `npc_aim_at` writes one onto
+/// everybody else, so a divergence in what a character wanted to do is findable
+/// only while each of those has exactly one caller.
+///
+/// The second half is unchanged and is what stops the policy leaking: an armed
+/// NPC who is **not on the duty roster and has no file to answer** still fires
+/// nothing, whatever `step_engage` does for the officers who are — and the
+/// policy spends zero rays looking.
 #[test]
-fn nothing_of_the_npc_firing_policy_leaked_in() {
-    // **THE WHOLE FIXED STEP, NOT TWO HAND-PICKED FILES** (the audit's fix).
+fn the_trigger_has_exactly_one_author_and_it_is_the_firing_policy() {
+    // **THE WHOLE FIXED STEP, NOT TWO HAND-PICKED FILES** (the WPN2d audit's
+    // fix, kept).
     //
     // This read `!DISPATCH.contains("npc_aim_at")` and the same of `crime.rs`,
     // which is a narrow pin with a hole on either side of it: a leak into
@@ -2655,7 +2670,8 @@ fn nothing_of_the_npc_firing_policy_leaked_in() {
     // So the pin is on a CALL — `npc_aim_at(` — over every `.rs` in the two
     // crates the fixed step lives in, with the one file that DEFINES it
     // exempted by name. A mention in a comment is a mention; `npc_aim_at(` is
-    // a call.
+    // a call. Wave WPN2e adds exactly ONE permitted caller, checked by file
+    // below rather than exempted here — so a leak into a third file counts.
     let mut callers: Vec<String> = Vec::new();
     for dir in [
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/inf-physics/src"),
@@ -2694,12 +2710,21 @@ fn nothing_of_the_npc_firing_policy_leaked_in() {
             }
         }
     }
-    assert!(
-        callers.is_empty(),
-        "the fixed step calls `npc_aim_at` outside its own file — WPN2e's \
-         target selection has leaked into WPN2d: {callers:?}"
+    // Exactly one, and it is the policy's own file. A second caller anywhere is
+    // a second author of an NPC's intent.
+    assert_eq!(
+        callers.len(),
+        1,
+        "`npc_aim_at` has {} callers outside its own file and the firing policy is supposed to be the only one: {callers:?}",
+        callers.len()
     );
-    // And an armed NPC standing beside the hero fires nothing on its own.
+    assert!(
+        callers[0].contains("engage.rs"),
+        "the one caller of `npc_aim_at` is not the firing policy: {}",
+        callers[0]
+    );
+    // And an armed NPC standing beside the hero — nobody is wanted, so the
+    // policy never reaches the duty roster — fires nothing on its own.
     let mut r = Range::new(registry());
     stand(
         &mut r.world,
@@ -2711,12 +2736,20 @@ fn nothing_of_the_npc_firing_policy_leaked_in() {
     r.resync();
     r.arm(shooter_guid(0), "m4a1");
     let mut shots = 0;
+    let mut rays = 0;
     for _ in 0..120 {
-        shots += r.step().shots;
+        let rep = r.step();
+        shots += rep.shots;
+        rays += rep.engage.rays;
     }
     assert_eq!(
         shots, 0,
         "an armed NPC opened fire with no policy to tell it to"
+    );
+    // …and the policy spent nothing looking at a level where nobody is wanted.
+    assert_eq!(
+        rays, 0,
+        "the firing policy cast {rays} engage rays on a level with no open file"
     );
 }
 

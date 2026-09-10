@@ -168,7 +168,7 @@ pub fn step_recognition(
 /// `RespondersRes`, and could not be put there by anything short of a new door.
 /// A wanted system in which the player's own eyes refresh the police's file
 /// would be the omniscience this wave exists to remove, wearing a different hat.
-fn officers(world: &EcsWorld) -> Vec<Uuid> {
+pub(super) fn officers(world: &EcsWorld) -> Vec<Uuid> {
     let Some(res) = dispatch::dispatch_of(world) else {
         return Vec::new();
     };
@@ -357,7 +357,7 @@ fn blocked(
 /// A character's `Transform` is its capsule **centre**, which is already about
 /// chest height, so it is used as-is; a population record is a pair of feet and
 /// is lifted by [`EYE_HEIGHT_M`].
-fn eye_of(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+pub(super) fn eye_of(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     if let Some(e) = world.entity_of(guid) {
         if let Some(t) = world
             .world()
