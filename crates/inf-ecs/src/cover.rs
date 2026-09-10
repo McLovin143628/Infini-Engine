@@ -479,6 +479,124 @@ pub fn peek_lateral_m(side: CoverSide, peek: f64) -> f64 {
     side.lateral_sign() * PEEK_LATERAL_M * peek.clamp(0.0, 1.0)
 }
 
+// ── BLIND FIRE (wave WPN2e) ─────────────────────────────────────────────────
+
+/// **How far past the surface a blind-fired round leaves from**, metres.
+///
+/// **Thirty-five centimetres** — an outstretched forearm past the face of the
+/// cover, and it is not decoration: a round that left from where the *hand*
+/// actually is would start behind the wall and stop in it on segment zero. The
+/// whole point of blind fire is that the weapon clears the cover and the head
+/// does not.
+///
+/// It is measured from [`CoverState::anchor`], which is where the feet sit
+/// **against** the surface, so the origin is 0.35 m beyond the surface plane
+/// whatever the character's own posture is doing.
+pub const BLIND_REACH_M: f64 = 0.35;
+
+/// **How far above a low cover's top a blind-fired round leaves from**, metres.
+///
+/// **Fifteen centimetres** — the weapon held over the parapet, clear of it, with
+/// the shooter still crouched behind. Smaller and the round clips its own cover
+/// on a surface the probe measured a centimetre low; larger and the weapon is
+/// waving in the air.
+pub const BLIND_CLEAR_M: f64 = 0.15;
+
+/// **How far around a high cover's edge a blind-fired round leaves from**,
+/// metres.
+///
+/// **`PEEK_LATERAL_M`** — the same 0.45 m a real peek steps, because the arm
+/// goes exactly as far round the corner as the body would have and the point is
+/// that the head stays behind it.
+pub const BLIND_LATERAL_M: f64 = PEEK_LATERAL_M;
+
+/// **How much wider a blind shot's cone is**, degrees.
+///
+/// **Nine.** Firing at something you cannot see is the least accurate thing a
+/// person with a gun does, and this is added to whatever cone the weapon, the
+/// stance and the bloom already resolved — so a blind burst from a bench-rested
+/// sniper rifle is still tighter than a blind burst from a submachine gun, and
+/// both are wild.
+///
+/// Nine degrees is 1.6 m of scatter at 10 m and 5.5 m at 35 m, which is the
+/// engagement range: at the far end of the policy's own reach a blind shot is a
+/// suppression tool and not an aimed one, which is what it should be.
+pub const BLIND_FIRE_CONE_DEG: f64 = 9.0;
+
+/// **Where a BLIND round leaves from, and which way it goes** (wave WPN2e) —
+/// the whole rule, as one pure function.
+///
+/// Blind fire is *"the weapon clears the cover and the head does not"*, and this
+/// is the two facts that statement implies:
+///
+/// * **the direction** is the cover's own outward normal.
+///   [`CoverState::normal`] points back **at** the character, so out is
+///   `-normal`, and the answer is a yaw because a blind shot is level: nobody
+///   aims a weapon they are not looking down;
+/// * **the origin** is past the surface, and *how* it gets past depends on the
+///   class, which is the same distinction [`peek_side`] draws:
+///   - **`Low`** — over the top. [`BLIND_CLEAR_M`] above the surface's own
+///     measured top, [`BLIND_REACH_M`] beyond its face.
+///   - **`High`** — round the nearer end, whichever of `left_m` / `right_m` is
+///     shorter, [`BLIND_LATERAL_M`] along the tangent and [`BLIND_REACH_M`]
+///     beyond the face, at whatever height the caller's muzzle already is.
+///     Unlike [`nearer_corner`] there is no reach gate: a character cannot
+///     *lean* round a corner four metres away and can perfectly well point a
+///     weapon at it, and a wall with no end at all (`left_m` and `right_m` both
+///     infinite) takes the left arm of the tie, which is a direction rather than
+///     a refusal.
+///
+/// `muzzle_y` is the height the shooter's own muzzle is at, used for the high
+/// case; the low case ignores it, because a weapon held over a parapet is at the
+/// parapet's height and not at the crouched shooter's chest.
+///
+/// Answers `None` for a state that is not in cover and for a degenerate normal —
+/// refusals as values, and the caller fires normally.
+///
+/// Portable: [`inf_math::patan2_64`], because this yaw reaches a ray cast, whose
+/// hit reaches the damage door, which reaches the trace.
+pub fn blind_fire_shot(cover: &CoverState, muzzle_y: f64) -> Option<(Vec3d, f64)> {
+    if !cover.active {
+        return None;
+    }
+    let n = Vec3d::new(cover.normal.x, 0.0, cover.normal.z);
+    let len = (n.x * n.x + n.z * n.z).sqrt();
+    if !len.is_finite() || len < 1.0e-9 {
+        return None;
+    }
+    // Out of cover is AWAY from the character, and the normal points at it.
+    let out = Vec3d::new(-n.x / len, 0.0, -n.z / len);
+    let yaw = inf_math::patan2_64(out.x, out.z).to_degrees();
+    let anchor = cover.anchor;
+    let origin = if cover.class.crouches() {
+        // Over the top. `top_m` is measured above the anchor's feet, and an
+        // unmeasured top (an infinite wall the probe found no lid on) is not a
+        // low cover by `classify`'s own rule, so it cannot reach here.
+        let top = if cover.top_m.is_finite() {
+            cover.top_m
+        } else {
+            return None;
+        };
+        Vec3d::new(
+            anchor.x + out.x * BLIND_REACH_M,
+            anchor.y + top + BLIND_CLEAR_M,
+            anchor.z + out.z * BLIND_REACH_M,
+        )
+    } else {
+        // Round the nearer end. The tangent is the same one the probe measured
+        // its extents along, so `left_m` and `right_m` are in its frame.
+        let t = tangent_left(cover.normal);
+        let sign = if cover.left_m <= cover.right_m { 1.0 } else { -1.0 };
+        Vec3d::new(
+            anchor.x + out.x * BLIND_REACH_M + t.x * sign * BLIND_LATERAL_M,
+            muzzle_y,
+            anchor.z + out.z * BLIND_REACH_M + t.z * sign * BLIND_LATERAL_M,
+        )
+    };
+    (origin.x.is_finite() && origin.y.is_finite() && origin.z.is_finite() && yaw.is_finite())
+        .then_some((origin, yaw))
+}
+
 /// **Whether a peek should stand the character up.**
 ///
 /// Only the `Over` peek does. Half-way through the lean it is still crouched, so

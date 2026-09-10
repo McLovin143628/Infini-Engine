@@ -1552,10 +1552,15 @@ fn the_islands_machine_has_the_cover_states_a_rebuild_would_produce() {
         .map(|s| s.name.as_str())
         .filter(|n| n.starts_with("cover_"))
         .collect();
+    // **FIVE since wave WPN2e**, and the fifth is why the number is written
+    // down rather than derived: `cover_blind_fire` is the blind-fire additive's
+    // own slot, and a wave that adds a cover state without re-running
+    // `inf-import --rebind-graph` leaves the island playing a machine that has
+    // never heard of it. Four was COV1's stance-and-move pair per class.
     assert_eq!(
         want.len(),
-        4,
-        "the table itself no longer produces four cover states: {want:?}"
+        5,
+        "the table itself no longer produces five cover states: {want:?}"
     );
     let mut checked = 0usize;
     let mut stale: Vec<String> = Vec::new();

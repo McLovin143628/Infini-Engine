@@ -1632,6 +1632,30 @@ pub fn step_pose_evaluation<'c>(
                                     .push(crate::weapon::THROW_NOTIFY.to_string());
                             }
                         }
+                        // ── **BLIND FIRE** (wave WPN2e) ──
+                        //
+                        // The throws' third sibling and the same machinery a
+                        // fourth time: a delta from the clip's own first frame,
+                        // over the upper-body mask, played once on the
+                        // character's own clock. An additive and not a state
+                        // because a character firing blind is still in cover,
+                        // and the mask is what keeps the crouch: a pelvis drop
+                        // and two leg chains are not in an upper-body mask, so
+                        // the arm goes over the wall and the body stays behind
+                        // it.
+                        //
+                        // BEFORE the peek's lean, because they are mutually
+                        // exclusive in the gameplay rule (a character that is
+                        // leaning out is aiming, and `d3::gameplay` refuses to
+                        // call a shot blind while `want_aim` is set) and the
+                        // order is what a reader should not have to guess.
+                        //
+                        // **Absent costs nothing**: `blind_fire_s` is `0` on
+                        // every character that has never fired blind, which is
+                        // one component read.
+                        if let Some(left) = blind_fire_of(world, entity) {
+                            apply_blind_fire(asset, &mut pose, machine, &clips, left);
+                        }
                         // ── **THE PEEK'S LEAN** (wave COV1) ──
                         //
                         // The capsule has already stepped out around the corner
@@ -2511,6 +2535,14 @@ fn weapon_sweep_pose<'c>(
 /// The clock counts DOWN, so the elapsed time is the clip's own duration minus
 /// what is left — resolved inside the pass, which is the only place that has the
 /// clip.
+fn blind_fire_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<f64> {
+    let cm = world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)?;
+    let left = cm.runtime.blind_fire_s;
+    (left.is_finite() && left > 0.0).then_some(left)
+}
+
 fn throw_of(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> Option<(bool, f64)> {
     let cm = world
         .world()
@@ -2571,6 +2603,66 @@ fn apply_throw<'c>(
     let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, false);
     let delta = inf_anim::additive_delta(&base, &now);
     let layer = inf_anim::AnimLayer::additive("throw", 1.0).with_mask(mask);
+    *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
+    true
+}
+
+/// **Apply a BLIND-FIRE additive** (wave WPN2e), answering whether it wrote
+/// anything.
+///
+/// [`apply_throw`]'s twin, sharing every one of its arguments' reasons: a delta
+/// from the clip's own first frame, over
+/// [`inf_anim::JointMask::upper_body`], because a blind shot is a shoulder, an
+/// elbow and a chest and the LEGS must keep doing whatever the cover stance was
+/// doing.
+///
+/// The mask is what makes the whole thing safe to layer over
+/// `INF_Cover_Low_Idle`: the crouch is a pelvis translation and two leg chains,
+/// none of which is in an upper-body mask, so the character stays behind its
+/// wall while its arm goes over it.
+///
+/// `left_s` is what remains on the character's own clock, and the elapsed time
+/// is the clip's duration minus it — the clock's owner does not have the clip.
+fn apply_blind_fire<'c>(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    machine: &inf_anim::StateMachine,
+    clips: &dyn Fn(ClipRef) -> Option<&'c inf_anim::AnimClip>,
+    left_s: f64,
+) -> bool {
+    let Some(state) = machine
+        .states
+        .iter()
+        .find(|s| s.name == inf_anim::als::BLIND_FIRE_STATE)
+    else {
+        return false;
+    };
+    let inf_anim::state_machine::Motion::Clip(cref) = &state.motion else {
+        return false;
+    };
+    let Some(clip) = clips(*cref) else {
+        return false;
+    };
+    let dur = f64::from(clip.duration);
+    if dur <= 0.0 || dur.is_nan() {
+        return false;
+    }
+    let t = (dur - left_s).clamp(0.0, dur);
+    if t <= 1.0e-9 || t.is_nan() {
+        // The first frame of the clip is its reference pose, so the delta is the
+        // identity and this writes nothing — the throw's own guard, for the same
+        // byte-identity reason.
+        return false;
+    }
+    let Some(mask) =
+        inf_anim::JointMask::upper_body("Mask_BlindFire", &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    let base = inf_anim::pose::sample_clip(&rig.skeleton, clip, 0.0, false);
+    let now = inf_anim::pose::sample_clip(&rig.skeleton, clip, t as f32, false);
+    let delta = inf_anim::additive_delta(&base, &now);
+    let layer = inf_anim::AnimLayer::additive("blind_fire", 1.0).with_mask(mask);
     *pose = inf_anim::apply_layers(pose, [(&layer, &delta)]);
     true
 }

@@ -794,6 +794,35 @@ pub fn start_throw(world: &mut EcsWorld, guid: Uuid, overhand: bool, duration_s:
     true
 }
 
+/// **Start a BLIND-FIRE one-shot** (wave WPN2e) — [`start_throw`]'s twin, and
+/// the same shape for the same reason: the GAMEPLAY step decides that a round
+/// left the weapon over the top of a wall, and the gameplay step has no clip, so
+/// the duration crosses this door rather than being looked up twice.
+///
+/// `inf_anim::BLIND_FIRE_S` is the number to pass. Answers `false` for a
+/// character that is not there and for a non-positive duration.
+///
+/// **RE-ARMED on every blind round**, deliberately: a unit holding its trigger
+/// through a burst keeps its arm over the parapet for as long as it is firing
+/// plus the clip's own tail, rather than dropping it half way through and
+/// snapping it back up.
+pub fn start_blind_fire(world: &mut EcsWorld, guid: Uuid, duration_s: f64) -> bool {
+    if duration_s <= 0.0 || duration_s.is_nan() {
+        return false;
+    }
+    let Some(entity) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut cm) = world
+        .world_mut()
+        .get_mut::<crate::components::CharacterMovement>(entity)
+    else {
+        return false;
+    };
+    cm.runtime.blind_fire_s = duration_s;
+    true
+}
+
 /// **Forget every bridge entry.** Called by [`crate::pose::clear_poses`], which is
 /// the one door that forgets a play session's animation state.
 pub fn clear_anim_bridge(world: &mut EcsWorld) {

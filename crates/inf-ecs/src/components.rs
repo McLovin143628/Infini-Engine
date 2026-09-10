@@ -1902,6 +1902,16 @@ pub struct MovementRuntime {
     pub throw_total_s: f64,
     /// Whether the running throw is **overhand** (`true`) or underhand.
     pub throw_over: bool,
+    /// **How long the running BLIND-FIRE one-shot has left**, seconds; `0` is
+    /// not blind-firing (wave WPN2e).
+    ///
+    /// [`throw_s`](Self::throw_s)' twin, counted down by the same line of
+    /// `d3::movement` for the same reason: a character firing blind from cover
+    /// walks, turns and falls like any other, because the clip is an upper-body
+    /// ADDITIVE and not a mode. `Default` is zero, so a character that has never
+    /// fired blind carries nothing and the pose pass takes one component read
+    /// and returns.
+    pub blind_fire_s: f64,
 
     // ── integrated state ──
     /// World velocity, m/s. **Owned by the movement step** — this is the whole

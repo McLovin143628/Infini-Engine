@@ -121,8 +121,8 @@ pub use als::{
 };
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use authored::{
-    author_clips, can_author, AuthorError, AUTHORED_CLIPS, THROW_OVER_S, THROW_RELEASE_FRAC,
-    THROW_UNDER_S,
+    author_clips, can_author, AuthorError, AUTHORED_CLIPS, BLIND_FIRE_S, THROW_OVER_S,
+    THROW_RELEASE_FRAC, THROW_UNDER_S,
 };
 pub use blend_space::{
     blend_leader, blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d,

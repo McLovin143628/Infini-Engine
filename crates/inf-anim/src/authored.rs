@@ -40,6 +40,7 @@
 //! | `INF_Cover_Low_Move` | the same stance with a 22° abduction / 30° knee shuffle and a 10° torso counter-sway | 1.20 s, looping |
 //! | `INF_Cover_High_Idle` | upright, chest 8° back and 22° twisted toward the surface, the near forearm AIMED across the chest (84° up, 72° across), the far arm braced | 3.60 s, looping (a 2° breath) |
 //! | `INF_Cover_High_Move` | the same stance side-stepping: 22° hip abduction alternating, 30° knee, 10° torso counter-sway | 1.10 s, looping |
+//! | `INF_Cover_BlindFire` | the weapon arm from the cover stance (34°/26°, 86°/66°) to 150°/8° and 168°/4° — straight up over the parapet — the far arm tucked, and the chest pitching 12° → 34° so the head goes DOWN; holds to 75 %, recovers a third | 0.70 s, one-shot additive |
 //!
 //! # Determinism
 //!
@@ -77,6 +78,18 @@ pub const THROW_OVER_S: f64 = 0.85;
 
 /// **How long the underhand throw plays**, seconds. See [`THROW_OVER_S`].
 pub const THROW_UNDER_S: f64 = 0.75;
+
+/// **How long a blind shot from cover plays**, seconds (wave WPN2e).
+///
+/// **0.70.** Named beside the generator on [`THROW_OVER_S`]'s argument verbatim:
+/// the GAMEPLAY step has to start the additive's clock and the gameplay step has
+/// no clip, so `inf_ecs::anim_bridge::start_blind_fire` takes a duration
+/// precisely so the two cannot disagree.
+///
+/// Seven tenths of a second is long enough that the arm visibly goes up, holds,
+/// and comes down, and short enough that a unit on a 1.6 s engagement cadence is
+/// back behind its wall before the next burst.
+pub const BLIND_FIRE_S: f64 = 0.70;
 
 /// **How far into a throw the hand lets go**, as a fraction of the clip (wave
 /// WPN2d).
@@ -116,6 +129,13 @@ pub const AUTHORED_CLIPS: &[&str] = &[
     "INF_Cover_Low_Move",
     "INF_Cover_High_Idle",
     "INF_Cover_High_Move",
+    // -- wave WPN2e: firing without looking --
+    //
+    // The upper-body one-shot COV1 priced and did not build. An OVERLAY and not
+    // a state, on the throws' argument verbatim: a character blind-firing is
+    // still in cover, still crouched or still standing against its wall, and a
+    // state would replace the stance the whole shot is taken from.
+    "INF_Cover_BlindFire",
 ];
 
 /// Why an authored set refused to generate.
@@ -492,6 +512,7 @@ pub fn author_clips(rig: &SkeletonAsset) -> Result<Vec<(String, AnimClip)>, Auth
         ("INF_Cover_Low_Move".into(), cover(&r, true, true)),
         ("INF_Cover_High_Idle".into(), cover(&r, false, false)),
         ("INF_Cover_High_Move".into(), cover(&r, false, true)),
+        ("INF_Cover_BlindFire".into(), blind_fire(&r)),
     ];
     for (name, clip) in out.iter_mut() {
         if matches!(
@@ -863,6 +884,145 @@ fn cover(r: &Rig, low: bool, moving: bool) -> AnimClip {
         (false, true) => "INF_Cover_High_Move",
     };
     AnimClip::new(name, tracks)
+}
+
+/// **FIRING WITHOUT LOOKING** (wave WPN2e) — the upper-body one-shot COV1 priced
+/// and did not build. [`BLIND_FIRE_S`], one-shot, an **additive overlay**.
+///
+/// # What it depicts, stated
+///
+/// The weapon goes over the cover and the head does not. Over the first 45 % of
+/// the clip:
+///
+/// * the **weapon (near) arm** goes from the cover stance's own numbers
+///   (34° lift, 26° across at the shoulder; 86° / 66° at the forearm — the same
+///   figures [`cover`] holds it at) to **150° lift / 8° across** at the shoulder
+///   and **168° / 4°** at the forearm: the arm straight up and slightly across
+///   the body's centre line, which is where a hand holding a weapon over a
+///   parapet is;
+/// * the **far arm** tucks in — 20° lift, 22° across; 70° / 44° — because the
+///   shooter is not bracing anything, it is hiding;
+/// * the **chest** pitches from the stance's 12° forward to **34°**, which is
+///   the head going down. The whole point of the pose: a viewer must be able to
+///   see that this character cannot see what it is shooting at.
+///
+/// It **holds** to 75 % and then returns a third of the way back over the last
+/// quarter, so the blend out of the additive has somewhere to go — the slide's
+/// own recovery rule.
+///
+/// # Why no legs and no pelvis
+///
+/// Because it is an ADDITIVE over whatever cover stance the machine is in, and
+/// that stance owns the crouch. A blind-fire clip that also wrote a pelvis drop
+/// would fight `INF_Cover_Low_Idle` for the same channel and win by being later
+/// in the layer stack, so a crouched shooter would stand up to hide.
+///
+/// Five joints — chest, two upper arms, two lower arms — which is over
+/// `AUTHORED_MIN_JOINTS` and is the same shape the throws are.
+fn blind_fire(r: &Rig) -> AnimClip {
+    let n = 8;
+    let times = times_of(BLIND_FIRE_S, n);
+    // The clip's own shape: rise over the first 45 %, hold to 75 %, recover a
+    // third of the way over the last quarter.
+    let shape = |i: usize| -> f64 {
+        let a = i as f64 / n as f64;
+        if a <= 0.45 {
+            a / 0.45
+        } else if a <= 0.75 {
+            1.0
+        } else {
+            1.0 - (a - 0.75) / 0.25 / 3.0
+        }
+    };
+    let mut tracks: Vec<JointTrack> = Vec::new();
+    // **Every rotation below is `bind * delta`** — `cover`'s rule, and its
+    // reason: this is a STANDING (or crouching) pose a small delta away from
+    // bind, so writing the local outright would put the shoulder wherever the
+    // clavicle's frame happens to point.
+    let of = |j: u16, q: [f32; 4]| -> [f32; 4] { quat_mul(r.bind_rot[j as usize], q) };
+    let of_opt = |j: Option<u16>, q: [f32; 4]| -> [f32; 4] { j.map(|j| of(j, q)).unwrap_or(q) };
+    // The chest, in the RIG's frame, written in the chest's own.
+    let chest_world = |i: usize| -> [f32; 4] {
+        let pitch = 12.0 + (34.0 - 12.0) * shape(i);
+        quat_mul(qx(pitch.to_radians()), qy(18.0_f64.to_radians()))
+    };
+    rot1(
+        &mut tracks,
+        r.chest(),
+        &times,
+        (0..=n)
+            .map(|i| of(r.chest(), r.in_frame_of(r.chest(), chest_world(i))))
+            .collect(),
+    );
+    // The arms, POINTED rather than rotated — `cover`'s `arm_dir`, verbatim,
+    // including the measured `across_sign`: the two rigs in this tree put the
+    // left shoulder on opposite sides of the origin.
+    let arm_dir = |side: usize, lift_deg: f64, across_deg: f64| -> [f64; 3] {
+        let side_sign = r.across_sign[side];
+        let (l, a) = (lift_deg.to_radians(), across_deg.to_radians());
+        [
+            side_sign * psin64(l) * psin64(a),
+            -pcos64(l),
+            psin64(l) * pcos64(a),
+        ]
+    };
+    let mut arm_local: [[Vec<[f32; 4]>; 2]; 2] = Default::default();
+    for i in 0..=n {
+        let t = shape(i);
+        for (side, slot) in arm_local.iter_mut().enumerate() {
+            let parent = if r.is_ancestor(r.chest(), r.upper_arm[side]) {
+                chest_world(i)
+            } else {
+                QUAT_ID
+            };
+            // Near arm: the cover stance's own start, and up over the top.
+            // Far arm: tucked, and it barely moves.
+            let (lift, across, fore_lift, fore_across) = if side == 0 {
+                (
+                    34.0 + (150.0 - 34.0) * t,
+                    26.0 + (8.0 - 26.0) * t,
+                    86.0 + (168.0 - 86.0) * t,
+                    66.0 + (4.0 - 66.0) * t,
+                )
+            } else {
+                (
+                    22.0 + (20.0 - 22.0) * t,
+                    12.0 + (22.0 - 12.0) * t,
+                    58.0 + (70.0 - 58.0) * t,
+                    28.0 + (44.0 - 28.0) * t,
+                )
+            };
+            let (upper_world, upper_local) = r.aim_under(
+                parent,
+                r.upper_arm[side],
+                r.lower_arm[side],
+                arm_dir(side, lift, across),
+            );
+            let (_, lower_local) = r.aim_under(
+                quat_mul(parent, upper_world),
+                r.lower_arm[side],
+                r.hand[side],
+                arm_dir(side, fore_lift, fore_across),
+            );
+            slot[0].push(of_opt(r.upper_arm[side], upper_local));
+            slot[1].push(of_opt(r.lower_arm[side], lower_local));
+        }
+    }
+    for (side, slot) in arm_local.iter_mut().enumerate() {
+        rot(
+            &mut tracks,
+            r.upper_arm[side],
+            &times,
+            std::mem::take(&mut slot[0]),
+        );
+        rot(
+            &mut tracks,
+            r.lower_arm[side],
+            &times,
+            std::mem::take(&mut slot[1]),
+        );
+    }
+    AnimClip::new("INF_Cover_BlindFire", tracks)
 }
 
 /// Hamilton product of two `[x, y, z, w]` quaternions.

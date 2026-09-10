@@ -1143,9 +1143,34 @@ impl HeroLog {
                 ))
             })
             .unwrap_or_else(|| "-".to_string());
+        // **THE SHOOTOUT COLUMNS** (wave WPN2e), APPENDED for the reason every
+        // block above them was: every column index a script already reads keeps
+        // its meaning. Neither is derivable from the columns in front, and both
+        // read the WORLD rather than a report:
+        //
+        // * `engaged` — how many responding units are pointing a weapon at
+        //   somebody **right now** (`inf_ecs::engage::engaged_units`, which
+        //   counts slots with a live target). A frame of an officer aiming has
+        //   to be triggered on this: the police arrive over tens of seconds and
+        //   the aim itself is a ray-gated decision that can go away between two
+        //   screenshots.
+        // * `incoming` — rounds in the air that the hero did **not** fire. The
+        //   pool carries a `shooter` per round, so this is "somebody is shooting
+        //   at me" as a number, which is what a frame of the hero under fire is
+        //   waited on. Zero on every level nobody has fired at the hero on.
+        //
+        // Both are zero for a session in which nobody is wanted, which is every
+        // session before this wave.
+        let engaged = inf_ecs::engage::engaged_units(sim.world());
+        let incoming = guid
+            .and_then(|g| {
+                inf_ecs::ballistics::round_pool(sim.world())
+                    .map(|p| p.rounds.iter().filter(|r| r.shooter != g).count())
+            })
+            .unwrap_or(0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1188,7 +1213,9 @@ impl HeroLog {
                 tail,
                 class,
                 attach,
-                lock
+                lock,
+                engaged,
+                incoming
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1202,11 +1229,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 32 fields wide since wave WPN2d, which the gate
+            // The row is 34 fields wide since wave WPN2e, which the gate
             // asserts against the armed branch above it and against the demo
             // README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

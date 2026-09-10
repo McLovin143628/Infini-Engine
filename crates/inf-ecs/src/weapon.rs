@@ -1685,6 +1685,20 @@ pub const THROW_TRIGGER: &str = "weapon_throw";
 /// machine cannot tell the two apart from a trigger alone.
 pub const MELEE_TRIGGER: &str = "melee_swing";
 
+/// **The one-shot a BLIND shot from cover plays** (wave WPN2e).
+///
+/// Its own name rather than [`FIRE_TRIGGER`], on [`MELEE_TRIGGER`]'s argument
+/// verbatim: a rig that played `weapon_fire` for a blind shot would stand the
+/// character up to aim down sights it is deliberately not using, and the whole
+/// point of blind fire is that the weapon clears the cover and the head does
+/// not.
+///
+/// Armed through [`crate::anim_bridge::set_anim_trigger`] whether or not a state
+/// machine is listening -- the same contract [`FIRE_TRIGGER`] and
+/// [`THROW_TRIGGER`] have, so a capsule with no rig still fires and a rig that
+/// grows the clip starts playing it with no gameplay change.
+pub const BLIND_FIRE_TRIGGER: &str = "weapon_blind_fire";
+
 /// The animation trigger a door kick arms — a P29-style one-shot, reached
 /// through `inf_ecs::anim_bridge::set_anim_trigger` exactly as the ragdoll's is.
 pub const KICK_TRIGGER: &str = "door_kick";

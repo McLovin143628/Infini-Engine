@@ -40,8 +40,8 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
-                  class,attach,lock
-                  — THIRTY-TWO columns, four rows a second, and NO header line:
+                  class,attach,lock,engaged,incoming
+                  — THIRTY-FOUR columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -70,10 +70,23 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                             cone loses it, so a frame of the indicator has to be
                             triggered on it.
 
+                  and 33-34 are WPN2e's:
+
+                    engaged  how many responding units are pointing a weapon at
+                             somebody RIGHT NOW. The police arrive over tens of
+                             seconds and the aim is a ray-gated decision that can
+                             go away between two screenshots, so a frame of an
+                             officer aiming is triggered on this and not on a
+                             wall clock.
+                    incoming rounds in the air the hero did NOT fire — "somebody
+                             is shooting at me", as a number. Zero on every level
+                             nobody has fired at the hero on.
+
                   The numbers above are ONE-based, which is how a person counts
                   columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
-                  so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`
-                  and `lock` is `$c[31]`.
+                  so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`,
+                  `lock` is `$c[31]`, `engaged` is `$c[32]` and `incoming` is
+                  `$c[33]`.
 demo.log          every step the driver took, with timings
 ```
 

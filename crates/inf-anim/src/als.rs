@@ -60,6 +60,11 @@ pub const BREATH_STATE: &str = "breath";
 pub const THROW_OVER_STATE: &str = "throw_over";
 /// See [`THROW_OVER_STATE`].
 pub const THROW_UNDER_STATE: &str = "throw_under";
+/// The state whose clip is the **blind-fire additive** (wave WPN2e) —
+/// `INF_Cover_BlindFire`, layered over whatever cover stance the machine is in
+/// rather than entered, because a character firing blind is still in cover and a
+/// state would replace the stance the shot is taken from.
+pub const BLIND_FIRE_STATE: &str = "cover_blind_fire";
 
 /// **The stance overlay every character wears** (wave WPN2b) —
 /// `ALS_StanceVariation_Normal`, layered over the idle through the upper-body
@@ -724,6 +729,19 @@ pub const LOCOMOTION_MAP: &[LocoSlot] = &[
         kind: SlotKind::Overlay,
         looping: false,
         clips: &[("INF_Throw_Under", O)],
+    },
+    // **BLIND FIRE** (wave WPN2e) -- the throws' third sibling, and an overlay
+    // for their reason one mode along: a character firing blind is still in
+    // cover, still crouched or still standing against its wall, and a STATE
+    // would replace the stance the whole shot is taken from. `LocoMode::Cover`
+    // rather than `Grounded` because it is only ever played there, which is what
+    // makes an inspector reading the map able to see that.
+    LocoSlot {
+        state: "cover_blind_fire",
+        mode: LocoMode::Cover,
+        kind: SlotKind::Overlay,
+        looping: false,
+        clips: &[("INF_Cover_BlindFire", O)],
     },
     // ── the BREATH (wave CHAR1b.2, carried item 128) ────────────────────
     //

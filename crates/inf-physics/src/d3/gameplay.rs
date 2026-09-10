@@ -456,6 +456,15 @@ pub struct GameplayReport {
     /// "somebody saw something" are indistinguishable, and a seed that silently
     /// recorded nothing would look identical to a seed that worked.
     pub witnessed: u32,
+    /// **Rounds fired BLIND from cover** this step (wave WPN2e) — the subset of
+    /// [`shots`](Self::shots) whose origin and direction came from the cover's
+    /// own surface rather than from the shooter's aim.
+    ///
+    /// Its own counter because "a character in cover fired" and "a character
+    /// fired without looking" are different facts, and a gate that could not
+    /// tell them apart would certify a course in which every shot from cover was
+    /// an aimed one.
+    pub blind_shots: u32,
     /// **Melee swings thrown** this step (wave WPN1) — the subset of
     /// [`shots`](Self::shots) that were an arc rather than a ray.
     ///
@@ -1897,7 +1906,60 @@ fn step_weapons(
         if !def.is_melee() && !from_weapon && inf_ecs::pose::evaluated_pose(world, guid).is_some() {
             report.muzzles_without_a_socket += 1;
         }
-        let dir = weapon::shot_direction_with(&def, yaw, pitch, shot_index, cone_deg);
+        // **BLIND FIRE** (wave WPN2e) — the one branch, and it is the hero's and
+        // the NPC's alike.
+        //
+        // The condition is a **behaviour and not a key**: in cover, trigger
+        // down, and **not aiming**. A player's right mouse button is what leans
+        // a character out of cover (`want_aim`, COV1's own field), so holding
+        // fire without it is *"shoot without looking"* — which is exactly what
+        // blind fire is, needs no new binding, and reads identically for an NPC
+        // whose peek duty cycle happens to be in its shut half
+        // (`d3::engage::is_blind_from_cover`).
+        //
+        // What changes is the round's ORIGIN and its DIRECTION, both from
+        // `inf_ecs::cover::blind_fire_shot`: out along the cover's own surface
+        // normal, from a point past the surface — over the top of a low cover,
+        // round the nearer end of a high one. A shot that left from where the
+        // hand actually is would start behind the wall and stop in it on segment
+        // zero, which is why the origin moves and not just the aim.
+        //
+        // The cone gains `BLIND_FIRE_CONE_DEG` on top of whatever the weapon,
+        // the stance and the bloom already resolved, and the pitch is **zero**:
+        // nobody aims a weapon they are not looking down.
+        //
+        // Inert for every character that is not in cover, which is every
+        // character on every level committed before wave COV1: one component
+        // read and an early `None`.
+        let blind = blind_fire_of(world, guid, entity, from.y);
+        let (from, dir, cone_deg) = match blind {
+            Some((origin, blind_yaw)) => {
+                let cone = cone_deg + inf_ecs::cover::BLIND_FIRE_CONE_DEG;
+                (
+                    origin,
+                    weapon::shot_direction_with(&def, blind_yaw, 0.0, shot_index, cone),
+                    cone,
+                )
+            }
+            None => (
+                from,
+                weapon::shot_direction_with(&def, yaw, pitch, shot_index, cone_deg),
+                cone_deg,
+            ),
+        };
+        if blind.is_some() {
+            report.blind_shots += 1;
+            // Its own one-shot, beside `FIRE_TRIGGER` and not instead of it:
+            // a rig that played `weapon_fire` for a blind shot would stand the
+            // character up to aim down sights it is deliberately not using.
+            inf_ecs::anim_bridge::set_anim_trigger(world, guid, weapon::BLIND_FIRE_TRIGGER);
+            // …and the AUTHORED additive itself (`INF_Cover_BlindFire`), on its
+            // own clock. A trigger is a request to a state machine that may have
+            // no such state; this is the layer the pose pass reads directly, and
+            // it is what puts the arm over the wall on a rig whose graph nobody
+            // has rebuilt.
+            inf_ecs::anim_bridge::start_blind_fire(world, guid, inf_anim::BLIND_FIRE_S);
+        }
         // **THE BRASS** (wave WPN2c) — one case per round that leaves a barrel,
         // thrown out of the weapon's own ejection port. A melee weapon ejects
         // nothing (a fist has no port), and neither does one whose port speed is
@@ -2064,6 +2126,33 @@ fn step_weapons(
 /// Sensors are not in it, and do not need to be: `AllSolid` is
 /// `QueryFilter::default().exclude_sensors()`, so a trigger volume cannot stop
 /// a bullet.
+/// **Whether this shot is a BLIND one, and where it leaves from** (wave WPN2e).
+///
+/// The ECS half of [`inf_ecs::cover::blind_fire_shot`]: the three fields the
+/// rule needs are on the character's own `MovementRuntime`, and the rule itself
+/// is pure and unit-tested without a world.
+///
+/// `None` for a character that is not in cover, one that is leaning out of it
+/// (`want_aim` — that character can see what it is shooting at), and one whose
+/// cover state is degenerate.
+///
+/// **One component read** on every character that is not in cover, which is
+/// every character on every level committed before wave COV1.
+fn blind_fire_of(
+    world: &EcsWorld,
+    guid: Uuid,
+    entity: inf_ecs::Entity,
+    muzzle_y: f64,
+) -> Option<(DVec3, f64)> {
+    let cm = world.world().get::<CharacterMovement>(entity)?;
+    if cm.mode != inf_ecs::components::MovementMode::Cover || cm.runtime.want_aim {
+        return None;
+    }
+    let _ = guid;
+    let (origin, yaw) = inf_ecs::cover::blind_fire_shot(&cm.runtime.cover, muzzle_y)?;
+    Some((origin.to_dvec3(), yaw))
+}
+
 fn shot_exclusions(
     world: &EcsWorld,
     bridge: &PhysicsBridge3D,

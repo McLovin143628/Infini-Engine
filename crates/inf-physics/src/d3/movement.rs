@@ -1145,6 +1145,14 @@ fn step_one(
     if cm.runtime.throw_s > 0.0 {
         cm.runtime.throw_s = (cm.runtime.throw_s - dt).max(0.0);
     }
+    // **The blind shot's one-shot clock** (wave WPN2e), beside the throw's and
+    // for its reason verbatim: a character firing blind from cover is still in
+    // cover, still crouched or still standing, and the clip is an upper-body
+    // additive over that stance. One saturating subtraction on a field that is
+    // zero for every character that has never fired blind.
+    if cm.runtime.blind_fire_s > 0.0 {
+        cm.runtime.blind_fire_s = (cm.runtime.blind_fire_s - dt).max(0.0);
+    }
 
     // ── 4. Mode resolution: the single table, asked once per candidate.
     let previous_mode = cm.mode;
