@@ -2275,9 +2275,33 @@ else {
     # 3. THE RESPONSE. The units have to DRIVE, so this is the long wait, and it
     #    is on `engaged` rather than on a clock: an officer that has arrived and
     #    has no line of sight is not a frame of an officer aiming at you.
-    $engaged = @(Wait-ForHero -Csv $heroCsv -What "a responding unit with its weapon on the hero (col 33)" -TimeoutS 150.0 `
-        -Predicate { param($c) ($c.Count -gt 32) -and ([int]$c[32] -gt 0) } `
-        -Out (Join-Path $OutDir "A2-officer-aiming.png"))[-1]
+    #
+    #    **AND THE HERO KEEPS FIRING WHILE IT WAITS** (WPN2e audit), which is not
+    #    decoration. `inf_ecs::engage::TRAIL_STALE_STEPS` is 180 steps -- THREE
+    #    SECONDS -- and the whole policy refuses a pair whose `last_seen` is
+    #    older than that, correctly: a suspect nobody has seen for three seconds
+    #    is a SEARCH and not a target. A file opened by EAR carries no
+    #    description either (you cannot describe a bang), so nothing on the
+    #    recognition path can refresh it. The first cut of this leg fired ten
+    #    rounds and then stood still for a hundred and fifty seconds, and what it
+    #    was actually asking for was an officer that shoots a man it has no idea
+    #    is there. Measured then: `peak heat 36, peak units on scene 1, peak
+    #    engaged 0` -- the town heard it, the car arrived, and the policy
+    #    correctly refused.
+    #
+    #    So the wait is a firefight. A burst every few seconds, `R` when the
+    #    magazine runs dry, which is what a player being shot at actually does.
+    $engaged = $false
+    for ($w = 0; ($w -lt 30) -and (-not $engaged); $w++) {
+        for ($t = 0; $t -lt 4; $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 200
+            [InfInput]::LeftUp(); Start-Sleep -Milliseconds 140
+        }
+        [InfInput]::Down(0x52); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x52)   # R
+        $engaged = @(Wait-ForHero -Csv $heroCsv -What "a responding unit with its weapon on the hero (col 33)" -TimeoutS 3.0 `
+            -Predicate { param($c) ($c.Count -gt 32) -and ([int]$c[32] -gt 0) } `
+            -Out (Join-Path $OutDir "A2-officer-aiming.png"))[-1]
+    }
     if ($engaged) {
         $shootFrames++
         $engRow = (Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
@@ -2325,7 +2349,13 @@ else {
         else { Say "SHOOTOUT: T pressed and nothing coverable was in reach" }
     }
     else {
-        Say "SHOOTOUT: no unit engaged inside 150 s -- the response never reached the hero"
+        # **THE FOUR NUMBERS, NOT ONE** (WPN2e audit). `engaged 0` is what you
+        # get when nobody heard the shot, when the file went cold, when the car
+        # never arrived, and when it arrived and could not see you. The columns
+        # below are what tell them apart -- see tools/demo/README.md.
+        $last = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+        Say ("SHOOTOUT: no unit engaged -- heat {0}, units on scene {1}, casings {2}" -f `
+            $last[34], $last[35], $last[27])
     }
 
     # What the session's own columns say about the shootout, quoted.
