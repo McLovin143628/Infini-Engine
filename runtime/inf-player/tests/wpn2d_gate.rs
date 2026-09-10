@@ -2589,23 +2589,41 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     // A shotgun's whole pull, timed, against the weapon phase's own budget.
+    //
+    // **THE PULL'S MARGINAL COST, NOT THE FIXTURE'S FIRST STEP** (the CI red of
+    // 2026-09-10). This timed the FIRST step of a fresh `Range` with the trigger
+    // held, which is the pull plus everything a cold fixture pays on its first
+    // step (allocations, first-touch page faults, the audio log's first
+    // growth): 99 us on the machine that wrote it once, 2 076 us on the same
+    // machine the next day, 1 930 us on the Ubuntu runner and 2 325 us on the
+    // Windows one, against a 1.5 ms ceiling the pull itself was nowhere near.
+    // The budget is a bound on the WEAPON phase, so the arm now warms the
+    // fixture, times a control step with the trigger released, then the pull
+    // step, and asserts the DIFFERENCE. Same process, same fixture, same
+    // machine: whatever a slow runner adds to both steps cancels, and what is
+    // left is what the pull costs.
     let mut s = Range::new(registry());
     s.arm(HERO, "remington_870");
     s.aim(HERO, 0.0, 0.0);
+    s.hold_trigger(HERO, false);
+    let _warm = s.step();
+    let t_control = std::time::Instant::now();
+    let _control = s.step();
+    let control_us = t_control.elapsed().as_secs_f64() * 1e6;
     s.hold_trigger(HERO, true);
     let t1 = std::time::Instant::now();
     let rep = s.step();
     let step_us = t1.elapsed().as_secs_f64() * 1e6;
+    let pull_us = (step_us - control_us).max(0.0);
     println!(
-        "one 8-pellet pull: {step_us:.1} us for the whole gameplay step, {} \
-         casts (budget {:.1} ms)",
+        "one 8-pellet pull: {step_us:.1} us for the whole gameplay step, {control_us:.1} us for the same step with the trigger released, {pull_us:.1} us for the pull itself, {} casts (budget {:.1} ms)",
         rep.rounds.shot_rays,
         inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     assert_eq!(rep.rounds.pellets, 8);
     assert!(
-        step_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
-        "one 8-pellet pull cost {step_us:.1} us against a {:.1} ms step budget",
+        pull_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+        "one 8-pellet pull cost {pull_us:.1} us over the same step without it ({step_us:.1} vs {control_us:.1} us) against a {:.1} ms step budget",
         inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     // The enclosure probe is SHARED across the pull: eight pellets and six
