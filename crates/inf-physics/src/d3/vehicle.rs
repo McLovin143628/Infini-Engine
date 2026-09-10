@@ -50,9 +50,9 @@ use std::collections::BTreeSet;
 use glam::DVec3;
 use uuid::Uuid;
 
-use inf_ecs::components::Transform;
+use inf_ecs::components::{Collider3D, Transform};
 use inf_ecs::math::Vec3d;
-use inf_ecs::vehicle::{ChassisState, WheelContact, WheelForce};
+use inf_ecs::vehicle::{ChassisState, SurfaceClass, WheelContact, WheelForce};
 use inf_ecs::EcsWorld;
 
 use super::query::CastTargets;
@@ -116,6 +116,97 @@ pub fn step_vehicles(
     out
 }
 
+/// How many rays one tyre's footprint is sampled with (wave VEH3a).
+///
+/// Four, the bottom of the research doc's *4–8 raycasts per tire footprint*
+/// band. The cost is linear and it is paid every step by every simulated wheel,
+/// so the number that matters is the measured one in `VEHICLE_STEP_BUDGET_MS`'s
+/// own arm rather than the one the doc suggests.
+pub const FOOTPRINT_SAMPLES: usize = 4;
+
+/// Half a tyre's width, as a fraction of its radius — where the outer pair of
+/// footprint rays sit.
+///
+/// 0.30 of the radius is a 0.21 m half-width on the default 0.35 m wheel, i.e. a
+/// 205-section tyre, which is what the drawn tyre already is
+/// (`inf_ecs::vehicle::TYRE_WIDTH_FRAC`).
+const FOOTPRINT_HALF_WIDTH_FRAC: f64 = 0.30;
+
+/// Half a contact patch's length, as a fraction of the tyre's radius.
+///
+/// 0.22 of the radius is a 15 cm patch on the default wheel, which is a loaded
+/// road tyre's. Shorter than it is wide, which is why the pair that matters at a
+/// kerb is the LATERAL one.
+const FOOTPRINT_HALF_LENGTH_FRAC: f64 = 0.22;
+
+/// **What surface a hit entity is** (wave VEH3a), from the field that has been
+/// on `Collider3D` since P12.1 and that the tyre model has never read.
+///
+/// # A friction is not a surface identity, and mapping it as one cost a wave
+///
+/// The first cut nearest-matched `Collider3D::friction` against
+/// [`SurfaceClass::dry_mu`], which reads as the obvious thing to do and is a
+/// category error: that field is the **solver's** Coulomb coefficient for
+/// box-on-box contact, chosen by whoever wanted a crate to stop sliding, and it
+/// is not a tyre's µ. Measured immediately — the feel-table fixture's ground
+/// carries `friction: 0.9`, which nearest-matches to concrete (0.95) and cost
+/// the sports row **five per cent** of its grip. That five per cent took its
+/// 0–100 km/h from **3.98 s to 10.70**, because a car whose drive force sits
+/// just inside its traction limit falls out of it and its traction control then
+/// throttles the launch.
+///
+/// So the mapping is BANDED, and the band that matters is the top one:
+///
+/// * **`friction >= 0.85` is a SEALED surface** — asphalt, µ 1.0. Both values in
+///   committed content land here (the Ring-0 default 0.5 is exempt below, and
+///   the ground fixtures use 0.9), so no level this repository ships changes
+///   grip at all.
+/// * below that, the value IS read as the surface's own µ and nearest-matched,
+///   so an author says *this is gravel* with `friction = 0.6` and *this is mud*
+///   with `0.35` — through a field that already exists, at zero schema cost,
+///   which is what the VEH3a price ruled.
+/// * the Ring-0 **default is exempt**, and that is load-bearing:
+///   `Collider3D::default().friction` is 0.5, which nearest-matches to sand
+///   (0.45), so without the branch every kerb, bridge and building in every
+///   committed level would become a beach.
+///
+/// What this leaves for a later wave, by name: the TERRAIN heightfield answers
+/// asphalt like everything else, so the island's grass verges are not soft yet.
+/// The honest door for that is the P19 biome map read at the contact point, and
+/// it is a lookup this bridge cannot reach today.
+fn surface_under(world: &EcsWorld, guid: Uuid) -> SurfaceClass {
+    let Some(entity) = world.entity_of(guid) else {
+        return SurfaceClass::Asphalt;
+    };
+    let Some(col) = world.world().get::<Collider3D>(entity) else {
+        return SurfaceClass::Asphalt;
+    };
+    if !col.friction.is_finite()
+        || col.friction >= SEALED_SURFACE_FRICTION
+        || (col.friction - DEFAULT_COLLIDER_FRICTION).abs() < 1e-9
+    {
+        return SurfaceClass::Asphalt;
+    }
+    let mut best = SurfaceClass::Asphalt;
+    let mut best_err = f64::INFINITY;
+    for s in SurfaceClass::all() {
+        let err = (s.dry_mu() - col.friction).abs();
+        if err < best_err {
+            best_err = err;
+            best = s;
+        }
+    }
+    best
+}
+
+/// At or above this, a collider's friction says *sealed road* rather than a µ.
+const SEALED_SURFACE_FRICTION: f64 = 0.85;
+
+/// `Collider3D::default().friction`, restated here because
+/// [`surface_under`] must recognise *the author said nothing* and a value read
+/// from the type it is comparing against would agree with anything.
+const DEFAULT_COLLIDER_FRICTION: f64 = 0.5;
+
 fn step_one(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -152,8 +243,18 @@ fn step_one(
         exclude.insert(c);
     }
 
-    // ── 1. the rays. One per wheel, `O(wheels)`.
-    let rays: Vec<(DVec3, f64, f64)> = {
+    // ── 1. the rays. FOUR per wheel since wave VEH3a, `O(4 · wheels)`.
+    //
+    // The research doc asks for *4-8 raycasts per tire footprint*, and the reason
+    // is the kerb: one ray at the wheel's centre sees a kerb as a step change —
+    // the wheel is either fully on it or fully off it — while four at the corners
+    // of the contact patch see it arrive under one edge first, which is what a
+    // real tyre does. The wheel rides on the HIGHEST ground under its patch (the
+    // shortest ray), and the surface it works against is the four normals'
+    // average, which is the bilinear smoothing the 15.69° snap on open DTM relief
+    // has been waiting for since P29.7.
+    let (fwd_b, right_b, _) = state.basis();
+    let rays: Vec<[(DVec3, f64); FOOTPRINT_SAMPLES]> = {
         let v = bridge.vehicle_of(chassis)?;
         let rest = v.suspension_rest_m();
         v.rig()
@@ -164,36 +265,97 @@ fn step_one(
                 // extension; the strut anchor is `rest` above it, and the ray
                 // reaches one radius past the extended centre.
                 let anchor_local = wm.mount_local.to_dvec3() + DVec3::Y * rest;
-                (
-                    state.position + state.rotation * anchor_local,
-                    rest + wm.radius_m,
-                    wm.radius_m,
-                )
+                let anchor = state.position + state.rotation * anchor_local;
+                // The patch, in the CHASSIS frame rather than the steered wheel's:
+                // the corners of a footprint are a property of the wheel's own
+                // geometry and the steering angle would rotate them by at most a
+                // few degrees at the speeds a kerb is met at. Half a tyre's width
+                // across, and a contact patch's half-length along.
+                let half_w = wm.radius_m * FOOTPRINT_HALF_WIDTH_FRAC;
+                let half_l = wm.radius_m * FOOTPRINT_HALF_LENGTH_FRAC;
+                let max_toi = rest + wm.radius_m;
+                [
+                    (anchor - right_b * half_w - fwd_b * half_l, max_toi),
+                    (anchor + right_b * half_w - fwd_b * half_l, max_toi),
+                    (anchor - right_b * half_w + fwd_b * half_l, max_toi),
+                    (anchor + right_b * half_w + fwd_b * half_l, max_toi),
+                ]
             })
             .collect()
     };
-    let hits: Vec<Option<WheelContact>> = rays
+    let hits: Vec<Option<(WheelContact, Uuid)>> = rays
         .iter()
-        .map(|(origin, max_toi, _)| {
-            bridge
-                .world_mut()
-                // **Everything solid**, not just static geometry: a car drives
-                // over a crate and up a fractured chunk, and a suspension ray
-                // that skipped dynamic bodies would put the wheel through them.
-                //
-                // `AllSolid` and not `All` (island wave VEH1a): P29.7 shipped
-                // this with `All`, which includes sensors, and carried the
-                // consequence as a named bound — *"a car crossing a trigger
-                // volume would ride on it"*. A trigger is a description of a
-                // region and exerts no force, so a suspension pushing off one is
-                // a car floating on a checkpoint. Measured before the filter:
-                // `a_wheel_does_not_ride_on_a_trigger_volume`.
-                .cast_ray_where(*origin, -up, *max_toi, &exclude, CastTargets::AllSolid)
-                .map(|hit| WheelContact {
-                    point: hit.point,
-                    normal: hit.normal,
-                    distance_m: hit.toi,
-                })
+        .map(|corners| {
+            let mut point = DVec3::ZERO;
+            let mut normal = DVec3::ZERO;
+            let mut nearest = f64::INFINITY;
+            let mut found = 0usize;
+            let mut nearest_guid: Option<Uuid> = None;
+            for (origin, max_toi) in corners.iter() {
+                let hit = bridge
+                    .world_mut()
+                    // **Everything solid**, not just static geometry: a car drives
+                    // over a crate and up a fractured chunk, and a suspension ray
+                    // that skipped dynamic bodies would put the wheel through
+                    // them.
+                    //
+                    // `AllSolid` and not `All` (island wave VEH1a): P29.7 shipped
+                    // this with `All`, which includes sensors, and carried the
+                    // consequence as a named bound — *"a car crossing a trigger
+                    // volume would ride on it"*. A trigger is a description of a
+                    // region and exerts no force, so a suspension pushing off one
+                    // is a car floating on a checkpoint. Measured before the
+                    // filter: `a_wheel_does_not_ride_on_a_trigger_volume`.
+                    .cast_ray_where(*origin, -up, *max_toi, &exclude, CastTargets::AllSolid);
+                let Some(hit) = hit else { continue };
+                found += 1;
+                point += hit.point;
+                normal += hit.normal;
+                if hit.toi < nearest {
+                    nearest = hit.toi;
+                    nearest_guid = bridge.guid_of_collider(hit.collider);
+                }
+            }
+            if found == 0 {
+                return None;
+            }
+            let n = found as f64;
+            // The BILINEAR normal: the mean of what the corners found, normalized.
+            // A patch straddling a kerb edge gets the average of the road's normal
+            // and the kerb face's, which is the direction a tyre actually pushes
+            // against there.
+            let blended = (normal / n).normalize_or_zero();
+            Some((
+                WheelContact {
+                    point: point / n,
+                    // The wheel rests on the HIGHEST ground under its patch, so
+                    // the suspension takes the shortest ray. Averaging the
+                    // distances instead would let a wheel sink half-way into a
+                    // kerb before the spring noticed it.
+                    normal: if blended == DVec3::ZERO { up } else { blended },
+                    distance_m: nearest,
+                },
+                nearest_guid.unwrap_or_else(Uuid::nil),
+            ))
+        })
+        .collect();
+
+    // ── 1b. WHAT EACH WHEEL IS STANDING ON (wave VEH3a) ──────────────────────
+    //
+    // The lookup happens HERE, once per wheel per step, because this is the only
+    // place the hit collider and the world are both in scope. What reaches the
+    // model is one number per wheel (`WheelState::mu_surface`), so the tyre never
+    // learns what a collider is and `surface_mu` has exactly one caller.
+    // The bridge publishes WHAT THE GROUND IS and stops there. What that ground
+    // is WORTH is the car's own business — its compound row is a tunable, live
+    // on `self.tuning`, and a µ computed out here would silently ignore a tune
+    // made through the live-tuning door. So `surface_mu` is called by the model,
+    // once, with both halves in scope.
+    let surfaces: Vec<SurfaceClass> = hits
+        .iter()
+        .map(|h| match h {
+            Some((_, guid)) => surface_under(world, *guid),
+            None => SurfaceClass::Asphalt,
         })
         .collect();
 
@@ -201,8 +363,9 @@ fn step_one(
     forces.clear();
     let (grounded, load_n, poses) = {
         let v = bridge.vehicle_mut(chassis)?;
-        for (state, hit) in v.wheels_mut().iter_mut().zip(hits) {
-            state.contact = hit;
+        for ((state, hit), class) in v.wheels_mut().iter_mut().zip(hits).zip(surfaces) {
+            state.contact = hit.map(|(c, _)| c);
+            state.surface = class;
         }
         v.solve(state, dt, forces);
         let grounded = v.wheels().iter().filter(|w| w.contact.is_some()).count();

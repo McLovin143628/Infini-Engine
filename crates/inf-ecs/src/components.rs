@@ -3106,7 +3106,18 @@ pub struct VehicleClass {
     /// (wave VEH3a).
     ///
     /// Slip power is the friction force times the sliding speed, which is the
-    /// energy actually going into the rubber. A 40 kW burnout is 36 C/s.
+    /// energy actually going into the rubber.
+    ///
+    /// **Derived from thermal mass, not dialled in**: a 10 kg tyre carcass at
+    /// about 1.5 kJ/(kg·K) is 15 kJ per degree, so a kilowatt for a second is
+    /// 1/15 of a degree. A drag burnout — 10 kN sliding at 30 m/s, 300 kW — is
+    /// 20 °C/s, which takes a tyre past 100 °C in five seconds; a hard traction-
+    /// limited launch is 15 kW and adds a degree a second, which is nothing.
+    ///
+    /// It was 0.9 first, and that is what dialling in costs: at that rate a
+    /// sports car's own launch cooked its tyres to the 250 °C ceiling and lost
+    /// 41 % of its grip on the way, taking the VEH2a feel table's 0-100 from
+    /// **3.98 s to 10.70**.
     pub tyre_heat_rate: f64,
     /// The temperature at which this compound grips best, Celsius
     /// (wave VEH3a).

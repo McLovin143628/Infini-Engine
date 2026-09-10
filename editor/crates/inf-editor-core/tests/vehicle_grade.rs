@@ -154,6 +154,14 @@ fn ramp_world(grade: f64, id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
 /// simply drove off the end of the world — it reported a stop that never happened
 /// because it was in free fall, `inf` metres from where the brakes went on.
 fn flat_world(id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
+    flat_world_on(id, 0.9)
+}
+
+/// [`flat_world`] with the ground's `Collider3D::friction` chosen — which is how
+/// wave VEH3a lets a fixture say *this is grass* without a schema field
+/// (`inf_physics::d3::vehicle::surface_under`). `0.9` is the sealed-road band
+/// every other caller uses.
+fn flat_world_on(id: &str, friction: f64) -> (SceneDoc, PhysicsBridge3D, f64) {
     let def = *inf_editor_core::vehicle::island_vehicles()
         .get(id)
         .unwrap_or_else(|| panic!("the catalogue has no `{id}` row"));
@@ -175,7 +183,7 @@ fn flat_world(id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
         .insert(inf_ecs::components::Collider3D {
             shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
             half_extents: inf_ecs::math::Vec3d::new(4_000.0, 0.5, 4_000.0),
-            friction: 0.9,
+            friction,
             ..Default::default()
         });
     inf_editor_core::vehicle::spawn_vehicle(
@@ -629,4 +637,115 @@ fn every_catalogue_row_sprints_stops_and_tops_out_inside_its_own_spec() {
             spec.top_frac.1
         );
     }
+}
+
+/// **THE SURFACE ARM** (wave VEH3a): the same car, the same speed, the same
+/// brake — and forty metres more to stop on grass than on tarmac.
+///
+/// The research doc's own table is asphalt 1.00, gravel 0.60, grass 0.55. Until
+/// this wave the tyre model read none of it: grip was `lateral_grip` and
+/// `longitudinal_grip` and nothing else, and `Collider3D::friction` — which has
+/// existed since P12.1 — reached no wheel. A car braked identically on a
+/// motorway and in a field.
+///
+/// Measured rather than asserted: the stopping distance from 100 km/h on each of
+/// the six surfaces is printed, and the claims are the ORDER (every softer
+/// surface is longer) plus the two the doc names by number.
+///
+/// The compound row is the second half, and it is the half a single grip scalar
+/// could never express: the same car on the same grass, with
+/// `tyre_surface_set = 2` (off-road) instead of `0` (road), stops shorter.
+#[test]
+fn a_car_brakes_on_the_surface_it_is_actually_on() {
+    // The surfaces, and the `Collider3D::friction` an author writes for each.
+    // 0.9 is the sealed band; the rest are the doc's own µ.
+    let surfaces: [(&str, f64); 4] = [
+        ("asphalt", 0.9),
+        ("gravel", 0.60),
+        ("grass", 0.55),
+        ("mud", 0.35),
+    ];
+    let stop_from = |friction: f64, compound: f64| -> f64 {
+        let (mut doc, mut bridge, _) = flat_world_on("sedan", friction);
+        if compound != 0.0 {
+            if let Some(v) = bridge.vehicle_mut(CAR) {
+                assert!(v.tune("tyre_surface_set", compound), "the compound row");
+            }
+        }
+        for _ in 0..90 {
+            step(doc.world_mut(), &mut bridge, VehicleControls::default());
+        }
+        let speed = |b: &PhysicsBridge3D| -> f64 {
+            b.body_of(CAR)
+                .and_then(|body| b.world().body_linvel(body))
+                .map(|v| DVec3::new(v.x, 0.0, v.z).length())
+                .unwrap_or(0.0)
+        };
+        // Up to speed under power — on THIS surface, so a soft one takes longer
+        // to get there and that is fine; what is timed is the stop.
+        let full = VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..3_600 {
+            step(doc.world_mut(), &mut bridge, full);
+            if speed(&bridge) >= 27.78 {
+                break;
+            }
+        }
+        let reached = speed(&bridge);
+        assert!(
+            reached > 20.0,
+            "the car only reached {reached} m/s on friction {friction}, so the \
+             stop below is not from a comparable speed"
+        );
+        let from = car_at(&doc);
+        let brake = VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..3_600 {
+            step(doc.world_mut(), &mut bridge, brake);
+            if speed(&bridge) < 0.5 {
+                break;
+            }
+        }
+        // Normalised to a 100 km/h stop, since a soft surface may not have
+        // reached it: distance scales with v², which is the honest correction.
+        (car_at(&doc) - from).length() * (27.78 / reached).powi(2)
+    };
+
+    let mut last = 0.0f64;
+    let mut measured: Vec<(&str, f64)> = Vec::new();
+    for (name, friction) in surfaces {
+        let d = stop_from(friction, 0.0);
+        println!("THE SURFACE ARM: a sedan stops from 100 km/h in {d:6.1} m on {name}");
+        measured.push((name, d));
+        assert!(
+            d > last,
+            "{name} stopped in {d} m, no further than the harder surface before \
+             it ({last} m) — the µ table is not reaching the contact"
+        );
+        last = d;
+    }
+    let asphalt = measured[0].1;
+    let grass = measured[2].1;
+    assert!(
+        grass > asphalt * 1.4,
+        "grass stopped in {grass} m against tarmac's {asphalt} — the doc's table \
+         is 0.55 against 1.00 and this is barely a difference"
+    );
+
+    // THE COMPOUND ROW: off-road tyres on the same grass, same car, same brake.
+    let road = stop_from(0.55, 0.0);
+    let off = stop_from(0.55, 2.0);
+    println!(
+        "THE COMPOUND ROW: on grass, road tyres stop in {road:.1} m and off-road \
+         tyres in {off:.1} m"
+    );
+    assert!(
+        off < road * 0.95,
+        "off-road tyres stopped in {off} m against road tyres' {road} on the \
+         same grass — `tyre_surface_set` reaches nothing"
+    );
 }

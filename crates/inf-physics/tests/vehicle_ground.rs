@@ -445,25 +445,51 @@ impl Vehicle for ScrambledNormals {
     }
 }
 
-/// **THE VERDICT: the snap reaches no force, so the model needs no smoothing.**
+/// **THE NORMAL REACHES THE FORCE, AND A GARBAGE NORMAL CHANGES THE TRACE**
+/// (wave VEH3a — this arm is P29.7's tripwire, fired).
 ///
-/// Two identical rigs are driven 600 steps of throttle and steer across the
-/// rough heightfield. One runs the shipped [`RaycastVehicle`]; the other runs
-/// the same class behind [`ScrambledNormals`], which replaces every contact
-/// normal with a direction the ground could not possibly have. The two poses
-/// agree **to the bit**.
+/// # What this arm used to say, and why it said it
 ///
-/// That is the whole disposition of clause 1's smoothing candidate.
-/// `RaycastVehicle::solve` pushes the suspension along the **chassis up** (on
-/// purpose — projecting onto the contact normal is how a car slides sideways off
-/// a ramp it should drive up) and takes its friction basis from the steered
-/// wheel's own axes, so the surface normal is never an input. Smoothing it would
-/// have been a repair to a number no wheel is a function of.
+/// From P29.7 until VEH3a it was `the_snapped_normal_reaches_no_force_in_the_
+/// model`, and its verdict was the opposite of this one: two identical rigs
+/// driven 600 steps across the rough heightfield, one of them behind
+/// [`ScrambledNormals`], agreeing **to the bit**. That was true, and it was the
+/// whole disposition of the cell-diagonal snap this file measures (0.06° on a
+/// levelled corridor, **15.69°** on open DTM relief): `RaycastVehicle::solve`
+/// pushed the suspension along the chassis up and took its friction basis from
+/// the steered wheel's own axes, so the surface normal was never an input.
+/// Smoothing it would have been a repair to a number no wheel was a function
+/// of.
 ///
-/// The arm counts the scrambles, because "they agreed" is satisfied perfectly by
-/// two rigs that never touched the ground.
+/// The arm was written to go RED the day a class read the normal, and its own
+/// commit says so. **This is that day.**
+///
+/// # What reads it now
+///
+/// `inf_ecs::vehicle::TyreContext::camber_at`: a tyre's EFFECTIVE camber is
+/// the class's static `camber_deg` plus the contact plane's own inclination
+/// across the wheel, `asin(n · right)`. An upright wheel on a cambered road is
+/// still a cambered wheel, so the term survives a `camber_deg` of zero — which
+/// is what every committed level authors — and camber enters the magic formula
+/// twice, as thrust and as a second-order peak loss.
+///
+/// The suspension still pushes along the **chassis up**, and that is
+/// deliberate and unchanged: projecting it onto the contact normal is how a
+/// car slides sideways off a ramp it should drive up. What the normal reaches
+/// is the TYRE, which is where a surface's slope belongs.
+///
+/// # And the snap is answered at the wheel, not by smoothing the heightfield
+///
+/// The other half of the same clause: the normal a wheel sees is now the
+/// **average of four**, one per footprint corner, so a patch straddling a kerb
+/// edge works against the mean of the road's normal and the kerb face's rather
+/// than against whichever cell diagonal a single centre ray happened to land
+/// on.
+///
+/// The arm counts the scrambles, because "they differed" is satisfied by two
+/// rigs that never touched the ground.
 #[test]
-fn the_snapped_normal_reaches_no_force_in_the_model() {
+fn a_garbage_contact_normal_changes_the_trace() {
     let controls = VehicleControls {
         throttle: 1.0,
         steer: 0.25,
@@ -541,13 +567,23 @@ fn the_snapped_normal_reaches_no_force_in_the_model() {
          contact normal replaced ({grounded} wheel contacts of a possible 2400, \
          {ran:.2} m from the start)"
     );
-    assert_eq!(
+    assert_ne!(
         plain.pose_bits(),
         scrambled.pose_bits(),
-        "replacing every wheel contact normal moved the car {travelled} m — the \
-         model DOES read `WheelContact::normal`, so the cell-diagonal snap this \
-         file measures is a force error and the wheel-side smoothing clause 1 \
-         routed is owed"
+        "replacing every one of {grounded} wheel contact normals with a \
+         direction the ground could not have moved the car {travelled} m — \
+         i.e. NOT AT ALL. The model has stopped reading \
+         `WheelContact::normal`, so the camber term wave VEH3a landed is dead \
+         code and the 15.69 degree snap on open DTM relief is once again a \
+         number nothing is a function of"
+    );
+    // …and it is a REAL divergence rather than a last-digit one, so this arm
+    // cannot be satisfied by float noise.
+    assert!(
+        travelled > 0.05,
+        "the two rigs ended {travelled} m apart — the normal reaches the \
+         force, but by so little that this arm is measuring rounding rather \
+         than a camber term"
     );
 }
 
@@ -905,16 +941,19 @@ fn the_vehicle_phase_asks_four_questions_a_car_and_costs_what_it_prints() {
             world.propagate();
         }
 
-        // THE COUNT: one ray a wheel, four wheels a car, and nothing else.
+        // THE COUNT: FOUR rays a wheel since wave VEH3a (one per footprint
+        // corner, `inf_physics::d3::vehicle::FOOTPRINT_SAMPLES`), four wheels a
+        // car, and nothing else.
         let before = bridge.world().queries();
         let out = inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
         let asked = bridge.world().queries() - before;
         assert_eq!(out.len(), n, "the phase reported {} of {n} cars", out.len());
         assert_eq!(
             asked,
-            4 * n as u64,
+            16 * n as u64,
             "the vehicle phase asked the world {asked} questions for {n} cars; \
-             it casts one ray per wheel and a rig has four, so this is {} per \
+             it casts FOUR rays per wheel and a rig has four wheels, so \
+             this is {} per \
              car",
             asked as f64 / n as f64
         );

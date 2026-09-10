@@ -777,8 +777,9 @@ pub struct VehicleTuning {
     /// How fast a tyre sheds heat, per second, per degree above ambient
     /// (wave VEH3a).
     ///
-    /// A time constant of about 17 s standing still, and faster with air
-    /// moving over it -- which is why a lap cools what a burnout heated.
+    /// A time constant of about 50 s standing still and 12 s at 30 m/s, which is
+    /// why a lap cools what a burnout heated and a car left at the kerb does not
+    /// cool instantly.
     pub tyre_cool_rate: f64,
     /// The share of grip a tyre loses per 100 C away from
     /// [`tyre_optimum_c`](Self::tyre_optimum_c) (wave VEH3a).
@@ -790,10 +791,25 @@ pub struct VehicleTuning {
     /// (wave VEH3a).
     ///
     /// Slip power is the friction force times the sliding speed, which is the
-    /// energy actually going into the rubber. A 40 kW burnout is 36 C/s.
+    /// energy actually going into the rubber.
+    ///
+    /// **Derived from thermal mass, not dialled in**: a 10 kg tyre carcass at
+    /// about 1.5 kJ/(kg·K) is 15 kJ per degree, so a kilowatt for a second is
+    /// 1/15 of a degree. A drag burnout — 10 kN sliding at 30 m/s, 300 kW — is
+    /// 20 °C/s, which takes a tyre past 100 °C in five seconds; a hard traction-
+    /// limited launch is 15 kW and adds a degree a second, which is nothing.
+    ///
+    /// It was 0.9 first, and that is what dialling in costs: at that rate a
+    /// sports car's own launch cooked its tyres to the 250 °C ceiling and lost
+    /// 41 % of its grip on the way, taking the VEH2a feel table's 0-100 from
+    /// **3.98 s to 10.70**.
     pub tyre_heat_rate: f64,
-    /// The temperature at which this compound grips best, Celsius
-    /// (wave VEH3a).
+    /// **The temperature grip starts to fall above**, Celsius (wave VEH3a).
+    ///
+    /// One-sided: a tyre below this is simply a tyre. See
+    /// [`heat_grip_factor`](crate::vehicle::heat_grip_factor) for the
+    /// measurement that decided it — a two-sided window spawns every car in the
+    /// world at 0.84 of its grip.
     pub tyre_optimum_c: f64,
     /// How many inner tyre/suspension solves run per fixed step (wave VEH3a).
     ///
@@ -981,9 +997,9 @@ impl Default for VehicleTuning {
             turbo_boost_max: 0.0,
             turbo_lag_s: 0.15,
             turbo_spool_s: 0.7,
-            tyre_cool_rate: 0.06,
+            tyre_cool_rate: 0.02,
             tyre_heat_grip_loss: 0.25,
-            tyre_heat_rate: 0.9,
+            tyre_heat_rate: 0.07,
             tyre_optimum_c: 85.0,
             tyre_substeps: 4.0,
             tyre_surface_set: 0.0,
@@ -3135,6 +3151,30 @@ pub struct WheelState {
     /// ([`aid_torque_cap_nm`]) and this is how much of it survived. What a HUD
     /// would draw, and what a test reads to see the aid engage.
     pub tc_cut: f64,
+
+    // ── the contact and the rubber (wave VEH3a) ─────────────────────────────
+    /// **This tyre's temperature**, Celsius — integrated by [`solve`] from the
+    /// slip power the contact patch actually absorbed.
+    ///
+    /// Runtime state, never serialized, and the reason it is on the WHEEL rather
+    /// than on the vehicle: a burnout heats the driven pair and leaves the other
+    /// two cold, which is the whole reason a tyre model has a temperature at all.
+    ///
+    /// [`solve`]: Vehicle::solve
+    pub temp_c: f64,
+    /// **The µ multiplier this contact is worth** — [`surface_mu`]'s answer for
+    /// the surface under this wheel, this class's compound and the weather.
+    ///
+    /// A READOUT, written by [`solve`] from [`surface`](Self::surface) and this
+    /// class's own compound row — what the telemetry HUD draws. `1.0` is dry
+    /// asphalt under a road tyre, which is what every vehicle in this repository
+    /// drove on before wave VEH3a.
+    ///
+    /// [`solve`]: Vehicle::solve
+    pub mu_surface: f64,
+    /// **What this wheel is standing on** — what the audio, the particle waves
+    /// and the telemetry HUD read instead of each deciding for themselves.
+    pub surface: SurfaceClass,
 }
 
 impl WheelState {
@@ -3146,6 +3186,13 @@ impl WheelState {
         Self {
             length_m: rest_length_m,
             tc_cut: 1.0,
+            // A cold tyre on dry asphalt. `Default` cannot say either — a derived
+            // `temp_c` is 0 °C, which is a frozen tyre, and a derived
+            // `mu_surface` is 0, which is a car on ice — so every construction
+            // site goes through here.
+            temp_c: TYRE_AMBIENT_C,
+            mu_surface: 1.0,
+            surface: SurfaceClass::Asphalt,
             ..Default::default()
         }
     }
@@ -3801,6 +3848,49 @@ pub fn shift_target(
 /// The falling branch is the whole point and is what P29.7's model could not
 /// have: past the peak a tyre grips **less**, so a slide is something a driver
 /// has to correct rather than a state the car settles into comfortably.
+/// **Both axes' resolved curves** (wave VEH3a) — what a tyre IS, once the `0`
+/// sentinels have been derived and `B` has been solved.
+///
+/// It exists because resolving is not free: `Pacejka::solve_b` runs twelve Newton
+/// steps with a portable `atan` in each, and the force is evaluated twice per
+/// wheel per step. Resolving inside the force cost **16.88 µs a car** against
+/// VEH2a's 1.30 — a thirteen-fold step-cost regression measured at 64 cars, and
+/// 1.08 ms against a 0.5 ms budget. Hoisted to once per vehicle per step it is
+/// back inside it.
+///
+/// The lesson is not "cache things": it is that a *derivation* placed at the
+/// innermost call site is a derivation run at the innermost rate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TyreCurves {
+    /// The longitudinal axis's curve.
+    pub long: Pacejka,
+    /// The lateral axis's curve.
+    pub lat: Pacejka,
+}
+
+impl TyreCurves {
+    /// Resolve both axes from a class. Once per vehicle per step, never per
+    /// wheel and never per force.
+    pub fn of(t: &VehicleTuning) -> Self {
+        Self {
+            long: t.pacejka_long(),
+            lat: t.pacejka_lat(),
+        }
+    }
+
+    /// The same pair with both stiffnesses scaled — what tyre heat does, applied
+    /// per wheel because each wheel has its own temperature.
+    pub fn softened(self, heat: f64) -> Self {
+        if heat >= 1.0 {
+            return self;
+        }
+        Self {
+            long: self.long.with_b(self.long.b * heat),
+            lat: self.lat.with_b(self.lat.b * heat),
+        }
+    }
+}
+
 /// **The magic formula's coefficients for one axis** (wave VEH3a).
 ///
 /// `D` is not here: it is the peak friction, and this engine already computes it
@@ -4085,6 +4175,15 @@ pub enum SurfaceClass {
 /// How many surfaces the table has — the arity a compound row must cover.
 pub const SURFACE_COUNT: usize = 6;
 
+/// The air temperature a tyre cools toward, Celsius (wave VEH3a).
+///
+/// A Ring-0 constant rather than a class field, because how warm the air is is a
+/// property of the WORLD and not of a car — the same argument the surface table
+/// is built on. The P17 weather state owns a real ambient and the hook for it is
+/// [`Vehicle::solve`]'s own `TyreContext`; until a wave routes it, twenty degrees
+/// is the number every committed level means.
+pub const TYRE_AMBIENT_C: f64 = 20.0;
+
 /// How many tyre compounds the table has ([`VehicleTuning::tyre_surface_set`]).
 pub const COMPOUND_COUNT: usize = 4;
 
@@ -4217,27 +4316,41 @@ pub fn surface_mu(surface: SurfaceClass, compound: f64, wetness: f64) -> f64 {
 
 /// **What a tyre's temperature does to its grip** (wave VEH3a).
 ///
-/// Peaks at [`VehicleTuning::tyre_optimum_c`] and falls away on both sides —
-/// cold rubber has not keyed to the road and hot rubber is greasy — at
-/// [`VehicleTuning::tyre_heat_grip_loss`] per 100 °C of error. Clamped at
-/// `0.35`, because a tyre that has lost two thirds of its grip is a car that
-/// cannot be recovered and this model is not a tyre-destruction simulator.
+/// Full grip up to [`VehicleTuning::tyre_optimum_c`], then falling at
+/// [`VehicleTuning::tyre_heat_grip_loss`] per 100 °C past it. Clamped at `0.35`,
+/// because a tyre that has lost two thirds of its grip is a car that cannot be
+/// recovered and this model is not a tyre-destruction simulator.
 ///
 /// The research doc's own sentence is *overheated tires lose linear grip*, so
 /// this factor scales the whole magic-formula peak **and** its stiffness (see
 /// [`tyre_force_with`]) rather than only the peak: a cooked tyre goes greasy,
 /// not merely weak.
+///
+/// # ONE-SIDED, and the measurement that decided it
+///
+/// A two-sided window — cold rubber has not keyed to the road either — is what a
+/// race simulator models, and it was written first. It is wrong for this
+/// engine's content, and the reason is a number: a tyre starts at
+/// [`TYRE_AMBIENT_C`], the shipped optimum is 85 °C and the shipped loss is 0.25
+/// per 100 °C, so every car in the world would spawn at **0.84** of its grip and
+/// every parked and traffic vehicle would stay there for ever. Measured
+/// directly: it took ABS from spending 0.55 of a stop locked to **0.89**, and
+/// traction control stopped helping at all.
+///
+/// So `tyre_optimum_c` is the temperature grip starts to FALL above, and a cold
+/// tyre is simply a tyre — which is also the only half of it the research doc
+/// claims.
 pub fn heat_grip_factor(tuning: &VehicleTuning, temp_c: f64) -> f64 {
     if !temp_c.is_finite() {
         return 1.0;
     }
-    let err = (temp_c - tuning.tyre_optimum_c).abs() / 100.0;
+    let over = (temp_c - tuning.tyre_optimum_c).max(0.0) / 100.0;
     let loss = if tuning.tyre_heat_grip_loss.is_finite() {
         tuning.tyre_heat_grip_loss.max(0.0)
     } else {
         0.0
     };
-    (1.0 - loss * err).clamp(0.35, 1.0)
+    (1.0 - loss * over).clamp(0.35, 1.0)
 }
 
 /// **A tyre's temperature, one step on** (wave VEH3a).
@@ -4311,6 +4424,48 @@ pub struct TyreContext {
 }
 
 impl TyreContext {
+    /// **The world's whole multiplier on this tyre's peak** — surface, heat and
+    /// the camber's second-order loss, in one number.
+    ///
+    /// One door, because the stick/slip split sizes its budget from the same
+    /// grip the force is drawn from: a wheel that computed its ellipse on dry
+    /// asphalt and its force on wet grass would "stick" at a force the ground
+    /// cannot supply, which is a car that drives on ice as if it were tarmac.
+    pub fn grip_scale(&self) -> f64 {
+        let mu = if self.mu_surface.is_finite() {
+            self.mu_surface.max(0.0)
+        } else {
+            1.0
+        };
+        let heat = if self.heat_grip.is_finite() {
+            self.heat_grip.clamp(0.05, 2.0)
+        } else {
+            1.0
+        };
+        let c = if self.camber_deg.is_finite() {
+            self.camber_deg.clamp(-20.0, 20.0)
+        } else {
+            0.0
+        };
+        mu * heat * (1.0 - CAMBER_GRIP_LOSS_PER_DEG2 * c * c).max(0.5)
+    }
+
+    /// **The effective camber at a contact** (wave VEH3a) — the class's static
+    /// angle plus the contact plane's own inclination across the wheel.
+    ///
+    /// **This is the line that makes `WheelContact::normal` reach a force.** The
+    /// inclination is `asin(n · right)`: a normal leaning toward the wheel's
+    /// right is ground falling away to the left, which is a wheel standing at an
+    /// angle to the surface it is on whatever its suspension geometry says.
+    ///
+    /// Portable `asin` through [`inf_math::pacos64`], because this number reaches
+    /// a committed trace.
+    pub fn camber_at(static_deg: f64, normal: DVec3, wheel_right: DVec3) -> f64 {
+        let d = normal.dot(wheel_right).clamp(-1.0, 1.0);
+        let asin = std::f64::consts::FRAC_PI_2 - inf_math::pacos64(d);
+        static_deg + asin.to_degrees()
+    }
+
     /// Dry asphalt, a tyre at its optimum, an upright wheel — **exactly what
     /// every vehicle in this repository drove on before wave VEH3a**, so the
     /// wrapper below is the neutral context rather than a second model.
@@ -4370,6 +4525,7 @@ pub fn tyre_force_n(
 ) -> (f64, f64) {
     tyre_force_with(
         tuning,
+        &TyreCurves::of(tuning),
         load_n,
         static_load_n,
         slip_ratio,
@@ -4410,6 +4566,7 @@ pub fn tyre_force_n(
 ///   This is the term through which `WheelContact::normal` reaches a force.
 pub fn tyre_force_with(
     tuning: &VehicleTuning,
+    curves: &TyreCurves,
     load_n: f64,
     static_load_n: f64,
     slip_ratio: f64,
@@ -4444,19 +4601,12 @@ pub fn tyre_force_with(
     if s < 1e-12 {
         return (0.0, 0.0);
     }
-    // The world's two multipliers on D, and heat's second one on B.
-    let mu_world = if ctx.mu_surface.is_finite() {
-        ctx.mu_surface.max(0.0)
-    } else {
-        1.0
-    };
-    let heat = if ctx.heat_grip.is_finite() {
-        ctx.heat_grip.clamp(0.05, 2.0)
-    } else {
-        1.0
-    };
-    let camber_loss = (1.0 - CAMBER_GRIP_LOSS_PER_DEG2 * camber * camber).max(0.5);
-    let world = mu_world * heat * camber_loss;
+    // The world's whole multiplier on D — surface, heat and the camber loss —
+    // through the SAME door the stick/slip budget above sizes itself with. Heat's
+    // second effect, on B, is applied by the caller through
+    // `TyreCurves::softened`, because the curve is resolved once per vehicle and
+    // softened once per wheel.
+    let world = ctx.grip_scale();
 
     let mu_x = load_sensitive_mu(
         tuning.longitudinal_grip * world,
@@ -4470,12 +4620,8 @@ pub fn tyre_force_with(
         static_load_n,
         tuning.tyre_load_sensitivity,
     );
-    // Heat softens the STIFFNESS as well as the peak. `heat` is at most 1.0 for
-    // a tyre off its optimum, so this can only ever make the rise lazier.
-    let long = tuning.pacejka_long().with_b(tuning.pacejka_long().b * heat);
-    let lat_c = tuning.pacejka_lat().with_b(tuning.pacejka_lat().b * heat);
-    let fx_mag = mu_x * load_n * long.curve(s * px);
-    let fy_mag = mu_y * load_n * lat_c.curve(s * py);
+    let fx_mag = mu_x * load_n * curves.long.curve(s * px);
+    let fy_mag = mu_y * load_n * curves.lat.curve(s * py);
     // A positive slip RATIO is the wheel outrunning the road, which pushes the
     // car FORWARD; a positive lateral slip is the patch sliding right, which the
     // tyre resists to the LEFT. The two conventions differ by a sign and it is
@@ -4680,6 +4826,11 @@ impl Vehicle for RaycastVehicle {
                 .map(|w| w.mount_local.z.abs())
                 .fold(0.0f64, f64::max);
         let static_load = self.static_load_n(chassis.mass_kg);
+        // **ONCE per vehicle per step.** Resolving a magic-formula axis runs
+        // twelve Newton steps with a portable atan in each, and the force below
+        // is evaluated twice per wheel — so resolving inside it cost 16.88 µs a
+        // car against VEH2a's 1.30, measured at 64 cars. See `TyreCurves`.
+        let base_curves = TyreCurves::of(&self.tuning);
         let inertia = if self.tuning.wheel_inertia_kgm2.is_finite() {
             self.tuning.wheel_inertia_kgm2.max(1e-3)
         } else {
@@ -5193,15 +5344,54 @@ impl Vehicle for RaycastVehicle {
             // peak the curve is flat or falling and the stiffness is gone. This
             // is the standard stick/slip split and it is the reason the model is
             // stable at 60 Hz without a sub-step.
-            let (_, fy_stick) = tyre_force_n(&self.tuning, load, static_load, 0.0, slip_lat);
+            // ── WHAT THE WORLD CONTRIBUTES (wave VEH3a) ─────────────────────
+            //
+            // Three numbers, built once per wheel per step and used by BOTH the
+            // ellipse budget below and the force itself, so a wheel cannot size
+            // its stick/slip split against grip it does not have.
+            //
+            // The camber term is where `WheelContact::normal` finally reaches a
+            // force. It has been measured, unread and tripwired since P29.7 —
+            // `the_snapped_normal_reaches_no_force_in_the_model` proved 600 steps
+            // bit-identical with the normal replaced by garbage — and that arm is
+            // re-stated by this wave rather than deleted: the normal reaches the
+            // force, and a garbage normal changes the trace.
+            // What the ground is worth to THIS car: the surface the bridge
+            // published, this class's own compound row, and the weather. One
+            // call site for `surface_mu`, and it is here rather than at the
+            // bridge because `tyre_surface_set` is a tunable a live tune can move
+            // and the bridge cannot see one.
+            //
+            // Wetness is the P17 weather state's and routing it is a later
+            // wave's; this passes a dry world until one does, named rather than
+            // silently zero.
+            state.mu_surface = surface_mu(state.surface, self.tuning.tyre_surface_set, 0.0);
+            let ctx = TyreContext {
+                mu_surface: state.mu_surface,
+                heat_grip: heat_grip_factor(&self.tuning, state.temp_c),
+                camber_deg: match state.contact {
+                    Some(c) => {
+                        TyreContext::camber_at(self.tuning.camber_deg, c.normal, wheel_right)
+                    }
+                    None => self.tuning.camber_deg,
+                },
+            };
+            let world = ctx.grip_scale();
+            // Heat softens the STIFFNESS as well as the peak — the doc's *shifts
+            // B and D*. `heat_grip` is at most 1.0, so this can only make the
+            // rise lazier, and the softening is per WHEEL because each wheel has
+            // its own temperature.
+            let curves = base_curves.softened(ctx.heat_grip);
+            let (_, fy_stick) =
+                tyre_force_with(&self.tuning, &curves, load, static_load, 0.0, slip_lat, ctx);
             let mu_x = load_sensitive_mu(
-                self.tuning.longitudinal_grip,
+                self.tuning.longitudinal_grip * world,
                 load,
                 static_load,
                 self.tuning.tyre_load_sensitivity,
             );
             let mu_y = load_sensitive_mu(
-                self.tuning.lateral_grip,
+                self.tuning.lateral_grip * world,
                 load,
                 static_load,
                 self.tuning.tyre_load_sensitivity,
@@ -5246,7 +5436,15 @@ impl Vehicle for RaycastVehicle {
             } else {
                 let slip_ratio = (omega * radius - along_v) / reference;
                 state.slip_ratio = slip_ratio;
-                let f = tyre_force_n(&self.tuning, load, static_load, slip_ratio, slip_lat);
+                let f = tyre_force_with(
+                    &self.tuning,
+                    &curves,
+                    load,
+                    static_load,
+                    slip_ratio,
+                    slip_lat,
+                    ctx,
+                );
                 // The ground's reaction may still not push the wheel PAST free
                 // rolling in one step; that is the sliding branch's own safety
                 // net and it is what a breakaway settles onto.
@@ -5280,6 +5478,28 @@ impl Vehicle for RaycastVehicle {
             state.spin_deg = (state.spin_deg
                 + state.omega_rad_s * dt * 180.0 / std::f64::consts::PI)
                 .rem_euclid(360.0);
+
+            // ── THE RUBBER GETS HOT (wave VEH3a) ────────────────────────────
+            //
+            // Slip POWER, not slip: the energy going into the tyre is the force
+            // it is carrying times the speed the patch is sliding at. That is
+            // why a burnout — huge force, huge sliding speed — cooks a tyre in
+            // seconds while a locked wheel on ice, which has almost no force,
+            // barely warms one.
+            //
+            // Both axes contribute. A car held in a long drift is heating its
+            // tyres on the LATERAL term alone, and a model that read only the
+            // longitudinal one would say a four-wheel drift is free.
+            let slip_v_long = omega * radius - along_v;
+            let slip_power = (fx * slip_v_long).abs() + (fy * side_v).abs();
+            state.temp_c = tyre_temperature_step(
+                &self.tuning,
+                state.temp_c,
+                slip_power,
+                along_v.abs(),
+                TYRE_AMBIENT_C,
+                dt,
+            );
         }
 
         // ── the air ──────────────────────────────────────────────────────────
@@ -7812,14 +8032,26 @@ mod tests {
         let t = VehicleTuning::default();
         let ambient = 20.0;
 
-        // A burnout: 4 kN of friction sliding at 15 m/s is 60 kW into the rubber.
+        // A drag burnout: 10 kN of friction sliding at 30 m/s is 300 kW into the
+        // rubber, which is what a stationary car with its wheels spinning does.
         let mut temp = ambient;
-        for _ in 0..120 {
-            temp = tyre_temperature_step(&t, temp, 4_000.0 * 15.0, 2.0, ambient, 1.0 / 60.0);
+        for _ in 0..(60 * 5) {
+            temp = tyre_temperature_step(&t, temp, 10_000.0 * 30.0, 2.0, ambient, 1.0 / 60.0);
         }
         assert!(
             temp > 90.0,
-            "two seconds of burnout took the tyre to {temp} °C"
+            "five seconds of burnout took the tyre to {temp} °C"
+        );
+        // …and a HARD LAUNCH, which is 15 kW, does not: a car that cooked its own
+        // tyres getting off the line is the defect the rate was calibrated out of
+        // (it cost the sports row 3.98 s to 100 km/h and gave back 10.70).
+        let mut launch = ambient;
+        for _ in 0..(60 * 10) {
+            launch = tyre_temperature_step(&t, launch, 5_000.0 * 3.0, 20.0, ambient, 1.0 / 60.0);
+        }
+        assert!(
+            heat_grip_factor(&t, launch) > 0.999,
+            "ten seconds of hard launch took the tyre to {launch} °C and cost it              grip — a car cannot be allowed to cook its tyres by accelerating"
         );
         let hot = temp;
 
@@ -7831,24 +8063,39 @@ mod tests {
             temp < hot - 30.0,
             "thirty seconds of running cooled {hot} °C to {temp} °C"
         );
+        println!("HEAT: a five-second burnout reached {hot:.1} °C; thirty seconds of running at 30 m/s brought it to {temp:.1} °C (ambient {ambient})");
         assert!(temp >= ambient, "a tyre cooled below the air around it");
 
-        // GRIP: peaks at the optimum and falls off both sides.
+        // GRIP: full up to the optimum, falling above it, and NOT falling below
+        // — the one-sided window, which is the half the research doc claims and
+        // the half this engine's parked and traffic cars can afford.
         let at_opt = heat_grip_factor(&t, t.tyre_optimum_c);
         assert_eq!(at_opt, 1.0);
+        assert_eq!(
+            heat_grip_factor(&t, ambient),
+            1.0,
+            "a cold tyre lost grip — every car in the world spawns cold, and a two-sided window handicaps all of them for ever"
+        );
         assert!(heat_grip_factor(&t, t.tyre_optimum_c + 100.0) < at_opt);
-        assert!(heat_grip_factor(&t, t.tyre_optimum_c - 60.0) < at_opt);
-        // …and a cooked tyre really loses force, through the one door.
-        let cold = TyreContext {
-            heat_grip: heat_grip_factor(&t, ambient),
+        // …and a COOKED tyre really loses force, through the one door.
+        let cooked = TyreContext {
+            heat_grip: heat_grip_factor(&t, hot),
             ..TyreContext::NEUTRAL
         };
-        let (fx_hot, _) = tyre_force_with(&t, 3_000.0, 3_000.0, 0.12, 0.0, TyreContext::NEUTRAL);
-        let (fx_cold, _) = tyre_force_with(&t, 3_000.0, 3_000.0, 0.12, 0.0, cold);
+        let (fx_ok, _) = tyre_force_with(
+            &t,
+            &TyreCurves::of(&t),
+            3_000.0,
+            3_000.0,
+            0.12,
+            0.0,
+            TyreContext::NEUTRAL,
+        );
+        let (fx_cooked, _) =
+            tyre_force_with(&t, &TyreCurves::of(&t), 3_000.0, 3_000.0, 0.12, 0.0, cooked);
         assert!(
-            fx_cold < fx_hot * 0.95,
-            "a tyre {} °C off its optimum pulled {fx_cold} N against {fx_hot} N",
-            t.tyre_optimum_c - ambient
+            fx_cooked < fx_ok,
+            "a tyre at {hot} °C pulled {fx_cooked} N against a fresh {fx_ok} N"
         );
         // A bounded model: no step can produce a NaN or run away.
         assert!(tyre_temperature_step(&t, f64::NAN, 1e12, 1e9, ambient, 1.0 / 60.0).is_finite());
@@ -7867,7 +8114,15 @@ mod tests {
     fn camber_makes_side_force_at_zero_slip_angle() {
         let t = VehicleTuning::default();
         let (load, stat) = (3_000.0, 3_000.0);
-        let upright = tyre_force_with(&t, load, stat, 0.0, 0.0, TyreContext::NEUTRAL);
+        let upright = tyre_force_with(
+            &t,
+            &TyreCurves::of(&t),
+            load,
+            stat,
+            0.0,
+            0.0,
+            TyreContext::NEUTRAL,
+        );
         assert_eq!(
             upright,
             (0.0, 0.0),
@@ -7877,6 +8132,7 @@ mod tests {
         let leaning = |deg: f64| {
             tyre_force_with(
                 &t,
+                &TyreCurves::of(&t),
                 load,
                 stat,
                 0.0,
@@ -7900,6 +8156,7 @@ mod tests {
         let peak = |deg: f64| {
             tyre_force_with(
                 &t,
+                &TyreCurves::of(&t),
                 load,
                 stat,
                 0.12,
