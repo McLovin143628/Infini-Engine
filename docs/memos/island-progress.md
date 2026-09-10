@@ -38179,3 +38179,257 @@ cruiser is off the ground while it is being dragged (`wheels 4/0, load 0 N`), so
 for those seconds it is a car sliding along a road rather than driving on it. It
 is on the road, on its own route, at 8 m/s, and it hands back to the physics that
 was driving it the moment it catches up.
+
+## VEH3a — TYRES AND THE SCHEMA WINDOW (2026-09-10)
+
+### THE PRICE (phase 1, no bytes moved)
+
+Base `f160697c`. The arc brief's item 0: *"the implementer's first commit is the
+PRICE, the orchestrator rules before any bytes move."* The VEH3 arc gets **one**
+scene window, v27 → v28, and the VEH2a law says it is spent once with every
+tunable the eight waves need — so every candidate row of all eight is priced
+here, with its home, its wire cost, the wave that consumes it, the no-schema
+alternative and a recommendation. **No schema byte moved and no Rust file was
+edited to write this**; the only change in this commit is this section.
+
+Three committed claims were re-measured on the way and **two are wrong**: a
+`Uuid` costs **17** bytes on this wire, not 16; the refused per-level `CameraRig`
+costs **1 510** bytes per character, not the 776 recorded at `camera.rs:1990`;
+and WPN2b's carried 219 says `aim_blend_speed` needs this window when it needs
+**nothing**.
+
+#### THE PRICE TABLE — every candidate row of the VEH3 arc, priced
+
+**The unit of account.** `bincode::config::standard()` (`inf-scene/src/lib.rs:1310`)
+— **varints reach integers only**, so `f64` is **8 B** fixed, `Vec3d` (`inf-ecs/
+src/math.rs:60`, three `f64`) is **24 B**, `Option<T>` is **1 + T**, `bool` is
+**1 B**, and a `Uuid` is **17 B**, not 16: uuid's compact serde impl calls
+`serialize_bytes`, so bincode writes a length varint first. That is **measured**,
+not assumed — `samples/island/VancouverIsland.inf_lvl` reads
+`1b | 10 "Vancouver Island" | fb 2c 02 | 10 <16 bytes> | 03 "Sun"`: schema 27, the
+title, **556** entities (the sidecar's own `entity_count`), then a **`10`-prefixed**
+guid, then the first entity's name. `Option<Uuid>` is therefore **18 B**.
+
+**What a growth costs and what a SLOT costs are different questions.** Growing
+`VehicleClass` costs **zero** on every entity that carries no class — the `Option`
+tag is already there (`the_v25_tail_costs_a_pre_v25_record_nothing`). A **new
+record slot** costs **+1 B on every entity in every level**: **1 310** of them
+across the 24 committed levels (summed from the `.inf_lvl.toml` sidecars).
+
+| row | home | wire cost / entity | which wave consumes it, for what | the NO-SCHEMA alternative + its cost | recommendation |
+|---|---|---|---|---|---|
+| **— TYRES —** | | | | | |
+| `pacejka_lat_b`, `pacejka_lat_c`, `pacejka_lat_e` | `VehicleClass` f64 ×3 | **24 B** | VEH3a.1 — the magic formula's stiffness/shape/curvature on the lateral axis; `tyre_curve` (`vehicle.rs:3431`) is re-shaped around them | derive B/C/E from the shipped `tyre_lat_rise_bias` + `tyre_lat_peak_slip` by a fixed conversion — **0 B**, but then no row can ever author a curve shape and VEH3f's 150 rows all share one tyre | **TAKE** — B/C/E *is* the doc's model; a conversion that cannot be overridden is the old two-knob tyre wearing Pacejka's name |
+| `pacejka_long_b`, `pacejka_long_c`, `pacejka_long_e` | `VehicleClass` f64 ×3 | **24 B** | VEH3a.1 — the same on the longitudinal axis | as above | **TAKE** — same reason |
+| `tyre_heat_rate`, `tyre_cool_rate` | `VehicleClass` f64 ×2 | **16 B** | VEH3a.3 — heating ∝ slip power, cooling ∝ (T − ambient) | a Ring-0 constant pair — **0 B**, but a truck tyre and a slick then heat identically | **TAKE** — a burnout is a tuning question and these are the only per-class handle on it |
+| `tyre_heat_grip_loss`, `tyre_optimum_c` | `VehicleClass` f64 ×2 | **16 B** | VEH3a.3 — where grip peaks and how fast it falls each side | constants — **0 B**; same objection | **TAKE** |
+| tyre TEMPERATURE (the state) | `WheelState` (runtime, **never serialized**, `vehicle.rs:2716`) | **0 B** | VEH3a.3 — the per-wheel °C the telemetry HUD draws | n/a — this **is** the alternative | **RESOURCE** — runtime state is not authored data; trace bytes move, schema does not |
+| `camber_deg` | `VehicleClass` f64 | **8 B** | VEH3a.1/.4 — the camber term of the formula | 0° everywhere, a constant — **0 B** | **TAKE** — but flagged: a camber term is what finally READS `WheelContact::normal` and reddens `the_snapped_normal_reaches_no_force_in_the_model` (`vehicle.rs:2686-2708`) on purpose |
+| `relaxation_m` | `VehicleClass` f64 | **8 B** | VEH3a.1 — relaxation length; lateral force lags the slip angle | a constant ≈0.3 m — **0 B** | **TAKE** — 8 B inside an open window against a second window later |
+| `tyre_substeps` (the N of VEH3a.5) | `VehicleClass` f64 | **8 B** | VEH3a.5 — N inner solves per 60 Hz step, default 4 | a Ring-0 constant — **0 B**, and VEH3a.5 explicitly reserves the right to ship **N = 1** | **TAKE** — the honest N may be 1 for a sedan and 4 for a hypercar and only a persisted field can say so; the downside if the measurement says "always 1" is 8 B × 29 cars = **232 B** |
+| `tyre_surface_set` (the µ-table id) | `VehicleClass` f64 (an index) | **8 B** | VEH3a.2 — which compound's response this class runs against the µ table | derive from `lateral_grip` — **0 B**, but road tyres and rally tyres then meet gravel identically | **TAKE** — this is what makes a rally row different off-road |
+| the µ TABLE itself (asphalt/gravel/grass/sand/mud, wet ×0.7) | a bevy `Resource` keyed by `Guid`/biome — the `DeformFieldRes` doctrine | **0 B** | VEH3a.2 — read at the contact through `RayHit3D.collider` → `guid_of_collider`; `Collider3D.friction` already exists (`components.rs:1074`) and the tyre has never read it | n/a — this **is** the alternative | **RESOURCE** — a surface is a property of the world, not of the car |
+| **— DRIVETRAIN —** | | | | | |
+| `flywheel_inertia_kgm2`, `clutch_torque_nm`, `clutch_engage_s` | `VehicleClass` f64 ×3 | **24 B** | VEH3b.1 — the flywheel + clutch that re-rule the rigid-driveline refusal (`vehicle.rs:437-438`) | constants — **0 B**, and every car then flares identically off the line | **TAKE** — a launch is the most-felt thing in the doc's §2 |
+| `fuel_cut_rpm` | `VehicleClass` f64 | **8 B** | VEH3b.2 — the limiter bounce replacing the past-redline plateau (VEH2a carried) | reuse `redline_rpm` — **0 B**, and the cut then cannot sit above or below the redline | **TAKE** — a limiter that is exactly the redline is a plateau with a new name |
+| `turbo_boost_max`, `turbo_spool_s`, `turbo_lag_s` | `VehicleClass` f64 ×3 | **24 B** | VEH3b.4 — boost as a first-order state; VEH3e.1 reads it for the turbo whine + blow-off | none — the three need a home wherever the roster's turbo rows live | **TAKE** — `turbo_boost_max = 0` is a free "naturally aspirated" |
+| `lsd_preload_front_nm`, `lsd_preload_rear_nm` | `VehicleClass` f64 ×2 | **16 B** | VEH3b.3 — LSD preload per axle beside the existing `diff_lock_front/rear` scalar | keep the scalar alone — **0 B**, and Open/LSD/Locked stays one number that cannot express a Torsen | **TAKE** |
+| `lsd_power_ramp_front/rear`, `lsd_coast_ramp_front/rear` | `VehicleClass` f64 ×4 | **32 B** | VEH3b.3 — the bias ratio on power and on the overrun | as above | **TAKE** — the one-wheel-on-grass gate arm is exactly what these buy |
+| `differential = "open\|lsd\|locked"` | **not a field** — a TOML spelling resolved before numeric keys, the `drivetrain` precedent (`vehicle.rs:2495-2511`) | **0 B** | VEH3b.3 | n/a | **DERIVE** — a word that sets three numbers, never a fourth source of truth |
+| **— AUDIO —** | | | | | |
+| `cylinders`, `firing_order_variant` | `VehicleClass` f64 ×2 | **16 B** | VEH3e.1 — the combustion grain's firing rate `(rpm/60)·(cyl/2)` and which grain set | `VehicleDef` geometry (no `Serialize`, free) — **0 B**, but `VehicleDef` is consumed at **generation time only**, so a committed car in a committed level would lose its engine note | **TAKE** — an engine's voice is per-vehicle authored data and 29 committed cars must keep it |
+| **— BODY / DAMAGE —** | | | | | |
+| `door_count` | `VehicleBody`'s `BodyPart` table (`vehicle.rs:972`, fractions of the chassis, **no `Serialize`**) | **0 B** | VEH3c.1 — how many door children `rig_nodes` spawns | this **is** the alternative: a sedan family has four doors and a coupe two because their part tables say so | **DERIVE** — a door count that disagreed with the part table would be two spellings of one fact |
+| `hood_hinge` | same — the `Hood` part's own hinge axis inside `BodyPartKind` | **0 B** | VEH3c.1/.2 | as above | **DERIVE** — a hinge is geometry, and geometry is free here |
+| `glass_health_j` | `VehicleClass` f64 | **8 B** | VEH3c.3 — the joules a pane takes before it shatters under WPN2's rounds | a constant — **0 B**, and an armoured HVY Nightshark then loses its glass to a 9 mm exactly as a hatchback does | **TAKE** — the roster has armoured rows and this is the number that makes them armoured |
+| `panel_health_j` | `VehicleClass` f64 | **8 B** | VEH3c.4/.5 — the joules a panel absorbs; `is_flesh`'s complement in `apply_hit` (`gameplay.rs:1654-1687`) | a constant — **0 B**; same objection | **TAKE** |
+| `part_break_impulse_ns` | `VehicleClass` f64 | **8 B** | VEH3c.2 — the joint impulse over which `remove_joint` sheds a bumper | a constant — **0 B**; same objection | **TAKE** |
+| **— BOARDING SOCKETS —** | | | | | |
+| `door_handle_l/r`, `seat_l/r/rear`, `pedal_throttle/brake`, `wheel_hub` — **persisted as a component** | a new `VehicleSockets` at the record **tail**, 8 × `Vec3d` | **1 + 192 = 193 B** on a chassis **and +1 B on all 1 310 entities** → **6 878 B** of committed content | VEH3d.2/.3 — hand IK to the handle, hands on the wheel, feet on the pedals | — | **REFUSE this shape** — it also costs both hosts' record→world lines, the wire pin, the Details reflection and a new field in every full `RuntimeEntity` literal across **11** files |
+| the same — **persisted as scalars** | `VehicleClass` f64 ×24 | **192 B**, **no new slot** | VEH3d | — | if the orchestrator wants sockets authored, **this** is the shape: it travels the existing `set(name, f64)` door and touches no host |
+| the same — **DERIVED** | `VehicleRig` (runtime, `vehicle.rs:177`) from `VehicleDef.half_extents` + the family `BodyPart` table — **both `Serialize`-free** | **0 B** | VEH3d | this **is** the alternative | **DERIVE** — and it is how **addendum #3's roof seat closes**: `chassis_of` (`vehicle.rs:250-262`) returns the collider's **top face**, so `step_driving` parks a driver on the roof (−0.000 / −0.001 m on three of four island drivers). A derived cabin seat fixes **all 29 committed cars retroactively**; a persisted seat would need all 29 re-authored, or a default that is the same derivation anyway |
+| **— AIR + SEA —** | | | | | |
+| `wing_area_m2` | `VehicleClass` f64 | **8 B** | VEH3g.1 — `½ρv²S·CL(α)`, **and** the recogniser's own discriminator: the brief's *"a wheeled chassis whose class carries `wing_area_m2 > 0`"* is how a fixed wing is expressible at all without a fourth collider shape | `VehicleDef` geometry — **0 B** at generation time, but a committed aeroplane on the island airstrip would arrive with no wing | **TAKE** — no other wave may move the schema, and without it VEH3g cannot exist |
+| `stall_deg` | `VehicleClass` f64 | **8 B** | VEH3g.1 — the stall past α; a named gate arm | a constant 15° — **0 B**, and a biplane then stalls like a jet | **TAKE** |
+| `planing_speed_mps` | `VehicleClass` f64 | **8 B** | VEH3g.3 — planing vs displacement hull; the jetski's gate arm | `VehicleDef.buoyancy_*` are already the free geometry keys — **0 B** at generation time, same objection as the wing | **TAKE** |
+| **— THE RUNTIME-LOADABLE CATALOGUE —** | | | | | |
+| `.inf_vehicle` / `.inf_items` as an **asset kind** | `AssetKind` variant + `kind_code` **26** appended (`inf-asset/src/pack.rs:160-190`: *"appended, never inserted: a kind code is a WIRE value"*) + an `AssetPayload` type + `is_root_kind` (`inf-packager/src/cook.rs:2086`) + a player enumerator on the `is_class_kind` pattern (`inf-player/src/level.rs:258`) | **0 B of scene schema** | VEH3f.1 — a fleet an author edits after cook | — | the kind **absorbs WITHOUT the scene window**. What it needs instead is a `ScenePayload` vector, i.e. **payload 13 → 14 alone** |
+| an entity `Uuid` field naming a catalogue row | `RuntimeEntityGen` tail, `Option<Uuid>` | **18 B** on the naming entity **+ 1 B × 1 310** = **1 310 B** | VEH3f.1 — only if an entity must name a *specific* profile | the row is name-keyed and the record **already carries `name: String`**; and WPN2 proved the route at 85 rows — `WEAPON_REGISTRY_TOML` is an `include_str!` delivered by the Blueprint node `item.define` (`inf-blueprint/src/nodekit.rs:1601`), whose own doc says a `.inf_act` *"reaches all three [boot paths] with none"* — **0 B** | **RESOURCE** — mint `vehicle.define` on `item.define`'s exact shape. Today `VehicleDefs` has **no runtime user at all** (only `editor/crates/inf-editor-core/src/vehicle.rs:947`), so the loader is a Ring-0 resource + one node, not a schema move |
+| **— THE PER-LEVEL `CameraRig` (addendum #2) —** | | | | | |
+| `camera_rig` | `RuntimeEntityGen` tail, `Option<CameraRig>` | **1 510 B** per rigged character **+ 1 B × 1 310 entities** (re-measured — see below) | CHAR1c's refusal; VEH3d.6 rides the director and wants no field of its own | **carried 159's own two named doors**, the cheaper one being a **write half for the level-side `camera.toml`** (`CameraTuning::to_toml` already exists; a caller and a frontend affordance do not) — **0 B** | **CARRY** — but the addendum's letter says TAKE; the verdict and both prices are below and the ruling is the orchestrator's |
+| **— WPN2b CARRIED 219 —** | | | | | |
+| `aim_blend_speed` | `CameraTuning` (`inf-ecs/src/camera.rs:453`) | **0 B TODAY** | WPN2b — one `state_blend_speed` serves both the gait change and the aim | n/a | **DERIVE / already free** — carried 219's premise (*"a serialized-component field and therefore a scene-schema move"*) is **false**: `RuntimeEntityGen` has **no camera slot**, which is the same fact CHAR1c's audit measured. A new `CameraTuning` field costs a `names()` entry and a `camera.toml` key and nothing else. It becomes **8 B only if the `CameraRig` row is taken** |
+
+#### THE `CameraRig` VERDICT, from the CHAR1c audit (addendum #2's question, answered)
+
+**An authored rig does NOT persist.** The audit's `an_authored_rig_does_not_
+survive_a_save_and_a_reload` is each half of it as a number, and the finding is
+now written into `crates/inf-ecs/src/camera.rs:1948-1985`:
+
+| | |
+|---|---|
+| authored on the component (`walk.arm_length_m`) | `Some(6.25)` |
+| after a real `.inf_lvl` save and load, a rig at all | **no** |
+| what the wizard writes beside a character | `Some(3.0)` — `CameraTuning::default()`, never the rig |
+| what the RUNTIME reads | `camera.toml` beside the **LEVEL** (`inf_player::input::load_camera_beside`) |
+| a level-side `camera.toml` at 6.25 m | loads as `Some(6.25)` — the one surface that persists |
+
+Three independent failures: the component is not in the scene record; the
+wizard's file is the plain default and never read the rig it inserted; and
+nothing reads a **character-side** `camera.toml` at all. So by addendum #2's
+letter — *"if they do not [persist], VEH3a's window is where it lands"* — **the
+row lands**.
+
+**And the price is nearly twice what the refusal recorded.** `camera.rs:1990`
+says *"776 bytes per character (97 `f64` at bincode's fixed width)"*. Re-counted
+from the declarations:
+
+| block | f64 |
+|---|---|
+| `CameraSettings` (`arm_length_m`, 3 × `Vec3d`, `rotation_lag`, `fov_deg`) | 12 |
+| `GaitCameraSettings` = 4 × `CameraSettings` (walk/run/sprint/crouch) | 48 |
+| `velocity_direction` + `looking_direction` + `aiming` | 144 |
+| `first_person: CameraSettings` | 12 |
+| `driving: DrivingCameraSettings` (a `CameraSettings` + 6) | 18 |
+| the five loose scalars | 5 |
+| `collision: CameraCollision` (9 f64 + 2 `bool` + 1 `u32`) | 9 |
+| **`CameraTuning`** | **188 f64 + 2 bool + 1 u32 varint = 1 507 B** |
+| `CameraRig` = `CameraTuning` + `right_shoulder` + `first_person` | **1 509 B** |
+| `Option<CameraRig>` at the record tail | **1 510 B** present, **1 B** absent |
+
+**1 510 B, not 776 B** — the committed claim is short by **734 B**, because it
+counted a per-state block once where the table holds twelve of them. A refusal
+priced at half of what it refuses is a number to correct whichever way the
+orchestrator rules.
+
+**Why the recommendation is CARRY anyway.** The gap the user actually has is
+carried 159's: *nothing an author can edit reaches the island's camera*, because
+the island ships **no `camera.toml`** and the level-side table has **no write
+half**. A `camera_rig` row buys **per-character overrides** — a different boom
+for the hero than for a possessed NPC — which nobody has asked for, at 1 510 B
+per character plus a new slot on all 1 310 entities plus both hosts' record→world
+lines plus the wire pin plus the Details reflection. The write half buys the
+thing that is missing, at **zero schema**. If the orchestrator rules TAKE, the
+row is +1 511 B per rigged character and +1 310 B of slot tags, and
+`aim_blend_speed` rides inside it for 8 B more.
+
+---
+
+#### THE FIXED COST OF THE WINDOW ITSELF, whatever rows land
+
+**The precedent, measured.** VEH2a's v27 bump is `73c4157c`
+(*"scene schema v27 — the vehicle class grows, once, in both mirrors"*): **51
+files, 854 insertions, 122 deletions**, of which the code is exactly two files at
+**426 lines each** — `crates/inf-scene/src/lib.rs` and
+`editor/crates/inf-editor-core/src/scene/serialize.rs` — plus 28 lines of
+`inf-ecs/src/vehicle.rs`, plus 24 `.inf_lvl` (binary, byte-for-byte re-blessed)
+and 24 `.inf_lvl.toml` at 4 lines each. Its Ring-0 half, `33e39518`, was a
+separate commit: 3 files, 879 insertions.
+
+**Every file the v27 → v28 bump touches**
+
+| # | path | what moves |
+|---|---|---|
+| 1 | `crates/inf-scene/src/lib.rs` | `SCHEMA_VERSION: u32 = 27` → **28** (`:500`); a new **v28 rung** on the `SCHEMA_VERSION` ladder doc; **`VehicleClassV27`** frozen (62 fields) + `into_current`/`from_current` on the `VehicleClassV26` idiom (`:1801-1830`); **`EntityRecordV27 = RuntimeEntityGen<Terrain, Option<VehicleClassV27>, Material>`** + its `impl` (`:1038` idiom); `SceneFileV27` frozen at `Vec<EntityRecordV27>` and a new `SceneFileV28` at `RuntimeEntity` (`:1326`); the decode ladder's `27 =>` branch becomes a **per-record lift** (VEH2a's own audit finding: the `26 =>` branch was an identity nobody executed); the wire pin `V27EntityWire`/`SceneFileV27Wire` → V28 (`:11830`, `:12000`) with **`VehicleClassWire` grown to 62 + N independently declared fields** (`:11887`) |
+| 2 | `crates/inf-scene/src/lib.rs` (tests) | `v27_downgrade_is_lossless_except_for_what_v28_added` — a **COUNT**, not a field list, on the `v26_downgrade…` shape (`:13128`); `V27_CLASS_NAMES: [&str; 62]` + an independent `V27ClassWriter` + `a_v27_payload_decodes_at_v28_with_every_v26_field_at_its_own_offset` (`:13200-13258` idiom); `a_v28_payload_is_refused_by_name` (`:13965` idiom); **`the_frozen_tile_generation_covers_this_schema`'s hard `assert_eq!(SCHEMA_VERSION, 27)` (`:10341`)** |
+| 3 | `editor/crates/inf-editor-core/src/scene/serialize.rs` | the **character-for-character mirror** of every line of 1 and 2: `SCHEMA_VERSION` (`:461`), `VehicleClassV27` (`:1570` idiom), `EntityRecordV27` (`:1070`), `SceneFileV27`/`V28` (`:6650`), the ladder (`:7277`), the wire pin (`:14858`, `:14900`, `:15017`), the hard pin (`:13120`), and the v27 downgrade arms (`:16003-16180`) |
+| 4 | `crates/inf-ecs/src/components.rs` | `VehicleClass`'s declaration + `Default` + **`settings(&self) -> [(&str, f64); 62]`** (`:3077`) — a fixed-arity array, so the arity moves with the field count |
+| 5 | `crates/inf-ecs/src/vehicle.rs` | `VehicleTuning` (`:361`) + **`names() -> &[&str]`** (`:835`) + `set`/`get` + `Default`. **The tripwire:** `VehicleClass::set` routes through `to_tuning`/`from_tuning` (`components.rs:3044-3068`), so a `VehicleTuning` field NOT mirrored into `VehicleClass` is **silently dropped on every round trip** |
+| 6 | `crates/inf-runtime/src/pie.rs` | `SCENE_PAYLOAD_VERSION: u32 = 13` → **14** (`:264`) + a ladder rung. **HONEST FINDING: this is NOT mandatory by precedent.** VEH2a's v27 bump left the payload at **12** (`git show 73c4157c:crates/inf-runtime/src/pie.rs` — 12 before and after). The envelope's own v11 rung argues for it (*"it only fires if the envelope moves when the contract does"*), and it becomes **unavoidable** the moment a new payload **vector** lands (the catalogue kind). Priced as cheap either way |
+| 7 | 24 × `samples\|templates/*/*.inf_lvl` | re-blessed at v28 — `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples` |
+| 8 | 24 × `samples\|templates/*/*.inf_lvl.toml` | `schema_version = 27` → **28** and a new `content_hash`; **all 24 verified at 27 today** |
+| 9 | doc restatements | `crates/inf-ecs/src/cover.rs:29` (*"Scene v27, `ScenePayload` 13 and `EXPECTED_LEVELS` 24"*), `runtime/inf-player/tests/char1c_gate.rs:1877` + `:1952`, `docs/ROADMAP.md`, `docs/memos/island-progress.md`, `docs/memos/parity-certification.md`. The other 12 `v27` mentions in `inf-ecs` are historical claims about past waves (*"this wave did not move it"*) and stay true |
+| 10 | **only if a NEW SLOT lands** (sockets component / catalogue `Uuid` / `camera_rig`) | both hosts' record→world lines — `runtime/inf-player/src/level.rs:831`+`:1020` and `editor/.../serialize.rs:6869`+`:7421` — plus `crates/inf-scene/src/partition.rs:1318`, `runtime/inf-player/src/cell_stream.rs:1236`, and a new field in every full `RuntimeEntity` literal: **11 files, 51 sites** carry `vehicle_class:` today |
+
+**What does NOT move.** `EXPECTED_LEVELS` stays **24**. Goldens stay **64 PNGs on
+disk** and none are re-blessed — a schema bump changes no pixel. **No committed
+trace moves either**, as long as the new fields are unread: they arrive at their
+Ring-0 defaults and every existing number is bit-identical. A trace re-bless
+becomes due only when a *later clause* reads a field.
+
+**Hours, machinery alone** (no field semantics, no gate, no measurement):
+
+| | est. |
+|---|---|
+| `inf-scene` rung: frozen types, ladder branch, wire pin, four test arms | **2 h** |
+| the editor mirror, character-for-character | **1 h** |
+| the payload rung (if taken) | **0.5 h** |
+| re-bless 24 levels + 24 sidecars, the two hard `== 27` pins, the doc restatements | **0.5 h** |
+| `battery3.sh -j 3` + clippy `-D warnings` + fmt + rustdoc, run LAST | **1.5 h** (wall clock) |
+| **total** | **≈ 5.5 h est.** |
+
+---
+
+#### THE TOTALS, and the population that carries them
+
+**The committed vehicle census — 29 entities, structurally counted.** Every
+`.inf_lvl` in `samples/` and `templates/` was scanned for a `Some(VehicleClass)`
+tail — an `01` tag followed by 62 finite `f64` — and each hit's first ten fields
+read back as a real tuning (`brake_force_n`, `damping_ns_per_m`, …). Three
+all-zero / terrain-height false positives were opened and discarded.
+
+| level | entities carrying an authored `VehicleClass` |
+|---|---|
+| `samples/island/VancouverIsland.inf_lvl` | **26** (7 civilian `… Car`, 4 `ambulance`, 7 fire `engine`, 4 `cruiser`, 2 `swat`, `Harbour Launch` and `Light Helicopter` — the last two read back at `drag = 35.0 / enter = 0.62` and `drag = 2.20 / enter = 0.72 / max_speed 70.0`, and their entity names were recovered from the bytes preceding their class runs) |
+| `samples/island-fixture/IslandFixture.inf_lvl` | **3** |
+| the other 22 levels | **0** — `phase22-playground`'s *"Car Chassis"* and `phase29-locomotion`'s *"Car"* are wheeled rigs with **no authored class**, so they run the Ring-0 defaults in both hosts |
+| **total** | **29** |
+
+**TAKE EVERYTHING** — every candidate at its persisted home, sockets in their
+cheapest persisted shape:
+
+| | |
+|---|---|
+| `VehicleClass` 62 → **123** fields (35 recommended + `door_count` + `hood_hinge` + 24 socket scalars) | **+488 B** per class-carrying entity |
+| a catalogue `Option<Uuid>` slot | **+18 B** on a naming entity, **+1 B × 1 310** |
+| an `Option<CameraRig>` slot (+ `aim_blend_speed` inside it) | **+1 518 B** per rigged character, **+1 B × 1 310** |
+| **per vehicle chassis entity** | **488 + 18 + 1 = 507 B** |
+| **across all committed content** | 29 × 488 + 29 × 18 + 2 × 1 310 + ≈7 × 1 518 = **≈ 27 920 B (27.3 KiB)**, est. on the character count |
+
+**TAKE ONLY THE RECOMMENDATIONS** — 35 new `f64`, all inside the slot that
+already exists:
+
+| | |
+|---|---|
+| `VehicleClass` 62 → **97** fields (`97 × 8 = 776 B`) | **+280 B** per class-carrying entity |
+| new record slots | **none** — so every non-vehicle entity in all 24 levels is byte-unchanged but for the schema byte |
+| **per vehicle chassis entity** | **280 B** |
+| **across all committed content** | 29 × 280 = **8 120 B (7.9 KiB)** — the island grows 26 × 280 = **7 280 B** (146 263 → ≈153 543), the fixture **840 B**, the other 22 levels **0** |
+
+The recommended set is **29 % of the take-everything cost and adds no slot at
+all**, which is the difference between a bump that touches two codec files and a
+bump that touches thirteen.
+
+**The 35, by block** — tyres 14 (`pacejka_lat_b/c/e`, `pacejka_long_b/c/e`,
+`tyre_heat_rate`, `tyre_cool_rate`, `tyre_heat_grip_loss`, `tyre_optimum_c`,
+`camber_deg`, `relaxation_m`, `tyre_substeps`, `tyre_surface_set`), drivetrain 13
+(`flywheel_inertia_kgm2`, `clutch_torque_nm`, `clutch_engage_s`, `fuel_cut_rpm`,
+`turbo_boost_max`, `turbo_spool_s`, `turbo_lag_s`, `lsd_preload_front_nm`,
+`lsd_preload_rear_nm`, `lsd_power_ramp_front`, `lsd_power_ramp_rear`,
+`lsd_coast_ramp_front`, `lsd_coast_ramp_rear`), audio 2 (`cylinders`,
+`firing_order_variant`), body 3 (`glass_health_j`, `panel_health_j`,
+`part_break_impulse_ns`), air + sea 3 (`wing_area_m2`, `stall_deg`,
+`planing_speed_mps`).
+
+**WHAT IS NOT TAKEN, BY NAME** — `door_count` and `hood_hinge` (the family's
+`BodyPart` table already is them); the eight boarding sockets (derived from
+`VehicleDef.half_extents` + the family part table, which is also what closes
+addendum #3's roof seat for all 29 committed cars at once); the per-surface µ
+table and every tyre temperature (runtime resources, the `DeformFieldRes`
+doctrine); the roster's runtime loader (a `vehicle.define` Blueprint node on
+`item.define`'s proven shape, plus an optional `.inf_vehicle` asset kind that
+needs **payload 14 and no scene schema**); the per-level `CameraRig` (carried
+159's level-side write half is the zero-schema door to the same complaint); and
+`aim_blend_speed`, which is **free today** and whose carried-219 premise was
+wrong.
+
+#### WHAT THIS SECTION LEAVES FOR THE RULING
+
+Seven decisions, in the order they change the bump's shape: the 35 `f64` on
+`VehicleClass`; the boarding sockets (derive / 24 scalars / a component);
+`door_count` + `hood_hinge`; the catalogue's route (a `vehicle.define` node / an
+asset kind at payload 14 / a per-entity `Uuid`); the per-level `CameraRig`;
+whether `SCENE_PAYLOAD_VERSION` moves at all; and nothing at all for
+`aim_blend_speed`, which is already free. The window opens on the ruling and not
+before.
+
