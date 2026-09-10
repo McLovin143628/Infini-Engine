@@ -100,10 +100,41 @@ param(
     # Photograph the hero's FACE at ~1.7 m before Play. See tools/demo/portrait.mjs:
     # the loop's own camera is behind the character and a head is 30 px of a 1080p
     # frame, which is not evidence about a face.
-    [bool]$Portrait = $true
+    [bool]$Portrait = $true,
+    # **THE LOOP'S OWN GATE** (WPN2e audit, the cheap half of carried 281).
+    #
+    # Two thousand three hundred lines of PowerShell that nothing type-checks,
+    # nothing lints and no test runs -- and wave WPN2e shipped three faults into
+    # it while the battery stayed green through two whole sessions. What would
+    # have caught them is not a linter: `Parser::ParseFile` finds syntax errors
+    # and found none of these. It is running the leg's own logic over a RECORDED
+    # `hero.csv` with no editor at all.
+    #
+    # That is this. Point it at a session directory (or a `hero.csv`) from any
+    # previous run; it exercises `Wait-ForHero` both ways round, the shootout
+    # leg's own row-splitting pipeline, and every column index the legs read,
+    # and it exits non-zero if any of them answers the way the three faults
+    # answered. It launches nothing and takes about a second.
+    #
+    # The half it is NOT: it does not drive the input synthesiser, does not
+    # press Play, and cannot see a leg whose sleeps are too short. Those need a
+    # recorded INPUT trace as well, which is a wave.
+    [string]$DryRun = ""
 )
 
 $ErrorActionPreference = "Continue"
+# **THE LOOP MAY NOT EXIT 0 WITH EXCEPTIONS IN ITS OWN LOG** (WPN2e audit,
+# closing carried 282). Wave WPN2e's first relaunch printed an
+# `InvalidOperation` in red in the middle of an otherwise clean session and
+# still exited 0, because nothing ever read `$Error`. Cleared here so the count
+# at the bottom is this run's, and read at the bottom beside `$failed`.
+#
+# Every `-ErrorAction Ignore` in this file became `Ignore` in the same
+# commit: `SilentlyContinue` still RECORDS, so the expected misses (a process
+# that is not running, an env var that is not set) would have made the count
+# meaningless. `Ignore` suppresses and does not record, which is what those call
+# sites always meant.
+$Error.Clear()
 $ProgressPreference = "SilentlyContinue"
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $release = Join-Path $repo "target\release"
@@ -142,7 +173,7 @@ function Wait-ForHero {
     $deadline = (Get-Date).AddSeconds($TimeoutS)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path $Csv) {
-            $rows = @(Get-Content $Csv -ErrorAction SilentlyContinue | Where-Object { $_ -match "^[0-9]" })
+            $rows = @(Get-Content $Csv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
             if ($rows.Count -gt 0) {
                 $c = $rows[-1].Split(",")
                 if (& $Predicate $c) {
@@ -160,6 +191,84 @@ function Wait-ForHero {
     return $false
 }
 
+# ── 0a. THE DRY RUN (WPN2e audit, the cheap half of carried 281) ─────────────
+#
+#    Everything this file does that is a PURE FUNCTION of a recorded session,
+#    run against one, with no editor, no player and no input synthesiser. It
+#    exists because the three faults wave WPN2e shipped into the leg below were
+#    all of this shape and all invisible to every gate in the repository.
+if ($DryRun -ne "") {
+    $csv = $DryRun
+    if (Test-Path -PathType Container $csv) { $csv = Join-Path $csv "hero.csv" }
+    if (-not (Test-Path $csv)) {
+        Say "DRYRUN: no hero.csv at $csv"
+        exit 4
+    }
+    $bad = 0
+    $rows = @(Get-Content $csv | Where-Object { $_ -match "^[0-9]" })
+    Say ("DRYRUN over {0}: {1} data row(s)" -f $csv, $rows.Count)
+    if ($rows.Count -eq 0) { Say "DRYRUN FAIL: the recording has no data rows"; exit 4 }
+
+    # (1) `Wait-ForHero` answers TRUE for a predicate that holds, and the
+    #     `@(...)[-1]` idiom every leg uses gets a BOOLEAN out of it. Fault 1 was
+    #     a leg that indexed the return value as if it were the row.
+    $hit = @(Wait-ForHero -Csv $csv -What "DRYRUN a predicate that must hold" -TimeoutS 2.0 `
+        -Predicate { param($c) $c.Count -gt 5 })[-1]
+    if ($hit -isnot [bool]) { Say "DRYRUN FAIL: Wait-ForHero did not answer a boolean"; $bad++ }
+    elseif (-not $hit) { Say "DRYRUN FAIL: a predicate that must hold did not fire"; $bad++ }
+
+    # (2) …and FALSE for one that cannot, inside its own timeout.
+    $miss = @(Wait-ForHero -Csv $csv -What "DRYRUN a predicate that cannot hold" -TimeoutS 1.0 `
+        -Predicate { param($c) $c.Count -gt 9999 })[-1]
+    if ($miss -isnot [bool]) { Say "DRYRUN FAIL: the miss did not answer a boolean"; $bad++ }
+    elseif ($miss) { Say "DRYRUN FAIL: a predicate that cannot hold fired"; $bad++ }
+
+    # (3) THE SHOOTOUT SUMMARY'S OWN PIPELINE. Fault 2 was
+    #     `ForEach-Object { $_.Split(",") }`, which UNROLLS, so the filter behind
+    #     it tested a single string's `.Count` and the whole block printed
+    #     nothing at all -- silently -- for two full sessions.
+    $rowsE = @(Get-Content $csv | Where-Object { $_ -match "^[0-9]" } |
+        ForEach-Object { , $_.Split(",") } | Where-Object { $_.Count -gt 33 })
+    Say ("DRYRUN: the shootout summary's pipeline yields {0} row(s) of >33 columns" -f $rowsE.Count)
+    if ($rowsE.Count -eq 0) {
+        Say "DRYRUN FAIL: the summary pipeline produced nothing -- either it unrolls again or the recording predates the columns"
+        $bad++
+    }
+    else {
+        # …and the peaks it computes do not throw.
+        $peakEng = ($rowsE | ForEach-Object { [int]$_[32] } | Measure-Object -Maximum).Maximum
+        $peakInc = ($rowsE | ForEach-Object { [int]$_[33] } | Measure-Object -Maximum).Maximum
+        $peakBrass = ($rowsE | ForEach-Object { [int]$_[27] } | Measure-Object -Maximum).Maximum
+        Say ("DRYRUN: peak engaged {0}, incoming {1}, casings {2}" -f $peakEng, $peakInc, $peakBrass)
+    }
+
+    # (4) EVERY COLUMN INDEX THE LEGS READ is inside the recording's own width.
+    #     A leg that reads a column the player stopped writing is the next fault
+    #     of this shape, and it would throw exactly where fault 1 did.
+    $width = $rows[-1].Split(",").Count
+    foreach ($i in @(5, 11, 22, 27, 28, 32, 33)) {
+        if ($i -ge $width) {
+            Say ("DRYRUN FAIL: a leg reads column {0} and the recording is {1} wide" -f $i, $width)
+            $bad++
+        }
+    }
+    Say ("DRYRUN: hero.csv is {0} columns wide" -f $width)
+
+    # (5) …and nothing above threw. This is carried 282's own check, run on the
+    #     part of the script a dry run can reach.
+    if ($Error.Count -gt 0) {
+        Say ("DRYRUN FAIL: {0} exception(s) were thrown" -f $Error.Count)
+        foreach ($e in $Error) { Say ("  " + $e.ToString()) }
+        $bad++
+    }
+    if ($bad -gt 0) {
+        Say "DRYRUN FAILED: $bad check(s)"
+        exit 4
+    }
+    Say "DRYRUN OK: 5 checks, 0 failures -- no editor was launched"
+    exit 0
+}
+
 Say "repo    $repo"
 Say "mode    $PlayMode"
 Say "out     $OutDir"
@@ -169,7 +278,7 @@ Say "out     $OutDir"
 #    The island's pack is memory-mapped and a build that tries to replace a
 #    RUNNING executable fails as a sharing violation, which MSVC reports as
 #    LNK1104 and which reads like a disk problem. Refuse early and say why.
-$running = Get-Process -ErrorAction SilentlyContinue |
+$running = Get-Process -ErrorAction Ignore |
     Where-Object { $_.ProcessName -in @("inf-studio", "inf-player") }
 if ($running) {
     Say ("REFUSED: these are already running -> " + (($running | ForEach-Object { "$($_.ProcessName)/$($_.Id)" }) -join ", "))
@@ -263,9 +372,9 @@ if ($SpawnAt -ne "") {
     }
     $env:INF_PIE_SPAWN_AT = $spawnValue; Say "spawn override: $spawnValue"
 }
-else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction SilentlyContinue }
+else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction Ignore }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
-else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction SilentlyContinue }
+else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction Ignore }
 # WPN2a: the WHOLE list goes to the player, which puts every one of them in the
 # hero's bag and equips the first. The loop cycles the rest in with the SCROLL
 # WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one
@@ -287,7 +396,7 @@ if ($ArmHero -ne "") {
         }
     }
 }
-if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction SilentlyContinue }
+if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction Ignore }
 $proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru
 Say "launched pid $($proc.Id); waiting up to $BootWaitS s for the shell"
 
@@ -330,7 +439,7 @@ Start-Sleep -Seconds $EditorSettleS
 # newly placed body on one run in four, and the portrait then photographed her
 # instead of the hero. With one pawn in the document there is nothing to
 # resolve.
-if ($Portrait -and (Get-Command node -ErrorAction SilentlyContinue)) {
+if ($Portrait -and (Get-Command node -ErrorAction Ignore)) {
     Say "framing the hero's face (document only; never saved)"
     & node (Join-Path $PSScriptRoot "portrait.mjs") $Port 2>&1 | ForEach-Object { Say "  cdp: $_" }
     if ($LASTEXITCODE -ne 0) { Say "  portrait.mjs exit $LASTEXITCODE" }
@@ -339,13 +448,13 @@ if ($Portrait -and (Get-Command node -ErrorAction SilentlyContinue)) {
         ForEach-Object { Say $_ }
     # …and back, so the frames after this one are the level's own pose. ONE
     # undo: the portrait is one transaction, the hero's own translation.
-    if (Get-Command node -ErrorAction SilentlyContinue) {
+    if (Get-Command node -ErrorAction Ignore) {
         & node (Join-Path $PSScriptRoot "undo.mjs") $Port 1 2>&1 | ForEach-Object { Say "  cdp: $_" }
     }
     Start-Sleep -Seconds 2
 }
 
-if ($PlaceFemale -and (Get-Command node -ErrorAction SilentlyContinue)) {
+if ($PlaceFemale -and (Get-Command node -ErrorAction Ignore)) {
     Say "placing the FEMALE committed body beside the pawn (document only; never saved)"
     & node (Join-Path $PSScriptRoot "place.mjs") $Port 2>&1 | ForEach-Object { Say "  cdp: $_" }
     if ($LASTEXITCODE -ne 0) { Say "  place.mjs exit $LASTEXITCODE" }
@@ -356,7 +465,7 @@ if ($PlaceFemale -and (Get-Command node -ErrorAction SilentlyContinue)) {
 
 # ── 3. press Play ────────────────────────────────────────────────────────────
 $pressed = $false
-if (Get-Command node -ErrorAction SilentlyContinue) {
+if (Get-Command node -ErrorAction Ignore) {
     Say "pressing Play over CDP"
     & node (Join-Path $PSScriptRoot "play.mjs") $Port 8 $PlayMode 2>&1 | ForEach-Object { Say "  cdp: $_" }
     if ($LASTEXITCODE -eq 0) { $pressed = $true } else { Say "  cdp failed (exit $LASTEXITCODE)" }
@@ -368,7 +477,7 @@ if (-not $pressed) {
     Add-Type -AssemblyName System.Windows.Forms
     if ($PlayMode -ne "embedded") {
         Say "REFUSED: -PlayMode window needs the CDP path (there is no coordinate for a menu item)"
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $proc.Id -Force -ErrorAction Ignore
         exit 6
     }
     Say "pressing Play by coordinate (1220, 49)"
@@ -392,7 +501,7 @@ public class InfClick {
 Say "waiting up to $PieWaitS s for inf-player.exe"
 $player = $null
 for ($i = 0; $i -lt $PieWaitS; $i++) {
-    $player = Get-Process -Name "inf-player" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $player = Get-Process -Name "inf-player" -ErrorAction Ignore | Select-Object -First 1
     if ($player) { Say "player pid $($player.Id) after $($i + 1) s"; break }
     if ($proc.HasExited) { Say "EDITOR EXITED with $($proc.ExitCode)"; exit 4 }
     Start-Sleep -Seconds 1
@@ -400,13 +509,13 @@ for ($i = 0; $i -lt $PieWaitS; $i++) {
 if (-not $player) {
     Say "NO PLAYER after $PieWaitS s"
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "02-no-player.png") | ForEach-Object { Say $_ }
-    if (-not $KeepOpen) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $KeepOpen) { Stop-Process -Id $proc.Id -Force -ErrorAction Ignore }
     exit 5
 }
 
 # A console window is the defect this wave closed; look for one belonging to
 # either process while both are alive.
-$consoles = Get-Process -ErrorAction SilentlyContinue |
+$consoles = Get-Process -ErrorAction Ignore |
     Where-Object { $_.ProcessName -eq "conhost" -or $_.ProcessName -eq "WindowsTerminal" } |
     Where-Object { $_.MainWindowTitle -like "*inf-player*" }
 Say ("console windows named inf-player: " + $(if ($consoles) { ($consoles | ForEach-Object { $_.MainWindowTitle }) -join "; " } else { "none" }))
@@ -2291,14 +2400,29 @@ if ($KeepOpen) {
     Say "left running (pid $($proc.Id)); the island's pack stays mapped until you close it"
 } else {
     Say "closing"
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $proc.Id -Force -ErrorAction Ignore
     Start-Sleep -Seconds 2
-    Get-Process -Name "inf-player" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name "inf-player" -ErrorAction Ignore | Stop-Process -Force -ErrorAction Ignore
     Start-Sleep -Seconds 1
     # The control for the two readings above: a cursor that is hidden here as
     # well is a cursor this script cannot see, not one the game took.
     Say ("cursor after the session ended: " + [InfInput]::CursorState())
-    Say ("still running: " + $(if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -in @("inf-studio", "inf-player") }) { "YES" } else { "none" }))
+    Say ("still running: " + $(if (Get-Process -ErrorAction Ignore | Where-Object { $_.ProcessName -in @("inf-studio", "inf-player") }) { "YES" } else { "none" }))
+}
+# **WHAT THE RUN THREW** (WPN2e audit, carried 282). An exception this script
+# did not expect is a defect in this script, and until now it printed in red and
+# exited 0. Every expected miss is `-ErrorAction Ignore` and does not land here.
+if ($Error.Count -gt 0) {
+    Say ("EXCEPTIONS: {0} error(s) were thrown during this run -- the loop's own defect, not the game's" -f $Error.Count)
+    $shown = 0
+    foreach ($e in $Error) {
+        if ($shown -ge 10) { break }
+        $where = ""
+        if ($e.InvocationInfo) { $where = " at line " + $e.InvocationInfo.ScriptLineNumber }
+        Say ("  {0}{1}" -f $e.ToString(), $where)
+        $shown++
+    }
+    $failed = $true
 }
 if ($failed) {
     # **Non-zero, and that is the point** (audit FIX1). A demo loop that always
