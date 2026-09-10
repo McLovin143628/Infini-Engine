@@ -38,6 +38,10 @@ use inf_ecs::EcsWorld;
 use inf_physics::d3::{self, PhysicsBridge3D};
 use inf_project::ProjectManifest;
 
+const GAMEPLAY_RS: &str = include_str!("../../../crates/inf-physics/src/d3/gameplay.rs");
+const MOVEMENT_RS: &str = include_str!("../../../crates/inf-physics/src/d3/movement.rs");
+const FEEL_RS: &str = include_str!("../../../crates/inf-ecs/src/feel.rs");
+
 const DT: f64 = 1.0 / 60.0;
 const GRAVITY: DVec3 = DVec3::new(0.0, -9.81, 0.0);
 const RADIUS: f64 = 0.3;
@@ -1417,6 +1421,56 @@ fn the_attachment_catalogue_is_the_docs_own_lists() {
     println!("the attachment catalogue: {total} rows over ten slots");
     assert_eq!(total, 530, "the doc's lists are 530 rows");
     assert_eq!(cat.len(), total);
+
+    // **AND HOW MANY OF THEM DO NOTHING AT ALL** (the audit's fix, and the
+    // brief's own test of this file: "an attachment that is only a row must
+    // fail the arm that claims otherwise").
+    //
+    // The catalogue's numbers are DERIVED from each attachment's NAME by one
+    // rule per keyword, which is what makes 530 rows checkable at all — and a
+    // name with no keyword in it derives nothing. Forty-four rows come out with
+    // every multiplier at 1.0, an ADS delta of 0, no magazine override and no
+    // art: `polygonal_rifled_barrel`, `sling_swivel_endplate`,
+    // `ribbed_heat_dissipating_barrel`, `low_magnification_cqb_optic`,
+    // `integrated_carry_handle_optic`, `pistol_grip_buffer_extension` and
+    // thirty-eight more. They are 8.3 % of the catalogue and they are content
+    // that a player can fit, that the bench will cycle through, and that
+    // changes nothing whatsoever about the weapon.
+    //
+    // The count is PINNED rather than refused, because the alternative — every
+    // row must move something — would mean inventing numbers for names the
+    // keyword table cannot read, which is exactly the 530 unfalsifiable
+    // hand-tuned numbers the derivation exists to avoid. What a pin buys is
+    // that the figure is a fact in a gate instead of an absence in a table:
+    // adding a keyword rule that reaches one of the forty-four reds this arm,
+    // and so does adding a forty-fifth inert row.
+    let inert: Vec<&str> = (0..cat.len() as u16)
+        .filter_map(|i| cat.get(i))
+        .filter(|d| {
+            let m = &d.modifiers;
+            m.damage_mult == 1.0
+                && m.range_mult == 1.0
+                && m.recoil_mult == 1.0
+                && m.move_speed_mult == 1.0
+                && m.velocity_mult == 1.0
+                && m.loudness_mult == 1.0
+                && m.ads_time_delta_ms == 0.0
+                && m.mag_capacity_override.is_none()
+                && d.art == attachment::AttachmentArt::None
+        })
+        .map(|d| d.id.as_str())
+        .collect();
+    println!(
+        "  rows that change NOTHING: {} of {total} ({:.1} %) — e.g. {:?}",
+        inert.len(),
+        inert.len() as f64 / total as f64 * 100.0,
+        &inert[..inert.len().min(4)]
+    );
+    assert_eq!(
+        inert.len(),
+        44,
+        "the catalogue's inert rows moved: {inert:?}"
+    );
     // The DMR's `stock` carries both the doc's stocks AND its cheek risers,
     // which is the slot mapping the file states.
     assert_eq!(
@@ -1509,6 +1563,71 @@ fn the_fold_is_applied_through_the_one_weapon_def_door() {
         bare_bytes,
         "a stripped rifle does not fold what a rifle that never had one does"
     );
+    // **AND THE FOLD HAS ONE DOOR, WHICH IS A GREP** (the audit's fix, and the
+    // brief's own test of the claim: plant a second copy of a modifier rule and
+    // the arm must red).
+    //
+    // Everything above this line proves the fold is applied CORRECTLY. It
+    // cannot prove it is applied ONCE — a helper beside `equipped_def` that
+    // re-implemented `loudness_mult` would leave every assertion above green
+    // and every caller that used the helper reading different numbers. So the
+    // sites are counted.
+    //
+    // `attachment::fold(..).apply(..)` is the whole application, and it appears
+    // exactly twice: inside `weapon::equipped_def`, which is the door every
+    // reader goes through, and inside `weapon::equip_attachment`, which cannot
+    // use that door because it is holding the `WeaponState` mutably while it
+    // tops the magazine up. Both call the SAME `fold` and the SAME
+    // `StatModifiers::apply`, so there is one copy of the rule and two callers
+    // of it — which is what "one door" has to mean in a language where a
+    // function can be called twice.
+    const WEAPON_RS: &str = include_str!("../../../crates/inf-ecs/src/weapon.rs");
+    const ATTACHMENT_RS: &str = include_str!("../../../crates/inf-ecs/src/attachment.rs");
+    let applications = WEAPON_RS.matches("fold(").count();
+    assert_eq!(
+        applications, 2,
+        "`attachment::fold` is called {applications} times in `weapon.rs` — the          fold has grown a second door and the two can now disagree"
+    );
+    assert_eq!(
+        ATTACHMENT_RS.matches("pub fn apply(").count(),
+        1,
+        "there is more than one `StatModifiers::apply` — a second copy of the          rule is a second answer to `what does a suppressor do`"
+    );
+    assert_eq!(
+        ATTACHMENT_RS.matches("pub fn fold(").count(),
+        1,
+        "there is more than one `attachment::fold`"
+    );
+    // …and no OTHER file multiplies by a modifier itself. The five multipliers
+    // and the one delta are named here so a sixth cannot be added silently in
+    // some caller's own arithmetic.
+    for (file, text) in [
+        ("gameplay.rs", GAMEPLAY_RS),
+        ("movement.rs", MOVEMENT_RS),
+        ("feel.rs", FEEL_RS),
+    ] {
+        for rule in [
+            "loudness_mult",
+            "damage_mult",
+            "range_mult",
+            "recoil_mult",
+            "velocity_mult",
+            "ads_time_delta_ms",
+        ] {
+            let hits = text
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//") && l.contains(rule)
+                })
+                .count();
+            assert_eq!(
+                hits, 0,
+                "`{file}` reads `{rule}` itself — the fold is supposed to have                  happened before anything downstream of `equipped_def` sees a                  number"
+            );
+        }
+    }
+
     // A part that does not fit the class is refused as a VALUE.
     let pistol_can = cat
         .find(
@@ -1937,13 +2056,63 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
             "{id} has no art and is not a shotgun or a launcher"
         );
     }
-    // Fourteen, not fifteen: the G67 grenade is a `launcher`-class row and it
-    // HAS art (`SM_G67`), so what is left bare is the ten shotguns and the five
-    // rocket launchers minus it.
-    assert_eq!(bare.len(), 14, "ten shotguns and four rocket launchers");
+    // Fourteen, and the split is **nine shotguns and five launchers** (the
+    // audit's fix). The wave's own report and this comment both said "ten
+    // shotguns and four launchers", and neither is what the table answers:
+    // `saiga_12` is an AK-pattern shotgun and the NAME rule reaches it before
+    // the class rule does, so it draws `SM_KA47`; and `g67_grenade` is a
+    // `launcher`-class row that the THROWABLE rule reaches first, so it draws
+    // `SM_G67`. Two rows cross the class boundary in opposite directions and
+    // the total is the same fourteen either way, which is exactly how a
+    // miscounted split survives a total.
+    assert_eq!(bare.len(), 14);
+    let bare_by_class = |c: WeaponClass| -> usize {
+        bare.iter()
+            .filter(|id| {
+                defs.get(id)
+                    .and_then(|i| i.weapon)
+                    .is_some_and(|d| d.audio_class() == c)
+            })
+            .count()
+    };
+    assert_eq!(
+        (
+            bare_by_class(WeaponClass::Shotgun),
+            bare_by_class(WeaponClass::Launcher)
+        ),
+        (9, 5),
+        "the bare rows are {bare:?}"
+    );
     assert!(
         bare.iter().all(|id| id != "g67_grenade"),
         "the grenade is drawn as a primitive"
+    );
+    // **AND THE WHOLE TABLE IS PINNED, ROW COUNT BY ROW COUNT** (the audit's
+    // fix). The census was printed and never asserted, so the class -> art
+    // table lived in a report where nothing could contradict it. It is 88 rows,
+    // and every one of these numbers is a fact about the shipped registry:
+    // `SM_KA74U` is imported, is in `WEAPON_MESH_KEYS`, and **no row reaches
+    // it** — carried 249, as a zero in a gate rather than a sentence.
+    let want: &[(&str, usize)] = &[
+        ("SM_AR4", 16),
+        ("SM_G67", 1),
+        ("SM_KA47", 6),
+        ("SM_KA_VAL", 10),
+        ("SM_KA_VAL_Y", 10),
+        ("SM_M9_KNIFE", 2),
+        ("SM_SMG11", 19),
+        ("SM_SMG11_NOSTOCK", 10),
+    ];
+    let got: Vec<(&str, usize)> = by_key.iter().map(|(k, n)| (*k, *n)).collect();
+    assert_eq!(got.as_slice(), want, "the class -> art table moved");
+    assert_eq!(
+        got.iter().map(|(_, n)| n).sum::<usize>() + bare.len(),
+        88,
+        "the shipped registry is 88 weapon rows"
+    );
+    assert!(
+        !by_key.contains_key("SM_KA74U"),
+        "a row reaches `SM_KA74U` now — carried 249 is closed and this pin has          to move with it"
     );
     // Every key the table can answer is enumerated, so the importer's rebind
     // list and this census cannot disagree.
@@ -2443,15 +2612,62 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
 /// assumed.
 #[test]
 fn nothing_of_the_npc_firing_policy_leaked_in() {
-    const DISPATCH: &str = include_str!("../../../crates/inf-physics/src/d3/dispatch.rs");
-    const CRIME: &str = include_str!("../../../crates/inf-physics/src/d3/crime.rs");
-    for (what, text) in [("dispatch", DISPATCH), ("crime", CRIME)] {
-        assert!(
-            !text.contains("npc_aim_at"),
-            "`{what}.rs` calls `npc_aim_at` — WPN2e's target selection has leaked \
-             into WPN2d"
-        );
+    // **THE WHOLE FIXED STEP, NOT TWO HAND-PICKED FILES** (the audit's fix).
+    //
+    // This read `!DISPATCH.contains("npc_aim_at")` and the same of `crime.rs`,
+    // which is a narrow pin with a hole on either side of it: a leak into
+    // `cover.rs`, `traffic.rs` or any third file sailed through, and
+    // `cover.rs` *names* `npc_aim_at` four times in its own doc comments
+    // (explaining that it deliberately does NOT call it), so the naive
+    // spelling would have gone red on prose if it had been pointed there.
+    //
+    // So the pin is on a CALL — `npc_aim_at(` — over every `.rs` in the two
+    // crates the fixed step lives in, with the one file that DEFINES it
+    // exempted by name. A mention in a comment is a mention; `npc_aim_at(` is
+    // a call.
+    let mut callers: Vec<String> = Vec::new();
+    for dir in [
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/inf-physics/src"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/inf-ecs/src"),
+    ] {
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                    continue;
+                }
+                // The definition's own file.
+                if path.file_name().and_then(|x| x.to_str()) == Some("gameplay.rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in text.lines() {
+                    let t = line.trim_start();
+                    if t.starts_with("//") || t.starts_with("///") {
+                        continue;
+                    }
+                    if line.contains("npc_aim_at(") {
+                        callers.push(format!("{}: {}", path.display(), line.trim()));
+                    }
+                }
+            }
+        }
     }
+    assert!(
+        callers.is_empty(),
+        "the fixed step calls `npc_aim_at` outside its own file — WPN2e's \
+         target selection has leaked into WPN2d: {callers:?}"
+    );
     // And an armed NPC standing beside the hero fires nothing on its own.
     let mut r = Range::new(registry());
     stand(
@@ -2726,5 +2942,80 @@ fn the_first_person_seat_survives_the_weapon_that_aims_down_its_sights() {
         branch.contains("set_view_mode"),
         "the view-mode key writes the session camera and not the subject's rig, \
          so the next fixed step undoes it"
+    );
+}
+
+
+/// **THE PREVIEWED ARC IS THE FLIGHT'S OWN ARITHMETIC** (wave WPN2d audit).
+///
+/// `ballistics::throw_arc`'s doc says it is "the SAME integrator the body itself
+/// flies on, stepped at the same `PROJECTILE_SUB_STEPS`-derived rate, so the
+/// line a player is shown and the path the grenade takes are one arithmetic". It
+/// was the same FUNCTION at a step **twenty times coarser**: the flight advances
+/// the pool at `dt / PROJECTILE_SUB_STEPS` = 1/240 s and the preview stepped
+/// once per drawn point, at `THROW_ARC_S / THROW_ARC_POINTS` = 1/12 s.
+/// `advance_round` is semi-implicit Euler and does not sub-step inside itself,
+/// so that is a different answer, not the same one sampled: the closed-form
+/// error for a body under gravity is `g·t·dt/2`, which at two seconds is
+/// **0.818 m at 1/12 s against 0.041 m at 1/240 s**.
+///
+/// **What this arm reads**: the preview's own last point against the same
+/// integrator run the FLIGHT's way for the same two seconds. Not a tolerance —
+/// the same arithmetic in the same order, so it is an equality.
+///
+/// **Mutation → red**: put `THROW_ARC_SUB_STEPS` back to 1 (the shipped
+/// behaviour before this audit) — the endpoint moves **0.78 m**.
+#[test]
+fn the_previewed_throw_arc_is_the_flights_own_arithmetic() {
+    let def = row("g67_grenade");
+    let from = DVec3::new(0.0, 1.65, 0.0);
+    let v = DVec3::new(0.0, 6.0, 14.0);
+
+    let arc = ballistics::throw_arc(from, v, &def);
+    assert_eq!(
+        arc.len(),
+        ballistics::THROW_ARC_POINTS,
+        "the preview stopped early"
+    );
+
+    // The FLIGHT's own way: `PROJECTILE_SUB_STEPS` sub-steps of the fixed step,
+    // which is what `step_rounds` does to a body. Every drawn point is compared,
+    // not only the last, because a preview that agreed at the ends and bowed in
+    // the middle is still a line that lies.
+    let sub_dt = DT / ballistics::PROJECTILE_SUB_STEPS as f64;
+    assert!(
+        (sub_dt
+            - ballistics::THROW_ARC_S
+                / (ballistics::THROW_ARC_POINTS as f64
+                    * ballistics::THROW_ARC_SUB_STEPS as f64))
+            .abs()
+            < 1e-15,
+        "the preview's sub-step is not the flight's: {sub_dt}"
+    );
+    let (mut p, mut vel) = (from, v);
+    let mut gap: f64 = 0.0;
+    for point in arc.iter().skip(1) {
+        for _ in 0..ballistics::THROW_ARC_SUB_STEPS {
+            let (np, nv) = ballistics::advance_round(p, vel, &def, sub_dt);
+            p = np;
+            vel = nv;
+        }
+        gap = gap.max((*point - p).length());
+    }
+    let drawn = *arc.last().expect("a preview has an end");
+    println!(
+        "the preview ends at ({:.4}, {:.4}, {:.4}); the flight's own integration \
+         ends at ({:.4}, {:.4}, {:.4}) — {gap:.6} m apart",
+        drawn.x, drawn.y, drawn.z, p.x, p.y, p.z
+    );
+    assert!(
+        gap < 1e-9,
+        "the line a player aims along is {gap:.4} m from where the grenade goes"
+    );
+    // **The anti-vacuity half**: the arc has to be a real flight, not a point.
+    let span = (drawn - from).length();
+    assert!(
+        span > 10.0,
+        "the preview covered {span:.2} m — this arm is comparing two nothings"
     );
 }

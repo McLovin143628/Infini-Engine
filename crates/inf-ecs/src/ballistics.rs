@@ -715,6 +715,24 @@ pub const THROW_ARC_POINTS: usize = 24;
 /// the air on purpose.
 pub const THROW_ARC_S: f64 = 2.0;
 
+/// **How many integration steps the preview takes per DRAWN POINT** (wave WPN2d
+/// audit).
+///
+/// Twenty, and it is arithmetic rather than taste: the flight advances the pool
+/// at `dt / PROJECTILE_SUB_STEPS`, which on a 60 Hz host is **1/240 s**, and
+/// `THROW_ARC_S / (THROW_ARC_POINTS * 20)` is `2.0 / 480` — the same 1/240 s.
+///
+/// It exists because [`throw_arc`] stepped `advance_round` once per drawn point,
+/// at `2.0 / 24 = 1/12 s`, which is **twenty times coarser than the flight** —
+/// while its own doc said it was "stepped at the same
+/// `PROJECTILE_SUB_STEPS`-derived rate". `advance_round` is semi-implicit Euler
+/// and does not sub-step internally, so a coarser step is a different answer:
+/// for a body under gravity the closed form of the error is `g·t·dt/2`, which at
+/// `t = 2 s` is **0.818 m at 1/12 s against 0.041 m at 1/240 s**. The line a
+/// player aimed along ended about **three quarters of a metre below** where the
+/// grenade went. That is the reticle-that-lies this function's own doc refuses.
+pub const THROW_ARC_SUB_STEPS: u32 = 20;
+
 /// **Where a thrown body would go** (wave WPN2d) — the preview arc, as a pure
 /// function.
 ///
@@ -734,16 +752,19 @@ pub fn throw_arc(at: DVec3, velocity: DVec3, def: &WeaponDef) -> Vec<DVec3> {
     if !at.is_finite() || !velocity.is_finite() {
         return out;
     }
-    let dt = THROW_ARC_S / THROW_ARC_POINTS as f64;
+    // The FLIGHT's sub-step, not the point spacing. See [`THROW_ARC_SUB_STEPS`].
+    let sub_dt = THROW_ARC_S / (THROW_ARC_POINTS as f64 * THROW_ARC_SUB_STEPS as f64);
     let (mut p, mut v) = (at, velocity);
     out.push(p);
-    for _ in 1..THROW_ARC_POINTS {
-        let (np, nv) = advance_round(p, v, def, dt);
-        if !np.is_finite() {
-            break;
+    'points: for _ in 1..THROW_ARC_POINTS {
+        for _ in 0..THROW_ARC_SUB_STEPS {
+            let (np, nv) = advance_round(p, v, def, sub_dt);
+            if !np.is_finite() {
+                break 'points;
+            }
+            p = np;
+            v = nv;
         }
-        p = np;
-        v = nv;
         out.push(p);
     }
     out

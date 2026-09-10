@@ -205,9 +205,21 @@ pub struct MeshRef {
     /// references a `.inf_mesh` asset; the **player** renders its real geometry —
     /// through the cook-derived `.inf_vmesh` meshlet path when virtualized
     /// geometry is enabled (the auto-tier's High tier), or the classic
-    /// discrete-LOD fallback otherwise — while the interactive editor viewport
+    /// discrete-LOD fallback otherwise.
+    ///
+    /// **And so does the interactive editor viewport**, since P18.3. This said
+    /// the opposite until wave WPN2d's audit — "the interactive editor viewport
     /// keeps drawing the `primitive` placeholder (a documented gap: the
-    /// asset-DB-in-viewport binding is a follow-up).
+    /// asset-DB-in-viewport binding is a follow-up)" — which stopped being true
+    /// at `inf_viewport::host`'s own "THE OLDEST DOCUMENTED GAP, CLOSED", where
+    /// a `MeshRef.asset` with a derived vmesh renders real geometry through the
+    /// same vgeom scene content the player uses. A stale doc on the component
+    /// every renderer reads is worse than none: this one had a wave planning
+    /// around a gap that had been closed for ten phases.
+    ///
+    /// An **unresolved** asset still falls back to the built-in `primitive`, in
+    /// both hosts, which is why a weapon whose art is not on this machine draws
+    /// a box rather than nothing.
     ///
     /// Additive field: `#[serde(default)]` so pre-v7 `.inf_lvl` files load with
     /// `None`; `#[reflect(ignore)]` (assigned by drag-drop, not the Details

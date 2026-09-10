@@ -1817,6 +1817,23 @@ if ($armList.Count -gt 0) {
     else {
         $row = & $heroRow
         Say ("WPN2d: at boom {0} m the body draws {1} and the {2} in the hand does not fade" -f $row[13], $row[14], $row[29])
+        # **AND LOOK FOR IT** (WPN2d audit). The first-person seat is at the
+        # HEAD and the weapon is at the HAND socket, which is about half a metre
+        # below it and a quarter of a metre forward -- some 63 degrees under the
+        # horizon, which is outside a 60-degree vertical frustum unless the aim
+        # is pitched well down. The audit's first session took `90` at a -23
+        # degree aim and photographed a kerb: honest, and no evidence either way
+        # about a weapon that does not fade. Two more frames, at both pitch
+        # clamps, so the question is answered by pixels rather than by a
+        # frustum.
+        [InfInput]::Look(0, 900); Start-Sleep -Milliseconds 450
+        $row = & $heroRow
+        Say ("WPN2d: first person, pitch at one clamp: boom {0}, body {1}, class {2}" -f $row[13], $row[14], $row[29])
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "90b-first-person-weapon-down.png") | ForEach-Object { Say $_ }
+        [InfInput]::Look(0, -900); Start-Sleep -Milliseconds 450
+        $row = & $heroRow
+        Say ("WPN2d: first person, pitch at the other clamp: boom {0}, body {1}, class {2}" -f $row[13], $row[14], $row[29])
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "90c-first-person-weapon-up.png") | ForEach-Object { Say $_ }
     }
 
     # **AND BACK OUT TO THE BOOM FOR THE CLASS FRAMES** (WPN2d audit). A
@@ -1930,24 +1947,49 @@ if ($armList.Count -gt 0) {
             -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -eq $lw) -and ($c[5].Trim() -ne "Ragdoll") })[-1]
         if (-not $onLk) { Say "WPN2d: the rotation never brought `"$lw`" round for the lock" }
         else {
-            # Level, and a touch below: a car sits at the hero's own feet height
-            # and the reticle is at 1.65 m.
-            [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 250
-            [InfInput]::Look(0, -400); Start-Sleep -Milliseconds 300
+            # **HOLD STILL AND WATCH** (WPN2d audit, third session).
+            #
+            # Two sweeps found nothing and both were WRONG ABOUT THE WORLD. The
+            # second session's own `hero.csv` carries **288 samples at `1.00+`**
+            # -- a COMPLETED lock -- in twelve windows, and every window is a
+            # dwell of the `-ArmHero` rotation in which the Javelin was in the
+            # hand *and nothing was driving the look*. The two windows that
+            # coincide with this leg's own sweep have no lock in them at all.
+            #
+            # The reason is arithmetic: a lock needs `lock_s` of CONTINUOUS hold
+            # on the same target (1.6 s for the Javelin, 1.2 for the Stinger),
+            # and a sweep that turns the aim every 1.5 s never lets one finish.
+            # The leg was chasing a thing that only happens when you stop
+            # chasing it.
+            #
+            # So: stand still, aim wherever the last leg left the reticle, and
+            # WATCH the column for two full dwells. Only if that finds nothing
+            # does the sweep run -- and then at 3 s a bearing, which is longer
+            # than `lock_s`.
             [InfInput]::RightDown(); Start-Sleep -Milliseconds 400
-            $lk = $false
-            for ($b = 0; ($b -lt 16) -and (-not $lk); $b++) {
-                $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something (bearing $b)" -TimeoutS 2.5 `
-                    -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
-                    -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
-                if (-not $lk) { [InfInput]::Look(150, 0); Start-Sleep -Milliseconds 250 }
+            $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock, without chasing it" -TimeoutS ([math]::Max(20.0, $ArmDwellS * 2)) `
+                -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
+                -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
+            if (-not $lk) {
+                Say "WPN2d: no lock while standing still -- sweeping, three seconds a bearing"
+                foreach ($up in 260, 320, 380) {
+                    if ($lk) { break }
+                    [InfInput]::Look(0, 900);   Start-Sleep -Milliseconds 250
+                    [InfInput]::Look(0, -$up);  Start-Sleep -Milliseconds 300
+                    for ($b = 0; ($b -lt 8) -and (-not $lk); $b++) {
+                        $lk = @(Wait-ForHero -Csv $heroCsv -What "a lock on something (elevation $up, bearing $b)" -TimeoutS 3.0 `
+                            -Predicate { param($c) ($c.Count -gt 31) -and ($c[31].Trim() -ne "-") -and ([double]($c[31].TrimEnd("+")) -gt 0.05) } `
+                            -Out (Join-Path $OutDir "93-lock-on.png"))[-1]
+                        if (-not $lk) { [InfInput]::Look(300, 0); Start-Sleep -Milliseconds 200 }
+                    }
+                }
             }
             [InfInput]::RightUp()
             if ($lk) {
                 $row = & $heroRow
                 Say ("WPN2d: the lock indicator reads {0} with `"{1}`" up" -f $row[31], $lw)
             } else {
-                Say "WPN2d: nothing lockable was in the cone over sixteen level bearings -- no lock frame"
+                Say "WPN2d: nothing lockable in two dwells of standing still, nor over three elevations x eight bearings -- no lock frame"
             }
         }
     }
