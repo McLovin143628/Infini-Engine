@@ -5,7 +5,7 @@
 //! inf-import --manifest <manifest.json> --into <project-dir>
 //!            [--pack <name>]…            only these packs
 //!            [--max-texture <n>]         ceiling on a texture's longest side (0 = source)
-//!            [--dest <subfolder>]        under <project>/Content (default "UE")
+//! [--dest <subfolder>] under <project>/Content (default "UE")
 //!            [--bind <Stem>=<key>]…      write a material at a committed GUID
 //!            [--no-meshes]               materials and textures only
 //!            [--character-lods <n>]      LOD rungs to store per character (default 3)
@@ -246,17 +246,17 @@ fn run(args: &[String]) -> Result<(), String> {
         println!("inf-import: material {id}  {key}");
     }
     for (key, id, rungs, tris) in &report.meshes {
-        println!("inf-import: mesh     {id}  {tris:>7} tris, {rungs} source rungs  {key}");
+        println!("inf-import: mesh {id}  {tris:>7} tris, {rungs} source rungs  {key}");
     }
     for (key, mesh, skel, rungs, tris, joints) in &report.skeletal {
         println!(
-            "inf-import: body     {mesh}  {tris:>7} tris, {rungs} rungs, {joints} joints, \
+            "inf-import: body {mesh}  {tris:>7} tris, {rungs} rungs, {joints} joints, \
              skeleton {}  {key}",
             skel.map(|s| s.to_string()).unwrap_or_else(|| "NONE".into())
         );
     }
     for (key, id, tracks) in &report.clips {
-        println!("inf-import: clip     {id}  {tracks:>4} tracks  {key}");
+        println!("inf-import: clip {id}  {tracks:>4} tracks  {key}");
     }
     for (pack, licence, ship) in &report.licences {
         println!(

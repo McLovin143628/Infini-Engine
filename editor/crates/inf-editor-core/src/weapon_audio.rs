@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(
             clips.len(),
             38,
-            "seven classes times five, less the rifle's body, plus the casing,              the blast and the two melee surfaces"
+            "seven classes times five, less the rifle's body, plus the casing, the blast and the two melee surfaces"
         );
         let mut guids = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();

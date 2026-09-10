@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(
             clips.len(),
             40,
-            "thirty-six report clips, the casing, the venue loop, and wave              WPN2d's blast plus its two melee surfaces"
+            "thirty-six report clips, the casing, the venue loop, and wave WPN2d's blast plus its two melee surfaces"
         );
         let uniq: std::collections::BTreeSet<Uuid> = clips.iter().copied().collect();
         assert_eq!(uniq.len(), clips.len(), "the list has a duplicate");

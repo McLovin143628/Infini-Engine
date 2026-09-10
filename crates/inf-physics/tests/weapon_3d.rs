@@ -1125,6 +1125,14 @@ fn the_equipped_weapon_is_an_entity_attached_to_the_hand_socket() {
     // nothing looked. The attachment pass leaves a follower's size alone now
     // (`an_attachment_places_a_follower_without_resizing_it`); this is the half
     // that says the size it is left with is the barrel's.
+    //
+    // **AND IT IS THE PLACEHOLDER'S SIZE, NOT A REAL MESH'S** (wave WPN2d). A
+    // weapon whose class HAS art draws that art at 1:1 — the art is modelled in
+    // metres and already IS the length its class says it is, and stretching it
+    // would distort a rifle to fit a number authored to describe that rifle. So
+    // the fixture's rifle is given a mesh of its own to make sure it takes the
+    // PLACEHOLDER branch, which is the branch this arm is about. Without it the
+    // scale reads 1.0 and the message says so.
     let t = *rig
         .world
         .world()
@@ -1135,6 +1143,23 @@ fn the_equipped_weapon_is_an_entity_attached_to_the_hand_socket() {
         .and_then(|d| d.weapon)
         .expect("the fixture's rifle")
         .muzzle_forward_m;
+    let drawn = rig
+        .world
+        .world()
+        .get::<inf_ecs::components::MeshRef>(e)
+        .copied()
+        .expect("a weapon has a mesh reference");
+    if drawn.asset.is_some() {
+        // The class table gave it art: a real mesh is drawn at its own size and
+        // the barrel is what the MUZZLE is measured along, not what the mesh is
+        // stretched to.
+        assert_eq!(
+            t.scale,
+            inf_ecs::math::Vec3d::ONE,
+            "a real weapon mesh was stretched to the placeholder's box"
+        );
+        return;
+    }
     assert!(
         (t.scale.z - barrel).abs() < 1e-9,
         "the placeholder is {:?} long against a {barrel} m barrel",

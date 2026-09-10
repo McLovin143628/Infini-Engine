@@ -874,7 +874,7 @@ fn a_locked_round_follows_its_target_and_an_unlocked_one_does_not() {
     let (guided_hit, guided) = miss_by(true);
     let (dumb_hit, dumb) = miss_by(false);
     println!(
-        "the Javelin at a car 3 m off a 40 m shot: guided hit={guided_hit}          (closest sample {guided:.3} m), unguided hit={dumb_hit} (closest sample          {dumb:.3} m)"
+        "the Javelin at a car 3 m off a 40 m shot: guided hit={guided_hit} (closest sample {guided:.3} m), unguided hit={dumb_hit} (closest sample {dumb:.3} m)"
     );
     assert!(
         guided_hit,
@@ -882,7 +882,7 @@ fn a_locked_round_follows_its_target_and_an_unlocked_one_does_not() {
     );
     assert!(
         !dumb_hit,
-        "the UNGUIDED round hit a car three metres off the line it was fired          along — the fixture is not measuring guidance"
+        "the UNGUIDED round hit a car three metres off the line it was fired along — the fixture is not measuring guidance"
     );
 }
 

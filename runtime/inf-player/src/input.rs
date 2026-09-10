@@ -367,7 +367,7 @@ mod tests {
         println!("the inventory panel reads: {want:?}");
         assert!(
             want.len() >= 8,
-            "only {} keys were scraped out of the panel's reducer — the scrape              has stopped matching its source and this arm is vacuous",
+            "only {} keys were scraped out of the panel's reducer — the scrape has stopped matching its source and this arm is vacuous",
             want.len()
         );
         let missing: Vec<&String> = want
@@ -376,7 +376,7 @@ mod tests {
             .collect();
         assert!(
             missing.is_empty(),
-            "the inventory panel reads {} key(s) no `KeyCode` reaches, so they do              nothing in the shipped player: {missing:?}",
+            "the inventory panel reads {} key(s) no `KeyCode` reaches, so they do nothing in the shipped player: {missing:?}",
             missing.len()
         );
         // ANTI-VACUITY: the three wave WPN2d added are really in the set.
