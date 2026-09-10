@@ -2882,11 +2882,15 @@ fn a_firefight_is_inside_the_weapon_budget() {
     // **THE CONTROL IS NOT A COLD FIRST STEP** (the WPN2d audit's law): the
     // world has stepped 240 times already, and the released-trigger step below
     // is run three times with only the last one timed.
-    let mut control_us = 0.0;
-    for _ in 0..3 {
+    // **THE MINIMUM OF FIVE, NOT THE LAST OF THREE** (the CI red of 2026-09-10 on
+    // the policy arm below, and the same shape here): a single timed step can
+    // absorb a scheduler stall on a shared runner; the intrinsic cost is the
+    // least of several timings, because a stall can only add.
+    let mut control_us = f64::INFINITY;
+    for _ in 0..5 {
         let t = std::time::Instant::now();
         let _ = b.step();
-        control_us = t.elapsed().as_secs_f64() * 1e6;
+        control_us = control_us.min(t.elapsed().as_secs_f64() * 1e6);
     }
     b.hold_trigger(HERO, true);
     b.top_up(HERO);
@@ -2897,9 +2901,13 @@ fn a_firefight_is_inside_the_weapon_budget() {
             cm.runtime.want_attack = true;
         }
     }
-    let t1 = std::time::Instant::now();
-    let rep = b.step();
-    let step_us = t1.elapsed().as_secs_f64() * 1e6;
+    let mut rep = b.step();
+    let mut step_us = f64::INFINITY;
+    for _ in 0..5 {
+        let t1 = std::time::Instant::now();
+        rep = b.step();
+        step_us = step_us.min(t1.elapsed().as_secs_f64() * 1e6);
+    }
     let cost_us = (step_us - control_us).max(0.0);
     println!("=== the firefight's cost ===");
     println!(
@@ -2972,12 +2980,19 @@ fn the_firing_policy_is_inside_the_npc_budget_at_a_thousand_agents() {
     }
     // The CONTROL: the same thousand agents, nobody wanted, so the policy runs
     // its early return.
-    let mut control_us = 0.0;
+    // **THE MINIMUM OF FIVE, NOT THE LAST OF THREE** (the CI red of 2026-09-10):
+    // on the Ubuntu runner one measured step read 3 543.8 us against a 251.0 us
+    // control while the same arm read 70 us on two other runners and on the
+    // machine that wrote it — a single scheduler stall inside the ONE step the
+    // arm happened to time. The intrinsic cost of a step is the least of several
+    // timings of it; a stall can only add. Five timed steps each side, the
+    // minimum of each, and the difference of the minima.
+    let mut control_us = f64::INFINITY;
     let mut control = b.step();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let t0 = std::time::Instant::now();
         control = b.step();
-        control_us = t0.elapsed().as_secs_f64() * 1e6;
+        control_us = control_us.min(t0.elapsed().as_secs_f64() * 1e6);
     }
     assert_eq!(control.engage.rays, 0, "the control is already engaged");
     // …and now with a file open.
@@ -2985,11 +3000,11 @@ fn the_firing_policy_is_inside_the_npc_budget_at_a_thousand_agents() {
     // A few steps to settle the ledger, then the measurement — the LAST of
     // three, on the control's own rule.
     let mut hot = b.step();
-    let mut hot_us = 0.0;
-    for _ in 0..3 {
+    let mut hot_us = f64::INFINITY;
+    for _ in 0..5 {
         let t1 = std::time::Instant::now();
         hot = b.step();
-        hot_us = t1.elapsed().as_secs_f64() * 1e6;
+        hot_us = hot_us.min(t1.elapsed().as_secs_f64() * 1e6);
     }
     let cost_us = (hot_us - control_us).max(0.0);
     println!("=== the policy at a thousand agents ===");

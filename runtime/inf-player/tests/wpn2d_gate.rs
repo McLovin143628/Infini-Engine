@@ -2607,13 +2607,34 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
     s.aim(HERO, 0.0, 0.0);
     s.hold_trigger(HERO, false);
     let _warm = s.step();
-    let t_control = std::time::Instant::now();
-    let _control = s.step();
-    let control_us = t_control.elapsed().as_secs_f64() * 1e6;
-    s.hold_trigger(HERO, true);
-    let t1 = std::time::Instant::now();
-    let rep = s.step();
-    let step_us = t1.elapsed().as_secs_f64() * 1e6;
+    // **THE MINIMUM OF FIVE** (the same runner-stall lesson as the WPN2e cost
+    // arms): five timed control steps and five timed pulls, each pull spaced by
+    // the weapon's own interval so every one of them fires, and the difference
+    // of the two minima is the pull's cost.
+    let mut control_us = f64::INFINITY;
+    for _ in 0..5 {
+        let t_control = std::time::Instant::now();
+        let _control = s.step();
+        control_us = control_us.min(t_control.elapsed().as_secs_f64() * 1e6);
+    }
+    let mut step_us = f64::INFINITY;
+    let mut rep = None;
+    for _ in 0..5 {
+        s.hold_trigger(HERO, true);
+        let t1 = std::time::Instant::now();
+        let r = s.step();
+        step_us = step_us.min(t1.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(
+            r.rounds.pellets, 8,
+            "a timed pull did not fire its eight pellets"
+        );
+        rep = Some(r);
+        s.hold_trigger(HERO, false);
+        for _ in 0..90 {
+            let _ = s.step();
+        }
+    }
+    let rep = rep.expect("five pulls were timed");
     let pull_us = (step_us - control_us).max(0.0);
     println!(
         "one 8-pellet pull: {step_us:.1} us for the whole gameplay step, {control_us:.1} us for the same step with the trigger released, {pull_us:.1} us for the pull itself, {} casts (budget {:.1} ms)",
