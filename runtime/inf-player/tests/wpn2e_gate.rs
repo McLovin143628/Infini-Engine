@@ -797,6 +797,79 @@ fn a_unit_with_no_sight_and_no_trail_never_aims() {
         t_cold.rays, 0,
         "a ray was spent on a pair the trail-age rule had already refused"
     );
+
+    // 4. **THE MAN IS STANDING IN FRONT OF YOU AND THE FILE SAYS HE IS A
+    //    HUNDRED METRES AWAY** (wave WPN2e audit).
+    //
+    //    # Why this street had to be added
+    //
+    //    Streets 1-3 cannot see the cheat this arm is named for. The wave's own
+    //    report names the falsifier as *"pass the suspect's transform to
+    //    `may_engage` in place of `last_seen`"* -- and this audit RAN that
+    //    mutation and the arm stayed **GREEN**. It has to: street 2 is refused
+    //    by a RAY and street 3 by the trail's AGE, and neither of those reads a
+    //    position at all, so substituting one position for another changes
+    //    nothing in either. The one thing `last_seen` decides on its own is the
+    //    RANGE, and until now no street made the remembered place and the real
+    //    body disagree about it.
+    //
+    //    Here they disagree by seventy metres. The file was opened at 100 m and
+    //    is FRESH; the suspect is standing 30 m from the officer with a clear
+    //    line and nothing in the way. Read `last_seen` and the pair is out of
+    //    `ENGAGE_RANGE_M` before a ray is spent; read the transform and the
+    //    officer points a weapon at a man it has no reason to know is there.
+    //
+    //    Thirty metres and not fourteen, deliberately: outfit-only recognition
+    //    reaches **16.7 m** in daylight (`crime::Channel::weight`'s own table),
+    //    so at fourteen the officer would legitimately RECOGNISE the hero, and
+    //    `crime::sight` would move `last_seen` onto him -- which is the police
+    //    doing their job and would dissolve the premise.
+    //
+    //    **The mutation**: replace `*last_seen` with `Vec3d::from_dvec3(*at)` at
+    //    EITHER call site in `d3::engage::step_engage` -- `worth_a_ray`'s or
+    //    `may_engage`'s -- and this street reds while the three above stay green.
+    let mut lying = Beat::new();
+    let d = lying.officer(0, DVec3::new(0.0, 0.0, 30.0));
+    lying.file_on_hero(Response::Swat, DVec3::new(0.0, 0.0, 100.0));
+    lying.arm(d, "glock_17");
+    let t_lying = lying.run(30);
+    let remembered = crime::profile_of(&lying.world, HERO)
+        .map(|f| f.last_seen())
+        .expect("the file");
+    println!(
+        "  the file says (0, 0, {:.0}) and the man is at (0, 0, 0), 30 m from the officer: {} rays, {} aimed",
+        remembered.z, t_lying.rays, t_lying.aimed
+    );
+    assert!(
+        (remembered.z - 100.0).abs() < 1.0,
+        "the fixture's own premise moved: `last_seen` is at z {:.1}, so nobody is being remembered in the wrong place",
+        remembered.z
+    );
+    assert_eq!(
+        t_lying.rays, 0,
+        "a ray was spent on a suspect the FILE puts 70 m outside `ENGAGE_RANGE_M` — the range gate is reading a position nobody looked at"
+    );
+    assert_eq!(
+        t_lying.aimed, 0,
+        "an officer aimed at a man whose file puts him a hundred metres away — THE POLICE READ THE TRANSFORM"
+    );
+
+    // …and the CONTROL for street 4, which is what makes its two zeros mean
+    // something: the same street with the file pointing at where the man really
+    // is. Same officer, same distance, same everything else.
+    let mut honest = Beat::new();
+    let e = honest.officer(0, DVec3::new(0.0, 0.0, 30.0));
+    honest.file_on_hero(Response::Swat, DVec3::ZERO);
+    honest.arm(e, "glock_17");
+    let t_honest = honest.run(30);
+    println!(
+        "  the CONTROL, the same street with the file pointing at the man: {} rays, {} aimed",
+        t_honest.rays, t_honest.aimed
+    );
+    assert!(
+        t_honest.aimed > 0,
+        "the control never aimed at 30 m, so street 4's zeros are about the range and not about the file"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1995,6 +2068,182 @@ fn a_town_that_goes_cold_takes_the_weapons_back() {
             .unwrap_or(0)
             > 0,
         "the officer's holstered sidearm left its inventory — that is dropping, not holstering"
+    );
+}
+
+/// **THE TRIGGER COMES DOWN WHEN THE POLICY STOPS LOOKING** (wave WPN2e audit).
+///
+/// # Why this arm exists
+///
+/// This is wave WPN2e's own headline defect — *"`npc_aim_at` writes `want_attack`
+/// as a LEVEL and nothing lowered it … **258 rounds** left an officer's weapon
+/// over a run in which the policy decided to fire ZERO times"* — and its fix,
+/// `gameplay::npc_set_trigger`, **had no arm that could see it removed**. This
+/// audit ran the mutation: delete the release loop in `step_engage` and every
+/// arm in the file stays green, including the one the wave's report names.
+///
+/// It has to. In that fixture the hero fires all the way through, so the file
+/// never goes cold, the officer is visited on every step, and the release path
+/// is never taken at all. A fix nothing exercises is a fix nothing pins.
+///
+/// # What this reads
+///
+/// The world, in two halves of one run. The officer engages a hero it can see
+/// and fires; then the hero is **taken two hundred metres away**, out of
+/// `ENGAGE_RANGE_M` and out of every ray — so the policy stops visiting that
+/// officer entirely, which is the exact condition the defect needed. The arm
+/// counts the rounds that left the officer's barrel in each half and reads
+/// `EngageStats::released` beside them.
+///
+/// **The mutation**: `if false && super::gameplay::npc_set_trigger(world, unit,
+/// false)` in `step_engage`'s release loop — the second half fills with rounds
+/// nobody decided to fire.
+#[test]
+fn an_officer_the_policy_stops_visiting_stops_firing() {
+    let mut b = Beat::new();
+    let crew = b.officer(0, DVec3::new(0.0, 0.0, 14.0));
+    // The witness that keeps the file warm while the hero is still here.
+    b.civilian(5, DVec3::new(12.0, 0.0, 4.0));
+    b.file_on_hero(Response::Swat, DVec3::ZERO);
+    b.arm(crew, "m4a1");
+    let mut first = 0usize;
+    // **Run until the trigger is DOWN**, and that is the whole fixture: the
+    // cadence opens it for `ENGAGE_BURST_STEPS` out of every
+    // `ENGAGE_PERIOD_STEPS`, and the defect is a `true` the policy leaves behind
+    // — so a run that happens to stop in the shut half of the cycle would find
+    // nothing to release and would pass for the wrong reason.
+    let mut held = false;
+    for _ in 0..(8 * engage::ENGAGE_PERIOD_STEPS as usize) {
+        b.top_up(crew);
+        let r = b.step();
+        first += r.hits.iter().filter(|h| h.shooter == crew).count();
+        if first > 0 && b.cm(crew).runtime.want_attack {
+            held = true;
+            break;
+        }
+    }
+    assert!(
+        held,
+        "the fixture never caught the officer with its trigger down, so there is nothing to release"
+    );
+    // **AND NOW THE SUSPECT IS BEHIND A WALL.** A twelve-metre slab goes up on
+    // the line, so the officer is still VISITED — the file is warm and
+    // `last_seen` is in range, so a ray is spent — and the ray comes back
+    // stopped. It is not in cover, so it cannot fire blind either. That is the
+    // shape the defect needed: a unit the policy looks at and decides not to
+    // engage, whose `want_attack` the last visit left `true`.
+    slab(
+        &mut b.world,
+        wall_guid(0),
+        "Wall",
+        DVec3::new(0.0, 2.0, 7.0),
+        Vec3d::new(6.0, 2.0, 0.5),
+    );
+    b.resync();
+    let mut second = 0usize;
+    let mut released = 0usize;
+    for _ in 0..(4 * engage::ENGAGE_PERIOD_STEPS as usize) {
+        b.top_up(crew);
+        let r = b.step();
+        second += r.hits.iter().filter(|h| h.shooter == crew).count();
+        released += r.engage.released;
+    }
+    println!("\n=== A TRIGGER NOBODY LOWERS ===");
+    println!("  with the suspect in front of it: {first} round(s), trigger held {held}");
+    println!("  once a wall goes up between them: {second} round(s), {released} release(s)");
+    assert!(
+        first > 0,
+        "the officer never fired in the first half, so the second half's zero proves nothing"
+    );
+    assert!(
+        released > 0,
+        "the policy stopped visiting the officer and never released its trigger"
+    );
+    assert_eq!(
+        second, 0,
+        "{second} round(s) left an officer's weapon over a run in which the policy decided to fire NONE — the trigger is a level nobody lowered"
+    );
+    assert!(
+        !b.cm(crew).runtime.want_attack,
+        "the officer is still holding its trigger down with nobody to shoot at"
+    );
+}
+
+/// **AN OFFICER DOES NOT TAKE COVER FROM ITS OWN GUNSHOT** (wave WPN2e audit,
+/// closing carried 279).
+///
+/// `inf_ecs::cover::under_fire`'s own doc has said *"a responder inside
+/// `radius_m` of a place this step's gunfire came from, **that it did not fire
+/// itself**"* since wave COV1, and `step_npc_cover` passed it `panic_sources` —
+/// which coalesces every LOUD shot in the step, including the responder's own
+/// muzzle. So an officer that pulled a trigger stood zero metres from a place
+/// gunfire came from and dived behind a wall from itself.
+///
+/// Wave WPN2e found it, fixed its OWN reader (`d3::engage::note_incoming`) and
+/// left the cover half alone because fixing it moves COV1's measured duty
+/// cycle. It does, and this audit re-measured it: 242 → 205 steps in cover,
+/// 133 → 96 leaned out, 55.0 % → 46.8 % duty. `cov1_gate` is 16/16 green.
+///
+/// # What it reads
+///
+/// `NpcCoverReport::under_fire` and the officer's own `MovementMode` on a street
+/// where **the only gunfire in the world is the officer's own** — the hero never
+/// pulls a trigger, so every source in `panic_sources` came from the muzzle of
+/// the unit being asked about.
+///
+/// **The mutation**: `if false && shooters.contains(&unit)` in `step_npc_cover`
+/// — the officer takes cover from itself and both assertions go red.
+#[test]
+fn an_officer_that_fires_is_not_fired_upon_by_its_own_weapon() {
+    let mut b = Beat::new();
+    let crew = b.officer(0, DVec3::new(0.0, 0.0, 14.0));
+    // Something to take cover behind, a metre and a half in front of it — so a
+    // failure is "it took cover" and not "it had nowhere to go".
+    slab(
+        &mut b.world,
+        wall_guid(0),
+        "Parapet",
+        DVec3::new(0.0, 0.45, 12.5),
+        Vec3d::new(4.0, 0.45, 0.35),
+    );
+    b.resync();
+    b.civilian(5, DVec3::new(12.0, 0.0, 4.0));
+    b.file_on_hero(Response::Swat, DVec3::ZERO);
+    b.arm(crew, "m4a1");
+    // **THE HERO NEVER FIRES.** Its trigger is untouched for the whole run, so
+    // every loud shot in this world leaves the officer's own barrel.
+    let mut officer_rounds = 0usize;
+    let mut under_fire = 0usize;
+    let mut in_cover = 0usize;
+    let mut hero_rounds = 0usize;
+    for _ in 0..(6 * engage::ENGAGE_PERIOD_STEPS as usize) {
+        b.top_up(crew);
+        let r = b.step();
+        officer_rounds += r.hits.iter().filter(|h| h.shooter == crew).count();
+        hero_rounds += r.hits.iter().filter(|h| h.shooter == HERO).count();
+        under_fire += r.npc_cover.under_fire;
+        in_cover += r.npc_cover.in_cover;
+    }
+    println!("\n=== AN OFFICER FIRING AT A HERO THAT NEVER SHOOTS BACK ===");
+    println!("  the officer fired {officer_rounds} round(s); the hero fired {hero_rounds}");
+    println!(
+        "  the cover pass called it under fire on {under_fire} step(s); in cover on {in_cover}"
+    );
+    assert_eq!(
+        hero_rounds, 0,
+        "the fixture's hero fired {hero_rounds} rounds, so the sources are not the officer's own"
+    );
+    assert!(
+        officer_rounds > 0,
+        "the officer never fired, so there was never a source to mistake for incoming"
+    );
+    assert_eq!(
+        under_fire, 0,
+        "an officer was 'under fire' on {under_fire} step(s) in a world where the only gunshots were its own"
+    );
+    assert_eq!(
+        in_cover, 0,
+        "an officer took cover from its own gunshot on {in_cover} step(s)"
     );
 }
 

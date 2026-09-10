@@ -1069,25 +1069,18 @@ fn escort(
         .map(|v| v.length())
         .unwrap_or(0.0);
     let fire = due - s_now > dispatch::ESCORT_LAG_M && speed < dispatch::ESCORT_STALL_MPS;
-    // ── **THE COLLIDER FOLLOWS THE ESCORT**, and without this line the escort
-    //    does nothing at all -- measured, and it is the finding inside the
-    //    finding. A wedged chassis is wedged because the SOLVER owns its
-    //    position: the first cut of this function wrote the body pose sixty
-    //    times a second and read it back correct every time, and the contact
-    //    solver put it back inside the same 0.1 m pocket on the same step. The
-    //    trace is in the audit report.
-    //
-    //    So an escorted unit is not in the collision world. It is the same door
-    //    a SEATED CHARACTER goes through (`super::vehicle::park_collider`, which
-    //    is why a passenger does not collide with the car it is riding in), and
-    //    it is a bridge operation rather than a component write: the author's
-    //    `RigidBody3D` is never touched, so an editor Simulate session cannot
-    //    save a police car as something it was not.
-    //
-    //    It is restored the moment the unit catches up, and by `arrive` and
-    //    `park` at both ends of a run -- a disabled collider with no release is
-    //    the leak-with-a-deadline this house names.
-    super::vehicle::park_collider(bridge, chassis, fire);
+    // **THE CHASSIS KEEPS ITS COLLIDER**, and that is a measurement rather than
+    // an omission. The first cut of this function dragged the unit at
+    // `ESCORT_SPEED_MPS` and wrote the body pose sixty times a second; the pose
+    // read back correct every time and the contact solver put the car back
+    // inside the same 0.1 m pocket on the same step, so it moved four metres in
+    // three minutes. Taking the chassis OUT of the collision world (the door a
+    // seated passenger goes through) fixed it — and so did dragging at
+    // `ESCORT_DRAG_MPS`, twice the schedule, which is what shipped for its own
+    // reason. Measured on the island with the collider parked and with it left
+    // alone: **the same 12 m at the same 62.6 s**. A police car with no collider
+    // is a police car that drives through the player, so the version that does
+    // not need one is the version that ships.
     if !fire {
         return None;
     }
@@ -1169,9 +1162,6 @@ fn arrive(
         }
     }
     handbrake(bridge, chassis);
-    // **The escort's release** (wave WPN2e audit) — a unit that arrived while it
-    // was being escorted is back in the collision world the instant it stops.
-    super::vehicle::park_collider(bridge, chassis, false);
     // The crew stands `SCENE_STAND_M` from ITS OWN VEHICLE, on the line toward
     // the incident — which is where somebody who has just got out of that
     // vehicle is. See `SCENE_STAND_M` for why it is not measured from the
@@ -1369,8 +1359,6 @@ fn park(
         run.path = None;
     }
     handbrake(bridge, chassis);
-    // The escort's other release — see `arrive`.
-    super::vehicle::park_collider(bridge, chassis, false);
     dispatch::set_responder(world, crew, false);
     if let Some(e) = world.entity_of(crew) {
         super::vehicle::park_collider(bridge, crew, false);
