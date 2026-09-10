@@ -2090,6 +2090,144 @@ if ($armList.Count -gt 0) {
 }
 
 
+# ── 5e. THE SHOOTOUT (wave WPN2e) ────────────────────────────────────────────
+#
+#    The police fire back. Everything this leg photographs is downstream of ONE
+#    player action -- firing a weapon in a street where somebody can see you --
+#    and every frame is TRIGGERED on a column the sim writes:
+#
+#      col 33 `engaged`   how many responding units are pointing a weapon at
+#                         somebody RIGHT NOW. It is the only honest trigger for
+#                         "an officer is aiming at me": the police arrive over
+#                         tens of seconds and the aim itself is a ray-gated
+#                         decision that can go away between two screenshots.
+#      col 34 `incoming`  rounds in the air the hero did NOT fire. "Somebody is
+#                         shooting at me", as a number.
+#      col 28 `casings`   brass on the ground.
+#      col 6  `mode`      `Cover` for the cover frame.
+#
+#    (One-based; `$c[..]` below is zero-based, so `engaged` is `$c[32]`.)
+#
+#    THE CHAIN IT DRIVES, and every link is shipped: a loud shot is witnessed by
+#    whoever can see it (`step_witness`), the act opens a criminal profile keyed
+#    on a DESCRIPTION (`crime::report_act`), the heat picks a rung
+#    (`Response::for_heat`), the dispatcher sends the nearest free unit by route
+#    cost, the crew gets out at the scene and is ISSUED a weapon
+#    (`d3::engage::arm_crew`), and the firing policy points it at the person on
+#    the file -- with line of sight, on a cadence, and never through a colleague
+#    or a bystander.
+#
+#    It runs LAST, deliberately: it makes the hero wanted, and a wanted hero
+#    being shot at is not the state any other leg wants to photograph.
+Say "-- SHOOTOUT (WPN2e): make yourself wanted, and see who turns up --"
+Restore-PlayerFocus "before the shootout"
+$shootFrames = 0
+# 1. SOMETHING IN THE HAND. The rotation may already have put one there; if not,
+#    the island's own kerb pickup is the door (leg 5a's, without its frames).
+$armed = @(Wait-ForHero -Csv $heroCsv -What "a weapon in the hand (for the shootout)" -TimeoutS 6.0 `
+    -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -ne "-") -and ($c[22].Trim() -ne "bandage") })[-1]
+if (-not $armed) {
+    for ($k = 0; ($k -lt 8) -and (-not $armed); $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # E
+        Start-Sleep -Milliseconds 200
+        [InfInput]::Wheel(1)
+        $armed = @(Wait-ForHero -Csv $heroCsv -What "a weapon in the hand (try $($k + 1))" -TimeoutS 1.2 `
+            -Predicate { param($c) ($c.Count -gt 22) -and ($c[22].Trim() -ne "-") -and ($c[22].Trim() -ne "bandage") })[-1]
+    }
+}
+if (-not $armed) {
+    Say "SHOOTOUT: nothing in the hand, so there is no crime to commit -- skipped"
+}
+else {
+    Say ("SHOOTOUT: firing {0} in the street to open a file" -f $armed[22].Trim())
+    # 2. THE CRIME. A loud shot is worth two heat and `Response::for_heat` puts
+    #    three at `MultiUnit` and six at `Swat`, so a handful of trigger pulls is
+    #    a tactical response -- IF somebody saw them. The island's own crowd is
+    #    the witness; `WITNESS_RADIUS_M` is 120 m and the ray has to clear.
+    #    Level the aim first: a shot into the ground still makes the noise, but a
+    #    shot down the street is the one a pedestrian's line of sight reaches.
+    [InfInput]::Look(0, -40)
+    Start-Sleep -Milliseconds 250
+    for ($t = 0; $t -lt 10; $t++) {
+        [InfInput]::LeftDown(); Start-Sleep -Milliseconds 260
+        [InfInput]::LeftUp(); Start-Sleep -Milliseconds 180
+    }
+    $brass = @(Wait-ForHero -Csv $heroCsv -What "brass on the ground after the shots" -TimeoutS 4.0 `
+        -Predicate { param($c) ($c.Count -gt 27) -and ([int]$c[27] -gt 0) } `
+        -Out (Join-Path $OutDir "A1-shootout-casings.png"))[-1]
+    if ($brass) { $shootFrames++ } else { Say "SHOOTOUT: no brass on the ground after ten pulls" }
+
+    # 3. THE RESPONSE. The units have to DRIVE, so this is the long wait, and it
+    #    is on `engaged` rather than on a clock: an officer that has arrived and
+    #    has no line of sight is not a frame of an officer aiming at you.
+    $engaged = @(Wait-ForHero -Csv $heroCsv -What "a responding unit with its weapon on the hero (col 33)" -TimeoutS 150.0 `
+        -Predicate { param($c) ($c.Count -gt 32) -and ([int]$c[32] -gt 0) } `
+        -Out (Join-Path $OutDir "A2-officer-aiming.png"))[-1]
+    if ($engaged) {
+        $shootFrames++
+        Say ("SHOOTOUT: {0} unit(s) engaged" -f $engaged[32])
+        # 4. THE HERO UNDER FIRE. `incoming` counts rounds in the air that the
+        #    hero did not fire, which is what "they are shooting back" is.
+        $incoming = @(Wait-ForHero -Csv $heroCsv -What "rounds in the air the hero did not fire (col 34)" -TimeoutS 40.0 `
+            -Predicate { param($c) ($c.Count -gt 33) -and ([int]$c[33] -gt 0) } `
+            -Out (Join-Path $OutDir "A3-under-fire.png"))[-1]
+        if ($incoming) { $shootFrames++ } else { Say "SHOOTOUT: nobody fired at the hero inside forty seconds" }
+
+        # 5. RETURNING FIRE, with the officers in the frame. The trigger is the
+        #    officers still being engaged while the hero's own magazine moves.
+        for ($t = 0; $t -lt 8; $t++) {
+            [InfInput]::LeftDown(); Start-Sleep -Milliseconds 240
+            [InfInput]::LeftUp(); Start-Sleep -Milliseconds 120
+        }
+        $returned = @(Wait-ForHero -Csv $heroCsv -What "the hero returning fire with units engaged" -TimeoutS 6.0 `
+            -Predicate { param($c) ($c.Count -gt 32) -and ([int]$c[32] -gt 0) -and ([int]$c[27] -gt 0) } `
+            -Out (Join-Path $OutDir "A4-returning-fire.png"))[-1]
+        if ($returned) { $shootFrames++ }
+
+        # 6. COVER, AND THE BLIND SHOT. `T` is the cover key; a hero in cover
+        #    with the trigger down and the AIM RELEASED is firing blind -- the
+        #    branch is a behaviour and not a binding, so there is nothing else to
+        #    press. The frame is triggered on the MODE, and the blind shot is
+        #    fired with the right button up.
+        [InfInput]::Down(0x14); Start-Sleep -Milliseconds 160; [InfInput]::Up(0x14)   # T
+        $inCover = @(Wait-ForHero -Csv $heroCsv -What "the hero in cover, under fire" -TimeoutS 4.0 `
+            -Predicate { param($c) ($c.Count -gt 5) -and ($c[5].Trim() -eq "Cover") } `
+            -Out (Join-Path $OutDir "A5-cover-under-fire.png"))[-1]
+        if ($inCover) {
+            $shootFrames++
+            for ($t = 0; $t -lt 6; $t++) {
+                [InfInput]::LeftDown(); Start-Sleep -Milliseconds 240
+                [InfInput]::LeftUp(); Start-Sleep -Milliseconds 120
+            }
+            $blind = @(Wait-ForHero -Csv $heroCsv -What "a blind shot from cover (in cover, brass in the air)" -TimeoutS 4.0 `
+                -Predicate { param($c) ($c.Count -gt 27) -and ($c[5].Trim() -eq "Cover") -and ([int]$c[27] -gt 0) } `
+                -Out (Join-Path $OutDir "A6-blind-fire.png"))[-1]
+            if ($blind) { $shootFrames++ } else { Say "SHOOTOUT: in cover and no brass -- the blind branch took no shot" }
+            # Out of cover again, so the closing distance measurement is a walk.
+            [InfInput]::Down(0x11); Start-Sleep -Milliseconds 400; [InfInput]::Up(0x11)   # W, away from the wall
+        }
+        else { Say "SHOOTOUT: T pressed and nothing coverable was in reach" }
+    }
+    else {
+        Say "SHOOTOUT: no unit engaged inside 150 s -- the response never reached the hero"
+    }
+
+    # What the session's own columns say about the shootout, quoted.
+    if (Test-Path $heroCsv) {
+        $rowsE = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" } |
+            ForEach-Object { $_.Split(",") } | Where-Object { $_.Count -gt 33 })
+        if ($rowsE.Count -gt 0) {
+            $peakEng = ($rowsE | ForEach-Object { [int]$_[32] } | Measure-Object -Maximum).Maximum
+            $peakInc = ($rowsE | ForEach-Object { [int]$_[33] } | Measure-Object -Maximum).Maximum
+            $peakBrass = ($rowsE | ForEach-Object { [int]$_[27] } | Measure-Object -Maximum).Maximum
+            Say "  peak engaged units : $peakEng"
+            Say "  peak incoming rounds: $peakInc"
+            Say "  peak casings alive : $peakBrass"
+            Say "  shootout frames    : $shootFrames of 6"
+        }
+    }
+}
+
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
     $rows = Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" }
