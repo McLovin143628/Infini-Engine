@@ -521,6 +521,15 @@ fn an_arriving_police_crew_is_issued_a_weapon_and_a_cold_town_issues_none() {
             "the {} rung's officer is carrying the wrong thing",
             want.name()
         );
+        // …and the LEDGER counted it, which is what tells "the door ran" from
+        // "the officer already had one".
+        let equips = engage::engage_of(&b.world).map(|r| r.equips).unwrap_or(0);
+        assert_eq!(
+            equips,
+            u64::from(expect.is_some()),
+            "the {} rung issued {issued:?} and the ledger counted {equips}",
+            want.name()
+        );
     }
     // …and a FIRE crew standing at the same scene is issued nothing, at the
     // hottest rung there is.
@@ -574,7 +583,7 @@ fn the_ladder_is_three_behaviours_on_one_street() {
     // A tidy row for the report, and the numbers the design rests on.
     println!("=== the response ladder, as behaviour ===");
     println!("  rung         posture         aimed  warned  trigger  npc shots");
-    let mut rows: Vec<(Response, Tally)> = Vec::new();
+    let mut rows: Vec<(Response, Tally, u64, u64)> = Vec::new();
     for rung in [Response::Patrol, Response::MultiUnit, Response::Swat] {
         let mut b = Beat::new();
         let crew = b.officer(0, DVec3::new(0.0, 0.0, 14.0));
@@ -591,13 +600,37 @@ fn the_ladder_is_three_behaviours_on_one_street() {
             t.triggers,
             t.npc_hits.len()
         );
-        rows.push((rung, t));
+        let (shots, holds) = engage::engage_of(&b.world)
+            .map(|r| (r.shots, r.holds))
+            .unwrap_or((0, 0));
+        rows.push((rung, t, shots, holds));
     }
     let patrol = &rows[0].1;
     let multi = &rows[1].1;
     let swat = &rows[2].1;
+    // The LEDGER's own session counters, beside the report's per-step ones —
+    // two places that must agree about whether anybody fired, and the only
+    // readers `EngageRes::shots` and `EngageRes::holds` have.
+    println!(
+        "  the ledger over the SWAT run: {} trigger-steps, {} refused",
+        rows[2].2, rows[2].3
+    );
+    assert_eq!(
+        rows[2].2 as usize, swat.triggers,
+        "the ledger counted {} trigger-steps and the report counted {}",
+        rows[2].2, swat.triggers
+    );
+    assert_eq!(
+        rows[0].2, 0,
+        "the ledger counted {} trigger-steps for a PATROL",
+        rows[0].2
+    );
+    assert!(
+        rows[0].3 > 0,
+        "a patrol refused nothing, so `EngageRes::holds` never moved"
+    );
     // ARMED: the pass ran and pointed weapons in all three.
-    for (rung, t) in &rows {
+    for (rung, t, _, _) in &rows {
         assert!(
             t.aimed > 0,
             "the {} rung never aimed at anybody — the fixture is not engaged",
@@ -2252,6 +2285,369 @@ fn every_row_of_the_parity_memo_cites_an_arm_that_exists() {
             "the parity memo never mentions {must:?} — the honest half is missing"
         );
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// (h) THE ISLAND'S OWN CHAIN, LINK BY LINK
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **WHERE THE SHIPPED ISLAND'S RESPONSE CHAIN ACTUALLY STOPS** — the arm the
+/// demo loop's own failure asked for.
+///
+/// The session this wave filmed pressed the trigger ten times in a street and
+/// waited **150 s** for `engaged` to move. It never did, and `hero.csv` cannot
+/// say which link broke: it carries what the POLICE are doing and nothing about
+/// whether anybody saw the crime, whether a file was opened, or whether a unit
+/// was ever sent. This arm boots the same island and prints every link:
+///
+/// 1. **witnessed** — `witness::witnessed()` after the shots;
+/// 2. **filed** — `crime::wanted()` and the heat on the hero's file;
+/// 3. **the fleet** — how many police units the level derived at all;
+/// 4. **dispatched** — `DispatchRes::assigned` / `unanswered`;
+/// 5. **arrived** — units `OnScene`;
+/// 6. **armed** — crews carrying a weapon;
+/// 7. **engaged** — `engage::engaged_units`.
+///
+/// It **asserts the two links this wave owns** — the player's trigger works on
+/// the shipped island, and a witness two metres away opens a file — and PRINTS
+/// the rest, deliberately: a fleet's distance from a spawn and a crowd's density
+/// at it are level-design facts, and an arm that went red on them would be a gate
+/// failing about where somebody put a building.
+///
+/// # What it found, and it is why the wave's own shootout frames do not exist
+///
+/// | link | the island | the control |
+/// |---|---|---|
+/// | the hero fires | **17 rounds** | 10 more |
+/// | acts recorded | 17 | 10 |
+/// | …with an **OBSERVER** | **0** | **10** |
+/// | the nearest crowd agent | **117 m** | 2 m |
+/// | files open | **0**, heat 0 | **1**, heat **20** (`swat`) |
+/// | police in the fleet | 3 | 3 |
+/// | assignments | 2 | 3 |
+/// | units **on scene** | 0 | **0** after three minutes |
+/// | the nearest responder got to | — | **93 m** |
+/// | units engaged | 0 | **0** |
+///
+/// Two facts, both about the island and neither about the policy:
+///
+/// 1. **a gunshot on the showcase island is witnessed by nobody**, because the
+///    nearest crowd agent is 117 m away and the witness ray does not cross that
+///    much terrain. Put one pedestrian two metres away and the file opens at
+///    heat 20 on the first burst;
+/// 2. **a dispatched unit does not arrive.** With a `Swat`-grade file open, three
+///    assignments were made and the nearest responder closed to **93 m** and
+///    stopped — over three minutes, and `ON_SCENE_M` is 12. It is never on
+///    scene, so it is never issued a weapon and never engages.
+///
+/// Local-only: the island is not in this repository, so CI skips it.
+#[test]
+fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project — local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    let mut sim = island_sim(&content);
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    // Let the level stream and the society settle, exactly as the demo loop's
+    // own 20 s does.
+    for _ in 0..1200 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let at = sim
+        .world()
+        .entity_of(hero)
+        .and_then(|e| sim.world().world().get::<Transform>(e))
+        .map(|t| t.translation.to_dvec3())
+        .expect("the hero has a place");
+    // **THE CATALOGUE, MERGED HERE**, and the reason is a measurement this arm
+    // made on its first run: a LOOSELY loaded island has **0 item definitions**
+    // after 1 200 steps. The island's own `Quartermaster` Blueprint defines the
+    // registry on `BeginPlay` and reaches a real preview (the demo loop's
+    // SIDEARM leg picks the `glock_17` off the kerb with no environment
+    // variable), but `inf_player::level::load` + `sim_from_built` is not that
+    // path. Without this the hero fires its FISTS, which are quiet, raise no
+    // act, and make every link below read zero for the wrong reason.
+    //
+    // `merge_toml` is the same door `item.define` dispatches to.
+    {
+        let defs = inf_ecs::item::item_defs_mut(sim.world_mut());
+        if defs.len() == 0 {
+            defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
+                .expect("the shipped registry parses");
+        }
+    }
+    let rows = inf_ecs::item::item_defs(sim.world())
+        .map(|d| d.len())
+        .unwrap_or(0);
+    let left = item::give(sim.world_mut(), hero, "glock_17", 1);
+    let equipped = d3::gameplay::equip_weapon(sim.world_mut(), hero, "glock_17");
+    println!(
+        "  0. the level's catalogue     : {rows} rows; give left {left} over, equipped {equipped}"
+    );
+    // Fire, through the shipped input path, for ten seconds.
+    let mut state = inf_input::InputState::new(inf_input::default_map());
+    let mut shots = 0u32;
+    for i in 0..600 {
+        let events: Vec<inf_input::InputEvent> = vec![inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: (i / 15) % 2 == 0,
+        }];
+        state.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state, DT));
+        shots += sim.gameplay().shots;
+    }
+    let acts = inf_ecs::witness::witnessed(sim.world()).to_vec();
+    let witnessed = acts.len();
+    let with_observers = acts.iter().filter(|a| !a.observers.is_empty()).count();
+    let clock = inf_ecs::traffic::steps(sim.world());
+    let candidates =
+        inf_ecs::witness::candidates_near(sim.world(), at, d3::gameplay::WITNESS_RADIUS_M);
+    let near = candidates.len();
+    let mut ranges: Vec<String> = candidates
+        .iter()
+        .map(|(_, p)| format!("{:.0} m", (*p - at).length()))
+        .collect();
+    ranges.truncate(8);
+    let kinds: std::collections::BTreeSet<&str> = acts.iter().map(|a| a.kind.name()).collect();
+    // …and then wait, driving nothing, for the response.
+    let mut peak_assigned = 0u64;
+    let mut peak_on_scene = 0usize;
+    let mut peak_engaged = 0usize;
+    let mut peak_armed = 0usize;
+    for _ in 0..3600 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let (assigned, on_scene) = dispatch::dispatch_of(sim.world())
+            .map(|r| {
+                (
+                    r.assigned,
+                    r.runs
+                        .values()
+                        .filter(|u| u.state == UnitState::OnScene)
+                        .count(),
+                )
+            })
+            .unwrap_or((0, 0));
+        peak_assigned = peak_assigned.max(assigned);
+        peak_on_scene = peak_on_scene.max(on_scene);
+        peak_engaged = peak_engaged.max(engage::engaged_units(sim.world()));
+        let armed = dispatch::responders(sim.world())
+            .into_iter()
+            .filter(|g| weapon::equipped_def(sim.world(), *g).is_some())
+            .count();
+        peak_armed = peak_armed.max(armed);
+    }
+    let police = dispatch::fleet_of(sim.world())
+        .map(|f| {
+            f.units
+                .values()
+                .filter(|u| u.kind == UnitKind::Police)
+                .count()
+        })
+        .unwrap_or(0);
+    let unanswered = dispatch::dispatch_of(sim.world())
+        .map(|r| r.unanswered)
+        .unwrap_or(0);
+    let heat = crime::heat_of(sim.world(), hero);
+    println!(
+        "\n=== THE ISLAND'S CHAIN, from ({:.0}, {:.0}) ===",
+        at.x, at.z
+    );
+    println!("  1. the hero fired            : {shots} rounds");
+    println!(
+        "  2. acts recorded             : {witnessed} ({kinds:?}); {with_observers} of them have an OBSERVER"
+    );
+    println!(
+        "     the crowd within {:.0} m : {near} agents at {ranges:?}; the traffic clock reads {clock}",
+        d3::gameplay::WITNESS_RADIUS_M
+    );
+    println!(
+        "  3. files open                : {} (the hero's heat {heat}, rung {})",
+        crime::wanted(sim.world()).len(),
+        Response::for_heat(heat).name()
+    );
+    println!("  4. police units in the fleet : {police}");
+    println!("  5. assignments made          : {peak_assigned} (unanswered {unanswered})");
+    println!("  6. units on scene            : {peak_on_scene}");
+    println!("  7. crews carrying a weapon   : {peak_armed}");
+    println!("  8. units ENGAGED             : {peak_engaged}");
+    // ── THE CONTROL, and it is what tells a CONTENT fact from an ENGINE one.
+    //
+    // Put a pedestrian eight metres away — a distance the island's own crowd
+    // simply does not happen to stand at — and fire again. If a file opens, the
+    // chain works and what the island lacks is somebody close enough to see;
+    // if it does not, the witness pass itself is broken on this level.
+    let watcher = Uuid::from_u128(0x2E00_0C00);
+    {
+        let w = sim.world_mut();
+        let mut pop = w
+            .world_mut()
+            .remove_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+            .unwrap_or_default();
+        pop.hand_installed = true;
+        pop.records.insert(
+            watcher,
+            inf_ecs::crowd::CrowdRecord::standing(
+                inf_ecs::crowd::CrowdArchetype::humanoid(None, None, None),
+                at + DVec3::new(2.0, -1.0, 0.0),
+            ),
+        );
+        w.world_mut().insert_resource(pop);
+    }
+    // **AND A FULL MAGAZINE**, or the control is vacuous: a `glock_17` holds
+    // seventeen rounds and the first burst fired exactly seventeen. Nothing
+    // reloads an idle hero, so without this the control's own trigger produces
+    // no gunshot at all and the zero below would mean "nobody fired" rather than
+    // "nobody saw".
+    let mut state2 = inf_input::InputState::new(inf_input::default_map());
+    let mut control_shots = 0u32;
+    for i in 0..300 {
+        {
+            let w = sim.world_mut();
+            if let Some((_, def)) = weapon::equipped_def(w, hero) {
+                if let Some(e) = w.entity_of(hero) {
+                    if let Some(mut st) = w.world_mut().get_mut::<weapon::WeaponState>(e) {
+                        st.magazine = def.magazine;
+                    }
+                }
+            }
+        }
+        let events: Vec<inf_input::InputEvent> = vec![inf_input::InputEvent::MouseButton {
+            button: inf_input::MouseButton::Left,
+            pressed: (i / 15) % 2 == 0,
+        }];
+        state2.apply_dt(&events, DT);
+        sim.step_once(inf_player::input::held_actions(&state2, DT));
+        control_shots += sim.gameplay().shots;
+    }
+    for _ in 0..240 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let seen = inf_ecs::witness::witnessed(sim.world())
+        .iter()
+        .filter(|a| !a.observers.is_empty())
+        .count();
+    let close = inf_ecs::witness::candidates_near(sim.world(), at, 20.0).len();
+    println!(
+        "  9. THE CONTROL, one pedestrian two metres away: {control_shots} more rounds, {close} candidate(s) inside 20 m, {seen} act(s) with an observer, {} file(s) open, heat {}",
+        crime::wanted(sim.world()).len(),
+        crime::heat_of(sim.world(), hero)
+    );
+
+    // ── AND THEN THE WHOLE CHAIN, from a file that really is open.
+    //
+    // Sixty seconds of the dispatcher with a `Swat`-grade file on the hero: does
+    // a unit leave, arrive, get issued a weapon, and point it?
+    let mut a2 = 0u64;
+    let mut on2 = 0usize;
+    let mut armed2 = 0usize;
+    let mut eng2 = 0usize;
+    let mut closest = f64::INFINITY;
+    let mut engaged_at: Option<f64> = None;
+    // **Three minutes**, because sixty seconds was measured and was not enough:
+    // the nearest responder was still 93 m out when the first cut of this arm
+    // stopped counting.
+    for step in 0..10_800 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        if let Some(res) = dispatch::dispatch_of(sim.world()) {
+            a2 = a2.max(res.assigned);
+            on2 = on2.max(
+                res.runs
+                    .values()
+                    .filter(|u| u.state == UnitState::OnScene)
+                    .count(),
+            );
+        }
+        for crew in dispatch::responders(sim.world()) {
+            if weapon::equipped_def(sim.world(), crew).is_some() {
+                armed2 = armed2.max(1);
+            }
+            if let Some(e) = sim.world().entity_of(crew) {
+                if let Some(t) = sim.world().world().get::<Transform>(e) {
+                    closest = closest.min((t.translation.to_dvec3() - at).length());
+                }
+            }
+        }
+        let now = engage::engaged_units(sim.world());
+        if now > 0 && engaged_at.is_none() {
+            engaged_at = Some(f64::from(step) / 60.0);
+        }
+        eng2 = eng2.max(now);
+    }
+    println!(
+        " 10. three minutes with a WARM file: {a2} assignment(s), {on2} on scene, {armed2} armed crew, {eng2} ENGAGED; the nearest responder got within {closest:.0} m; first engaged at {}",
+        engaged_at
+            .map(|t| format!("{t:.1} s"))
+            .unwrap_or_else(|| "never".to_string())
+    );
+
+    // **The one assertion**: the player's own trigger works on the shipped
+    // island. Everything below it is printed, because a police station's
+    // distance from a spawn is a level-design fact and a gate that failed on it
+    // would be red about where somebody put a building.
+    assert!(
+        shots > 0,
+        "the island's own sidearm fired nothing through the shipped input path"
+    );
+    // …and the CONTROL, which is the half that tells a content fact from an
+    // engine one: with somebody standing close enough to see, the shipped
+    // island's own chain gets as far as a warm file at the top rung.
+    assert!(
+        control_shots > 0,
+        "the control fired nothing — a `glock_17` holds 17 rounds and the first burst used all of them"
+    );
+    assert!(
+        seen > 0,
+        "a pedestrian two metres from {control_shots} gunshots witnessed none of them — the witness pass is broken on this level, not the island's crowd density"
+    );
+    assert!(
+        crime::heat_of(sim.world(), hero) > 0,
+        "{seen} witnessed gunshots opened no file on the shipped island"
+    );
+}
+
+// ── the island, loosely (cov1_gate's `loose_sim`, verbatim) ─────────────────
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The island project, or `None` on a machine (CI included) that has none: its
+/// content is licensed and local-only.
+fn island_project() -> Option<PathBuf> {
+    let p = repo().join("../../../island-build/project/Content");
+    p.is_dir().then(|| p.canonicalize().unwrap_or(p))
+}
+
+fn island_sim(content: &Path) -> inf_player::runtime_sim::RuntimeSim {
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_cloth_assets(inf_player::level::load_cloth_assets_from_dir(content))
+    .with_audio(inf_player::level::load_audio_assets_from_dir(content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the loose level builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    sim
 }
 
 // ── the fixture plumbing (wpn2d_gate's, verbatim) ───────────────────────────

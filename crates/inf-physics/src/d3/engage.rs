@@ -118,8 +118,6 @@ pub struct EngageStats {
     /// Units firing BLIND from cover this step — in cover, not leaned out, and
     /// pulling anyway.
     pub blind: usize,
-    /// Weapons issued at arrival this step.
-    pub equipped: usize,
     /// Units a round came past this step — what [`Posture::ReturnFire`] reads
     /// next step. Written by [`note_incoming`].
     pub incoming: usize,
@@ -351,7 +349,6 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
         decisions.push((*officer, suspect, !hold, blind));
         let slot = res.units.entry(*officer).or_default();
         slot.target = suspect;
-        slot.seen_step = step;
         if hold {
             slot.holds = slot.holds.saturating_add(1);
             res.holds = res.holds.saturating_add(1);
@@ -611,9 +608,18 @@ fn blind_out(world: &EcsWorld, unit: Uuid) -> Option<DVec3> {
 /// target, or a `MultiUnit` response would need to already be firing to start
 /// firing.
 ///
+/// `shooters` is who pulled a trigger this step, and a unit in it is skipped — a
+/// unit is not fired upon by its own weapon.
+///
 /// Inert on every step nothing was fired on: the source list is empty and the
 /// function returns before it touches the ledger.
-pub fn note_incoming(world: &mut EcsWorld, sources: &[DVec3], radius_m: f64, step: u64) -> usize {
+pub fn note_incoming(
+    world: &mut EcsWorld,
+    sources: &[DVec3],
+    shooters: &BTreeSet<Uuid>,
+    radius_m: f64,
+    step: u64,
+) -> usize {
     if sources.is_empty() {
         return 0;
     }
@@ -624,6 +630,21 @@ pub fn note_incoming(world: &mut EcsWorld, sources: &[DVec3], radius_m: f64, ste
     let places: Vec<Vec3d> = sources.iter().map(|s| Vec3d::from_dvec3(*s)).collect();
     let mut under: Vec<Uuid> = Vec::new();
     for unit in responders {
+        // **A UNIT IS NOT FIRED UPON BY ITS OWN WEAPON.**
+        //
+        // `panic_sources` coalesces every LOUD shot in the step and a shot's
+        // source is its own muzzle, so without this line an officer that pulled
+        // a trigger is standing zero metres from a place gunfire came from and
+        // marks itself. At `Posture::ReturnFire` that is a rung un-holding
+        // itself, which is exactly what that rung exists not to do.
+        //
+        // (`inf_ecs::cover::under_fire`'s own doc says *"that it did not fire
+        // itself"* and its COV1 caller does not pass it the shooters — see this
+        // wave's report. Changing the cover pass would move COV1's measured
+        // numbers; this is the reader that needed it.)
+        if shooters.contains(&unit) {
+            continue;
+        }
         let Some(here) = super::crime::eye_of(world, unit) else {
             continue;
         };
@@ -721,7 +742,7 @@ pub fn engagements(world: &EcsWorld) -> BTreeMap<Uuid, Uuid> {
         .map(|r| {
             r.units
                 .iter()
-                .filter(|(_, u)| !u.target.is_nil())
+                .filter(|(_, u)| u.engaged())
                 .map(|(g, u)| (*g, u.target))
                 .collect()
         })

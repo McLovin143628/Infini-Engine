@@ -36,6 +36,12 @@ Useful switches:
 01-editor.png     the editor as it booted, on the showcase island
 02-pie-a.png      the running game
 03-pie-b.png      the same, two seconds later, with W held throughout
+A1..A6-*.png      the SHOOTOUT (wave WPN2e, section 5e, last): the brass, an
+                  officer aiming at the hero, the hero under fire, the hero
+                  returning it, cover under fire, and a blind shot. Every one is
+                  triggered on a column the sim writes -- `engaged` and
+                  `incoming` are the two the wave appended for exactly this --
+                  and every one says so in the log when it does not fire
 hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pitch,
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,

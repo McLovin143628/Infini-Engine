@@ -706,9 +706,11 @@ pub fn step_gameplay(
     //
     //     Inert on every step nothing was fired on: the list is empty and the
     //     call returns before it touches the ledger.
+    let shooters: BTreeSet<Uuid> = report.hits.iter().map(|h| h.shooter).collect();
     report.engage.incoming = super::engage::note_incoming(
         world,
         &sources,
+        &shooters,
         PANIC_RADIUS_M,
         inf_ecs::traffic::steps(world),
     );
@@ -1931,7 +1933,14 @@ fn step_weapons(
         // Inert for every character that is not in cover, which is every
         // character on every level committed before wave COV1: one component
         // read and an early `None`.
-        let blind = blind_fire_of(world, guid, entity, from.y);
+        // **A MELEE WEAPON IS NEVER BLIND-FIRED.** The branch sits above the
+        // swing's own arm, and a punch whose origin was moved 0.35 m past the
+        // wall would reach round a corner nobody leaned round. `is_melee` is the
+        // same predicate the brass, the trigger animation and the recoil spring
+        // are gated on.
+        let blind = (!def.is_melee())
+            .then(|| blind_fire_of(world, guid, entity, from.y))
+            .flatten();
         let (from, dir, cone_deg) = match blind {
             Some((origin, blind_yaw)) => {
                 let cone = cone_deg + inf_ecs::cover::BLIND_FIRE_CONE_DEG;

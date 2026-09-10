@@ -404,8 +404,6 @@ pub struct UnitEngagement {
     /// Who it is engaging. `Uuid::nil()` when it has a file and no line of
     /// sight — the unit is *looking* and not aiming.
     pub target: Uuid,
-    /// The step [`target`](Self::target) was last confirmed by a ray.
-    pub seen_step: u64,
     /// **The last step a round came past this unit**, which is what
     /// [`Posture::ReturnFire`] reads. `u64::MAX` means never, so the
     /// subtraction below cannot wrap into "just now".
@@ -418,11 +416,21 @@ pub struct UnitEngagement {
     pub holds: u64,
 }
 
+impl UnitEngagement {
+    /// **Whether this unit is pointing a weapon at somebody right now.**
+    ///
+    /// A named predicate rather than `!target.is_nil()` at four call sites, on
+    /// [`crate::dispatch::is_responder`]'s terms: it is a fact about the world
+    /// and a fact nobody can ask about is a filter.
+    pub fn engaged(&self) -> bool {
+        !self.target.is_nil()
+    }
+}
+
 impl Default for UnitEngagement {
     fn default() -> Self {
         Self {
             target: Uuid::nil(),
-            seen_step: 0,
             // **Never, and it has to be spelled** — a zero here would read as
             // "shot at on step 0", which on a level that opens hot is inside
             // `RETURN_FIRE_MEMORY_STEPS` and would make every `MultiUnit` unit
@@ -472,7 +480,7 @@ pub fn engage_of(world: &crate::EcsWorld) -> Option<&EngageRes> {
 /// whose aim was written this step.
 pub fn engaged_units(world: &crate::EcsWorld) -> usize {
     engage_of(world)
-        .map(|r| r.units.values().filter(|u| !u.target.is_nil()).count())
+        .map(|r| r.units.values().filter(|u| u.engaged()).count())
         .unwrap_or(0)
 }
 
