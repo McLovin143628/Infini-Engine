@@ -50,9 +50,11 @@ use std::collections::BTreeSet;
 use glam::DVec3;
 use uuid::Uuid;
 
-use inf_ecs::components::{Collider3D, Transform};
+use inf_ecs::components::{Collider3D, Terrain, Transform};
 use inf_ecs::math::Vec3d;
-use inf_ecs::vehicle::{ChassisState, SurfaceClass, WheelContact, WheelForce, MAX_SUBSTEPS};
+use inf_ecs::vehicle::{
+    ChassisState, Footprint, SurfaceClass, WheelContact, WheelForce, MAX_SUBSTEPS,
+};
 use inf_ecs::EcsWorld;
 
 use super::query::CastTargets;
@@ -106,10 +108,19 @@ pub fn step_vehicles(
     if guids.is_empty() {
         return Vec::new();
     }
+    // **THE GROUND'S OWN SURFACE** (wave VEH3a), derived once a step and cheap
+    // when nothing moved — `traffic::sync_carriageway`'s pattern, and it is here
+    // rather than at level load for that door's reason: a level whose terrain or
+    // blocks change during a session (the editor's whole job) gets a map that
+    // followed them, and one that did not pays a stamp walk.
+    inf_ecs::vehicle::sync_surface_map(world);
+    // The weather, read ONCE for every vehicle in the level rather than once per
+    // wheel: it is the same sky.
+    let (wetness, ambient_c) = inf_ecs::vehicle::weather_at(world);
     let mut out = Vec::with_capacity(guids.len());
     let mut forces: Vec<WheelForce> = Vec::new();
     for chassis in guids {
-        if let Some(o) = step_one(world, bridge, chassis, dt, &mut forces) {
+        if let Some(o) = step_one(world, bridge, chassis, dt, wetness, ambient_c, &mut forces) {
             out.push(o);
         }
     }
@@ -123,21 +134,6 @@ pub fn step_vehicles(
 /// so the number that matters is the measured one in `VEHICLE_STEP_BUDGET_MS`'s
 /// own arm rather than the one the doc suggests.
 pub const FOOTPRINT_SAMPLES: usize = 4;
-
-/// Half a tyre's width, as a fraction of its radius — where the outer pair of
-/// footprint rays sit.
-///
-/// 0.30 of the radius is a 0.21 m half-width on the default 0.35 m wheel, i.e. a
-/// 205-section tyre, which is what the drawn tyre already is
-/// (`inf_ecs::vehicle::TYRE_WIDTH_FRAC`).
-const FOOTPRINT_HALF_WIDTH_FRAC: f64 = 0.30;
-
-/// Half a contact patch's length, as a fraction of the tyre's radius.
-///
-/// 0.22 of the radius is a 15 cm patch on the default wheel, which is a loaded
-/// road tyre's. Shorter than it is wide, which is why the pair that matters at a
-/// kerb is the LATERAL one.
-const FOOTPRINT_HALF_LENGTH_FRAC: f64 = 0.22;
 
 /// **What surface a hit entity is** (wave VEH3a), from the field that has been
 /// on `Collider3D` since P12.1 and that the tyre model has never read.
@@ -174,10 +170,23 @@ const FOOTPRINT_HALF_LENGTH_FRAC: f64 = 0.22;
 /// asphalt like everything else, so the island's grass verges are not soft yet.
 /// The honest door for that is the P19 biome map read at the contact point, and
 /// it is a lookup this bridge cannot reach today.
-fn surface_under(world: &EcsWorld, guid: Uuid) -> SurfaceClass {
+fn surface_under(world: &EcsWorld, guid: Uuid, at: DVec3) -> SurfaceClass {
     let Some(entity) = world.entity_of(guid) else {
         return SurfaceClass::Asphalt;
     };
+    // **THE TERRAIN ANSWERS FROM ITS MAP**, not from its collider's friction.
+    // A heightfield is ONE collider over a whole island, so a friction on it
+    // could only ever say one thing about fifty square kilometres of road,
+    // verge, beach and forest floor. `SurfaceMap` is the level's own splat and
+    // its own carriageway, sampled where the wheel actually is.
+    if world.world().get::<Terrain>(entity).is_some() {
+        if let Some(class) = inf_ecs::vehicle::surface_map_of(world)
+            .and_then(|res| res.maps.get(&guid))
+            .and_then(|map| map.at(at.x, at.z))
+        {
+            return class;
+        }
+    }
     let Some(col) = world.world().get::<Collider3D>(entity) else {
         return SurfaceClass::Asphalt;
     };
@@ -212,6 +221,8 @@ fn step_one(
     bridge: &mut PhysicsBridge3D,
     chassis: Uuid,
     dt: f64,
+    wetness: f64,
+    ambient_c: f64,
     forces: &mut Vec<WheelForce>,
 ) -> Option<VehicleOutcome> {
     let body = bridge.body_of(chassis)?;
@@ -254,6 +265,11 @@ fn step_one(
     // average, which is the bilinear smoothing the 15.69° snap on open DTM relief
     // has been waiting for since P29.7.
     let (fwd_b, right_b, _) = state.basis();
+    let footprint = world
+        .world()
+        .get_resource::<Footprint>()
+        .copied()
+        .unwrap_or(Footprint::SHIPPED);
     let rays: Vec<[(DVec3, f64); FOOTPRINT_SAMPLES]> = {
         let v = bridge.vehicle_of(chassis)?;
         let rest = v.suspension_rest_m();
@@ -271,8 +287,8 @@ fn step_one(
                 // geometry and the steering angle would rotate them by at most a
                 // few degrees at the speeds a kerb is met at. Half a tyre's width
                 // across, and a contact patch's half-length along.
-                let half_w = wm.radius_m * FOOTPRINT_HALF_WIDTH_FRAC;
-                let half_l = wm.radius_m * FOOTPRINT_HALF_LENGTH_FRAC;
+                let half_w = wm.radius_m * footprint.half_width_frac;
+                let half_l = wm.radius_m * footprint.half_length_frac;
                 let max_toi = rest + wm.radius_m;
                 [
                     (anchor - right_b * half_w - fwd_b * half_l, max_toi),
@@ -354,7 +370,7 @@ fn step_one(
     let surfaces: Vec<SurfaceClass> = hits
         .iter()
         .map(|h| match h {
-            Some((_, guid)) => surface_under(world, *guid),
+            Some((c, guid)) => surface_under(world, *guid, c.point),
             None => SurfaceClass::Asphalt,
         })
         .collect();
@@ -366,6 +382,8 @@ fn step_one(
         for ((state, hit), class) in v.wheels_mut().iter_mut().zip(hits).zip(surfaces) {
             state.contact = hit.map(|(c, _)| c);
             state.surface = class;
+            state.wetness = wetness;
+            state.ambient_c = ambient_c;
         }
         // ── THE INNER LOOP (wave VEH3a clause 5) ────────────────────────
         //

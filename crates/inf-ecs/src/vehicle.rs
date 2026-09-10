@@ -47,7 +47,7 @@
 //! not a shortcut: a vehicle *class* is content, and content is the island
 //! phase's.
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
 use crate::components::{BodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, Transform};
@@ -3180,6 +3180,12 @@ pub struct WheelState {
     /// **What this wheel is standing on** — what the audio, the particle waves
     /// and the telemetry HUD read instead of each deciding for themselves.
     pub surface: SurfaceClass,
+    /// How wet this contact is, `[0, 1]` — [`weather_at`]'s first answer,
+    /// published by the bridge because the weather is a property of the world.
+    pub wetness: f64,
+    /// The air temperature this tyre cools toward, Celsius — [`weather_at`]'s
+    /// second answer.
+    pub ambient_c: f64,
 }
 
 impl WheelState {
@@ -3198,6 +3204,8 @@ impl WheelState {
             temp_c: TYRE_AMBIENT_C,
             mu_surface: 1.0,
             surface: SurfaceClass::Asphalt,
+            wetness: 0.0,
+            ambient_c: TYRE_AMBIENT_C,
             ..Default::default()
         }
     }
@@ -4196,14 +4204,119 @@ pub enum SurfaceClass {
 /// How many surfaces the table has — the arity a compound row must cover.
 pub const SURFACE_COUNT: usize = 6;
 
-/// The air temperature a tyre cools toward, Celsius (wave VEH3a).
+/// **The shape of the patch the four rays sample** (wave VEH3a), as fractions of
+/// the tyre's radius — and the door a measurement uses to ask what the four
+/// casts actually bought.
+///
+/// A `Resource` rather than a pair of constants for one reason: clause 4 of the
+/// wave owes a number, *the vertical acceleration of a chassis mounting a 12 cm
+/// kerb with ONE cast against FOUR*, and there is no honest way to measure that
+/// without running the shipped code path with the patch collapsed to a point.
+/// [`Footprint::CENTRE`] is exactly the single centre ray P29.7 through VEH2c
+/// shipped, produced by the same lines rather than by a second copy of them.
+#[derive(bevy_ecs::prelude::Resource, Clone, Copy, Debug, PartialEq)]
+pub struct Footprint {
+    /// Half a tyre's width, as a fraction of its radius.
+    pub half_width_frac: f64,
+    /// Half a contact patch's length, as a fraction of its radius.
+    pub half_length_frac: f64,
+}
+
+impl Footprint {
+    /// What ships: 0.30 of the radius across — a 0.21 m half-width on the
+    /// default 0.35 m wheel, i.e. a 205-section tyre, which is what the drawn
+    /// tyre already is (`inf_ecs::vehicle::TYRE_WIDTH_FRAC`) — and 0.22 along,
+    /// a 15 cm patch. Shorter than it is wide, which is why the pair that
+    /// matters at a kerb is the LATERAL one.
+    pub const SHIPPED: Self = Self {
+        half_width_frac: 0.30,
+        half_length_frac: 0.22,
+    };
+
+    /// A patch collapsed to a point — the four rays become four copies of the
+    /// centre ray, which is the pre-VEH3a behaviour exactly. **For measurement**,
+    /// and the arm that uses it says so.
+    pub const CENTRE: Self = Self {
+        half_width_frac: 0.0,
+        half_length_frac: 0.0,
+    };
+}
+
+impl Default for Footprint {
+    fn default() -> Self {
+        Self::SHIPPED
+    }
+}
+
+/// The air temperature a tyre cools toward with no weather to say otherwise,
+/// Celsius (wave VEH3a).
 ///
 /// A Ring-0 constant rather than a class field, because how warm the air is is a
 /// property of the WORLD and not of a car — the same argument the surface table
-/// is built on. The P17 weather state owns a real ambient and the hook for it is
-/// [`Vehicle::solve`]'s own `TyreContext`; until a wave routes it, twenty degrees
-/// is the number every committed level means.
+/// is built on. A level whose weather block is off, or which has no sky at all,
+/// means this number.
 pub const TYRE_AMBIENT_C: f64 = 20.0;
+
+/// The air temperature full snow implies, Celsius — see [`weather_at`].
+pub const SNOW_AMBIENT_C: f64 = 0.0;
+
+/// **The two things the weather does to a tyre** (wave VEH3a): how wet the road
+/// is, `[0, 1]`, and how cold the air is, Celsius.
+///
+/// A pure read of sim state — the first enabled [`SkyAtmosphere`] block's live
+/// weather, in `Guid` order so two hosts cannot pick different skies — so both
+/// hosts compute it identically and it reaches no trace of its own.
+///
+/// # There is no ambient TEMPERATURE in the weather state, and this says so
+///
+/// `WeatherParams` carries coverage, cloud type, wind, fog density,
+/// precipitation and **snowiness**, and nothing else. Wetness is therefore a
+/// direct read of `weather_precipitation`; the ambient is **derived from
+/// snowiness**, which is the only field that carries the information: snowiness
+/// is the precipitation's PHASE (`0` rain, `1` snow), and precipitation falls as
+/// snow when the air is at or below freezing. So the air is
+/// [`TYRE_AMBIENT_C`] in rain and [`SNOW_AMBIENT_C`] in snow, blended.
+///
+/// That is a proxy and it is written down as one. A real ambient belongs on the
+/// weather block, costs a `WeatherParams` field and a `SkyAtmosphere` slot, and
+/// is a schema move this wave's window did not price — so it is carried by name
+/// rather than smuggled in.
+///
+/// [`SkyAtmosphere`]: crate::components::SkyAtmosphere
+pub fn weather_at(world: &EcsWorld) -> (f64, f64) {
+    let w = world.world();
+    let mut best: Option<(Uuid, f32, f32)> = None;
+    for e in w.iter_entities() {
+        let Some(sky) = e.get::<crate::components::SkyAtmosphere>() else {
+            continue;
+        };
+        if !sky.weather_enabled {
+            continue;
+        }
+        let guid = e
+            .get::<crate::components::Guid>()
+            .map(|g| g.0)
+            .unwrap_or_else(Uuid::nil);
+        let cand = (guid, sky.weather_precipitation, sky.weather_snowiness);
+        // FIRST in `Guid` order, so a level with two skies is answered by the
+        // same one on both hosts whatever order the archetypes walked.
+        if best.is_none_or(|b| cand.0 < b.0) {
+            best = Some(cand);
+        }
+    }
+    let Some((_, precip, snow)) = best else {
+        return (0.0, TYRE_AMBIENT_C);
+    };
+    let wet = f64::from(precip).clamp(0.0, 1.0);
+    let s = f64::from(snow).clamp(0.0, 1.0);
+    // Snow is not wet in the tyre's sense: it is a surface of its own, and this
+    // engine's table has no `Snow` arm. What snow DOES is take the heat out of
+    // the air, so the wetness is scaled back as the phase freezes.
+    (
+        wet * (1.0 - s),
+        TYRE_AMBIENT_C + (SNOW_AMBIENT_C - TYRE_AMBIENT_C) * s,
+    )
+}
 
 /// How many tyre compounds the table has ([`VehicleTuning::tyre_surface_set`]).
 pub const COMPOUND_COUNT: usize = 4;
@@ -4278,6 +4391,282 @@ impl SurfaceClass {
             SurfaceClass::Gravel | SurfaceClass::Sand | SurfaceClass::Mud
         )
     }
+}
+
+/// The coarse grid a [`SurfaceMap`] wants, metres (wave VEH3a).
+///
+/// Four metres, because a street's carriageway is about seven: at eight the road
+/// and its verge fall in the same cell over half the network and the arm this
+/// exists for could not be written. It is coarsened automatically if a level's
+/// terrain is large enough to blow [`SURFACE_MAP_MAX_CELLS`] — see
+/// [`SurfaceMap::of_terrain`], which reports the size it actually chose.
+pub const SURFACE_MAP_CELL_M: f64 = 4.0;
+
+/// The most cells a [`SurfaceMap`] may hold — one megabyte at one `u8` each.
+///
+/// A bound rather than a target. The island is the level this matters on and it
+/// fits; a level that does not gets a coarser grid and a stated cell size rather
+/// than an allocation nobody budgeted for.
+pub const SURFACE_MAP_MAX_CELLS: usize = 1 << 20;
+
+/// **What the ground under a level's terrain is made of** (wave VEH3a) — a
+/// coarse `u8` grid over the terrain's own extent, one [`SurfaceClass`] a cell.
+///
+/// # Why this exists
+///
+/// `Collider3D::friction` gives an author a per-collider door, and it is the
+/// right one for a kerb or a bridge deck. It is no use at all for the thing a
+/// player actually drives on: **the island is a heightfield**, and a heightfield
+/// is one collider. Without this, every metre of a 50 km² island — road, verge,
+/// beach and forest floor — answered the same µ, and the surface table changed
+/// nothing anybody would ever feel.
+///
+/// # What it is built from
+///
+/// Two sources, both already in the level:
+///
+/// * the terrain's **splat**, through `TerrainData::dominant_layer_at` — the
+///   island's four layers are grass, rock, forest floor and sand, so the map
+///   reads grass and forest floor as [`Grass`](SurfaceClass::Grass), rock as
+///   [`Gravel`](SurfaceClass::Gravel) and sand as [`Sand`](SurfaceClass::Sand);
+/// * the **carriageway**, through `crate::traffic::streets_of` — the same door
+///   traffic drives down and parked cars line up along, so a road cannot be in
+///   one place for the tyres and another for the cars. Cells within the
+///   street's own `street_carriageway_half_m` of a centreline are
+///   [`Asphalt`](SurfaceClass::Asphalt).
+///
+/// The road is stamped SECOND and wins, which is the honest order: a road laid
+/// over grass is a road.
+///
+/// # It is a resource, not a field
+///
+/// Derived at the same rate the carriageway is, from the same stamp, by the same
+/// kind of door ([`sync_surface_map`]) — so it costs no schema, both hosts build
+/// it from the same level data, and a level whose blocks have not moved pays one
+/// stamp walk a step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceMap {
+    origin: DVec2,
+    cell_m: f64,
+    w: usize,
+    h: usize,
+    cells: Vec<u8>,
+}
+
+impl SurfaceMap {
+    /// Build the map for one terrain, or `None` if it has no authored extent.
+    ///
+    /// `O(cells + street length / cell)`, once per derivation.
+    pub fn of_terrain(
+        terrain: &crate::components::Terrain,
+        streets: &[crate::traffic::Street],
+    ) -> Option<Self> {
+        let (min, max) = terrain.data.xz_bounds()?;
+        let span = max - min;
+        if !(span.x.is_finite() && span.y.is_finite() && span.x > 0.0 && span.y > 0.0) {
+            return None;
+        }
+        // Coarsen until it fits. Doubling rather than solving, so the chosen cell
+        // size is always a power-of-two multiple of the wanted one and a level
+        // that grows slightly does not re-tile at a new irrational pitch.
+        let mut cell_m = SURFACE_MAP_CELL_M;
+        let (mut w, mut h) = (0usize, 0usize);
+        for _ in 0..12 {
+            w = (span.x / cell_m).ceil() as usize + 1;
+            h = (span.y / cell_m).ceil() as usize + 1;
+            if w.saturating_mul(h) <= SURFACE_MAP_MAX_CELLS {
+                break;
+            }
+            cell_m *= 2.0;
+        }
+        if w == 0 || h == 0 || w.saturating_mul(h) > SURFACE_MAP_MAX_CELLS {
+            return None;
+        }
+        let mut cells = vec![SurfaceClass::Grass.index() as u8; w * h];
+        // 1. the splat.
+        for j in 0..h {
+            for i in 0..w {
+                let p = DVec2::new(min.x + i as f64 * cell_m, min.y + j as f64 * cell_m);
+                let class = match terrain.data.dominant_layer_at(p) {
+                    // grass / forest floor
+                    Some(0) | Some(2) => SurfaceClass::Grass,
+                    // rock reads as gravel: loose stone is what a tyre meets on
+                    // it, and there is no `Rock` in the doc's table.
+                    Some(1) => SurfaceClass::Gravel,
+                    Some(3) => SurfaceClass::Sand,
+                    _ => SurfaceClass::Grass,
+                };
+                cells[j * w + i] = class.index() as u8;
+            }
+        }
+        // 2. the roads, which win.
+        let asphalt = SurfaceClass::Asphalt.index() as u8;
+        for st in streets {
+            let half = crate::traffic::street_carriageway_half_m(st.gap_m);
+            let lo = DVec2::new(st.a.x.min(st.b.x), st.a.y.min(st.b.y)) - DVec2::splat(half);
+            let hi = DVec2::new(st.a.x.max(st.b.x), st.a.y.max(st.b.y)) + DVec2::splat(half);
+            let i0 = (((lo.x - min.x) / cell_m).floor().max(0.0) as usize).min(w - 1);
+            let i1 = (((hi.x - min.x) / cell_m).ceil().max(0.0) as usize).min(w - 1);
+            let j0 = (((lo.y - min.y) / cell_m).floor().max(0.0) as usize).min(h - 1);
+            let j1 = (((hi.y - min.y) / cell_m).ceil().max(0.0) as usize).min(h - 1);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let p = DVec2::new(min.x + i as f64 * cell_m, min.y + j as f64 * cell_m);
+                    if point_segment_distance(p, st.a, st.b) <= half {
+                        cells[j * w + i] = asphalt;
+                    }
+                }
+            }
+        }
+        Some(Self {
+            origin: min,
+            cell_m,
+            w,
+            h,
+            cells,
+        })
+    }
+
+    /// The surface at a world point, or `None` outside the map.
+    ///
+    /// **Nearest cell, never interpolated** — a surface is categorical, and the
+    /// midpoint between asphalt and grass is one of the two, exactly as
+    /// `TerrainData::biome_at`'s own doc argues.
+    pub fn at(&self, x: f64, z: f64) -> Option<SurfaceClass> {
+        if !(x.is_finite() && z.is_finite()) {
+            return None;
+        }
+        let i = ((x - self.origin.x) / self.cell_m).round();
+        let j = ((z - self.origin.y) / self.cell_m).round();
+        if i < 0.0 || j < 0.0 {
+            return None;
+        }
+        let (i, j) = (i as usize, j as usize);
+        if i >= self.w || j >= self.h {
+            return None;
+        }
+        Some(SurfaceClass::from_index(
+            self.cells[j * self.w + i] as usize,
+        ))
+    }
+
+    /// The cell size this map actually chose, metres.
+    pub fn cell_m(&self) -> f64 {
+        self.cell_m
+    }
+
+    /// How many cells it holds.
+    pub fn cells(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// How many bytes it holds — one per cell, and the number a budget wants.
+    pub fn bytes(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// How many cells carry `class` — what a census arm counts.
+    pub fn count_of(&self, class: SurfaceClass) -> usize {
+        let want = class.index() as u8;
+        self.cells.iter().filter(|c| **c == want).count()
+    }
+}
+
+/// The distance from a point to a segment, in the XZ plane.
+fn point_segment_distance(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    if !(len2.is_finite() && len2 > 1e-12) {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    (p - (a + ab * t)).length()
+}
+
+/// **The level's surface maps**, one per terrain, derived (wave VEH3a).
+#[derive(bevy_ecs::prelude::Resource, Default, Debug)]
+pub struct SurfaceMapRes {
+    /// Keyed by the terrain entity's `Guid`, so a level with two terrains gets
+    /// two maps and a contact is classified by the one it is standing on.
+    pub maps: std::collections::BTreeMap<Uuid, SurfaceMap>,
+    /// The level stamp this was derived at — `TrafficRes::stamp`'s idiom.
+    pub stamp: u64,
+    /// How many times the derivation has actually run: a gate asserts **one**
+    /// over a settled level, which is what says the cache is a cache.
+    pub derivations: u64,
+}
+
+/// **Derive the level's surface maps if its terrain or its blocks have moved** —
+/// the one door both hosts call, on [`crate::traffic::sync_carriageway`]'s
+/// pattern and for its reason.
+///
+/// Returns `true` when it rebuilt. Cheap when nothing changed: one stamp walk.
+pub fn sync_surface_map(world: &mut EcsWorld) -> bool {
+    let mut stamp: u64 = crate::traffic::block_stamp(world);
+    let terrains: Vec<(Uuid, u64)>;
+    {
+        // Collected and SORTED, so the stamp is a function of the level's
+        // contents and not of a bevy archetype walk — `block_stamp`'s own
+        // discipline, one component over.
+        let w = world.world();
+        let mut found: Vec<(Uuid, u64)> = w
+            .iter_entities()
+            .filter_map(|e| {
+                let g = e.get::<crate::components::Guid>()?;
+                let t = e.get::<crate::components::Terrain>()?;
+                let n = t.data.tile_count() as u64;
+                let bits = t.meters_per_sample.to_bits() ^ u64::from(t.tile_resolution);
+                Some((g.0, n.wrapping_mul(0x9E37_79B9).wrapping_add(bits)))
+            })
+            .collect();
+        found.sort();
+        for (g, h) in &found {
+            stamp = stamp
+                .wrapping_mul(0x0100_0000_01B3)
+                .wrapping_add((g.as_u128() as u64) ^ h);
+        }
+        terrains = found;
+    }
+    if let Some(res) = world.world().get_resource::<SurfaceMapRes>() {
+        if res.stamp == stamp {
+            return false;
+        }
+    }
+    let streets = crate::traffic::streets_of(world);
+    let mut maps: std::collections::BTreeMap<Uuid, SurfaceMap> = std::collections::BTreeMap::new();
+    for (guid, _) in &terrains {
+        let Some(entity) = world.entity_of(*guid) else {
+            continue;
+        };
+        let Some(terrain) = world.world().get::<crate::components::Terrain>(entity) else {
+            continue;
+        };
+        if let Some(map) = SurfaceMap::of_terrain(terrain, &streets) {
+            maps.insert(*guid, map);
+        }
+    }
+    let derivations = world
+        .world()
+        .get_resource::<SurfaceMapRes>()
+        .map(|r| r.derivations)
+        .unwrap_or(0);
+    world.world_mut().insert_resource(SurfaceMapRes {
+        maps,
+        stamp,
+        derivations: derivations + 1,
+    });
+    true
+}
+
+/// The level's surface maps, if they have been derived — the read side.
+pub fn surface_map_of(world: &EcsWorld) -> Option<&SurfaceMapRes> {
+    world.world().get_resource::<SurfaceMapRes>()
+}
+
+/// Forget the derivation, so a world is byte-for-byte one that never had it.
+/// [`crate::traffic::clear_carriageway`]'s twin, for its reason.
+pub fn clear_surface_map(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<SurfaceMapRes>();
 }
 
 /// **How a compound answers a surface** (wave VEH3a) — the row
@@ -5387,10 +5776,11 @@ impl Vehicle for RaycastVehicle {
             // bridge because `tyre_surface_set` is a tunable a live tune can move
             // and the bridge cannot see one.
             //
-            // Wetness is the P17 weather state's and routing it is a later
-            // wave's; this passes a dry world until one does, named rather than
-            // silently zero.
-            state.mu_surface = surface_mu(state.surface, self.tuning.tyre_surface_set, 0.0);
+            // Wetness is the P17 weather state's `weather_precipitation`,
+            // published per wheel by the bridge through [`weather_at`] — a
+            // property of the world, like the surface beside it.
+            state.mu_surface =
+                surface_mu(state.surface, self.tuning.tyre_surface_set, state.wetness);
             let ctx = TyreContext {
                 mu_surface: state.mu_surface,
                 heat_grip: heat_grip_factor(&self.tuning, state.temp_c),
@@ -5522,7 +5912,7 @@ impl Vehicle for RaycastVehicle {
                 state.temp_c,
                 slip_power,
                 along_v.abs(),
-                TYRE_AMBIENT_C,
+                state.ambient_c,
                 dt,
             );
         }
