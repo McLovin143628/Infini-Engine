@@ -1180,6 +1180,35 @@ impl HeroLog {
         let heat = guid
             .map(|g| inf_ecs::crime::heat_of(sim.world(), g))
             .unwrap_or(0);
+        // * `responder_m` — how far the NEAREST responding crew is from the hero.
+        //   `engaged 0` with a unit on scene is two more different bugs: an
+        //   officer that cannot SEE you and an officer that is not NEAR you.
+        //   `inf_ecs::engage::ENGAGE_RANGE_M` is 35 m and a unit stops within
+        //   `ON_SCENE_M` of an incident **or where its road runs out**, which on
+        //   a street can be a long way further.
+        let responder_m = guid
+            .and_then(|g| {
+                let here = sim
+                    .world()
+                    .entity_of(g)
+                    .and_then(|e| sim.world().world().get::<inf_ecs::components::Transform>(e))
+                    .map(|t| t.translation.to_dvec3())?;
+                inf_ecs::dispatch::responders(sim.world())
+                    .into_iter()
+                    .filter_map(|crew| {
+                        let at = sim
+                            .world()
+                            .entity_of(crew)
+                            .and_then(|e| {
+                                sim.world().world().get::<inf_ecs::components::Transform>(e)
+                            })
+                            .map(|t| t.translation.to_dvec3())?;
+                        let d = (at - here).length();
+                        d.is_finite().then_some(d)
+                    })
+                    .fold(None::<f64>, |best, d| Some(best.map_or(d, |b| b.min(d))))
+            })
+            .unwrap_or(-1.0);
         let on_scene = inf_ecs::dispatch::dispatch_of(sim.world())
             .map(|r| {
                 r.runs
@@ -1196,7 +1225,7 @@ impl HeroLog {
             .unwrap_or(0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1243,7 +1272,8 @@ impl HeroLog {
                 engaged,
                 incoming,
                 heat,
-                on_scene
+                on_scene,
+                responder_m
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1261,7 +1291,7 @@ impl HeroLog {
             // asserts against the armed branch above it and against the demo
             // README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

@@ -46,8 +46,8 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
-                  class,attach,lock,engaged,incoming,heat,on_scene
-                  — THIRTY-SIX columns, four rows a second, and NO header line:
+                  class,attach,lock,engaged,incoming,heat,on_scene,responder_m
+                  — THIRTY-SEVEN columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -76,7 +76,7 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                             cone loses it, so a frame of the indicator has to be
                             triggered on it.
 
-                  and 33-36 are WPN2e's and its audit's:
+                  and 33-37 are WPN2e's and its audit's:
 
                     engaged  how many responding units are pointing a weapon at
                              somebody RIGHT NOW. The police arrive over tens of
@@ -93,6 +93,12 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                              cars, 6+ SWAT. It bleeds off one point per
                              `HEAT_DECAY_STEPS` (15 s) since the last sighting.
                     on_scene units standing at an incident right now.
+                    responder_m how far the NEAREST responding crew is from the
+                             hero, or -1 before one exists. `ENGAGE_RANGE_M` is
+                             35 m and a unit stops within `ON_SCENE_M` of an
+                             incident OR where its road runs out, which on a
+                             street can be a long way further — so "on scene"
+                             and "near you" are two different facts.
 
                   The last two are the WPN2e AUDIT's, and they exist because two
                   waves failed to diagnose this loop's own shootout leg with the
@@ -107,7 +113,8 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
                   so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`,
                   `lock` is `$c[31]`, `engaged` is `$c[32]`, `incoming` is
-                  `$c[33]`, `heat` is `$c[34]` and `on_scene` is `$c[35]`.
+                  `$c[33]`, `heat` is `$c[34]`, `on_scene` is `$c[35]` and
+                  `responder_m` is `$c[36]`.
 demo.log          every step the driver took, with timings
 ```
 

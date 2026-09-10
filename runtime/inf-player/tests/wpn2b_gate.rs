@@ -2557,16 +2557,16 @@ fn the_hero_log_and_its_readme_agree() {
         "`demo.ps1` no longer reads the mode at `$c[5]`, so index 5 is not the mode any more"
     );
     // **The README counts the same columns** — carried 225.
-    // **Thirty-six since the WPN2e AUDIT** — WPN2e appended `engaged` and
-    // `incoming` (thirty-three and thirty-four) and the audit appended `heat`
-    // and `on_scene`, for the reason every block before them was: two waves
+    // **Thirty-seven since the WPN2e AUDIT** — WPN2e appended `engaged` and
+    // `incoming` (thirty-three and thirty-four) and the audit appended `heat`,
+    // `on_scene` and `responder_m`, for the reason every block before them was: two waves
     // failed to diagnose the shootout leg because the loop's only instrument
     // stopped at `engaged`, and "nobody heard the shot", "the file went cold"
     // and "the car never arrived" are three different bugs that all read zero.
     let n = width(&armed);
-    assert_eq!(n, 36, "the row is {n} fields and this arm's word is 36");
+    assert_eq!(n, 37, "the row is {n} fields and this arm's word is 37");
     assert!(
-        README.contains("THIRTY-SIX") || README.contains("thirty-six"),
+        README.contains("THIRTY-SEVEN") || README.contains("thirty-seven"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [

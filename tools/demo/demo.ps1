@@ -246,7 +246,7 @@ if ($DryRun -ne "") {
     #     A leg that reads a column the player stopped writing is the next fault
     #     of this shape, and it would throw exactly where fault 1 did.
     $width = $rows[-1].Split(",").Count
-    foreach ($i in @(5, 11, 22, 27, 28, 32, 33, 34, 35)) {
+    foreach ($i in @(5, 11, 22, 27, 28, 32, 33, 34, 35, 36)) {
         if ($i -ge $width) {
             Say ("DRYRUN FAIL: a leg reads column {0} and the recording is {1} wide" -f $i, $width)
             $bad++
@@ -2354,8 +2354,8 @@ else {
         # never arrived, and when it arrived and could not see you. The columns
         # below are what tell them apart -- see tools/demo/README.md.
         $last = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
-        Say ("SHOOTOUT: no unit engaged -- heat {0}, units on scene {1}, casings {2}" -f `
-            $last[34], $last[35], $last[27])
+        Say ("SHOOTOUT: no unit engaged -- heat {0}, units on scene {1}, nearest responder {2} m, casings {3}" -f `
+            $last[34], $last[35], $last[36], $last[27])
     }
 
     # What the session's own columns say about the shootout, quoted.
@@ -2380,7 +2380,9 @@ else {
             # the same number for four different bugs; these are what tell them
             # apart. See tools/demo/README.md.
             Say "  peak heat on the hero: $peakHeat"
+            $nearest = ($rowsE | ForEach-Object { [double]$_[36] } | Where-Object { $_ -ge 0 } | Measure-Object -Minimum).Minimum
             Say "  peak units on scene : $peakScene"
+            Say ("  nearest responder   : {0:N1} m (engage range 35 m)" -f $nearest)
             Say "  shootout frames    : $shootFrames of 6"
         }
     }
