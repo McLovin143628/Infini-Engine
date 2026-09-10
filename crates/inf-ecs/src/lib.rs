@@ -58,6 +58,10 @@ pub mod dispatch;
 // I6: doors — a leaf on a hinge, a lock priced as one P22 bond, and the sparse
 // resource that holds what a player has done to them.
 pub mod door;
+// WPN2e: the NPC FIRING POLICY -- the response ladder read as four behaviours,
+// the cadence, the friendly cone, and the police-don't-cheat gate every aim
+// goes through. Decides; `inf_physics::d3::engage` applies.
+pub mod engage;
 // WPN2b: how a weapon FEELS -- the three recoil layers (a hold-point spring,
 // an AIM impulse the look integrator spends, and the spread's bloom), the
 // sway that shares the breath's clock, and the aim-down-sights blend. Pure
