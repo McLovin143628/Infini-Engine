@@ -8076,7 +8076,7 @@ mod tests {
         }
         assert!(
             heat_grip_factor(&t, launch) > 0.999,
-            "ten seconds of hard launch took the tyre to {launch} °C and cost it              grip — a car cannot be allowed to cook its tyres by accelerating"
+            "a ten-second hard launch reached {launch} °C and cost grip"
         );
         let hot = temp;
 
