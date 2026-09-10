@@ -211,8 +211,10 @@ pub const FRIENDLY_CONE_DEG: f64 = 12.0;
 /// **Sixteen**, and it is its own number rather than a reuse of either of the
 /// budgets it sits between, which is the whole reason it is written down:
 ///
-/// * [`crate::witness::MAX_ACTS_PER_STEP`] × observers — WPN1's **witness**
-///   budget, 32 — is about who SAW something happen;
+/// * `d3::gameplay::MAX_ACTS_PER_STEP` × [`crate::witness::MAX_OBSERVERS`] —
+///   WPN1's **witness** budget, 32 — is about who SAW something happen. (A code
+///   span for the first, because it lives in the applying crate and Ring 0
+///   cannot link downhill.);
 /// * `d3::crime::MAX_RECOGNITION_RAYS` — 32 — is about who is RECOGNISED;
 /// * [`crate::ballistics::MAX_SHOT_RAYS_PER_STEP`] is what a step's **bullets**
 ///   may cost.

@@ -20,8 +20,11 @@
 //!    writers, both behind a witness or a recognition ray, and it is private to
 //!    `inf_ecs::crime` — so an officer's *destination* can only ever be a place
 //!    somebody actually saw the suspect;
-//! 2. **a ray this step came back clear** — [`look_along`], which is
-//!    `super::crime::blocked`'s rule with the hit's owner kept.
+//! 2. **a ray this step came back clear** — `look_along`, which is
+//!    `super::crime::blocked`'s rule with the hit's owner kept. (Code spans,
+//!    because both are private and a public doc that links to one is a rustdoc
+//!    warning for a reference no reader of the public API could follow —
+//!    `super::gameplay::panic_sources_for`'s own rule.)
 //!
 //! The suspect's real transform is read to AIM the ray, exactly as
 //! `super::crime::look` reads it, and `super::crime`'s own header says why that
@@ -138,9 +141,9 @@ pub struct EngageStats {
 ///
 /// 1. the open files, and the hottest rung any of them is at — the town's
 ///    posture ([`inf_ecs::engage::posture_for`]);
-/// 2. the armed police units, from the same duty roster
-///    [`super::crime::officers`] reads, so an officer who is looking and an
-///    officer who is shooting are the same set;
+/// 2. the armed police units, from the same duty roster `super::crime::officers`
+///    reads, so an officer who is looking and an officer who is shooting are the
+///    same set;
 /// 3. per pair, the range gate against the file's **last-seen**, then a ray,
 ///    then [`inf_ecs::engage::may_engage`];
 /// 4. the aim, through [`super::gameplay::npc_aim_at`], with the trigger
