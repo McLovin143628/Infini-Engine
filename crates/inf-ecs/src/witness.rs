@@ -85,6 +85,44 @@ pub enum ActKind {
     /// noise, so the only people who know about it are the ones who *saw* it,
     /// which is exactly what an observer list is for.
     Assault,
+    /// **A ROUND LANDED ON SOMEBODY AND THEY LIVED** (wave WPN2e, closing the
+    /// WPN2a audit's carried item 205).
+    ///
+    /// # The hole it fills
+    ///
+    /// Until this variant existed, *shooting a person* left the same record as
+    /// *firing into the air*: [`Shot`](Self::Shot), at the muzzle, worth two
+    /// heat. The two halves of WPN2a's hybrid each got there by a different
+    /// route and both arrived nowhere —
+    ///
+    /// * a **hitscan** hit is `loud`, so the gunshot filter took it and recorded
+    ///   the pull; the fact that it *connected* went in no record at all;
+    /// * a **projectile** arrival is quiet and carries `arrived`, which WPN2a
+    ///   added to the [`Assault`](Self::Assault) filter precisely so a bullet
+    ///   reaching somebody was not filed as a beating — correctly, and it left
+    ///   the arrival filing nothing whatever.
+    ///
+    /// So a town could not tell somebody firing a rifle at a wall from somebody
+    /// putting rounds into a pedestrian, and the police's whole reason to escalate
+    /// is *who is shooting at whom*.
+    ///
+    /// # Why not just widen `Assault`
+    ///
+    /// Because WPN2a's sentence is still true — a bullet reaching somebody is
+    /// not a beating — and because the two want different heat. A punch is one;
+    /// a round that connects is two, so a shot that HITS costs four
+    /// ([`Shot`](Self::Shot) plus this) and brings a
+    /// [`crate::crime::Response::MultiUnit`] where a shot that misses costs two
+    /// and brings one car. That is the ladder doing the thing it is for.
+    ///
+    /// **Non-fatal only.** A round that kills raises [`Killed`](Self::Killed),
+    /// which outranks it and is filed against the same shooter; a wounding is
+    /// what happens when the body is still working afterwards.
+    ///
+    /// Appended, on [`Carjack`](Self::Carjack)'s terms: `as_u8` is folded into
+    /// [`crate::crime::profile_state_bytes`], so a variant in the middle would
+    /// cost every committed hash in the tree.
+    Wounded,
 }
 
 impl ActKind {
@@ -95,6 +133,7 @@ impl ActKind {
             ActKind::Killed => "killed",
             ActKind::Carjack => "carjack",
             ActKind::Assault => "assault",
+            ActKind::Wounded => "wounded",
         }
     }
 
@@ -106,20 +145,26 @@ impl ActKind {
             ActKind::Killed => 1,
             ActKind::Carjack => 2,
             ActKind::Assault => 3,
+            ActKind::Wounded => 4,
         }
     }
 
     /// **How much heat this act adds to whoever did it** — the severity ladder's
     /// input, in the units [`crate::crime::Profile::heat`] counts.
     ///
-    /// A death is worth three, a shot two, and a carjack or a punch one each.
+    /// A death is worth three, a shot two, a **wounding** two (wave WPN2e), and
+    /// a carjack or a punch one each.
     /// The shape is the point rather than the exact numbers: one petty act does
     /// not bring a tactical van, and three of them do
     /// ([`crate::crime::Response::for_heat`]).
     pub fn heat(self) -> u32 {
         match self {
             ActKind::Killed => 3,
-            ActKind::Shot => 2,
+            // **Two, the same as the shot that carried it** (wave WPN2e). A
+            // round that CONNECTS therefore costs four -- `Shot` plus this --
+            // which is the rung above a round that misses, and that gap is the
+            // whole reason the variant exists.
+            ActKind::Shot | ActKind::Wounded => 2,
             ActKind::Carjack | ActKind::Assault => 1,
         }
     }

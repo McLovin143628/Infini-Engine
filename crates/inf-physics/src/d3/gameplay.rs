@@ -3182,6 +3182,44 @@ fn step_witness(
             .unwrap_or_else(Uuid::nil);
         acts.push((ActKind::Killed, killer, at, *guid));
     }
+    // **A ROUND LANDED ON SOMEBODY AND THEY LIVED** (wave WPN2e, closing the
+    // WPN2a audit's carried item 205).
+    //
+    // Second, on the death's own argument: a dispatcher asked to name one thing
+    // about a street should name the body first and the wound next, and only
+    // then the noise. `MAX_ACTS_PER_STEP` is four, so the order is what survives
+    // a busy step.
+    //
+    // **What a round is, in this list.** WPN2a's hybrid arrives by two routes
+    // and both are here:
+    //
+    // * a **hitscan** hit is `loud` — the pull and the impact are one record;
+    // * a **projectile arrival** is quiet and carries `arrived`.
+    //
+    // A **melee blow is neither**, which is what leaves `ActKind::Assault`'s own
+    // bucket below exactly what it was: `!loud && !arrived && on_flesh`.
+    //
+    // Three refusals, and each one is a fact rather than a tidy-up:
+    //
+    // 1. a body that stopped working **this step** is a killing, already above;
+    // 2. a body that was **already** down is a corpse, and emptying a magazine
+    //    into one is not a fresh wounding sixty times a second;
+    // 3. a hit that named nobody (`target` is `None`) is a wall.
+    for hit in hits
+        .iter()
+        .filter(|h| h.on_flesh && (h.loud || h.arrived) && h.from.is_finite())
+    {
+        if acts.len() >= MAX_ACTS_PER_STEP {
+            break;
+        }
+        let Some(target) = hit.target else {
+            continue;
+        };
+        if killed.contains(&target) || weapon::is_downed(world, target) {
+            continue;
+        }
+        acts.push((ActKind::Wounded, hit.shooter, hit.to, target));
+    }
     for hit in hits.iter().filter(|h| h.loud && h.from.is_finite()) {
         if acts.len() >= MAX_ACTS_PER_STEP {
             break;

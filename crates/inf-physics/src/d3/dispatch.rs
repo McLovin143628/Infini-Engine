@@ -257,6 +257,10 @@ fn open_incidents(
                 match a.kind {
                     inf_ecs::witness::ActKind::Shot => 1,
                     inf_ecs::witness::ActKind::Killed => 2,
+                    // WPN2e: somebody was shot and lived. A scene worth as many
+                    // cars as a shot fired and fewer than a body -- the same
+                    // shape `ActKind::heat` gives it, one ladder along.
+                    inf_ecs::witness::ActKind::Wounded => 1,
                     inf_ecs::witness::ActKind::Carjack | inf_ecs::witness::ActKind::Assault => 1,
                 },
                 // EMS3: WHO did it, so the scene can be linked to their file
