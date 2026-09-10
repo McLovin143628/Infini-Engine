@@ -2618,6 +2618,193 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
     );
 }
 
+/// **THE ISLAND'S HERO CARRIES ITS WEAPON IN ITS HAND** (wave WPN2e audit,
+/// closing the WPN2d audit's carried 266 and this arc's carried 280).
+///
+/// # What it reads
+///
+/// The world, three ways, on the SHIPPED island with the SHIPPED rig:
+///
+/// 1. the hero's own evaluated pose publishes a `hand_r` socket
+///    ([`inf_ecs::pose::EvaluatedPose::socket`]) -- which is what
+///    `d3::gameplay`'s muzzle rule requires before it will read a weapon's
+///    barrel at all;
+/// 2. the equipped weapon ENTITY's own `GlobalTransform` is at that socket and
+///    not at the character's origin -- measured as two distances, so a weapon
+///    that had simply moved somewhere else would fail as loudly as one that had
+///    not moved at all;
+/// 3. `GameplayReport::muzzles_without_a_socket`, the tripwire wave SK1b minted
+///    for exactly this and which nothing on the island had ever read, is ZERO
+///    over the run.
+///
+/// # Why it is an AUDIT arm and not the wave's
+///
+/// The wave shipped with the island's hero drawing its Glock at its PELVIS, and
+/// its report says so (carried 280) -- *"one re-import closes it"*. It does not:
+/// a re-import fixes the rigs somebody re-imports and leaves every `.inf_skel`
+/// already on disk exactly as broken. Measured on this machine before the fix:
+/// **0 of the island's 104 `.inf_skel` files publish a socket table**, the
+/// hero's `Starter.inf_skel` among them.
+///
+/// What closes it is `inf_anim::asset`'s own load-time door -- `migrate` derives
+/// the table for a rig that authors none, inside `inf_asset::decode`, which is
+/// the one door BOTH hosts read a `.inf_skel` through. This arm is that door
+/// seen from the far end of the engine.
+///
+/// **The mutation**: delete the `derive_sockets` call in
+/// `SkeletonAsset::migrate` and every assertion below goes red -- the socket is
+/// `None`, the weapon sits at the character origin, and the muzzle tripwire
+/// counts every shot.
+#[test]
+fn the_islands_own_hero_carries_its_weapon_in_its_hand() {
+    let Some(content) = island_project() else {
+        eprintln!("SKIP: no island project - local-only content");
+        return;
+    };
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        eprintln!("SKIP: no VancouverIsland.inf_lvl");
+        return;
+    }
+    // -- FIRST, the rigs on disk, read through the shipped decode door.
+    let mut rigs = 0usize;
+    let mut with_hand = 0usize;
+    let mut authored = 0usize;
+    for entry in walk_skeletons(&content) {
+        let Ok(bytes) = std::fs::read(&entry) else {
+            continue;
+        };
+        let Ok(rig) = inf_asset::decode::<inf_anim::SkeletonAsset>(&bytes) else {
+            continue;
+        };
+        rigs += 1;
+        if inf_anim::sockets::find_socket(&rig.sockets, "hand_r").is_some() {
+            with_hand += 1;
+        }
+        if rig.skeleton.joints().iter().any(|j| j.name == "hand_r") {
+            authored += 1;
+        }
+    }
+    println!("\n=== THE ISLAND'S RIGS, THROUGH `inf_asset::decode` ===");
+    println!(
+        "  {rigs} `.inf_skel` decoded; {authored} have a `hand_r` JOINT; {with_hand} publish a `hand_r` SOCKET"
+    );
+    assert!(rigs > 0, "the island has no rigs at all");
+    assert_eq!(
+        with_hand,
+        authored,
+        "{} of {authored} island rigs with a `hand_r` joint publish no `hand_r` socket - a weapon on one of them draws at the pelvis",
+        authored - with_hand
+    );
+
+    // -- THEN the world: the hero, its pose, and the weapon entity.
+    let mut sim = island_sim(&content);
+    let hero = inf_ecs::movement::camera_subject(sim.world()).expect("the island has a pawn");
+    for _ in 0..600 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    {
+        let defs = inf_ecs::item::item_defs_mut(sim.world_mut());
+        if defs.is_empty() {
+            defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
+                .expect("the shipped registry parses");
+        }
+    }
+    item::give(sim.world_mut(), hero, "glock_17", 1);
+    assert!(
+        d3::gameplay::equip_weapon(sim.world_mut(), hero, "glock_17"),
+        "the island's own sidearm would not equip"
+    );
+    // Enough steps for the weapon entity to be spawned, posed and attached.
+    let mut no_socket = 0u32;
+    for _ in 0..120 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        no_socket += sim.gameplay().muzzles_without_a_socket;
+    }
+    let socket = inf_ecs::pose::evaluated_pose(sim.world(), hero)
+        .and_then(|p| p.socket(d3::gameplay::WEAPON_SOCKET));
+    let origin = sim
+        .world()
+        .entity_of(hero)
+        .and_then(|e| sim.world().world().get::<Transform>(e))
+        .map(|t| t.translation.to_dvec3())
+        .expect("the hero has a place");
+    let weapon_guid = d3::gameplay::equipped_weapon_guid(hero);
+    let weapon_at = sim
+        .world()
+        .entity_of(weapon_guid)
+        .and_then(|e| {
+            sim.world()
+                .world()
+                .get::<inf_ecs::components::GlobalTransform>(e)
+        })
+        .map(|g| g.0.transform_point3(DVec3::ZERO))
+        .expect("the equipped weapon is an entity");
+    // **The same composition `inf_ecs::attach::update_attachments` makes** --
+    // `pose::model_to_world` (the character-space lift, NOT the raw entity
+    // transform) times the socket's own model-space matrix. Spelling it a second
+    // way would measure a place nothing draws.
+    let hero_pose =
+        inf_ecs::pose::model_to_world_of(sim.world(), hero).expect("the hero has a transform");
+    let hand_world = socket
+        .map(|m| hero_pose * glam::DAffine3::from_mat4(m.as_dmat4()))
+        .map(|a| a.translation);
+    let from_origin = (weapon_at - origin).length();
+    let from_hand = hand_world
+        .map(|h| (weapon_at - h).length())
+        .unwrap_or(f64::NAN);
+    println!("=== THE ISLAND'S HERO, WITH THE GLOCK ===");
+    println!(
+        "  hand_r socket           : {}",
+        if socket.is_some() {
+            "published"
+        } else {
+            "MISSING"
+        }
+    );
+    println!(
+        "  the weapon entity is    : {from_origin:.3} m from the character origin, {from_hand:.3} m from the hand socket"
+    );
+    println!("  muzzles without a socket: {no_socket} over 120 steps");
+    assert!(
+        socket.is_some(),
+        "the island's hero publishes no `{}` socket - its weapon draws at its pelvis",
+        d3::gameplay::WEAPON_SOCKET
+    );
+    assert!(
+        from_origin > 0.25,
+        "the weapon is {from_origin:.3} m from the character's own origin - that IS the pelvis"
+    );
+    assert!(
+        from_hand < 0.25,
+        "the weapon is {from_hand:.3} m from the hand socket it is supposed to be attached to"
+    );
+    assert_eq!(
+        no_socket, 0,
+        "the muzzle fell back to the capsule rule on a rig that publishes a socket"
+    );
+}
+
+/// Every `.inf_skel` under a content root, recursively.
+fn walk_skeletons(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "inf_skel") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 // ── the island, loosely (cov1_gate's `loose_sim`, verbatim) ─────────────────
 
 fn repo() -> PathBuf {

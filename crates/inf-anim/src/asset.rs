@@ -202,6 +202,38 @@ impl AssetPayload for SkeletonAsset {
         self.skeleton
             .validate()
             .map_err(|e| inf_asset::AssetError::Decode(format!("invalid skeleton: {e}")))?;
+        // ── **A RIG WITH NO SOCKET TABLE GETS ONE, AT LOAD** (wave WPN2e audit,
+        //    closing the WPN2d audit's carried 266 / this arc's carried 280).
+        //
+        // `SkeletonAsset::new` leaves `sockets` empty and that is what both
+        // importers built until wave WPN2d, so every `.inf_skel` written before
+        // it — the island's own MetaHuman hero included — publishes NONE. The
+        // consequence is silent and total: `inf_ecs::attach::update_attachments`
+        // falls back to the target's ORIGIN, so an equipped weapon is drawn
+        // inside the character's pelvis, and every frame of the shipped game
+        // shows a hero with empty hands.
+        //
+        // WPN2d fixed the two IMPORTERS, which fixes a rig somebody re-imports
+        // and no rig already on disk. This is the other half, and it is the half
+        // that means a re-import is never the only fix: the same
+        // `crate::sockets::derive_sockets` runs at DECODE, in the one door both
+        // hosts read an asset through (`inf_asset::decode` → `migrate`), so the
+        // editor and the shipped player derive the same table from the same
+        // bytes.
+        //
+        // **Only when the rig authors none.** A rig that publishes its own table
+        // — `crate::manny`, `crate::template`, every sample committed in this
+        // repository, and everything re-imported since WPN2d — is untouched, so
+        // this cannot overwrite an author's socket with a guess.
+        //
+        // Load-time and not per-step, which is `derive_sockets`' own ruling: a
+        // runtime fallback would be twelve name lookups over a hundred and sixty
+        // joints per character per fixed step AND would change what the fixed
+        // step computes for a muzzle, which is a trace. This changes a decoded
+        // VALUE once, before anything has stepped.
+        if self.sockets.is_empty() {
+            self.sockets = crate::sockets::derive_sockets(&self.skeleton);
+        }
         // The side tables index joints. A row naming a joint this rig does not
         // have is not a panic anywhere — every reader bounds-checks — but it is a
         // rig that says something false about itself, and the failure it produces
@@ -865,8 +897,76 @@ mod tests {
         let e2 = encode(&a).unwrap();
         assert_eq!(e1, e2, "re-encoding is byte-identical");
         let back: SkeletonAsset = decode(&e1).unwrap();
-        assert_eq!(back, a);
-        assert!(back.sockets.is_empty());
+        // Everything except the socket table is the identity. The table is not,
+        // and deliberately: `migrate` DERIVES one for a rig that authors none
+        // (wave WPN2e audit) — see the arm below. This rig has a `root` joint,
+        // so it gets `root_socket` and nothing else.
+        assert_eq!(back.skeleton, a.skeleton);
+        assert_eq!(back.schema_version, a.schema_version);
+        assert_eq!(
+            back.sockets,
+            crate::sockets::derive_sockets(&a.skeleton),
+            "a decoded rig's socket table is the derivation of its own joints"
+        );
+    }
+
+    /// **A RIG WITH NO SOCKETS GETS THEM AT LOAD** (wave WPN2e audit, closing
+    /// the WPN2d audit's carried 266 and this arc's carried 280).
+    ///
+    /// The WPN2d audit found that every rig this engine has ever IMPORTED
+    /// publishes an empty socket table, so an equipped weapon draws at the
+    /// character's ORIGIN — its pelvis — and fixed the two importers. That fixes
+    /// a rig somebody re-imports and no rig already on disk. This is the door
+    /// that means a re-import is never the only fix: `migrate` runs inside
+    /// `inf_asset::decode`, which is the one door BOTH hosts read a `.inf_skel`
+    /// through.
+    ///
+    /// **The mutation**: delete the `derive_sockets` call in `migrate` and the
+    /// first assertion goes red — `hand_r` is `None`, which is the pelvis.
+    #[test]
+    fn a_rig_that_authors_no_sockets_is_given_them_when_it_is_decoded() {
+        let ue = Skeleton::new(vec![
+            Joint {
+                name: "root".into(),
+                parent: None,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+            Joint {
+                name: "spine_05".into(),
+                parent: Some(0),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+            Joint {
+                name: "hand_r".into(),
+                parent: Some(1),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+        ])
+        .unwrap();
+        // What every importer wrote before wave WPN2d, and what the island's own
+        // MetaHuman `.inf_skel` still holds on disk: nothing.
+        let bare = SkeletonAsset::new(ue.clone());
+        assert!(bare.sockets.is_empty(), "the fixture is not a bare rig");
+        let back: SkeletonAsset = decode(&encode(&bare).unwrap()).unwrap();
+        let hand = crate::sockets::find_socket(&back.sockets, "hand_r")
+            .expect("a decoded rig with a `hand_r` joint must publish a `hand_r` socket");
+        assert_eq!(hand.joint, 2, "the socket rides the joint of that name");
+        assert!(crate::sockets::find_socket(&back.sockets, "back").is_some());
+        assert!(crate::sockets::find_socket(&back.sockets, "root_socket").is_some());
+        // …and a joint this rig does not have is not invented.
+        assert!(crate::sockets::find_socket(&back.sockets, "foot_l").is_none());
+
+        // **AN AUTHORED TABLE IS NEVER OVERWRITTEN.** A rig that publishes its
+        // own sockets — `crate::manny`, `crate::template`, every sample in this
+        // repository — decodes exactly as it was written, so this door cannot
+        // replace an author's socket with a guess.
+        let authored = SkeletonAsset::with_sockets(ue, vec![Socket::new("muzzle", 2)]);
+        let back2: SkeletonAsset = decode(&encode(&authored).unwrap()).unwrap();
+        assert_eq!(back2.sockets, authored.sockets, "an authored table moved");
+        assert!(crate::sockets::find_socket(&back2.sockets, "hand_r").is_none());
     }
 
     /// v2: the limits side table rides the payload and round-trips.
@@ -880,7 +980,10 @@ mod tests {
         let e1 = encode(&a).unwrap();
         assert_eq!(e1, encode(&a).unwrap(), "re-encoding is byte-identical");
         let back: SkeletonAsset = decode(&e1).unwrap();
-        assert_eq!(back, a);
+        // The limits table is the identity; the socket table is derived at load
+        // (wave WPN2e audit) — see `a_rig_that_authors_no_sockets_is_given_them_when_it_is_decoded`.
+        assert_eq!(back.limits, a.limits);
+        assert_eq!(back.skeleton, a.skeleton);
         assert_eq!(back.limit(1).unwrap().min_deg[0], -150.0);
         assert!(back.limit(0).is_none(), "an absent joint is unlimited");
     }
