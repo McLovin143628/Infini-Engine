@@ -1670,23 +1670,38 @@ fn a_non_fatal_round_raises_an_act_of_its_own() {
 /// 3. it files **no description at all** -- the evidence table stays empty, so
 ///    nothing on the recognition path can match on a file opened by ear. That is
 ///    *"a lower evidence weight"* as a mechanism rather than as an adjective;
-/// 4. it never moves `Profile::last_seen`. The shooter walks twenty metres and
-///    fires again, and the place the police are searching does not move --
-///    EMS3's law, intact, with hearing on top of it;
+/// 4. it moves `Profile::last_seen` to THE SHOT'S OWN PLACE and to nothing else.
+///    The shooter walks twenty metres in SILENCE and the place the police are
+///    searching does not follow him; he fires once from there and it does. A
+///    gunshot puts you somewhere just as loudly as a witness does, and the thing
+///    the law forbids is reading a TRANSFORM — which this function has no route
+///    to;
 /// 5. it spends **zero rays**. The whole run's `shot_rays` is identical with the
 ///    listener present and absent, because sound is not a line of sight.
 ///
 /// **The mutations**: return `0.0` from `weapon::audible_radius_m` (claim 1 goes
 /// red, and the control below stays green -- which is what tells the two apart);
 /// make `heard_heat` answer `2` (claim 2); file the outfit in `report_heard`
-/// (claim 3); write `last_seen` in `report_heard` (claim 4).
+/// (claim 3); write the SHOOTER'S TRANSFORM instead of `act.at` in
+/// `report_heard` (claim 4 -- the silent walk moves the trail).
+///
+/// # Why claim 4 is not "it never moves it"
+///
+/// It was, in the first cut of this channel, and the SHIPPED GAME measured what
+/// that costs. On the island the town heard the gunfire (**heat 37**), sent a
+/// car, and the car ARRIVED (**units on scene 1**) — and the officer stood
+/// there and did nothing, because `engage::TRAIL_STALE_STEPS` refuses a pair
+/// whose `last_seen` is more than three seconds old and nothing was ever going
+/// to refresh one a hearer had frozen: a file opened by ear has no description,
+/// so recognition cannot renew it either. The channel opened files nobody could
+/// act on.
 #[test]
 fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
     // A listener at 200 m: outside `WITNESS_RADIUS_M` (120 m) and inside a
     // `glock_17`'s own report range, with a wall between it and the muzzle.
     const FAR_M: f64 = 200.0;
 
-    let run = |listener: Option<f64>| -> (usize, usize, u32, u32, u32, DVec3, DVec3) {
+    let run = |listener: Option<f64>| -> (usize, usize, u32, u32, u32, DVec3, DVec3, DVec3) {
         let mut beat = Beat::new();
         slab(
             &mut beat.world,
@@ -1711,13 +1726,25 @@ fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
         let first_seen = crime::profile_of(&beat.world, HERO)
             .map(|f| f.last_seen())
             .unwrap_or(DVec3::ZERO);
-        // …and now the shooter WALKS, and fires again from somewhere else.
+        // …and now the shooter WALKS TWENTY METRES IN SILENCE. The trigger is
+        // never touched, so nothing announces the move — and the place the
+        // police are searching must not follow him.
         if let Some(e) = beat.world.entity_of(HERO) {
             if let Some(mut t) = beat.world.world_mut().get_mut::<Transform>(e) {
                 t.translation = Vec3d::new(20.0, 0.0, 0.0);
             }
         }
         beat.resync();
+        for _ in 0..240 {
+            beat.hold_trigger(HERO, false);
+            let r = beat.step();
+            rays += r.rounds.shot_rays;
+        }
+        let after_walk = crime::profile_of(&beat.world, HERO)
+            .map(|f| f.last_seen())
+            .unwrap_or(DVec3::ZERO);
+        // …and NOW he fires from where he is standing, which is the other half:
+        // a gunshot puts you somewhere.
         for i in 0..240 {
             beat.top_up(HERO);
             beat.hold_trigger(HERO, i % 4 == 0);
@@ -1734,11 +1761,13 @@ fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
         let moved_seen = crime::profile_of(&beat.world, HERO)
             .map(|f| f.last_seen())
             .unwrap_or(DVec3::ZERO);
-        (seen, heard, heat, evidence, rays, first_seen, moved_seen)
+        (
+            seen, heard, heat, evidence, rays, first_seen, after_walk, moved_seen,
+        )
     };
 
-    let (seen, heard, heat, evidence, rays, first, after) = run(Some(FAR_M));
-    let (c_seen, c_heard, c_heat, _, control_rays, _, _) = run(None);
+    let (seen, heard, heat, evidence, rays, first, walked, fired_again) = run(Some(FAR_M));
+    let (c_seen, c_heard, c_heat, _, control_rays, _, _, _) = run(None);
     println!("\n=== A GUNSHOT NOBODY SAW ===");
     println!(
         "  a listener at {FAR_M:.0} m, behind a wall, outside the {:.0} m witness radius:",
@@ -1749,7 +1778,10 @@ fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
         Response::for_heat(heat).name()
     );
     println!("    the file's evidence channels: {evidence}");
-    println!("    last_seen {first:?} -> {after:?} after the shooter walked 20 m");
+    println!(
+        "    last_seen: fired at {:.1}, walked in silence -> {:.1}, fired again -> {:.1} (on x)",
+        first.x, walked.x, fired_again.x
+    );
     println!(
         "  the CONTROL, nobody within earshot: acts SEEN {c_seen} / HEARD {c_heard}, heat {c_heat}"
     );
@@ -1792,11 +1824,16 @@ fn a_gunshot_nobody_saw_is_still_heard_and_opens_a_file() {
         "a file opened by ear carries {evidence} description channel(s) - a hearer described somebody"
     );
 
-    // (4) `last_seen` NEVER MOVES. EMS3's law: only a witness or a recognition
-    //     may write it, and hearing is neither.
+    // (4) THE TRAIL IS THE SHOT'S OWN PLACE, and nothing else. A silent walk
+    //     does not move it; a shot from the new place does.
     assert_eq!(
-        first, after,
-        "the shooter walked 20 m, fired, and the place the police are searching MOVED - hearing wrote `last_seen`"
+        first, walked,
+        "the shooter walked 20 m WITHOUT FIRING and the place the police are searching followed him - hearing read a transform"
+    );
+    assert!(
+        (fired_again.x - 20.0).abs() < 1.5,
+        "the shooter fired from x 20 and the trail is at x {:.2} - a gunshot did not put him anywhere",
+        fired_again.x
     );
 
     // (5) ZERO RAYS. The named budget is `MAX_SHOT_RAYS_PER_STEP`, and the ears

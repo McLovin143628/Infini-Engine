@@ -651,17 +651,20 @@ pub fn report_act(world: &mut EcsWorld, act: &WitnessedAct, vehicle: Option<u64>
 ///   [`crate::crime::match_score`] has nothing to match on and a file opened by
 ///   ear cannot get anybody recognised. That is *"a lower evidence weight than
 ///   sight"* as a mechanism rather than as an adjective;
-/// * **does not move [`Profile::last_seen`]**. That field is what the police
-///   drive to and what [`crate::engage::may_engage`] measures its range against,
-///   and it stays what its name says: a place a person actually SAW the suspect.
-///   A file that already exists keeps whatever position it had; a file this
-///   opens is anchored at the shot itself — which is public, it is where the
-///   noise came from, and it is the only address hearing can honestly give.
+/// * **moves [`Profile::last_seen`] to the SHOT'S OWN PLACE, and to nothing
+///   else.** That field is what the police drive to and what
+///   [`crate::engage::may_engage`] measures its range against, and the law it
+///   carries is *"a place somebody actually put the suspect"* — a gunshot puts
+///   the suspect somewhere just as loudly as a witness does. What it may never
+///   be is the suspect's TRANSFORM, and there is nowhere in this function to
+///   read one: [`crate::witness::WitnessedAct::at`] is the muzzle, written by
+///   the weapon step.
 ///
-/// So hearing gets the police into the street and **sight is what keeps them on
-/// you**: the trail an ear laid goes stale in
-/// [`crate::engage::TRAIL_STALE_STEPS`] (three seconds) and nothing but a
-/// witness or a recognition renews it. EMS3's evasion clause is untouched.
+/// So **the trail is only as fresh as the last shot**. Stop firing and it goes
+/// stale in [`crate::engage::TRAIL_STALE_STEPS`] — three seconds — and the
+/// police are searching a place you are not, which is EMS3's evasion clause
+/// working through a channel it did not have. Keep firing and you are telling
+/// them where you are, which is what firing a gun in a street does.
 ///
 /// # No transform is read anywhere in here
 ///
@@ -701,9 +704,19 @@ pub fn report_heard(world: &mut EcsWorld, act: &WitnessedAct) -> Option<u32> {
         }
     });
     file.heat = file.heat.saturating_add(worth);
+    // **AND THE PLACE THE SHOT CAME FROM**, which is the act's own position and
+    // never a transform — see the header. This was `heat` only in the first cut
+    // of this door, and the shipped game measured what that costs: on the island
+    // the town heard the gunfire (**heat 37**), sent a car, the car ARRIVED
+    // (**units on scene 1**) — and the officer stood there, because
+    // `crate::engage::TRAIL_STALE_STEPS` refuses a pair whose `last_seen` is
+    // more than three seconds old and nothing was ever going to refresh one a
+    // hearer had frozen. A file with no description cannot be refreshed by
+    // recognition either. The channel was inert.
+    file.last_seen = act.at;
+    file.last_seen_step = act.step;
     // **The clock stops**, exactly as a sighting stops it (see `sight`): a town
-    // being shot at every second is not a town whose file is going cold. It is
-    // the heat that is being renewed and not the position.
+    // being shot at every second is not a town whose file is going cold.
     file.decayed_step = act.step;
     let heat = file.heat;
     if opened {
