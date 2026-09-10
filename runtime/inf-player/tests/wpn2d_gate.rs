@@ -392,11 +392,21 @@ fn the_pattern_at_ten_metres_is_the_cone_the_row_says_it_is() {
         worst <= bound + 1e-6,
         "a pellet landed {worst:.3} m out and the cone allows {bound:.3} m"
     );
-    // …and it is a PATTERN, not a point: the eight are not all in one place.
+    // …and it is THE ROW'S cone and not some narrower one (the audit's fix).
+    //
+    // This half read `worst > bound * 0.3` and the arm's own mutation —
+    // "pass the resolved PULL cone instead of `def.cone_deg`" — DID NOT RED IT.
+    // The resolved cone for a standing, stationary, hip-firing hero is
+    // `spread_deg` = 3.00°, not 4.00°, so the eight do not collapse: they land
+    // in a 0.244 m pattern inside a 0.325 m bound, which is 75 % of it and
+    // passes a third. The sampler has no RNG in it — `shot_uniforms` at eight
+    // consecutive indices — so the ratio is a FIXED number for this fixture and
+    // can be pinned tightly instead of bounded loosely.
     assert!(
-        worst > bound * 0.3,
-        "the widest pellet is {worst:.4} m out of a {bound:.4} m cone — the \
-         pattern has collapsed and this arm would pass on a single ray"
+        worst >= bound * 0.9,
+        "the widest pellet is {worst:.4} m out of a {bound:.4} m cone ({:.1} % \
+         of it) — the eight rays are not leaving through the cone the ROW names",
+        worst / bound * 100.0
     );
 }
 
@@ -1051,10 +1061,17 @@ fn the_grenade_leaves_the_hand_at_the_clips_release_point_by_either_path() {
             .is_none(),
         "the thrown grenade is still drawn in the hand that threw it"
     );
-    let ik = inf_ecs::pose::hand_ik(&r.world, HERO);
+    // **THE HAND-IK HALF IS NOT MEASURED HERE, AND SAYS SO** (the audit's fix).
+    // This read `ik.map(|i| i.gun.is_none()).unwrap_or(true)`, and this fixture
+    // has no rig and never runs the pose step, so `hand_ik` is `None` and the
+    // assertion was `true` for every possible engine behaviour. The world half
+    // above it — the weapon entity is gone from the hand — is the claim this arm
+    // can make; the IK weight going to zero at the release is CHAR1b.2's own
+    // seam and is carried.
     assert!(
-        ik.map(|i| i.gun.is_none()).unwrap_or(true),
-        "the hand is still gripping a weapon after the release"
+        inf_ecs::pose::hand_ik(&r.world, HERO).is_none(),
+        "this fixture grew a rig — the hand-IK claim can be made here now, and \
+         should be, instead of being carried"
     );
 
     // ── path 1: the notify, and it gets there FIRST ──
@@ -1571,6 +1588,50 @@ fn a_suppressor_is_quieter_in_the_command_and_not_in_a_table() {
         (b[1].source.volume / a[1].source.volume - m.loudness_mult).abs() < 1e-9,
         "the body layer dropped by something other than the row's loudness"
     );
+
+    // **AND IT IS IN THE COMMAND, WHICH IS THIS ARM'S OWN TITLE** (the audit's
+    // fix). Everything above this line calls `report_layers` from the TEST,
+    // with numbers the test read off a `WeaponDef` — a re-implementation of the
+    // call site, not the call site. What both hosts actually pass is
+    // `hit.report_max_m` and `hit.report_gain` off a `WeaponHit` that a fired
+    // round produced (`runtime_sim.rs`' `if hit.loud` block), so the whole
+    // folded-def → hit → command chain was unmeasured. Fire the thing.
+    let fired = |canned: bool| -> (f64, f64, bool) {
+        let mut g = Range::new(registry());
+        g.arm(HERO, "m4a1");
+        g.step();
+        if canned {
+            assert!(weapon::equip_attachment(
+                &mut g.world,
+                HERO,
+                AttachmentSlot::Muzzle,
+                Some(supp)
+            ));
+        }
+        g.aim(HERO, 0.0, 0.0);
+        g.hold_trigger(HERO, true);
+        let rep = g.step();
+        let h = rep.hits.first().expect("a round left the barrel");
+        (h.report_max_m, h.report_gain, h.loud)
+    };
+    let (reach_bare, gain_bare, loud_bare) = fired(false);
+    let (reach_can, gain_can, loud_can) = fired(true);
+    println!(
+        "the WeaponHit the command is built from: reach {reach_bare:.1} -> \
+         {reach_can:.1} m, gain {gain_bare:.4} -> {gain_can:.4}"
+    );
+    assert!(loud_bare && loud_can, "a rifle shot has to be loud to be heard");
+    assert!(
+        reach_can < reach_bare,
+        "the hit the command is built from carries as far with a can on: \
+         {reach_can:.1} against {reach_bare:.1} m"
+    );
+    assert!(
+        (gain_can / gain_bare - m.loudness_mult).abs() < 1e-9,
+        "the hit's gain moved by {:.6} and the row says {:.6}",
+        gain_can / gain_bare,
+        m.loudness_mult
+    );
 }
 
 /// **AN EXTENDED MAGAZINE CHANGES THE READOUT** — the string the HUD draws.
@@ -1656,7 +1717,49 @@ fn a_scope_changes_the_ads_time_which_is_the_cameras_own_blend() {
         scoped.ads_time_ms > bare.ads_time_ms,
         "a 4x scope did not slow the sight picture"
     );
-    assert!(b < a, "the camera blend did not slow with it");
+    // `b < a` is a CONSEQUENCE of the line above it — `blend_speed_for_ads` is
+    // monotone decreasing in the ADS time — so it is the same fact twice and is
+    // not asserted here. What is asserted is the value the CAMERA reads.
+    //
+    // **THE CAMERA'S OWN BLEND IS A NUMBER ON THE SUBJECT'S RIG** (the audit's
+    // fix). Wave WPN2b's aim block writes `feel::ADS_BLEND_RIG_KEY` onto the
+    // character through `camera::set_camera_rig_value` every step it aims, and
+    // `step_locomotion_camera` reads it back. This arm never ran that step, so
+    // "which is the camera's own blend" was a title and not a measurement.
+    let ads_key = |r: &mut Range| -> f64 {
+        {
+            let e = r.world.entity_of(HERO).expect("the hero");
+            let mut cm = r
+                .world
+                .world_mut()
+                .get_mut::<CharacterMovement>(e)
+                .expect("a character");
+            cm.runtime.want_aim = true;
+        }
+        for _ in 0..10 {
+            r.step();
+        }
+        inf_ecs::camera::camera_rig_value(&r.world, HERO, inf_ecs::feel::ADS_BLEND_RIG_KEY)
+            .expect("the aim block writes the blend onto the rig")
+    };
+    let mut bare_r = Range::new(registry());
+    bare_r.arm(HERO, "m4a1");
+    bare_r.step();
+    let bare_blend = ads_key(&mut bare_r);
+    let scoped_blend = ads_key(&mut r);
+    println!(
+        "the blend the camera reads off the rig: {bare_blend:.4} /s bare, \
+         {scoped_blend:.4} /s with the ACOG"
+    );
+    assert!(
+        scoped_blend < bare_blend,
+        "the number the camera blends at did not move: {scoped_blend:.4} \
+         against {bare_blend:.4}"
+    );
+    assert!(
+        (scoped_blend - b).abs() < 1e-9,
+        "the rig carries {scoped_blend:.6} and the fold says {b:.6}"
+    );
     // And the ART is a scope, which is what `step_accessories` draws.
     assert_eq!(
         cat.get(acog).expect("the row").art,
@@ -1727,6 +1830,67 @@ fn the_bench_round_trips_through_the_panels_own_verb() {
         none.verb, None,
         "a rail slot the catalogue has no rows for asked for one anyway"
     );
+
+    // **AND THE VERB IS APPLIED, WHICH IS WHAT "ROUND TRIP" MEANS** (the audit's
+    // fix). Everything above this line calls one pure UI reducer on a
+    // hand-written `InventoryView` literal. It never reaches
+    // `RuntimeSim::apply_inventory_verb`, never touches an `EcsWorld` and never
+    // fits anything — so this arm's OWN stated mutation, "deleting the
+    // `CycleAttachment` arm from `apply_inventory_verb`", was invisible to it.
+    let mut range = Range::new(registry());
+    range.arm(HERO, "m4a1");
+    range.step();
+    let bare = weapon::equipped_def(&range.world, HERO).expect("a rifle").1;
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
+        std::mem::replace(&mut range.world, EcsWorld::new()),
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        60.0,
+    );
+    let muzzle = AttachmentSlot::Muzzle.index() as u8;
+    assert!(
+        sim.apply_inventory_verb(inf_ui::InventoryVerb::CycleAttachment {
+            slot: muzzle,
+            delta: 1
+        }),
+        "the panel's verb fitted nothing"
+    );
+    let fitted = weapon::equipped_def(sim.world(), HERO).expect("a rifle").1;
+    let state = sim
+        .world()
+        .world()
+        .get::<weapon::WeaponState>(sim.world().entity_of(HERO).expect("the hero"))
+        .cloned()
+        .expect("an ammunition clock");
+    println!(
+        "the panel's own verb fitted catalogue row {:?}: the report went {:.1} -> {:.1} m",
+        state.attachment(AttachmentSlot::Muzzle),
+        bare.report_max_m,
+        fitted.report_max_m
+    );
+    assert!(
+        state.attachment(AttachmentSlot::Muzzle).is_some(),
+        "the rail is still bare after the panel's own verb"
+    );
+    // The EFFECT, not the row: a can on the muzzle is a quieter rifle.
+    assert!(
+        fitted.report_max_m < bare.report_max_m,
+        "the fitted part changed nothing: {:.1} against {:.1} m",
+        fitted.report_max_m,
+        bare.report_max_m
+    );
+    // …and `delta: 0` strips it, through the same door.
+    assert!(sim.apply_inventory_verb(inf_ui::InventoryVerb::CycleAttachment {
+        slot: muzzle,
+        delta: 0
+    }));
+    let stripped = weapon::equipped_def(sim.world(), HERO).expect("a rifle").1;
+    assert!(
+        (stripped.report_max_m - bare.report_max_m).abs() < 1e-9,
+        "stripping the rail did not put the rifle back: {:.1} against {:.1} m",
+        stripped.report_max_m,
+        bare.report_max_m
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1789,11 +1953,21 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
             "{k} is answered by the table and is not in `WEAPON_MESH_KEYS`"
         );
     }
-    // And the identity is a pure function of the name.
-    for k in weapon::WEAPON_MESH_KEYS {
-        assert_eq!(weapon::weapon_mesh_guid(k), weapon::weapon_mesh_guid(k));
-        assert!(!weapon::weapon_mesh_guid(k).is_nil());
-    }
+    // **AND THE IDENTITY IS PINNED, NOT RESTATED** (the audit's fix). This read
+    // `assert_eq!(f(k), f(k))` and `!f(k).is_nil()`: the first is `f(x) == f(x)`
+    // for a pure function and the second cannot fail, because the constructor
+    // forces the version and variant nibbles. Neither could tell a changed hash
+    // from an unchanged one — and the whole point of the derived guid is that a
+    // committed catalogue can name licensed art the repository does not carry,
+    // which only works if the number never moves. So it is a BYTE PIN: the
+    // bridge's `--rebind-mesh SM_AR4=...` landed the imported mesh at exactly
+    // this id, and a change to `weapon_mesh_guid` orphans 82 MB of local art.
+    assert_eq!(
+        weapon::weapon_mesh_guid("SM_AR4").to_string(),
+        "8edbc0b7-5afb-4dfa-bb5d-1a32bf19c88e",
+        "the derived identity of the AR's art moved — every rebind the bridge \
+         wrote now points at nothing"
+    );
     let ids: BTreeSet<Uuid> = weapon::WEAPON_MESH_KEYS
         .iter()
         .map(|k| weapon::weapon_mesh_guid(k))
@@ -1920,13 +2094,31 @@ fn the_weapon_does_not_fade_with_the_body() {
     r.arm(HERO, "m4a1");
     r.step();
     let weapon_guid = d3::gameplay::equipped_weapon_guid(HERO);
+    // **A BYSTANDER THAT EXISTS** (the audit's fix). This arm asked for the fade
+    // of `victim_guid(0)` and never spawned one, and `subject_fade_for`'s first
+    // line returns 1.0 for anything that is not the subject before it looks
+    // anything up — so that third assertion was a tautology about a guid.
+    r.victim(victim_guid(0), DVec3::new(3.0, 0.0, 3.0));
     // A 0.2 m boom is a first-person seat: the camera thins its subject to
     // nothing.
     let fade = 0.05;
+    // **AND THE SUBJECT IS THE ONE THE RENDERER PASSES** (the audit's fix). Both
+    // shipped call sites pass `sim.camera_subject()`, which is a CHARACTER; the
+    // weapon case used to pass the weapon's own guid as the subject, which is a
+    // state the renderer never produces, so the `EquippedWeapon` arm the
+    // mutation targets was never the branch under test.
     let body = weapon::subject_fade_for(&r.world, HERO, Some(HERO), fade);
-    let gun = weapon::subject_fade_for(&r.world, weapon_guid, Some(weapon_guid), fade);
+    let gun = weapon::subject_fade_for(&r.world, weapon_guid, Some(HERO), fade);
     let other = weapon::subject_fade_for(&r.world, victim_guid(0), Some(HERO), fade);
     println!("at a {fade} fade: the body draws {body}, the weapon {gun}, a bystander {other}");
+    assert!(
+        r.world.entity_of(victim_guid(0)).is_some(),
+        "the bystander this arm reads about has to exist"
+    );
+    assert!(
+        weapon::is_equipped_weapon(&r.world, weapon_guid),
+        "the weapon entity is not carrying the marker the rule reads"
+    );
     assert_eq!(body, fade, "the subject's own body is not thinned");
     assert_eq!(gun, 1.0, "the weapon faded with the body");
     assert_eq!(other, 1.0, "something that is not the subject was thinned");
@@ -1961,6 +2153,20 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_class_course() {
     assert!(ta.pellets >= 8, "the course never fired the shotgun");
     assert!(ta.blasts > 0, "the course never set anything off");
     assert!(ta.throws > 0, "the course never threw anything");
+    // **THE TRACES ARE THE SAME LENGTH** (the audit's fix). `zip` truncates to
+    // the shorter iterator, so an EMPTY PIE trace passed both loops below
+    // without a single comparison being made.
+    assert!(
+        ta.trace.len() > 300,
+        "the course traced {} steps, which is not a course",
+        ta.trace.len()
+    );
+    assert_eq!(
+        (ta.trace.len(), ta.trace.len()),
+        (tb.trace.len(), tp.trace.len()),
+        "the three traces are not the same length, so `zip` would compare a \
+         prefix and call it agreement"
+    );
     for (i, (x, y)) in ta.trace.iter().zip(tb.trace.iter()).enumerate() {
         assert_eq!(x, y, "step {i}: two independent cooks diverged");
     }
@@ -1969,9 +2175,21 @@ fn pie_equals_shipping_and_two_cooks_agree_over_a_class_course() {
     }
     assert_eq!(ta.audio, tb.audio, "two cooks made different noises");
     assert_eq!(ta.audio, tp.audio, "PIE and shipping made different noises");
+    // **PIE'S OWN BLAST COUNT, COMPARED TO SOMETHING** (the audit's fix). This
+    // read `(ta.shots, ta.pellets, ta.blasts) == (tp.shots, tp.pellets,
+    // tp.throws.max(ta.blasts))`: the third element compares `ta.blasts`
+    // against `max(tp.throws, ta.blasts)`, which is `ta.blasts` for every input
+    // where PIE threw no more than shipping blasted — so `tp.blasts` was never
+    // compared to anything at all.
     assert_eq!(
-        (ta.shots, ta.pellets, ta.blasts),
-        (tp.shots, tp.pellets, tp.throws.max(ta.blasts))
+        (ta.shots, ta.pellets, ta.blasts, ta.throws),
+        (tp.shots, tp.pellets, tp.blasts, tp.throws),
+        "PIE and shipping did not do the same things"
+    );
+    assert_eq!(
+        (ta.shots, ta.pellets, ta.blasts, ta.throws),
+        (tb.shots, tb.pellets, tb.blasts, tb.throws),
+        "two cooks did not do the same things"
     );
 }
 
@@ -2121,12 +2339,72 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         "one blast over 30 bodies: {us:.1} us, {} hurt, {} rays, {} shadowed",
         report.blasts[0].hurt, report.rounds.blast_rays, report.rounds.blast_shadowed
     );
-    assert!(report.blasts[0].hurt > 0, "the sweep hurt nobody");
+    assert_eq!(report.blasts[0].hurt, 30, "the sweep did not reach 30 bodies");
+    // `blast_rays <= MAX_BLAST_TARGETS` was this arm's only bound and it is
+    // VACUOUS FOR EVERY INPUT: `apply_blast` walks
+    // `candidates.into_iter().take(MAX_BLAST_TARGETS)` and only counts a ray
+    // inside that loop, so the bound is guaranteed by the code under test. The
+    // honest reading is the SPEND — one ray per body it actually reached.
+    assert_eq!(
+        report.rounds.blast_rays as usize, 30,
+        "the sweep spent {} rays on 30 bodies",
+        report.rounds.blast_rays
+    );
+    // **AND THE BUDGET IS ASSERTED, WHICH IS THIS ARM'S OWN NAME** (the audit's
+    // fix). `WEAPON_STEP_BUDGET_MS` used to appear in this file exactly once,
+    // inside a `println!` format string: the arm measured two numbers, printed
+    // them, and asserted nothing about either.
     assert!(
-        report.rounds.blast_rays as usize <= d3::gameplay::MAX_BLAST_TARGETS,
-        "the sweep spent {} rays against a bound of {}",
-        report.rounds.blast_rays,
+        us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+        "one blast over 30 bodies cost {us:.1} us against a {:.1} ms step budget",
+        inf_player::budget::WEAPON_STEP_BUDGET_MS
+    );
+
+    // **THE CANDIDATE WALK, PRICED AT A THOUSAND** (carried 254, and the audit's
+    // own question). `MAX_BLAST_TARGETS` caps how many bodies take joules; the
+    // walk that FINDS them is `O(characters + destructibles)` and runs whole.
+    // A level with a thousand agents in it pays for all of them on every
+    // explosion, and until now nothing said what that costs.
+    let mut big = Range::new(registry());
+    for i in 0..1000 {
+        let a = i as f64 * 0.0063;
+        let ring = 6.0 + (i % 40) as f64 * 4.0;
+        big.victim(
+            victim_guid(i),
+            DVec3::new(a.cos() * ring, 0.0, 20.0 + a.sin() * ring),
+        );
+    }
+    let mut big_report = d3::GameplayReport::default();
+    let t2 = std::time::Instant::now();
+    d3::gameplay::blast_for_test(
+        &mut big.world,
+        &mut big.bridge,
+        HERO,
+        DVec3::new(0.0, 1.4, 20.0),
+        &def,
+        DT,
+        &mut big_report,
+    );
+    let big_us = t2.elapsed().as_secs_f64() * 1e6;
+    println!(
+        "one blast over 1000 candidates: {big_us:.1} us, {} hurt, {} rays \
+         (the spend is capped at {}, the walk is not)",
+        big_report.blasts[0].hurt,
+        big_report.rounds.blast_rays,
         d3::gameplay::MAX_BLAST_TARGETS
+    );
+    // The SPEND is bounded and the WALK is not, and both halves are asserted so
+    // a future change to either is visible here.
+    assert!(
+        big_report.blasts[0].hurt as usize <= d3::gameplay::MAX_BLAST_TARGETS,
+        "the spend is not capped: {} bodies",
+        big_report.blasts[0].hurt
+    );
+    assert!(
+        big_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+        "one blast over a thousand candidates cost {big_us:.1} us against a \
+         {:.1} ms step budget — the unbounded candidate walk has to be bounded",
+        inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     // A shotgun's whole pull, timed, against the weapon phase's own budget.
     let mut s = Range::new(registry());
@@ -2143,6 +2421,18 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     assert_eq!(rep.rounds.pellets, 8);
+    assert!(
+        step_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+        "one 8-pellet pull cost {step_us:.1} us against a {:.1} ms step budget",
+        inf_player::budget::WEAPON_STEP_BUDGET_MS
+    );
+    // The enclosure probe is SHARED across the pull: eight pellets and six
+    // probe casts, not eight lots of seven.
+    assert_eq!(
+        rep.rounds.shot_rays, 14,
+        "an eight-pellet pull spent {} casts",
+        rep.rounds.shot_rays
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2275,4 +2565,166 @@ fn pie_sim() -> inf_player::runtime_sim::RuntimeSim {
     inf_player::sim_from_payload(&payload)
         .expect("the PIE world builds")
         .sim
+}
+
+
+// ── the audit's own arms ────────────────────────────────────────────────────
+
+/// **THE FIRST-PERSON SEAT, AND THE RIG THAT AIMING DOWN SIGHTS GAVE THE HERO**
+/// (wave WPN2d audit).
+///
+/// Clause 6's first-person rule -- the weapon does not fade with the body -- is
+/// proved in `the_weapon_does_not_fade_with_the_body` on a pure function, and
+/// the wave's own frame of it (`90-first-person-weapon.png`) NEVER FIRED in any
+/// of three sessions. The wave carried that as "the view-mode key is a toggle,
+/// so one press is a coin flip". It is not a coin flip. The seat is
+/// UNREACHABLE for any character that has aimed down its sights, and the
+/// sessions say so:
+///
+/// | session | `# view mode` notes | boom minimum |
+/// |---|---|---|
+/// | `AUDIT-COV1-FINAL` (before wave WPN2b) | FIRST at 9104, **THIRD at 9224** | **0.0000 m** |
+/// | `AUDIT-WPN2c-FINAL` | FIRST x4, no THIRD | 1.2931 m |
+/// | WPN2d sessions 1/2/3 | FIRST x4 / x6 / x5, no THIRD | 0.9325 / 0.8692 / 0.1037 m |
+///
+/// Four presses that all read "the camera is in third person" mean something
+/// put it back between them, and there is exactly one other writer: wave
+/// CHAR1c's `step_locomotion_camera` copies `CameraRig::first_person` onto the
+/// session camera on EVERY fixed step for any subject that carries a rig. The
+/// key wrote the session camera; the next step overwrote it.
+///
+/// What gave a wizard-built hero a rig is **wave WPN2b's ADS blend**:
+/// `movement.rs`' aim block calls `set_camera_rig_value(.., ADS_BLEND_RIG_KEY,
+/// ..)`, and that door *inserts a `CameraRig::default()`* when the character has
+/// none. `CameraRig::default().first_person` is `false`. So the first weapon
+/// with an `ads_time_ms` kills the view-mode key for the rest of the session --
+/// and takes the level's own `camera.toml` table with it, because the inserted
+/// rig carries `CameraTuning::default()`.
+///
+/// CHAR1c knew the rule and wrote it down for the OTHER consumer: the editor's
+/// camera tuning goes through the rig first, "because the fixed-step door
+/// copies that rig onto the session camera every step"
+/// (`editor/crates/inf-editor-core/src/simulate.rs:930-940`). The key did not.
+///
+/// **What this arm reads**: whether a rig appeared, then the session camera's
+/// `view_mode` AND its `arm_m` after a fixed step -- the boom is the seat, and a
+/// mode that says FirstPerson over a 3 m boom is not one.
+///
+/// **The mutation**: drop the `set_view_mode` call from
+/// `runtime/inf-player/src/window.rs`' view-mode branch -- the mode reverts to
+/// `ThirdPerson` on the next step and the boom stays out at the walk block's
+/// arm, which is the defect this arm was written from.
+#[test]
+fn the_first_person_seat_survives_the_weapon_that_aims_down_its_sights() {
+    let mut r = Range::new(registry());
+    r.arm(HERO, "m4a1");
+    assert!(
+        row("m4a1").ads_time_ms > 0.0,
+        "the fixture needs a weapon that aims down its sights"
+    );
+    // A wizard-built character has no rig: the host's own table is its camera,
+    // which is the behaviour every level committed before CHAR1c has.
+    assert!(
+        inf_ecs::camera::camera_rig(&r.world, HERO).is_none(),
+        "the fixture's hero already had a rig before it aimed"
+    );
+
+    // Aim down the sights, which is all it takes.
+    {
+        let e = r.world.entity_of(HERO).expect("the hero");
+        let mut cm = r
+            .world
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("a character");
+        cm.runtime.want_aim = true;
+    }
+    for _ in 0..10 {
+        r.step();
+    }
+    let rig = inf_ecs::camera::camera_rig(&r.world, HERO);
+    assert!(
+        rig.is_some(),
+        "the ADS blend did not give the hero a rig -- this arm's premise moved"
+    );
+    assert!(
+        !rig.expect("a rig").first_person,
+        "the inserted rig should default to third person, which is the trap"
+    );
+
+    // The third-person boom this fixture settles at, so the seat has something
+    // to be measured AGAINST rather than against a constant.
+    let mut cam = inf_ecs::camera::LocomotionCamera::default();
+    for _ in 0..240 {
+        r.bridge.sync_from_world(&r.world);
+        d3::step_locomotion_camera(&r.world, &mut r.bridge, &mut cam, HERO, DT);
+    }
+    let third = cam.arm_m;
+    assert!(
+        third > 1.0,
+        "the fixture's third-person boom never came out: {third:.4} m"
+    );
+
+    // Now the player's own view-mode key, through the door it calls.
+    cam.view_mode = inf_ecs::camera::ViewMode::FirstPerson;
+    assert!(
+        inf_ecs::camera::set_view_mode(&mut r.world, HERO, true),
+        "the door found no rig to write"
+    );
+    for _ in 0..240 {
+        r.bridge.sync_from_world(&r.world);
+        d3::step_locomotion_camera(&r.world, &mut r.bridge, &mut cam, HERO, DT);
+    }
+    assert_eq!(
+        cam.view_mode,
+        inf_ecs::camera::ViewMode::FirstPerson,
+        "the fixed step put the camera back in third person — the key cannot \
+         reach a character that has a rig"
+    );
+    // **THE SEAT IS THE BOOM, NOT THE FLAG.** A `view_mode` that says
+    // FirstPerson over a three-metre arm is a field, not a camera. (It does not
+    // reach zero in this fixture: the collision probe floors it at
+    // `reach × min_arm_fraction`, which is the same 0.15-ish number CHAR1c's
+    // own audit measured at a wall. What matters is that it is a fraction of
+    // the arm it was on.)
+    let first = cam.arm_m;
+    assert!(
+        first < third * 0.25,
+        "the mode says first person and the boom is {first:.4} m against a \
+         third-person {third:.4} m"
+    );
+
+    // …and back, which is the half that proves it is a toggle and not a latch.
+    cam.view_mode = inf_ecs::camera::ViewMode::ThirdPerson;
+    assert!(inf_ecs::camera::set_view_mode(&mut r.world, HERO, false));
+    for _ in 0..240 {
+        r.bridge.sync_from_world(&r.world);
+        d3::step_locomotion_camera(&r.world, &mut r.bridge, &mut cam, HERO, DT);
+    }
+    assert_eq!(cam.view_mode, inf_ecs::camera::ViewMode::ThirdPerson);
+    assert!(
+        (cam.arm_m - third).abs() < 0.05,
+        "the boom came back to {:.4} m and left from {third:.4} m",
+        cam.arm_m
+    );
+
+    // **AND THE SHIPPED KEY GOES THROUGH THAT DOOR.** The world half above is
+    // about the rig; this is about the one call site a player ever reaches. It
+    // is a source pin for the reason `nothing_of_the_npc_firing_policy_leaked_in`
+    // is one — the branch lives inside the window's event loop and there is no
+    // seam to drive it from a test.
+    let window = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
+    )
+    .expect("the player's window source");
+    let branch = window
+        .split("actions::VIEW_MODE")
+        .nth(1)
+        .expect("the view-mode branch");
+    let branch = &branch[..branch.len().min(4000)];
+    assert!(
+        branch.contains("set_view_mode"),
+        "the view-mode key writes the session camera and not the subject's rig, \
+         so the next fixed step undoes it"
+    );
 }

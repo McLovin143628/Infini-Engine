@@ -2183,6 +2183,37 @@ pub fn camera_rig_value(world: &crate::EcsWorld, guid: uuid::Uuid, name: &str) -
     world.world().get::<CameraRig>(e)?.get(name)
 }
 
+/// **Put a subject into (or out of) the first-person seat, wherever that
+/// subject's authority lives** (wave WPN2d audit).
+///
+/// The session camera is a host-owned value and a `CameraRig` is a component,
+/// and [`crate::camera::CameraRig`]'s own door — the fixed step's
+/// `step_locomotion_camera` — copies the rig onto the session camera on EVERY
+/// step for a subject that carries one. So a view-mode key that wrote only the
+/// session camera worked exactly until something gave the character a rig, and
+/// wave WPN2b's ADS blend gives one to any character that aims down sights.
+///
+/// This is the same rule the editor's camera tuning already follows (`the
+/// subject's RIG first`): write the rig when there is one, and leave a rig-less
+/// character's session camera to the caller, which is the behaviour every level
+/// committed before CHAR1c has. It **never inserts** a rig — a character with no
+/// rig is not silently given `CameraTuning::default()` in place of the level's
+/// own table.
+///
+/// Returns whether a rig took the write.
+pub fn set_view_mode(world: &mut crate::EcsWorld, guid: uuid::Uuid, first_person: bool) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    match world.world_mut().get_mut::<CameraRig>(e) {
+        Some(mut rig) => {
+            rig.first_person = first_person;
+            true
+        }
+        None => false,
+    }
+}
+
 /// **Write one of `guid`'s rig values by name.**
 ///
 /// Answers whether it landed. A character with no rig **gets one** — the

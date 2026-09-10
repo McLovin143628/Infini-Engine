@@ -991,6 +991,28 @@ impl PlayerApp {
             // (`ALSBaseCharacter.cpp:857-872`).
             if let Some(subject) = self.sim.camera_subject() {
                 inf_ecs::movement::apply_view_mode_rotation(self.sim.world_mut(), subject, first);
+                // **AND THE SUBJECT'S OWN RIG** (wave WPN2d audit). Wave
+                // CHAR1c's `step_locomotion_camera` copies
+                // `CameraRig::first_person` onto the session camera on EVERY
+                // fixed step for a subject that carries a rig, so the write
+                // above this one was undone before the boom could move.
+                //
+                // Nothing gave a wizard-built hero a rig until wave WPN2b's ADS
+                // blend, which reaches `set_camera_rig_value` — a door that
+                // INSERTS a `CameraRig::default()` when there is none, and that
+                // default is third person. So from the first weapon with an
+                // `ads_time_ms`, this key did nothing at all. Measured on wave
+                // WPN2d's own sessions: `# view mode FIRST person` four, five
+                // and six times with no `THIRD person` between them, and a boom
+                // that never went below 0.87 m in two of the three; the last
+                // session before wave WPN2b logged the pair and reached
+                // 0.0000 m.
+                //
+                // `set_view_mode` never inserts a rig, so a character that has
+                // none keeps the host's own `camera.toml` table and the line
+                // above stays its whole answer — which is exactly what shipped
+                // before CHAR1c.
+                inf_ecs::camera::set_view_mode(self.sim.world_mut(), subject, first);
             }
             let steps = self.sim.steps();
             self.hero_log.note(&format!(
