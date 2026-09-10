@@ -1937,7 +1937,7 @@ fn step_weapons(
             // one, which `resolve_shot` keeps.
             let bill = report.rounds.shot_rays as usize + 1;
             if bill > inf_ecs::ballistics::MAX_SHOT_RAYS_PER_STEP {
-                report.rounds.pellets_refused += u32::from(pellets - p);
+                report.rounds.pellets_refused += pellets - p;
                 break;
             }
             // Consecutive counter indices, strided by the pellet bound so two
@@ -3324,6 +3324,7 @@ fn strike_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
 /// `O(characters)`, over the same walk [`gunners`] already makes — and only on
 /// the steps a swing actually leaves, which at [`weapon::FIST_RPM`] is at most
 /// one and a half a second.
+#[allow(clippy::too_many_arguments)]
 fn resolve_swing(
     world: &EcsWorld,
     bridge: &mut PhysicsBridge3D,

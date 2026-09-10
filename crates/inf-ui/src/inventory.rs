@@ -235,18 +235,23 @@ pub fn handle(
             }
         }
         "BracketRight" | "BracketLeft" | "Backspace" => {
-            if !view.bench.is_empty() {
-                let i = state.bench_focus.min(view.bench.len() - 1);
-                if view.bench[i].options > 0 {
-                    out.verb = Some(InventoryVerb::CycleAttachment {
-                        slot: i as u8,
-                        delta: match code.as_str() {
-                            "BracketRight" => 1,
-                            "BracketLeft" => -1,
-                            _ => 0,
-                        },
-                    });
-                }
+            // The two lookups are `let`s and not nested `if`s on purpose: an
+            // `if` wrapping the whole arm body is a match guard wearing a
+            // disguise (clippy's `collapsible_match`), and a guard would put the
+            // condition on its own LINE — which is where
+            // `every_key_the_inventory_panel_reads_has_a_route` scrapes this
+            // reducer's key literals from.
+            let i = state.bench_focus.min(view.bench.len().saturating_sub(1));
+            let fittable = view.bench.get(i).is_some_and(|b| b.options > 0);
+            if fittable {
+                out.verb = Some(InventoryVerb::CycleAttachment {
+                    slot: i as u8,
+                    delta: match code.as_str() {
+                        "BracketRight" => 1,
+                        "BracketLeft" => -1,
+                        _ => 0,
+                    },
+                });
             }
         }
         // Every other key is taken and does nothing — see the doc above.

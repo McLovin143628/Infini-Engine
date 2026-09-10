@@ -1446,7 +1446,7 @@ pub fn equip_attachment(
     // the defect it would be. It is deliberately not the other way round — a
     // SMALLER magazine spills, which is the same rule.
     let folded = crate::attachment::fold(&state.attach).apply(&def);
-    state.magazine = state.magazine.min(folded.magazine).max(0);
+    state.magazine = state.magazine.min(folded.magazine);
     if folded.magazine > def.magazine {
         state.magazine = folded.magazine;
     }
