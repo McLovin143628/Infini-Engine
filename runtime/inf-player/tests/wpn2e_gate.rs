@@ -2337,7 +2337,11 @@ fn an_officer_three_metres_away_still_aims_and_a_launcher_still_does_not() {
     println!("\n=== HOW CLOSE IS TOO CLOSE, PER WEAPON ===");
     println!("  distance   glock_17 rays/aimed   rpg_7 rays/aimed");
     for ((d, pr, pa), (_, lr, la)) in pistol.iter().zip(launcher.iter()) {
-        println!("  {d:>7.1} m   {pr:>5} / {pa:<5}          {lr:>5} / {la:<5}");
+        println!(
+            "  {d:>7.1} m   {:<22}{:<22}",
+            format!("{pr} / {pa}"),
+            format!("{lr} / {la}")
+        );
     }
     // A PISTOL takes the shot at three metres.
     for (d, rays, aimed) in pistol.iter().filter(|(d, _, _)| *d < 4.0) {
@@ -3582,7 +3586,8 @@ fn the_islands_own_hero_carries_its_weapon_in_its_hand() {
         .unwrap_or(f64::NAN);
     println!("=== THE ISLAND'S HERO, WITH THE GLOCK ===");
     println!(
-        "  hand_r socket           : {}",
+        "  {:<24}: {}",
+        "hand_r socket",
         if socket.is_some() {
             "published"
         } else {
@@ -3803,7 +3808,12 @@ fn a_dispatched_unit_reaches_a_warm_file_on_the_island() {
                 "  t={:>5.0} s escorted={escorted} steered={} {}",
                 f64::from(step) / 60.0,
                 sim.dispatch_stats().steered,
-                line.join("\n              ")
+                line.join(&format!(
+                    "
+{:width$}",
+                    "",
+                    width = 14
+                ))
             );
         }
     }
