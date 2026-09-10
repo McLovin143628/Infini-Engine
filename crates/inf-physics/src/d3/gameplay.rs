@@ -4566,6 +4566,61 @@ pub fn npc_aim_at(world: &mut EcsWorld, shooter: Uuid, target: Uuid, hold_trigge
     true
 }
 
+/// **AN ARMED NPC'S TRIGGER, WITHOUT AN AIM** (wave WPN2e) — [`npc_aim_at`]'s
+/// other half, and the door BLIND FIRE goes through.
+///
+/// # Why this exists, measured
+///
+/// `npc_aim_at` writes `want_attack` as a **level**, which is right — a
+/// semi-automatic weapon needs `try_fire`'s own edge rule and nothing else — and
+/// it has exactly one consequence nobody had met until wave WPN2e's own gate
+/// went red: **a level nobody lowers stays high.** An officer whose suspect
+/// walks behind a wall, or whose file closes, is simply *not visited* by the
+/// firing policy on the next step, so the last `true` it was handed is still
+/// there and it goes on emptying its magazine at nothing.
+///
+/// Measured on `wpn2e_gate::an_npc_fires_blind_from_cover_too` before this
+/// existed: **258 rounds** left an officer's weapon over a run in which the
+/// policy made **zero** decisions to fire — every one of them on a step the
+/// policy had not looked at that officer at all.
+///
+/// So the policy has a way to say *stop*, and it is a door rather than a write
+/// at the call site for `npc_aim_at`'s own reason: `apply_intent` authors a
+/// player's intent and these two author everybody else's, and a divergence in
+/// what a character wanted to do is findable only while that stays true.
+///
+/// # …and the same door is what BLIND FIRE needs
+///
+/// A unit that has taken cover from somebody it can no longer see must still be
+/// able to put rounds over its own wall, and it must do so **without reading
+/// where that somebody is**. [`npc_aim_at`] cannot serve: it takes a target
+/// guid and resolves `strike_point` off that body's transform, which for a
+/// shooter with no line of sight is exactly the cheat the police-don't-cheat law
+/// forbids.
+///
+/// So blind fire writes the **trigger and nothing else**. The direction comes
+/// from the shooter's own [`inf_ecs::cover::CoverState::normal`] — a surface it
+/// is touching — and the decision to fire at all comes from the file's
+/// `last_seen`, which is a place somebody actually saw. No transform is read.
+///
+/// Refuses a shooter that is not there and one that is player-controlled, and
+/// answers whether the level CHANGED — so a caller can count the units it
+/// actually stopped rather than the units it visited.
+pub fn npc_set_trigger(world: &mut EcsWorld, shooter: Uuid, hold: bool) -> bool {
+    let Some(entity) = world.entity_of(shooter) else {
+        return false;
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
+        return false;
+    };
+    if cm.player_controlled {
+        return false;
+    }
+    let was = cm.runtime.want_attack;
+    cm.runtime.want_attack = hold;
+    was != hold
+}
+
 /// Give `character` an equipped weapon by item id — the door a Blueprint and a
 /// gate both use, so a weapon cannot be equipped without its ammunition clock.
 pub fn equip_weapon(world: &mut EcsWorld, character: Uuid, item_id: &str) -> bool {

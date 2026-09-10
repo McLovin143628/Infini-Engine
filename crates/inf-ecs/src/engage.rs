@@ -530,7 +530,13 @@ mod tests {
             "a unit with no line of sight aimed"
         );
         assert!(
-            !may_engage(Posture::FireOnSight, unit, seen, TRAIL_STALE_STEPS + 1, true),
+            !may_engage(
+                Posture::FireOnSight,
+                unit,
+                seen,
+                TRAIL_STALE_STEPS + 1,
+                true
+            ),
             "a unit aimed at a trail three seconds cold"
         );
         assert!(

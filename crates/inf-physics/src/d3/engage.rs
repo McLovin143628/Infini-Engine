@@ -92,8 +92,15 @@ pub struct EngageStats {
     pub cold_trail: usize,
     /// `npc_aim_at` calls that returned `true` — weapons actually pointed.
     pub aimed: usize,
-    /// Of those, the ones whose trigger was left CLOSED because the posture is
-    /// [`Posture::Warn`]. **The patrol rung's whole behaviour**, counted.
+    /// Of those, the ones taken at [`Posture::Warn`] — a weapon pointed at
+    /// somebody with the trigger closed **because that is what the rung does**,
+    /// and not because a discipline rule or a cadence refused it. **The patrol
+    /// rung's whole behaviour**, counted.
+    ///
+    /// Deliberately NOT "every aim whose trigger was shut": at
+    /// [`Posture::FireOnSight`] most steps of a cadence cycle have the trigger
+    /// shut, and counting those as warnings would make a SWAT response read as
+    /// a patrol.
     pub warned: usize,
     /// Of those, the ones whose trigger was OPEN.
     pub triggers: usize,
@@ -116,6 +123,15 @@ pub struct EngageStats {
     /// Units a round came past this step — what [`Posture::ReturnFire`] reads
     /// next step. Written by [`note_incoming`].
     pub incoming: usize,
+    /// **Triggers the pass CLOSED on a unit it did not engage** — units that
+    /// were firing and have stopped.
+    ///
+    /// Its own counter because it measures a defect this wave's own gate found:
+    /// `npc_aim_at` writes a LEVEL, and a level nobody lowers stays high. An
+    /// officer whose suspect walks behind a wall is not visited by the loop
+    /// above at all, so without this it would go on firing at nothing for ever
+    /// — 258 rounds over a run in which the policy decided to fire zero times.
+    pub released: usize,
 }
 
 /// **Advance the firing policy one fixed step.**
@@ -135,10 +151,24 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
     let mut stats = EngageStats::default();
     let wanted = crime::wanted(world);
     if wanted.is_empty() {
-        // **Nobody is wanted: nothing at all happens.** No roster walk, no
-        // distance test, no ray — and the ledger is dropped so a session that
-        // cleared its last file carries no engagement into the next one.
+        // **Nobody is wanted: nothing at all happens** — with ONE exception,
+        // which is the whole of `super::gameplay::npc_set_trigger`'s reason.
+        //
+        // No roster walk, no distance test, no ray. But a unit that WAS firing
+        // when the last file closed is holding a trigger nobody is going to
+        // lower, so every engagement in the ledger is released before the ledger
+        // is dropped. A town that goes cold with an officer mid-burst would
+        // otherwise have an officer emptying its magazine into an empty street
+        // for the rest of the session.
         if world.world().get_resource::<EngageRes>().is_some() {
+            let firing: Vec<Uuid> = engage::engage_of(world)
+                .map(|r| r.units.keys().copied().collect())
+                .unwrap_or_default();
+            for unit in firing {
+                if super::gameplay::npc_set_trigger(world, unit, false) {
+                    stats.released += 1;
+                }
+            }
             world.world_mut().insert_resource(EngageRes::default());
         }
         return stats;
@@ -192,8 +222,12 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
     res.units.retain(|g, _| live.contains(g));
 
     let mut decisions: Vec<(Uuid, Uuid, bool, bool)> = Vec::new();
+    // Units the pass looked at and decided NOT to engage — their triggers come
+    // down below.
+    let mut release: Vec<Uuid> = Vec::new();
     for (officer, _class) in &officers {
         let Some(eye) = super::crime::eye_of(world, *officer) else {
+            release.push(*officer);
             continue;
         };
         let here = Vec3d::from_dvec3(eye);
@@ -201,7 +235,7 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             .units
             .get(officer)
             .is_some_and(|slot| slot.fired_upon(step));
-        let mut engaged: Option<(Uuid, DVec3, Sight)> = None;
+        let mut engaged: Option<(Uuid, DVec3, Sight, Option<DVec3>)> = None;
         for (suspect, at, last_seen, trail_age) in &subjects {
             if suspect == officer {
                 continue;
@@ -238,25 +272,39 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             // see somebody past a pedestrian — but it absolutely breaks the
             // firing line, and that distinction is the whole of the discipline
             // rule below.
-            if !engage::may_engage(
-                posture,
-                here,
-                *last_seen,
-                *trail_age,
-                sight != Sight::Wall,
-            ) {
+            if !engage::may_engage(posture, here, *last_seen, *trail_age, sight != Sight::Wall) {
                 stats.blocked += 1;
+                // **...AND BLIND FIRE IS THE ONE THING A UNIT MAY STILL DO.**
+                //
+                // No line of sight means no AIM -- that is the law, and it holds:
+                // nothing below reads the suspect's transform. What a unit in
+                // cover may do is put rounds over its OWN WALL, in the direction
+                // that wall faces, because it knows a suspect was last seen out
+                // there (`last_seen`, in range, fresh) and because a surface it
+                // is touching tells it which way "out there" is.
+                //
+                // It is only available FROM COVER. A unit standing in the open
+                // with a wall between it and a suspect is not suppressing
+                // anything; it is shooting a wall.
+                if let Some(out) = blind_out(world, *officer) {
+                    engaged = Some((*suspect, *at, sight, Some(out)));
+                    break;
+                }
                 continue;
             }
-            engaged = Some((*suspect, *at, sight));
+            engaged = Some((*suspect, *at, sight, None));
             break;
         }
-        let Some((suspect, at, sight)) = engaged else {
-            // Seen nobody: the slot forgets its target so `engaged_units` reads
-            // what is true right now.
+        let Some((suspect, at, sight, blind_out)) = engaged else {
+            // **Seen nobody: the slot forgets its target AND the trigger comes
+            // down.** The second half is not tidying — see
+            // `super::gameplay::npc_set_trigger`: `want_attack` is a level, this
+            // officer will not be visited again while it can see nothing, and a
+            // level nobody lowers stays high.
             if let Some(slot) = res.units.get_mut(officer) {
                 slot.target = Uuid::nil();
             }
+            release.push(*officer);
             continue;
         };
         // ── THE TRIGGER, and every reason it stays shut.
@@ -270,12 +318,28 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             }
             hold = true;
         }
-        let aim_at = Vec3d::from_dvec3(at);
+        // **WHAT THE DISCIPLINE RULES ARE MEASURED AGAINST.** For an aimed shot
+        // that is the suspect; for a blind one it is a point out along the
+        // cover's own normal at the engagement range, because that is where the
+        // rounds are going. A unit spraying over its wall into a colleague
+        // standing in front of it is exactly as wrong as one doing it on
+        // purpose.
+        let aim_at = match blind_out {
+            Some(out) => Vec3d::from_dvec3(eye + out * engage::ENGAGE_RANGE_M),
+            None => Vec3d::from_dvec3(at),
+        };
         if !hold && friendly_in_cone(world, &friendlies, *officer, here, aim_at).is_some() {
             stats.friendly_holds += 1;
             hold = true;
         }
-        if !hold && civilian_in_the_way(world, sight, *officer, suspect, eye, here, aim_at) {
+        // A blind shot's ray already came back stopped, so `sight` says nothing
+        // useful about who is in ITS line -- the cone walk is the whole test.
+        let line = if blind_out.is_some() {
+            Sight::Clear
+        } else {
+            sight
+        };
+        if !hold && civilian_in_the_way(world, line, *officer, suspect, eye, here, aim_at) {
             stats.civilian_holds += 1;
             hold = true;
         }
@@ -283,7 +347,7 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             stats.cadence_holds += 1;
             hold = true;
         }
-        let blind = !hold && is_blind_from_cover(world, *officer);
+        let blind = blind_out.is_some();
         decisions.push((*officer, suspect, !hold, blind));
         let slot = res.units.entry(*officer).or_default();
         slot.target = suspect;
@@ -300,17 +364,33 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
     // **`npc_aim_at` is called HERE and nowhere else**, which is the applier's
     // half of the law: every one of these is downstream of a range gate on a
     // remembered position, a ray, and `may_engage`.
+    for unit in release {
+        if super::gameplay::npc_set_trigger(world, unit, false) {
+            stats.released += 1;
+        }
+    }
     for (officer, suspect, trigger, blind) in decisions {
+        // **BLIND FIRE WRITES THE TRIGGER AND NOTHING ELSE.** `npc_aim_at`
+        // resolves `strike_point` off the target's transform, and a shooter with
+        // no line of sight must not read one -- see
+        // `super::gameplay::npc_set_trigger`. Its body is already pointed at the
+        // PLACE the gunfire came from by `super::cover::aim_and_lean`, which
+        // heard it rather than saw it.
+        if blind {
+            super::gameplay::npc_set_trigger(world, officer, trigger);
+            if trigger {
+                stats.triggers += 1;
+                stats.blind += 1;
+            }
+            continue;
+        }
         if !super::gameplay::npc_aim_at(world, officer, suspect, trigger) {
             continue;
         }
         stats.aimed += 1;
         if trigger {
             stats.triggers += 1;
-            if blind {
-                stats.blind += 1;
-            }
-        } else {
+        } else if posture == Posture::Warn {
             stats.warned += 1;
         }
     }
@@ -389,9 +469,10 @@ fn look_along(
             }
         }
     }
-    let hit = bridge
-        .world_mut()
-        .cast_ray_where(eye, to / d, d, &exclude, super::CastTargets::AllSolid);
+    let hit =
+        bridge
+            .world_mut()
+            .cast_ray_where(eye, to / d, d, &exclude, super::CastTargets::AllSolid);
     // A centimetre of tolerance — the wall a shot leaves through, and
     // `super::crime::blocked`'s own slack.
     let Some(hit) = hit.filter(|h| h.toi < d - 0.01) else {
@@ -492,22 +573,28 @@ fn civilian_in_the_way(
         })
 }
 
-/// **Is this unit about to fire BLIND** — in cover, and not leaned out of it.
+/// **Which way this unit would fire BLIND**, or `None` if it cannot.
 ///
-/// The NPC half of wave WPN2e's blind fire. `super::cover::step_npc_cover` runs
-/// the peek duty cycle and writes `want_aim`; a unit whose trigger comes up in
-/// the *shut* half of that cycle does not stand up to take the shot, it puts the
-/// weapon over the top. The round's direction is the cover's own surface normal
-/// and is resolved in `super::gameplay::step_weapons` — one branch, one rule,
-/// the hero's and the NPC's.
-fn is_blind_from_cover(world: &EcsWorld, unit: Uuid) -> bool {
-    let Some(e) = world.entity_of(unit) else {
-        return false;
-    };
-    world
-        .world()
-        .get::<CharacterMovement>(e)
-        .is_some_and(|cm| cm.mode == MovementMode::Cover && !cm.runtime.want_aim)
+/// In cover, not leaned out of it, and against a surface whose normal is real.
+/// `super::cover::step_npc_cover` runs the peek duty cycle and writes
+/// `want_aim`; a unit whose trigger comes up in the *shut* half of that cycle
+/// does not stand up to take the shot, it puts the weapon over the top.
+///
+/// The vector is the cover's **outward** planar normal (`CoverState::normal`
+/// points back AT the character) and it is what the discipline cone is measured
+/// along. The ROUND's own direction is resolved a second time, from the same
+/// field, in `super::gameplay::step_weapons`: one rule, two readers, and the
+/// second one is the hero's as well as the NPC's.
+fn blind_out(world: &EcsWorld, unit: Uuid) -> Option<DVec3> {
+    let e = world.entity_of(unit)?;
+    let cm = world.world().get::<CharacterMovement>(e)?;
+    if cm.mode != MovementMode::Cover || cm.runtime.want_aim || !cm.runtime.cover.active {
+        return None;
+    }
+    let n = cm.runtime.cover.normal;
+    let out = DVec3::new(-n.x, 0.0, -n.z);
+    let len = out.length();
+    (len.is_finite() && len > 1.0e-9).then(|| out / len)
 }
 
 /// **Note that a round came past these units** — what [`Posture::ReturnFire`]
@@ -526,12 +613,7 @@ fn is_blind_from_cover(world: &EcsWorld, unit: Uuid) -> bool {
 ///
 /// Inert on every step nothing was fired on: the source list is empty and the
 /// function returns before it touches the ledger.
-pub fn note_incoming(
-    world: &mut EcsWorld,
-    sources: &[DVec3],
-    radius_m: f64,
-    step: u64,
-) -> usize {
+pub fn note_incoming(world: &mut EcsWorld, sources: &[DVec3], radius_m: f64, step: u64) -> usize {
     if sources.is_empty() {
         return 0;
     }

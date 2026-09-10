@@ -2703,7 +2703,12 @@ fn the_trigger_has_exactly_one_author_and_it_is_the_firing_policy() {
                     if t.starts_with("//") || t.starts_with("///") {
                         continue;
                     }
-                    if line.contains("npc_aim_at(") {
+                    // **BOTH HALVES OF THE DOOR** (wave WPN2e). `npc_aim_at`
+                    // writes the trigger UP and `npc_hold_fire` writes it DOWN,
+                    // and one author means one author of both: a second caller
+                    // of the release is as much a second opinion about an NPC's
+                    // intent as a second caller of the aim.
+                    if line.contains("npc_aim_at(") || line.contains("npc_set_trigger(") {
                         callers.push(format!("{}: {}", path.display(), line.trim()));
                     }
                 }
@@ -2712,16 +2717,17 @@ fn the_trigger_has_exactly_one_author_and_it_is_the_firing_policy() {
     }
     // Exactly one, and it is the policy's own file. A second caller anywhere is
     // a second author of an NPC's intent.
-    assert_eq!(
-        callers.len(),
-        1,
-        "`npc_aim_at` has {} callers outside its own file and the firing policy is supposed to be the only one: {callers:?}",
-        callers.len()
-    );
     assert!(
-        callers[0].contains("engage.rs"),
-        "the one caller of `npc_aim_at` is not the firing policy: {}",
-        callers[0]
+        !callers.is_empty(),
+        "nothing calls `npc_aim_at` or `npc_hold_fire` at all — the firing policy is gone"
+    );
+    let strays: Vec<&String> = callers
+        .iter()
+        .filter(|c| !c.contains("engage.rs"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "an NPC's trigger is written outside the firing policy's own file, so it has more than one author: {strays:?}"
     );
     // And an armed NPC standing beside the hero — nobody is wanted, so the
     // policy never reaches the duty roster — fires nothing on its own.

@@ -37864,3 +37864,182 @@ no particle system (the P22 remainder), so a launcher's own smoke is PAR2's alon
 with the muzzle flash. The **NPC firing policy** is WPN2e's and nothing of it
 leaked in — asserted, in a source arm and in a course where an armed NPC stands
 beside the hero for two seconds and fires nothing.
+
+## WAVE WPN2e — NPC GUNPLAY AND THE PARITY GATE (2026-09-10)
+
+**THE POLICE FIRE BACK, AND THEY DO NOT CHEAT.** `npc_aim_at` has existed since
+wave WPN1 with **zero shipped callers** — `wpn2d_gate` had an arm whose whole job
+was to assert that nothing called it — and COV1 left an officer standing behind a
+wall with its body aim on the threat and its trigger untouched, saying so in its
+own doc. `inf_ecs::engage` (the decider) and `d3::engage` (the applier) are the
+wave that closes both seams, and they are the **first shipped caller** of
+`npc_aim_at` and of `equip_weapon`.
+
+**THE LADDER IS A BEHAVIOUR, NOT A UNIT COUNT.** `Response` has meant *how many
+cars* since EMS2. `engage::posture_for` is the same rung read a second way:
+`Cold → Hold`, `Patrol → Warn`, `MultiUnit → ReturnFire`, `Swat → FireOnSight` —
+one function, four arms, no new state. Measured on one street, one officer,
+fourteen metres, three heat levels, over two engagement cycles:
+
+| rung | posture | aimed | warned | triggers | rounds returned |
+|---|---|---|---|---|---|
+| `Patrol` | warn | 181 | 181 | **0** | **0** |
+| `MultiUnit` | return-fire | 181 | 0 | **0** | **0** |
+| `MultiUnit`, once fired upon | return-fire | — | — | **33** | 2 |
+| `Swat` | fire-on-sight | 181 | 0 | **33** | 2 |
+
+A patrol points a weapon at you and never pulls; two units shoot back once you
+shoot; SWAT shoots first. That is a player-visible escalation ladder and it is
+the same `Response` the dispatcher has been counting cars with since EMS2.
+
+**THE LAW, AS AN ARM.** `engage::may_engage` takes the file's own `last_seen`,
+its age, and a line-of-sight ray the applier cast *this step*, and refuses if
+either is missing. `worth_a_ray` exists precisely so the call site above the ray
+never contains a placeholder `true` — which is the mutation the law arm makes,
+and a call site that carried one by design would hide it. Measured, three
+streets:
+
+| street | engage rays | blocked | **aimed** |
+|---|---|---|---|
+| a clear line, a fresh file | 30 | 0 | **30** |
+| a twelve-metre wall between | 30 | 30 | **0** |
+| a trail 240 steps cold | **0** | — | **0** |
+
+The range gate is measured against `last_seen` and **not** against the suspect's
+transform, which is the one place a policy could quietly start reading a position
+nobody looked at. The cold-trail street spends no rays at all: a file nobody has
+refreshed for `TRAIL_STALE_STEPS` (180, three seconds) is a *search*, which is
+EMS3's evasion clause continuing to work while somebody is shooting at it.
+
+**FIRE DISCIPLINE IS TWO RULES AND TWO COUNTERS.** A responder inside
+`FRIENDLY_CONE_DEG` (12°) and nearer than the target holds fire; so does a unit
+whose engage ray's first hit is a civilian, or whose cone holds one. Measured:
+two officers on one bearing at 8 m and 16 m — the near one fires **2** rounds,
+the far one **0**, with **181** friendly holds. A pedestrian standing between an
+officer and the suspect: **181** civilian holds and **0** rounds; the same
+pedestrian six metres to one side: **0** holds and **2** rounds, and the
+pedestrian is never hit.
+
+A body on the line does **not** break the officer's line of sight — you can see
+somebody past a pedestrian — and does break the firing line. That distinction is
+why an officer still *points a weapon at you* while a bystander is in the way,
+which is the behaviour, rather than looking blankly at a wall.
+
+**`NPC_ENGAGE_RAYS_PER_STEP` IS SIXTEEN, AND IT IS ITS OWN NUMBER.** Not WPN1's
+witness budget (`MAX_ACTS_PER_STEP × MAX_OBSERVERS`), not EMS3's recognition
+budget (32), not `MAX_SHOT_RAYS_PER_STEP` (256) — those answer *who saw it*, *who
+is recognised* and *what bullets cost*, and this answers *can this officer see
+the person it is about to shoot at*. Measured: **0** rays on a street with four
+armed officers and nobody wanted; **4** a step with one file open; **16 of 16**
+with twenty officers, which is the ceiling refusing in `Guid` order rather than
+queueing.
+
+**BLIND FIRE, BOTH AUTHORS.** COV1 priced it at *"one authored upper-body
+one-shot from the rig, one branch in `step_weapons` along the surface normal ±
+the spread, one ray arm"*. The branch is a **behaviour and not a key**: in cover,
+trigger down, and NOT aiming — a player's right mouse button is what leans a
+character out of cover, so holding fire without it is *shoot without looking*, it
+needs no new binding, and it reads identically for an officer whose peek duty
+cycle is in its shut half.
+
+`inf_ecs::cover::blind_fire_shot` moves the ORIGIN as well as the direction, and
+that is the half a naive implementation gets wrong: a round leaving from where
+the hand actually is starts behind the wall and stops in it on segment zero. Over
+the top of a low cover (`BLIND_CLEAR_M` 0.15 m above its measured top), round the
+nearer end of a high one (`BLIND_LATERAL_M` 0.45 m along the tangent), always
+`BLIND_REACH_M` 0.35 m past the surface, at pitch **zero** — nobody aims a weapon
+they are not looking down — through a cone widened by `BLIND_FIRE_CONE_DEG` 9°,
+which is 1.6 m of scatter at 10 m and 5.5 m at the policy's own engagement range.
+
+**AND BLIND FIRE IS WHERE THE LAW GETS STRONGER, NOT WEAKER.** A crouched officer
+cannot see over its own parapet — the ray comes back stopped, every time — so the
+law refuses the aim, and the first cut of this wave therefore had an officer that
+took cover and never fired again. The resolution is not an exception to the law:
+a blind shot writes the **trigger and nothing else** (`npc_set_trigger`), and its
+direction comes from a *surface the officer is touching* and its permission from
+a *place somebody actually saw the suspect*. **No transform is read at all.** It
+is the most law-abiding shot in the engine.
+
+Measured over a nineteen-second suppression on one street: **242** steps in
+cover, **133** of them leaned out (a 55 % duty cycle against
+`NPC_PEEK_OUT_S` 1.2 / `NPC_PEEK_IN_S` 1.8), **32** rounds fired, **238** blind
+decisions and **55** blind rounds, with the authored one-shot's clock reaching
+its full **0.700 s**.
+
+**`INF_Cover_BlindFire`** is the clip: the weapon arm from the cover stance's own
+34°/26° and 86°/66° to **150°/8°** and **168°/4°** — straight up over the parapet
+— the far arm tucked, and the chest pitching **12° → 34°** so the head goes down.
+That last number is the pose's whole point: a viewer must be able to see that
+this character cannot see what it is shooting at. An additive over
+`JointMask::upper_body`, which is what keeps the crouch — a pelvis drop and two
+leg chains are not in an upper-body mask, so the arm goes over the wall and the
+body stays behind it. The island's two locomotion graphs were rebuilt for it
+through `inf-import --rebind-graph m f`, **no UE boot**: 63 → 64 states, 88 clips
+bound, 0 unbound.
+
+**A LEVEL NOBODY LOWERS STAYS HIGH** — the defect this wave's own gate found, and
+the reason there are two doors and not one. `npc_aim_at` writes `want_attack` as
+a level, which is right; what nobody had met is that an officer whose suspect
+walks behind a wall is simply *not visited* on the next step, so the last `true`
+it was handed is still there. Measured before the fix: **258 rounds** left an
+officer's weapon over a run in which the policy decided to fire **zero** times.
+`npc_set_trigger` is the release, `stats.released` counts it, and a town that
+goes **cold** releases every engagement before it drops the ledger — otherwise an
+officer mid-burst empties its magazine into an empty street for the rest of the
+session.
+
+**CARRIED 205 IS CLOSED, AND IT WAS BIGGER THAN THE CARRY SAID.** The WPN2a audit
+carried *"a non-fatal hit at range raises no act of its own"*. Both halves of the
+hybrid got there by different routes and both arrived nowhere: a **hitscan** hit
+is `loud`, so the gunshot filter recorded the pull and the fact that it connected
+went in no record at all; a **projectile** arrival is quiet and carries
+`arrived`, which WPN2a added to the `Assault` filter precisely so a bullet
+reaching somebody was not filed as a beating — correctly, and it left the arrival
+filing nothing whatever. So the town could not tell a man firing a rifle at a
+wall from a man putting rounds into a pedestrian.
+
+`ActKind::Wounded` (appended, `as_u8` 4, on `Carjack`'s freeze-pin terms) is
+worth **two**, the same as the shot that carried it — so a round that connects
+costs **four** and brings a `MultiUnit` where a round that misses costs two and
+brings one car. Measured: firing at a wall records `[Shot]` and **2** heat;
+firing at a person records `[Wounded, Shot]` and **4**. It is **non-fatal only**,
+and the two refusals are each a fact: a body that stopped working this step is a
+killing (already filed, against the shooter), and a body that was already down is
+a corpse — **60** further rounds reached one on the floor and not one of them
+raised a wounding.
+
+**A CAR SHOT AT STILL SPENDS NOTHING**, and the gate says so rather than leaving
+it unmeasured: 2 rounds stop in the chassis carrying **600 J** each, `on_flesh`
+is false, and the chassis has no `Health` at all. The arm asserts the absence, so
+the day **VEH3c** gives a chassis health it goes red and this paragraph gets
+rewritten. That is a boundary, not a hole.
+
+**THE SHOOTOUT COURSE.** Hero, two officers, one file at the top rung, four
+hundred steps, driven on the editor's preview world and on two independently
+cooked packs — **PIE == shipping == both cooks**, byte for byte over 420
+`state_bytes` and every audio command. The hero fired **30**, the officers **14**,
+the policy spent **331** engage rays and refused **268** shots. The officers are
+injected into all three sims by one function, so a divergence cannot be a
+difference in the fixtures; the policy is a pure function of sim state, and there
+is no stored randomness anywhere in it (the cadence is a counter hash of
+`(guid, step)`).
+
+**COST.** A firefight of nine shooters, seven rounds in flight and 111 casings
+costs **126.9 µs** over the same step with the triggers released, against
+`WEAPON_STEP_BUDGET_MS` **1.5 ms** — a control step and the measured step in the
+same warm process, which is the WPN2d audit's own law. The firing policy at
+**1 000 crowd records** and eight officers costs **84.0 µs** over the same step
+with nobody wanted, against `NPC_STEP_BUDGET_MS` **1.0 ms**. A street where
+nobody is wanted pays **one `wanted` call** and returns.
+
+**WHAT IS NOT HERE.** No **muzzle flash, no impact dust, no backblast** — this
+engine still has no particle system, and PAR2 is where a firefight stops being a
+sequence of sounds and sudden holes. No **recorded audio**: every committed sound
+in this repository is a generated sawtooth, the four-layer stack is four source
+keys, and a real pack is the user's to supply. **Cars take no damage** (VEH3c).
+There is no **squad**: two officers at one scene each decide alone, and the only
+thing they share is a cone test that stops one shooting the other. There is no
+**reload** in the policy — an officer's magazine empties and it stops firing,
+which reads as trigger discipline and is not. And an officer's aim, once the
+suspect is out of sight, goes to the PLACE the gunfire came from and stays there;
+a search pattern is EMS3's `last_seen` and a wave of its own.

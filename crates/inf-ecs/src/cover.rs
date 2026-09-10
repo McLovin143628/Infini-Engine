@@ -586,7 +586,11 @@ pub fn blind_fire_shot(cover: &CoverState, muzzle_y: f64) -> Option<(Vec3d, f64)
         // Round the nearer end. The tangent is the same one the probe measured
         // its extents along, so `left_m` and `right_m` are in its frame.
         let t = tangent_left(cover.normal);
-        let sign = if cover.left_m <= cover.right_m { 1.0 } else { -1.0 };
+        let sign = if cover.left_m <= cover.right_m {
+            1.0
+        } else {
+            -1.0
+        };
         Vec3d::new(
             anchor.x + out.x * BLIND_REACH_M + t.x * sign * BLIND_LATERAL_M,
             muzzle_y,
