@@ -203,6 +203,17 @@ officer has a drawing animation and a holster; ours has a rifle that appears in
 its hand on the step it arrives. The reference's shot has a muzzle flash and an
 impact puff; ours has a sound and a hole. Both are named below.
 
+**…and on the SHIPPED island the chain does not run at all**, which is worth
+saying in a parity memo rather than only in a ledger.
+`wpn2e_gate::the_islands_own_chain_from_a_gunshot_to_an_engaged_officer`
+measures it: seventeen gunshots at the showcase spawn record seventeen acts and
+**none of them has an observer**, because the nearest crowd agent is **117 m**
+away. One pedestrian two metres away opens a file at **heat 20** on the first
+burst — so the chain works and the island lacks somebody close enough to see. And
+with that warm file, a dispatched unit closes to **93 m and stops**, over three
+minutes, against an `ON_SCENE_M` of 12. Both are level-design facts on EMS1/EMS2
+ground; neither is in the firing policy, which is certified on fixtures.
+
 **`police-bike/` — the brawl.** The reference shows an officer closing to melee,
 a struggle, and bystanders scattering. Here: the melee door exists and is
 measured (reach, cone, an LOS box cast, a surface-named impact), the scatter

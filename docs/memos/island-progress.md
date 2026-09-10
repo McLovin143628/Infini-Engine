@@ -38032,6 +38032,42 @@ same warm process, which is the WPN2d audit's own law. The firing policy at
 with nobody wanted, against `NPC_STEP_BUDGET_MS` **1.0 ms**. A street where
 nobody is wanted pays **one `wanted` call** and returns.
 
+**AND THE ISLAND'S OWN CHAIN STOPS TWICE, BOTH TIMES BEFORE THE POLICY.** The
+wave's filmed session pressed the trigger ten times in a street and waited
+**150 s** for an officer to point a weapon back; none came.
+`the_islands_own_chain_from_a_gunshot_to_an_engaged_officer` boots the shipped
+island and measures every link, and neither break is in this wave's code:
+
+| link | the island | a control at 2 m |
+|---|---|---|
+| the hero fires | **17 rounds** | 10 more |
+| acts recorded | 17 | 10 |
+| …with an **OBSERVER** | **0** | **10** |
+| the nearest crowd agent | **117 m** | 2 m |
+| files open | **0**, heat 0 | **1**, heat **20** (`swat`) |
+| police in the fleet | 3 | 3 |
+| assignments | 2 | 3 |
+| units **on scene** | 0 | **0** after three minutes |
+| the nearest responder reached | — | **93 m** |
+| units engaged | 0 | **0** |
+
+1. **A GUNSHOT ON THE SHOWCASE ISLAND IS WITNESSED BY NOBODY.** The nearest crowd
+   agent to the spawn is **117 m** away and the witness ray does not cross that
+   much of the island. Every one of seventeen `Shot` acts was recorded with an
+   empty observer list, `crime::report_act` refuses those, and the whole wanted
+   system — EMS3's profiles, EMS2's crime feed and this wave's firing policy —
+   never starts from the player's own gunfire. Put ONE pedestrian two metres away
+   and the file opens at **heat 20** on the first burst.
+2. **A DISPATCHED UNIT DOES NOT ARRIVE.** With that warm `Swat` file, three
+   assignments were made and the nearest responder closed to **93 m and
+   stopped**, over three minutes, against an `ON_SCENE_M` of **12**. It is never
+   on scene, so it is never issued a weapon and never engages.
+
+Both are EMS1/EMS2 ground and both are recorded here with their numbers rather
+than as "the frames did not fire". The policy itself is certified on fixtures by
+nineteen arms, including a shootout course that agrees byte for byte across PIE,
+shipping and two cooks.
+
 **WHAT IS NOT HERE.** No **muzzle flash, no impact dust, no backblast** — this
 engine still has no particle system, and PAR2 is where a firefight stops being a
 sequence of sounds and sudden holes. No **recorded audio**: every committed sound
