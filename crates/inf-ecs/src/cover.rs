@@ -27,7 +27,9 @@
 //! derived, and a level saved with a character in cover loads with that
 //! character standing where the cover was rather than with a dangling reference
 //! to a wall. Scene **v27**, `ScenePayload` **13** and `EXPECTED_LEVELS` **24**
-//! are all untouched by this wave.
+//! were all untouched by this wave. (The scene is **v28** since wave VEH3a
+//! spent the VEH3 arc's window on the vehicle class; nothing in COV1 moved
+//! with it, and `ScenePayload` is still 13.)
 //!
 //! Derived does not mean unsimulated: the mode, the snapped transform and the
 //! peek are all fixed-step state, so PIE and shipping integrate them identically

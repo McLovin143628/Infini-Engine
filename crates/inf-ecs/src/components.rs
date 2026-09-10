@@ -2952,11 +2952,198 @@ pub struct VehicleClass {
     pub tyre_slide_frac: f64,
     /// A wheel's rotational inertia, kg·m².
     pub wheel_inertia_kgm2: f64,
+
+    // ── the VEH3 arc's window (scene v28) ───────────────────────────────────
+    //
+    // Thirty-eight, appended at the tail sorted among themselves. bincode is
+    // positional: every field above keeps the byte offset it had at v27.
+    /// **Static camber**, degrees -- negative leans the wheel's top inward
+    /// (wave VEH3a).
+    ///
+    /// The *effective* camber the tyre works at is this plus the contact
+    /// plane's own inclination, which is where `WheelContact::normal` finally
+    /// reaches a force. `0.0` is the upright wheel every pre-v28 row had, and
+    /// an upright wheel on a cambered road still works at an angle.
+    pub camber_deg: f64,
+    /// How long the clutch takes to go from fully slipping to locked, seconds
+    /// (wave VEH3b).
+    pub clutch_engage_s: f64,
+    /// The most torque the clutch can pass while slipping, newton-metres
+    /// (wave VEH3b).
+    ///
+    /// About 1.6x the default `peak_torque_nm`, which is a road clutch's
+    /// margin: it holds in every gear and still slips on a dumped launch.
+    pub clutch_torque_nm: f64,
+    /// How many cylinders fire, for the audio grain's rate (wave VEH3e).
+    ///
+    /// A four-stroke's firing frequency is `(rpm / 60) * (cylinders / 2)`, so
+    /// this number IS the engine's pitch relationship to its revs. `0` for a
+    /// turbine or a motor, which have no combustion events at all.
+    pub cylinders: f64,
+    /// **Which grain set the engine sings from** (wave VEH3e): `0` petrol,
+    /// `1` diesel, `2` turbine, `3` electric, `4` propeller, `5` rotor,
+    /// `6` outboard.
+    ///
+    /// Beside [`cylinders`](crate::vehicle::VehicleTuning::cylinders) rather than derived from it,
+    /// because a cylinder count and a firing order do not say *diesel*: a
+    /// four-cylinder diesel and a four-cylinder petrol fire at the same rate
+    /// and sound nothing alike.
+    pub engine_voice_kind: f64,
+    /// Which firing order the grains are laid out in (wave VEH3e): `0` the
+    /// even-fire inline order, `1` a cross-plane V8, `2` a flat-plane V8,
+    /// `3` an odd-fire V-twin.
+    ///
+    /// It changes the *spacing* of the impulses inside one engine cycle, which
+    /// is the whole difference between a muscle car's burble and a supercar's
+    /// wail at identical revs and identical cylinder counts.
+    pub firing_order_variant: f64,
+    /// The crankshaft and flywheel's rotational inertia, kg.m^2 (wave VEH3b).
+    ///
+    /// What makes an engine's revs a STATE rather than a function of wheel
+    /// speed: with an inertia the rpm can flare on a downshift and hang on a
+    /// throttle lift. `0` restores the rigid driveline P29.7 shipped.
+    pub flywheel_inertia_kgm2: f64,
+    /// Where the limiter cuts fuel, rpm; `0` means
+    /// [`redline_rpm`](crate::vehicle::VehicleTuning::redline_rpm) (wave VEH3b).
+    ///
+    /// A rev limiter is a CUT and a restore, not a plateau -- the bounce off it
+    /// is what an engine sounds like at the top of a gear, and VEH2a carried
+    /// the plateau as a named bound.
+    pub fuel_cut_rpm: f64,
+    /// The joules a window pane absorbs before it shatters (wave VEH3c).
+    ///
+    /// A hard elbow is about 100 J and a 9 mm round about 500, so the default
+    /// is a road car's laminated side glass. An armoured row raises it.
+    pub glass_health_j: f64,
+    /// The front differential's **coast** ramp -- the share of the axle's
+    /// overrun torque biased to the slower wheel, `[0, 1]` (wave VEH3b).
+    pub lsd_coast_ramp_front: f64,
+    /// The rear differential's coast ramp, `[0, 1]` (wave VEH3b).
+    pub lsd_coast_ramp_rear: f64,
+    /// The front differential's **power** ramp -- the share of the axle's drive
+    /// torque biased to the slower wheel under load, `[0, 1]` (wave VEH3b).
+    ///
+    /// `0` leaves [`diff_lock_front`](crate::vehicle::VehicleTuning::diff_lock_front) alone, which is
+    /// the scalar lock every pre-v28 row drove on.
+    pub lsd_power_ramp_front: f64,
+    /// The rear differential's power ramp, `[0, 1]` (wave VEH3b).
+    pub lsd_power_ramp_rear: f64,
+    /// The front differential's preload, newton-metres -- the torque it biases
+    /// before any speed difference exists at all (wave VEH3b).
+    pub lsd_preload_front_nm: f64,
+    /// The rear differential's preload, newton-metres (wave VEH3b).
+    pub lsd_preload_rear_nm: f64,
+    /// **Pacejka B (stiffness) on the lateral axis**; `0` derives it from
+    /// [`tyre_lat_peak_slip`](crate::vehicle::VehicleTuning::tyre_lat_peak_slip) and
+    /// [`tyre_lat_rise_bias`](crate::vehicle::VehicleTuning::tyre_lat_rise_bias) (wave VEH3a).
+    ///
+    /// The sentinel is what keeps the eleven catalogue rows shipped before v28
+    /// driving as they were measured: none of them authored a magic-formula
+    /// coefficient, and inventing one for them would be the codec deciding a
+    /// tuning question. The conversion is `crate::vehicle::Pacejka::resolve`.
+    pub pacejka_lat_b: f64,
+    /// Pacejka C (shape) on the lateral axis; `0` derives it (wave VEH3a).
+    pub pacejka_lat_c: f64,
+    /// Pacejka E (curvature) on the lateral axis; `0` derives it (wave VEH3a).
+    pub pacejka_lat_e: f64,
+    /// Pacejka B (stiffness) on the longitudinal axis; `0` derives it from
+    /// [`tyre_long_peak_slip`](crate::vehicle::VehicleTuning::tyre_long_peak_slip) and
+    /// [`tyre_long_rise_bias`](crate::vehicle::VehicleTuning::tyre_long_rise_bias) (wave VEH3a).
+    pub pacejka_long_b: f64,
+    /// Pacejka C (shape) on the longitudinal axis; `0` derives it (wave VEH3a).
+    pub pacejka_long_c: f64,
+    /// Pacejka E (curvature) on the longitudinal axis; `0` derives it
+    /// (wave VEH3a).
+    pub pacejka_long_e: f64,
+    /// The joules a body panel absorbs before it is written off (wave VEH3c).
+    pub panel_health_j: f64,
+    /// The joint impulse over which a hinged part tears off, newton-seconds
+    /// (wave VEH3c).
+    ///
+    /// A 1 200 kg car at 60 km/h carries about 20 000 N.s, so a bumper mount
+    /// that lets go at a quarter of that sheds on a real crash and survives a
+    /// kerb.
+    pub part_break_impulse_ns: f64,
+    /// The speed at which a hull climbs onto its own bow wave, m/s; `0` is a
+    /// displacement hull that never planes (wave VEH3g).
+    pub planing_speed_mps: f64,
+    /// **Tyre relaxation length**, metres -- how far the wheel must roll before
+    /// the lateral force catches up with the slip angle (wave VEH3a).
+    ///
+    /// A passenger tyre's is 0.2 to 0.5 m. It is what stops a steering input
+    /// from producing its whole force in one step, and it is a length rather
+    /// than a time because a stopped tyre does not relax.
+    pub relaxation_m: f64,
+    /// Sail area, m^2; `0` for anything that is not a sailing craft
+    /// (wave VEH3g).
+    pub sail_area_m2: f64,
+    /// The angle of attack past which a wing stalls, degrees (wave VEH3g).
+    ///
+    /// Read only when [`wing_area_m2`](crate::vehicle::VehicleTuning::wing_area_m2) is positive.
+    pub stall_deg: f64,
+    /// Peak boost as a torque MULTIPLIER above 1.0; `0` is naturally aspirated
+    /// (wave VEH3b).
+    pub turbo_boost_max: f64,
+    /// The dead time between the throttle opening and the turbo beginning to
+    /// spool, seconds (wave VEH3b).
+    pub turbo_lag_s: f64,
+    /// The time constant of the boost's first-order rise, seconds
+    /// (wave VEH3b).
+    pub turbo_spool_s: f64,
+    /// How fast a tyre sheds heat, per second, per degree above ambient
+    /// (wave VEH3a).
+    ///
+    /// A time constant of about 17 s standing still, and faster with air
+    /// moving over it -- which is why a lap cools what a burnout heated.
+    pub tyre_cool_rate: f64,
+    /// The share of grip a tyre loses per 100 C away from
+    /// [`tyre_optimum_c`](crate::vehicle::VehicleTuning::tyre_optimum_c) (wave VEH3a).
+    ///
+    /// The doc's *overheated tyres lose linear grip*: it scales both the peak
+    /// and the stiffness, so a cooked tyre is greasy rather than merely weak.
+    pub tyre_heat_grip_loss: f64,
+    /// How fast a tyre heats, degrees per second per kilowatt of slip power
+    /// (wave VEH3a).
+    ///
+    /// Slip power is the friction force times the sliding speed, which is the
+    /// energy actually going into the rubber. A 40 kW burnout is 36 C/s.
+    pub tyre_heat_rate: f64,
+    /// The temperature at which this compound grips best, Celsius
+    /// (wave VEH3a).
+    pub tyre_optimum_c: f64,
+    /// How many inner tyre/suspension solves run per fixed step (wave VEH3a).
+    ///
+    /// The doc asks for 300-400 Hz where this engine's stick/slip split is
+    /// stable at 60 without one; `4` is 240 Hz. Clamped to `1..=8` by
+    /// [`substeps`](crate::vehicle::VehicleTuning::substeps), because a solver count an author typed as
+    /// `0` is a division by zero two call sites down.
+    pub tyre_substeps: f64,
+    /// Which compound row of the surface table this tyre answers from
+    /// (wave VEH3a): `0` road, `1` all-terrain, `2` off-road, `3` slick.
+    ///
+    /// What makes a rally row and a road row meet gravel differently. The
+    /// table itself is a runtime resource keyed by the surface, not a field.
+    pub tyre_surface_set: f64,
+    /// Wing reference area, m^2; `0` for anything that is not a fixed-wing
+    /// aircraft (wave VEH3g).
+    ///
+    /// **It is also the discriminator.** The part recogniser's collider-shape
+    /// space is exhausted, so a fixed wing is a WHEELED chassis whose class
+    /// carries a positive wing area -- that is how a Dodo can have landing
+    /// gear and lift at the same time without a fourth collider shape.
+    pub wing_area_m2: f64,
+    /// The wing's aspect ratio (span^2 / area); `0` means no wing
+    /// (wave VEH3g).
+    ///
+    /// Induced drag is `k = 1 / (pi * AR * e)`, so without this the drag model
+    /// would have to invent a span out of the fuselage's collider box. Read
+    /// only when [`wing_area_m2`](crate::vehicle::VehicleTuning::wing_area_m2) is positive.
+    pub wing_aspect_ratio: f64,
 }
 
 impl Default for VehicleClass {
     /// The Ring-0 defaults, read from the ONE definition of them rather than
-    /// restated — a second copy of sixty-two numbers is a second thing to update.
+    /// restated — a second copy of a hundred numbers is a second thing to update.
     fn default() -> Self {
         Self::from_tuning(&crate::vehicle::VehicleTuning::default())
     }
@@ -3029,6 +3216,45 @@ impl VehicleClass {
             tyre_long_rise_bias: t.tyre_long_rise_bias,
             tyre_slide_frac: t.tyre_slide_frac,
             wheel_inertia_kgm2: t.wheel_inertia_kgm2,
+            // ── the v28 window (the VEH3 arc) ───────────────────────────
+            camber_deg: t.camber_deg,
+            clutch_engage_s: t.clutch_engage_s,
+            clutch_torque_nm: t.clutch_torque_nm,
+            cylinders: t.cylinders,
+            engine_voice_kind: t.engine_voice_kind,
+            firing_order_variant: t.firing_order_variant,
+            flywheel_inertia_kgm2: t.flywheel_inertia_kgm2,
+            fuel_cut_rpm: t.fuel_cut_rpm,
+            glass_health_j: t.glass_health_j,
+            lsd_coast_ramp_front: t.lsd_coast_ramp_front,
+            lsd_coast_ramp_rear: t.lsd_coast_ramp_rear,
+            lsd_power_ramp_front: t.lsd_power_ramp_front,
+            lsd_power_ramp_rear: t.lsd_power_ramp_rear,
+            lsd_preload_front_nm: t.lsd_preload_front_nm,
+            lsd_preload_rear_nm: t.lsd_preload_rear_nm,
+            pacejka_lat_b: t.pacejka_lat_b,
+            pacejka_lat_c: t.pacejka_lat_c,
+            pacejka_lat_e: t.pacejka_lat_e,
+            pacejka_long_b: t.pacejka_long_b,
+            pacejka_long_c: t.pacejka_long_c,
+            pacejka_long_e: t.pacejka_long_e,
+            panel_health_j: t.panel_health_j,
+            part_break_impulse_ns: t.part_break_impulse_ns,
+            planing_speed_mps: t.planing_speed_mps,
+            relaxation_m: t.relaxation_m,
+            sail_area_m2: t.sail_area_m2,
+            stall_deg: t.stall_deg,
+            turbo_boost_max: t.turbo_boost_max,
+            turbo_lag_s: t.turbo_lag_s,
+            turbo_spool_s: t.turbo_spool_s,
+            tyre_cool_rate: t.tyre_cool_rate,
+            tyre_heat_grip_loss: t.tyre_heat_grip_loss,
+            tyre_heat_rate: t.tyre_heat_rate,
+            tyre_optimum_c: t.tyre_optimum_c,
+            tyre_substeps: t.tyre_substeps,
+            tyre_surface_set: t.tyre_surface_set,
+            wing_area_m2: t.wing_area_m2,
+            wing_aspect_ratio: t.wing_aspect_ratio,
         }
     }
 
@@ -3040,7 +3266,7 @@ impl VehicleClass {
     /// default any more (v25 took `enter_window`, which the window closed). That
     /// is what makes [`set`](Self::set) able to reuse the tuning door's own name
     /// list instead of restating it, and it is asserted both ways by
-    /// `the_class_and_the_tuning_are_the_same_sixty_two_numbers`.
+    /// `the_class_and_the_tuning_are_the_same_hundred_numbers`.
     pub fn to_tuning(&self) -> crate::vehicle::VehicleTuning {
         let mut t = crate::vehicle::VehicleTuning::default();
         for (name, value) in self.settings() {
@@ -3074,7 +3300,7 @@ impl VehicleClass {
     /// Ordered, because two tunables can interact (a `max_speed_mps` below the
     /// current speed changes what `max_engine_force_n` does) and an unordered
     /// application would make the installed class depend on a map's iteration.
-    pub fn settings(&self) -> [(&'static str, f64); 62] {
+    pub fn settings(&self) -> [(&'static str, f64); 100] {
         [
             ("abs_slip", self.abs_slip),
             ("ackermann", self.ackermann),
@@ -3082,7 +3308,11 @@ impl VehicleClass {
             ("anti_roll_rear_n_per_m", self.anti_roll_rear_n_per_m),
             ("brake_bias", self.brake_bias),
             ("brake_force_n", self.brake_force_n),
+            ("camber_deg", self.camber_deg),
+            ("clutch_engage_s", self.clutch_engage_s),
+            ("clutch_torque_nm", self.clutch_torque_nm),
             ("cog_height_m", self.cog_height_m),
+            ("cylinders", self.cylinders),
             ("damping_ns_per_m", self.damping_ns_per_m),
             ("diff_lock_front", self.diff_lock_front),
             ("diff_lock_rear", self.diff_lock_rear),
@@ -3091,11 +3321,15 @@ impl VehicleClass {
             ("drag_lateral_n_per_mps2", self.drag_lateral_n_per_mps2),
             ("drag_n_per_mps2", self.drag_n_per_mps2),
             ("engine_brake_nm", self.engine_brake_nm),
+            ("engine_voice_kind", self.engine_voice_kind),
             ("enter_time_s", self.enter_time_s),
             ("enter_warp_end", self.enter_warp_end),
             ("enter_warp_start", self.enter_warp_start),
             ("final_drive", self.final_drive),
+            ("firing_order_variant", self.firing_order_variant),
+            ("flywheel_inertia_kgm2", self.flywheel_inertia_kgm2),
             ("front_torque_split", self.front_torque_split),
+            ("fuel_cut_rpm", self.fuel_cut_rpm),
             ("gear_1_ratio", self.gear_1_ratio),
             ("gear_2_ratio", self.gear_2_ratio),
             ("gear_3_ratio", self.gear_3_ratio),
@@ -3105,39 +3339,69 @@ impl VehicleClass {
             ("gear_7_ratio", self.gear_7_ratio),
             ("gear_8_ratio", self.gear_8_ratio),
             ("gear_count", self.gear_count),
+            ("glass_health_j", self.glass_health_j),
             ("handbrake_force_n", self.handbrake_force_n),
             ("idle_rpm", self.idle_rpm),
             ("idle_torque_frac", self.idle_torque_frac),
             ("lateral_grip", self.lateral_grip),
             ("longitudinal_grip", self.longitudinal_grip),
+            ("lsd_coast_ramp_front", self.lsd_coast_ramp_front),
+            ("lsd_coast_ramp_rear", self.lsd_coast_ramp_rear),
+            ("lsd_power_ramp_front", self.lsd_power_ramp_front),
+            ("lsd_power_ramp_rear", self.lsd_power_ramp_rear),
+            ("lsd_preload_front_nm", self.lsd_preload_front_nm),
+            ("lsd_preload_rear_nm", self.lsd_preload_rear_nm),
             ("max_engine_force_n", self.max_engine_force_n),
             ("max_speed_mps", self.max_speed_mps),
             ("max_steer_deg", self.max_steer_deg),
             ("min_steer_deg", self.min_steer_deg),
+            ("pacejka_lat_b", self.pacejka_lat_b),
+            ("pacejka_lat_c", self.pacejka_lat_c),
+            ("pacejka_lat_e", self.pacejka_lat_e),
+            ("pacejka_long_b", self.pacejka_long_b),
+            ("pacejka_long_c", self.pacejka_long_c),
+            ("pacejka_long_e", self.pacejka_long_e),
+            ("panel_health_j", self.panel_health_j),
+            ("part_break_impulse_ns", self.part_break_impulse_ns),
             ("peak_torque_nm", self.peak_torque_nm),
             ("peak_torque_rpm", self.peak_torque_rpm),
+            ("planing_speed_mps", self.planing_speed_mps),
             ("redline_rpm", self.redline_rpm),
             ("redline_torque_frac", self.redline_torque_frac),
+            ("relaxation_m", self.relaxation_m),
             ("rest_length_m", self.rest_length_m),
             ("reverse_ratio", self.reverse_ratio),
             ("rolling_resistance", self.rolling_resistance),
+            ("sail_area_m2", self.sail_area_m2),
             ("shift_down_rpm", self.shift_down_rpm),
             ("shift_time_s", self.shift_time_s),
             ("shift_up_rpm", self.shift_up_rpm),
             ("stability_control", self.stability_control),
+            ("stall_deg", self.stall_deg),
             ("steer_rate_deg_per_s", self.steer_rate_deg_per_s),
             ("steer_return_deg_per_s", self.steer_return_deg_per_s),
             ("stiffness_n_per_m", self.stiffness_n_per_m),
             ("torque_curve_bias", self.torque_curve_bias),
             ("traction_control_slip", self.traction_control_slip),
             ("travel_m", self.travel_m),
+            ("turbo_boost_max", self.turbo_boost_max),
+            ("turbo_lag_s", self.turbo_lag_s),
+            ("turbo_spool_s", self.turbo_spool_s),
+            ("tyre_cool_rate", self.tyre_cool_rate),
+            ("tyre_heat_grip_loss", self.tyre_heat_grip_loss),
+            ("tyre_heat_rate", self.tyre_heat_rate),
             ("tyre_lat_peak_slip", self.tyre_lat_peak_slip),
             ("tyre_lat_rise_bias", self.tyre_lat_rise_bias),
             ("tyre_load_sensitivity", self.tyre_load_sensitivity),
             ("tyre_long_peak_slip", self.tyre_long_peak_slip),
             ("tyre_long_rise_bias", self.tyre_long_rise_bias),
+            ("tyre_optimum_c", self.tyre_optimum_c),
             ("tyre_slide_frac", self.tyre_slide_frac),
+            ("tyre_substeps", self.tyre_substeps),
+            ("tyre_surface_set", self.tyre_surface_set),
             ("wheel_inertia_kgm2", self.wheel_inertia_kgm2),
+            ("wing_area_m2", self.wing_area_m2),
+            ("wing_aspect_ratio", self.wing_aspect_ratio),
         ]
     }
 

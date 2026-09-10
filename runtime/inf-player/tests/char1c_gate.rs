@@ -1874,9 +1874,14 @@ fn the_camera_never_ends_inside_the_islands_geometry() {
 /// the user's own question was about **authoring** a boom and an author who
 /// cannot keep what they authored has not authored anything:
 ///
-/// 1. The component is not in the scene record (schema v27 is unmoved, which is
-///    the wave's own claim), so a level SAVED and RELOADED has no rig on any
-///    character — including the one the wizard just made.
+/// 1. The component is not in the scene record — true at v27, when this arm
+///    was written, and still true at **v28**: wave VEH3a spent the VEH3
+///    arc's window on the vehicle class and PRICED this row rather than
+///    taking it (1 510 B per rigged character plus a slot on all 1 310
+///    committed entities, against a level-side `camera.toml` write half
+///    that costs no schema at all — carried 159). So a level SAVED and
+///    RELOADED still has no rig on any character, including the one the
+///    wizard just made.
 /// 2. The `camera.toml` the wizard writes beside a character is
 ///    `CameraTuning::default()`, unconditionally — it never reads the rig it
 ///    inserted, so the file and the component cannot even be made to agree.
@@ -1949,7 +1954,7 @@ fn an_authored_rig_does_not_survive_a_save_and_a_reload() {
     assert!(
         after.is_none(),
         "a `CameraRig` survived a save and a reload — the scene record grew and \
-         this arm's whole statement is stale (re-read schema v27)"
+         this arm's whole statement is stale (re-read schema v28)"
     );
     assert_eq!(after_v, None);
     assert_eq!(

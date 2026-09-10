@@ -1,6 +1,6 @@
-schema_version = 27
+schema_version = 28
 guid = "00000000-0000-0000-0000-000084010000"
 title = "Platformer 2D"
 entity_count = 5
-content_hash = "413da2445acc0b60"
+content_hash = "b6e2f5503afe2531"
 dependencies = []

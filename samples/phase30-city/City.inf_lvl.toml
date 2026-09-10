@@ -1,8 +1,8 @@
-schema_version = 27
+schema_version = 28
 guid = "00000000-0000-0000-0000-000084300000"
 title = "Island City"
 entity_count = 103
-content_hash = "609554a562aa8a4b"
+content_hash = "ad3a3bbb9266e146"
 dependencies = [
     "00000000-0000-0000-0000-000084300001",
     "00000000-0000-0000-0000-000084300002",

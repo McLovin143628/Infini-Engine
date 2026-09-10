@@ -1982,14 +1982,37 @@ pub fn basis(yaw_deg: f64, pitch_deg: f64) -> (DVec3, DVec3, DVec3) {
 /// read at level load**, which is the design the false sentence assumed and is a
 /// load-path change in both hosts. Filed as the audit's own carried item.
 ///
-/// The other branch is priced rather than waved at. A per-level rig is a
-/// **positional append to the entity record** — scene v27 → v28, the pre-v28
-/// entity record frozen as `EntityRecordV27`, both hosts' `apply_record`
-/// mirrors grown (pinned character-for-character by `apply_record_mirror`), the
-/// PIE payload v13 → v14, a downgrade bless, and all twenty-four committed
-/// `.inf_lvl` re-cooked — **for 776 bytes per character** (97 `f64` at
-/// bincode's fixed width) carrying, today, the same numbers on every one of
-/// them. That is the whole cost, and it is why this wave did not spend it.
+/// The other branch is priced rather than waved at, and wave **VEH3a**
+/// re-measured the price when the VEH3 arc's window opened, because a refusal
+/// costed at half of what it refuses is not a refusal anybody can rule on.
+///
+/// A per-level rig is a **positional append to the entity record** — the
+/// pre-bump entity record frozen, both hosts' record→world lines grown, the
+/// wire pin grown, a downgrade bless, and all twenty-four committed
+/// `.inf_lvl` re-blessed. The paragraph this replaces said **776 bytes per
+/// character (97 `f64`)**. Counted from the declarations, it is not:
+///
+/// | block | `f64` |
+/// |---|---|
+/// | [`CameraSettings`] — one arm, three [`Vec3d`], a rotation lag, an FOV | 12 |
+/// | [`GaitCameraSettings`] — four of those (walk/run/sprint/crouch) | 48 |
+/// | `velocity_direction` + `looking_direction` + `aiming` | 144 |
+/// | `first_person` | 12 |
+/// | `driving` — a [`CameraSettings`] plus six | 18 |
+/// | the five loose scalars | 5 |
+/// | [`CameraCollision`] — nine, beside two `bool` and a `u32` | 9 |
+///
+/// **[`CameraTuning`] is 188 `f64` + 2 `bool` + 1 varint `u32` = 1 507 B**,
+/// [`CameraRig`] is **1 509 B** with its two flags, and the `Option` at the
+/// record's tail is **1 510 B** present and **1 B** absent — so a slot also
+/// costs one byte on every one of the 1 310 entities the twenty-four
+/// committed levels hold. The old figure counted a per-state block ONCE where
+/// the table holds twelve of them, and was short by **734 bytes**.
+///
+/// VEH3a priced it at that number and the ruling was **CARRY**: the row buys
+/// per-character overrides nobody has asked for, while the gap that exists is
+/// carried 159's — the island ships no `camera.toml` and the level-side table
+/// has no WRITE half — and that door costs no schema at all.
 ///
 /// # A character with no rig is not a character with no camera
 ///

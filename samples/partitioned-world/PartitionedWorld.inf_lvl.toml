@@ -1,6 +1,6 @@
-schema_version = 27
+schema_version = 28
 guid = "00000000-0000-0000-0000-000084160500"
 title = "Partitioned World"
 entity_count = 20
-content_hash = "6e7108c2f336ebdd"
+content_hash = "c2bd9db7cc81caec"
 dependencies = []
