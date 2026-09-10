@@ -1586,12 +1586,14 @@ fn the_fold_is_applied_through_the_one_weapon_def_door() {
     let applications = WEAPON_RS.matches("fold(").count();
     assert_eq!(
         applications, 2,
-        "`attachment::fold` is called {applications} times in `weapon.rs` — the          fold has grown a second door and the two can now disagree"
+        "`attachment::fold` is called {applications} times in `weapon.rs` — \
+         the fold has grown a second door and the two can now disagree"
     );
     assert_eq!(
         ATTACHMENT_RS.matches("pub fn apply(").count(),
         1,
-        "there is more than one `StatModifiers::apply` — a second copy of the          rule is a second answer to `what does a suppressor do`"
+        "there is more than one `StatModifiers::apply` — a second copy of \
+         the rule is a second answer to `what does a suppressor do`"
     );
     assert_eq!(
         ATTACHMENT_RS.matches("pub fn fold(").count(),
@@ -1623,7 +1625,9 @@ fn the_fold_is_applied_through_the_one_weapon_def_door() {
                 .count();
             assert_eq!(
                 hits, 0,
-                "`{file}` reads `{rule}` itself — the fold is supposed to have                  happened before anything downstream of `equipped_def` sees a                  number"
+                "`{file}` reads `{rule}` itself — the fold is supposed to have \
+                 happened before anything downstream of `equipped_def` sees \
+                 a number"
             );
         }
     }
@@ -2117,7 +2121,8 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
     );
     assert!(
         !by_key.contains_key("SM_KA74U"),
-        "a row reaches `SM_KA74U` now — carried 249 is closed and this pin has          to move with it"
+        "a row reaches `SM_KA74U` now — carried 249 is closed and this pin \
+         has to move with it"
     );
     // Every key the table can answer is enumerated, so the importer's rebind
     // list and this census cannot disagree.
