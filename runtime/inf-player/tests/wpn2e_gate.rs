@@ -405,7 +405,7 @@ impl Tally {
         self.peeks += usize::from(r.npc_cover.peeking > 0);
         for h in &r.hits {
             if h.shooter != HERO {
-                self.npc_hits.push(h.clone());
+                self.npc_hits.push(*h);
             }
         }
     }
@@ -2379,7 +2379,7 @@ fn the_islands_own_chain_from_a_gunshot_to_an_engaged_officer() {
     // `merge_toml` is the same door `item.define` dispatches to.
     {
         let defs = inf_ecs::item::item_defs_mut(sim.world_mut());
-        if defs.len() == 0 {
+        if defs.is_empty() {
             defs.merge_toml(weapon::WEAPON_REGISTRY_TOML)
                 .expect("the shipped registry parses");
         }

@@ -572,7 +572,7 @@ mod tests {
             "a unit fired a launcher at somebody inside its own blast"
         );
         // The engagement range is INSIDE the recognition range, deliberately.
-        assert!(ENGAGE_RANGE_M < crate::crime::RECOGNITION_RANGE_M);
+        const { assert!(ENGAGE_RANGE_M < crate::crime::RECOGNITION_RANGE_M) };
     }
 
     #[test]
@@ -661,8 +661,10 @@ mod tests {
             !fresh.fired_upon(u64::MAX),
             "`never` wrapped into `just now`"
         );
-        let mut hit = UnitEngagement::default();
-        hit.fired_upon_step = 100;
+        let hit = UnitEngagement {
+            fired_upon_step: 100,
+            ..Default::default()
+        };
         assert!(hit.fired_upon(100));
         assert!(hit.fired_upon(100 + RETURN_FIRE_MEMORY_STEPS));
         assert!(!hit.fired_upon(101 + RETURN_FIRE_MEMORY_STEPS));

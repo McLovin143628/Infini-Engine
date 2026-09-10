@@ -64,7 +64,7 @@ use uuid::Uuid;
 use inf_ecs::components::{CharacterMovement, MovementMode};
 use inf_ecs::crime;
 use inf_ecs::dispatch::{self, UnitKind};
-use inf_ecs::engage::{self, EngageRes, Posture, UnitEngagement};
+use inf_ecs::engage::{self, EngageRes, Posture};
 use inf_ecs::math::Vec3d;
 use inf_ecs::EcsWorld;
 
@@ -663,10 +663,7 @@ pub fn note_incoming(
         .remove_resource::<EngageRes>()
         .unwrap_or_default();
     for unit in &under {
-        res.units
-            .entry(*unit)
-            .or_insert_with(UnitEngagement::default)
-            .fired_upon_step = step;
+        res.units.entry(*unit).or_default().fired_upon_step = step;
     }
     world.world_mut().insert_resource(res);
     under.len()
