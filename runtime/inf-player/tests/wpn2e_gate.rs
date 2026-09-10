@@ -2290,6 +2290,89 @@ fn an_officer_that_fires_is_not_fired_upon_by_its_own_weapon() {
     );
 }
 
+/// **AN OFFICER THREE METRES AWAY STILL AIMS, AND A LAUNCHER STILL DOES NOT**
+/// (wave WPN2e audit).
+///
+/// # What the shipped game measured
+///
+/// Wave WPN2e made `MIN_ENGAGE_M` a flat 4 m for every weapon, from a launcher's
+/// own arithmetic: 4 000 J over an 8 m blast radius is lethal to a 2 000 J body
+/// inside 2.34 m, so a unit that fired one at somebody standing next to it would
+/// kill itself. True, and it was being applied to a `glock_17`.
+///
+/// Driven through the editor's Play button on the island: the town heard the
+/// gunfire (**heat 36**), sent cars, and a crew arrived and stood **2.5 m** from
+/// the hero — and the policy refused it, for ever. A police officer standing
+/// three metres from an armed suspect did nothing at all, which is the most
+/// common distance in a street fight and the only one a player ever sees up
+/// close. The demo loop's own `responder_m` column is what found it.
+///
+/// # What it reads
+///
+/// The engage rays spent and the aims made, at six distances, with a pistol and
+/// then with a launcher — the world, twelve times over.
+///
+/// **The mutation**: make `min_engage_m` answer `MIN_ENGAGE_M` for everything
+/// and the pistol's first two rows go to zero; make it answer `0.0` for
+/// everything and the launcher's do not.
+#[test]
+fn an_officer_three_metres_away_still_aims_and_a_launcher_still_does_not() {
+    let table = |id: &str| -> Vec<(f64, usize, usize)> {
+        [2.5f64, 3.5, 5.0, 10.0, 30.0, 40.0]
+            .into_iter()
+            .map(|d| {
+                let mut b = Beat::new();
+                let crew = b.officer(0, DVec3::new(0.0, 0.0, d));
+                // The witness that keeps the file's trail fresh.
+                b.civilian(5, DVec3::new(12.0, 0.0, 4.0));
+                b.file_on_hero(Response::Swat, DVec3::ZERO);
+                b.arm(crew, id);
+                let t = b.run(60);
+                (d, t.rays, t.aimed)
+            })
+            .collect()
+    };
+    let pistol = table("glock_17");
+    let launcher = table("rpg_7");
+    println!("\n=== HOW CLOSE IS TOO CLOSE, PER WEAPON ===");
+    println!("  distance   glock_17 rays/aimed   rpg_7 rays/aimed");
+    for ((d, pr, pa), (_, lr, la)) in pistol.iter().zip(launcher.iter()) {
+        println!("  {d:>7.1} m   {pr:>5} / {pa:<5}          {lr:>5} / {la:<5}");
+    }
+    // A PISTOL takes the shot at three metres.
+    for (d, rays, aimed) in pistol.iter().filter(|(d, _, _)| *d < 4.0) {
+        assert!(
+            *aimed > 0 && *rays > 0,
+            "an officer with a pistol {d:.1} m from an armed suspect never aimed — a launcher's blast guard is being applied to a handgun"
+        );
+    }
+    // …and a LAUNCHER does not, at the same distances.
+    for (d, rays, aimed) in launcher.iter().filter(|(d, _, _)| *d < 4.0) {
+        assert_eq!(
+            (*rays, *aimed),
+            (0, 0),
+            "a unit fired a launcher at somebody {d:.1} m away — inside its own blast"
+        );
+    }
+    // Both aim in the middle of the band, and neither past `ENGAGE_RANGE_M`.
+    for (label, rows) in [("glock_17", &pistol), ("rpg_7", &launcher)] {
+        let mid = rows
+            .iter()
+            .find(|(d, _, _)| (*d - 10.0).abs() < 0.01)
+            .expect("the 10 m row");
+        assert!(mid.2 > 0, "{label} never aimed at ten metres");
+        let far = rows
+            .iter()
+            .find(|(d, _, _)| (*d - 40.0).abs() < 0.01)
+            .expect("the 40 m row");
+        assert_eq!(
+            (far.1, far.2),
+            (0, 0),
+            "{label} aimed at forty metres, past `ENGAGE_RANGE_M`"
+        );
+    }
+}
+
 #[test]
 fn a_killing_is_filed_against_the_shooter_and_a_corpse_is_not_also_wounded() {
     let mut b = Beat::new();

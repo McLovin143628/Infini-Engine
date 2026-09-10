@@ -263,7 +263,7 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
     // releases, after the ledger write, on the same "no world writes inside the
     // read walk" rule.
     let mut reload: Vec<Uuid> = Vec::new();
-    for (officer, _class) in &officers {
+    for (officer, min_m) in &officers {
         let Some(eye) = super::crime::eye_of(world, *officer) else {
             release.push(*officer);
             continue;
@@ -286,7 +286,7 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             //    it exists so this call site never contains the placeholder
             //    `true` the law arm's own mutation would be indistinguishable
             //    from.
-            if !engage::worth_a_ray(posture, here, *last_seen, *trail_age) {
+            if !engage::worth_a_ray(posture, here, *last_seen, *trail_age, *min_m) {
                 // Distinguish the two refusals so the counters mean something:
                 // a cold trail is a suspect the police have lost, and a range
                 // failure is one they have not reached.
@@ -310,7 +310,14 @@ pub fn step_engage(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, step: u64
             // see somebody past a pedestrian — but it absolutely breaks the
             // firing line, and that distinction is the whole of the discipline
             // rule below.
-            if !engage::may_engage(posture, here, *last_seen, *trail_age, sight != Sight::Wall) {
+            if !engage::may_engage(
+                posture,
+                here,
+                *last_seen,
+                *trail_age,
+                *min_m,
+                sight != Sight::Wall,
+            ) {
                 stats.blocked += 1;
                 // **...AND BLIND FIRE IS THE ONE THING A UNIT MAY STILL DO.**
                 //
@@ -493,12 +500,16 @@ fn needs_a_reload(world: &EcsWorld, unit: Uuid) -> bool {
 /// The weapon is [`inf_ecs::weapon::equipped_def`], which is the folded
 /// definition an attachment may have changed: a policy that read the base row
 /// would be deciding with a different weapon from the one that fires.
-fn armed_officers(world: &EcsWorld) -> Vec<(Uuid, inf_ecs::weapon::WeaponClass)> {
+fn armed_officers(world: &EcsWorld) -> Vec<(Uuid, f64)> {
     super::crime::officers(world)
         .into_iter()
         .filter_map(|g| {
             let (_, def) = inf_ecs::weapon::equipped_def(world, g)?;
-            (!def.is_melee()).then_some((g, def.audio_class()))
+            // **The weapon's own minimum engagement range** (wave WPN2e audit),
+            // taken here because this is where the folded definition already is:
+            // a launcher may not be fired at somebody standing next to you and a
+            // pistol very much may. See `inf_ecs::engage::min_engage_m`.
+            (!def.is_melee()).then_some((g, engage::min_engage_m(def.blast_radius_m)))
         })
         .collect()
 }

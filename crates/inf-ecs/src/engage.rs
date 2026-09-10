@@ -171,7 +171,39 @@ pub const ENGAGE_RANGE_M: f64 = 35.0;
 ///
 /// A minimum engagement range is **policy, not physics**, which is why it is
 /// here and not in [`crate::weapon::WeaponDef`]: the round would happily fly.
+///
+/// # It is the BLAST's minimum, and it was being applied to a pistol
+///
+/// Wave WPN2e made this a flat constant for every weapon, and the shipped game
+/// measured what that costs. Driven through the editor's Play button on the
+/// island: the town heard the gunfire (**heat 36**), sent cars, and a crew
+/// arrived and stood **2.5 m** from the hero — and the policy refused it, for
+/// ever, because 2.5 is less than four. A police officer standing three metres
+/// from an armed suspect did nothing at all, which is the most common distance
+/// in a street fight and the only one a player ever sees up close.
+///
+/// The number is right and its SCOPE was wrong: it is derived from a launcher's
+/// own arithmetic (4 000 J over an 8 m blast radius is lethal to a 2 000 J body
+/// inside 2.34 m), and a `glock_17` has no blast at all. [`min_engage_m`] is the
+/// same number asked of the weapon in the officer's hands.
 pub const MIN_ENGAGE_M: f64 = 4.0;
+
+/// **How close is too close for THIS weapon**, metres (wave WPN2e audit).
+///
+/// [`MIN_ENGAGE_M`] for anything with a blast radius — a launcher, a grenade —
+/// because a unit that fired one at somebody standing next to it would kill
+/// itself; **zero** for everything else, because a pistol has no blast and a
+/// bullet at three metres is the shot a police officer actually takes.
+///
+/// A pure function of one number off [`crate::weapon::WeaponDef`], so the policy
+/// asks the weapon rather than carrying a second opinion about it.
+pub fn min_engage_m(blast_radius_m: f64) -> f64 {
+    if blast_radius_m.is_finite() && blast_radius_m > 0.0 {
+        MIN_ENGAGE_M
+    } else {
+        0.0
+    }
+}
 
 /// **How stale a trail may be and still be worth aiming at**, fixed steps.
 ///
@@ -368,9 +400,10 @@ pub fn may_engage(
     unit_at: Vec3d,
     last_seen: Vec3d,
     trail_age: u64,
+    min_m: f64,
     line_of_sight: bool,
 ) -> bool {
-    line_of_sight && worth_a_ray(posture, unit_at, last_seen, trail_age)
+    line_of_sight && worth_a_ray(posture, unit_at, last_seen, trail_age, min_m)
 }
 
 /// **Everything [`may_engage`] asks EXCEPT the ray** — the pre-filter that
@@ -385,7 +418,13 @@ pub fn may_engage(
 ///
 /// Everything else is here — the posture, the trail's age, and the range
 /// measured against the **remembered** position rather than the real one.
-pub fn worth_a_ray(posture: Posture, unit_at: Vec3d, last_seen: Vec3d, trail_age: u64) -> bool {
+pub fn worth_a_ray(
+    posture: Posture,
+    unit_at: Vec3d,
+    last_seen: Vec3d,
+    trail_age: u64,
+    min_m: f64,
+) -> bool {
     if !posture.aims() || trail_age > TRAIL_STALE_STEPS {
         return false;
     }
@@ -393,7 +432,8 @@ pub fn worth_a_ray(posture: Posture, unit_at: Vec3d, last_seen: Vec3d, trail_age
         + (last_seen.y - unit_at.y).powi(2)
         + (last_seen.z - unit_at.z).powi(2))
     .sqrt();
-    d.is_finite() && (MIN_ENGAGE_M..=ENGAGE_RANGE_M).contains(&d)
+    let min = min_m.clamp(0.0, ENGAGE_RANGE_M);
+    d.is_finite() && (min..=ENGAGE_RANGE_M).contains(&d)
 }
 
 // ── the pass's own memory ───────────────────────────────────────────────────
@@ -533,10 +573,10 @@ mod tests {
         let unit = Vec3d::new(0.0, 0.0, 0.0);
         let seen = Vec3d::new(0.0, 0.0, 20.0);
         // Everything right.
-        assert!(may_engage(Posture::FireOnSight, unit, seen, 0, true));
+        assert!(may_engage(Posture::FireOnSight, unit, seen, 0, 0.0, true));
         // …and each argument alone takes it away.
         assert!(
-            !may_engage(Posture::FireOnSight, unit, seen, 0, false),
+            !may_engage(Posture::FireOnSight, unit, seen, 0, 0.0, false),
             "a unit with no line of sight aimed"
         );
         assert!(
@@ -545,12 +585,13 @@ mod tests {
                 unit,
                 seen,
                 TRAIL_STALE_STEPS + 1,
+                0.0,
                 true
             ),
             "a unit aimed at a trail three seconds cold"
         );
         assert!(
-            !may_engage(Posture::Hold, unit, seen, 0, true),
+            !may_engage(Posture::Hold, unit, seen, 0, 0.0, true),
             "a cold town aimed at somebody"
         );
         // Out of range, both ways.
@@ -559,6 +600,7 @@ mod tests {
             unit,
             Vec3d::new(0.0, 0.0, ENGAGE_RANGE_M + 0.1),
             0,
+            0.0,
             true
         ));
         assert!(
@@ -567,10 +609,27 @@ mod tests {
                 unit,
                 Vec3d::new(0.0, 0.0, MIN_ENGAGE_M - 0.1),
                 0,
+                MIN_ENGAGE_M,
                 true
             ),
             "a unit fired a launcher at somebody inside its own blast"
         );
+        // …and the SAME distance with a weapon that has no blast is a shot an
+        // officer takes (wave WPN2e audit): `min_engage_m` asks the weapon.
+        assert!(
+            may_engage(
+                Posture::FireOnSight,
+                unit,
+                Vec3d::new(0.0, 0.0, MIN_ENGAGE_M - 0.1),
+                0,
+                min_engage_m(0.0),
+                true
+            ),
+            "a pistol was refused at three metres because a launcher would be"
+        );
+        assert_eq!(min_engage_m(0.0), 0.0);
+        assert_eq!(min_engage_m(8.0), MIN_ENGAGE_M);
+        assert_eq!(min_engage_m(f64::NAN), 0.0);
         // The engagement range is INSIDE the recognition range, deliberately.
         const { assert!(ENGAGE_RANGE_M < crate::crime::RECOGNITION_RANGE_M) };
     }
