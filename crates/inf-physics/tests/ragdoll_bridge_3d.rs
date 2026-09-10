@@ -1137,3 +1137,125 @@ fn the_committed_table_less_sample_ragdolls_into_one_connected_body() {
         );
     }
 }
+
+
+/// **A CORPSE DOES NOT CLIMB INTO THE SKY** (wave WPN2d audit).
+///
+/// Wave WPN2d's session 3 photographed seven frames captioned "the mesh in the
+/// hero's hands" and every one of them is a corpse 33 to 48 m above the street:
+/// the hero blew itself up with its own launcher at 2.2 m, entered `Ragdoll`,
+/// and then rose **83.2 m over 295.6 s at a near-constant 0.281 m/s** with the
+/// finite differences a metre a second of jitter about that mean. A straight
+/// line is not a parabola, and a body with nothing under it can only follow a
+/// parabola.
+///
+/// The pump is upstream and carried since island wave I5 (joints seeded
+/// violating their limits, and a speed clamp that rescales a velocity vector
+/// and so destroys momentum asymmetrically when it bites), so this arm does not
+/// try to reproduce the solver's own energy injection. It **injects one**, which
+/// is the honest way to test a bound: every limb is given a fixed upward
+/// velocity after every step, which unbounded is an 8 m/s² climb, and the claim
+/// is that the assembly still cannot leave the ground it fell on.
+///
+/// Mutating `FREE_FLIGHT_SLACK_M` upward, or deleting either half of the
+/// free-flight block in `step_ragdoll`, reds this arm: measured with the block
+/// removed, the pelvis reaches **y = 1.2e4 m** inside the same 18 000 steps.
+#[test]
+fn a_pumped_corpse_cannot_climb_away_from_the_ground_it_fell_on() {
+    // The pump: what one step adds to every limb, m/s. Nearly twice what
+    // gravity takes away in a step (9.81/60 = 0.1635), so the unbounded answer
+    // is not a drift but a climb.
+    const PUMP_MPS: f64 = 0.30;
+    // What the bound is worth. The ground probe under the pelvis reaches
+    // `half + radius + 0.1` = 1.0 m below it, so a corpse can creep that far
+    // while it still counts as standing on something; `FREE_FLIGHT_SLACK_M` and
+    // the momentum it has when the probe finally loses the surface buy the rest.
+    const CEILING_M: f64 = 2.5;
+
+    let mut sim = Sim::with_rig(0.0, mannequin());
+    for _ in 0..30 {
+        sim.step(&MovementIntent::default());
+    }
+    // A corpse, so the get-up never fires and the ragdoll runs for as long as
+    // the level does — which is the state the island session was in.
+    let e = sim.world.entity_of(HERO).unwrap();
+    sim.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(inf_ecs::weapon::Health {
+            joules: 0.0,
+            capacity_j: 100.0,
+            dead: true,
+        });
+    assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+    for _ in 0..4 {
+        sim.step(&MovementIntent::default());
+    }
+    let bodies = sim
+        .bridge
+        .ragdoll_of(HERO)
+        .expect("the bodies were built")
+        .bodies
+        .clone();
+    assert!(bodies.len() >= 7, "{} bodies", bodies.len());
+    let pelvis = sim
+        .bridge
+        .ragdoll_of(HERO)
+        .and_then(|r| r.pelvis)
+        .expect("the pelvis was identified");
+    let pelvis_y = |s: &Sim| -> f64 {
+        s.bridge
+            .world()
+            .body_translation(pelvis)
+            .map(|t| t.y)
+            .unwrap_or(f64::NAN)
+    };
+
+    // Let it fall over first, so "where it fell" is a real number and not the
+    // standing pose's hips.
+    for _ in 0..600 {
+        sim.step(&MovementIntent::default());
+    }
+    let settled_y = pelvis_y(&sim);
+    assert!(
+        settled_y.is_finite() && settled_y < 0.6,
+        "the ragdoll never reached the floor: pelvis at {settled_y:.3} m"
+    );
+
+    // 300 seconds — the length of the island session that found this.
+    let mut highest = settled_y;
+    let mut lowest = settled_y;
+    for _ in 0..18_000 {
+        for b in &bodies {
+            let v = sim.bridge.world().body_linvel(*b).unwrap_or(DVec3::ZERO);
+            sim.bridge
+                .world_mut()
+                .set_body_linvel(*b, v + DVec3::Y * PUMP_MPS);
+        }
+        sim.step(&MovementIntent::default());
+        let y = pelvis_y(&sim);
+        assert!(y.is_finite(), "the pelvis left the number line");
+        highest = highest.max(y);
+        lowest = lowest.min(y);
+    }
+    let end = pelvis_y(&sim);
+    assert!(
+        highest <= settled_y + CEILING_M,
+        "a pumped corpse climbed to {highest:.3} m from {settled_y:.3} m — the \
+         free-flight bound in `step_ragdoll` is not holding it"
+    );
+    assert!(
+        end <= settled_y + CEILING_M,
+        "a pumped corpse ended {:.3} m above where it fell",
+        end - settled_y
+    );
+    // **The anti-vacuity half**: the pump has to be reaching the bodies at all.
+    // A fixture whose ragdoll had despawned, or whose bodies were asleep, would
+    // pass every bound above by never moving.
+    assert!(
+        highest - lowest > 0.05,
+        "the pump never moved the corpse ({:.4} m of travel) — this arm is \
+         measuring nothing",
+        highest - lowest
+    );
+}

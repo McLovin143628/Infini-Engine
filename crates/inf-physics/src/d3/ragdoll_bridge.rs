@@ -74,6 +74,41 @@ pub const SETTLE_TIME_S: f64 = 0.6;
 /// necessary.
 pub const MAX_LIMB_SPEED_MPS: f64 = -inf_anim::ragdoll::GRAVITY_CUTOFF_MPS;
 
+/// **How far above its own ballistic path a ragdoll's centre of mass may be
+/// while nothing is holding it up**, metres (wave WPN2d audit).
+///
+/// The third bound in this family, and the one the first two could not see.
+/// [`MAX_LIMB_SPEED_MPS`] bounds a *speed* and
+/// [`inf_anim::ragdoll::GRAVITY_CUTOFF_MPS`] bounds an *acceleration*; neither
+/// notices an assembly whose limbs are all slow and all drifting the same way.
+/// Measured on the island: a corpse left ragdolling for 295.6 s rose
+/// **83.2 m at a near-constant 0.281 m/s**, with the finite differences a
+/// ±1 m/s random walk about that mean — a body in free flight cannot do that,
+/// because free flight is `y'' = -g` and nothing else.
+///
+/// The slack is what a solver's own noise is allowed to be. It is deliberately
+/// larger than a step's worth of drift and far smaller than the ground probe's
+/// reach, so a corpse that creeps upward off the floor is pulled back the
+/// moment the probe under its pelvis loses the surface.
+pub const FREE_FLIGHT_SLACK_M: f64 = 0.25;
+
+/// **The ballistic reference a ragdoll's centre of mass is held to** while the
+/// probe under its pelvis finds nothing to stand on (wave WPN2d audit).
+///
+/// It is re-seeded from the assembly itself on every step that *does* find
+/// ground, so a contact may lift a body as hard as it likes; it is integrated
+/// as `y'' = -g` on every step that does not. The bound is on the CENTRE OF
+/// MASS, and the correction is subtracted uniformly from every body, so the
+/// relative motion of the limbs — the flail — is left exactly as the solver
+/// computed it. Only the drift of the whole is removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FreeFlight {
+    /// Where the reference centre of mass is, metres.
+    pub y: f64,
+    /// How fast it is rising, m/s.
+    pub vy: f64,
+}
+
 /// How long the bridge waits for the pose step to answer a rig request before
 /// concluding that **no rig is coming**, seconds (P29.4 audit, A1).
 ///
@@ -130,6 +165,10 @@ pub struct SpawnedRagdoll {
     pub root: Option<BodyId3D>,
     /// How long the root has been slower than [`SETTLE_SPEED_MPS`].
     pub settled_s: f64,
+    /// **The ballistic path the centre of mass is held to while it is airborne**
+    /// (wave WPN2d audit) — `None` until the first step that has to bound it.
+    /// See [`FreeFlight`] and [`FREE_FLIGHT_SLACK_M`].
+    pub free_flight: Option<FreeFlight>,
     /// **Which joint each body IS, and how to read its rotation as that joint's**
     /// (wave CHAR1b.2), parallel to [`bodies`](Self::bodies).
     ///
@@ -378,7 +417,7 @@ pub fn step_ragdoll(
     };
     let half = cm.half_height_for(MovementMode::Grounded);
     let mut on_ground = false;
-    if let Some(spawned) = bridge.ragdoll_of(guid).cloned() {
+    if let Some(mut spawned) = bridge.ragdoll_of(guid).cloned() {
         let root_vel = spawned
             .root
             .and_then(|b| bridge.world().body_linvel(b))
@@ -432,6 +471,120 @@ pub fn step_ragdoll(
                 bridge
                     .world_mut()
                     .set_body_linvel(*b, v * (MAX_LIMB_SPEED_MPS / speed));
+            }
+        }
+        // **...AND A CEILING ON THE ALTITUDE THE WHOLE ASSEMBLY MAY GAIN** (wave
+        // WPN2d audit).
+        //
+        // The two bounds above are both bounds on ONE BODY: an acceleration
+        // (`gravity_enabled`) and a speed (`MAX_LIMB_SPEED_MPS`). Neither can
+        // see fifteen slow limbs all drifting the same way, and that is what
+        // the island produced. Wave WPN2d's own session 3 photographed seven
+        // frames captioned "the mesh in the hero's hands" of a corpse **33 to
+        // 48 m above the street**: the hero blew itself up with its own
+        // launcher at 2.2 m, entered `Ragdoll`, and rose **83.2 m over 295.6 s
+        // at a near-constant 0.281 m/s** -- a straight line, not a parabola,
+        // with a metre a second of jitter about it. Every frame the wave took
+        // after that was of the sky.
+        //
+        // The source is upstream and is carried by name since island wave I5:
+        // an articulated body whose joints are seeded violating their limits
+        // has energy fed into it every step, and `MAX_LIMB_SPEED_MPS` -- which
+        // rescales a limb's velocity vector -- destroys momentum
+        // asymmetrically when it bites, so the residual is a systematic drift
+        // rather than a random walk. **This is a bound, not a cure**, exactly
+        // as that one is.
+        //
+        // What it bounds is the one thing that is not a matter of taste: a
+        // body with nothing under it is in FREE FLIGHT, and free flight is
+        // `y'' = -g`. The reference path is re-seeded from the assembly itself
+        // on every step the pelvis probe finds ground -- so a contact, an
+        // explosion or a car may throw a corpse as hard as it likes -- and
+        // integrated as a parabola on every step it does not. The excess is
+        // taken off the CENTRE OF MASS and subtracted uniformly, so the limbs'
+        // motion relative to one another, which is the flail, is left exactly
+        // as the solver computed it.
+        {
+            let mut mass = 0.0f64;
+            let mut mom_y = 0.0f64;
+            let mut mass_y = 0.0f64;
+            for b in &spawned.bodies {
+                let m = bridge.world().body_mass(*b).unwrap_or(0.0);
+                if !(m.is_finite() && m > 0.0) {
+                    continue;
+                }
+                let v = bridge.world().body_linvel(*b).unwrap_or(DVec3::ZERO);
+                let t = bridge.world().body_translation(*b).unwrap_or(DVec3::ZERO);
+                if !(v.y.is_finite() && t.y.is_finite()) {
+                    continue;
+                }
+                mass += m;
+                mom_y += m * v.y;
+                mass_y += m * t.y;
+            }
+            if mass > 0.0 {
+                let com_y = mass_y / mass;
+                let com_vy = mom_y / mass;
+                // The probe under the pelvis has not run yet this step, so this
+                // is the last answer it gave -- which is the honest one: what
+                // the assembly was standing on when it was last asked.
+                let grounded = cm.runtime.ragdoll.on_ground;
+                match spawned.free_flight {
+                    Some(mut r) if !grounded => {
+                        let g = bridge.world().gravity().y;
+                        // 1. The velocity: free flight allows exactly `g*dt` of
+                        //    change and no more. A centre of mass rising faster
+                        //    than that is being pushed by nothing.
+                        let want_vy = r.vy + g * dt;
+                        let mut com_vy = com_vy;
+                        if com_vy > want_vy {
+                            let excess = com_vy - want_vy;
+                            for b in &spawned.bodies {
+                                let Some(v) = bridge.world().body_linvel(*b) else {
+                                    continue;
+                                };
+                                bridge
+                                    .world_mut()
+                                    .set_body_linvel(*b, DVec3::new(v.x, v.y - excess, v.z));
+                            }
+                            com_vy = want_vy;
+                        }
+                        // A centre of mass falling FASTER than the reference is
+                        // fine -- it hit something, or the speed clamp took a
+                        // bite -- and the reference follows it down, so the
+                        // difference is never banked into a later rise.
+                        r.vy = com_vy;
+                        // 2. The position, because a solver that corrects
+                        //    penetration moves bodies without moving their
+                        //    velocities: a purely positional drift would pass
+                        //    the check above and still leave the level.
+                        let want_y = r.y + r.vy * dt;
+                        if com_y > want_y + FREE_FLIGHT_SLACK_M {
+                            let excess = com_y - (want_y + FREE_FLIGHT_SLACK_M);
+                            for b in &spawned.bodies {
+                                let Some(t) = bridge.world().body_translation(*b) else {
+                                    continue;
+                                };
+                                bridge
+                                    .world_mut()
+                                    .set_body_translation(*b, DVec3::new(t.x, t.y - excess, t.z));
+                            }
+                            r.y = want_y + FREE_FLIGHT_SLACK_M;
+                        } else {
+                            r.y = com_y.min(want_y + FREE_FLIGHT_SLACK_M);
+                        }
+                        spawned.free_flight = Some(r);
+                    }
+                    // On the ground, or on the first step this has ever run for
+                    // this ragdoll: the reference IS the assembly. Whatever a
+                    // contact just did to it is legitimate by definition.
+                    _ => {
+                        spawned.free_flight = Some(FreeFlight {
+                            y: com_y,
+                            vy: com_vy,
+                        });
+                    }
+                }
             }
         }
         // **The pelvis decides which way up the character is.**
@@ -502,7 +655,6 @@ pub fn step_ragdoll(
         }
         // Settling: the root has to be slow for a while, not just for one step,
         // because a ragdoll at the top of its arc is momentarily slow too.
-        let mut spawned = spawned;
         if root_vel.length() < SETTLE_SPEED_MPS && on_ground {
             spawned.settled_s += dt;
         } else {
