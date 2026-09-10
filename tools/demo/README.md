@@ -46,8 +46,8 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
-                  class,attach,lock,engaged,incoming
-                  — THIRTY-FOUR columns, four rows a second, and NO header line:
+                  class,attach,lock,engaged,incoming,heat,on_scene
+                  — THIRTY-SIX columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -76,7 +76,7 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                             cone loses it, so a frame of the indicator has to be
                             triggered on it.
 
-                  and 33-34 are WPN2e's:
+                  and 33-36 are WPN2e's and its audit's:
 
                     engaged  how many responding units are pointing a weapon at
                              somebody RIGHT NOW. The police arrive over tens of
@@ -87,12 +87,27 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                     incoming rounds in the air the hero did NOT fire — "somebody
                              is shooting at me", as a number. Zero on every level
                              nobody has fired at the hero on.
+                    heat     the hero's own criminal heat (`CrimeRes`), which is
+                             what `Response::for_heat` reads and therefore the
+                             whole rung ladder: 0 cold, 1-2 a patrol, 3-5 two
+                             cars, 6+ SWAT. It bleeds off one point per
+                             `HEAT_DECAY_STEPS` (15 s) since the last sighting.
+                    on_scene units standing at an incident right now.
+
+                  The last two are the WPN2e AUDIT's, and they exist because two
+                  waves failed to diagnose this loop's own shootout leg with the
+                  columns in front of them: `engaged 0` is the same number for
+                  "nobody heard the shot", "the file went cold before the car
+                  arrived", "the car never arrived" and "the officer arrived and
+                  could not see you", and those are four different bugs in four
+                  different crates. `heat` and `on_scene` are the two that tell
+                  them apart.
 
                   The numbers above are ONE-based, which is how a person counts
                   columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
                   so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`,
-                  `lock` is `$c[31]`, `engaged` is `$c[32]` and `incoming` is
-                  `$c[33]`.
+                  `lock` is `$c[31]`, `engaged` is `$c[32]`, `incoming` is
+                  `$c[33]`, `heat` is `$c[34]` and `on_scene` is `$c[35]`.
 demo.log          every step the driver took, with timings
 ```
 

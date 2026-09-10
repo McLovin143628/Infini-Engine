@@ -1162,6 +1162,32 @@ impl HeroLog {
         // Both are zero for a session in which nobody is wanted, which is every
         // session before this wave.
         let engaged = inf_ecs::engage::engaged_units(sim.world());
+        // **AND THE WANTED SYSTEM ITSELF** (wave WPN2e audit), appended on the
+        // same rule. Two waves failed to diagnose the shootout leg because the
+        // loop's only instrument stopped at `engaged`: a run that photographs
+        // nothing cannot tell "nobody heard the shot", "the file went cold",
+        // "the car never arrived" and "the officer arrived and could not see
+        // you" apart, and those are four different bugs in four different
+        // crates.
+        //
+        // * `heat` — the hero's own `CrimeRes` heat, which is what
+        //   `Response::for_heat` reads and therefore the whole rung ladder;
+        // * `on_scene` — units whose `UnitRun::state` is `OnScene`, which is the
+        //   link between "a car was sent" and "an officer is standing here".
+        //
+        // Both are zero for every session before this wave and cost one absent
+        // resource read on a level with no crime.
+        let heat = guid
+            .map(|g| inf_ecs::crime::heat_of(sim.world(), g))
+            .unwrap_or(0);
+        let on_scene = inf_ecs::dispatch::dispatch_of(sim.world())
+            .map(|r| {
+                r.runs
+                    .values()
+                    .filter(|u| u.state == inf_ecs::dispatch::UnitState::OnScene)
+                    .count()
+            })
+            .unwrap_or(0);
         let incoming = guid
             .and_then(|g| {
                 inf_ecs::ballistics::round_pool(sim.world())
@@ -1170,7 +1196,7 @@ impl HeroLog {
             .unwrap_or(0);
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1215,7 +1241,9 @@ impl HeroLog {
                 attach,
                 lock,
                 engaged,
-                incoming
+                incoming,
+                heat,
+                on_scene
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1233,7 +1261,7 @@ impl HeroLog {
             // asserts against the armed branch above it and against the demo
             // README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

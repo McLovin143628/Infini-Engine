@@ -246,7 +246,7 @@ if ($DryRun -ne "") {
     #     A leg that reads a column the player stopped writing is the next fault
     #     of this shape, and it would throw exactly where fault 1 did.
     $width = $rows[-1].Split(",").Count
-    foreach ($i in @(5, 11, 22, 27, 28, 32, 33)) {
+    foreach ($i in @(5, 11, 22, 27, 28, 32, 33, 34, 35)) {
         if ($i -ge $width) {
             Say ("DRYRUN FAIL: a leg reads column {0} and the recording is {1} wide" -f $i, $width)
             $bad++
@@ -2341,9 +2341,16 @@ else {
             $peakEng = ($rowsE | ForEach-Object { [int]$_[32] } | Measure-Object -Maximum).Maximum
             $peakInc = ($rowsE | ForEach-Object { [int]$_[33] } | Measure-Object -Maximum).Maximum
             $peakBrass = ($rowsE | ForEach-Object { [int]$_[27] } | Measure-Object -Maximum).Maximum
+            $peakHeat = ($rowsE | ForEach-Object { [int]$_[34] } | Measure-Object -Maximum).Maximum
+            $peakScene = ($rowsE | ForEach-Object { [int]$_[35] } | Measure-Object -Maximum).Maximum
             Say "  peak engaged units : $peakEng"
             Say "  peak incoming rounds: $peakInc"
             Say "  peak casings alive : $peakBrass"
+            # **THE WANTED CHAIN, AS FOUR NUMBERS** (WPN2e audit). `engaged 0` is
+            # the same number for four different bugs; these are what tell them
+            # apart. See tools/demo/README.md.
+            Say "  peak heat on the hero: $peakHeat"
+            Say "  peak units on scene : $peakScene"
             Say "  shootout frames    : $shootFrames of 6"
         }
     }
