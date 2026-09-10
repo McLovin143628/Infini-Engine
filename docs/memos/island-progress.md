@@ -38607,3 +38607,153 @@ own comparison number was 0.083.
 authorable today**. `TyreCurves` is the pattern for anything else expensive: a
 derivation placed at the innermost call site is a derivation run at the innermost
 rate, and that cost 16.88 µs a car before it was hoisted.
+
+### VEH3a, PHASE 3 — CLAUSES 2, 3, 4 AND 6, FINISHED
+
+The carried list of phase 2 said seven of its nine items were later waves'. They
+were not: items 1–6 and 8 were inside this brief. This is them.
+
+#### THE TERRAIN'S OWN SURFACE (clause 2)
+
+The µ table reached module colliders and nothing else — and on a **heightfield**
+island that is nothing anybody drives on: one collider, fifty square kilometres,
+one friction value.
+
+`SurfaceMap` is a coarse `u8` grid over a terrain's own extent, built from two
+sources already in the level:
+
+| source | door | what it gives |
+|---|---|---|
+| the **splat** | `TerrainData::dominant_layer_at` | grass and forest floor → `Grass`, rock → `Gravel`, sand → `Sand` |
+| the **carriageway** | `traffic::streets_of` + `street_carriageway_half_m` | `Asphalt`, stamped **second** so a road laid over grass is a road |
+
+`SurfaceMapRes` is derived on `traffic::sync_carriageway`'s pattern and stamp, so
+both hosts build it from the same level data, it costs **no schema**, and a level
+whose blocks have not moved pays one stamp walk a step.
+
+**Cell size 4 m**, capped at `2^20` cells and coarsened by doubling if a terrain
+would blow it. Measured on the gate's own 320 m field: **49 284 cells = 49 284
+bytes**, and a 24 m street stamps **216** of them asphalt.
+
+**The arm** (`the_ground_under_the_wheel_decides_the_stop`): from 72 km/h the rig
+stops in **49.3 m on grass** and **64.5 m on sand** — the same car, the same
+brake, the same fixture with one splat layer repainted. The mutation named in the
+arm's doc is `SurfaceMap::at` returning `Asphalt` unconditionally, which makes the
+two numbers one.
+
+**The compound row**, which one grip scalar could never say: on the same sand,
+road tyres **52.6 m** and off-road tyres **37.0 m**.
+
+#### WETNESS (clause 2's `wet × 0.7`)
+
+`weather_at` reads the first enabled `SkyAtmosphere` in `Guid` order — so two
+hosts cannot pick different skies — and the bridge publishes its answer per wheel
+beside the surface. `weather_precipitation` goes into `surface_mu`'s third
+argument.
+
+**The arm** (`rain_lengthens_the_stop`): **39.8 m dry, 56.0 m in rain**, with the
+published wetness asserted against what the sky said before either stop is timed.
+
+#### THE AIR TEMPERATURE (clause 3) — and an honest finding
+
+**The P17 weather state owns no ambient temperature.** `WeatherParams` is
+coverage, cloud type, wind, fog density, precipitation and snowiness, and nothing
+else. So the ambient is **derived from `snowiness`** — the precipitation's PHASE,
+and the only field that carries the information, since precipitation falls as snow
+when the air is at or below freezing: **20 °C in rain, 0 °C in snow**, blended.
+
+That is a proxy. `weather_at`'s own doc says so, and a real ambient is a
+`WeatherParams` field plus a `SkyAtmosphere` slot — a schema move this wave's
+window did not price, so it is carried by name rather than smuggled in.
+
+**The arm** (`the_air_temperature_is_the_weathers`): rain **20.0 °C**, snow
+**0.0 °C**, and a tyre left running settles at each, the two settled temperatures
+differing by the ambient delta.
+
+#### THE KERB (clause 4) — and the number is not the one that was hoped for
+
+`Footprint` is now a Ring-0 `Resource` with `SHIPPED` and `CENTRE`, because there
+is no honest way to measure what four casts bought without running the **shipped
+path** with the patch collapsed to a point — the same lines, not a second copy.
+
+**Measured**, a wheel mounting a 12 cm kerb at 30 km/h, peak chassis vertical
+acceleration:
+
+| | peak |
+|---|---|
+| FOUR casts (shipped) | **4.7 m/s²** |
+| ONE cast (`Footprint::CENTRE`, the pre-VEH3a path) | **4.3 m/s²** |
+
+**The four-cast spike is 9 % LARGER, not smaller**, and the arm states it rather
+than claiming an improvement nobody measured. The reason is physical: the wider
+patch meets the kerb **earlier** — the leading corner finds it first — so the
+suspension has less time to take it. What four casts buy is the *normal* (the
+bilinear blend the tripwire proves is read), not a softer impact. The arm bounds
+the ratio at 1.5× so a genuinely worse sampling scheme still reds.
+
+#### THE GATE (clause 6) — `runtime/inf-player/tests/veh3a_gate.rs`
+
+**Sixteen arms**, the mutation for each named in the file's own header table, each
+with an engagement count so *the arm ran* and *something happened* stay two facts.
+
+| # | arm | mutation that reds it | engagement counted | the number |
+|---|---|---|---|---|
+| 1 | `the_feel_table_holds_within_five_percent` | any change to B/C/E | 800 contact-steps | reached 20.03 m/s, stopped in 49.4 m |
+| 2 | `the_magic_formula_is_not_the_old_curve` | `Pacejka::curve` → `tyre_curve` | 400 samples | **0.2127** apart at 0.34× peak, **0.0** at the peak |
+| 3 | `the_ground_under_the_wheel_decides_the_stop` | `SurfaceMap::at` → `Asphalt` | 49 284 cells, 200+ contacts each run | grass **49.3 m**, sand **64.5 m** |
+| 4 | `the_compound_row_changes_what_a_surface_is_worth` | `compound_factor` → 1.0 | 200+ contacts each run | road **52.6 m**, off-road **37.0 m** |
+| 5 | `rain_lengthens_the_stop` | `SURFACE_WET_MULT` → 1.0 | wetness asserted against the sky | dry **39.8 m**, rain **56.0 m** |
+| 6 | `a_burnout_heats_the_tyre_and_costs_it_grip` | `tyre_heat_rate` → 0.0 | **229** slipping steps | 20.0 → **21.1 °C** |
+| 7 | `the_air_temperature_is_the_weathers` | `weather_at`'s snow blend → constant | two ambients sampled | rain **20.0 °C**, snow **0.0 °C** |
+| 8 | `a_garbage_contact_normal_changes_the_trace` | `camber_at` → `static_deg` | 3 of 3 tilted normals distinct | 0 N level, then **−3028 / 2463 / −2463 N** |
+| 9 | `four_casts_do_not_make_a_kerb_worse` | the `Footprint` swap **is** the control | 1+ kerb crossing each run | **4.7** vs **4.3 m/s²** |
+| 10 | `the_substep_loop_runs_and_one_is_what_ships` | drop the local chassis advance | 400+ contact steps each N | **4.920 m** apart |
+| 11 | `every_v28_tunable_survives_the_wire` | drop a line from `from_tuning` | **100** fields moved | 100 authored, encoded, decoded, read back |
+| 12 | `the_v27_downgrade_loses_exactly_the_thirty_eight` | a 101st field with no rung | 62 + 38 | sorted and disjoint |
+| 13 | `the_vehicle_phase_costs_what_it_prints` | a per-force derivation put back | 64 cars, min of 5 each side | **0.3909 ms**, **6.11 µs a car**, budget 0.5 |
+| 14 | `the_surface_table_says_what_the_research_says` | any table edit | 6 rows restated from the doc | asphalt 1.00 … mud 0.35 |
+| 15 | `a_surface_map_answers_its_own_extent_and_nothing_else` | drop the bounds check | 49 284 cells | 4.0 m, 49 284 bytes |
+| 16 | `a_road_laid_over_grass_is_a_road` | stamp streets before the splat | 216 of 49 284 cells | the road wins |
+
+**PIE == shipping** is not duplicated in the file and the header says why:
+`island_gate::pie_equals_shipping_on_an_island_drive` drives the cooked island on
+both hosts and compares them step for step, and it is **green at this HEAD with
+the model reading B/C/E, the surface map and the contact normal** — which is the
+re-bless this wave owes and its cause. A second 232-second cook would measure the
+same thing twice.
+
+#### THREE THINGS THE GATE FOUND WHILE BEING WRITTEN
+
+Each is recorded in the code rather than quietly fixed:
+
+1. **The kerb spike is larger, not smaller** — above.
+2. **A line-lock burnout produces no slip on tarmac.** This rig's brakes out-hold
+   its engine, 13 kN against 8, so brake-and-throttle is a parked car: measured at
+   **zero** slipping steps. The arm runs on sand under slick tyres (µ 0.25), where
+   the drive really does outrun the grip, and says why.
+3. **The budget arm was timing the wrong phase.** `sync_from_world` is the
+   bridge's own phase and is paid by every level with or without a car in it;
+   timing it inside the loop put 64 cars at **0.5250 ms** against a 0.5 budget.
+   The vehicle phase alone is **0.3909**.
+
+#### THE CARRIED LIST, AS IT NOW STANDS
+
+1. **No frames, and the editor was not relaunched** (clause 7's demo). The HUD
+   row, the `hero.csv` columns and `tools/demo/demo.ps1 -PlayMode window` on the
+   island are **not built**. This is the one item of the coordinator's list that
+   is not done, and it is not done because the turn ran out, not because it was
+   refused.
+2. **The sub-step chassis advance is linear only** — the angular half needs the
+   body's inertia tensor, which is on rapier's side of the seam. **Moot at the
+   shipped N = 1**, where the loop does not run.
+3. **31 of the 38 tunables have no consumer yet** — every VEH3b/c/e/g row. The
+   one-window law working as intended; each is named with its wave in the ladder
+   rung.
+4. **There is no ambient TEMPERATURE in the weather state** (new, measured). The
+   air is derived from `snowiness`; a real ambient costs a `WeatherParams` field
+   and a `SkyAtmosphere` slot.
+5. **The four-cast kerb spike is 9 % larger than the one-cast spike** (new,
+   measured). What the four casts buy is the normal, not a softer impact.
+6. **`SurfaceMap` has no `Mud` producer from a terrain** (new). The island's four
+   splat layers are grass, rock, forest floor and sand; mud is reachable only
+   through a collider's friction band.
