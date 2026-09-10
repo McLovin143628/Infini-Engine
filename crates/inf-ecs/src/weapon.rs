@@ -1656,7 +1656,7 @@ pub const RELOAD_TRIGGER: &str = "weapon_reload";
 ///
 /// One name, exported, for [`RELOAD_NOTIFY`]'s reason verbatim: the pose step
 /// fires it when the throw additive crosses
-/// [`inf_anim::THROW_RELEASE_FRAC`](inf_anim::THROW_RELEASE_FRAC) and
+/// [`inf_anim::THROW_RELEASE_FRAC`] and
 /// `inf_physics::d3::gameplay::step_throws` consumes it, and a notify spelled
 /// twice is a grenade that never leaves the hand on exactly the rigs that spell
 /// it the other way.
