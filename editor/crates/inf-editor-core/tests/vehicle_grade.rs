@@ -472,32 +472,55 @@ struct Spec {
 /// diesel van is not, and a van's brakes work on a van's mass.
 /// (`audit:` VEH2a — the wave wrote "420 N·m" and "five-second"; the catalogue
 /// row says 460 and the arm measures 3.98 s.)
+/// **THE BAND IS FIVE PER CENT** (VEH3a's audit), and it was sixty.
+///
+/// The VEH3 arc's ruling asks the magic formula to *"reproduce the VEH2a feel
+/// table within 5 % (sports 0-100 3.98 s / sedan 7.37 / suv 7.40 / van 17.43 /
+/// truck 0-78 6.75)"*, and wave VEH3a measured exactly that — by hand, at
+/// `HEAD~4` and at `HEAD`, 0.00 % moved on all five rows. What it did not do is
+/// GATE it: these rows carried `2.5..8.0 s` and `20..46 m` for a car that
+/// measures 3.98 s and 31.1 m, so a later wave could have moved the sports row
+/// by forty per cent and every arm in the repository would have stayed green.
+/// The number the whole arc is judged on had no arm.
+///
+/// Each row is now its MEASURED value plus and minus five per cent, re-measured
+/// on the audit's own tree and identical to the wave's to every printed digit.
+/// The top-speed fraction is left as it was: a governor is a different claim and
+/// `0.88..1.02` of a limiter is already the shape of one.
+///
+/// **If this reds on a platform that is not the one it was measured on**, that
+/// is the finding and not a reason to widen it back: the fixed step is
+/// deterministic and the tyre curve is portable (`patan2_64`, `psin64`), so a
+/// difference here is a real one and it should be read before it is blessed.
 const SPECS: [Spec; 5] = [
     Spec {
         id: "sports",
         sprint_to_mps: 27.78,
-        sprint_max_s: 8.0,
-        sprint_min_s: 2.5,
-        brake_max_m: 46.0,
-        brake_min_m: 20.0,
+        // 3.98 s and 31.1 m, +/- 5 % — see the SPECS doc above.
+        sprint_max_s: 4.18,
+        sprint_min_s: 3.78,
+        brake_max_m: 32.7,
+        brake_min_m: 29.5,
         top_frac: (0.88, 1.02),
     },
     Spec {
         id: "sedan",
         sprint_to_mps: 27.78,
-        sprint_max_s: 16.0,
-        sprint_min_s: 4.0,
-        brake_max_m: 60.0,
-        brake_min_m: 22.0,
+        // 7.37 s and 36.4 m, +/- 5 %.
+        sprint_max_s: 7.74,
+        sprint_min_s: 7.00,
+        brake_max_m: 38.2,
+        brake_min_m: 34.6,
         top_frac: (0.88, 1.02),
     },
     Spec {
         id: "suv",
         sprint_to_mps: 27.78,
-        sprint_max_s: 16.0,
-        sprint_min_s: 4.0,
-        brake_max_m: 70.0,
-        brake_min_m: 24.0,
+        // 7.40 s and 40.7 m, +/- 5 %.
+        sprint_max_s: 7.77,
+        sprint_min_s: 7.03,
+        brake_max_m: 42.7,
+        brake_min_m: 38.7,
         top_frac: (0.88, 1.02),
     },
     // Limited to 32 m/s (115 km/h), so 100 km/h is reachable but only just —
@@ -507,10 +530,11 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "van",
         sprint_to_mps: 27.78,
-        sprint_max_s: 32.0,
-        sprint_min_s: 9.0,
-        brake_max_m: 85.0,
-        brake_min_m: 30.0,
+        // 17.43 s and 50.4 m, +/- 5 %.
+        sprint_max_s: 18.30,
+        sprint_min_s: 16.56,
+        brake_max_m: 52.9,
+        brake_min_m: 47.9,
         top_frac: (0.88, 1.02),
     },
     // Limited to 27 m/s (97 km/h): timed to 80 % of its own limiter, which is
@@ -518,10 +542,11 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "truck",
         sprint_to_mps: 21.6,
-        sprint_max_s: 18.0,
-        sprint_min_s: 4.0,
-        brake_max_m: 55.0,
-        brake_min_m: 18.0,
+        // 6.75 s and 32.7 m, +/- 5 %.
+        sprint_max_s: 7.09,
+        sprint_min_s: 6.41,
+        brake_max_m: 34.3,
+        brake_min_m: 31.1,
         top_frac: (0.88, 1.02),
     },
 ];
