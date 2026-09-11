@@ -741,6 +741,39 @@ impl PhysicsWorld3D {
         (tracked, touching)
     }
 
+    /// **Is this body TOUCHING anything solid right now?** (wave VEH3c)
+    ///
+    /// Non-destructive, unlike
+    /// [`drain_contact_events`](Self::drain_contact_events) — a host already
+    /// owns that drain and a second consumer would steal its events. This walks
+    /// the narrow phase's own contact graph for each of the body's colliders and
+    /// answers on the first pair that has an ACTIVE contact, so it is `O(pairs
+    /// on this body)` and answers `false` on the first `graph_indices` miss for
+    /// a body nothing is near.
+    ///
+    /// # Why a damage model needs it
+    ///
+    /// A velocity change is not evidence that the world hit you. Measured the
+    /// hard way: the dispatcher writes an escorted unit's pose along a nav path
+    /// and zeroes its velocities, so a parked ambulance read a 1 370 N.s blow
+    /// **every step for four thousand steps**, and a unit pulling away from its
+    /// apron read 14 020 N.s of "crash" from going 0 to 2.6 m/s in one step.
+    /// Neither was touching anything. A blow has to have something on the other
+    /// end of it, and this is how a caller asks.
+    pub fn body_has_contact(&self, body: BodyId3D) -> bool {
+        let Some(rb) = self.bodies.get(body.0) else {
+            return false;
+        };
+        for c in rb.colliders() {
+            for pair in self.narrow_phase.contact_pairs_with(*c) {
+                if pair.has_any_active_contact() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Remove and return all contact events accumulated since the last drain,
     /// sorted deterministically by `(collider_a, collider_b, phase)`. Pair member
     /// order is canonicalized (`collider_a <= collider_b`) so a given pair always

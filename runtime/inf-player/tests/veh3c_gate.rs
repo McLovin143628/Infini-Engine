@@ -568,9 +568,14 @@ fn the_crash_table_is_monotone_in_speed() {
     assert!(rows[3].3 > 0, "a 60 km/h crash shed nothing");
 }
 
-/// **A shed part is a body on the ground**, with a part's own mass.
+/// **A shed part falls to the ground and lies there**, with a part's own mass.
+///
+/// It is DRAWN debris and not a rapier body — see
+/// `inf_physics::d3::bodywork`'s own note for the three measurements that
+/// decided it — so what this reads is the `Debris` row the bodywork owns and the
+/// entity's own `Transform` following it down.
 #[test]
-fn the_shed_part_is_a_body_on_the_ground() {
+fn the_shed_part_falls_to_the_ground_and_lies_there() {
     let mut rig = Rig::row_at("sedan", -60.0, Some(0.0));
     rig.crash(60.0 / 3.6);
     let (guid, state) = rig
@@ -582,38 +587,103 @@ fn the_shed_part_is_a_body_on_the_ground() {
         .entity_of(guid)
         .expect("a shed part is still an entity");
     assert!(
-        rig.world.world().get::<RigidBody3D>(e).is_some(),
-        "the shed bumper has no body"
-    );
-    assert!(
         rig.world.parent_of(e).is_none(),
         "the shed bumper is still a child of the car it came off"
     );
-    let body = rig
-        .bridge
-        .body_of(guid)
-        .expect("the shed bumper is in the solver");
-    let mass = rig.bridge.world().body_mass(body).unwrap_or(0.0);
-    let y0 = rig.bridge.world().body_translation(body).unwrap().y;
-    rig.step(120);
-    let y1 = rig
-        .bridge
-        .world()
-        .body_translation(body)
-        .map(|p| p.y)
-        .unwrap_or(y0);
-    eprintln!("the shed bumper weighs {mass:.2} kg and fell from {y0:.3} m to {y1:.3} m");
+    assert!(
+        rig.bridge.body_of(guid).is_none(),
+        "the shed bumper is a rapier body -- debris the solver can pair with a car is what stopped a responding ambulance getting home"
+    );
+    let half = rig
+        .world
+        .entity_of(CHASSIS)
+        .and_then(|c| rig.world.world().get::<Collider3D>(c))
+        .map(|c| c.half_extents)
+        .unwrap();
+    let mass = inf_ecs::vehicle::part_mass_kg(BodyPartKind::Bumper, state.half_frac, half);
+    let debris = |w: &EcsWorld| -> Option<inf_ecs::bodywork::Debris> {
+        inf_ecs::bodywork::damage_of(w)
+            .and_then(|r| r.shed.iter().find(|d| d.guid == guid).copied())
+    };
+    let d0 = debris(&rig.world).expect("the bumper is in the debris list");
+    let y0 = d0.at.y;
+    rig.step(180);
+    let d1 = debris(&rig.world).expect("the bumper is still in the debris list");
+    let t = rig
+        .world
+        .entity_of(guid)
+        .and_then(|e| rig.world.world().get::<Transform>(e))
+        .map(|t| t.translation)
+        .unwrap();
+    eprintln!(
+        "the shed bumper weighs {mass:.2} kg, fell from {y0:.3} m to {:.3} m (rest {:.3}), drawn at {:.3}",
+        d1.at.y, d1.rest_y, t.y
+    );
     assert!(
         (3.0..=40.0).contains(&mass),
         "the shed bumper weighs {mass:.2} kg"
     );
     assert!(
-        y1 < y0 + 0.05,
-        "the shed bumper rose from {y0:.3} to {y1:.3}"
+        d1.at.y <= y0 + 1e-9,
+        "the shed bumper rose from {y0:.3} to {:.3}",
+        d1.at.y
     );
     assert!(
-        y1 > -2.0,
-        "the shed bumper fell through the world to {y1:.3}"
+        (d1.at.y - d1.rest_y).abs() < 1e-9,
+        "the shed bumper is still falling at {:.3} against a rest of {:.3}",
+        d1.at.y,
+        d1.rest_y
+    );
+    assert!(
+        (t.y - d1.at.y).abs() < 1e-9,
+        "the drawn bumper is at {:.3} and the debris row says {:.3}",
+        t.y,
+        d1.at.y
+    );
+    assert!(
+        d1.at.y > -2.0,
+        "the shed bumper fell through the world to {:.3}",
+        d1.at.y
+    );
+    // **AND THE INTEGRATOR REALLY INTEGRATES.** The bumper above shed INTO the
+    // wall it hit, so its own rest is where it let go and "it fell" would be a
+    // claim about nothing. Lift the row two metres and watch it come back down:
+    // that is the arm, and it reds the day `step_debris` stops stepping.
+    {
+        let res = inf_ecs::bodywork::damage_mut(&mut rig.world);
+        let d = res
+            .shed
+            .iter_mut()
+            .find(|d| d.guid == guid)
+            .expect("the row is there");
+        d.at.y += 2.0;
+        d.vel = Vec3d::ZERO;
+    }
+    let lifted = debris(&rig.world).unwrap().at.y;
+    rig.step(1);
+    let after_one = debris(&rig.world).unwrap().at.y;
+    rig.step(120);
+    let landed = debris(&rig.world).unwrap();
+    eprintln!(
+        "lifted to {lifted:.3}, {after_one:.3} after one step, {:.3} after two seconds (rest {:.3})",
+        landed.at.y, landed.rest_y
+    );
+    assert!(
+        after_one < lifted,
+        "one step of gravity moved it from {lifted:.3} to {after_one:.3}"
+    );
+    assert!(
+        (landed.at.y - landed.rest_y).abs() < 1e-9,
+        "it came to rest at {:.3} and its ground is {:.3}",
+        landed.at.y,
+        landed.rest_y
+    );
+    assert_eq!(landed.vel, Vec3d::ZERO, "a landed part is still moving");
+    // …and it is reaped.
+    rig.step((inf_ecs::bodywork::PART_DEBRIS_LIFETIME_S * 60.0) as u32 + 10);
+    assert!(
+        debris(&rig.world).is_none() && rig.world.entity_of(guid).is_none(),
+        "the shed bumper outlived its own debris lifetime"
     );
 }
 
@@ -1208,12 +1278,13 @@ fn a_blast_reaches_the_car_and_not_the_panel_that_came_off_it() {
         .part_named("bumper_front")
         .expect("it has a front bumper");
     assert_eq!(shed.latch, PartLatch::Shed, "nothing came off to test with");
-    let shed_body = rig
-        .bridge
-        .body_of(shed_guid)
-        .expect("the shed bumper is in the solver");
     let before_hull = rig.damage().hull_j;
-    let before_at = rig.bridge.world().body_translation(shed_body).unwrap();
+    let debris_y = |w: &EcsWorld| -> f64 {
+        inf_ecs::bodywork::damage_of(w)
+            .and_then(|r| r.shed.iter().find(|d| d.guid == shed_guid).map(|d| d.at.y))
+            .unwrap_or(f64::NAN)
+    };
+    let before_at = debris_y(&rig.world);
 
     // The candidate set the blast walks, measured rather than asserted about.
     let candidates: Vec<Uuid> = rig.bridge.vehicle_guids();
@@ -1230,14 +1301,17 @@ fn a_blast_reaches_the_car_and_not_the_panel_that_came_off_it() {
         "a 7 kg shed bumper is a blast candidate — this is the WPN2d levitation \
          defect with a bumper in it"
     );
+    assert!(
+        rig.bridge.body_of(shed_guid).is_none(),
+        "a shed part is a rapier body, so a blast could reach it through the solver"
+    );
 
     // …and the joules really do reach the chassis through the one door.
     let blast_at = rig.at() + DVec3::new(0.85, -0.30, -0.20);
     inf_physics::d3::bodywork::hit_vehicle(&mut rig.world, &rig.bridge, CHASSIS, blast_at, 4_000.0);
     let after_hull = rig.damage().hull_j;
     rig.step(60);
-    let after_at = rig.bridge.world().body_translation(shed_body).unwrap();
-    let rose = after_at.y - before_at.y;
+    let rose = debris_y(&rig.world) - before_at;
     eprintln!(
         "4 000 J of blast: the hull went {before_hull:.0} -> {after_hull:.0} J and the shed bumper \
          moved {rose:+.4} m vertically in the second after"

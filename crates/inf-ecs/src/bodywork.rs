@@ -332,12 +332,12 @@ pub struct VehicleDamage {
     /// trap `DrivetrainState::clutch_slip_rad_s` is kept out of the VEH3b fold
     /// to avoid.
     pub last_vel: Vec3d,
-    /// **What this car's own model applied last step**, newtons — the force
-    /// whose work is not a crash.
+    /// **Where the chassis was at the end of the last step**, world metres —
+    /// what a TELEPORT is measured against.
     ///
     /// NOT FOLDED and not part of [`is_quiet`](Self::is_quiet), for
     /// [`last_vel`](Self::last_vel)'s reason exactly.
-    pub last_force: Vec3d,
+    pub last_pos: Vec3d,
     /// Whether [`last_vel`](Self::last_vel) has ever been written. The first
     /// step of a car's life has no previous velocity, and treating a standing
     /// start as a 0 m/s crash would be an impulse of exactly zero — harmless —
@@ -417,6 +417,39 @@ impl VehicleDamage {
     }
 }
 
+/// **One piece of a car lying in the road** (wave VEH3c).
+///
+/// # It is DRAWN and it is not a rapier body, and that is a ruling
+///
+/// A shed panel is integrated by `inf_physics::d3::bodywork::step_debris` —
+/// `at += v·dt`, `v.y -= g·dt`, stop at the ground it was over — rather than
+/// handed to the solver. See that function's own note for the three
+/// measurements behind it; the short version is that a bumper in front of a
+/// responding ambulance went under its wheel rays and stopped it, and a door on
+/// a real hinge, held to a chassis the dispatcher teleports, launched one to
+/// 1 705 metres.
+///
+/// It is on the RESOURCE and not in the trace's per-part rows: a piece of
+/// debris is a pose, and the pose reaches the trace through the entity's own
+/// `Transform` in `sim_snapshot`'s first section, exactly as every other drawn
+/// thing's does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Debris {
+    /// The part entity, still in the world and no longer anybody's child.
+    pub guid: Uuid,
+    /// The step it left the car.
+    pub born: u64,
+    /// Where it is, world metres.
+    pub at: Vec3d,
+    /// How fast it is going, m/s. Zero once it has landed.
+    pub vel: Vec3d,
+    /// The `y` it comes to rest at — one downward ray, cast once, at the moment
+    /// it shed.
+    pub rest_y: f64,
+    /// How fast it tumbles, degrees per second, about each axis.
+    pub spin_deg_s: Vec3d,
+}
+
 /// **Every vehicle's damage, keyed by chassis** — the resource.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct VehicleDamageRes {
@@ -431,9 +464,9 @@ pub struct VehicleDamageRes {
     /// because nothing ever aged. Not folded: it is a clock, and a clock in a
     /// determinism trace is a clock in a determinism trace.
     pub steps: u64,
-    /// The shed parts still lying about, oldest first: `(part guid, the step it
-    /// was shed)`. The debris cap's own list.
-    pub shed: Vec<(Uuid, u64)>,
+    /// The shed parts still lying about, oldest first — the debris cap's own
+    /// list, and the pose of every piece.
+    pub shed: Vec<Debris>,
     /// The glass shards still drawn: `(shard guid, the step it was thrown)`.
     pub shards: Vec<(Uuid, u64)>,
 }

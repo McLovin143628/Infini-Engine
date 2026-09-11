@@ -79,19 +79,6 @@ pub struct VehicleOutcome {
     ///
     /// [`Vehicle::engine_state`]: inf_ecs::vehicle::Vehicle::engine_state
     pub revs: f64,
-    /// **The total force this step's model asked for**, newtons, world space
-    /// (wave VEH3c) — the sum of every [`WheelForce`] the class answered with.
-    ///
-    /// Published so the BODYWORK can tell a crash from a car doing its job. A
-    /// blow is `m*dv` across a step, and a car's own suspension, tyres and
-    /// aerodynamics deliver most of that most of the time: a saloon settling on
-    /// its springs on the step it is spawned changes speed by more than a 15 km/h
-    /// shunt does. Subtracting what the model itself applied leaves the impulse
-    /// the WORLD delivered, which is the only one a bumper should come off for.
-    ///
-    /// Measured before it existed: a parked car folded 439 trace bytes and its
-    /// boot lid dented 0.3 mm, because the settle read as a crash from below.
-    pub applied_n: DVec3,
     /// How hard the driver is asking, `[0, 1]` — the other half of the same
     /// answer.
     ///
@@ -124,7 +111,7 @@ pub fn step_vehicles(
         // last car on a level can be despawned while its own door is on the
         // floor -- so the bodywork step runs on the empty case too, where it is
         // one `is_none` on a level that never had a car.
-        super::bodywork::step_bodywork(world, bridge, dt, &[]);
+        super::bodywork::step_bodywork(world, bridge, dt);
         return Vec::new();
     }
     // **THE GROUND'S OWN SURFACE** (wave VEH3a), derived once a step and cheap
@@ -161,7 +148,7 @@ pub fn step_vehicles(
     // Here rather than in a sibling each host calls for `step_vehicles`' own
     // reason, one level down: a sibling would be a hand-maintained mirror, and
     // this rides the `vehicle_step` fence both hosts already carry.
-    super::bodywork::step_bodywork(world, bridge, dt, &out);
+    super::bodywork::step_bodywork(world, bridge, dt);
     out
 }
 
@@ -523,10 +510,8 @@ fn step_one(
     if !bridge.is_buoyant(chassis) {
         bridge.world_mut().reset_forces(body);
     }
-    let mut applied_n = DVec3::ZERO;
     for f in forces.iter() {
         if f.force != DVec3::ZERO {
-            applied_n += f.force;
             bridge
                 .world_mut()
                 .apply_force_at_point(body, f.force, f.point);
@@ -610,7 +595,6 @@ fn step_one(
         wheels_grounded: grounded,
         load_n,
         forward_mps,
-        applied_n,
         revs,
         load,
     })

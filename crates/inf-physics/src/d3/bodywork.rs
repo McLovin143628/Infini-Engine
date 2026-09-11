@@ -35,19 +35,16 @@ use glam::{DQuat, DVec3};
 use uuid::Uuid;
 
 use inf_ecs::bodywork::{
-    damage_mut, damage_of, part_pose, DamageLimits, PartLatch, PartState, VehicleDamage,
+    damage_mut, damage_of, part_pose, DamageLimits, Debris, PartLatch, PartState, VehicleDamage,
     GLASS_SHARDS, GLASS_SHARD_LIFETIME_S, LATCH_POP_FRAC, MAX_DENT_M, MAX_GLASS_SHARDS,
     MAX_SHED_PARTS, PART_DEBRIS_LIFETIME_S,
 };
-use inf_ecs::components::{
-    BodyKind3D, Collider3D, ColliderShape3DKind, GlobalTransform, Joint3D,
-    JointKind3D as SceneJointKind3D, MeshRef, RigidBody3D, Sprite, Transform, Visibility,
-};
+use inf_ecs::components::{Collider3D, GlobalTransform, MeshRef, Sprite, Transform, Visibility};
 use inf_ecs::math::Vec3d;
 use inf_ecs::vehicle::BodyPartKind;
 use inf_ecs::EcsWorld;
 
-use super::{BreakWatch3D, PhysicsBridge3D};
+use super::PhysicsBridge3D;
 
 /// **The smallest blow this model calls a crash**, newton-seconds.
 ///
@@ -56,6 +53,32 @@ use super::{BreakWatch3D, PhysicsBridge3D};
 /// exactly where "the driver did something" stops and "the car hit something"
 /// begins, and a car being driven hard sheds nothing.
 pub const CRASH_MIN_NS: f64 = 300.0;
+
+/// **How fast a car has to have been going for a blow to be a crash**, m/s.
+///
+/// Two metres a second, which is walking pace. Under it a car is parking, being
+/// nudged by a kerb, or being placed by something that is not the solver -- and
+/// none of those should cost it a bumper. A real shunt at 15 km/h is four.
+pub const CRASH_MIN_SPEED_MPS: f64 = 2.0;
+
+/// **How hard a blow has to stop a car for it to be a crash**, m/s^2.
+///
+/// Twenty-five, which is two and a half g. No tyre delivers it: a road car
+/// brakes at about 1.0 g and a racing slick at 1.5, so this floor is a property
+/// of the physics rather than of the car's mass -- which an impulse floor alone
+/// cannot be, because a five-tonne appliance braking normally puts more than a
+/// thousand newton-seconds into a step and a saloon doing the same puts two
+/// hundred.
+pub const CRASH_MIN_DECEL_MPS2: f64 = 25.0;
+
+/// **How far a chassis may drift from where its own velocity would have put it
+/// before this model calls it PLACED**, metres.
+///
+/// A quarter of a metre. A rapier body integrates its own position from its own
+/// velocity, so the discrepancy for a body the solver owns is the half-a-t-
+/// squared of one step -- micrometres. Anything at this scale is somebody
+/// writing a pose: the dispatcher's escort, a park, a tier respawn.
+pub const TELEPORT_M: f64 = 0.25;
 
 /// **The share of a crash's kinetic energy the HULL absorbs.**
 ///
@@ -83,6 +106,16 @@ pub const GLASS_CRASH_FRAC: f64 = 0.001;
 /// half of car is the levitating-ragdoll defect with a bumper in it.
 pub const SHED_VELOCITY_FRAC: f64 = 1.0;
 
+/// **How far below a shed part this model looks for the ground**, metres.
+///
+/// Eight. A panel that leaves a car on a bridge has a long way to fall and a
+/// bounded look for it; past this it simply keeps falling until it is reaped,
+/// which is what a part thrown off a cliff should do.
+pub const DEBRIS_GROUND_REACH_M: f64 = 8.0;
+
+/// **How fast a shed part tumbles**, degrees per second.
+pub const DEBRIS_SPIN_DEG_S: f64 = 220.0;
+
 /// The salt a glass shard's `Guid` is carved out of.
 const SHARD_SALT: u128 = 0x5645_4833_4347_4c41_5353_5348_4152_4400;
 
@@ -106,8 +139,8 @@ pub struct BodyworkReport {
     pub fires: usize,
     /// How many shed parts and shards were reaped this step.
     pub reaped: usize,
-    /// How many live hinges are being watched for their own break.
-    pub watched: usize,
+    /// How many shed parts are still lying about.
+    pub debris: usize,
 }
 
 /// One part, as the WORLD describes it — the facts gathered before any borrow
@@ -131,6 +164,9 @@ struct CarFacts {
     vel: DVec3,
     pos: DVec3,
     rot: DQuat,
+    /// **Whether this chassis is TOUCHING anything solid** — the other half of
+    /// what makes a blow a crash.
+    touching: bool,
     /// **The three thresholds this row's own class sets.**
     ///
     /// Read off the chassis's own `VehicleClass` every step, and cheap enough to
@@ -152,7 +188,6 @@ pub fn step_bodywork(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     dt: f64,
-    outcomes: &[super::vehicle::VehicleOutcome],
 ) -> BodyworkReport {
     let mut report = BodyworkReport::default();
     if !dt.is_finite() || dt <= 0.0 {
@@ -202,24 +237,20 @@ pub fn step_bodywork(
         for car in &cars {
             let row = res.rows.entry(car.chassis).or_default();
             for p in &car.parts {
-                let slot = row
-                    .parts
+                // **WRITTEN ONCE, ON THE STEP THE PART IS FIRST SEEN.**
+                //
+                // The baseline is what the LEVEL says and it never changes. The
+                // first cut re-wrote it from the entity's live `Transform` every
+                // step, which is a feedback loop with a measurement: this walk
+                // only runs for a car that is not quiet, so the moment a bonnet
+                // was dented its "authored" box was re-read from the dented one
+                // and dented again — a 39.6 mm dent closed a 186 mm panel to
+                // **0.1 mm** in under two seconds, and it took the part's own
+                // FACING axis with it.
+                row.parts
                     .entry(p.guid)
                     .or_insert_with(|| PartState::authored(p.kind, p.centre_frac, p.half_frac));
-                slot.kind = p.kind.as_u8();
-                slot.centre_frac = p.centre_frac;
-                slot.half_frac = p.half_frac;
-                // THE WORLD WINS. A traffic car that crossed a tier boundary was
-                // despawned and respawned whole, so a part this table believed
-                // was hanging off its hinge is a fresh child again — and a row
-                // that went on believing otherwise would try to tear off a door
-                // that is already bolted on.
-                if p.child && slot.latch == PartLatch::Live {
-                    slot.latch = PartLatch::Latched;
-                    slot.angle_deg = 0.0;
-                    slot.vel_deg_s = 0.0;
-                    slot.target_deg = 0.0;
-                }
+                let _ = p.child;
             }
         }
     }
@@ -228,35 +259,75 @@ pub fn step_bodywork(
     let mut ignite: Vec<(Uuid, DVec3)> = Vec::new();
     let mut shatter: Vec<(Uuid, Uuid)> = Vec::new();
     for car in &cars {
-        // What this car's own model asked the solver for LAST step — the force
-        // whose work is not a crash. Absent for a car the phase did not step,
-        // which is a car with no wheels.
-        let applied = outcomes
-            .iter()
-            .find(|o| o.chassis == car.chassis)
-            .map(|o| o.applied_n)
-            .unwrap_or(DVec3::ZERO);
         let Some(row) = damage_mut(world).rows.get_mut(&car.chassis) else {
             continue;
         };
         let mass = car.mass.max(1e-6);
-        // The velocity change the WORLD delivered: what actually happened, less
-        // gravity and less what this car's own suspension, tyres and aero asked
-        // for on the step it happened.
-        let owed = (row.last_force.to_dvec3() / mass + DVec3::new(0.0, -9.81, 0.0)) * dt;
         let dv = if row.seen {
-            car.vel - row.last_vel.to_dvec3() - owed
+            car.vel - row.last_vel.to_dvec3()
         } else {
             DVec3::ZERO
         };
+        // **WAS IT PLACED, OR DID IT DRIVE?** A rapier body integrates its own
+        // position from its own velocity, so a body whose position did not
+        // follow it was written by somebody. That is not a rare case: the
+        // dispatcher's `escort` drags a lagging unit along its nav path and
+        // zeroes both velocities, `park` puts one back on its apron, and a
+        // traffic car crossing a tier boundary is despawned and respawned at the
+        // same guid.
+        let drift = if row.seen {
+            (car.pos - row.last_pos.to_dvec3() - car.vel * dt).length()
+        } else {
+            0.0
+        };
+        let placed = drift > TELEPORT_M;
         row.last_vel = Vec3d::from_dvec3(car.vel);
-        row.last_force = Vec3d::from_dvec3(applied);
+        row.last_pos = Vec3d::from_dvec3(car.pos);
         row.seen = true;
         let j = mass * dv.length();
         if j.is_finite() && j > report.peak_impulse_ns {
             report.peak_impulse_ns = j;
         }
-        if !j.is_finite() || j < CRASH_MIN_NS {
+        // **A CRASH IS FOUR FACTS AT ONCE**, and every one of them was paid for.
+        //
+        // The first cut was `m*dv` less gravity and less the force the model
+        // itself asked for, on the reasoning that what is left is what the world
+        // delivered. That reasoning has a hole in it: the force a car's
+        // suspension asks for is NOT the net force on it when the chassis is
+        // also resting on something. The EMS fixture's van sits on its belly
+        // (`size_the_suspension`'s own documented failure), so its struts asked
+        // for **107 kN** on a 2.6 t body and the ground quietly cancelled it --
+        // and the model read the difference as a **1 370 N.s blow every step for
+        // four thousand steps**. On top of that the dispatcher zeroes an
+        // escorted unit's velocities, so a unit pulling off its apron read
+        // **14 020 N.s** from going 0 to 2.6 m/s in a single step. The cruiser
+        // shed its bumper, the appliance popped its tailgate, and the joint that
+        // then tried to hold a door onto a chassis being teleported along a nav
+        // path launched an ambulance to **1 705 metres**.
+        //
+        // So the applied-force correction is gone and four plain facts stand in
+        // its place. A crash is a blow that
+        //
+        // * is a real DECELERATION -- harder than any tyre can deliver
+        //   ([`CRASH_MIN_DECEL_MPS2`]), which is what makes the floor a property
+        //   of the physics rather than of the car's mass;
+        // * is carried by a body that was MOVING ([`CRASH_MIN_SPEED_MPS`]);
+        // * SLOWED IT DOWN -- an impulse that speeds a car up is somebody
+        //   writing its state;
+        // * and lands on a body that is TOUCHING something. A blow has to have
+        //   something on the other end of it.
+        //
+        // …on a car that was not PLACED this step.
+        let was = car.vel - dv;
+        let decel = dv.length() / dt;
+        if !j.is_finite()
+            || placed
+            || j < CRASH_MIN_NS
+            || decel < CRASH_MIN_DECEL_MPS2
+            || was.length() < CRASH_MIN_SPEED_MPS
+            || car.vel.length() > was.length()
+            || !car.touching
+        {
             continue;
         }
         report.crashes += 1;
@@ -336,7 +407,10 @@ pub fn step_bodywork(
             .map(|r| {
                 r.parts
                     .iter()
-                    .filter(|(_, s)| s.latch == PartLatch::Latched)
+                    // **Latched AND Live.** A part that has been knocked open
+                    // is still a child of the chassis and is still drawn by the
+                    // same hinge — `Live` means *open*, not *elsewhere*.
+                    .filter(|(_, s)| s.latch.attached())
                     .map(|(g, s)| (*g, kind_of_state(s), *s))
                     .collect()
             })
@@ -378,91 +452,52 @@ pub fn step_bodywork(
         }
     }
 
-    // ── 5. the parts that are no longer children ────────────────────────────
-    let mut watches: Vec<BreakWatch3D> = Vec::new();
-    let mut breaks: Vec<(Uuid, Uuid)> = Vec::new();
+    // ── 5. the parts that have LEFT the car ─────────────────────────────────
+    //
+    // **A DETACHED PART IS DRAWN DEBRIS AND NOT A RAPIER BODY**, and that is a
+    // ruling with three measurements behind it.
+    //
+    // The first cut gave a shed part its own dynamic body and gave a POPPED one
+    // a body plus a real rapier revolute back to the chassis, watched for its
+    // own break by `d3::joint::BreakWatch3D`. Every one of those is a new
+    // physics object attached to, or lying in front of, a car that is still
+    // being driven — and the EMS fixture measured what that costs. A bumper that
+    // came off in front of a responding ambulance went under its own wheel rays
+    // and stopped it getting home; a door on a hinge, held to a chassis the
+    // dispatcher teleports along a nav path and zeroes the velocities of, was
+    // yanked by its own joint until the **ambulance was at 1 705 metres**. Three
+    // EMS gates that predate this wave went red, and the matrix says exactly
+    // which half each of them was: two on the debris, one on the joint.
+    //
+    // So a part that leaves a car cannot interfere with a car. A SHED part is
+    // reparented to the root, keeps the velocity it left with, falls under
+    // gravity to the ground it was over and lies there until it is reaped — all
+    // of it arithmetic in this function, deterministic on both hosts, and
+    // invisible to the solver. A POPPED part stays a CHILD and swings open on
+    // the analytic hinge it already had.
+    //
+    // What that costs is named rather than hidden: **a bumper in the road cannot
+    // be run over and an open door cannot be torn off by a lamp post.** The
+    // facade door those need — `joint_impulse` and `break_over_threshold`, with
+    // their own arms in `joints3d.rs` — is built and is not called from here.
     for car in &cars {
-        let limits = car.limits;
         let detaching: Vec<(Uuid, BodyPartKind, PartState)> = damage_of(world)
             .and_then(|r| r.rows.get(&car.chassis))
             .map(|r| {
                 r.parts
                     .iter()
-                    .filter(|(_, s)| s.latch == PartLatch::Live || s.latch == PartLatch::Shed)
+                    .filter(|(_, s)| s.latch == PartLatch::Shed)
                     .map(|(g, s)| (*g, kind_of_state(s), *s))
                     .collect()
             })
             .unwrap_or_default();
         for (guid, kind, state) in detaching {
-            let hinged = state.latch == PartLatch::Live;
-            detach(world, car, guid, kind, &state, hinged, step);
-            if hinged {
-                if let Some(j) = bridge.joint_of(guid) {
-                    watches.push(BreakWatch3D {
-                        joint: j,
-                        threshold_ns: limits.part_break_impulse_ns,
-                    });
-                    breaks.push((car.chassis, guid));
-                }
-            } else if state.shed_step + 2 >= step {
-                // It leaves with the car and no faster — the WPN2d law.
-                if let Some(b) = bridge.body_of(guid) {
-                    bridge
-                        .world_mut()
-                        .set_body_linvel(b, car.vel * SHED_VELOCITY_FRAC);
-                }
-            }
+            shed_to_debris(world, bridge, car, guid, kind, &state, step);
         }
     }
-    report.watched = watches.len();
 
-    // ── 6. the breaks ───────────────────────────────────────────────────────
-    if !watches.is_empty() {
-        let broken = bridge.world_mut().break_over_threshold(&watches);
-        for b in broken {
-            let Some(idx) = watches.iter().position(|w| w.joint == b.joint) else {
-                continue;
-            };
-            let (chassis, part) = breaks[idx];
-            let car = cars.iter().find(|c| c.chassis == chassis);
-            if let Some(e) = world.entity_of(part) {
-                world.world_mut().entity_mut(e).remove::<Joint3D>();
-                // A shed part is SOLID: it has to land on the road rather than
-                // pass through it, where a swinging one is deliberately not (see
-                // `detach`).
-                if let Some(mut c) = world.world_mut().get_mut::<Collider3D>(e) {
-                    c.sensor = false;
-                }
-                // **AND IT IS MOVED CLEAR AS IT LETS GO**, for the reason a
-                // freshly shed part is spawned clear: a solid body that appears
-                // overlapping the chassis is a depenetration force with nowhere
-                // to go, and that force put a 7 kg bumper 0.8 m into the air the
-                // first time this wave measured it. A door that tore off its
-                // hinge at 40 degrees open is half inside the car it came off,
-                // so it is stepped away from the chassis centre by a hand's
-                // width along the line it is already on.
-                if let Some(c) = car {
-                    if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
-                        let away = (t.translation.to_dvec3() - c.pos).normalize_or_zero();
-                        if away != DVec3::ZERO {
-                            t.translation =
-                                Vec3d::from_dvec3(t.translation.to_dvec3() + away * 0.15);
-                        }
-                    }
-                }
-            }
-            if let Some(s) = damage_mut(world)
-                .rows
-                .get_mut(&chassis)
-                .and_then(|r| r.parts.get_mut(&part))
-            {
-                s.latch = PartLatch::Shed;
-                s.shed_step = step;
-            }
-            damage_mut(world).shed.push((part, step));
-            report.shed += 1;
-        }
-    }
+    // ── 6. the debris falls ─────────────────────────────────────────────────
+    report.debris = step_debris(world, dt);
 
     // ── 7. the glass ────────────────────────────────────────────────────────
     for (chassis, pane) in shatter {
@@ -530,6 +565,7 @@ fn car_facts(
     let rot = w.body_rotation(body)?;
     let vel = w.body_linvel(body).unwrap_or(DVec3::ZERO);
     let mass = w.body_mass(body).unwrap_or(0.0);
+    let touching = w.body_has_contact(body);
     let mut parts = Vec::new();
     if walk {
         for child in world.children_of(entity) {
@@ -596,6 +632,7 @@ fn car_facts(
         pos,
         rot,
         limits: DamageLimits::of(world, chassis),
+        touching,
         parts,
         wheels,
     })
@@ -616,24 +653,24 @@ fn kind_of_state(s: &PartState) -> BodyPartKind {
     BodyPartKind::of(name, s.centre_frac, s.half_frac)
 }
 
-/// **Take a part off the hierarchy and give it a body** — the one door both the
-/// LIVE and the SHED regimes go through.
+/// **Take a part off the car and make it debris** (wave VEH3c) — the one door a
+/// shed part goes through.
 ///
-/// Idempotent: a part that already has a body is left alone, so this is safe to
-/// call every step for as long as the part exists.
-fn detach(
+/// Idempotent: a part already off the hierarchy is left alone, so this is safe
+/// to call every step for as long as the part exists.
+fn shed_to_debris(
     world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
     car: &CarFacts,
     guid: Uuid,
     kind: BodyPartKind,
     state: &PartState,
-    hinged: bool,
     step: u64,
 ) {
     let Some(entity) = world.entity_of(guid) else {
         return;
     };
-    if world.world().get::<RigidBody3D>(entity).is_some() {
+    if world.parent_of(entity).is_none() {
         return;
     }
     // Where it is, in the world, at the moment it lets go.
@@ -650,18 +687,9 @@ fn detach(
         (scale.y * 0.5).abs().max(0.01),
         (scale.z * 0.5).abs().max(0.01),
     );
-    // **A SHED PART IS SPAWNED CLEAR OF THE CAR IT CAME OFF.**
-    //
-    // A part is drawn ON the chassis's own outer face, so half its box is
-    // INSIDE the chassis collider — and two overlapping dynamic bodies are a
-    // depenetration force with nowhere to go. Measured before this offset
-    // existed: a 7 kg bumper that came off at 60 km/h **rose** from 0.501 m to
-    // 1.328 m in the second after it let go, which is the P29.6 ragdoll
-    // launch wearing a bumper.
-    //
-    // So it is pushed out along the axis it FACES by its own half-thickness and
-    // a hand's width more. The direction is derived, not authored: a door goes
-    // sideways, a bumper forwards, a boot lid backwards.
+    // **PUSHED CLEAR OF THE CAR IT CAME OFF**, along the axis it faces — a
+    // bumper forwards, a door sideways, a boot lid backwards. The direction is
+    // derived from the part's own offset and not authored.
     let (axis, sign) = state.facing();
     let out = [half.x, half.y, half.z][axis] + 0.12;
     let mut local_out = local_t;
@@ -670,9 +698,32 @@ fn detach(
         1 => local_out.y += sign * out,
         _ => local_out.z += sign * out,
     }
-    let at = car.pos + car.rot * if hinged { local_t } else { local_out }.to_dvec3();
-    let mass = inf_ecs::vehicle::part_mass_kg(kind, state.half_frac, car.half).max(0.5);
-    let volume = 8.0 * half.x * half.y * half.z;
+    let at = car.pos + car.rot * local_out.to_dvec3();
+    // **The ground it will lie on**, one ray, once, at the moment it sheds. A
+    // falling panel needs somewhere to stop and this is the cheapest honest
+    // answer: everything solid, straight down, from a metre above where it left.
+    //
+    // **The car it came off is excluded**, and that is not a nicety: the ray
+    // starts a metre over a panel that is still touching its own chassis, so
+    // without the exclusion it hits the car and a bumper "rests" a metre ABOVE
+    // where it let go. Measured: a rest of 1.721 m for a part at 0.621.
+    let mut exclude: BTreeSet<super::ColliderId3D> = BTreeSet::new();
+    if let Some(c) = bridge.collider_of(car.chassis) {
+        exclude.insert(c);
+    }
+    let rest_y = bridge
+        .world_mut()
+        .cast_ray_where(
+            at + DVec3::Y,
+            -DVec3::Y,
+            DEBRIS_GROUND_REACH_M,
+            &exclude,
+            super::CastTargets::AllSolid,
+        )
+        .map(|h| at.y + 1.0 - h.toi + half.y)
+        .unwrap_or(at.y - DEBRIS_GROUND_REACH_M)
+        // …and it can never be above where the part let go: a panel falls.
+        .min(at.y);
     world.reparent(entity, None);
     let mut t = Transform {
         translation: Vec3d::from_dvec3(at),
@@ -680,73 +731,82 @@ fn detach(
         scale,
     };
     t.set_quat(rot);
-    let mut em = world.world_mut().entity_mut(entity);
-    em.insert(t);
-    em.insert(RigidBody3D {
-        kind: BodyKind3D::Dynamic,
-        angular_damping: 0.6,
-        ..Default::default()
-    });
-    em.insert(Collider3D {
-        shape_kind: ColliderShape3DKind::Box,
-        half_extents: half,
-        // **A SWINGING part is a SENSOR and a SHED one is solid**, and that is
-        // the same depenetration finding from the other end. A door on its
-        // hinge is held INSIDE the car's own collider by the joint that holds
-        // it, so a solid one would fight the chassis every step for as long as
-        // it hung there; the facade's `Joint3D` has no `contacts` flag to turn
-        // off (retired at P29, disposition row 12), so the collider is the door
-        // that is available. What it costs is named: **an open door does not
-        // collide with the world** — it swings through a lamp post — until a
-        // wave gives `Joint3D` its flag back. A shed part is solid and lands on
-        // the road, which is the half that matters for a frame.
-        sensor: hinged,
-        // `Collider3D::density` is rapier's own mass-per-volume and not a
-        // material density (the P20.2 finding): a 0.4 m wheel at the default
-        // weighs 268 grams. So it is derived from the mass the PART is worth,
-        // and `a_shed_part_weighs_what_a_part_weighs` is what keeps that honest.
-        density: (mass / volume.max(1e-6)).clamp(1.0, 20_000.0),
-        friction: 0.7,
-        ..Default::default()
-    });
-    if hinged {
-        if let Some(hinge) = kind.hinge() {
-            let pivot = Vec3d::new(
-                hinge.at.x * car.half.x,
-                hinge.at.y * car.half.y,
-                hinge.at.z * car.half.z,
-            );
-            let (lo, hi) = if hinge.open_deg < 0.0 {
-                (hinge.open_deg, 0.0)
-            } else {
-                (0.0, hinge.open_deg)
-            };
-            em.insert(Joint3D {
-                other: inf_ecs::refs::EntityRef::new(car.chassis),
-                kind: SceneJointKind3D::Revolute,
-                local_anchor: Vec3d::new(
-                    pivot.x - local_t.x,
-                    pivot.y - local_t.y,
-                    pivot.z - local_t.z,
-                ),
-                other_anchor: pivot,
-                axis: hinge.axis,
-                limits_enabled: true,
-                limit_min: lo.to_radians(),
-                limit_max: hi.to_radians(),
-                motor_enabled: true,
-                motor_target_pos: state.target_deg.to_radians(),
-                motor_target_vel: 0.0,
-                motor_stiffness: inf_ecs::bodywork::HINGE_STIFFNESS,
-                motor_damping: inf_ecs::bodywork::HINGE_DAMPING,
-                motor_max_force: 1_200.0,
-                ..Default::default()
-            });
-        }
-    } else {
-        damage_mut(world).shed.push((guid, step));
+    if let Some(mut tr) = world.world_mut().get_mut::<Transform>(entity) {
+        *tr = t;
     }
+    damage_mut(world).shed.push(Debris {
+        guid,
+        born: step,
+        at: Vec3d::from_dvec3(at),
+        vel: Vec3d::from_dvec3(car.vel * SHED_VELOCITY_FRAC),
+        rest_y,
+        // A tumble, derived from which way it left rather than drawn from
+        // anything: a part that went sideways rolls, one that went forward
+        // pitches. No RNG reaches a fixed step.
+        spin_deg_s: match axis {
+            0 => Vec3d::new(0.0, 0.0, -sign * DEBRIS_SPIN_DEG_S),
+            1 => Vec3d::new(DEBRIS_SPIN_DEG_S, 0.0, 0.0),
+            _ => Vec3d::new(sign * DEBRIS_SPIN_DEG_S, 0.0, 0.0),
+        },
+    });
     world.mark_dirty();
+}
+
+/// **Advance every piece of debris**, and answer how many are still lying about.
+///
+/// Ballistic and then still: `at += v·dt`, `v.y -= g·dt`, and when it reaches the
+/// ground it was over it stops there and stays. Pure arithmetic on state this
+/// module owns, so two hosts agree by construction and the solver never sees it.
+fn step_debris(world: &mut EcsWorld, dt: f64) -> usize {
+    let Some(res) = damage_of(world) else {
+        return 0;
+    };
+    if res.shed.is_empty() {
+        return 0;
+    }
+    let mut moved: Vec<(Uuid, Vec3d, Vec3d)> = Vec::with_capacity(res.shed.len());
+    let mut next: Vec<Debris> = Vec::with_capacity(res.shed.len());
+    for d in &res.shed {
+        let mut d = *d;
+        if d.at.y > d.rest_y {
+            d.vel.y -= 9.81 * dt;
+            d.at = Vec3d::new(
+                d.at.x + d.vel.x * dt,
+                d.at.y + d.vel.y * dt,
+                d.at.z + d.vel.z * dt,
+            );
+            if d.at.y <= d.rest_y {
+                d.at.y = d.rest_y;
+                d.vel = Vec3d::ZERO;
+            }
+            let spin = Vec3d::new(
+                d.spin_deg_s.x * dt,
+                d.spin_deg_s.y * dt,
+                d.spin_deg_s.z * dt,
+            );
+            moved.push((d.guid, d.at, spin));
+        }
+        next.push(d);
+    }
+    let n = next.len();
+    damage_mut(world).shed = next;
+    for (guid, at, spin) in moved {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+            t.translation = at;
+            t.rotation = Vec3d::new(
+                t.rotation.x + spin.x,
+                t.rotation.y + spin.y,
+                t.rotation.z + spin.z,
+            );
+        }
+    }
+    if n > 0 {
+        world.mark_dirty();
+    }
+    n
 }
 
 /// **Shatter one pane**: hide it, and throw a handful of shards.
@@ -833,9 +893,9 @@ fn reap(world: &mut EcsWorld, step: u64, live: &BTreeSet<Uuid>) -> usize {
             return 0;
         };
         let over = res.shed.len().saturating_sub(MAX_SHED_PARTS);
-        for (i, (guid, born)) in res.shed.iter().enumerate() {
-            if i < over || step.saturating_sub(*born) > life_steps {
-                kill_parts.push(*guid);
+        for (i, d) in res.shed.iter().enumerate() {
+            if i < over || step.saturating_sub(d.born) > life_steps {
+                kill_parts.push(d.guid);
             }
         }
         for (guid, born) in &res.shards {
@@ -863,7 +923,7 @@ fn reap(world: &mut EcsWorld, step: u64, live: &BTreeSet<Uuid>) -> usize {
             let parts: Vec<Uuid> = row.parts.keys().copied().collect();
             for p in parts {
                 if let Some(e) = world.entity_of(p) {
-                    if world.world().get::<RigidBody3D>(e).is_some() {
+                    if world.parent_of(e).is_none() {
                         world.despawn(e);
                         n += 1;
                     }
@@ -873,7 +933,7 @@ fn reap(world: &mut EcsWorld, step: u64, live: &BTreeSet<Uuid>) -> usize {
     }
     {
         let res = damage_mut(world);
-        res.shed.retain(|(g, _)| !kill_parts.contains(g));
+        res.shed.retain(|d| !kill_parts.contains(&d.guid));
         res.shards.retain(|(g, _)| !kill_shards.contains(g));
         for chassis in orphan_rows {
             res.rows.remove(&chassis);
@@ -924,6 +984,20 @@ pub fn hit_vehicle(
     energy_j: f64,
 ) -> Option<VehicleHit> {
     if !energy_j.is_finite() || energy_j <= 0.0 {
+        return None;
+    }
+    // **IS IT A CAR AT ALL**, and this is the whole reason `is_vehicle` exists.
+    //
+    // Without this line `car_facts` answers for anything with a `Collider3D` and
+    // a body in the bridge, which is a WALL — and a round into a wall was then
+    // spent on a "vehicle" that is a lamp post, so it never reached the P22
+    // destructible door below. Measured the hard way: five arms across four
+    // files went red at once (`weapon_3d`'s wall and its no-health character,
+    // `phase30_gameplay_gate`'s rifle round, `wpn2d_gate`'s blast), every one of
+    // them about joules arriving at the destructible door and finding nobody
+    // there. The bridge's vehicle map is the ONE answer to "is this a car" —
+    // the same door the E-key prompt and WPN2d's lock both ask.
+    if !is_vehicle(bridge, chassis) {
         return None;
     }
     let car = car_facts(world, bridge, chassis, true)?;
