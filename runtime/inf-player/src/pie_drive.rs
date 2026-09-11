@@ -1387,9 +1387,44 @@ impl HeroLog {
             .and_then(|seat| sim.bridge3d().vehicle_of(seat.vehicle))
             .and_then(|v| v.drivetrain())
             .unwrap_or_default();
+        // **THE BODYWORK COLUMNS** (wave VEH3c), APPENDED for the drivetrain
+        // columns' reason verbatim: a frame of a shed bumper, a shattered pane,
+        // a flat tyre or a burning car cannot be triggered on a position column,
+        // and every one of those is a different thing that reads the same in
+        // `speed`. All five read `0` on a level where nobody is driving.
+        let (car_health, engine_scale, flats, panes_broken, parts_shed) = {
+            let seated = guid
+                .and_then(|g| sim.world().entity_of(g))
+                .and_then(|e| {
+                    sim.world()
+                        .world()
+                        .get::<inf_ecs::components::CharacterMovement>(e)
+                        .map(|cm| cm.runtime.seat)
+                })
+                .filter(|seat| seat.is_seated())
+                .map(|seat| seat.vehicle);
+            match seated {
+                Some(v) => {
+                    let world = sim.world();
+                    let limits = inf_ecs::bodywork::DamageLimits::of(world, v);
+                    let d = inf_ecs::bodywork::damage_of(world)
+                        .and_then(|r| r.rows.get(&v))
+                        .cloned()
+                        .unwrap_or_default();
+                    (
+                        100.0 * d.hull_frac(limits.hull_capacity_j()),
+                        100.0 * d.engine_scale(),
+                        d.flat_count(),
+                        d.panes_broken(),
+                        d.parts_shed(),
+                    )
+                }
+                None => (0.0, 0.0, 0, 0, 0),
+            }
+        };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1449,7 +1484,12 @@ impl HeroLog {
                 drivetrain.rpm,
                 drivetrain.clutch_lock,
                 drivetrain.boost,
-                u8::from(drivetrain.fuel_cut)
+                u8::from(drivetrain.fuel_cut),
+                car_health,
+                engine_scale,
+                flats,
+                panes_broken,
+                parts_shed
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1463,11 +1503,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 49 fields wide since wave VEH3b — 45 at VEH3a plus
-            // the four drivetrain columns — which the gate asserts against the
+            // The row is 54 fields wide since wave VEH3c — 49 at VEH3b plus
+            // the five bodywork columns — which the gate asserts against the
             // armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

@@ -2573,10 +2573,15 @@ fn the_hero_log_and_its_readme_agree() {
     // downshift blip and a limiter bounce are three different things that all
     // read the same in `speed`, and a frame of any of them has to be triggered
     // on a column that can see it.
+    // **Fifty-four since wave VEH3c**, which appended the five bodywork columns
+    // on the same argument one system over: a shed bumper, a shattered window, a
+    // flat tyre and a burning car are four different things that all read the
+    // same in `speed`, and a frame of any of them has to be triggered on a
+    // column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 49, "the row is {n} fields and this arm's word is 49");
+    assert_eq!(n, 54, "the row is {n} fields and this arm's word is 54");
     assert!(
-        README.contains("FORTY-NINE") || README.contains("forty-nine"),
+        README.contains("FIFTY-FOUR") || README.contains("fifty-four"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2607,6 +2612,12 @@ fn the_hero_log_and_its_readme_agree() {
         "clutch",
         "boost",
         "cut",
+        // Wave VEH3c's five.
+        "car_health",
+        "engine_scale",
+        "flats",
+        "panes_broken",
+        "parts_shed",
     ] {
         assert!(
             README.contains(col),

@@ -1538,3 +1538,141 @@ fn a_town_with_no_fleet_never_gets_a_dispatcher() {
          dispatcher — every pre-EMS2 committed hash moves"
     );
 }
+
+// ── the burning CAR (wave VEH3c) ────────────────────────────────────────────
+
+/// **A CAR THAT BURNS BRINGS THE APPLIANCE** — the EMS2 chain, walked by a
+/// vehicle instead of by a building.
+///
+/// The whole of what wave VEH3c had to add for this is **nothing**:
+/// `IncidentKind::Fire`'s `building` slot is read for de-duplication and never
+/// dereferenced, so a chassis guid drops into it at no schema cost and the
+/// dispatcher never learns that the thing on fire has wheels. This arm is what
+/// says so out loud, on the town fixture that already has blocks, a
+/// carriageway, a station and an appliance — the same one
+/// `a_fire_brings_the_appliance_smokes_and_leaves_nothing_behind` uses, because
+/// a second spelling of a fixture is the defect this repository has paid for at
+/// five separate seams.
+///
+/// The half about the CAR — how many joules it takes, when the latch flips,
+/// that the fire reaches the determinism trace — is
+/// `veh3c_gate::a_car_with_no_hull_left_burns`.
+#[test]
+fn a_burning_car_brings_the_appliance() {
+    const VICTIM: Uuid = Uuid::from_u128(0x0E52_1099);
+    let mut town = Town::new();
+    // An ordinary civilian saloon, parked in the street at the far corner —
+    // no livery, so `unit_kind_of` refuses it and it is NOT in the fleet.
+    let at = DVec3::new(100.0, 0.0, 100.0);
+    {
+        let mut def = VehicleDef::default();
+        inf_ecs::traffic::size_the_suspension(&mut def);
+        let sag = def.class.travel_m * inf_ecs::traffic::STATIC_SAG_FRAC;
+        let rest_y = -def.wheel_drop_m + def.wheel_radius_m - sag;
+        inf_ecs::vehicle::spawn_rig_at(
+            &mut town.world,
+            VICTIM,
+            &def,
+            &RigSpawn {
+                name: "Victim".to_string(),
+                at: DVec3::new(at.x, rest_y, at.z),
+                yaw_deg: 0.0,
+                paint: Color::new(0.2, 0.3, 0.5, 1.0),
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+            true,
+        );
+        town.world.mark_dirty();
+        town.world.propagate();
+    }
+    town.steps(30);
+    assert_eq!(
+        dispatch::unit_kind_of(&town.world, VICTIM),
+        None,
+        "the victim is in the fleet — a burning fire engine is a different test"
+    );
+
+    // Burn it down through the door a round goes through.
+    let cap = inf_ecs::bodywork::DamageLimits::of(&town.world, VICTIM).hull_capacity_j();
+    let mut spent = 0.0;
+    let hit_at = town.at(VICTIM) + DVec3::new(0.85, -0.3, -0.2);
+    while spent < cap + 2_000.0 {
+        inf_physics::d3::bodywork::hit_vehicle(
+            &mut town.world,
+            &town.bridge,
+            VICTIM,
+            hit_at,
+            1_000.0,
+        );
+        spent += 1_000.0;
+    }
+    let burning = inf_physics::d3::bodywork::damage_or_default(&town.world, VICTIM).burning();
+    eprintln!("{spent:.0} J into a {cap:.0} J saloon: burning = {burning}");
+    assert!(burning, "a car with no hull left is not on fire");
+
+    // …and the brigade comes, hoses it and goes home.
+    let mut states: Vec<IncidentState> = Vec::new();
+    let mut nearest = f64::INFINITY;
+    let mut arrived_at: Option<f64> = None;
+    let mut peak_puffs = 0usize;
+    let mut min_intensity = 1.0f64;
+    let mut chosen: Option<Uuid> = None;
+    for i in 0..7_200u32 {
+        town.step();
+        let Some(res) = dispatch::dispatch_of(&town.world) else {
+            continue;
+        };
+        peak_puffs = peak_puffs.max(res.puffs.len());
+        let Some((_, inc)) = res.incidents.iter().find(|(_, inc)| {
+            matches!(inc.kind, dispatch::IncidentKind::Fire { building, .. } if building == VICTIM)
+        }) else {
+            continue;
+        };
+        if let dispatch::IncidentKind::Fire { intensity, .. } = inc.kind {
+            min_intensity = min_intensity.min(intensity);
+        }
+        if states.last() != Some(&inc.state) {
+            states.push(inc.state);
+            eprintln!(
+                "  step {i}: the car fire is {:?} ({:?})",
+                inc.state, inc.unit
+            );
+        }
+        if let Some(unit) = inc.unit {
+            chosen = Some(unit);
+            if res.runs.get(&unit).is_some_and(|r| r.state.running_hot()) {
+                let d = (town.at(unit) - inc.at).length();
+                nearest = nearest.min(d);
+                if d <= dispatch::ON_SCENE_M && arrived_at.is_none() {
+                    arrived_at = Some(f64::from(i) / 60.0);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "the car fire's states {states:?}; the unit sent was {chosen:?} (the appliance is \
+         {APPLIANCE:?}); nearest {nearest:.2} m at {arrived_at:?} s; peak puffs {peak_puffs}; \
+         intensity fell to {min_intensity:.3}"
+    );
+    assert!(
+        states.contains(&IncidentState::Assigned),
+        "a burning car was never assigned to anybody"
+    );
+    assert_eq!(
+        chosen,
+        Some(APPLIANCE),
+        "the wrong unit answered a car fire"
+    );
+    assert!(
+        arrived_at.is_some(),
+        "the appliance never got within {} m of a burning car — its nearest was {nearest:.2}",
+        dispatch::ON_SCENE_M
+    );
+    assert!(peak_puffs > 0, "a burning car made no smoke");
+    assert!(
+        min_intensity <= 0.0,
+        "the crew never put it out: the intensity bottomed at {min_intensity:.3}"
+    );
+}

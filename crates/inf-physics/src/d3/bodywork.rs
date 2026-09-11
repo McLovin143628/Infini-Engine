@@ -901,7 +901,7 @@ pub fn hit_vehicle(
     }
     let car = car_facts(world, bridge, chassis, true)?;
     let limits = car.limits;
-    let step = inf_ecs::traffic::steps(world);
+    let step = now(world);
     let local = car.rot.inverse() * (at - car.pos);
     let mut out = VehicleHit::default();
 
@@ -984,6 +984,16 @@ pub fn hit_vehicle(
         .is_some();
     }
     Some(out)
+}
+
+/// **What step it is, by the bodywork's own clock** — never `traffic::steps`,
+/// which stands still on a level with no traffic in it.
+///
+/// Floored at 1, so a fire filed before the bodywork has ever stepped still
+/// reads as burning: `fire_step` of `0` means *not on fire*, and a clock that
+/// could answer zero would make the two the same.
+fn now(world: &EcsWorld) -> u64 {
+    damage_of(world).map(|r| r.steps).unwrap_or(0).max(1)
 }
 
 /// **Is this guid a vehicle chassis the bodywork can spend on?** — the one test

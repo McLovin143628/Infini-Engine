@@ -30,11 +30,21 @@
 //! | `a_car_shot_at_spends_its_own_joules` | the vehicle branch deleted from `apply_hit` | joules in, joules on the hull | passes — this one is about the HULL |
 //! | `a_dead_engine_stalls_and_a_hurt_one_is_slower` | `set_damage` made a no-op | the 0-100 times, the rpm | passes |
 //! | `a_flat_tyre_pulls` | `FLAT_MU_FRAC` → 1.0 and `FLAT_RADIUS_FRAC` → 1.0 | the yaw rate with and without | passes |
-//! | `a_car_that_burns_brings_the_brigade` | the `report_incident` call deleted | the incident, the unit, the metres | passes |
+//! | `a_car_with_no_hull_left_burns` | the ignite branch deleted from `hit_vehicle` | the joules at which it lit, the trace | passes |
+//! | `the_crash_table_is_monotone_in_speed` | `impact_share` flattened to one number | five speeds, the N.s and the parts of each | **fails** |
 //! | `a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` | the latched fast path deleted | µs/car, control and measured | n/a — it is a COST arm |
 //! | `a_quiet_level_folds_no_bodywork_bytes` | `VehicleDamage::is_quiet` → `false` | parked cars, driven steps | passes — the section is empty either way, which is the point |
 //! | `two_runs_of_one_crash_fold_the_same_bytes` | a clock or an RNG anywhere in the step | the bytes' own length | passes |
-//! | `every_authored_family_is_a_car_with_doors` | a family's parts emptied | 79 parts over 7 families | **fails** |
+//! | `every_authored_family_is_a_car_with_doors` | a family's parts emptied | 84 parts over 6 catalogue rows | **fails** |
+//!
+//! The BRIGADE's arrival is measured where a town is:
+//! `inf_physics::tests::dispatch_3d::a_burning_car_brings_the_appliance` walks
+//! the whole EMS2 chain on a burning CAR over the `Town` fixture that already
+//! has blocks, a carriageway, a station and an appliance — assigned on step 0,
+//! on scene at 57.2 s and 11.64 m, resolved at 62.3 s, 22 puffs of smoke, the
+//! intensity hosed to zero. Re-building that fixture in this file would be a
+//! second spelling of it, which is the defect this repository has paid for at
+//! five separate seams.
 //!
 //! # PIE == shipping, the mirrors, and the wire
 //!
@@ -1109,4 +1119,67 @@ fn a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them() {
         eprintln!("(the ceiling of x{ceiling:.2} is asserted under release off CI only)");
     }
     assert!(control > 0.0 && parts > 0.0, "the clock measured nothing");
+}
+
+// ── (e) the fire ────────────────────────────────────────────────────────────
+
+/// **A car with no hull left BURNS**, and files the incident the brigade
+/// answers.
+///
+/// The EMS2 door, unchanged: a burning car is an `IncidentKind::Fire` whose
+/// `building` slot carries the CHASSIS' guid. That slot is read for
+/// de-duplication and never dereferenced, so a car drops into it with no schema
+/// move — and the whole chain (open, assign, route, arrive, hose, resolve) works
+/// on it without knowing it is a car.
+///
+/// **The ARRIVAL is measured where a town is**, not here:
+/// `inf_physics::tests::dispatch_3d::a_burning_car_brings_the_appliance` runs it
+/// on the `Town` fixture, which already has blocks, a carriageway, a station and
+/// an appliance. Re-building one of those in this file would be a second
+/// spelling of a fixture, which is the defect this repository has paid for at
+/// five separate seams. What this arm owns is the half that is about the CAR:
+/// the joules, the latch, and that a level with no dispatcher REFUSES the
+/// incident as a value rather than failing.
+#[test]
+fn a_car_with_no_hull_left_burns() {
+    let mut rig = Rig::row("sedan");
+    let cap = rig.limits().hull_capacity_j();
+    // The FLANK, low and well aft: not a pane, not a wheel, not the engine bay.
+    let at = rig.at() + DVec3::new(0.85, -0.30, -0.20);
+    assert!(!rig.damage().burning(), "a fresh car is on fire");
+    let mut spent = 0.0;
+    let mut lit_at = None;
+    while spent < cap + 2_000.0 {
+        inf_physics::d3::bodywork::hit_vehicle(&mut rig.world, &rig.bridge, CHASSIS, at, 1_000.0);
+        spent += 1_000.0;
+        if lit_at.is_none() && rig.damage().burning() {
+            lit_at = Some(spent);
+        }
+    }
+    let d = rig.damage();
+    eprintln!(
+        "the saloon caught fire at {:?} J of a {cap:.0} J hull ({spent:.0} spent); its own step counter says {}",
+        lit_at, d.fire_step
+    );
+    assert_eq!(
+        lit_at,
+        Some(cap),
+        "the car lit at {lit_at:?} J and its hull is worth {cap:.0}"
+    );
+    assert!(d.burning());
+    assert!(
+        d.fire_step > 0,
+        "the fire step is {} — the bodywork's own clock is standing still",
+        d.fire_step
+    );
+    // …and the fire is in the TRACE, which is what makes two hosts agree about
+    // a burning car.
+    let bytes = inf_ecs::bodywork::damage_state_bytes(&rig.world);
+    assert!(!bytes.is_empty(), "a burning car folds nothing");
+    // A level with no dispatcher refuses the incident and does not fail: the
+    // car still burns, which is a REFUSAL AS A VALUE rather than a panic.
+    assert!(
+        inf_ecs::dispatch::dispatch_of(&rig.world).is_none(),
+        "the fixture grew a dispatcher — this half of the arm is vacuous"
+    );
 }

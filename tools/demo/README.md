@@ -48,8 +48,9 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
                   class,attach,lock,engaged,incoming,heat,on_scene,responder_m,
                   tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,
-                  slip_ratio,slip_lat,mu,rpm,clutch,boost,cut
-                  — FORTY-NINE columns, four rows a second, and NO header line:
+                  slip_ratio,slip_lat,mu,rpm,clutch,boost,cut,
+                  car_health,engine_scale,flats,panes_broken,parts_shed
+                  — FIFTY-FOUR columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -65,7 +66,13 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   engagement in `[0, 1]`, the turbo's boost in `[0, 1]` and `1`
                   while the limiter is cutting fuel — the four a launch flare, a
                   downshift blip and a limiter bounce have to be triggered on,
-                  because none of them is visible in `speed`),
+                  because none of them is visible in `speed`), 50-54 are
+                  VEH3c's (the hull's remaining percent, the engine's remaining
+                  percent, how many tyres are flat, how many panes have gone and
+                  how many parts have left the car — all `0` when nobody is
+                  driving, which is the same convention the eight tyre columns
+                  before them use, and the five a shed bumper, a shattered
+                  window, a flat and a burning car have to be triggered on),
                   24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,
@@ -126,8 +133,10 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   columns; `demo.ps1`'s own predicates index `$c[..]` ZERO-based,
                   so `boom_m` is `$c[13]`, `ads` is `$c[26]`, `tail` is `$c[28]`,
                   `lock` is `$c[31]`, `engaged` is `$c[32]`, `incoming` is
-                  `$c[33]`, `heat` is `$c[34]`, `on_scene` is `$c[35]` and
-                  `responder_m` is `$c[36]`.
+                  `$c[33]`, `heat` is `$c[34]`, `on_scene` is `$c[35]`,
+                  `responder_m` is `$c[36]`, `car_health` is `$c[49]`,
+                  `engine_scale` is `$c[50]`, `flats` is `$c[51]`,
+                  `panes_broken` is `$c[52]` and `parts_shed` is `$c[53]`.
 demo.log          every step the driver took, with timings
 ```
 

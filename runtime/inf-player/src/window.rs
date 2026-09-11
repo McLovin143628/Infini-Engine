@@ -668,8 +668,23 @@ impl PlayerApp {
         let drive = drivetrain
             .map(|d| inf_ecs::vehicle::drivetrain_readout(&d, turbocharged))
             .unwrap_or_default();
+        // **THE DAMAGE ROW** (wave VEH3c), last, because it is the row a driver
+        // looks at when something has already gone wrong. Empty on a whole car,
+        // exactly as the drivetrain row is empty on a boat: a car nobody has
+        // crashed or shot at draws the three rows it drew before this wave.
+        let damage = {
+            let world = sim.world();
+            let d = inf_ecs::bodywork::damage_of(world).and_then(|r| r.rows.get(&vehicle));
+            match d {
+                Some(d) if !d.is_quiet() => inf_ecs::bodywork::damage_readout(
+                    d,
+                    inf_ecs::bodywork::DamageLimits::of(world, vehicle),
+                ),
+                _ => String::new(),
+            }
+        };
         let mut text = head;
-        for line in [drive, row] {
+        for line in [drive, row, damage] {
             if !line.is_empty() {
                 text.push('\n');
                 text.push_str(&line);
