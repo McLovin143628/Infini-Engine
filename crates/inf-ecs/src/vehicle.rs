@@ -6180,7 +6180,28 @@ pub fn ackermann_deg(
     rack_deg * (1.0 + a * (factor - 1.0))
 }
 
-/// **The suspension**: spring plus damper, in newtons, never negative.
+/// **Where the bump stop starts**, as a fraction of
+/// [`travel_m`](VehicleTuning::travel_m) (`audit:` VEH3b).
+///
+/// A real strut's bump rubber is the last centimetre or two of a fifteen-to-
+/// twenty-centimetre travel, which is where 0.85 comes from: the main rate owns
+/// the first eighty-five per cent and the stop owns the rest.
+pub const BUMP_STOP_ENGAGE_FRAC: f64 = 0.85;
+
+/// **How stiff the bump stop is**, as a multiple of
+/// [`stiffness_n_per_m`](VehicleTuning::stiffness_n_per_m) at FULL travel
+/// (`audit:` VEH3b).
+///
+/// The stop's force at the end of travel is `stiffness × MULT × span`, where
+/// `span` is the last [`BUMP_STOP_ENGAGE_FRAC`] of the travel — so on the Ring-0
+/// rig (20 000 N/m over 0.25 m) the stop adds **9 000 N** on top of the main
+/// spring's 5 000 at the very end, and the strut is nearly three times as hard
+/// to push through its last millimetre as its first. That is the number that
+/// makes an axle stop saturating, and it is the one thing this constant is for.
+pub const BUMP_STOP_RATE_MULT: f64 = 12.0;
+
+/// **The suspension**: spring plus damper plus BUMP STOP, in newtons, never
+/// negative.
 ///
 /// `compression_m` is how far the suspension is from full extension and
 /// `closing_mps` how fast it is still compressing (positive = compressing). A
@@ -6188,34 +6209,58 @@ pub fn ackermann_deg(
 /// that sucks a car onto the road, so the result is floored at zero — the
 /// standard, and the reason a raycast vehicle does not need a rebound spring.
 ///
-/// # THERE IS NO BUMP STOP, and what that costs (`audit:` VEH3b)
+/// # THE BUMP STOP, and the defect it closes (`audit:` VEH3b)
 ///
-/// The compression is CLAMPED at [`travel_m`](VehicleTuning::travel_m), so past
-/// the stop this strut pushes with a **constant** force. It is not a bump stop:
-/// a bump stop is a rate that rises, and a rate that rises is what stops the
-/// chassis. A car whose axles have both saturated therefore carries
-/// `stiffness x travel` at each end whatever the chassis is doing, and the load
-/// TRANSFER that the friction circle is sized from stops happening.
+/// Until this audit the compression was simply CLAMPED at
+/// [`travel_m`](VehicleTuning::travel_m), so past the stop the strut pushed with
+/// a **constant** force. That is not a bump stop: a bump stop is a rate that
+/// RISES, and a rate that rises is what stops the chassis. Both axles of a car
+/// that had bottomed therefore carried `stiffness × travel` whatever the chassis
+/// was doing, and the load TRANSFER the friction circle is sized from stopped
+/// happening — measured on the shipped rig under a 0.87 g stop: the front axle
+/// took **−491 N** where the research doc's `m·a·h / L` predicts **+2 609**,
+/// which is 118.8 % apart with the SIGN inverted, because the rear was carrying
+/// the car.
 ///
-/// It is not hypothetical on the shipped rig. `travel_m` is generous (0.25 m
-/// against a road car's 0.15–0.20) and the RATE is not: the Ring-0 default
-/// stands on **0.149 m of its 0.25 m travel**, and all nine wheeled catalogue
-/// rows stand on 54–88 % of theirs. Measured under a 0.87 g stop
-/// (`veh3b_gate::the_shipped_spring_bottoms_out_and_the_formula_is_what_pays`):
-/// the front axle is at its stop on **90 of 90 braked steps** and takes
-/// **−491 N** of transfer where the research doc's `m·a·h / L` predicts
-/// **+2 609** — 118.8 % apart, with the SIGN inverted, because the rear is
-/// carrying the car.
+/// # The law, and why it is a cubic
 ///
-/// Wave VEH3b's clause 5 ("weight transfer verified") measured 3.7 % on a
-/// fixture stiffened to 90 000 N/m and carried the bottoming as *"a suspension
-/// tuning question for VEH3f's handling profiles, not a model defect."* The
-/// first half is a spring rate and is VEH3f's; **a strut with no stop is this
-/// function's**, and the two arms of clause 5 are true about a spring nothing
-/// ships until it lands.
+/// Let `x` be the compression, `x_e = ` [`BUMP_STOP_ENGAGE_FRAC`]` × travel`
+/// and `span = travel − x_e`. Past `x_e` the strut gains
+///
+/// ```text
+/// F_stop = stiffness × BUMP_STOP_RATE_MULT × (x − x_e)³ / span²
+/// ```
+///
+/// A **cubic** rather than a second linear rate, for one reason and it is
+/// numerical: a cubic is zero AND has zero slope at `x_e`, so the stop arrives
+/// without a step in the force or a kink in its derivative, and a strut that
+/// crosses the engagement point at speed does not ring. Its marginal rate at
+/// full travel is `3 × MULT` times the main one, which is a stop a chassis
+/// cannot push through.
+///
+/// The clamp stays exactly where it was: `travel_m` is the GEOMETRIC limit and
+/// the suspension pass already clamps the strut's length to it, so `x` never
+/// exceeds `travel` and the stop does all of its work inside the last
+/// fifteen per cent.
+///
+/// Arithmetic only — a multiply and two squares — so it is portable by
+/// construction and both hosts call this one function.
 pub fn suspension_force_n(tuning: &VehicleTuning, compression_m: f64, closing_mps: f64) -> f64 {
-    let x = compression_m.clamp(0.0, tuning.travel_m);
-    let f = tuning.stiffness_n_per_m * x + tuning.damping_ns_per_m * closing_mps;
+    let travel = if tuning.travel_m.is_finite() {
+        tuning.travel_m.max(0.0)
+    } else {
+        0.0
+    };
+    let x = compression_m.clamp(0.0, travel);
+    let engage = travel * BUMP_STOP_ENGAGE_FRAC;
+    let span = travel - engage;
+    let stop = if span > 0.0 && x > engage {
+        let over = x - engage;
+        tuning.stiffness_n_per_m * BUMP_STOP_RATE_MULT * over * over * over / (span * span)
+    } else {
+        0.0
+    };
+    let f = tuning.stiffness_n_per_m * x + stop + tuning.damping_ns_per_m * closing_mps;
     f.max(0.0)
 }
 
@@ -9963,10 +10008,32 @@ mod tests {
             0.0,
             "a strut that pulled down would suck the car onto the road"
         );
-        // And the travel is a clamp, not a suggestion.
+        // And the travel is a clamp, not a suggestion -- the force at ten metres
+        // of compression is the force at full travel, which since the `audit:`
+        // VEH3b bump stop is the main rate PLUS the stop's own contribution at
+        // the end of its span.
+        let span = t.travel_m * (1.0 - BUMP_STOP_ENGAGE_FRAC);
         assert_eq!(
             suspension_force_n(&t, 10.0, 0.0),
-            t.stiffness_n_per_m * t.travel_m
+            t.stiffness_n_per_m * t.travel_m + t.stiffness_n_per_m * BUMP_STOP_RATE_MULT * span
+        );
+
+        // **THE BUMP STOP IS A RATE THAT RISES** (`audit:` VEH3b). Below the
+        // engagement the strut is exactly the linear spring it always was; above
+        // it, the last millimetre costs far more than the first.
+        let engage = t.travel_m * BUMP_STOP_ENGAGE_FRAC;
+        assert_eq!(
+            suspension_force_n(&t, engage, 0.0),
+            t.stiffness_n_per_m * engage,
+            "the stop is doing work before it engages"
+        );
+        let early = suspension_force_n(&t, engage * 0.5 + 0.001, 0.0)
+            - suspension_force_n(&t, engage * 0.5, 0.0);
+        let late = suspension_force_n(&t, t.travel_m, 0.0)
+            - suspension_force_n(&t, t.travel_m - 0.001, 0.0);
+        assert!(
+            late > early * 10.0,
+            "a millimetre at the stop cost {late} N and one in the middle {early} N"
         );
     }
 
