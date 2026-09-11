@@ -2310,6 +2310,19 @@ fn the_axle_loads_are_the_formulas_on_the_shipped_rows() {
 ///
 /// **The mutation**: `BUMP_STOP_RATE_MULT` -> 0 (the stop removed) — the fixture
 /// saturates again and the world half fails.
+///
+/// # And a stop can be TOO stiff, which is a measurement and not a taste
+///
+/// `BUMP_STOP_RATE_MULT` was 12 for an afternoon. A wheel that finds itself deep
+/// past the engagement in a single step — a streaming pop, a kerb, a spawn in
+/// geometry — was then handed a force big enough to throw the car, and on the
+/// island it did: `wpn2e_gate::a_dispatched_unit_reaches_a_warm_file_on_the_
+/// island` put **two of five responders at y = −11 799 m and y = −16 570 m**,
+/// falling at over a hundred metres a second with no wheel in contact, and the
+/// nearest unit got to **169 m of a 12 m radius**. Isolated by mutation: zero
+/// passes, twelve fails, six passes, and the SPRINGS make no difference to it
+/// (the same 169 m at 35 % and at 45 % static compression). Six is what ships,
+/// and this arm's own numbers are what it costs.
 #[test]
 fn the_bump_stop_is_a_rate_that_rises_and_the_rows_are_sprung_for_it() {
     // -- 1. THE LAW --

@@ -6193,12 +6193,33 @@ pub const BUMP_STOP_ENGAGE_FRAC: f64 = 0.85;
 /// (`audit:` VEH3b).
 ///
 /// The stop's force at the end of travel is `stiffness × MULT × span`, where
-/// `span` is the last [`BUMP_STOP_ENGAGE_FRAC`] of the travel — so on the Ring-0
-/// rig (20 000 N/m over 0.25 m) the stop adds **9 000 N** on top of the main
-/// spring's 5 000 at the very end, and the strut is nearly three times as hard
-/// to push through its last millimetre as its first. That is the number that
-/// makes an axle stop saturating, and it is the one thing this constant is for.
-pub const BUMP_STOP_RATE_MULT: f64 = 12.0;
+/// `span` is the last `1 −` [`BUMP_STOP_ENGAGE_FRAC`] of the travel — so on the
+/// Ring-0 rig (20 000 N/m over 0.25 m) the stop adds **4 500 N** on top of the
+/// main spring's 5 000 at the very end, and its last millimetre costs
+/// **370 N against a middle millimetre's 20**. That is what makes an axle stop
+/// saturating, and it is the one thing this constant is for.
+///
+/// # Why SIX and not twelve, measured
+///
+/// It was twelve, which put 9 000 N on top and made the last millimetre cost
+/// 721 N. That is a better bump stop and a worse ENGINE: a wheel that finds
+/// itself deep past the engagement in a single step — a streaming pop, a kerb, a
+/// spawn that lands a car in geometry — is then handed a force big enough to
+/// throw the car, and on the island it did.
+/// `wpn2e_gate::a_dispatched_unit_reaches_a_warm_file_on_the_island` measured
+/// it: **two of five responders ended at y = −11 799 m and y = −16 570 m**,
+/// falling at over a hundred metres a second with no wheel in contact, and the
+/// nearest unit to the incident got to **169 m of a 12 m radius** — police
+/// response on the island, broken. Isolated by mutation: with the stop at zero
+/// the arm passes, at twelve it fails, at six it passes, and the springs make no
+/// difference to it at all (the same 169 m at both 35 % and 45 % static
+/// compression).
+///
+/// Six keeps everything the stop is for. The Ring-0 fixture's load transfer is
+/// **8.0 %** from the doc's formula against 118.8 % with no stop at all, and it
+/// still never reaches `travel_m` (deepest 0.243 m of 0.25, 0 of 90 braked
+/// steps pinned).
+pub const BUMP_STOP_RATE_MULT: f64 = 6.0;
 
 /// **The suspension**: spring plus damper plus BUMP STOP, in newtons, never
 /// negative.
