@@ -39664,3 +39664,271 @@ the chassis ROOF as well, and both are one wave's work.
 | schema / payload / levels / goldens | **v28 / 13 / 24 / 64**, all unmoved; no level re-cooked, none re-blessed |
 | `Cargo.lock` / `deny.toml` / new deps | untouched / untouched / none |
 | the real editor on the final tree | twice, **559 actors, streaming 52 / 52**; both sessions closed `still running: none` |
+## WAVE VEH3c — THE MODULAR BODY + DAMAGE (2026-09-11)
+
+A car is made of doors now. `BodyPart` gains `kind: BodyPartKind { Panel |
+Door{hinge, side} | Hood{hinge} | Trunk{hinge} | Bumper | Glass }`, and it costs
+**nothing on the wire**: that table is `&'static` and has never been
+`Serialize`, so VEH3a's spent schema window stays spent — scene **v28**,
+`ScenePayload` **13**, `EXPECTED_LEVELS` **24**, goldens **64**, all unmoved, no
+persisted field, `veh3a_gate::every_v28_tunable_survives_the_wire` still walking
+all **100**. What the wave is the CONSUMER of is the three tunables VEH3a landed
+with no consumer at all: `glass_health_j`, `panel_health_j`,
+`part_break_impulse_ns`.
+
+**THE COLLIDER-SHAPE SPACE STAYS EXHAUSTED.** `PartKind` is still
+`Thruster | Rotor`, `part_of`/`wheel_of`/`rig_of` are untouched, and a LATCHED
+part carries no `RigidBody3D`, no `Collider3D` and no joint — so nothing the
+recogniser walks can see one, and a thousand parked cars pay nothing for having
+doors. **The rule is the NAME**, because a shipped player has no parts table:
+`BodyPartKind::of(name, centre, half)` reads a kind off an entity's own name and
+its drawn box — `dispatch::unit_kind_of`'s ruling one system over, for its reason
+verbatim — and `every_authored_part_is_recognised_as_the_kind_it_declares` holds
+the table's declaration and the world's recognition together over **79 parts of
+seven families** (panel 28, door 14, hood 3, trunk 5, bumper 10, glass 19). The
+hinge is DERIVED from the box: a door about the vertical at its forward edge, a
+bonnet about the lateral at its rear edge, a boot lid at its forward edge.
+
+The five wheeled families are re-authored — **84 parts over six catalogue rows**
+against four before — and the `bonnet` and `boot` drawn since VEH1a are
+**re-declared** as what they always were rather than duplicated, which is why the
+silhouette at 64 m did not change. Two committed levels re-cooked: the island
+(154 171 → 200 667 B) and its fixture (23 740 → 30 193 B), the only two with a
+vehicle in them.
+
+### the breakable joint, because rapier has no break force
+
+`PhysicsWorld3D::joint_impulse` unpacks rapier's own `ImpulseJoint::impulses`;
+`BreakWatch3D { joint, threshold_ns }` + `break_over_threshold` read it each step
+and `remove_joint` the ones that let go. In the FACADE, because a hinged car
+door, a tow rope and a trailer coupling are one rule. **A refusal is a value**:
+zero, negative and NaN are UNBREAKABLE, never instant. Measured on a 2 000 kg arm
+— the hinge carries **80.5 N·s** a step, breaks on step **18** at half of it,
+survives 1 000× it and survives 0 / −1 / NaN, and the freed body falls over 4 m
+in the second after.
+
+### the crash table
+
+A catalogue saloon into a static wall, parts bolted on before → after:
+
+| speed | peak blow | parts | shed | popped | panes | hull |
+|---|---|---|---|---|---|---|
+| 15 km/h | 30 N·s | 14 → 14 | 0 | 0 | 0 | 0 J |
+| 30 km/h | 4 056 N·s | 14 → 14 | 0 | 0 | 0 | 814 J |
+| 45 km/h | 9 308 N·s | 14 → 13 | 1 | 0 | 0 | 4 292 J |
+| **60 km/h** | **17 730 N·s** | **14 → 13** | **1** | **3** | 0 | **15 503 J** |
+| 90 km/h | 28 606 N·s | 14 → 11 | 2 | 2 | 1 | 38 423 J |
+
+At 60 the front bumper sheds and the bonnet pops, and the REAR bumper and the
+boot lid are untouched — the face test read rather than asserted. Tuned
+unbreakable, the same 18 879 N·s blow leaves all fourteen on.
+
+### six findings, all measured before they were fixed
+
+1. **A CRASH IS FOUR FACTS AT ONCE.** Reading `m·Δv` across a step made a PARKED
+   car fold **439 trace bytes** with its boot lid dented **0.3 mm**. Subtracting
+   the force the model itself asked for fixed that and broke something worse:
+   the force a suspension asks for is not the net force on a car whose chassis is
+   ALSO resting on something, so the EMS fixture's bellied van (**107 kN** of
+   strut on a 2.6 t body, silently cancelled by the ground) read a **1 370 N·s
+   blow every step for four thousand steps**, and a unit pulling off its apron
+   read **14 020 N·s** from going 0 to 2.6 m/s in one step. The correction is
+   gone; a crash is now a real DECELERATION (25 m/s² — a property of the physics,
+   where an impulse floor is a property of the car's mass), on a body that was
+   MOVING, that SLOWED, while TOUCHING something (`body_has_contact`, a new
+   non-destructive door — a host already owns the contact drain), and that was
+   not PLACED (a rapier body integrates its own position from its own velocity,
+   so a body whose position did not follow it was written by somebody).
+2. **A LOAD PATH IS NOT A MASS RATIO.** Sizing a part's share as
+   `J · m_part/m_chassis` gives an 8 kg bumper **128 N·s** of a 19 200 N·s crash
+   against a 4 500 N·s mount, so a car could be driven into a wall at any speed
+   and keep every panel. A bumper comes off because it is the thing that hit the
+   wall.
+3. **A DETACHED PART THAT IS A RAPIER BODY DISABLES THE CAR IT CAME OFF.** Three
+   measurements: a 7 kg bumper spawned inside its own chassis **rose from 0.501 m
+   to 1.328 m** (the P29.6 ragdoll launch wearing a bumper); spawned clear it
+   landed in front of the car and a responding ambulance **never got home**,
+   because a bumper in the road goes under a wheel ray; and a door on a real
+   revolute, held to a chassis the dispatcher teleports, was yanked by its own
+   joint until the **ambulance was at 1 705 metres**. Three EMS gates went red
+   and the matrix named which half each was. A shed part is DRAWN debris now —
+   reparented to the root, keeping the velocity it left with, falling to the
+   ground it was over (one ray, cast once, EXCLUDING the car it came off, without
+   which it "rests" a metre above where it let go) — and a popped part stays a
+   child swinging on the analytic hinge. The cost is named: **a bumper in the
+   road cannot be run over and an open door cannot be torn off by a lamp post**,
+   and `joint_impulse`/`break_over_threshold` keep their own arms and no caller.
+4. **A PANEL IS A SHELL.** Pricing a part by its box's VOLUME made a bonnet weigh
+   **164.38 kg**. Mass is the largest FACE times an areal density now; the fifty
+   shedding parts weigh **2.64–30.49 kg**, and the 2.64 is the number the WPN2d
+   blast law is measured against.
+5. **THE BASELINE IS WHAT THE LEVEL SAYS AND IT NEVER CHANGES.** The reconcile
+   re-wrote each part's authored box from the entity's live `Transform` every
+   step — and that walk only runs for a car that is NOT quiet, so the moment a
+   bonnet was dented its "authored" box was re-read from the dented one and
+   dented again: a **39.6 mm dent closed a 186 mm panel to 0.1 mm** in under two
+   seconds and took the part's own facing axis with it.
+6. **`hit_vehicle` ANSWERED FOR A WALL.** It asked the WORLD (a collider and a
+   body) instead of the BRIDGE (the vehicle map), so a round into a wall was
+   spent on a "vehicle" that is a lamp post and never reached the P22
+   destructible door — five arms across four files, every one of them about
+   joules arriving somewhere and finding nobody there.
+
+### the three states
+
+LATCHED (a drawn child, no physics, an analytic hinge), LIVE (the same child,
+open on that hinge) and SHED (drawn debris off the hierarchy, integrated by
+arithmetic, reaped at the P22 debris lifetime under a cap). A door commanded open
+is **half open in 11 steps** and settles on its **66°** limit to 1e-6 of the
+drawn transform.
+
+### the glass, the dent, the health, the flat and the fire
+
+**GLASS**: the P22 fracture door was priced (a mesh per pane shape per family, a
+`.inf_fracture` per mesh at cook, `Destructible` on a child of a dynamic body for
+the first time, 8–16 of the level's 256 debris slots per windscreen, ~250 KB of
+committed mesh) and **refused**; the pane is HIDDEN and six `Sprite` shards are
+thrown on content-derived guids in a deterministic fan, reaped at 1.6 s and
+bounded at 96. Measured: 1 500 J takes a 120 J pane and 0 shards survive
+200 steps; at 1e9 J of health it holds.
+
+**DENT**: the P22 deform field is a world-XZ terrain heightfield with **no
+mesh-space door**, so a dent is a local push-in on the part's own drawn box along
+the axis it faces, rebuilt from the authored baseline every step and portable
+(`psin64`/`pcos64`, because the rotation reaches a `Transform` and `sim_snapshot`
+folds every one). Measured: a 60 km/h frontal dents the bonnet **39.6 mm** and
+the boot **0.0**, and the bonnet's drawn box goes 1.5840 → 1.5444 on its own
+axis.
+
+**HEALTH**: the WPN2a sentence — *"a car spends nothing"* — is retired.
+`apply_hit` gains the vehicle arm before the destructible one, and where the
+round lands decides what it costs: a wheel, a pane, the engine bay or the hull. A
+hull is four panels (**36 000 J**), an engine one (**9 000 J**). Measured: 10 000 J
+into the flank leaves 72 % of the hull and 100 % of the engine; 10 000 J into the
+nose kills the engine.
+
+**THE ENGINE SCALE IS A RUNTIME ONE**, never a tuning write — and scaling only
+the driveline CEILING was measured to do **nothing**: the sports row's 0–100 was
+**4.32 s against 4.32 s** at half power, because it is torque-limited in first and
+never reaches its ceiling. `CrankStep::power_frac` scales the engine's own torque
+too, and at zero it is a STALL — no combustion torque and **no idle floor**.
+Measured: **4.32 s whole, 6.18 s at half**, and a dead engine turns at **0 rpm**
+and reaches **0.000 m/s** on five seconds of full throttle.
+
+**THE FLAT** costs the tyre the doc's own two numbers — radius ×0.75, grip ×0.60
+— and the ray keeps the INFLATED radius on purpose or a flat tyre would find no
+ground. Measured over four seconds at a dead-straight wheel: **1.36° of yaw and
+6.836 m of drift**, against **0.00° and 0.000 m** whole.
+
+**THE FIRE** is the EMS2 door unchanged: a burning car is an `IncidentKind::Fire`
+whose `building` slot carries the CHASSIS' guid, and that slot is read for
+de-duplication and never dereferenced — so a car drops into it with no schema
+move and the dispatcher never learns the thing on fire has wheels. Measured on
+the `Town` fixture: **assigned on step 0, on scene at 57.23 s and 11.64 m,
+resolved at 62.3 s, 22 puffs of smoke, the intensity hosed to −0.003**.
+
+**THE BLAST** reaches the CHASSIS and never a PART, which is the WPN2d levitation
+law met head on — the lightest body a crashed car leaves is a 2.64 kg pane. This
+closes the sentence that audit left the wave by name (*"a vehicle that carries
+`Destructible` takes blast damage the day it is authored"* — and none does).
+
+### the trace's eighteenth section, and the clock
+
+`bodywork::damage_state_bytes`, at the tail after VEH3b's drivetrain, pinned in
+`projector_mirror`'s `SECTIONS` (17 → 18) in the same commit that folded it, and
+**empty until something breaks**. `VehicleDamage::is_quiet` is exactly the set it
+writes; `last_vel`, `last_force` and each part's authored geometry are
+deliberately outside both, which is the trap `clutch_slip_rad_s` is kept out of
+the VEH3b fold to avoid. **No MIRROR fence was added and none was needed**:
+`step_bodywork` is the last statement of `step_vehicles`, inside the fence both
+hosts already carry.
+
+**THE BODYWORK KEEPS ITS OWN CLOCK**, and that was wrong in two places before it
+was right. `traffic::steps` is advanced by the traffic pass and stands still on a
+level with no traffic: a fixture's glass shards outlived their own second and a
+half for ever, and a car burned down on such a level had `fire_step == 0`, which
+is the same value as NOT ON FIRE.
+
+### the cost
+
+A thousand parked saloons, the same thousand built again with every drawn part
+despawned, min of five measured steps in one process. The first cut cost
+**×1.700** — a child walk, a `String` per part per step, and a hundred-field
+`VehicleTuning` built through a hundred `set` calls for three numbers. Two fast
+paths later it is **×1.083 debug**. And one of those fast paths was a defect
+first: `limits` was briefly lazy, so a crash on a step a car was still quiet used
+the Ring-0 default 4 500 N·s and a car tuned UNBREAKABLE shed its bumper anyway.
+
+### the frames, and what the instrument said
+
+`demo.ps1 -PlayMode window` on the island, **three runs**. Runs 1 and 2 both ended
+`VEH3a: NO CAR reached in thirty-six taps of E over a full turn`, so none of the
+fourteen vehicle frames of VEH3a, VEH3b or VEH3c was in either session — the hero
+was `Grounded` in both, not wedged and not ragdolling, and in run 1 it finished
+**9 m** from the car it could not board against an `ENTER_REACH_M` of 3.0. Run 2
+placed it at a known-boardable car at t = 315…375 s and the boarding leg ran at
+**t ≈ 1 060** — the session was three times longer than run 1's. Run 3 placed it
+every **40 s from 280 to 1 440** and the leg found a car on the first tap. That is
+a finding about the INSTRUMENT: the loop's boarding hunt is a fixed number of taps
+at wherever the previous leg left the hero, and whether it succeeds is a function
+of how long the earlier legs took.
+
+Run 3: the hero moved **298.990 m over 4 203 samples**, **863 driving rows**, the
+hull fell to **77.8 %**, **1 part shed**. Two frames, both triggered on the new
+columns — `99-veh3c-hull.png` on `car_health` falling under 99.9 while `Driving`,
+with the HUD reading `HULL 78%  ENG 100%  FLATS 0  GLASS 0/4  SHED 1`, and
+`100-veh3c-shed.png` on `parts_shed` passing 0. The pane, the flat, the fire and
+the shot-up-car triggers did not fire and each says why in the log.
+
+And `car.mjs` — the new CDP script that frames a car in the authoring viewport —
+exited **4** on its first run, *"NO CAR WITH DOORS in the open document"*. It was
+right: the editor's boot ladder opens the generated showcase project, and that
+project's copy of the island is **146 263 B dated four days before this wave**
+with no `door_fl` in it. Handed the tree's own level, the same editor reports
+**772 actors** and a car with **18 drawn parts**. The PIE frames are unaffected
+and that is not luck — a traffic or parked car is materialized at runtime through
+the same `rig_nodes` recipe, so it has its doors whatever the level file says.
+**Refreshing that project is a showcase step outside this wave's tree.**
+
+### the closing numbers
+
+| | |
+|---|---|
+| the wave | **9 commits**, `b119641f`..`e10d3032`, unpushed |
+| the gate | `veh3c_gate.rs`, **18 arms**, every one mutation-verified with an engagement count |
+| battery (`battery3.sh -j 3`), LAST | **AGGREGATE over 397 binaries: 7628 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** |
+| clippy `--workspace --all-targets` with `-D warnings`, run LAST | **exit 0** |
+| rustdoc COLD | **425** of a 450 ceiling — the same number the VEH3b audit closed at, so ~1 300 lines of new doc added none |
+| `cargo fmt` per member | **49 packages, 0 unformatted**; `git diff --exit-code` clean |
+| the wasm leg | `cargo check --target wasm32-unknown-unknown -p inf-player` with `-D warnings` — **exit 0** |
+| CRLF | **0** over all 27 touched blobs |
+| schema / payload / levels / goldens | **v28 / 13 / 24 / 64**, all unmoved |
+| committed content | **two `.inf_lvl` re-cooked** (the island and its fixture) and their sidecars; nothing else |
+| `Cargo.lock` / `deny.toml` / new deps | untouched / untouched / **none** |
+| the parked-car cost | **×1.083 debug** against a ×1.05 ceiling asserted under release off CI |
+| the real editor on the final tree | twice, **772 actors**, a car with **18 drawn parts**; both sessions closed `still running: none` |
+
+### what VEH3d, VEH3f and VEH3h inherit
+
+**VEH3d** gets its whole substrate as a SEAM rather than as code: the door hinge
+is derived from the door's own drawn box (`BodyPartKind::Door { hinge, side }`),
+`set_part_open` is the actuation door and already drives the motor, the handle
+socket is DERIVED and not persisted (the door's outer face at two thirds of its
+height — `centre_frac` pushed out along `PartState::facing`, all of it on state a
+shipped player carries), `parts_of` is the census in `Guid` order and `PartSide`
+is how a pipeline picks which door to walk to.
+
+**VEH3f** gets the part families, authored as fractions exactly as the panels
+are, and the naming convention that IS the schema (`door*`, `hood*`/`bonnet*`,
+`trunk*`/`boot*`/`tailgate*`, `bumper*`, `glass*`) — with
+`every_authored_part_is_recognised_as_the_kind_it_declares` going red the day a
+family names a door something the world cannot read. Plus the measured masses: a
+roster row whose proportions put a door at 100 kg is a row with a defect. And
+the honest facts that the truck family draws no separate bonnet (its `cab`
+reaches the nose) and the van has no rear pane.
+
+**VEH3h** gets the crash table at five speeds, the honest sentence that the
+island has nothing a car can hit at 60 km/h except a kerb, a pillar, a lightpost
+or another car, the parked-car ratio and its ceiling, and three carried items to
+name as gaps or close: the un-used breakable joint, the transform dent, and the
+un-persisted damage.
