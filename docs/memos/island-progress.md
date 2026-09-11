@@ -38757,3 +38757,113 @@ Each is recorded in the code rather than quietly fixed:
 6. **`SurfaceMap` has no `Mud` producer from a terrain** (new). The island's four
    splat layers are grass, rock, forest floor and sand; mud is reachable only
    through a collider's friction band.
+
+### VEH3a, CLAUSE 7 — THE HUD, THE COLUMNS, THE DEMO AND THE EDITOR
+
+#### 1. THE HUD ROW
+
+`inf_ecs::vehicle::tyre_readout` sits beside `drive_readout` in Ring 0, for its
+stated reason verbatim — *a host function cannot be tested and this one can* —
+and both hosts draw it from there. The shape:
+
+```
+76/74/68/69 C  asphalt  slip 0.03/-0.01  mu 1.00
+```
+
+Four temperatures, the surface the **most** wheels are on (a car with two wheels
+on the verge is a car on the verge; a row naming four surfaces is unreadable),
+the **driven** axle's two slips, and the µ the contact is worth. Every number is
+read off `WheelState` after the solve published it. A craft with no tyres answers
+the **empty string** and draws no second line, so a boat and a helicopter are
+handled in Ring 0 rather than special-cased at the host.
+
+Arm 17 of `veh3a_gate.rs`, `the_hud_row_says_what_the_tyres_know`: a car spun on
+sand under slick tyres, then the row asserted to contain the surface name and the
+hottest tyre's own temperature. Measured: `21/21/21/21 C  sand  slip 0.00/-0.00
+mu 0.25`.
+
+#### 2. `hero.csv` — EIGHT COLUMNS, APPENDED
+
+```
+t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pitch,state,foot_mm,
+boom_m,body_fade,whisker_steer,camera_holder,cover_class,cover_side,cover_peek,
+rounds,last_hit_m,equipped,recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
+class,attach,lock,engaged,incoming,heat,on_scene,responder_m,
+tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,slip_ratio,slip_lat,mu
+```
+
+**FORTY-FIVE** columns, no header line, appended at the tail so every index a
+script already reads keeps its meaning. `tools/demo/README.md` says so and
+`the_hero_log_and_its_readme_agree` asserts the README, the armed row and the
+hero-less row against one another — the hero-less row is widened by the same
+eight commas, because a different-width row is a row no consumer can index.
+
+#### 3. THE DEMO — `tools/demo/demo.ps1 -PlayMode window`, on the island
+
+| # | frame | trigger | fired? |
+|---|---|---|---|
+| a | `90-veh3a-hud-road.png` | `Driving` AND `surface == asphalt` AND `speed > 3` | **YES, after 1.09 s** |
+| b | `91-veh3a-verge.png` | `Driving` AND `surface != asphalt` | **no** — the car never left asphalt |
+| c | `92-veh3a-burnout.png` | `tyre_temp_rl > 60` (fallback `> 21.5`) | **no** — see below |
+| d | `93-veh3a-kerb.png` | `|slip_ratio| > 0.25` | **no** — the driven axle never swung |
+
+The captured line for (a), verbatim from `demo.log`:
+
+```
+368.133,22088,-1755.1316,17.9557,2098.6227,Driving,3.0247,...,80.4,
+21.1,21.1,21.1,21.1,asphalt,0.0000,0.0032,1.000
+```
+
+Four live temperatures, the classifier's own surface, the driven axle's slips and
+**µ exactly 1.000** — the island's own road, through the `SurfaceMap` built from
+its splat and its carriageway.
+
+**Why (c) did not fire, and it is the model rather than a miss.** This rig's
+brakes out-hold its engine — 13 kN against 8 — so brake-and-throttle on asphalt
+under road tyres is a parked car. The gate measured the same thing at **zero**
+slipping steps, which is exactly why
+`a_burnout_heats_the_tyre_and_costs_it_grip` spins one on **sand under slick
+tyres** (µ 0.25) and gets **229** slipping steps taking a tyre 20.0 → 21.1 °C.
+The log says this where the miss is reported.
+
+**And an instrument fault the first run found.** The hero stood **2.8 m** from
+`Harbour City Car` at (−1752.0, 16.8, 2048.0) and twenty-five taps of E reached
+nothing, because `mode` read `Crouch` on **801 of 1 239** rows. That is the fault
+the script's own `Stand-Up` exists for; the leg calls it now and boarded on the
+next run. **The boarding is flaky across runs** — of three sessions, one boarded
+and two did not — and the log names which. `demo-run3-no-car.log` and
+`hero-run3.csv` are kept beside the primary pair as the evidence.
+
+#### 4. THE REAL EDITOR — `95-veh3a-editor-v28.png`
+
+Relaunched on the final tree from `target/release/inf-studio.exe`. The island
+opens: **Vancouver Island, 556 actors, 220 root actors, streamed `.inf_terrain`,
+streaming 52/52**, the road and its markings drawn, a car and the hero on it. The
+Output Log carries **only `INFO` lines** (`pcg_stream` populating radii) — no
+warning and no error. The window title is `Infini Engine`, `Responding: True`,
+and it was closed afterwards.
+
+**What I could NOT capture**: the Details grid showing `tyre_optimum_c`. Clicking
+the car in the viewport selects a body **panel** (`lower`), not the chassis that
+carries the `VehicleClass`; the Outliner's `chassis` filter finds all eight rigs
+and highlights a row, but the Details panel kept reading *Select an object to
+view details* through four attempts at the selection. So the "100 settings on the
+Details grid" frame is **not in this session**, and that is stated rather than
+substituted with a different picture.
+
+#### THE CARRIED LIST, FINAL
+
+1. **The Details-grid frame was not captured** (new). The island opens at v28
+   with no console errors and that frame exists; a frame of `tyre_optimum_c` in
+   the property grid does not, because an Outliner selection did not populate the
+   Details panel in the attempts made.
+2. **Three of the demo's four tyre frames did not fire**, each for a stated
+   reason, and (c)'s reason is the model being right.
+3. **The demo's boarding is flaky** — one session in three.
+4. **The sub-step chassis advance is linear only** — moot at the shipped N = 1.
+5. **31 of the 38 tunables have no consumer yet** — VEH3b/c/e/g.
+6. **The P17 weather state owns no ambient temperature**; the air is derived from
+   `snowiness`.
+7. **The four-cast kerb spike is 9 % larger** than the one-cast spike.
+8. **`SurfaceMap` has no `Mud` producer from a terrain** — the island's four
+   splat layers are grass, rock, forest floor and sand.
