@@ -423,13 +423,33 @@ pub const NPC_BUDGET_AGENTS: usize = 1000;
 /// able to see anything: a vehicle phase that grew to a visible share of a 6 ms
 /// step trips this by an order of magnitude.
 ///
+/// # RE-PRICED AT WAVE VEH3a: **×3.1, four casts a tyre, and the constant still does not move**
+///
+/// VEH3a's tyre casts **four rays a wheel** (the footprint's corners, blended to
+/// one contact and a bilinear normal), evaluates the magic formula per axis,
+/// reads a surface map at every contact and integrates a temperature. The arm
+/// is `veh3a_gate::the_vehicle_phase_costs_what_it_prints` — a warmed fixture, a
+/// control step and a measured step, the minimum of five each — and it reads
+/// **0.3971 ms dev / 0.3543 ms release at 64 cars** (6.21 / 5.54 µs a car) on
+/// the machine that wrote it, against VEH2a's 0.1277 / ~0.10. The rays are the
+/// cost again: four times the casts for roughly three times the phase.
+///
+/// The first CI run of that arm asserted a **dev** build on three shared runners
+/// and read **0.52 / 0.86 / 0.87 ms** — over the ceiling on all three — because
+/// it was written without the conditioning below. §8 forbids raising this
+/// constant to meet a runner, and the release figure it actually governs is
+/// inside it with ~1.4× headroom, so the arm took the house conditioning and
+/// the constant stayed. The headroom that VEH2a left at ~3.9× dev is now
+/// **~1.3× dev / ~1.4× release**: the ratchet's own report on what four casts
+/// cost, and the number VEH3b–h spend from.
+///
 /// # A clock, so: release only, real machine only
 ///
 /// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons — reported
 /// everywhere, asserted under `cargo test --release` off CI.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 0.5
-/// (VEH1a); re-priced but NOT moved at VEH2a (see above).
+/// (VEH1a); re-priced but NOT moved at VEH2a and again at VEH3a (see above).
 pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
 
 /// The fleet [`VEHICLE_STEP_BUDGET_MS`] is measured at.

@@ -39105,3 +39105,17 @@ needs drive force to beat `µ·N` while something holds the car, this engine bra
 all four wheels, and 13 kN beats 8. Slicks make it *worse* on tarmac — 1.10
 against a road tyre's 1.00. What produces one is a low-µ surface, which is why
 the gate spins one on **sand under slicks** at µ 0.25 and 229 slipping steps.
+
+> **CI, after the push (2026-09-11).** Run 34565141599 was red on all three
+> runners for one arm, `the_vehicle_phase_costs_what_it_prints`: it asserted
+> `VEHICLE_STEP_BUDGET_MS` in a **dev** build on shared runners and read
+> **0.86 / 0.52 / 0.87 ms** against 0.40 on the machine that wrote it. The
+> constant's own doc says *a clock, so: release only, real machine only*, and
+> §8 forbids raising it to meet a runner. The arm now takes the house
+> conditioning — reported everywhere, `return` under `cfg!(debug_assertions)`
+> and under `CI`, asserted with `RATCHET_NOTE` only in release off CI, the
+> island gate's own tail — and the release figure it governs is **0.3543 ms at
+> 64 cars, 5.54 µs a car**, inside 0.5 with ~1.4× headroom. `budget.rs` and
+> `docs/profiling.md` carry the VEH3a re-price (×3.1 for four casts a wheel,
+> the constant unmoved). Law, written into the discipline: a budget arm against
+> a §8 constant never asserts in dev or on CI.

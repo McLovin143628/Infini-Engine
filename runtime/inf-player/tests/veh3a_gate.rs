@@ -1412,6 +1412,13 @@ fn the_v27_downgrade_loses_exactly_the_thirty_eight() {
 ///
 /// **The mutation**: putting `TyreCurves::of` back inside `tyre_force_with`,
 /// which cost 16.88 µs a car and 1.08 ms a step when it was there.
+///
+/// A clock, so — like every budget arm in the house and like the constant's
+/// own doc says — it is REPORTED in every build and ASSERTED only under
+/// `cargo test --release` off CI. The first CI run of this arm asserted a dev
+/// build on three shared runners and read 0.86 / 0.52 / 0.87 ms against 0.40
+/// on the machine that wrote it; §8 forbids moving the constant up to meet a
+/// runner, so the arm took the house conditioning instead.
 #[test]
 fn the_vehicle_phase_costs_what_it_prints() {
     const CARS: usize = 64;
@@ -1482,11 +1489,19 @@ fn the_vehicle_phase_costs_what_it_prints() {
         "sixty-four cars cost {} ms more than none, so this arm timed nothing",
         m - c
     );
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the vehicle phase is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the vehicle phase is reported, not asserted (shared runner)");
+        return;
+    }
     assert!(
         m <= inf_player::budget::VEHICLE_STEP_BUDGET_MS,
-        "the vehicle phase costs {m} ms a step at {CARS} cars against a budget of \
-         {} — the budget moves with its population or the model does",
-        inf_player::budget::VEHICLE_STEP_BUDGET_MS
+        "the vehicle phase costs {m:.4} ms a step at {CARS} cars against a {} ms ceiling {}",
+        inf_player::budget::VEHICLE_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
     );
 }
 
