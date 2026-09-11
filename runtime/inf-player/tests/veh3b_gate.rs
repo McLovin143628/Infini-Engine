@@ -39,6 +39,7 @@
 //! | `the_hud_row_says_what_the_drivetrain_knows` | the row's own `format!` | four rows built from real state |  n/a |
 //! | `the_vehicle_phase_costs_what_it_prints` | any per-wheel derivation put back | cars, control + measured | n/a |
 //! | `two_runs_of_one_drive_fold_the_same_bytes` | a clock or an RNG anywhere in `crank_step` | 213 distinct states of 240, plus a source ban | passes |
+//! | `a_class_edited_after_creation_reaches_the_car_only_through_the_tuner` | the live-tuner half deleted from `pie_drive.rs` | two 360-step drives, 0.000 boost against 0.812 | passes |
 //!
 //! # PIE == shipping, the mirrors, and the wire
 //!
@@ -1672,6 +1673,81 @@ fn two_runs_of_one_drive_fold_the_same_bytes() {
         assert!(
             !body.contains(banned),
             "`crank_step` reaches `{banned}`, which is not portable and not deterministic"
+        );
+    }
+}
+
+/// **A CLASS EDITED AFTER THE CAR EXISTS REACHES IT ONLY THROUGH THE TUNER**
+/// (wave VEH3b) — the seam `INF_PIE_TUNE_VEHICLE` was only half across.
+///
+/// `PhysicsBridge3D::reconcile_vehicles` installs an authored `VehicleClass`
+/// **once, at creation**, and says why in its own doc: *"the component is the
+/// STARTING point; the tuner owns it from there"* — re-installing every step
+/// would silently undo every edit an author made during Simulate. That ruling
+/// is right and this arm does not challenge it. What it pins is the
+/// CONSEQUENCE, which VEH3a's preview tuning door did not carry: writing the
+/// component on a car that already exists changes what the Details grid shows
+/// and **nothing the car does**.
+///
+/// Measured by the demo loop, which is how it was found: a session that asked
+/// for `turbo_boost_max=0.8` on twenty-three island chassis drove six hundred
+/// and eleven rows at **0.000 boost**. `pie_drive.rs` now tunes the running
+/// vehicles as well as the component, and the source pin below is there for
+/// `the_shipped_host_draws_the_drivetrain_row`'s reason exactly: a host loop
+/// cannot be reached from a test, so what can be pinned is that it is written.
+#[test]
+fn a_class_edited_after_creation_reaches_the_car_only_through_the_tuner() {
+    let full = VehicleControls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    // (a) THE COMPONENT ALONE, on a car that already exists.
+    let mut rig = settled(Rig::sealed());
+    let e = rig.world.entity_of(CHASSIS).expect("the chassis entity");
+    let mut class = rig
+        .world
+        .world()
+        .get::<inf_ecs::components::VehicleClass>(e)
+        .copied()
+        .unwrap_or_default();
+    assert!(class.set("turbo_boost_max", 0.8));
+    rig.world.world_mut().entity_mut(e).insert(class);
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.drive(full, 180);
+    let component_only = (0..180).fold(0.0f64, |m, _| {
+        rig.drive(full, 1);
+        m.max(rig.drivetrain().boost)
+    });
+
+    // (b) THE SAME NUMBER THROUGH THE TUNER, which is what the bridge's own
+    //     doc says owns it from creation onward.
+    let mut rig = settled(Rig::sealed());
+    rig.tune(&[("turbo_boost_max", 0.8)]);
+    let tuned = (0..360).fold(0.0f64, |m, _| {
+        rig.drive(full, 1);
+        m.max(rig.drivetrain().boost)
+    });
+    println!("VEH3b SEAM: an edited component alone made {component_only:.3} of boost on a car that already existed; the same number through the live tuner made {tuned:.3}");
+    assert_eq!(
+        component_only, 0.0,
+        "an edited component reached a running car's physics, so `reconcile_vehicles` has started re-installing and every live tune is now being undone"
+    );
+    assert!(
+        tuned > 0.3,
+        "the live tuner made {tuned:.3} of boost, so this arm's control is not a control"
+    );
+
+    // …and the shipped preview door crosses BOTH halves.
+    const DRIVE: &str = include_str!("../src/pie_drive.rs");
+    for fragment in [
+        "if let Some(v) = sim.bridge3d_mut().vehicle_mut(*guid) {",
+        "if v.tune(name, *value) {",
+        "on the RUNNING vehicles",
+    ] {
+        assert!(
+            DRIVE.contains(fragment),
+            "`pie_drive.rs` no longer carries `{fragment}`, so `INF_PIE_TUNE_VEHICLE` is back to editing a component nothing reads"
         );
     }
 }

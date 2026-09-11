@@ -911,6 +911,27 @@ impl SpawnOverride {
                 }
                 w.world_mut().entity_mut(entity).insert(class);
             }
+            // **AND THROUGH THE LIVE TUNER**, which is the half that reaches the
+            // PHYSICS (wave VEH3b). `reconcile_vehicles` installs an authored
+            // class ONCE, at creation, and says why in its own doc: *"the
+            // component is the STARTING point; the tuner owns it from there."*
+            // Every island chassis is created on the first sync, long before
+            // this door fires, so writing the component alone changed what the
+            // Details grid shows and nothing the car does.
+            //
+            // Measured, and it is what found this: a session that asked for
+            // `turbo_boost_max=0.8` on twenty-three chassis drove six hundred
+            // rows at **0.000 boost**. This door IS a tuner, so it tunes.
+            let mut live = 0usize;
+            for guid in &chassis {
+                if let Some(v) = sim.bridge3d_mut().vehicle_mut(*guid) {
+                    for (name, value) in &pairs {
+                        if v.tune(name, *value) {
+                            live += 1;
+                        }
+                    }
+                }
+            }
             for name in &refused {
                 eprintln!("inf-player: {TUNE_VEHICLE_ENV} name `{name}` is not a tunable");
             }
@@ -919,7 +940,7 @@ impl SpawnOverride {
                 said.push_str("; ");
             }
             said.push_str(&format!(
-                "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis (refused {refused:?})",
+                "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis and {live} on the RUNNING vehicles (refused {refused:?})",
                 chassis.len()
             ));
         }
