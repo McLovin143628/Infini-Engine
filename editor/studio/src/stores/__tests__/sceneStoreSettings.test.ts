@@ -117,6 +117,7 @@ const sample: LevelSettingsDto = {
     fog_density: 0,
     precipitation: 0,
     snowiness: 0,
+    ambient_c: 20,
   },
 };
 

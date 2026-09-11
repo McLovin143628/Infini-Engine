@@ -2568,15 +2568,17 @@ pub fn drive_readout(speed_mps: f64, gear: i32) -> String {
 /// **THE TYRE ROW** (wave VEH3a clause 7) — what the driving model now knows,
 /// on one line under [`drive_readout`].
 ///
-/// Four temperatures, the surface under each wheel, the driven axle's two slips
-/// and the µ the contact is worth. Every number is read off [`WheelState`] after
-/// the solve published it; none is recomputed here, or the HUD would be a second
-/// opinion rather than a record.
+/// Four temperatures, the surface under each wheel, the driven axle's two slips,
+/// the µ the contact is worth and **the air those tyres are cooling into**.
+/// Every number is read off [`WheelState`] after the solve published it; none is
+/// recomputed here, or the HUD would be a second opinion rather than a record —
+/// which is exactly why the air is `WheelState::ambient_c` (what the integrator
+/// used) and not a fresh call to [`weather_at`].
 ///
 /// In Ring 0 for [`drive_readout`]'s own reason, verbatim: a host function cannot
 /// be tested and this one can. Both hosts call it.
 ///
-/// Shape: `76/74/68/69 C  asphalt  slip 0.03/-0.01  mu 1.00`. An empty wheel list
+/// Shape: `76/74/68/69 C  asphalt  slip 0.03/-0.01  mu 1.00  air 12 C`. An empty wheel list
 /// answers the empty string, which is what "this craft has no tyres" has to look
 /// like — a boat and a helicopter draw no row at all.
 pub fn tyre_readout(wheels: &[WheelState]) -> String {
@@ -2604,8 +2606,9 @@ pub fn tyre_readout(wheels: &[WheelState]) -> String {
     // the front pair first, so the last two are the ones a rear-drive car spins.
     let driven = wheels.last().copied().unwrap_or_default();
     let mu = wheels.iter().map(|w| w.mu_surface).fold(0.0, f64::max);
+    let air = wheels[0].ambient_c;
     format!(
-        "{temps} C  {}  slip {:.2}/{:.2}  mu {mu:.2}",
+        "{temps} C  {}  slip {:.2}/{:.2}  mu {mu:.2}  air {air:.0} C",
         best.1.name(),
         driven.slip_ratio,
         driven.slip_lat
@@ -4304,64 +4307,79 @@ impl Default for Footprint {
 /// means this number.
 pub const TYRE_AMBIENT_C: f64 = 20.0;
 
-/// The air temperature full snow implies, Celsius — see [`weather_at`].
-pub const SNOW_AMBIENT_C: f64 = 0.0;
-
 /// **The two things the weather does to a tyre** (wave VEH3a): how wet the road
 /// is, `[0, 1]`, and how cold the air is, Celsius.
 ///
-/// A pure read of sim state — the first enabled [`SkyAtmosphere`] block's live
-/// weather, in `Guid` order so two hosts cannot pick different skies — so both
-/// hosts compute it identically and it reaches no trace of its own.
+/// A pure read of sim state, so both hosts compute it identically and it reaches
+/// no trace of its own.
 ///
-/// # There is no ambient TEMPERATURE in the weather state, and this says so
+/// # The air temperature is a FIELD, not a phase proxy
 ///
-/// `WeatherParams` carries coverage, cloud type, wind, fog density,
-/// precipitation and **snowiness**, and nothing else. Wetness is therefore a
-/// direct read of `weather_precipitation`; the ambient is **derived from
-/// snowiness**, which is the only field that carries the information: snowiness
-/// is the precipitation's PHASE (`0` rain, `1` snow), and precipitation falls as
-/// snow when the air is at or below freezing. So the air is
-/// [`TYRE_AMBIENT_C`] in rain and [`SNOW_AMBIENT_C`] in snow, blended.
+/// Until VEH3a's audit the weather block carried coverage, cloud type, wind, fog
+/// density, precipitation and **snowiness**, and nothing else — so the ambient
+/// was *derived* from snowiness (20 °C in rain, 0 °C in snow) because that was
+/// the only field which carried any of the information. "Rain falls at 20 °C"
+/// is not a law of physics, and the proxy could not express a cold dry morning
+/// at all. [`SkyAtmosphere::weather_ambient_c`] is the real field, landed in the
+/// same v28 window as the thirty-eight tunables under the one-window law, and
+/// this reads it.
 ///
-/// That is a proxy and it is written down as one. A real ambient belongs on the
-/// weather block, costs a `WeatherParams` field and a `SkyAtmosphere` slot, and
-/// is a schema move this wave's window did not price — so it is carried by name
-/// rather than smuggled in.
+/// # Which sky answers
 ///
-/// [`SkyAtmosphere`]: crate::components::SkyAtmosphere
+/// [`crate::sky::sky_authority`] — the ONE door, the entity carrying the clock,
+/// lowest [`Guid`](crate::components::Guid) wins — because that is the sky
+/// [`crate::sky::advance_weather`] blends and the renderer resolves, and a tyre
+/// reading a *different* atmosphere from the one the world is running would be
+/// two weathers in one level. A level whose atmosphere is **orphaned** (a
+/// `SkyAtmosphere` with no [`TimeOfDay`](crate::components::TimeOfDay) beside
+/// it — the condition `inf_ecs::sky` already warns about once per process)
+/// falls back to the lowest-`Guid` enabled atmosphere, so an authored weather
+/// block is never silently inert; pinned by `the_authority_sky_is_the_one_the_
+/// tyre_reads`.
+///
+/// [`SkyAtmosphere::weather_ambient_c`]: crate::components::SkyAtmosphere::weather_ambient_c
 pub fn weather_at(world: &EcsWorld) -> (f64, f64) {
     let w = world.world();
-    let mut best: Option<(Uuid, f32, f32)> = None;
-    for e in w.iter_entities() {
-        let Some(sky) = e.get::<crate::components::SkyAtmosphere>() else {
-            continue;
-        };
-        if !sky.weather_enabled {
-            continue;
+    let authority = crate::sky::sky_authority(world)
+        .and_then(|e| w.get::<crate::components::SkyAtmosphere>(e))
+        .filter(|sky| sky.weather_enabled)
+        .copied();
+    let sky = authority.or_else(|| {
+        // The orphan fallback: no clock on the atmosphere, so `sky_authority`
+        // cannot see it. FIRST in `Guid` order, so a level with two of them is
+        // answered by the same one on both hosts whatever order the archetypes
+        // walked.
+        let mut best: Option<(Uuid, crate::components::SkyAtmosphere)> = None;
+        for e in w.iter_entities() {
+            let Some(sky) = e.get::<crate::components::SkyAtmosphere>() else {
+                continue;
+            };
+            if !sky.weather_enabled {
+                continue;
+            }
+            let guid = e
+                .get::<crate::components::Guid>()
+                .map(|g| g.0)
+                .unwrap_or_else(Uuid::nil);
+            if best.is_none_or(|b| guid < b.0) {
+                best = Some((guid, *sky));
+            }
         }
-        let guid = e
-            .get::<crate::components::Guid>()
-            .map(|g| g.0)
-            .unwrap_or_else(Uuid::nil);
-        let cand = (guid, sky.weather_precipitation, sky.weather_snowiness);
-        // FIRST in `Guid` order, so a level with two skies is answered by the
-        // same one on both hosts whatever order the archetypes walked.
-        if best.is_none_or(|b| cand.0 < b.0) {
-            best = Some(cand);
-        }
-    }
-    let Some((_, precip, snow)) = best else {
+        best.map(|(_, sky)| sky)
+    });
+    let Some(sky) = sky else {
         return (0.0, TYRE_AMBIENT_C);
     };
-    let wet = f64::from(precip).clamp(0.0, 1.0);
-    let s = f64::from(snow).clamp(0.0, 1.0);
+    let wet = f64::from(sky.weather_precipitation).clamp(0.0, 1.0);
+    let s = f64::from(sky.weather_snowiness).clamp(0.0, 1.0);
+    let air = f64::from(sky.weather_ambient_c);
     // Snow is not wet in the tyre's sense: it is a surface of its own, and this
-    // engine's table has no `Snow` arm. What snow DOES is take the heat out of
-    // the air, so the wetness is scaled back as the phase freezes.
+    // engine's table has no `Snow` arm. So the wetness is scaled back as the
+    // phase freezes — a statement about the PHASE of the precipitation, which is
+    // what `snowiness` actually means, and no longer a statement about the air.
     (
         wet * (1.0 - s),
-        TYRE_AMBIENT_C + (SNOW_AMBIENT_C - TYRE_AMBIENT_C) * s,
+        if air.is_finite() { air } else { TYRE_AMBIENT_C },
     )
 }
 

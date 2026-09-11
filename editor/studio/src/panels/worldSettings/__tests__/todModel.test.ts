@@ -194,6 +194,7 @@ describe("World Settings weather model (P17.4)", () => {
       fog_density: 0.0,
       precipitation: 0.0,
       snowiness: 0.0,
+      ambient_c: 20.0,
     });
     expect(weatherPreset("overcast")).toEqual({
       coverage: 0.85,
@@ -203,6 +204,7 @@ describe("World Settings weather model (P17.4)", () => {
       fog_density: 7.5e-5,
       precipitation: 0.0,
       snowiness: 0.0,
+      ambient_c: 15.0,
     });
     expect(weatherPreset("storm")).toEqual({
       coverage: 1.0,
@@ -212,6 +214,7 @@ describe("World Settings weather model (P17.4)", () => {
       fog_density: 6.0e-4,
       precipitation: 1.0,
       snowiness: 0.0,
+      ambient_c: 12.0,
     });
     expect(weatherPreset("fog")).toEqual({
       coverage: 0.5,
@@ -221,6 +224,7 @@ describe("World Settings weather model (P17.4)", () => {
       fog_density: 6.0e-3,
       precipitation: 0.0,
       snowiness: 0.0,
+      ambient_c: 10.0,
     });
     expect(weatherPreset("snow")).toEqual({
       coverage: 0.9,
@@ -230,12 +234,26 @@ describe("World Settings weather model (P17.4)", () => {
       fog_density: 1.2e-3,
       precipitation: 0.7,
       snowiness: 1.0,
+      ambient_c: 0.0,
     });
   });
 
   it("gives every preset a distinct sky", () => {
     const seen = WEATHER_PRESETS.map((p) => JSON.stringify(weatherPreset(p)));
     expect(new Set(seen).size).toBe(WEATHER_PRESETS.length);
+  });
+
+  /**
+   * The air temperature is a FIELD, not the phase proxy the tyre model used to
+   * derive it from (schema v28, wave VEH3a's audit). Snow is the only preset
+   * at or below freezing, and Clear is the warmest — which is the ordering the
+   * `weather_ambient_c` row exists to make expressible.
+   */
+  it("orders the presets by how cold the air is, with snow at freezing", () => {
+    expect(weatherPreset("snow").ambient_c).toBe(0);
+    const order = WEATHER_PRESETS.map((p) => weatherPreset(p).ambient_c);
+    expect(order).toEqual([20, 15, 12, 10, 0]);
+    expect(new Set(order).size).toBe(WEATHER_PRESETS.length);
   });
 
   it("only Snow accumulates — the P22 hook's frontend tell", () => {

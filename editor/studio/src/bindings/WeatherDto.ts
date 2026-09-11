@@ -70,4 +70,11 @@ precipitation: number,
 /**
  * Live precipitation phase `[0, 1]`: 0 = rain, 1 = snow.
  */
-snowiness: number, };
+snowiness: number, 
+/**
+ * Live **air temperature, °C** (schema v28). A real field rather than the
+ * phase proxy the tyre model used to derive it from, so a preset can say
+ * "storm at 12 °C" and an author can drag it anywhere between the poles
+ * and Death Valley.
+ */
+ambient_c: number, };

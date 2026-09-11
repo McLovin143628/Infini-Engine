@@ -2684,6 +2684,11 @@ pub struct WeatherDto {
     pub precipitation: f32,
     /// Live precipitation phase `[0, 1]`: 0 = rain, 1 = snow.
     pub snowiness: f32,
+    /// Live **air temperature, °C** (schema v28). A real field rather than the
+    /// phase proxy the tyre model used to derive it from, so a preset can say
+    /// "storm at 12 °C" and an author can drag it anywhere between the poles
+    /// and Death Valley.
+    pub ambient_c: f32,
 }
 
 impl WeatherDto {
@@ -2707,6 +2712,7 @@ impl WeatherDto {
             fog_density: a.weather_fog_density,
             precipitation: a.weather_precipitation,
             snowiness: a.weather_snowiness,
+            ambient_c: a.weather_ambient_c,
         }
     }
 
@@ -2748,6 +2754,11 @@ impl WeatherDto {
             weather_fog_density: num(self.fog_density, 0.0, 0.0, 1.0),
             weather_precipitation: num(self.precipitation, 0.0, 0.0, 1.0),
             weather_snowiness: num(self.snowiness, 0.0, 0.0, 1.0),
+            // The bounds are the Earth's own measured extremes rounded out
+            // (−89.2 °C Vostok, 56.7 °C Furnace Creek), because a temperature
+            // is a physical quantity and a slider that reaches 10^38 is a
+            // slider that can put a tyre model into a state nothing models.
+            weather_ambient_c: num(self.ambient_c, 20.0, -90.0, 60.0),
             ..base
         }
     }
@@ -2769,6 +2780,7 @@ impl WeatherDto {
             fog_density: p.fog_density,
             precipitation: p.precipitation,
             snowiness: p.snowiness,
+            ambient_c: p.ambient_c,
             ..self
         }
     }

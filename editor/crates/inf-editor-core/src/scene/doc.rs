@@ -3641,6 +3641,7 @@ impl SceneDoc {
             &num(atmos.weather_precipitation),
         );
         self.edit_set_prop(guid, tp, "weather_snowiness", &num(atmos.weather_snowiness));
+        self.edit_set_prop(guid, tp, "weather_ambient_c", &num(atmos.weather_ambient_c));
         self.commit_transaction();
         Some(guid)
     }

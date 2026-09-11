@@ -537,6 +537,7 @@ pub fn advance_weather(world: &mut EcsWorld, dt: f64) -> Option<WeatherParams> {
         step(&mut live.fog_density, target.fog_density);
         step(&mut live.precipitation, target.precipitation);
         step(&mut live.snowiness, target.snowiness);
+        step(&mut live.ambient_c, target.ambient_c);
         a.weather_blend_remaining -= dt;
         live
     };

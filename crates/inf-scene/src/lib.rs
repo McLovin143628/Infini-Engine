@@ -60,7 +60,7 @@ use inf_ecs::components::{
     Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D,
     RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite, StreamingSource, Terrain,
     TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, VehicleClass, Volume, VoxelVolume,
-    WaterBody,
+    WaterBody, WeatherPreset,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -504,10 +504,33 @@ use uuid::Uuid;
 ///
 ///   The v27 rung is repeated exactly: the pre-v28 component freezes as
 ///   `VehicleClassV27`, the pre-v28 entity record as [`EntityRecordV27`] and the
-///   pre-v28 file as [`SceneFileV27`]; **no new generic parameter and no
-///   re-declared record was needed**, for the third time. The thirty-eight
-///   append at the component's **tail**, sorted among themselves, so every v25
-///   and v27 field keeps the offset it has.
+///   pre-v28 file as [`SceneFileV27`]; **no re-declared record was needed**, for
+///   the third time. The thirty-eight append at the component's **tail**, sorted
+///   among themselves, so every v25 and v27 field keeps the offset it has.
+///
+///   **And a THIRTY-NINTH row, on a second component** — [`SkyAtmosphere`]'s
+///   weather block grows `weather_ambient_c`, the **air temperature in °C**
+///   (wave VEH3a's audit, inside the same window under the one-window law: a
+///   row a wave discovers while the window is open lands in it, or it waits for
+///   a window nobody has budgeted). Before it the tyre model derived the air
+///   from `weather_snowiness` — the precipitation's *phase* — so "rain falls at
+///   20 °C" was a rule of this engine, a cold dry morning was inexpressible, and
+///   an author had no control over the number at all. The pre-v28 sky freezes as
+///   `SkyAtmosphereV27` (47 fields), which every frozen entity record from
+///   [`EntityRecordV14`] forward now carries; the live record's sky slot becomes
+///   the FOURTH generic parameter of [`RuntimeEntityGen`] — the `terrain`,
+///   `material` and `vehicle_class` slots' own idiom, fourth use — so no record
+///   was re-declared for it either. The wire pin gains an independently declared
+///   48-field `SkyAtmosphereWire`: **before this the pin named the LIVE
+///   `SkyAtmosphere`**, so no version of it could ever have caught a field
+///   appended to the sky without a bump.
+///
+///   The air costs **4 bytes on every entity that carries a sky** — one per
+///   level, and **seven of the twenty-four committed levels carry one**, so the
+///   whole cost of the row to committed content is **28 bytes** and the other
+///   seventeen levels do not grow at all. A pre-v28 sky lifts to the `Clear`
+///   preset's **20 °C**, which is exactly the number every pre-v28 tyre already
+///   cooled toward, so no committed trace moves.
 ///
 ///   What they buy, wave by wave: a **Pacejka magic formula per axis**
 ///   (`pacejka_lat_b/c/e`, `pacejka_long_b/c/e`) with a `0` sentinel that
@@ -545,7 +568,8 @@ use uuid::Uuid;
 ///   entity in all twenty-four committed levels is byte-unchanged but for the
 ///   schema byte. Twenty-nine entities across those levels carry a class
 ///   (twenty-six on the island, three in the island fixture), so the whole cost
-///   to committed content is **8 816 bytes**.
+///   to committed content is **8 816 bytes** for the class and **28 more** for
+///   the air, **8 844** in all.
 pub const SCHEMA_VERSION: u32 = 28;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
@@ -902,7 +926,12 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 /// (`the_v25_wire_shape_is_pinned_against_an_independent_declaration`) re-derives
 /// the whole layout from independently declared shadow types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>, M = Material> {
+pub struct RuntimeEntityGen<
+    T = Terrain,
+    V = Option<VehicleClass>,
+    M = Material,
+    S = Option<SkyAtmosphere>,
+> {
     /// Stable entity GUID (what selection/hierarchy reference across a reload).
     pub guid: Uuid,
     /// Display / Outliner name.
@@ -1022,7 +1051,7 @@ pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>, M = Material>
     /// How the clock's sun and moon light the world and tint the sky gradient.
     /// Sits on the same entity as `time_of_day`.
     #[serde(default)]
-    pub sky_atmosphere: Option<SkyAtmosphere>,
+    pub sky_atmosphere: S,
     // ── v17 (P20.1) water ───────────────────────────────────────────
     /// An ocean, a lake or a spline river. A `River` reads the `spline` slot on
     /// **this same entity** for its centreline — there is no reference to
@@ -1085,27 +1114,30 @@ pub type RuntimeEntity = RuntimeEntityGen<Terrain, Option<VehicleClass>, Materia
 /// VEH3a). The material and the terrain are the live ones — v28 moved neither.
 /// **No new generic parameter was needed**: the tail slot has been generic since
 /// v25 for exactly this, and this is its third use.
-type EntityRecordV27 = RuntimeEntityGen<Terrain, Option<VehicleClassV27>, Material>;
+type EntityRecordV27 =
+    RuntimeEntityGen<Terrain, Option<VehicleClassV27>, Material, Option<SkyAtmosphereV27>>;
 
 /// **The frozen v26 entity record**: the live shape *before* [`VehicleClass`]
 /// grew from fifteen tunables to sixty-two (island wave VEH2a). The material is
 /// the live one — v26 is the rung it arrived on. **No new generic parameter was
 /// needed**: the tail slot has been generic since v25 for exactly this.
-type EntityRecordV26 = RuntimeEntityGen<Terrain, Option<VehicleClassV26>, Material>;
+type EntityRecordV26 =
+    RuntimeEntityGen<Terrain, Option<VehicleClassV26>, Material, Option<SkyAtmosphereV27>>;
 
 /// **The frozen v25 entity record**: the live shape *before* `Material` gained
 /// its `emissive_intensity` (wave VIS1a). Nothing else about the record moved, so
 /// it is the live declaration with two type parameters turned back.
-type EntityRecordV25 = RuntimeEntityGen<Terrain, Option<VehicleClassV26>, MaterialV25>;
+type EntityRecordV25 =
+    RuntimeEntityGen<Terrain, Option<VehicleClassV26>, MaterialV25, Option<SkyAtmosphereV27>>;
 
 /// **The frozen v24 entity record**: the live shape *before* the vehicle class,
 /// with the live terrain (v25 changed no component). The `()` tail is the whole
 /// difference and costs zero bytes.
-type EntityRecordV24 = RuntimeEntityGen<Terrain, (), MaterialV25>;
+type EntityRecordV24 = RuntimeEntityGen<Terrain, (), MaterialV25, Option<SkyAtmosphereV27>>;
 
 /// **The frozen v23 entity record.** [`EntityRecordV24`] with the pre-v24
 /// [`TerrainV23`] — the shape before `TerrainLayer` gained its material binding.
-type EntityRecordV23 = RuntimeEntityGen<TerrainV23, (), MaterialV25>;
+type EntityRecordV23 = RuntimeEntityGen<TerrainV23, (), MaterialV25, Option<SkyAtmosphereV27>>;
 
 impl EntityRecordV27 {
     /// Lift a frozen v27 record to the live [`RuntimeEntity`]: the thirty-eight
@@ -1113,13 +1145,15 @@ impl EntityRecordV27 {
     /// pre-v28 level meant.
     fn into_runtime(self) -> RuntimeEntity {
         self.map_tail(|v| v.map(VehicleClassV27::into_current))
+            .map_sky(|s| s.map(SkyAtmosphereV27::into_current))
     }
 
     /// Project a live record onto the frozen v27 shape (the **downgrade-bless**
     /// path). The thirty-eight are what is lost.
     #[cfg_attr(not(test), allow(dead_code))]
     fn from_current(r: RuntimeEntity) -> Self {
-        r.map_tail(|v| v.map(VehicleClassV27::from_current))
+        r.map_sky(|s| s.map(SkyAtmosphereV27::from_current))
+            .map_tail(|v| v.map(VehicleClassV27::from_current))
     }
 }
 
@@ -1129,13 +1163,15 @@ impl EntityRecordV26 {
     /// pre-v27 level meant.
     fn into_runtime(self) -> RuntimeEntity {
         self.map_tail(|v| v.map(VehicleClassV26::into_current))
+            .map_sky(|s| s.map(SkyAtmosphereV27::into_current))
     }
 
     /// Project a live record onto the frozen v26 shape (the **downgrade-bless**
     /// path). The forty-seven are what is lost.
     #[cfg_attr(not(test), allow(dead_code))]
     fn from_current(r: RuntimeEntity) -> Self {
-        r.map_tail(|v| v.map(VehicleClassV26::from_current))
+        r.map_sky(|s| s.map(SkyAtmosphereV27::from_current))
+            .map_tail(|v| v.map(VehicleClassV26::from_current))
     }
 }
 
@@ -1173,35 +1209,43 @@ impl EntityRecordV24 {
     }
 }
 
-impl<T, V, M> RuntimeEntityGen<T, V, M> {
+impl<T, V, M, S> RuntimeEntityGen<T, V, M, S> {
     /// Replace the tail slot, moving every other field **wholesale**.
-    fn map_tail<W>(self, f: impl FnOnce(V) -> W) -> RuntimeEntityGen<T, W, M> {
-        self.map_slots(|t| t, f, |m| m)
+    fn map_tail<W>(self, f: impl FnOnce(V) -> W) -> RuntimeEntityGen<T, W, M, S> {
+        self.map_slots(|t| t, f, |m| m, |s| s)
     }
 
     /// Replace the **terrain** slot, moving every other field wholesale.
-    fn map_terrain<U>(self, f: impl FnOnce(T) -> U) -> RuntimeEntityGen<U, V, M> {
-        self.map_slots(f, |v| v, |m| m)
+    fn map_terrain<U>(self, f: impl FnOnce(T) -> U) -> RuntimeEntityGen<U, V, M, S> {
+        self.map_slots(f, |v| v, |m| m, |s| s)
     }
 
     /// Replace the **material** slot, moving every other field wholesale (wave
     /// VIS1a).
-    fn map_material<N>(self, f: impl FnOnce(M) -> N) -> RuntimeEntityGen<T, V, N> {
-        self.map_slots(|t| t, |v| v, f)
+    fn map_material<N>(self, f: impl FnOnce(M) -> N) -> RuntimeEntityGen<T, V, N, S> {
+        self.map_slots(|t| t, |v| v, f, |s| s)
     }
 
-    /// Replace all three generic slots, moving every other field **wholesale**.
+    /// Replace the **sky** slot, moving every other field wholesale (schema
+    /// v28, wave VEH3a's audit — the `SkyAtmosphere` weather block grew an air
+    /// temperature, so every frozen record carries the frozen sky).
+    fn map_sky<P>(self, f: impl FnOnce(S) -> P) -> RuntimeEntityGen<T, V, M, P> {
+        self.map_slots(|t| t, |v| v, |m| m, f)
+    }
+
+    /// Replace all four generic slots, moving every other field **wholesale**.
     ///
     /// The whole point of the parameters: a restatement is where a slot goes
     /// missing without the compiler noticing (the standing ladder rule), and
     /// this is the ONE function in the ladder that names all forty-eight — so
     /// there is one list to get right instead of one per rung per direction.
-    fn map_slots<U, W, N>(
+    fn map_slots<U, W, N, P>(
         self,
         ft: impl FnOnce(T) -> U,
         fv: impl FnOnce(V) -> W,
         fm: impl FnOnce(M) -> N,
-    ) -> RuntimeEntityGen<U, W, N> {
+        fs: impl FnOnce(S) -> P,
+    ) -> RuntimeEntityGen<U, W, N, P> {
         let RuntimeEntityGen {
             guid,
             name,
@@ -1295,7 +1339,7 @@ impl<T, V, M> RuntimeEntityGen<T, V, M> {
             streaming_source,
             always_loaded,
             time_of_day,
-            sky_atmosphere,
+            sky_atmosphere: fs(sky_atmosphere),
             water_body,
             buoyancy,
             voxel_volume,
@@ -4813,6 +4857,248 @@ impl SkyAtmosphereV13 {
     }
 }
 
+/// The **pre-v28** [`SkyAtmosphere`] byte layout (schema v28 froze this when the
+/// component grew its **air temperature**, `weather_ambient_c` — wave VEH3a's
+/// audit, inside the one window the VEH3 arc spends). Every frozen entity record
+/// from [`EntityRecordV14`] forward carries `sky_atmosphere` as
+/// `Option<SkyAtmosphereV27>`, exactly as [`EntityRecordV13`] carries it as
+/// `Option<SkyAtmosphereV13>`; [`SkyAtmosphereV27::into_current`] lifts it.
+///
+/// The 47 fields mirror the v27 component one-for-one **including their
+/// `#[serde(default = "...")]` markers**. The pre-v14 half reuses the `v13_*`
+/// default fns already frozen beside [`SkyAtmosphereV13`] — the same numbers,
+/// already pinned, and a third transcription of them is a third place for a
+/// digit to be wrong. The weather half gets its own `v27_*` fns for the same
+/// reason the v13 ones exist: a frozen record must not move when the live
+/// component's defaults are re-tuned.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct SkyAtmosphereV27 {
+    #[serde(default = "v13_sky_true")]
+    enabled: bool,
+    #[serde(default = "v13_sun_intensity")]
+    sun_intensity: f32,
+    #[serde(default = "v13_sun_color")]
+    sun_color: Color,
+    #[serde(default = "v13_moon_intensity")]
+    moon_intensity: f32,
+    #[serde(default = "v13_moon_color")]
+    moon_color: Color,
+    #[serde(default = "v13_sky_zenith")]
+    zenith: Color,
+    #[serde(default = "v13_sky_horizon")]
+    horizon: Color,
+    #[serde(default = "v13_sky_ground")]
+    ground: Color,
+    #[serde(default = "v13_night_darkening")]
+    night_darkening: f32,
+    #[serde(default = "v13_sky_true")]
+    physical: bool,
+    #[serde(default = "v13_one")]
+    sky_intensity: f32,
+    #[serde(default = "v13_one")]
+    turbidity: f32,
+    #[serde(default = "v13_mie_anisotropy")]
+    mie_anisotropy: f32,
+    #[serde(default = "v13_sun_disc_deg")]
+    sun_disc_deg: f32,
+    #[serde(default = "v13_moon_disc_deg")]
+    moon_disc_deg: f32,
+    #[serde(default = "v13_one")]
+    star_intensity: f32,
+    #[serde(default)]
+    tint_strength: f32,
+    #[serde(default = "v13_one")]
+    aerial_perspective: f32,
+    #[serde(default)]
+    fog_density: f32,
+    #[serde(default = "v13_fog_falloff")]
+    fog_falloff: f32,
+    #[serde(default)]
+    fog_height: f32,
+    #[serde(default = "v13_fog_color")]
+    fog_color: Color,
+    #[serde(default)]
+    clouds_enabled: bool,
+    #[serde(default = "v13_cloud_coverage")]
+    cloud_coverage: f32,
+    #[serde(default = "v13_cloud_type")]
+    cloud_type: f32,
+    #[serde(default = "v13_cloud_bottom")]
+    cloud_bottom: f32,
+    #[serde(default = "v13_cloud_top")]
+    cloud_top: f32,
+    #[serde(default = "v13_cloud_density")]
+    cloud_density: f32,
+    #[serde(default = "v13_cloud_detail")]
+    cloud_detail: f32,
+    #[serde(default)]
+    cloud_seed: u32,
+    #[serde(default = "v13_cloud_wind_x")]
+    cloud_wind_x: f32,
+    #[serde(default = "v13_cloud_wind_z")]
+    cloud_wind_z: f32,
+    #[serde(default = "v13_cloud_phase_g")]
+    cloud_phase_g: f32,
+    #[serde(default = "v13_one")]
+    cloud_shadow: f32,
+    #[serde(default = "v13_one")]
+    cloud_ambient: f32,
+    #[serde(default = "v13_cloud_color")]
+    cloud_color: Color,
+    #[serde(default)]
+    weather_enabled: bool,
+    #[serde(default)]
+    weather_target: WeatherPreset,
+    #[serde(default = "v27_weather_blend_seconds")]
+    weather_blend_seconds: f32,
+    #[serde(default)]
+    weather_blend_remaining: f32,
+    #[serde(default = "v27_weather_coverage")]
+    weather_coverage: f32,
+    #[serde(default = "v27_weather_cloud_type")]
+    weather_cloud_type: f32,
+    #[serde(default = "v27_weather_wind_x")]
+    weather_wind_x: f32,
+    #[serde(default = "v27_weather_wind_z")]
+    weather_wind_z: f32,
+    #[serde(default)]
+    weather_fog_density: f32,
+    #[serde(default)]
+    weather_precipitation: f32,
+    #[serde(default)]
+    weather_snowiness: f32,
+}
+
+fn v27_weather_blend_seconds() -> f32 {
+    8.0
+}
+fn v27_weather_coverage() -> f32 {
+    0.08
+}
+fn v27_weather_cloud_type() -> f32 {
+    0.75
+}
+fn v27_weather_wind_x() -> f32 {
+    4.0
+}
+fn v27_weather_wind_z() -> f32 {
+    1.5
+}
+
+impl SkyAtmosphereV27 {
+    /// Lift to the live [`SkyAtmosphere`]: the 47 v27 fields carry through
+    /// verbatim and `weather_ambient_c` takes its live default — the `Clear`
+    /// preset's **20 °C**, which is exactly the number every pre-v28 level's
+    /// tyre already cooled toward, so no committed trace moves.
+    fn into_current(self) -> SkyAtmosphere {
+        SkyAtmosphere {
+            enabled: self.enabled,
+            sun_intensity: self.sun_intensity,
+            sun_color: self.sun_color,
+            moon_intensity: self.moon_intensity,
+            moon_color: self.moon_color,
+            zenith: self.zenith,
+            horizon: self.horizon,
+            ground: self.ground,
+            night_darkening: self.night_darkening,
+            physical: self.physical,
+            sky_intensity: self.sky_intensity,
+            turbidity: self.turbidity,
+            mie_anisotropy: self.mie_anisotropy,
+            sun_disc_deg: self.sun_disc_deg,
+            moon_disc_deg: self.moon_disc_deg,
+            star_intensity: self.star_intensity,
+            tint_strength: self.tint_strength,
+            aerial_perspective: self.aerial_perspective,
+            fog_density: self.fog_density,
+            fog_falloff: self.fog_falloff,
+            fog_height: self.fog_height,
+            fog_color: self.fog_color,
+            clouds_enabled: self.clouds_enabled,
+            cloud_coverage: self.cloud_coverage,
+            cloud_type: self.cloud_type,
+            cloud_bottom: self.cloud_bottom,
+            cloud_top: self.cloud_top,
+            cloud_density: self.cloud_density,
+            cloud_detail: self.cloud_detail,
+            cloud_seed: self.cloud_seed,
+            cloud_wind_x: self.cloud_wind_x,
+            cloud_wind_z: self.cloud_wind_z,
+            cloud_phase_g: self.cloud_phase_g,
+            cloud_shadow: self.cloud_shadow,
+            cloud_ambient: self.cloud_ambient,
+            cloud_color: self.cloud_color,
+            weather_enabled: self.weather_enabled,
+            weather_target: self.weather_target,
+            weather_blend_seconds: self.weather_blend_seconds,
+            weather_blend_remaining: self.weather_blend_remaining,
+            weather_coverage: self.weather_coverage,
+            weather_cloud_type: self.weather_cloud_type,
+            weather_wind_x: self.weather_wind_x,
+            weather_wind_z: self.weather_wind_z,
+            weather_fog_density: self.weather_fog_density,
+            weather_precipitation: self.weather_precipitation,
+            weather_snowiness: self.weather_snowiness,
+            ..SkyAtmosphere::default()
+        }
+    }
+
+    /// Project a live [`SkyAtmosphere`] back onto the frozen v27 shape (the
+    /// **downgrade-bless** path). `weather_ambient_c` has no v27 home and is
+    /// dropped — the deliberately lossy direction.
+    fn from_current(a: SkyAtmosphere) -> Self {
+        Self {
+            enabled: a.enabled,
+            sun_intensity: a.sun_intensity,
+            sun_color: a.sun_color,
+            moon_intensity: a.moon_intensity,
+            moon_color: a.moon_color,
+            zenith: a.zenith,
+            horizon: a.horizon,
+            ground: a.ground,
+            night_darkening: a.night_darkening,
+            physical: a.physical,
+            sky_intensity: a.sky_intensity,
+            turbidity: a.turbidity,
+            mie_anisotropy: a.mie_anisotropy,
+            sun_disc_deg: a.sun_disc_deg,
+            moon_disc_deg: a.moon_disc_deg,
+            star_intensity: a.star_intensity,
+            tint_strength: a.tint_strength,
+            aerial_perspective: a.aerial_perspective,
+            fog_density: a.fog_density,
+            fog_falloff: a.fog_falloff,
+            fog_height: a.fog_height,
+            fog_color: a.fog_color,
+            clouds_enabled: a.clouds_enabled,
+            cloud_coverage: a.cloud_coverage,
+            cloud_type: a.cloud_type,
+            cloud_bottom: a.cloud_bottom,
+            cloud_top: a.cloud_top,
+            cloud_density: a.cloud_density,
+            cloud_detail: a.cloud_detail,
+            cloud_seed: a.cloud_seed,
+            cloud_wind_x: a.cloud_wind_x,
+            cloud_wind_z: a.cloud_wind_z,
+            cloud_phase_g: a.cloud_phase_g,
+            cloud_shadow: a.cloud_shadow,
+            cloud_ambient: a.cloud_ambient,
+            cloud_color: a.cloud_color,
+            weather_enabled: a.weather_enabled,
+            weather_target: a.weather_target,
+            weather_blend_seconds: a.weather_blend_seconds,
+            weather_blend_remaining: a.weather_blend_remaining,
+            weather_coverage: a.weather_coverage,
+            weather_cloud_type: a.weather_cloud_type,
+            weather_wind_x: a.weather_wind_x,
+            weather_wind_z: a.weather_wind_z,
+            weather_fog_density: a.weather_fog_density,
+            weather_precipitation: a.weather_precipitation,
+            weather_snowiness: a.weather_snowiness,
+        }
+    }
+}
+
 /// The **pre-v14** entity byte layout (schema v14 froze this when
 /// [`SkyAtmosphere`] grew its weather block). Identical to the live
 /// [`RuntimeEntity`] except that `sky_atmosphere` is typed as the frozen
@@ -5082,7 +5368,7 @@ struct EntityRecordV14 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
 }
 
 impl EntityRecordV14 {
@@ -5130,7 +5416,7 @@ impl EntityRecordV14 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
@@ -5190,7 +5476,7 @@ impl EntityRecordV14 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
         }
     }
 }
@@ -5273,7 +5559,7 @@ struct EntityRecordV15 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
 }
 
 impl EntityRecordV15 {
@@ -5321,7 +5607,7 @@ impl EntityRecordV15 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
@@ -5382,7 +5668,7 @@ impl EntityRecordV15 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
         }
     }
 }
@@ -5464,7 +5750,7 @@ struct EntityRecordV16 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
 }
 
 impl EntityRecordV16 {
@@ -5512,7 +5798,7 @@ impl EntityRecordV16 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
@@ -5572,7 +5858,7 @@ impl EntityRecordV16 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
         }
     }
 }
@@ -5654,7 +5940,7 @@ struct EntityRecordV17 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
     /// The v17 slot this record exists to keep carrying — a v17 level's water
     /// must survive the v18 hop, not merely decode.
     #[serde(default)]
@@ -5709,7 +5995,7 @@ impl EntityRecordV17 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: self.water_body,
             buoyancy: None,
             voxel_volume: None,
@@ -5769,7 +6055,7 @@ impl EntityRecordV17 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
         }
     }
@@ -5857,7 +6143,7 @@ struct EntityRecordV18 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
     /// The v17 slot this record still carries — a v18 level's water must survive
     /// the v19 hop, not merely decode.
     #[serde(default)]
@@ -5967,7 +6253,7 @@ impl EntityRecordV18 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
             buoyancy: r.buoyancy,
         }
@@ -6056,7 +6342,7 @@ struct EntityRecordV19 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
     /// The v17 slot this record still carries — a v18 level's water must survive
     /// the v19 hop, not merely decode.
     #[serde(default)]
@@ -6173,7 +6459,7 @@ impl EntityRecordV19 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
@@ -6201,7 +6487,7 @@ impl EntityRecordV19 {
 /// restating them. Nothing outside `#[cfg(test)]` ever instantiates it at
 /// anything but [`MaterialV21`].
 #[derive(Clone, Serialize, Deserialize)]
-struct EntityRecordV20Gen<M, T = TerrainV23> {
+struct EntityRecordV20Gen<M, T = TerrainV23, S = Option<SkyAtmosphereV27>> {
     guid: Uuid,
     name: String,
     parent: Option<Uuid>,
@@ -6272,7 +6558,7 @@ struct EntityRecordV20Gen<M, T = TerrainV23> {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: S,
     /// The v17 slot this record still carries — a v20 level's water must
     /// survive the v21 hop, not merely decode.
     #[serde(default)]
@@ -6338,7 +6624,7 @@ impl EntityRecordV20 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: self.water_body,
             buoyancy: self.buoyancy,
             voxel_volume: self.voxel_volume,
@@ -6398,7 +6684,7 @@ impl EntityRecordV20 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
@@ -6487,7 +6773,7 @@ struct EntityRecordV22 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
     #[serde(default)]
     water_body: Option<WaterBody>,
     #[serde(default)]
@@ -6550,7 +6836,7 @@ impl EntityRecordV22 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: self.water_body,
             buoyancy: self.buoyancy,
             voxel_volume: self.voxel_volume,
@@ -6610,7 +6896,7 @@ impl EntityRecordV22 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
@@ -6703,7 +6989,7 @@ struct EntityRecordV21 {
     #[serde(default)]
     time_of_day: Option<TimeOfDay>,
     #[serde(default)]
-    sky_atmosphere: Option<SkyAtmosphere>,
+    sky_atmosphere: Option<SkyAtmosphereV27>,
     #[serde(default)]
     water_body: Option<WaterBody>,
     #[serde(default)]
@@ -6768,7 +7054,7 @@ impl EntityRecordV21 {
             streaming_source: self.streaming_source,
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
-            sky_atmosphere: self.sky_atmosphere,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV27::into_current),
             water_body: self.water_body,
             buoyancy: self.buoyancy,
             voxel_volume: self.voxel_volume,
@@ -6828,7 +7114,7 @@ impl EntityRecordV21 {
             streaming_source: r.streaming_source,
             always_loaded: r.always_loaded,
             time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV27::from_current),
             water_body: r.water_body,
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
@@ -9219,7 +9505,8 @@ mod tests {
                 + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes()
-                + V26_RENDER_BLOCK_BYTES,
+                + V26_RENDER_BLOCK_BYTES
+                + AMBIENT_WIRE_BYTES,
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -9678,7 +9965,8 @@ mod tests {
                 + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes()
-                + V26_RENDER_BLOCK_BYTES,
+                + V26_RENDER_BLOCK_BYTES
+                + AMBIENT_WIRE_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -9706,6 +9994,14 @@ mod tests {
     /// the default `Clear` at index 0 costs one byte) + 9 f32. Named rather than
     /// spelled `38` at each use, so a future field lands in one place.
     const WEATHER_WIRE_BYTES: usize = 1 + 1 + 9 * 4;
+
+    /// Wire width of the **v28 air temperature** appended to the weather block
+    /// (wave VEH3a's audit) — one `f32`, on every entity that carries a sky.
+    ///
+    /// Beside [`WEATHER_WIRE_BYTES`] rather than folded into it, because that
+    /// constant is the price of the **v14** block and a v13 payload lifted to
+    /// the current schema pays both.
+    const AMBIENT_WIRE_BYTES: usize = 4;
 
     /// An all-`None` frozen v13 entity — the struct-update base for
     /// [`v13_scene_reference`]. Built through the downgrade hop so the field list
@@ -10103,7 +10399,8 @@ mod tests {
                 + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes()
-                + V26_RENDER_BLOCK_BYTES,
+                + V26_RENDER_BLOCK_BYTES
+                + AMBIENT_WIRE_BYTES,
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -12164,7 +12461,7 @@ mod tests {
     /// because clippy counts the tuple's nesting, and because naming it says
     /// what it is.
     type V28EntityWire = (
-        EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire>,
+        EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire, Option<SkyAtmosphereWire>>,
         Option<IkTarget>,
         Option<ClothSim>,
         Option<HairGuides>,
@@ -12207,6 +12504,70 @@ mod tests {
         macro_variation: f64,
         asset: Option<Uuid>,
         biome_set: Option<Uuid>,
+    }
+
+    /// **`SkyAtmosphere`, re-declared independently** for the v28 wire pin —
+    /// the `MaterialV22Wire` idiom, at the component wave VEH3a's audit grew.
+    ///
+    /// Forty-eight fields in declaration order. **Before this existed the pin
+    /// named the LIVE `SkyAtmosphere`**, so it could not have caught a field
+    /// appended to the sky without a bump — the one shape of drift it is for.
+    /// A field added to the live component now leaves bytes this shape cannot
+    /// account for; a field REMOVED makes it over-read into the record's tail.
+    #[derive(serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
+    struct SkyAtmosphereWire {
+        enabled: bool,
+        sun_intensity: f32,
+        sun_color: Color,
+        moon_intensity: f32,
+        moon_color: Color,
+        zenith: Color,
+        horizon: Color,
+        ground: Color,
+        night_darkening: f32,
+        physical: bool,
+        sky_intensity: f32,
+        turbidity: f32,
+        mie_anisotropy: f32,
+        sun_disc_deg: f32,
+        moon_disc_deg: f32,
+        star_intensity: f32,
+        tint_strength: f32,
+        aerial_perspective: f32,
+        fog_density: f32,
+        fog_falloff: f32,
+        fog_height: f32,
+        fog_color: Color,
+        clouds_enabled: bool,
+        cloud_coverage: f32,
+        cloud_type: f32,
+        cloud_bottom: f32,
+        cloud_top: f32,
+        cloud_density: f32,
+        cloud_detail: f32,
+        cloud_seed: u32,
+        cloud_wind_x: f32,
+        cloud_wind_z: f32,
+        cloud_phase_g: f32,
+        cloud_shadow: f32,
+        cloud_ambient: f32,
+        cloud_color: Color,
+        weather_enabled: bool,
+        weather_target: WeatherPreset,
+        weather_blend_seconds: f32,
+        weather_blend_remaining: f32,
+        weather_coverage: f32,
+        weather_cloud_type: f32,
+        weather_wind_x: f32,
+        weather_wind_z: f32,
+        weather_fog_density: f32,
+        weather_precipitation: f32,
+        weather_snowiness: f32,
+        weather_ambient_c: f32,
     }
 
     /// **`VehicleClass`, re-declared independently** for the v25 wire pin — the
@@ -12415,6 +12776,13 @@ mod tests {
                     hair_guides: Some(v21_fixture_hair()),
                     character_movement: Some(v23_fixture_movement()),
                     vehicle_class: Some(fixture_vehicle_class()),
+                    // A SKY, so the independently declared `SkyAtmosphereWire`
+                    // is actually DECODED THROUGH rather than skipped as an
+                    // absent `Option` — a pin nothing walks pins nothing.
+                    sky_atmosphere: Some(SkyAtmosphere {
+                        weather_ambient_c: -7.5,
+                        ..hostile_v27_sky()
+                    }),
                     ..v9_rec(Uuid::from_u128(0xFD10), "Hero", None).into_runtime()
                 },
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
@@ -13672,6 +14040,123 @@ mod tests {
         "wheel_inertia_kgm2",
     ];
 
+    /// **The v27 `SkyAtmosphere`, re-declared independently** for the
+    /// payload written below — the `V27ClassWriter` idiom at the sky slot.
+    ///
+    /// Forty-seven fields: the live component minus `weather_ambient_c`.
+    /// Declared here rather than reusing the codec's own frozen
+    /// `SkyAtmosphereV27`, so the bytes this fixture writes say what v27
+    /// said rather than what the frozen record currently says.
+    #[derive(serde::Serialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
+    struct SkyAtmosphereV27Writer {
+        enabled: bool,
+        sun_intensity: f32,
+        sun_color: Color,
+        moon_intensity: f32,
+        moon_color: Color,
+        zenith: Color,
+        horizon: Color,
+        ground: Color,
+        night_darkening: f32,
+        physical: bool,
+        sky_intensity: f32,
+        turbidity: f32,
+        mie_anisotropy: f32,
+        sun_disc_deg: f32,
+        moon_disc_deg: f32,
+        star_intensity: f32,
+        tint_strength: f32,
+        aerial_perspective: f32,
+        fog_density: f32,
+        fog_falloff: f32,
+        fog_height: f32,
+        fog_color: Color,
+        clouds_enabled: bool,
+        cloud_coverage: f32,
+        cloud_type: f32,
+        cloud_bottom: f32,
+        cloud_top: f32,
+        cloud_density: f32,
+        cloud_detail: f32,
+        cloud_seed: u32,
+        cloud_wind_x: f32,
+        cloud_wind_z: f32,
+        cloud_phase_g: f32,
+        cloud_shadow: f32,
+        cloud_ambient: f32,
+        cloud_color: Color,
+        weather_enabled: bool,
+        weather_target: WeatherPreset,
+        weather_blend_seconds: f32,
+        weather_blend_remaining: f32,
+        weather_coverage: f32,
+        weather_cloud_type: f32,
+        weather_wind_x: f32,
+        weather_wind_z: f32,
+        weather_fog_density: f32,
+        weather_precipitation: f32,
+        weather_snowiness: f32,
+    }
+
+    /// The frozen v27 sky, copied field-by-field into the INDEPENDENT writer
+    /// above — the `V27ClassWriter` route, at the sky slot. The copy is by name,
+    /// so the bytes come out in the writer's declaration order.
+    fn v27_sky_writer(a: SkyAtmosphereV27) -> SkyAtmosphereV27Writer {
+        SkyAtmosphereV27Writer {
+            enabled: a.enabled,
+            sun_intensity: a.sun_intensity,
+            sun_color: a.sun_color,
+            moon_intensity: a.moon_intensity,
+            moon_color: a.moon_color,
+            zenith: a.zenith,
+            horizon: a.horizon,
+            ground: a.ground,
+            night_darkening: a.night_darkening,
+            physical: a.physical,
+            sky_intensity: a.sky_intensity,
+            turbidity: a.turbidity,
+            mie_anisotropy: a.mie_anisotropy,
+            sun_disc_deg: a.sun_disc_deg,
+            moon_disc_deg: a.moon_disc_deg,
+            star_intensity: a.star_intensity,
+            tint_strength: a.tint_strength,
+            aerial_perspective: a.aerial_perspective,
+            fog_density: a.fog_density,
+            fog_falloff: a.fog_falloff,
+            fog_height: a.fog_height,
+            fog_color: a.fog_color,
+            clouds_enabled: a.clouds_enabled,
+            cloud_coverage: a.cloud_coverage,
+            cloud_type: a.cloud_type,
+            cloud_bottom: a.cloud_bottom,
+            cloud_top: a.cloud_top,
+            cloud_density: a.cloud_density,
+            cloud_detail: a.cloud_detail,
+            cloud_seed: a.cloud_seed,
+            cloud_wind_x: a.cloud_wind_x,
+            cloud_wind_z: a.cloud_wind_z,
+            cloud_phase_g: a.cloud_phase_g,
+            cloud_shadow: a.cloud_shadow,
+            cloud_ambient: a.cloud_ambient,
+            cloud_color: a.cloud_color,
+            weather_enabled: a.weather_enabled,
+            weather_target: a.weather_target,
+            weather_blend_seconds: a.weather_blend_seconds,
+            weather_blend_remaining: a.weather_blend_remaining,
+            weather_coverage: a.weather_coverage,
+            weather_cloud_type: a.weather_cloud_type,
+            weather_wind_x: a.weather_wind_x,
+            weather_wind_z: a.weather_wind_z,
+            weather_fog_density: a.weather_fog_density,
+            weather_precipitation: a.weather_precipitation,
+            weather_snowiness: a.weather_snowiness,
+        }
+    }
+
     /// The v27 class **as a writer**, declared independently of
     /// `VehicleClassV27` (wave VEH3a).
     ///
@@ -13747,7 +14232,8 @@ mod tests {
     }
 
     /// The v27 entity record with the class written by [`V27ClassWriter`].
-    type V27EntityWriter = RuntimeEntityGen<Terrain, Option<V27ClassWriter>, Material>;
+    type V27EntityWriter =
+        RuntimeEntityGen<Terrain, Option<V27ClassWriter>, Material, Option<SkyAtmosphereV27Writer>>;
 
     /// The v27 file, written independently of the record that reads it.
     #[derive(serde::Serialize)]
@@ -13783,81 +14269,88 @@ mod tests {
             vehicle_class: Some(authored),
             character_movement: Some(v23_fixture_movement()),
             terrain: Some(fixture_terrain()),
+            // A SKY as well, so the same payload proves the forty-seven v27
+            // atmosphere fields keep their offsets across v28's second row. Its
+            // air is left at the default, because a v27 file cannot carry one
+            // and the arm below is where that is measured.
+            sky_atmosphere: Some(hostile_v27_sky()),
             ..v9_rec(Uuid::from_u128(0xFE30), "Car", None).into_runtime()
         };
         // A second entity with NO class, so a ladder that wrote one value into
         // every slot cannot pass.
         let bare = v9_rec(Uuid::from_u128(0xFE31), "Marker", None).into_runtime();
         let writer = |r: &RuntimeEntity| -> V27EntityWriter {
-            EntityRecordV27::from_current(r.clone()).map_tail(|v| {
-                v.map(|_| {
-                    let c = r.vehicle_class.expect("the tail is Some");
-                    V27ClassWriter {
-                        brake_force_n: c.brake_force_n,
-                        damping_ns_per_m: c.damping_ns_per_m,
-                        drag_n_per_mps2: c.drag_n_per_mps2,
-                        enter_time_s: c.enter_time_s,
-                        handbrake_force_n: c.handbrake_force_n,
-                        lateral_grip: c.lateral_grip,
-                        longitudinal_grip: c.longitudinal_grip,
-                        max_engine_force_n: c.max_engine_force_n,
-                        max_speed_mps: c.max_speed_mps,
-                        max_steer_deg: c.max_steer_deg,
-                        min_steer_deg: c.min_steer_deg,
-                        rest_length_m: c.rest_length_m,
-                        rolling_resistance: c.rolling_resistance,
-                        stiffness_n_per_m: c.stiffness_n_per_m,
-                        travel_m: c.travel_m,
-                        abs_slip: c.abs_slip,
-                        ackermann: c.ackermann,
-                        anti_roll_front_n_per_m: c.anti_roll_front_n_per_m,
-                        anti_roll_rear_n_per_m: c.anti_roll_rear_n_per_m,
-                        brake_bias: c.brake_bias,
-                        cog_height_m: c.cog_height_m,
-                        diff_lock_front: c.diff_lock_front,
-                        diff_lock_rear: c.diff_lock_rear,
-                        downforce_centre_z: c.downforce_centre_z,
-                        downforce_n_per_mps2: c.downforce_n_per_mps2,
-                        drag_lateral_n_per_mps2: c.drag_lateral_n_per_mps2,
-                        engine_brake_nm: c.engine_brake_nm,
-                        enter_warp_end: c.enter_warp_end,
-                        enter_warp_start: c.enter_warp_start,
-                        final_drive: c.final_drive,
-                        front_torque_split: c.front_torque_split,
-                        gear_1_ratio: c.gear_1_ratio,
-                        gear_2_ratio: c.gear_2_ratio,
-                        gear_3_ratio: c.gear_3_ratio,
-                        gear_4_ratio: c.gear_4_ratio,
-                        gear_5_ratio: c.gear_5_ratio,
-                        gear_6_ratio: c.gear_6_ratio,
-                        gear_7_ratio: c.gear_7_ratio,
-                        gear_8_ratio: c.gear_8_ratio,
-                        gear_count: c.gear_count,
-                        idle_rpm: c.idle_rpm,
-                        idle_torque_frac: c.idle_torque_frac,
-                        peak_torque_nm: c.peak_torque_nm,
-                        peak_torque_rpm: c.peak_torque_rpm,
-                        redline_rpm: c.redline_rpm,
-                        redline_torque_frac: c.redline_torque_frac,
-                        reverse_ratio: c.reverse_ratio,
-                        shift_down_rpm: c.shift_down_rpm,
-                        shift_time_s: c.shift_time_s,
-                        shift_up_rpm: c.shift_up_rpm,
-                        stability_control: c.stability_control,
-                        steer_rate_deg_per_s: c.steer_rate_deg_per_s,
-                        steer_return_deg_per_s: c.steer_return_deg_per_s,
-                        torque_curve_bias: c.torque_curve_bias,
-                        traction_control_slip: c.traction_control_slip,
-                        tyre_lat_peak_slip: c.tyre_lat_peak_slip,
-                        tyre_lat_rise_bias: c.tyre_lat_rise_bias,
-                        tyre_load_sensitivity: c.tyre_load_sensitivity,
-                        tyre_long_peak_slip: c.tyre_long_peak_slip,
-                        tyre_long_rise_bias: c.tyre_long_rise_bias,
-                        tyre_slide_frac: c.tyre_slide_frac,
-                        wheel_inertia_kgm2: c.wheel_inertia_kgm2,
-                    }
+            EntityRecordV27::from_current(r.clone())
+                .map_sky(|s| s.map(v27_sky_writer))
+                .map_tail(|v| {
+                    v.map(|_| {
+                        let c = r.vehicle_class.expect("the tail is Some");
+                        V27ClassWriter {
+                            brake_force_n: c.brake_force_n,
+                            damping_ns_per_m: c.damping_ns_per_m,
+                            drag_n_per_mps2: c.drag_n_per_mps2,
+                            enter_time_s: c.enter_time_s,
+                            handbrake_force_n: c.handbrake_force_n,
+                            lateral_grip: c.lateral_grip,
+                            longitudinal_grip: c.longitudinal_grip,
+                            max_engine_force_n: c.max_engine_force_n,
+                            max_speed_mps: c.max_speed_mps,
+                            max_steer_deg: c.max_steer_deg,
+                            min_steer_deg: c.min_steer_deg,
+                            rest_length_m: c.rest_length_m,
+                            rolling_resistance: c.rolling_resistance,
+                            stiffness_n_per_m: c.stiffness_n_per_m,
+                            travel_m: c.travel_m,
+                            abs_slip: c.abs_slip,
+                            ackermann: c.ackermann,
+                            anti_roll_front_n_per_m: c.anti_roll_front_n_per_m,
+                            anti_roll_rear_n_per_m: c.anti_roll_rear_n_per_m,
+                            brake_bias: c.brake_bias,
+                            cog_height_m: c.cog_height_m,
+                            diff_lock_front: c.diff_lock_front,
+                            diff_lock_rear: c.diff_lock_rear,
+                            downforce_centre_z: c.downforce_centre_z,
+                            downforce_n_per_mps2: c.downforce_n_per_mps2,
+                            drag_lateral_n_per_mps2: c.drag_lateral_n_per_mps2,
+                            engine_brake_nm: c.engine_brake_nm,
+                            enter_warp_end: c.enter_warp_end,
+                            enter_warp_start: c.enter_warp_start,
+                            final_drive: c.final_drive,
+                            front_torque_split: c.front_torque_split,
+                            gear_1_ratio: c.gear_1_ratio,
+                            gear_2_ratio: c.gear_2_ratio,
+                            gear_3_ratio: c.gear_3_ratio,
+                            gear_4_ratio: c.gear_4_ratio,
+                            gear_5_ratio: c.gear_5_ratio,
+                            gear_6_ratio: c.gear_6_ratio,
+                            gear_7_ratio: c.gear_7_ratio,
+                            gear_8_ratio: c.gear_8_ratio,
+                            gear_count: c.gear_count,
+                            idle_rpm: c.idle_rpm,
+                            idle_torque_frac: c.idle_torque_frac,
+                            peak_torque_nm: c.peak_torque_nm,
+                            peak_torque_rpm: c.peak_torque_rpm,
+                            redline_rpm: c.redline_rpm,
+                            redline_torque_frac: c.redline_torque_frac,
+                            reverse_ratio: c.reverse_ratio,
+                            shift_down_rpm: c.shift_down_rpm,
+                            shift_time_s: c.shift_time_s,
+                            shift_up_rpm: c.shift_up_rpm,
+                            stability_control: c.stability_control,
+                            steer_rate_deg_per_s: c.steer_rate_deg_per_s,
+                            steer_return_deg_per_s: c.steer_return_deg_per_s,
+                            torque_curve_bias: c.torque_curve_bias,
+                            traction_control_slip: c.traction_control_slip,
+                            tyre_lat_peak_slip: c.tyre_lat_peak_slip,
+                            tyre_lat_rise_bias: c.tyre_lat_rise_bias,
+                            tyre_load_sensitivity: c.tyre_load_sensitivity,
+                            tyre_long_peak_slip: c.tyre_long_peak_slip,
+                            tyre_long_rise_bias: c.tyre_long_rise_bias,
+                            tyre_slide_frac: c.tyre_slide_frac,
+                            wheel_inertia_kgm2: c.wheel_inertia_kgm2,
+                        }
+                    })
                 })
-            })
         };
         let bytes = bincode::serde::encode_to_vec(
             &SceneFileV27Writer {
@@ -13921,6 +14414,148 @@ mod tests {
             "the v27 rung changed something that is not the vehicle class"
         );
         assert_eq!(encode(&back).unwrap()[0], SCHEMA_VERSION as u8);
+    }
+
+    /// A [`SkyAtmosphere`] with **every v27 field off its default**, so a rung
+    /// that dropped one, reordered two or lifted a constant is visible.
+    ///
+    /// `weather_ambient_c` is deliberately left at the live default: it is the
+    /// one field a v27 payload cannot carry, and
+    /// `the_v27_sky_rung_loses_exactly_the_air` is where that is measured.
+    fn hostile_v27_sky() -> SkyAtmosphere {
+        SkyAtmosphere {
+            enabled: false,
+            sun_intensity: 7.25,
+            sun_color: Color::new(0.11, 0.22, 0.33, 0.44),
+            moon_intensity: 0.37,
+            moon_color: Color::new(0.55, 0.66, 0.77, 0.88),
+            zenith: Color::new(0.01, 0.02, 0.03, 0.04),
+            horizon: Color::new(0.05, 0.06, 0.07, 0.08),
+            ground: Color::new(0.09, 0.10, 0.11, 0.12),
+            night_darkening: 0.31,
+            physical: false,
+            sky_intensity: 2.5,
+            turbidity: 3.5,
+            mie_anisotropy: 0.41,
+            sun_disc_deg: 1.25,
+            moon_disc_deg: 0.9,
+            star_intensity: 4.5,
+            tint_strength: 0.61,
+            aerial_perspective: 0.71,
+            fog_density: 1.5e-3,
+            fog_falloff: 0.021,
+            fog_height: 123.0,
+            fog_color: Color::new(0.13, 0.14, 0.15, 0.16),
+            clouds_enabled: true,
+            cloud_coverage: 0.62,
+            cloud_type: 0.27,
+            cloud_bottom: 900.0,
+            cloud_top: 5100.0,
+            cloud_density: 0.07,
+            cloud_detail: 0.44,
+            cloud_seed: 12_345,
+            cloud_wind_x: 11.5,
+            cloud_wind_z: -3.25,
+            cloud_phase_g: 0.66,
+            cloud_shadow: 0.81,
+            cloud_ambient: 0.91,
+            cloud_color: Color::new(0.17, 0.18, 0.19, 0.20),
+            weather_enabled: true,
+            weather_target: WeatherPreset::Storm,
+            weather_blend_seconds: 3.75,
+            weather_blend_remaining: 1.25,
+            weather_coverage: 0.93,
+            weather_cloud_type: 0.18,
+            weather_wind_x: 17.5,
+            weather_wind_z: 6.25,
+            weather_fog_density: 4.0e-4,
+            weather_precipitation: 0.85,
+            weather_snowiness: 0.35,
+            ..SkyAtmosphere::default()
+        }
+    }
+
+    /// **The downgrade direction for v28's SECOND row** — the frozen v27 entity
+    /// record loses the air temperature and **nothing else about the sky**
+    /// (wave VEH3a's audit).
+    ///
+    /// The mutation: dropping any one of the forty-seven from
+    /// `SkyAtmosphereV27::into_current` — that field comes back at its Ring-0
+    /// default and the equality below names it.
+    #[test]
+    fn the_v27_sky_rung_loses_exactly_the_air() {
+        let authored = SkyAtmosphere {
+            // 3.5 °C: a cold morning nothing in the weather block could have
+            // said before this row existed, and not a default of anything.
+            weather_ambient_c: 3.5,
+            ..hostile_v27_sky()
+        };
+        assert_ne!(
+            authored.weather_ambient_c,
+            SkyAtmosphere::default().weather_ambient_c,
+            "the fixture must author an air the default cannot produce"
+        );
+        let live = RuntimeEntity {
+            sky_atmosphere: Some(authored),
+            ..v9_rec(Uuid::from_u128(0xFE36), "Sky", None).into_runtime()
+        };
+        let back = EntityRecordV27::from_current(live.clone()).into_runtime();
+        assert_ne!(back, live, "the air must really be what is lost");
+        let got = back.sky_atmosphere.expect("the sky survives the rung");
+        assert_eq!(
+            got.weather_ambient_c,
+            SkyAtmosphere::default().weather_ambient_c,
+            "the air came back as {} rather than the Ring-0 default a v27 file means",
+            got.weather_ambient_c
+        );
+        assert_eq!(
+            SkyAtmosphere {
+                weather_ambient_c: authored.weather_ambient_c,
+                ..got
+            },
+            authored,
+            "the v27 sky rung lost something that is not the air"
+        );
+        // …and the rest of the record came through untouched.
+        assert_eq!(
+            RuntimeEntity {
+                sky_atmosphere: live.sky_atmosphere,
+                ..back
+            },
+            live,
+            "the v27 sky rung changed something that is not the sky"
+        );
+    }
+
+    /// The air costs **four bytes on an entity that carries a sky** and nothing
+    /// on one that does not — the second half of v28's price, measured the way
+    /// `v28_costs_304_bytes_on_a_class_and_nothing_on_anything_else` measures
+    /// the first.
+    #[test]
+    fn v28_costs_four_bytes_on_a_sky_and_nothing_on_anything_else() {
+        let bare = v9_rec(Uuid::from_u128(0xFE37), "Marker", None).into_runtime();
+        let with = RuntimeEntity {
+            sky_atmosphere: Some(hostile_v27_sky()),
+            ..bare.clone()
+        };
+        let a = bincode::serde::encode_to_vec(&bare, bincode_config()).unwrap();
+        let b = bincode::serde::encode_to_vec(&with, bincode_config()).unwrap();
+        let frozen = EntityRecordV27::from_current(with.clone());
+        let c = bincode::serde::encode_to_vec(&frozen, bincode_config()).unwrap();
+        assert_eq!(
+            b.len() - c.len(),
+            4,
+            "the v28 air costs {} bytes on a sky-carrying entity, not one f32",
+            b.len() - c.len()
+        );
+        // …and the frozen record's bytes are a strict PREFIX of the live one's
+        // up to the sky, which is what "appended at the block's tail" means.
+        let bare_frozen = EntityRecordV27::from_current(bare.clone());
+        let d = bincode::serde::encode_to_vec(&bare_frozen, bincode_config()).unwrap();
+        assert_eq!(
+            a, d,
+            "an entity with no sky and no class is not byte-identical across the v28 rung"
+        );
     }
 
     /// **The downgrade direction for v28** — the frozen v27 entity record loses
@@ -14126,7 +14761,8 @@ mod tests {
 
     /// The v26 entity record with the class written by [`V25ClassWriter`] — the
     /// v25 tail slot has been generic since v25 for exactly this kind of reuse.
-    type V26EntityWriter = RuntimeEntityGen<Terrain, Option<V25ClassWriter>, Material>;
+    type V26EntityWriter =
+        RuntimeEntityGen<Terrain, Option<V25ClassWriter>, Material, Option<SkyAtmosphereV27Writer>>;
 
     /// The v26 file, written independently of the record that reads it.
     #[derive(serde::Serialize)]
@@ -14170,28 +14806,30 @@ mod tests {
         // Written through the INDEPENDENT declarations, so the payload says what
         // v25 said rather than what the frozen record currently says.
         let writer = |r: &RuntimeEntity| -> V26EntityWriter {
-            EntityRecordV26::from_current(r.clone()).map_tail(|v| {
-                v.map(|_| {
-                    let c = r.vehicle_class.expect("the tail is Some");
-                    V25ClassWriter {
-                        brake_force_n: c.brake_force_n,
-                        damping_ns_per_m: c.damping_ns_per_m,
-                        drag_n_per_mps2: c.drag_n_per_mps2,
-                        enter_time_s: c.enter_time_s,
-                        handbrake_force_n: c.handbrake_force_n,
-                        lateral_grip: c.lateral_grip,
-                        longitudinal_grip: c.longitudinal_grip,
-                        max_engine_force_n: c.max_engine_force_n,
-                        max_speed_mps: c.max_speed_mps,
-                        max_steer_deg: c.max_steer_deg,
-                        min_steer_deg: c.min_steer_deg,
-                        rest_length_m: c.rest_length_m,
-                        rolling_resistance: c.rolling_resistance,
-                        stiffness_n_per_m: c.stiffness_n_per_m,
-                        travel_m: c.travel_m,
-                    }
+            EntityRecordV26::from_current(r.clone())
+                .map_sky(|s| s.map(v27_sky_writer))
+                .map_tail(|v| {
+                    v.map(|_| {
+                        let c = r.vehicle_class.expect("the tail is Some");
+                        V25ClassWriter {
+                            brake_force_n: c.brake_force_n,
+                            damping_ns_per_m: c.damping_ns_per_m,
+                            drag_n_per_mps2: c.drag_n_per_mps2,
+                            enter_time_s: c.enter_time_s,
+                            handbrake_force_n: c.handbrake_force_n,
+                            lateral_grip: c.lateral_grip,
+                            longitudinal_grip: c.longitudinal_grip,
+                            max_engine_force_n: c.max_engine_force_n,
+                            max_speed_mps: c.max_speed_mps,
+                            max_steer_deg: c.max_steer_deg,
+                            min_steer_deg: c.min_steer_deg,
+                            rest_length_m: c.rest_length_m,
+                            rolling_resistance: c.rolling_resistance,
+                            stiffness_n_per_m: c.stiffness_n_per_m,
+                            travel_m: c.travel_m,
+                        }
+                    })
                 })
-            })
         };
         let bytes = bincode::serde::encode_to_vec(
             &SceneFileV26Writer {

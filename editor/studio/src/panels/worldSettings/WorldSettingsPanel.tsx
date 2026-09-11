@@ -574,6 +574,13 @@ export default function WorldSettingsPanel() {
                 {precipLabel(settings.weather.precipitation, settings.weather.snowiness)}
               </ReadOnly>
             </PropertyRow>
+            <PropertyRow label="Air (&deg;C)">
+              <NumberField
+                value={settings.weather.ambient_c}
+                step={1}
+                onChange={(v) => patchWeather({ ambient_c: v })}
+              />
+            </PropertyRow>
           </PropertySection>
 
           <PropertySection title="World Partition">

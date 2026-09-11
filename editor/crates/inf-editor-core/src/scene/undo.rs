@@ -2185,8 +2185,13 @@ mod tests {
             fog_density: -1.0,
             precipitation: 7.5,
             snowiness: f32::NAN,
+            ambient_c: 5.0e7,
         };
         let a = hostile.to_component(SkyAtmosphere::default());
+        assert_eq!(
+            a.weather_ambient_c, 60.0,
+            "an air hotter than any place on Earth clamps to the hottest one"
+        );
         assert_eq!(
             a.weather_blend_seconds, 8.0,
             "NaN falls back to the default"

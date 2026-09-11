@@ -171,6 +171,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
   fog_density: number;
   precipitation: number;
   snowiness: number;
+  ambient_c: number;
 } {
   switch (preset) {
     case "overcast":
@@ -182,6 +183,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
         fog_density: 7.5e-5,
         precipitation: 0.0,
         snowiness: 0.0,
+        ambient_c: 15.0,
       };
     case "storm":
       return {
@@ -192,6 +194,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
         fog_density: 6.0e-4,
         precipitation: 1.0,
         snowiness: 0.0,
+        ambient_c: 12.0,
       };
     case "fog":
       return {
@@ -202,6 +205,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
         fog_density: 6.0e-3,
         precipitation: 0.0,
         snowiness: 0.0,
+        ambient_c: 10.0,
       };
     case "snow":
       return {
@@ -212,6 +216,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
         fog_density: 1.2e-3,
         precipitation: 0.7,
         snowiness: 1.0,
+        ambient_c: 0.0,
       };
     case "clear":
     default:
@@ -223,6 +228,7 @@ export function weatherPreset(preset: WeatherPresetDto): {
         fog_density: 0.0,
         precipitation: 0.0,
         snowiness: 0.0,
+        ambient_c: 20.0,
       };
   }
 }

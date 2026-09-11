@@ -5648,12 +5648,12 @@ pub enum WeatherPreset {
     Snow,
 }
 
-/// The seven blendable numbers a [`WeatherPreset`] expands to — the *whole*
+/// The eight blendable numbers a [`WeatherPreset`] expands to — the *whole*
 /// weather state, and exactly the fields [`SkyAtmosphere`]'s `weather_*` block
 /// stores live.
 ///
 /// Units per architecture rule 6: wind in **m/s**, fog extinction in **m⁻¹**
-/// (SI), the rest dimensionless `[0, 1]`.
+/// (SI), air temperature in **°C**, the rest dimensionless `[0, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherParams {
     /// Fractional cloud coverage `[0, 1]`, driving [`SkyAtmosphere::cloud_coverage`].
@@ -5674,6 +5674,21 @@ pub struct WeatherParams {
     /// `1` = snow (slow, round). Blendable, so a Storm → Snow transition is a
     /// continuous change of phase rather than a swap.
     pub snowiness: f32,
+    /// **The air temperature, °C** (schema v28, wave VEH3a's audit).
+    ///
+    /// A real field rather than a phase proxy. Before it existed the only thing
+    /// in the weather block that carried any information about how cold the day
+    /// was, was [`snowiness`](Self::snowiness) — so a tyre's ambient was derived
+    /// from it (20 °C in rain, 0 °C in snow) and *rain at 20 °C* was a law of
+    /// this engine rather than of physics. Now the preset says, an author can
+    /// edit it, the sequencer can key it, and the blend walks it like every
+    /// other number here.
+    ///
+    /// Read by [`crate::vehicle::weather_at`] (tyre cooling, the telemetry HUD
+    /// row). Deliberately NOT in [`crate::sky::ResolvedWeather`]: the renderer
+    /// has no use for an air temperature, and a projection field nothing draws
+    /// is a dead control.
+    pub ambient_c: f32,
 }
 
 impl WeatherPreset {
@@ -5701,6 +5716,10 @@ impl WeatherPreset {
                 fog_density: 0.0,
                 precipitation: 0.0,
                 snowiness: 0.0,
+                // A fair-weather day. This is also `TYRE_AMBIENT_C` and the
+                // `weather_ambient_c` default, so a level that never touches
+                // the weather block means exactly this number.
+                ambient_c: 20.0,
             },
             // A flat grey deck with a little haze under it (~40 km visibility).
             WeatherPreset::Overcast => WeatherParams {
@@ -5711,6 +5730,9 @@ impl WeatherPreset {
                 fog_density: 7.5e-5,
                 precipitation: 0.0,
                 snowiness: 0.0,
+                // A grey deck holds the day down a few degrees: less insolation
+                // in, less radiative loss out, and the range collapses.
+                ambient_c: 15.0,
             },
             // Solid, hard wind (≈ 24 m/s ≈ Beaufort 9), heavy rain, ~5 km
             // visibility through the downpour.
@@ -5722,6 +5744,9 @@ impl WeatherPreset {
                 fog_density: 6.0e-4,
                 precipitation: 1.0,
                 snowiness: 0.0,
+                // Heavy rain under a Beaufort 9: evaporative cooling and the
+                // downdraught together, and the road is wet as well as cold.
+                ambient_c: 12.0,
             },
             // Thick ground fog: 6e-3 m⁻¹ is a Koschmieder visibility of ~500 m.
             // Half a sky above it, and almost no wind — fog and wind do not
@@ -5734,6 +5759,9 @@ impl WeatherPreset {
                 fog_density: 6.0e-3,
                 precipitation: 0.0,
                 snowiness: 0.0,
+                // Radiation fog forms when the ground has cooled to the dew
+                // point, so a thick fog is by construction a cold morning.
+                ambient_c: 10.0,
             },
             // Heavy snow under a near-solid deck; the flakes themselves cut
             // visibility to a couple of kilometres.
@@ -5745,6 +5773,10 @@ impl WeatherPreset {
                 fog_density: 1.2e-3,
                 precipitation: 0.7,
                 snowiness: 1.0,
+                // Snow falls at or below freezing. That implication is the whole
+                // of what the old `snowiness` proxy could see; here it is one
+                // row of a table instead of the only rule in the engine.
+                ambient_c: 0.0,
             },
         }
     }
@@ -6083,6 +6115,14 @@ pub struct SkyAtmosphere {
     /// [`crate::sky::ResolvedSky::snow_accumulation_rate`] — the P22 hook.
     #[serde(default)]
     pub weather_snowiness: f32,
+    /// **The live air temperature, °C** (schema v28, wave VEH3a's audit) — see
+    /// [`WeatherParams::ambient_c`] for why it is a field and not a proxy.
+    ///
+    /// The default is the `Clear` preset's 20 °C, which is what every pre-v28
+    /// level meant: `SkyAtmosphereV27::into_current` lifts an old sky straight
+    /// onto it, so no committed level's air moves.
+    #[serde(default = "default_weather_ambient_c")]
+    pub weather_ambient_c: f32,
 }
 
 fn default_true() -> bool {
@@ -6183,6 +6223,9 @@ fn default_weather_wind_x() -> f32 {
 fn default_weather_wind_z() -> f32 {
     WeatherPreset::Clear.params().wind_z
 }
+fn default_weather_ambient_c() -> f32 {
+    WeatherPreset::Clear.params().ambient_c
+}
 
 impl SkyAtmosphere {
     /// The live weather values as a [`WeatherParams`] — the shape the blend and
@@ -6197,6 +6240,7 @@ impl SkyAtmosphere {
             fog_density: self.weather_fog_density,
             precipitation: self.weather_precipitation,
             snowiness: self.weather_snowiness,
+            ambient_c: self.weather_ambient_c,
         }
     }
 
@@ -6211,6 +6255,7 @@ impl SkyAtmosphere {
         self.weather_fog_density = p.fog_density;
         self.weather_precipitation = p.precipitation;
         self.weather_snowiness = p.snowiness;
+        self.weather_ambient_c = p.ambient_c;
     }
 }
 
@@ -6264,6 +6309,7 @@ impl Default for SkyAtmosphere {
             weather_fog_density: WeatherPreset::Clear.params().fog_density,
             weather_precipitation: WeatherPreset::Clear.params().precipitation,
             weather_snowiness: WeatherPreset::Clear.params().snowiness,
+            weather_ambient_c: WeatherPreset::Clear.params().ambient_c,
         }
     }
 }
