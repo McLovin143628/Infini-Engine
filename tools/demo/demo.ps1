@@ -2583,6 +2583,112 @@ if (-not $veh_driving) {
     }
 }
 
+# ── 6z2. WAVE VEH3b — THE DRIVETRAIN, AND WHAT ITS FOUR COLUMNS SEE ──────────
+#
+# Five frames, every one TRIGGERED on `hero.csv`'s four new columns rather than
+# slept for. Indices, zero-based, at the TAIL so every index above keeps its
+# meaning:
+#
+#   45  rpm      — the crank's own speed, a STATE since this wave
+#   46  clutch   — its engagement, `[0, 1]`; below 1 means it is slipping
+#   47  boost    — the turbo, `[0, 1]` of the class's own peak
+#   48  cut      — `1` while the limiter is cutting fuel
+#
+# None of the four is visible in a position column, which is why they were
+# appended: "the clutch is biting", "the turbo is spooling" and "the limiter is
+# bouncing" are three different things that all read the same in `speed`.
+#
+# **The car has to be MOVING for any of them**, so this leg runs after the tyre
+# leg and reuses whatever the hero is already sitting in. A session where the
+# tyre leg never reached a car reports that and takes none of the five.
+if (-not $veh_driving) {
+    Say "VEH3b: NO CAR was reached above -- none of the five drivetrain frames is in this session"
+} else {
+    Say "VEH3b: the crank, the clutch, the limiter and the turbo"
+
+    # (a) THE LAUNCH. Off the throttle until the car is stopped, then floor it:
+    #     the clutch is OPEN on a parked car and bites over `clutch_engage_s`,
+    #     so the frame is the one moment a driver feels the car take up.
+    [InfInput]::Up(0x11)
+    Start-Sleep -Milliseconds 2500
+    [InfInput]::Down(0x11)
+    $veh_launch = @(Wait-ForHero -Csv $heroCsv -What "the clutch biting at a standing start (VEH3b)" -TimeoutS 12.0 `
+        -Predicate { param($c) ($c.Count -gt 48) -and ($c[5] -eq "Driving") -and ([double]$c[46] -lt 0.95) -and ([double]$c[6] -lt 6.0) } `
+        -Out (Join-Path $OutDir "94-veh3b-launch.png"))[-1]
+    if (-not $veh_launch) {
+        Say "VEH3b: the clutch never reported a bite at a standing start -- frame (a) is not in this session"
+    }
+
+    # (b) THE SHIFT. The same column, at speed: a gearshift OPENS the clutch and
+    #     re-engages it over `clutch_engage_s`, which is the flare.
+    $veh_shift = @(Wait-ForHero -Csv $heroCsv -What "the clutch re-engaging after a shift (VEH3b)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 48) -and ($c[5] -eq "Driving") -and ([double]$c[46] -lt 0.95) -and ([double]$c[6] -gt 8.0) } `
+        -Out (Join-Path $OutDir "95-veh3b-shift.png"))[-1]
+    if (-not $veh_shift) {
+        Say "VEH3b: the clutch never re-engaged at speed -- frame (b) is not in this session"
+    }
+
+    # (c) THE LIMITER. The rev limiter CUTS now and the cut is a column, so this
+    #     asks the world for it directly. On the island's own roads the hero's
+    #     car reaches its governor before its redline -- the two are different
+    #     ceilings and `governor` is the one that binds on a road car -- so a
+    #     miss here is a fact about the class rather than about the model, and
+    #     the `veh3b_gate::the_limiter_cuts_and_restores` arm measures the saw
+    #     on a rig that CAN reach it (27 cut edges, 153 rpm of amplitude over a
+    #     5.8-step period).
+    $veh_cut = @(Wait-ForHero -Csv $heroCsv -What "the limiter cutting fuel (VEH3b)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 48) -and ($c[48] -eq "1") } `
+        -Out (Join-Path $OutDir "96-veh3b-redline.png"))[-1]
+    if (-not $veh_cut) {
+        Say "VEH3b: the limiter never cut -- the island's car reaches its GOVERNOR (a road-speed limiter) before its redline, and frame (c) is not in this session"
+    }
+
+    # (d) THE NOSE-DIVE. The row carries no suspension compression, so the
+    #     trigger is the thing that IS in it and happens at the same instant: a
+    #     braked DOWNSHIFT re-engages the clutch while the car is slowing hard,
+    #     which is exactly when the nose is at its lowest.
+    Say "VEH3b: hard on the brakes, looking for a downshift"
+    [InfInput]::Up(0x11)
+    [InfInput]::Down(0x1F)   # S, the brake
+    $veh_dive = @(Wait-ForHero -Csv $heroCsv -What "a braked downshift, the nose at its lowest (VEH3b)" -TimeoutS 12.0 `
+        -Predicate { param($c) ($c.Count -gt 48) -and ($c[5] -eq "Driving") -and ([double]$c[46] -lt 0.95) -and ([double]$c[6] -gt 3.0) } `
+        -Out (Join-Path $OutDir "97-veh3b-nosedive.png"))[-1]
+    [InfInput]::Up(0x1F)
+    if (-not $veh_dive) {
+        Say "VEH3b: no downshift came under the brakes -- frame (d) is not in this session"
+    }
+
+    # (e) THE BOOST. Every catalogue row shipped today is NATURALLY ASPIRATED
+    #     (`turbo_boost_max` is 0 on all eleven — `veh3b_gate` asserts it), so
+    #     this frame exists only when the session asked for a turbo through the
+    #     preview-only tuning door: `-TuneVehicle "turbo_boost_max=0.8"`. A
+    #     session that did not ask reports the miss and its reason.
+    [InfInput]::Down(0x11)
+    $veh_boost = @(Wait-ForHero -Csv $heroCsv -What "the turbo on boost (VEH3b)" -TimeoutS 15.0 `
+        -Predicate { param($c) ($c.Count -gt 48) -and ([double]$c[47] -gt 0.30) } `
+        -Out (Join-Path $OutDir "98-veh3b-boost.png"))[-1]
+    if (-not $veh_boost) {
+        Say "VEH3b: no boost -- every catalogue row is naturally aspirated, so frame (e) needs `-TuneVehicle `"turbo_boost_max=0.8`"` and this session did not ask"
+    }
+    [InfInput]::Up(0x11)
+
+    # WHAT THE FOUR COLUMNS ACTUALLY SAID, whatever fired: the last driving
+    # line, printed whole, so a reader can see them rather than take the
+    # triggers' word for it.
+    $last = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 48 -and ($_ -split ",")[5] -eq "Driving" })
+    if ($last.Count -gt 0) {
+        $c = $last[-1] -split ","
+        Say ("VEH3b ROW: {0} rpm  clutch {1}  boost {2}  cut {3}" -f $c[45], $c[46], $c[47], $c[48])
+        $slipping = @($last | Where-Object { [double](($_ -split ",")[46]) -lt 0.95 }).Count
+        $cutting = @($last | Where-Object { (($_ -split ",")[48]) -eq "1" }).Count
+        $maxrpm = ($last | ForEach-Object { [double](($_ -split ",")[45]) } | Measure-Object -Maximum).Maximum
+        Say ("VEH3b CENSUS: {0} driving rows, {1} with the clutch slipping, {2} with the limiter cutting, peak {3} rpm" -f $last.Count, $slipping, $cutting, $maxrpm)
+    } else {
+        Say "VEH3b ROW: no driving row was ever written"
+    }
+}
+
 # ── 7. close ─────────────────────────────────────────────────────────────────
 if ($KeepOpen) {
     Say "left running (pid $($proc.Id)); the island's pack stays mapped until you close it"
