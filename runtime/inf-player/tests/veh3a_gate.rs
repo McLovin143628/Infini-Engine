@@ -1627,7 +1627,7 @@ fn a_character_boards_from_as_far_as_the_reach_says() {
     let lift = seat.y - (car.y - 0.95);
     assert!(
         lift > 1.0,
-        "the seat is {lift} m above the ground, so this arm is not measuring the          thing it was written for -- a seat in the CABIN is VEH3d's and when it          lands this arm should be re-read rather than deleted"
+        "the seat is {lift} m above the ground, so this arm is not measuring the thing it was written for -- a seat in the CABIN is VEH3d's, and when it lands this arm should be re-read rather than deleted"
     );
 
     let furthest = |from: DVec3| -> f64 {
@@ -1649,11 +1649,11 @@ fn a_character_boards_from_as_far_as_the_reach_says() {
     );
     assert!(
         reach > 2.79,
-        "a character cannot board from {reach} m -- the demo stood 2.8 m from a          car and pressed E twenty-five times"
+        "a character cannot board from {reach} m -- the demo stood 2.8 m from a car and pressed E twenty-five times"
     );
     assert!(
         (reach - inf_physics::d3::vehicle::ENTER_REACH_M).abs() < 0.02,
-        "the reach on the ground is {reach} m against a stated {} -- a seat's          height is being subtracted from a player's reach",
+        "the reach on the ground is {reach} m against a stated {} -- a seat's height is being subtracted from a player's reach",
         inf_physics::d3::vehicle::ENTER_REACH_M
     );
     // …and the reach is still a REFUSAL past its edge, not an open door.
