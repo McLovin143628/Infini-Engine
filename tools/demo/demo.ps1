@@ -2473,17 +2473,31 @@ Say "VEH3a: boarding a car and driving it, watching the tyre row"
 
 # (a) THE HUD ROW ON THE ROAD. Board first, then hold the throttle until the
 #     world reports a car on asphalt at speed. The row is under the instruments.
+# **THE HUNT SWEEPS A DISC, NOT A LINE** (wave VEH3b, closing the VEH3a
+# audit's carried instrument item). The wave's hunt tapped E and walked `W`
+# between taps, so twenty-five taps carried the hero twenty metres along ONE
+# bearing -- and `ENTER_REACH_M` is 3.0 m, so a car four metres to either side
+# was never in reach. Measured: three sessions across two waves reached a car
+# twice, and both misses ended with the hero tens of metres from where it
+# started, walking away from the parked cars. Turning thirty degrees every
+# third tap makes the same twenty-five taps a rough circle instead of a
+# corridor, which is what "look around for a car" means.
 $veh_driving = $false
-for ($k = 0; $k -lt 25 -and -not $veh_driving; $k++) {
+for ($k = 0; $k -lt 36 -and -not $veh_driving; $k++) {
     [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
     $veh_driving = @(Wait-ForHero -Csv $heroCsv -What "the hero at a wheel (VEH3a)" -TimeoutS 0.9 `
         -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") })[-1]
-    if (-not $veh_driving -and $k -ge 5) {
+    if (-not $veh_driving -and $k -ge 3) {
+        if (($k % 3) -eq 0) {
+            # Thirty degrees at the shipped sensitivity, the cover leg's own
+            # arithmetic: 15 counts is about 2.2 degrees.
+            for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 }
+        }
         [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
     }
 }
 if (-not $veh_driving) {
-    Say "VEH3a: NO CAR reached in twenty-five taps of E -- none of the four tyre frames is in this session"
+    Say "VEH3a: NO CAR reached in thirty-six taps of E over a full turn -- none of the four tyre frames is in this session"
 } else {
     # Throttle, and let the surface classifier answer.
     [InfInput]::Down(0x11)

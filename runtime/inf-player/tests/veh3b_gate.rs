@@ -27,6 +27,7 @@
 //! | `a_downshift_flares_the_crank` | `flywheel_inertia_kgm2` → 0 | downshifts seen, steps of flare | **fails** |
 //! | `the_limiter_cuts_and_restores` | `FUEL_CUT_HYSTERESIS_RPM` → a band nothing escapes, or the cut branch deleted | cut edges, steps at the limiter | **fails** |
 //! | `the_three_differentials_launch_differently` | `lsd_transfer_nm` → 0 | contact steps on each of three runs | passes — this is a diff claim, not a crank one |
+//! | `the_lsd_transfer_is_a_preload_and_a_ramp` | the same, one level down — the anti-vacuity arm beside it | six properties of the function | passes, by design |
 //! | `the_boost_spools_and_blows_off` | `turbo_spool_s` → instant | steps with boost, and the NA control | **fails** |
 //! | `the_axle_loads_are_the_formulas` | `cog_height_m` → 0 | braked steps, launched steps | passes — weight transfer predates this wave |
 //! | `the_nose_dives_and_the_tail_squats` | `cog_height_m` → 0 | steps of each | passes |
@@ -37,6 +38,7 @@
 //! | `the_shipped_host_draws_the_drivetrain_row` | the call deleted from `inf_player::window` | three source fragments | n/a — a source pin |
 //! | `the_hud_row_says_what_the_drivetrain_knows` | the row's own `format!` | four rows built from real state |  n/a |
 //! | `the_vehicle_phase_costs_what_it_prints` | any per-wheel derivation put back | cars, control + measured | n/a |
+//! | `two_runs_of_one_drive_fold_the_same_bytes` | a clock or an RNG anywhere in `crank_step` | 213 distinct states of 240, plus a source ban | passes |
 //!
 //! # PIE == shipping, the mirrors, and the wire
 //!
