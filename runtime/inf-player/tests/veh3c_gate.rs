@@ -35,6 +35,7 @@
 //! | `a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` | the latched fast path deleted | µs/car, control and measured | n/a — it is a COST arm |
 //! | `a_quiet_level_folds_no_bodywork_bytes` | `VehicleDamage::is_quiet` → `false` | parked cars, driven steps | passes — the section is empty either way, which is the point |
 //! | `two_runs_of_one_crash_fold_the_same_bytes` | a clock or an RNG anywhere in the step | the bytes' own length | passes |
+//! | `pie_equals_shipping_on_a_crash_course` | either host's `step_bodywork` call deleted | 108 quiet steps then 439 bytes | passes — two empty traces agree too, which the anti-vacuity half refuses |
 //! | `every_authored_family_is_a_car_with_doors` | a family's parts emptied | 84 parts over 6 catalogue rows | **fails** |
 //!
 //! The BRIGADE's arrival is measured where a town is:
@@ -48,9 +49,13 @@
 //!
 //! # PIE == shipping, the mirrors, and the wire
 //!
-//! Not duplicated here, for `veh3a_gate`'s reason verbatim.
-//! `island_gate::pie_equals_shipping_on_an_island_drive` drives the cooked
-//! island on both hosts and compares them step for step. The bodywork needs no
+//! `pie_equals_shipping_on_a_crash_course` is this wave's own, on
+//! `deform_parity`'s shape: the editor's `SimSession` and the shipped player's
+//! `RuntimeSim` are driven directly through their own front doors over a car
+//! dropped onto a slab, and `damage_state_bytes` is compared step by step. The
+//! WIDER claim rides `island_gate::pie_equals_shipping_on_an_island_drive`,
+//! which drives the cooked island against the loose one — and every car on that
+//! island has doors now, so the bodywork step runs on both paths there too. The bodywork needs no
 //! MIRROR fence of its own: `step_bodywork` is the last statement of
 //! `inf_physics::d3::vehicle::step_vehicles`, inside the `vehicle_step` fence
 //! both hosts already carry and `fixed_step_mirror` already pins
@@ -1318,5 +1323,149 @@ fn this_wave_moved_no_schema() {
     assert!(
         head.contains("#[derive(Clone, Copy, Debug, PartialEq)]"),
         "`BodyPart`'s derive list changed: {head:?}"
+    );
+}
+
+// ── PIE == shipping, on a crash ─────────────────────────────────────────────
+
+/// **THE EDITOR'S PREVIEW AND THE SHIPPED PLAYER CRASH THE SAME CAR.**
+///
+/// `deform_parity`'s shape, one system over: the two fixed steps are driven
+/// directly through their own front doors (`RuntimeSim::new` and
+/// `SimSession::enter`), and what is compared is
+/// `bodywork::damage_state_bytes` step by step.
+///
+/// **The course is a DROP and not a drive**, and that is deliberate rather than
+/// convenient: `SimSession` exposes no bridge, so a driven car would need an
+/// input path that differs between the two hosts — and what this arm is about is
+/// the FIXED STEP, not the controller. A car dropped onto a slab takes a real
+/// blow from the world, dents the panels that face it, pops what its latches
+/// cannot hold and spends its hull, with **no input at all** on either side.
+///
+/// The wider PIE == shipping claim rides
+/// `island_gate::pie_equals_shipping_on_an_island_drive`, which drives the
+/// cooked island against the loose one — and every car on that island has doors
+/// now, so the bodywork step runs on both paths there too.
+#[test]
+fn pie_equals_shipping_on_a_crash_course() {
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::simulate::{SimInput, SimSession};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+
+    const HZ: f64 = 60.0;
+    const STEPS: u32 = 150;
+    /// High enough that the struts bottom out and the CHASSIS takes the blow.
+    /// A car that lands on its suspension is not crashing, and the model says so
+    /// by subtracting what the suspension asked for.
+    const DROP_M: f64 = 16.0;
+
+    fn slab_bits() -> (Transform, RigidBody3D, Collider3D) {
+        (
+            Transform {
+                translation: Vec3d::new(0.0, -0.5, 0.0),
+                ..Default::default()
+            },
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(60.0, 0.5, 60.0),
+                friction: 0.9,
+                ..Default::default()
+            },
+        )
+    }
+
+    let def = catalogue_def("sedan");
+    let spawn = inf_ecs::vehicle::RigSpawn {
+        name: "Dropped".into(),
+        at: DVec3::new(0.0, DROP_M, 0.0),
+        yaw_deg: 0.0,
+        paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
+        clip: None,
+        engine_voice: false,
+        livery: None,
+    };
+
+    let shipped: Vec<Vec<u8>> = {
+        let mut world = EcsWorld::new();
+        let g = world.spawn_with_guid(GROUND, "slab", None);
+        world.world_mut().entity_mut(g).insert(slab_bits());
+        inf_ecs::vehicle::spawn_rig(&mut world, CHASSIS, &def, &spawn);
+        world.propagate();
+        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
+        (0..STEPS)
+            .map(|_| {
+                sim.step_once(RuntimeInput::default());
+                inf_ecs::bodywork::damage_state_bytes(sim.world())
+            })
+            .collect()
+    };
+
+    let preview: Vec<Vec<u8>> = {
+        use inf_editor_core::ipc::SpawnKind;
+        let mut doc = SceneDoc::new();
+        let g = doc.create_with_guid(GROUND, SpawnKind::Empty, "slab", None);
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(g)
+            .insert(slab_bits());
+        inf_editor_core::vehicle::spawn_vehicle(
+            &mut doc,
+            CHASSIS,
+            &def,
+            inf_editor_core::vehicle::VehicleSpawn {
+                name: &spawn.name,
+                at: spawn.at,
+                yaw_deg: spawn.yaw_deg,
+                paint: spawn.paint,
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+        );
+        doc.world_mut().propagate();
+        let mut session = SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
+        let out = (0..STEPS)
+            .map(|_| {
+                session.step_once(&mut doc, SimInput::default());
+                inf_ecs::bodywork::damage_state_bytes(doc.world())
+            })
+            .collect();
+        session.exit(&mut doc);
+        out
+    };
+
+    // **ANTI-VACUITY.** Two empty traces are equal too: the drop has to have
+    // hurt the car, and the section has to have been empty before it did.
+    let first_loud = shipped.iter().position(|b| !b.is_empty());
+    eprintln!(
+        "the drop from {DROP_M} m: the bodywork section is empty for the first {:?} steps and \
+         {} bytes at the end",
+        first_loud,
+        shipped.last().map(|b| b.len()).unwrap_or(0)
+    );
+    assert!(
+        shipped[0].is_empty(),
+        "the car folded {} bytes before it had touched anything",
+        shipped[0].len()
+    );
+    assert!(
+        first_loud.is_some(),
+        "a {DROP_M} m drop did nothing to the car — this arm compares two \
+         recordings of nothing happening"
+    );
+    assert!(
+        !shipped.last().unwrap().is_empty(),
+        "the damage went away again"
+    );
+
+    assert_eq!(
+        shipped, preview,
+        "the shipped player and the editor's Simulate crashed the same car \
+         differently — PIE would stop matching shipping the first time somebody \
+         hit something"
     );
 }

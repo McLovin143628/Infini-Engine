@@ -2905,6 +2905,33 @@ if (-not $veh_driving) {
         Say "VEH3c: the car never burned -- a hull is four panels and a 60 km/h shunt spends half of one, so it takes two or three; dispatch_3d::a_burning_car_brings_the_appliance walks the brigade's whole answer instead (assigned on step 0, on scene at 57.2 s and 11.64 m, resolved at 62.3 s, 22 puffs)"
     }
 
+    # (f) THE SHOT-UP CAR, which needs no seat. The five columns above read the
+    #     car the hero is SITTING IN -- that is what "the hero's car damage"
+    #     means, and it is the rule the four drivetrain columns follow -- so a
+    #     car the hero shoots at from the pavement is damaged in the WORLD and is
+    #     not in this row. The frame is therefore triggered on the hero's own
+    #     TRIGGER (column 20, `rounds`, with the sidearm up) while it is pointed
+    #     at a parked car, and what the car SPENT is measured where it can be:
+    #     `veh3c_gate::a_car_shot_at_spends_its_own_joules` (10 000 J into the
+    #     flank leaves 72 % of the hull and 100 % of the engine; 10 000 into the
+    #     nose kills the engine).
+    Say "VEH3c: emptying a magazine into a parked car"
+    [InfInput]::Down(0x02)       # 1 -- the sidearm
+    Start-Sleep -Milliseconds 250
+    [InfInput]::Up(0x02)
+    [InfInput]::RightDown()      # aim
+    Start-Sleep -Milliseconds 400
+    [InfInput]::LeftDown()
+    $veh_shoot = @(Wait-ForHero -Csv $heroCsv -What "the hero emptying a magazine into a parked car (VEH3c)" -TimeoutS 8.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[20] -gt 0) -and ($c[22] -ne "-") } `
+        -Out (Join-Path $OutDir "104-veh3c-shot-car.png"))[-1]
+    Start-Sleep -Milliseconds 1200
+    [InfInput]::LeftUp()
+    [InfInput]::RightUp()
+    if (-not $veh_shoot) {
+        Say "VEH3c: the hero never fired -- frame (f) is not in this session"
+    }
+
     # WHAT THE FIVE COLUMNS ACTUALLY SAID, whatever fired: the last driving
     # line, printed whole, so a reader can see them rather than take the
     # triggers' word for it.

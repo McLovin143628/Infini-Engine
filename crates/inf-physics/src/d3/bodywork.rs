@@ -424,6 +424,7 @@ pub fn step_bodywork(
                 continue;
             };
             let (chassis, part) = breaks[idx];
+            let car = cars.iter().find(|c| c.chassis == chassis);
             if let Some(e) = world.entity_of(part) {
                 world.world_mut().entity_mut(e).remove::<Joint3D>();
                 // A shed part is SOLID: it has to land on the road rather than
@@ -431,6 +432,23 @@ pub fn step_bodywork(
                 // `detach`).
                 if let Some(mut c) = world.world_mut().get_mut::<Collider3D>(e) {
                     c.sensor = false;
+                }
+                // **AND IT IS MOVED CLEAR AS IT LETS GO**, for the reason a
+                // freshly shed part is spawned clear: a solid body that appears
+                // overlapping the chassis is a depenetration force with nowhere
+                // to go, and that force put a 7 kg bumper 0.8 m into the air the
+                // first time this wave measured it. A door that tore off its
+                // hinge at 40 degrees open is half inside the car it came off,
+                // so it is stepped away from the chassis centre by a hand's
+                // width along the line it is already on.
+                if let Some(c) = car {
+                    if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+                        let away = (t.translation.to_dvec3() - c.pos).normalize_or_zero();
+                        if away != DVec3::ZERO {
+                            t.translation =
+                                Vec3d::from_dvec3(t.translation.to_dvec3() + away * 0.15);
+                        }
+                    }
                 }
             }
             if let Some(s) = damage_mut(world)
@@ -552,15 +570,24 @@ fn car_facts(
             });
         }
     }
-    let rig = bridge.vehicle_of(chassis).map(|v| v.rig().clone());
-    let wheels = rig
-        .map(|r| {
-            r.wheels
-                .iter()
-                .map(|w| (w.mount_local, w.radius_m))
-                .collect()
-        })
-        .unwrap_or_default();
+    // **The wheels, only when somebody is going to ask** — `hit_vehicle` needs
+    // them to find which tyre a round punctured and nothing else does, and
+    // `VehicleRig::wheels` is a `Vec` behind the trait, so gathering it for a
+    // parked car is one heap allocation a car a step for an answer nobody wants.
+    let wheels: Vec<(Vec3d, f64)> = if walk {
+        bridge
+            .vehicle_of(chassis)
+            .map(|v| {
+                v.rig()
+                    .wheels
+                    .iter()
+                    .map(|w| (w.mount_local, w.radius_m))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     Some(CarFacts {
         chassis,
         half,
