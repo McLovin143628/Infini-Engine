@@ -39119,3 +39119,203 @@ the gate spins one on **sand under slicks** at µ 0.25 and 229 slipping steps.
 > `docs/profiling.md` carry the VEH3a re-price (×3.1 for four casts a wheel,
 > the constant unmoved). Law, written into the discipline: a budget arm against
 > a §8 constant never asserts in dev or on CI.
+
+## WAVE VEH3b — THE DRIVETRAIN (2026-09-11)
+
+**THE RIGID DRIVELINE IS GONE.** `engine_rpm` has answered `max(idle, wheels ×
+gear)` since P29.7, and `idle_rpm`'s own doc carried the refusal that made it a
+choice rather than an omission: *"below it a real clutch is slipping, and
+modelling the clutch is a state machine this engine does not need to be a car."*
+That sentence is exactly right about WHEN a clutch slips and silently assumes
+that what happens while it slips does not matter. What happens is the launch
+flare, the shift flare and the downshift blip, which are three of the four
+things a driver hears. It is **re-ruled in the code's own doc** with the user's
+research doc as the cause, and `crank_step` is the whole drivetrain in one
+function: a flywheel the revs are a STATE on, a clutch that is the tyre model's
+own stick/slip split one shaft over, a limiter that CUTS with hysteresis instead
+of plateauing, and a turbo whose boost is a first-order state with a dead time
+and a blow-off valve.
+
+**THE IDLE FLOOR SURVIVES AS A BOUND ON TORQUE.** A slipping clutch passing its
+full capacity off an engine already at idle is free energy: the crank would be
+dragged under, the model would clamp it back up, and the difference would arrive
+at the wheels as drive nobody paid for. So the capacity is bounded by what the
+engine can actually give — its own torque plus whatever the flywheel has above
+idle — and at idle that second term is zero, which is `max(idle, …)`'s behaviour
+reproduced through a mechanism instead of asserted by a clamp.
+
+**THE FEEL TABLE, RE-BLESSED WITH ITS CAUSE.** Two halves in opposite
+directions, and both are the physics: the clutch makes a launch quicker (a
+slipping clutch lets the crank sit in its own power band while the car is still
+slow, where a rigid driveline had the engine at idle), and the flywheel makes
+everything else slower (a locked clutch means the crank's inertia is part of
+every driven wheel's, reflected through the square of the gear — a quarter of a
+tonne of equivalent mass in first and almost nothing in sixth).
+
+| row | 0–100 km/h before | after | Δ | stop before | after | Δ |
+|---|---|---|---|---|---|---|
+| sports | 3.98 s | **3.75 s** | −5.8 % | 31.1 m | **30.0 m** | −3.5 % |
+| sedan | 7.37 s | **7.67 s** | +4.1 % | 36.4 m | **38.3 m** | +5.2 % |
+| suv | 7.40 s | **7.30 s** | −1.4 % | 40.7 m | **41.4 m** | +1.7 % |
+| van | 17.43 s | **17.07 s** | −2.1 % | 50.4 m | **50.6 m** | +0.4 % |
+| truck | 6.75 s (0–78) | **6.65 s** | −1.5 % | 32.7 m | **31.9 m** | −2.4 % |
+
+`flywheel_inertia_kgm2 = 0` restores the pre-VEH3b model **to the printed
+digit**: 3.98 s and 30.8 m on the sports row. Every band is re-cut at ±5 % of
+the new measurement with VEH2a's own figure kept beside it.
+
+**THE FLARE, MEASURED THE ONLY WAY THAT MEANS ANYTHING.** The first cut of the
+launch arm compared how far the crank rose over idle with a flywheel and
+without, and found the RIGID one bigger — 568 rpm against 474 — because a rigid
+car accelerates harder off the line and its revs follow its wheels. What a
+flywheel buys is not a bigger number on the tachometer but the GAP between the
+crank and the wheels:
+
+| | with a flywheel | rigid (`flywheel_inertia_kgm2 = 0`) |
+|---|---|---|
+| a launch: how far the crank ran AHEAD of its gearing | **1 048 rpm** | **0**, by construction |
+| steps of the launch with the clutch slipping | **35 of 60** | 0 |
+| a downshift: the biggest sweep | 670 rpm | 1 437 rpm |
+| …and how many steps it took | **35** | **1** |
+
+**THE LIMITER IS A CUT, AND VEH2a'S CARRIED ITEM IS CLOSED.**
+`engine_torque_nm`'s doc has said *"It is a plateau, not a fuel cut … Nothing in
+this model cuts fuel"* since VEH2a. Above `fuel_cut()` the torque is zero and it
+comes back `FUEL_CUT_HYSTERESIS_RPM` (300) below, so the crank BOUNCES at
+whatever rate its own inertia and load give it: **27 cut edges and 13 complete
+saws over ten seconds, a mean amplitude of 153 rpm over a 5.8-step period**,
+peaking at 6 652 rpm against a plateau's 7 020. Measured on mud with the box
+held in first, because on dry tarmac this rig cannot reach its own limiter at
+any throttle a script can apply — the same arithmetic the VEH3a audit recorded
+about the burnout frame. The cut state is readable and **is VEH3e's hook**.
+
+**THE DIFFERENTIALS ARE A CLUTCH PACK.** `lsd_transfer_nm` is a preload plus a
+power/coast ramp over Δω, bounded, moving torque FROM the faster wheel TO the
+slower one — so the axle's total is unchanged by construction and the faster
+wheel's torque may go NEGATIVE. One wheel on mud, one on sealed road, three
+seconds, rear drive, no traction control:
+
+| | distance | the driven axle's speed difference |
+|---|---|---|
+| open | 6.60 m | **307.3 rad/s** |
+| lsd (60 N·m preload, 0.6 power ramp) | **8.04 m** | **0.0 rad/s** |
+| locked (`diff_lock_rear = 1`) | **9.00 m** | 28.4 rad/s |
+
+**A spool STARVES and a clutch pack BRAKES**, which is why the LSD ends up
+tighter than the lock rather than looser: the scalar lock hands the axle to the
+slowest wheel and stops feeding the fastest — what the model's own doc has
+always said it does, and not the same thing as tying two shafts together — so
+the spun-up wheel coasts down on tyre drag alone. `differential =
+"open|lsd|locked"` is the `drivetrain` ruling applied to the second enum an
+author reaches for, resolved BEFORE any numeric key; all six LSD fields are `0`
+on every row shipped before v28, so the pass is the identity on them.
+
+**WEIGHT TRANSFER, VERIFIED AGAINST THE DOC FOR THE FIRST TIME.** The
+force-offset trick has been in the model since P29.7 and nothing had ever
+checked it against `Fz = Fz_static − m·a·h / L`. It agrees:
+
+| | measured transfer | the formula | apart |
+|---|---|---|---|
+| braking at −9.43 m/s² over 78 steps | **3 216 N** to the front | 3 341 N | **3.7 %** |
+| launching at 4.59 m/s² over 120 steps | **1 649 N** to the rear | 1 626 N | **1.4 %** |
+| the nose under full braking | **45.6 mm** of dive | (6.8 mm with `h = 0`) | |
+| the tail on a launch | **8.9 mm** of squat | (1.3 mm with `h = 0`) | |
+
+**`h` is the centre of gravity's height above the ROAD** — 0.817 m on this rig,
+derived from the world — and not `cog_height_m` (−0.25), which is an offset from
+the chassis collider's CENTRE. Getting it wrong is an eleven-to-one error and
+the first cut of the arm made it.
+
+### THE FOUR DEFECTS THIS WAVE MADE, AND WHAT EACH COST
+
+| what | what it cost | where it is written down |
+|---|---|---|
+| **A lock test on the two speeds alone.** A locked clutch's faces are never at the same number at the top of a step: the crank was slaved to the driveline's speed at the END of the last one and the wheels then moved — four rad/s a step in third under one g. The clutch "unlocked" on every braked step and the slipping branch fed the gearbox its whole capacity as DRIVE | the sports row's stop: **30.8 m → 53.5** | `CrankStep::locked` |
+| **The shift read the crank.** A shift opens the clutch, an open crank at full throttle flares into its own limiter inside a tenth of a second, and the box then saw a rev counter above `shift_up_rpm` | first to seventh in **half a second at fifteen metres a second** | the gearbox block |
+| **The eleven catalogue rows author an engine and not a clutch.** The sports row inherited the Ring-0 420 N·m against its own 460 and slipped for the whole of every gear | 0–100: **3.98 s → 8.85** | `clutch_capacity_nm` |
+| **`engine_rpm` clamps to `[idle, red]`**, so a stationary car reported a driveline at IDLE and the clutch locked onto it | the launch flare vanished entirely | `driveline_rpm` |
+
+A **fifth** belongs to the gate rather than to the model, and it is the same
+defect class the VEH3a audit named four of: `the_axle_loads_are_the_formulas`
+banded the TOTAL axle load where the doc's formula is the TRANSFER. The static
+load is two thirds of the number, so a ten-per-cent band passed a transfer that
+was twenty-six per cent wrong — measured, by deleting the force offset entirely
+and watching the arm stay green. `m a h / L` is the term the doc writes, so it
+is the term the arm bands.
+
+### THE SEVENTEENTH TRACE SECTION
+
+The crank, the clutch and the turbo live inside a `dyn Vehicle` in the physics
+bridge, and `state_bytes` is handed a WORLD — so the vehicle phase publishes
+them into `DrivetrainRes` and `drivetrain_state_bytes` folds them at the tail,
+**empty when every engine on the level is quiet**. `projector_mirror`'s
+`SECTIONS` allowlist grew its seventeenth row in the same commit that folded it,
+which is what the traffic section's two unpinned waves taught.
+
+`clutch_slip_rad_s` is a **diagnostic beside the state rather than part of it**,
+on `CasingPool::last_shot_indoors`' own terms: a PARKED car's clutch is slipping
+by definition (the engine idles and the wheels do not turn), so a quiet test
+that demanded zero slip would be true of nothing and the section would never be
+empty. The fold is now exactly the set `is_quiet` tests — **45 bytes a car**.
+
+Measured: a level with one parked car folds **0** bytes; after a second of
+throttle the same level folds **45**; ten seconds later, coasted to 2.21 m/s, it
+folds **0** again.
+
+### WHAT A LATER WAVE SHOULD NOT HAVE TO RE-DISCOVER
+
+1. **A locked clutch's two faces are never at the same number at the top of a
+   step.** The lag is one step of driveline acceleration, four rad/s in third
+   under one g. Any stick/slip test on a driveline has to carry the stick STATE.
+2. **A gearbox cannot see a crank it has just disconnected.** The shift decision
+   belongs on the input shaft, which is `engine_rpm`'s answer and always was.
+3. **A production clutch is never weaker than its own engine** — seven of the
+   eleven catalogue rows author a `clutch_torque_nm` below their own peak torque
+   and are carried by `clutch_capacity_nm`'s floor.
+4. **The Ring-0 rig sits on its bump stops under a 0.9 g stop.** Static
+   compression is 0.149 m of a 0.25 m travel, so a hard stop uses the remaining
+   0.10 m in a fifth of a second and both axles pin at `travel_m` from step 40 —
+   on the rigid driveline identically, so it is not this wave's. A car on its
+   bump stops measures its bump stops.
+5. **The Ring-0 rig uses TWO of its six gears.** Its `max_speed_mps` is 25 and
+   second reaches 5 300 rpm there, so the shipped default car can only ever make
+   one downshift.
+6. **A differential only has something to do when its wheels differ.** A 400 N·m
+   preload on a uniform pad moves a car by 0.19 micrometres, which reads exactly
+   like a field nothing consumes and is the opposite.
+
+### THE SESSIONS, AND WHAT THEY COST
+
+Five runs of `tools/demo/demo.ps1 -PlayMode window` on the island. Two of them
+found defects that no test could have, which is what a demo loop is for.
+
+| | 1 | 2 (`-SpawnAt`) | 3 (the disc hunt) | 4/5a (`cargo build`) | 5 (the tuned car) |
+|---|---|---|---|---|---|
+| reached `Driving` | **no** | **no** | **yes** | REFUSED at Play | **yes** |
+| `Driving` rows | 0 | 0 | **611** | — | **692** |
+| top speed | — | — | 12.53 m/s | — | **16.43 m/s** |
+| rows with the clutch slipping | — | — | **179** | — | **173** |
+| rows with the limiter cutting | — | — | 0 | — | **1** |
+| peak boost | — | — | **0.000** | — | **0.481** |
+
+**Session 3's zero boost is the finding**: the session asked for
+`turbo_boost_max=0.8`, the player said it had set twenty-three chassis, and the
+car drove six hundred and eleven rows at nothing. `reconcile_vehicles` installs
+an authored class ONCE at creation and every island chassis exists long before
+the preview door fires, so VEH3a's `INF_PIE_TUNE_VEHICLE` was editing a
+component nothing running reads. The door is a tuner and now tunes: session 5's
+note reads *"set 115 tunable(s) on 23 chassis **and 115 on the RUNNING
+vehicles**"* and the turbo answers.
+
+**Sessions 1 and 2 are the instrument, and it is fixed.** The hunt tapped E and
+walked `W` between taps, so twenty-five taps carried the hero twenty metres
+along ONE bearing against a 3.0 m reach. Turning thirty degrees every third tap
+over thirty-six taps makes it a disc, and the two sessions after the change both
+boarded. (Carried out of the VEH3a audit as *"the instrument's weakness is the
+direction it walks"*; closed.)
+
+**And session 4 is the script's own warning, met**: `cargo build --release -p
+inf-studio` is NOT `npx tauri build`, and it produces an editor that loads the
+DEV url — every Tauri `invoke` from CDP then answers *"Origin header is not a
+valid URL"* and the Play cluster is never found. `demo.ps1`'s build step says so
+in a comment three lines long, which is where this was read after the fact.
