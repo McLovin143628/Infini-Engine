@@ -932,11 +932,39 @@ impl SimSession {
             //    a `Keep` to land on — and both answer with a value rather than
             //    failing, which is what `CameraTuning::set` already promised.
             let applied = match &tune {
-                crate::tuning::Tune::Vehicle { guid, name, value } => self
-                    .bridge3d
-                    .vehicle_mut(*guid)
-                    .map(|v| v.tune(name, *value))
-                    .unwrap_or(false),
+                crate::tuning::Tune::Vehicle { guid, name, value } => {
+                    // **AND ONTO THE COMPONENT** (`audit:` VEH3b), which is the
+                    // half that makes a Details read agree with the car. The
+                    // running rig is the authority -- `reconcile_vehicles`
+                    // installs an authored class ONCE at creation and the tuner
+                    // owns it from there -- so the component write changes
+                    // nothing the car does and everything the author SEES. Wave
+                    // VEH3a's preview door (`INF_PIE_TUNE_VEHICLE`) had the
+                    // mirror of this defect the other way round and wave VEH3b
+                    // closed it: a door that wrote only the component tuned
+                    // nothing, and this one wrote only the rig and showed
+                    // nothing.
+                    //
+                    // Session-scoped for free: `exit` restores the snapshot
+                    // taken at `enter`, so the component goes back with every
+                    // other thing Simulate touched.
+                    if let Some(e) = doc.world().entity_of(*guid) {
+                        let mut class = doc
+                            .world()
+                            .world()
+                            .get::<inf_ecs::components::VehicleClass>(e)
+                            .copied()
+                            .unwrap_or_default();
+                        if class.set(name, *value) {
+                            doc.world_mut().world_mut().entity_mut(e).insert(class);
+                            doc.world_mut().mark_dirty();
+                        }
+                    }
+                    self.bridge3d
+                        .vehicle_mut(*guid)
+                        .map(|v| v.tune(name, *value))
+                        .unwrap_or(false)
+                }
                 // **The subject's RIG first** (wave CHAR1c). A character that
                 // carries a `CameraRig` is the authority on its own boom — the
                 // fixed-step door copies that rig onto the session camera every

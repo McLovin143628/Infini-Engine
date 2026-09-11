@@ -648,3 +648,107 @@ fn a_camera_tune_reaches_the_camera_through_the_queue() {
     );
     sim.exit(&mut doc);
 }
+
+/// **A VEHICLE TUNE REACHES THE DETAILS GRID TOO, AND GOES BACK ON STOP**
+/// (`audit:` VEH3b) — the other half of the seam wave VEH3b closed on the
+/// player.
+///
+/// The two hosts had the mirror of one defect. `INF_PIE_TUNE_VEHICLE` wrote the
+/// **component** and not the running rig, so a preview session set twenty-three
+/// chassis and drove six hundred rows at nothing; wave VEH3b fixed that half.
+/// The editor's `Tune::Vehicle` wrote the **running rig** and not the component,
+/// so an author dialling a spring rate during Simulate watched the car change
+/// and the Details panel not — and `Tune::Vehicle`'s own doc said why in a
+/// sentence that went stale at wave VEH2a: *"there is no document field for a
+/// kept value to land on."* `VehicleClass` has been a persisted component with
+/// its own `set(name, f64)` since v27.
+///
+/// So the session writes both. This is the arm: the component reads the tuned
+/// value while the session runs, the running rig reads it too, and `exit`'s
+/// snapshot restore takes the component back to what the author authored.
+///
+/// **What is still true**: a `Keep` on a vehicle tunable is applied and not
+/// kept. The document write it needs is a `Tune::Field`, and minting one is a
+/// wave's decision. Asserted here so it is a measured remainder rather than a
+/// forgotten one.
+#[test]
+fn a_vehicle_tune_reaches_the_details_grid_and_is_gone_on_stop() {
+    const NAME: &str = "stiffness_n_per_m";
+    const TUNED: f64 = 200_000.0;
+    let class_of = |doc: &SceneDoc| -> Option<f64> {
+        let e = doc.entity_of(CAR)?;
+        doc.world()
+            .world()
+            .get::<inf_ecs::components::VehicleClass>(e)
+            .map(|c| c.stiffness_n_per_m)
+    };
+
+    let mut doc = world_with_a_car();
+    let authored = class_of(&doc);
+    let mut sim = session(&mut doc);
+    sim.tune(
+        Tune::Vehicle {
+            guid: CAR,
+            name: NAME.to_string(),
+            value: TUNED,
+        },
+        TuneScope::Session,
+    );
+    sim.step_once(&mut doc, SimInput::default());
+
+    let on_the_component = class_of(&doc);
+    println!("THE VEHICLE TUNE: authored {authored:?}, the component reads {on_the_component:?} after one drained step");
+    // The RIG half is the arm above this one
+    // (`a_vehicle_tune_reaches_the_running_vehicle_and_changes_the_world`),
+    // which measures it where it shows: a ten-times stiffer spring settles the
+    // chassis measurably higher. `SimSession` exposes no bridge accessor and
+    // should not grow one for a test.
+    assert_eq!(
+        sim.pending_tunes(),
+        0,
+        "the queue did not drain, so nothing was applied"
+    );
+    assert_eq!(
+        on_the_component,
+        Some(TUNED),
+        "the running car is on a {TUNED} N/m spring and the Details grid still shows {on_the_component:?} — the two disagree, which is what an author reads as a slider that does nothing"
+    );
+
+    // …and `Stop` puts it back, because the component goes home with every
+    // other thing Simulate touched.
+    for _ in 0..30 {
+        sim.step_once(&mut doc, SimInput::default());
+    }
+    sim.exit(&mut doc);
+    let after = class_of(&doc);
+    println!("THE VEHICLE TUNE: after Stop the component reads {after:?}");
+    assert_ne!(
+        after,
+        Some(TUNED),
+        "a SESSION-scoped vehicle tune survived Stop on the document, which is a preview that edited the author's level"
+    );
+    assert_eq!(
+        after, authored,
+        "the component came back to {after:?} and the author wrote {authored:?}"
+    );
+
+    // **The remainder, measured**: a `Keep` is applied and not kept.
+    let mut doc = world_with_a_car();
+    let mut sim = session(&mut doc);
+    sim.tune(
+        Tune::Vehicle {
+            guid: CAR,
+            name: NAME.to_string(),
+            value: TUNED,
+        },
+        TuneScope::Keep,
+    );
+    sim.step_once(&mut doc, SimInput::default());
+    assert_eq!(class_of(&doc), Some(TUNED), "the Keep did not even apply");
+    sim.exit(&mut doc);
+    assert_ne!(
+        class_of(&doc),
+        Some(TUNED),
+        "a KEPT vehicle tune now lands on the document — `Tune::Vehicle`'s doc and `kept_edits` both say it cannot, so one of the three has moved"
+    );
+}

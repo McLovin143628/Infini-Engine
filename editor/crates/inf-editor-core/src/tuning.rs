@@ -96,6 +96,24 @@ pub enum Tune {
     /// So it is a session tune with no `Keep` half — there is no document field
     /// for a kept value to land on, and [`kept_edits`] says so by returning
     /// nothing rather than by failing.
+    ///
+    /// # `audit:` VEH3b — the second sentence went stale at wave VEH2a
+    ///
+    /// *"There is no document field for a kept value to land on"* was true when
+    /// this was written at P29.7 and has been false since wave VEH2a put
+    /// `VehicleClass` on the scene record: it is a persisted component with its
+    /// own `set(name, f64)`, and a `Tune::Field` at its type path would land on
+    /// the document like any other field.
+    ///
+    /// What changed is the smaller half of that, because it is the half an
+    /// author SEES: `SimSession::apply_pending_tunes` now writes the
+    /// **component** as well as the running rig, so the Details grid and the car
+    /// agree while the session runs, and the snapshot restore takes both back.
+    /// (Wave VEH3a's preview door had the mirror of this defect the other way
+    /// round — it wrote only the component, and tuned nothing.) What is still
+    /// true is that a `Keep` on a vehicle tunable is applied and not kept:
+    /// minting a `Tune::Field` from here is a wave's decision rather than an
+    /// audit's, and it is carried by name.
     Vehicle {
         guid: Uuid,
         name: String,
