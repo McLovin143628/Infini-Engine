@@ -421,6 +421,17 @@ pub struct CasingBounce {
 pub struct GameplayReport {
     /// The door system's own numbers.
     pub doors: super::door::DoorReport,
+    /// **How many rounds landed on a CAR this step** (wave VEH3c) — an
+    /// engagement counter, and zero on every level where nobody has shot at a
+    /// vehicle, which is what makes the arm that reads it a measurement rather
+    /// than a claim.
+    pub vehicle_hits: u32,
+    /// How many of those shattered a pane.
+    pub vehicle_panes: u32,
+    /// How many of those flattened a tyre.
+    pub vehicle_flats: u32,
+    /// How many of those set a car alight.
+    pub vehicle_fires: u32,
     /// **What the crowd did to the doors** this step (island wave NPC1c) — an
     /// engagement counter, because "the pass ran" and "an NPC opened
     /// something" are different facts and a gate that cannot tell them apart
@@ -2010,7 +2021,7 @@ fn step_weapons(
                     surface: inf_ecs::weapon::ImpactSurface::of(hit.on_flesh),
                 });
             }
-            apply_hit(world, &hit, dt, report);
+            apply_hit(world, bridge, &hit, dt, report);
             report.hits.push(hit);
             continue;
         }
@@ -2036,7 +2047,7 @@ fn step_weapons(
             if hit.loud {
                 inf_ecs::casing::note_shot_room(world, hit.indoors);
             }
-            apply_hit(world, &hit, dt, report);
+            apply_hit(world, bridge, &hit, dt, report);
             report.hits.push(hit);
             continue;
         }
@@ -2093,7 +2104,7 @@ fn step_weapons(
                 inf_ecs::casing::note_shot_room(world, hit.indoors);
             }
             report.rounds.pellets += 1;
-            apply_hit(world, &hit, dt, report);
+            apply_hit(world, bridge, &hit, dt, report);
             report.hits.push(hit);
         }
     }
@@ -3005,7 +3016,7 @@ fn step_rounds(
         report.rounds.in_flight = pool.rounds.len() as u32;
     }
     for (hit, _) in landed {
-        apply_hit(world, &hit, dt, report);
+        apply_hit(world, bridge, &hit, dt, report);
         report.hits.push(hit);
     }
     // **THE BLASTS**, after the direct impacts, so a rocket's direct joules are
@@ -3798,7 +3809,7 @@ fn apply_blast(
             listener_m: f64::INFINITY,
             shot_index: 0,
         };
-        apply_hit(world, &hit, dt, report);
+        apply_hit(world, bridge, &hit, dt, report);
         report.hits.push(hit);
         hurt += 1;
     }
@@ -4224,7 +4235,13 @@ fn is_flesh(world: &EcsWorld, guid: Uuid) -> bool {
 /// Persisting it is a field on `CrowdRecord`, which moves `crowd_state_bytes`
 /// and the `AGENT_TRACE_BYTES` ratio quoted against it — a wave, not a doc fix.
 /// On this wave's carried list by name.
-fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, dt: f64, report: &mut GameplayReport) {
+fn apply_hit(
+    world: &mut EcsWorld,
+    bridge: &PhysicsBridge3D,
+    hit: &WeaponHit,
+    dt: f64,
+    report: &mut GameplayReport,
+) {
     let Some(target) = hit.target else {
         return;
     };
@@ -4249,6 +4266,30 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, dt: f64, report: &mut Gamepl
             return;
         }
         stagger(world, hit, target, r.absorbed_j, before, dt, report);
+        return;
+    }
+    // **Not flesh, but a CAR** (wave VEH3c) — `is_flesh`'s complement, and the
+    // sentence the WPN2a audit wrote about this exact line retired. It read *"a
+    // car spends nothing -- no `Health`, 0 entries at the P22 door"*, and it was
+    // true: a chassis is not a character and carries no `Destructible`, so a
+    // round that stopped in one fell through to the refusal below and cost the
+    // car nothing at all.
+    //
+    // It costs now. Where on the car the round landed decides what it costs —
+    // a pane, a tyre, the engine bay or the hull — and the one door that decides
+    // is `bodywork::hit_vehicle`, which is also the door a blast reaches a car
+    // through, because a blast is `apply_hit` with a radius in front of it.
+    if let Some(spent) = super::bodywork::hit_vehicle(world, bridge, target, hit.to, hit.energy_j) {
+        report.vehicle_hits += 1;
+        if spent.pane.is_some() {
+            report.vehicle_panes += 1;
+        }
+        if spent.flat.is_some() {
+            report.vehicle_flats += 1;
+        }
+        if spent.ignited {
+            report.vehicle_fires += 1;
+        }
         return;
     }
     // Not flesh. **Only a destructible is owed anything** (wave WPN1): a round

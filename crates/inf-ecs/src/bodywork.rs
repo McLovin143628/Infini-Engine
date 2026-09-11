@@ -222,6 +222,18 @@ pub struct PartState {
     pub dent_m: f64,
     /// The sim step it left the car, or `0`.
     pub shed_step: u64,
+    /// **The part's AUTHORED centre**, in fractions of the chassis half-extents.
+    ///
+    /// **NOT FOLDED and not part of [`is_quiet`](Self::is_quiet)**, for
+    /// [`VehicleDamage::last_vel`]'s reason: it is what the level says, not what
+    /// happened to it. It is here rather than looked up in a parts table because
+    /// the drawn pose is rebuilt from the baseline every step — a dent that
+    /// pushed the transform it read next step would deepen for ever — and
+    /// because a shipped player has no parts table to look it up in.
+    pub centre_frac: Vec3d,
+    /// The part's AUTHORED half-extents, same units. Not folded, for the same
+    /// reason.
+    pub half_frac: Vec3d,
 }
 
 impl Default for PartState {
@@ -235,6 +247,8 @@ impl Default for PartState {
             damage_j: 0.0,
             dent_m: 0.0,
             shed_step: 0,
+            centre_frac: Vec3d::ZERO,
+            half_frac: Vec3d::ZERO,
         }
     }
 }
@@ -246,6 +260,35 @@ impl PartState {
             kind: kind.as_u8(),
             ..Default::default()
         }
+    }
+
+    /// The same, over a part's authored geometry.
+    pub fn authored(kind: BodyPartKind, centre_frac: Vec3d, half_frac: Vec3d) -> Self {
+        Self {
+            kind: kind.as_u8(),
+            centre_frac,
+            half_frac,
+            ..Default::default()
+        }
+    }
+
+    /// **Which way this part faces**, as an axis index and a sign — the axis of
+    /// its own offset from the chassis centre with the biggest share of it.
+    ///
+    /// A door's is `X`, a bumper's is `Z`, a roof panel's is `Y`. It is what a
+    /// dent is pushed along and what a crash's own direction is compared
+    /// against, and deriving it beats authoring it: a family that moves a part
+    /// moves which way it faces with it.
+    pub fn facing(&self) -> (usize, f64) {
+        let c = [self.centre_frac.x, self.centre_frac.y, self.centre_frac.z];
+        let mut best = 0usize;
+        for (i, v) in c.iter().enumerate() {
+            if v.abs() > c[best].abs() {
+                best = i;
+            }
+        }
+        let sign = if c[best] < 0.0 { -1.0 } else { 1.0 };
+        (best, sign)
     }
 
     /// **Nothing has happened to this part.**
@@ -289,6 +332,12 @@ pub struct VehicleDamage {
     /// trap `DrivetrainState::clutch_slip_rad_s` is kept out of the VEH3b fold
     /// to avoid.
     pub last_vel: Vec3d,
+    /// **What this car's own model applied last step**, newtons — the force
+    /// whose work is not a crash.
+    ///
+    /// NOT FOLDED and not part of [`is_quiet`](Self::is_quiet), for
+    /// [`last_vel`](Self::last_vel)'s reason exactly.
+    pub last_force: Vec3d,
     /// Whether [`last_vel`](Self::last_vel) has ever been written. The first
     /// step of a car's life has no previous velocity, and treating a standing
     /// start as a 0 m/s crash would be an impulse of exactly zero — harmless —
@@ -373,6 +422,15 @@ impl VehicleDamage {
 pub struct VehicleDamageRes {
     /// The rows, in `Guid` order.
     pub rows: BTreeMap<Uuid, VehicleDamage>,
+    /// **The bodywork's own step counter**, advanced once per fixed step by
+    /// `inf_physics::d3::bodywork::step_bodywork`.
+    ///
+    /// Its own rather than `traffic::steps`, which is advanced by the traffic
+    /// pass and stands still on every level with no traffic in it — measured: a
+    /// fixture's glass shards outlived their own second and a half for ever,
+    /// because nothing ever aged. Not folded: it is a clock, and a clock in a
+    /// determinism trace is a clock in a determinism trace.
+    pub steps: u64,
     /// The shed parts still lying about, oldest first: `(part guid, the step it
     /// was shed)`. The debris cap's own list.
     pub shed: Vec<(Uuid, u64)>,
@@ -451,12 +509,23 @@ impl DamageLimits {
     /// with no class answers the Ring-0 defaults rather than zero, because a car
     /// whose panels absorbed nothing would be written off by its own kerb.
     pub fn of(world: &EcsWorld, chassis: Uuid) -> Self {
-        let tuning = world
+        // The three fields, read DIRECTLY off the component rather than through
+        // `VehicleClass::to_tuning`. That door builds a hundred-field
+        // `VehicleTuning` and walks a hundred `set` calls to fill it, and this
+        // is asked once per damaged car per step -- measured at a thousand
+        // parked cars, it was most of the 0.92 microseconds a car the whole
+        // bodywork pass cost.
+        let Some(c) = world
             .entity_of(chassis)
             .and_then(|e| world.world().get::<VehicleClass>(e))
-            .map(|c| c.to_tuning())
-            .unwrap_or_default();
-        Self::of_tuning(&tuning)
+        else {
+            return Self::default();
+        };
+        Self {
+            glass_health_j: c.glass_health_j.max(1.0),
+            panel_health_j: c.panel_health_j.max(1.0),
+            part_break_impulse_ns: c.part_break_impulse_ns.max(0.0),
+        }
     }
 
     /// What a whole hull is worth, joules.
@@ -511,6 +580,107 @@ pub fn hinge_step(
         v = 0.0;
     }
     (a, v)
+}
+
+// ── where a part is DRAWN ───────────────────────────────────────────────────
+
+/// **The local pose one part is drawn at** (wave VEH3c) — its authored box, bent
+/// by its dent and swung on its hinge.
+///
+/// Rebuilt from the AUTHORED baseline every step rather than accumulated onto
+/// the transform it read: a dent applied to a dented transform deepens for ever,
+/// and a hinge integrated onto its own output drifts. `chassis_half` is the
+/// chassis collider's half-extents in metres; everything else is in fractions of
+/// them.
+///
+/// Returns `(translation, rotation_deg, scale)` in the chassis's own frame — the
+/// three fields of a `Transform`.
+///
+/// # Portable throughout
+///
+/// The rotation reaches a `Transform`, which `sim_snapshot` folds into the
+/// determinism trace's first section — so the sine and the cosine are
+/// [`inf_math::psin64`] and [`inf_math::pcos64`], never `f64::sin`. The P14 law's
+/// first class, met at a car door.
+pub fn part_pose(
+    part: &PartState,
+    kind: BodyPartKind,
+    chassis_half: Vec3d,
+    angle_deg: f64,
+) -> (Vec3d, Vec3d, Vec3d) {
+    let h = chassis_half;
+    let mut centre = Vec3d::new(
+        part.centre_frac.x * h.x,
+        part.centre_frac.y * h.y,
+        part.centre_frac.z * h.z,
+    );
+    let mut scale = Vec3d::new(
+        2.0 * part.half_frac.x * h.x,
+        2.0 * part.half_frac.y * h.y,
+        2.0 * part.half_frac.z * h.z,
+    );
+
+    // ── THE DENT ────────────────────────────────────────────────────────────
+    //
+    // A local push-in along the axis the part faces: the panel's outer face
+    // moves toward the middle of the car and its inner face stays where it was,
+    // which is what a dent IS. Bounded by `MAX_DENT_M` at the source and by
+    // four fifths of the panel's own thickness here, so a panel can never be
+    // pushed through the far side of its own car.
+    if part.dent_m > 0.0 {
+        let (axis, sign) = part.facing();
+        let base = [scale.x, scale.y, scale.z][axis];
+        let d = part.dent_m.min(MAX_DENT_M).min(0.8 * base);
+        let (c, sc) = match axis {
+            0 => (&mut centre.x, &mut scale.x),
+            1 => (&mut centre.y, &mut scale.y),
+            _ => (&mut centre.z, &mut scale.z),
+        };
+        *c -= sign * d * 0.5;
+        *sc = (*sc - d).max(1e-4);
+    }
+
+    // ── THE HINGE ───────────────────────────────────────────────────────────
+    let Some(hinge) = kind.hinge() else {
+        return (centre, Vec3d::ZERO, scale);
+    };
+    if angle_deg == 0.0 {
+        return (centre, Vec3d::ZERO, scale);
+    }
+    let pivot = Vec3d::new(hinge.at.x * h.x, hinge.at.y * h.y, hinge.at.z * h.z);
+    let rad = angle_deg.to_radians();
+    let (sn, cs) = (inf_math::psin64(rad), inf_math::pcos64(rad));
+    let d = Vec3d::new(centre.x - pivot.x, centre.y - pivot.y, centre.z - pivot.z);
+    // The two axes the tables author, and no others: a door swings about `+Y`
+    // and a bonnet or a boot lid about `+X`. A hinge on any other axis is a
+    // REFUSAL rather than a wrong answer — it draws shut, and
+    // `every_authored_part_is_recognised_as_the_kind_it_declares` is what stops
+    // one ever being authored.
+    if hinge.axis.y.abs() > hinge.axis.x.abs() {
+        // R_y(theta): x' = x cos + z sin, z' = -x sin + z cos.
+        (
+            Vec3d::new(
+                pivot.x + d.x * cs + d.z * sn,
+                centre.y,
+                pivot.z - d.x * sn + d.z * cs,
+            ),
+            Vec3d::new(0.0, angle_deg, 0.0),
+            scale,
+        )
+    } else if hinge.axis.x != 0.0 {
+        // R_x(theta): y' = y cos - z sin, z' = y sin + z cos.
+        (
+            Vec3d::new(
+                centre.x,
+                pivot.y + d.y * cs - d.z * sn,
+                pivot.z + d.y * sn + d.z * cs,
+            ),
+            Vec3d::new(angle_deg, 0.0, 0.0),
+            scale,
+        )
+    } else {
+        (centre, Vec3d::ZERO, scale)
+    }
 }
 
 // ── the trace (the 18th section) ────────────────────────────────────────────

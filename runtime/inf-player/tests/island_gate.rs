@@ -6336,6 +6336,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
                 wheels_grounded: 0,
                 load_n: 0.0,
                 forward_mps: 0.0,
+                applied_n: glam::DVec3::ZERO,
                 revs: 0.0,
                 load: 0.0,
             });

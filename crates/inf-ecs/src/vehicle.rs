@@ -4361,6 +4361,19 @@ pub struct WheelState {
     /// The air temperature this tyre cools toward, Celsius — [`weather_at`]'s
     /// second answer.
     pub ambient_c: f64,
+    /// **Whether this tyre is FLAT** (wave VEH3c).
+    ///
+    /// A readout on the wheel rather than a lookup into
+    /// [`crate::bodywork::VehicleDamage`] for `temp_c`'s reason exactly: a flat
+    /// is a property of ONE corner, and everything that reads a wheel — the
+    /// HUD, a squeal, a smoke plume — is already holding this struct. Written by
+    /// [`Vehicle::set_damage`] through the class, which is the one door the
+    /// bodywork step reaches a model through.
+    ///
+    /// It costs the tyre two things, both the research doc's own numbers: a
+    /// rolling radius of [`crate::bodywork::FLAT_RADIUS_FRAC`] (the corner sits
+    /// down) and a grip of [`crate::bodywork::FLAT_MU_FRAC`] (the car pulls).
+    pub flat: bool,
 }
 
 impl WheelState {
@@ -4383,6 +4396,29 @@ impl WheelState {
             ambient_c: TYRE_AMBIENT_C,
             ..Default::default()
         }
+    }
+}
+
+/// **Whether wheel `i` is flat**, out of a bitmask (wave VEH3c).
+///
+/// Eight wheels, because that is what a `u8` holds and no rig this engine
+/// authors has more; a ninth wheel is never flat, which is a refusal rather than
+/// a wrap-around onto the first.
+pub fn flat_bit(flats: u8, i: usize) -> bool {
+    i < 8 && (flats >> i) & 1 == 1
+}
+
+/// **What a tyre's rolling radius is**, metres — the inflated one, or
+/// [`crate::bodywork::FLAT_RADIUS_FRAC`] of it (wave VEH3c).
+///
+/// ONE rule with two call shapes: [`RaycastVehicle::wheel_radius`] for a caller
+/// holding the whole vehicle, and this for the two solve loops, which are inside
+/// a borrow of `self.rig` and cannot also take one of `self`.
+pub fn flat_radius_m(radius_m: f64, flat: bool) -> f64 {
+    if flat {
+        radius_m * crate::bodywork::FLAT_RADIUS_FRAC
+    } else {
+        radius_m
     }
 }
 
@@ -4612,6 +4648,37 @@ pub trait Vehicle: Send + Sync + 'static {
         (0.0, 0.0)
     }
 
+    /// **Tell this class what has been done to its car** (wave VEH3c) — the one
+    /// door `inf_physics::d3::bodywork` reaches a model through.
+    ///
+    /// `engine_scale` is a RUNTIME multiplier on the driveline ceiling, `[0, 1]`,
+    /// and it is deliberately not a `tune("max_engine_force_n", …)` write: a
+    /// tuning write has no base to come back to, so a car repaired after a
+    /// firefight would be repaired to whatever it was last damaged to. `0` is a
+    /// DEAD engine — no torque at all and no idle floor, which is what a stall
+    /// is.
+    ///
+    /// `flats` is a bitmask by [`VehicleRig::wheels`] index. A class with no
+    /// wheels and no engine ignores both, which is the default.
+    fn set_damage(&mut self, engine_scale: f64, flats: u8) {
+        let _ = (engine_scale, flats);
+    }
+
+    /// **How big this wheel is RIGHT NOW**, metres (wave VEH3c) — the authored
+    /// radius, less a quarter of it if the tyre is flat.
+    ///
+    /// On the trait rather than read off the rig because a flat is a property of
+    /// the model's own state: the rig says what was authored and this says what
+    /// is on the car. A class that cannot puncture answers the rig's own number,
+    /// which is every class but [`RaycastVehicle`].
+    fn wheel_radius_m(&self, index: usize) -> f64 {
+        self.rig()
+            .wheels
+            .get(index)
+            .map(|w| w.radius_m)
+            .unwrap_or(0.0)
+    }
+
     /// **What this class's drivetrain is doing** (wave VEH3b), or `None` for a
     /// class that does not have one.
     ///
@@ -4795,6 +4862,16 @@ pub struct RaycastVehicle {
     /// allocated inside a fixed step, once per vehicle per step, is exactly the
     /// kind of cost the vehicle phase was given its own budget row to notice.
     drive_nm: Vec<f64>,
+    /// **What this car's engine has left**, `[0, 1]` (wave VEH3c) -- a RUNTIME
+    /// multiplier on the driveline ceiling, written by
+    /// [`Vehicle::set_damage`] and never by a tuning write.
+    ///
+    /// `1.0` on a whole car, which is every car this engine has ever built, so
+    /// nothing that predates this wave changes by a newton.
+    engine_scale: f64,
+    /// **Which tyres are flat**, a bitmask by [`VehicleRig::wheels`] index
+    /// (wave VEH3c).
+    flats: u8,
 }
 
 impl RaycastVehicle {
@@ -4821,8 +4898,37 @@ impl RaycastVehicle {
             clutch_locked: false,
             boost: 0.0,
             boost_lag_s: tuning.turbo_lag_s,
+            // A car is built WHOLE. Both of these are the identity, so a rig
+            // that is never damaged behaves exactly as it did before wave VEH3c.
+            engine_scale: 1.0,
+            flats: 0,
             tuning,
         }
+    }
+
+    /// **How big wheel `i` is right now**, metres -- the authored radius, less a
+    /// quarter of it if that tyre is flat (wave VEH3c).
+    ///
+    /// The one place the flat reaches the geometry, and it reaches FOUR: the
+    /// traction control's torque cap, the driveline ceiling's force sum, the
+    /// suspension's own length (which is what makes the corner sit down) and the
+    /// wheel's equation of motion. A fifth caller -- the bridge's ray -- keeps
+    /// the INFLATED radius on purpose: the ray has to reach past where the tyre
+    /// would be if it were whole, or a flat tyre would find no ground at all.
+    pub fn wheel_radius(&self, i: usize) -> f64 {
+        let r = self.rig.wheels.get(i).map(|w| w.radius_m).unwrap_or(0.0);
+        flat_radius_m(r, flat_bit(self.flats, i))
+    }
+
+    /// What the engine has left, `[0, 1]` -- what a gate reads to see the damage
+    /// arrive.
+    pub fn engine_scale(&self) -> f64 {
+        self.engine_scale
+    }
+
+    /// Which tyres are flat, as a bitmask.
+    pub fn flats(&self) -> u8 {
+        self.flats
     }
 
     /// The tuning, for a test or a UI to read.
@@ -5365,6 +5471,25 @@ pub struct CrankStep {
     pub boost_mult: f64,
     /// The step, seconds.
     pub dt: f64,
+    /// **How much of its own power this engine still makes**, `[0, 1]`
+    /// (wave VEH3c).
+    ///
+    /// One number and not a flag, because a shot-up engine is not a switch: it
+    /// makes less torque at every rpm, and at `0` it makes none. `0` is
+    /// therefore a STALL and it is two things at once, both of them here: no
+    /// combustion torque at any throttle, and **no idle floor** -- the crank is
+    /// free to fall to zero, which is what makes a stalled car read as stalled
+    /// in the HUD, in the engine audio's pitch and in the trace.
+    ///
+    /// It scales the ENGINE and not only the driveline ceiling, and that is a
+    /// measurement rather than a preference: scaling the ceiling alone left the
+    /// sports row's 0-100 at **4.32 s against 4.32 s** with half its engine
+    /// gone, because that row is torque-limited in first and never reaches its
+    /// own ceiling.
+    ///
+    /// `1.0` for every car that has not been shot in the engine bay, which is
+    /// every car this engine has ever built.
+    pub power_frac: f64,
 }
 
 /// What the crank did (wave VEH3b).
@@ -5437,7 +5562,18 @@ pub struct CrankOut {
 /// torque, and closed otherwise; it moves at `dt / clutch_engage_s`, so
 /// [`VehicleTuning::clutch_engage_s`] is how long a bite takes.
 pub fn crank_step(tuning: &VehicleTuning, s: CrankStep) -> CrankOut {
-    let idle = if tuning.idle_rpm.is_finite() {
+    // **A dead engine has no idle** (wave VEH3c). The floor is what holds a
+    // running crank up against its own friction, and an engine that is not
+    // running does not have one -- so a stall is this line plus the torque cut
+    // below, and nothing else.
+    let power = if s.power_frac.is_finite() {
+        s.power_frac.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let idle = if power <= 0.0 {
+        0.0
+    } else if tuning.idle_rpm.is_finite() {
         tuning.idle_rpm.max(0.0)
     } else {
         0.0
@@ -5478,10 +5614,10 @@ pub fn crank_step(tuning: &VehicleTuning, s: CrankStep) -> CrankOut {
     } else {
         s.cutting
     };
-    let engine_nm = if cutting {
+    let engine_nm = if cutting || power <= 0.0 {
         0.0
     } else {
-        engine_torque_nm(tuning, rpm0) * throttle * boost_mult
+        engine_torque_nm(tuning, rpm0) * throttle * boost_mult * power
     };
 
     // -- the auto-clutch's engagement ----------------------------------------
@@ -6862,6 +6998,9 @@ pub struct TyreContext {
     /// the term survives a `camber_deg` of zero and why the standing tripwire
     /// `the_snapped_normal_reaches_no_force_in_the_model` had to be re-stated.
     pub camber_deg: f64,
+    /// **Whether this tyre is flat** (wave VEH3c) — `WheelState::flat`, carried
+    /// into the one place a grip multiplier is decided.
+    pub flat: bool,
 }
 
 impl TyreContext {
@@ -6873,6 +7012,15 @@ impl TyreContext {
     /// asphalt and its force on wet grass would "stick" at a force the ground
     /// cannot supply, which is a car that drives on ice as if it were tarmac.
     pub fn grip_scale(&self) -> f64 {
+        // **A flat tyre is a grip loss and not a surface** (wave VEH3c). It
+        // multiplies here, beside the heat and the camber, because those three
+        // are the same kind of fact: what this contact is worth against what the
+        // ground is worth.
+        let flat = if self.flat {
+            crate::bodywork::FLAT_MU_FRAC
+        } else {
+            1.0
+        };
         let mu = if self.mu_surface.is_finite() {
             self.mu_surface.max(0.0)
         } else {
@@ -6888,7 +7036,7 @@ impl TyreContext {
         } else {
             0.0
         };
-        mu * heat * (1.0 - CAMBER_GRIP_LOSS_PER_DEG2 * c * c).max(0.5)
+        flat * mu * heat * (1.0 - CAMBER_GRIP_LOSS_PER_DEG2 * c * c).max(0.5)
     }
 
     /// **The effective camber at a contact** (wave VEH3a) — the class's static
@@ -6914,6 +7062,7 @@ impl TyreContext {
         mu_surface: 1.0,
         heat_grip: 1.0,
         camber_deg: 0.0,
+        flat: false,
     };
 }
 
@@ -7282,6 +7431,19 @@ impl Vehicle for RaycastVehicle {
         (self.tuning.enter_time_s, self.tuning.enter_window())
     }
 
+    fn set_damage(&mut self, engine_scale: f64, flats: u8) {
+        self.engine_scale = if engine_scale.is_finite() {
+            engine_scale.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.flats = flats;
+    }
+
+    fn wheel_radius_m(&self, index: usize) -> f64 {
+        RaycastVehicle::wheel_radius(self, index)
+    }
+
     fn suspension_rest_m(&self) -> f64 {
         self.tuning.rest_length_m
     }
@@ -7503,6 +7665,9 @@ impl Vehicle for RaycastVehicle {
                 shifting: self.shifting(),
                 boost_mult: boost_multiplier(&self.tuning, boost),
                 dt,
+                // **What the engine has left** (wave VEH3c) -- one number, and
+                // the crank does the rest. At zero it is a stall.
+                power_frac: self.engine_scale,
             },
         );
         self.rpm = out_crank.rpm;
@@ -7686,7 +7851,7 @@ impl Vehicle for RaycastVehicle {
                     tc,
                     self.wheels[i].load_n,
                     static_load,
-                    self.rig.wheels[i].radius_m,
+                    self.wheel_radius(i),
                 );
                 let held = torque.clamp(-cap, cap);
                 self.wheels[i].tc_cut = if torque.abs() > 1e-9 {
@@ -7706,13 +7871,16 @@ impl Vehicle for RaycastVehicle {
         // handed in total, which is the half-shaft and the clutch a car actually
         // has. Scaled rather than clipped per wheel, so the SPLIT stays the split.
         let force_sum: f64 = self
-            .rig
-            .wheels
+            .drive_nm
             .iter()
-            .zip(self.drive_nm.iter())
-            .map(|(w, t)| t.abs() / w.radius_m.max(1e-3))
+            .enumerate()
+            .map(|(i, t)| t.abs() / self.wheel_radius(i).max(1e-3))
             .sum();
-        let ceiling = self.tuning.max_engine_force_n.max(0.0);
+        // **A damaged engine makes less of it** (wave VEH3c) -- a RUNTIME scale
+        // on the ceiling rather than a write to `max_engine_force_n`, so a car
+        // repaired after a firefight is repaired to what it was AUTHORED at and
+        // not to whatever it was last damaged to.
+        let ceiling = self.tuning.max_engine_force_n.max(0.0) * self.engine_scale.clamp(0.0, 1.0);
         if force_sum > ceiling && force_sum > 0.0 {
             let derate = ceiling / force_sum;
             for t in self.drive_nm.iter_mut() {
@@ -7825,6 +7993,7 @@ impl Vehicle for RaycastVehicle {
         // before any of them is final. One pass would have to look at a
         // neighbour's state before that neighbour had been visited, which is the
         // shape of bug that reads as "the bar only works on one side".
+        let flats = self.flats;
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
                 break;
@@ -7834,10 +8003,11 @@ impl Vehicle for RaycastVehicle {
                 state.load_n = 0.0;
                 continue;
             };
-            let length = (contact.distance_m - mount.radius_m).clamp(
-                self.tuning.rest_length_m - self.tuning.travel_m,
-                self.tuning.rest_length_m,
-            );
+            let length = (contact.distance_m - flat_radius_m(mount.radius_m, flat_bit(flats, i)))
+                .clamp(
+                    self.tuning.rest_length_m - self.tuning.travel_m,
+                    self.tuning.rest_length_m,
+                );
             state.length_m = length;
             // Closing speed from the CONTACT POINT's velocity rather than from
             // the length difference: a finite difference over one step is a step
@@ -7892,10 +8062,12 @@ impl Vehicle for RaycastVehicle {
             }
         }
 
+        let flats = self.flats;
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
                 break;
             };
+            state.flat = flat_bit(flats, i);
             let steer = if mount.steered() {
                 ackermann_deg(
                     steer_deg,
@@ -7918,7 +8090,7 @@ impl Vehicle for RaycastVehicle {
             } else {
                 steer_direction(right, -fwd, steer)
             };
-            let radius = mount.radius_m.max(1e-3);
+            let radius = flat_radius_m(mount.radius_m, flat_bit(flats, i)).max(1e-3);
             // **The crank's inertia is this wheel's too while the clutch is
             // locked** (wave VEH3b), through the square of the gear and this
             // wheel's own share of the driveline. Undriven wheels get none,
@@ -8074,6 +8246,7 @@ impl Vehicle for RaycastVehicle {
                     }
                     None => self.tuning.camber_deg,
                 },
+                flat: state.flat,
             };
             let world = ctx.grip_scale();
             // Heat softens the STIFFNESS as well as the peak — the doc's *shifts

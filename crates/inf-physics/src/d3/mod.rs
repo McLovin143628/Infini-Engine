@@ -17,6 +17,11 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 // VEN1b: what a listener hears through a DOORWAY, which is the half the
 // P12.3 single-ray model had no answer for.
 pub mod audio;
+// VEH3c: what happens to a car's bodywork -- the crash that tears a bumper off,
+// the hinge that swings a door, the pane that goes, the panel that dents, the
+// joules a round spends and the fire at the end of it. Rides the vehicle phase's
+// own MIRROR fence.
+pub mod bodywork;
 pub mod camera;
 pub mod carjack;
 // COV1: the cover probe -- the second reader of the mantle's own two sweeps.
@@ -62,6 +67,7 @@ pub mod vehicle;
 pub mod water;
 mod world;
 
+pub use bodywork::{hit_vehicle, step_bodywork, BodyworkReport, VehicleHit};
 pub use camera::{ragdoll_follow_pose, step_camera_with_requests, step_locomotion_camera};
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use cover::{
