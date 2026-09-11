@@ -189,15 +189,24 @@ impl Rig {
         ])
     }
 
+    /// A car twenty metres up, with nothing under it for the whole of a short
+    /// window (`audit:` VEH3b). Sixty steps of free fall is 4.9 m, so every
+    /// wheel is in the air for every step of it -- which is the one place a
+    /// wheel's speed can be changed without changing the chassis at all.
+    fn airborne() -> Self {
+        Self::at_height(&[(PAD, 0.0, 60.0, 0.9)], 20.0)
+    }
+
     fn build(slabs: &[(Uuid, f64, f64, f64)]) -> Self {
+        Self::at_height(slabs, -WHEEL_Y + WHEEL_RADIUS + 0.04)
+    }
+
+    fn at_height(slabs: &[(Uuid, f64, f64, f64)], y: f64) -> Self {
         let mut world = ground_world();
         for (guid, cx, hx, mu) in slabs {
             slab(&mut world, *guid, *cx, *hx, *mu);
         }
-        car(
-            &mut world,
-            DVec3::new(0.0, -WHEEL_Y + WHEEL_RADIUS + 0.04, -80.0),
-        );
+        car(&mut world, DVec3::new(0.0, y, -80.0));
         world.mark_dirty();
         world.propagate();
         let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
@@ -1758,4 +1767,130 @@ fn a_class_edited_after_creation_reaches_the_car_only_through_the_tuner() {
             "`pie_drive.rs` no longer carries `{fragment}`, so `INF_PIE_TUNE_VEHICLE` is back to editing a component nothing reads"
         );
     }
+}
+
+/// **A WHEEL'S SPEED IS IN THE TRACE, AND IT ALWAYS WAS** — through the wheel's
+/// own transform (`audit:` VEH3b, against the wave's carried item 4).
+///
+/// The wave carried this by name: *"what that leaves unfolded is the DRIVELINE's
+/// speed, and with it the wheel speeds — which no trace section in this
+/// repository has ever carried."* The first half is true and the conclusion is
+/// **false**, and the difference matters because it is the whole of the audit
+/// brief's worry: two hosts whose wheels turn at different speeds would, if it
+/// were true, agree about every byte until a tyre touched something.
+///
+/// They do not. `WheelState::omega_rad_s` is integrated into
+/// `WheelState::spin_deg` every step, and `inf_physics::d3::vehicle::step_one`
+/// writes that straight onto the wheel entity's own `Transform` as
+/// `rotation.x` — which `inf_ecs::sim::sim_snapshot` folds for every entity in
+/// the world, as the FIRST section of `RuntimeSim::state_bytes` and since long
+/// before this wave. A wheel-speed divergence is therefore a trace divergence in
+/// the step it happens, not in the step the wheel next touches the ground.
+///
+/// # Measured where nothing else can move
+///
+/// A car in free fall. Its chassis is a ballistic body — the same arc whatever
+/// the engine is doing — so the two runs below are **bit-identical in the
+/// chassis** and differ only in what the wheels are doing. If the wheels were
+/// not in the snapshot, the two traces would be equal, and they are not.
+///
+/// # The seam, stated
+///
+/// The write is skipped for a rig whose wheels have no ENTITY (`world
+/// .entity_of(guid)`), which is `reconcile_vehicles`' own "a rig with no wheel
+/// meshes simulates identically to one with them". Every vehicle the island
+/// parks is spawned by `spawn_rig`, which gives each wheel an entity — asserted
+/// here, so the day a rig arrives without one this arm is where it is read.
+#[test]
+fn a_wheels_speed_is_in_the_trace_through_its_own_transform() {
+    let fall = |throttle: f64| -> (Vec<inf_ecs::sim::EntitySimState>, usize, usize) {
+        let mut rig = Rig::airborne();
+        // **Traction control off**, and the reason is worth the line: the aid
+        // caps a wheel's drive torque at what its CONTACT PATCH can take, and an
+        // airborne wheel's load is zero — so with the shipped aid on, sixty
+        // steps of full throttle spin an airborne wheel by exactly nothing
+        // (measured: 0 of 4 wheels folded a different transform). That is the
+        // aid working, and it would have made this arm measure the aid.
+        rig.tune(&[("traction_control_slip", 0.0)]);
+        let c = VehicleControls {
+            throttle,
+            ..Default::default()
+        };
+        let mut airborne = 0usize;
+        for _ in 0..60 {
+            rig.drive(c, 1);
+            airborne += usize::from(rig.wheels().iter().all(|w| w.contact.is_none()));
+        }
+        let wheels = rig.wheels().len();
+        (inf_ecs::sim::sim_snapshot(&mut rig.world), airborne, wheels)
+    };
+    let (driven, driven_air, wheels) = fall(1.0);
+    let (coasting, coast_air, _) = fall(0.0);
+    assert_eq!(
+        (driven_air, coast_air),
+        (60, 60),
+        "the car landed inside the window, so the chassis is no longer the control"
+    );
+    assert!(wheels >= 4, "the rig has {wheels} wheels");
+
+    // The wheel entities, by the guids the rig itself names them with.
+    let rig = Rig::airborne();
+    let wheel_guids: Vec<Uuid> = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .expect("the bridge derived the rig")
+        .rig()
+        .wheels
+        .iter()
+        .map(|w| w.guid)
+        .collect();
+    assert_eq!(wheel_guids.len(), wheels);
+    for g in &wheel_guids {
+        assert!(
+            rig.world.entity_of(*g).is_some(),
+            "a wheel mount names a guid no entity carries, so nothing writes its \
+             spin into the world and this arm's claim does not hold for this rig"
+        );
+    }
+
+    let row = |snap: &[inf_ecs::sim::EntitySimState], g: Uuid| {
+        snap.iter()
+            .find(|s| s.guid == g)
+            .cloned()
+            .unwrap_or_else(|| panic!("`{g}` is not in the snapshot"))
+    };
+    // ── THE CHASSIS IS THE CONTROL ── a ballistic body, twice.
+    let (a, b) = (row(&driven, CHASSIS), row(&coasting, CHASSIS));
+    println!(
+        "VEH3b TRACE: after sixty airborne steps the chassis is at {:?} driven and {:?} coasting",
+        a.world_translation, b.world_translation
+    );
+    assert_eq!(
+        a, b,
+        "the chassis differs between a driven and a coasting free fall, so this \
+         arm is measuring the body and not the wheels"
+    );
+    // ── AND THE WHEELS ARE NOT ──
+    let mut spun = 0usize;
+    for g in &wheel_guids {
+        let (x, y) = (row(&driven, *g), row(&coasting, *g));
+        if x != y {
+            spun += 1;
+        }
+    }
+    println!(
+        "VEH3b TRACE: {spun} of {wheels} wheel entities fold different bytes, with \
+         the chassis bit-identical — a wheel's speed reaches `state_bytes` through \
+         its own `Transform::rotation`"
+    );
+    assert!(
+        spun >= 2,
+        "{spun} of {wheels} wheels folded a different transform under full \
+         throttle than under none, so a wheel-speed divergence really would be \
+         invisible to every trace comparison in this repository"
+    );
+    assert_ne!(
+        driven, coasting,
+        "two free falls differing only in wheel speed folded identical snapshots"
+    );
 }

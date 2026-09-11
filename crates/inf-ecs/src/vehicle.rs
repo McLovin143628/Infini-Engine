@@ -4655,6 +4655,19 @@ pub struct DrivetrainState {
     /// definition (the engine idles and the wheels do not turn), so a quiet test
     /// that demanded zero slip would be true of nothing and the section would
     /// never be empty.
+    ///
+    /// **And "a pure function of the crank's speed and the wheels'" is a whole
+    /// argument only because BOTH halves are in the trace** (`audit:` VEH3b).
+    /// The crank is folded here; the wheels are folded through each wheel
+    /// entity's own `Transform::rotation`, which carries
+    /// [`WheelState::spin_deg`] — [`omega_rad_s`](WheelState::omega_rad_s)'s
+    /// own integral — and which `inf_ecs::sim::sim_snapshot` has folded as the
+    /// FIRST section of the player's `state_bytes` since long before this wave.
+    /// The wave carried the opposite as an open item (*"the wheel speeds …
+    /// which no trace section in this repository has ever carried"*);
+    /// `veh3b_gate::a_wheels_speed_is_in_the_trace_through_its_own_transform`
+    /// measures it, on a car in free fall where the chassis is bit-identical and
+    /// four of four wheels are not.
     pub clutch_slip_rad_s: f64,
     /// The turbo's boost, `[0, 1]` of this class's own peak.
     pub boost: f64,

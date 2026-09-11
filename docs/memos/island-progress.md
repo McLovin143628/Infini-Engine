@@ -39260,6 +39260,23 @@ by definition (the engine idles and the wheels do not turn), so a quiet test
 that demanded zero slip would be true of nothing and the section would never be
 empty. The fold is now exactly the set `is_quiet` tests — **45 bytes a car**.
 
+**`audit:` AND THE WHEELS ARE IN THE TRACE TOO — they always were.** The wave
+carried the opposite (carried item 4: *"the wheel speeds … which no trace section
+in this repository has ever carried"*), and the audit brief's own worry rests on
+it: two hosts whose wheels turned at different speeds would agree about every
+byte until a tyre touched something. They would not. `WheelState::omega_rad_s`
+is integrated into `spin_deg` every step and `step_one` writes that onto the
+wheel ENTITY's `Transform::rotation.x`, which `sim_snapshot` folds as the FIRST
+section of `state_bytes`. Measured on a car in free fall, where the chassis
+cannot move differently: **the chassis is bit-identical between a full-throttle
+fall and a coasting one, and four of four wheels are not**
+(`veh3b_gate::a_wheels_speed_is_in_the_trace_through_its_own_transform`). So
+`clutch_slip_rad_s` really is derivable from folded state, which is what makes
+"a diagnostic" the right ruling rather than a convenient one. The seam that
+remains is a rig whose wheels carry no entity — `reconcile_vehicles`' own "a rig
+with no wheel meshes simulates identically to one with them" — and the arm
+asserts the island's own rigs are not that.
+
 Measured: a level with one parked car folds **0** bytes; after a second of
 throttle the same level folds **45**; ten seconds later, coasted to 2.21 m/s, it
 folds **0** again.
