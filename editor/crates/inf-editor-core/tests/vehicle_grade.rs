@@ -558,31 +558,34 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "sports",
         sprint_to_mps: 27.78,
-        // 3.75 s and 30.0 m, +/- 5 % (wave VEH3b; VEH2a measured 3.98 s / 31.1 m).
-        sprint_max_s: 3.94,
-        sprint_min_s: 3.56,
-        brake_max_m: 31.5,
-        brake_min_m: 28.5,
+        // **4.28 s and 29.0 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
+        // VEH3b measured 3.75 s / 30.0 m on the old rate and VEH2a 3.98 / 31.1).
+        sprint_max_s: 4.49,
+        sprint_min_s: 4.07,
+        brake_max_m: 30.5,
+        brake_min_m: 27.5,
         top_frac: (0.88, 1.02),
     },
     Spec {
         id: "sedan",
         sprint_to_mps: 27.78,
-        // 7.67 s and 38.3 m, +/- 5 % (wave VEH3b; VEH2a measured 7.37 s / 36.4 m).
-        sprint_max_s: 8.05,
-        sprint_min_s: 7.29,
-        brake_max_m: 40.2,
-        brake_min_m: 36.4,
+        // **7.62 s and 36.6 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
+        // VEH3b measured 7.67 s / 38.3 m on the old rate and VEH2a 7.37 / 36.4).
+        sprint_max_s: 8.00,
+        sprint_min_s: 7.24,
+        brake_max_m: 38.4,
+        brake_min_m: 34.8,
         top_frac: (0.88, 1.02),
     },
     Spec {
         id: "suv",
         sprint_to_mps: 27.78,
-        // 7.30 s and 41.4 m, +/- 5 % (wave VEH3b; VEH2a measured 7.40 s / 40.7 m).
-        sprint_max_s: 7.67,
-        sprint_min_s: 6.93,
-        brake_max_m: 43.5,
-        brake_min_m: 39.3,
+        // **7.22 s and 42.5 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
+        // VEH3b measured 7.30 s / 41.4 m on the old rate and VEH2a 7.40 / 40.7).
+        sprint_max_s: 7.58,
+        sprint_min_s: 6.86,
+        brake_max_m: 44.6,
+        brake_min_m: 40.4,
         top_frac: (0.88, 1.02),
     },
     // Limited to 32 m/s (115 km/h), so 100 km/h is reachable but only just —
@@ -592,11 +595,12 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "van",
         sprint_to_mps: 27.78,
-        // 17.07 s and 50.6 m, +/- 5 % (wave VEH3b; VEH2a measured 17.43 s / 50.4 m).
-        sprint_max_s: 17.92,
-        sprint_min_s: 16.22,
-        brake_max_m: 53.1,
-        brake_min_m: 48.1,
+        // **16.78 s and 56.9 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
+        // VEH3b measured 17.07 s / 50.6 m on the old rate and VEH2a 17.43 / 50.4).
+        sprint_max_s: 17.62,
+        sprint_min_s: 15.94,
+        brake_max_m: 59.7,
+        brake_min_m: 54.1,
         top_frac: (0.88, 1.02),
     },
     // Limited to 27 m/s (97 km/h): timed to 80 % of its own limiter, which is
@@ -604,11 +608,12 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "truck",
         sprint_to_mps: 21.6,
-        // 6.65 s and 31.9 m, +/- 5 % (wave VEH3b; VEH2a measured 6.75 s / 32.7 m).
-        sprint_max_s: 6.98,
-        sprint_min_s: 6.32,
-        brake_max_m: 33.5,
-        brake_min_m: 30.3,
+        // **6.50 s and 36.4 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
+        // VEH3b measured 6.65 s / 31.9 m on the old rate and VEH2a 6.75 / 32.7).
+        sprint_max_s: 6.83,
+        sprint_min_s: 6.17,
+        brake_max_m: 38.2,
+        brake_min_m: 34.6,
         top_frac: (0.88, 1.02),
     },
 ];
@@ -964,14 +969,34 @@ fn the_substep_loop_runs_and_the_shipped_n_is_one() {
 /// perfectly in the model can still print one step apart.
 #[test]
 fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
-    /// What wave VEH2a measured, printed beside every `SPECS` row above: the
-    /// sprint in seconds and the stop in metres, for the rigid driveline.
-    const VEH2A: [(&str, f64, f64); 5] = [
-        ("sports", 3.98, 31.1),
-        ("sedan", 7.37, 36.4),
-        ("suv", 7.40, 40.7),
-        ("van", 17.43, 50.4),
-        ("truck", 6.75, 32.7),
+    /// **What the pre-VEH3b DRIVETRAIN does on today's springs** -- the sprint in
+    /// seconds and the stop in metres with `flywheel_inertia_kgm2` at its own
+    /// sentinel.
+    ///
+    /// `audit:` VEH3b -- it was VEH2a's own measured pair, and that was right
+    /// while the springs had not moved. They have: the nine wheeled rows were
+    /// re-sprung to stand at a third of their travel, which is a change to the
+    /// CONTENT and not to the drivetrain, and a sentinel cannot restore a spring
+    /// it never touched. So the reference is re-measured here and VEH2a's pair is
+    /// printed beside it in the arm, where the size of the spring's own
+    /// contribution stays readable: the sports row's stop went 31.1 m to 27.9 m
+    /// on the rigid driveline for no reason but its rate.
+    const RIGID_ON_TODAYS_SPRINGS: [(&str, f64, f64); 5] = [
+        ("sports", 3.88, 27.9),
+        ("sedan", 7.30, 35.5),
+        ("suv", 7.30, 42.8),
+        ("van", 17.10, 57.0),
+        ("truck", 6.58, 36.5),
+    ];
+
+    /// VEH2a's own pair, kept for the printout so the spring's contribution is
+    /// readable rather than lost.
+    const VEH2A: [(f64, f64); 5] = [
+        (3.98, 31.1),
+        (7.37, 36.4),
+        (7.40, 40.7),
+        (17.43, 50.4),
+        (6.75, 32.7),
     ];
     let drive = |spec: &Spec, flywheel: Option<f64>| -> (f64, f64) {
         let (mut doc, mut bridge, _) = flat_world(spec.id);
@@ -1023,14 +1048,16 @@ fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
     };
 
     let mut moved = 0usize;
-    for (spec, (id, was_s, was_m)) in SPECS.iter().zip(VEH2A) {
+    for ((spec, (id, was_s, was_m)), (v2_s, v2_m)) in
+        SPECS.iter().zip(RIGID_ON_TODAYS_SPRINGS).zip(VEH2A)
+    {
         assert_eq!(spec.id, id, "the two tables are in different orders");
         let (ship_s, ship_m) = drive(spec, None);
         let (rigid_s, rigid_m) = drive(spec, Some(0.0));
         println!(
             "THE SENTINEL: {id:>6} ships {ship_s:>5.2} s / {ship_m:>5.1} m; with \
              the flywheel at 0 it is {rigid_s:>5.2} s / {rigid_m:>5.1} m, against \
-             VEH2a's {was_s:>5.2} s / {was_m:>5.1} m"
+             a reference of {was_s:>5.2} s / {was_m:>5.1} m (VEH2a, on its own springs, measured {v2_s:>5.2} / {v2_m:>5.1})"
         );
         // The shipped run is the one `SPECS` bands, so the two arms in this file
         // are measuring one car rather than two.
@@ -1051,13 +1078,13 @@ fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
         assert!(
             (rigid_s - was_s).abs() <= was_s * 0.01,
             "{id}: the flywheel sentinel sprinted {rigid_s:.2} s where the \
-             pre-VEH3b model measured {was_s:.2} — the sentinel does not restore \
+             pre-VEH3b drivetrain on these springs measures {was_s:.2} — it does not restore \
              it, so the feel table's re-bless has no cause"
         );
         assert!(
             (rigid_m - was_m).abs() <= was_m * 0.01,
             "{id}: the flywheel sentinel stopped in {rigid_m:.1} m where the \
-             pre-VEH3b model measured {was_m:.1}"
+             pre-VEH3b drivetrain on these springs measures {was_m:.1}"
         );
         if (rigid_s - ship_s).abs() > 0.01 || (rigid_m - ship_m).abs() > 0.05 {
             moved += 1;

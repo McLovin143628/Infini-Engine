@@ -1267,6 +1267,64 @@ fn the_nose_dives_and_the_tail_squats() {
         squat > flat_squat * 1.5,
         "the tail squatted {squat:.1} mm with a centre of gravity and {flat_squat:.1} mm with it at road level"
     );
+
+    // ── AND ON THE CAR THAT SHIPS ── (`audit:` VEH3b). Everything above is the
+    //    Ring-0 fixture on a spring stiffened for the arm; a player sees the
+    //    SEDAN, on its own re-sprung rate, and a nose-dive is the one number in
+    //    clause 5 that is a body moving rather than a load.
+    let mut rig = settled(Rig::sealed_row("sedan"));
+    rig.step(120);
+    let rest_front = rig.axle_compression_m(true);
+    let rest_rear = rig.axle_compression_m(false);
+    let travel = catalogue_def("sedan").class.to_tuning().travel_m;
+    let full = VehicleControls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    let mut squat = 0.0f64;
+    for _ in 0..120 {
+        rig.drive(full, 1);
+        squat = squat.max(rig.axle_compression_m(false) - rest_rear);
+    }
+    for _ in 0..1_800 {
+        rig.drive(full, 1);
+        if rig.speed() > 28.0 {
+            break;
+        }
+    }
+    let brake = VehicleControls {
+        brake: 1.0,
+        ..Default::default()
+    };
+    let (mut dive, mut deepest) = (0.0f64, 0.0f64);
+    for _ in 0..120 {
+        rig.drive(brake, 1);
+        let c = rig.axle_compression_m(true);
+        deepest = deepest.max(c);
+        dive = dive.max(c - rest_front);
+    }
+    println!(
+        "VEH3b BODY (the shipped sedan): the nose dives {:.1} mm and the tail squats {:.1} mm; deepest front compression {:.1} mm of a {:.0} mm travel ({:.0} % -- the stop engages at 85)",
+        dive * 1_000.0,
+        squat * 1_000.0,
+        deepest * 1_000.0,
+        travel * 1_000.0,
+        deepest / travel * 100.0
+    );
+    assert!(
+        dive * 1_000.0 > 20.0,
+        "the shipped sedan's nose dived {:.1} mm under full braking, which nobody would see",
+        dive * 1_000.0
+    );
+    assert!(
+        squat * 1_000.0 > 1.0,
+        "the shipped sedan's tail squatted {:.2} mm on a launch",
+        squat * 1_000.0
+    );
+    assert!(
+        deepest < travel,
+        "the shipped sedan reached {deepest:.3} m of its {travel:.2} m travel, so it is on its bump stop under the brakes"
+    );
 }
 
 // ── 5. THE THIRTEEN FIELDS ──────────────────────────────────────────────────
@@ -2055,8 +2113,25 @@ fn a_wheels_speed_is_in_the_trace_through_its_own_transform() {
 /// total (that vacuity is the wave's own finding) at 10 % of the doc's formula
 /// under a hard stop and a full launch.
 ///
-/// **The mutation**: take the bump stop out of `suspension_force_n` — both rows
-/// go back to saturating and the band fails.
+/// # Which half closes which, measured
+///
+/// The two fixes are not interchangeable and the mutations say so:
+///
+/// * **the RE-SPRING is what this arm rests on.** Put the sedan back on its
+///   21 000 N/m and the arm reds at the static-fraction guard before it ever
+///   brakes — 55 % of travel. On their new rates neither row comes near the
+///   stop: the sedan's deepest braked compression is **0.172 m of 0.25 (69 %)**
+///   against an 85 % engagement, so the stop does not fire here at all;
+/// * **the BUMP STOP is what closes the model**, and its own arm
+///   (`the_bump_stop_is_a_rate_that_rises_and_the_rows_are_sprung_for_it`)
+///   measures it where it fires — the UNSTIFFENED Ring-0 fixture, which reaches
+///   0.239 m of its 0.25 under a 0.95 g stop. Take the stop out
+///   (`BUMP_STOP_RATE_MULT` → 0) and THAT arm reds while this one stays green,
+///   which is the honest division of labour: the re-spring keeps a road car off
+///   its stops, and the stop is what makes the model right the day a kerb or a
+///   landing puts it there anyway.
+///
+/// **The mutation for this arm**: the sedan's old `stiffness_n_per_m` — RED.
 #[test]
 fn the_axle_loads_are_the_formulas_on_the_shipped_rows() {
     /// How many steps of the stop are averaged after the transient is skipped.
