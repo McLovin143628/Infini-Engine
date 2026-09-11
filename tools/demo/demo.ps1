@@ -1383,7 +1383,27 @@ function Stand-Up([string]$why) {
         [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x2E)   # scancode: C
         Start-Sleep -Milliseconds 500
     }
-    Say "STILL NOT STANDING after four taps of C -- the frames below are of whatever stance the world is in"
+    # **AND SAY WHAT THE HERO ACTUALLY IS** (VEH3b audit). `C` is the stance key,
+    # so four taps of it answer crouch, prone and slide and nothing else. A hero
+    # left in `Ragdoll` by a drop whose get-up never came is not a stance
+    # problem, and every leg after it runs against a body on the floor -- the
+    # boarding hunt included, which then reports "NO CAR reached in thirty-six
+    # taps of E" and blames the hunt. Measured: one audit session logged **607
+    # Ragdoll rows** and a `get-up NEVER FIRED`, and its VEH3a and VEH3b legs
+    # took none of their nine frames.
+    $mode = "?"
+    $state = "?"
+    $rowsNow = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
+    if ($rowsNow.Count -gt 0) {
+        $cNow = $rowsNow[-1].Split(",")
+        if ($cNow.Count -gt 11) { $mode = $cNow[5]; $state = $cNow[11] }
+    }
+    if ($mode -eq "Ragdoll") {
+        Say "STILL NOT STANDING ($why): the hero is RAGDOLLED (state '$state') and C is the stance key -- no input in this loop gets a body up, the engine's own get-up does, and it has not come. Every leg after this one is running against a body on the floor."
+    }
+    else {
+        Say "STILL NOT STANDING after four taps of C ($why): mode '$mode', state '$state' -- the frames below are of whatever stance the world is in"
+    }
     return $false
 }
 
@@ -2561,7 +2581,15 @@ for ($k = 0; $k -lt 36 -and -not $veh_driving; $k++) {
     }
 }
 if (-not $veh_driving) {
-    Say "VEH3a: NO CAR reached in thirty-six taps of E over a full turn -- none of the four tyre frames is in this session"
+    # **NAME THE MODE THE HUNT RAN IN** (VEH3b audit): `try_enter` refuses from
+    # any mode that is not grounded, so a hero left `Ragdoll` by an earlier leg
+    # cannot board however well the hunt sweeps -- and the message that only
+    # counted taps sent two audits looking at the hunt.
+    $huntMode = "?"
+    $rowsHunt = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
+    if ($rowsHunt.Count -gt 0) { $huntMode = $rowsHunt[-1].Split(",")[5] }
+    $ragdolled = @($rowsHunt | Where-Object { ($_ -split ",")[5] -eq "Ragdoll" }).Count
+    Say "VEH3a: NO CAR reached in thirty-six taps of E over a full turn -- none of the four tyre frames is in this session (the hero was '$huntMode'; $ragdolled of $($rowsHunt.Count) rows in this session were Ragdoll)"
 } else {
     # Throttle, and let the surface classifier answer.
     [InfInput]::Down(0x11)
