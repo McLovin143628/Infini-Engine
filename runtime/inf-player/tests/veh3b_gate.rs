@@ -1025,10 +1025,19 @@ fn the_axle_loads_are_the_formulas() {
     let a_x = braked_accel / braked as f64;
     let predicted = static_front - mass * a_x * h / wheelbase;
     println!("VEH3b LOAD: braking at {a_x:.2} m/s2 over {braked} steps the axles carried {measured:.0} N front and {measured_rear:.0} N rear, against the formula's {predicted:.0} N front (static {static_front:.0}, transfer {:.0} N)", -mass * a_x * h / wheelbase);
-    let err = (measured - predicted).abs() / predicted.max(1.0);
+    // **The TRANSFER is the claim, not the total** — and the difference is a
+    // vacuity this arm was measured to have. The static load is two thirds of
+    // the number, so a ten-per-cent band on the TOTAL passes a transfer that is
+    // twenty-six per cent wrong: measured with the force offset deleted, the
+    // front read 9 929 N against a formula's 9 110 — nine per cent, green — while
+    // the transfer underneath it was 3 972 against 3 153. The doc's formula IS
+    // the term `m a h / L`, so that is what is banded.
+    let moved = measured - static_front;
+    let want = -mass * a_x * h / wheelbase;
+    let err = (moved - want).abs() / want.abs().max(1.0);
     assert!(
         err < 0.10,
-        "the front axle measured {measured:.0} N under {a_x:.2} m/s2 and the doc's formula says {predicted:.0} N — {:.1} % apart",
+        "the front axle took {moved:.0} N of transfer under {a_x:.2} m/s2 and the doc's formula says {want:.0} N — {:.1} % apart",
         err * 100.0
     );
 
@@ -1058,10 +1067,12 @@ fn the_axle_loads_are_the_formulas() {
     let a_launch = launched_accel / launched as f64;
     let predicted_rear = static_rear + mass * a_launch * h / wheelbase;
     println!("VEH3b LOAD: launching at {a_launch:.2} m/s2 over {launched} steps the rear axle carried {measured_rear:.0} N against the formula's {predicted_rear:.0} N (static {static_rear:.0}, transfer {:.0} N)", mass * a_launch * h / wheelbase);
-    let err = (measured_rear - predicted_rear).abs() / predicted_rear.max(1.0);
+    let moved = measured_rear - static_rear;
+    let want = mass * a_launch * h / wheelbase;
+    let err = (moved - want).abs() / want.abs().max(1.0);
     assert!(
         err < 0.10,
-        "the rear axle measured {measured_rear:.0} N under {a_launch:.2} m/s2 and the doc's formula says {predicted_rear:.0} N — {:.1} % apart",
+        "the rear axle took {moved:.0} N of transfer under {a_launch:.2} m/s2 and the doc's formula says {want:.0} N — {:.1} % apart",
         err * 100.0
     );
 }
