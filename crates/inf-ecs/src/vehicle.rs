@@ -441,9 +441,27 @@ pub struct VehicleTuning {
     // now the driveline's CEILING and no longer the curve, because a curve that
     // is a single number cannot be revvy or torquey and those are the two things
     // a driver feels first.
-    /// Idle speed, rpm. The engine never turns slower than this: below it a real
-    /// clutch is slipping, and modelling the clutch is a state machine this
-    /// engine does not need to be a car.
+    /// Idle speed, rpm. The engine never turns slower than this.
+    ///
+    /// # The refusal this doc used to carry, re-ruled (wave VEH3b)
+    ///
+    /// VEH2a wrote here that *"below it a real clutch is slipping, and modelling
+    /// the clutch is a state machine this engine does not need to be a car"*,
+    /// and `max(idle, ...)` in [`engine_rpm`] was that sentence's whole
+    /// implementation. The user's research doc asks for the other half by name —
+    /// *"rather than applying direct force to the chassis, compute engine torque
+    /// based on current RPM using a lookup curve"* with a **flywheel** — and the
+    /// sentence is wrong in one specific way that only shows up once you look for
+    /// it: it is exactly right about WHEN a clutch slips and silently assumes
+    /// that what happens while it slips does not matter. What happens is the
+    /// launch flare, the shift flare and the downshift blip, which are three of
+    /// the four things a driver hears.
+    ///
+    /// So the clutch is a state machine now ([`crank_step`]), the idle floor
+    /// stays exactly where it was, and the floor's MECHANISM changed: it is no
+    /// longer a clamp on a derived number but a bound on how much torque the
+    /// clutch may take off a crank that is already at idle, which is what stops a
+    /// slipping clutch from being free energy.
     pub idle_rpm: f64,
     /// Where the torque curve peaks, rpm.
     pub peak_torque_rpm: f64,
@@ -1274,6 +1292,40 @@ impl VehicleTuning {
             return 1;
         }
         (self.tyre_substeps.round() as i64).clamp(1, MAX_SUBSTEPS as i64) as usize
+    }
+
+    /// **What the clutch can actually pass**, newton-metres (wave VEH3b) --
+    /// [`clutch_torque_nm`](Self::clutch_torque_nm) with a floor under it.
+    ///
+    /// # A clutch weaker than its own engine is a fault, not a tuning
+    ///
+    /// The Ring-0 default is 420 N.m against a 260 N.m engine, which is the
+    /// margin a road clutch is specified with. The eleven catalogue rows author
+    /// an engine and do NOT author a clutch, so the sports row -- 460 N.m of
+    /// peak torque -- inherited a clutch that could never hold it. Measured
+    /// before this floor existed: the clutch slipped for the whole of every
+    /// gear, the car was permanently torque-limited to 420 N.m, and its 0-100
+    /// went from **3.98 s to 8.85**.
+    ///
+    /// A real production clutch holds its engine's peak torque with margin,
+    /// because one that did not would burn out inside a mile. So the capacity is
+    /// never less than [`CLUTCH_TORQUE_MARGIN`] times the peak, and
+    /// `clutch_torque_nm` is what RAISES it -- a race twin-plate, a bigger
+    /// margin for a tow rating. It is a bound and it is stated rather than
+    /// hidden: this model cannot express a clutch that slips at cruise, and a
+    /// slipping clutch at cruise is a repair job rather than a handling trait.
+    pub fn clutch_capacity_nm(&self) -> f64 {
+        let authored = if self.clutch_torque_nm.is_finite() {
+            self.clutch_torque_nm.max(0.0)
+        } else {
+            0.0
+        };
+        let engine = if self.peak_torque_nm.is_finite() {
+            self.peak_torque_nm.max(0.0) * CLUTCH_TORQUE_MARGIN
+        } else {
+            0.0
+        };
+        authored.max(engine)
     }
 
     /// Where the limiter cuts, rpm — [`fuel_cut_rpm`](Self::fuel_cut_rpm) with
@@ -2936,6 +2988,42 @@ impl VehicleDef {
         // resolved HERE, before any numeric key, so an explicit
         // `front_torque_split` in the same table always wins whatever order the
         // TOML map happens to iterate in.
+        // **`differential` is a spelling too** (wave VEH3b), and it is the
+        // `drivetrain` ruling above applied to the second enum an author reaches
+        // for: the physics reads six numbers and a scalar lock, not a word, and
+        // an enum beside them would be a second source of truth for one fact.
+        //
+        // Resolved HERE, before any numeric key, so an explicit
+        // `lsd_power_ramp_rear` or `diff_lock_rear` in the same table always wins
+        // whatever order the TOML map happens to iterate in — which is what makes
+        // `differential = "lsd"` a starting point an author refines rather than a
+        // mode that overrides them.
+        if let Some(d) = table.get("differential") {
+            let name = d
+                .as_str()
+                .ok_or_else(|| "`differential` must be a string".to_string())?;
+            let (lock, preload, power, coast) = match name {
+                // Torque split evenly whatever the wheels are doing: one wheel
+                // on ice takes half and wastes it.
+                "open" => (0.0, 0.0, 0.0, 0.0),
+                // A clutch-pack LSD's own three numbers. The preload is a road
+                // car's; the ramps are the usual 60/40 split between power and
+                // coast, which is what makes a car tighten under power and stay
+                // neutral off it.
+                "lsd" => (0.0, LSD_ROW_PRELOAD_NM, 0.6, 0.35),
+                // The spool the scalar already was.
+                "locked" => (1.0, 0.0, 0.0, 0.0),
+                _ => return Err(format!("unknown differential `{name}` (open, lsd or locked; for any other bias say `lsd_preload_rear_nm` and the ramps directly)")),
+            };
+            def.class.diff_lock_front = lock;
+            def.class.diff_lock_rear = lock;
+            def.class.lsd_preload_front_nm = preload;
+            def.class.lsd_preload_rear_nm = preload;
+            def.class.lsd_power_ramp_front = power;
+            def.class.lsd_power_ramp_rear = power;
+            def.class.lsd_coast_ramp_front = coast;
+            def.class.lsd_coast_ramp_rear = coast;
+        }
         if let Some(d) = table.get("drivetrain") {
             let name = d
                 .as_str()
@@ -2954,7 +3042,7 @@ impl VehicleDef {
             def.class.front_torque_split = split;
         }
         for (k, v) in table {
-            if k == "body" || k == "drivetrain" {
+            if k == "body" || k == "drivetrain" || k == "differential" {
                 continue;
             }
             let n = v
@@ -2976,6 +3064,13 @@ impl VehicleDef {
 /// bytes are not reproducible.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VehicleDefs(pub std::collections::BTreeMap<String, VehicleDef>);
+
+/// **What a row that says `differential = "lsd"` gets as a preload**, N.m.
+///
+/// A road car's clutch-pack LSD carries 40 to 80 N.m of static bias, which is
+/// enough to stop one wheel spinning on a wet manhole and not enough to make the
+/// car push in a car park.
+pub const LSD_ROW_PRELOAD_NM: f64 = 60.0;
 
 /// The most rows one catalogue may declare.
 ///
@@ -3486,6 +3581,30 @@ pub trait Vehicle: Send + Sync + 'static {
         let _ = forward_mps;
         (0.0, 0.0)
     }
+
+    /// **What this class's drivetrain is doing** (wave VEH3b), or `None` for a
+    /// class that does not have one.
+    ///
+    /// On the trait for [`engine_state`](Self::engine_state)'s own reason: the
+    /// fixed-step door publishes it into the world so both hosts fold the same
+    /// bytes, and only the class knows whether it has a crank, a clutch and a
+    /// turbo at all. A hull and a rotorcraft answer `None` and fold nothing,
+    /// which is the same shape every other trace section's empty case has.
+    fn drivetrain(&self) -> Option<DrivetrainState> {
+        None
+    }
+
+    /// **What this class calls idle**, rpm (wave VEH3b) — the number
+    /// [`DrivetrainState::is_quiet`] is measured against.
+    ///
+    /// Beside [`drivetrain`](Self::drivetrain) rather than inside it because it
+    /// is a TUNING and not a state: folding it into the trace would put an
+    /// authored constant into a comparison of what two hosts simulated. A class
+    /// with no crank answers `0`, which makes its drivetrain quiet by
+    /// construction — as it should be, since it has not got one.
+    fn idle_rpm(&self) -> f64 {
+        0.0
+    }
 }
 
 // ── the engine loop (island wave VEH1a) ─────────────────────────────────────
@@ -3599,9 +3718,30 @@ pub struct RaycastVehicle {
     /// Seconds left of the shift in progress. **No drive torque crosses the box
     /// while this is positive**, which is the whole of why a shift is felt.
     shift_left_s: f64,
-    /// Engine speed, rpm — a *derived* value, held so the audio and the shift
-    /// model read the same number the torque came from.
+    /// **Engine speed, rpm — a STATE since wave VEH3b**, integrated on
+    /// [`VehicleTuning::flywheel_inertia_kgm2`] by [`crank_step`].
+    ///
+    /// It used to be derived from the wheels every step, which is a driveline
+    /// welded shut: the revs could not flare, could not hang and could not
+    /// bounce off a limiter. They are equal whenever the clutch is locked, which
+    /// is most of a drive and is why a car at cruise is unchanged.
     rpm: f64,
+    /// **The clutch's engagement**, `[0, 1]` (wave VEH3b) — `0` fully open,
+    /// `1` the capacity [`VehicleTuning::clutch_torque_nm`] names.
+    clutch_lock: f64,
+    /// How fast the clutch faces are sliding, rad/s at the crank — `0` while it
+    /// is locked, which is the state the audio and the HUD both read.
+    clutch_slip_rad_s: f64,
+    /// Whether the limiter is cutting fuel, this step (wave VEH3b).
+    fuel_cut: bool,
+    /// Whether the clutch is LOCKED -- the stick/slip state
+    /// [`CrankStep::locked`] is fed with.
+    clutch_locked: bool,
+    /// The turbo's boost, `[0, 1]` of this class's own peak (wave VEH3b).
+    boost: f64,
+    /// The dead time still to run before the compressor begins to spool,
+    /// seconds — [`VehicleTuning::turbo_lag_s`]'s own countdown.
+    boost_lag_s: f64,
     /// The road wheels' actual steer angle, degrees — the RACK's own state,
     /// which is what makes a steering rate and a return-to-centre possible.
     steer_deg: f64,
@@ -3630,6 +3770,16 @@ impl RaycastVehicle {
             shift_left_s: 0.0,
             steer_deg: 0.0,
             rpm: tuning.idle_rpm,
+            // A parked car's clutch is OPEN, which is what makes the first
+            // throttle of a launch a bite rather than a step change -- and what
+            // makes `DrivetrainState::is_quiet` true of every car nobody is
+            // driving, so a level with no running engine folds no trace bytes.
+            clutch_lock: 0.0,
+            clutch_slip_rad_s: 0.0,
+            fuel_cut: false,
+            clutch_locked: false,
+            boost: 0.0,
+            boost_lag_s: tuning.turbo_lag_s,
             tuning,
         }
     }
@@ -3653,6 +3803,40 @@ impl RaycastVehicle {
     /// The gear the box is in: `-1` reverse, `0` neutral, `1..=`.
     pub fn gear(&self) -> i32 {
         self.gear
+    }
+
+    /// **The clutch's engagement**, `[0, 1]` (wave VEH3b).
+    pub fn clutch_lock(&self) -> f64 {
+        self.clutch_lock
+    }
+
+    /// How fast the clutch faces are sliding, rad/s at the crank -- `0` locked.
+    pub fn clutch_slip_rad_s(&self) -> f64 {
+        self.clutch_slip_rad_s
+    }
+
+    /// **Whether the limiter is cutting fuel** (wave VEH3b) -- the state wave
+    /// VEH3e's audio hooks the limiter's own stutter onto.
+    pub fn fuel_cutting(&self) -> bool {
+        self.fuel_cut
+    }
+
+    /// **The turbo's boost**, `[0, 1]` of this class's own peak (wave VEH3b) --
+    /// the state wave VEH3e's whine and blow-off read.
+    pub fn boost(&self) -> f64 {
+        self.boost
+    }
+
+    /// **The five numbers a drivetrain folds into the trace** (wave VEH3b).
+    pub fn drivetrain_state(&self) -> DrivetrainState {
+        DrivetrainState {
+            rpm: self.rpm,
+            gear: self.gear,
+            clutch_lock: self.clutch_lock,
+            clutch_slip_rad_s: self.clutch_slip_rad_s,
+            boost: self.boost,
+            fuel_cut: self.fuel_cut,
+        }
     }
 
     /// The rack's angle, degrees — where the road wheels actually are, which
@@ -3856,11 +4040,20 @@ pub fn governor(tuning: &VehicleTuning, forward_mps: f64) -> f64 {
     }
 }
 
-/// **Engine speed from wheel speed** — a rigid driveline with an idle floor.
+/// **The crank speed the GEARING implies**, rpm — a rigid driveline with an idle
+/// floor.
 ///
-/// No clutch state machine: below the speed the gearing implies, a real clutch is
-/// slipping and the engine is at idle, and `max(idle, …)` is that in one
-/// comparison. Neutral (and a gear the box does not have) answers idle.
+/// # What this is, since wave VEH3b
+///
+/// It used to be the engine's rpm. It is now the DRIVELINE's: the speed the
+/// crank would turn at if the clutch were welded shut, which is one of the two
+/// inputs [`crank_step`] compares. The engine's own speed is a state with
+/// inertia and the two are equal only while the clutch is locked — which is most
+/// of the time, and is why the pre-VEH3b traces of a car at cruise are
+/// unchanged.
+///
+/// Neutral (and a gear the box does not have) answers idle, because a driveline
+/// that is not connected implies nothing.
 pub fn engine_rpm(tuning: &VehicleTuning, wheel_omega: f64, gear: i32) -> f64 {
     let idle = if tuning.idle_rpm.is_finite() {
         tuning.idle_rpm.max(0.0)
@@ -3877,6 +4070,567 @@ pub fn engine_rpm(tuning: &VehicleTuning, wheel_omega: f64, gear: i32) -> f64 {
         return idle;
     }
     (wheel_omega.abs() * ratio.abs() * 60.0 / std::f64::consts::TAU).clamp(idle, red)
+}
+
+// -- THE CRANK, THE CLUTCH AND THE TURBO (wave VEH3b) ------------------------
+
+/// **How far past the redline the crank may spin**, as a multiple of it.
+///
+/// A rev limiter is a CUT, and a cut takes time to bite: the flywheel carries
+/// the engine past the cut point for as many steps as its own inertia allows,
+/// and that overshoot IS the bounce. Eight per cent is a real limiter's slack.
+/// The clamp behind it is a bound rather than a model -- a driveline that has
+/// come apart (a wheel in the air with the cut disabled) stops here instead of
+/// running away.
+pub const OVERREV_CEILING_FRAC: f64 = 1.08;
+
+/// **How far below the cut the limiter turns the fuel back on**, rpm.
+///
+/// A limiter with no hysteresis cuts and restores on alternate steps, which is
+/// a buzz at half the step rate and not an engine. A band makes the bounce a
+/// property of the flywheel and the load instead: the crank has to fall this
+/// far before it fires again, and how long that takes is the period.
+pub const FUEL_CUT_HYSTERESIS_RPM: f64 = 300.0;
+
+/// **The margin a clutch is specified with**, as a multiple of the engine's own
+/// peak torque -- the floor under
+/// [`VehicleTuning::clutch_capacity_nm`](VehicleTuning::clutch_capacity_nm).
+///
+/// Sixty per cent over is what a road clutch carries: it holds in every gear,
+/// and it still slips on a dumped launch because a launch is not a torque
+/// question but an engagement one.
+pub const CLUTCH_TORQUE_MARGIN: f64 = 1.6;
+
+/// The crank-speed difference inside which a clutch that CAN lock does lock,
+/// rad/s.
+///
+/// The tyre model's stick/slip band, one shaft over: two faces within a couple
+/// of rad/s of each other are one shaft, and a band is what stops a locked
+/// driveline from being thrown in and out of lock by the last bit of a float.
+pub const CLUTCH_SYNC_RAD_S: f64 = 2.0;
+
+/// The share of the redline below which a turbocharger's compressor makes
+/// nothing at all.
+///
+/// A turbo is driven by exhaust flow and exhaust flow is a function of revs, so
+/// there is a floor under which boosting is not a small number but zero. A
+/// quarter of the redline is a road turbo's.
+pub const TURBO_THRESHOLD_FRAC: f64 = 0.25;
+
+/// How long a blow-off valve takes to dump the boost when the throttle shuts,
+/// seconds.
+pub const TURBO_BLOWOFF_S: f64 = 0.08;
+
+/// The throttle under which the turbo is on overrun and the valve is open.
+pub const TURBO_BLOWOFF_THROTTLE: f64 = 0.08;
+
+/// **The share of an axle's own torque a limited-slip differential may move
+/// across it**, on top of its preload.
+///
+/// A half means the slower wheel may be handed the whole axle and the faster one
+/// left with nothing but the preload's drag, which is what a strong clutch-type
+/// LSD does. It is a bound and not a tuning knob: the ramps
+/// ([`VehicleTuning::lsd_power_ramp_rear`] and its three siblings) are the
+/// tuning, and this is what stops a ramp of `1.0` from driving one wheel
+/// backwards harder than the engine drives the car forwards.
+pub const LSD_MAX_BIAS_FRAC: f64 = 0.5;
+
+/// **A limited-slip differential's own torque transfer**, newton-metres
+/// (wave VEH3b).
+///
+/// The doc's *"a limited-slip differential dynamically balances output torque
+/// between left and right wheels based on velocity delta"*, as the clutch-pack
+/// model every real one is: a **preload** that bites before any speed difference
+/// exists at all, plus a **ramp** -- a share of the torque already going through
+/// the axle -- engaged over [`DIFF_SPEED_BAND`] of wheel-speed difference.
+///
+/// The answer is what is moved FROM the faster wheel TO the slower one, so the
+/// axle's total is unchanged by construction and an LSD can never invent drive.
+/// The faster wheel may end up with a NEGATIVE torque, and that is not an
+/// accident: braking the wheel that is spinning is exactly what the clutch pack
+/// is for and is why a car with one wheel on grass drives away.
+///
+/// `axle_nm` is the magnitude of what the gearbox handed this axle. Both ramps
+/// and the preload at zero answer zero, which is the open differential every row
+/// shipped before v28 drives on.
+pub fn lsd_transfer_nm(preload_nm: f64, ramp: f64, axle_nm: f64, delta_rad_s: f64) -> f64 {
+    let preload = if preload_nm.is_finite() {
+        preload_nm.max(0.0)
+    } else {
+        0.0
+    };
+    let ramp = if ramp.is_finite() {
+        ramp.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if preload <= 0.0 && ramp <= 0.0 {
+        return 0.0;
+    }
+    let axle = if axle_nm.is_finite() {
+        axle_nm.abs()
+    } else {
+        0.0
+    };
+    let delta = if delta_rad_s.is_finite() {
+        delta_rad_s.abs()
+    } else {
+        0.0
+    };
+    // Engaged over the same band the spool is, and for the same reason: an axle
+    // whose wheels are simply rolling together must not be thrown between two
+    // states by the last bit of a float.
+    let engage = (delta / DIFF_SPEED_BAND).clamp(0.0, 1.0);
+    let want = preload + ramp * axle;
+    let ceiling = preload + axle * LSD_MAX_BIAS_FRAC;
+    (want * engage).min(ceiling)
+}
+
+/// Crank speed, rad/s, from rpm.
+pub fn crank_rad_s(rpm: f64) -> f64 {
+    rpm * std::f64::consts::TAU / 60.0
+}
+
+/// Crank speed, rpm, from rad/s.
+pub fn crank_rpm(rad_s: f64) -> f64 {
+    rad_s * 60.0 / std::f64::consts::TAU
+}
+
+/// **One step of the turbocharger**, `[0, 1]` of its own peak (wave VEH3b).
+///
+/// A first-order state and not a table: the compressor's shaft has inertia, so
+/// boost CHASES the flow the engine is asking for rather than arriving with the
+/// throttle. Three numbers shape it --
+/// [`turbo_lag_s`](VehicleTuning::turbo_lag_s) is the dead time before the
+/// shaft begins to spool at all, [`turbo_spool_s`](VehicleTuning::turbo_spool_s)
+/// is the time constant of the rise, and
+/// [`turbo_boost_max`](VehicleTuning::turbo_boost_max) is what the result is
+/// worth on the torque curve ([`boost_multiplier`]).
+///
+/// **The blow-off** is the other half and it is not the rise run backwards: a
+/// valve dumps the plenum in [`TURBO_BLOWOFF_S`] regardless of how long the
+/// spool took, which is why lifting mid-corner costs a turbocharged car its
+/// boost and a naturally-aspirated one nothing.
+///
+/// Answers the new boost and the dead time still to run. `turbo_boost_max` at
+/// zero is naturally aspirated and this holds boost at zero whatever the
+/// throttle does, which is every catalogue row shipped before wave VEH3f.
+pub fn turbo_step(
+    tuning: &VehicleTuning,
+    boost: f64,
+    lag_left_s: f64,
+    throttle: f64,
+    rpm: f64,
+    dt: f64,
+) -> (f64, f64) {
+    let lag = if tuning.turbo_lag_s.is_finite() {
+        tuning.turbo_lag_s.max(0.0)
+    } else {
+        0.0
+    };
+    if !(tuning.turbo_boost_max.is_finite() && tuning.turbo_boost_max > 0.0)
+        || !(dt.is_finite() && dt > 0.0)
+    {
+        return (0.0, lag);
+    }
+    let b0 = if boost.is_finite() {
+        boost.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let throttle = if throttle.is_finite() {
+        throttle.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if throttle <= TURBO_BLOWOFF_THROTTLE {
+        // The valve. The dead time is re-armed here, so the NEXT time the
+        // throttle opens the shaft has to be woken up again.
+        return ((b0 - dt / TURBO_BLOWOFF_S).max(0.0), lag);
+    }
+    let left = if lag_left_s.is_finite() {
+        (lag_left_s - dt).max(0.0)
+    } else {
+        0.0
+    };
+    if left > 0.0 {
+        return (b0, left);
+    }
+    let red = if tuning.redline_rpm.is_finite() {
+        tuning.redline_rpm.max(1.0)
+    } else {
+        1.0
+    };
+    let frac = if rpm.is_finite() { rpm / red } else { 0.0 };
+    let flow = ((frac - TURBO_THRESHOLD_FRAC) / (1.0 - TURBO_THRESHOLD_FRAC)).clamp(0.0, 1.0);
+    let target = throttle * flow;
+    let spool = if tuning.turbo_spool_s.is_finite() {
+        tuning.turbo_spool_s.max(1e-3)
+    } else {
+        1e-3
+    };
+    let next = b0 + (target - b0) * (dt / spool).min(1.0);
+    (next.clamp(0.0, 1.0), 0.0)
+}
+
+/// What the boost is worth on the torque curve -- a MULTIPLIER at or above 1.
+pub fn boost_multiplier(tuning: &VehicleTuning, boost: f64) -> f64 {
+    let max = if tuning.turbo_boost_max.is_finite() {
+        tuning.turbo_boost_max.max(0.0)
+    } else {
+        0.0
+    };
+    let b = if boost.is_finite() {
+        boost.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    1.0 + max * b
+}
+
+/// What one step of the crank needs to know (wave VEH3b).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrankStep {
+    /// The crank's own speed at the top of the step, rpm.
+    pub rpm: f64,
+    /// The clutch's engagement at the top of the step, `[0, 1]`.
+    pub lock: f64,
+    /// Whether the limiter was cutting at the top of the step.
+    pub cutting: bool,
+    /// **Whether the clutch was LOCKED at the top of the step**.
+    ///
+    /// The stick/slip state, carried in rather than re-derived, and it is
+    /// load-bearing: the two faces of a locked clutch are never at the same
+    /// number at the top of a step, because the crank was slaved to the
+    /// driveline's speed at the END of the last one and the wheels then moved.
+    /// Under one g in third that lag is four rad/s a step -- so a lock test that
+    /// only asked whether the speeds agree unlocked the clutch on every braked
+    /// step, and the slipping branch then fed the gearbox the clutch's whole
+    /// capacity as DRIVE. Measured: the sports row's stop from 100 km/h went
+    /// from 30.8 m to 53.5.
+    ///
+    /// A locked clutch therefore stays locked while the torque it has to pass
+    /// fits inside its capacity; an OPEN one has to see the speeds converge
+    /// before it may close. Which is what a clutch is.
+    pub locked: bool,
+    /// The crank speed the GEARING implies, UNCLAMPED --
+    /// [`driveline_rpm`]'s answer.
+    pub driveline_rpm: f64,
+    /// The driver's throttle, `[0, 1]`, unsigned (reverse is a gear).
+    pub throttle: f64,
+    /// Whether the box is mid-shift.
+    pub shifting: bool,
+    /// What the turbo is worth this step -- [`boost_multiplier`]'s answer.
+    pub boost_mult: f64,
+    /// The step, seconds.
+    pub dt: f64,
+}
+
+/// What the crank did (wave VEH3b).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrankOut {
+    /// The crank's speed at the bottom of the step, rpm.
+    pub rpm: f64,
+    /// The clutch's engagement at the bottom of the step, `[0, 1]`.
+    pub lock: f64,
+    /// Whether the limiter is cutting.
+    pub cutting: bool,
+    /// **The torque the clutch passed into the gearbox**, N.m at the crank --
+    /// what the wheels are driven by, in place of the engine's own torque.
+    pub clutch_nm: f64,
+    /// Whether the two faces ended the step sliding.
+    pub slipping: bool,
+    /// How fast they are sliding, rad/s at the crank.
+    pub slip_rad_s: f64,
+    /// The engine's own torque this step, N.m -- before the clutch.
+    pub engine_nm: f64,
+}
+
+/// **The crank, the clutch and the limiter, in one step** (wave VEH3b).
+///
+/// The whole of what the rigid driveline was not. Three things happen here and
+/// each is the answer to a sentence in the user's research doc or in VEH2a's
+/// carried list:
+///
+/// * **THE LIMITER** is a CUT with hysteresis rather than the plateau
+///   [`engine_torque_nm`] carried as a named bound. Above
+///   [`VehicleTuning::fuel_cut`] the fuel stops; it comes back
+///   [`FUEL_CUT_HYSTERESIS_RPM`] below, so the engine BOUNCES off the limiter at
+///   whatever rate its own inertia and its own load give it. That rate is
+///   readable ([`RaycastVehicle::fuel_cutting`]) and wave VEH3e's audio is its
+///   first consumer.
+/// * **THE FLYWHEEL** makes the revs a STATE.
+///   [`VehicleTuning::flywheel_inertia_kgm2`] at zero restores the rigid
+///   driveline exactly, which is the mutation the gate's flare arm uses.
+/// * **THE CLUTCH** is the stick/slip split the tyre model already is, one shaft
+///   over. If the torque the clutch has to pass fits inside its capacity and the
+///   two faces are within [`CLUTCH_SYNC_RAD_S`], it LOCKS and the crank is the
+///   driveline -- which is why a car at cruise behaves exactly as it did before
+///   this wave. Otherwise it SLIPS at its capacity and the crank integrates on
+///   its own inertia, which is the launch flare, the shift flare and the
+///   downshift blip.
+///
+/// # The idle floor, and why it is a bound on TORQUE now
+///
+/// A slipping clutch passing its full capacity off an engine that is already at
+/// idle is free energy: the crank would be dragged below idle, the model would
+/// clamp it back up, and the difference would arrive at the wheels as drive
+/// nobody paid for. So the capacity is bounded by what the engine can actually
+/// give -- its own torque, plus whatever the flywheel can give up before it
+/// reaches idle. At idle that second term is zero and the clutch passes exactly
+/// the engine's torque, which is `max(idle, ...)`'s behaviour reproduced through
+/// a mechanism instead of asserted by a clamp.
+///
+/// The same bound the other way round: when the BOX drives the CRANK (a
+/// downshift, or an overrun), the clutch passes only what it takes to spin the
+/// engine up to the driveline this step. Without it a downshift at a shut
+/// throttle would put the clutch's whole capacity through the gearbox as a
+/// brake, which is a clutch drop and not a gearshift.
+///
+/// # The auto-clutch
+///
+/// There is no pedal and there will not be one: the player's controls are a
+/// throttle, a brake, a handbrake and a steer, and a clutch pedal is not
+/// something a gamepad has. The target is open while the box is shifting, open
+/// while the driveline is turning slower than idle AND nobody is asking for
+/// torque, and closed otherwise; it moves at `dt / clutch_engage_s`, so
+/// [`VehicleTuning::clutch_engage_s`] is how long a bite takes.
+pub fn crank_step(tuning: &VehicleTuning, s: CrankStep) -> CrankOut {
+    let idle = if tuning.idle_rpm.is_finite() {
+        tuning.idle_rpm.max(0.0)
+    } else {
+        0.0
+    };
+    let red = if tuning.redline_rpm.is_finite() {
+        tuning.redline_rpm.max(idle + 1.0)
+    } else {
+        idle + 1.0
+    };
+    let ceiling = red * OVERREV_CEILING_FRAC;
+    let rpm0 = if s.rpm.is_finite() {
+        s.rpm.clamp(idle, ceiling)
+    } else {
+        idle
+    };
+    let drive_rpm = if s.driveline_rpm.is_finite() {
+        s.driveline_rpm.clamp(0.0, ceiling)
+    } else {
+        idle
+    };
+    let throttle = if s.throttle.is_finite() {
+        s.throttle.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let boost_mult = if s.boost_mult.is_finite() {
+        s.boost_mult.max(0.0)
+    } else {
+        1.0
+    };
+
+    // -- the limiter ---------------------------------------------------------
+    let cut_at = tuning.fuel_cut().max(idle + 1.0);
+    let cutting = if rpm0 >= cut_at {
+        true
+    } else if rpm0 <= cut_at - FUEL_CUT_HYSTERESIS_RPM {
+        false
+    } else {
+        s.cutting
+    };
+    let engine_nm = if cutting {
+        0.0
+    } else {
+        engine_torque_nm(tuning, rpm0) * throttle * boost_mult
+    };
+
+    // -- the auto-clutch's engagement ----------------------------------------
+    let lock0 = if s.lock.is_finite() {
+        s.lock.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let dt = if s.dt.is_finite() && s.dt > 0.0 {
+        s.dt
+    } else {
+        return CrankOut {
+            rpm: rpm0,
+            lock: lock0,
+            cutting: s.cutting,
+            clutch_nm: 0.0,
+            slipping: !s.locked,
+            slip_rad_s: 0.0,
+            engine_nm: 0.0,
+        };
+    };
+    let engage_s = if tuning.clutch_engage_s.is_finite() {
+        tuning.clutch_engage_s.max(1e-3)
+    } else {
+        1e-3
+    };
+    let target = if s.shifting {
+        0.0
+    } else if drive_rpm >= idle || throttle > 0.0 {
+        1.0
+    } else {
+        0.0
+    };
+    let step = dt / engage_s;
+    let lock = (lock0 + (target - lock0).clamp(-step, step)).clamp(0.0, 1.0);
+    let cap = tuning.clutch_capacity_nm() * lock;
+
+    // -- the flywheel --------------------------------------------------------
+    //
+    // Zero inertia is the pre-VEH3b rigid driveline, restored exactly: the crank
+    // IS the gearing's answer and every torque the engine makes crosses. It is
+    // the mutation the flare arm names, and it is the honest reading of a class
+    // that does not want a flywheel (a turbine, an electric motor).
+    let inertia = if tuning.flywheel_inertia_kgm2.is_finite() {
+        tuning.flywheel_inertia_kgm2.max(0.0)
+    } else {
+        0.0
+    };
+    if inertia <= 0.0 {
+        return CrankOut {
+            rpm: drive_rpm.clamp(idle, red),
+            lock: 1.0,
+            cutting,
+            clutch_nm: if s.shifting { 0.0 } else { engine_nm },
+            slipping: false,
+            slip_rad_s: 0.0,
+            engine_nm,
+        };
+    }
+
+    let omega_e = crank_rad_s(rpm0);
+    let omega_d = crank_rad_s(drive_rpm);
+    let omega_idle = crank_rad_s(idle);
+    // The crank's own drag, at the crank: pumping losses and friction, rising
+    // with the revs and biggest with the throttle shut. It is the SAME number
+    // the wheels see through the gears while the clutch is locked (see
+    // `RaycastVehicle::solve`'s engine-brake term, scaled by the lock), so the
+    // share applied HERE is the share the clutch is NOT carrying.
+    let rev_span = (red - idle).max(1.0);
+    let rev_frac = ((rpm0 - idle) / rev_span).clamp(0.0, 1.0);
+    let friction_nm = tuning.engine_brake_nm.max(0.0) * rev_frac * (1.0 - throttle) * (1.0 - lock);
+
+    let want = engine_nm - friction_nm;
+    let converged = (omega_e - omega_d).abs() <= CLUTCH_SYNC_RAD_S;
+    if !s.shifting && want.abs() <= cap && (s.locked || converged) {
+        // LOCKED. The crank is the driveline and the flywheel's own inertia is
+        // carried by the driven wheels (`RaycastVehicle::solve` reflects it
+        // through the square of the gear), which is what a welded shaft means
+        // and is why this branch cannot lose energy.
+        return CrankOut {
+            rpm: drive_rpm.clamp(idle, red),
+            lock,
+            cutting,
+            clutch_nm: want,
+            slipping: false,
+            slip_rad_s: 0.0,
+            engine_nm,
+        };
+    }
+
+    // SLIPPING. **The torque that would SYNC the two faces this step** is the
+    // bound, not the capacity: a clutch passes what it is asked for until it
+    // runs out of grip, and what a sliding clutch is asked for is exactly enough
+    // to stop sliding. Bounding it by the capacity alone put the whole 736 N.m
+    // of a sports clutch into the gearbox on every step the faces were a few
+    // rad/s apart, which is every step of a hard stop.
+    let sync = want + inertia * (omega_e - omega_d) / dt;
+    let passed = if sync >= 0.0 {
+        // The crank drives the box, and may not be dragged below idle: the most
+        // it can give is its own torque plus what the flywheel has above idle.
+        let floor = want + inertia * (omega_e - omega_idle) / dt;
+        cap.min(sync).min(floor.max(0.0))
+    } else {
+        // The box drives the crank -- a downshift, or an overrun.
+        -cap.min(-sync)
+    };
+    let mut omega = omega_e + (want - passed) * dt / inertia;
+    // Neither face may cross the other inside one step -- the tyre model's own
+    // "the ground may not push the wheel past free rolling", one shaft over.
+    omega = if omega_e >= omega_d {
+        omega.max(omega_d)
+    } else {
+        omega.min(omega_d)
+    };
+    CrankOut {
+        rpm: crank_rpm(omega).clamp(idle, ceiling),
+        lock,
+        cutting,
+        clutch_nm: passed,
+        slipping: true,
+        slip_rad_s: (omega_e - omega_d).abs(),
+        engine_nm,
+    }
+}
+
+/// **What a drivetrain is doing**, as the numbers two hosts have to agree about
+/// (wave VEH3b).
+///
+/// Sim state and not a report: the crank's speed decides the torque, the
+/// clutch's engagement decides how much of it crosses, the boost decides how
+/// much there was, and the cut decides whether there was any. Two hosts that
+/// disagreed about any of them have diverged about how fast a car is going one
+/// step later -- which is invisible in a transform for exactly one step, the
+/// reason wave WPN2b gives for folding a spring.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DrivetrainState {
+    /// Crank speed, rpm.
+    pub rpm: f64,
+    /// The gear the box is in: `-1` reverse, `0` neutral, `1..`.
+    pub gear: i32,
+    /// The clutch's engagement, `[0, 1]`.
+    pub clutch_lock: f64,
+    /// How fast the clutch faces are sliding, rad/s at the crank.
+    pub clutch_slip_rad_s: f64,
+    /// The turbo's boost, `[0, 1]` of this class's own peak.
+    pub boost: f64,
+    /// Whether the limiter is cutting fuel this step.
+    pub fuel_cut: bool,
+}
+
+impl DrivetrainState {
+    /// **Whether this drivetrain has nothing to say** -- a parked car with an
+    /// open clutch at idle, which is what every vehicle on a level nobody is
+    /// driving is.
+    ///
+    /// It is what keeps [`drivetrain_state_bytes`] EMPTY on a level with no
+    /// running engine, and therefore keeps every trace committed before this
+    /// wave byte-identical unless something actually drove.
+    pub fn is_quiet(&self, idle_rpm: f64) -> bool {
+        self.gear == 1
+            && self.clutch_lock <= 0.0
+            && self.clutch_slip_rad_s <= 0.0
+            && self.boost <= 0.0
+            && !self.fuel_cut
+            && self.rpm <= idle_rpm + 1e-9
+    }
+}
+
+/// **The crank speed the gearing implies, UNCLAMPED**, rpm (wave VEH3b).
+///
+/// [`engine_rpm`]'s answer without its idle floor and without its redline
+/// ceiling, which is what a clutch has to be compared against: a stationary car
+/// in gear turns its input shaft at ZERO, and a floor of `idle` there tells the
+/// clutch it may lock onto an engine speed the wheels are nowhere near. That
+/// exact mistake shipped for one afternoon of this wave and cost the launch its
+/// flare entirely -- the clutch locked at a standstill and the crank sat at idle
+/// through the whole of first gear.
+///
+/// The ceiling is dropped for the mirror of the same reason: a car left in first
+/// at motorway speed really is asking its engine for nine thousand rpm, and a
+/// model that quietly answered `redline` would have the clutch locked onto a
+/// number the driveline is not turning at.
+///
+/// Neutral, and a gear the box does not have, answer `0`.
+pub fn driveline_rpm(tuning: &VehicleTuning, wheel_omega: f64, gear: i32) -> f64 {
+    let ratio = tuning.drive_ratio(gear);
+    if !wheel_omega.is_finite() || !ratio.is_finite() || ratio == 0.0 {
+        return 0.0;
+    }
+    wheel_omega.abs() * ratio.abs() * 60.0 / std::f64::consts::TAU
 }
 
 /// **The automatic gearbox's decision**: which gear to be in.
@@ -4690,6 +5444,107 @@ fn point_segment_distance(p: DVec2, a: DVec2, b: DVec2) -> f64 {
     (p - (a + ab * t)).length()
 }
 
+/// **Every drivetrain's own state, by chassis** (wave VEH3b) — what the
+/// fixed-step door publishes so both hosts fold the same bytes.
+///
+/// The crank, the clutch and the turbo live inside a `dyn Vehicle` in the
+/// physics bridge, which is a place no trace can reach: `state_bytes` is handed
+/// a world. So the door that already walks every vehicle every step writes the
+/// answer here, and [`drivetrain_state_bytes`] folds it — the same shape
+/// `SurfaceMapRes` uses in the other direction, one step later.
+///
+/// Rebuilt whole every step rather than accumulated, so a car that was despawned
+/// leaves nothing behind for a later step to fold.
+#[derive(bevy_ecs::prelude::Resource, Default, Debug, Clone, PartialEq)]
+pub struct DrivetrainRes {
+    /// Keyed by the chassis entity's `Guid`, in guid order.
+    pub rows: std::collections::BTreeMap<Uuid, DrivetrainState>,
+    /// The idle rpm each row's own class authors — what
+    /// [`DrivetrainState::is_quiet`] is measured against, carried beside the
+    /// row because the fold cannot see a class.
+    pub idle_rpm: std::collections::BTreeMap<Uuid, f64>,
+}
+
+/// **Publish this step's drivetrains** — the one door the fixed-step vehicle
+/// phase writes through.
+///
+/// It replaces the whole table, so the answer is a function of the vehicles that
+/// exist NOW. A level with no wheeled vehicle clears it to empty rather than
+/// leaving a stale row standing.
+pub fn publish_drivetrains(world: &mut EcsWorld, rows: Vec<(Uuid, DrivetrainState, f64)>) {
+    let w = world.world_mut();
+    if rows.is_empty() {
+        w.remove_resource::<DrivetrainRes>();
+        return;
+    }
+    if w.get_resource::<DrivetrainRes>().is_none() {
+        w.insert_resource(DrivetrainRes::default());
+    }
+    let mut res = w.resource_mut::<DrivetrainRes>();
+    res.rows.clear();
+    res.idle_rpm.clear();
+    for (guid, state, idle) in rows {
+        res.rows.insert(guid, state);
+        res.idle_rpm.insert(guid, idle);
+    }
+}
+
+/// The drivetrain table, if this world has ever stepped a vehicle.
+pub fn drivetrains_of(world: &EcsWorld) -> Option<&DrivetrainRes> {
+    world.world().get_resource::<DrivetrainRes>()
+}
+
+/// **Forget every drivetrain** — the Simulate session's door, on
+/// `crate::casing::clear_casings`' terms exactly: run 2 of a session must begin
+/// where run 1 did, and a crank spinning when the author pressed stop is run
+/// 1's.
+pub fn clear_drivetrains(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<DrivetrainRes>();
+}
+
+/// How many bytes one drivetrain folds: 16 of guid, four `f64`, a gear and a
+/// flag.
+pub const DRIVETRAIN_TRACE_BYTES: usize = 16 + 4 * 8 + 4 + 1;
+
+/// **The drivetrains' trace bytes** (wave VEH3b) —
+/// [`DRIVETRAIN_TRACE_BYTES`] a car, in guid order, and **empty when every
+/// engine on the level is quiet**.
+///
+/// Empty is the load-bearing half, exactly as it is for
+/// `crate::casing::casing_state_bytes`: a parked car sits at idle with its
+/// clutch open and its turbo cold, which is [`DrivetrainState::is_quiet`], so a
+/// level nobody is driving folds nothing and every trace committed before this
+/// wave is byte-identical.
+///
+/// What it folds is the state and not the torque. A torque is a pure function of
+/// these numbers and of the wheels, which the snapshot already carries; the
+/// crank's speed, the clutch's engagement, the boost and the cut are the state
+/// nothing else can see — and two hosts that disagreed about any of them agree
+/// about every transform in the world for exactly one step.
+pub fn drivetrain_state_bytes(world: &EcsWorld) -> Vec<u8> {
+    let Some(res) = drivetrains_of(world) else {
+        return Vec::new();
+    };
+    let live: Vec<(&Uuid, &DrivetrainState)> = res
+        .rows
+        .iter()
+        .filter(|(g, s)| !s.is_quiet(res.idle_rpm.get(*g).copied().unwrap_or(0.0)))
+        .collect();
+    if live.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(live.len() * DRIVETRAIN_TRACE_BYTES);
+    for (guid, s) in live {
+        out.extend_from_slice(guid.as_bytes());
+        for v in [s.rpm, s.clutch_lock, s.clutch_slip_rad_s, s.boost] {
+            out.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        out.extend_from_slice(&s.gear.to_le_bytes());
+        out.push(u8::from(s.fuel_cut));
+    }
+    out
+}
+
 /// **The level's surface maps**, one per terrain, derived (wave VEH3a).
 #[derive(bevy_ecs::prelude::Resource, Default, Debug)]
 pub struct SurfaceMapRes {
@@ -5298,6 +6153,14 @@ impl Vehicle for RaycastVehicle {
         (revs, self.controls.throttle.abs().clamp(0.0, 1.0))
     }
 
+    fn drivetrain(&self) -> Option<DrivetrainState> {
+        Some(RaycastVehicle::drivetrain_state(self))
+    }
+
+    fn idle_rpm(&self) -> f64 {
+        self.tuning.idle_rpm
+    }
+
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
         if !dt.is_finite() || dt <= 0.0 {
             return;
@@ -5406,31 +6269,99 @@ impl Vehicle for RaycastVehicle {
             .map(|(m, w)| axle_share(m.steered()) * w.omega_rad_s)
             .sum();
         self.shift_left_s = (self.shift_left_s - dt).max(0.0);
-        self.rpm = engine_rpm(&self.tuning, mean_omega, self.gear);
+        // **The shift is decided on the INPUT SHAFT, not on the crank**
+        // (wave VEH3b) -- which is what a gearbox has, and is
+        // [`engine_rpm`]'s answer exactly as it was before this wave, so the
+        // eleven catalogue rows shift where they always did.
+        //
+        // The first cut read `self.rpm`, the crank's own state, and it produced
+        // a SHIFT CASCADE: a shift opens the clutch, an open crank at full
+        // throttle flares into its own limiter inside a tenth of a second, and
+        // the box then saw a rev counter above `shift_up_rpm` and shifted again.
+        // Measured on the sports row: first to seventh in half a second at
+        // fifteen metres a second, with the engine bouncing off the limiter the
+        // whole way. A gearbox cannot see a crank it has just disconnected.
         if self.shift_left_s <= 0.0 {
             let want = shift_target(
                 &self.tuning,
                 self.gear,
-                self.rpm,
+                engine_rpm(&self.tuning, mean_omega, self.gear),
                 self.controls.throttle,
                 forward_mps,
             );
             if want != self.gear {
                 self.gear = want;
                 self.shift_left_s = self.tuning.shift_time_s.max(0.0);
-                self.rpm = engine_rpm(&self.tuning, mean_omega, self.gear);
             }
         }
         let ratio = self.tuning.drive_ratio(self.gear);
         let throttle = self.controls.throttle.clamp(-1.0, 1.0).abs();
-        // **No torque crosses the box during a shift** — the whole of why a shift
-        // is something a driver feels rather than a number that changes.
-        let crank = if self.shifting() {
+
+        // ── the crank, the clutch and the turbo (wave VEH3b) ─────────────────
+        //
+        // What used to be one multiplication (`engine_torque_nm(rpm) * throttle
+        // * governor`, zeroed during a shift) is now three states with their own
+        // step: the turbo's boost, the crank's speed and the clutch's
+        // engagement. See [`crank_step`] for the whole of why.
+        //
+        // **The governor rides the THROTTLE and not the answer**, which it did
+        // not before and had to. A limiter that scaled the torque AFTER the
+        // clutch would leave the engine making full torque against a driveline
+        // taking none, so the crank would climb into its own limiter while the
+        // car sat at its top speed; scaling the pedal instead makes the engine
+        // do what a limiter makes an engine do, and its pumping losses come up
+        // with it.
+        //
+        // **No torque crosses the box during a shift** — still true, and now it
+        // is the clutch that is open rather than a number that is zero, so the
+        // crank is free for the length of the shift and that is the shift flare.
+        let driveline_rpm = driveline_rpm(&self.tuning, mean_omega, self.gear);
+        let (boost, boost_lag) = turbo_step(
+            &self.tuning,
+            self.boost,
+            self.boost_lag_s,
+            throttle,
+            self.rpm,
+            dt,
+        );
+        self.boost = boost;
+        self.boost_lag_s = boost_lag;
+        let out_crank = crank_step(
+            &self.tuning,
+            CrankStep {
+                rpm: self.rpm,
+                lock: self.clutch_lock,
+                cutting: self.fuel_cut,
+                locked: self.clutch_locked,
+                driveline_rpm,
+                throttle: throttle * governor(&self.tuning, forward_mps),
+                shifting: self.shifting(),
+                boost_mult: boost_multiplier(&self.tuning, boost),
+                dt,
+            },
+        );
+        self.rpm = out_crank.rpm;
+        self.clutch_lock = out_crank.lock;
+        self.clutch_slip_rad_s = out_crank.slip_rad_s;
+        self.fuel_cut = out_crank.cutting;
+        self.clutch_locked = !out_crank.slipping;
+        // **What the gearbox is handed is what the CLUTCH passed**, not what the
+        // engine made. They are the same number whenever the clutch is locked.
+        let crank = out_crank.clutch_nm;
+        // **The flywheel, reflected at the wheels.** A locked clutch means the
+        // crank and the road wheels are one shaft, so the crank's inertia is
+        // part of every driven wheel's — through the SQUARE of the total gear,
+        // which is why it is worth a quarter of a tonne in first and nothing in
+        // sixth. Applying it as an inertia rather than as a torque is what keeps
+        // it stable: a torque would need the driveline's acceleration, which is
+        // a difference of two noisy numbers, and an inertia needs nothing.
+        //
+        // Zero while the clutch slips, because a slipping clutch is exactly the
+        // absence of that shaft.
+        let reflected_kgm2 = if out_crank.slipping {
             0.0
         } else {
-            engine_torque_nm(&self.tuning, self.rpm)
-                * throttle
-                * governor(&self.tuning, forward_mps)
+            self.tuning.flywheel_inertia_kgm2.max(0.0) * ratio * ratio
         };
         // Reverse is a gear, so its ratio is positive and the DIRECTION is the
         // gear's sign. One sign, spent here.
@@ -5502,18 +6433,87 @@ impl Vehicle for RaycastVehicle {
                 let axle = base * n as f64;
                 base * (1.0 - lock * ramp) + axle * lock * ramp * mine
             };
-            // **Traction control**, which is one line once a wheel has a slip
-            // ratio: if this wheel was spinning last step, hand it less. Last
-            // step's, and that is not a shortcut — a real system measures and
-            // then modulates, so a one-step lag is the mechanism rather than an
-            // approximation of it.
-            // **Traction control**: the torque request, clamped to what this
-            // contact patch can take at the aid's own target slip. Last step's
-            // load, because the suspension pass has not run yet — a load changes
-            // over tens of milliseconds where a wheel's speed changes in one
-            // step, so a step-old load is a measurement and a step-old slip is
-            // not (see `aid_torque_cap_nm`).
-            let mut torque = crank * ratio * direction * weight;
+            self.drive_nm[i] = crank * ratio * direction * weight;
+        }
+
+        // ── the limited-slip differentials (wave VEH3b) ──────────────────────
+        //
+        // The lock above is a SPOOL: at `1` the whole axle goes to the slowest
+        // wheel and at `0` it is shared evenly whatever the wheels are doing.
+        // Between those two is the differential every real road car actually
+        // has, and it is not a blend of them: a clutch-pack LSD moves a bounded
+        // amount of torque across the axle — a **preload** plus a **ramp** on
+        // what is already going through it, engaged over the speed difference —
+        // and it does so by BRAKING the faster wheel, which is why the faster
+        // wheel's torque may end up negative.
+        //
+        // A second pass rather than a term inside the loop above, because a
+        // transfer needs both wheels' torques to exist before either is final —
+        // the anti-roll bar's own reason, one axle over.
+        //
+        // Every row shipped before the v28 window authors `0` for all six
+        // fields, so `lsd_transfer_nm` answers zero and this pass is the
+        // identity on them. That is what keeps the feel table theirs.
+        for front_axle in [true, false] {
+            let (preload, power, coast) = if front_axle {
+                (
+                    self.tuning.lsd_preload_front_nm,
+                    self.tuning.lsd_power_ramp_front,
+                    self.tuning.lsd_coast_ramp_front,
+                )
+            } else {
+                (
+                    self.tuning.lsd_preload_rear_nm,
+                    self.tuning.lsd_power_ramp_rear,
+                    self.tuning.lsd_coast_ramp_rear,
+                )
+            };
+            if !(preload > 0.0 || power > 0.0 || coast > 0.0) {
+                continue;
+            }
+            let on: Vec<usize> = (0..wheels)
+                .filter(|i| self.rig.wheels[*i].steered() == front_axle)
+                .collect();
+            if on.len() != 2 {
+                // A differential has two output shafts. An axle the recogniser
+                // found one wheel on, or three, has no across to bias.
+                continue;
+            }
+            let (a, b) = (on[0], on[1]);
+            let (slow, fast) = if self.wheels[a].omega_rad_s <= self.wheels[b].omega_rad_s {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let axle_nm = self.drive_nm[a] + self.drive_nm[b];
+            // **Power or coast** is decided by which way the driveline is
+            // pulling, not by the pedal: a car on a trailing throttle in gear is
+            // on its coast ramp whatever the driver's foot is doing.
+            let ramp = if axle_nm * direction > 0.0 {
+                power
+            } else {
+                coast
+            };
+            let delta = self.wheels[fast].omega_rad_s - self.wheels[slow].omega_rad_s;
+            let transfer = lsd_transfer_nm(preload, ramp, axle_nm, delta) * direction;
+            self.drive_nm[slow] += transfer;
+            self.drive_nm[fast] -= transfer;
+        }
+
+        // ── traction control ─────────────────────────────────────────────────
+        //
+        // **Traction control**: the torque request, clamped to what this
+        // contact patch can take at the aid's own target slip. Last step's
+        // load, because the suspension pass has not run yet — a load changes
+        // over tens of milliseconds where a wheel's speed changes in one
+        // step, so a step-old load is a measurement and a step-old slip is
+        // not (see `aid_torque_cap_nm`).
+        //
+        // AFTER the differentials since wave VEH3b, and that order is the
+        // physics: an aid limits what a contact patch is given, and what a
+        // wheel is given is what the differential handed it.
+        for i in 0..wheels {
+            let mut torque = self.drive_nm[i];
             let tc = self.tuning.traction_control_slip;
             if tc.is_finite() && tc > 0.0 {
                 let cap = aid_torque_cap_nm(
@@ -5589,10 +6589,17 @@ impl Vehicle for RaycastVehicle {
         // Distributed through `axle_share`, exactly like drive torque: an axle
         // the engine cannot turn is an axle the engine cannot slow, so on a
         // rear-drive car the front wheels genuinely coast.
+        //
+        // **Through the clutch since wave VEH3b**: scaled by the engagement, so
+        // an open clutch is a car that coasts and a slipping one brakes on
+        // however much of the shaft is actually touching. The other half of the
+        // same drag — what slows the CRANK when the clutch is not carrying it —
+        // is `crank_step`'s own `friction_nm`, weighted by `1 - lock`, so the
+        // two halves sum to one engine's friction and never to two.
         let engine_brake_total = if throttle > 0.0 || self.shifting() {
             0.0
         } else {
-            self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs()
+            self.tuning.engine_brake_nm.max(0.0) * rev_frac * ratio.abs() * self.clutch_lock
         };
         // ── stability control ────────────────────────────────────────────────
         //
@@ -5747,6 +6754,11 @@ impl Vehicle for RaycastVehicle {
                 steer_direction(right, -fwd, steer)
             };
             let radius = mount.radius_m.max(1e-3);
+            // **The crank's inertia is this wheel's too while the clutch is
+            // locked** (wave VEH3b), through the square of the gear and this
+            // wheel's own share of the driveline. Undriven wheels get none,
+            // which is what an undriven wheel is.
+            let inertia = inertia + reflected_kgm2 * axle_share(mount.steered());
 
             // ── the wheel's own equation of motion ───────────────────────────
             //
@@ -9414,8 +10426,22 @@ mod tests {
             let fz: f64 = out.iter().map(|f| f.force.z).sum();
             chassis.linvel.z += fz / 1_200.0 / 60.0;
             let r = v.engine_state(chassis.linvel.z).0;
-            if revs.last().is_some_and(|p: &f64| r < *p - 0.05) {
-                drops += 1;
+            // **Measured over a WINDOW since wave VEH3b**, not step to step. The
+            // revs used to be a pure function of the wheels, so a shift moved
+            // them by the whole ratio step inside ONE step and a per-step
+            // threshold caught it. With a flywheel between the crank and the box
+            // the same fall takes the length of the clutch's engagement -- about
+            // thirty steps -- and the biggest single step of it is under forty
+            // rpm, which is the arm going green on a car whose needle genuinely
+            // drops. A twenty-step window is still far shorter than a gear.
+            const W: usize = 20;
+            if revs.len() >= W {
+                let was = revs[revs.len() - W..]
+                    .iter()
+                    .fold(f64::MIN, |a: f64, b: &f64| a.max(*b));
+                if r < was - 0.05 && revs.last().is_some_and(|p: &f64| r < *p) {
+                    drops += 1;
+                }
             }
             revs.push(r);
             gears.push(v.gear());
@@ -9564,6 +10590,39 @@ mod tests {
     /// it: a lockup arm with ABS on measures ABS, and a differential arm with
     /// traction control on measures traction control. The aids get their own
     /// fixtures, which turn them back on one at a time.
+    /// **Let the drivetrain catch up with a fixture's hand-written state**
+    /// (wave VEH3b).
+    ///
+    /// The crank is a STATE now. A `RaycastVehicle` built for a test starts at
+    /// idle, in first, with its clutch OPEN, so a fixture that writes a wheel
+    /// speed by hand and solves once is measuring a car whose engine has not yet
+    /// been told the wheels are turning -- and the clutch then spends its whole
+    /// capacity spinning the crank up, which arrives at the contact patch as
+    /// several kilonewtons of drag that has nothing to do with what the arm is
+    /// about. Measured, before this helper existed: a 0.9 front brake bias read
+    /// 2 052 N at the front against 1 670 at the rear, where the ratio it is
+    /// named for is nine to one.
+    ///
+    /// So the fixture is driven forwards for a while with no input, holding the
+    /// wheels at the speed it wants, which lets the box find its gear and the
+    /// clutch lock. It is the one thing a real car does before it brakes.
+    fn settle(v: &mut RaycastVehicle, chassis: ChassisState, omegas: &[f64], steps: u32) {
+        let hold = v.controls();
+        v.control(VehicleControls::default());
+        let mut out = Vec::new();
+        for _ in 0..steps {
+            for (i, w) in v.wheels_mut().iter_mut().enumerate() {
+                w.omega_rad_s = omegas[i.min(omegas.len() - 1)];
+            }
+            out.clear();
+            v.solve(chassis, 1.0 / 60.0, &mut out);
+        }
+        for (i, w) in v.wheels_mut().iter_mut().enumerate() {
+            w.omega_rad_s = omegas[i.min(omegas.len() - 1)];
+        }
+        v.control(hold);
+    }
+
     fn grounded(tuning: &[(&str, f64)]) -> RaycastVehicle {
         let mut v = RaycastVehicle::new(rig(4));
         for (name, value) in [
@@ -9725,12 +10784,12 @@ mod tests {
                 ("diff_lock_rear", lock),
             ]);
             v.wheels_mut()[3].contact = None;
-            v.wheels_mut()[2].omega_rad_s = 0.0;
-            v.wheels_mut()[3].omega_rad_s = 40.0;
             v.control(VehicleControls {
                 throttle: 0.3,
                 ..Default::default()
             });
+            // The crank catches up first (wave VEH3b) -- see `settle`.
+            settle(&mut v, resting(1_200.0), &[0.0, 0.0, 0.0, 40.0], 60);
             let mut out = Vec::new();
             v.solve(resting(1_200.0), 1.0 / 60.0, &mut out);
             out.iter().map(|f| f.force.z).sum()
@@ -9750,15 +10809,14 @@ mod tests {
     fn the_brake_bias_is_the_share_the_front_axle_takes() {
         let axles = |bias: f64| -> (f64, f64) {
             let mut v = grounded(&[("brake_bias", bias), ("abs_slip", 0.0)]);
-            for w in v.wheels_mut() {
-                w.omega_rad_s = 12.0 / 0.35;
-            }
+            let mut chassis = resting(1_200.0);
+            chassis.linvel = DVec3::new(0.0, 0.0, 12.0);
             v.control(VehicleControls {
                 brake: 1.0,
                 ..Default::default()
             });
-            let mut chassis = resting(1_200.0);
-            chassis.linvel = DVec3::new(0.0, 0.0, 12.0);
+            // The crank catches up first (wave VEH3b) -- see `settle`.
+            settle(&mut v, chassis, &[12.0 / 0.35], 120);
             let mut out = Vec::new();
             for _ in 0..4 {
                 out.clear();
@@ -10082,19 +11140,34 @@ mod tests {
     /// Both halves matter. An ABS that merely stopped the wheel locking while
     /// lengthening the stop would be a worse brake with a better graph, and that
     /// is exactly what a naive one does.
+    ///
+    /// # The brakes are raised, and that is the arm rather than a fudge
+    /// (wave VEH3b)
+    ///
+    /// The Ring-0 `brake_force_n` cannot lock this fixture's tyres: the wheels
+    /// carry more load than the default rig's springs imply, so a LOCKED wheel
+    /// still slides at more force than the brake budget, and the two stops
+    /// measured 40.92 m and 40.83 -- ABS worth nine centimetres in forty-one
+    /// metres. That is a true statement about a car whose brakes cannot out-grip
+    /// its tyres and it is not a statement about ABS, so the fixture is given
+    /// brakes that CAN lock a wheel and the arm measures what it is named for.
+    /// Read the other way round it is the finding: **an anti-lock system is
+    /// worth nothing on a car that cannot lock a wheel.**
     #[test]
     fn abs_keeps_the_wheel_out_of_lockup_and_stops_shorter_for_it() {
         let stop = |abs: f64| -> (f64, f64, f64) {
-            let mut v = grounded(&[("abs_slip", abs)]);
+            let mut v = grounded(&[("abs_slip", abs), ("brake_force_n", 20_000.0)]);
             let mut chassis = resting(1_200.0);
             chassis.linvel = DVec3::new(0.0, 0.0, 25.0);
-            for w in v.wheels_mut() {
-                w.omega_rad_s = 25.0 / 0.35;
-            }
             v.control(VehicleControls {
                 brake: 1.0,
                 ..Default::default()
             });
+            // The crank catches up first, and the BOX finds its gear (wave
+            // VEH3b): a fresh fixture is in first, and first at 25 m/s is an
+            // over-rev no automatic would allow, so the clutch spent the whole
+            // stop dragging a crank up instead of the brakes slowing a car.
+            settle(&mut v, chassis, &[25.0 / 0.35], 150);
             let mut out = Vec::new();
             let (mut travelled, mut locked) = (0.0, 0usize);
             // Sampled MID-STOP, not at the end: by step 180 both cars are

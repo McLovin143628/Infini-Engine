@@ -1440,6 +1440,23 @@ impl RuntimeSim {
         // this wave byte-identical: a level that has never fired folds nothing,
         // and so does one whose brass has all aged out.
         out.extend_from_slice(&inf_ecs::casing::casing_state_bytes(&self.world));
+        // VEH3b appends the DRIVETRAINS, last, on the sixteen above's argument
+        // with one of its own: the crank's speed, the clutch's engagement, the
+        // boost and the fuel cut are the only sim state in this engine that
+        // lives inside the physics bridge rather than in the world, so the
+        // vehicle phase publishes them into `DrivetrainRes` and this folds them.
+        // Two hosts that disagreed about a clutch agree about every transform in
+        // the world for exactly one step and then one of them is going faster --
+        // which is the reason wave WPN2b gives for folding a spring, at the
+        // other end of the same car.
+        //
+        // **The position is frozen** and `projector_mirror`'s `SECTIONS`
+        // allowlist is extended in the SAME commit. **EMPTY when every engine on
+        // the level is quiet** -- a parked car sits at idle with its clutch open
+        // and its turbo cold, which `DrivetrainState::is_quiet` is -- so a level
+        // nobody is driving folds nothing and every trace committed before this
+        // wave stays byte-identical.
+        out.extend_from_slice(&inf_ecs::vehicle::drivetrain_state_bytes(&self.world));
         out
     }
 

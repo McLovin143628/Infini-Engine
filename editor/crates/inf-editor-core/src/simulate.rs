@@ -608,6 +608,12 @@ impl SimSession {
         // not match the shipped player, which starts from an empty pool every
         // time.
         inf_ecs::ballistics::clear_rounds(doc.world_mut());
+        // VEH3b: and every crank still spinning, for the same reason a fifth
+        // time -- an engine the author left at four thousand rpm in run 1 is run
+        // 1's, and a second run that began with it there would fold different
+        // trace bytes from the shipped player, which starts every vehicle at
+        // idle with its clutch open.
+        inf_ecs::vehicle::clear_drivetrains(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -1064,6 +1070,12 @@ impl SimSession {
         // not match the shipped player, which starts from an empty pool every
         // time.
         inf_ecs::ballistics::clear_rounds(doc.world_mut());
+        // VEH3b: and every crank still spinning, for the same reason a fifth
+        // time -- an engine the author left at four thousand rpm in run 1 is run
+        // 1's, and a second run that began with it there would fold different
+        // trace bytes from the shipped player, which starts every vehicle at
+        // idle with its clutch open.
+        inf_ecs::vehicle::clear_drivetrains(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an

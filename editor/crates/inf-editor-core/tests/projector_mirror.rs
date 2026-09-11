@@ -2876,7 +2876,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 16] = [
+    const SECTIONS: [&str; 17] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2940,6 +2940,16 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // snapshot section, fifteen rows earlier, wearing a transform as its
         // symptom.
         "casing::casing_state_bytes",
+        // VEH3b, pinned in the SAME commit that folds it. The only section on
+        // this list whose state does not live in the world at all: the crank,
+        // the clutch and the turbo are inside a `dyn Vehicle` in the physics
+        // bridge, and the vehicle phase publishes them into `DrivetrainRes` so
+        // a trace can reach them. Its absence would be invisible for the
+        // spring's reason and one more of its own -- a clutch that engaged on
+        // one host and slipped on the other produces IDENTICAL transforms for
+        // the step it happened on, because a torque is an acceleration and an
+        // acceleration is a position two steps later.
+        "vehicle::drivetrain_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

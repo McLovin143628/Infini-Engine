@@ -119,11 +119,24 @@ pub fn step_vehicles(
     let (wetness, ambient_c) = inf_ecs::vehicle::weather_at(world);
     let mut out = Vec::with_capacity(guids.len());
     let mut forces: Vec<WheelForce> = Vec::new();
+    // **What every drivetrain did, gathered for the trace** (wave VEH3b). The
+    // crank, the clutch and the turbo live inside a `dyn Vehicle` in this
+    // bridge, and `state_bytes` is handed a WORLD -- so the walk that already
+    // visits every vehicle every step is where the answer crosses. Rebuilt
+    // whole, so a car that was despawned leaves nothing behind.
+    let mut drivetrains: Vec<(Uuid, inf_ecs::vehicle::DrivetrainState, f64)> =
+        Vec::with_capacity(guids.len());
     for chassis in guids {
         if let Some(o) = step_one(world, bridge, chassis, dt, wetness, ambient_c, &mut forces) {
+            if let Some(v) = bridge.vehicle_of(chassis) {
+                if let Some(state) = v.drivetrain() {
+                    drivetrains.push((chassis, state, v.idle_rpm()));
+                }
+            }
             out.push(o);
         }
     }
+    inf_ecs::vehicle::publish_drivetrains(world, drivetrains);
     out
 }
 
