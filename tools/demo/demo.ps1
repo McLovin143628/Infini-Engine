@@ -172,28 +172,61 @@ $failed = $false
 # last about a second, so `32-slide.png` and `34-prone.png` were photographs of a
 # standing character with the right filename. `hero.csv` already carries the
 # machine state in column 12 and the position in 3..5, four times a second; this
-# waits for a predicate over the newest row and shoots when it holds, or says
-# plainly that it never did.
+# waits for a predicate over the rows and shoots when it holds, or says plainly
+# that it never did.
+#
+# **IT SCANS EVERY ROW APPENDED SINCE ITS LAST LOOK** (VEH3b audit, closing that
+# wave's carried item 3). It used to test `$rows[-1]` alone, four times a second,
+# against a log written sixty times a second -- so it could only ever see one
+# row in fifteen, and an event shorter than 250 ms was invisible to it however
+# loudly the world reported it. Wave VEH3b lost three of its five frames to
+# exactly that and said so: the limiter cut on **one** row of a 692-row drive,
+# the turbo peaked at 0.481 for about two seconds of a 376-second session, and
+# both were plainly in the telemetry plot afterwards.
+#
+# The baseline is the row count at ENTRY, never zero: the predicates are things
+# like "the clutch is slipping", which were true at some point in every leg
+# before this one, and scanning the whole file would fire on a row from four
+# legs ago. What the frame then shows is the world a fraction of a second after
+# the row that fired, which is honest and is why the age is printed: a trigger
+# that matched a row 0.4 s old is a photograph of the moment after it.
 function Wait-ForHero {
     param(
         [string]$Csv,
         [scriptblock]$Predicate,
         [string]$What,
         [double]$TimeoutS = 8.0,
-        [string]$Out = ""
+        [string]$Out = "",
+        # Where the scan starts. `-1` is "whatever is already in the file when
+        # this call begins", which is what a live leg wants; `0` scans the whole
+        # recording, which is what the dry run over a finished session wants and
+        # is the only caller that passes it.
+        [int]$FromRow = -1
     )
+    $seen = 0
+    if ($FromRow -ge 0) {
+        $seen = $FromRow
+    }
+    elseif (Test-Path $Csv) {
+        $seen = @(Get-Content $Csv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" }).Count
+    }
     $deadline = (Get-Date).AddSeconds($TimeoutS)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path $Csv) {
             $rows = @(Get-Content $Csv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
-            if ($rows.Count -gt 0) {
-                $c = $rows[-1].Split(",")
-                if (& $Predicate $c) {
-                    Say "TRIGGER $What after $([math]::Round(($TimeoutS - ($deadline - (Get-Date)).TotalSeconds), 2)) s: $($rows[-1])"
-                    if ($Out -ne "") {
-                        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $Out | ForEach-Object { Say $_ }
+            if ($rows.Count -gt $seen) {
+                $fresh = @($rows[$seen..($rows.Count - 1)])
+                $seen = $rows.Count
+                foreach ($row in $fresh) {
+                    $c = $row.Split(",")
+                    if (& $Predicate $c) {
+                        $age = $rows.Count - ([array]::IndexOf($rows, $row) + 1)
+                        Say "TRIGGER $What after $([math]::Round(($TimeoutS - ($deadline - (Get-Date)).TotalSeconds), 2)) s ($age row(s) ago of $($fresh.Count) new): $row"
+                        if ($Out -ne "") {
+                            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $Out | ForEach-Object { Say $_ }
+                        }
+                        return $true
                     }
-                    return $true
                 }
             }
         }
@@ -224,16 +257,42 @@ if ($DryRun -ne "") {
     # (1) `Wait-ForHero` answers TRUE for a predicate that holds, and the
     #     `@(...)[-1]` idiom every leg uses gets a BOOLEAN out of it. Fault 1 was
     #     a leg that indexed the return value as if it were the row.
+    #     `-FromRow 0` because a finished recording appends nothing and a live
+    #     leg's baseline is "what was already there".
     $hit = @(Wait-ForHero -Csv $csv -What "DRYRUN a predicate that must hold" -TimeoutS 2.0 `
-        -Predicate { param($c) $c.Count -gt 5 })[-1]
+        -FromRow 0 -Predicate { param($c) $c.Count -gt 5 })[-1]
     if ($hit -isnot [bool]) { Say "DRYRUN FAIL: Wait-ForHero did not answer a boolean"; $bad++ }
     elseif (-not $hit) { Say "DRYRUN FAIL: a predicate that must hold did not fire"; $bad++ }
 
     # (2) …and FALSE for one that cannot, inside its own timeout.
     $miss = @(Wait-ForHero -Csv $csv -What "DRYRUN a predicate that cannot hold" -TimeoutS 1.0 `
-        -Predicate { param($c) $c.Count -gt 9999 })[-1]
+        -FromRow 0 -Predicate { param($c) $c.Count -gt 9999 })[-1]
     if ($miss -isnot [bool]) { Say "DRYRUN FAIL: the miss did not answer a boolean"; $bad++ }
     elseif ($miss) { Say "DRYRUN FAIL: a predicate that cannot hold fired"; $bad++ }
+
+    # (2b) **AND IT SEES A ROW THAT IS NOT THE LAST ONE** (VEH3b audit). The
+    #      whole of that wave's carried item 3: the trigger tested `$rows[-1]`
+    #      alone, four times a second, against a log written sixty times a
+    #      second, so an event that lasted one row was invisible however loudly
+    #      the world reported it. This asks for a predicate that holds on
+    #      EXACTLY ONE interior row of the recording -- the first data row -- and
+    #      cannot hold on the last.
+    $first = $rows[0]
+    $interior = $true
+    if ($rows.Count -lt 2) {
+        Say "DRYRUN: the recording has one row, so the interior-row check has no interior"
+    }
+    else {
+        $interior = @(Wait-ForHero -Csv $csv -What "DRYRUN a predicate that holds only on the FIRST row" -TimeoutS 2.0 `
+            -FromRow 0 -Predicate { param($c) ($c -join ",") -eq $first })[-1]
+    }
+    if (-not $interior) {
+        Say "DRYRUN FAIL: the trigger cannot see a row that is not the last one -- it is back to polling `$rows[-1] and every short event is invisible to it"
+        $bad++
+    }
+    else {
+        Say ("DRYRUN: the trigger matched row 1 of {0}, so it scans what was appended rather than the tail" -f $rows.Count)
+    }
 
     # (3) THE SHOOTOUT SUMMARY'S OWN PIPELINE. Fault 2 was
     #     `ForEach-Object { $_.Split(",") }`, which UNROLLS, so the filter behind
