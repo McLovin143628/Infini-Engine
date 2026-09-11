@@ -39362,3 +39362,130 @@ inf-studio` is NOT `npx tauri build`, and it produces an editor that loads the
 DEV url — every Tauri `invoke` from CDP then answers *"Origin header is not a
 valid URL"* and the Play cluster is never found. `demo.ps1`'s build step says so
 in a comment three lines long, which is where this was read after the fact.
+
+## WAVE VEH3b — THE AUDIT (2026-09-11)
+
+**The drivetrain is real and it holds.** Sixteen of the wave's sixteen mutations
+reproduce RED, every table in its report reproduces to the printed digit, and a
+rigid driveline forced down `crank_step`'s own zero-inertia branch cannot pass
+the arms that name it. What this audit found around that is four claims that
+could not fail for the reason they were named after, one carried item that was
+the wrong way round, and **one model gap the wave ruled out of its own scope
+incorrectly**.
+
+### audit: THERE IS NO BUMP STOP, SO CLAUSE 5 IS TRUE OF A SPRING NOTHING SHIPS (`8df36f42`)
+
+Both weight-transfer arms stiffen the fixture to 90 000 N/m before they measure,
+and both say why: the Ring-0 rig sits on its stops under a 0.9 g stop. The wave
+ruled that *"a suspension tuning question for VEH3f's handling profiles, not a
+model defect."*
+
+Half of it is right. `suspension_force_n` **clamps its compression at
+`travel_m`**, so past the stop the strut pushes with a CONSTANT force — which is
+not a bump stop, because a bump stop is a rate that rises. Both axles saturate at
+`stiffness × travel` and the transfer the doc's formula describes stops
+happening.
+
+| | the 90 000 N/m fixture | the SHIPPED spring |
+|---|---|---|
+| front-axle transfer under the brakes | 3 216 N | **−491 N** |
+| the doc's `m·a·h / L` | 3 341 N | 2 609 N |
+| apart | **3.7 %** | **118.8 %, sign INVERTED** |
+| braked steps at the stop | — | **90 of 90** |
+
+The rear is carrying the car, so the load a tyre's friction circle is sized from
+is wrong under exactly the condition where braking matters.
+
+`travel_m` is **not** the short number — 0.25 m against a road car's 0.15–0.20,
+and the nine wheeled catalogue rows author 0.16–0.30. The RATE is: all nine stand
+on **54–88 %** of their own travel doing nothing (truck 88, engine 86, swat 67,
+sports 66, van 64, ambulance 62, cruiser 55, sedan 55, suv 54) where a road car
+sits at about a third. A rate is VEH3f's; a strut with no stop is the model's.
+
+`the_shipped_spring_bottoms_out_and_the_formula_is_what_pays` asserts the DEFECT,
+on P22's own precedent: the day a stop lands it reds,
+`the_axle_loads_are_the_formulas` drops its fixture spring, and this section gets
+rewritten. **The suspension law is not changed here** — that is a feel-table
+re-bless and a trace re-bless, and it is a wave's decision.
+
+### audit: FOUR CLAIMS THAT COULD NOT FAIL FOR THEIR OWN REASON
+
+| what | measured | closed by |
+|---|---|---|
+| **the turbo's dead time** was the rev THRESHOLD, not `turbo_lag_s`: a standing start spends a second under `TURBO_THRESHOLD_FRAC` and the count was capped at 60 either way | forcing `lag` to zero left the arm **GREEN** printing the same "60 steps of dead time" | `8c8e0c69` — re-measured with the revs already up and the valve re-arming the lag: **9 steps at 0.15 s against 0 with none** |
+| **the portable-math ban** read a flat 6 000-character window over a **5 905**-character `crank_step` — 95 characters of slack — and never read `turbo_step` or `lsd_transfer_nm`, which its own comment claims are arithmetic | a `.sin()` planted in `turbo_step` was invisible to it | `e7c18160` — bounded at each function's own closing brace (the fix `projector_mirror`'s twin window prescribed in this wave's own commit), **8 415 characters**, `Instant` banned beside `SystemTime` |
+| **the feel table's re-bless** rested on *"`flywheel_inertia_kgm2 = 0` restores the pre-VEH3b model … 3.98 s and 30.8 m"* — prose in four places, an arm in none, and the digit wrong (30.8 m is a mid-wave build's stop) | the sentinel restores **3.98 s and 31.1 m**, which is VEH2a's printed pair exactly, and does the same on all four other rows | `3793ff69` — `the_flywheel_sentinel_restores_the_pre_veh3b_feel_table`, ten runs, banded against `SPECS` on one side and VEH2a on the other |
+| **the demo's trigger** polled the LAST ROW four times a second against a 60 Hz log — one row in fifteen | in the wave's OWN 1 880-row recording the four "NEVER FIRED" predicates match **2 / 1 / 4 / 21** rows; the shift's stated cause (*"none was above 8 m/s"*) is false | `aa67a129` — it scans every row appended since its last look, baselined at entry, printing the matched row's age; the dry run carries an interior-row check |
+
+### audit: A WHEEL'S SPEED IS IN THE TRACE, AND IT ALWAYS WAS (`c17c121c`)
+
+The wave's carried item 4 — *"the wheel speeds … which no trace section in this
+repository has ever carried"* — is true about a trace SECTION and false about the
+trace, and the audit brief's whole worry rests on it. `omega_rad_s` is integrated
+into `spin_deg` every step and `step_one` writes that onto the wheel ENTITY's
+`Transform::rotation.x`, which `sim_snapshot` folds as the FIRST section of
+`state_bytes`.
+
+Measured where nothing else can move — a car in free fall, sixty steps, every
+wheel in the air for every one of them: **the chassis's folded row is
+bit-identical** between a full-throttle fall and a coasting one, and **four of
+four wheel entities are not**. So `clutch_slip_rad_s` really is derivable from
+folded state, which makes "a diagnostic" the right ruling rather than a convenient
+one. (Two things the arm records: traction control caps an airborne wheel's drive
+at its contact patch's own zero, so with the aid on the same sixty steps spin the
+wheels by **0 of 4**; and the write is skipped for a rig whose wheels carry no
+entity.)
+
+### audit: THE IMMOVABLE ISLAND CAR IS NOT PARKED IN THE AIR (`eab925be`)
+
+VEH3a's audit carried it and this wave carried it again, with the only evidence a
+chassis that *"sits ~1.4 m above the ground under it, which reads as perched
+rather than parked"*. Nothing walked the fleet and asked. Eleven resident wheeled
+vehicles on the fixture island, settled:
+
+| | |
+|---|---|
+| standing on 3 or 4 of their 4 wheels | **11 of 11** |
+| on a REAL contact (`surface_census`, not the missed-raycast default) | `asphalt` at µ 1.00, all of them |
+| chassis ORIGIN over its own contact | **0.86–2.31 m** — saloon 1.04, working rows 1.31–1.55, fire appliance 2.31 |
+
+So **"~1.4 m above the ground" is where a parked car's chassis origin belongs**:
+the origin is the body's centre and the contact is under the tyre.
+
+The immovability has two mechanisms and neither is a placement. **The traffic
+system is driving it**: before `mark_taken` — the same Ring-0 door a boarding
+player goes through — nine of eleven covered under half a metre in three seconds
+of full throttle while standing on four wheels at µ 1.00. **And somebody is in
+the seat**: `step_character_movement` writes the occupant's own intent before the
+vehicle phase and `step_one` clears the controls after every solve, so an
+occupant's silence beats anybody else's throttle — every car that stayed at
+exactly its 800 rpm idle through 180 steps of throttle had its own traffic driver
+sitting in it, and every car that revved (1 088–4 644 rpm) had an empty seat.
+
+### audit: THE SURFACE COLUMN COULD NOT TELL A ROAD FROM A KERB (`1229231f`)
+
+The other half of the same misreading, and the reason it was possible. VEH3a's
+audit read `surface asphalt / mu 1.000 / slip 0.0000` off the stuck car and
+concluded the wheels had grip. Those three columns say **exactly the same thing**
+about a chassis beached with its wheels hanging: `step_one` classifies a MISSED
+raycast as `Asphalt` (it has to answer something), `mu_surface` is written only on
+a step that HAS a contact so it keeps the last value it had, and a slip ratio over
+a stationary wheel is `0` either way.
+
+`surface_census` is one Ring-0 door both readers call — the demo log used to run
+its own copy of the tie-break, which is how the two could disagree — and it reads
+CONTACTS. On the pad: **4 of 4 → `asphalt` at µ 1.000**. Twenty metres up: **0 of
+4, all four still CLAIMING asphalt → `air` at µ 0.000**. `AIRBORNE_SURFACE` is
+deliberately not a seventh `SurfaceClass`: in the air is the absence of a surface.
+
+### audit: THE EDITOR'S VEHICLE TUNE SHOWED NOTHING (`6af365f3`)
+
+The two hosts had the mirror of one defect. `INF_PIE_TUNE_VEHICLE` wrote the
+COMPONENT and not the running rig — the wave found that and closed it.
+`Tune::Vehicle` wrote the RIG and not the component, so an author dialling a
+spring rate during Simulate watched the car change and the Details panel not, on
+a doc sentence that went stale when VEH2a put `VehicleClass` on the scene record
+(*"there is no document field for a kept value to land on"*). Now both:
+`None` → **`Some(200000.0)`** after one drained step → **back to `None`** after
+Stop, because `exit` restores the snapshot. A `Keep` on a vehicle tunable is
+still applied and not kept, and the arm asserts that too.

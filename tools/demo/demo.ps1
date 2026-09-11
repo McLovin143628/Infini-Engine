@@ -208,7 +208,12 @@ function Wait-ForHero {
         $seen = $FromRow
     }
     elseif (Test-Path $Csv) {
-        $seen = @(Get-Content $Csv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" }).Count
+        # **MINUS ONE**, so the newest existing row is still in the first scan.
+        # It is the row the old poll tested, and a call with a 0.1-second
+        # timeout (the recoil legs have several) can see NO new row at all at
+        # 4 Hz -- so without the look-back this change would have made those
+        # strictly worse while making every longer one better.
+        $seen = [math]::Max(0, @(Get-Content $Csv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" }).Count - 1)
     }
     $deadline = (Get-Date).AddSeconds($TimeoutS)
     while ((Get-Date) -lt $deadline) {
