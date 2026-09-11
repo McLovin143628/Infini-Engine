@@ -39490,3 +39490,53 @@ a doc sentence that went stale when VEH2a put `VehicleClass` on the scene record
 `None` → **`Some(200000.0)`** after one drained step → **back to `None`** after
 Stop, because `exit` restores the snapshot. A `Keep` on a vehicle tunable is
 still applied and not kept, and the arm asserts that too.
+
+### audit: TWO SESSIONS OF THE SHIPPED GAME, AND WHY NEITHER DROVE
+
+| | session 1 | session 2 (`-SpawnAt` beside a car the wave's own session boarded) |
+|---|---|---|
+| the editor opened the island | **yes** | **yes** — 559 actors, **streaming 52 / 52**, Harbour City's main street |
+| rows logged | 1 456 | **4 169** |
+| reached `Driving` | **no** | **no** |
+| closed cleanly | `still running: none` | `still running: none` |
+
+**It was not the boarding hunt.** Session 2's hero was **RAGDOLLED — 743 of its
+4 169 rows**, and every row of the boarding window: the drop leg's `get-up NEVER
+FIRED`, nothing in the loop gets a body up (`tick_get_up` is the engine's own and
+it did not come), and `try_enter` refuses from any mode that is not grounded. So
+thirty-six taps of E swept a full circle around a car the hero could never enter,
+and the log said *"NO CAR reached in thirty-six taps of E over a full turn"* —
+which blames the hunt this wave had just widened into a disc.
+
+`e9ad7d48` makes the loop say it. `Stand-Up` taps `C`, the STANCE key, which
+answers crouch, prone and slide and nothing else; it now reads the mode it failed
+on and names a ragdoll for what it is, and the boarding leg's miss prints the
+mode and the session's `Ragdoll` row count. **Nothing is guessed at**: there is
+no input in this loop that requests a get-up, so the fix is the diagnosis.
+
+**And the (c′) evidence does not depend on a live frame.** The instrument's own
+fault is measured on a recording that HAS the rows — the wave's own 1 880-row
+session, where the four "NEVER FIRED" predicates match **2 / 1 / 4 / 21** rows —
+and the fix is verified by the dry run's new interior-row check (5 checks, 0
+failures). What is missing is a live session that reaches a car, and the reason
+it is missing is now in the log rather than in an auditor's guess.
+
+### audit: THE CLOSING NUMBERS
+
+| | |
+|---|---|
+| the audit | **12 commits**, `c9fad07a`..`e9ad7d48`, unpushed; the wave's nine untouched |
+| six new arms | `veh3b_gate` ×3, `vehicle_grade` ×1, `island_gate` ×1, `live_tuning` ×1; two existing arms re-aimed (the boost's dead time, the determinism arm's source ban) |
+| the mutation battery | **21 of 21 RED** — the wave's sixteen reproduced, five added (`N` the fourth defect, `O` a `.sin()` in `turbo_step`, `P` the contact filter, `Q` the component write, `R` `turbo_lag_s` at zero) |
+| the rigid-driveline sweep | **7 of 20** arms red with `crank_step` forced down its zero-inertia branch — two more than the wave's own table claimed |
+| battery (`battery3.sh -j 3`), LAST | **AGGREGATE over 396 binaries: 7598 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** (the wave's 7590/2, with its two closures verified as fixes with causes) |
+| PIE == shipping | `island_gate` **27 passed**; two cooks `partitioned_world` **12 passed** |
+| the vehicle phase at 64 cars | **0.4215 ms dev / 0.3662 ms release** re-measured (the wave's 0.4181 / 0.3598), budget **0.5** unmoved, **1.37×** headroom |
+| rustdoc COLD | **425** of a 450 ceiling |
+| the wasm leg | `cargo check --target wasm32-unknown-unknown -p inf-player` with `-D warnings` — **exit 0** |
+| clippy `--workspace --all-targets` with `-D warnings`, run LAST | **exit 0** |
+| `cargo fmt` per member | **49 packages, 0 unformatted**; `git diff --exit-code` clean after a real fmt |
+| CRLF | **0** over all 17 touched blobs |
+| schema / payload / levels / goldens | **v28 / 13 / 24 / 64**, all unmoved; no level re-cooked, none re-blessed |
+| `Cargo.lock` / `deny.toml` / new deps | untouched / untouched / none |
+| the real editor on the final tree | twice, **559 actors, streaming 52 / 52**; both sessions closed `still running: none` |
