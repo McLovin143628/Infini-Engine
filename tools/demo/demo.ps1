@@ -1398,8 +1398,29 @@ function Stand-Up([string]$why) {
         $cNow = $rowsNow[-1].Split(",")
         if ($cNow.Count -gt 11) { $mode = $cNow[5]; $state = $cNow[11] }
     }
+    # **A FALL THAT IS NOT FALLING IS A WEDGE** (VEH3b audit). The same session
+    # that ragdolled spent the TEN MINUTES before it in `FallControlled` with its
+    # position frozen to the digit -- 2 140 rows at (-1765.4930, 16.9137,
+    # 2143.5534), y moving 11 cm in ten minutes, `fall` then `fall_fast` -- after
+    # walking into something that lifted it 0.47 m off a `Grounded` run. Then it
+    # ragdolled and never got up. A loop that kept tapping keys at it for the
+    # rest of the session is a loop that could not see any of that.
+    $frozen = $false
+    if ($rowsNow.Count -ge 8) {
+        $tail = @($rowsNow[($rowsNow.Count - 8)..($rowsNow.Count - 1)] | ForEach-Object {
+                $q = $_ -split ","
+                "{0},{1},{2}" -f $q[2], $q[3], $q[4]
+            })
+        $frozen = (@($tail | Select-Object -Unique).Count -eq 1)
+    }
     if ($mode -eq "Ragdoll") {
         Say "STILL NOT STANDING ($why): the hero is RAGDOLLED (state '$state') and C is the stance key -- no input in this loop gets a body up, the engine's own get-up does, and it has not come. Every leg after this one is running against a body on the floor."
+    }
+    elseif ($frozen -and $mode -match "^Fall") {
+        Say "STILL NOT STANDING ($why): the hero is WEDGED -- mode '$mode', state '$state', and its position has not changed over the last eight samples. It is falling and not moving, which is geometry holding it; no key in this loop frees it and every leg after this one is aimed at a character that cannot walk."
+    }
+    elseif ($frozen) {
+        Say "STILL NOT STANDING ($why): mode '$mode', state '$state', and the position has not changed over the last eight samples -- the hero is stuck, not mid-animation"
     }
     else {
         Say "STILL NOT STANDING after four taps of C ($why): mode '$mode', state '$state' -- the frames below are of whatever stance the world is in"
