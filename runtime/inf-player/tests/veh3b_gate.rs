@@ -897,9 +897,68 @@ fn the_boost_spools_and_blows_off() {
         peak > 0.5,
         "the boost never got past {peak:.2} of its own peak at full throttle"
     );
+    // **THE DEAD TIME, MEASURED WHERE IT IS THE DEAD TIME** (`audit:` VEH3b).
+    //
+    // This used to be `dead`: the steps of the first second with no boost, and
+    // an assertion that there were at least eight of them, commented *"and
+    // `turbo_lag_s` is nine of them"*. It is not. Boost is also zero below
+    // `TURBO_THRESHOLD_FRAC` of the redline, which a standing start spends about
+    // a second under, so the count is the THRESHOLD and not the lag — measured,
+    // by forcing `turbo_lag_s` to zero inside `turbo_step`: the arm stayed GREEN
+    // and printed the same "60 steps of dead time".
+    //
+    // A dead time is the delay between asking and getting, so it is measured
+    // with the revs already up: drive onto boost, LIFT (the valve dumps and the
+    // dead time re-arms — the model's own documented behaviour), then open the
+    // throttle again and count the steps until the shaft answers.
+    let relag = |lag: f64| -> usize {
+        let mut rig = settled(Rig::sealed());
+        rig.tune(&[
+            ("turbo_boost_max", 0.6),
+            ("turbo_spool_s", 0.7),
+            ("turbo_lag_s", lag),
+        ]);
+        let full = VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        rig.drive(full, 240);
+        assert!(
+            rig.drivetrain().boost > 0.0,
+            "the fixture never got on boost, so there is no lift to re-arm"
+        );
+        rig.drive(VehicleControls::default(), 10);
+        assert_eq!(
+            rig.drivetrain().boost,
+            0.0,
+            "the blow-off did not empty the plenum in ten steps"
+        );
+        for i in 0..120 {
+            rig.drive(full, 1);
+            if rig.drivetrain().boost > 0.0 {
+                return i;
+            }
+        }
+        120
+    };
+    let lagged = relag(0.15);
+    let instant = relag(0.0);
+    println!("VEH3b TURBO: with the revs already up, a 0.15 s dead time cost {lagged} steps between the throttle and the boost, and no dead time cost {instant}");
     assert!(
         dead >= 8,
-        "the compressor began spooling after {dead} steps, and `turbo_lag_s` is nine of them"
+        "the compressor made no boost for {dead} steps of a standing start — the THRESHOLD, not the lag; see `relag` below for the dead time itself"
+    );
+    assert!(
+        lagged >= 8,
+        "a 0.15 s dead time is nine steps and the boost arrived after {lagged}"
+    );
+    assert!(
+        instant <= 1,
+        "with `turbo_lag_s` at zero the boost still took {instant} steps to appear, so this pair is not measuring the dead time"
+    );
+    assert!(
+        lagged > instant + 5,
+        "the dead time cost {lagged} steps and its absence {instant} — the same turbo twice"
     );
     assert!(
         rise > fast_rise + 5,
