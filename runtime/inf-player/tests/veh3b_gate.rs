@@ -612,7 +612,7 @@ fn the_limiter_cuts_and_restores() {
         "the crank fell {amp:.0} rpm between a cut and its restore, which is a plateau with a flag on it"
     );
     assert!(
-        period >= 1.0 && period < 60.0,
+        (1.0..60.0).contains(&period),
         "the limiter's mean period is {period:.1} steps"
     );
     assert!(
@@ -1218,7 +1218,10 @@ fn every_drivetrain_tunable_moves_the_world() {
     // turbo ones with the turbo switched on so the field has something to do.
     const TURBO: (&str, f64) = ("turbo_boost_max", 0.8);
     const NO_TC: (&str, f64) = ("traction_control_slip", 0.0);
-    let cases: [(&str, bool, &[(&str, f64)]); 13] = [
+    /// One case: the field's name, whether it needs the SPLIT surface, and the
+    /// tuning that exercises it.
+    type Case = (&'static str, bool, &'static [(&'static str, f64)]);
+    let cases: [Case; 13] = [
         (
             "flywheel_inertia_kgm2",
             false,
