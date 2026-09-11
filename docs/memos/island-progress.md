@@ -39531,38 +39531,50 @@ within 10 %"* — which an arm that asserts the defect is honest about and is no
 gains `stiffness × BUMP_STOP_RATE_MULT × (x − x_e)^3 / span^2`. A **cubic**, and
 a cubic for one reason: it is zero AND has zero slope at the engagement, so a
 strut crossing it at speed gains no step in force and no kink in its derivative
-and does not ring. `BUMP_STOP_RATE_MULT` is 12, which makes the marginal rate at
-full travel **36×** the main one. The clamp at `travel_m` stays as the geometric
+and does not ring. `BUMP_STOP_RATE_MULT` is 6, which makes the marginal rate at
+full travel **18×** the main one. The clamp at `travel_m` stays as the geometric
 limit, so the stop does all of its work inside the last fifteen per cent.
 Arithmetic only — portable by construction, one Ring-0 function, both hosts.
-Measured on the Ring-0 tuning: **a millimetre at the stop costs 721 N and one in
-the middle 20 N**, and the strut carries 14 000 N at full travel against a bare
+Measured on the Ring-0 tuning: **a millimetre at the stop costs 370 N and one in
+the middle 20 N**, and the strut carries 9 500 N at full travel against a bare
 spring's 5 000.
 
-**THE NINE WHEELED ROWS.** Each rate is now `mass / 4 / (travel × 0.35)` and each
+**And twelve was too stiff, measured rather than tasted.** At 12 a wheel deep
+past the engagement in one step is handed a force big enough to throw the car,
+and on the island it did: `wpn2e_gate::a_dispatched_unit_reaches_a_warm_file_on_
+the_island` put **two of five responders at y = -11 799 m and y = -16 570 m**,
+falling at over a hundred metres a second with no wheel in contact, and the
+nearest unit got to **169 m of a 12 m radius**. Isolated by mutation: 0 passes,
+12 fails, 6 passes, and the springs make no difference to it at all.
+
+**THE NINE WHEELED ROWS.** Each rate is now `mass / 4 / (travel × 0.45)` and each
 damper moves with the square root of the rate, so the damping ratio is the one
 the row was authored with; nothing else in any row moved. They stood on **54–88 %**
-of their own travel and now stand on **35 %**, every one:
+of their own travel and now stand on **45 %**, every one. A third was tried
+first and is the textbook fraction; what it costs is DROOP -- the travel a wheel
+reaches DOWN with is exactly the static compression it settled out of -- and at
+35 % a parked island car stood on 1 of its 4 wheels. The ruling's band is
+30-45 %, so the rates sit at its gentle end:
 
 | row | k was -> now | c was -> now | stood on -> stands on |
 |---|---|---|---|
-| sedan | 21 000 -> 33 000 | 3 200 -> 4 000 | 55 % -> 35 % |
-| truck | 26 000 -> 65 500 | 3 800 -> 6 050 | 88 % -> 35 % |
-| sports | 32 000 -> 60 000 | 4 200 -> 5 750 | 66 % -> 35 % |
-| suv | 34 000 -> 52 500 | 5 200 -> 6 450 | 54 % -> 35 % |
-| van | 42 000 -> 77 000 | 6 800 -> 9 200 | 64 % -> 35 % |
-| cruiser | 26 000 -> 41 000 | 3 900 -> 4 900 | 55 % -> 35 % |
-| ambulance | 38 000 -> 67 000 | 6 200 -> 8 250 | 62 % -> 35 % |
-| swat | 48 000 -> 92 500 | 7 600 -> 10 550 | 67 % -> 35 % |
-| engine | 105 000 -> 258 500 | 16 000 -> 25 100 | 86 % -> 35 % |
+| sedan | 21 000 -> 26 000 | 3 200 -> 3 550 | 55 % -> 45 % |
+| truck | 26 000 -> 51 000 | 3 800 -> 5 300 | 88 % -> 45 % |
+| sports | 32 000 -> 47 000 | 4 200 -> 5 100 | 66 % -> 45 % |
+| suv | 34 000 -> 41 000 | 5 200 -> 5 700 | 54 % -> 45 % |
+| van | 42 000 -> 60 000 | 6 800 -> 8 150 | 64 % -> 45 % |
+| cruiser | 26 000 -> 32 000 | 3 900 -> 4 350 | 55 % -> 45 % |
+| ambulance | 38 000 -> 52 000 | 6 200 -> 7 250 | 62 % -> 45 % |
+| swat | 48 000 -> 72 000 | 7 600 -> 9 300 | 67 % -> 45 % |
+| engine | 105 000 -> 201 000 | 16 000 -> 22 150 | 86 % -> 45 % |
 
 **CLAUSE 5, ON THE ROWS THAT SHIP.** The sedan's and the truck's own cars,
 nothing stiffened:
 
 | row | braking | the doc | apart | launching | the doc | apart |
 |---|---|---|---|---|---|---|
-| sedan | 2 216 N @ −10.55 m/s² | 2 342 N | **5.3 %** | 926 N @ 3.91 | 867 N | **6.8 %** |
-| truck | 2 968 N @ −6.37 m/s² | 3 034 N | **2.2 %** | 2 237 N @ 4.62 | 2 203 N | **1.6 %** |
+| sedan | 2 037 N @ −10.37 m/s² | 2 197 N | **7.3 %** | 900 N @ 3.90 | 827 N | **8.8 %** |
+| truck | 2 852 N @ −6.34 m/s² | 2 915 N | **2.2 %** | 2 177 N @ 4.60 | 2 114 N | **3.0 %** |
 
 with **0 of 150** braked steps at `travel_m` on either. The transfer is read as
 HALF THE FRONT-TO-REAR DIFFERENCE, which is what the doc's formula says it is —
@@ -39571,20 +39583,21 @@ the sedan's stop that is 284 N (2.4 % of its weight) the formula has no term for
 
 And the arm that asserted the defect is **inverted**: the UNSTIFFENED Ring-0
 fixture was 118.8 % from the formula with the sign inverted and 90 of 90 braked
-steps pinned; it now reads **6.3 % apart and 0 of 90 pinned**.
+steps pinned; it now reads **8.0 % apart and 0 of 90 pinned**. And the stop is
+not decorative on a road car: the shipped sedan's hardest stop reaches **96 % of
+its travel** and the stop is what holds it out of the clamp.
 
 **WHICH HALF CLOSES WHICH.** Measured, and they are not interchangeable: put the
 sedan back on 21 000 N/m and the shipped-rows arm reds at its static-fraction
 guard before it ever brakes, while neither row reaches the stop on its new rate
-(the sedan's deepest braked compression is 69 % of travel against an 85 %
-engagement). Take the stop out and the bump-stop arm reds while the shipped-rows
+(the sedan reaches the stop only on its hardest stop). Take the stop out and the bump-stop arm reds while the shipped-rows
 arm stays green. The re-spring keeps a road car off its stops; the stop is what
 makes the model right the day a kerb or a landing puts it there anyway.
 
 **RE-BLESSED WITH CAUSE.** The feel table at ±5 % of the new measurement with
-both earlier figures beside every row (sports 3.98 / 3.75 / **4.28 s**, sedan
-7.37 / 7.67 / **7.62**, suv 7.40 / 7.30 / **7.22**, van 17.43 / 17.07 /
-**16.78**, truck 6.75 / 6.65 / **6.50**). The sentinel's reference re-scoped —
+both earlier figures beside every row (sports 3.98 / 3.75 / **4.32 s**, sedan
+7.37 / 7.67 / **7.65**, suv 7.40 / 7.30 / **7.25**, van 17.43 / 17.07 /
+**16.88**, truck 6.75 / 6.65 / **6.53**). The sentinel's reference re-scoped —
 `flywheel_inertia_kgm2 = 0` restores the pre-VEH3b DRIVETRAIN and cannot restore
 a spring it never touched, so the reference is *the pre-VEH3b drivetrain on
 today's springs* with VEH2a's pair printed beside it. `island_gate` **28 passed**
@@ -39593,7 +39606,7 @@ spring, and nothing in the tree pins a committed trace hash). `veh3a_gate` 21 an
 `wpn2b_gate` 27 — no ride-height arm moved, because the seat is still the chassis
 roof and only the heights under it changed. And the nose-dive pair re-measured
 where a player sees it, on the shipped sedan: **115.4 mm of dive and 14.1 mm of
-squat**, deepest front compression **203.4 mm of 250 (81 %)**.
+squat**, deepest front compression **240.0 mm of 250 (96 %)**.
 
 **THE BUDGET.** 64 cars in release: the wave 0.3598 ms, this audit before the
 stop 0.3662, **with the stop 0.3589 ms (5.61 µs a car)** — inside the spread of a
@@ -39636,11 +39649,11 @@ the chassis ROOF as well, and both are one wave's work.
 
 | | |
 |---|---|
-| the audit | **12 commits**, `c9fad07a`..`e9ad7d48`, unpushed; the wave's nine untouched |
+| the audit | **21 commits**, `c9fad07a`..`HEAD`, unpushed; the wave's nine untouched |
 | six new arms | `veh3b_gate` ×3, `vehicle_grade` ×1, `island_gate` ×1, `live_tuning` ×1; two existing arms re-aimed (the boost's dead time, the determinism arm's source ban) |
 | the mutation battery | **21 of 21 RED** — the wave's sixteen reproduced, five added (`N` the fourth defect, `O` a `.sin()` in `turbo_step`, `P` the contact filter, `Q` the component write, `R` `turbo_lag_s` at zero) |
 | the rigid-driveline sweep | **7 of 20** arms red with `crank_step` forced down its zero-inertia branch — two more than the wave's own table claimed |
-| battery (`battery3.sh -j 3`), LAST | **AGGREGATE over 396 binaries: 7598 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** (the wave's 7590/2, with its two closures verified as fixes with causes) |
+| battery (`battery3.sh -j 3`), LAST | **AGGREGATE over 396 binaries: 7599 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** |
 | PIE == shipping | `island_gate` **28 passed** (re-run after the springs); two cooks `partitioned_world` **12 passed** |
 | the vehicle phase at 64 cars | **0.3589 ms release** with the bump stop (5.61 µs a car) against the wave's 0.3598 and this audit's own pre-stop 0.3662; budget **0.5** unmoved, **1.39×** headroom |
 | rustdoc COLD | **425** of a 450 ceiling |
