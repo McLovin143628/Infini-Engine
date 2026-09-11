@@ -1399,6 +1399,421 @@ impl VehicleTuning {
 /// chunk or a building module.
 const VEHICLE_PART_SALT: u128 = 0x7645_4831_4143_4152_424f_4459_5041_5254;
 
+// -- the modular body (wave VEH3c) ------------------------------------------
+
+/// **Which side of a car a part is on** (wave VEH3c).
+///
+/// Three values and not two: a bonnet and a boot lid are on neither side, and a
+/// [`PartSide::Centre`] that had to be spelled as "left, by convention" is the
+/// kind of lie a boarding wave would then have to read past when it asks which
+/// door to walk to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PartSide {
+    /// `-X` of the chassis.
+    Left,
+    /// `+X` of the chassis.
+    Right,
+    /// On the centreline — a bonnet, a boot, a bumper, a windscreen.
+    Centre,
+}
+
+impl PartSide {
+    /// A stable short name, for a gate trace and a diagnostic.
+    pub fn name(self) -> &'static str {
+        match self {
+            PartSide::Left => "left",
+            PartSide::Right => "right",
+            PartSide::Centre => "centre",
+        }
+    }
+
+    /// The side a part at this local `x` is on, in fractions of the chassis
+    /// half-width — the rule the WORLD answers with, since a shipped player has
+    /// no parts table.
+    pub fn of(centre_x: f64) -> Self {
+        if centre_x <= -PART_SIDE_FRAC {
+            PartSide::Left
+        } else if centre_x >= PART_SIDE_FRAC {
+            PartSide::Right
+        } else {
+            PartSide::Centre
+        }
+    }
+}
+
+/// How far off the centreline a part must sit to be a SIDE part, in fractions
+/// of the chassis half-width.
+///
+/// Half. A sedan's doors are drawn at `x = ±0.92` and its glass at `±0.87`; a
+/// bonnet, a boot and a bumper are all at `0`. Nothing this engine authors sits
+/// between, so the threshold is the middle of a gap rather than a tuned edge.
+pub const PART_SIDE_FRAC: f64 = 0.5;
+
+/// **A part's hinge** (wave VEH3c) — the axis it swings about, where that axis
+/// passes through the chassis, and how far it opens.
+///
+/// # Why it is DERIVED from the part rather than authored beside it
+///
+/// A door hinges at its forward edge about the vertical; a bonnet hinges at its
+/// rear edge about the lateral; a boot lid hinges at its forward edge about the
+/// lateral. All three are a function of the part's own drawn box and which kind
+/// of part it is, and the wave that has to read them back is wave VEH3d, which
+/// will be holding a level and not a table. So [`Hinge::of`] answers from the
+/// geometry, the parts table declares the same fact, and
+/// `every_authored_part_is_recognised_as_the_kind_it_declares` holds the two
+/// together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hinge {
+    /// The hinge axis in the chassis frame, unit.
+    pub axis: Vec3d,
+    /// Where the axis passes through, **in fractions of the chassis
+    /// half-extents** — the same units [`BodyPart::centre`] is in.
+    pub at: Vec3d,
+    /// How far the part swings, degrees, signed about [`axis`](Self::axis).
+    /// The closed limit is always `0`.
+    pub open_deg: f64,
+}
+
+/// How far a car door swings open, degrees.
+pub const DOOR_OPEN_DEG: f64 = 66.0;
+/// How far a bonnet lifts, degrees.
+pub const HOOD_OPEN_DEG: f64 = 52.0;
+/// How far a boot lid lifts, degrees.
+pub const TRUNK_OPEN_DEG: f64 = 58.0;
+
+/// **What one drawn part of a body IS** (wave VEH3c) — the vocabulary the
+/// damage model reads.
+///
+/// # It costs NOTHING on the wire, and that is the whole point
+///
+/// [`BodyPart`] is a `&'static` table read at rig-construction time; it is not
+/// `Serialize` and never has been. So a `kind` field is free: no scene-schema
+/// window, no `ScenePayload` bump, no downgrade bless, no level re-cooked for
+/// the field itself. VEH3a's window is spent and this wave does not reopen it.
+///
+/// # The collider-shape space stays EXHAUSTED
+///
+/// [`PartKind`] — the *recogniser's* vocabulary — is `Thruster | Rotor` and the
+/// three authored collider shapes are spoken for (sphere = wheel, box =
+/// thruster, capsule = rotor). This enum is a different question with a
+/// different answer: a door, a bonnet and a pane of glass are recognised by
+/// **name and geometry**, not by a collider, so no fourth shape is minted and
+/// `rig_of` is untouched. A latched part carries no `RigidBody3D` and no
+/// `Collider3D` at all, which is also why a thousand parked cars pay nothing
+/// for having doors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BodyPartKind {
+    /// The body itself — a sill, a greenhouse, a bed side, a roof rail. It
+    /// dents and it never comes off.
+    Panel,
+    /// A door, on its own hinge.
+    Door { hinge: Hinge, side: PartSide },
+    /// A bonnet, hinged at its rear edge.
+    Hood { hinge: Hinge },
+    /// A boot lid or a tailgate, hinged at its forward edge.
+    Trunk { hinge: Hinge },
+    /// A bumper — no hinge, and the first thing a crash reaches.
+    Bumper,
+    /// A window pane. It does not dent; it shatters.
+    Glass,
+}
+
+/// **A door's hinge**: about the VERTICAL, at the door's own forward edge.
+///
+/// `const` because the parts tables are `const` items, and a `const fn` may not
+/// compare two floats — so which way the door swings is a parameter rather than
+/// a branch on `centre.x`, and [`Hinge::of`] is the non-`const` twin that makes
+/// the branch. The two are held together by
+/// `every_authored_part_is_recognised_as_the_kind_it_declares`.
+pub const fn door_hinge(centre: Vec3d, half: Vec3d, open_deg: f64) -> Hinge {
+    Hinge {
+        axis: Vec3d::new(0.0, 1.0, 0.0),
+        at: Vec3d::new(centre.x, centre.y, centre.z + half.z),
+        open_deg,
+    }
+}
+
+/// **A bonnet's hinge**: about the LATERAL, at its REAR edge, lifting at the
+/// nose — which is what every road car built since the fifties does.
+pub const fn hood_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
+    Hinge {
+        axis: Vec3d::new(1.0, 0.0, 0.0),
+        at: Vec3d::new(centre.x, centre.y, centre.z - half.z),
+        open_deg: HOOD_OPEN_DEG,
+    }
+}
+
+/// **A boot lid's or a tailgate's hinge**: the same rule as [`hood_hinge`] with
+/// the sign of `z` turned round, so it pivots at its forward edge and lifts at
+/// the tail.
+pub const fn trunk_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
+    Hinge {
+        axis: Vec3d::new(1.0, 0.0, 0.0),
+        at: Vec3d::new(centre.x, centre.y, centre.z + half.z),
+        open_deg: -TRUNK_OPEN_DEG,
+    }
+}
+
+impl Hinge {
+    /// The hinge a part of this wire `kind` with this drawn box would have —
+    /// the WORLD-side twin of the three `const fn` above.
+    ///
+    /// `centre` and `half` are the part's own, in fractions of the chassis
+    /// half-extents; the pivot comes out in the same units. A door swings out
+    /// of the side it is on: the near-side door opens anticlockwise seen from
+    /// above, the off-side one clockwise.
+    pub fn of(kind: u8, centre: Vec3d, half: Vec3d) -> Option<Hinge> {
+        match kind {
+            KIND_DOOR => {
+                let sign = if centre.x < 0.0 { 1.0 } else { -1.0 };
+                Some(door_hinge(centre, half, sign * DOOR_OPEN_DEG))
+            }
+            KIND_HOOD => Some(hood_hinge(centre, half)),
+            KIND_TRUNK => Some(trunk_hinge(centre, half)),
+            _ => None,
+        }
+    }
+}
+
+/// **What one drawn part weighs**, kilogrammes — its own box at its kind's own
+/// density (wave VEH3c).
+///
+/// `half` is the part's, in fractions of the chassis half-extents; `chassis` is
+/// the chassis half-extents in metres. The area is the DRAWN box's largest
+/// FACE, because a body panel is a sheet and not a solid — see
+/// [`BodyPartKind::areal_kg_m2`] for the 164 kg bonnet that ruling cost.
+///
+/// It is the number the shed body is given, and the WPN2d law's subject: *size
+/// a blast against the LIGHTEST body in its radius*, and a door is light.
+pub fn part_mass_kg(kind: BodyPartKind, half: Vec3d, chassis: Vec3d) -> f64 {
+    let x = (2.0 * half.x * chassis.x).abs();
+    let y = (2.0 * half.y * chassis.y).abs();
+    let z = (2.0 * half.z * chassis.z).abs();
+    // The largest face: a panel is a sheet, and the sheet is the biggest side
+    // of the box that draws it.
+    let area = (x * y).max(y * z).max(z * x);
+    (kind.areal_kg_m2() * area).max(0.0)
+}
+
+/// [`BodyPartKind::as_u8`] for a [`BodyPartKind::Panel`].
+pub const KIND_PANEL: u8 = 0;
+/// The same, for a [`BodyPartKind::Door`].
+pub const KIND_DOOR: u8 = 1;
+/// The same, for a [`BodyPartKind::Hood`].
+pub const KIND_HOOD: u8 = 2;
+/// The same, for a [`BodyPartKind::Trunk`].
+pub const KIND_TRUNK: u8 = 3;
+/// The same, for a [`BodyPartKind::Bumper`].
+pub const KIND_BUMPER: u8 = 4;
+/// The same, for a [`BodyPartKind::Glass`].
+pub const KIND_GLASS: u8 = 5;
+
+impl BodyPartKind {
+    /// The frozen wire number this kind folds as — **append only**, exactly as
+    /// [`crate::dispatch::IncidentKind`]'s own is, because it reaches the
+    /// determinism trace.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            BodyPartKind::Panel => KIND_PANEL,
+            BodyPartKind::Door { .. } => KIND_DOOR,
+            BodyPartKind::Hood { .. } => KIND_HOOD,
+            BodyPartKind::Trunk { .. } => KIND_TRUNK,
+            BodyPartKind::Bumper => KIND_BUMPER,
+            BodyPartKind::Glass => KIND_GLASS,
+        }
+    }
+
+    /// A stable short name, for a gate trace and a diagnostic.
+    pub fn name(self) -> &'static str {
+        match self {
+            BodyPartKind::Panel => "panel",
+            BodyPartKind::Door { .. } => "door",
+            BodyPartKind::Hood { .. } => "hood",
+            BodyPartKind::Trunk { .. } => "trunk",
+            BodyPartKind::Bumper => "bumper",
+            BodyPartKind::Glass => "glass",
+        }
+    }
+
+    /// This part's hinge, or `None` for the three kinds that have none.
+    pub fn hinge(self) -> Option<Hinge> {
+        match self {
+            BodyPartKind::Door { hinge, .. }
+            | BodyPartKind::Hood { hinge }
+            | BodyPartKind::Trunk { hinge } => Some(hinge),
+            _ => None,
+        }
+    }
+
+    /// Which side of the car this part is on.
+    pub fn side(self) -> PartSide {
+        match self {
+            BodyPartKind::Door { side, .. } => side,
+            _ => PartSide::Centre,
+        }
+    }
+
+    /// **Whether this kind can come off at all.** A panel is the body: it
+    /// dents, it is written off, and it stays bolted to what it is part of.
+    pub fn sheds(self) -> bool {
+        !matches!(self, BodyPartKind::Panel)
+    }
+
+    /// **Whether this kind DENTS.** Glass does not bend; it breaks.
+    pub fn dents(self) -> bool {
+        !matches!(self, BodyPartKind::Glass)
+    }
+
+    /// **The share of a crash's impulse that flows through this part's own
+    /// mounts**, `[0, 1]`.
+    ///
+    /// # It is a LOAD PATH and not a mass ratio, and that distinction is the
+    /// whole model
+    ///
+    /// The first cut sized a part's impulse as `J_chassis * m_part / m_chassis`
+    /// — the part's own inertial reaction — which is arithmetically correct and
+    /// answers the wrong question. An 8 kg bumper on a 1 200 kg car takes 0.7 %
+    /// of 19 200 N.s, i.e. **128 N.s** against a 4 500 N.s mount, so on that
+    /// model a car could be driven into a wall at any speed at all and keep
+    /// every panel. A bumper does not come off because of its own momentum; it
+    /// comes off because it is *the thing that hit the wall*, and the whole
+    /// crash goes through it.
+    ///
+    /// So the share is a LOAD PATH: a bumper is the impact structure and takes
+    /// essentially all of it, a door struck side-on takes half, a bonnet and a
+    /// boot lid are behind the bumper and take a fifth, and a pane a fraction
+    /// again. Multiplied by [`face`](Self::face), which is what makes a REAR
+    /// bumper survive a frontal crash.
+    pub fn impact_share(self) -> f64 {
+        match self {
+            BodyPartKind::Panel => 0.0,
+            BodyPartKind::Door { .. } => 0.50,
+            BodyPartKind::Hood { .. } => 0.20,
+            BodyPartKind::Trunk { .. } => 0.20,
+            BodyPartKind::Bumper => 1.00,
+            BodyPartKind::Glass => 0.14,
+        }
+    }
+
+    /// **What a square metre of this part weighs**, kg/m^2.
+    ///
+    /// # A panel is a SHELL, and a volume density gets that wrong by ten times
+    ///
+    /// The first cut multiplied a kind's density by its drawn box's VOLUME, and
+    /// a bonnet came out at **164 kg** — because the box that draws a bonnet is
+    /// 1.9 m x 0.15 m x 1.4 m of solid, and a bonnet is a 1.5 mm skin on a
+    /// frame. So the mass is the part's largest FACE times an areal density,
+    /// which is what a sheet-metal panel actually is, and the numbers below are
+    /// the ones a workshop manual gives: a door with its glass and its
+    /// mechanism, a single-skin bonnet, a bumper that is a beam inside a cover,
+    /// and laminated screen glass at five millimetres.
+    pub fn areal_kg_m2(self) -> f64 {
+        match self {
+            // Never sheds, so it never needs a mass.
+            BodyPartKind::Panel => 0.0,
+            BodyPartKind::Door { .. } => 55.0,
+            BodyPartKind::Hood { .. } | BodyPartKind::Trunk { .. } => 8.0,
+            BodyPartKind::Bumper => 20.0,
+            BodyPartKind::Glass => 12.5,
+        }
+    }
+
+    /// **How much of a blow arriving along `impact_dir` this part is in the way
+    /// of**, `[0, 1]`.
+    ///
+    /// `impact_dir` is the direction the blow travels **in the chassis frame**,
+    /// so a car that ran into a wall nose-first was travelling `+Z` and its blow
+    /// arrives along `+Z` — which is where its bonnet and its front bumper are.
+    /// The answer is the cosine between that and the part's own offset from the
+    /// chassis centre, floored at zero: a rear bumper is not in the way of a
+    /// frontal crash and answers `0`.
+    pub fn face(centre: Vec3d, impact_dir: Vec3d) -> f64 {
+        let l = (centre.x * centre.x + centre.y * centre.y + centre.z * centre.z).sqrt();
+        let d = (impact_dir.x * impact_dir.x
+            + impact_dir.y * impact_dir.y
+            + impact_dir.z * impact_dir.z)
+            .sqrt();
+        if l <= 1e-9 || d <= 1e-9 {
+            return 0.0;
+        }
+        ((centre.x * impact_dir.x + centre.y * impact_dir.y + centre.z * impact_dir.z) / (l * d))
+            .clamp(0.0, 1.0)
+    }
+
+    /// **The kind a part of this NAME and this drawn box is** — the rule the
+    /// WORLD answers with.
+    ///
+    /// # Why the name and not the table
+    ///
+    /// `inf_ecs::dispatch::unit_kind_of`'s ruling, one system over and for its
+    /// reason verbatim: *the only channel that survives being written to an
+    /// `.inf_lvl` and opened by a shipped player*. A cooked level carries an
+    /// entity's name and its transform; it does not carry a `&'static
+    /// BodyPart` table, and a shipped player has no `VehicleDef` to look one up
+    /// in. So the naming convention below IS the schema, at zero bytes:
+    ///
+    /// | name begins with | kind |
+    /// |---|---|
+    /// | `door` | [`Door`](BodyPartKind::Door), side from its own `x` |
+    /// | `hood` or `bonnet` | [`Hood`](BodyPartKind::Hood) |
+    /// | `trunk`, `boot` or `tailgate` | [`Trunk`](BodyPartKind::Trunk) |
+    /// | `bumper` | [`Bumper`](BodyPartKind::Bumper) |
+    /// | `glass` | [`Glass`](BodyPartKind::Glass) |
+    /// | anything else | [`Panel`](BodyPartKind::Panel) |
+    ///
+    /// The parts tables declare the same fact in their own
+    /// [`BodyPart::kind`] field, and
+    /// `every_authored_part_is_recognised_as_the_kind_it_declares` is what stops
+    /// the two ever disagreeing — the
+    /// `every_livery_is_recognised_as_the_service_it_declares` precedent
+    /// exactly.
+    pub fn of(name: &str, centre: Vec3d, half: Vec3d) -> BodyPartKind {
+        let wire = if name.starts_with("door") {
+            KIND_DOOR
+        } else if name.starts_with("hood") || name.starts_with("bonnet") {
+            KIND_HOOD
+        } else if name.starts_with("trunk")
+            || name.starts_with("boot")
+            || name.starts_with("tailgate")
+        {
+            KIND_TRUNK
+        } else if name.starts_with("bumper") {
+            KIND_BUMPER
+        } else if name.starts_with("glass") {
+            KIND_GLASS
+        } else {
+            KIND_PANEL
+        };
+        match wire {
+            KIND_DOOR => BodyPartKind::Door {
+                hinge: Hinge::of(KIND_DOOR, centre, half).unwrap_or(Hinge {
+                    axis: Vec3d::new(0.0, 1.0, 0.0),
+                    at: centre,
+                    open_deg: DOOR_OPEN_DEG,
+                }),
+                side: PartSide::of(centre.x),
+            },
+            KIND_HOOD => BodyPartKind::Hood {
+                hinge: Hinge::of(KIND_HOOD, centre, half).unwrap_or(Hinge {
+                    axis: Vec3d::new(1.0, 0.0, 0.0),
+                    at: centre,
+                    open_deg: HOOD_OPEN_DEG,
+                }),
+            },
+            KIND_TRUNK => BodyPartKind::Trunk {
+                hinge: Hinge::of(KIND_TRUNK, centre, half).unwrap_or(Hinge {
+                    axis: Vec3d::new(1.0, 0.0, 0.0),
+                    at: centre,
+                    open_deg: -TRUNK_OPEN_DEG,
+                }),
+            },
+            KIND_BUMPER => BodyPartKind::Bumper,
+            KIND_GLASS => BodyPartKind::Glass,
+            _ => BodyPartKind::Panel,
+        }
+    }
+}
+
 /// One drawn part of a vehicle's body, **in fractions of the chassis
 /// half-extents**.
 ///
@@ -1425,6 +1840,14 @@ pub struct BodyPart {
     pub half: Vec3d,
     /// Which built-in primitive draws it.
     pub primitive: crate::components::Primitive,
+    /// **What this part IS** (wave VEH3c) -- a panel, a door, a bonnet, a boot
+    /// lid, a bumper or a pane of glass.
+    ///
+    /// The AUTHORING side of a fact the world answers for itself through
+    /// [`BodyPartKind::of`]; the two are held together by
+    /// `every_authored_part_is_recognised_as_the_kind_it_declares`. Free on the
+    /// wire: this table is `&'static` and has never been `Serialize`.
+    pub kind: BodyPartKind,
 }
 
 /// **What one part of a vehicle is painted, when it is not painted the
@@ -1571,6 +1994,7 @@ const LAUNCH_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.42, 0.0),
         half: Vec3d::new(0.88, 0.58, 0.92),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The topsides — full beam and full length, and where the gunwale is.
     BodyPart {
@@ -1578,6 +2002,7 @@ const LAUNCH_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.14, -0.05),
         half: Vec3d::new(1.00, 0.22, 0.95),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The wheelhouse, forward of amidships where a launch's is.
     BodyPart {
@@ -1585,6 +2010,7 @@ const LAUNCH_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.64, 0.18),
         half: Vec3d::new(0.60, 0.36, 0.42),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The bow, narrower and higher — the flare that keeps water off the deck.
     BodyPart {
@@ -1592,6 +2018,7 @@ const LAUNCH_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.10, 0.82),
         half: Vec3d::new(0.56, 0.36, 0.18),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
 ];
 
@@ -1613,30 +2040,35 @@ const ROTORCRAFT_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.02, 0.42),
         half: Vec3d::new(1.00, 0.84, 0.58),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "boom",
         centre: Vec3d::new(0.0, 0.30, -0.57),
         half: Vec3d::new(0.20, 0.20, 0.43),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "fin",
         centre: Vec3d::new(0.0, 0.60, -0.80),
         half: Vec3d::new(0.07, 0.40, 0.14),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "skid_left",
         centre: Vec3d::new(-0.62, -0.95, 0.05),
         half: Vec3d::new(0.07, 0.05, 0.70),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "skid_right",
         centre: Vec3d::new(0.62, -0.95, 0.05),
         half: Vec3d::new(0.07, 0.05, 0.70),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
 ];
 
@@ -1715,6 +2147,7 @@ const SEDAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.5, 0.0),
         half: Vec3d::new(1.0, 0.5, 1.0),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The greenhouse: narrower, shorter, set back from the nose.
     BodyPart {
@@ -1722,6 +2155,7 @@ const SEDAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.5, -0.06),
         half: Vec3d::new(0.86, 0.5, 0.42),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The bonnet, low and forward of the screen. It meets the lower body at
     // `y = 0` rather than floating above it — a gap between two boxes is a slot
@@ -1731,6 +2165,9 @@ const SEDAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.15, 0.62),
         half: Vec3d::new(0.94, 0.15, 0.36),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Hood {
+            hinge: hood_hinge(Vec3d::new(0.0, 0.15, 0.62), Vec3d::new(0.94, 0.15, 0.36)),
+        },
     },
     // The boot lid, a little higher than the bonnet — which is most of what
     // reads as "saloon" rather than "estate" from behind.
@@ -1739,6 +2176,118 @@ const SEDAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.18, -0.72),
         half: Vec3d::new(0.94, 0.18, 0.26),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Trunk {
+            hinge: trunk_hinge(Vec3d::new(0.0, 0.18, -0.72), Vec3d::new(0.94, 0.18, 0.26)),
+        },
+    },
+    // **The four doors** (wave VEH3c). Proud of the lower body's flank by
+    // three per cent of its half-width, which is a door skin's own
+    // thickness on a real car and is what makes the shut line visible at
+    // forty metres. The hinge is DERIVED from this box by `door_hinge`,
+    // so a family that moves a door moves its hinge with it.
+    BodyPart {
+        name: "door_fl",
+        centre: Vec3d::new(-0.955, -0.4, 0.3),
+        half: Vec3d::new(0.045, 0.36, 0.26),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, -0.4, 0.3),
+                Vec3d::new(0.045, 0.36, 0.26),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_fr",
+        centre: Vec3d::new(0.955, -0.4, 0.3),
+        half: Vec3d::new(0.045, 0.36, 0.26),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, -0.4, 0.3),
+                Vec3d::new(0.045, 0.36, 0.26),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    BodyPart {
+        name: "door_rl",
+        centre: Vec3d::new(-0.955, -0.4, -0.22),
+        half: Vec3d::new(0.045, 0.34, 0.22),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, -0.4, -0.22),
+                Vec3d::new(0.045, 0.34, 0.22),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_rr",
+        centre: Vec3d::new(0.955, -0.4, -0.22),
+        half: Vec3d::new(0.045, 0.34, 0.22),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, -0.4, -0.22),
+                Vec3d::new(0.045, 0.34, 0.22),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    // **The bumpers**, standing proud of the nose and the tail. They are
+    // the impact structure -- `BodyPartKind::impact_share` gives them all
+    // of a crash -- so a car that meets a wall loses these first.
+    BodyPart {
+        name: "bumper_front",
+        centre: Vec3d::new(0.0, -0.42, 0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "bumper_rear",
+        centre: Vec3d::new(0.0, -0.42, -0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    // **The glasshouse**, four panes straddling the greenhouse's own
+    // faces. Each is a separate entity because a pane that shatters has
+    // to be able to go while the roof stays.
+    BodyPart {
+        name: "glass_windscreen",
+        centre: Vec3d::new(0.0, 0.52, 0.35),
+        half: Vec3d::new(0.80, 0.34, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_rear",
+        centre: Vec3d::new(0.0, 0.52, -0.46),
+        half: Vec3d::new(0.80, 0.30, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_l",
+        centre: Vec3d::new(-0.88, 0.52, -0.06),
+        half: Vec3d::new(0.04, 0.32, 0.38),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_r",
+        centre: Vec3d::new(0.88, 0.52, -0.06),
+        half: Vec3d::new(0.04, 0.32, 0.38),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
     },
 ];
 
@@ -1749,6 +2298,7 @@ const TRUCK_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.6, 0.0),
         half: Vec3d::new(1.0, 0.4, 1.0),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // A tall cab over the front axle.
     BodyPart {
@@ -1756,6 +2306,7 @@ const TRUCK_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.4, 0.5),
         half: Vec3d::new(0.94, 0.6, 0.42),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // The bed's floor and its two sides — the open volume is what makes it a
     // pickup rather than a van.
@@ -1764,24 +2315,107 @@ const TRUCK_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.1, -0.5),
         half: Vec3d::new(0.96, 0.1, 0.5),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "bed_left",
         centre: Vec3d::new(-0.88, 0.15, -0.5),
         half: Vec3d::new(0.09, 0.35, 0.5),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "bed_right",
         centre: Vec3d::new(0.88, 0.15, -0.5),
         half: Vec3d::new(0.09, 0.35, 0.5),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "headboard",
         centre: Vec3d::new(0.0, 0.2, 0.02),
         half: Vec3d::new(0.94, 0.4, 0.06),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
+    },
+    BodyPart {
+        name: "door_l",
+        centre: Vec3d::new(-0.955, 0.05, 0.5),
+        half: Vec3d::new(0.045, 0.42, 0.3),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, 0.05, 0.5),
+                Vec3d::new(0.045, 0.42, 0.3),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_r",
+        centre: Vec3d::new(0.955, 0.05, 0.5),
+        half: Vec3d::new(0.045, 0.42, 0.3),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, 0.05, 0.5),
+                Vec3d::new(0.045, 0.42, 0.3),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    BodyPart {
+        name: "tailgate",
+        centre: Vec3d::new(0.0, 0.15, -0.97),
+        half: Vec3d::new(0.92, 0.3, 0.03),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Trunk {
+            hinge: trunk_hinge(Vec3d::new(0.0, 0.15, -0.97), Vec3d::new(0.92, 0.3, 0.03)),
+        },
+    },
+    BodyPart {
+        name: "bumper_front",
+        centre: Vec3d::new(0.0, -0.72, 0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "bumper_rear",
+        centre: Vec3d::new(0.0, -0.72, -0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "glass_windscreen",
+        centre: Vec3d::new(0.0, 0.45, 0.90),
+        half: Vec3d::new(0.86, 0.42, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_rear",
+        centre: Vec3d::new(0.0, 0.45, 0.10),
+        half: Vec3d::new(0.86, 0.40, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_l",
+        centre: Vec3d::new(-0.90, 0.45, 0.50),
+        half: Vec3d::new(0.04, 0.40, 0.32),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_r",
+        centre: Vec3d::new(0.90, 0.45, 0.50),
+        half: Vec3d::new(0.04, 0.40, 0.32),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
     },
 ];
 
@@ -1792,6 +2426,7 @@ const SPORTS_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.5, 0.0),
         half: Vec3d::new(1.0, 0.5, 1.0),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // Small, narrow, and a long way back — which is most of what reads as
     // "sports car" from any angle at all.
@@ -1800,24 +2435,103 @@ const SPORTS_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.5, -0.20),
         half: Vec3d::new(0.80, 0.5, 0.34),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "bonnet",
         centre: Vec3d::new(0.0, 0.05, 0.62),
         half: Vec3d::new(0.96, 0.15, 0.36),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Hood {
+            hinge: hood_hinge(Vec3d::new(0.0, 0.05, 0.62), Vec3d::new(0.96, 0.15, 0.36)),
+        },
     },
     BodyPart {
         name: "boot",
         centre: Vec3d::new(0.0, 0.05, -0.72),
         half: Vec3d::new(0.94, 0.13, 0.26),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Trunk {
+            hinge: trunk_hinge(Vec3d::new(0.0, 0.05, -0.72), Vec3d::new(0.94, 0.13, 0.26)),
+        },
     },
     BodyPart {
         name: "spoiler",
         centre: Vec3d::new(0.0, 0.34, -0.92),
         half: Vec3d::new(0.86, 0.05, 0.07),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
+    },
+    // Two doors and a long one each: the coupe's own proportion.
+    BodyPart {
+        name: "door_l",
+        centre: Vec3d::new(-0.955, -0.42, 0.05),
+        half: Vec3d::new(0.045, 0.34, 0.34),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, -0.42, 0.05),
+                Vec3d::new(0.045, 0.34, 0.34),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_r",
+        centre: Vec3d::new(0.955, -0.42, 0.05),
+        half: Vec3d::new(0.045, 0.34, 0.34),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, -0.42, 0.05),
+                Vec3d::new(0.045, 0.34, 0.34),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    BodyPart {
+        name: "bumper_front",
+        centre: Vec3d::new(0.0, -0.52, 0.985),
+        half: Vec3d::new(0.96, 0.14, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "bumper_rear",
+        centre: Vec3d::new(0.0, -0.52, -0.985),
+        half: Vec3d::new(0.96, 0.14, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "glass_windscreen",
+        centre: Vec3d::new(0.0, 0.52, 0.10),
+        half: Vec3d::new(0.74, 0.34, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_rear",
+        centre: Vec3d::new(0.0, 0.52, -0.50),
+        half: Vec3d::new(0.74, 0.30, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_l",
+        centre: Vec3d::new(-0.82, 0.52, -0.20),
+        half: Vec3d::new(0.04, 0.32, 0.30),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_r",
+        centre: Vec3d::new(0.82, 0.52, -0.20),
+        half: Vec3d::new(0.04, 0.32, 0.30),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
     },
 ];
 
@@ -1828,18 +2542,23 @@ const SUV_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.55, 0.0),
         half: Vec3d::new(1.0, 0.45, 1.0),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "cabin",
         centre: Vec3d::new(0.0, 0.42, -0.14),
         half: Vec3d::new(0.92, 0.52, 0.55),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "bonnet",
         centre: Vec3d::new(0.0, 0.12, 0.66),
         half: Vec3d::new(0.94, 0.22, 0.32),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Hood {
+            hinge: hood_hinge(Vec3d::new(0.0, 0.12, 0.66), Vec3d::new(0.94, 0.22, 0.32)),
+        },
     },
     // The rails are what reach the top of the hull, so the topmost part of an
     // SUV is a 16 cm rail rather than its whole roof — which is what keeps the
@@ -1849,12 +2568,124 @@ const SUV_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(-0.78, 0.95, -0.10),
         half: Vec3d::new(0.08, 0.05, 0.50),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "rail_right",
         centre: Vec3d::new(0.78, 0.95, -0.10),
         half: Vec3d::new(0.08, 0.05, 0.50),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
+    },
+    BodyPart {
+        name: "door_fl",
+        centre: Vec3d::new(-0.955, -0.44, 0.24),
+        half: Vec3d::new(0.045, 0.32, 0.26),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, -0.44, 0.24),
+                Vec3d::new(0.045, 0.32, 0.26),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_fr",
+        centre: Vec3d::new(0.955, -0.44, 0.24),
+        half: Vec3d::new(0.045, 0.32, 0.26),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, -0.44, 0.24),
+                Vec3d::new(0.045, 0.32, 0.26),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    BodyPart {
+        name: "door_rl",
+        centre: Vec3d::new(-0.955, -0.44, -0.28),
+        half: Vec3d::new(0.045, 0.32, 0.24),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, -0.44, -0.28),
+                Vec3d::new(0.045, 0.32, 0.24),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_rr",
+        centre: Vec3d::new(0.955, -0.44, -0.28),
+        half: Vec3d::new(0.045, 0.32, 0.24),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, -0.44, -0.28),
+                Vec3d::new(0.045, 0.32, 0.24),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    // A five-door's tailgate is a boot lid by every rule this model has:
+    // it hinges about the lateral and it is behind the cabin, so it takes
+    // `BodyPartKind::Trunk` and the name the recogniser knows it by.
+    BodyPart {
+        name: "tailgate",
+        centre: Vec3d::new(0.0, 0.1, -0.965),
+        half: Vec3d::new(0.9, 0.42, 0.035),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Trunk {
+            hinge: trunk_hinge(Vec3d::new(0.0, 0.1, -0.965), Vec3d::new(0.9, 0.42, 0.035)),
+        },
+    },
+    BodyPart {
+        name: "bumper_front",
+        centre: Vec3d::new(0.0, -0.52, 0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "bumper_rear",
+        centre: Vec3d::new(0.0, -0.52, -0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "glass_windscreen",
+        centre: Vec3d::new(0.0, 0.44, 0.38),
+        half: Vec3d::new(0.84, 0.36, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_rear",
+        centre: Vec3d::new(0.0, 0.44, -0.66),
+        half: Vec3d::new(0.84, 0.34, 0.04),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_l",
+        centre: Vec3d::new(-0.88, 0.44, -0.14),
+        half: Vec3d::new(0.04, 0.34, 0.48),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_r",
+        centre: Vec3d::new(0.88, 0.44, -0.14),
+        half: Vec3d::new(0.04, 0.34, 0.48),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
     },
 ];
 
@@ -1865,18 +2696,21 @@ const VAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, -0.80, 0.0),
         half: Vec3d::new(1.0, 0.20, 1.0),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "cab",
         centre: Vec3d::new(0.0, 0.05, 0.72),
         half: Vec3d::new(0.92, 0.55, 0.26),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     BodyPart {
         name: "box",
         centre: Vec3d::new(0.0, 0.06, -0.30),
         half: Vec3d::new(0.96, 0.62, 0.68),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
     },
     // Inset on every axis, which is both what a van's roof actually looks like
     // and what keeps the topmost part from being the whole vehicle.
@@ -1885,6 +2719,82 @@ const VAN_PARTS: &[BodyPart] = &[
         centre: Vec3d::new(0.0, 0.84, -0.30),
         half: Vec3d::new(0.88, 0.16, 0.58),
         primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Panel,
+    },
+    BodyPart {
+        name: "door_l",
+        centre: Vec3d::new(-0.955, 0.02, 0.72),
+        half: Vec3d::new(0.045, 0.4, 0.22),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(-0.955, 0.02, 0.72),
+                Vec3d::new(0.045, 0.4, 0.22),
+                DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Left,
+        },
+    },
+    BodyPart {
+        name: "door_r",
+        centre: Vec3d::new(0.955, 0.02, 0.72),
+        half: Vec3d::new(0.045, 0.4, 0.22),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Door {
+            hinge: door_hinge(
+                Vec3d::new(0.955, 0.02, 0.72),
+                Vec3d::new(0.045, 0.4, 0.22),
+                -DOOR_OPEN_DEG,
+            ),
+            side: PartSide::Right,
+        },
+    },
+    BodyPart {
+        name: "tailgate",
+        centre: Vec3d::new(0.0, 0.06, -0.975),
+        half: Vec3d::new(0.92, 0.56, 0.025),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Trunk {
+            hinge: trunk_hinge(Vec3d::new(0.0, 0.06, -0.975), Vec3d::new(0.92, 0.56, 0.025)),
+        },
+    },
+    BodyPart {
+        name: "bumper_front",
+        centre: Vec3d::new(0.0, -0.62, 0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    BodyPart {
+        name: "bumper_rear",
+        centre: Vec3d::new(0.0, -0.62, -0.985),
+        half: Vec3d::new(0.96, 0.16, 0.015),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Bumper,
+    },
+    // A panel van has a screen and two door windows and NOTHING behind
+    // them -- which is what a van looks like and why this family has no
+    // rear pane.
+    BodyPart {
+        name: "glass_windscreen",
+        centre: Vec3d::new(0.0, 0.26, 0.965),
+        half: Vec3d::new(0.86, 0.3, 0.035),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_l",
+        centre: Vec3d::new(-0.88, 0.20, 0.72),
+        half: Vec3d::new(0.04, 0.24, 0.20),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
+    },
+    BodyPart {
+        name: "glass_side_r",
+        centre: Vec3d::new(0.88, 0.20, 0.72),
+        half: Vec3d::new(0.04, 0.24, 0.20),
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Glass,
     },
 ];
 
@@ -2015,6 +2925,16 @@ pub const CHASSIS_ANGULAR_DAMPING: f64 = 0.5;
 
 /// The chassis collider's friction.
 pub const CHASSIS_FRICTION: f64 = 0.5;
+
+/// **What a pane of glass is painted** (wave VEH3c) — dark, smooth, a little
+/// metallic, and never the body's colour.
+///
+/// Opaque on purpose. A translucent pane is a sorting decision for the whole
+/// forward pass and the `AdvancedRealisticGlass` transmission term is the PAR
+/// arc's work; a dark specular box reads as glass from outside at every
+/// distance this engine draws a car at, and it costs the renderer nothing it
+/// was not already paying for a body panel.
+pub const GLASS_COLOR: crate::math::Color = crate::math::Color::new(0.07, 0.09, 0.12, 1.0);
 
 /// **Where one vehicle goes and what it looks like** — the half of a rig that is
 /// not the [`VehicleDef`].
@@ -2223,6 +3143,18 @@ pub fn rig_nodes_at(
     // same three multiplications. A part the livery does not name keeps
     // `spawn.paint`, which is every part of every civilian vehicle and all of
     // traffic — so nothing that predates this wave moves a byte.
+    //
+    // **AND EVERY PART, AT EVERY TIER** (wave VEH3c). The doors, the bumpers
+    // and the glass this wave adds are emitted by the same loop and at the same
+    // tiers as the panels that were always here, and that is a decision with a
+    // reason rather than an omission: a bonnet and a boot lid ARE the silhouette
+    // (they are the two parts that make a saloon a saloon from behind), so a
+    // tier that dropped "the damage model's parts" would have dropped them too
+    // and changed what a parked car looks like at 64 m. The cost is DRAWN
+    // entities and not simulated ones — a latched part carries no
+    // `RigidBody3D`, no `Collider3D` and no joint, so the vehicle phase never
+    // sees one and a thousand parked cars cost exactly what they cost before
+    // (`a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them`).
     let body_parts = def.body.parts().iter().map(|p| {
         let paint = spawn.livery.and_then(|l| l.part(p.name));
         (*p, paint)
@@ -2237,11 +3169,26 @@ pub fn rig_nodes_at(
         // Built from the unliveried material and then overwritten, so a part
         // with no override is BYTE-IDENTICAL to what this loop wrote before the
         // livery existed rather than merely equal to it by inspection.
-        let mut material = Material {
-            base_color: spawn.paint,
-            metallic: 0.35,
-            roughness: 0.42,
-            ..Default::default()
+        let mut material = if part.kind == BodyPartKind::Glass {
+            // **Glass is not paint** (wave VEH3c). A pane takes the body's
+            // colour off nothing: it is dark, smooth and a little metallic,
+            // which is what a car's glass reads as from outside under any sky.
+            // The `AdvancedRealisticGlass` LOOK — refraction, a real
+            // transmission term, the shatter pattern — is the PAR arc's; this
+            // is the GEOMETRY and the STATE, which is what this wave owes.
+            Material {
+                base_color: GLASS_COLOR,
+                metallic: 0.10,
+                roughness: 0.08,
+                ..Default::default()
+            }
+        } else {
+            Material {
+                base_color: spawn.paint,
+                metallic: 0.35,
+                roughness: 0.42,
+                ..Default::default()
+            }
         };
         if let Some(p) = paint {
             material.base_color = p.base_color;
@@ -8990,6 +9937,7 @@ mod tests {
             centre: Vec3d::new(0.0, 1.06, 0.0),
             half: Vec3d::new(0.5, 0.06, 0.2),
             primitive: crate::components::Primitive::Cube,
+            kind: BodyPartKind::Panel,
         };
         static LIVERY: Livery = Livery {
             name: "test",
@@ -11819,5 +12767,145 @@ mod tests {
             v.wheels()[0].slip_ratio
         );
         assert!(v.wheels()[0].omega_rad_s > 0.0);
+    }
+
+    // ── the modular body (wave VEH3c) ───────────────────────────────────────
+
+    /// The AUTHORED kind and the kind the WORLD recognises are the same fact.
+    ///
+    /// `every_livery_is_recognised_as_the_service_it_declares`' shape, one
+    /// system over: the parts table declares, [`BodyPartKind::of`] recognises
+    /// off a name and a box, and a shipped player only ever has the second. A
+    /// family that names a door `left_panel` fails here rather than shipping a
+    /// car whose door cannot open.
+    #[test]
+    fn every_authored_part_is_recognised_as_the_kind_it_declares() {
+        let mut seen = 0usize;
+        let mut kinds = [0usize; 6];
+        for body in VehicleBody::ALL {
+            for part in body.parts() {
+                let got = BodyPartKind::of(part.name, part.centre, part.half);
+                assert_eq!(
+                    got.as_u8(),
+                    part.kind.as_u8(),
+                    "{}'s `{}` declares {} and the world reads {}",
+                    body.name(),
+                    part.name,
+                    part.kind.name(),
+                    got.name()
+                );
+                assert_eq!(
+                    got,
+                    part.kind,
+                    "{}'s `{}`: the declared and recognised kinds differ in their \
+                     hinge or their side",
+                    body.name(),
+                    part.name
+                );
+                kinds[got.as_u8() as usize] += 1;
+                seen += 1;
+            }
+        }
+        eprintln!(
+            "parts: {seen} over {} families — panel {} door {} hood {} trunk {} bumper {} glass {}",
+            VehicleBody::ALL.len(),
+            kinds[0],
+            kinds[1],
+            kinds[2],
+            kinds[3],
+            kinds[4],
+            kinds[5]
+        );
+        // The engagement count: this is not a test of an empty list.
+        assert!(seen >= 60, "only {seen} parts over seven families");
+        for (i, name) in ["panel", "door", "hood", "trunk", "bumper", "glass"]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(kinds[i] > 0, "no part of any family is a {name}");
+        }
+    }
+
+    /// Every wheeled family has doors on both sides, a bumper at each end and
+    /// glass — the census the roster (VEH3f) and boarding (VEH3d) both read.
+    #[test]
+    fn every_wheeled_family_has_doors_bumpers_and_glass() {
+        for body in VehicleBody::CIVILIAN {
+            let parts = body.parts();
+            let doors: Vec<PartSide> = parts
+                .iter()
+                .filter(|p| p.kind.as_u8() == KIND_DOOR)
+                .map(|p| p.kind.side())
+                .collect();
+            let bumpers = parts
+                .iter()
+                .filter(|p| p.kind == BodyPartKind::Bumper)
+                .count();
+            let glass = parts
+                .iter()
+                .filter(|p| p.kind == BodyPartKind::Glass)
+                .count();
+            let hinged = parts.iter().filter(|p| p.kind.hinge().is_some()).count();
+            eprintln!(
+                "{}: {} parts, {} doors ({} left / {} right), {bumpers} bumpers, {glass} panes, {hinged} hinged",
+                body.name(),
+                parts.len(),
+                doors.len(),
+                doors.iter().filter(|s| **s == PartSide::Left).count(),
+                doors.iter().filter(|s| **s == PartSide::Right).count(),
+            );
+            assert!(
+                doors.len() >= 2,
+                "{} has {} doors",
+                body.name(),
+                doors.len()
+            );
+            assert_eq!(
+                doors.iter().filter(|s| **s == PartSide::Left).count(),
+                doors.iter().filter(|s| **s == PartSide::Right).count(),
+                "{} is not symmetrical about its doors",
+                body.name()
+            );
+            assert_eq!(bumpers, 2, "{} has {bumpers} bumpers", body.name());
+            assert!(glass >= 3, "{} has {glass} panes", body.name());
+            // A door, a bonnet or a boot lid: every road car has at least three
+            // things that open.
+            assert!(hinged >= 3, "{} has {hinged} hinged parts", body.name());
+        }
+    }
+
+    /// A shed part weighs what a part weighs — the number the debris body and
+    /// the blast sweep are both sized against (the WPN2d law: size a blast
+    /// against the LIGHTEST body in its radius).
+    #[test]
+    fn a_shed_part_weighs_what_a_part_weighs() {
+        let def = VehicleDef::default();
+        let mut lightest = f64::MAX;
+        let mut rows = 0;
+        for body in VehicleBody::CIVILIAN {
+            for part in body.parts() {
+                if !part.kind.sheds() {
+                    continue;
+                }
+                let m = part_mass_kg(part.kind, part.half, def.half_extents);
+                eprintln!(
+                    "{} {} ({}): {m:.2} kg",
+                    body.name(),
+                    part.name,
+                    part.kind.name()
+                );
+                assert!(
+                    (1.0..=140.0).contains(&m),
+                    "{} {} weighs {m:.2} kg",
+                    body.name(),
+                    part.name
+                );
+                lightest = lightest.min(m);
+                rows += 1;
+            }
+        }
+        assert!(rows >= 40, "only {rows} shedding parts over five families");
+        eprintln!("the lightest shedding part on the Ring-0 rig is {lightest:.2} kg");
+        assert!(lightest >= 1.0);
     }
 }

@@ -911,6 +911,7 @@ const SEDAN_BAR: BodyPart = BodyPart {
     centre: Vec3d::new(0.0, 1.06, -0.06),
     half: Vec3d::new(0.6, 0.06, 0.18),
     primitive: inf_ecs::components::Primitive::Cube,
+    kind: inf_ecs::vehicle::BodyPartKind::Panel,
 };
 
 /// A roof light bar for the van body.
@@ -919,6 +920,7 @@ const VAN_BAR: BodyPart = BodyPart {
     centre: Vec3d::new(0.0, 1.06, -0.1),
     half: Vec3d::new(0.55, 0.06, 0.3),
     primitive: inf_ecs::components::Primitive::Cube,
+    kind: inf_ecs::vehicle::BodyPartKind::Panel,
 };
 
 /// A light bar over the truck body's cab, not over its bed.
@@ -927,6 +929,7 @@ const TRUCK_BAR: BodyPart = BodyPart {
     centre: Vec3d::new(0.0, 1.06, 0.5),
     half: Vec3d::new(0.6, 0.06, 0.16),
     primitive: inf_ecs::components::Primitive::Cube,
+    kind: inf_ecs::vehicle::BodyPartKind::Panel,
 };
 
 /// **White over blue** — the cruiser.

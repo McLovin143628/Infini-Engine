@@ -705,6 +705,7 @@ fn a_liveried_helicopter_would_be_claimed_by_the_dispatcher() {
         centre: Vec3d::new(0.0, 0.92, 0.30),
         half: Vec3d::new(0.30, 0.06, 0.14),
         primitive: inf_ecs::components::Primitive::Cube,
+        kind: inf_ecs::vehicle::BodyPartKind::Panel,
     };
     const AIR_LIVERY: Livery = Livery {
         name: "air support",

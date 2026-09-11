@@ -56,6 +56,7 @@ static BAR: BodyPart = BodyPart {
     centre: Vec3d::new(0.0, 1.02, 0.0),
     half: Vec3d::new(0.5, 0.06, 0.18),
     primitive: inf_ecs::components::Primitive::Cube,
+    kind: inf_ecs::vehicle::BodyPartKind::Panel,
 };
 static RED: PartPaint = PartPaint {
     base_color: Color::new(0.9, 0.1, 0.1, 1.0),
