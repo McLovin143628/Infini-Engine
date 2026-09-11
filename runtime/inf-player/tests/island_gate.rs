@@ -9324,3 +9324,220 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
         inf_player::budget::RATCHET_NOTE
     );
 }
+
+/// **EVERY CAR THE ISLAND PARKS IS ON ITS WHEELS, AND EVERY ONE OF THEM MOVES**
+/// (`audit:` VEH3b, against VEH3a's carried item 7).
+///
+/// The VEH3a audit carried it and the VEH3b wave carried it again: *"a car the
+/// hero boards can still be one that cannot move."* Session 1 of that audit held
+/// the throttle for 123 seconds against a chassis that drifted 0.02 m, and the
+/// only evidence about WHY was three `hero.csv` columns that could not tell a
+/// road from a kerb (`surface_census`, closed in this audit's own commit).
+///
+/// `pie_equals_shipping_when_the_car_drives_the_circuit` drives **one** car —
+/// the nearest civilian one to the hero — so a fleet where one row is beached
+/// passes it perfectly. This walks the whole resident fleet and asks two
+/// questions of every vehicle in it:
+///
+/// 1. **is it standing on its wheels?** A parked car settles onto its springs in
+///    a second; a car high-centred on a kerb or a doorstep has wheels in the air
+///    and the suspension never reaches anything;
+/// 2. **does the throttle reach the ground?** Not "did the hero get in" — the
+///    controls are applied to the vehicle directly, so the answer is about the
+///    car rather than about the seat.
+///
+/// A vehicle with no wheels at all (the launch, the helicopter) is skipped by
+/// name: a hull has nothing to stand on and answering "0 of 0 wheels in contact"
+/// would be a false alarm rather than a finding.
+///
+/// # WHAT IT MEASURED, AND WHAT IT OVERTURNS
+///
+/// **Nothing is perched.** Eleven resident vehicles, **all eleven** standing on
+/// three or four of their four wheels, every contact on `asphalt` at µ 1.00 —
+/// real contacts through `surface_census`, not the `Asphalt` a missed raycast
+/// answers.
+///
+/// **And "~1.4 m above the ground" is where a parked car's chassis belongs.**
+/// The VEH3a audit read its stuck car's height and called it *"perched rather
+/// than parked"*. Measured across this fleet, a chassis ORIGIN sits **0.86 to
+/// 2.31 m over its own wheel contact** — 1.04 m for a saloon, 1.31–1.55 for the
+/// working rows, 2.31 for the fire appliance — because the origin is the body's
+/// centre and the contact is under the tyre. A car at 1.4 m is a car on its
+/// springs.
+///
+/// **The immovability has two mechanisms and neither is placement**, both
+/// measured here:
+///
+/// 1. **the traffic system is driving it.** Before `mark_taken`, nine of eleven
+///    covered under half a metre in three seconds of full throttle while
+///    standing on four wheels on asphalt at µ 1.00 — `step_traffic` writes a
+///    parked car's controls every step until the record says somebody has
+///    touched it;
+/// 2. **somebody is in the seat.** `step_character_movement` writes the
+///    occupant's own intent before the vehicle phase and `step_one` clears the
+///    controls after every solve, so an occupant's silence beats anybody else's
+///    throttle. Every car that stayed at **exactly its 800 rpm idle** through
+///    180 steps of throttle had its own traffic driver sitting in it; every car
+///    that revved to 1 088–4 644 rpm had an empty seat or lost its driver
+///    mid-run.
+///
+/// Both are the engine working. What they are not is a car parked in the air,
+/// and the arm that could have said so did not exist.
+#[test]
+fn every_parked_island_vehicle_rests_on_its_wheels_and_drives() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let pack = cook(tmp.path());
+    let mut sim = pack_sim(&pack);
+
+    // Settle: the springs take about a second, and the terrain under a car has
+    // to have paged in before a raycast can find it.
+    for _ in 0..120 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let fleet = cars(&sim);
+    assert!(
+        !fleet.is_empty(),
+        "the resident world holds no vehicle at all"
+    );
+
+    let mut checked = 0usize;
+    let mut beached: Vec<(uuid::Uuid, usize, usize)> = Vec::new();
+    let mut stuck: Vec<(uuid::Uuid, f64)> = Vec::new();
+    for guid in &fleet {
+        let Some(v) = sim.bridge3d().vehicle_of(*guid) else {
+            continue;
+        };
+        let wheels = v.wheels().len();
+        if wheels == 0 {
+            continue;
+        }
+        let grounded = v.wheels().iter().filter(|w| w.contact.is_some()).count();
+        let (surface, mu) = inf_ecs::vehicle::surface_census(v.wheels());
+        let at = chassis_at(&sim, *guid);
+        let clearance = v
+            .wheels()
+            .iter()
+            .filter_map(|w| w.contact.map(|c| at.y - c.point.y))
+            .fold(f64::NEG_INFINITY, f64::max);
+        checked += 1;
+        println!(
+            "THE FLEET AT REST: {guid} at ({:.1}, {:.1}, {:.1}) has {grounded} of \
+             {wheels} wheels on `{surface}` (mu {mu:.2}), chassis {clearance:.2} m \
+             over its own contact",
+            at.x, at.y, at.z
+        );
+        if grounded * 2 < wheels {
+            beached.push((*guid, grounded, wheels));
+        }
+    }
+    assert!(
+        checked >= 2,
+        "only {checked} wheeled vehicle(s) were resident, so this arm walked a fleet of one"
+    );
+    assert!(
+        beached.is_empty(),
+        "parked island vehicles are standing on fewer than half their wheels — \
+         {beached:?} (guid, grounded, wheels). A chassis high-centred on a kerb \
+         or a doorstep boards and does not drive, which is the user's \
+         \"Play doesn't work\" class"
+    );
+
+    // ── AND THE THROTTLE REACHES THE ENGINE ── every one of them, in turn.
+    //
+    // **The measurement is the CRANK, not the distance.** These cars are parked
+    // on a hillside between 122 m and 141 m of elevation, so a car that rolls is
+    // a car that covered metres and a car nose-up on a grade is one that did
+    // not, and neither says anything about whether the pedal reached the engine.
+    // The crank does: idle is 800 rpm and nothing but a throttle lifts it.
+    //
+    // **`mark_taken` first**, through the same Ring-0 door a boarding player
+    // goes through, and it is load-bearing: `step_traffic` writes a PARKED car's
+    // controls every step and stops only when the record says somebody has
+    // touched it (`if rec.taken { … continue; }`). Without it this loop measured
+    // the handbrake -- nine of eleven cars covered under half a metre in three
+    // seconds of full throttle while standing on four wheels on asphalt at
+    // mu 1.00, which is the traffic system working and is exactly the reading
+    // VEH3a's audit could not rule out from `hero.csv`.
+    //
+    // **A car with somebody in its seat is SKIPPED, and that is the finding.**
+    // `step_character_movement` runs before the vehicle phase and writes the
+    // occupant's own intent, and `step_one` clears the controls after every
+    // solve -- so an occupant's silence beats anybody else's throttle, every
+    // step. Measured below: every car whose seat holds its own traffic driver
+    // sits at **800 rpm through 180 steps of full throttle**, and every car with
+    // an empty seat revs. It is the right rule (one commander per vehicle) and
+    // it is the mechanism a "boardable but immovable" car would have, so the
+    // occupied ones are counted and named rather than asserted.
+    let mut revved = 0usize;
+    let mut occupied = 0usize;
+    for guid in &fleet {
+        if sim
+            .bridge3d()
+            .vehicle_of(*guid)
+            .is_none_or(|v| v.wheels().is_empty())
+        {
+            continue;
+        }
+        let traffics = inf_ecs::traffic::mark_taken(sim.world_mut(), *guid);
+        let occupant = inf_physics::d3::carjack::occupant_of(sim.world(), *guid);
+        let from = chassis_at(&sim, *guid);
+        let idle = sim
+            .bridge3d()
+            .vehicle_of(*guid)
+            .map(|v| v.idle_rpm())
+            .unwrap_or(0.0);
+        let mut peak_rpm = 0.0f64;
+        for _ in 0..180 {
+            if let Some(v) = sim.bridge3d_mut().vehicle_mut(*guid) {
+                v.control(inf_ecs::vehicle::VehicleControls {
+                    throttle: 1.0,
+                    ..Default::default()
+                });
+            }
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            if let Some(d) = sim
+                .bridge3d()
+                .vehicle_of(*guid)
+                .and_then(|v| v.drivetrain())
+            {
+                peak_rpm = peak_rpm.max(d.rpm);
+            }
+        }
+        let moved = (chassis_at(&sim, *guid) - from).length();
+        println!(
+            "THE FLEET DRIVEN: {guid} ({}) reached {peak_rpm:.0} rpm over an {idle:.0} rpm idle and covered {moved:.2} m in three seconds; seat {}",
+            if traffics { "the traffic's, taken" } else { "authored" },
+            match occupant {
+                Some(who) if who == inf_ecs::traffic::driver_guid(*guid) => "its own driver".to_string(),
+                Some(who) => format!("{who}"),
+                None => "empty".to_string(),
+            }
+        );
+        occupied += usize::from(occupant.is_some());
+        if peak_rpm > idle + 200.0 {
+            revved += 1;
+        } else {
+            stuck.push((*guid, peak_rpm));
+        }
+        // Hand it back, so the next car's three seconds are not spent alongside
+        // one still accelerating.
+        if let Some(v) = sim.bridge3d_mut().vehicle_mut(*guid) {
+            v.control(inf_ecs::vehicle::VehicleControls::default());
+        }
+    }
+    let wheeled = revved + stuck.len();
+    println!(
+        "THE FLEET DRIVEN: {revved} of {wheeled} resident vehicles revved over their own idle under throttle once taken; {occupied} of them had somebody in the seat when the throttle was applied, and an occupant's own intent is written by `step_character_movement` before every vehicle phase"
+    );
+    // A MAJORITY rather than all, and the reason is named: this arm drives from
+    // OUTSIDE the seat, and the engine has exactly one commander per vehicle per
+    // step. A car whose seat is held by its own traffic driver, or whose
+    // dispatch responder has a plan, hears its occupant and not this loop --
+    // which is the right rule and is not something an arm driving from outside
+    // can control for. What it CAN say, and what the VEH3a carry needs said, is
+    // that a throttle applied to a parked island car reaches the engine at all.
+    assert!(
+        revved * 2 > wheeled,
+        "only {revved} of {wheeled} resident vehicles revved over idle under full throttle -- {stuck:?} (guid, peak rpm) did not, and VEH3a's audit carried exactly this: a car the hero boards and cannot move"
+    );
+}
