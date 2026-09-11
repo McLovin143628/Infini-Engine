@@ -3758,6 +3758,33 @@ fn apply_blast(
             .into_iter()
             .filter(|(_, p)| (*p - at).length() <= radius),
     );
+    // **…AND EVERY CAR** (wave VEH3c). The WPN2d audit left this by name: *"a
+    // vehicle that carries `Destructible` takes blast damage the day it is
+    // authored"* -- and no vehicle carries one, so a rocket beside a car did
+    // nothing to it. It does now, through the same `apply_hit` every other
+    // candidate goes through, which reaches `bodywork::hit_vehicle`.
+    //
+    // **The candidate is the CHASSIS and never a part**, and that is the WPN2d
+    // levitation law met head on: *size a blast against the LIGHTEST body in
+    // its radius*. The lightest body a crashed car leaves on the road is a
+    // 2.6 kg pane of glass, and a blast sized for a tonne and a half of car
+    // would put it over a rooftop. A shed part is not in this list, so it takes
+    // no blast impulse at all -- it is simply in the way of the ray, like a
+    // kerb.
+    candidates.extend(
+        bridge
+            .vehicle_guids()
+            .into_iter()
+            .filter_map(|g| {
+                let e = world.entity_of(g)?;
+                let p = world
+                    .world()
+                    .get::<inf_ecs::components::GlobalTransform>(e)
+                    .map(|t| t.0.translation)?;
+                ((p - at).length() <= radius).then_some((g, p))
+            })
+            .collect::<Vec<_>>(),
+    );
     candidates.sort_by_key(|(g, _)| *g);
     candidates.dedup_by_key(|(g, _)| *g);
     let mut hurt = 0u32;

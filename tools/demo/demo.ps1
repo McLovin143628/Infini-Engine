@@ -322,7 +322,7 @@ if ($DryRun -ne "") {
     #     A leg that reads a column the player stopped writing is the next fault
     #     of this shape, and it would throw exactly where fault 1 did.
     $width = $rows[-1].Split(",").Count
-    foreach ($i in @(5, 11, 22, 27, 28, 32, 33, 34, 35, 36)) {
+    foreach ($i in @(5, 11, 22, 27, 28, 32, 33, 34, 35, 36, 49, 50, 51, 52, 53)) {
         if ($i -ge $width) {
             Say ("DRYRUN FAIL: a leg reads column {0} and the recording is {1} wide" -f $i, $width)
             $bad++
@@ -2813,6 +2813,112 @@ if (-not $veh_driving) {
         Say ("VEH3b CENSUS: {0} driving rows, {1} with the clutch slipping, {2} with the limiter cutting, peak {3} rpm" -f $last.Count, $slipping, $cutting, $maxrpm)
     } else {
         Say "VEH3b ROW: no driving row was ever written"
+    }
+}
+
+# ── 6z3. WAVE VEH3c — THE MODULAR BODY, AND WHAT ITS FIVE COLUMNS SEE ────────
+#
+# Five frames, every one TRIGGERED on `hero.csv`'s five new columns rather than
+# slept for. Indices, zero-based, at the TAIL so every index above keeps its
+# meaning:
+#
+#   49  car_health    — the hull's remaining percent
+#   50  engine_scale  — the engine's remaining percent
+#   51  flats         — how many tyres are flat
+#   52  panes_broken  — how many windows have gone
+#   53  parts_shed    — how many parts have left the car
+#
+# None of the five is visible in a position column, and none of them is visible
+# in the four VEH3b appended either: "the bumper came off", "the windscreen
+# went", "the near-side front is flat" and "the engine is dead" are four
+# different things that all read the same in `speed` and in `rpm`.
+#
+# **THE COLUMNS READ THE CAR THE HERO IS SITTING IN**, which is what "the
+# hero's car damage" means and is the same rule the four drivetrain columns
+# follow. A car the hero shoots at from the pavement is damaged in the WORLD and
+# is not in this row — so the shot-up-car frame below is taken from the driver's
+# seat of a car that has been hurt, not from outside one.
+#
+# **The car has to be MOVING for any of them**, so this leg runs after the
+# drivetrain leg and reuses whatever the hero is already sitting in. A session
+# where the tyre leg never reached a car reports that and takes none of the five.
+if (-not $veh_driving) {
+    Say "VEH3c: NO CAR was reached above -- none of the five bodywork frames is in this session"
+} else {
+    Say "VEH3c: the bodywork -- a crash, a shed part, a pane, a flat and a fire"
+
+    # (a) THE CRASH. Full throttle, held, into whatever the island has that a
+    #     car can hit. **The island's BUILDINGS carry no ECS collider** (carried
+    #     since COV1), so what stops a car here is a kerb, a pillar, a lightpost
+    #     module or another parked vehicle -- the crash arm on the FIXTURE
+    #     (`veh3c_gate::a_crash_at_sixty_sheds_the_bumper_and_pops_the_bonnet`)
+    #     is where a 60 km/h wall is, and it measures 18 879 N.s, one bumper
+    #     shed and the bonnet popped.
+    Say "VEH3c: hard ahead, looking for something to hit"
+    [InfInput]::Down(0x11)
+    $veh_hurt = @(Wait-ForHero -Csv $heroCsv -What "the hull taking damage (VEH3c)" -TimeoutS 30.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ($c[5] -eq "Driving") -and ([double]$c[49] -lt 99.9) -and ([double]$c[49] -gt 0.0) } `
+        -Out (Join-Path $OutDir "99-veh3c-hull.png"))[-1]
+    if (-not $veh_hurt) {
+        Say "VEH3c: the hull never took a blow -- the hero's car found nothing on this street with a collider on it, and frame (a) is not in this session"
+    }
+
+    # (b) THE SHED PART. The same run, one column over: a part that has left the
+    #     car. `parts_shed` counts them, and a frame on the first one is the
+    #     bumper lying in the road behind the car that lost it.
+    $veh_shed = @(Wait-ForHero -Csv $heroCsv -What "a part off the car (VEH3c)" -TimeoutS 25.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[53] -gt 0) } `
+        -Out (Join-Path $OutDir "100-veh3c-shed.png"))[-1]
+    if (-not $veh_shed) {
+        Say "VEH3c: nothing came off -- a part needs part_break_impulse_ns through its own mounts, which is a 45 km/h shunt on the fixture, and frame (b) is not in this session"
+    }
+
+    # (c) THE GLASS. A pane goes to a round or to a hard enough shunt, and the
+    #     frame is the car with a hole where its windscreen was.
+    $veh_glass = @(Wait-ForHero -Csv $heroCsv -What "a window gone (VEH3c)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[52] -gt 0) } `
+        -Out (Join-Path $OutDir "101-veh3c-glass.png"))[-1]
+    if (-not $veh_glass) {
+        Say "VEH3c: no pane went -- glass takes a thousandth of a crash's energy through its own mounts (a 90 km/h shunt on the fixture) or a round through it, and frame (c) is not in this session"
+    }
+
+    # (d) THE FLAT. A tyre is punctured by a ROUND and not by a kerb: the hit
+    #     resolver flattens a wheel a round lands within FLAT_HIT_RADII of,
+    #     and nothing on the island shoots at the hero's tyres. A session that
+    #     wants this frame arms the hero and shoots its own car's wheel from the
+    #     pavement first, which is a leg of its own and is not this one.
+    $veh_flat = @(Wait-ForHero -Csv $heroCsv -What "a flat tyre (VEH3c)" -TimeoutS 6.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[51] -gt 0) } `
+        -Out (Join-Path $OutDir "102-veh3c-flat.png"))[-1]
+    if (-not $veh_flat) {
+        Say "VEH3c: no flat -- a puncture is a ROUND inside a wheel's own radius and a kerb cannot do it, so frame (d) needs somebody shooting at the tyres; veh3c_gate::a_flat_tyre_pulls measures the pull instead (1.36 deg of yaw and 6.8 m of drift over four seconds, against 0.00 and 0.000 whole)"
+    }
+
+    # (e) THE FIRE. A hull is four panels -- 36 000 J by default -- and a
+    #     60 km/h shunt spends about 17 000 of them, so a car burns on its
+    #     second or third real crash. Keep going.
+    $veh_fire = @(Wait-ForHero -Csv $heroCsv -What "a burning car (VEH3c)" -TimeoutS 30.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ($c[5] -eq "Driving") -and ([double]$c[49] -le 0.0) -and ([double]$c[6] -ge 0.0) } `
+        -Out (Join-Path $OutDir "103-veh3c-fire.png"))[-1]
+    [InfInput]::Up(0x11)
+    if (-not $veh_fire) {
+        Say "VEH3c: the car never burned -- a hull is four panels and a 60 km/h shunt spends half of one, so it takes two or three; dispatch_3d::a_burning_car_brings_the_appliance walks the brigade's whole answer instead (assigned on step 0, on scene at 57.2 s and 11.64 m, resolved at 62.3 s, 22 puffs)"
+    }
+
+    # WHAT THE FIVE COLUMNS ACTUALLY SAID, whatever fired: the last driving
+    # line, printed whole, so a reader can see them rather than take the
+    # triggers' word for it.
+    $last = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 53 -and ($_ -split ",")[5] -eq "Driving" })
+    if ($last.Count -gt 0) {
+        $c = $last[-1] -split ","
+        Say ("VEH3c ROW: hull {0}%  engine {1}%  flats {2}  panes {3}  shed {4}" -f $c[49], $c[50], $c[51], $c[52], $c[53])
+        $minHull = ($last | ForEach-Object { [double](($_ -split ",")[49]) } | Measure-Object -Minimum).Minimum
+        $maxShed = ($last | ForEach-Object { [int](($_ -split ",")[53]) } | Measure-Object -Maximum).Maximum
+        $maxPane = ($last | ForEach-Object { [int](($_ -split ",")[52]) } | Measure-Object -Maximum).Maximum
+        Say ("VEH3c CENSUS: {0} driving rows, hull fell to {1}%, {2} part(s) shed, {3} pane(s) broken" -f $last.Count, $minHull, $maxShed, $maxPane)
+    } else {
+        Say "VEH3c ROW: no driving row was ever written"
     }
 }
 

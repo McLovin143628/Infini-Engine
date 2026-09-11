@@ -1183,3 +1183,140 @@ fn a_car_with_no_hull_left_burns() {
         "the fixture grew a dispatcher — this half of the arm is vacuous"
     );
 }
+
+// ── the blast, and the lightest body in its radius ──────────────────────────
+
+/// **A blast reaches the CAR and never the panel that came off it.**
+///
+/// The WPN2d levitation law, met head on: *size a blast against the LIGHTEST
+/// body in its radius*. The lightest body a crashed car leaves on the road is a
+/// 2.6 kg pane of glass, and a blast sized for a tonne and a half of car would
+/// put it over a rooftop — so a shed part is deliberately NOT in the blast's
+/// candidate set. The chassis is, which is what closes the sentence the WPN2d
+/// audit left this wave by name: *"a vehicle that carries `Destructible` takes
+/// blast damage the day it is authored"*, and no vehicle carries one.
+#[test]
+fn a_blast_reaches_the_car_and_not_the_panel_that_came_off_it() {
+    let mut rig = Rig::row_at("sedan", -60.0, Some(0.0));
+    rig.crash(60.0 / 3.6);
+    let (shed_guid, shed) = rig
+        .part_named("bumper_front")
+        .expect("it has a front bumper");
+    assert_eq!(shed.latch, PartLatch::Shed, "nothing came off to test with");
+    let shed_body = rig
+        .bridge
+        .body_of(shed_guid)
+        .expect("the shed bumper is in the solver");
+    let before_hull = rig.damage().hull_j;
+    let before_at = rig.bridge.world().body_translation(shed_body).unwrap();
+
+    // The candidate set the blast walks, measured rather than asserted about.
+    let candidates: Vec<Uuid> = rig.bridge.vehicle_guids();
+    eprintln!(
+        "the blast's vehicle candidates are {:?} and the shed bumper is {shed_guid}",
+        candidates
+    );
+    assert!(
+        candidates.contains(&CHASSIS),
+        "the chassis is not a blast candidate"
+    );
+    assert!(
+        !candidates.contains(&shed_guid),
+        "a 7 kg shed bumper is a blast candidate — this is the WPN2d levitation \
+         defect with a bumper in it"
+    );
+
+    // …and the joules really do reach the chassis through the one door.
+    let blast_at = rig.at() + DVec3::new(0.85, -0.30, -0.20);
+    inf_physics::d3::bodywork::hit_vehicle(&mut rig.world, &rig.bridge, CHASSIS, blast_at, 4_000.0);
+    let after_hull = rig.damage().hull_j;
+    rig.step(60);
+    let after_at = rig.bridge.world().body_translation(shed_body).unwrap();
+    let rose = after_at.y - before_at.y;
+    eprintln!(
+        "4 000 J of blast: the hull went {before_hull:.0} -> {after_hull:.0} J and the shed bumper \
+         moved {rose:+.4} m vertically in the second after"
+    );
+    assert!(
+        after_hull > before_hull + 3_900.0,
+        "the blast's joules did not reach the chassis"
+    );
+    assert!(
+        rose < 0.05,
+        "the shed bumper rose {rose:.4} m — something is pushing a 7 kg panel with a car's impulse"
+    );
+}
+
+// ── the shipped host, and the source pins ───────────────────────────────────
+
+/// **The shipped host draws the damage row**, and the readout says what the
+/// bodywork knows.
+///
+/// A SOURCE pin, because `inf_player::window` cannot be constructed in a test —
+/// it owns a window. The formatting is Ring 0's and is measured on real state
+/// below; this is what says the host calls it, which is `veh3b_gate`'s own split
+/// verbatim.
+#[test]
+fn the_shipped_host_draws_the_damage_row() {
+    const SRC: &str = include_str!("../src/window.rs");
+    for needle in [
+        "inf_ecs::bodywork::damage_readout",
+        "inf_ecs::bodywork::damage_of",
+        "inf_ecs::bodywork::DamageLimits::of",
+    ] {
+        assert!(
+            SRC.contains(needle),
+            "`runtime/inf-player/src/window.rs` no longer calls `{needle}` — the \
+             hero's car damage is computed and nothing draws it"
+        );
+    }
+    // …and the row is EMPTY on a whole car, which is what keeps every pre-VEH3c
+    // HUD identical.
+    let limits = DamageLimits::default();
+    let whole = inf_ecs::bodywork::VehicleDamage::default();
+    assert!(whole.is_quiet(), "a fresh car is not quiet");
+    let mut hurt = whole.clone();
+    hurt.hull_j = limits.hull_capacity_j() * 0.25;
+    hurt.engine_damage = 0.4;
+    hurt.flatten(2);
+    hurt.parts.insert(
+        Uuid::from_u128(1),
+        PartState::new(inf_ecs::vehicle::BodyPartKind::Glass),
+    );
+    hurt.parts.get_mut(&Uuid::from_u128(1)).unwrap().latch = PartLatch::Gone;
+    hurt.fire_step = 7;
+    let row = inf_ecs::bodywork::damage_readout(&hurt, limits);
+    eprintln!("the damage row reads: {row}");
+    assert_eq!(row, "HULL 75%  ENG 60%  FLATS 1  GLASS 1/1  ON FIRE");
+}
+
+/// **Every new number this wave added is a RUNTIME one** — no persisted field
+/// landed, and VEH3a's spent schema window stays spent.
+#[test]
+fn this_wave_moved_no_schema() {
+    // The three tunables the bodywork reads all predate this wave: VEH3a landed
+    // them in the v28 window and `veh3a_gate::every_v28_tunable_survives_the_wire`
+    // walks all hundred through the editor's own codec.
+    let names = inf_ecs::vehicle::VehicleTuning::names();
+    for n in ["glass_health_j", "panel_health_j", "part_break_impulse_ns"] {
+        assert!(names.contains(&n), "`{n}` is not a v28 tunable");
+    }
+    assert_eq!(names.len(), 100, "the tunable count moved");
+    // …and `BodyPart` itself is not serializable, which is what makes
+    // `BodyPartKind` free. A source pin, because the type has no `Serialize` to
+    // assert the absence of.
+    const SRC: &str = include_str!("../../../crates/inf-ecs/src/vehicle.rs");
+    let at = SRC
+        .find("pub struct BodyPart {")
+        .expect("`BodyPart` is in `inf-ecs::vehicle`");
+    let head = &SRC[at.saturating_sub(400)..at];
+    assert!(
+        !head.contains("Serialize"),
+        "`BodyPart` grew a `Serialize` — a parts table on the wire is a schema \
+         window, and VEH3a spent the only one this arc gets"
+    );
+    assert!(
+        head.contains("#[derive(Clone, Copy, Debug, PartialEq)]"),
+        "`BodyPart`'s derive list changed: {head:?}"
+    );
+}
