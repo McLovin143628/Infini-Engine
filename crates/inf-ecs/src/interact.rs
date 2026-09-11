@@ -83,6 +83,40 @@ pub enum InteractVerb {
 }
 
 impl InteractVerb {
+    /// **Whether this verb's reach is a GROUND-PLANE question** (VEH3a's audit).
+    ///
+    /// [`resolve`] measures a candidate's range from the character's FEET to the
+    /// candidate's published position, in three dimensions. For a door handle or
+    /// an item on the floor that is exactly right.
+    ///
+    /// For a **vehicle seat** it is not, and the reason is that the seat is a
+    /// DERIVED point rather than an authored one: `VehicleRig::seat_local` is
+    /// the chassis collider's top face, so the published position sits on the
+    /// roof — 1.45 m above the ground on the default rig, and higher on a van or
+    /// a truck. Measured in three dimensions that height is subtracted from the
+    /// player's reach: `ENTER_REACH_M` is 3.00 m and the furthest a character
+    /// could actually board from was **2.62 m** on the default rig
+    /// (`sqrt(3² − 1.45²)`), less on anything taller, and nothing said so. It is
+    /// what made the demo's boarding flaky one session in three — the hero stood
+    /// 2.8 m from a car and twenty-five presses of E reached nothing.
+    ///
+    /// "How close am I to that car" is a question about the ground, and a
+    /// player cannot see the height of a derived seat. So [`Enter`](Self::Enter)
+    /// and [`Carjack`](Self::Carjack) — the two verbs whose position is a seat
+    /// pose — measure their range on the XZ plane, and every other verb keeps
+    /// the three-dimensional test it has always had.
+    ///
+    /// The reported `InteractHit::distance_m` stays the true three-dimensional
+    /// distance, and the RANKING is still by it: this changes which candidates
+    /// are admitted, never which of two admitted ones wins.
+    ///
+    /// Pinned by `veh3a_gate::a_character_boards_from_as_far_as_the_reach_says`.
+    pub fn reach_is_on_the_ground(self) -> bool {
+        matches!(self, InteractVerb::Enter | InteractVerb::Carjack)
+    }
+}
+
+impl InteractVerb {
     /// The word the prompt starts with.
     pub fn word(self) -> &'static str {
         match self {
@@ -253,7 +287,16 @@ pub fn resolve(
         }
         let to = c.position - feet;
         let d = to.length();
-        if !d.is_finite() || d > c.range_m {
+        // The range test is the verb's own — see `reach_is_on_the_ground`. The
+        // RANKING below stays the three-dimensional `d` for every candidate, so
+        // this decides who is admitted and never which of two admitted ones
+        // wins.
+        let reach_d = if c.verb.reach_is_on_the_ground() {
+            (to.x * to.x + to.z * to.z).sqrt()
+        } else {
+            d
+        };
+        if !d.is_finite() || !reach_d.is_finite() || reach_d > c.range_m {
             continue;
         }
         if c.view_cone_deg < NO_VIEW_TEST_DEG {

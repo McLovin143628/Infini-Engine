@@ -1595,6 +1595,75 @@ fn mud_is_reachable_through_the_collider_the_wheel_is_standing_on() {
     );
 }
 
+/// **A CHARACTER BOARDS FROM AS FAR AS THE REACH SAYS** (VEH3a's audit — the
+/// demo's flaky boarding, diagnosed in the shipped host).
+///
+/// The wave's demo reported the hero standing **2.8 m** from `Harbour City Car`
+/// while twenty-five presses of E reached nothing, and boarding succeeding in
+/// one session of three. It is not the script and it is not the crouch (`Crouch`
+/// is in `is_grounded_family`, so a crouched character boards): it is that
+/// `ENTER_REACH_M` was measured in THREE dimensions to a seat that sits on the
+/// chassis collider's TOP FACE.
+///
+/// So the effective reach along the ground was `sqrt(3² − h²)` for a seat `h`
+/// above the feet — **2.62 m** on the default rig, less on a van and less again
+/// on a truck — and nothing in the engine said so. A player cannot see the
+/// height of a derived seat, and "how close am I to that car" is a question
+/// about the ground.
+///
+/// `InteractVerb::reach_is_on_the_ground` is the fix: `Enter` and `Carjack`
+/// measure their range on the XZ plane, every other verb keeps the
+/// three-dimensional test, and the RANKING is untouched.
+///
+/// **The mutation**: `reach_is_on_the_ground` returning `false` — the reach
+/// collapses back to 2.62 m and the second assertion names it.
+#[test]
+fn a_character_boards_from_as_far_as_the_reach_says() {
+    use std::collections::BTreeSet;
+    let mut rig = Rig::on(0);
+    rig.step(60);
+    let (seat, _, _) = inf_physics::d3::vehicle::seat_pose(&rig.bridge, CHASSIS).expect("a seat");
+    let car = rig.at();
+    let lift = seat.y - (car.y - 0.95);
+    assert!(
+        lift > 1.0,
+        "the seat is {lift} m above the ground, so this arm is not measuring the          thing it was written for -- a seat in the CABIN is VEH3d's and when it          lands this arm should be re-read rather than deleted"
+    );
+
+    let furthest = |from: DVec3| -> f64 {
+        let mut reach = 0.0f64;
+        for i in 0..500 {
+            let d = f64::from(i) * 0.01;
+            let feet = from + DVec3::new(d, 0.0, 0.0);
+            if inf_physics::d3::vehicle::try_enter(&rig.bridge, feet, &BTreeSet::new()).is_some() {
+                reach = d;
+            }
+        }
+        reach
+    };
+    let ground = DVec3::new(seat.x, car.y - 0.95, seat.z);
+    let reach = furthest(ground);
+    println!(
+        "VEH3a BOARD: the seat is {lift:.2} m above the feet and a character boards from {reach:.2} m away (ENTER_REACH_M {:.2})",
+        inf_physics::d3::vehicle::ENTER_REACH_M
+    );
+    assert!(
+        reach > 2.79,
+        "a character cannot board from {reach} m -- the demo stood 2.8 m from a          car and pressed E twenty-five times"
+    );
+    assert!(
+        (reach - inf_physics::d3::vehicle::ENTER_REACH_M).abs() < 0.02,
+        "the reach on the ground is {reach} m against a stated {} -- a seat's          height is being subtracted from a player's reach",
+        inf_physics::d3::vehicle::ENTER_REACH_M
+    );
+    // …and the reach is still a REFUSAL past its edge, not an open door.
+    let feet = ground + DVec3::new(inf_physics::d3::vehicle::ENTER_REACH_M + 0.5, 0.0, 0.0);
+    assert!(
+        inf_physics::d3::vehicle::try_enter(&rig.bridge, feet, &BTreeSet::new()).is_none(),
+        "a character three and a half metres away boarded anyway"
+    );
+}
+
 /// **THE SURFACE TABLE IS THE RESEARCH DOC'S**, restated here rather than read
 /// from the type — a table computed from the thing it checks agrees with
 /// anything.
