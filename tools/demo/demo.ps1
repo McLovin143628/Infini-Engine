@@ -119,7 +119,19 @@ param(
     # The half it is NOT: it does not drive the input synthesiser, does not
     # press Play, and cannot see a leg whose sleeps are too short. Those need a
     # recorded INPUT trace as well, which is a wave.
-    [string]$DryRun = ""
+    [string]$DryRun = "",
+    # **RETUNE EVERY VEHICLE IN THE LEVEL FOR THE SESSION** (VEH3a's audit),
+    # `INF_PIE_TUNE_VEHICLE`. A `;`-separated `name=value` list, sent through
+    # `VehicleClass::set` -- the same by-name door an authored catalogue row
+    # uses -- and written onto the chassis entity, so the physics bridge
+    # installs it on its next sync. Nothing bypasses the model.
+    #
+    # It exists because wave VEH3a's burnout frame COULD NOT fire: a line-lock
+    # burnout on asphalt under road tyres makes no slip at all in this model,
+    # because the island car's brakes out-hold its engine (13 kN against 8).
+    # `tyre_surface_set=3` is the slick row, and the gate measures a burnout on
+    # it at 229 slipping steps.
+    [string]$TuneVehicle = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -397,6 +409,8 @@ if ($ArmHero -ne "") {
     }
 }
 if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction Ignore }
+if ($TuneVehicle -ne "") { $env:INF_PIE_TUNE_VEHICLE = $TuneVehicle; Say "tune vehicle: $TuneVehicle" }
+else { Remove-Item env:INF_PIE_TUNE_VEHICLE -ErrorAction Ignore }
 $proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru
 Say "launched pid $($proc.Id); waiting up to $BootWaitS s for the shell"
 
@@ -2496,6 +2510,18 @@ if (-not $veh_driving) {
         -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") -and ($c[41] -ne "asphalt") -and ($c[41] -ne "-") } `
         -Out (Join-Path $OutDir "91-veh3a-verge.png"))[-1]
     if (-not $veh_verge) {
+        # **THE OTHER WAY** (VEH3a's audit). One six-second steer is one
+        # direction, and which side of the carriageway the car is on when the
+        # leg starts is not something this script knows. The first run of the
+        # wave held D and never left the road; holding A is the same leg
+        # mirrored, and between them the car has crossed the whole carriageway.
+        Say "VEH3a: still on asphalt -- steering the OTHER way"
+        [InfInput]::Down(0x1E); Start-Sleep -Milliseconds 7000; [InfInput]::Up(0x1E)   # A
+        $veh_verge = @(Wait-ForHero -Csv $heroCsv -What "the verge (the other way)" -TimeoutS 20.0 `
+            -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") -and ($c[41] -ne "asphalt") -and ($c[41] -ne "-") } `
+            -Out (Join-Path $OutDir "91-veh3a-verge.png"))[-1]
+    }
+    if (-not $veh_verge) {
         Say "VEH3a: the car never left ASPHALT -- frame (b) is not in this session"
     }
 
@@ -2505,6 +2531,13 @@ if (-not $veh_driving) {
     #     number below is what a road car on the island's own ground really
     #     reaches, and 60 C is asked for first so a miss is reported rather than
     #     dressed down.
+    # **AND THE COMPOUND IS AN OPERATOR'S SWITCH NOW** (VEH3a's audit). The
+    # wave's session could not fire this frame and said so honestly: on asphalt
+    # under ROAD tyres a line-lock burnout is a parked car, because this rig's
+    # brakes out-hold its engine. `-TuneVehicle "tyre_surface_set=3"` puts the
+    # SLICK row on every chassis through `VehicleClass::set` -- the same by-name
+    # door an authored catalogue uses -- and then the drive really does outrun
+    # the grip. A session that did not ask for it still reports the miss.
     Say "VEH3a: burnout -- brake and throttle together"
     [InfInput]::Down(0x1F)   # S, the brake
     $veh_hot = @(Wait-ForHero -Csv $heroCsv -What "the tyres past 60 C" -TimeoutS 25.0 `

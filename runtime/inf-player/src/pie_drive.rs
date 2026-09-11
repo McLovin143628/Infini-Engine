@@ -523,6 +523,27 @@ pub use inf_runtime::pie::WEAR_CLOTH_ENV;
 /// contains it.
 pub const ARM_HERO_ENV: &str = "INF_PIE_ARM_HERO";
 
+/// **Preview-only: retune every vehicle in the level** (VEH3a's audit),
+/// `name=value;name=value`.
+///
+/// [`ARM_HERO_ENV`]'s shape at the vehicle. It exists because three of wave
+/// VEH3a's four tyre frames did not fire, and one of them could not: a
+/// line-lock burnout on ASPHALT under ROAD tyres produces no slip at all in
+/// this model, because the island car's brakes out-hold its engine (13 kN
+/// against 8). The gate spins one on SAND under SLICK tyres and measures 229
+/// slipping steps; the demo loop had no way to say "slicks".
+///
+/// The values go through `VehicleClass::set` — the by-name door the authored
+/// catalogue uses — and are written onto the chassis ENTITY, so the physics
+/// bridge installs them on its next sync exactly as it installs an authored
+/// class. Nothing bypasses the model.
+///
+/// Applied **once**, to **every** chassis in the level (an island session has no
+/// door to name one car, and the hero boards whichever is nearest), in a
+/// **preview** session only. A name the door does not know is a refusal with a
+/// reason on stderr, which is the whole point of an operator's switch.
+pub const TUNE_VEHICLE_ENV: &str = "INF_PIE_TUNE_VEHICLE";
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -546,6 +567,10 @@ pub struct SpawnOverride {
     /// seconds when it named one, and whether they have been given.
     weapons: Vec<(String, Option<f64>)>,
     weapon_done: bool,
+    /// The `name=value` pairs [`TUNE_VEHICLE_ENV`] named, and whether they have
+    /// been installed.
+    tune: Vec<(String, f64)>,
+    tune_done: bool,
     /// Which id the rotation is holding, and when it hands over. Both are `0`
     /// on a list that named no dwell, which never rotates.
     equip_at: usize,
@@ -598,6 +623,24 @@ impl SpawnOverride {
                 }
             }
             at.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+        // **The vehicle tuning** (VEH3a's audit), on the weapon list's own
+        // shape: a malformed entry is a refusal with a reason on stderr.
+        let mut tune: Vec<(String, f64)> = Vec::new();
+        if let Ok(v) = std::env::var(TUNE_VEHICLE_ENV) {
+            for entry in v.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+                match entry.split_once('=') {
+                    Some((name, value)) => match value.trim().parse::<f64>() {
+                        Ok(x) if x.is_finite() => tune.push((name.trim().to_string(), x)),
+                        _ => eprintln!(
+                            "inf-player: {TUNE_VEHICLE_ENV} entry `{entry}` has no finite value"
+                        ),
+                    },
+                    None => eprintln!(
+                        "inf-player: {TUNE_VEHICLE_ENV} entry `{entry}` is not `name=value`"
+                    ),
+                }
+            }
         }
         // The same read the editor's payload builder does, through the same
         // door: a garment worn here that the payload did not carry resolves to
@@ -683,6 +726,7 @@ impl SpawnOverride {
         if done
             && (self.cloth.is_none() || self.cloth_done)
             && (self.weapons.is_empty() || self.weapon_done)
+            && (self.tune.is_empty() || self.tune_done)
             && !self.rotates()
         {
             return None;
@@ -694,11 +738,12 @@ impl SpawnOverride {
         let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
         let wear = self.cloth.filter(|_| !self.cloth_done);
         let arm = (!self.weapon_done && !self.weapons.is_empty()).then(|| self.weapons.clone());
+        let retune = (!self.tune_done && !self.tune.is_empty()).then(|| self.tune.clone());
         // The rotation's own clock (carried 209). It is checked BEFORE the
         // early return, because a rotation is the only thing this door does
         // that is not one-shot.
         let rotate = self.rotates() && self.weapon_done && self.accum >= self.equip_next_s;
-        if due.is_none() && wear.is_none() && arm.is_none() && !rotate {
+        if due.is_none() && wear.is_none() && arm.is_none() && retune.is_none() && !rotate {
             return None;
         }
         let hero = inf_ecs::movement::camera_subject(sim.world())?;
@@ -829,6 +874,52 @@ impl SpawnOverride {
                 "{ARM_HERO_ENV} rotation equipped `{id}` ({}/{n}, ok {ok}) at t={:.1}s",
                 self.equip_at + 1,
                 self.accum
+            ));
+        }
+        // **THE VEHICLE TUNING** (VEH3a's audit). Last, because it walks the
+        // level rather than the hero, and because a car retuned before the
+        // placement would be retuned on a chassis the streamer has not paged in.
+        if let Some(pairs) = retune {
+            let w = sim.world_mut();
+            // Every chassis in the level, through the RECOGNISER rather than a
+            // component query: a vehicle is a rig with wheels, and that is the
+            // one definition both hosts already share.
+            let chassis: Vec<Uuid> = w
+                .world()
+                .iter_entities()
+                .filter_map(|e| e.get::<inf_ecs::components::Guid>().map(|g| g.0))
+                .filter(|g| inf_ecs::vehicle::rig_of(w, *g).is_some_and(|r| !r.wheels.is_empty()))
+                .collect();
+            let mut took = 0usize;
+            let mut refused: Vec<&str> = Vec::new();
+            for guid in &chassis {
+                let Some(entity) = w.entity_of(*guid) else {
+                    continue;
+                };
+                let mut class = w
+                    .world()
+                    .get::<inf_ecs::components::VehicleClass>(entity)
+                    .copied()
+                    .unwrap_or_default();
+                for (name, value) in &pairs {
+                    if class.set(name, *value) {
+                        took += 1;
+                    } else if !refused.contains(&name.as_str()) {
+                        refused.push(name.as_str());
+                    }
+                }
+                w.world_mut().entity_mut(entity).insert(class);
+            }
+            for name in &refused {
+                eprintln!("inf-player: {TUNE_VEHICLE_ENV} name `{name}` is not a tunable");
+            }
+            self.tune_done = true;
+            if !said.is_empty() {
+                said.push_str("; ");
+            }
+            said.push_str(&format!(
+                "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis (refused {refused:?})",
+                chassis.len()
             ));
         }
         (!said.is_empty()).then_some(said)
