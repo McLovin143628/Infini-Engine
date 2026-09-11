@@ -97,22 +97,53 @@ if (!hit) {
   ws.close();
   process.exit(3);
 }
-console.log(`selecting: ${hit.name} ${hit.guid}`);
-await invoke("scene_select", { guids: [hit.guid], additive: false });
-await sleep(600);
+const byGuid = new Map(rows.map((e) => [e.guid, e]));
 
-// The grid, from the BACKEND rather than from the DOM: `scene_details` is what
-// the panel renders, so a claim made about it is a claim about the same data.
-const details = await invoke("scene_details", {});
-const comps = Array.isArray(details?.components) ? details.components : [];
-const fields = comps.flatMap((c) => (c.fields ?? []).map((f) => f.label));
-console.log(`details: ${details?.name} — ${comps.length} components, ${fields.length} fields`);
-if (fields.length === 0) {
-  console.log("THE GRID IS EMPTY for that selection");
+// **A RIG IS A HIERARCHY, and the component is on one node of it.** The wave's
+// account — *"clicking the car selects a body PANEL (`lower`), not the chassis
+// that carries the `VehicleClass`"* — is the general case: a viewport pick, and
+// a name search, answer a node, and the thing you asked about may be on its
+// parent or on a sibling. So this walks: the node, then up its parents, then
+// each of the root's children, and stops at the first whose grid really carries
+// the field. A tool that selected one node and reported an empty grid would be
+// re-discovering the wave's own dead end every time it ran.
+const look = async (guid) => {
+  await invoke("scene_select", { guids: [guid], additive: false });
+  await sleep(250);
+  const d = await invoke("scene_details", {});
+  const cs = Array.isArray(d?.components) ? d.components : [];
+  const fs = cs.flatMap((c) => (c.fields ?? []).map((f) => f.label));
+  return { d, cs, fs, hits: fs.filter((f) => f.toLowerCase().includes(filter.toLowerCase())) };
+};
+
+const order = [hit.guid];
+let up = hit;
+for (let i = 0; i < 4 && up?.parent; i++) {
+  up = byGuid.get(up.parent);
+  if (up) order.push(up.guid);
+}
+if (up) for (const c of up.children ?? []) if (!order.includes(c)) order.push(c);
+
+let found = null;
+for (const guid of order) {
+  const r = await look(guid);
+  const who = byGuid.get(guid);
+  console.log(`  ${who?.name ?? guid}: ${r.cs.length} components, ${r.fs.length} fields, ${r.hits.length} matching`);
+  if (r.hits.length > 0 || (filter === "" && r.fs.length > 0)) { found = { guid, ...r }; break; }
+}
+if (!found) {
+  console.log(`NO NODE in that rig carries a field matching "${filter}"`);
   ws.close();
   process.exit(4);
 }
-const named = fields.filter((f) => f.toLowerCase().includes(filter.toLowerCase()));
+await invoke("scene_select", { guids: [found.guid], additive: false });
+await sleep(400);
+console.log(`selected: ${byGuid.get(found.guid)?.name} ${found.guid}`);
+const details = found.d;
+const comps = found.cs;
+const fields = found.fs;
+console.log(`details: ${details?.name} — ${comps.length} components, ${fields.length} fields`);
+const named = found.hits;
 console.log(`fields matching "${filter}": ${named.length}${named.length ? " — " + named.slice(0, 8).join(", ") : ""}`);
 
 if (filter) {
