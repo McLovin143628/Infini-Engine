@@ -9368,9 +9368,9 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
 /// **The immovability has two mechanisms and neither is placement**, both
 /// measured here:
 ///
-/// 1. **the traffic system is driving it.** Before `mark_taken`, nine of eleven
-///    covered under half a metre in three seconds of full throttle while
-///    standing on four wheels on asphalt at µ 1.00 — `step_traffic` writes a
+/// 1. **the traffic system is driving it.** Before `mark_taken`, **eight of
+///    eleven** covered under half a metre in three seconds of full throttle
+///    (nine under 0.6 m) while standing on four wheels on asphalt at µ 1.00 — `step_traffic` writes a
 ///    parked car's controls every step until the record says somebody has
 ///    touched it;
 /// 2. **somebody is in the seat.** `step_character_movement` writes the
@@ -9454,8 +9454,8 @@ fn every_parked_island_vehicle_rests_on_its_wheels_and_drives() {
     // goes through, and it is load-bearing: `step_traffic` writes a PARKED car's
     // controls every step and stops only when the record says somebody has
     // touched it (`if rec.taken { … continue; }`). Without it this loop measured
-    // the handbrake -- nine of eleven cars covered under half a metre in three
-    // seconds of full throttle while standing on four wheels on asphalt at
+    // the handbrake -- EIGHT of eleven cars covered under half a metre in three
+    // seconds of full throttle (nine under 0.6 m) while standing on four wheels on asphalt at
     // mu 1.00, which is the traffic system working and is exactly the reading
     // VEH3a's audit could not rule out from `hero.csv`.
     //

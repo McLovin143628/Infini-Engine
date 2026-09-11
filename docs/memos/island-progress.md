@@ -39454,8 +39454,9 @@ the origin is the body's centre and the contact is under the tyre.
 
 The immovability has two mechanisms and neither is a placement. **The traffic
 system is driving it**: before `mark_taken` — the same Ring-0 door a boarding
-player goes through — nine of eleven covered under half a metre in three seconds
-of full throttle while standing on four wheels at µ 1.00. **And somebody is in
+player goes through — **eight of eleven** covered under half a metre in three
+seconds of full throttle (nine under 0.6 m) while standing on four wheels at
+µ 1.00. **And somebody is in
 the seat**: `step_character_movement` writes the occupant's own intent before the
 vehicle phase and `step_one` clears the controls after every solve, so an
 occupant's silence beats anybody else's throttle — every car that stayed at
