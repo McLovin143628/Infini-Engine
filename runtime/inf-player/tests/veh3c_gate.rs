@@ -24,7 +24,7 @@
 //! |---|---|---|---|
 //! | `a_door_opens_on_its_hinge_and_shuts_again` | `hinge_step`'s motor term deleted | degrees travelled, steps | **fails** — it has no door |
 //! | `a_crash_at_sixty_sheds_the_bumper_and_pops_the_bonnet` | `part_break_impulse_ns` → infinity | the blow's own N.s, parts before/after | **fails** — nothing to shed |
-//! | `the_shed_part_is_a_body_on_the_ground` | the `RigidBody3D` insert dropped | the part's own fall, its mass | **fails** |
+//! | `the_shed_part_falls_to_the_ground_and_lies_there` | `step_debris` stopped stepping | its mass, its fall, its rest, its reap | **fails** |
 //! | `a_round_through_a_window_takes_the_window` | `glass_health_j` → 1e9 | the pane's latch, the rounds spent | **fails** |
 //! | `a_crash_dents_the_panel_it_reaches_and_not_the_one_it_does_not` | `DENT_M_PER_KNS` → 0 | the dent in mm, front and back | **fails** |
 //! | `a_car_shot_at_spends_its_own_joules` | the vehicle branch deleted from `apply_hit` | joules in, joules on the hull | passes — this one is about the HULL |
@@ -37,6 +37,9 @@
 //! | `two_runs_of_one_crash_fold_the_same_bytes` | a clock or an RNG anywhere in the step | the bytes' own length | passes |
 //! | `pie_equals_shipping_on_a_crash_course` | either host's `step_bodywork` call deleted | 108 quiet steps then 439 bytes | passes — two empty traces agree too, which the anti-vacuity half refuses |
 //! | `every_authored_family_is_a_car_with_doors` | a family's parts emptied | 84 parts over 6 catalogue rows | **fails** |
+//! | `a_blast_reaches_the_car_and_not_the_panel_that_came_off_it` | the chassis walk removed from `apply_blast` | the candidate set, 4 000 J on the hull, the debris' own height | **fails** |
+//! | `the_shipped_host_draws_the_damage_row` | the call deleted from `inf_player::window` | three source fragments and one row | n/a |
+//! | `this_wave_moved_no_schema` | a `Serialize` on `BodyPart` | 100 tunables, three names | n/a |
 //!
 //! The BRIGADE's arrival is measured where a town is:
 //! `inf_physics::tests::dispatch_3d::a_burning_car_brings_the_appliance` walks
