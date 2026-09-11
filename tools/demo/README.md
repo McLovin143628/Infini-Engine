@@ -46,14 +46,20 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   state,foot_mm,boom_m,body_fade,whisker_steer,camera_holder,
                   cover_class,cover_side,cover_peek,rounds,last_hit_m,equipped,
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
-                  class,attach,lock,engaged,incoming,heat,on_scene,responder_m
-                  — THIRTY-SEVEN columns, four rows a second, and NO header line:
+                  class,attach,lock,engaged,incoming,heat,on_scene,responder_m,
+                  tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,
+                  slip_ratio,slip_lat,mu
+                  — FORTY-FIVE columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
                   CHAR1c's (boom / fade / steer / holder), 18-20 are COV1's,
                   21-23 are WPN2a's (rounds in flight, the last impact's flight
-                  distance, and the equipped id), 24-27 are WPN2b's (the
+                  distance, and the equipped id), 38-45 are VEH3a's (four tyre
+                  temperatures in Celsius, the surface the most wheels are on,
+                  the driven axle's slip ratio and lateral slip, and the µ the
+                  contact is worth — all `0`/`-` when nobody is driving),
+                  24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,
                   and the aim-down-sights blend), 28-29 are WPN2c's (how many

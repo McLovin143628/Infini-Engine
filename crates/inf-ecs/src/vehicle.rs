@@ -2565,6 +2565,53 @@ pub fn drive_readout(speed_mps: f64, gear: i32) -> String {
     format!("{kmh:.0} km/h    {}", gear_label(gear))
 }
 
+/// **THE TYRE ROW** (wave VEH3a clause 7) — what the driving model now knows,
+/// on one line under [`drive_readout`].
+///
+/// Four temperatures, the surface under each wheel, the driven axle's two slips
+/// and the µ the contact is worth. Every number is read off [`WheelState`] after
+/// the solve published it; none is recomputed here, or the HUD would be a second
+/// opinion rather than a record.
+///
+/// In Ring 0 for [`drive_readout`]'s own reason, verbatim: a host function cannot
+/// be tested and this one can. Both hosts call it.
+///
+/// Shape: `76/74/68/69 C  asphalt  slip 0.03/-0.01  mu 1.00`. An empty wheel list
+/// answers the empty string, which is what "this craft has no tyres" has to look
+/// like — a boat and a helicopter draw no row at all.
+pub fn tyre_readout(wheels: &[WheelState]) -> String {
+    if wheels.is_empty() {
+        return String::new();
+    }
+    let mut temps = String::new();
+    for (i, w) in wheels.iter().take(4).enumerate() {
+        if i > 0 {
+            temps.push('/');
+        }
+        temps.push_str(&format!("{:.0}", w.temp_c));
+    }
+    // The surface the MOST wheels are on, ties broken by the table's own order,
+    // because a row that named four surfaces would be unreadable and a car with
+    // two wheels on the verge is a car on the verge.
+    let mut best = (0usize, SurfaceClass::Asphalt);
+    for s in SurfaceClass::all() {
+        let n = wheels.iter().filter(|w| w.surface == s).count();
+        if n > best.0 {
+            best = (n, s);
+        }
+    }
+    // THE DRIVEN AXLE is the rear pair where there is one: `wheel_mounts` puts
+    // the front pair first, so the last two are the ones a rear-drive car spins.
+    let driven = wheels.last().copied().unwrap_or_default();
+    let mu = wheels.iter().map(|w| w.mu_surface).fold(0.0, f64::max);
+    format!(
+        "{temps} C  {}  slip {:.2}/{:.2}  mu {mu:.2}",
+        best.1.name(),
+        driven.slip_ratio,
+        driven.slip_lat
+    )
+}
+
 /// The letter or number on the gate for one gear.
 ///
 /// `-1` and below is reverse, `0` is neutral, and everything above is its own

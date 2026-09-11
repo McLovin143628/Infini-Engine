@@ -1112,3 +1112,63 @@ fn a_road_laid_over_grass_is_a_road() {
         paved.cells()
     );
 }
+
+/// **THE HUD ROW SAYS WHAT THE TYRES KNOW** (wave VEH3a clause 7).
+///
+/// The driving model publishes four temperatures, a surface and a µ, and until
+/// this row nothing a player could see said any of it. `tyre_readout` is in
+/// Ring 0 for `drive_readout`'s own reason — a host function cannot be tested
+/// and this one can — and both hosts draw it from there.
+///
+/// **The mutation**: deleting the `tyre_readout` call from
+/// `inf_player::window::Window::drive_readout`, or the row's own `format!` —
+/// the string stops naming a temperature or a surface and this arm reds.
+#[test]
+fn the_hud_row_says_what_the_tyres_know() {
+    // A heated car on sand, from the model's own state rather than a literal.
+    let mut rig = Rig::on(3);
+    if let Some(v) = rig.bridge.vehicle_mut(CHASSIS) {
+        assert!(v.tune("tyre_surface_set", 3.0));
+    }
+    rig.step(60);
+    let full = VehicleControls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    let mut spun = 0usize;
+    for _ in 0..(60 * 8) {
+        rig.drive(full, 1);
+        if rig.wheel(3).slip_ratio.abs() > 0.02 {
+            spun += 1;
+        }
+    }
+    assert!(
+        spun > 20,
+        "only {spun} slipping steps, so nothing was heated"
+    );
+
+    let wheels: Vec<inf_ecs::vehicle::WheelState> = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .map(|v| v.wheels().to_vec())
+        .expect("the car");
+    let row = inf_ecs::vehicle::tyre_readout(&wheels);
+    println!("VEH3a HUD: {row}");
+    assert!(
+        row.contains("sand"),
+        "the row is `{row}` and the wheels are on {}",
+        wheels[0].surface.name()
+    );
+    let hottest = wheels.iter().map(|w| w.temp_c).fold(0.0f64, f64::max);
+    assert!(
+        row.contains(&format!("{hottest:.0}")),
+        "the row is `{row}` and the hottest tyre is {hottest:.1} °C"
+    );
+    assert!(
+        row.contains("mu ") && row.contains("slip "),
+        "the row is `{row}`"
+    );
+    // …and a craft with no tyres draws no row at all, which is what a boat and a
+    // helicopter need rather than a line of zeroes.
+    assert_eq!(inf_ecs::vehicle::tyre_readout(&[]), "");
+}

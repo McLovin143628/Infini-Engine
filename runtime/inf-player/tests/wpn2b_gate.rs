@@ -2557,6 +2557,11 @@ fn the_hero_log_and_its_readme_agree() {
         "`demo.ps1` no longer reads the mode at `$c[5]`, so index 5 is not the mode any more"
     );
     // **The README counts the same columns** — carried 225.
+    // **Forty-five since wave VEH3a**, which appended the eight tyre columns for
+    // the reason every block before them was: a frame of a burnout, a verge or a
+    // kerb cannot be triggered on a position column, and "the car is on grass",
+    // "the tyres are cooked" and "the wheel is spinning" are three different
+    // things that all read the same in `speed`.
     // **Thirty-seven since the WPN2e AUDIT** — WPN2e appended `engaged` and
     // `incoming` (thirty-three and thirty-four) and the audit appended `heat`,
     // `on_scene` and `responder_m`, for the reason every block before them was: two waves
@@ -2564,9 +2569,9 @@ fn the_hero_log_and_its_readme_agree() {
     // stopped at `engaged`, and "nobody heard the shot", "the file went cold"
     // and "the car never arrived" are three different bugs that all read zero.
     let n = width(&armed);
-    assert_eq!(n, 37, "the row is {n} fields and this arm's word is 37");
+    assert_eq!(n, 45, "the row is {n} fields and this arm's word is 45");
     assert!(
-        README.contains("THIRTY-SEVEN") || README.contains("thirty-seven"),
+        README.contains("FORTY-FIVE") || README.contains("forty-five"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2585,6 +2590,13 @@ fn the_hero_log_and_its_readme_agree() {
         // Wave WPN2e's two.
         "engaged",
         "incoming",
+        // Wave VEH3a's eight.
+        "tyre_temp_fl",
+        "tyre_temp_rr",
+        "surface",
+        "slip_ratio",
+        "slip_lat",
+        "mu",
     ] {
         assert!(
             README.contains(col),

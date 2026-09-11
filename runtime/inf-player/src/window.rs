@@ -629,9 +629,13 @@ impl PlayerApp {
                 cm.runtime.velocity.to_dvec3().length(),
             )
         };
-        let (rig, gear, at, airborne) = {
+        let (rig, gear, at, airborne, tyres) = {
             let v = sim.bridge3d().vehicle_of(vehicle)?;
             let rig = v.rig().clone();
+            // **THE TYRE ROW** (wave VEH3a): the wheels' own published state,
+            // copied out here because the formatting is Ring 0's and the borrow
+            // is not.
+            let tyres = v.wheels().to_vec();
             let airborne = rig
                 .parts_of(inf_ecs::vehicle::PartKind::Rotor)
                 .next()
@@ -642,12 +646,24 @@ impl PlayerApp {
                     .get::<inf_ecs::components::Transform>(e)
                     .map(|t| t.translation.to_dvec3())
             })?;
-            (rig, v.gear(), at, airborne)
+            (rig, v.gear(), at, airborne, tyres)
         };
         // The ground query is a `&mut` call on the sim (it may page a tile in),
         // so it is made only for the one craft that draws a height.
         let height = airborne.then(|| at.y - sim.terrain_height_at(at.x, at.z));
-        Some(inf_ecs::vehicle::craft_readout(&rig, speed, gear, height))
+        let head = inf_ecs::vehicle::craft_readout(&rig, speed, gear, height);
+        // The tyre row goes UNDER the instruments, and a craft with no tyres
+        // draws no second line at all — a boat and a helicopter answer the empty
+        // string from Ring 0 rather than being special-cased here.
+        let row = inf_ecs::vehicle::tyre_readout(&tyres);
+        Some(if row.is_empty() {
+            head
+        } else {
+            format!(
+                "{head}
+{row}"
+            )
+        })
     }
 
     /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for
