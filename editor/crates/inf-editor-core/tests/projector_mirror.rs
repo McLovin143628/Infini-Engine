@@ -3009,8 +3009,17 @@ fn simulate_forgets_on_exit_exactly_what_it_forgot_on_entry() {
             .unwrap_or_else(|| panic!("`{anchor}` is not in `simulate.rs`"));
         let body = &src[start..];
         // Far enough to hold the whole clear block and stop well before the next
-        // one: the two are hundreds of lines apart.
-        let window = &body[..body.len().min(6000)];
+        // one: the two anchors are **23 975 characters** apart, measured.
+        //
+        // **It was 6 000 and wave VEH3b's own entry call landed at offset
+        // 6 001** -- one character outside, because the call carried a six-line
+        // comment saying why it exists. The arm then reported the clear as
+        // present on the way OUT and absent on the way IN, which is a true
+        // statement about a window and a false one about the source. Eight
+        // thousand is 2 000 of slack against 16 000 of gap; if a wave ever needs
+        // more, the honest fix is to bound the block at its own closing brace
+        // rather than to move this number again.
+        let window = &body[..body.len().min(8000)];
         let mut out = std::collections::BTreeSet::new();
         for line in window.lines() {
             let line = line.trim();

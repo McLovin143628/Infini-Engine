@@ -1854,10 +1854,17 @@ fn the_shipped_host_draws_the_tyre_row() {
         .find("\n    /// **The shooter's readout**")
         .unwrap_or(body.len());
     let body = &body[..end];
+    // **`row.is_empty()` was the third fragment and wave VEH3b retired it**, with
+    // cause: the readout composes THREE lines now (the instruments, the
+    // drivetrain, the tyres) and a loop over `[drive, row]` that skips the empty
+    // ones replaced the two-armed `if`. The claim this arm makes is unchanged and
+    // the fragment that carries it is the one that always did -- a craft with no
+    // tyres still draws no row, and `tyre_readout(&[]) == ""` above is where that
+    // half is measured rather than pinned.
     for fragment in [
         "inf_ecs::vehicle::craft_readout(",
         "inf_ecs::vehicle::tyre_readout(&tyres)",
-        "row.is_empty()",
+        "if !line.is_empty()",
     ] {
         assert!(
             body.contains(fragment),
