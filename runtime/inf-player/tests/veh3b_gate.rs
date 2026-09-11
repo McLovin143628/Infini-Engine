@@ -958,7 +958,11 @@ fn the_boost_spools_and_blows_off() {
 /// identically, so it is not this wave's. A car on its bump stops measures its
 /// bump stops, so the fixture is given a spring that keeps the suspension inside
 /// its own travel and the arm measures the moment it is named for. The
-/// bottoming-out is carried by name.
+/// bottoming-out is carried by name — and `audit:` VEH3b re-ruled what it is:
+/// `the_shipped_spring_bottoms_out_and_the_formula_is_what_pays` measures this
+/// same stop on the SHIPPED spring and finds the transfer **118.8 % from the
+/// formula with the sign inverted**, because `suspension_force_n` has no bump
+/// stop at all. The 3.7 % below is a true statement about a 90 000 N/m fixture.
 ///
 /// **The mutation**: `cog_height_m` → the chassis centre's own height below the
 /// road, i.e. an `h` of zero — the force is applied AT the contact patch, the
@@ -1937,5 +1941,183 @@ fn a_wheels_speed_is_in_the_trace_through_its_own_transform() {
     assert_ne!(
         driven, coasting,
         "two free falls differing only in wheel speed folded identical snapshots"
+    );
+}
+
+/// **THE SHIPPED SPRING BOTTOMS OUT, AND HERE IS WHAT IT COSTS THE FORMULA**
+/// (`audit:` VEH3b, arming the wave's carried item 1).
+///
+/// `the_axle_loads_are_the_formulas` and `the_nose_dives_and_the_tail_squats`
+/// both stiffen the spring to 90 000 N/m before they measure, and both say why:
+/// the Ring-0 rig **sits on its bump stops under a 0.9 g stop**, and a car on
+/// its bump stops measures its bump stops. That is the right fixture for the
+/// claim those arms make. It also means the two headline numbers of clause 5 —
+/// 3.7 % braking and 1.4 % launching — are measured on a spring nothing ships.
+///
+/// This arm measures the SHIPPED one. Nothing here is a stiffened fixture: it is
+/// the Ring-0 default rig, on the default spring, stopped from the same speed,
+/// and it records three things the wave stated and never measured:
+///
+/// 1. how much of its own travel the rig uses standing still;
+/// 2. how many steps of a hard stop both axles spend pinned at `travel_m`;
+/// 3. what the doc's `m·a·h / L` agreement is worth once the bump stop is in it.
+///
+/// # `travel_m` is not the short number — the spring rate is
+///
+/// A road car's suspension travel is 0.15–0.20 m and the Ring-0 default is
+/// **0.25 m**, so the travel is generous rather than short (the catalogue's nine
+/// rows author 0.16–0.30 m, which is the same band). What is wrong is the RATE
+/// against the mass: a real car sits at roughly a third of its jounce travel and
+/// this rig sits at **0.149 m of 0.25**, which leaves a tenth of a metre for
+/// everything a road can do. The catalogue's own worst is the sports row —
+/// 32 000 N/m under 1 374 kg on a 0.16 m travel — which is **two thirds** used
+/// standing still. VEH3f's handling profiles are where a rate lands; this arm is
+/// the number it should land against.
+#[test]
+fn the_shipped_spring_bottoms_out_and_the_formula_is_what_pays() {
+    let travel = VehicleTuning::default().travel_m;
+    let mut rig = settled(Rig::sealed());
+    rig.step(120);
+    let mass = rig.mass_kg();
+    let wheelbase = rig.wheelbase_m();
+    let contact_y = rig
+        .wheel(0)
+        .contact
+        .map(|c| c.point.y)
+        .expect("the car is standing on something");
+    let h = rig.at().y - contact_y + VehicleTuning::default().cog_height_m;
+    let static_front = rig.axle_load_n(true);
+    let rest_front = rig.axle_compression_m(true);
+    println!(
+        "VEH3b BUMP: the shipped rig stands on {rest_front:.3} m of its {travel:.2} m travel ({:.0} % of it), {mass:.0} kg on a {wheelbase:.2} m wheelbase, h = {h:.3} m",
+        rest_front / travel * 100.0
+    );
+    assert!(
+        rest_front > 0.05 && rest_front < travel,
+        "the rig stands at {rest_front:.3} m of a {travel:.2} m travel, which is not a car on its springs"
+    );
+
+    // ── the same stop the load arm makes, on the spring that ships ──
+    let full = VehicleControls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    for _ in 0..900 {
+        rig.drive(full, 1);
+        if rig.speed() > 22.0 {
+            break;
+        }
+    }
+    let brake = VehicleControls {
+        brake: 1.0,
+        ..Default::default()
+    };
+    rig.drive(brake, 40);
+    let (mut braked, mut front, mut rear, mut accel) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+    let (mut bottomed, mut deepest) = (0usize, 0.0f64);
+    let mut last = rig.speed();
+    for _ in 0..90 {
+        rig.drive(brake, 1);
+        let v = rig.speed();
+        let a = (v - last) / DT;
+        last = v;
+        let c = rig.axle_compression_m(true);
+        deepest = deepest.max(c);
+        if c >= travel - 1e-6 {
+            bottomed += 1;
+        }
+        if a < -4.0 && v > 3.0 {
+            braked += 1;
+            front += rig.axle_load_n(true);
+            rear += rig.axle_load_n(false);
+            accel += a;
+        }
+    }
+    assert!(
+        braked > 20,
+        "only {braked} steps of the stop pulled more than 0.4 g"
+    );
+    let measured = front / braked as f64;
+    let a_x = accel / braked as f64;
+    let moved = measured - static_front;
+    let want = -mass * a_x * h / wheelbase;
+    let err = (moved - want).abs() / want.abs().max(1.0);
+    println!(
+        "VEH3b BUMP: braking at {a_x:.2} m/s2 the front axle took {moved:.0} N of transfer against the doc's {want:.0} N — {:.1} % apart on the SHIPPED spring, against 3.7 % on the stiffened one; the front axle was at its bump stop on {bottomed} of 90 steps, deepest {deepest:.3} m of {travel:.2} (rear carried {:.0} N)",
+        err * 100.0,
+        rear / braked as f64
+    );
+    // **The engagement**: a stop this rig cannot take inside its own travel.
+    assert!(
+        bottomed > 10,
+        "the front axle reached its stop on {bottomed} of 90 braked steps, so the wave's carried item 1 no longer describes this rig and this arm should be re-read rather than kept"
+    );
+    // **THIS ARM ASSERTS A DEFECT, DELIBERATELY** — P22's own precedent, where
+    // the gate pinned the outcome of non-local damage "so the day a hit position
+    // arrives the test fails and the ledger gets rewritten".
+    //
+    // There is **no bump stop in this model**: `suspension_force_n` clamps its
+    // compression at `travel_m`, so past the stop the strut pushes with a
+    // CONSTANT force. Both axles saturate at `stiffness x travel` and the
+    // transfer the doc's formula describes cannot happen at all — measured, the
+    // front axle LOSES 491 N where `m a h / L` predicts it gains 2 609, which is
+    // not an inaccuracy but the wrong sign. The rear is carrying the car.
+    //
+    // So the wave's carried item 1 is re-ruled: it is **not** "a suspension
+    // tuning question for VEH3f's handling profiles". A spring rate is VEH3f's;
+    // a strut with no stop is a model gap, and clause 5's 3.7 % is a true
+    // statement about a 90 000 N/m fixture and not about a car this engine
+    // ships.
+    //
+    // When a stop lands, this assertion reds. That is the point of it.
+    assert!(
+        err > 0.5,
+        "the shipped spring's transfer is now {:.1} % from the doc's formula, against the 118.8 % this arm was written on — something has given the suspension a bump stop, and `the_axle_loads_are_the_formulas` should drop its 90 000 N/m fixture and this arm should be deleted",
+        err * 100.0
+    );
+    assert!(
+        moved < 0.0 && want > 0.0,
+        "the front axle took {moved:.0} N of transfer against a predicted {want:.0} — the sign inversion this arm records is gone"
+    );
+
+    // …and the catalogue's own rows, by the same arithmetic, so "the shipped
+    // spring" is a fleet fact rather than a fixture one.
+    let mut worst = (String::new(), 0.0f64);
+    let catalogue = inf_editor_core::vehicle::island_vehicles();
+    let mut rows = 0usize;
+    for (id, def) in catalogue.0.iter() {
+        // WHEELED rows only: a hull and a helicopter carry a `travel_m` nothing
+        // reads, and the launch's 6 830 kg over four notional corners reads as
+        // 335 % of a travel it does not have.
+        if !def.body.wheeled() {
+            continue;
+        }
+        rows += 1;
+        let t = def.class.to_tuning();
+        // The row's own mass is its body's: a chassis collider of these half
+        // extents at this density, which is what rapier is handed.
+        let e = def.half_extents;
+        let kg = 8.0 * e.x * e.y * e.z * def.density_kg_m3;
+        // Four corners: how much of its travel it stands on.
+        let used = kg * 9.81 / 4.0 / t.stiffness_n_per_m / t.travel_m;
+        println!(
+            "VEH3b BUMP: {id:>10} stands on {:.0} % of its {:.2} m travel ({kg:.0} kg on {:.0} N/m corners)",
+            used * 100.0,
+            t.travel_m,
+            t.stiffness_n_per_m
+        );
+        if used > worst.1 {
+            worst = (id.clone(), used);
+        }
+    }
+    println!(
+        "VEH3b BUMP: {rows} wheeled rows; the worst is `{}` at {:.0} % of its travel standing still, and a road car sits at about a third",
+        worst.0, worst.1 * 100.0
+    );
+    assert!(rows >= 9, "only {rows} wheeled rows in the catalogue");
+    assert!(
+        worst.1 > 0.4,
+        "the worst wheeled row stands on {:.0} % of its travel, so the fleet no longer has the tuning problem this arm records",
+        worst.1 * 100.0
     );
 }

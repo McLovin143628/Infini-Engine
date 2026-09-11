@@ -6152,6 +6152,32 @@ pub fn ackermann_deg(
 /// suspension that pulls the chassis DOWN when it is extending is a suspension
 /// that sucks a car onto the road, so the result is floored at zero — the
 /// standard, and the reason a raycast vehicle does not need a rebound spring.
+///
+/// # THERE IS NO BUMP STOP, and what that costs (`audit:` VEH3b)
+///
+/// The compression is CLAMPED at [`travel_m`](VehicleTuning::travel_m), so past
+/// the stop this strut pushes with a **constant** force. It is not a bump stop:
+/// a bump stop is a rate that rises, and a rate that rises is what stops the
+/// chassis. A car whose axles have both saturated therefore carries
+/// `stiffness x travel` at each end whatever the chassis is doing, and the load
+/// TRANSFER that the friction circle is sized from stops happening.
+///
+/// It is not hypothetical on the shipped rig. `travel_m` is generous (0.25 m
+/// against a road car's 0.15–0.20) and the RATE is not: the Ring-0 default
+/// stands on **0.149 m of its 0.25 m travel**, and all nine wheeled catalogue
+/// rows stand on 54–88 % of theirs. Measured under a 0.87 g stop
+/// (`veh3b_gate::the_shipped_spring_bottoms_out_and_the_formula_is_what_pays`):
+/// the front axle is at its stop on **90 of 90 braked steps** and takes
+/// **−491 N** of transfer where the research doc's `m·a·h / L` predicts
+/// **+2 609** — 118.8 % apart, with the SIGN inverted, because the rear is
+/// carrying the car.
+///
+/// Wave VEH3b's clause 5 ("weight transfer verified") measured 3.7 % on a
+/// fixture stiffened to 90 000 N/m and carried the bottoming as *"a suspension
+/// tuning question for VEH3f's handling profiles, not a model defect."* The
+/// first half is a spring rate and is VEH3f's; **a strut with no stop is this
+/// function's**, and the two arms of clause 5 are true about a spring nothing
+/// ships until it lands.
 pub fn suspension_force_n(tuning: &VehicleTuning, compression_m: f64, closing_mps: f64) -> f64 {
     let x = compression_m.clamp(0.0, tuning.travel_m);
     let f = tuning.stiffness_n_per_m * x + tuning.damping_ns_per_m * closing_mps;

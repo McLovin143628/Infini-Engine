@@ -39296,6 +39296,30 @@ folds **0** again.
    0.10 m in a fifth of a second and both axles pin at `travel_m` from step 40 —
    on the rigid driveline identically, so it is not this wave's. A car on its
    bump stops measures its bump stops.
+
+   **`audit:` AND THERE IS NO BUMP STOP TO SIT ON.** The wave ruled this *"a
+   suspension tuning question for VEH3f's handling profiles, not a model
+   defect."* Half of that is right. `suspension_force_n` CLAMPS its compression
+   at `travel_m`, so past the stop the strut pushes with a **constant** force —
+   which is not a bump stop, because a bump stop is a rate that rises. Both
+   axles saturate at `stiffness × travel` and the transfer the doc's formula
+   describes stops happening. Measured on the shipped spring under a 0.87 g
+   stop: the front axle is at its stop on **90 of 90 braked steps** and takes
+   **−491 N** where `m·a·h/L` predicts **+2 609** — 118.8 % apart with the sign
+   INVERTED, the rear carrying the car. So clause 5's 3.7 % and 1.4 % are true
+   statements about a 90 000 N/m fixture and not about a car this engine ships,
+   and the load a tyre's friction circle is sized from is wrong under exactly
+   the condition where braking matters.
+
+   `travel_m` is **not** the short number: 0.25 m against a road car's
+   0.15–0.20, and the nine wheeled catalogue rows author 0.16–0.30. The rate is:
+   every one of the nine stands on **54–88 %** of its own travel doing nothing
+   (truck 88, engine 86, swat 67, sports 66, van 64, ambulance 62, cruiser 55,
+   sedan 55, suv 54) where a road car sits at about a third. A rate is VEH3f's;
+   a strut with no stop is the model's.
+   `veh3b_gate::the_shipped_spring_bottoms_out_and_the_formula_is_what_pays`
+   is the arm, and it asserts the DEFECT (P22's own precedent) so the day a stop
+   lands it reds and this paragraph gets rewritten.
 5. **The Ring-0 rig uses TWO of its six gears.** Its `max_speed_mps` is 25 and
    second reaches 5 300 rpm there, so the shipped default car can only ever make
    one downshift.
