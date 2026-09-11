@@ -39521,6 +39521,117 @@ and the fix is verified by the dry run's new interior-row check (5 checks, 0
 failures). What is missing is a live session that reaches a car, and the reason
 it is missing is now in the log rather than in an auditor's guess.
 
+### audit: FINDING 1 CLOSED — A BUMP STOP, NINE RE-SPRUNG ROWS, AND CLAUSE 5 ON THE CARS THAT SHIP
+
+The orchestrator's ruling: a gap a cert names gets CLOSED, not carried, and
+clause 5 of the VEH3b brief is *"weight transfer VERIFIED on the shipped rows
+within 10 %"* — which an arm that asserts the defect is honest about and is not.
+
+**THE BUMP STOP.** Past `BUMP_STOP_ENGAGE_FRAC` (0.85) of the travel the strut
+gains `stiffness × BUMP_STOP_RATE_MULT × (x − x_e)^3 / span^2`. A **cubic**, and
+a cubic for one reason: it is zero AND has zero slope at the engagement, so a
+strut crossing it at speed gains no step in force and no kink in its derivative
+and does not ring. `BUMP_STOP_RATE_MULT` is 12, which makes the marginal rate at
+full travel **36×** the main one. The clamp at `travel_m` stays as the geometric
+limit, so the stop does all of its work inside the last fifteen per cent.
+Arithmetic only — portable by construction, one Ring-0 function, both hosts.
+Measured on the Ring-0 tuning: **a millimetre at the stop costs 721 N and one in
+the middle 20 N**, and the strut carries 14 000 N at full travel against a bare
+spring's 5 000.
+
+**THE NINE WHEELED ROWS.** Each rate is now `mass / 4 / (travel × 0.35)` and each
+damper moves with the square root of the rate, so the damping ratio is the one
+the row was authored with; nothing else in any row moved. They stood on **54–88 %**
+of their own travel and now stand on **35 %**, every one:
+
+| row | k was -> now | c was -> now | stood on -> stands on |
+|---|---|---|---|
+| sedan | 21 000 -> 33 000 | 3 200 -> 4 000 | 55 % -> 35 % |
+| truck | 26 000 -> 65 500 | 3 800 -> 6 050 | 88 % -> 35 % |
+| sports | 32 000 -> 60 000 | 4 200 -> 5 750 | 66 % -> 35 % |
+| suv | 34 000 -> 52 500 | 5 200 -> 6 450 | 54 % -> 35 % |
+| van | 42 000 -> 77 000 | 6 800 -> 9 200 | 64 % -> 35 % |
+| cruiser | 26 000 -> 41 000 | 3 900 -> 4 900 | 55 % -> 35 % |
+| ambulance | 38 000 -> 67 000 | 6 200 -> 8 250 | 62 % -> 35 % |
+| swat | 48 000 -> 92 500 | 7 600 -> 10 550 | 67 % -> 35 % |
+| engine | 105 000 -> 258 500 | 16 000 -> 25 100 | 86 % -> 35 % |
+
+**CLAUSE 5, ON THE ROWS THAT SHIP.** The sedan's and the truck's own cars,
+nothing stiffened:
+
+| row | braking | the doc | apart | launching | the doc | apart |
+|---|---|---|---|---|---|---|
+| sedan | 2 216 N @ −10.55 m/s² | 2 342 N | **5.3 %** | 926 N @ 3.91 | 867 N | **6.8 %** |
+| truck | 2 968 N @ −6.37 m/s² | 3 034 N | **2.2 %** | 2 237 N @ 4.62 | 2 203 N | **1.6 %** |
+
+with **0 of 150** braked steps at `travel_m` on either. The transfer is read as
+HALF THE FRONT-TO-REAR DIFFERENCE, which is what the doc's formula says it is —
+reading the front's gain alone carries the chassis' common-mode settle, and on
+the sedan's stop that is 284 N (2.4 % of its weight) the formula has no term for.
+
+And the arm that asserted the defect is **inverted**: the UNSTIFFENED Ring-0
+fixture was 118.8 % from the formula with the sign inverted and 90 of 90 braked
+steps pinned; it now reads **6.3 % apart and 0 of 90 pinned**.
+
+**WHICH HALF CLOSES WHICH.** Measured, and they are not interchangeable: put the
+sedan back on 21 000 N/m and the shipped-rows arm reds at its static-fraction
+guard before it ever brakes, while neither row reaches the stop on its new rate
+(the sedan's deepest braked compression is 69 % of travel against an 85 %
+engagement). Take the stop out and the bump-stop arm reds while the shipped-rows
+arm stays green. The re-spring keeps a road car off its stops; the stop is what
+makes the model right the day a kerb or a landing puts it there anyway.
+
+**RE-BLESSED WITH CAUSE.** The feel table at ±5 % of the new measurement with
+both earlier figures beside every row (sports 3.98 / 3.75 / **4.28 s**, sedan
+7.37 / 7.67 / **7.62**, suv 7.40 / 7.30 / **7.22**, van 17.43 / 17.07 /
+**16.78**, truck 6.75 / 6.65 / **6.50**). The sentinel's reference re-scoped —
+`flywheel_inertia_kgm2 = 0` restores the pre-VEH3b DRIVETRAIN and cannot restore
+a spring it never touched, so the reference is *the pre-VEH3b drivetrain on
+today's springs* with VEH2a's pair printed beside it. `island_gate` **28 passed**
+(PIE == shipping; the trace's bytes move because every car is on a different
+spring, and nothing in the tree pins a committed trace hash). `veh3a_gate` 21 and
+`wpn2b_gate` 27 — no ride-height arm moved, because the seat is still the chassis
+roof and only the heights under it changed. And the nose-dive pair re-measured
+where a player sees it, on the shipped sedan: **115.4 mm of dive and 14.1 mm of
+squat**, deepest front compression **203.4 mm of 250 (81 %)**.
+
+**THE BUDGET.** 64 cars in release: the wave 0.3598 ms, this audit before the
+stop 0.3662, **with the stop 0.3589 ms (5.61 µs a car)** — inside the spread of a
+clock, budget **0.5** unmoved, 1.39× headroom.
+
+### audit: THE HERO WAS NOT SHOT — IT WAS WEDGED, THEN IT RAGDOLLED
+
+`engaged = incoming = heat = 0` on every one of session 2's 2 140 fall rows and
+743 ragdoll rows: not the wanted level, not police fire, not a car strike, so no
+instrument change to the wanted state was warranted and none was made. What
+happened: at t = 349.917 the hero was `Grounded` and running at y = 16.5475; at
+t = 350.200 it was lifted **0.47 m** into `FallControlled`; and from t = 350.483
+to t = 949.883 it sat **frozen to the digit at (−1765.4930, 16.9137, 2143.5534)
+for 2 140 rows — ten minutes of `fall` then `fall_fast`, y moving 11.4 cm** —
+before ragdolling for the remaining 211 s. A fall that does not move is geometry
+holding a character, and `try_enter` refuses from both modes, which is why the
+boarding hunt swept a full circle around a car it could never enter. `Stand-Up`
+names a WEDGE now (eight samples at one position while falling) as well as a
+ragdoll; no key in this loop frees one, so the fix is the diagnosis.
+
+### audit: WHAT VEH3d INHERITS — AN OCCUPIED SEAT IS NEVER ENTERABLE
+
+Not fixed here, by the orchestrator's ruling, and written down by name. Measured:
+**every car that stayed at exactly its 800 rpm idle through 180 steps of full
+throttle had its own traffic driver sitting in it**, and every car with an empty
+seat revved to 1 088–4 644 rpm. The mechanism is `step_character_movement`
+running BEFORE the vehicle phase and writing the occupant's own intent, plus
+`step_one` clearing `VehicleControls` after every solve — so an occupant's
+silence beats anybody else's throttle, every step, for ever. That is the right
+rule (one commander per vehicle per step) and it is exactly the mechanism a
+"boardable but immovable" car would have. What VEH3d owns is the DOOR: an
+occupied seat is never enterable, so boarding one is either a **carjack** (VEH2b's
+own verb, which already exists and already calls `mark_taken`) or a **refusal by
+name**. Today `interact::candidates` filters the free-seat list with the occupied
+set so the hero is never offered one — but a car boarded through any other route
+with a driver still in it idles for ever and nothing says so. The seat is still
+the chassis ROOF as well, and both are one wave's work.
+
 ### audit: THE CLOSING NUMBERS
 
 | | |
@@ -39530,8 +39641,8 @@ it is missing is now in the log rather than in an auditor's guess.
 | the mutation battery | **21 of 21 RED** — the wave's sixteen reproduced, five added (`N` the fourth defect, `O` a `.sin()` in `turbo_step`, `P` the contact filter, `Q` the component write, `R` `turbo_lag_s` at zero) |
 | the rigid-driveline sweep | **7 of 20** arms red with `crank_step` forced down its zero-inertia branch — two more than the wave's own table claimed |
 | battery (`battery3.sh -j 3`), LAST | **AGGREGATE over 396 binaries: 7598 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** (the wave's 7590/2, with its two closures verified as fixes with causes) |
-| PIE == shipping | `island_gate` **27 passed**; two cooks `partitioned_world` **12 passed** |
-| the vehicle phase at 64 cars | **0.4215 ms dev / 0.3662 ms release** re-measured (the wave's 0.4181 / 0.3598), budget **0.5** unmoved, **1.37×** headroom |
+| PIE == shipping | `island_gate` **28 passed** (re-run after the springs); two cooks `partitioned_world` **12 passed** |
+| the vehicle phase at 64 cars | **0.3589 ms release** with the bump stop (5.61 µs a car) against the wave's 0.3598 and this audit's own pre-stop 0.3662; budget **0.5** unmoved, **1.39×** headroom |
 | rustdoc COLD | **425** of a 450 ceiling |
 | the wasm leg | `cargo check --target wasm32-unknown-unknown -p inf-player` with `-D warnings` — **exit 0** |
 | clippy `--workspace --all-targets` with `-D warnings`, run LAST | **exit 0** |
