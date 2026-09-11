@@ -2121,3 +2121,97 @@ fn the_shipped_spring_bottoms_out_and_the_formula_is_what_pays() {
         worst.1 * 100.0
     );
 }
+
+/// **A CAR WITH NO WHEEL ON THE GROUND SAYS SO** (`audit:` VEH3b) — the column
+/// that could not tell a road from a kerb.
+///
+/// Wave VEH3a's audit found an island car the hero could board and could not
+/// move, and read this off `hero.csv`:
+///
+/// ```text
+/// …,Driving,0.0000,…,asphalt,0.0000,0.0000,1.000
+/// ```
+///
+/// and concluded *"`surface asphalt`, `mu 1.000`"* — i.e. the wheels have grip
+/// and the throttle is not reaching them. Those three columns say **exactly the
+/// same thing** about a chassis beached on a kerb with its wheels hanging, which
+/// is the other half of that hypothesis and the likelier one: `step_one`
+/// classifies a wheel whose raycast MISSED as `Asphalt` (the "no ground" default
+/// it must answer something with), `mu_surface` is only written on a step with a
+/// contact so it keeps whatever the last one was worth, and a slip ratio over a
+/// stationary wheel on a stationary car is `0` either way.
+///
+/// So the census reads **contacts** now, and a car with none answers `air`.
+/// Measured here on the two states a car can be in, on the same rig.
+///
+/// **The mutation**: drop the `contact.is_some()` filter from `surface_census`
+/// and the airborne car reads `asphalt` again — verified RED.
+#[test]
+fn a_car_with_no_wheel_on_the_ground_says_air() {
+    // ── ON THE ROAD ──
+    let mut rig = settled(Rig::sealed());
+    rig.drive(
+        VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        },
+        30,
+    );
+    let wheels = rig.wheels();
+    let grounded = wheels.iter().filter(|w| w.contact.is_some()).count();
+    let (on_road, road_mu) = inf_ecs::vehicle::surface_census(&wheels);
+    let road_row = inf_ecs::vehicle::tyre_readout(&wheels);
+    println!("VEH3b AIR: {grounded} of {} wheels in contact -> `{on_road}` at mu {road_mu:.3}; the row is `{road_row}`", wheels.len());
+    assert_eq!(grounded, wheels.len(), "the car is not on the pad");
+    assert_eq!(on_road, "asphalt");
+    assert!(road_mu > 0.5, "the road is worth mu {road_mu:.3}");
+    assert!(road_row.contains("asphalt"), "{road_row}");
+
+    // ── AND IN THE AIR ── the same rig, twenty metres up, with the same
+    //    `surface` field on every wheel (the bridge answers `Asphalt` for a
+    //    raycast that found nothing) and no contact under any of them.
+    let mut rig = Rig::airborne();
+    rig.step(20);
+    let wheels = rig.wheels();
+    let grounded = wheels.iter().filter(|w| w.contact.is_some()).count();
+    let claimed = wheels
+        .iter()
+        .filter(|w| w.surface == SurfaceClass::Asphalt)
+        .count();
+    let (in_air, air_mu) = inf_ecs::vehicle::surface_census(&wheels);
+    let air_row = inf_ecs::vehicle::tyre_readout(&wheels);
+    println!("VEH3b AIR: {grounded} of {} wheels in contact and {claimed} still CLAIM asphalt -> `{in_air}` at mu {air_mu:.3}; the row is `{air_row}`", wheels.len());
+    assert_eq!(
+        grounded, 0,
+        "the car landed, so there is nothing to measure"
+    );
+    assert_eq!(
+        claimed,
+        wheels.len(),
+        "no wheel claims asphalt any more, so the defect this arm records is somewhere else now"
+    );
+    assert_eq!(
+        in_air,
+        inf_ecs::vehicle::AIRBORNE_SURFACE,
+        "a car with {grounded} wheels on the ground reported `{in_air}`"
+    );
+    assert_eq!(
+        air_mu, 0.0,
+        "an airborne car's contact is worth {air_mu:.3}"
+    );
+    // The surface sits between the temperatures and the slips, so the check is
+    // positional: the row's LAST word is the ambient air temperature and always
+    // has been, and a `contains("air")` would pass on that alone.
+    assert!(
+        air_row.contains("C  air  slip") && !air_row.contains("asphalt"),
+        "the HUD row for a car in the air is `{air_row}`"
+    );
+
+    // …and the demo log's own column goes through the SAME door rather than a
+    // second copy of the tie-break, which is what let the two disagree.
+    const DRIVE: &str = include_str!("../src/pie_drive.rs");
+    assert!(
+        DRIVE.contains("inf_ecs::vehicle::surface_census(&tyres)"),
+        "`pie_drive.rs` has stopped reading Ring 0's census, so `hero.csv`'s surface column can go back to calling a beached car a road"
+    );
+}

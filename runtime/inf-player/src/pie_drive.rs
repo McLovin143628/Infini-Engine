@@ -1357,20 +1357,16 @@ impl HeroLog {
             .map(|v| v.wheels().to_vec())
             .unwrap_or_default();
         let temp_at = |i: usize| tyres.get(i).map(|w| w.temp_c).unwrap_or(0.0);
+        // **Through Ring 0's own census** (`audit:` VEH3b), which is where the
+        // "no wheel is on the ground" answer lives: this block used to run its
+        // own copy of the tie-break and count wheels whose raycast MISSED, so a
+        // beached car logged `asphalt` and a µ left over from its last contact
+        // -- the three columns the VEH3a audit read a stuck island car off.
         let (tyre_surface, tyre_mu) = if tyres.is_empty() {
             ("-".to_string(), 0.0)
         } else {
-            let mut best = (0usize, inf_ecs::vehicle::SurfaceClass::Asphalt);
-            for c in inf_ecs::vehicle::SurfaceClass::all() {
-                let n = tyres.iter().filter(|w| w.surface == c).count();
-                if n > best.0 {
-                    best = (n, c);
-                }
-            }
-            (
-                best.1.name().to_string(),
-                tyres.iter().map(|w| w.mu_surface).fold(0.0, f64::max),
-            )
+            let (s, mu) = inf_ecs::vehicle::surface_census(&tyres);
+            (s.to_string(), mu)
         };
         let driven = tyres.last().copied().unwrap_or_default();
         // **THE DRIVETRAIN COLUMNS** (wave VEH3b), APPENDED for the reason the

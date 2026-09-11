@@ -58,7 +58,9 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   distance, and the equipped id), 38-45 are VEH3a's (four tyre
                   temperatures in Celsius, the surface the most wheels are on,
                   the driven axle's slip ratio and lateral slip, and the µ the
-                  contact is worth — all `0`/`-` when nobody is driving),
+                  contact is worth — all `0`/`-` when nobody is driving, and
+                  `air`/`0.000` when the car has NO WHEEL ON THE GROUND, which
+                  is a different thing from `asphalt` and used to read as one),
                   46-49 are VEH3b's (the crank's own rpm, the clutch's
                   engagement in `[0, 1]`, the turbo's boost in `[0, 1]` and `1`
                   while the limiter is cutting fuel — the four a launch flare, a

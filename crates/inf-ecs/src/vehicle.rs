@@ -2644,28 +2644,63 @@ pub fn tyre_readout(wheels: &[WheelState]) -> String {
         }
         temps.push_str(&format!("{:.0}", w.temp_c));
     }
-    // The surface the MOST wheels are on, ties broken by the table's own order,
-    // because a row that named four surfaces would be unreadable and a car with
-    // two wheels on the verge is a car on the verge.
+    // THE DRIVEN AXLE is the rear pair where there is one: `wheel_mounts` puts
+    // the front pair first, so the last two are the ones a rear-drive car spins.
+    let driven = wheels.last().copied().unwrap_or_default();
+    let (surface, mu) = surface_census(wheels);
+    let air = wheels[0].ambient_c;
+    format!(
+        "{temps} C  {surface}  slip {:.2}/{:.2}  mu {mu:.2}  air {air:.0} C",
+        driven.slip_ratio, driven.slip_lat
+    )
+}
+
+/// **What a car is standing on, and what it is worth** — the one door the HUD
+/// row and the demo log both read (`audit:` VEH3b).
+///
+/// The surface the MOST wheels are on, ties broken by the table's own order,
+/// because a row that named four surfaces would be unreadable and a car with two
+/// wheels on the verge is a car on the verge. The µ is the best any contact has.
+///
+/// # A car with no wheel on the ground answers [`AIRBORNE_SURFACE`]
+///
+/// And that is the whole reason this is a function. `step_one` classifies a
+/// wheel whose raycast MISSED as `SurfaceClass::Asphalt` — the default it has to
+/// answer "no ground was found" with — and the census that used to live inside
+/// [`tyre_readout`] counted those wheels, so a car with all four in the air read
+/// `asphalt` with a µ left over from the last contact it had.
+///
+/// It is not a cosmetic difference. Wave VEH3a's audit found an island car the
+/// hero could board and could not move, read `surface asphalt / mu 1.000 /
+/// slip 0.0000` off `hero.csv`, and concluded the wheels had grip and the
+/// throttle was not reaching them. Those three columns say **exactly the same
+/// thing** about a chassis beached on a kerb with its wheels hanging, which is
+/// the other half of that hypothesis and the one no column could distinguish.
+/// A row that says `air` distinguishes them.
+pub fn surface_census(wheels: &[WheelState]) -> (&'static str, f64) {
+    let grounded = || wheels.iter().filter(|w| w.contact.is_some());
+    if grounded().next().is_none() {
+        return (AIRBORNE_SURFACE, 0.0);
+    }
     let mut best = (0usize, SurfaceClass::Asphalt);
     for s in SurfaceClass::all() {
-        let n = wheels.iter().filter(|w| w.surface == s).count();
+        let n = grounded().filter(|w| w.surface == s).count();
         if n > best.0 {
             best = (n, s);
         }
     }
-    // THE DRIVEN AXLE is the rear pair where there is one: `wheel_mounts` puts
-    // the front pair first, so the last two are the ones a rear-drive car spins.
-    let driven = wheels.last().copied().unwrap_or_default();
-    let mu = wheels.iter().map(|w| w.mu_surface).fold(0.0, f64::max);
-    let air = wheels[0].ambient_c;
-    format!(
-        "{temps} C  {}  slip {:.2}/{:.2}  mu {mu:.2}  air {air:.0} C",
+    (
         best.1.name(),
-        driven.slip_ratio,
-        driven.slip_lat
+        grounded().map(|w| w.mu_surface).fold(0.0, f64::max),
     )
 }
+
+/// What [`surface_census`] answers for a car with no wheel on the ground.
+///
+/// Deliberately not a [`SurfaceClass`]: "in the air" is the ABSENCE of a
+/// surface, and a seventh enum variant would put it on the µ table, in the wire
+/// enum's frozen order, and in every `all()` walk in this file.
+pub const AIRBORNE_SURFACE: &str = "air";
 
 /// **THE DRIVETRAIN ROW** (wave VEH3b) -- what the crank, the clutch and the
 /// turbo are doing, on one line between [`craft_readout`] and [`tyre_readout`].
