@@ -53,7 +53,7 @@ use uuid::Uuid;
 use inf_ecs::components::{Collider3D, Terrain, Transform};
 use inf_ecs::math::Vec3d;
 use inf_ecs::vehicle::{
-    ChassisState, Footprint, SurfaceClass, WheelContact, WheelForce, MAX_SUBSTEPS,
+    ChassisState, Footprint, SubstepAdvance, SurfaceClass, WheelContact, WheelForce, MAX_SUBSTEPS,
 };
 use inf_ecs::EcsWorld;
 
@@ -404,8 +404,22 @@ fn step_one(
         // Between sub-steps the chassis state is advanced LOCALLY by the force
         // the previous sub-step produced, so the second sub-step sees the
         // velocity the first one earned rather than the one the step began with.
-        // Without that the loop is N identical solves and buys nothing at all.
+        //
+        // What that is worth was MEASURED, not asserted (VEH3a's audit): over
+        // six hundred steps of a full-throttle turn at N = 4 it moves the car
+        // **1.894 m** against holding the chassis at the state the fixed step
+        // began with. And the thing the wave's prose said — that without it the
+        // loop is N identical solves buying nothing — is false: the sub-steps
+        // still solve at `dt/4` and average, which is its own trajectory. Both
+        // halves are `veh3a_gate::the_substep_loop_runs_and_one_is_what_ships`,
+        // through `SubstepAdvance`.
         let substeps = v.substeps().clamp(1, MAX_SUBSTEPS);
+        // The measurement door, `Footprint`'s own idiom — see `SubstepAdvance`.
+        let advance = world
+            .world()
+            .get_resource::<SubstepAdvance>()
+            .copied()
+            .unwrap_or_default();
         if substeps == 1 {
             v.solve(state, dt, forces);
         } else {
@@ -439,7 +453,7 @@ fn step_one(
                 // lives in rapier and is not on this side of the seam, and the
                 // yaw a car develops inside 4 ms is small next to the linear
                 // velocity change. Stated rather than hidden.
-                if i + 1 < substeps {
+                if i + 1 < substeps && advance == SubstepAdvance::Shipped {
                     let net: DVec3 = sub.iter().map(|f| f.force).sum();
                     running.linvel += net * inv_mass * sub_dt;
                     running.position += running.linvel * sub_dt;

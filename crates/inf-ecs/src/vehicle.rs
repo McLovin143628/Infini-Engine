@@ -4298,6 +4298,32 @@ impl Default for Footprint {
     }
 }
 
+/// **Whether the inner tyre loop advances the chassis between sub-steps**
+/// (VEH3a's audit), on [`Footprint`]'s own reason.
+///
+/// The wave's own mutation table named *"removing the local chassis advance —
+/// which makes N = 4 four identical solves and collapses the difference to
+/// zero"* as what reds `the_substep_loop_runs_and_one_is_what_ships`. It does
+/// not: removing the advance leaves N = 4 still solving at `dt/4` and
+/// averaging, which is a different trajectory from one solve at `dt` for a
+/// reason that has nothing to do with the advance. Measured — the arm stayed
+/// GREEN under exactly that edit.
+///
+/// So the advance gets the door `Footprint` has, for the same stated reason:
+/// there is no honest way to measure what a step of the shipped path buys
+/// except by running the shipped path with that step turned off, **produced by
+/// the same lines** rather than by a second copy of them.
+#[derive(bevy_ecs::prelude::Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SubstepAdvance {
+    /// What ships: each sub-step sees the velocity the previous one earned.
+    #[default]
+    Shipped,
+    /// The chassis is held at the state the fixed step began with, so every
+    /// sub-step solves the same problem. **For measurement**, and the arm that
+    /// uses it says so.
+    Frozen,
+}
+
 /// The air temperature a tyre cools toward with no weather to say otherwise,
 /// Celsius (wave VEH3a).
 ///

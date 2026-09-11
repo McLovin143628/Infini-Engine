@@ -25,7 +25,7 @@
 //! | `the_authority_sky_is_the_one_the_tyre_reads` | drop the `sky_authority` branch | the orphan, and the no-authority fallback |
 //! | `a_garbage_contact_normal_changes_the_trace` | `TyreContext::camber_at` → `static_deg` | contacts scrambled |
 //! | `four_casts_do_not_make_a_kerb_worse` | `Footprint::SHIPPED` → `CENTRE` **is** the control | kerb crossings |
-//! | `the_substep_loop_runs_and_one_is_what_ships` | the local chassis advance removed → N=4 equals N=1 | steps run at each N |
+//! | `the_substep_loop_runs_and_one_is_what_ships` | a single solve in place of the loop (first half); `SubstepAdvance::Frozen`'s branch made unconditional (second half — the wave's own named mutation left this arm GREEN) | steps run at each N, and the advance's own metres |
 //! | `every_v28_tunable_survives_the_wire` | drop one field from `VehicleClass::from_tuning` | fields moved (100) |
 //! | `the_v27_downgrade_loses_exactly_the_thirty_eight` | append a 101st field without a rung, or rename one of the sixty-two | 62 kept + 38 added, against two independent lists |
 //! | `the_hud_row_says_what_the_tyres_know` | the row's own `format!` | the surface, the hottest tyre, the air |
@@ -963,8 +963,21 @@ fn four_casts_do_not_make_a_kerb_worse() {
 
 /// **THE SUBSTEP LOOP RUNS, AND ONE IS WHAT SHIPS** (wave VEH3a clause 5).
 ///
-/// **The mutation**: removing the local chassis advance between sub-steps, which
-/// makes N = 4 four identical solves and collapses the difference to zero.
+/// **And what the loop's inner step actually buys, with a control.** The wave
+/// named "removing the local chassis advance between sub-steps — which makes
+/// N = 4 four identical solves and collapses the difference to zero" as what
+/// reds this arm. It does NOT, and that was measured: with the advance deleted
+/// the arm stayed **green**, because N = 4 still solves at `dt/4` and averages,
+/// which is a different trajectory from one solve at `dt` for a reason that has
+/// nothing to do with the advance.
+///
+/// So the advance gets [`Footprint`]'s door — `SubstepAdvance::Frozen` runs the
+/// SHIPPED lines with that one step turned off — and the second measurement is
+/// the honest one: **1.894 m** over six hundred steps.
+///
+/// **The mutation**: the `SubstepAdvance::Shipped` condition made unconditional
+/// (the two four-step runs converge and the second half reds); the loop replaced
+/// by a single solve (the first half reds).
 #[test]
 fn the_substep_loop_runs_and_one_is_what_ships() {
     let shipped = VehicleTuning::default();
@@ -1010,9 +1023,40 @@ fn the_substep_loop_runs_and_one_is_what_ships() {
     println!("VEH3a SUBSTEP: N = 1 and N = 4 end {apart:.3} m apart over 600 steps");
     assert!(
         apart > 0.5,
-        "N = 1 and N = 4 ended {apart} m apart — the inner loop is not running, or \
-         it is running N identical solves because the chassis is not advanced \
-         between them"
+        "N = 1 and N = 4 ended {apart} m apart -- the inner loop is not running"
+    );
+
+    // AND THE ADVANCE ITSELF, through the shipped lines with it turned off.
+    let held_at = |advance: inf_ecs::vehicle::SubstepAdvance| -> DVec3 {
+        let mut rig = Rig::on(0);
+        rig.world.world_mut().insert_resource(advance);
+        if let Some(v) = rig.bridge.vehicle_mut(CHASSIS) {
+            assert!(v.tune("tyre_substeps", 4.0));
+        }
+        rig.step(60);
+        let full = VehicleControls {
+            throttle: 1.0,
+            steer: 0.35,
+            ..Default::default()
+        };
+        rig.drive(full, 600);
+        rig.at()
+    };
+    let shipped = held_at(inf_ecs::vehicle::SubstepAdvance::Shipped);
+    let held = held_at(inf_ecs::vehicle::SubstepAdvance::Frozen);
+    let gained = (shipped - held).length();
+    println!(
+        "VEH3a SUBSTEP ADVANCE: at N = 4, advancing the chassis between sub-steps moves the car {gained:.3} m over holding it"
+    );
+    assert!(
+        gained > 0.01,
+        "the shipped four-step run and one that never advanced the chassis ended {gained} m apart -- the inner loop IS N identical solves, and the paragraph in `step_vehicles` that says otherwise is prose"
+    );
+    // ...and the SHIPPED N = 4 is the run the first comparison measured, so the
+    // two halves of this arm are about the same code.
+    assert!(
+        (shipped - four).length() < 1e-9,
+        "the resource door changed the shipped path: {shipped:?} against {four:?}"
     );
 }
 
