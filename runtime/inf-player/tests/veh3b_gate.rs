@@ -1674,24 +1674,69 @@ fn two_runs_of_one_drive_fold_the_same_bytes() {
     // and `turbo_step` is arithmetic, and `lsd_transfer_nm` is arithmetic. The
     // portable-math law's subject in this crate is the tyre curve, which VEH3a
     // owns.
+    //
+    // **BOUNDED AT EACH FUNCTION'S OWN CLOSING BRACE** (`audit:` VEH3b), and
+    // the reason is this wave's own scar one file over: the ban read a flat
+    // 6 000-character window over a `crank_step` that measures **5 905**, which
+    // is ninety-five characters of slack — one added comment line from silently
+    // un-banning the tail of the function it names. `projector_mirror`'s twin
+    // window was six thousand characters too, wave VEH3b's own entry call landed
+    // at offset 6 001, and the fix that commit wrote in its own comment is the
+    // one taken here: *"the honest fix is to bound the block at its own closing
+    // brace rather than to move this number again."*
+    //
+    // And it scans all THREE functions the sentence above names. Two of them
+    // were prose: `turbo_step` and `lsd_transfer_nm` were claimed arithmetic and
+    // read by nothing.
     const VEHICLE: &str = include_str!("../../../crates/inf-ecs/src/vehicle.rs");
-    let crank = VEHICLE
-        .find("pub fn crank_step(")
-        .expect("the crank's own door");
-    let body = &VEHICLE[crank..crank + 6_000];
-    for banned in [
-        ".sin()",
-        ".cos()",
-        ".tan()",
-        ".atan2(",
-        "rand",
-        "SystemTime",
+    let body_of = |decl: &str| -> &str {
+        let start = VEHICLE
+            .find(decl)
+            .unwrap_or_else(|| panic!("`{decl}` is not in `vehicle.rs` at all"));
+        let body = &VEHICLE[start..];
+        // A top-level `fn` closes at column zero, so this is the function and
+        // nothing after it — however long it grows.
+        let end = body
+            .find(
+                "
+}
+",
+            )
+            .unwrap_or_else(|| panic!("`{decl}` never closes at column zero"));
+        &body[..end]
+    };
+    let mut scanned = 0usize;
+    for decl in [
+        "pub fn crank_step(",
+        "pub fn turbo_step(",
+        "pub fn lsd_transfer_nm(",
     ] {
+        let body = body_of(decl);
+        // Non-vacuity: a window that found nothing would ban nothing.
         assert!(
-            !body.contains(banned),
-            "`crank_step` reaches `{banned}`, which is not portable and not deterministic"
+            body.len() > 400,
+            "`{decl}`'s body read back as {} characters, so this ban is scanning a window and not a function",
+            body.len()
         );
+        scanned += body.len();
+        for banned in [
+            ".sin()",
+            ".cos()",
+            ".tan()",
+            ".atan2(",
+            "rand",
+            "SystemTime",
+            "Instant",
+        ] {
+            assert!(
+                !body.contains(banned),
+                "`{decl}` reaches `{banned}`, which is not portable and not deterministic"
+            );
+        }
     }
+    println!(
+        "VEH3b DETERMINISM: {scanned} characters of crank, turbo and differential scanned for platform trigonometry, a clock and an RNG — each bounded at its own closing brace"
+    );
 }
 
 /// **A CLASS EDITED AFTER THE CAR EXISTS REACHES IT ONLY THROUGH THE TUNER**
