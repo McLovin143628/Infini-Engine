@@ -239,11 +239,11 @@ brake_force_n = 13000.0
 # 55 % of its 0.25 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 1185 kg / 4 corners / (0.25 m x 0.35), and the damper moves with the
+# is 1185 kg / 4 corners / (0.25 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.2 % of travel at rest**.
-stiffness_n_per_m = 33000.0
-damping_ns_per_m = 4000.0
+# with. Measured after: **44.7 % of travel at rest**.
+stiffness_n_per_m = 26000.0
+damping_ns_per_m = 3550.0
 # A 2.0-litre petrol, geared to reach its limiter in top (island wave VEH2a).
 peak_torque_nm = 245.0
 peak_torque_rpm = 4000.0
@@ -281,11 +281,11 @@ brake_force_n = 15000.0
 # 88 % of its 0.25 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 2341 kg / 4 corners / (0.25 m x 0.35), and the damper moves with the
+# is 2341 kg / 4 corners / (0.25 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.1 % of travel at rest**.
-stiffness_n_per_m = 65500.0
-damping_ns_per_m = 6050.0
+# with. Measured after: **45.0 % of travel at rest**.
+stiffness_n_per_m = 51000.0
+damping_ns_per_m = 5300.0
 max_steer_deg = 32.0
 min_steer_deg = 6.0
 # A DIESEL, and the reason the row needs one at all (island wave VEH2a): the
@@ -381,11 +381,11 @@ travel_m = 0.16
 # 66 % of its 0.16 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 1374 kg / 4 corners / (0.16 m x 0.35), and the damper moves with the
+# is 1374 kg / 4 corners / (0.16 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.1 % of travel at rest**.
-stiffness_n_per_m = 60000.0
-damping_ns_per_m = 5750.0
+# with. Measured after: **45.0 % of travel at rest**.
+stiffness_n_per_m = 47000.0
+damping_ns_per_m = 5100.0
 rolling_resistance = 0.012
 cog_height_m = -0.43
 anti_roll_front_n_per_m = 22000.0
@@ -451,11 +451,11 @@ travel_m = 0.28
 # 54 % of its 0.28 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 2098 kg / 4 corners / (0.28 m x 0.35), and the damper moves with the
+# is 2098 kg / 4 corners / (0.28 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.0 % of travel at rest**.
-stiffness_n_per_m = 52500.0
-damping_ns_per_m = 6450.0
+# with. Measured after: **44.9 % of travel at rest**.
+stiffness_n_per_m = 41000.0
+damping_ns_per_m = 5700.0
 rolling_resistance = 0.016
 cog_height_m = -0.4
 anti_roll_front_n_per_m = 16000.0
@@ -517,11 +517,11 @@ travel_m = 0.3
 # 64 % of its 0.30 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 3296 kg / 4 corners / (0.30 m x 0.35), and the damper moves with the
+# is 3296 kg / 4 corners / (0.30 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.0 % of travel at rest**.
-stiffness_n_per_m = 77000.0
-damping_ns_per_m = 9200.0
+# with. Measured after: **44.9 % of travel at rest**.
+stiffness_n_per_m = 60000.0
+damping_ns_per_m = 8150.0
 rolling_resistance = 0.02
 cog_height_m = -0.49
 anti_roll_front_n_per_m = 14000.0
@@ -590,11 +590,11 @@ wheel_inertia_kgm2 = 1.3
 # 55 % of its 0.25 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 1466 kg / 4 corners / (0.25 m x 0.35), and the damper moves with the
+# is 1466 kg / 4 corners / (0.25 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.1 % of travel at rest**.
-stiffness_n_per_m = 41000.0
-damping_ns_per_m = 4900.0
+# with. Measured after: **45.0 % of travel at rest**.
+stiffness_n_per_m = 32000.0
+damping_ns_per_m = 4350.0
 cog_height_m = -0.36
 # The aids are turned DOWN, below the saloon's and above the coupe's: a pursuit
 # car is driven by somebody trained to.
@@ -645,11 +645,11 @@ travel_m = 0.3
 # 62 % of its 0.30 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 2875 kg / 4 corners / (0.30 m x 0.35), and the damper moves with the
+# is 2875 kg / 4 corners / (0.30 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.1 % of travel at rest**.
-stiffness_n_per_m = 67000.0
-damping_ns_per_m = 8250.0
+# with. Measured after: **45.0 % of travel at rest**.
+stiffness_n_per_m = 52000.0
+damping_ns_per_m = 7250.0
 rolling_resistance = 0.018
 cog_height_m = -0.5
 drag_lateral_n_per_mps2 = 3.0
@@ -706,11 +706,11 @@ travel_m = 0.26
 # 67 % of its 0.26 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 3424 kg / 4 corners / (0.26 m x 0.35), and the damper moves with the
+# is 3424 kg / 4 corners / (0.26 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **34.9 % of travel at rest**.
-stiffness_n_per_m = 92500.0
-damping_ns_per_m = 10550.0
+# with. Measured after: **44.9 % of travel at rest**.
+stiffness_n_per_m = 72000.0
+damping_ns_per_m = 9300.0
 rolling_resistance = 0.022
 cog_height_m = -0.44
 drag_lateral_n_per_mps2 = 3.4
@@ -771,11 +771,11 @@ travel_m = 0.24
 # 86 % of its 0.24 m travel doing nothing, where a road car sits at about
 # a third -- so a stop of any weight put it on its bump stop and the load
 # TRANSFER the friction circle is sized from stopped happening. The rate
-# is 8850 kg / 4 corners / (0.24 m x 0.35), and the damper moves with the
+# is 8850 kg / 4 corners / (0.24 m x 0.45), and the damper moves with the
 # square root of it so the damping ratio is the one this row was authored
-# with. Measured after: **35.0 % of travel at rest**.
-stiffness_n_per_m = 258500.0
-damping_ns_per_m = 25100.0
+# with. Measured after: **44.9 % of travel at rest**.
+stiffness_n_per_m = 201000.0
+damping_ns_per_m = 22150.0
 rolling_resistance = 0.026
 cog_height_m = -0.6
 anti_roll_front_n_per_m = 34000.0

@@ -1062,6 +1062,19 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // settlement block does, so a level with seven of them holds however many
     // are near the simulation and no more.
     let fleet = crate::vehicle::island_vehicles();
+    // **WHERE THE SETTLEMENT'S OWN CARS WENT** (`audit:` VEH3b). The emergency
+    // apron below already refuses a spot that is not clear of a vehicle it has
+    // parked, and its own comment promises the same of the settlement's car --
+    // *"and neither sits on the settlement's own car"* -- but the promise was
+    // kept only by arithmetic (the apron starts one pitch PAST the vertex the
+    // civilian car is at) and never by the clearance test, because the civilian
+    // spots were never in the list it tests against. An apron offset is enough
+    // to close that gap on a real site, and on this island it did: two parked
+    // vehicles 3.2 m apart, and once the audit's springs left them less droop
+    // one settled ON TOP of the other -- 1 of 4 wheels down and a chassis 0.03 m
+    // over its own contact, which is `island_gate::every_parked_island_vehicle_
+    // rests_on_its_wheels_and_drives`' whole subject.
+    let mut civilian_spots: Vec<DVec3> = Vec::new();
     for (n, plan) in plans.iter().enumerate() {
         // **The whole fleet reaches the island** (island wave VEH2a). A city
         // parks the two road cars, a town the working vehicles and the wagon,
@@ -1089,17 +1102,19 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         // A yaw of θ about `+Y` takes `+Z` to `(sin θ, 0, cos θ)`, so facing a
         // direction `d` is `atan2(d.x, d.z)`.
         let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
+        let civilian_at = DVec3::new(
+            v.x,
+            crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M,
+            v.z,
+        );
+        civilian_spots.push(civilian_at);
         crate::vehicle::spawn_vehicle(
             &mut doc,
             guid,
             def,
             crate::vehicle::VehicleSpawn {
                 name: &format!("{} Car", plan.name),
-                at: DVec3::new(
-                    v.x,
-                    crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M,
-                    v.z,
-                ),
+                at: civilian_at,
                 yaw_deg,
                 paint: car_paint(plan.site),
                 clip: None,
@@ -1152,7 +1167,9 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         // `k`), portable (a length against a constant), and it moves nothing
         // that was already clear — which is every station on the island except
         // Eastgate's.
-        let mut parked: Vec<DVec3> = Vec::new();
+        // **SEEDED WITH THE SETTLEMENT'S OWN CARS** (`audit:` VEH3b), so the
+        // clearance test tests what its comment always claimed.
+        let mut parked: Vec<DVec3> = civilian_spots.clone();
         for b in plan.blocks.iter().filter(|b| b.archetype.is_institution()) {
             let fleet = station_fleet(b.archetype);
             if fleet.is_empty() {

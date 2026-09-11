@@ -979,14 +979,14 @@ fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
     /// CONTENT and not to the drivetrain, and a sentinel cannot restore a spring
     /// it never touched. So the reference is re-measured here and VEH2a's pair is
     /// printed beside it in the arm, where the size of the spring's own
-    /// contribution stays readable: the sports row's stop went 31.1 m to 27.9 m
+    /// contribution stays readable: the sports row's stop went 31.1 m to 28.3 m
     /// on the rigid driveline for no reason but its rate.
     const RIGID_ON_TODAYS_SPRINGS: [(&str, f64, f64); 5] = [
-        ("sports", 3.88, 27.9),
-        ("sedan", 7.30, 35.5),
-        ("suv", 7.30, 42.8),
-        ("van", 17.10, 57.0),
-        ("truck", 6.58, 36.5),
+        ("sports", 3.92, 28.3),
+        ("sedan", 7.33, 35.5),
+        ("suv", 7.35, 42.5),
+        ("van", 17.20, 56.6),
+        ("truck", 6.62, 36.7),
     ];
 
     /// VEH2a's own pair, kept for the printout so the spring's contribution is
