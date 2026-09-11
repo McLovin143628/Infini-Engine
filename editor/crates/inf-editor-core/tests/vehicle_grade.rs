@@ -545,7 +545,15 @@ struct Spec {
 /// size of the move is readable rather than lost.
 ///
 /// `flywheel_inertia_kgm2 = 0` restores the pre-VEH3b model exactly -- measured,
-/// to the printed digit: 3.98 s and 30.8 m on the sports row.
+/// to the printed digit: **3.98 s and 31.1 m on the sports row**, and VEH2a's own
+/// pair on all four of the others.
+///
+/// (`audit:` VEH3b — the wave wrote "30.8 m" here and in three other places. That
+/// number is the stop a MID-WAVE build made and it survives in
+/// `CrankStep::locked`'s defect note; the restoration measures **31.1**, which is
+/// VEH2a's printed stop to the digit. The claim was understated rather than
+/// overstated, and it is now
+/// `the_flywheel_sentinel_restores_the_pre_veh3b_feel_table` rather than prose.)
 const SPECS: [Spec; 5] = [
     Spec {
         id: "sports",
@@ -924,5 +932,142 @@ fn the_substep_loop_runs_and_the_shipped_n_is_one() {
         one_v > 5.0 && four_v > 5.0,
         "N = 1 ended at {one_v} m/s and N = 4 at {four_v} — a comparison between \
          a car and a wreck says nothing about sub-stepping"
+    );
+}
+
+/// **THE RE-BLESS'S OWN CAUSE, ARMED** (`audit:` VEH3b).
+///
+/// `SPECS` above was re-cut once, at wave VEH3b, and the whole justification for
+/// re-cutting it is one sentence: *"`flywheel_inertia_kgm2 = 0` restores the
+/// pre-VEH3b model exactly."* That sentence was **prose in four places and an
+/// arm in none** — so a later wave could move the drivetrain, re-bless the five
+/// rows again, and repeat the sentence without anything checking it.
+///
+/// This is the check. Every row is driven twice on the same fixture: once as the
+/// catalogue authors it, and once with the flywheel at its own documented
+/// sentinel through the live tuning door. The second run has to land on **wave
+/// VEH2a's own printed pair**, which is the number the band was cut from before
+/// this wave and is kept beside each `SPECS` row.
+///
+/// # It is 31.1 m and not 30.8
+///
+/// The wave's report, its ledger, `veh3b_gate`'s module doc and the `SPECS` doc
+/// above all said the sentinel restores *"3.98 s and 30.8 m"*. Measured here:
+/// **3.98 s and 31.1 m** — which is VEH2a's printed stop to the digit, so the
+/// restoration is EXACT and the claim understated it by naming a number from the
+/// wave's own defect narrative (the 30.8 m in `CrankStep::locked`'s doc is a
+/// mid-wave build's stop, not this one).
+///
+/// The tolerance is 1 % rather than 0 % for one reason and it is not slack: the
+/// sprint is quantised to the fixed step (1/60 s ≈ 0.27 % of a 3.98 s sprint)
+/// and the stop is measured at a 0.5 m/s threshold, so two runs that agree
+/// perfectly in the model can still print one step apart.
+#[test]
+fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
+    /// What wave VEH2a measured, printed beside every `SPECS` row above: the
+    /// sprint in seconds and the stop in metres, for the rigid driveline.
+    const VEH2A: [(&str, f64, f64); 5] = [
+        ("sports", 3.98, 31.1),
+        ("sedan", 7.37, 36.4),
+        ("suv", 7.40, 40.7),
+        ("van", 17.43, 50.4),
+        ("truck", 6.75, 32.7),
+    ];
+    let drive = |spec: &Spec, flywheel: Option<f64>| -> (f64, f64) {
+        let (mut doc, mut bridge, _) = flat_world(spec.id);
+        if let Some(v) = flywheel {
+            assert!(
+                bridge
+                    .vehicle_mut(CAR)
+                    .is_some_and(|car| car.tune("flywheel_inertia_kgm2", v)),
+                "the fixture could not reach the flywheel"
+            );
+        }
+        for _ in 0..90 {
+            step(doc.world_mut(), &mut bridge, VehicleControls::default());
+        }
+        let speed = |b: &PhysicsBridge3D| -> f64 {
+            b.body_of(CAR)
+                .and_then(|body| b.world().body_linvel(body))
+                .map(|v| DVec3::new(v.x, 0.0, v.z).length())
+                .unwrap_or(0.0)
+        };
+        let full = VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        let mut sprint_s = f64::INFINITY;
+        for i in 0..3_600 {
+            step(doc.world_mut(), &mut bridge, full);
+            if speed(&bridge) >= spec.sprint_to_mps && sprint_s.is_infinite() {
+                sprint_s = (i + 1) as f64 * DT;
+            }
+        }
+        let brake = VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        };
+        while speed(&bridge) > spec.sprint_to_mps {
+            step(doc.world_mut(), &mut bridge, brake);
+        }
+        let from = car_at(&doc);
+        let mut brake_m = f64::INFINITY;
+        for _ in 0..1_800 {
+            step(doc.world_mut(), &mut bridge, brake);
+            if speed(&bridge) < 0.5 {
+                brake_m = (car_at(&doc) - from).length();
+                break;
+            }
+        }
+        (sprint_s, brake_m)
+    };
+
+    let mut moved = 0usize;
+    for (spec, (id, was_s, was_m)) in SPECS.iter().zip(VEH2A) {
+        assert_eq!(spec.id, id, "the two tables are in different orders");
+        let (ship_s, ship_m) = drive(spec, None);
+        let (rigid_s, rigid_m) = drive(spec, Some(0.0));
+        println!(
+            "THE SENTINEL: {id:>6} ships {ship_s:>5.2} s / {ship_m:>5.1} m; with \
+             the flywheel at 0 it is {rigid_s:>5.2} s / {rigid_m:>5.1} m, against \
+             VEH2a's {was_s:>5.2} s / {was_m:>5.1} m"
+        );
+        // The shipped run is the one `SPECS` bands, so the two arms in this file
+        // are measuring one car rather than two.
+        assert!(
+            ship_s >= spec.sprint_min_s && ship_s <= spec.sprint_max_s,
+            "{id}: this arm measured {ship_s:.2} s and `SPECS` bands \
+             {:.2}..{:.2} — the two arms have drifted apart",
+            spec.sprint_min_s,
+            spec.sprint_max_s
+        );
+        assert!(
+            ship_m >= spec.brake_min_m && ship_m <= spec.brake_max_m,
+            "{id}: this arm measured {ship_m:.1} m and `SPECS` bands {:.1}..{:.1}",
+            spec.brake_min_m,
+            spec.brake_max_m
+        );
+        // …and the sentinel lands on VEH2a's own number.
+        assert!(
+            (rigid_s - was_s).abs() <= was_s * 0.01,
+            "{id}: the flywheel sentinel sprinted {rigid_s:.2} s where the \
+             pre-VEH3b model measured {was_s:.2} — the sentinel does not restore \
+             it, so the feel table's re-bless has no cause"
+        );
+        assert!(
+            (rigid_m - was_m).abs() <= was_m * 0.01,
+            "{id}: the flywheel sentinel stopped in {rigid_m:.1} m where the \
+             pre-VEH3b model measured {was_m:.1}"
+        );
+        if (rigid_s - ship_s).abs() > 0.01 || (rigid_m - ship_m).abs() > 0.05 {
+            moved += 1;
+        }
+    }
+    // **The anti-vacuity half**: a sentinel that restored the shipped numbers
+    // because the flywheel does nothing would pass every assertion above.
+    assert!(
+        moved >= 4,
+        "the flywheel changed only {moved} of the five rows, so this arm is \
+         comparing a car with itself"
     );
 }

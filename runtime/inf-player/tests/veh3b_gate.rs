@@ -17,7 +17,12 @@
 //! The question the audit brief asks of every arm, answered in the table. The
 //! honest way to ask it is `flywheel_inertia_kgm2 = 0`, which is not a hostile
 //! edit but the field's own documented sentinel: it restores the pre-VEH3b model
-//! exactly, to the printed digit (3.98 s and 30.8 m on the sports row). Seven of
+//! exactly, to the printed digit -- **3.98 s and 31.1 m on the sports row, and
+//! VEH2a's own pair on the other four** (`audit:` VEH3b; the wave's prose said
+//! 30.8 m, which is a number out of its own defect narrative and not this
+//! measurement, and the true one is the stronger claim).
+//! `vehicle_grade::the_flywheel_sentinel_restores_the_pre_veh3b_feel_table` is
+//! where that is an arm rather than a sentence. Seven of
 //! the arms below use it as their CONTROL rather than as a mutation, which is
 //! the same fact read the useful way round.
 //!

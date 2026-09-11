@@ -39161,7 +39161,9 @@ tonne of equivalent mass in first and almost nothing in sixth).
 | truck | 6.75 s (0–78) | **6.65 s** | −1.5 % | 32.7 m | **31.9 m** | −2.4 % |
 
 `flywheel_inertia_kgm2 = 0` restores the pre-VEH3b model **to the printed
-digit**: 3.98 s and 30.8 m on the sports row. Every band is re-cut at ±5 % of
+digit**: 3.98 s and 31.1 m on the sports row — and VEH2a's own pair on all four
+of the others (`audit:` VEH3b; the wave wrote 30.8 m, which is a mid-wave build's
+stop out of its own defect narrative). Every band is re-cut at ±5 % of
 the new measurement with VEH2a's own figure kept beside it.
 
 **THE FLARE, MEASURED THE ONLY WAY THAT MEANS ANYTHING.** The first cut of the
