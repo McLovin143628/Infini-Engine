@@ -38867,3 +38867,241 @@ substituted with a different picture.
 7. **The four-cast kerb spike is 9 % larger** than the one-cast spike.
 8. **`SurfaceMap` has no `Mud` producer from a terrain** — the island's four
    splat layers are grass, rock, forest floor and sand.
+
+## WAVE VEH3a — THE AUDIT (2026-09-10)
+
+`audit:` eight commits over `beb9fcac`, unpushed. The window was sound and one
+row short; four of the wave's own claims could not fail for the reasons they
+were named after; and the flaky boarding it carried as an instrument fault is a
+host defect.
+
+### audit: THE AMBIENT — the row the window was short (`434a0a24`)
+
+The wave measured it and carried it: `WeatherParams` owns no ambient
+temperature, so `weather_at` derived the air a tyre cools into from
+`weather_snowiness` — the precipitation's PHASE — giving 20 °C in rain and 0 °C
+in snow. Rain at 20 °C is a rule of this engine and not of physics; a cold dry
+morning was inexpressible; no author could touch the number.
+
+**The window was still open.** Under the one-window law a row a wave discovers
+while its window is open lands IN it, or it waits for a window nobody has
+budgeted. So `ambient_c` landed, with the rigor the thirty-eight got.
+
+| | |
+|---|---|
+| `WeatherParams` | 7 → **8** fields; all five presets get one — Clear 20, Overcast 15, Storm 12, Fog 10, Snow 0 °C |
+| `SkyAtmosphere` | `weather_ambient_c` at the weather block's tail, defaulting to the `Clear` preset's 20 °C — exactly what every pre-v28 tyre already cooled toward |
+| the frozen shape | `SkyAtmosphereV27`, **47 fields**, the `SkyAtmosphereV13` idiom; the pre-v14 half reuses the already-frozen `v13_*` default fns (a third transcription is a third place for a digit to be wrong) and the weather half gets five `v27_*` ones |
+| the record | `RuntimeEntityGen`'s **fourth generic parameter** — the terrain/material/tail idiom, fourth use — plus `map_sky`; every frozen record from V14 forward carries the frozen sky and none was re-declared |
+| the cost | **4 B** on an entity that carries a sky, **0** on every other; **7 of the 24** committed levels carry one → **28 B**, against the class's 8 816 |
+| the schema | still **v28** — the same rung, grown. Payload **13**, `EXPECTED_LEVELS` **24**, goldens **64** |
+
+**THE WIRE PIN COULD NOT SEE A `SkyAtmosphere` CHANGE, AND NEVER COULD HAVE.**
+`SceneFileV28Wire`'s entity element is `EntityRecordV20Gen<…>`, and that frozen
+record declared `sky_atmosphere: Option<SkyAtmosphere>` — the **live type**. A
+pin exists to be an independent declaration of the layout; one that names the
+live component drifts with it by construction, so a field appended to the sky
+without a bump would have decoded cleanly and consumed exactly the bytes it
+wrote. The one shape of drift it is for was invisible to it. Closed with an
+independently declared 48-field `SkyAtmosphereWire`, and the pin's own fixture
+now carries a sky so the shape is DECODED THROUGH rather than skipped as an
+absent `Option` — a pin nothing walks pins nothing.
+
+**And the tyre read a different sky from the one the world was blending.**
+`weather_at` walked every enabled `SkyAtmosphere` in `Guid` order while
+`advance_weather` and the renderer both use `sky::sky_authority` — the entity
+carrying the clock. A level with an orphaned low-`Guid` atmosphere ran two
+weathers. It asks the authority now, falling back to the lowest-`Guid` enabled
+atmosphere only when no authority exists, so an authored weather block is never
+silently inert.
+
+The editor half is `WeatherDto.ambient_c` (clamped to −90..60 °C, the Earth's
+own measured extremes), the World Settings "Air" row, the TypeScript preset
+mirror and its test, and `edit_set_prop`. The repo's own
+`weather_and_atmosphere_edits_compose_rather_than_overwrite` caught the DTO gap
+by itself: a Snow preset was landing at 20 °C.
+
+### audit: FOUR ARMS THAT COULD NOT FAIL FOR THEIR OWN REASON
+
+**1. `the_v27_downgrade_loses_exactly_the_thirty_eight` was vacuous**
+(`941b8ddf`). It took `settings()[..62]` as the v27 set and `[62..]` as the v28
+set. `settings()` is sorted **alphabetically** and the thirty-eight are
+interleaved through it — `camber_deg` is the seventh name and it is new — so the
+split was an arbitrary cut of a sorted list, and both assertions (the halves are
+disjoint; the second half is sorted) are trivially true of any hundred distinct
+sorted strings. It touched neither the codec, nor the frozen record, nor
+`V27_CLASS_NAMES`. Rewritten against two independently declared lists: the live
+door's hundred minus the v27 sixty-two must be exactly the thirty-eight the
+ruling took — **62 kept, 38 added, 100 in all**.
+
+**2. "and costs it grip" was a pure function agreeing with itself**
+(`941b8ddf`). The arm measured the heat in the world (20.0 → 21.1 °C) and then
+proved the grip half by calling `heat_grip_factor` at `optimum + 120 °C` — a
+temperature the burnout never reaches. **Nothing in the gate asserted the solver
+applies the factor at all.** Now three world measurements: the rise, a rolling
+CONTROL that gains **0.00 °C** over the same eight seconds, and two stops at the
+same 20.0 °C world temperature differing only in the authored optimum —
+**32.8 m** under an 85 °C optimum against **56.4 m** under a −30 °C one.
+
+**3. The HUD arm's named mutation was unreachable** (`941b8ddf`).
+`the_hud_row_says_what_the_tyres_know` names "deleting the `tyre_readout` call
+from `inf_player::window`" and reads only Ring 0, so that deletion left it
+green. `the_shipped_host_draws_the_tyre_row` pins the call site by source
+fragment on the `projector_mirror` idiom — and records what is true rather than
+what the prose said: **only `inf-player` draws a driving readout**. The editor
+draws neither `craft_readout` nor the tyre row, so "both hosts draw it from
+there" meant "both hosts could".
+
+**4. The sub-step's named mutation leaves its arm green** (`0201770b`). The
+wave's table and `step_vehicles`'s own prose say that removing the local chassis
+advance "makes N = 4 four identical solves and collapses the difference to
+zero". Measured: the arm stayed green at 4.920 m, because N = 4 still solves at
+`dt/4` and averages — its own trajectory, whether or not the chassis moved
+between sub-steps. `SubstepAdvance` is `Footprint`'s door at the second place
+this wave needed one, for the reason `Footprint` states verbatim; the advance is
+worth **1.894 m** over six hundred steps, and the mutation that reds it is the
+`Shipped` condition made unconditional.
+
+### audit: THE NUMBER THE ARC IS JUDGED ON HAD NO BAND (`a0e2848f`)
+
+The ruling asks the magic formula to reproduce the feel table **within 5 %**.
+The wave measured exactly that, by hand, and did not gate it:
+`vehicle_grade::SPECS` carried `2.5..8.0 s` and `20..46 m` for a sports row that
+measures 3.98 s and 31.1 m — a later wave could have taken it to six seconds and
+forty-five metres with every arm green.
+
+Each row is now its measured value ±5 %, re-measured on the audit's tree and
+identical to the wave's to every printed digit: sports **3.98 s / 31.1 m**,
+sedan **7.37 / 36.4**, suv **7.40 / 40.7**, van **17.43 / 50.4**, truck
+**6.75 (0–78) / 32.7**.
+
+Two mutations, and both are worth writing down. Asphalt made worth 7 % less
+takes the sports row to **11.25 s** and reds it. The E map the wave REJECTED
+moves the table by **nothing at all** — which is not a weak band, it is the
+physics: the conversion pins the peak's PLACE and its HEIGHT and these five rows
+brake within a couple of per cent of peak slip. `the_magic_formula_is_not_the_
+old_curve` is the arm that sees a shape change, and the two must be read as a
+pair.
+
+### audit: THE KERB — the wave's explanation overturned (`19e23bf6`)
+
+VEH3a recorded *"the four-cast spike is 9 % LARGER … the wider patch meets the
+kerb EARLIER — the leading corner finds it first — so the suspension has less
+time to take it"*, from one approach speed.
+
+The arithmetic refuses that before any measurement does: **one cast snaps in
+exactly the same way**. Both are a step of the same 12 cm taken 0.077 m apart in
+space, and a ray-cast suspension's compression is a STEP rather than a ramp — so
+the force it makes does not depend on the approach speed at all.
+
+Swept over three real approach speeds the ratio **brackets one**: 0.98× at
+14.6 km/h, 1.07× at 30.2, 1.01× at 46.9. The 9 % is sampling phase.
+
+And the first cut of that sweep was itself vacuous: it held full throttle from
+sixty metres out, so all three runs met the kerb at the same speed and printed
+1.10× three times. The throttle is bang-banged at the target now and an
+assertion pins that the three approach speeds really differ.
+
+**What the blend is**, recorded because the question was asked: the contact
+POINT is the mean of the four hits, the NORMAL is their mean re-normalized (the
+bilinear blend), and the DISTANCE is their **minimum**. The minimum is the
+rigid-wheel constraint and not a snap — a wheel cannot penetrate any ground
+under its patch — and averaging the distances would let a tyre sink half-way
+into a kerb before the spring noticed. Lifting the contact point to the ride
+surface during a straddle was tried and moved the spike by nothing.
+
+### audit: MUD IS CONTENT, NOT DEAD DATA (`19e23bf6`)
+
+`surface_under` has two doors. A terrain answers from its splat — read by layer
+INDEX against the island's convention, so mud would have to spend one of the
+four `TERRAIN_LAYERS` slots grass/rock/forest-floor/sand already fill. Every
+other collider answers from its own friction, banded to the nearest row: a
+module, a prop or a marsh volume authored at 0.35 **is** mud today, measured at
+**61 steps** reading `Mud` with the contact worth **0.25** against grass's 0.39,
+and the terrain's own map still holding zero mud cells.
+
+### audit: WHY E AT 2.8 m BOARDED NOTHING (`64f12945`)
+
+The wave carried "the boarding is flaky — one session in three". It is not the
+script and it is not the crouch (`Crouch` is in `is_grounded_family`, so a
+crouched character boards). It is the shipped host.
+
+`ENTER_REACH_M` is 3.00 m, measured in THREE dimensions from the feet to the
+seat — and `VehicleRig::seat_local` is the chassis collider's **top face**, the
+roof. Measured on the default rig: the seat is **1.45 m** above the feet and the
+furthest a character could actually board from was **2.62 m**, exactly
+`sqrt(3² − 1.45²)`. A van is worse and a truck worse again, and nothing said so.
+So 2.8 m from a car was out of reach every time, on any rig whose seat is more
+than 1.09 m up.
+
+`InteractVerb::reach_is_on_the_ground` makes `Enter` and `Carjack` — the two
+verbs whose published position is a seat pose — measure their range on the XZ
+plane. Every other verb keeps the three-dimensional test, because a door handle
+and an item on the floor are genuinely where they are; the RANKING is untouched.
+Re-measured: **3.00 m of 3.00**, and 3.5 m still refused. When VEH3d moves the
+seat into the cabin the arm should be re-read rather than deleted, and it says
+so.
+
+### audit: A TUNING DOOR FOR THE PREVIEW (`37230d54`)
+
+`INF_PIE_TUNE_VEHICLE` is `INF_PIE_ARM_HERO`'s shape at the vehicle:
+`name=value;…` through `VehicleClass::set`, written onto the chassis entity so
+the physics bridge installs it on its next sync. It exists because the wave's
+burnout frame could not fire: on asphalt under road tyres a line-lock burnout
+makes no slip at all, the island car's brakes out-holding its engine 13 kN to 8.
+`demo.ps1 -TuneVehicle "tyre_surface_set=3"` is the switch.
+
+### audit: THE DETAILS GRID WAS NEVER THE PROBLEM — the entity was (`f6dd908c`)
+
+The wave owed a frame of the hundred tunables and could not get one. Measured in
+the shipped editor, on the island, through the same door the Outliner's own click
+calls:
+
+| the node | the grid |
+|---|---|
+| `chassis` | **4** components, **14** fields — Translation … Metallic |
+| `Harbour City Car` | **6** components, **133** fields, **12** matching *tyre* |
+
+The node named `chassis` is a rig CHILD and carries no class. The class is on the
+CAR, and its grid has every one of the hundred — `Tyre Lat Peak Slip`, `Tyre Load
+Sensitivity`, `Tyre Cool Rate`, `Tyre Heat Grip Loss`, `Tyre Optimum C` and the
+rest. `VehicleClass` has been a registered editable component since v25 and the
+panel renders it correctly; **nothing about the editor needed fixing**.
+
+`tools/demo/details.mjs` is the door, and because a rig is a HIERARCHY it walks
+the node, then its parents, then the root's children, and stops at the first
+whose grid really carries the field asked for.
+
+### audit: THREE SESSIONS OF THE SHIPPED GAME, AND WHAT THEY FOUND
+
+| | session 1 | session 2 (`-SpawnAt`) | session 3 (`-SpawnAt -TuneVehicle`) |
+|---|---|---|---|
+| reached `Driving` in the tyre leg | **yes** | **yes** | **no** — 25 taps of E, no car in reach |
+| `Driving` rows | 961 | 395 | 4 |
+| fastest while driving | **0.045 m/s** | **14.47 m/s** | — |
+| (a) `90-veh3a-hud-road.png` | no | **FIRED** at 3.83 m/s, µ 1.000 | no |
+| (b) the verge | no (both directions) | no (both directions) | no |
+| (c) `92-veh3a-burnout.png` | **FIRED**, 21.6 °C against a 20.0 air | **FIRED**, 21.7 against 20.0 | no |
+| (d) the kerb | no | no | no |
+| `INF_PIE_TUNE_VEHICLE` | — | (inert: the bug) | **23 tunables on 23 chassis** |
+
+**Boarding is 2 of 3, and the miss is not the reach.** Session 3's hero ended at
+(−1750.45, 16.58, 2071.40) — twenty-one metres from where it was placed, because
+the hunt walks `W` between presses and walked away from the parked cars. The
+reach itself is measured and fixed (2.62 → 3.00 m on the ground) and pinned by
+`a_character_boards_from_as_far_as_the_reach_says`.
+
+**A car the hero boards can be one that cannot move.** Session 1 held `W` for
+123 seconds on a chassis that drifted 0.02 m, `slip 0.0000`, while the same
+session had driven a different car at 16.9 m/s ninety seconds earlier. It is not
+the traffic handbrake — that path marks a car `taken` the moment a non-driver
+occupies it and `continue`s past every control — so it is an authored island
+vehicle in a bad spot, sitting ~1.4 m above the ground under it. It is what
+prevented three of the four tyre triggers in that session, and it is carried.
+
+**A tarmac burnout is not a thing this model does**, and the arithmetic is worth
+stating once because three briefs have asked for the frame: a stationary burnout
+needs drive force to beat `µ·N` while something holds the car, this engine brakes
+all four wheels, and 13 kN beats 8. Slicks make it *worse* on tarmac — 1.10
+against a road tyre's 1.00. What produces one is a low-µ surface, which is why
+the gate spins one on **sand under slicks** at µ 0.25 and 229 slipping steps.
