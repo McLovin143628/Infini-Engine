@@ -159,6 +159,15 @@ and clicks it. If node is not on the PATH or the port never opens, the driver
 falls back to clicking the button's screen coordinate on a maximized 1080p
 window and says so in the log.
 
+The same port drives the other CDP scripts beside it: `place.mjs` adds the
+committed female body to the open document, `portrait.mjs` frames the hero's
+face, `undo.mjs` puts both back before Play, and `car.mjs` (wave VEH3c) frames a
+CAR -- it finds a part named `door_fl` or `door_l` in the open document, moves
+its PARENT onto the editor camera's own opening view ray, and exits 4 if the
+level's vehicles have no doors, so a level that lost its parts is a refusal
+rather than a photograph of a box. None of the four writes to disk: the document
+is left dirty and nothing presses Ctrl+S.
+
 Setting `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` yourself does **not** work and
 the reason is in `inf_studio_lib::debuggable_context`: WebView2 reads that
 variable only when the embedder passes no arguments of its own, and Tauri always
