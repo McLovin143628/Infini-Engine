@@ -4519,7 +4519,12 @@ pub const SURFACE_MAP_MAX_CELLS: usize = 1 << 20;
 /// * the terrain's **splat**, through `TerrainData::dominant_layer_at` — the
 ///   island's four layers are grass, rock, forest floor and sand, so the map
 ///   reads grass and forest floor as [`Grass`](SurfaceClass::Grass), rock as
-///   [`Gravel`](SurfaceClass::Gravel) and sand as [`Sand`](SurfaceClass::Sand);
+///   [`Gravel`](SurfaceClass::Gravel) and sand as [`Sand`](SurfaceClass::Sand).
+///   **The read is by layer INDEX**, and that is a convention rather than a
+///   fact about the data: a `TerrainLayer` carries an albedo, a roughness, a
+///   texture scale and a material binding, and nothing that says what the
+///   ground IS. A level whose four layers mean something else gets this
+///   mapping anyway;
 /// * the **carriageway**, through `crate::traffic::streets_of` — the same door
 ///   traffic drives down and parked cars line up along, so a road cannot be in
 ///   one place for the tyres and another for the cars. Cells within the
@@ -4528,6 +4533,17 @@ pub const SURFACE_MAP_MAX_CELLS: usize = 1 << 20;
 ///
 /// The road is stamped SECOND and wins, which is the honest order: a road laid
 /// over grass is a road.
+///
+/// # There is no [`Mud`](SurfaceClass::Mud) here, and that is content
+///
+/// A terrain cannot currently produce mud, because mud would have to spend one
+/// of the four [`TERRAIN_LAYERS`](crate::components::TERRAIN_LAYERS) slots the
+/// island's grass, rock, forest floor and sand already fill. The row is not
+/// dead: `surface_under`'s OTHER door bands a `Collider3D::friction` to the
+/// nearest row of the table, so a module, a prop or a marsh volume authored at
+/// 0.35 IS mud in the world today — measured by
+/// `veh3a_gate::mud_is_reachable_through_the_collider_the_wheel_is_standing_on`.
+/// Painting a wetland is a job for whoever paints the island.
 ///
 /// # It is a resource, not a field
 ///

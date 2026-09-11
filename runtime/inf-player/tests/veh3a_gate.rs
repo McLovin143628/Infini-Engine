@@ -864,19 +864,61 @@ fn a_garbage_contact_normal_changes_the_trace() {
 }
 
 /// **FOUR CASTS DO NOT MAKE A KERB WORSE** (wave VEH3a clause 4) — the number
-/// the wave owes, with its own control.
+/// the wave owes, with its own control, **swept over three approach speeds**
+/// (VEH3a's audit).
 ///
-/// A wheel mounting a 12 cm kerb at 30 km/h, driven twice: once with the shipped
-/// four-corner footprint and once with [`Footprint::CENTRE`], which collapses the
-/// patch to a point and is the single centre ray P29.7 through VEH2c shipped —
-/// **produced by the same lines**, not by a second copy of them.
+/// A wheel mounting a 12 cm kerb, driven twice at each speed: once with the
+/// shipped four-corner footprint and once with [`Footprint::CENTRE`], which
+/// collapses the patch to a point and is the single centre ray P29.7 through
+/// VEH2c shipped — **produced by the same lines**, not by a second copy.
+///
+/// # What the blend is, and why the wave's 9 % is not a defect
+///
+/// The four casts are blended three different ways, each for its own reason:
+/// the contact POINT is their mean, the NORMAL is their mean re-normalized (the
+/// bilinear blend — a patch straddling a kerb edge pushes against the average of
+/// the road's normal and the kerb face's), and the DISTANCE is their **minimum**.
+///
+/// The minimum is the rigid-wheel constraint, not a snap: a wheel cannot
+/// penetrate any ground under its patch, so it rides on the highest of it.
+/// Averaging the distances would let a tyre sink half-way into a kerb before the
+/// spring noticed, and that is a worse error than the one it would fix.
+///
+/// # The wave's 9 % was one sample, and the sweep says so
+///
+/// VEH3a recorded *"the four-cast spike is 9 % LARGER, not smaller … the wider
+/// patch meets the kerb EARLIER — the leading corner finds it first — so the
+/// suspension has less time to take it"*, measured at one approach speed.
+///
+/// The arithmetic refuses that explanation before any measurement does: ONE
+/// cast snaps in exactly the same way. Both are a step of the same 12 cm, taken
+/// 0.077 m (the patch's half-length) apart in space — and because a ray-cast
+/// suspension's compression is a STEP rather than a ramp, the force it makes
+/// does not depend on how fast the car was going at all. What differs between
+/// the two is only WHERE inside a 60 Hz frame the step lands.
+///
+/// Swept over three real approach speeds the ratio is **0.98× at 14.6 km/h,
+/// 1.07× at 30.2 and 1.01× at 46.9** — it brackets one. The 9 % is sampling
+/// phase, not a wide patch sharpening a kerb, and all three are printed so no
+/// later wave inherits the wrong explanation.
+///
+/// (The first cut of this sweep was itself vacuous and is worth recording: it
+/// held full throttle from sixty metres out, so all three runs met the kerb at
+/// the same speed and printed the same 1.10× three times. The throttle is
+/// bang-banged at the target now, and an assertion says the three speeds really
+/// differ.)
+///
+/// **What would actually soften a kerb is tyre ENVELOPING** — a carcass that
+/// deforms around the edge so the effective radius grows continuously — and
+/// this model has no carcass. What the four casts buy is the NORMAL, which the
+/// tripwire proves is read.
 ///
 /// **The mutation IS the control**: swapping the resource is what makes the two
-/// numbers, so an arm that measured nothing would report a difference of zero and
-/// fail the engagement assertion below.
+/// numbers, so an arm that measured nothing would report a difference of zero
+/// and fail the engagement assertion below.
 #[test]
 fn four_casts_do_not_make_a_kerb_worse() {
-    let mount = |footprint: Footprint| -> (f64, usize) {
+    let mount = |footprint: Footprint, to: f64| -> (f64, usize, f64) {
         let mut rig = Rig::on(0);
         rig.world.world_mut().insert_resource(footprint);
         // A 12 cm kerb across the car's path.
@@ -904,21 +946,27 @@ fn four_casts_do_not_make_a_kerb_worse() {
         rig.bridge.sync_from_world(&rig.world);
         rig.step(60);
 
-        // Up to 30 km/h and ACROSS, in ONE run — a car that reached the kerb
+        // Up to speed and ACROSS, in ONE run — a car that reached the kerb
         // during the sprint would otherwise be past it before the measurement
         // began, which is what the first cut of this arm measured: 0 crossings.
         let full = VehicleControls {
             throttle: 1.0,
             ..Default::default()
         };
+        let coast = VehicleControls::default();
         let mut worst = 0.0f64;
         let mut last_vy = 0.0;
         let mut crossings = 0usize;
         let mut at_speed = false;
+        let mut at_kerb = 0.0f64;
         for _ in 0..2_400 {
             let before = rig.at().z;
-            rig.drive(full, 1);
-            at_speed |= rig.speed() >= 8.33;
+            at_speed |= rig.speed() >= to;
+            // BANG-BANG at the target: full throttle under it, coast over it.
+            // Holding full throttle instead makes every run arrive at the kerb
+            // at the same speed, and coasting outright leaves the slow run short
+            // of it — both measured.
+            rig.drive(if rig.speed() < to { full } else { coast }, 1);
             let vy = rig
                 .bridge
                 .body_of(CHASSIS)
@@ -934,28 +982,75 @@ fn four_casts_do_not_make_a_kerb_worse() {
             }
             if before < 0.0 && rig.at().z >= 0.0 {
                 crossings += 1;
+                at_kerb = rig.speed();
             }
             if crossings > 0 && rig.at().z > 8.0 {
                 break;
             }
         }
-        assert!(at_speed, "the car never reached 30 km/h before the kerb");
-        (worst, crossings)
+        assert!(at_speed, "the car never reached {to} m/s before the kerb");
+        (worst, crossings, at_kerb)
     };
-    let (four, four_n) = mount(Footprint::SHIPPED);
-    let (one, one_n) = mount(Footprint::CENTRE);
-    assert!(
-        four_n >= 1 && one_n >= 1,
-        "the car crossed the kerb {four_n} / {one_n} times — it never reached it, \
-         so these are two numbers about flat ground"
+    let mut ratios: Vec<f64> = Vec::new();
+    let mut speeds: Vec<f64> = Vec::new();
+    for to in [4.0, 8.33, 13.0] {
+        let (four, four_n, four_v) = mount(Footprint::SHIPPED, to);
+        let (one, one_n, one_v) = mount(Footprint::CENTRE, to);
+        assert!(
+            (four_v - one_v).abs() < 0.5,
+            "the two runs met the kerb at {four_v} and {one_v} m/s, so they are not comparable"
+        );
+        speeds.push(four_v);
+        assert!(
+            four_n >= 1 && one_n >= 1,
+            "at {to} m/s the car crossed the kerb {four_n} / {one_n} times — it \
+             never reached it, so these are two numbers about flat ground"
+        );
+        assert!(
+            four > 0.5 && one > 0.5,
+            "at {to} m/s the peaks are {four} / {one} m/s² — nothing was mounted"
+        );
+        let ratio = four / one;
+        ratios.push(ratio);
+        println!(
+            "VEH3a KERB: mounting a 12 cm kerb at {:.1} km/h, the chassis peaks at \
+             {four:.1} m/s² with FOUR casts and {one:.1} m/s² with ONE ({ratio:.2}×)",
+            four_v * 3.6
+        );
+        assert!(
+            four <= one * 1.5,
+            "at {to} m/s the four-cast spike is {four} m/s² against the one-cast \
+             {one} — half as much again, which is not a footprint being sampled \
+             but a wall being hit"
+        );
+    }
+    assert_eq!(ratios.len(), 3, "the sweep did not run");
+    // …and the three runs really met the kerb at three DIFFERENT speeds, which
+    // the first cut of this sweep did not: a car held at full throttle over
+    // sixty metres arrives at the same speed whatever the target was, so the
+    // sweep was one run printed three times. The throttle is released at the
+    // target now, and this is the assertion that says so.
+    let (lo, hi) = (
+        speeds.iter().copied().fold(f64::MAX, f64::min),
+        speeds.iter().copied().fold(0.0f64, f64::max),
     );
-    println!(
-        "VEH3a KERB: mounting a 12 cm kerb at 30 km/h, the chassis peaks at \
-         {four:.1} m/s² with FOUR casts and {one:.1} m/s² with ONE"
+    assert!(
+        hi > lo * 1.5,
+        "the three runs met the kerb at {speeds:?} m/s — that is one approach speed printed three times"
+    );
+    // The sweep's own conclusion, asserted rather than left to the reader: the
+    // ratio is not a systematic penalty the wide patch pays. If the blend were
+    // sharpening the impact it would exceed 1 at EVERY speed.
+    let worst = ratios.iter().copied().fold(0.0f64, f64::max);
+    let best = ratios.iter().copied().fold(f64::MAX, f64::min);
+    println!("VEH3a KERB SWEEP: the four/one ratio spans {best:.2}× to {worst:.2}×");
+    assert!(
+        best <= 1.0,
+        "the four-cast spike is larger at EVERY speed measured ({ratios:?}) -- that is a wide patch sharpening a kerb rather than the phase of a 60 Hz sample against a 12 cm step, and the wave's explanation would then be right after all"
     );
     assert!(
-        four <= one * 1.5,
-        "the four-cast spike is {four} m/s² against the one-cast {one} — half as much again, which is not a footprint being sampled but a wall being hit"
+        worst < 1.5,
+        "the four-cast spike reaches {worst} times the one-cast one ({ratios:?}), which is not a footprint being sampled but a wall being hit"
     );
 }
 
@@ -1396,6 +1491,109 @@ fn the_vehicle_phase_costs_what_it_prints() {
 }
 
 // ── 8. THE µ TABLE ITSELF ───────────────────────────────────────────────────
+
+/// **MUD IS REACHABLE, AND NOT FROM A TERRAIN** (VEH3a's audit).
+///
+/// The wave carried *"`SurfaceMap` has no `Mud` producer from a terrain"* as an
+/// open item. It is not a gap in the tyre model, and this arm is which of the
+/// two it is.
+///
+/// `surface_under` has **two doors**. A terrain answers from its own
+/// `SurfaceMap`, built from the splat — and the splat is read by LAYER INDEX
+/// against the island's convention (0 and 2 grass and forest floor, 1 rock, 3
+/// sand), so mud would have to spend one of the four `TERRAIN_LAYERS` slots the
+/// island has already filled. That is a content decision for whoever paints the
+/// island, not a model defect.
+///
+/// Every OTHER collider answers from its own `Collider3D::friction`, banded to
+/// the nearest row of the doc's table — so a module, a prop or a marsh volume
+/// authored at 0.35 IS mud, in the world, today. This arm drives a car onto one
+/// and reads it off the wheel.
+#[test]
+fn mud_is_reachable_through_the_collider_the_wheel_is_standing_on() {
+    let mut rig = Rig::on(0);
+    // A slab of churned ground across the car's path, authored at the doc's own
+    // mud coefficient. Raised a hair over the terrain so the wheels meet it.
+    let slab = Uuid::from_u128(0x5E3A_0020);
+    let e = rig.world.spawn_with_guid(slab, "Marsh", None);
+    rig.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(Transform {
+            translation: Vec3d::new(0.0, 0.01, 40.0),
+            ..Default::default()
+        })
+        .insert(Visibility::default())
+        .insert(RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        })
+        .insert(Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(20.0, 0.01, 40.0),
+            friction: SurfaceClass::Mud.dry_mu(),
+            ..Default::default()
+        });
+    rig.world.mark_dirty();
+    rig.world.propagate();
+    rig.bridge.sync_from_world(&rig.world);
+    rig.step(30);
+    assert_eq!(
+        rig.wheel(0).surface,
+        SurfaceClass::Grass,
+        "the car starts on the terrain's own splat"
+    );
+
+    // Onto the slab.
+    let full = VehicleControls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    let mut on_mud = 0usize;
+    for _ in 0..1_200 {
+        rig.drive(full, 1);
+        if rig.wheel(0).surface == SurfaceClass::Mud {
+            on_mud += 1;
+        }
+        if on_mud > 60 {
+            break;
+        }
+    }
+    assert!(
+        on_mud > 60,
+        "the car spent {on_mud} steps on a 0.35-friction slab without once \
+         reading `Mud` — the collider door is not reaching the table"
+    );
+    let mu = rig.wheel(0).mu_surface;
+    println!("VEH3a MUD: {on_mud} steps on an authored 0.35 collider, µ {mu:.2}");
+    // The µ the CONTACT is worth, not the table's raw row: the compound the
+    // class authors is applied on top, which is the whole point of
+    // `tyre_surface_set` and is why this reads `surface_mu` rather than
+    // `dry_mu` — a road tyre on mud is worth less than mud is.
+    assert_eq!(
+        mu,
+        surface_mu(SurfaceClass::Mud, 0.0, 0.0),
+        "the wheel is on mud and the contact is worth {mu}"
+    );
+    assert!(
+        mu < surface_mu(SurfaceClass::Grass, 0.0, 0.0),
+        "mud is worth {mu} and grass is worth {} -- the table is not ordered",
+        surface_mu(SurfaceClass::Grass, 0.0, 0.0)
+    );
+    // …and the terrain really has none, which is the carried item stated as a
+    // measurement rather than a worry: the island's four layers are grass, rock,
+    // forest floor and sand.
+    let world = ground_world(0);
+    let ent = world.entity_of(GROUND).expect("the ground");
+    let terrain = world.world().get::<Terrain>(ent).expect("terrain");
+    let map = SurfaceMap::of_terrain(terrain, &[]).expect("a map");
+    assert_eq!(
+        map.count_of(SurfaceClass::Mud),
+        0,
+        "a splat has started producing mud — the layer convention moved and \
+         `SurfaceMap::of_terrain`'s doc no longer says what it does"
+    );
+}
 
 /// **THE SURFACE TABLE IS THE RESEARCH DOC'S**, restated here rather than read
 /// from the type — a table computed from the thing it checks agrees with
