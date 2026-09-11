@@ -2568,10 +2568,15 @@ fn the_hero_log_and_its_readme_agree() {
     // failed to diagnose the shootout leg because the loop's only instrument
     // stopped at `engaged`, and "nobody heard the shot", "the file went cold"
     // and "the car never arrived" are three different bugs that all read zero.
+    // **Forty-nine since wave VEH3b**, which appended the four drivetrain
+    // columns for the reason every block before them was: a launch flare, a
+    // downshift blip and a limiter bounce are three different things that all
+    // read the same in `speed`, and a frame of any of them has to be triggered
+    // on a column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 45, "the row is {n} fields and this arm's word is 45");
+    assert_eq!(n, 49, "the row is {n} fields and this arm's word is 49");
     assert!(
-        README.contains("FORTY-FIVE") || README.contains("forty-five"),
+        README.contains("FORTY-NINE") || README.contains("forty-nine"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2597,6 +2602,11 @@ fn the_hero_log_and_its_readme_agree() {
         "slip_ratio",
         "slip_lat",
         "mu",
+        // Wave VEH3b's four.
+        "rpm",
+        "clutch",
+        "boost",
+        "cut",
     ] {
         assert!(
             README.contains(col),

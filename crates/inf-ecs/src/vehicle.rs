@@ -2667,6 +2667,54 @@ pub fn tyre_readout(wheels: &[WheelState]) -> String {
     )
 }
 
+/// **THE DRIVETRAIN ROW** (wave VEH3b) -- what the crank, the clutch and the
+/// turbo are doing, on one line between [`craft_readout`] and [`tyre_readout`].
+///
+/// Shape: `4820 rpm   3   clutch 62%   boost 0.34   CUT`. The clutch is shown
+/// as a percentage because engagement is the number a driver FEELS (a bite
+/// point is a percentage of a pedal), and the cut is shown as a word because it
+/// is a state rather than a quantity.
+///
+/// **The two things it will not draw** are as deliberate as the five it does. A
+/// naturally-aspirated class has no boost column at all rather than a column of
+/// zeroes, because `turbo_boost_max` at zero means the car has no turbocharger
+/// and a permanent `boost 0.00` is a readout inviting a question with no
+/// answer. And a fully locked clutch draws no clutch column, because a locked
+/// clutch is the normal state of a drivetrain and a row that said `clutch 100%`
+/// for the whole of a drive would be teaching a driver to ignore it.
+///
+/// In Ring 0 for [`drive_readout`]'s own reason, verbatim: a host function
+/// cannot be tested and this one can. Every number is read off
+/// [`DrivetrainState`] after the solve published it; none is recomputed here.
+pub fn drivetrain_readout(state: &DrivetrainState, turbocharged: bool) -> String {
+    let rpm = if state.rpm.is_finite() {
+        state.rpm.max(0.0)
+    } else {
+        0.0
+    };
+    let mut out = format!("{rpm:.0} rpm   {}", gear_label(state.gear));
+    let lock = if state.clutch_lock.is_finite() {
+        state.clutch_lock.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if lock < 1.0 {
+        out.push_str(&format!("   clutch {:.0}%", lock * 100.0));
+    }
+    if turbocharged {
+        let boost = if state.boost.is_finite() {
+            state.boost.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        out.push_str(&format!("   boost {boost:.2}"));
+    }
+    if state.fuel_cut {
+        out.push_str("   CUT");
+    }
+    out
+}
+
 /// The letter or number on the gate for one gear.
 ///
 /// `-1` and below is reverse, `0` is neutral, and everything above is its own
@@ -3592,6 +3640,17 @@ pub trait Vehicle: Send + Sync + 'static {
     /// which is the same shape every other trace section's empty case has.
     fn drivetrain(&self) -> Option<DrivetrainState> {
         None
+    }
+
+    /// **Whether this class carries a turbocharger** (wave VEH3b) -- what the
+    /// HUD's boost column is drawn on, and what wave VEH3e's whine and blow-off
+    /// are hung on.
+    ///
+    /// On the trait beside [`idle_rpm`](Self::idle_rpm) and for its reason: a
+    /// caller holding a `&dyn Vehicle` cannot ask it for a tuning, and a class
+    /// with no engine at all answers `false`.
+    fn turbocharged(&self) -> bool {
+        false
     }
 
     /// **What this class calls idle**, rpm (wave VEH3b) — the number
@@ -4584,6 +4643,18 @@ pub struct DrivetrainState {
     /// The clutch's engagement, `[0, 1]`.
     pub clutch_lock: f64,
     /// How fast the clutch faces are sliding, rad/s at the crank.
+    ///
+    /// A DIAGNOSTIC beside the state rather than part of it, on
+    /// [`crate::casing::CasingPool::last_shot_indoors`]' own terms: it is a pure
+    /// function of the crank's speed and the wheels', it is **not folded** by
+    /// [`drivetrain_state_bytes`], and its readers are the HUD's clutch column
+    /// and `hero.csv`.
+    ///
+    /// Not folding it is what lets [`DrivetrainState::is_quiet`] test exactly
+    /// the set the fold carries — because a PARKED car's clutch is slipping by
+    /// definition (the engine idles and the wheels do not turn), so a quiet test
+    /// that demanded zero slip would be true of nothing and the section would
+    /// never be empty.
     pub clutch_slip_rad_s: f64,
     /// The turbo's boost, `[0, 1]` of this class's own peak.
     pub boost: f64,
@@ -4602,7 +4673,6 @@ impl DrivetrainState {
     pub fn is_quiet(&self, idle_rpm: f64) -> bool {
         self.gear == 1
             && self.clutch_lock <= 0.0
-            && self.clutch_slip_rad_s <= 0.0
             && self.boost <= 0.0
             && !self.fuel_cut
             && self.rpm <= idle_rpm + 1e-9
@@ -5502,9 +5572,13 @@ pub fn clear_drivetrains(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<DrivetrainRes>();
 }
 
-/// How many bytes one drivetrain folds: 16 of guid, four `f64`, a gear and a
+/// How many bytes one drivetrain folds: 16 of guid, three `f64`, a gear and a
 /// flag.
-pub const DRIVETRAIN_TRACE_BYTES: usize = 16 + 4 * 8 + 4 + 1;
+///
+/// **Exactly the set [`DrivetrainState::is_quiet`] tests**, which is not a
+/// coincidence: a fold carrying a field the quiet test cannot see would go empty
+/// while that field was still moving.
+pub const DRIVETRAIN_TRACE_BYTES: usize = 16 + 3 * 8 + 4 + 1;
 
 /// **The drivetrains' trace bytes** (wave VEH3b) —
 /// [`DRIVETRAIN_TRACE_BYTES`] a car, in guid order, and **empty when every
@@ -5536,7 +5610,7 @@ pub fn drivetrain_state_bytes(world: &EcsWorld) -> Vec<u8> {
     let mut out = Vec::with_capacity(live.len() * DRIVETRAIN_TRACE_BYTES);
     for (guid, s) in live {
         out.extend_from_slice(guid.as_bytes());
-        for v in [s.rpm, s.clutch_lock, s.clutch_slip_rad_s, s.boost] {
+        for v in [s.rpm, s.clutch_lock, s.boost] {
             out.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         out.extend_from_slice(&s.gear.to_le_bytes());
@@ -6159,6 +6233,10 @@ impl Vehicle for RaycastVehicle {
 
     fn idle_rpm(&self) -> f64 {
         self.tuning.idle_rpm
+    }
+
+    fn turbocharged(&self) -> bool {
+        self.tuning.turbo_boost_max.is_finite() && self.tuning.turbo_boost_max > 0.0
     }
 
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {

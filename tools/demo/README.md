@@ -48,8 +48,8 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   recoil_mm,aim_recoil_deg,spread_deg,ads,casings,tail,
                   class,attach,lock,engaged,incoming,heat,on_scene,responder_m,
                   tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,
-                  slip_ratio,slip_lat,mu
-                  — FORTY-FIVE columns, four rows a second, and NO header line:
+                  slip_ratio,slip_lat,mu,rpm,clutch,boost,cut
+                  — FORTY-NINE columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -59,6 +59,11 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   temperatures in Celsius, the surface the most wheels are on,
                   the driven axle's slip ratio and lateral slip, and the µ the
                   contact is worth — all `0`/`-` when nobody is driving),
+                  46-49 are VEH3b's (the crank's own rpm, the clutch's
+                  engagement in `[0, 1]`, the turbo's boost in `[0, 1]` and `1`
+                  while the limiter is cutting fuel — the four a launch flare, a
+                  downshift blip and a limiter bounce have to be triggered on,
+                  because none of them is visible in `speed`),
                   24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,

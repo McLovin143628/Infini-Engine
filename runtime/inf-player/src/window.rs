@@ -629,9 +629,14 @@ impl PlayerApp {
                 cm.runtime.velocity.to_dvec3().length(),
             )
         };
-        let (rig, gear, at, airborne, tyres) = {
+        let (rig, gear, at, airborne, tyres, drivetrain, turbocharged) = {
             let v = sim.bridge3d().vehicle_of(vehicle)?;
             let rig = v.rig().clone();
+            // **THE DRIVETRAIN ROW** (wave VEH3b): the crank, the clutch and the
+            // turbo, copied out here for the tyre row's reason exactly -- the
+            // formatting is Ring 0's and the borrow is not.
+            let drivetrain = v.drivetrain();
+            let turbocharged = v.turbocharged();
             // **THE TYRE ROW** (wave VEH3a): the wheels' own published state,
             // copied out here because the formatting is Ring 0's and the borrow
             // is not.
@@ -646,7 +651,7 @@ impl PlayerApp {
                     .get::<inf_ecs::components::Transform>(e)
                     .map(|t| t.translation.to_dvec3())
             })?;
-            (rig, v.gear(), at, airborne, tyres)
+            (rig, v.gear(), at, airborne, tyres, drivetrain, turbocharged)
         };
         // The ground query is a `&mut` call on the sim (it may page a tile in),
         // so it is made only for the one craft that draws a height.
@@ -656,14 +661,21 @@ impl PlayerApp {
         // draws no second line at all — a boat and a helicopter answer the empty
         // string from Ring 0 rather than being special-cased here.
         let row = inf_ecs::vehicle::tyre_readout(&tyres);
-        Some(if row.is_empty() {
-            head
-        } else {
-            format!(
-                "{head}
-{row}"
-            )
-        })
+        // The drivetrain row goes BETWEEN the instruments and the tyres, because
+        // that is the order a driver reads them in: what the car is doing, what
+        // the engine is doing, what the rubber is doing. A craft with no
+        // drivetrain (a boat, a helicopter) draws neither of the two.
+        let drive = drivetrain
+            .map(|d| inf_ecs::vehicle::drivetrain_readout(&d, turbocharged))
+            .unwrap_or_default();
+        let mut text = head;
+        for line in [drive, row] {
+            if !line.is_empty() {
+                text.push('\n');
+                text.push_str(&line);
+            }
+        }
+        Some(text)
     }
 
     /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for
