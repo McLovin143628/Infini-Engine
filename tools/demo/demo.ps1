@@ -2434,6 +2434,122 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
+# ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
+#
+# Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
+# slept for. Indices, zero-based, and they are at the TAIL so every index above
+# keeps its meaning:
+#
+#   37..40  tyre_temp_fl / fr / rl / rr, Celsius
+#   41      surface   — the class the most wheels are on
+#   42      slip_ratio, 43 slip_lat   — the DRIVEN axle's
+#   44      mu        — what this contact is worth
+#
+# None of these is visible in a position column, which is exactly why they were
+# appended: "the car is on grass", "the tyres are cooked" and "the wheel is
+# spinning" are three different things that all read the same in `speed`.
+Restore-PlayerFocus "before the tyre leg"
+# **STAND UP FIRST**, for the reason the camera leg above states and measures: a
+# session that has been through the prone leg is CROUCHED, and a crouched hero
+# does not board. Measured on the first run of this leg -- the hero stood 2.8 m
+# from `Harbour City Car` at (-1752.0, 16.8, 2048.0) and twenty-five taps of E
+# reached nothing, with `mode` reading `Crouch` on 801 of 1 239 rows.
+Stand-Up "before the tyre leg" | Out-Null
+Say "VEH3a: boarding a car and driving it, watching the tyre row"
+
+# (a) THE HUD ROW ON THE ROAD. Board first, then hold the throttle until the
+#     world reports a car on asphalt at speed. The row is under the instruments.
+$veh_driving = $false
+for ($k = 0; $k -lt 25 -and -not $veh_driving; $k++) {
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    $veh_driving = @(Wait-ForHero -Csv $heroCsv -What "the hero at a wheel (VEH3a)" -TimeoutS 0.9 `
+        -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") })[-1]
+    if (-not $veh_driving -and $k -ge 5) {
+        [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
+    }
+}
+if (-not $veh_driving) {
+    Say "VEH3a: NO CAR reached in twenty-five taps of E -- none of the four tyre frames is in this session"
+} else {
+    # Throttle, and let the surface classifier answer.
+    [InfInput]::Down(0x11)
+    $veh_road = @(Wait-ForHero -Csv $heroCsv -What "the tyre row on the road (surface asphalt, moving)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") -and ($c[41] -eq "asphalt") -and ([double]$c[6] -gt 3.0) } `
+        -Out (Join-Path $OutDir "90-veh3a-hud-road.png"))[-1]
+    if (-not $veh_road) {
+        Say "VEH3a: the car never reported ASPHALT while moving -- frame (a) is not in this session"
+    }
+
+    # (b) THE VERGE. Steer off the carriageway and wait for the class to flip.
+    #     The car slows because the ground is worth less: both halves are in the
+    #     row, and the predicate asks for the surface, not for the slowing, so a
+    #     car that flipped class without losing speed still trips it and the
+    #     speed is in the captured line for a reader to check.
+    Say "VEH3a: steering off the carriageway"
+    # **A LONG steer, and the throttle stays down.** Measured on the first run:
+    # 1.4 s of D at 3 m/s is four metres of lateral travel and the island's
+    # carriageway is wider than that, so the surface never left `asphalt`. This
+    # holds the wheel over for six seconds and lets the car build speed first.
+    Start-Sleep -Milliseconds 2500
+    [InfInput]::Down(0x20); Start-Sleep -Milliseconds 6000; [InfInput]::Up(0x20)   # D
+    $veh_verge = @(Wait-ForHero -Csv $heroCsv -What "the verge (surface leaves asphalt)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") -and ($c[41] -ne "asphalt") -and ($c[41] -ne "-") } `
+        -Out (Join-Path $OutDir "91-veh3a-verge.png"))[-1]
+    if (-not $veh_verge) {
+        Say "VEH3a: the car never left ASPHALT -- frame (b) is not in this session"
+    }
+
+    # (c) THE BURNOUT. Brake and throttle together on whatever the car is
+    #     standing on, and watch the four temperatures climb. The hero's car has
+    #     the catalogue's ROAD tyres -- this loop does not re-tune it, so the
+    #     number below is what a road car on the island's own ground really
+    #     reaches, and 60 C is asked for first so a miss is reported rather than
+    #     dressed down.
+    Say "VEH3a: burnout -- brake and throttle together"
+    [InfInput]::Down(0x1F)   # S, the brake
+    $veh_hot = @(Wait-ForHero -Csv $heroCsv -What "the tyres past 60 C" -TimeoutS 25.0 `
+        -Predicate { param($c) ($c.Count -gt 44) -and (([double]$c[39] -gt 60.0) -or ([double]$c[40] -gt 60.0)) } `
+        -Out (Join-Path $OutDir "92-veh3a-burnout.png"))[-1]
+    if (-not $veh_hot) {
+        Say "VEH3a: no tyre passed 60 C -- asking instead for ANY heating above the 20 C ambient"
+        $veh_warm = @(Wait-ForHero -Csv $heroCsv -What "a tyre warmer than the air" -TimeoutS 15.0 `
+            -Predicate { param($c) ($c.Count -gt 44) -and (([double]$c[39] -gt 21.5) -or ([double]$c[40] -gt 21.5)) } `
+            -Out (Join-Path $OutDir "92-veh3a-burnout.png"))[-1]
+        if (-not $veh_warm) {
+            Say "VEH3a: the tyres never warmed at all -- and on ASPHALT under ROAD tyres that is the MODEL, not a miss: this rig's brakes out-hold its engine (13 kN against 8), so a line-lock burnout is a parked car. `veh3a_gate::a_burnout_heats_the_tyre_and_costs_it_grip` spins one on SAND under SLICK tyres, where mu is 0.25, and measures 229 slipping steps taking a tyre 20.0 -> 21.1 C. Frame (c) is not in this session and the reason is a number."
+        }
+    }
+    [InfInput]::Up(0x1F)
+
+    # (d) THE KERB. Drive at a kerb and catch the step the suspension takes. The
+    #     row carries no vertical acceleration, so the trigger is the thing that
+    #     IS in it and means the same: a driven wheel losing and regaining its
+    #     contact hard enough to swing the slip.
+    Say "VEH3a: back on the throttle, looking for a kerb"
+    [InfInput]::Down(0x1E); Start-Sleep -Milliseconds 2200; [InfInput]::Up(0x1E)   # A, back toward the kerb
+    Start-Sleep -Milliseconds 2500
+    $veh_kerb = @(Wait-ForHero -Csv $heroCsv -What "the kerb (the driven axle's slip swings)" -TimeoutS 20.0 `
+        -Predicate { param($c) ($c.Count -gt 44) -and ($c[5] -eq "Driving") -and ([math]::Abs([double]$c[42]) -gt 0.25) } `
+        -Out (Join-Path $OutDir "93-veh3a-kerb.png"))[-1]
+    if (-not $veh_kerb) {
+        Say "VEH3a: the driven axle never swung past 0.25 of slip -- frame (d) is not in this session"
+    }
+    [InfInput]::Up(0x11)
+
+    # WHAT THE ROW ACTUALLY SAID, whatever fired: the last driving line, printed
+    # whole, so a reader can see the eight columns rather than take the triggers'
+    # word for them.
+    $last = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 44 -and ($_ -split ",")[5] -eq "Driving" })
+    if ($last.Count -gt 0) {
+        $c = $last[-1] -split ","
+        Say ("VEH3a ROW: temps {0}/{1}/{2}/{3} C  surface {4}  slip {5}/{6}  mu {7}" -f `
+            $c[37], $c[38], $c[39], $c[40], $c[41], $c[42], $c[43], $c[44])
+    } else {
+        Say "VEH3a ROW: no driving row was ever written"
+    }
+}
+
 # ── 7. close ─────────────────────────────────────────────────────────────────
 if ($KeepOpen) {
     Say "left running (pid $($proc.Id)); the island's pack stays mapped until you close it"
