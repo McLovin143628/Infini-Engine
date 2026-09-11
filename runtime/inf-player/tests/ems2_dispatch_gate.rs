@@ -281,6 +281,18 @@ struct Run {
     last_step: u64,
     /// Units still running hot on the last step — the ambient feed's own tail.
     hot_at_end: usize,
+    /// **How many units are not back in station at the last step** — every one
+    /// `EnRoute`, `OnScene` *or* `Returning` (`audit:` VEH3b).
+    ///
+    /// `hot_at_end` is `running_hot`, which is `EnRoute | OnScene` and
+    /// deliberately excludes a unit driving home with its bar handed back. That
+    /// is the right set for a siren and the WRONG one for the bookkeeping
+    /// identity below: `assigned - returned` counts every unit that has left and
+    /// not arrived home, and a unit mid-`Returning` is exactly that. The
+    /// identity held only while no run happened to end with one on the way back,
+    /// and wave VEH3b's audit re-sprung the emergency rows, changed how fast
+    /// they drive, and produced one.
+    still_out: usize,
     /// Summed counters over the run.
     assigned: usize,
     arrived: usize,
@@ -336,6 +348,7 @@ fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
         units: BTreeMap::new(),
         last_step: 0,
         hot_at_end: 0,
+        still_out: 0,
         assigned: 0,
         arrived: 0,
         resolved: 0,
@@ -377,6 +390,7 @@ fn editor_run(with_fleet: bool) -> Run {
         units: BTreeMap::new(),
         last_step: 0,
         hot_at_end: 0,
+        still_out: 0,
         assigned: 0,
         arrived: 0,
         resolved: 0,
@@ -437,6 +451,11 @@ fn finish(run: &mut Run, world: &EcsWorld) {
         run.units.insert(*chassis, (r.state, r.since_step));
     }
     run.hot_at_end = res.runs.values().filter(|r| r.state.running_hot()).count();
+    run.still_out = res
+        .runs
+        .values()
+        .filter(|r| r.state != dispatch::UnitState::InStation)
+        .count();
 }
 
 // ── (a) the headline ────────────────────────────────────────────────────────
@@ -544,9 +563,9 @@ fn three_emergencies_bring_three_services_and_send_them_home() {
     assert!(run.returned >= 3, "{} return(s)", run.returned);
     assert_eq!(
         run.assigned - run.returned,
-        run.hot_at_end,
+        run.still_out,
         "{} unit(s) were sent, {} came back and {} are still out — the \
-         difference must be exactly the ones still running",
+         difference must be exactly the ones not back in station",
         run.assigned,
         run.returned,
         run.hot_at_end
@@ -643,7 +662,18 @@ fn every_responding_unit_sounds_a_siren_and_returns_its_bar() {
     let res = dispatch::dispatch_of(sim.world()).expect("a dispatcher");
     let mut released = 0usize;
     for chassis in [CRUISER, AMBULANCE, APPLIANCE] {
-        if res.runs[&chassis].state != UnitState::InStation {
+        // **A bar is handed back when the unit stops running HOT**, not when it
+        // reaches its bay (`audit:` VEH3b). `running_hot` is `EnRoute |
+        // OnScene`, and `UnitState::Returning`'s own doc says why: *"a returning
+        // unit is not running hot, which is what an ambulance that has already
+        // dropped its patient does."* So `res.bars` releases at the same edge,
+        // and a test that counted only `InStation` units counted one fewer than
+        // the pin did whenever a run ended with somebody still driving home.
+        //
+        // It held while no run happened to end that way. Wave VEH3b's audit
+        // re-sprung the emergency rows, changed how fast they drive, and
+        // produced one: 1 pinned and 1 released against three units.
+        if res.runs[&chassis].state.running_hot() {
             continue;
         }
         let bar = dispatch::light_bar_of(sim.world(), chassis).expect("a bar");
@@ -656,10 +686,10 @@ fn every_responding_unit_sounds_a_siren_and_returns_its_bar() {
         );
         released += 1;
     }
-    println!("  {released} of 3 unit(s) home with their bars handed back");
+    println!("  {released} of 3 unit(s) with their bars handed back");
     assert!(
         released > 0,
-        "no unit was in station at the end, so the release was never checked"
+        "no unit had stopped running hot at the end, so the release was never checked"
     );
     assert_eq!(
         res.bars.len() + released,
