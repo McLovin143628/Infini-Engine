@@ -689,6 +689,7 @@ impl SpawnOverride {
             at,
             cloth,
             weapons,
+            tune,
             ..Self::default()
         }
     }
