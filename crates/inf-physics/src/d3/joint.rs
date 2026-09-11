@@ -56,6 +56,65 @@ impl PartialOrd for JointId3D {
     }
 }
 
+// ── breakable joints (wave VEH3c) ───────────────────────────────────────────
+
+/// **What a joint carried last step**, newton-seconds — the impulse the solver
+/// had to apply to keep the two bodies constrained.
+///
+/// Read straight off rapier's own `ImpulseJoint::impulses`, which is a
+/// six-vector: three linear components and three angular ones, in the joint's
+/// own basis. The basis does not matter to the only question this wave asks of
+/// it — *how big was it* — because a magnitude is invariant under the rotation
+/// between one orthonormal basis and another.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct JointImpulse3D {
+    /// The linear impulse, N.s.
+    pub linear: DVec3,
+    /// The angular impulse, N.m.s.
+    pub angular: DVec3,
+}
+
+impl JointImpulse3D {
+    /// The linear impulse's magnitude, N.s — what a break threshold is in.
+    pub fn magnitude_ns(&self) -> f64 {
+        self.linear.length()
+    }
+}
+
+/// **One joint being watched for its own destruction** (wave VEH3c).
+///
+/// # Why a watch and not a field on the joint
+///
+/// Rapier has no break force. Its `GenericJoint` carries limits, motors and
+/// contact flags and nothing that says *let go past this*, and adding one would
+/// mean forking the solver. What it does carry is the impulse it applied, so a
+/// breakable joint is *a joint, a number, and somebody looking* — and putting
+/// the looking in the facade rather than inside a caller is what makes a
+/// hinged door, a tow rope and a trailer coupling one mechanism instead of
+/// three.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakWatch3D {
+    /// The joint to watch.
+    pub joint: JointId3D,
+    /// The linear impulse over which it lets go, N.s. A non-finite or
+    /// non-positive threshold means **unbreakable** — a refusal is a value, and
+    /// the alternative is a joint that shatters the instant it is loaded.
+    pub threshold_ns: f64,
+}
+
+/// **A joint that let go**, and what it was carrying when it did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointBreak3D {
+    /// The joint, now removed. The handle is dead: `contains_joint` answers
+    /// `false` for it from the moment this value exists.
+    pub joint: JointId3D,
+    /// The impulse it was carrying on the step it broke, N.s — the measurement
+    /// a gate reads, and the reason it is returned rather than logged.
+    pub impulse_ns: f64,
+    /// The threshold it passed, N.s.
+    pub threshold_ns: f64,
+}
+
 /// Motor parameters for a driven joint axis (revolute/prismatic).
 ///
 /// A motor drives the joint toward a target: set `target_vel` (and leave

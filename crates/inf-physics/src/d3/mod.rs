@@ -83,7 +83,9 @@ pub use fracture::{
     CRACK_OPENING_M, DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
 };
 pub use gameplay::{step_gameplay, GameplayReport, WeaponHit};
-pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
+pub use joint::{
+    BreakWatch3D, JointBreak3D, JointDesc3D, JointId3D, JointImpulse3D, JointKind3D, JointMotor3D,
+};
 pub use label::{ColliderFamily, ColliderLabel};
 pub use movement::{mover_for, step_character_movement, MoveOutcome};
 pub use query::{CastTargets, RayHit3D, ShapeHit3D};

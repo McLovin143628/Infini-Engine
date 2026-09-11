@@ -1106,6 +1106,65 @@ impl PhysicsWorld3D {
         ids
     }
 
+    /// **What a joint was carrying on the last step** (wave VEH3c), or `None` if
+    /// the handle is invalid.
+    ///
+    /// Rapier's own `ImpulseJoint::impulses`, unpacked: a six-vector whose first
+    /// three components are the linear impulse and whose last three are the
+    /// angular one, on `JointAxis`'s frozen order (`LinX, LinY, LinZ, AngX,
+    /// AngY, AngZ`). It is the impulse the solver applied *this step*, so it is
+    /// in newton-seconds at the fixed step's own `dt` and it is zero on a joint
+    /// that has never been solved.
+    ///
+    /// This is the whole of what makes a BREAKABLE joint possible in this
+    /// engine — see [`BreakWatch3D`](super::joint::BreakWatch3D).
+    pub fn joint_impulse(&self, joint: JointId3D) -> Option<super::joint::JointImpulse3D> {
+        let j = self.impulse_joints.get(joint.0)?;
+        Some(super::joint::JointImpulse3D {
+            linear: DVec3::new(j.impulses[0], j.impulses[1], j.impulses[2]),
+            angular: DVec3::new(j.impulses[3], j.impulses[4], j.impulses[5]),
+        })
+    }
+
+    /// **Break every watched joint whose impulse passed its threshold**
+    /// (wave VEH3c) — the one door a breakable joint goes through.
+    ///
+    /// Walks the watches in the order given, reads each joint's own impulse,
+    /// and [`remove_joint`](Self::remove_joint)s the ones that let go. A watch
+    /// whose handle is already dead, or whose threshold is not a positive finite
+    /// number, is skipped — a refusal is a value here as everywhere, and a joint
+    /// with a threshold of zero would shatter on the step it was created.
+    ///
+    /// Returns what broke and what it was carrying, so a caller can measure the
+    /// break rather than infer it. **Deterministic**: no allocation beyond the
+    /// result, no iteration over a hash map, and the order is the caller's.
+    pub fn break_over_threshold(
+        &mut self,
+        watches: &[super::joint::BreakWatch3D],
+    ) -> Vec<super::joint::JointBreak3D> {
+        let mut out = Vec::new();
+        for w in watches {
+            if !w.threshold_ns.is_finite() || w.threshold_ns <= 0.0 {
+                continue;
+            }
+            let Some(imp) = self.joint_impulse(w.joint) else {
+                continue;
+            };
+            let ns = imp.magnitude_ns();
+            if !ns.is_finite() || ns <= w.threshold_ns {
+                continue;
+            }
+            if self.remove_joint(w.joint) {
+                out.push(super::joint::JointBreak3D {
+                    joint: w.joint,
+                    impulse_ns: ns,
+                    threshold_ns: w.threshold_ns,
+                });
+            }
+        }
+        out
+    }
+
     /// The two bodies a joint connects (canonicalized `body_a <= body_b`), or
     /// `None` if the handle is invalid.
     pub fn joint_bodies(&self, joint: JointId3D) -> Option<(BodyId3D, BodyId3D)> {

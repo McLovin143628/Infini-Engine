@@ -268,3 +268,154 @@ fn restitution_max_combine_makes_a_bouncy_pair() {
         "Max-combine should bounce higher than Min-combine (max={bouncy}, min={dead})"
     );
 }
+
+// ── breakable joints (wave VEH3c) ───────────────────────────────────────────
+
+/// A heavy body hung off a hinge, and the hinge watched.
+///
+/// Returns `(broke, peak_ns, steps_to_break)`. The load is a real one: a 2 000 kg
+/// box on a 0.5 m arm under gravity pulls about 9.8 kN, i.e. roughly 163 N.s
+/// every 60 Hz step, so a 60 N.s threshold lets go and a 10 000 N.s one does not.
+fn hinge_under_load(threshold_ns: f64) -> (bool, f64, usize) {
+    let mut world = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let anchor = world.add_body(
+        BodyKind3D::Static,
+        DVec3::new(0.0, 5.0, 0.0),
+        DQuat::IDENTITY,
+    );
+    let arm = world.add_body(
+        BodyKind3D::Dynamic,
+        DVec3::new(0.5, 5.0, 0.0),
+        DQuat::IDENTITY,
+    );
+    world.add_collider(
+        arm,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(0.5, 0.1, 0.5),
+        })
+        .density(4_000.0),
+    );
+    let jid = world
+        .add_joint(
+            anchor,
+            arm,
+            JointDesc3D::new(JointKind3D::Revolute {
+                axis: DVec3::Z,
+                limits: None,
+                motor: None,
+            })
+            .local_anchor1(DVec3::ZERO)
+            .local_anchor2(DVec3::new(-0.5, 0.0, 0.0)),
+        )
+        .expect("the hinge builds");
+    let watch = [inf_physics::d3::BreakWatch3D {
+        joint: jid,
+        threshold_ns,
+    }];
+    let mut peak = 0.0f64;
+    let mut broke_at = None;
+    for i in 0..240 {
+        world.step(DT);
+        if let Some(imp) = world.joint_impulse(jid) {
+            peak = peak.max(imp.magnitude_ns());
+        }
+        let broken = world.break_over_threshold(&watch);
+        if let Some(b) = broken.first() {
+            assert_eq!(b.joint, jid);
+            assert!(b.impulse_ns > b.threshold_ns);
+            broke_at = Some(i);
+            break;
+        }
+    }
+    (broke_at.is_some(), peak, broke_at.unwrap_or(240))
+}
+
+#[test]
+fn a_watched_hinge_lets_go_over_its_threshold_and_holds_under_it() {
+    // The measurement first: what does this hinge actually carry?
+    let (_, peak, _) = hinge_under_load(f64::INFINITY);
+    eprintln!("the loaded hinge carries a peak of {peak:.1} N.s a step");
+    assert!(
+        peak > 1.0,
+        "the fixture's hinge carries {peak:.3} N.s -- it is not loaded, so \
+         neither half of this arm measures anything"
+    );
+
+    // Over the threshold: it lets go, and the handle is dead afterwards.
+    let (broke, at_peak, step) = hinge_under_load(peak * 0.5);
+    assert!(
+        broke,
+        "a hinge carrying {peak:.1} N.s did not break at {:.1}",
+        peak * 0.5
+    );
+    eprintln!("broke on step {step} carrying {at_peak:.1} N.s");
+
+    // THE MUTATION: an unbreakable threshold, and nothing lets go in four
+    // seconds of the same load.
+    let (broke, _, step) = hinge_under_load(peak * 1000.0);
+    assert!(!broke, "an unbreakable hinge broke on step {step}");
+
+    // …and a refusal is a value: zero and NaN are UNBREAKABLE, not instant.
+    for t in [0.0, -1.0, f64::NAN] {
+        let (broke, _, _) = hinge_under_load(t);
+        assert!(!broke, "a threshold of {t} broke the hinge");
+    }
+}
+
+#[test]
+fn a_broken_joint_leaves_a_free_body_behind() {
+    let mut world = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let anchor = world.add_body(
+        BodyKind3D::Static,
+        DVec3::new(0.0, 20.0, 0.0),
+        DQuat::IDENTITY,
+    );
+    let arm = world.add_body(
+        BodyKind3D::Dynamic,
+        DVec3::new(0.5, 20.0, 0.0),
+        DQuat::IDENTITY,
+    );
+    world.add_collider(
+        arm,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(0.5, 0.1, 0.5),
+        })
+        .density(4_000.0),
+    );
+    let jid = world
+        .add_joint(
+            anchor,
+            arm,
+            JointDesc3D::new(JointKind3D::Revolute {
+                axis: DVec3::Z,
+                limits: None,
+                motor: None,
+            })
+            .local_anchor1(DVec3::ZERO)
+            .local_anchor2(DVec3::new(-0.5, 0.0, 0.0)),
+        )
+        .expect("the hinge builds");
+    for _ in 0..30 {
+        world.step(DT);
+    }
+    let held = world.body_translation(arm).unwrap().y;
+    assert!(
+        held > 19.0,
+        "the hinge did not hold the arm up: it is at {held:.3}"
+    );
+    let broken = world.break_over_threshold(&[inf_physics::d3::BreakWatch3D {
+        joint: jid,
+        threshold_ns: 1.0,
+    }]);
+    assert_eq!(broken.len(), 1);
+    assert!(!world.contains_joint(jid), "the handle is still live");
+    for _ in 0..60 {
+        world.step(DT);
+    }
+    let fell = world.body_translation(arm).unwrap().y;
+    eprintln!("held at {held:.3} m, fell to {fell:.3} m in one second");
+    assert!(
+        fell < held - 4.0,
+        "the freed body only fell from {held:.3} to {fell:.3}"
+    );
+}
