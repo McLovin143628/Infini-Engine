@@ -20,13 +20,16 @@
 //! | `the_ground_under_the_wheel_decides_the_stop` | `SurfaceMap::at` → always `Asphalt` | cells classified, and contacts on each surface |
 //! | `the_compound_row_changes_what_a_surface_is_worth` | `compound_factor` → 1.0 | contacts on the soft surface |
 //! | `rain_lengthens_the_stop` | `SURFACE_WET_MULT` → 1.0 | steps with `wetness > 0` |
-//! | `a_burnout_heats_the_tyre_and_costs_it_grip` | `tyre_heat_rate` → 0.0 | steps with slip power |
-//! | `the_air_temperature_is_the_weathers` | `weather_at`'s snow blend → constant | the two ambients |
+//! | `a_burnout_heats_the_tyre_and_costs_it_grip` | `tyre_heat_rate` → 0.0 (the rise); `heat_grip` dropped from `TyreContext` (the two stops) | steps with slip power, and a rolling CONTROL |
+//! | `the_air_temperature_is_the_weathers` | `weather_at` → `TYRE_AMBIENT_C`, or back to the snowiness blend | the two airs, and two skies differing only in phase |
+//! | `the_authority_sky_is_the_one_the_tyre_reads` | drop the `sky_authority` branch | the orphan, and the no-authority fallback |
 //! | `a_garbage_contact_normal_changes_the_trace` | `TyreContext::camber_at` → `static_deg` | contacts scrambled |
 //! | `four_casts_do_not_make_a_kerb_worse` | `Footprint::SHIPPED` → `CENTRE` **is** the control | kerb crossings |
 //! | `the_substep_loop_runs_and_one_is_what_ships` | the local chassis advance removed → N=4 equals N=1 | steps run at each N |
 //! | `every_v28_tunable_survives_the_wire` | drop one field from `VehicleClass::from_tuning` | fields moved (100) |
-//! | `the_v27_downgrade_loses_exactly_the_thirty_eight` | append a 101st field without a rung | fields lost (38) |
+//! | `the_v27_downgrade_loses_exactly_the_thirty_eight` | append a 101st field without a rung, or rename one of the sixty-two | 62 kept + 38 added, against two independent lists |
+//! | `the_hud_row_says_what_the_tyres_know` | the row's own `format!` | the surface, the hottest tyre, the air |
+//! | `the_shipped_host_draws_the_tyre_row` | delete the `tyre_readout` call from `inf_player::window` | three source fragments |
 //! | `the_vehicle_phase_costs_what_it_prints` | any per-force derivation put back | cars, and the control/measured pair |
 //!
 //! # PIE == shipping
@@ -41,8 +44,8 @@ use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
 use inf_ecs::components::{
-    BodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, SkyAtmosphere, Terrain, Transform,
-    VehicleClass, Visibility,
+    BodyKind3D, Collider3D, ColliderShape3DKind, Guid, RigidBody3D, SkyAtmosphere, Terrain,
+    TimeOfDay, Transform, VehicleClass, Visibility,
 };
 use inf_ecs::math::Vec3d;
 use inf_ecs::vehicle::{
@@ -239,7 +242,12 @@ fn car(world: &mut EcsWorld, at: DVec3) {
 
 /// Put a sky with live weather into the world, and answer the two numbers the
 /// tyre reads off it.
-fn weather(world: &mut EcsWorld, precipitation: f32, snowiness: f32) -> (f64, f64) {
+///
+/// The sky carries a `TimeOfDay`, because the entity holding the clock is what
+/// `inf_ecs::sky::sky_authority` answers and therefore what `advance_weather`
+/// blends and the renderer resolves — a fixture whose atmosphere is orphaned
+/// would be testing the fallback and calling it the door.
+fn weather(world: &mut EcsWorld, precipitation: f32, snowiness: f32, ambient_c: f32) -> (f64, f64) {
     let e = world
         .entity_of(SKY)
         .unwrap_or_else(|| world.spawn_with_guid(SKY, "Sky", None));
@@ -248,10 +256,12 @@ fn weather(world: &mut EcsWorld, precipitation: f32, snowiness: f32) -> (f64, f6
         .entity_mut(e)
         .insert(Transform::default())
         .insert(Visibility::default())
+        .insert(TimeOfDay::default())
         .insert(SkyAtmosphere {
             weather_enabled: true,
             weather_precipitation: precipitation,
             weather_snowiness: snowiness,
+            weather_ambient_c: ambient_c,
             ..Default::default()
         });
     world.mark_dirty();
@@ -470,7 +480,7 @@ fn the_compound_row_changes_what_a_surface_is_worth() {
 fn rain_lengthens_the_stop() {
     let stop = |precip: f32| -> (f64, f64, usize) {
         let mut rig = Rig::on(0);
-        let (wet, _) = weather(&mut rig.world, precip, 0.0);
+        let (wet, _) = weather(&mut rig.world, precip, 0.0, 20.0);
         rig.bridge.sync_from_world(&rig.world);
         rig.step(30);
         let seen = rig.wheel(0).wetness;
@@ -502,8 +512,23 @@ fn rain_lengthens_the_stop() {
 /// **A BURNOUT HEATS THE TYRE AND COSTS IT GRIP, AND A LAP COOLS IT**
 /// (wave VEH3a clause 3).
 ///
-/// **The mutation**: `tyre_heat_rate` → 0.0, which leaves the tyre at ambient
-/// through the burnout and reds the first assertion.
+/// Three facts, each measured in the WORLD and each with its own control:
+///
+/// 1. a burnout raises the temperature the solver published;
+/// 2. a car that is NOT slipping does not heat at all (the control — without it
+///    "the number went up" could be the integrator drifting);
+/// 3. **the SOLVER charges for the heat.** The pure `heat_grip_factor` agreeing
+///    with itself proves nothing about the model: the same rig, at the same
+///    world temperature, stops at two different distances when its class
+///    authors an optimum above that temperature and one below it.
+///
+/// Fact 3 exists because at the shipped tuning this rig's burnout reaches about
+/// **21 °C** against an 85 °C optimum, so the burnout itself costs no grip and
+/// an arm that claimed otherwise would be reading a function rather than a car.
+///
+/// **The mutation**: `tyre_heat_rate` → 0.0 reds 1; the loss being applied to
+/// the curve rather than only computed (drop `heat_grip` from `TyreContext`)
+/// reds 3.
 #[test]
 fn a_burnout_heats_the_tyre_and_costs_it_grip() {
     // SAND under SLICK tyres: µ 0.45 × 0.55 = 0.25, so the drive force really
@@ -558,10 +583,77 @@ fn a_burnout_heats_the_tyre_and_costs_it_grip() {
          (grip factor {:.3})",
         heat_grip_factor(&t, hot)
     );
-    // …and the model really pays for it.
+
+    // THE CONTROL: the same rig, the same seconds, rolling instead of spinning.
+    // Without it "the temperature rose" could be an integrator that drifts.
+    let mut idle = Rig::on(3);
+    if let Some(v) = idle.bridge.vehicle_mut(CHASSIS) {
+        assert!(v.tune("tyre_surface_set", 3.0));
+    }
+    idle.step(60);
+    let idle_cold = idle.wheel(0).temp_c;
+    idle.step(60 * 8);
+    let idle_hot = idle
+        .bridge
+        .vehicle_of(CHASSIS)
+        .map(|v| v.wheels().iter().map(|w| w.temp_c).fold(f64::MIN, f64::max))
+        .unwrap_or(0.0);
     assert!(
-        heat_grip_factor(&t, t.tyre_optimum_c + 120.0) < 0.95,
-        "a tyre 120 °C over its optimum keeps all its grip"
+        (idle_hot - idle_cold).abs() < 0.05,
+        "a car that never slipped moved from {idle_cold} °C to {idle_hot} — heat \
+         is arriving from something that is not slip power"
+    );
+    assert!(
+        hot - cold > (idle_hot - idle_cold) + 1.0,
+        "the burnout gained {:.3} °C and the rolling control gained {:.3} — the \
+         two are not separable",
+        hot - cold,
+        idle_hot - idle_cold
+    );
+
+    // AND THE SOLVER REALLY PAYS FOR IT. The model's own door agreeing with
+    // itself is not the claim; two stops are. Same car, same ground, same
+    // temperature — one class thinks it is under its optimum and one thinks it
+    // is well over.
+    let stop_at = |optimum_c: f64, loss: f64| -> (f64, f64, usize, f64) {
+        let mut rig = Rig::on(3);
+        if let Some(v) = rig.bridge.vehicle_mut(CHASSIS) {
+            assert!(v.tune("tyre_optimum_c", optimum_c));
+            assert!(v.tune("tyre_heat_grip_loss", loss));
+        }
+        rig.step(60);
+        let temp = rig.wheel(0).temp_c;
+        let (d, v, n) = rig.sprint_and_stop(14.0);
+        (d * (14.0 / v).powi(2), temp, n, v)
+    };
+    // The shipped optimum: a tyre at ambient is far below it, so full grip.
+    let (cool_stop, cool_temp, cool_n, _) = stop_at(85.0, 0.25);
+    // A compound whose optimum is BELOW the air and which falls off hard: the
+    // same ~20 °C tyre is now over its optimum, and the solver must charge it.
+    let (cooked_stop, cooked_temp, cooked_n, _) = stop_at(-30.0, 1.0);
+    assert!(
+        cool_n > 150 && cooked_n > 150,
+        "{cool_n} / {cooked_n} contact steps — one of the stops was in the air"
+    );
+    assert!(
+        (cool_temp - cooked_temp).abs() < 1.0,
+        "the two runs were at {cool_temp} °C and {cooked_temp} — this arm must \
+         vary the OPTIMUM, not the temperature"
+    );
+    assert_eq!(
+        heat_grip_factor(&t, cool_temp),
+        1.0,
+        "a tyre at {cool_temp} °C under an 85 °C optimum is not at full grip"
+    );
+    println!(
+        "VEH3a HEAT GRIP: at {cool_temp:.1} °C the rig stops in {cool_stop:.1} m \
+         under an 85 °C optimum and {cooked_stop:.1} m under a −30 °C one"
+    );
+    assert!(
+        cooked_stop > cool_stop * 1.10,
+        "a tyre {:.0} °C over its optimum stopped in {cooked_stop} m against a \
+         cool tyre's {cool_stop} — `heat_grip` reaches no force in the solver",
+        cooked_temp + 30.0
     );
 
     // THE COOL-DOWN, on the model's own door.
@@ -575,32 +667,49 @@ fn a_burnout_heats_the_tyre_and_costs_it_grip() {
     );
 }
 
-/// **THE AIR TEMPERATURE IS THE WEATHER'S** (wave VEH3a clause 3).
+/// **THE AIR TEMPERATURE IS THE WEATHER'S** (wave VEH3a clause 3, closed by its
+/// audit).
 ///
-/// The P17 weather state carries **no ambient temperature field** — coverage,
-/// cloud type, wind, fog, precipitation and snowiness, and nothing else. So the
-/// ambient is derived from `snowiness`, which is the precipitation's PHASE and
-/// therefore the only field that carries the information. That is a proxy and
-/// `weather_at`'s own doc says so.
+/// The wave shipped this as a PROXY: `WeatherParams` owned no ambient, so the
+/// air was derived from `weather_snowiness` — the precipitation's phase — and
+/// 20 °C in rain was a rule of this engine rather than of physics. The audit
+/// landed `weather_ambient_c` in the same v28 window, and this arm now reads
+/// the field.
 ///
-/// **The mutation**: `weather_at` returning `TYRE_AMBIENT_C` unconditionally —
-/// the two ambients become one number.
+/// **The mutation**: `weather_at` returning `TYRE_AMBIENT_C` unconditionally, or
+/// going back to the snowiness blend — the third assertion below is the one that
+/// separates the field from the proxy, because the two skies it compares differ
+/// ONLY in their phase.
 #[test]
 fn the_air_temperature_is_the_weathers() {
     let mut rig = Rig::on(0);
-    let (_, warm) = weather(&mut rig.world, 0.5, 0.0);
-    let (_, cold) = weather(&mut rig.world, 0.5, 1.0);
+    let (_, warm) = weather(&mut rig.world, 0.5, 0.0, 24.0);
+    let (_, cold) = weather(&mut rig.world, 0.5, 1.0, -6.0);
     let mut sampled = 0usize;
-    for (name, a) in [("rain", warm), ("snow", cold)] {
+    for (name, a) in [("warm", warm), ("cold", cold)] {
         assert!(a.is_finite(), "{name} gave a non-finite ambient");
         sampled += 1;
     }
     assert_eq!(sampled, 2);
-    assert!(
-        warm - cold > 15.0,
-        "rain reads {warm} °C and snow {cold} — the phase is not reaching the air"
+    assert_eq!(warm, 24.0, "the sky says 24 °C and the tyre reads {warm}");
+    assert_eq!(cold, -6.0, "the sky says −6 °C and the tyre reads {cold}");
+    println!("VEH3a AIR: the sky's own field reads {warm:.1} °C and {cold:.1} °C");
+
+    // THE ANTI-PROXY: two skies that differ ONLY in the precipitation's phase
+    // read the SAME air. Under the old derivation these were 20 °C and 0 °C.
+    let (wet_rain, rain_air) = weather(&mut rig.world, 1.0, 0.0, 11.0);
+    let (wet_snow, snow_air) = weather(&mut rig.world, 1.0, 1.0, 11.0);
+    assert_eq!(
+        rain_air, snow_air,
+        "rain reads {rain_air} °C and snow {snow_air} at the same authored air — \
+         the phase is still deciding the temperature"
     );
-    println!("VEH3a AIR: rain {warm:.1} °C, snow {cold:.1} °C");
+    assert_eq!(rain_air, 11.0);
+    // …and the phase still decides the WETNESS, which is what it actually means.
+    assert!(
+        wet_rain > 0.9 && wet_snow < 0.1,
+        "rain published {wet_rain} of wetness and snow {wet_snow}"
+    );
 
     // …and a tyre really cools to the number the sky gave.
     let t = VehicleTuning::default();
@@ -613,10 +722,79 @@ fn the_air_temperature_is_the_weathers() {
     };
     let (a, b) = (settle(warm), settle(cold));
     assert!(
-        (a - b) - (warm - cold) < 1.0 && (a - b) > 10.0,
-        "a tyre settled at {a} °C in rain and {b} in snow, against airs of {warm} \
-         and {cold}"
+        ((a - b) - (warm - cold)).abs() < 1.0,
+        "a tyre settled at {a} °C in the warm air and {b} in the cold, against \
+         airs of {warm} and {cold} — the gap is not the ambient delta"
     );
+}
+
+/// **THE AUTHORITY SKY IS THE ONE THE TYRE READS** (VEH3a's audit).
+///
+/// `advance_weather` blends, and the renderer resolves, the atmosphere on the
+/// entity that carries the CLOCK (`inf_ecs::sky::sky_authority`, lowest `Guid`
+/// among them). `weather_at` walked every enabled atmosphere in `Guid` order
+/// instead — so a level with an orphaned low-`Guid` sky ran two weathers: one
+/// the world blended and a different one the tyres cooled into.
+///
+/// **The mutation**: dropping the `sky_authority` branch — the orphan's air
+/// wins and the first assertion reds.
+#[test]
+fn the_authority_sky_is_the_one_the_tyre_reads() {
+    let mut rig = Rig::on(0);
+    // The ORPHAN: a lower `Guid`, no clock, a hostile air.
+    let orphan = rig
+        .world
+        .spawn_with_guid(uuid::Uuid::from_u128(0x0000_0001), "Orphan Sky", None);
+    rig.world
+        .world_mut()
+        .entity_mut(orphan)
+        .insert(Transform::default())
+        .insert(Visibility::default())
+        .insert(SkyAtmosphere {
+            weather_enabled: true,
+            weather_ambient_c: -40.0,
+            ..Default::default()
+        });
+    // THE AUTHORITY: a higher `Guid`, and the clock.
+    let (_, air) = weather(&mut rig.world, 0.0, 0.0, 18.0);
+    assert!(
+        rig.world
+            .world()
+            .get::<Guid>(orphan)
+            .is_some_and(|g| g.0 < SKY),
+        "the orphan must sort BEFORE the authority or this arm proves nothing"
+    );
+    assert_eq!(
+        air, 18.0,
+        "the tyre read {air} °C — the orphaned atmosphere with no clock won, and \
+         the level is running two weathers"
+    );
+
+    // …and with NO authority at all the orphan is still read, so an authored
+    // weather block is never silently inert.
+    let mut lone = Rig::on(0);
+    let e = lone
+        .world
+        .spawn_with_guid(uuid::Uuid::from_u128(0x0000_0002), "Lone Sky", None);
+    lone.world
+        .world_mut()
+        .entity_mut(e)
+        .insert(Transform::default())
+        .insert(Visibility::default())
+        .insert(SkyAtmosphere {
+            weather_enabled: true,
+            weather_ambient_c: -12.0,
+            ..Default::default()
+        });
+    lone.world.mark_dirty();
+    lone.world.propagate();
+    let (_, fallback) = weather_at(&lone.world);
+    assert_eq!(
+        fallback, -12.0,
+        "a level whose only atmosphere carries no clock read {fallback} °C \
+         instead of its own authored air"
+    );
+    println!("VEH3a AUTHORITY: the clock's sky answers {air:.1} °C over the orphan's −40.0");
 }
 
 // ── 4. THE NORMAL AND THE KERB ──────────────────────────────────────────────
@@ -894,43 +1072,192 @@ fn every_v28_tunable_survives_the_wire() {
     println!("VEH3a WIRE: {checked} tunables authored, encoded, decoded and read back by name");
 }
 
-/// **THE v27 DOWNGRADE LOSES EXACTLY THE THIRTY-EIGHT** (wave VEH3a's window).
+/// The sixty-two tunables `VehicleClass` carried at **v27**, restated here and
+/// nowhere derived (VEH3a's audit).
 ///
-/// Counted, not listed — a list stops covering whatever lands next.
+/// The arm below used to take `names()[..62]` as "the v27 set" and `[62..]` as
+/// "the v28 set". `names()` is sorted ALPHABETICALLY and the thirty-eight are
+/// interleaved through it — `camber_deg` is the seventh name in the list and it
+/// is new — so that split was an arbitrary cut of a sorted list, and every
+/// assertion it made (the halves are disjoint; the second half is sorted) is
+/// trivially true of any hundred distinct sorted strings. It could not have
+/// failed for the reason it was named after.
 ///
-/// **The mutation**: appending a 101st field to `VehicleClass` without a schema
-/// rung — the count becomes 39 and this arm reds.
+/// `inf_scene`'s own `V27_CLASS_NAMES` is private to that crate's test module,
+/// so this is a THIRD independent declaration, which is the point: a list the
+/// codec cannot see is a list the codec cannot drift with.
+#[rustfmt::skip]
+const V27_NAMES: [&str; 62] = [
+    "brake_force_n",
+    "damping_ns_per_m",
+    "drag_n_per_mps2",
+    "enter_time_s",
+    "handbrake_force_n",
+    "lateral_grip",
+    "longitudinal_grip",
+    "max_engine_force_n",
+    "max_speed_mps",
+    "max_steer_deg",
+    "min_steer_deg",
+    "rest_length_m",
+    "rolling_resistance",
+    "stiffness_n_per_m",
+    "travel_m",
+    "abs_slip",
+    "ackermann",
+    "anti_roll_front_n_per_m",
+    "anti_roll_rear_n_per_m",
+    "brake_bias",
+    "cog_height_m",
+    "diff_lock_front",
+    "diff_lock_rear",
+    "downforce_centre_z",
+    "downforce_n_per_mps2",
+    "drag_lateral_n_per_mps2",
+    "engine_brake_nm",
+    "enter_warp_end",
+    "enter_warp_start",
+    "final_drive",
+    "front_torque_split",
+    "gear_1_ratio",
+    "gear_2_ratio",
+    "gear_3_ratio",
+    "gear_4_ratio",
+    "gear_5_ratio",
+    "gear_6_ratio",
+    "gear_7_ratio",
+    "gear_8_ratio",
+    "gear_count",
+    "idle_rpm",
+    "idle_torque_frac",
+    "peak_torque_nm",
+    "peak_torque_rpm",
+    "redline_rpm",
+    "redline_torque_frac",
+    "reverse_ratio",
+    "shift_down_rpm",
+    "shift_time_s",
+    "shift_up_rpm",
+    "stability_control",
+    "steer_rate_deg_per_s",
+    "steer_return_deg_per_s",
+    "torque_curve_bias",
+    "traction_control_slip",
+    "tyre_lat_peak_slip",
+    "tyre_lat_rise_bias",
+    "tyre_load_sensitivity",
+    "tyre_long_peak_slip",
+    "tyre_long_rise_bias",
+    "tyre_slide_frac",
+    "wheel_inertia_kgm2",
+];
+
+/// The thirty-eight the v28 window took, restated from the orchestrator's own
+/// ruling rather than computed from the type (VEH3a's audit).
+///
+/// A row smuggled into the window, or a ruled row quietly dropped, changes this
+/// set and nothing else in the repository would notice.
+#[rustfmt::skip]
+const V28_NAMES: [&str; 38] = [
+    "camber_deg",
+    "clutch_engage_s",
+    "clutch_torque_nm",
+    "cylinders",
+    "engine_voice_kind",
+    "firing_order_variant",
+    "flywheel_inertia_kgm2",
+    "fuel_cut_rpm",
+    "glass_health_j",
+    "lsd_coast_ramp_front",
+    "lsd_coast_ramp_rear",
+    "lsd_power_ramp_front",
+    "lsd_power_ramp_rear",
+    "lsd_preload_front_nm",
+    "lsd_preload_rear_nm",
+    "pacejka_lat_b",
+    "pacejka_lat_c",
+    "pacejka_lat_e",
+    "pacejka_long_b",
+    "pacejka_long_c",
+    "pacejka_long_e",
+    "panel_health_j",
+    "part_break_impulse_ns",
+    "planing_speed_mps",
+    "relaxation_m",
+    "sail_area_m2",
+    "stall_deg",
+    "turbo_boost_max",
+    "turbo_lag_s",
+    "turbo_spool_s",
+    "tyre_cool_rate",
+    "tyre_heat_grip_loss",
+    "tyre_heat_rate",
+    "tyre_optimum_c",
+    "tyre_substeps",
+    "tyre_surface_set",
+    "wing_area_m2",
+    "wing_aspect_ratio",
+];
+
+/// **THE v28 WINDOW CARRIES EXACTLY THE THIRTY-EIGHT THAT WERE RULED** (wave
+/// VEH3a's window; the arm rewritten by its audit).
+///
+/// Counted AND named: the live door's hundred settings minus the independently
+/// declared v27 sixty-two must be exactly the thirty-eight the price table was
+/// ruled on — no more (a row smuggled in), no fewer (a ruled row dropped), and
+/// none of the sixty-two renamed under the sorting.
+///
+/// **The mutation**: append a hundred-and-first field to `VehicleClass` without
+/// a schema rung, or rename one of the sixty-two — either way the difference
+/// stops matching and this arm names the field.
 #[test]
 fn the_v27_downgrade_loses_exactly_the_thirty_eight() {
-    // The frozen v27 shape is private to the codec, so the claim is made through
-    // the door a shipped build uses: a v27 payload's fields survive and the v28
-    // tail arrives at the Ring-0 defaults. `inf-scene`'s own
-    // `v27_downgrade_is_lossless_except_for_what_v28_added` owns the in-memory
-    // half; this is the arithmetic half, in the file the audit reads.
-    let default = VehicleClass::default();
-    let names: Vec<&str> = default.settings().iter().map(|(n, _)| *n).collect();
-    assert_eq!(names.len(), 100);
-    let v27: Vec<&str> = names[..62].to_vec();
-    let v28: Vec<&str> = names[62..].to_vec();
+    use std::collections::BTreeSet;
+    let live: Vec<&str> = VehicleClass::default()
+        .settings()
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
     assert_eq!(
-        v28.len(),
-        38,
-        "the v28 tail is {} long, not thirty-eight",
-        v28.len()
+        live.len(),
+        100,
+        "the live door advertises {} settings",
+        live.len()
     );
-    // Sorted among themselves, which is what "appended at the tail" means and is
-    // the property a mis-ordered append would break.
-    let mut sorted = v28.clone();
-    sorted.sort_unstable();
-    assert_eq!(sorted, v28, "the v28 tail is not sorted among itself");
-    // …and none of the thirty-eight is a v27 name wearing a new position.
-    for n in &v28 {
-        assert!(!v27.contains(n), "`{n}` is in both halves");
-    }
+    let live: BTreeSet<&str> = live.into_iter().collect();
+    assert_eq!(live.len(), 100, "two settings share a name");
+
+    let v27: BTreeSet<&str> = V27_NAMES.into_iter().collect();
+    let v28: BTreeSet<&str> = V28_NAMES.into_iter().collect();
+    assert_eq!(v27.len(), 62);
+    assert_eq!(v28.len(), 38);
+    assert!(
+        v27.is_disjoint(&v28),
+        "a name is in both the v27 list and the v28 one: {:?}",
+        v27.intersection(&v28).collect::<Vec<_>>()
+    );
+
+    let added: BTreeSet<&str> = live.difference(&v27).copied().collect();
+    assert_eq!(
+        added,
+        v28,
+        "the window carries {:?} over the ruling, and is missing {:?}",
+        added.difference(&v28).collect::<Vec<_>>(),
+        v28.difference(&added).collect::<Vec<_>>()
+    );
+    let kept: BTreeSet<&str> = live.intersection(&v27).copied().collect();
+    assert_eq!(
+        kept.len(),
+        62,
+        "{} of the sixty-two v27 names no longer exist on the live class: {:?}",
+        62 - kept.len(),
+        v27.difference(&kept).collect::<Vec<_>>()
+    );
     println!(
-        "VEH3a WINDOW: {} v27 names then {} v28 names, sorted and disjoint",
-        v27.len(),
-        v28.len()
+        "VEH3a WINDOW: {} v27 names kept, {} v28 names added, {} in all",
+        kept.len(),
+        added.len(),
+        live.len()
     );
 }
 
@@ -1120,9 +1447,12 @@ fn a_road_laid_over_grass_is_a_road() {
 /// Ring 0 for `drive_readout`'s own reason — a host function cannot be tested
 /// and this one can — and both hosts draw it from there.
 ///
-/// **The mutation**: deleting the `tyre_readout` call from
-/// `inf_player::window::Window::drive_readout`, or the row's own `format!` —
-/// the string stops naming a temperature or a surface and this arm reds.
+/// **The mutation**: the row's own `format!` — the string stops naming a
+/// temperature or a surface and this arm reds. The OTHER half of the named
+/// mutation, *deleting the call from the host*, is unreachable from a unit arm
+/// for the same reason the formatting lives in Ring 0 at all, so it has a
+/// source pin of its own below (`the_shipped_host_draws_the_tyre_row`) on the
+/// `projector_mirror` idiom.
 #[test]
 fn the_hud_row_says_what_the_tyres_know() {
     // A heated car on sand, from the model's own state rather than a literal.
@@ -1171,4 +1501,44 @@ fn the_hud_row_says_what_the_tyres_know() {
     // …and a craft with no tyres draws no row at all, which is what a boat and a
     // helicopter need rather than a line of zeroes.
     assert_eq!(inf_ecs::vehicle::tyre_readout(&[]), "");
+}
+
+/// **THE SHIPPED HOST DRAWS THE TYRE ROW** (VEH3a's audit).
+///
+/// `tyre_readout` is in Ring 0 because a host function cannot be tested — which
+/// also means nothing could catch its CALL SITE being deleted, and the wave's
+/// own mutation table named exactly that deletion. A source pin is what the
+/// `projector_mirror` gate uses for the same shape of claim, so this is that.
+///
+/// It also records what is true rather than what the wave's prose said: only
+/// `inf-player` draws a driving readout at all. The editor draws neither
+/// `craft_readout` nor this row, and "both hosts draw it" meant "both hosts
+/// COULD".
+#[test]
+fn the_shipped_host_draws_the_tyre_row() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
+    )
+    .expect("the shipped host's window source");
+    let head = src
+        .find("fn drive_readout(")
+        .expect("the host still has a drive readout");
+    let body = &src[head..];
+    let end = body
+        .find("\n    /// **The shooter's readout**")
+        .unwrap_or(body.len());
+    let body = &body[..end];
+    for fragment in [
+        "inf_ecs::vehicle::craft_readout(",
+        "inf_ecs::vehicle::tyre_readout(&tyres)",
+        "row.is_empty()",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`drive_readout` no longer contains `{fragment}` — the tyre row was \
+             removed from the shipped HUD, or this gate needs updating \
+             deliberately:\n{body}"
+        );
+    }
+    println!("VEH3a HOST: the player's `drive_readout` draws the Ring-0 tyre row");
 }
