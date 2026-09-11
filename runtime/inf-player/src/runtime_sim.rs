@@ -1457,6 +1457,22 @@ impl RuntimeSim {
         // nobody is driving folds nothing and every trace committed before this
         // wave stays byte-identical.
         out.extend_from_slice(&inf_ecs::vehicle::drivetrain_state_bytes(&self.world));
+        // VEH3c appends the BODYWORK, after the drivetrain and last of all: what
+        // angle every hinge is at, what each part has absorbed, how deep its
+        // dent is, which of them have left the car and when, the hull's own
+        // joules, the engine's damage, which wheels are flat and whether the
+        // thing is on fire. It lives in `VehicleDamageRes` for the seventeenth
+        // section's reason one system over -- it is sim state that is not a
+        // component, because VEH3a's schema window is spent and a car's damage
+        // is a session's fact rather than an author's.
+        //
+        // **The position is frozen** and `projector_mirror`'s `SECTIONS`
+        // allowlist grows its eighteenth row in the SAME commit. **EMPTY until
+        // something breaks** -- a car standing on its wheels with its doors shut
+        // is `VehicleDamage::is_quiet`, so a level nobody has crashed or shot at
+        // folds nothing and every trace committed before this wave stays
+        // byte-identical.
+        out.extend_from_slice(&inf_ecs::bodywork::damage_state_bytes(&self.world));
         out
     }
 

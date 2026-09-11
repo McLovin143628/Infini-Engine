@@ -27,6 +27,11 @@ pub mod audio;
 // construction — its anchors are `StreamingSource` entities, never a camera.
 pub mod ballistics;
 pub mod band;
+// VEH3c: a car's bodywork and what happens to it -- the hinges its doors swing
+// on, the impulse that tears them off, the panes, the dents, the hull's joules,
+// a dead engine, a flat and a fire. A resource, so no schema moves; the 18th
+// section of the determinism trace, empty until something breaks.
+pub mod bodywork;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).
 pub mod camera;

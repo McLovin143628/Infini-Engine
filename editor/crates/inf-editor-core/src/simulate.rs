@@ -614,6 +614,12 @@ impl SimSession {
         // trace bytes from the shipped player, which starts every vehicle at
         // idle with its clutch open.
         inf_ecs::vehicle::clear_drivetrains(doc.world_mut());
+        // VEH3c: and every door the author tore off, for the same reason a
+        // sixth time -- a car the author crashed in run 1 is run 1's, and a
+        // second run that began with its bonnet on the road would fold
+        // different trace bytes from the shipped player, which starts every car
+        // whole.
+        inf_ecs::bodywork::clear_damage(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -1104,6 +1110,12 @@ impl SimSession {
         // trace bytes from the shipped player, which starts every vehicle at
         // idle with its clutch open.
         inf_ecs::vehicle::clear_drivetrains(doc.world_mut());
+        // VEH3c: and every door the author tore off, for the same reason a
+        // sixth time -- a car the author crashed in run 1 is run 1's, and a
+        // second run that began with its bonnet on the road would fold
+        // different trace bytes from the shipped player, which starts every car
+        // whole.
+        inf_ecs::bodywork::clear_damage(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an

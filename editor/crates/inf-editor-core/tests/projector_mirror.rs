@@ -2876,7 +2876,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 17] = [
+    const SECTIONS: [&str; 18] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2950,6 +2950,16 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // the step it happened on, because a torque is an acceleration and an
         // acceleration is a position two steps later.
         "vehicle::drivetrain_state_bytes",
+        // VEH3c, pinned in the SAME commit that folds it, and last. The
+        // bodywork: hinge angles, per-part damage and dents, what has left the
+        // car and when, the hull's joules, the engine's damage, the flats and
+        // the fire. Its absence would be invisible to every other section for a
+        // reason of its own -- a door that tore off on one host and held on the
+        // other changes nothing at all about the CHASSIS' transform on the step
+        // it happened, because a door weighs twenty kilogrammes against a tonne
+        // and a half, and the two hosts then diverge over the following second
+        // as one of them drags a panel along the road.
+        "bodywork::damage_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()
