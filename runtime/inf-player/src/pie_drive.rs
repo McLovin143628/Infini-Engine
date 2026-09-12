@@ -544,6 +544,17 @@ pub const ARM_HERO_ENV: &str = "INF_PIE_ARM_HERO";
 /// reason on stderr, which is the whole point of an operator's switch.
 pub const TUNE_VEHICLE_ENV: &str = "INF_PIE_TUNE_VEHICLE";
 
+/// **How often [`TUNE_VEHICLE_ENV`] re-applies itself**, seconds (VEH3c audit).
+///
+/// Twenty is a measurement of what it has to outrun rather than a round number:
+/// `traffic::TRAFFIC_FULL_M` is crossed by a car the hero is driving toward in a
+/// few seconds, and a tier crossing despawns and respawns the rig at its
+/// **authored** class. Twenty seconds is short enough that a car the hero walks
+/// up to is tuned before it is boarded and long enough that the walk — every
+/// entity in the level, filtered through `rig_of` — is a thousandth of the
+/// session's own budget.
+const TUNE_PERIOD_S: f64 = 20.0;
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -568,9 +579,35 @@ pub struct SpawnOverride {
     weapons: Vec<(String, Option<f64>)>,
     weapon_done: bool,
     /// The `name=value` pairs [`TUNE_VEHICLE_ENV`] named, and whether they have
-    /// been installed.
+    /// been installed **at least once**.
     tune: Vec<(String, f64)>,
     tune_done: bool,
+    /// **When the tuning is next re-applied**, seconds on this door's own clock
+    /// (VEH3c audit).
+    ///
+    /// # Once was not enough, and the number that says so
+    ///
+    /// This door used to fire exactly once and set `tune_done`. Every island
+    /// chassis is created on the first sync, so that reached the twenty-three
+    /// that were resident then — and **not the car the hero actually boards**,
+    /// because a parked or traffic car crosses a tier boundary by being
+    /// despawned and respawned through `rig_nodes`, which re-mints its
+    /// **authored** `VehicleClass` and wipes the tuning with it.
+    ///
+    /// Measured: a session that asked for `panel_health_j=2000` (a 8 000 J hull
+    /// against the default 36 000) on twenty-three chassis, drove nine hundred
+    /// rows and finished at **77.9 % of hull** — which is 7 956 J of a 36 000 J
+    /// hull, i.e. the DEFAULT, and within a tenth of a percent of the untuned
+    /// session before it. Three of wave VEH3c's five frames could not fire
+    /// because of it.
+    ///
+    /// So it re-applies on a cadence. It is idempotent — `VehicleClass::set`
+    /// and `Vehicle::tune` both write a value rather than accumulate one — and
+    /// it is preview-only, like everything else on this door.
+    tune_next_s: f64,
+    /// How many chassis the last re-tune found, so a pass that finds the same
+    /// number stays quiet in the log.
+    tune_seen: usize,
     /// Which id the rotation is holding, and when it hands over. Both are `0`
     /// on a list that named no dwell, which never rotates.
     equip_at: usize,
@@ -727,7 +764,7 @@ impl SpawnOverride {
         if done
             && (self.cloth.is_none() || self.cloth_done)
             && (self.weapons.is_empty() || self.weapon_done)
-            && (self.tune.is_empty() || self.tune_done)
+            && self.tune.is_empty()
             && !self.rotates()
         {
             return None;
@@ -739,7 +776,13 @@ impl SpawnOverride {
         let due = (!done && self.accum >= self.at[self.next].1).then(|| self.at[self.next]);
         let wear = self.cloth.filter(|_| !self.cloth_done);
         let arm = (!self.weapon_done && !self.weapons.is_empty()).then(|| self.weapons.clone());
-        let retune = (!self.tune_done && !self.tune.is_empty()).then(|| self.tune.clone());
+        // **A CADENCE, not a one-shot** (VEH3c audit) — see `tune_next_s` for the
+        // 77.9 %-of-a-36-000-J-hull measurement that decided it. The first pass
+        // still runs at `SPAWN_DELAY_S`, and every `TUNE_PERIOD_S` after that
+        // catches whatever the streamer, the traffic pass or a tier boundary has
+        // minted since.
+        let retune =
+            (!self.tune.is_empty() && self.accum >= self.tune_next_s).then(|| self.tune.clone());
         // The rotation's own clock (carried 209). It is checked BEFORE the
         // early return, because a rotation is the only thing this door does
         // that is not one-shot.
@@ -935,14 +978,26 @@ impl SpawnOverride {
             for name in &refused {
                 eprintln!("inf-player: {TUNE_VEHICLE_ENV} name `{name}` is not a tunable");
             }
+            let first = !self.tune_done;
             self.tune_done = true;
-            if !said.is_empty() {
-                said.push_str("; ");
+            self.tune_next_s = self.accum + TUNE_PERIOD_S;
+            // **Only the first pass and the passes that FIND something new are
+            // said**, because a line every twenty seconds for twenty minutes is
+            // a log nobody reads. `took` counts the component writes, which is
+            // constant once every chassis is resident; what moves is the chassis
+            // COUNT, and a session that re-tunes a car the tier ladder just
+            // re-minted is exactly the event worth a line.
+            if first || chassis.len() != self.tune_seen {
+                self.tune_seen = chassis.len();
+                if !said.is_empty() {
+                    said.push_str("; ");
+                }
+                said.push_str(&format!(
+                    "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis and {live} on the RUNNING vehicles at t={:.1}s (refused {refused:?})",
+                    chassis.len(),
+                    self.accum
+                ));
             }
-            said.push_str(&format!(
-                "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis and {live} on the RUNNING vehicles (refused {refused:?})",
-                chassis.len()
-            ));
         }
         (!said.is_empty()).then_some(said)
     }

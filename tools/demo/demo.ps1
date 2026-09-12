@@ -2935,6 +2935,18 @@ if (-not $veh_driving) {
     [InfInput]::Down(0x02)       # 1 -- the sidearm
     Start-Sleep -Milliseconds 250
     [InfInput]::Up(0x02)
+    # **AND IT RELOADS FIRST**, which is the second half of the same finding.
+    # `hero.csv`'s `rounds` column is rounds IN FLIGHT, not a count of shots, so
+    # a leg that fires an EMPTY gun and a leg that fires a full one look
+    # identical in it -- and by the time this leg runs, the weapon legs an hour
+    # earlier have put thirty-odd rounds through a seventeen-round magazine and
+    # nothing in this script has ever pressed R. Measured on the audit's own
+    # first session: 26 rows with `rounds > 0` in 5 315, every one of them
+    # between t=29 s and t=47 s. R is `reload` in the shipped map.
+    for ($i = 0; $i -lt 3; $i++) {
+        [InfInput]::Down(0x13); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x13)   # R
+        Start-Sleep -Milliseconds 700
+    }
     # Turn to face the car it stepped out of — a hero leaves by the near-side
     # door, so the car is to its RIGHT — and pitch DOWN, because what this leg
     # wants after the bodywork is a TYRE: a puncture is a round inside a wheel's

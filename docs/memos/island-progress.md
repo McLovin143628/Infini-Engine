@@ -39932,3 +39932,119 @@ island has nothing a car can hit at 60 km/h except a kerb, a pillar, a lightpost
 or another car, the parked-car ratio and its ceiling, and three carried items to
 name as gaps or close: the un-used breakable joint, the transform dent, and the
 un-persisted damage.
+
+### audit: a release number nobody ran, a blast that never went off, and a refusal that does not reproduce (2026-09-11)
+
+**The wave holds.** Every table in its report reproduces to the printed digit —
+the crash table at five speeds, 10 kJ into the flank and into the nose, 4.32 s
+against 6.18, 851 → 0 rpm, the brigade on scene at 57.23 s and 11.64 m — and
+**twenty-three mutations** across the gate's eighteen arms and the six beside
+their fixtures all reproduce RED. `island_gate` **28**, `partitioned_world`
+**12**, `projector_mirror` **56** with `SECTIONS` at 18 and its ORDER pinned,
+`fixed_step_mirror` **15** holding the `vehicle_step` fence character-for-
+character on both hosts. No new collider shape, no `rand`, no clock, no
+`f64::sin` anywhere in the Ring-0 diff; `Cargo.lock`, `deny.toml` and
+`Cargo.toml` untouched; **v28 / 13 / 24 / 64** unmoved.
+
+Three things did not hold, and one of them is the wave's own headline.
+
+**1. THE PARKED-CAR CEILING IS A RELEASE NUMBER AND NOBODY RAN IT THERE.**
+`a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` asserts its
+×1.05 ceiling under release off CI — the house conditioning — so the ×1.083 the
+wave reported is from the one build where the assertion is an `eprintln!`. Run
+where the ceiling lives it measured **×1.097 and the arm panicked**; the report's
+*"the release number is in §12"* names a number §12 does not contain.
+`VehicleDamage::is_quiet` walked the row's whole `BTreeMap` of parts and
+`step_bodywork` asked it **twice a car a step**, plus a third full walk and a
+`Vec` allocation in the shed gather that ran for every car whether or not
+anything had come off one — forty-two thousand B-tree node visits a step, on a
+thousand parked saloons, to be told nothing had happened. Three corrections: the
+answer is read ONCE and carried on `CarFacts` (with the crash pass naming the
+cars it made loud, because a crash is the only thing that can falsify it
+mid-step); the shed gather takes the same flag; and `is_quiet` is **O(1)** on a
+maintained `loud_parts` count, refreshed at five cold write sites and checked by
+a `debug_assert_eq!` against the full walk, so a stale count reds every gate in
+this repository. **×1.097 → ×0.978–×1.030** over six release runs, with the
+intermediate step measured too (×1.019 ×1.037 ×1.050 ×1.056 ×1.030 ×1.010 — two
+failures in six, which is why the count and not just the hoist).
+
+**2. THE BLAST ARM NEVER FIRED A BLAST.**
+`a_blast_reaches_the_car_and_not_the_panel_that_came_off_it` is the arm that
+closes the sentence the WPN2d audit left this wave by name, and its own table
+says the mutation that reds it is *the chassis walk removed from `apply_blast`*.
+It never called `apply_blast`: it read `PhysicsBridge3D::vehicle_guids` — the
+bridge's list of cars, the same list with the walk or without it — printed it as
+"the blast's candidate set", and spent 4 000 J through `hit_vehicle`, the
+direct-hit door. Measured: with the chassis extension `take(0)`-ed out, the old
+arm stays **GREEN**. And `GameplayReport::vehicle_hits` and its three siblings —
+four counters the wave added so that "a round reached a car" would be a
+measurement — were **read by nothing in the tree**. The arm fires a real one now
+through `gameplay::blast_for_test` and reads `blasts.len()`, `vehicle_hits`,
+`vehicle_panes`, and the joules against the CLOSED FORM: the sweep's candidate
+point is the chassis' own `GlobalTransform`, 0.923 m from a charge at the flank,
+so `blast_damage_j` owes it **2 863.643 J** of a 4 000 J charge and the hull
+takes 2 863.643 exactly. The first cut asked for "> 3 900" and would have passed
+a blast that ignored the falloff.
+
+**3. THE REFUSAL'S CAUSE DOES NOT REPRODUCE.** The wave's first carried item, and
+the first thing VEH3d and VEH3f are told to price, is *"a door on a real
+revolute, held to a chassis the dispatcher teleports, launched an ambulance to
+1 705 metres."* `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit`
+reproduces `escort_nudge`'s own four writes — position, rotation, both velocities
+zeroed — for 240 steps, with a 22 kg door on a real revolute with limits and a
+motor, drawn half inside its own hull. **Six regimes out of six, the chassis
+finishes 1.8 to 6.3 mm off its own schedule** and the door never more than 1.62 m
+from it. The peak the hinge carries: **772.8 N·s** naive with contacts on,
+**15.5** with them off, **3.0** moved as a unit, **3.0** with the joint remade —
+and a saloon bumper's mount is 4 500. The last figure is the one that changes
+what VEH3d builds: **rapier's accumulated impulse was never the problem**, so a
+teleport door owes a jointed rig a PLACEMENT, not a solver reset. The second arm
+isolates the other half — a part drawn on the hull face it straddles is the P29.6
+depenetration shape wearing a door, and `JointDesc3D::contacts = false` takes the
+pair from **6.07 m/s to 1.82**; the wave's first cut did not set it, which is why
+its bumper "rose from 0.501 m to 1.328 m". What the wave measured was the
+spurious crash its own `applied_n` correction manufactured, and that correction
+was removed **in the same wave** without the refusal being re-measured.
+
+**The bodywork is NOT moved onto the joints here**, and that is a decision with
+its own reasons: a live part needs a rapier body the bridge builds from
+**persisted** components on a level whose damage is deliberately not persisted,
+it must be reparented to the root first, the joint cannot ride the ECS `Joint3D`
+component (it is in `EntityRecord` since scene v6, so a `contacts` field on it is
+a bincode-positional bump and VEH3a spent the window), the bridge builds a body
+one sync AFTER the components land, and three of `veh3c_gate`'s arms read the
+analytic hinge's exactness. That is a wave. What lands is the evidence that it is
+worth doing and the recipe for doing it.
+
+### the two arms that could not see what they measured
+
+**A flat costs a tyre two things and the arm could only see one.** Neither
+constant reds `a_flat_tyre_pulls` on its own: `FLAT_RADIUS_FRAC` → 1.0 leaves the
+grip pulling, and `FLAT_MU_FRAC` → 1.0 makes it pull **harder** — 6.846 m of
+drift becomes **9.843**, because the deflated corner then has a whole tyre's
+lateral authority to steer with, and an arm whose only test is "more than the
+control" reads that as a better pass. The RADIUS now has the ride height, which
+is what and only what it moves (**0.8883 m whole, 0.8704 m on a flat — 17.8 mm
+lower**, on the same settle on both runs), and the GRIP has a ceiling on the pull
+at 8.5 m. Both mutations RED.
+
+**And the leg that said "the hero never fired" had put the hero in a car.** The
+shot-up-car leg runs straight after the bodywork leg, which leaves the hero
+DRIVING, then presses `1`, aims and holds the trigger — and a seated character
+does not fire. The recording that sentence was written from has **23 rows with
+`rounds > 0`** in it, all from the weapon legs half an hour earlier. The leg taps
+`E` first now, waits for the hero to be anything but `Driving`, empties a
+magazine into the car it stepped out of, sweeps DOWN the wheel arch in four
+pitches, and gets back IN — because the five bodywork columns read the car the
+hero is SITTING IN, so a tyre shot out from the pavement is invisible in that row
+until the hero is behind its wheel again.
+
+### the 46 KB, answered
+
+The island grew **556 → 772** entities and the fixture **72 → 102**, and it is
+parts, once each: **233 bodywork parts on the island, 33 on the fixture, 0
+duplicated guids on either.** The guids are `body_part_guid(chassis, name)` —
+content-derived — so the runtime door mints the same ones the level already holds
+and `spawn_rig_at` skips a guid the world has. Both levels re-save
+**byte-identical** to what is committed, twice over, and
+`committed_level_sidecars` is the standing arm that says so for all twenty-four.
