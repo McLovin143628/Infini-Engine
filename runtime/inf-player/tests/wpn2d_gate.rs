@@ -2483,6 +2483,25 @@ fn class_course(mut sim: inf_player::runtime_sim::RuntimeSim) -> Course {
 // (h) COST
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// A clock is asserted under `cargo test --release` off CI, like every budget
+/// row in the house (`WEAPON_STEP_BUDGET_MS`'s own doc: *a clock, so: release
+/// only, real machine only*); everywhere else it is reported. Returns whether
+/// the caller asserts. This arm redded the Windows runner twice in a dev build
+/// (2 325 us for a cold pull on 2026-09-10, 2 158.7 us for a cold thousand-
+/// candidate blast on 2026-09-12) against a 1.5 ms ceiling the same work is
+/// nowhere near on a real machine in release.
+fn clock_is_asserted(what: &str) -> bool {
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: {what} is reported, not asserted");
+        return false;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: {what} is reported, not asserted (shared runner)");
+        return false;
+    }
+    true
+}
+
 /// **THE STEP'S RAY BILL AND ITS BLAST SWEEP ARE INSIDE THE BUDGET** — measured
 /// at the population the wave created.
 #[test]
@@ -2502,6 +2521,10 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         class: Some(WeaponClass::Launcher),
         ..Default::default()
     };
+    // WARMED: a fresh fixture's first step pays allocations and first-touch
+    // page faults that are not the blast's (the pull below learnt this the
+    // hard way on the runners).
+    let _warm = r.step();
     let mut report = d3::GameplayReport::default();
     let t0 = std::time::Instant::now();
     d3::gameplay::blast_for_test(
@@ -2536,11 +2559,13 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
     // fix). `WEAPON_STEP_BUDGET_MS` used to appear in this file exactly once,
     // inside a `println!` format string: the arm measured two numbers, printed
     // them, and asserted nothing about either.
-    assert!(
-        us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
-        "one blast over 30 bodies cost {us:.1} us against a {:.1} ms step budget",
-        inf_player::budget::WEAPON_STEP_BUDGET_MS
-    );
+    if clock_is_asserted("the blast over 30 bodies") {
+        assert!(
+            us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+            "one blast over 30 bodies cost {us:.1} us against a {:.1} ms step budget",
+            inf_player::budget::WEAPON_STEP_BUDGET_MS
+        );
+    }
 
     // **THE CANDIDATE WALK, PRICED AT A THOUSAND** (carried 254, and the audit's
     // own question). `MAX_BLAST_TARGETS` caps how many bodies take joules; the
@@ -2556,6 +2581,7 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
             DVec3::new(a.cos() * ring, 0.0, 20.0 + a.sin() * ring),
         );
     }
+    let _warm = big.step();
     let mut big_report = d3::GameplayReport::default();
     let t2 = std::time::Instant::now();
     d3::gameplay::blast_for_test(
@@ -2582,12 +2608,14 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         "the spend is not capped: {} bodies",
         big_report.blasts[0].hurt
     );
-    assert!(
-        big_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
-        "one blast over a thousand candidates cost {big_us:.1} us against a \
-         {:.1} ms step budget — the unbounded candidate walk has to be bounded",
-        inf_player::budget::WEAPON_STEP_BUDGET_MS
-    );
+    if clock_is_asserted("the blast over a thousand candidates") {
+        assert!(
+            big_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+            "one blast over a thousand candidates cost {big_us:.1} us against a \
+             {:.1} ms step budget — the unbounded candidate walk has to be bounded",
+            inf_player::budget::WEAPON_STEP_BUDGET_MS
+        );
+    }
     // A shotgun's whole pull, timed, against the weapon phase's own budget.
     //
     // **THE PULL'S MARGINAL COST, NOT THE FIXTURE'S FIRST STEP** (the CI red of
@@ -2642,11 +2670,13 @@ fn the_ray_bill_and_the_blast_sweep_are_inside_the_budget() {
         inf_player::budget::WEAPON_STEP_BUDGET_MS
     );
     assert_eq!(rep.rounds.pellets, 8);
-    assert!(
-        pull_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
-        "one 8-pellet pull cost {pull_us:.1} us over the same step without it ({step_us:.1} vs {control_us:.1} us) against a {:.1} ms step budget",
-        inf_player::budget::WEAPON_STEP_BUDGET_MS
-    );
+    if clock_is_asserted("the eight-pellet pull") {
+        assert!(
+            pull_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
+            "one 8-pellet pull cost {pull_us:.1} us over the same step without it ({step_us:.1} vs {control_us:.1} us) against a {:.1} ms step budget",
+            inf_player::budget::WEAPON_STEP_BUDGET_MS
+        );
+    }
     // The enclosure probe is SHARED across the pull: eight pellets and six
     // probe casts, not eight lots of seven.
     assert_eq!(

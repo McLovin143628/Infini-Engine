@@ -2272,10 +2272,22 @@ fn eight_shooters_bursting_cost_what_they_cost() {
         .map(|f| !f.at_rest())
         .unwrap_or(false);
     assert!(live, "nobody was actually firing, so this measures nothing");
+    // A clock: reported everywhere, asserted under `cargo test --release` off
+    // CI — `WEAPON_STEP_BUDGET_MS`'s own conditioning, and the tail every
+    // budget row in the house carries.
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the eight-shooter budget is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the eight-shooter budget is reported, not asserted (shared runner)");
+        return;
+    }
     assert!(
         with < inf_player::budget::WEAPON_STEP_BUDGET_MS,
-        "eight shooters bursting cost {with:.4} ms against a {:.2} ms budget",
-        inf_player::budget::WEAPON_STEP_BUDGET_MS
+        "eight shooters bursting cost {with:.4} ms against a {:.2} ms budget {}",
+        inf_player::budget::WEAPON_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
     );
 }
 

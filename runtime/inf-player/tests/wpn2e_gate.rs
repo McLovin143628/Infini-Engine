@@ -2925,10 +2925,21 @@ fn a_firefight_is_inside_the_weapon_budget() {
         "the fixture has {} shooters",
         b.officers.len()
     );
+    // A clock: reported everywhere, asserted under `cargo test --release` off
+    // CI — the constant's own conditioning and every budget row's tail.
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the firefight's cost is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the firefight's cost is reported, not asserted (shared runner)");
+        return;
+    }
     assert!(
         cost_us <= inf_player::budget::WEAPON_STEP_BUDGET_MS * 1000.0,
-        "a firefight cost {cost_us:.1} us over the same step without it ({step_us:.1} vs {control_us:.1}) against a {:.1} ms budget",
-        inf_player::budget::WEAPON_STEP_BUDGET_MS
+        "a firefight cost {cost_us:.1} us over the same step without it ({step_us:.1} vs {control_us:.1}) against a {:.1} ms budget {}",
+        inf_player::budget::WEAPON_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
     );
 }
 
@@ -3020,10 +3031,22 @@ fn the_firing_policy_is_inside_the_npc_budget_at_a_thousand_agents() {
         hot.engage.rays > 0,
         "the measured step ran no engage rays, so it is a second control"
     );
+    // A clock: reported everywhere, asserted under `cargo test --release` off
+    // CI — the constant's own conditioning and every budget row's tail (this
+    // arm caught a 3.5 ms runner stall in a dev build on 2026-09-10).
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the policy's cost is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the policy's cost is reported, not asserted (shared runner)");
+        return;
+    }
     assert!(
         cost_us <= inf_player::budget::NPC_STEP_BUDGET_MS * 1000.0,
-        "the firing policy cost {cost_us:.1} us over the same step without it ({hot_us:.1} vs {control_us:.1}) against a {:.1} ms budget",
-        inf_player::budget::NPC_STEP_BUDGET_MS
+        "the firing policy cost {cost_us:.1} us over the same step without it ({hot_us:.1} vs {control_us:.1}) against a {:.1} ms budget {}",
+        inf_player::budget::NPC_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
     );
 }
 
