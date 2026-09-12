@@ -40323,3 +40323,27 @@ what was just shed, come back over it at PART throttle, photograph it — and fr
 (b3), triggered on `parts_shed` rising once the doors are on their hinges. A
 session that did not ask for `doors_open` says so in the log and cites the arm,
 rather than photographing a shut car and calling it a hinge.
+
+### audit: the P22 law twice, and the second time was the closing battery
+
+`cook::advisory_source_gate::no_string_literal_in_the_workspace_carries_an_eaten_continuation`
+is the arm the P22 law left behind, and it went red **twice** in this audit on
+the auditor's own writing.
+
+The first was one literal in `crates/inf-ecs/src/bodywork.rs` (the O(1)
+`is_quiet`'s `debug_assert_eq!` message). The second came on the **closing
+battery**, with **seven** more — all in `runtime/inf-player/tests/veh3c_gate.rs`,
+at lines 424, 432, 438, 656, 676, 700 and 1675 — every one written by the joint
+build through a **Python heredoc**, which is the exact mechanism the law names,
+and every one inside a message that only a FAILING ARM would ever print. So they
+were invisible to a green run and would have surfaced, garbled, on the day
+somebody needed them most.
+
+Each is now the single space the continuation meant. `advisory_source_gate`
+**29 passed**, `veh3c_gate` **20 passed**.
+
+**The lesson is not "be careful".** It is that the law needs a gate because
+carefulness has now failed four times in this repository — twice on waves, twice
+on an auditor — and that the gate has to run on the CLOSING battery and not only
+mid-wave, because the writing that produced these seven happened after the
+mid-audit catch.
