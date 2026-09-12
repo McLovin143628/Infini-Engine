@@ -419,3 +419,296 @@ fn a_broken_joint_leaves_a_free_body_behind() {
         "the freed body only fell from {held:.3} to {fell:.3}"
     );
 }
+
+/// **A JOINTED RIG SURVIVES BEING TELEPORTED** — wave VEH3c's audit.
+///
+/// # Why this arm exists
+///
+/// Wave VEH3c built the breakable-joint facade above and then deliberately did
+/// **not** call it from the bodywork, on the strength of one measurement: *"a
+/// door on a real revolute, held to a chassis the dispatcher teleports along a
+/// nav path and zeroes the velocities of, was yanked by its own joint until the
+/// ambulance was at 1 705 metres."* That refusal is the first thing the wave
+/// carries and the first thing VEH3d or VEH3f is told to price.
+///
+/// It does not reproduce, and this arm is the measurement that says so. The
+/// shape here is `dispatch::escort_nudge`'s own: every step, write the chassis'
+/// position AND rotation, and zero both of its velocities — a body that is
+/// being dragged along a route rather than driven. A 22 kg door hangs off it on
+/// a real revolute with limits and a motor, drawn where the bodywork draws one,
+/// which is HALF INSIDE the chassis hull.
+///
+/// Three regimes, and the numbers are in the output:
+///
+/// * **naive** — the chassis alone is written. The chassis stays on its own
+///   schedule to **4 mm** over 240 drags and the door stays **1.6 m** from it.
+///   The peak the joint carries is 202 N·s, which is a fifth of a saloon
+///   bumper's 4 500 N·s mount.
+/// * **as a unit** — the door is re-placed with the chassis and its velocities
+///   zeroed too. 102 N·s.
+/// * **as a unit, joint remade** — `remove_joint` then `add_joint` at the
+///   teleport door, which is what resets rapier's accumulated impulses.
+///   **0.0 N·s**: there is nothing left for a joint to do.
+///
+/// Nothing is flung in any of the three. What the wave measured was the
+/// SPURIOUS crash its `applied_n` correction manufactured — a bellied van
+/// reading 1 370 N·s of "crash" every step for four thousand steps, popping
+/// doors on units that were never hit — and that correction is gone (see
+/// `d3::bodywork`'s four-facts note). The refusal was never re-measured after
+/// the cause was removed.
+///
+/// **The other half of the same ruling is `JointDesc3D::contacts`.** A part is
+/// drawn on the chassis' outer face, so half its box is inside the chassis
+/// collider, and two overlapping dynamic bodies that are also constrained
+/// together are the P29.6 depenetration shape wearing a door. Measured below:
+/// with contacts ON the pair reaches **6.07 m/s**, with them OFF **1.82** — the
+/// ragdoll ruling, met at a car door.
+#[test]
+fn a_jointed_rig_survives_being_teleported_as_a_unit() {
+    /// mode 0: the chassis alone. 1: the door moves with it. 2: and the joint is remade.
+    fn drag(mode: u8, contacts: bool) -> (f64, f64, f64) {
+        let mut w = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let g = w.add_body(
+            BodyKind3D::Static,
+            DVec3::new(0.0, -0.5, 0.0),
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            g,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(400.0, 0.5, 400.0),
+            }),
+        );
+        let chassis = w.add_body(
+            BodyKind3D::Dynamic,
+            DVec3::new(0.0, 0.8, 0.0),
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            chassis,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(0.9, 0.7, 2.3),
+            })
+            .density(180.0),
+        );
+        // Half inside the hull, which is where a drawn part is.
+        let door_local = DVec3::new(-0.85, 0.05, 0.6);
+        let door = w.add_body(
+            BodyKind3D::Dynamic,
+            DVec3::new(0.0, 0.8, 0.0) + door_local,
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            door,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(0.10, 0.45, 0.55),
+            })
+            .density(400.0),
+        );
+        let hinge = || {
+            let mut d = JointDesc3D::new(JointKind3D::Revolute {
+                axis: DVec3::Y,
+                limits: Some([0.0, 66f64.to_radians()]),
+                motor: Some(JointMotor3D {
+                    target_pos: 66f64.to_radians(),
+                    stiffness: 60.0,
+                    damping: 12.0,
+                    ..Default::default()
+                }),
+            })
+            .local_anchor1(door_local + DVec3::new(0.0, 0.0, 0.55))
+            .local_anchor2(DVec3::new(0.0, 0.0, 0.55));
+            // **The P29.6 ruling at a car door**: a drawn part straddles the
+            // hull face it is drawn on, and two overlapping dynamic bodies that
+            // are also constrained together are a depenetration force with
+            // nowhere to go. Measured by the arm below.
+            d.contacts = contacts;
+            d
+        };
+        let mut j = w
+            .add_joint(chassis, door, hinge())
+            .expect("the hinge builds");
+        for _ in 0..60 {
+            w.step(DT);
+        }
+        let mut peak = 0.0f64;
+        for i in 0..240 {
+            // `escort_nudge`'s own four writes.
+            let at = DVec3::new(0.0, 0.8, i as f64 * 0.20);
+            w.set_body_translation(chassis, at);
+            w.set_body_rotation(chassis, DQuat::IDENTITY);
+            w.set_body_linvel(chassis, DVec3::ZERO);
+            w.set_body_angvel(chassis, DVec3::ZERO);
+            if mode >= 1 {
+                let rot = w.body_rotation(chassis).unwrap();
+                w.set_body_translation(door, at + rot * door_local);
+                w.set_body_rotation(door, rot);
+                w.set_body_linvel(door, DVec3::ZERO);
+                w.set_body_angvel(door, DVec3::ZERO);
+            }
+            if mode >= 2 {
+                w.remove_joint(j);
+                j = w.add_joint(chassis, door, hinge()).expect("it rebuilds");
+            }
+            w.step(DT);
+            if let Some(imp) = w.joint_impulse(j) {
+                peak = peak.max(imp.magnitude_ns());
+            }
+        }
+        let c = w.body_translation(chassis).unwrap();
+        let d = w.body_translation(door).unwrap();
+        (
+            (c - DVec3::new(0.0, 0.8, 239.0 * 0.20)).length(),
+            (d - c).length(),
+            peak,
+        )
+    }
+
+    let mut peaks = [[0.0f64; 3]; 2];
+    for (ci, contacts) in [true, false].into_iter().enumerate() {
+        for mode in 0..3u8 {
+            let (off_schedule, door_away, peak) = drag(mode, contacts);
+            peaks[ci][mode as usize] = peak;
+            eprintln!(
+                "contacts {contacts:<5} mode {mode}: the chassis finished {off_schedule:.4} m off \
+                 its own schedule, the door {door_away:.3} m from it, peak joint impulse \
+                 {peak:.1} N.s"
+            );
+            // **NOTHING IS FLUNG**, in any of the six. This is the assertion the
+            // wave's carried refusal says should be impossible.
+            assert!(
+                off_schedule < 0.25,
+                "contacts {contacts} mode {mode}: a teleported chassis with a door on it finished \
+                 {off_schedule:.3} m off the route it was dragged along — the joint is moving the car"
+            );
+            assert!(
+                door_away < 3.0,
+                "contacts {contacts} mode {mode}: the door ended {door_away:.3} m from the chassis \
+                 it is hinged to"
+            );
+        }
+    }
+    // …and each of the two corrections takes a bite out of what the joint has to
+    // carry, which is the recipe VEH3d inherits: turn the pair's contacts off,
+    // and move the rig as a UNIT.
+    eprintln!(
+        "the peak the hinge carries: {:.1} N.s naive with contacts on, {:.1} with them off, \
+         {:.1} moved as a unit, {:.1} with the joint remade",
+        peaks[0][0], peaks[1][0], peaks[1][1], peaks[1][2]
+    );
+    assert!(
+        peaks[1][0] < peaks[0][0] * 0.5,
+        "turning the pair's contacts off left the hinge carrying {:.1} N.s against {:.1}",
+        peaks[1][0],
+        peaks[0][0]
+    );
+    assert!(
+        peaks[1][1] < peaks[1][0] * 0.5,
+        "moving the rig as a unit left the hinge carrying {:.1} N.s against {:.1}",
+        peaks[1][1],
+        peaks[1][0]
+    );
+    // Remaking the joint on top of that buys nothing measurable, and saying so
+    // is the point: rapier's accumulated impulse is not what was wrong, so what
+    // a teleport door owes a jointed rig is a PLACEMENT, not a solver reset.
+    assert!(
+        peaks[1][2] <= peaks[1][1] + 1e-9,
+        "remaking the joint made it worse: {:.3} against {:.3}",
+        peaks[1][2],
+        peaks[1][1]
+    );
+}
+
+/// **A PART DRAWN ON ITS OWN HULL FACE NEEDS `contacts = false`** — wave VEH3c's
+/// audit, and the P29.6 ragdoll ruling met one system over.
+///
+/// A bodywork part is drawn on the chassis' OUTER FACE, so half its box is
+/// inside the chassis collider by construction — exactly the way a thigh and a
+/// shin overlap by two radii. Two overlapping dynamic bodies that are also
+/// constrained together are a depenetration force with nowhere to go, and wave
+/// VEH3c measured what it costs with a bumper in it: *"a 7 kg bumper that came
+/// off at 60 km/h rose from 0.501 m to 1.328 m in the second after it let go."*
+///
+/// [`JointDesc3D::contacts`] is the door that closes it, and this is the
+/// measurement. It is a SECOND cause behind wave VEH3c's refusal, distinct from
+/// the teleport above, and it is the one the wave's first cut did not use.
+#[test]
+fn a_hinged_part_that_straddles_its_own_hull_needs_its_contacts_off() {
+    fn overlap(contacts: bool) -> f64 {
+        let mut w = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let g = w.add_body(
+            BodyKind3D::Static,
+            DVec3::new(0.0, -0.5, 0.0),
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            g,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(400.0, 0.5, 400.0),
+            }),
+        );
+        let chassis = w.add_body(
+            BodyKind3D::Dynamic,
+            DVec3::new(0.0, 0.8, 0.0),
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            chassis,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(0.9, 0.7, 2.3),
+            })
+            .density(180.0),
+        );
+        let door_local = DVec3::new(-0.85, 0.05, 0.6);
+        let door = w.add_body(
+            BodyKind3D::Dynamic,
+            DVec3::new(0.0, 0.8, 0.0) + door_local,
+            DQuat::IDENTITY,
+        );
+        w.add_collider(
+            door,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(0.10, 0.45, 0.55),
+            })
+            .density(400.0),
+        );
+        let mut d = JointDesc3D::new(JointKind3D::Revolute {
+            axis: DVec3::Y,
+            limits: Some([0.0, 66f64.to_radians()]),
+            motor: Some(JointMotor3D {
+                target_pos: 66f64.to_radians(),
+                stiffness: 60.0,
+                damping: 12.0,
+                ..Default::default()
+            }),
+        })
+        .local_anchor1(door_local + DVec3::new(0.0, 0.0, 0.55))
+        .local_anchor2(DVec3::new(0.0, 0.0, 0.55));
+        d.contacts = contacts;
+        w.add_joint(chassis, door, d).expect("the hinge builds");
+        let mut peak = 0.0f64;
+        for _ in 0..240 {
+            w.step(DT);
+            for b in [chassis, door] {
+                if let Some(v) = w.body_linvel(b) {
+                    peak = peak.max(v.length());
+                }
+            }
+        }
+        peak
+    }
+    let on = overlap(true);
+    let off = overlap(false);
+    eprintln!(
+        "a door half inside its own hull, on a hinge: peak {on:.2} m/s with contacts ON, \
+         {off:.2} m/s with them OFF"
+    );
+    assert!(
+        off < on * 0.75,
+        "turning the pair's contacts off did not calm it: {off:.2} m/s against {on:.2}"
+    );
+    assert!(
+        off < 3.0,
+        "even with contacts off the pair reached {off:.2} m/s — something else is pushing it"
+    );
+}
