@@ -84,6 +84,9 @@ const CHASSIS: Uuid = Uuid::from_u128(0x5E3C_0001);
 const GROUND: Uuid = Uuid::from_u128(0x5E3C_0002);
 const PAD: Uuid = Uuid::from_u128(0x5E3C_0003);
 const WALL: Uuid = Uuid::from_u128(0x5E3C_0004);
+/// The blast's own shooter — a guid the world does not hold, so the sweep's
+/// shooter-exclusion has something to exclude and the car is the only candidate.
+const SHOOTER: Uuid = Uuid::from_u128(0x5E3C_0005);
 const HALF: f64 = 300.0;
 
 // ── the fixture ─────────────────────────────────────────────────────────────
@@ -1309,19 +1312,87 @@ fn a_blast_reaches_the_car_and_not_the_panel_that_came_off_it() {
         "a shed part is a rapier body, so a blast could reach it through the solver"
     );
 
-    // …and the joules really do reach the chassis through the one door.
+    // …and A REAL BLAST really does reach the chassis.
+    //
+    // **Through `apply_blast` itself**, by its own public gate door, and never
+    // through `hit_vehicle` — which is what the first cut of this arm did, and
+    // which made it VACUOUS. The mutation this arm's own table names is *the
+    // chassis walk removed from `apply_blast`*, and an arm that never calls
+    // `apply_blast` stays green through it: what it read as "the blast's
+    // candidate set" was `PhysicsBridge3D::vehicle_guids`, which is the bridge's
+    // list of cars and is the same list with or without the walk.
+    // `blast_for_test` is a `pub` alias for the one blast sweep in this engine.
+    let mut def = inf_ecs::weapon::WeaponDef {
+        blast_radius_m: 6.0,
+        blast_damage_j: 4_000.0,
+        ..Default::default()
+    };
+    def.class = Some(inf_ecs::weapon::WeaponClass::Launcher);
     let blast_at = rig.at() + DVec3::new(0.85, -0.30, -0.20);
-    inf_physics::d3::bodywork::hit_vehicle(&mut rig.world, &rig.bridge, CHASSIS, blast_at, 4_000.0);
+    let chassis_at = rig
+        .world
+        .entity_of(CHASSIS)
+        .and_then(|e| {
+            rig.world
+                .world()
+                .get::<inf_ecs::components::GlobalTransform>(e)
+        })
+        .map(|g| g.0.translation)
+        .expect("the chassis has a global transform");
+    let mut report = inf_physics::d3::GameplayReport::default();
+    inf_physics::d3::gameplay::blast_for_test(
+        &mut rig.world,
+        &mut rig.bridge,
+        SHOOTER,
+        blast_at,
+        &def,
+        DT,
+        &mut report,
+    );
     let after_hull = rig.damage().hull_j;
     rig.step(60);
     let rose = debris_y(&rig.world) - before_at;
     eprintln!(
-        "4 000 J of blast: the hull went {before_hull:.0} -> {after_hull:.0} J and the shed bumper \
-         moved {rose:+.4} m vertically in the second after"
+        "a real blast: {} bodies hurt, {} of them VEHICLES; the hull went {before_hull:.0} -> \
+         {after_hull:.0} J and the shed bumper moved {rose:+.4} m vertically in the second after",
+        report.blasts.first().map(|b| b.hurt).unwrap_or(0),
+        report.vehicle_hits
     );
+    // **THE ENGAGEMENT COUNT.** `GameplayReport::vehicle_hits` and its three
+    // siblings were added by this wave and read by NOTHING in the tree — four
+    // counters whose whole purpose is to make "a round reached a car" a
+    // measurement rather than a claim, and no arm asked them. This is their
+    // reader, and it is this arm's anti-vacuity half.
+    assert_eq!(
+        report.blasts.len(),
+        1,
+        "the blast did not go off at all — this arm measures nothing"
+    );
+    assert_eq!(
+        report.vehicle_hits, 1,
+        "a blast six metres from a car reached {} vehicles — the chassis walk is \
+         not in `apply_blast`",
+        report.vehicle_hits
+    );
+    assert_eq!(
+        report.vehicle_panes, 0,
+        "a blast beside the flank took a pane"
+    );
+    // **THE CLOSED FORM, not "roughly all of it".** The blast's candidate point
+    // is the chassis's own `GlobalTransform`, which is the car's centre and not
+    // the point the charge went off at, so the joules that arrive are the WPN2d
+    // falloff at that distance — measured against `ballistics::blast_damage_j`
+    // rather than against the charge's face value.
+    let want = inf_ecs::ballistics::blast_damage_j(&def, (chassis_at - blast_at).length());
+    eprintln!(
+        "the chassis is {:.3} m from the charge, so the closed form owes it {want:.3} J",
+        (chassis_at - blast_at).length()
+    );
+    assert!(want > 2_000.0, "the fixture put the charge too far off");
     assert!(
-        after_hull > before_hull + 3_900.0,
-        "the blast's joules did not reach the chassis"
+        ((after_hull - before_hull) - want).abs() < 1e-6,
+        "the blast spent {:.3} J on the hull and the closed form owes {want:.3}",
+        after_hull - before_hull
     );
     assert!(
         rose < 0.05,
