@@ -120,6 +120,96 @@ pub struct PoseWriteback3D {
     pub rotation: DQuat,
 }
 
+/// **A live part's hinge motor**, stiffness and damping (wave VEH3c's audit).
+///
+/// The analytic hinge these replace ran at `HINGE_STIFFNESS` 60 and
+/// `HINGE_DAMPING` 12 on an angle in DEGREES; a rapier position motor is
+/// acceleration-based and works in radians, so the pair is re-derived rather
+/// than copied — and it is derived the way the WPN2b audit ruled a spring is:
+/// **critical damping of a unit mass is `2*sqrt(k)`**, so the damping follows
+/// the stiffness instead of being a second number somebody has to keep in step.
+/// A door that overshoots its own limit is a door that bangs against its stop
+/// every time it opens.
+const PART_MOTOR_STIFFNESS: f64 = 60.0;
+/// `2*sqrt(PART_MOTOR_STIFFNESS)` — see it for why this is derived, not chosen.
+const PART_MOTOR_DAMPING: f64 = 15.491_933_384_829_668;
+/// What the motor may spend, N.m. High enough to move a 30 kg truck door on its
+/// own hinge, low enough that the door loses to a lamp post — which is the whole
+/// of what makes an open door tearable.
+const PART_MOTOR_MAX_FORCE: f64 = 4_000.0;
+
+/// **A bodywork part that has gone LIVE** — wave VEH3c, the audit's closure of
+/// the joint clause.
+///
+/// A part of a car is LATCHED (a drawn child with no physics at all), LIVE (this:
+/// a rapier body on a real revolute back to its chassis) or SHED (the same body
+/// with the joint gone). It becomes live lazily — at the first `set_part_open`
+/// or the first blow its mounts feel — so a parked car never has one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartBody3D {
+    /// The chassis it came off, whether or not it is still attached to it.
+    pub chassis: Uuid,
+    /// Its own rapier body.
+    pub body: BodyId3D,
+    /// Its collider.
+    pub collider: Option<ColliderId3D>,
+    /// The revolute back to the chassis — `None` once it has been shed.
+    pub joint: Option<JointId3D>,
+    /// Where the part sits on the chassis, metres in the chassis frame. What a
+    /// teleport re-places it by, and what a re-made joint anchors against.
+    pub local: DVec3,
+    /// Its drawn half-extents, world metres.
+    pub half: DVec3,
+    /// The hinge axis, chassis frame. `DVec3::Y` for a door, `X` for a bonnet.
+    pub axis: DVec3,
+    /// The pivot on the chassis, chassis frame.
+    pub anchor_chassis: DVec3,
+    /// The pivot on the part, part frame.
+    pub anchor_part: DVec3,
+    /// The open limit, radians, signed. **Zero means a part with no hinge** — a
+    /// bumper — which is welded rather than hinged until it lets go.
+    pub open_rad: f64,
+    /// **What the motor was last AIMED at**, degrees.
+    ///
+    /// Recorded so the bodywork can re-aim it only when the command changes: a
+    /// re-aim rebuilds the joint's `GenericJoint` through the one lowering, and
+    /// doing that every step would throw away the solver's warm start on a door
+    /// that is simply swinging.
+    pub motor_deg: f64,
+}
+
+/// What [`PhysicsBridge3D::install_part_body`] needs to build one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartInstall3D {
+    /// The chassis's guid.
+    pub chassis: Uuid,
+    /// The part's world pose at the moment it goes live.
+    pub at: DVec3,
+    /// Its world rotation at that moment (the chassis's, plus its own swing).
+    pub rot: DQuat,
+    /// Its offset on the chassis, chassis frame, metres.
+    pub local: DVec3,
+    /// Its drawn half-extents, world metres.
+    pub half: DVec3,
+    /// Its mass, kg — the SHELL mass the parts table derives, not a box volume
+    /// at a material density (a bonnet is a 1.5 mm skin, and pricing it by
+    /// volume made it 164 kg).
+    pub mass_kg: f64,
+    /// The hinge, or `None` for a bumper.
+    pub hinge: Option<PartHinge3D>,
+}
+
+/// A part's hinge, in the chassis frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartHinge3D {
+    /// The axis it swings about.
+    pub axis: DVec3,
+    /// The pivot, chassis frame.
+    pub pivot: DVec3,
+    /// The open limit, radians, signed.
+    pub open_rad: f64,
+}
+
 /// One tracked entity: its rapier body/collider handles plus the last-synced
 /// descriptors (for cheap change detection).
 struct BodyRecord {
@@ -351,6 +441,35 @@ pub struct PhysicsBridge3D {
     /// step. Empty for every level with no vehicle in it, which is what keeps
     /// the whole mechanism free on the off path.
     vehicles: BTreeMap<Uuid, Box<dyn inf_ecs::vehicle::Vehicle>>,
+    /// **The bodywork parts that have gone LIVE** (wave VEH3c, the audit's
+    /// joint closure), keyed by the part entity's own `Guid`.
+    ///
+    /// # Why the handles live here and not on an entity
+    ///
+    /// A live door is a rapier body on a real revolute back to its chassis, and
+    /// it is **not** an ECS `RigidBody3D` + `Collider3D`, for two reasons that
+    /// are both rulings this arc already paid for:
+    ///
+    /// * `inf_ecs::vehicle::part_of` recognises a rig's parts off their
+    ///   COLLIDER, and the collider-shape space is exhausted (`Thruster` is the
+    ///   box, `Rotor` the capsule, a wheel the sphere). A box collider on a door
+    ///   would be read as a thruster by the one recogniser both hosts share. The
+    ///   arc brief's own words: *parts of a wheeled rig must be recognised
+    ///   WITHOUT colliders.*
+    /// * `Joint3D` has been in the `.inf_lvl` `EntityRecord` since scene v6, so
+    ///   a `contacts` flag on it is a bincode-positional schema bump — and VEH3a
+    ///   spent the only window this arc gets. `JointDesc3D::without_contacts`
+    ///   costs nothing because the facade owns the joint.
+    ///
+    /// So the bodywork asks the FACADE for a body, a collider and a joint, and
+    /// the handles are recorded here — beside the vehicles, in the one place
+    /// that already holds rapier handles. A `BTreeMap` for the usual reason: the
+    /// install, the break watch and the write-back all walk it in `Guid` order.
+    ///
+    /// **Empty on every level where no car has been opened or hit**, which is
+    /// every level at rest: a latched part is a drawn child with no physics at
+    /// all, and that is what keeps a thousand parked cars free.
+    part_bodies: BTreeMap<Uuid, PartBody3D>,
     /// Swim latches, keyed by character `Guid` (P20.2). Separate from
     /// [`buoyant`](Self::buoyant) because a character controller is kinematic and
     /// never floats — it swims.
@@ -427,6 +546,7 @@ impl PhysicsBridge3D {
             buoyant: BuoyantMap::new(),
             ragdolls: BTreeMap::new(),
             vehicles: BTreeMap::new(),
+            part_bodies: BTreeMap::new(),
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
             snaps_scratch: Vec::new(),
@@ -616,6 +736,240 @@ impl PhysicsBridge3D {
 
     /// Every chassis `Guid` with a vehicle, in `Guid` order — the door's walk,
     /// and `O(vehicles)`.
+    // ── the bodywork's live parts (wave VEH3c, the audit's joint closure) ──
+
+    /// One live part's handles, or `None` if it is still latched.
+    pub fn part_body(&self, guid: Uuid) -> Option<PartBody3D> {
+        self.part_bodies.get(&guid).copied()
+    }
+
+    /// Every live part, in `Guid` order. Empty on a level at rest.
+    pub fn part_body_guids(&self) -> Vec<Uuid> {
+        self.part_bodies.keys().copied().collect()
+    }
+
+    /// Every live part of one chassis, in `Guid` order.
+    pub fn parts_of_chassis(&self, chassis: Uuid) -> Vec<Uuid> {
+        self.part_bodies
+            .iter()
+            .filter(|(_, p)| p.chassis == chassis)
+            .map(|(g, _)| *g)
+            .collect()
+    }
+
+    /// How many live parts there are — the engagement count a cost arm reads.
+    pub fn part_body_count(&self) -> usize {
+        self.part_bodies.len()
+    }
+
+    /// **Give a part a body and hang it on its own hinge.**
+    ///
+    /// The joint's contacts against its own chassis are **OFF**, and that is a
+    /// measurement rather than a preference: a part is drawn on the chassis'
+    /// outer face, so half its box is inside the chassis collider by
+    /// construction — the P29.6 depenetration shape wearing a door.
+    /// `joints3d::a_hinged_part_that_straddles_its_own_hull_needs_its_contacts_off`
+    /// measures 6.07 m/s with them on against 1.82 with them off, and the
+    /// teleport arm beside it measures the peak the hinge carries going 772.8 to
+    /// 15.5 N.s on the same flag.
+    ///
+    /// Idempotent: a guid already installed is answered with what it has.
+    pub fn install_part_body(&mut self, guid: Uuid, desc: PartInstall3D) -> Option<PartBody3D> {
+        if let Some(p) = self.part_bodies.get(&guid) {
+            return Some(*p);
+        }
+        let chassis = self.entities.get(&desc.chassis)?.body;
+        let half = DVec3::new(
+            desc.half.x.abs().max(0.01),
+            desc.half.y.abs().max(0.01),
+            desc.half.z.abs().max(0.01),
+        );
+        let body = self.world.add_body(BodyKind3D::Dynamic, desc.at, desc.rot);
+        // **The mass is the table's, not the box's.** `add_collider` prices a
+        // shape at a DENSITY, and a panel is a shell: the density that gives a
+        // 22 kg door its 22 kg is the mass divided by the box's own volume.
+        let volume = (8.0 * half.x * half.y * half.z).max(1e-6);
+        let collider = self.world.add_collider(
+            body,
+            ColliderDesc3D::new(ColliderShape3D::Box { half_extents: half })
+                .density((desc.mass_kg.max(0.1) / volume).clamp(1.0, 100_000.0))
+                .friction(0.7),
+        );
+        let joint = desc.hinge.and_then(|h| {
+            let d = Self::part_joint_desc(h.axis, h.pivot, h.pivot - desc.local, h.open_rad, 0.0);
+            self.world.add_joint(chassis, body, d)
+        });
+        let rec = PartBody3D {
+            chassis: desc.chassis,
+            body,
+            collider,
+            joint,
+            local: desc.local,
+            half,
+            axis: desc.hinge.map(|h| h.axis).unwrap_or(DVec3::Y),
+            anchor_chassis: desc.hinge.map(|h| h.pivot).unwrap_or(desc.local),
+            anchor_part: desc
+                .hinge
+                .map(|h| h.pivot - desc.local)
+                .unwrap_or(DVec3::ZERO),
+            open_rad: desc.hinge.map(|h| h.open_rad).unwrap_or(0.0),
+            motor_deg: 0.0,
+        };
+        self.part_bodies.insert(guid, rec);
+        Some(rec)
+    }
+
+    /// **The ONE description of what a part's joint is**, aimed at `target_rad`.
+    ///
+    /// A revolute with the hinge's own limits and a position motor, or a WELD
+    /// for a part with no hinge — a bumper stays put until it lets go, and a
+    /// bumper has no axis to swing about. Its contacts against its own chassis
+    /// are off; see [`install_part_body`](Self::install_part_body).
+    ///
+    /// Both the install and the re-aim build it from here, so a door that has
+    /// been opened and shut is described by the same function that first hung
+    /// it — which is what stops "the joint the motor drives" and "the joint the
+    /// break watch reads" ever being two different joints.
+    fn part_joint_desc(
+        axis: DVec3,
+        pivot_chassis: DVec3,
+        pivot_part: DVec3,
+        open_rad: f64,
+        target_rad: f64,
+    ) -> JointDesc3D {
+        let (lo, hi) = if open_rad < 0.0 {
+            (open_rad, 0.0)
+        } else {
+            (0.0, open_rad)
+        };
+        let kind = if open_rad == 0.0 {
+            JointKind3D::Fixed
+        } else {
+            JointKind3D::Revolute {
+                axis,
+                limits: Some([lo, hi]),
+                motor: Some(JointMotor3D {
+                    target_pos: target_rad.clamp(lo, hi),
+                    stiffness: PART_MOTOR_STIFFNESS,
+                    damping: PART_MOTOR_DAMPING,
+                    max_force: PART_MOTOR_MAX_FORCE,
+                    ..Default::default()
+                }),
+            }
+        };
+        JointDesc3D::new(kind)
+            .local_anchor1(pivot_chassis)
+            .local_anchor2(pivot_part)
+            .without_contacts()
+    }
+
+    /// **Drive one live part's hinge**, radians — `set_part_open`'s solver half.
+    pub fn set_part_motor(&mut self, guid: Uuid, target_rad: f64) -> bool {
+        let Some(p) = self.part_bodies.get(&guid).copied() else {
+            return false;
+        };
+        let (Some(joint), true) = (p.joint, p.open_rad != 0.0) else {
+            return false;
+        };
+        let desc = Self::part_joint_desc(
+            p.axis,
+            p.anchor_chassis,
+            p.anchor_part,
+            p.open_rad,
+            target_rad,
+        );
+        if !self.world.retune_joint(joint, desc) {
+            return false;
+        }
+        if let Some(rec) = self.part_bodies.get_mut(&guid) {
+            rec.motor_deg = target_rad.to_degrees();
+        }
+        true
+    }
+
+    /// **What one part's hinge is carrying**, newton-seconds — the number
+    /// `part_break_impulse_ns` is compared against. `None` once it has let go.
+    pub fn part_joint_impulse(&self, guid: Uuid) -> Option<f64> {
+        let p = self.part_bodies.get(&guid)?;
+        let joint = p.joint?;
+        self.world.joint_impulse(joint).map(|i| i.magnitude_ns())
+    }
+
+    /// **The angle one part's hinge stands at**, radians.
+    ///
+    /// Read off the two bodies' relative rotation about the hinge axis, through
+    /// [`inf_math::patan2_64`] — never `f64::atan2`, because this number reaches
+    /// `PartState::angle_deg` and the trace's eighteenth section folds it (the
+    /// P14 law's first class, met at a car door for the second time).
+    pub fn part_angle_rad(&self, guid: Uuid) -> Option<f64> {
+        let p = self.part_bodies.get(&guid)?;
+        let chassis = self.entities.get(&p.chassis)?.body;
+        let qc = self.world.body_rotation(chassis)?;
+        let qp = self.world.body_rotation(p.body)?;
+        let rel = qc.inverse() * qp;
+        let axis = p.axis.normalize_or_zero();
+        let s = rel.xyz().dot(axis);
+        Some(2.0 * inf_math::patan2_64(s, rel.w))
+    }
+
+    /// **Let one part go**: the joint is removed and the body is free.
+    ///
+    /// The body stays — a shed bumper in the road is a thing a wheel can hit,
+    /// which is the whole point of the part having one.
+    pub fn free_part_body(&mut self, guid: Uuid) -> bool {
+        let Some(p) = self.part_bodies.get_mut(&guid) else {
+            return false;
+        };
+        let Some(joint) = p.joint.take() else {
+            return false;
+        };
+        self.world.remove_joint(joint)
+    }
+
+    /// **Take a part's body away entirely** — the reap, and the despawn.
+    pub fn drop_part_body(&mut self, guid: Uuid) -> bool {
+        let Some(p) = self.part_bodies.remove(&guid) else {
+            return false;
+        };
+        if let Some(j) = p.joint {
+            self.world.remove_joint(j);
+        }
+        self.world.remove_body(p.body)
+    }
+
+    /// **Move a live part with its chassis, and reset its joint** — the other
+    /// half of [`super::bodywork::place_vehicle`].
+    ///
+    /// A rig moves as a UNIT or it does not move at all. Measured over 240 of
+    /// the dispatcher's own drags in
+    /// `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit`: the peak
+    /// the hinge carries goes **15.5 N.s** when only the chassis is written to
+    /// **3.0** when the part is written with it.
+    pub fn place_part_body(&mut self, guid: Uuid, at: DVec3, rot: DQuat) -> bool {
+        let Some(p) = self.part_bodies.get(&guid).copied() else {
+            return false;
+        };
+        self.world.set_body_translation(p.body, at);
+        self.world.set_body_rotation(p.body, rot);
+        self.world.set_body_linvel(p.body, DVec3::ZERO);
+        self.world.set_body_angvel(p.body, DVec3::ZERO);
+        // …and the joint is REMADE, which is what resets rapier's accumulated
+        // impulse. Measured worth nothing on top of moving the rig together —
+        // 3.0 N.s either way — and it is here because a solver that ever does
+        // start warm-starting a moved joint should find this already done.
+        let (Some(joint), Some(chassis)) = (p.joint, self.entities.get(&p.chassis).map(|r| r.body))
+        else {
+            return true;
+        };
+        self.world.remove_joint(joint);
+        let desc = Self::part_joint_desc(p.axis, p.anchor_chassis, p.anchor_part, p.open_rad, 0.0);
+        let fresh = self.world.add_joint(chassis, p.body, desc);
+        if let Some(rec) = self.part_bodies.get_mut(&guid) {
+            rec.joint = fresh;
+        }
+        true
+    }
+
     pub fn vehicle_guids(&self) -> Vec<Uuid> {
         self.vehicles.keys().copied().collect()
     }
@@ -2429,6 +2783,29 @@ impl PhysicsBridge3D {
             let (Some(translation), Some(rotation)) = (
                 self.world.body_translation(rec.body),
                 self.world.body_rotation(rec.body),
+            ) else {
+                continue;
+            };
+            let Some(entity) = world.entity_of(*guid) else {
+                continue;
+            };
+            if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
+                t.translation = Vec3d::from_dvec3(translation);
+                t.set_quat(rotation);
+                changed = true;
+            }
+        }
+        // **The bodywork's live parts** (wave VEH3c's audit). They are rapier
+        // bodies the FACADE owns rather than entities the sync mirrors — see
+        // `part_bodies` for the two rulings that put them there — so their poses
+        // come back here, in the same `Guid`-ordered walk and for the same
+        // reason: a door the solver moved is a door the renderer has to draw
+        // where the solver put it. A live part is a ROOT entity, so what is
+        // written is its WORLD pose, exactly as for a dynamic body above.
+        for (guid, p) in &self.part_bodies {
+            let (Some(translation), Some(rotation)) = (
+                self.world.body_translation(p.body),
+                self.world.body_rotation(p.body),
             ) else {
                 continue;
             };

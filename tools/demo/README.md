@@ -180,6 +180,44 @@ the island's pack is memory-mapped and a build that tries to replace a running
 executable fails as a sharing violation, which surfaces as `LNK1104` and looks
 like a disk problem. Close the editor first, or pass `-SkipBuild`.
 
+## `island-refresh.ps1` — refresh the island WITHOUT reverting its hero
+
+**Never run `inf island build` on its own.** It is safe for the terrain, the
+roads, the biomes and the level, and destructive to the character:
+`samples/island/island.toml`'s `content` list copies the committed starter
+character into the project BY NAME, and the island's hero is not the committed
+starter — it is a MetaHuman rebound at those GUIDs by
+`inf-import --rebind-character`, local-only content this repository does not
+carry and CI never sees. A plain build puts the **161-joint wizard rig and its
+five-track clips** back over the **342-joint MetaHuman body and its 150-track
+ALS clips**, and reddens four gates that have nothing to do with the wave that
+ran it:
+
+| gate | after a plain `inf island build` | after `island-refresh.ps1` |
+|---|---|---|
+| `char1a3_gate` | 11 / **11 failed** | **14 / 0** |
+| `char1b_gate` | 21 / **11 failed** | **32 / 0** |
+| `cov1_gate` | 13 / **3 failed** | **16 / 0** |
+| `outfit1_gate` | 14 / **3 failed** | **17 / 0** |
+
+The first symptom is `hero's rig has 161 joints … right: 342`, which reads like
+a character regression and is a file copy.
+
+```
+pwsh tools/demo/island-refresh.ps1                # build, then restore
+pwsh tools/demo/island-refresh.ps1 -SkipBuild     # restore only
+```
+
+It runs `inf island build` and then the three imports **in the order that makes
+them work** — a clip's coupling to a skeleton is POSITIONAL, so the mannequin
+and its 164 ALS clips go to the starter GUIDs first, and the MetaHuman body swap
+second, where `retarget_committed_clips` re-retargets by NAME (**150 of 161
+tracks kept, 11 dropped**, every one an IK or attachment helper). Run the body
+swap alone and the retarget runs on the wizard's five-track clips and keeps
+**four**. The clips go under `Content/UE/Mannequins/` because that is where the
+original import put them, and a second copy under `Content/UE/` makes every ALS
+name AMBIGUOUS — 74 of 74 sequences come back "unbound" with all of them on disk.
+
 ## It is a gate, not a screenshot service (audit FIX1)
 
 `demo.ps1` **exits non-zero (7)** when the hero moved less than `-MinMetres`

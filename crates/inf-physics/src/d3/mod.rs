@@ -79,8 +79,8 @@ pub use dispatch::{step_dispatch, DispatchStats};
 pub use door::{door_leaf_guid, step_doors, DoorReport};
 pub use ecs::{
     pcg_shell_guid, pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid,
-    BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
-    DEBRIS_LAYER,
+    BodyDesc3D, EntitySync3D, JointSync3D, PartBody3D, PartHinge3D, PartInstall3D, PhysicsBridge3D,
+    PoseWriteback3D, TerrainColliderAudit, DEBRIS_LAYER,
 };
 pub use events::ContactEvent3D;
 pub use fracture::{

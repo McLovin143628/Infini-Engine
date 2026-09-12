@@ -1098,24 +1098,25 @@ fn escort(
     let dir = path.direction_at(s_next);
     let yaw_deg = traffic::yaw_of_dir(dir);
     let rot = glam::DQuat::from_rotation_y(yaw_deg.to_radians());
-    let w = bridge.world_mut();
-    w.set_body_translation(body, at);
-    w.set_body_rotation(body, rot);
-    // **The velocities go to zero**, both of them. A chassis that has spent
-    // three minutes grinding at full lock against a wall is carrying an angular
-    // velocity and a suspension load that would throw it off the road the
-    // instant it was free of the geometry.
-    w.set_body_linvel(body, DVec3::ZERO);
-    w.set_body_angvel(body, DVec3::ZERO);
-    // …and the document follows the body, so everything that reads a `Transform`
-    // — the crew's seat, the recognition pass, the siren — sees the same place
-    // this step rather than one step later.
-    if let Some(e) = world.entity_of(chassis) {
-        if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
-            t.translation = inf_ecs::math::Vec3d::from_dvec3(at);
-            t.rotation.y = yaw_deg;
-        }
-    }
+    // **THROUGH THE ONE TELEPORT DOOR** (wave VEH3c's audit). This used to be
+    // four writes here: the pose, the rotation and both velocities. It is now
+    // `bodywork::place_vehicle`, which does those four AND re-places every part
+    // still hanging off the chassis on its own joint, with the joint remade.
+    //
+    // It is not a tidy-up. A part on a real revolute, held to a chassis somebody
+    // writes the pose of, is a joint whose two ends disagree about where they
+    // are — and the solver closes that gap with whatever impulse it takes.
+    // Measured over 240 of these drags in
+    // `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit`: the peak
+    // the hinge carries goes **15.5 N.s** with only the chassis written to
+    // **3.0** with the rig moved together. `dispatch_3d::a_teleported_rig_moves_as_a_unit`
+    // drags a DOORED ambulance through this very function and reads both ends.
+    //
+    // The document follows the body inside that door, so everything that reads a
+    // `Transform` this step — the crew's seat, the recognition pass, the siren —
+    // sees the same place rather than one step later.
+    super::bodywork::place_vehicle(world, bridge, chassis, at, rot);
+    let _ = (body, yaw_deg);
     stats.escorted += 1;
     Some(at)
 }

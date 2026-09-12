@@ -19,40 +19,39 @@
 //!
 //! # The three regimes, and the one rule
 //!
-//! **THE SOLVER IS NOT IN ANY OF THEM**, and that is this wave's largest
-//! refusal rather than an omission. The first draft of this paragraph described
-//! the design that was *refused* — a `Live` part as a root entity with a dynamic
-//! body and a real rapier revolute, a `Shed` part as a free dynamic body — and
-//! the VEH3c audit caught it: nothing in the shipped code builds either. What is
-//! below is what runs.
+//! **KINEMATIC UNTIL OPENED OR HIT**, and then the solver's.
 //!
 //! * **Latched** — a drawn child of the chassis with no `RigidBody3D`, no
-//!   `Collider3D` and no joint. Its hinge is integrated here, in three lines of
-//!   arithmetic ([`hinge_step`]), and the answer is written onto its own local
-//!   `Transform`. A thousand parked cars are a thousand cars in this state and
-//!   they cost the solver **nothing**.
-//! * **Live** — the SAME child, standing open on that same analytic hinge.
-//!   `Live` means *open*, not *elsewhere*: it is still a child, it still has no
-//!   body and no collider, and no joint holds it on.
-//! * **Shed** — off the hierarchy and reparented to the root, integrated by
-//!   `inf_physics::d3::bodywork::step_debris` (`at += v·dt`, `v.y -= g·dt`, stop
-//!   at the ground it was over), reaped at [`PART_DEBRIS_LIFETIME_S`] under
-//!   [`MAX_SHED_PARTS`]. Still not a rapier body.
+//!   `Collider3D`, no rapier body and no joint. Its hinge is integrated here, in
+//!   three lines of arithmetic ([`hinge_step`]), and the answer is written onto
+//!   its own local `Transform`. A thousand parked cars are a thousand cars in
+//!   this state and they cost the solver **nothing** — which is the whole reason
+//!   the body is built lazily rather than at spawn.
+//! * **Live** — a rapier body of its own on a REAL revolute back to the chassis,
+//!   with the hinge's limits, a position motor and its contacts against that
+//!   chassis turned off. It is a ROOT entity from that moment (the bridge
+//!   mirrors a body at its entity's local transform), and what holds it on is
+//!   the joint. `set_part_open` drives the motor; the joint's own impulse is
+//!   watched every step by `inf_physics::d3::PhysicsWorld3D::joint_impulse`, and
+//!   over [`hinge_tear_ns`] `remove_joint` lets it go.
+//! * **Shed** — the same body with the joint gone: free, thrown clear along the
+//!   axis it faces, reaped at [`PART_DEBRIS_LIFETIME_S`] under
+//!   [`MAX_SHED_PARTS`]. A car can run it over, because it is a thing that is
+//!   there.
 //!
 //! The rule that moves a part between them is one function of one number: how
 //! much of a blow reached its mounts. Under `LATCH_POP_FRAC` of the threshold
 //! nothing happens; over it a hinged part POPS (it goes live, and swings); over
 //! the threshold itself it SHEDS. A bumper has no hinge, so for a bumper there
-//! is no middle state and the two branches are the same branch.
+//! is no middle state and the two branches are the same branch — and a bumper is
+//! therefore never on a joint, only ever latched or free.
 //!
-//! **What that costs is named rather than hidden**: a bumper in the road cannot
-//! be run over, and an open door cannot be torn off by a lamp post.
-//! `inf_physics::d3::BreakWatch3D` and `PhysicsWorld3D::joint_impulse` are the
-//! facade door those need; they are built, they have their own arms in
-//! `joints3d.rs`, and **nothing here calls them.** See
-//! `inf_physics::d3::bodywork`'s own note in section 5 of `step_bodywork`, and
-//! `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit` for what the
-//! VEH3c audit measured about the refusal's stated cause.
+//! **The two break paths read two different impulses**, which is a distinction
+//! the audit had to make: the CRASH path compares a share of the whole car's
+//! blow against `part_break_impulse_ns`, and the JOINT path compares what the
+//! part's own hinge carried against [`hinge_tear_ns`]. A 22 kg door can deliver
+//! 183 N.s at 30 km/h and a 60 km/h shunt puts nine thousand through the same
+//! door's load path; one number could not have served both.
 //!
 //! # What is deliberately NOT here
 //!
@@ -80,6 +79,51 @@ use crate::world::EcsWorld;
 /// or twenty rifle ones. That is a car you have to *mean* to destroy, which is
 /// the reference footage's own answer.
 pub const HULL_PANELS: f64 = 4.0;
+
+/// **How fast a part has to be STOPPED for its hinge to let go**, m/s — at the
+/// catalogue's own default mount (wave VEH3c's audit).
+///
+/// # Why a hinge needs its own number, and it is not `part_break_impulse_ns`
+///
+/// The two break paths read impulses of two different KINDS and the audit found
+/// them being compared to one number:
+///
+/// * the CRASH path asks what share of the whole car's blow reached a part's
+///   mounts — `J · face · impact_share`, where `J` is the CHASSIS' impulse. A
+///   60 km/h shunt is 18 879 N.s, and half of that through a door's load path is
+///   nine thousand. Against a 4 500 N.s mount it tears, which is right.
+/// * the JOINT path asks what the part's OWN hinge carried. A 22 kg door hitting
+///   a lamp post at 30 km/h can deliver `m·v` = **183 N.s** and no more — it is
+///   a door, not a car. Measured at 68 km/h it reaches **515**, against **2** in
+///   open air. Compared to the same 4 500 it never breaks, and an open door
+///   would be indestructible by anything smaller than the car it is on.
+///
+/// So a hinge tears at a SPEED: four metres a second of the part's own momentum,
+/// which is a door that hits something at walking-to-jogging pace and loses.
+/// Cornering at half a g puts 1.8 N.s through a 22 kg door in a step, so the
+/// margin against normal driving is about fifty to one.
+///
+/// **The tuning still governs it.** [`hinge_tear_ns`] scales this by the row's
+/// own `part_break_impulse_ns` against the default, so a car tuned UNBREAKABLE
+/// is unbreakable on both paths and a car tuned fragile loses its doors on both.
+pub const HINGE_TEAR_MPS: f64 = 4.0;
+
+/// **What one part's hinge lets go at**, newton-seconds — see
+/// [`HINGE_TEAR_MPS`].
+///
+/// `mass · HINGE_TEAR_MPS`, scaled by how far the row's own mount is from the
+/// catalogue default. A non-positive or non-finite mount is UNBREAKABLE, which
+/// is the same refusal-as-a-value `BreakWatch3D` makes of its own threshold.
+pub fn hinge_tear_ns(part_mass_kg: f64, part_break_impulse_ns: f64) -> f64 {
+    if !part_break_impulse_ns.is_finite() || part_break_impulse_ns <= 0.0 {
+        return f64::INFINITY;
+    }
+    let default = crate::vehicle::VehicleTuning::default().part_break_impulse_ns;
+    if default <= 0.0 {
+        return f64::INFINITY;
+    }
+    (part_mass_kg.max(0.1) * HINGE_TEAR_MPS * (part_break_impulse_ns / default)).max(1.0)
+}
 
 /// **The fraction of `part_break_impulse_ns` at which a latch POPS** rather than
 /// tearing off.
@@ -182,18 +226,16 @@ pub enum PartLatch {
     /// joint — the state a thousand parked cars are in.
     #[default]
     Latched,
-    /// **Standing OPEN on that same hinge** — still a child, still no body, no
-    /// collider and no joint.
+    /// **On its own hinge**: a root entity with a rapier body and a real
+    /// revolute back to the chassis, watched for its own break.
     ///
-    /// `Live` means *open*, not *elsewhere*. The wave's first draft of this
-    /// sentence said "a root entity with a dynamic body and a real revolute
-    /// joint to the chassis, watched for its own break", which describes the
-    /// design the wave PRICED AND REFUSED and which nothing builds — caught by
-    /// the VEH3c audit. See this module's own "three regimes" note.
+    /// `Live` means *open*, and it is the state a part enters lazily — on the
+    /// first `set_part_open` or the first blow past `LATCH_POP_FRAC` of its
+    /// mount. See this module's own "three regimes" note.
     Live,
-    /// Off the car — drawn [`Debris`] the bodywork integrates itself, reaped at
-    /// [`PART_DEBRIS_LIFETIME_S`] under [`MAX_SHED_PARTS`]. **Not a rapier
-    /// body**: see [`Debris`] for what that costs and why.
+    /// Off the car — the same body with its joint gone, free, reaped at
+    /// [`PART_DEBRIS_LIFETIME_S`] under [`MAX_SHED_PARTS`]. A car can run it
+    /// over; see [`Debris`] for the audit that made that true.
     Shed,
     /// Gone. A pane that shattered leaves nothing to fall.
     Gone,
@@ -488,44 +530,39 @@ impl VehicleDamage {
     }
 }
 
-/// **One piece of a car lying in the road** (wave VEH3c).
+/// **One piece of a car lying in the road** (wave VEH3c), and its clock.
 ///
-/// # It is DRAWN and it is not a rapier body, and that is a ruling
+/// # It IS a rapier body, and that took an audit
 ///
-/// A shed panel is integrated by `inf_physics::d3::bodywork::step_debris` —
-/// `at += v·dt`, `v.y -= g·dt`, stop at the ground it was over — rather than
-/// handed to the solver. The short version of why is that a bumper in front of
-/// a responding ambulance went under its wheel rays and stopped it getting home.
-///
-/// **The other half of that ruling did not survive the VEH3c audit.** The wave
-/// also wrote that *"a door on a real hinge, held to a chassis the dispatcher
-/// teleports, launched one to 1 705 metres"*, and
+/// The wave shipped a shed panel as DRAWN debris the bodywork integrated itself
+/// — `at += v·dt`, stop at the ground it was over — and refused to give it a
+/// body on three measurements. Two of them were about the solver and are
+/// answered (`JointDesc3D::without_contacts` for the overlap, a push clear along
+/// the part's own facing axis for the spawn); the third, *"a door on a real
+/// hinge, held to a chassis the dispatcher teleports, launched one to 1 705
+/// metres"*, **did not reproduce** —
 /// `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit` measures the
-/// same drag six ways and finds the chassis **1.8 to 6.3 mm** off its own
-/// schedule in every one of them. What the wave measured was the spurious crash
-/// its own `applied_n` correction manufactured, and that correction was removed
-/// in the same wave. The ruling stands on the WHEEL-RAY half; the joint half is
-/// open, and the recipe is in that arm.
+/// same drag six ways and finds the chassis 1.8 to 6.3 mm off its own schedule
+/// in every one. And the first of the two that stood was never a defect at all:
+/// a bumper going under a responding ambulance's wheel rays is the POINT, and
+/// `a_shed_bumper_in_the_road_is_run_over` measures the car driving over it.
 ///
-/// It is on the RESOURCE and not in the trace's per-part rows: a piece of
-/// debris is a pose, and the pose reaches the trace through the entity's own
-/// `Transform` in `sim_snapshot`'s first section, exactly as every other drawn
-/// thing's does.
+/// So this record is no longer a pose. It is a guid and a CLOCK: the body is
+/// the solver's, and what the bodywork still owes it is a lifetime
+/// ([`PART_DEBRIS_LIFETIME_S`]) and a cap ([`MAX_SHED_PARTS`]).
+///
+/// It is on the RESOURCE and not in the trace's per-part rows for the reason it
+/// always was: a piece of debris is a pose, and the pose reaches the trace
+/// through the entity's own `Transform` in `sim_snapshot`'s first section,
+/// exactly as every other drawn thing's does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Debris {
-    /// The part entity, still in the world and no longer anybody's child.
+    /// The part entity — a rapier body of its own, off the hierarchy, lying
+    /// where the solver put it.
     pub guid: Uuid,
-    /// The step it left the car.
+    /// The step it left the car. What [`PART_DEBRIS_LIFETIME_S`] is measured
+    /// from, and what the [`MAX_SHED_PARTS`] cap evicts by.
     pub born: u64,
-    /// Where it is, world metres.
-    pub at: Vec3d,
-    /// How fast it is going, m/s. Zero once it has landed.
-    pub vel: Vec3d,
-    /// The `y` it comes to rest at — one downward ray, cast once, at the moment
-    /// it shed.
-    pub rest_y: f64,
-    /// How fast it tumbles, degrees per second, about each axis.
-    pub spin_deg_s: Vec3d,
 }
 
 /// **Every vehicle's damage, keyed by chassis** — the resource.

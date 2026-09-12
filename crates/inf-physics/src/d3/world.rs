@@ -1159,6 +1159,27 @@ impl PhysicsWorld3D {
         })
     }
 
+    /// **Re-aim a revolute's position motor**, radians (wave VEH3c's audit).
+    ///
+    /// The other half of a joint that is DRIVEN rather than merely constrained:
+    /// a car door is opened by asking its hinge to hold a new angle, and an
+    /// actuation door that had to rebuild the joint to do it would throw away
+    /// the solver's warm start every time somebody touched a handle.
+    ///
+    /// Answers `false` for a dead handle or a joint with no angular motor — a
+    /// refusal is a value, as it is in [`break_over_threshold`](Self::break_over_threshold).
+    /// Re-describe a live joint **through the same lowering that built it** —
+    /// `JointDesc3D::to_generic`, so a motor re-aimed here is bit-identical to
+    /// one that was asked for at `add_joint`. There is one description of what a
+    /// joint is in this engine and this keeps it that way.
+    pub fn retune_joint(&mut self, joint: JointId3D, desc: super::joint::JointDesc3D) -> bool {
+        let Some(j) = self.impulse_joints.get_mut(joint.0, true) else {
+            return false;
+        };
+        j.data = desc.to_generic();
+        true
+    }
+
     /// **Break every watched joint whose impulse passed its threshold**
     /// (wave VEH3c) — the one door a breakable joint goes through.
     ///

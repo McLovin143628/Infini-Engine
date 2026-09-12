@@ -1676,3 +1676,129 @@ fn a_burning_car_brings_the_appliance() {
         "the crew never put it out: the intensity bottomed at {min_intensity:.3}"
     );
 }
+
+/// **A TELEPORTED RIG MOVES AS A UNIT** — wave VEH3c's audit, on the
+/// dispatcher's own fixture and through the dispatcher's own door.
+///
+/// # What this replaces
+///
+/// The wave refused to put a car's bodywork on real joints on one measurement:
+/// *"a door on a real revolute, held to a chassis the dispatcher teleports along
+/// a nav path and zeroes the velocities of, was yanked by its own joint until
+/// the ambulance was at 1 705 metres."* `escort_nudge` is that teleport, and
+/// this is a DOORED ambulance going through it.
+///
+/// The door is `bodywork::place_vehicle` now: it does the four writes
+/// `escort_nudge` used to do inline AND re-places every part still hanging off
+/// the chassis, with the joint remade. What the arm reads is both ends of the
+/// rig — the chassis against the place it was told to go, and the door against
+/// the chassis.
+#[test]
+fn a_teleported_rig_moves_as_a_unit() {
+    let mut town = Town::new();
+    town.steps(60);
+
+    // Open the ambulance's near-side door, so there is a real revolute with a
+    // real body on it to be dragged around.
+    let parts = inf_physics::d3::bodywork::parts_of(&town.world, AMBULANCE);
+    let (door, _) = parts
+        .iter()
+        .copied()
+        .find(|(g, s)| {
+            s.kind == inf_ecs::vehicle::KIND_DOOR
+                && inf_ecs::vehicle::body_part_guid(AMBULANCE, "door_fl") == *g
+        })
+        .or_else(|| {
+            parts
+                .iter()
+                .copied()
+                .find(|(_, s)| s.kind == inf_ecs::vehicle::KIND_DOOR)
+        })
+        .expect("the ambulance has a door");
+    assert!(
+        inf_physics::d3::bodywork::set_part_open(
+            &mut town.world,
+            &mut town.bridge,
+            AMBULANCE,
+            door,
+            true
+        ),
+        "the ambulance refused to open a door"
+    );
+    town.steps(90);
+    let p = town
+        .bridge
+        .part_body(door)
+        .expect("an opened door is a body on a hinge");
+    assert!(p.joint.is_some(), "the door is on no joint");
+
+    // …and now drag it, exactly as `escort_nudge` does: the pose and the
+    // rotation written every step and both velocities zeroed, for four seconds.
+    let start = town.at(AMBULANCE);
+    let mut worst_chassis = 0.0f64;
+    let mut worst_door = 0.0f64;
+    let mut peak_ns = 0.0f64;
+    let mut worst_y = 0.0f64;
+    for i in 0..240 {
+        // **Down the clear side of the apron.** The cruiser is parked at
+        // z = +12 and the appliance at +26, so a drag in +z is a drag into
+        // another unit — which is a fact about the fixture, not about the
+        // joints, and it cost this arm 0.13 m of "off schedule" before it was
+        // noticed.
+        let want = start - DVec3::new(0.0, 0.0, i as f64 * 0.20);
+        inf_physics::d3::bodywork::place_vehicle(
+            &mut town.world,
+            &mut town.bridge,
+            AMBULANCE,
+            want,
+            glam::DQuat::IDENTITY,
+        );
+        town.step();
+        let body = town
+            .bridge
+            .body_of(AMBULANCE)
+            .expect("the ambulance is a body");
+        let here = town.bridge.world().body_translation(body).unwrap();
+        // **ALONG THE ROUTE, which is what a nav path is.** `escort_nudge` drags
+        // a unit in the XZ plane; the vertical is the suspension's business and
+        // a chassis that settles 13 cm onto its own springs after being placed
+        // is a car resting, not a car being flung. The `y` is printed beside it.
+        worst_chassis =
+            worst_chassis.max(DVec3::new(here.x - want.x, 0.0, here.z - want.z).length());
+        worst_y = worst_y.max((here.y - want.y).abs());
+        if let Some(pb) = town.bridge.part_body(door) {
+            let dp = town.bridge.world().body_translation(pb.body).unwrap();
+            worst_door = worst_door.max((dp - (here + pb.local)).length());
+        }
+        if let Some(ns) = town.bridge.part_joint_impulse(door) {
+            peak_ns = peak_ns.max(ns);
+        }
+    }
+    let travelled = (town.at(AMBULANCE) - start).length();
+    println!(
+        "240 drags of 0.20 m: the ambulance travelled {travelled:.2} m, finished {worst_chassis:.4} m off its own route at worst ({worst_y:.4} m of settle in y), the door stayed {worst_door:.4} m from where it hangs, and the hinge peaked at {peak_ns:.1} N.s"
+    );
+
+    // **THE CHASSIS STAYS WHERE THE DISPATCHER PUT IT.** One centimetre — the
+    // ruling's own bound — against the 1 705 metres the wave recorded.
+    assert!(
+        worst_chassis < 0.01,
+        "the ambulance finished {worst_chassis:.4} m off the route it was dragged along ({worst_y:.4} m in y)"
+    );
+    // **AND THE DOOR STAYS ON IT.** Five centimetres of the hinge's own slack.
+    assert!(
+        worst_door < 0.05,
+        "the door drifted {worst_door:.4} m from where it hangs on the chassis"
+    );
+    assert!(
+        travelled > 40.0,
+        "the ambulance only moved {travelled:.2} m — this arm dragged nothing"
+    );
+    // …and the door is still ON.
+    assert!(
+        town.bridge
+            .part_body(door)
+            .is_some_and(|pb| pb.joint.is_some()),
+        "the drag tore the door off — a rig that moves as a unit puts nothing through its own hinge"
+    );
+}
