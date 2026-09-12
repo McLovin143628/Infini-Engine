@@ -421,7 +421,7 @@ fn a_door_opens_on_its_hinge_and_shuts_again() {
             .entity_of(guid)
             .and_then(|e| rig.world.parent_of(e))
             .is_none(),
-        "a live door is still a CHILD — the bridge mirrors a body at its local          transform, so a body-carrying entity has to be a root"
+        "a live door is still a CHILD — the bridge mirrors a body at its local transform, so a body-carrying entity has to be a root"
     );
     // THE WORLD, not the table: the drawn part's own transform is where the
     // SOLVER put it, and the solver put it away from the chassis' centre.
@@ -429,13 +429,13 @@ fn a_door_opens_on_its_hinge_and_shuts_again() {
     let t = rig.world.world().get::<Transform>(e).copied().unwrap();
     let swing = (t.translation.to_dvec3() - rig.at()).length();
     eprintln!(
-        "the door's drawn pose is {:?} — {swing:.3} m from the chassis origin,          and the hinge carries {:.1} N.s",
+        "the door's drawn pose is {:?} — {swing:.3} m from the chassis origin, and the hinge carries {:.1} N.s",
         t.translation,
         rig.bridge.part_joint_impulse(guid).unwrap_or(0.0)
     );
     assert!(
         swing > 0.5,
-        "the drawn door is {swing:.3} m from the car's own origin — the solver          is not moving it"
+        "the drawn door is {swing:.3} m from the car's own origin — the solver is not moving it"
     );
     // The engagement count: it really travelled.
     assert!(
@@ -653,7 +653,7 @@ fn the_shed_part_falls_to_the_ground_and_lies_there() {
         .map(|v| v.length())
         .unwrap_or(0.0);
     eprintln!(
-        "the shed bumper weighs {mass:.2} kg, fell from {y0:.3} m to {:.3} m and is          doing {vel:.4} m/s four seconds later",
+        "the shed bumper weighs {mass:.2} kg, fell from {y0:.3} m to {:.3} m and is doing {vel:.4} m/s four seconds later",
         after.y
     );
     // The MASS is the parts table's shell mass, not a box at a material density.
@@ -673,7 +673,7 @@ fn the_shed_part_falls_to_the_ground_and_lies_there() {
     );
     assert!(
         after.y <= y0 + 0.05,
-        "the shed bumper ROSE from {y0:.3} to {:.3} -- two overlapping dynamic          bodies are a depenetration force with nowhere to go, which is the          P29.6 shape wearing a bumper",
+        "the shed bumper ROSE from {y0:.3} to {:.3} -- two overlapping dynamic bodies are a depenetration force with nowhere to go, which is the P29.6 shape wearing a bumper",
         after.y
     );
     // …and the drawn entity is where the solver put it.
@@ -697,7 +697,7 @@ fn the_shed_part_falls_to_the_ground_and_lies_there() {
     );
     assert!(
         rig.bridge.part_body(guid).is_none(),
-        "the entity went and its rapier body stayed -- a collider nothing draws          and nothing owns"
+        "the entity went and its rapier body stayed -- a collider nothing draws and nothing owns"
     );
 }
 
@@ -1672,7 +1672,7 @@ fn a_blast_reaches_the_car_and_not_the_panel_that_came_off_it() {
     );
     assert!(
         rig.bridge.body_of(shed_guid).is_none(),
-        "the shed bumper is in the bridge's ENTITY map — a blast walks that map,          and a 7 kg panel with a car's impulse on it is the levitation defect"
+        "the shed bumper is in the bridge's ENTITY map — a blast walks that map, and a 7 kg panel with a car's impulse on it is the levitation defect"
     );
 
     // …and A REAL BLAST really does reach the chassis.
