@@ -17,27 +17,42 @@
 //! **empty until something breaks**, so every quiet level's bytes are what they
 //! were.
 //!
-//! # The two regimes, and the one rule
+//! # The three regimes, and the one rule
 //!
-//! A part is LATCHED or it is LIVE, and that is the tier ladder rather than a
-//! convenience:
+//! **THE SOLVER IS NOT IN ANY OF THEM**, and that is this wave's largest
+//! refusal rather than an omission. The first draft of this paragraph described
+//! the design that was *refused* — a `Live` part as a root entity with a dynamic
+//! body and a real rapier revolute, a `Shed` part as a free dynamic body — and
+//! the VEH3c audit caught it: nothing in the shipped code builds either. What is
+//! below is what runs.
 //!
-//! * **Latched** — it is a drawn child of the chassis with no `RigidBody3D`, no
+//! * **Latched** — a drawn child of the chassis with no `RigidBody3D`, no
 //!   `Collider3D` and no joint. Its hinge is integrated here, in three lines of
 //!   arithmetic ([`hinge_step`]), and the answer is written onto its own local
 //!   `Transform`. A thousand parked cars are a thousand cars in this state and
 //!   they cost the solver **nothing**.
-//! * **Live** — it is a root entity with its own dynamic body, its own box
-//!   collider and a real rapier revolute joint back to the chassis, with the
-//!   same limits and the same motor. The joint's own impulse is watched by
-//!   `inf_physics::d3::BreakWatch3D`, and over `part_break_impulse_ns` it is
-//!   removed and the part is free.
+//! * **Live** — the SAME child, standing open on that same analytic hinge.
+//!   `Live` means *open*, not *elsewhere*: it is still a child, it still has no
+//!   body and no collider, and no joint holds it on.
+//! * **Shed** — off the hierarchy and reparented to the root, integrated by
+//!   `inf_physics::d3::bodywork::step_debris` (`at += v·dt`, `v.y -= g·dt`, stop
+//!   at the ground it was over), reaped at [`PART_DEBRIS_LIFETIME_S`] under
+//!   [`MAX_SHED_PARTS`]. Still not a rapier body.
 //!
 //! The rule that moves a part between them is one function of one number: how
 //! much of a blow reached its mounts. Under `LATCH_POP_FRAC` of the threshold
 //! nothing happens; over it a hinged part POPS (it goes live, and swings); over
 //! the threshold itself it SHEDS. A bumper has no hinge, so for a bumper there
 //! is no middle state and the two branches are the same branch.
+//!
+//! **What that costs is named rather than hidden**: a bumper in the road cannot
+//! be run over, and an open door cannot be torn off by a lamp post.
+//! `inf_physics::d3::BreakWatch3D` and `PhysicsWorld3D::joint_impulse` are the
+//! facade door those need; they are built, they have their own arms in
+//! `joints3d.rs`, and **nothing here calls them.** See
+//! `inf_physics::d3::bodywork`'s own note in section 5 of `step_bodywork`, and
+//! `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit` for what the
+//! VEH3c audit measured about the refusal's stated cause.
 //!
 //! # What is deliberately NOT here
 //!
@@ -167,10 +182,18 @@ pub enum PartLatch {
     /// joint — the state a thousand parked cars are in.
     #[default]
     Latched,
-    /// On its own hinge: a root entity with a dynamic body and a real revolute
-    /// joint to the chassis, watched for its own break.
+    /// **Standing OPEN on that same hinge** — still a child, still no body, no
+    /// collider and no joint.
+    ///
+    /// `Live` means *open*, not *elsewhere*. The wave's first draft of this
+    /// sentence said "a root entity with a dynamic body and a real revolute
+    /// joint to the chassis, watched for its own break", which describes the
+    /// design the wave PRICED AND REFUSED and which nothing builds — caught by
+    /// the VEH3c audit. See this module's own "three regimes" note.
     Live,
-    /// Off the car — a free dynamic body with a debris lifetime.
+    /// Off the car — drawn [`Debris`] the bodywork integrates itself, reaped at
+    /// [`PART_DEBRIS_LIFETIME_S`] under [`MAX_SHED_PARTS`]. **Not a rapier
+    /// body**: see [`Debris`] for what that costs and why.
     Shed,
     /// Gone. A pane that shattered leaves nothing to fall.
     Gone,
@@ -471,11 +494,18 @@ impl VehicleDamage {
 ///
 /// A shed panel is integrated by `inf_physics::d3::bodywork::step_debris` —
 /// `at += v·dt`, `v.y -= g·dt`, stop at the ground it was over — rather than
-/// handed to the solver. See that function's own note for the three
-/// measurements behind it; the short version is that a bumper in front of a
-/// responding ambulance went under its wheel rays and stopped it, and a door on
-/// a real hinge, held to a chassis the dispatcher teleports, launched one to
-/// 1 705 metres.
+/// handed to the solver. The short version of why is that a bumper in front of
+/// a responding ambulance went under its wheel rays and stopped it getting home.
+///
+/// **The other half of that ruling did not survive the VEH3c audit.** The wave
+/// also wrote that *"a door on a real hinge, held to a chassis the dispatcher
+/// teleports, launched one to 1 705 metres"*, and
+/// `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit` measures the
+/// same drag six ways and finds the chassis **1.8 to 6.3 mm** off its own
+/// schedule in every one of them. What the wave measured was the spurious crash
+/// its own `applied_n` correction manufactured, and that correction was removed
+/// in the same wave. The ruling stands on the WHEEL-RAY half; the joint half is
+/// open, and the recipe is in that arm.
 ///
 /// It is on the RESOURCE and not in the trace's per-part rows: a piece of
 /// debris is a pose, and the pose reaches the trace through the entity's own

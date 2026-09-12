@@ -500,6 +500,20 @@ pub fn step_bodywork(
     // EMS gates that predate this wave went red, and the matrix says exactly
     // which half each of them was: two on the debris, one on the joint.
     //
+    // **THE JOINT THIRD OF THAT DOES NOT REPRODUCE** (VEH3c audit).
+    // `joints3d::a_jointed_rig_survives_being_teleported_as_a_unit` runs
+    // `escort_nudge`'s own four writes for 240 steps with a 22 kg door on a real
+    // revolute drawn half inside its own hull, six ways -- three placements x
+    // the pair's contacts on and off -- and the chassis finishes **1.8 to 6.3 mm**
+    // off its own schedule in every one of them, with the door never more than
+    // 1.62 m from it. The peak the hinge carries goes 772.8 N.s naive with
+    // contacts ON, 15.5 with them OFF, 3.0 moved as a unit, 3.0 with the joint
+    // remade -- against a 4 500 N.s bumper mount. What the wave measured was the
+    // SPURIOUS crash its own `applied_n` correction manufactured (see section 3
+    // above), and that correction was removed in the same wave without the
+    // refusal being re-measured. The two DEBRIS measurements stand; the joint
+    // one does not, and the recipe for closing it is in that arm.
+    //
     // So a part that leaves a car cannot interfere with a car. A SHED part is
     // reparented to the root, keeps the velocity it left with, falls under
     // gravity to the ground it was over and lies there until it is reaped — all
@@ -1148,7 +1162,13 @@ pub fn is_vehicle(bridge: &PhysicsBridge3D, guid: Uuid) -> bool {
 }
 
 /// **Open or shut one part** (wave VEH3c) — the door VEH3d's boarding pipeline
-/// will drive, and the one the demo's own hero key reaches.
+/// will drive.
+///
+/// **Nothing calls it outside `veh3c_gate`**, and that is deliberate: an input
+/// path to a car door is VEH3d's and this wave does not build it early. The
+/// first draft of this line said *"and the one the demo's own hero key
+/// reaches"*, which is not true of any key in the shipped input map and
+/// contradicts the wave's own carried item 6 — caught by the VEH3c audit.
 ///
 /// `open` drives the hinge to its own limit; `!open` drives it shut. Answers
 /// whether the part exists and has a hinge at all.
