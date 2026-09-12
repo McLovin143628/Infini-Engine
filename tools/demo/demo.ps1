@@ -2897,7 +2897,11 @@ if (-not $veh_driving) {
     # (e) THE FIRE. A hull is four panels -- 36 000 J by default -- and a
     #     60 km/h shunt spends about 17 000 of them, so a car burns on its
     #     second or third real crash. Keep going.
-    $veh_fire = @(Wait-ForHero -Csv $heroCsv -What "a burning car (VEH3c)" -TimeoutS 30.0 `
+    # **SIXTY SECONDS, and that is a measurement**: the audit's second session
+    # drove this leg's thirty and finished at **0.9 % of hull** -- one more shunt
+    # short of the fire. A hull is spent a shunt at a time and the island's
+    # streets offer one every ten seconds or so.
+    $veh_fire = @(Wait-ForHero -Csv $heroCsv -What "a burning car (VEH3c)" -TimeoutS 60.0 `
         -Predicate { param($c) ($c.Count -gt 53) -and ($c[5] -eq "Driving") -and ([double]$c[49] -le 0.0) -and ([double]$c[6] -ge 0.0) } `
         -Out (Join-Path $OutDir "103-veh3c-fire.png"))[-1]
     [InfInput]::Up(0x11)
@@ -2955,8 +2959,18 @@ if (-not $veh_driving) {
     [InfInput]::RightDown()      # aim
     Start-Sleep -Milliseconds 400
     [InfInput]::LeftDown()
-    $veh_shoot = @(Wait-ForHero -Csv $heroCsv -What "the hero emptying a magazine into a parked car (VEH3c)" -TimeoutS 8.0 `
-        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[20] -gt 0) -and ($c[22] -ne "-") } `
+    # **THE TRIGGER IS THE BRASS, NOT THE BULLET** -- the third half of the same
+    # finding. Column 20 is rounds IN FLIGHT: a pistol round covers the three
+    # metres to a car it is pointed at in about eight milliseconds and this log
+    # samples every two hundred and fifty, so the chance a sample catches one is
+    # about three percent. Measured on the audit's own second session, with the
+    # hero correctly on its feet, aiming, holding the trigger for twelve
+    # seconds: `rounds` read **0 in every one of the forty-eight rows** -- and
+    # `casings` (column 27) went **0 -> 1 -> 2 -> 3**. The hero was firing the
+    # whole time. A casing lies on the road for seconds; a bullet is a sample's
+    # width of nothing.
+    $veh_shoot = @(Wait-ForHero -Csv $heroCsv -What "the hero emptying a magazine into a parked car (VEH3c)" -TimeoutS 10.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[27] -gt 0) -and ($c[22] -ne "-") } `
         -Out (Join-Path $OutDir "104-veh3c-shot-car.png"))[-1]
     Start-Sleep -Milliseconds 1200
     [InfInput]::LeftUp()
