@@ -734,8 +734,6 @@ impl PhysicsBridge3D {
         self.vehicles.insert(guid, vehicle);
     }
 
-    /// Every chassis `Guid` with a vehicle, in `Guid` order — the door's walk,
-    /// and `O(vehicles)`.
     // ── the bodywork's live parts (wave VEH3c, the audit's joint closure) ──
 
     /// One live part's handles, or `None` if it is still latched.
@@ -970,6 +968,8 @@ impl PhysicsBridge3D {
         true
     }
 
+    /// Every chassis `Guid` with a vehicle, in `Guid` order — the door's walk,
+    /// and `O(vehicles)`.
     pub fn vehicle_guids(&self) -> Vec<Uuid> {
         self.vehicles.keys().copied().collect()
     }
