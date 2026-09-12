@@ -812,6 +812,40 @@ impl RuntimeSim {
         portal(&self.world, &mut self.bridge3d, listener, emitter)
     }
 
+    /// **Swing every hinged part of one chassis open or shut** (VEH3c audit) —
+    /// the preview door `INF_PIE_TUNE_VEHICLE`'s `doors_open` reaches.
+    ///
+    /// It exists for the same reason [`Self::audio_portal`] does: the rule needs
+    /// two DISJOINT FIELDS of this struct and a caller holding `&mut RuntimeSim`
+    /// cannot borrow `world_mut()` and `bridge3d_mut()` at once through the
+    /// accessors. Answers how many parts took it.
+    ///
+    /// **The game has no key for this and this is not one.** An input path to a
+    /// car door is VEH3d's; what the audit needed was a way to put a door on its
+    /// hinge in a *running* session, so that the thing the arms measure
+    /// (`an_open_door_is_torn_off_by_a_lamp_post`) can also be SEEN. The world
+    /// does the rest — the hinge, the limit, the impulse and the tear are the
+    /// shipping path and nothing here touches them.
+    pub fn open_vehicle_doors(&mut self, chassis: Uuid, open: bool) -> usize {
+        let parts = inf_physics::d3::bodywork::parts_of(&self.world, chassis);
+        let mut took = 0usize;
+        for (guid, state) in parts {
+            if !state.latch.attached() {
+                continue;
+            }
+            if inf_physics::d3::bodywork::set_part_open(
+                &mut self.world,
+                &mut self.bridge3d,
+                chassis,
+                guid,
+                open,
+            ) {
+                took += 1;
+            }
+        }
+        took
+    }
+
     /// **The most recent fixed step's traffic counters** (VEH2b) — cars per
     /// tier, how many are on a leg of their day, how many carry an NPC driver,
     /// how many the traffic has let go of, and how many commuter routes are

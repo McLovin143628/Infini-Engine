@@ -131,6 +131,13 @@ param(
     # because the island car's brakes out-hold its engine (13 kN against 8).
     # `tyre_surface_set=3` is the slick row, and the gate measures a burnout on
     # it at 229 slipping steps.
+    #
+    # **ONE NAME ON THE LIST IS NOT A TUNABLE** (VEH3c's audit): `doors_open=1`
+    # swings every hinged part of every chassis onto its motor, and `=0` shuts
+    # them. It is a DIRECTIVE -- filtered out before either tuner sees the pairs,
+    # so it is never reported refused -- and it exists because the shipped input
+    # map has no key for a car door (VEH3d owns that), so without it the joints
+    # the wave built can be measured and never SEEN. Frame (b3) below needs it.
     [string]$TuneVehicle = ""
 )
 
@@ -2871,6 +2878,65 @@ if (-not $veh_driving) {
         -Out (Join-Path $OutDir "100-veh3c-shed.png"))[-1]
     if (-not $veh_shed) {
         Say "VEH3c: nothing came off -- a part needs part_break_impulse_ns through its own mounts, which is a 45 km/h shunt on the fixture, and frame (b) is not in this session"
+    }
+
+    # (b2) **THE SHED PART IS A BODY, AND A CAR CAN RUN OVER IT** (the VEH3c
+    #      audit's joint closure). Until the joints landed, a shed part was
+    #      DRAWN debris the solver had never heard of: the wave said so in its
+    #      own ledger -- *"a bumper in the road cannot be run over"*. It can now,
+    #      and the arm that measures it is
+    #      `veh3c_gate::a_shed_bumper_in_the_road_is_run_over` (a cast over the
+    #      panel stops 18.5 mm short of the road beside it, and a car crossing it
+    #      at walking pace rides 2.7 mm higher and keeps going at 3.00 m/s).
+    #
+    #      There is no COLUMN for "a wheel is on a bumper", so this frame is not
+    #      triggered: it is a manoeuvre -- reverse away from what was just shed,
+    #      then come back over it at part throttle -- and a photograph of the
+    #      result. Part throttle is the point. At full throttle a car crosses a
+    #      70 mm panel in a fifth of a fixed step, which is a fact about the
+    #      SAMPLE RATE and is in the arm too.
+    if ($veh_shed) {
+        Say "VEH3c: backing off the debris, then rolling back over it"
+        [InfInput]::Up(0x11)
+        [InfInput]::Down(0x1F)   # scancode: S
+        Start-Sleep -Milliseconds 2600
+        [InfInput]::Up(0x1F)
+        Start-Sleep -Milliseconds 600
+        [InfInput]::Down(0x11)   # scancode: W
+        Start-Sleep -Milliseconds 1500
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "105-veh3c-bumper-run-over.png") | ForEach-Object { Say $_ }
+        Start-Sleep -Milliseconds 900
+    }
+
+    # (b3) **AN OPEN DOOR IS TORN OFF ITS HINGE.** The other sentence the wave
+    #      carried. A door past `LATCH_POP_FRAC` of its mount is a rapier body on
+    #      a real revolute with a motor and its contacts against its own chassis
+    #      off; the joint's impulse is read every step and over `hinge_tear_ns`
+    #      the joint is REMOVED and the door goes. Measured on the fixture at
+    #      515 N.s through the hinge against 2 N.s in open air
+    #      (`veh3c_gate::an_open_door_is_torn_off_by_a_lamp_post`).
+    #
+    #      **The shipped input map has no key for a car door** -- that is VEH3d's
+    #      -- so the doors are put on their hinges through the preview door
+    #      `-TuneVehicle "doors_open=1"`, and the WORLD does the rest. A session
+    #      that did not ask for it says so instead of taking a frame of a shut
+    #      car and calling it a hinge.
+    if ($TuneVehicle -match "doors_open\s*=\s*[^0]") {
+        $shedBefore = 0
+        $rows = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+            Where-Object { ($_ -split ",").Count -gt 53 })
+        if ($rows.Count -gt 0) { $shedBefore = [int](($rows[-1] -split ",")[53]) }
+        Say "VEH3c: doors on their hinges -- driving at something with one of them open (shed is $shedBefore)"
+        [InfInput]::Down(0x11)
+        $veh_tear = @(Wait-ForHero -Csv $heroCsv -What "a door off its hinge (VEH3c)" -TimeoutS 30.0 `
+            -Predicate { param($c) ($c.Count -gt 53) -and ([int]$c[53] -gt $shedBefore) } `
+            -Out (Join-Path $OutDir "106-veh3c-door-torn-off.png"))[-1]
+        if (-not $veh_tear) {
+            Say "VEH3c: nothing else came off -- the hinge carries only what the PART brings (a 22 kg door at 30 km/h delivers 183 N.s), so the door has to MEET something, and frame (b3) is not in this session"
+        }
+    }
+    else {
+        Say "VEH3c: no door is on a hinge in this session -- the shipped input map has no key for a car door (VEH3d owns that), so frame (b3) needs -TuneVehicle `"doors_open=1`"; veh3c_gate::an_open_door_is_torn_off_by_a_lamp_post measures the tear instead (515 N.s through the hinge and 14 -> 13 parts, against 2 N.s and 14 -> 14 in open air)"
     }
 
     # (c) THE GLASS. A pane goes to a round or to a hard enough shunt, and the

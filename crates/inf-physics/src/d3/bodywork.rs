@@ -1329,11 +1329,14 @@ pub fn is_vehicle(bridge: &PhysicsBridge3D, guid: Uuid) -> bool {
 /// **Open or shut one part** (wave VEH3c) — the door VEH3d's boarding pipeline
 /// will drive.
 ///
-/// **Nothing calls it outside `veh3c_gate`**, and that is deliberate: an input
-/// path to a car door is VEH3d's and this wave does not build it early. The
-/// first draft of this line said *"and the one the demo's own hero key
-/// reaches"*, which is not true of any key in the shipped input map and
-/// contradicts the wave's own carried item 6 — caught by the VEH3c audit.
+/// **No KEY reaches it**, and that is deliberate: an input path to a car door is
+/// VEH3d's and this wave does not build it early. The first draft of this line
+/// said *"and the one the demo's own hero key reaches"*, which is not true of
+/// any key in the shipped input map and contradicts the wave's own carried
+/// item 6 — caught by the VEH3c audit. Its callers are `veh3c_gate`,
+/// `dispatch_3d`, and `RuntimeSim::open_vehicle_doors`, which is the preview
+/// door `INF_PIE_TUNE_VEHICLE`'s `doors_open` directive reaches so that a
+/// *running* session can show a door on its hinge.
 ///
 /// `open` drives the hinge to its own limit; `!open` drives it shut. Answers
 /// whether the part exists and has a hinge at all.

@@ -555,6 +555,16 @@ pub const TUNE_VEHICLE_ENV: &str = "INF_PIE_TUNE_VEHICLE";
 /// session's own budget.
 const TUNE_PERIOD_S: f64 = 20.0;
 
+/// **The one name on [`TUNE_VEHICLE_ENV`] that is not a tunable** (VEH3c audit).
+///
+/// `doors_open=1` swings every hinged part of every chassis onto its motor and
+/// `doors_open=0` shuts them again. It is a DIRECTIVE: it is filtered out of the
+/// name/value pairs before `VehicleClass::set` and `Vehicle::tune` see them, so
+/// it is never reported refused, and it reaches
+/// [`RuntimeSim::open_vehicle_doors`](crate::runtime_sim::RuntimeSim::open_vehicle_doors)
+/// rather than either tuner.
+const DOORS_OPEN_NAME: &str = "doors_open";
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -924,6 +934,21 @@ impl SpawnOverride {
         // level rather than the hero, and because a car retuned before the
         // placement would be retuned on a chassis the streamer has not paged in.
         if let Some(pairs) = retune {
+            // **`doors_open` IS A DIRECTIVE, NOT A TUNABLE** (VEH3c audit). It
+            // swings every hinged part of every chassis onto its motor, which is
+            // the only way a *running* session can show a door on its hinge: the
+            // shipped input map has no key for one (VEH3d owns that), so without
+            // this the joints the wave built could be measured and never seen.
+            // Filtered out of `pairs` before the tunables run, or every chassis
+            // would report it refused.
+            let doors: Option<bool> = pairs
+                .iter()
+                .find(|(n, _)| n == DOORS_OPEN_NAME)
+                .map(|(_, v)| *v != 0.0);
+            let pairs: Vec<(String, f64)> = pairs
+                .into_iter()
+                .filter(|(n, _)| n != DOORS_OPEN_NAME)
+                .collect();
             let w = sim.world_mut();
             // Every chassis in the level, through the RECOGNISER rather than a
             // component query: a vehicle is a rig with wheels, and that is the
@@ -975,6 +1000,17 @@ impl SpawnOverride {
                     }
                 }
             }
+            // …and the directive, after the tuning, because a door swung open on
+            // a chassis the tier ladder has just re-minted would be swung on the
+            // OLD rig. `set_part_open` is idempotent — it writes a target angle
+            // rather than adding one — so the cadence re-opening a door that is
+            // already open costs a motor re-aim that the bodywork skips.
+            let mut swung = 0usize;
+            if let Some(open) = doors {
+                for guid in &chassis {
+                    swung += sim.open_vehicle_doors(*guid, open);
+                }
+            }
             for name in &refused {
                 eprintln!("inf-player: {TUNE_VEHICLE_ENV} name `{name}` is not a tunable");
             }
@@ -993,7 +1029,7 @@ impl SpawnOverride {
                     said.push_str("; ");
                 }
                 said.push_str(&format!(
-                    "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis and {live} on the RUNNING vehicles at t={:.1}s (refused {refused:?})",
+                    "{TUNE_VEHICLE_ENV} set {took} tunable(s) on {} chassis and {live} on the RUNNING vehicles at t={:.1}s, swung {swung} part(s) onto their hinges (refused {refused:?})",
                     chassis.len(),
                     self.accum
                 ));

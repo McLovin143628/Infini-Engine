@@ -40183,3 +40183,143 @@ was is the same defect as the Ring-0 prose above.
 | the parked-car cost | **×1.097 release and FAILING** as landed → **×0.978–×1.030** over six release runs |
 | the mutation battery | **23 mutations**, every one RED; three of them were GREEN first and are findings 1, 2 and 6 |
 | the real editor on the final tree | `--open` on the committed island, CDP up in 1 s, **772 entities**, `car.mjs` **exit 0** on a chassis with **18 drawn parts**; closed, `still running: none` |
+
+## WAVE VEH3c — THE AUDIT, THE JOINT CLOSURE (2026-09-11)
+
+### audit: the bodywork goes on the real joints, and (a′) closes
+
+The audit falsified the refusal; the coordinator ruled that the clause then
+closes in this wave rather than the next. It does.
+
+**A PART IS A BODY ON A REAL REVOLUTE FROM THE MOMENT IT IS OPENED OR HIT.** A
+door, a bonnet or a boot lid past `LATCH_POP_FRAC` of its mount — or handed to
+`set_part_open` — becomes a rapier body on a `Joint3D::Revolute` back to its
+chassis, with the hinge's own limits, a position motor and its contacts against
+that chassis **off**. The motor is what `set_part_open` drives; the joint's own
+impulse is read every step through `PhysicsWorld3D::joint_impulse`, and over its
+tear threshold `remove_joint` lets the part go. The wave's own sentence — *"the
+facade door is built, is proven, and is not called from the bodywork"* — is
+retired by giving it a caller.
+
+**KINEMATIC UNTIL OPENED OR HIT, and that is what keeps it free.** A latched part
+has no body, no collider, no joint and no rapier anything: the solver has never
+heard of it. The body is built LAZILY, on the step it is first needed. A thousand
+parked saloons measure **×0.992 / ×1.005 / ×0.994 / ×1.029 / ×1.003 / ×1.016** in
+release against a ×1.05 ceiling — six runs, min of five steps each.
+
+**The handles live in the FACADE and not on the entity**, for two reasons this
+arc had already paid for: `inf_ecs::vehicle::part_of` recognises a rig's parts
+off their COLLIDER and the collider-shape space is exhausted (a box collider on a
+door would read as a thruster), and `Joint3D` has been in the `.inf_lvl`
+`EntityRecord` since scene **v6**, so a `contacts` flag on it would be a
+bincode-positional schema bump — and VEH3a spent the only window this arc gets.
+`PhysicsBridge3D::part_bodies` is the map; **v28 / 13 / 24 / 64 do not move**.
+
+### the teleport is ONE door, and there is only one caller
+
+`bodywork::place_vehicle` does the pose, the rotation and both velocities AND
+re-places every jointed part with the joint remade. `dispatch::escort_nudge` —
+which drags a lagging unit along its nav path — is the only hand-set of a chassis
+in the engine; the two that look like more are not (a traffic tier change
+DESPAWNS and respawns, and the root-motion writers and the seat follower move a
+CHARACTER). Measured on the dispatcher's own `Town` fixture with a DOORED
+ambulance, 240 drags of 0.20 m:
+
+| | measured |
+|---|---|
+| travelled | **47.80 m** |
+| chassis off its own route, worst | **0.0000 m** |
+| …and in `y` | **0.0000 m** |
+| the door from where it hangs, worst | **0.0001 m** |
+| the peak the hinge carried | **1.6 N·s** |
+
+Against the **1 705 metres** the wave recorded for this exact drag.
+
+### a hinge needed its own number, and finding it was the work
+
+The two break paths read impulses of two different KINDS and the wave compared
+both to `part_break_impulse_ns`:
+
+* the CRASH path is a share of the WHOLE CAR's blow — a 60 km/h shunt puts about
+  **9 000 N·s** through a door's load path, against a 4 500 N·s mount;
+* a JOINT carries only what the PART brings — a 22 kg door at 30 km/h can deliver
+  **183 N·s** and no more. Measured at 68 km/h it reached **515**, against **2**
+  in open air.
+
+Against one 4 500 the joint path never fires and an open door is indestructible
+by anything but the car it is on. `hinge_tear_ns` is `mass × HINGE_TEAR_MPS` —
+four metres a second of the part's own momentum — scaled by the row's own mount
+against the catalogue default, so a car tuned UNBREAKABLE is unbreakable on both
+paths and the two paths keep their own units.
+
+### the two sentences the wave carried, retired with arms
+
+**`a_shed_bumper_in_the_road_is_run_over`**: a cast over the shed panel stops
+**18.5 mm** above where the same cast six metres to the side reaches, and a car
+crossing it at walking pace rides **2.7 mm** higher than on clear road — one
+wheel of four on an 18.5 mm panel is at most 4.6 mm at the origin — and keeps
+going at **3.00 m/s**. At full throttle it reads **−1.3 mm**, because a car
+crosses a 70 mm panel in a fifth of a fixed step; that is a fact about the SAMPLE
+RATE and it is in the arm.
+
+**`an_open_door_is_torn_off_by_a_lamp_post`**: with a post, **515 N·s** through
+the hinge, **14 → 13** parts, the door SHED, the car down 19.7 → 11.1 m/s. The
+control — same car, same open door, no post — **2 N·s**, 14 → 14, still live.
+
+### the crash table does not move, and that is the point
+
+30 / 4 056 / 9 308 / 17 730 / 28 606 N·s at the five speeds, the same sheds, the
+same pops, the same pane. The LOAD PATH is unchanged and a bumper still has no
+hinge; what the joints add is what happens after. `island_gate` **28** with no
+re-bless — PIE == shipping did not move either.
+
+### eight mutations, all red, and one of them is a warning
+
+```
+J1  PART_MOTOR_STIFFNESS -> 0            a_door_opens_on_its_hinge...   RED
+J2  part_to_body never called            a_door_opens_on_its_hinge...   RED
+J3  part_to_body never called            the_shed_part_falls...         RED
+J4  part_to_body never called            a_shed_bumper_in_the_road...   RED
+J5  the break watch disabled             an_open_door_is_torn_off...    RED
+J6  .without_contacts() removed          an_open_door_is_torn_off...    RED
+J7  place_vehicle moves only the chassis a_teleported_rig_moves...      RED
+J8  report_incident never called         a_burning_car_brings...        RED
+```
+
+**J6 is the one to read twice.** With contacts back ON between a part and its own
+chassis, the door jams at **1.42°** — it cannot leave the hull it is drawn on —
+the car is immobilised at **0.0 m/s**, and the door sheds immediately *with no
+post at all*. The P29.6 depenetration defect, on demand.
+
+### and `inf island build` no longer reverts the hero
+
+`tools/demo/island-refresh.ps1` is the recipe build followed by the three imports
+in the order that makes them work, so a regeneration cannot silently put the
+161-joint wizard rig back over the MetaHuman. `tools/demo/README.md` carries the
+table of what a plain build costs (28 arms across four local-only gates) and why
+the order and the `--dest` matter.
+
+### audit: the joints could be measured and not SEEN, so a preview door opens them
+
+The shipped input map has no key for a car door — that is VEH3d's, and clause (i)
+said not to build it early. So the two sentences retired above could be *proven*
+in `veh3c_gate` and never appear in a frame of the running game, which is half of
+what a wave is judged on.
+
+`INF_PIE_TUNE_VEHICLE` grew its **one name that is not a tunable**: `doors_open=1`
+swings every hinged part of every chassis onto its motor and `=0` shuts them. It
+is a DIRECTIVE — filtered out of the name/value pairs before `VehicleClass::set`
+and `Vehicle::tune` ever see them, so it is never reported refused — and it
+reaches `RuntimeSim::open_vehicle_doors`, an ad-hoc door in the shape
+`audio_portal` already had, for the same reason: the rule needs two DISJOINT
+FIELDS of that struct and a caller holding `&mut RuntimeSim` cannot borrow
+`world_mut()` and `bridge3d_mut()` at once through the accessors.
+
+**Nothing about the door is faked.** The hinge, its limit, the impulse the joint
+carries and the tear are the shipping path; the directive only decides that a
+door is open. `demo.ps1` section 6z3 gained frame (b2) — a manoeuvre rather than
+a trigger, because there is no column for "a wheel is on a bumper": reverse off
+what was just shed, come back over it at PART throttle, photograph it — and frame
+(b3), triggered on `parts_shed` rising once the doors are on their hinges. A
+session that did not ask for `doors_open` says so in the log and cites the arm,
+rather than photographing a shut car and calling it a hinge.

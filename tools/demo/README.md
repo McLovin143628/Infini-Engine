@@ -173,6 +173,49 @@ the reason is in `inf_studio_lib::debuggable_context`: WebView2 reads that
 variable only when the embedder passes no arguments of its own, and Tauri always
 passes some.
 
+## `-TuneVehicle "doors_open=1"` — the one name that is not a tunable
+
+`-TuneVehicle` is a `;`-separated `name=value` list that reaches
+`VehicleClass::set` and `Vehicle::tune`, the same by-name doors an authored
+catalogue row uses. **`doors_open` is the exception.** It is a DIRECTIVE: it is
+filtered out of the pairs before either tuner sees them — so it is never reported
+refused — and it reaches `RuntimeSim::open_vehicle_doors`, which swings every
+hinged part of every chassis onto its motor (`=0` shuts them again).
+
+It exists because **the shipped input map has no key for a car door.** An input
+path to one is wave VEH3d's. Without this directive the joints wave VEH3c built —
+a door past `LATCH_POP_FRAC` of its mount is a rapier body on a real revolute
+with a motor and its contacts against its own chassis off — could be *measured*
+and never *seen*. Nothing else about the door is faked: the hinge, its limit, the
+impulse the joint carries and the tear are the shipping path.
+
+Two frames in section 6z3 come from it, and the second needs it:
+
+```
+105-veh3c-bumper-run-over.png   a car back over what it just shed. NOT triggered
+                                — there is no column for "a wheel is on a
+                                bumper" — so it is a manoeuvre (reverse, then
+                                return at PART throttle) and a photograph.
+                                `veh3c_gate::a_shed_bumper_in_the_road_is_run_over`
+                                is the measurement: a cast over the panel stops
+                                18.5 mm short of the road beside it and a car
+                                crossing at walking pace rides 2.7 mm higher and
+                                keeps going at 3.00 m/s. At FULL throttle it
+                                reads −1.3 mm, because a car crosses a 70 mm
+                                panel in a fifth of a fixed step — which is a
+                                fact about the sample rate, not about the panel.
+106-veh3c-door-torn-off.png     triggered on `parts_shed` rising after the doors
+                                are on their hinges. A hinge carries only what
+                                the PART brings (a 22 kg door at 30 km/h delivers
+                                183 N·s), so the door has to MEET something;
+                                `an_open_door_is_torn_off_by_a_lamp_post`
+                                measures 515 N·s and 14 → 13 parts against 2 N·s
+                                and 14 → 14 in open air.
+```
+
+A session that did not ask for `doors_open` says so in the log and cites the arm,
+rather than photographing a shut car and calling it a hinge.
+
 ## Before you run it
 
 The driver refuses to build while an `inf-studio` or `inf-player` is running —
