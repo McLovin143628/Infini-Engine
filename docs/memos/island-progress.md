@@ -40048,3 +40048,138 @@ content-derived — so the runtime door mints the same ones the level already ho
 and `spawn_rig_at` skips a guid the world has. Both levels re-save
 **byte-identical** to what is committed, twice over, and
 `committed_level_sidecars` is the standing arm that says so for all twenty-four.
+
+### the instrument, four times over — and two frames that had never fired
+
+The wave's three unfired bodywork frames were read as facts about the world. All
+three were the loop, and so was a fourth nobody had noticed.
+
+1. **The shot-up-car leg told a SEATED hero to fire.** It runs straight after the
+   bodywork leg, which leaves the hero DRIVING, and a seated character does not
+   fire. Its own log said *"the hero never fired: it was still seated"* and the
+   ledger wrote it down as a fact; the recording behind it has **23 rows with
+   `rounds > 0`**, all from the weapon legs half an hour earlier. It taps `E`
+   first now, gets out, empties a magazine into the car it stepped out of, sweeps
+   DOWN the wheel arch in four pitches, and **gets back in** — because the five
+   bodywork columns read the car the hero is SITTING IN, so a tyre shot out from
+   the pavement is invisible in that row until it is behind the wheel again.
+2. **`INF_PIE_TUNE_VEHICLE` fires ONCE.** An audit session asking for
+   `panel_health_j=2000` — an 8 000 J hull against the default 36 000 — on
+   twenty-three chassis drove nine hundred rows and finished at **77.9 % of
+   hull**, which is 7 956 J of a **36 000 J** hull, i.e. the DEFAULT, within a
+   tenth of a percent of the untuned session before it. Every island chassis
+   exists on the first sync, and a parked or traffic car crosses a tier boundary
+   by being **despawned and respawned through `rig_nodes`**, which re-mints its
+   authored `VehicleClass`. The resident fleet moves between **16 and 32** over
+   one session; the hero boards at t ≈ 1 050 s. It is a cadence now
+   (`TUNE_PERIOD_S` = 20 s), idempotent and preview-only.
+3. **The loop has never pressed `reload`.** Thirty-odd rounds go through a
+   seventeen-round Glock in the weapon legs and nothing in two thousand four
+   hundred lines has ever pressed `R`.
+4. **And the column the leg triggers on cannot see a shot.** `rounds` is rounds
+   IN FLIGHT. With the hero on its feet, aiming, holding the trigger for twelve
+   seconds, `rounds` read **0 in all forty-eight rows** — and `casings` went
+   **0 → 1 → 2 → 3**, with brass still on the road twenty seconds later. **The
+   gun was firing the whole time.** A pistol round covers three metres in eight
+   milliseconds and the log samples every two hundred and fifty, so a sample
+   catches one about **3 %** of the time. The trigger is the brass now.
+
+With (1) and (2) in, the session's car went from **hull 77.8 %, 1 shed, 0 panes**
+to **hull 0.9 %, 6 shed, 1 pane** — and `101-veh3c-glass.png` (col 52
+`panes_broken`) and `104a-veh3c-out-of-the-car.png` (col 5 leaving `Driving`)
+are two frames the wave could not take. The FLAT still has no round in a tyre and
+the FIRE came **one shunt short** at 0.9 % inside its own thirty-second window,
+which is sixty now. A third session, carrying the casings trigger, never boarded
+at all: the hero was **`Ragdoll` for 2 644 of its 4 000-odd rows** and the
+boarding hunt taps `E` at wherever the previous leg left it — the VEH3b audit's
+carried boarding item, met from a third side.
+
+**The showcase project was regenerated** on this tree
+(`inf island build --recipe samples/island/island.toml`): its island is
+**200 667 B with eight `door_fl`** against the **146 263 B, zero** copy that was
+four days stale. The real editor, relaunched on the final tree with `--open` on
+the committed island, reports **772 entities** and `car.mjs` exits **0** on a
+chassis with **18 drawn parts** — `lower, cabin, bonnet, boot, door_fl, door_fr,
+door_rl, door_rr, bumper_front, bumper_rear, glass_windscreen, glass_rear,
+glass_side_l, glass_side_r` and four wheels. Closed; `still running: none`.
+
+### `inf island build` reverts the island's HERO, and the audit found out by doing it
+
+**THE REGENERATION IS SAFE FOR THE TERRAIN AND DESTRUCTIVE TO THE CHARACTER.**
+`island.toml`'s `content` list copies `../starter-character/Starter.inf_skel`,
+its body, its skin and its three clips into the project by NAME — and the
+island's hero is **not** the committed starter. It is a MetaHuman rebound at
+those GUIDs by `inf-import --rebind-character`, local-only content this
+repository does not carry and CI never sees. So the build put the **161-joint
+wizard rig and its five-track clips** back over the **342-joint MetaHuman body
+and its 150-track ALS clips**, and reddened **28 arms across four gates** that
+have nothing to do with this wave:
+
+| gate | after the regeneration | restored |
+|---|---|---|
+| `char1a3_gate` | 11 / **11 failed** | **14 / 0** |
+| `char1b_gate` | 21 / **11 failed** | **32 / 0** |
+| `cov1_gate` | 13 / **3 failed** | **16 / 0** |
+| `outfit1_gate` | 14 / **3 failed** | **17 / 0** |
+
+The first symptom was *"hero's rig has 161 joints … right: 342"*, which reads
+like a character regression and is a **file copy**.
+
+**The restore is three imports IN ORDER**, all run from `Infinity_Engine/`
+(the importer refuses a destination inside the checkout):
+
+1. `inf-import --manifest ue-out/char1a3/manifest.json --into island-build/project
+   --rebind-character …SKM_Manny_SKM_Manny --rebind-character-f …SKM_Quinn_SKM_Quinn`
+   — the mannequin **and its 164 ALS clips** at the starter GUIDs;
+2. the same with `ue-out/outfit1/manifest.json`,
+   `--rebind-character INF_Combined_INF_Dominic_FullBody_INF_Dominic_FullBody`
+   (and `-f` Vivian), `--only Combined --character-lods 3` — the body swap, whose
+   `retarget_committed_clips` re-retargets by NAME: **150 of 161 tracks kept, 11
+   dropped**, exactly CHAR1a.3's number;
+3. the same manifest with the four `--wearable` rows and `--only Clothing --only
+   Grooms` — the outfits and the hair.
+
+**The order is the whole trick**, for the reason the CHAR1a.3 entry above already
+gives: a clip's coupling to a skeleton is POSITIONAL. Run step 2 alone — which
+is what this audit tried first — and the retarget runs on the *wizard's
+five-track* clips and keeps **four**.
+
+**And a re-import needs `--dest`**: the original wrote its clips under
+`Content/UE/Mannequins/`, a re-run with the default `--dest UE` writes a second
+copy under `Content/UE/`, and `char1b_gate`'s resolver returns `None` on an
+AMBIGUOUS name — **74 of 74 ALS sequences came back "unbound"** with every one of
+them on disk twice. 252 duplicate clip files, 56 duplicate per-bone clips and 73
+byte-identical material copies were removed.
+
+**What a future wave owes this**: either run the three imports after every island
+build, or teach the recipe's copy step to leave a GUID alone when what is already
+there was written by the importer.
+
+### and the packager gate caught the AUDIT
+
+`no_string_literal_in_the_workspace_carries_an_eaten_continuation` went red on
+`crates/inf-ecs/src/bodywork.rs:409` — *"a run of 14 spaces inside a literal"* —
+because the `debug_assert_eq!` message of the O(1) `is_quiet` was written through
+a Python heredoc and the heredoc ate the backslash. The P22 law, third catch in
+this repository and the first on an auditor rather than on a wave. It is recorded
+rather than quietly fixed: a report that claims "0 continuations added" when one
+was is the same defect as the Ring-0 prose above.
+
+### audit: the closing numbers
+
+| | |
+|---|---|
+| the audit | **`ee9fe8c3..e441026a`** plus this block's own, **10 commits**, unpushed, tree clean |
+| **battery (`battery3.sh -j 3`), LAST** | **AGGREGATE over 397 binaries: 7630 passed, 0 failed, 23 ignored**; FAILING BINARIES **(none)**; warnings **0**; exit **0** |
+| clippy `--workspace --all-targets` with `-D warnings`, LAST | **exit 0** |
+| rustdoc COLD (`target/doc` removed first) | **425** of a 450 ceiling — the wave's own number and the VEH3b audit's, so ~300 lines of new doc added none |
+| `cargo fmt` per member | **49 packages, 0 unformatted**; `git diff --exit-code` clean |
+| the wasm leg | `cargo check --target wasm32-unknown-unknown -p inf-player` with `RUSTFLAGS=-D warnings` — **exit 0** |
+| CRLF | **0** over all 26 touched text blobs |
+| schema / payload / levels / goldens | **v28 / 13 / 24 / 64**, all unmoved; nothing re-cooked by this audit |
+| `Cargo.lock` / `deny.toml` / `Cargo.toml` / new deps | untouched / untouched / untouched / **none** |
+| new collider shape / RNG / clock / non-portable trig | **none of any of them** in the whole range |
+| the determinism gates | `island_gate` **28**, `partitioned_world` **12**, `level_content` **7**, `committed_level_sidecars` **3**, `fixed_step_mirror` **15**, `projector_mirror` **56** with `SECTIONS` at 18 and its order pinned |
+| the parked-car cost | **×1.097 release and FAILING** as landed → **×0.978–×1.030** over six release runs |
+| the mutation battery | **23 mutations**, every one RED; three of them were GREEN first and are findings 1, 2 and 6 |
+| the real editor on the final tree | `--open` on the committed island, CDP up in 1 s, **772 entities**, `car.mjs` **exit 0** on a chassis with **18 drawn parts**; closed, `still running: none` |
