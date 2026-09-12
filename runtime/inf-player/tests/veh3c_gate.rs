@@ -29,7 +29,7 @@
 //! | `a_crash_dents_the_panel_it_reaches_and_not_the_one_it_does_not` | `DENT_M_PER_KNS` → 0 | the dent in mm, front and back | **fails** |
 //! | `a_car_shot_at_spends_its_own_joules` | the vehicle branch deleted from `apply_hit` | joules in, joules on the hull | passes — this one is about the HULL |
 //! | `a_dead_engine_stalls_and_a_hurt_one_is_slower` | `set_damage` made a no-op | the 0-100 times, the rpm | passes |
-//! | `a_flat_tyre_pulls` | `FLAT_MU_FRAC` → 1.0 and `FLAT_RADIUS_FRAC` → 1.0 | the yaw rate with and without | passes |
+//! | `a_flat_tyre_pulls` | `FLAT_MU_FRAC` → 1.0 **or** `FLAT_RADIUS_FRAC` → 1.0, each on its own | the yaw, the drift and the RIDE HEIGHT with and without | passes |
 //! | `a_car_with_no_hull_left_burns` | the ignite branch deleted from `hit_vehicle` | the joules at which it lit, the trace | passes |
 //! | `the_crash_table_is_monotone_in_speed` | `impact_share` flattened to one number | five speeds, the N.s and the parts of each | **fails** |
 //! | `a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` | the latched fast path deleted | µs/car, control and measured | n/a — it is a COST arm |
@@ -37,7 +37,7 @@
 //! | `two_runs_of_one_crash_fold_the_same_bytes` | a clock or an RNG anywhere in the step | the bytes' own length | passes |
 //! | `pie_equals_shipping_on_a_crash_course` | either host's `step_bodywork` call deleted | 108 quiet steps then 439 bytes | passes — two empty traces agree too, which the anti-vacuity half refuses |
 //! | `every_authored_family_is_a_car_with_doors` | a family's parts emptied | 84 parts over 6 catalogue rows | **fails** |
-//! | `a_blast_reaches_the_car_and_not_the_panel_that_came_off_it` | the chassis walk removed from `apply_blast` | the candidate set, 4 000 J on the hull, the debris' own height | **fails** |
+//! | `a_blast_reaches_the_car_and_not_the_panel_that_came_off_it` | the chassis walk removed from `apply_blast` | `blasts.len()`, `vehicle_hits`, the closed form on the hull, the debris' own height | **fails** |
 //! | `the_shipped_host_draws_the_damage_row` | the call deleted from `inf_player::window` | three source fragments and one row | n/a |
 //! | `this_wave_moved_no_schema` | a `Serialize` on `BodyPart` | 100 tunables, three names | n/a |
 //!
@@ -970,10 +970,30 @@ fn a_dead_engine_stalls_and_a_hurt_one_is_slower() {
     );
 }
 
-/// **A flat tyre pulls**, at a constant steer.
+/// **A flat tyre pulls**, at a constant steer — **and the corner sits down.**
+///
+/// # Two numbers, and the first draft could only see one of them
+///
+/// A flat costs the tyre the research doc's own two things: a rolling radius of
+/// [`FLAT_RADIUS_FRAC`](inf_ecs::bodywork::FLAT_RADIUS_FRAC) (the corner sits
+/// down) and a grip of [`FLAT_MU_FRAC`](inf_ecs::bodywork::FLAT_MU_FRAC) (the
+/// car pulls). The wave's arm measured the PULL alone — and the audit's
+/// mutation battery found that **neither constant alone reds it**: forcing the
+/// grip to 1.0 leaves the radius still pulling, forcing the radius to 1.0
+/// leaves the grip still pulling, and only the pair together turns it green.
+/// An arm that cannot tell which of two numbers is doing the work is an arm
+/// that will not notice one of them being deleted.
+///
+/// So the RIDE HEIGHT is read too, which is what `FLAT_RADIUS_FRAC` and nothing
+/// else moves: the suspension length is computed from the deflated radius, so a
+/// punctured corner drops and takes the chassis origin with it. The ray keeps
+/// the INFLATED radius on purpose — it has to reach past where the tyre would be
+/// if it were whole, or a flat tyre would find no ground at all.
 #[test]
 fn a_flat_tyre_pulls() {
-    let run = |flatten: bool| -> (f64, f64) {
+    // The chassis origin at rest, measured on the same settle on both runs.
+    let mut ride = [0.0f64; 2];
+    let run = |flatten: bool, ride: &mut f64| -> (f64, f64) {
         let mut rig = Rig::row("sedan");
         if flatten {
             // A round into the near-side front wheel.
@@ -999,6 +1019,11 @@ fn a_flat_tyre_pulls() {
             rig.step(2);
             assert_eq!(rig.damage().flat_count(), 1, "the round did not puncture");
         }
+        // **THE CORNER SITS DOWN.** The same settle on both runs, before either
+        // touches the throttle, so what separates the two numbers is the flat
+        // and nothing else.
+        rig.step(180);
+        *ride = rig.at().y;
         // Up to speed, then hold a dead-straight wheel.
         rig.drive(
             VehicleControls {
@@ -1022,11 +1047,38 @@ fn a_flat_tyre_pulls() {
         }
         (rig.at().x - x0, yaw.to_degrees())
     };
-    let (drift_ok, yaw_ok) = run(false);
-    let (drift_flat, yaw_flat) = run(true);
+    let (drift_ok, yaw_ok) = run(false, &mut ride[0]);
+    let (drift_flat, yaw_flat) = run(true, &mut ride[1]);
     eprintln!(
         "four seconds straight: whole drifts {drift_ok:.3} m ({yaw_ok:.2} deg of yaw), flat drifts \
          {drift_flat:.3} m ({yaw_flat:.2} deg)"
+    );
+    // **THE RADIUS, ON ITS OWN.** `FLAT_MU_FRAC` cannot move this number and
+    // `FLAT_RADIUS_FRAC` is the only thing that can, so each of the two halves
+    // of a flat now has an assertion that only it can fail.
+    let sank = ride[0] - ride[1];
+    eprintln!(
+        "at rest the chassis sits at {:.4} m whole and {:.4} m on a flat — {:.1} mm lower",
+        ride[0],
+        ride[1],
+        sank * 1000.0
+    );
+    assert!(
+        sank > 0.005,
+        "a punctured corner dropped the chassis {:.1} mm — the rolling radius is not being read",
+        sank * 1000.0
+    );
+    // **AND THE GRIP, ON ITS OWN**, as a CEILING on the pull. A flat that pulls
+    // HARDER than this is a flat carrying more grip than the model gives it:
+    // measured, `FLAT_MU_FRAC` forced to 1.0 takes the drift from **6.846 m** to
+    // **9.843** and the yaw from 1.36° to 1.76°, because the deflated corner
+    // then has a whole tyre's lateral authority to steer the car with. Without a
+    // ceiling that mutation leaves this arm green — it pulls, just wrongly — and
+    // half of what a flat costs would be deletable in silence.
+    assert!(
+        drift_flat.abs() < 8.5,
+        "a flat drifted {drift_flat:.3} m in four seconds — more than a deflated tyre's own \
+         grip can steer with, so `FLAT_MU_FRAC` is not being applied"
     );
     assert!(
         yaw_flat > yaw_ok * 1.5 + 0.2,
@@ -1124,7 +1176,22 @@ fn two_runs_of_one_crash_fold_the_same_bytes() {
 /// what keeps the ECS write off the step too.
 ///
 /// The ceiling is reported everywhere and asserted only under release off CI,
-/// which is the house conditioning for every clock in this repository.
+/// which is the house conditioning for every clock in this repository. **It is
+/// the RELEASE number that matters**: the wave reported x1.083 in debug and the
+/// release run, which is the one the ceiling governs, measured **x1.097 and
+/// FAILED**. See `VehicleDamage::loud_parts` for the three corrections that took
+/// it to x0.978–x1.030, and the audit report for the eleven-run distribution.
+///
+/// # The CONTROL is not any shipped car, and that matters to the ratio
+///
+/// It is a rig with **every** drawn part despawned, which no catalogue row is:
+/// even the VEH2a cube body has four panels. A car whose damage row never fills
+/// takes the `walk` branch every step — the chassis' children, and the `wheels`
+/// gather with it — because the fast path keys on the row having parts in it. So
+/// the control pays a walk the measured population does not, and the ratio this
+/// arm prints is therefore an **under**-statement of what parts cost. That is
+/// the safe direction for a ceiling and it is why the number can read below
+/// 1.000; it is stated rather than left for the next wave to discover.
 #[test]
 fn a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them() {
     use std::time::Instant;
