@@ -2915,10 +2915,31 @@ if (-not $veh_driving) {
     #     `veh3c_gate::a_car_shot_at_spends_its_own_joules` (10 000 J into the
     #     flank leaves 72 % of the hull and 100 % of the engine; 10 000 into the
     #     nose kills the engine).
-    Say "VEH3c: emptying a magazine into a parked car"
+    # **THE HERO HAS TO GET OUT FIRST.** Wave VEH3c's leg pressed `1`, aimed and
+    # held the trigger with the hero still in the driver's seat, read "the hero
+    # never fired" out of its own log and wrote it down as a fact about the
+    # world. It is a fact about the LEG: a seated character does not fire, and
+    # the recording it wrote that sentence from has **23 rows with `rounds > 0`
+    # in it**, every one of them from the weapon legs half an hour earlier. `E`
+    # is the one key that boards and un-boards, and this is the audit's
+    # correction (VEH3c audit, priority (e')).
+    Say "VEH3c: out of the car, to shoot at it"
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # E -- out
+    $veh_out = @(Wait-ForHero -Csv $heroCsv -What "the hero back on its feet (VEH3c)" -TimeoutS 8.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ($c[5] -ne "Driving") -and ($c[5] -ne "-") } `
+        -Out (Join-Path $OutDir "104a-veh3c-out-of-the-car.png"))[-1]
+    if (-not $veh_out) {
+        Say "VEH3c: the hero never left the car -- frames (f) and (d) need it on its feet"
+    }
+    Say "VEH3c: emptying a magazine into the car it just got out of"
     [InfInput]::Down(0x02)       # 1 -- the sidearm
     Start-Sleep -Milliseconds 250
     [InfInput]::Up(0x02)
+    # Turn to face the car it stepped out of — a hero leaves by the near-side
+    # door, so the car is to its RIGHT — and pitch DOWN, because what this leg
+    # wants after the bodywork is a TYRE: a puncture is a round inside a wheel's
+    # own radius and nothing else in this engine makes one.
+    for ($i = 0; $i -lt 30; $i++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 16 }
     [InfInput]::RightDown()      # aim
     Start-Sleep -Milliseconds 400
     [InfInput]::LeftDown()
@@ -2927,9 +2948,37 @@ if (-not $veh_driving) {
         -Out (Join-Path $OutDir "104-veh3c-shot-car.png"))[-1]
     Start-Sleep -Milliseconds 1200
     [InfInput]::LeftUp()
-    [InfInput]::RightUp()
     if (-not $veh_shoot) {
         Say "VEH3c: the hero never fired -- frame (f) is not in this session"
+    }
+    # …and now DOWN at the wheel arch, in four steps, firing at each: a tyre is
+    # 0.35 m of a 1.4 m car and the pitch that reaches it from three metres away
+    # is a narrow band, so this sweeps it rather than guessing one angle.
+    Say "VEH3c: down at the wheel arch, for a puncture"
+    for ($p = 0; $p -lt 4; $p++) {
+        for ($i = 0; $i -lt 5; $i++) { [InfInput]::Look(0, 40); Start-Sleep -Milliseconds 16 }
+        [InfInput]::LeftDown()
+        Start-Sleep -Milliseconds 900
+        [InfInput]::LeftUp()
+        Start-Sleep -Milliseconds 200
+    }
+    [InfInput]::RightUp()
+    # **AND BACK IN**, because the five columns read the car the hero is SITTING
+    # IN. A tyre shot out from the pavement is flat in the WORLD and invisible in
+    # this row until the hero is behind its wheel again — which is also the only
+    # way to photograph what a flat DOES, since what a flat does is pull.
+    Say "VEH3c: back in, to drive on whatever the magazine left"
+    for ($i = 0; $i -lt 6; $i++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 90; [InfInput]::Up(0x12)   # E
+        Start-Sleep -Milliseconds 350
+    }
+    [InfInput]::Down(0x11)
+    $veh_flat2 = @(Wait-ForHero -Csv $heroCsv -What "a flat tyre, shot out and then driven on (VEH3c)" -TimeoutS 14.0 `
+        -Predicate { param($c) ($c.Count -gt 53) -and ($c[5] -eq "Driving") -and ([int]$c[51] -gt 0) } `
+        -Out (Join-Path $OutDir "102-veh3c-flat.png"))[-1]
+    [InfInput]::Up(0x11)
+    if (-not $veh_flat2) {
+        Say "VEH3c: no puncture -- the sweep at the wheel arch put no round inside FLAT_HIT_RADII of a wheel, or the hero did not get back in; veh3c_gate::a_flat_tyre_pulls measures the pull instead (1.36 deg of yaw and 6.836 m of drift over four seconds, against 0.00 and 0.000 whole)"
     }
 
     # WHAT THE FIVE COLUMNS ACTUALLY SAID, whatever fired: the last driving
