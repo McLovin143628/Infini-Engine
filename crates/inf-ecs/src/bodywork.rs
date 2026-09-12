@@ -406,7 +406,7 @@ impl VehicleDamage {
         debug_assert_eq!(
             self.loud_parts as usize,
             self.parts.values().filter(|p| !p.is_quiet()).count(),
-            "VehicleDamage::loud_parts is stale — a part was written without a              refresh_parts() after it"
+            "VehicleDamage::loud_parts is stale — a part was written without a refresh_parts() after it"
         );
         self.hull_j == 0.0
             && self.engine_damage == 0.0
