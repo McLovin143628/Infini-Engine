@@ -176,6 +176,23 @@ struct CarFacts {
     /// 4 500 N.s instead of the row's own, and a car tuned UNBREAKABLE shed its
     /// bumper anyway.
     limits: DamageLimits,
+    /// **Whether this car's row was quiet at the TOP of the step** --
+    /// `VehicleDamage::is_quiet`, read once.
+    ///
+    /// Read ONCE, and that is a measurement rather than a tidy-up. `is_quiet`
+    /// walks the row's whole `BTreeMap` of parts, and the first cut asked it
+    /// twice a car a step -- once to decide whether to walk the children and
+    /// once to decide whether to run the hinge pass. On a thousand parked
+    /// saloons that is twenty-eight thousand B-tree node visits a step for an
+    /// answer that cannot change between the two questions, and it cost
+    /// **x1.097 against a x1.05 ceiling in release** -- the configuration the
+    /// ceiling is actually asserted in. Asked once and carried here it is
+    /// **x1.021**.
+    ///
+    /// A car that goes loud DURING the step is picked up by `loud_now`, not by
+    /// this: a crash is the one thing that can falsify this flag after it is
+    /// read, and the crash pass knows exactly which cars it touched.
+    quiet: bool,
     parts: Vec<PartFacts>,
     wheels: Vec<(Vec3d, f64)>,
 }
@@ -225,7 +242,11 @@ pub fn step_bodywork(
                 Some((true, quiet)) => !quiet,
                 _ => true,
             };
-            car_facts(world, bridge, *g, walk)
+            let quiet = matches!(known, Some((_, true)));
+            car_facts(world, bridge, *g, walk).map(|mut c| {
+                c.quiet = quiet;
+                c
+            })
         })
         .collect();
     report.cars = cars.len();
@@ -258,6 +279,12 @@ pub fn step_bodywork(
     // ── 3. the crash ────────────────────────────────────────────────────────
     let mut ignite: Vec<(Uuid, DVec3)> = Vec::new();
     let mut shatter: Vec<(Uuid, Uuid)> = Vec::new();
+    // **The cars this step made loud.** `CarFacts::quiet` is read at the top of
+    // the step and a crash is the one thing that can falsify it before the hinge
+    // pass asks -- so the crash pass says so, rather than the hinge pass asking
+    // the row a second time. Empty on every level where nobody hit anything,
+    // which is the point.
+    let mut loud_now: BTreeSet<Uuid> = BTreeSet::new();
     for car in &cars {
         let Some(row) = damage_mut(world).rows.get_mut(&car.chassis) else {
             continue;
@@ -331,6 +358,7 @@ pub fn step_bodywork(
             continue;
         }
         report.crashes += 1;
+        loud_now.insert(car.chassis);
         let limits = car.limits;
         // The blow arrives along the direction the car was travelling, which is
         // the OPPOSITE of the velocity change a wall makes — and in the chassis
@@ -383,6 +411,8 @@ pub fn step_bodywork(
                 report.popped += 1;
             }
         }
+        // The crash pass has just written every part it reached.
+        row.refresh_parts();
         if row.hull_j >= limits.hull_capacity_j() && row.fire_step == 0 {
             row.fire_step = step;
             ignite.push((car.chassis, car.pos));
@@ -395,11 +425,10 @@ pub fn step_bodywork(
     // of the cheap path: a latched hinge at zero with a target of zero has
     // nothing to integrate and nothing to write.
     for car in &cars {
-        let quiet = damage_of(world)
-            .and_then(|r| r.rows.get(&car.chassis))
-            .map(|r| r.is_quiet())
-            .unwrap_or(true);
-        if quiet {
+        // Read once at the top of the step and corrected by the crash pass --
+        // never asked of the row a second time. See `CarFacts::quiet` for the
+        // x1.097-against-a-x1.05-ceiling measurement that decided it.
+        if car.quiet && !loud_now.contains(&car.chassis) {
             continue;
         }
         let work: Vec<(Uuid, BodyPartKind, PartState)> = damage_of(world)
@@ -428,13 +457,15 @@ pub fn step_bodywork(
                     dt,
                 )
             };
-            if let Some(s) = damage_mut(world)
-                .rows
-                .get_mut(&car.chassis)
-                .and_then(|r| r.parts.get_mut(&guid))
-            {
-                s.angle_deg = angle;
-                s.vel_deg_s = vel;
+            if let Some(r) = damage_mut(world).rows.get_mut(&car.chassis) {
+                if let Some(s) = r.parts.get_mut(&guid) {
+                    s.angle_deg = angle;
+                    s.vel_deg_s = vel;
+                }
+                // A hinge that has come home makes its part quiet again, which
+                // is what lets a car whose door was opened and shut go back to
+                // costing nothing.
+                r.refresh_parts();
             }
             if state.dent_m == 0.0 && angle == 0.0 && state.angle_deg == 0.0 {
                 continue;
@@ -481,6 +512,14 @@ pub fn step_bodywork(
     // facade door those need — `joint_impulse` and `break_over_threshold`, with
     // their own arms in `joints3d.rs` — is built and is not called from here.
     for car in &cars {
+        // **A quiet car has shed nothing**, so it does not pay for the question.
+        // Without this the gather ran for every car every step -- a resource
+        // lookup, a fourteen-node B-tree walk and a `Vec` allocation apiece --
+        // to answer `Shed` fourteen times for a thousand parked saloons. Same
+        // flag, same correction, as the hinge pass above.
+        if car.quiet && !loud_now.contains(&car.chassis) {
+            continue;
+        }
         let detaching: Vec<(Uuid, BodyPartKind, PartState)> = damage_of(world)
             .and_then(|r| r.rows.get(&car.chassis))
             .map(|r| {
@@ -633,6 +672,9 @@ fn car_facts(
         rot,
         limits: DamageLimits::of(world, chassis),
         touching,
+        // Filled in by the caller, which is the only place that has already
+        // asked the row the question -- see `CarFacts::quiet`.
+        quiet: false,
         parts,
         wheels,
     })
@@ -812,17 +854,17 @@ fn step_debris(world: &mut EcsWorld, dt: f64) -> usize {
 /// **Shatter one pane**: hide it, and throw a handful of shards.
 fn shatter_pane(world: &mut EcsWorld, chassis: Uuid, pane: Uuid, step: u64) -> bool {
     {
-        let Some(s) = damage_mut(world)
-            .rows
-            .get_mut(&chassis)
-            .and_then(|r| r.parts.get_mut(&pane))
-        else {
+        let Some(r) = damage_mut(world).rows.get_mut(&chassis) else {
+            return false;
+        };
+        let Some(s) = r.parts.get_mut(&pane) else {
             return false;
         };
         if s.latch == PartLatch::Gone {
             return false;
         }
         s.latch = PartLatch::Gone;
+        r.refresh_parts();
     }
     let Some(entity) = world.entity_of(pane) else {
         return false;
@@ -1044,7 +1086,9 @@ pub fn hit_vehicle(
             let row = damage_mut(world).rows.entry(chassis).or_default();
             let slot = row.parts.entry(guid).or_default();
             slot.damage_j += energy_j;
-            slot.damage_j >= limits.glass_health_j && slot.latch != PartLatch::Gone
+            let broke = slot.damage_j >= limits.glass_health_j && slot.latch != PartLatch::Gone;
+            row.refresh_parts();
+            broke
         };
         if broke && shatter_pane(world, chassis, guid, step) {
             out.pane = Some(guid);
@@ -1119,12 +1163,11 @@ pub fn set_part_open(world: &mut EcsWorld, chassis: Uuid, part: Uuid, open: bool
     let Some(hinge) = kind.hinge() else {
         return false;
     };
-    if let Some(s) = damage_mut(world)
-        .rows
-        .get_mut(&chassis)
-        .and_then(|r| r.parts.get_mut(&part))
-    {
-        s.target_deg = if open { hinge.open_deg } else { 0.0 };
+    if let Some(r) = damage_mut(world).rows.get_mut(&chassis) {
+        if let Some(s) = r.parts.get_mut(&part) {
+            s.target_deg = if open { hinge.open_deg } else { 0.0 };
+        }
+        r.refresh_parts();
     }
     true
 }

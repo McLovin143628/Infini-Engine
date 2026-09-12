@@ -343,16 +343,64 @@ pub struct VehicleDamage {
     /// start as a 0 m/s crash would be an impulse of exactly zero — harmless —
     /// while treating a car SPAWNED at speed as one would not.
     pub seen: bool,
+    /// **How many of [`parts`](Self::parts) are NOT quiet** — a maintained
+    /// count, so [`is_quiet`](Self::is_quiet) is O(1) rather than a walk over
+    /// the whole map.
+    ///
+    /// # Why a count and not a walk
+    ///
+    /// `is_quiet` is the hot question of the bodywork step: it decides whether a
+    /// car pays for a child walk, a hinge pass and a shed gather. Asked of a
+    /// `BTreeMap` of fourteen parts, a thousand parked saloons walked
+    /// twenty-eight thousand B-tree nodes a step to be told nothing had
+    /// happened — and the parked-car arm measured **x1.097 against its x1.05
+    /// ceiling in RELEASE**, which is the only configuration that ceiling is
+    /// asserted in. (The wave reported x1.083 in debug and never ran the
+    /// release number the ceiling governs.) Hoisting the second of the two
+    /// questions took it to x1.041 and it still crossed the ceiling on two runs
+    /// in eleven; this count is what takes it under for good.
+    ///
+    /// # It cannot go stale unnoticed
+    ///
+    /// Refreshed by [`refresh_parts`](Self::refresh_parts) after every burst of
+    /// part writes, and `is_quiet` carries a `debug_assert_eq!` against the full
+    /// walk — so every gate in this repository, all of which run in debug,
+    /// falsifies a count somebody forgot to refresh. In release the assert is
+    /// gone and the read is a `u32` compare.
+    ///
+    /// **NOT FOLDED and NOT PERSISTED**: it is a derivative of `parts`, which is
+    /// folded part by part, and `VehicleDamage` lives on a bevy resource.
+    pub loud_parts: u32,
 }
 
 impl VehicleDamage {
     /// **Nothing has happened to this car.**
+    ///
+    /// O(1): the parts' half is [`loud_parts`](Self::loud_parts), checked
+    /// against the full walk by a `debug_assert` so a stale count reds every
+    /// gate in the repository. See that field for the measurement.
     pub fn is_quiet(&self) -> bool {
+        debug_assert_eq!(
+            self.loud_parts as usize,
+            self.parts.values().filter(|p| !p.is_quiet()).count(),
+            "VehicleDamage::loud_parts is stale — a part was written without a              refresh_parts() after it"
+        );
         self.hull_j == 0.0
             && self.engine_damage == 0.0
             && self.flats == 0
             && self.fire_step == 0
-            && self.parts.values().all(PartState::is_quiet)
+            && self.loud_parts == 0
+    }
+
+    /// **Re-count the parts that are not quiet.** Call after any burst of writes
+    /// to [`parts`](Self::parts) — see [`loud_parts`](Self::loud_parts).
+    ///
+    /// O(parts), and it runs on the cold path only: a part is written by a
+    /// crash, a round, a shatter, a hinge that is moving or an author opening a
+    /// door, and every one of those is a car that has already stopped being
+    /// quiet.
+    pub fn refresh_parts(&mut self) {
+        self.loud_parts = self.parts.values().filter(|p| !p.is_quiet()).count() as u32;
     }
 
     /// The runtime scale on `max_engine_force_n`, `[0, 1]`.
@@ -868,6 +916,7 @@ mod tests {
             let row = res.rows.get_mut(&chassis).unwrap();
             row.parts.get_mut(&part).unwrap().latch = PartLatch::Shed;
             row.parts.get_mut(&part).unwrap().shed_step = 12;
+            row.refresh_parts();
         }
         let bytes = damage_state_bytes(&world);
         assert_eq!(
